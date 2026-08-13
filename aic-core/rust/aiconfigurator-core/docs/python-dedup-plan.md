@@ -5,6 +5,85 @@ SPDX-License-Identifier: Apache-2.0
 
 # Phase 2 Execution Plan — Rust-default flip and Python latency-path removal
 
+**Status (2026-08-14): PR-1 (#1454), PR-2 (#1496) and PR-2.5 (#1508) MERGED;
+PR-3 delivered as the ENGINE-STEP-path retirement — see "PR-3 disposition"
+below.** The original PR-3 scope ("delete the per-call query stack
+wholesale") was revised after FPM (#1384) landed a live consumer of that
+stack; #1461's Rust FPM port (Op::FpmForward + fpm_sol.rs) then let PR-3
+delete the Python FPM walk too.
+
+## PR-3 disposition (2026-08-14) — what was deleted, what was kept, and why
+
+**Deleted (the engine-step path, both op-level and FPM):**
+
+- `base_backend`'s Python step branches: the phase runners
+  (`_run_context_phase` / `_run_generation_phase`), `run_mixed`'s three-pass
+  composition, `_get_fpm_mix_step_latency`, the encoder `op.query()`
+  fallback loop, and the `RustEngineUnsupportedError` "parity by
+  delegation" rescue arms — an inexpressible op graph is a hard error now
+  (the opspec coverage tripwire keeps that unreachable for shipped ops). A
+  non-`PerfDatabase` database on a step surface raises `TypeError` (the
+  compiled engine resolves perf data from disk by identity). En route, the
+  two #1461 leftover guards that still forced FPM static/decode onto the
+  Python walk were closed (rust-first, verified answer-preserving to full
+  precision on the synthetic parity fixture).
+- `fpm_forward.py`'s query machinery: `query`/`query_totals`/
+  `query_pass_baseline`, the parquet+sidecar loader and validators, the
+  perf_interp configs, and `_oplevel_sol_fn` (the per-op DatabaseMode.SOL
+  roofline closure). The Rust core owns FPM end to end
+  (`perf_database/fpm_forward.rs`, `operators/fpm_forward.rs`,
+  `operators/fpm_sol.rs`); `FPMForwardOp` keeps only the construction
+  surface `_to_opspec` and the memory model consume.
+- The `"python"` value of `engine_step_backend` became a warn-once
+  deprecation NO-OP (routes to the compiled engine; accepted one release
+  cycle, then dropped). Unknown values now raise. The gate keeps only the
+  non-`PerfDatabase` delegation (consumed by the AFD orchestration).
+- The live-Python golden capture harness (`regenerate_goldens.py` + guard
+  tests): the goldens are frozen artifacts; `pin_goldens.py` appends/
+  refreshes records from the live rust engine (provenance-marked
+  `post_freeze_pins`), making the golden diff the review artifact. The FPM
+  parity class freezes its Python-side references inline
+  (`_FPM_*_FROZEN`) since its dataset is generated per-run.
+- The relative Rust-vs-Python CI perf gate and the benchmark's python arm;
+  the python-vs-rust support-matrix compare machinery
+  (`scan_rust_parity.py`, `--compare-engine-step-backends`); the
+  `prediction_regression_gate` python pin flipped to rust.
+- The dead `Mamba2` composite op class (+ its opspec EXEMPT entry).
+
+**Kept — the PER-CALL query stack (`operations/*.py` `query()` +
+`_query_*_table`, `perf_database.query_*`, `perf_interp/`,
+`util_empirical.py`) stays intact.** Its load-bearing consumers:
+
+1. **AFD comm ops** (`afd_transfer.py`, permanent Python orchestration)
+   query `query_nccl` / `query_p2p` / `query_mem_op` EMPIRICALLY, and
+   `_sum_latency` keeps its `op.query()` fallback loop.
+2. **`tools/sanity_check/validate_database.ipynb`** (+ its e2e) exercises
+   10 `PerfDatabase.query_*` methods per-call, including the SOL_FULL
+   raw-tuple diagnostic — which therefore stays as-is.
+3. **Internal couplings** that make partial carving unsafe: GEMM's silicon
+   path re-queries SOL (fp8_static floor), `_correct_sol` needs table
+   lookups at load time, mamba has no mode dispatch, MSA's empirical path
+   divides DSA-SOL by DSA-SILICON.
+
+(FPM was the third hard dependent when PR-3 was first scoped — its
+roofline queried every op-level op in SOL — but #1461 moved that to
+`fpm_sol.rs`, which is what unlocked deleting the walk.)
+
+**Sequel (PR-4 candidates — tracked in #1357 Phase 3):**
+
+1. Re-oracle `validate_database.ipynb` onto the per-op evaluation FFI
+   (needs a small FFI addition if the sol_math/sol_mem decomposition plots
+   are to survive; rust computes both components internally).
+2. Then delete the per-call stack family-by-family (#1357's
+   thin-delegation shape), retiring `query_*`, the empirical/silicon table
+   bodies, and `util_empirical`'s math (keep the provenance constants) —
+   with the AFD comm-table queries re-pointed at the op-list FFI or kept
+   as the last per-call island.
+
+The keep/delete inventory and Gate-3 text below are retained as the
+original plan of record; where they conflict with this disposition, the
+disposition wins.
+
 **Status (2026-08-06): PR-1 (#1454) MERGED 2026-08-05; PR-2 in flight.**
 PR-2 closes every gap listed below and lands the Gate-2 golden anchor. State
 of the former gaps:
