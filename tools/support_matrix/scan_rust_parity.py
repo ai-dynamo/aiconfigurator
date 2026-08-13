@@ -461,6 +461,9 @@ def _run_probe(
         isl=constraints.isl,
         osl=constraints.osl,
         prefix=constraints.prefix,
+        image_height=constraints.image_height,
+        image_width=constraints.image_width,
+        num_images=constraints.num_images,
         tp_size=tp,
         moe_tp_size=moe_tp,
         moe_ep_size=moe_ep,
@@ -492,7 +495,9 @@ def probe_entry(entry: Entry) -> ProbeRecord:
     started = time.monotonic()
     constraints = _get_test_constraints(entry.model)
     shape_str = (
-        f"isl={constraints.isl},osl={constraints.osl},prefix={constraints.prefix},total_gpus={constraints.total_gpus}"
+        f"isl={constraints.isl},osl={constraints.osl},prefix={constraints.prefix},total_gpus={constraints.total_gpus},"
+        f"image_height={constraints.image_height},image_width={constraints.image_width},"
+        f"num_images={constraints.num_images}"
     )
 
     python_ttft, python_tpot, python_err = _run_probe(entry, constraints, backend_label="python")
