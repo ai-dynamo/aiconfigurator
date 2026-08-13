@@ -8,13 +8,13 @@ import logging
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
-from aiconfigurator_core.sdk.models.blocks.moe import MoEBlockShape
+from aiconfigurator_core.sdk.models.blocks.moe import MoEBlockShape, build_moe_block_ops
 from aiconfigurator_core.sdk.models.helpers import (
     attention_modules_excluded_from_quant,
     attention_projection_exclusions,
-    build_large_ep_moe_ops,
     large_ep_gpus_per_node,
     mtp_scale_factor,
+    power_law_distribution,
     quant_exclude_patterns,
     validate_trtllm_large_ep,
 )
@@ -187,29 +187,38 @@ class DeepSeekV32Model(BaseModel):
     def _large_ep_moe_ops(self, phase: str, shape: MoEBlockShape, scale_factor: float) -> list:
         """MoE block for a large-EP config (``cfg.moe_comm_backend`` set).
 
-        Body shared with the DeepSeek family in
-        ``helpers.build_large_ep_moe_ops`` (distribution transcription notes
-        live there). The shared-expert dtype is asymmetric in the legacy
-        classes and is reproduced as such: trtllm sized its shared GEMMs with
-        ``_dsa_shared_expert_quant_mode`` (deepseek_v32.py:536-555, 631-653 at
-        commit 8372e60), i.e. bf16 for checkpoints like ``nvidia/GLM-5.2-NVFP4``
-        that exclude ``mlp.shared_experts*`` from quantization, while sglang
-        used the plain ``gemm_quant_mode`` (deepseek_v32.py:796-819) -- so the
-        override is passed on trtllm only.
+        Workload-distribution strings transcribed from the deleted wideEP
+        classes at commit 8372e60: sglang flattens the prefill alpha to 0.6
+        under EPLB (deepseek_v32.py:740-751); trtllm keeps alpha 1.01 in both
+        phases and marks EPLB with the ``_eplb`` suffix (deepseek_v32.py:479-486).
+
+        The shared-expert dtype is asymmetric in the legacy classes and is
+        reproduced as such: trtllm sized its shared GEMMs with
+        ``_dsa_shared_expert_quant_mode`` (deepseek_v32.py:536-555, 631-653),
+        i.e. bf16 for checkpoints like ``nvidia/GLM-5.2-NVFP4`` that exclude
+        ``mlp.shared_experts*`` from quantization, while sglang used the plain
+        ``gemm_quant_mode`` (deepseek_v32.py:796-819) -- so the override is
+        passed on trtllm only.
         """
-        shared_gemm_quant_mode = (
-            _dsa_shared_expert_quant_mode(self.extra_params, self.config.gemm_quant_mode)
-            if self._backend_name == "trtllm"
-            else None
-        )
-        return build_large_ep_moe_ops(
+        base = self.config.workload_distribution
+        shared_gemm_quant_mode = None
+        if self._backend_name == "trtllm":
+            distribution = power_law_distribution(base, self._power_law_alpha, eplb_suffix=self.config.enable_eplb)
+            shared_gemm_quant_mode = _dsa_shared_expert_quant_mode(self.extra_params, self.config.gemm_quant_mode)
+        else:
+            alpha = 0.6 if (phase == "context" and self.config.enable_eplb) else self._power_law_alpha
+            distribution = power_law_distribution(base, alpha)
+        return build_moe_block_ops(
             phase,
             shape,
             self.config,
+            self.config.moe_quant_mode,
+            distribution,
             scale_factor=scale_factor,
             backend_name=self._backend_name,
+            inference_phase=phase,
             model_family=self.model_family,
-            power_law_alpha=self._power_law_alpha,
+            attn_cp_size=self.config.cp_size,
             gpus_per_node=self._gpus_per_node,
             shared_gemm_quant_mode=shared_gemm_quant_mode,
         )
@@ -304,6 +313,7 @@ class DeepSeekV32Model(BaseModel):
                         cp_size=self.config.cp_size,
                         index_topk_freq=self.extra_params.get("index_topk_freq", 1),
                         dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
+                        attn_projection_quant_modes=dsa_attn_quant_modes,
                     ),
                     ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
                 ]
@@ -333,6 +343,7 @@ class DeepSeekV32Model(BaseModel):
                         architecture=self.architecture,
                         index_topk_freq=self.extra_params.get("index_topk_freq", 1),
                         dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
+                        attn_projection_quant_modes=dsa_attn_quant_modes,
                     ),
                     ops.ElementWise("generation_add_norm_2", generation_scale, 2 * h, 2 * h, 0.8),
                 ]

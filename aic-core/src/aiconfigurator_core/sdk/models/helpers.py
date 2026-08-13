@@ -12,17 +12,15 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import warnings
 from functools import cache
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 from aiconfigurator_core.sdk import common, config
 from aiconfigurator_core.sdk.utils import (
     get_model_config_from_model_path,
     parse_compressed_tensors_quant,
 )
-
-if TYPE_CHECKING:
-    from aiconfigurator_core.sdk.models.blocks.moe import MoEBlockShape
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +111,13 @@ def attention_modules_excluded_from_quant(raw_config: dict) -> bool:
     return bool(attention_projection_exclusions(raw_config))
 
 
-def attention_op_keys(model_family: str, backend_name: str, is_large_ep: bool = False) -> tuple[str, str]:
+def attention_op_keys(
+    model_family: str,
+    backend_name: str,
+    is_large_ep: bool = False,
+    *,
+    enable_wideep: bool | None = None,
+) -> tuple[str, str]:
     """(context_op, generation_op) support-matrix keys for a model family /
     backend / large-EP combination.
 
@@ -122,6 +126,14 @@ def attention_op_keys(model_family: str, backend_name: str, is_large_ep: bool = 
     (:func:`resolve_context_fmha_by_data`). Every context op keys on fmha at
     the top level; every generation op keys on kv dtype.
     """
+    if enable_wideep is not None:
+        warnings.warn(
+            "'enable_wideep' is deprecated; use 'is_large_ep' instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        is_large_ep = enable_wideep
+
     if model_family == "DEEPSEEKV4":
         return "deepseek_v4_context_module", "deepseek_v4_generation_module"
     if model_family == "DEEPSEEKV32":
@@ -184,58 +196,6 @@ def large_ep_gpus_per_node(model_config: config.ModelConfig) -> int:
         # silently mis-prices a custom/direct builder call.
         raise ValueError(f"num_gpus_per_node must be a positive integer (hardware fact), got {value!r}")
     return value
-
-
-def build_large_ep_moe_ops(
-    phase: str,
-    shape: MoEBlockShape,
-    cfg: config.ModelConfig,
-    *,
-    scale_factor: float,
-    backend_name: str,
-    model_family: str,
-    power_law_alpha: float,
-    gpus_per_node: int,
-    shared_gemm_quant_mode: common.GEMMQuantMode | None = None,
-) -> list:
-    """One MoE block for a large-EP config (``cfg.moe_comm_backend`` set).
-
-    The shared body of ``DeepSeekModel._large_ep_moe_ops`` and
-    ``DeepSeekV32Model._large_ep_moe_ops``: resolve the model-owned
-    workload-distribution string, then delegate to ``build_moe_block_ops``.
-    ``shared_gemm_quant_mode`` is the one caller-specific difference — the
-    DeepSeekV32 family passes its ``dsa_shared_expert_quant_mode`` on trtllm.
-
-    Workload-distribution strings are transcribed from the deleted wideEP
-    classes at commit 8372e60: sglang flattens the prefill alpha to 0.6 under
-    EPLB (deepseek.py:1089-1101 / deepseek_v32.py:740-751), while trtllm keeps
-    the model alpha in both phases and marks EPLB with the ``_eplb`` suffix
-    instead (deepseek.py:626-636 / deepseek_v32.py:479-486).
-    """
-    # Deferred import: blocks/moe.py imports this module (check_is_moe) at
-    # import time, so a top-level import here would be circular.
-    from aiconfigurator_core.sdk.models.blocks.moe import build_moe_block_ops
-
-    base = cfg.workload_distribution
-    if backend_name == "trtllm":
-        distribution = power_law_distribution(base, power_law_alpha, eplb_suffix=cfg.enable_eplb)
-    else:
-        alpha = 0.6 if (phase == "context" and cfg.enable_eplb) else power_law_alpha
-        distribution = power_law_distribution(base, alpha)
-    return build_moe_block_ops(
-        phase,
-        shape,
-        cfg,
-        cfg.moe_quant_mode,
-        distribution,
-        scale_factor=scale_factor,
-        backend_name=backend_name,
-        inference_phase=phase,
-        model_family=model_family,
-        attn_cp_size=cfg.cp_size,
-        gpus_per_node=gpus_per_node,
-        shared_gemm_quant_mode=shared_gemm_quant_mode,
-    )
 
 
 def validate_trtllm_large_ep(

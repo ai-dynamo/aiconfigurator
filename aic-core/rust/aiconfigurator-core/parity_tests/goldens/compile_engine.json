@@ -2,8 +2,8 @@
   "header": {
     "command": "python aic-core/rust/aiconfigurator-core/parity_tests/regenerate_goldens.py",
     "engine_step_backend": "python",
-    "git_describe": "b37e8fd5",
-    "git_head": "b37e8fd5ce609594d880c1ef0f03bb8c36b588dd",
+    "git_describe": "7269634d",
+    "git_head": "7269634dd74b2d34c481bda3f582f7233b4f5e10",
     "reference_count": 53,
     "thread_caps": {
       "MKL_NUM_THREADS": "1",
@@ -66,6 +66,6 @@
     "wideep_sglang::static_ctx": 99.42331852569644,
     "wideep_sglang::static_gen": 32.82787657651461,
     "wideep_trtllm::static_ctx": 80.41054370779536,
-    "wideep_trtllm::static_gen": 48.217231523625635
+    "wideep_trtllm::static_gen": 51.04392295026042
   }
 }

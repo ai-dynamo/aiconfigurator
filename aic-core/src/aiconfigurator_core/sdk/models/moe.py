@@ -103,13 +103,19 @@ class MOEModel(BaseModel):
         gemm_quant_mode = self.config.gemm_quant_mode
         kvcache_quant_mode = self.config.kvcache_quant_mode
         fmha_quant_mode = self.config.fmha_quant_mode
-        workload_distribution = power_law_distribution(self.config.workload_distribution, self._power_law_alpha)
-        # Large-EP prefill flattens to alpha 0.6 under EPLB (transcribed from the
-        # deleted SGLangEPMOEModel, models/moe.py:424 at commit 8372e60). The
-        # fused path and every decode phase keep the family alpha.
+        trtllm_eplb = self._is_large_ep and self._backend_name == "trtllm" and self.config.enable_eplb
+        workload_distribution = power_law_distribution(
+            self.config.workload_distribution,
+            self._power_law_alpha,
+            eplb_suffix=trtllm_eplb,
+        )
+        # DeepEP prefill flattens to alpha 0.6 under EPLB (transcribed from the
+        # deleted SGLangEPMOEModel, models/moe.py:424 at commit 8372e60).
+        # TRT-LLM keeps the family alpha and selects its EPLB rows via the
+        # ``_eplb`` suffix in both phases.
         context_workload_distribution = (
             power_law_distribution(self.config.workload_distribution, 0.6)
-            if self._is_large_ep and self.config.enable_eplb
+            if self._is_large_ep and self._backend_name in ("sglang", "vllm") and self.config.enable_eplb
             else workload_distribution
         )
         # Context parallelism (sglang AllGather, prefill-only). Dense GQA attn

@@ -417,7 +417,7 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--max-seq-len`: TRT-LLM `--max_seq_len` (default: `isl + osl`). Controls how many KV blocks are pre-allocated per sequence; set to match your deployment for accurate KV-capacity filtering.
 - `--enable-chunked-prefill`: Enable chunked prefill for a finer-grained context-token sweep. When off (default), the context-token stride is aligned to ISL for faster sweeping.
 - `--enable-wideep`: **Deprecated and ignored** (accepted with a one-time warning). Large-EP (wideEP) is explored automatically — see the note below.
-- `--moe-backend`: Explicit SGLang MoE backend. `megamoe` is a real kernel selection (use it to model DeepSeek-V4 MegaMoE on Blackwell); `deepep_moe` is deprecated: it is ignored for modeling (large-EP is explored automatically from data coverage), but on SGLang it still narrows the default `moe_tp` candidates to `[1]` — explicit `*_moe_tp_candidates` always win.
+- `--moe-backend`: Explicit SGLang MoE backend. `megamoe` is a real kernel selection (use it to model DeepSeek-V4 MegaMoE on Blackwell); `deepep_moe` is deprecated and ignored (large-EP is explored automatically from data coverage).
 
 > **Large-EP (wideEP) is explored automatically.** For MoE models, multi-node EP-only
 > parallelism joins the search whenever the performance database covers the model's MoE

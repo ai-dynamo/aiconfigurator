@@ -1071,7 +1071,7 @@ class Task:
         tuple is large-EP -- i.e. on the search space, which is resolved in
         between (see ``__post_init__``).
         """
-        roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]
+        roles = ["agg"] if self.serving_mode in ("agg", "afd") else ["prefill", "decode"]
         fmha_explicit = self._fmha_explicit
 
         # Data-driven FMHA resolution: if an inferred fp8 has no fp8 slice in
@@ -1138,6 +1138,13 @@ class Task:
         a per-tuple gap is pruned by the sweep, not fatal here. Fused first, so
         the universally-reachable regime leads the diagnostics. Mapping lives in
         ``models.attention_op_keys``."""
+        # AFD partitions the aggregate model across its A/F topology and does
+        # not enumerate the standard agg TP/DP/EP candidate lists. It also
+        # never assigns the standard per-tuple MoE comm backend, so its
+        # attention surface is the fused aggregate one.
+        if self.serving_mode == "afd" and role == "agg":
+            return [attention_op_keys(self._model_family, self.backend_name, False)]
+
         regimes: set[bool] = set()
         for tup in self.iter_parallel(role):
             regimes.add(self._resolve_moe_comm_backend(role, tup) is not None)
@@ -1167,17 +1174,13 @@ class Task:
         return ("context", "generation")
 
     def _required_large_ep_phases(self, role: str) -> tuple[str, ...]:
-        """Extra phase-coverage requirement large EP puts on a role.
+        """Phases that must be covered before a role can run large EP.
 
-        Returns ``("context",)`` for the single-phase roles (prefill/decode)
-        and the full phase pair for agg; callers union it with
-        ``_role_phases(role)``, so the effective requirement is always the
-        phases the role runs PLUS context. Context is required even for a
-        decode worker because its model object holds the whole graph and the
-        memory model sizes its weights from ``model.context_ops``
-        (``base_backend._get_memory_usage``) — a fused context span under a
-        large-EP decode step would be priced with the wrong (÷tp shared
-        expert, router) weights."""
+        The phases the role RUNS, plus CONTEXT for every role: a worker's model
+        object holds the whole graph and the memory model sizes its weights
+        from ``model.context_ops`` (``base_backend._get_memory_usage``), so a
+        decode worker with a fused context span and a large-EP decode step
+        would be priced with the wrong (÷tp shared expert, router) weights."""
         return ("context",) if role != "agg" else self._role_phases(role)
 
     def _large_ep_coverage(self, role: str) -> dict[str, dict[str, set[int]]]:
@@ -1199,11 +1202,8 @@ class Task:
         backends cover the same EP); the caller picks the first one covering
         the tuple's EP.
 
-        Never raises on missing DATA: an absent model shape, system spec,
-        database or table yields ``{}`` -- the fused path then serves every
-        tuple. A caller BUG still raises: a str-typed ``moe_quant_mode`` is a
-        ``TypeError``, not empty coverage (it would silently miss every
-        enum-keyed compute row and disable large-EP exploration).
+        Never raises: a missing model shape, system spec, database or table
+        yields ``{}`` -- the fused path then serves every tuple.
         """
         cached = self._large_ep_coverage_cache.get(role)
         if cached is not None:

@@ -300,6 +300,20 @@ class TestCLIIntegration:
         assert exc_info.value.code == 2
         assert "the following arguments are required" in capsys.readouterr().err
 
+    def test_recommend_help_marks_legacy_large_ep_options_deprecated_and_ignored(self, capsys):
+        parser = argparse.ArgumentParser()
+        configure_parser(parser)
+
+        with pytest.raises(SystemExit) as exc_info:
+            parser.parse_args(["recommend", "--help"])
+
+        assert exc_info.value.code == 0
+        help_text = capsys.readouterr().out
+        normalized_help = " ".join(help_text.split())
+        assert "--enable-wideep" in help_text
+        assert "Deprecated and ignored" in help_text
+        assert "'deepep_moe' is deprecated and ignored" in normalized_help
+
     @pytest.mark.parametrize(
         "builder_patch",
         [
