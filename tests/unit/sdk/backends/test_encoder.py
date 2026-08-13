@@ -756,13 +756,28 @@ class TestEncoderMemoryInSummary:
         assert summary.get_encoder_memory()["total"] > 0
         assert summary.get_summary_df().iloc[0]["ttft"] == pytest.approx(encoder_latency + context_latency)
 
-    def test_qwen35_video_estimate_executes_encoder_and_adds_video_tokens_to_context(self):
+    @pytest.mark.parametrize(
+        ("model_name", "expected_projector_instances"),
+        [
+            ("Qwen/Qwen3.5-27B", 1),
+            ("Qwen/Qwen3-VL-8B-Instruct", 4),
+            ("Qwen/Qwen3-VL-30B-A3B-Instruct", 4),
+        ],
+    )
+    def test_qwen_video_estimate_executes_encoder_and_adds_video_tokens_to_context(
+        self, model_name, expected_projector_instances
+    ):
         from types import SimpleNamespace
         from unittest.mock import MagicMock
 
         from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 
-        model = get_model("Qwen/Qwen3.5-27B", config.ModelConfig(), "trtllm")
+        model_config = config.ModelConfig(moe_tp_size=1, moe_ep_size=1) if "A3B" in model_name else config.ModelConfig()
+        model = get_model(model_name, model_config, "trtllm")
+        assert model.encoder_config.temporal_patch_size == 2
+        assert model.encoder_config.projector_n_instances == expected_projector_instances
+        projector_op = next(op for op in model.encoder_ops if op._name == "encoder_projector_fc0_gemm")
+        assert projector_op._scale_factor == expected_projector_instances
         database = SimpleNamespace(
             backend="trtllm",
             version="10.0",
@@ -805,7 +820,7 @@ class TestEncoderMemoryInSummary:
         assert attention_call["s"] == (448 // 16) * (448 // 16) == 784
         assert attention_call["x"] == 4 * 784
 
-        # The explicit post-merge token override still needs the frame count
+        # The explicit post-merge token override still needs the sampled frame count
         # to preserve Qwen's one-spatial-sequence-per-temporal-patch contract.
         override_rc = RuntimeConfig(
             batch_size=1,

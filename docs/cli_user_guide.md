@@ -433,7 +433,7 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--image-height`, `--image-width`: Image dimensions in pixels. Default: `0` (disabled — the request is modeled as text-only).
 - `--num-images`: Number of images per request. Default: `1`.
 - `--video-height`, `--video-width`: Video frame dimensions in pixels. Default: `0` (disabled).
-- `--video-frames`: Number of frames per video. Default: `0` (disabled).
+- `--video-frames`: Number of sampled/preprocessed frames per video. Default: `0` (disabled).
 - `--num-videos`: Number of videos per request. Default: `0`.
 - `--num-video-tokens`: Explicit post-merge tokens per video; requires `--video-frames`.
   Default: `0` (derive from dimensions).
@@ -441,7 +441,7 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 
 The image and video input flags are also available in `recommend` mode.
 
-Image and video workloads must currently be estimated separately. Video token accounting uses the model's temporal patch size before the spatial merge.
+Image and video workloads must currently be estimated separately. Qwen3-VL dense/MoE and Qwen3.5 video token accounting uses each model's temporal patch size before the spatial merge.
 Visual encoder workloads are not supported by AFD mode. Video estimates are supported for functional estimation, but saving deployment artifacts for a video workload is rejected until the generator has a video benchmark schema; run without `--save-dir`.
 
 The SLA, precision, and speculative-decoding flags (`--strict-sla`, `--request-latency`, `--inclusive-tpot`, `--nextn`, `--nextn-accepted`, `--database-mode`) have dedicated subsections below. Shared flags such as `--save-dir`, `--top-n`, and `--systems-paths` are described in [Common Arguments](#common-arguments-all-modes).
