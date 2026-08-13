@@ -360,7 +360,7 @@ def _resolve_flashinfer_gdn_decode():
         return None
     try:
         from flashinfer.gdn_decode import gated_delta_rule_decode_pretranspose
-    except ImportError as e:
+    except (ImportError, RuntimeError) as e:
         print(
             f"  SM{sm_version}: FlashInfer bf16 GDN decode lane unavailable "
             f"(flashinfer.gdn_decode import failed: {e}); skipping "
