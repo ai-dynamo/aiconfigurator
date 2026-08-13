@@ -2280,6 +2280,47 @@ class TestRustEngineStepFpmParity:
         allowed = max(abs(py) * PARITY_RTOL, 1e-9)
         assert abs(rs - py) <= allowed, f"{point}: py={py} rs={rs} delta={abs(rs - py)}"
 
+    def test_fpm_arena_selects_the_fpm_engine(self, fpm_systems_root, monkeypatch):
+        # Review finding (#1461): from_native() dropped forward_model, so the
+        # FPM arena always compiled the op_level engine. A decode-only
+        # estimate hitting the fpm_forward table's exact row proves the
+        # whole-model engine was selected through the supported predictor API.
+        _prepare_rust_core(monkeypatch)
+        from aiconfigurator_core.sdk.rust_engine_step import RustForwardPassPerfModel
+
+        config = {
+            "schema_version": 1,
+            "model_name": _FPM_MODEL,
+            "system_name": "b200_sxm",
+            "backend": "vllm",
+            "backend_version": _FPM_VERSION,
+            "systems_path": str(fpm_systems_root),
+            "tp_size": 2,
+            "pp_size": 1,
+            "attention_dp_size": 1,
+            "moe_tp_size": 1,
+            "moe_ep_size": 2,
+            "weight_dtype": "fp8_block",
+            "moe_dtype": "fp8_block",
+            "activation_dtype": "bfloat16",
+            "kv_cache_dtype": "fp8",
+            "kv_block_size": None,
+            "nextn": None,
+            "forward_model": "fpm",
+        }
+        model = RustForwardPassPerfModel.from_native(config)
+        decode_only = [
+            {
+                "version": 1,
+                "scheduled_requests": {
+                    "num_decode_requests": 1,
+                    "sum_decode_kv_tokens": 1025,
+                },
+            }
+        ]
+        ms = model.estimate_forward_pass_time_ms(decode_only)
+        assert ms == pytest.approx(2.2)  # exact fpm decode row (1, 1025)
+
     def test_fpm_spec_tags(self, fpm_systems_root, monkeypatch):
         _prepare_rust_core(monkeypatch)
         import json as _json

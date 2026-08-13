@@ -1131,8 +1131,14 @@ impl Engine {
     /// [`Self::forward_pass_time_ms`]).
     fn rank_latency_ms(&self, metrics: &ForwardPassMetrics) -> Result<f64, AicError> {
         let sched = &metrics.scheduled_requests;
-        let has_prefill = sched.num_prefill_requests > 0;
-        let has_decode = sched.num_decode_requests > 0;
+        // Token-based dispatch, aligned with `IterationFeatures` (fpm/model.rs):
+        // a fully prefix-cached payload can retain prefill request/KV metadata
+        // (`num_prefill_requests = 1, sum_prefill_tokens = 0`) while scheduling
+        // no fresh prefill compute — that iteration is decode-only. A count
+        // check would query prefill at zero tokens (outside the FPM domain)
+        // and price decode as marginal work riding a pass that does not exist.
+        let has_prefill = sched.sum_prefill_tokens > 0;
+        let has_decode = sched.num_decode_requests > 0 || sched.sum_decode_kv_tokens > 0;
 
         // FPM engines never enter the three-pass mix composition (its op-name
         // filters cannot see a whole-model op). Prefill-only and decode-only
@@ -1285,6 +1291,7 @@ mod tests {
                 scale_num_tokens: 0,
                 low_precision_input: false,
                 seq_split: 1,
+                below_grid_sol: false,
             }),
             Op::ContextAttention(ContextAttentionOp {
                 name: "context_attention".into(),
@@ -1330,6 +1337,7 @@ mod tests {
             systems_path: None,
             backend: BackendKind::Vllm,
             backend_version: Some("0.19.0".to_string()),
+            forward_model: None,
             kv_block_size: None,
             parallel: ParallelMapping {
                 tp_size: 8,
@@ -1665,6 +1673,32 @@ mod tests {
         let mixed = engine.mixed_step_latency(0, 8, 511, 0, 0, 1.0, 1.0).unwrap();
         assert!((mixed - 7.0).abs() < 1e-12, "got {mixed}");
         assert_eq!(engine.decode_step_latency(0, 511, 0, 1.0).unwrap(), 0.0);
+    }
+
+    /// A fully prefix-cached payload retains prefill request/KV metadata
+    /// while scheduling no fresh prefill compute: dispatch must be
+    /// token-based (aligned with `IterationFeatures`) — a count-based check
+    /// would query prefill at zero tokens (outside the FPM domain) and
+    /// price decode as marginal work riding a pass that does not exist.
+    #[test]
+    fn fpm_rank_prefix_cached_payload_is_decode_only() {
+        use crate::fpm::{ForwardPassMetrics, ScheduledRequestMetrics};
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = build_fpm_engine(tmp.path(), None).unwrap();
+        let metrics = ForwardPassMetrics {
+            scheduled_requests: ScheduledRequestMetrics {
+                num_prefill_requests: 1,
+                sum_prefill_tokens: 0,
+                sum_prefill_kv_tokens: 4096,
+                num_decode_requests: 8,
+                sum_decode_kv_tokens: 4096, // exact decode row -> 7.0
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // FULL decode latency (decode-only), not the marginal composition.
+        let ms = engine.forward_pass_time_ms(&[metrics]).unwrap();
+        assert!((ms - 7.0).abs() < 1e-12, "{ms}");
     }
 
     /// Telemetry dispatch: single-workload FPM ranks flow through the shared

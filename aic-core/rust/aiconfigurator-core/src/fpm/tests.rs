@@ -46,6 +46,7 @@ fn context_ops() -> Vec<Op> {
             scale_num_tokens: 0,
             low_precision_input: false,
             seq_split: 1,
+            below_grid_sol: false,
         }),
         Op::ContextAttention(ContextAttentionOp {
             name: "context_attention".into(),
@@ -91,6 +92,7 @@ fn fixture_engine_config() -> EngineConfig {
         systems_path: None,
         backend: BackendKind::Vllm,
         backend_version: Some("0.19.0".to_string()),
+        forward_model: None,
         kv_block_size: None,
         parallel: ParallelMapping {
             tp_size: 8,

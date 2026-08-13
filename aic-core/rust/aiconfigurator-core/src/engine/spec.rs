@@ -187,6 +187,7 @@ mod tests {
             scale_num_tokens: 0,
             low_precision_input: true,
             seq_split: 1,
+            below_grid_sol: false,
         }
     }
 
@@ -330,6 +331,7 @@ mod tests {
             is_context: false,
             sms: 12,
             scale_num_tokens: 1,
+            attn_ar_modeled: false,
         }
     }
 
@@ -725,6 +727,7 @@ mod tests {
             systems_path: None,
             backend: crate::BackendKind::Trtllm,
             backend_version: Some("1.0.0rc3".into()),
+            forward_model: None,
             kv_block_size: Some(64),
             parallel: ParallelMapping {
                 tp_size: 8,

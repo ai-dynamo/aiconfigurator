@@ -543,6 +543,7 @@ mod tests {
             scale_num_tokens: 1,
             low_precision_input: false,
             seq_split: 1,
+            below_grid_sol: false,
         };
         let s = spec();
         let m = 8192.0_f64;
@@ -756,6 +757,7 @@ mod tests {
             is_context: true,
             sms: 12,
             scale_num_tokens: 1,
+            attn_ar_modeled: false,
         };
         // dp=1, attn_tp = 4/1 = 4 > 1 -> allreduce only
         let volume = 8192.0 * 6144.0;

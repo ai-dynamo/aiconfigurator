@@ -2594,6 +2594,7 @@ class PerfDatabase:
         k: int,
         quant_mode: common.GEMMQuantMode,
         database_mode: common.DatabaseMode | None = None,
+        below_grid_sol: bool = False,
     ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query GEMM operation latency and energy. Delegates to ``GEMM``;
@@ -2612,7 +2613,7 @@ class PerfDatabase:
         """
         from aiconfigurator_core.sdk.operations.gemm import GEMM
 
-        return GEMM._query_gemm_table(self, m, n, k, quant_mode, database_mode)
+        return GEMM._query_gemm_table(self, m, n, k, quant_mode, database_mode, below_grid_sol=below_grid_sol)
 
     @functools.lru_cache(maxsize=32768)
     def query_compute_scale(
