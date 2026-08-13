@@ -29,6 +29,7 @@ import yaml
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.base import resolve_op_data_path
+from aiconfigurator.sdk.operations.gemm import load_gemm_data
 from aiconfigurator.sdk.perf_database import PerfDatabase, _load_op_kernel_source_manifest_entries
 
 pytestmark = pytest.mark.unit
@@ -148,6 +149,25 @@ def test_declared_reuse_channel_admits_newer_donor_in_isolation(systems_root: Pa
     assert _channels(db, "moe_perf.parquet") == ["primary", "declared_reuse"]
 
 
+def test_declared_reuse_rejects_legacy_incomplete_donor(systems_root: Path) -> None:
+    """A declared legacy-layout donor carrying INCOMPLETE.txt is unusable."""
+    backend, requested, donor = "sglang", "0.5.12", "0.5.14"
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{requested}/gemm_perf.parquet")
+    _write_yaml(
+        systems_root,
+        f"data/h100_sxm/gemm/{backend}/{requested}/reuse.yaml",
+        {"reuse": [_reuse_entry("gemm_perf", donor)]},
+    )
+    _write(systems_root, f"data/h100_sxm/{backend}/{donor}/gemm_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/{backend}/{donor}/INCOMPLETE.txt", b"partial collection\n")
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+
+    assert _channels(db, "gemm_perf.parquet") == ["primary"]
+    assert all(donor not in path for path, _ in sources)
+
+
 def test_declared_reuse_works_with_no_primary_data_at_all(systems_root: Path) -> None:
     """Mirrors the real l40s/quantize/vllm/0.22.0 case: the requested version
     dir holds ONLY a reuse.yaml, no parquet of its own."""
@@ -189,6 +209,20 @@ def test_fallback_nearest_earlier_descending_no_manifest_needed(systems_root: Pa
 
     assert _versions(db, "gemm_perf.parquet") == ["1.0.0", "0.9.0", "0.8.0"]
     assert _channels(db, "gemm_perf.parquet") == ["primary", "fallback", "fallback"]
+
+
+def test_fallback_rejects_legacy_incomplete_donor(systems_root: Path) -> None:
+    """Implicit same-backend fallback must honor the legacy whole-dir veto."""
+    backend, requested, donor = "trtllm", "1.0.0", "0.9.0"
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{requested}/gemm_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/{backend}/{donor}/gemm_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/{backend}/{donor}/INCOMPLETE.txt", b"partial collection\n")
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+
+    assert _channels(db, "gemm_perf.parquet") == ["primary"]
+    assert all(donor not in path for path, _ in sources)
 
 
 def test_fallback_excludes_newer_than_requested(systems_root: Path) -> None:
@@ -353,6 +387,62 @@ def test_full_channel_order_declared_then_fallback_nearest_then_cross_backend(sy
 # ---------------------------------------------------------------------------
 # Self-overlap (the l40s case): primary already owns the table
 # ---------------------------------------------------------------------------
+
+
+def test_cross_backend_rejects_legacy_incomplete_donor(systems_root: Path) -> None:
+    """Cross-backend fill must not admit an INCOMPLETE legacy directory."""
+    backend, requested = "trtllm", "1.0.0"
+    donor_backend, donor_version = "sglang", "0.5.14"
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{requested}/gemm_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/{donor_backend}/{donor_version}/gemm_perf.parquet")
+    _write(
+        systems_root,
+        f"data/h100_sxm/{donor_backend}/{donor_version}/INCOMPLETE.txt",
+        b"partial collection\n",
+    )
+    _write_manifest(
+        systems_root,
+        [("gemm_perf.parquet", "shared_kernel", "shared", [backend, donor_backend])],
+    )
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+
+    assert _channels(db, "gemm_perf.parquet") == ["primary"]
+    assert all(donor_backend not in path for path, _ in sources)
+
+
+def test_loaded_rows_keep_primary_and_fill_only_missing_shapes(systems_root: Path) -> None:
+    """Exercise the loader: overlap is first-wins; fallback fills only gaps."""
+    backend, requested, donor = "trtllm", "1.0.0", "0.9.0"
+    header = "framework,version,device,op_name,gemm_dtype,m,n,k,latency\n"
+    primary_rows = header + "trtllm,1.0.0,h100,gemm,bfloat16,128,256,512,1.25\n"
+    fallback_rows = header + (
+        "trtllm,0.9.0,h100,gemm,bfloat16,128,256,512,9.50\ntrtllm,0.9.0,h100,gemm,bfloat16,256,256,512,2.50\n"
+    )
+    _write(
+        systems_root,
+        f"data/h100_sxm/gemm/{backend}/{requested}/gemm_perf.txt",
+        primary_rows.encode(),
+    )
+    _write_yaml(
+        systems_root,
+        f"data/h100_sxm/gemm/{backend}/{requested}/collection_meta.yaml",
+        {"tables": {"gemm_perf": {"status": "partial"}}},
+    )
+    _write(
+        systems_root,
+        f"data/h100_sxm/gemm/{backend}/{donor}/gemm_perf.txt",
+        fallback_rows.encode(),
+    )
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+    loaded = load_gemm_data(sources)
+
+    quant = common.GEMMQuantMode.bfloat16
+    assert loaded[quant][128][256][512]["latency"] == pytest.approx(1.25)
+    assert loaded[quant][256][256][512]["latency"] == pytest.approx(2.50)
 
 
 def test_self_overlap_declared_donor_admitted_after_primary(systems_root: Path) -> None:

@@ -2349,6 +2349,10 @@ class PerfDatabase:
             donor_path = resolve_op_data_path(system_data_root, backend_lower, from_version, op_file_basename)
             if not os.path.isfile(donor_path):
                 continue
+            if _version_dir_unusable_for_request(
+                os.path.dirname(donor_path), system_data_root, strict=self.strict_provenance
+            ):
+                continue
             records.append(
                 {
                     "version": from_version,
@@ -2385,6 +2389,10 @@ class PerfDatabase:
             for _, sibling_version in earlier_versions:
                 sibling_path = resolve_op_data_path(system_data_root, backend_lower, sibling_version, op_file_basename)
                 if not os.path.isfile(sibling_path):
+                    continue
+                if _version_dir_unusable_for_request(
+                    os.path.dirname(sibling_path), system_data_root, strict=self.strict_provenance
+                ):
                     continue
                 records.append(
                     {"version": sibling_version, "path": sibling_path, "channel": "fallback", "ks_filter": None}
@@ -2430,6 +2438,10 @@ class PerfDatabase:
             for sibling_version in fw_versions:
                 sibling_path = resolve_op_data_path(system_data_root, framework, sibling_version, op_file_basename)
                 if not os.path.isfile(sibling_path):
+                    continue
+                if _version_dir_unusable_for_request(
+                    os.path.dirname(sibling_path), system_data_root, strict=self.strict_provenance
+                ):
                     continue
                 records.append(
                     {
