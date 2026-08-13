@@ -30,6 +30,9 @@ def _row(
     err_msg: str = "",
     command: str = ("uv run aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --database-mode SILICON"),
     source: str | None = None,
+    image_height: str = "",
+    image_width: str = "",
+    num_images: str = "",
 ) -> list[str]:
     if source is None:
         source = "silicon" if status == STATUS_PASS else ""
@@ -44,6 +47,9 @@ def _row(
         err_msg,
         command,
         source,
+        image_height,
+        image_width,
+        num_images,
     ]
 
 
@@ -202,7 +208,8 @@ def test_metadata_diff_detects_replay_command_or_source_changes(old_command, new
     changes = find_metadata_changes([old], [new])
 
     assert len(changes) == 1
-    assert changes[0][-4:] == (old_command, new_command, old_source, new_source)
+    assert changes[0][-2] == (old_command, old_source, "", "", "")
+    assert changes[0][-1] == (new_command, new_source, "", "", "")
 
 
 def test_pass_to_hardware_incompatible_is_blocking_transition():

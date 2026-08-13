@@ -10,7 +10,6 @@ from tools.support_matrix.support_matrix import (
     STATUS_FAIL,
     STATUS_FRAMEWORK_INCOMPATIBLE,
     STATUS_HW_INCOMPATIBLE,
-    STATUS_HYBRID_PASS,
     SupportMatrix,
     TestConstraints,
 )
@@ -309,7 +308,7 @@ def test_l40s_sglang_dsa_missing_data_gap_is_hardware_incompatible(monkeypatch):
     assert "SGLang DSA/NSA module collectors require SM90+" in errors["agg"]
 
 
-def test_kimi_moonshot_trtllm_b200_int4_wo_is_framework_incompatible(monkeypatch):
+def test_kimi_moonshot_trtllm_b200_is_encoder_unsupported_before_text_framework_gap(monkeypatch):
     def fake_run_mode(**_kwargs):
         raise ValueError(
             "Unsupported moe quant mode 'int4_wo' for system='b200_sxm', backend='trtllm', version='1.3.0rc10'."
@@ -326,11 +325,11 @@ def test_kimi_moonshot_trtllm_b200_int4_wo_is_framework_incompatible(monkeypatch
         system_spec=_b200_system_spec(),
     )
 
-    assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
-    assert "Unsupported moe quant mode 'int4_wo'" in errors["agg"]
+    assert statuses == {"agg": STATUS_FAIL, "disagg": STATUS_FAIL}
+    assert errors["agg"].startswith("ENCODER_UNSUPPORTED:")
 
 
-def test_kimi_framework_gap_can_be_hybrid_estimable_without_becoming_silicon_pass(monkeypatch):
+def test_kimi_encoder_unsupported_cannot_be_hybrid_rescued_by_text_backbone(monkeypatch):
     calls: list[str] = []
 
     def fake_run_mode(**kwargs):
@@ -354,11 +353,11 @@ def test_kimi_framework_gap_can_be_hybrid_estimable_without_becoming_silicon_pas
         include_commands=True,
     )
 
-    assert statuses == {"agg": STATUS_HYBRID_PASS}
-    assert errors == {"agg": None}
-    assert sources == {"agg": "empirical"}
-    assert "--database-mode HYBRID" in commands["agg"]
-    assert calls == ["SILICON", "HYBRID"]
+    assert statuses == {"agg": STATUS_FAIL}
+    assert errors["agg"].startswith("ENCODER_UNSUPPORTED:")
+    assert sources == {"agg": ""}
+    assert "--database-mode SILICON" in commands["agg"]
+    assert calls == []
 
 
 def test_kimi_moonshot_trtllm_int4_wo_other_system_remains_fail(monkeypatch):
