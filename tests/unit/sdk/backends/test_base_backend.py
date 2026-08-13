@@ -124,6 +124,63 @@ def runtime_config() -> RuntimeConfig:
     return RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, prefix=2)
 
 
+class TestMTPActivationMemoryScaling:
+    """MTP activation scaling applies only to the decode-token share."""
+
+    @staticmethod
+    def _model():
+        return SimpleNamespace(
+            context_ops=[SimpleNamespace(get_weights=lambda: 0.0)],
+            config=ModelConfig(
+                tp_size=1,
+                pp_size=1,
+                attention_dp_size=1,
+                moe_tp_size=1,
+                moe_ep_size=1,
+            ),
+            _num_heads=32,
+            _head_size=128,
+            _num_experts=0,
+            model_family="test",
+            get_kvcache_bytes_per_sequence=lambda _seq_len: 0.0,
+            _cp_kv_memory_divisor=lambda: 1,
+        )
+
+    @staticmethod
+    def _database():
+        return SimpleNamespace(system_spec={"misc": {"nccl_mem": {1: 0}, "other_mem": 0}})
+
+    def _activations(self, *, nextn: int, num_tokens: int, mtp_scaled_tokens: int | None) -> float:
+        model = self._model()
+        model.config.nextn = nextn
+        return BaseBackend()._get_memory_usage(
+            model,
+            self._database(),
+            batch_size=4,
+            beam_width=1,
+            isl=65_536,
+            osl=400,
+            num_tokens=num_tokens,
+            mtp_scaled_tokens=mtp_scaled_tokens,
+        )["activations"]
+
+    def test_mixed_step_scales_only_decode_share(self):
+        num_tokens = 65_536 + 3
+        base = self._activations(nextn=0, num_tokens=num_tokens, mtp_scaled_tokens=3)
+        spec = self._activations(nextn=3, num_tokens=num_tokens, mtp_scaled_tokens=3)
+        assert spec / base == pytest.approx((65_536 + 3 * 4) / num_tokens, rel=1e-6)
+
+    def test_decode_only_step_keeps_full_multiplier(self):
+        base = self._activations(nextn=0, num_tokens=512, mtp_scaled_tokens=None)
+        spec = self._activations(nextn=3, num_tokens=512, mtp_scaled_tokens=None)
+        assert spec / base == pytest.approx(4.0, rel=1e-6)
+
+    def test_prefill_only_step_does_not_scale(self):
+        base = self._activations(nextn=0, num_tokens=65_536, mtp_scaled_tokens=0)
+        spec = self._activations(nextn=3, num_tokens=65_536, mtp_scaled_tokens=0)
+        assert spec == pytest.approx(base, rel=1e-9)
+
+
 @pytest.mark.parametrize("mode", ["static", "static_ctx", "static_gen"])
 @pytest.mark.parametrize("latency_correction_scale", [1.0, 1.25])
 def test_run_static_latency_only_matches_run_static_latency(

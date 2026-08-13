@@ -775,6 +775,60 @@ class TestKVCacheElementsPerToken:
         assert model.get_kvcache_elements_per_token() == model._num_layers * (512 + 64)
 
 
+class TestGptOssHybridKVCache:
+    """gpt-oss KV-cache memory must honor its hybrid SWA/global layout."""
+
+    MODEL = "openai/gpt-oss-120b"
+    LAYERS = 36
+    KV_HEADS = 8
+    HEAD_SIZE = 64
+    WINDOW = 128
+
+    @classmethod
+    def _expected_bytes(cls, seq_len: int) -> float:
+        per_layer_token = cls.KV_HEADS * cls.HEAD_SIZE * 2
+        num_swa = cls.LAYERS // 2
+        num_global = cls.LAYERS - num_swa
+        return per_layer_token * (num_swa * min(seq_len, cls.WINDOW) + num_global * seq_len)
+
+    @classmethod
+    def _model(cls):
+        model_config = config.ModelConfig(tp_size=1, moe_tp_size=1, moe_ep_size=1)
+        model_config.kvcache_quant_mode = common.KVCacheQuantMode.fp8
+        return get_model(cls.MODEL, model_config, backend_name="vllm")
+
+    def test_long_sequence_uses_hybrid_layout(self):
+        model = self._model()
+        seq_len = 65_936
+        got = model.get_kvcache_bytes_per_sequence(seq_len)
+        assert got == pytest.approx(self._expected_bytes(seq_len), rel=1e-9)
+
+        all_global = seq_len * self.LAYERS * 2 * self.KV_HEADS * self.HEAD_SIZE
+        assert got < 0.52 * all_global
+
+    def test_below_window_matches_linear_layout(self):
+        model = self._model()
+        seq_len = 100
+        linear = seq_len * self.LAYERS * 2 * self.KV_HEADS * self.HEAD_SIZE
+        assert model.get_kvcache_bytes_per_sequence(seq_len) == pytest.approx(linear, rel=1e-9)
+
+        per_layer_token = self.KV_HEADS * self.HEAD_SIZE * 2
+        at_window = model.get_kvcache_bytes_per_sequence(self.WINDOW)
+        assert at_window == pytest.approx(self.WINDOW * self.LAYERS * per_layer_token, rel=1e-9)
+
+        above_window = model.get_kvcache_bytes_per_sequence(self.WINDOW + 1)
+        num_global = self.LAYERS - self.LAYERS // 2
+        assert above_window == pytest.approx(at_window + num_global * per_layer_token, rel=1e-9)
+
+    def test_max_tokens_inverts_piecewise_curve(self):
+        model = self._model()
+        seq_len = 50_000
+        budget = model.get_kvcache_bytes_per_sequence(seq_len)
+        max_tokens = model.get_kvcache_max_tokens(budget)
+        assert model.get_kvcache_bytes_per_sequence(max_tokens) <= budget
+        assert model.get_kvcache_bytes_per_sequence(max_tokens + 1) > budget
+
+
 class TestGetKvcacheMaxTokens:
     """``Model.get_kvcache_max_tokens`` -- the capacity-sizing inverse of
     ``get_kvcache_bytes_per_sequence``.

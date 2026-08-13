@@ -2156,9 +2156,7 @@ class BaseBackend:
                 # inflates activations ~(nextn+1)x and over-prunes concurrency.
                 decode_share = min(max(mtp_scaled_tokens, 0), num_tokens)
                 activations = (
-                    activations
-                    * (num_tokens - decode_share + decode_share * (model.config.nextn + 1))
-                    / num_tokens
+                    activations * (num_tokens - decode_share + decode_share * (model.config.nextn + 1)) / num_tokens
                 )
             else:
                 # Decode-only steps (disagg decode worker): every token in the
