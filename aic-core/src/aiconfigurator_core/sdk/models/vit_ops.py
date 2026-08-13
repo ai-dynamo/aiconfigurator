@@ -221,3 +221,168 @@ def build_encoder_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int, enable_
             )
         )
     return result
+
+
+def _gemma4_vision_transformer_ops(enc_cfg: common.Gemma4VisionEncoderConfig, tp_size: int) -> list:
+    """Build the Gemma 4 vision tower without Qwen3-VL merger assumptions.
+
+    The graph follows ``Gemma4VisionModel``: learned patch + 2-D position
+    embeddings, 27 non-causal transformer blocks with Q/K/V normalization,
+    full x/y RoPE and a gated MLP, followed by position-aware average pooling,
+    standardization, RMS normalization, and one language-space projection.
+    """
+    depth = enc_cfg.depth
+    h_vit = enc_cfg.hidden_size
+    n_vit = enc_cfg.num_heads
+    n_kv = enc_cfg.num_key_value_heads
+    head_dim = enc_cfg.head_dim
+    inter_vit = enc_cfg.intermediate_size
+    pool = enc_cfg.pooling_kernel_size
+
+    if min(depth, h_vit, n_vit, n_kv, head_dim, inter_vit, enc_cfg.patch_size, pool) <= 0:
+        raise ValueError("Gemma 4 vision encoder dimensions must all be positive")
+    if n_vit != n_kv:
+        raise ValueError("Gemma 4 vision encoder requires full MHA (num_heads == num_key_value_heads)")
+    if n_vit * head_dim != h_vit:
+        raise ValueError("Gemma 4 vision num_heads * head_dim must equal hidden_size")
+    for field, value in (
+        ("num_heads", n_vit),
+        ("num_key_value_heads", n_kv),
+        ("intermediate_size", inter_vit),
+    ):
+        if value % tp_size != 0:
+            raise ValueError(f"Gemma 4 vision {field} ({value}) must be divisible by tp_size ({tp_size})")
+
+    vit_gemm_mode = common.GEMMQuantMode.bfloat16
+    vit_fmha_mode = common.FMHAQuantMode.bfloat16
+    qkv_width = (n_vit + 2 * n_kv) * head_dim // tp_size
+    attn_width = n_vit * head_dim // tp_size
+    inter_per_tp = inter_vit // tp_size
+
+    result = [
+        # Pixel patches are already flattened by the processor to 3 * patch².
+        ops.GEMM(
+            "encoder_patch_embed_gemm",
+            1,
+            h_vit,
+            3 * enc_cfg.patch_size**2,
+            vit_gemm_mode,
+        ),
+        # Two independent learned tables (x and y).  A scale factor of two
+        # accounts for both lookups in latency and resident weights.
+        ops.Embedding(
+            "encoder_position_embedding",
+            2,
+            enc_cfg.position_embedding_size,
+            h_vit,
+            0.3,
+        ),
+        ops.ElementWise("encoder_patch_embed_add", 1, 3 * h_vit, h_vit, 0.8),
+        ops.ElementWise("encoder_input_norm", depth, h_vit, h_vit, 0.8),
+        ops.GEMM("encoder_qkv_gemm", depth, qkv_width, h_vit, vit_gemm_mode),
+        # Per-head Q/K/V RMSNorm plus full two-dimensional RoPE on Q and K.
+        # RoPE is explicit here rather than the Qwen-specific partial-RoPE
+        # path inside EncoderAttention.
+        ops.ElementWise("encoder_qkv_norm_rope_2d", depth, 3 * attn_width, 3 * attn_width, 0.8),
+        ops.EncoderAttention(
+            "encoder_attention",
+            depth,
+            n_vit // tp_size,
+            head_dim,
+            fmha_quant_mode=vit_fmha_mode,
+            partial_rotary_factor=0.0,
+        ),
+        ops.GEMM(
+            "encoder_proj_gemm",
+            depth,
+            h_vit,
+            attn_width,
+            vit_gemm_mode,
+            low_precision_input=True,
+        ),
+        ops.CustomAllReduce("encoder_ar_1", depth, h_vit, tp_size),
+        ops.ElementWise("encoder_post_attn_norm_residual", depth, 3 * h_vit, h_vit, 0.8),
+        ops.ElementWise("encoder_pre_ffn_norm", depth, h_vit, h_vit, 0.8),
+        # Gemma 4's vision MLP is gated: separate gate/up projections are
+        # represented as one fused GEMM with a 2*intermediate output.
+        ops.GEMM("encoder_ffn_gate_up_gemm", depth, 2 * inter_per_tp, h_vit, vit_gemm_mode),
+        ops.ElementWise("encoder_ffn_act_mul", depth, 2 * inter_per_tp, inter_per_tp, 0.8),
+        ops.GEMM(
+            "encoder_ffn_down_gemm",
+            depth,
+            h_vit,
+            inter_per_tp,
+            vit_gemm_mode,
+            low_precision_input=True,
+        ),
+        ops.CustomAllReduce("encoder_ar_2", depth, h_vit, tp_size),
+        ops.ElementWise("encoder_post_ffn_norm_residual", depth, 3 * h_vit, h_vit, 0.8),
+        # Query x is the pre-pooling patch count. scale_num_tokens converts it
+        # to pooled tokens while dim_in accounts for all pool² source patches.
+        ops.ElementWise(
+            "encoder_gemma4_pool_avg",
+            1,
+            pool**2 * h_vit,
+            h_vit,
+            0.8,
+            scale_num_tokens=pool**2,
+        ),
+        # sqrt(hidden) scaling and optional checkpoint standardization execute
+        # on the pooled soft-token stream.
+        ops.ElementWise(
+            "encoder_gemma4_pool_postprocess",
+            1,
+            (3 if enc_cfg.standardize else 1) * h_vit,
+            h_vit,
+            0.8,
+        ),
+        ops.ElementWise("encoder_projector_pre_norm", 1, h_vit, h_vit, 0.8),
+        # Gemma4MultimodalEmbedder uses a ReplicatedLinear in vLLM and is
+        # absent from the Hugging Face vision TP plan.  Keep the complete
+        # 1152 -> language-hidden projection on every rank; there is no Qwen
+        # PatchMerger-style projector sharding or projector AllReduce.
+        ops.GEMM(
+            "encoder_projector_fc0_gemm",
+            1,
+            enc_cfg.out_hidden_size,
+            h_vit,
+            vit_gemm_mode,
+        ),
+    ]
+    return result
+
+
+def build_gemma4_vision_encoder_ops(
+    enc_cfg: common.Gemma4VisionEncoderConfig,
+    tp_size: int,
+    enable_encoder_dp: bool = True,
+) -> list:
+    """Build Gemma 4 vision ops under encoder-DP or legacy encoder-TP.
+
+    Encoder-DP keeps one complete vision tower per TP rank, shards whole images
+    across those replicas, then all-gathers the projected soft-token embeddings.
+    Encoder-TP shards attention and gated-MLP weights with per-block
+    all-reduces.  Gemma's language projection remains replicated, matching the
+    engine contract.
+    """
+    if not isinstance(enc_cfg, common.Gemma4VisionEncoderConfig):
+        raise TypeError(
+            f"build_gemma4_vision_encoder_ops requires Gemma4VisionEncoderConfig, got {type(enc_cfg).__name__}"
+        )
+
+    if not enable_encoder_dp:
+        return _gemma4_vision_transformer_ops(enc_cfg, tp_size)
+
+    result = _gemma4_vision_transformer_ops(enc_cfg, 1)
+    if tp_size > 1:
+        result.append(
+            ops.NCCL(
+                "encoder_dp_all_gather",
+                1,
+                "all_gather",
+                num_elements_per_token=enc_cfg.out_hidden_size * tp_size,
+                num_gpus=tp_size,
+                comm_quant_mode=common.CommQuantMode.half,
+            )
+        )
+    return result

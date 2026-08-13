@@ -517,6 +517,7 @@ def _parse_hf_config_json(config: dict) -> dict:
     """
     architecture = config["architectures"][0]
     vision_cfg = config.get("vision_config")
+    vision_soft_tokens_per_image = config.get("vision_soft_tokens_per_image")
 
     # For multimodal models, unwrap the nested text config so that all LLM
     # parameters (layers, hidden_size, MoE fields, etc.) are read from the
@@ -790,6 +791,67 @@ def _parse_hf_config_json(config: dict) -> dict:
         global_hd = config.get("global_head_dim")
         if global_hd is None:
             global_hd = swa_hd
+
+        gemma4_vision_config = None
+        if vision_cfg is not None:
+            if not isinstance(vision_cfg, dict):
+                raise ValueError(
+                    f"Expected 'vision_config' to be a dict for architecture {architecture}, "
+                    f"got {type(vision_cfg).__name__}"
+                )
+            if vision_cfg.get("model_type") not in (None, "gemma4_vision"):
+                raise ValueError(
+                    f"Gemma 4 vision_config.model_type must be 'gemma4_vision', got {vision_cfg.get('model_type')!r}"
+                )
+
+            pooling_kernel_size = int(vision_cfg["pooling_kernel_size"])
+            if pooling_kernel_size <= 0:
+                raise ValueError("Gemma 4 vision pooling_kernel_size must be positive")
+            soft_tokens_per_image = int(
+                vision_soft_tokens_per_image
+                if vision_soft_tokens_per_image is not None
+                else vision_cfg.get("default_output_length", 0)
+            )
+            if soft_tokens_per_image <= 0:
+                raise ValueError(
+                    "Gemma 4 requires a positive vision_soft_tokens_per_image or vision_config.default_output_length"
+                )
+
+            vision_hidden_size = int(vision_cfg["hidden_size"])
+            vision_num_heads = int(vision_cfg["num_attention_heads"])
+            vision_num_kv_heads = int(vision_cfg.get("num_key_value_heads", vision_num_heads))
+            vision_head_dim = int(vision_cfg.get("head_dim", vision_hidden_size // vision_num_heads))
+            if vision_num_heads * vision_head_dim != vision_hidden_size:
+                raise ValueError(
+                    "Gemma 4 vision attention geometry must satisfy num_attention_heads * head_dim == hidden_size"
+                )
+            if vision_num_kv_heads != vision_num_heads:
+                raise ValueError(
+                    "Gemma 4 vision modeling currently requires full MHA (num_key_value_heads == num_attention_heads)"
+                )
+
+            gemma4_vision_config = common.Gemma4VisionEncoderConfig(
+                depth=int(vision_cfg["num_hidden_layers"]),
+                hidden_size=vision_hidden_size,
+                num_heads=vision_num_heads,
+                intermediate_size=int(vision_cfg["intermediate_size"]),
+                patch_size=int(vision_cfg["patch_size"]),
+                temporal_patch_size=1,
+                # This is average-pooling stride, not Qwen pixel shuffle.  The
+                # subclass keeps the distinction explicit for op construction.
+                spatial_merge_size=pooling_kernel_size,
+                out_hidden_size=hidden_size,
+                projector_dims=((vision_hidden_size, hidden_size),),
+                projector_n_instances=1,
+                # Full 2-D RoPE, split independently across x/y head halves.
+                partial_rotary_factor=1.0,
+                num_key_value_heads=vision_num_kv_heads,
+                head_dim=vision_head_dim,
+                pooling_kernel_size=pooling_kernel_size,
+                position_embedding_size=int(vision_cfg["position_embedding_size"]),
+                soft_tokens_per_image=soft_tokens_per_image,
+                standardize=bool(vision_cfg.get("standardize", False)),
+            )
         extra_params = common.Gemma4MixConfig(
             layer_types=tuple(layer_types_raw),
             swa_num_kv_heads=swa_num_kv,
@@ -798,13 +860,15 @@ def _parse_hf_config_json(config: dict) -> dict:
             global_head_dim=global_hd,
             sliding_window_size=config.get("sliding_window", 0),
             attention_k_eq_v=bool(config.get("attention_k_eq_v", False)),
+            vision_config=gemma4_vision_config,
         )
         logger.info(
             f"Gemma 4 config: "
             f"swa_layers={extra_params.layer_types.count('sliding_attention')}, "
             f"global_layers={extra_params.layer_types.count('full_attention')}, "
             f"num_experts={num_experts}, top_k={topk}, "
-            f"sw={extra_params.sliding_window_size}, k_eq_v_global={extra_params.attention_k_eq_v}"
+            f"sw={extra_params.sliding_window_size}, k_eq_v_global={extra_params.attention_k_eq_v}, "
+            f"vision={'enabled' if gemma4_vision_config is not None else 'disabled'}"
         )
     elif architecture in {
         "Step3p7ForConditionalGeneration",

@@ -14,6 +14,8 @@ from tools.support_matrix.support_matrix import (
     STATUS_PASS,
     SupportMatrix,
     TestConstraints,
+    _get_matrix_visual_workload,
+    _support_matrix_row_command,
 )
 
 pytestmark = pytest.mark.unit
@@ -142,3 +144,55 @@ def test_task_uses_silicon_database_mode(monkeypatch):
     )
 
     assert captured_kwargs["database_mode"] == common.DatabaseMode.SILICON.name
+
+
+def test_matrix_derives_gemma4_fixed_budget_image_workload():
+    _get_matrix_visual_workload.cache_clear()
+
+    assert _get_matrix_visual_workload("google/gemma-4-26B-A4B") == (672, 960, 1)
+    assert _get_matrix_visual_workload("Qwen/Qwen3-VL-32B-Instruct") == (448, 448, 1)
+    assert _get_matrix_visual_workload("Qwen/Qwen3-32B") is None
+
+
+def test_matrix_image_constraints_reach_task_and_replay_command(monkeypatch):
+    captured_kwargs = {}
+
+    class FakeTask:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(support_matrix_module, "Task", FakeTask)
+    constraints = TestConstraints(
+        total_gpus=32,
+        isl=256,
+        osl=256,
+        prefix=128,
+        ttft=2000.0,
+        tpot=50.0,
+        image_height=672,
+        image_width=960,
+        num_images=1,
+    )
+
+    SupportMatrix._create_task(
+        mode="disagg",
+        model="google/gemma-4-26B-A4B",
+        system="b200_sxm",
+        backend="trtllm",
+        version="1.3.0rc20",
+        constraints=constraints,
+        engine_step_backend=None,
+    )
+    command = _support_matrix_row_command(
+        model="google/gemma-4-26B-A4B",
+        system="b200_sxm",
+        backend="trtllm",
+        version="1.3.0rc20",
+        mode="disagg",
+        constraints=constraints,
+    )
+
+    assert captured_kwargs["image_height"] == 672
+    assert captured_kwargs["image_width"] == 960
+    assert captured_kwargs["num_images_per_request"] == 1
+    assert "--image-height 672 --image-width 960 --num-images 1" in command

@@ -18,7 +18,8 @@ import shlex
 import traceback
 from concurrent.futures import BrokenExecutor, ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import cache
 from itertools import groupby
 from pathlib import Path
 
@@ -110,6 +111,9 @@ class TestConstraints:
     prefix: int
     ttft: float
     tpot: float
+    image_height: int = 0
+    image_width: int = 0
+    num_images: int = 0
 
 
 @dataclass(frozen=True)
@@ -176,6 +180,17 @@ def _support_matrix_row_command(
         # comparator; use the default Python engine-step path for the public
         # replay command.
         parts.extend(["--engine-step-backend", "python"])
+    if constraints.image_height > 0 and constraints.image_width > 0 and constraints.num_images > 0:
+        parts.extend(
+            [
+                "--image-height",
+                str(constraints.image_height),
+                "--image-width",
+                str(constraints.image_width),
+                "--num-images",
+                str(constraints.num_images),
+            ]
+        )
     _ = (
         mode,
         engine_step_comparison_rtol,
@@ -198,26 +213,66 @@ _SIZE_TIERS: list[tuple[float, TestConstraints]] = [
 _DEFAULT_TIER = _LARGE  # > 100B params
 
 
+@cache
+def _get_matrix_visual_workload(model_path: str) -> tuple[int, int, int] | None:
+    """Return one representative image workload when AIC models an encoder.
+
+    Matrix rows used to exercise multimodal architectures as text-only, which
+    could report PASS without querying any encoder op.  Derive this workload
+    from the parsed model configuration so both agg and disagg checks cover the
+    encoder automatically whenever ``encoder_ops`` are expected.
+    """
+    model_info = _get_model_info(model_path)
+    extra = model_info.get("extra_params")
+    if isinstance(extra, common.Gemma4MixConfig):
+        enc_cfg = extra.vision_config
+    elif isinstance(extra, common.VisionEncoderConfig):
+        enc_cfg = extra
+    else:
+        enc_cfg = None
+    if enc_cfg is None:
+        return None
+
+    stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
+    if isinstance(enc_cfg, common.Gemma4VisionEncoderConfig):
+        # Choose the closest-to-square exact factorization of the checkpoint's
+        # soft-token budget.  For 280 tokens this is a 14x20 pooled grid, or a
+        # processor-aligned 672x960 image at patch=16/pool=3.
+        soft_tokens = enc_cfg.soft_tokens_per_image
+        pooled_h = int(soft_tokens**0.5)
+        while pooled_h > 1 and soft_tokens % pooled_h:
+            pooled_h -= 1
+        pooled_w = soft_tokens // pooled_h
+        return pooled_h * stride, pooled_w * stride, 1
+
+    # 14x14 post-merge tokens is the standard 448x448 Qwen3-VL workload.
+    return 14 * stride, 14 * stride, 1
+
+
 def _get_test_constraints(model_path: str) -> TestConstraints:
     """Return the appropriate test constraints based on estimated model size."""
     weight_bytes = _estimate_model_weight_bytes(model_path)
     num_params = weight_bytes / _BYTES_PER_PARAM
+    selected = _DEFAULT_TIER
     for threshold, constraints in _SIZE_TIERS:
         if num_params < threshold:
-            logger.info(
-                "Model %s: ~%.1fB params → %s",
-                model_path,
-                num_params / 1e9,
-                constraints,
-            )
-            return constraints
+            selected = constraints
+            break
+    visual_workload = _get_matrix_visual_workload(model_path)
+    if visual_workload is not None:
+        selected = replace(
+            selected,
+            image_height=visual_workload[0],
+            image_width=visual_workload[1],
+            num_images=visual_workload[2],
+        )
     logger.info(
         "Model %s: ~%.1fB params → %s",
         model_path,
         num_params / 1e9,
-        _DEFAULT_TIER,
+        selected,
     )
-    return _DEFAULT_TIER
+    return selected
 
 
 def _is_known_framework_incompatible_gap(
@@ -766,6 +821,12 @@ class SupportMatrix:
             # (e.g. AIC_SM_TRANSFERS="off" or "xshape,xquant"). None -> all kinds on.
             "transfer_policy": os.environ.get("AIC_SM_TRANSFERS") or None,
         }
+        if constraints.image_height > 0 and constraints.image_width > 0 and constraints.num_images > 0:
+            common_kwargs.update(
+                image_height=constraints.image_height,
+                image_width=constraints.image_width,
+                num_images_per_request=constraints.num_images,
+            )
         if mode == "disagg":
             # v2 disagg forbids shared top-level worker fields; fan out to both roles.
             return Task(

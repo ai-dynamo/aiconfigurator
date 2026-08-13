@@ -229,14 +229,34 @@ class BaseBackend:
         """Resolve the per-image pre-merge / post-merge token counts from
         RuntimeConfig + VisionEncoderConfig.
 
-        Resolution order:
+        Qwen-style resolution order:
             1. image_height + image_width (computed from patch/merge sizes)
             2. num_image_tokens (explicit per-image override)
+
+        Gemma 4 instead follows its fixed-budget processor/engine contract:
+        image dimensions indicate that an image is present, while the checkpoint
+        ``soft_tokens_per_image`` determines the post-pool budget.  The SDK-only
+        ``num_image_tokens`` field can override that budget for Gemma 4's
+        supported dynamic soft-token modes.
 
         Returns ``(tokens_post_merge_per_image, pre_merge_per_image)``.
         Returns ``(0, 0)`` when neither is set (text-only path).
         """
         has_image_dims = runtime_config.image_height > 0 and runtime_config.image_width > 0
+        if isinstance(enc_cfg, common.Gemma4VisionEncoderConfig):
+            if not has_image_dims and runtime_config.num_image_tokens <= 0:
+                return 0, 0
+            tokens_per_image = runtime_config.num_image_tokens or enc_cfg.soft_tokens_per_image
+            if tokens_per_image not in enc_cfg.supported_soft_token_budgets:
+                raise ValueError(
+                    f"Gemma 4 num_image_tokens must be one of {enc_cfg.supported_soft_token_budgets}, "
+                    f"got {tokens_per_image}"
+                )
+            pre_merge_per_image = tokens_per_image * enc_cfg.pooling_kernel_size**2
+            if tokens_per_image <= 0 or pre_merge_per_image <= 0:
+                return 0, 0
+            return tokens_per_image, pre_merge_per_image
+
         if has_image_dims:
             img_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
             tokens_per_image = (runtime_config.image_height // img_stride) * (runtime_config.image_width // img_stride)
@@ -292,7 +312,11 @@ class BaseBackend:
         # on post-merge tokens; ViT attention uses cu_seqlens (each image an
         # independent varlen sequence of pre_merge_per_image patches).
         def _encoder_eff_s(op) -> int:
-            use_post = "encoder_projector" in op._name or "all_gather" in op._name
+            use_post = (
+                "encoder_projector" in op._name
+                or "encoder_gemma4_pool_postprocess" in op._name
+                or "all_gather" in op._name
+            )
             use_varlen = "encoder_attention" in op._name
             if use_varlen:
                 return pre_merge_per_image
@@ -1502,10 +1526,18 @@ class BaseBackend:
         enc_cfg = getattr(model, "encoder_config", None)
         activations = 0.0
         if isinstance(enc_cfg, common.VisionEncoderConfig) and num_tokens > 0:
-            # ~3x hidden_size per patch covers QKV, attention output, and FFN intermediates (bfloat16)
-            activations = 2 * num_tokens * enc_cfg.hidden_size * 3
-            # Projected embeddings (all projector instances concatenated along hidden)
-            activations += 2 * embed_tokens * enc_cfg.out_hidden_size * enc_cfg.projector_n_instances
+            if isinstance(enc_cfg, common.Gemma4VisionEncoderConfig):
+                # Peak gated-MLP workspace: input plus gate/up intermediates.
+                peak_patch_width = enc_cfg.hidden_size + 2 * enc_cfg.intermediate_size
+                activations = 2 * num_tokens * max(3 * enc_cfg.hidden_size, peak_patch_width)
+                # Pooled tower output, normalized projection input, and final
+                # language-space embeddings coexist at the adapter boundary.
+                activations += 2 * embed_tokens * (2 * enc_cfg.hidden_size + enc_cfg.out_hidden_size)
+            else:
+                # ~3x hidden_size per patch covers QKV, attention output, and FFN intermediates (bfloat16)
+                activations = 2 * num_tokens * enc_cfg.hidden_size * 3
+                # Projected embeddings (all projector instances concatenated along hidden)
+                activations += 2 * embed_tokens * enc_cfg.out_hidden_size * enc_cfg.projector_n_instances
             activations = max(activations, 32 * 1024 * 1024)  # 32 MiB minimum
         one_gib = 1 << 30
         return {
@@ -1579,6 +1611,7 @@ class BaseBackend:
             runtime_config.image_height,
             runtime_config.image_width,
             runtime_config.num_images_per_request,
+            runtime_config.num_image_tokens,
         )
         cache_key = (
             self._make_agg_cache_key(isl, osl, b, ctx_tokens, engine_step_backend_key, agg_extra),

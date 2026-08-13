@@ -7,6 +7,7 @@ import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
 from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor
+from aiconfigurator_core.sdk.models.vit_ops import build_gemma4_vision_encoder_ops
 
 
 @register_model("GEMMA4MIX")
@@ -94,7 +95,7 @@ class Gemma4MixModel(BaseModel):
         self._power_law_alpha = 1.01
 
     def set_gemma4_config(self, cfg: common.Gemma4MixConfig) -> None:
-        """Apply Gemma4MixConfig and rebuild context/generation ops.
+        """Apply Gemma4MixConfig and rebuild text plus optional vision ops.
 
         Validates that ``layer_types`` length matches ``num_layers`` and contains only
         recognized values before accepting the config.
@@ -112,6 +113,16 @@ class Gemma4MixModel(BaseModel):
         self._gemma4_config = cfg
         self._build_context_ops()
         self._build_generation_ops()
+        self.encoder_ops = []
+        self.encoder_config = cfg.vision_config
+        if cfg.vision_config is not None:
+            self.encoder_ops.extend(
+                build_gemma4_vision_encoder_ops(
+                    cfg.vision_config,
+                    self.config.tp_size,
+                    self.config.enable_encoder_dp,
+                )
+            )
         if self.config.cp_size > 1:
             # decode never runs CP. Route the generation MoEDispatch ops to their
             # decode-CP comm path (pre=0 / post=all_reduce) rather than prefill's
