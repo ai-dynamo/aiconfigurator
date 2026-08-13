@@ -220,6 +220,33 @@ def test_resumed_scan_retires_skipped_encoder_unsupported_result(tmp_path):
         assert conn.execute("SELECT entry_key FROM pareto_results").fetchall() == []
 
 
+def test_resumed_scan_fails_closed_when_encoder_coverage_is_unresolvable(tmp_path, monkeypatch):
+    db_path = tmp_path / "scan.sqlite"
+    legacy_entry = Entry(
+        model="Qwen/Qwen3.5-27B",
+        architecture="Qwen3_5ForConditionalGeneration",
+        system="b200_sxm",
+        backend="vllm",
+        version="0.24.0",
+        mode="agg",
+        baseline_status=STATUS_PASS,
+    )
+    init_db(db_path)
+    seed_entries(db_path, [legacy_entry])
+    monkeypatch.setattr(
+        "tools.support_matrix.scan_rust_parity._get_encoder_coverage",
+        lambda _model: (_ for _ in ()).throw(RuntimeError("metadata unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="metadata unavailable"):
+        seed_entries(db_path, [])
+
+    # The failed retirement transaction leaves the database unchanged for an
+    # operator to diagnose; it is never reported by this aborted scan.
+    with _connect(db_path) as conn:
+        assert conn.execute("SELECT entry_key FROM entries").fetchall() == [(legacy_entry.key,)]
+
+
 def test_parity_probe_passes_image_arguments(monkeypatch):
     calls = []
 

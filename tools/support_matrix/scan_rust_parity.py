@@ -375,15 +375,9 @@ def seed_entries(db_path: Path, entries: list[Entry]) -> int:
         retired_keys = []
         for entry_key, model in conn.execute("SELECT entry_key, model FROM entries"):
             if model not in coverage_by_model:
-                try:
-                    coverage_by_model[model] = _get_encoder_coverage(model)
-                except Exception:
-                    # Historical scan databases can outlive bundled configs.
-                    # Leave an unresolvable entry alone rather than preventing
-                    # the rest of the resumable scan from starting.
-                    coverage_by_model[model] = None
+                coverage_by_model[model] = _get_encoder_coverage(model)
             coverage = coverage_by_model[model]
-            if coverage is not None and coverage.checkpoint_declares_encoder and not coverage.aic_encoder_implemented:
+            if coverage.checkpoint_declares_encoder and not coverage.aic_encoder_implemented:
                 retired_keys.append(entry_key)
         for entry_key in retired_keys:
             conn.execute("DELETE FROM probe_results WHERE entry_key = ?", (entry_key,))
