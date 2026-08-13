@@ -44,6 +44,11 @@ def test_num_frames_per_visual_requires_positive_non_boolean_integer(value):
         Task(num_frames_per_visual=value)
 
 
+def test_video_frames_require_image_dimensions():
+    with pytest.raises(ValueError, match="requires positive image_height and image_width"):
+        Task(num_frames_per_visual=8)
+
+
 def test_agg_with_model_resolves_identity_and_backend():
     t = Task(
         serving_mode="agg",

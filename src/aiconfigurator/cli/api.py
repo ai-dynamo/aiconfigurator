@@ -44,6 +44,17 @@ DEFAULT_DECODE_LATENCY_CORRECTION_SCALE = 1.08
 POWER_DATA_COVERAGE_THRESHOLD = 0.9
 
 
+def _validate_visual_workload(image_height: int, image_width: int, num_frames_per_visual: int) -> None:
+    if (
+        isinstance(num_frames_per_visual, bool)
+        or not isinstance(num_frames_per_visual, int)
+        or num_frames_per_visual <= 0
+    ):
+        raise ValueError(f"num_frames_per_visual must be a positive non-boolean integer, got {num_frames_per_visual!r}")
+    if num_frames_per_visual > 1 and not (image_height > 0 and image_width > 0):
+        raise ValueError("num_frames_per_visual > 1 requires positive image_height and image_width")
+
+
 def cli_support(
     model_path: str,
     system: str,
@@ -277,6 +288,7 @@ def cli_default(
         >>> print(result.chosen_exp)  # e.g., 'agg_trtllm' or 'disagg_vllm'
         >>> print(result.best_throughputs)  # Shows all 6 backend/mode combinations
     """
+    _validate_visual_workload(image_height, image_width, num_frames_per_visual)
     # Fail fast on inconsistent MTP inputs (same early check as the CLI path).
     # nextn="auto" resolves the draft depth from the checkpoint first.
     if nextn == "auto":
@@ -480,6 +492,7 @@ def cli_recommend(
         ... )
         >>> print(result.best_configs)
     """
+    _validate_visual_workload(image_height, image_width, num_frames_per_visual)
     import math
 
     from aiconfigurator.sdk.perf_database import load_system_spec
@@ -1124,6 +1137,7 @@ def cli_estimate(
         ...     decode_batch_size=64, decode_num_workers=2,
         ... )
     """
+    _validate_visual_workload(image_height, image_width, num_frames_per_visual)
     from aiconfigurator.sdk.backends.factory import get_backend
     from aiconfigurator.sdk.models import get_model
     from aiconfigurator.sdk.perf_database import (

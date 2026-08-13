@@ -169,6 +169,8 @@ class RuntimeConfig:
             raise ValueError(
                 f"num_frames_per_visual must be a positive non-boolean integer, got {self.num_frames_per_visual!r}"
             )
+        if self.num_frames_per_visual > 1 and not (self.image_height > 0 and self.image_width > 0):
+            raise ValueError("num_frames_per_visual > 1 requires positive image_height and image_width")
 
 
 @dataclass

@@ -226,6 +226,17 @@ def _positive_float(value: str) -> float:
     return f
 
 
+def _positive_int(value: str) -> int:
+    """Argparse type for positive integers."""
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value!r}") from None
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value!r}")
+    return parsed
+
+
 def _validate_model_path(model_path: str) -> str:
     """
     Validate model_path which can be:
@@ -416,7 +427,7 @@ def _add_default_mode_arguments(parser):
     )
     parser.add_argument(
         "--num-frames-per-visual",
-        type=int,
+        type=_positive_int,
         default=1,
         help="Frames per visual input. Use 1 for images and >1 for video clips. Default: 1.",
     )
@@ -617,7 +628,7 @@ def _add_recommend_mode_arguments(parser):
     )
     parser.add_argument(
         "--num-frames-per-visual",
-        type=int,
+        type=_positive_int,
         default=1,
         help="Frames per visual input. Use 1 for images and >1 for video clips. Default: 1.",
     )
@@ -822,7 +833,7 @@ def _add_estimate_mode_arguments(parser):
     )
     parser.add_argument(
         "--num-frames-per-visual",
-        type=int,
+        type=_positive_int,
         default=1,
         help="Frames per visual input. Use 1 for images and >1 for video clips. Default: 1.",
     )
@@ -1505,7 +1516,6 @@ def build_default_tasks(
     image_height: int = 0,
     image_width: int = 0,
     num_images: int = 1,
-    num_frames_per_visual: int = 1,
     enable_encoder_dp: bool = True,
     ttft: float = 2000.0,
     tpot: float = 30.0,
@@ -1524,6 +1534,7 @@ def build_default_tasks(
     afd_max_a_batch_size: int = 1024,
     afd_max_candidates: int = 10_000,
     afd_candidate_overflow: str = "error",
+    num_frames_per_visual: int = 1,
 ) -> dict[str, Task]:
     """Build task configs for the selected default-mode serving modes.
 
@@ -1572,6 +1583,8 @@ def build_default_tasks(
         Task objects keyed by serving mode and, when requested, backend.
     """
     decode_system = decode_system or system
+    if num_frames_per_visual > 1 and not (image_height > 0 and image_width > 0):
+        raise ValueError("num_frames_per_visual > 1 requires positive image_height and image_width")
     if serving_mode not in ("auto", "all", "agg", "disagg", "afd"):
         raise ValueError(f"Invalid serving_mode: {serving_mode!r}. Use 'auto', 'all', 'agg', 'disagg', or 'afd'.")
     if serving_mode == "auto":

@@ -9,6 +9,7 @@ while keeping heavy computation mocked out.
 """
 
 import argparse
+import inspect
 import logging
 from unittest.mock import MagicMock, patch
 
@@ -29,6 +30,16 @@ from aiconfigurator.cli.report_and_save import _apply_inclusive_tpot
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 
 pytestmark = pytest.mark.unit
+
+
+def test_build_default_tasks_appends_new_video_parameter():
+    parameters = list(inspect.signature(build_default_tasks).parameters)
+    assert parameters[-2:] == ["afd_candidate_overflow", "num_frames_per_visual"]
+
+
+def test_build_default_tasks_rejects_video_without_dimensions():
+    with pytest.raises(ValueError, match="requires positive image_height and image_width"):
+        build_default_tasks("moonshotai/Kimi-K2.5", 8, "b200_sxm", num_frames_per_visual=8)
 
 
 class TestCLILogLevelResolution:

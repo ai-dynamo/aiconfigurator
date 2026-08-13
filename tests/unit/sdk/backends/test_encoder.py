@@ -269,6 +269,10 @@ class TestRuntimeConfigImageFields:
         with pytest.raises(ValueError, match="positive non-boolean integer"):
             RuntimeConfig(num_frames_per_visual=value)
 
+    def test_video_frames_require_image_dimensions(self):
+        with pytest.raises(ValueError, match="requires positive image_height and image_width"):
+            RuntimeConfig(num_frames_per_visual=8)
+
     def test_default_num_image_tokens_is_zero(self):
         rc = RuntimeConfig(batch_size=1, isl=512, osl=128)
         assert rc.num_image_tokens == 0
