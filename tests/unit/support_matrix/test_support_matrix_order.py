@@ -142,3 +142,42 @@ def test_task_uses_silicon_database_mode(monkeypatch):
     )
 
     assert captured_kwargs["database_mode"] == common.DatabaseMode.SILICON.name
+
+
+@pytest.mark.parametrize("mode", ["agg", "disagg"])
+@pytest.mark.parametrize("model", ["moonshotai/Kimi-K2.5", "nvidia/Kimi-K2.5-NVFP4"])
+def test_kimi_matrix_tasks_exercise_representative_encoder_workload(monkeypatch, mode, model):
+    captured_kwargs = {}
+
+    class FakeTask:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(support_matrix_module, "Task", FakeTask)
+    SupportMatrix._create_task(
+        mode=mode,
+        model=model,
+        system="b200_sxm",
+        backend="trtllm",
+        version="1.2.0rc5",
+        constraints=TestConstraints(total_gpus=8, isl=256, osl=256, prefix=0, ttft=2000.0, tpot=50.0),
+        engine_step_backend=None,
+    )
+
+    assert captured_kwargs["image_height"] == 448
+    assert captured_kwargs["image_width"] == 448
+    assert captured_kwargs["num_images_per_request"] == 1
+    assert captured_kwargs["num_frames_per_visual"] == 1
+
+
+def test_kimi_matrix_reproduction_command_includes_visual_workload():
+    command = support_matrix_module._support_matrix_row_command(
+        model="nvidia/Kimi-K2.5-NVFP4",
+        system="b200_sxm",
+        backend="trtllm",
+        version="1.2.0rc5",
+        mode="agg",
+        constraints=TestConstraints(total_gpus=8, isl=256, osl=256, prefix=0, ttft=2000.0, tpot=50.0),
+    )
+
+    assert "--image-height 448 --image-width 448 --num-images 1" in command

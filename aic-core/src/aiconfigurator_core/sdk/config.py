@@ -157,6 +157,20 @@ class RuntimeConfig:
     image_width: int = 0
     num_images_per_request: int = 1
     num_image_tokens: int = 0  # override: ViT output tokens per image; ignored when image_height/width are set
+    # Frames in each visual input. 1 models an image; >1 models a video clip.
+    num_frames_per_visual: int = 1
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.num_frames_per_visual, bool)
+            or not isinstance(self.num_frames_per_visual, int)
+            or self.num_frames_per_visual <= 0
+        ):
+            raise ValueError(
+                f"num_frames_per_visual must be a positive non-boolean integer, got {self.num_frames_per_visual!r}"
+            )
+        if self.num_frames_per_visual > 1 and not (self.image_height > 0 and self.image_width > 0):
+            raise ValueError("num_frames_per_visual > 1 requires positive image_height and image_width")
 
 
 @dataclass

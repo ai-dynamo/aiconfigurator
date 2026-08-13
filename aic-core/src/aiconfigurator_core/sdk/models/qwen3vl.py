@@ -40,7 +40,7 @@ class Qwen3VLModel(LLAMAModel):
             model_info["context"],
             model_config,
             model_info["extra_params"],
-            encoder_config=model_info["extra_params"],
+            encoder_config=model_info.get("encoder_config") or model_info["extra_params"],
         )
 
     def __init__(self, *args, encoder_config: common.VisionEncoderConfig) -> None:
@@ -78,7 +78,7 @@ class Qwen3VLMoEModel(MOEModel):
             model_config,
             model_info["extra_params"],
         )
-        return cls(*moe_args, *base_args, encoder_config=model_info["extra_params"])
+        return cls(*moe_args, *base_args, encoder_config=model_info.get("encoder_config") or model_info["extra_params"])
 
     def __init__(
         self, topk: int, num_experts: int, moe_inter_size: int, *args, encoder_config: common.VisionEncoderConfig

@@ -453,6 +453,41 @@ class TestCLIArgumentParsing:
         args = cli_parser.parse_args(["estimate", *common_args, "--disable-encoder-dp"])
         assert args.disable_encoder_dp is True
 
+    @pytest.mark.parametrize("mode", ["default", "recommend", "estimate"])
+    def test_num_frames_per_visual_flag(self, cli_parser, mode):
+        args = [mode, "--model-path", "moonshotai/Kimi-K2.5", "--system", "b200_sxm"]
+        if mode == "default":
+            args.extend(["--total-gpus", "8"])
+        elif mode == "recommend":
+            args.extend(["--target-request-rate", "1"])
+        args.extend(["--image-height", "448", "--image-width", "448", "--num-frames-per-visual", "8"])
+
+        parsed = cli_parser.parse_args(args)
+        assert parsed.num_frames_per_visual == 8
+
+    @pytest.mark.parametrize("mode", ["default", "recommend", "estimate"])
+    def test_num_frames_per_visual_defaults_to_one(self, cli_parser, mode):
+        args = [mode, "--model-path", "moonshotai/Kimi-K2.5", "--system", "b200_sxm"]
+        if mode == "default":
+            args.extend(["--total-gpus", "8"])
+        elif mode == "recommend":
+            args.extend(["--target-request-rate", "1"])
+
+        assert cli_parser.parse_args(args).num_frames_per_visual == 1
+
+    @pytest.mark.parametrize("mode", ["default", "recommend", "estimate"])
+    @pytest.mark.parametrize("value", ["0", "-1"])
+    def test_num_frames_per_visual_rejects_non_positive_values(self, cli_parser, mode, value):
+        args = [mode, "--model-path", "moonshotai/Kimi-K2.5", "--system", "b200_sxm"]
+        if mode == "default":
+            args.extend(["--total-gpus", "8"])
+        elif mode == "recommend":
+            args.extend(["--target-request-rate", "1"])
+        args.extend(["--num-frames-per-visual", value])
+
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(args)
+
     def test_recommend_mode_parses_request_rate(self, cli_parser):
         args = cli_parser.parse_args(
             [

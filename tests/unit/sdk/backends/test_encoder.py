@@ -13,6 +13,8 @@ Covers:
 - InferenceSummary encoder latency/energy accessors
 """
 
+from dataclasses import fields
+
 import pytest
 
 from aiconfigurator.sdk import common, config
@@ -257,6 +259,19 @@ class TestEncoderRuntime:
 
 class TestRuntimeConfigImageFields:
     """Test image-related fields added to RuntimeConfig for VL support."""
+
+    def test_new_video_field_preserves_legacy_positional_order(self):
+        init_fields = [field.name for field in fields(RuntimeConfig) if field.init]
+        assert init_fields[-2:] == ["num_image_tokens", "num_frames_per_visual"]
+
+    @pytest.mark.parametrize("value", [0, -1, 1.5, True, False])
+    def test_num_frames_per_visual_requires_positive_non_boolean_integer(self, value):
+        with pytest.raises(ValueError, match="positive non-boolean integer"):
+            RuntimeConfig(num_frames_per_visual=value)
+
+    def test_video_frames_require_image_dimensions(self):
+        with pytest.raises(ValueError, match="requires positive image_height and image_width"):
+            RuntimeConfig(num_frames_per_visual=8)
 
     def test_default_num_image_tokens_is_zero(self):
         rc = RuntimeConfig(batch_size=1, isl=512, osl=128)

@@ -183,6 +183,19 @@ class VisionEncoderConfig:
             rotated fraction — the 2-axis vision RoPE always rotates the full
             head_dim (vLLM ApplyRotaryEmb / SGLang cat([cos, cos])). Only gates
             the encoder_rope_apply op; 0.0 means no RoPE.
+        gemm_quant_mode (str): Encoder GEMM precision, kept separate from the
+            language checkpoint's quantization mode.
+        fmha_quant_mode (str): Encoder-attention precision. EncoderAttention
+            currently supports bfloat16 only.
+        patch_embed_input_channels (int): Input channels for a Conv2d-equivalent
+            patch embedding GEMM. Zero means the patch embed is not modeled.
+        final_norm (bool): Whether the vision transformer has a final norm.
+        projector_pre_norm (bool): Whether PatchMerger normalizes patch features
+            before spatial/temporal merging.
+        pool_temporal (bool): Whether the merger pools the temporal dimension so
+            video frames increase encoder work but not LLM visual-token count.
+        video_attention_type (str): Declared video attention topology, retained
+            explicitly for architecture validation and reporting.
     """
 
     depth: int
@@ -197,6 +210,15 @@ class VisionEncoderConfig:
     projector_dims: tuple[tuple[int, int], ...] = ()
     projector_n_instances: int = 1
     partial_rotary_factor: float = 0.0
+    # New fields are appended, never inserted: this dataclass has a generated
+    # positional constructor and legacy callers may still use it positionally.
+    gemm_quant_mode: str = "bfloat16"
+    fmha_quant_mode: str = "bfloat16"
+    patch_embed_input_channels: int = 0
+    final_norm: bool = False
+    projector_pre_norm: bool = False
+    pool_temporal: bool = False
+    video_attention_type: str = ""
 
 
 @dataclass(frozen=True)

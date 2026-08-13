@@ -517,6 +517,8 @@ def _parse_hf_config_json(config: dict) -> dict:
     """
     architecture = config["architectures"][0]
     vision_cfg = config.get("vision_config")
+    encoder_config = None
+    root_quant_cfg = config.get("quantization_config")
 
     # For multimodal models, unwrap the nested text config so that all LLM
     # parameters (layers, hidden_size, MoE fields, etc.) are read from the
@@ -673,6 +675,83 @@ def _parse_hf_config_json(config: dict) -> dict:
             "kv_lora_rank": config.get("kv_lora_rank", 0),
             "qk_rope_head_dim": config.get("qk_rope_head_dim", 0),
         }
+        if vision_cfg:
+            merge_kernel = vision_cfg.get("merge_kernel_size", [2, 2])
+            if not (isinstance(merge_kernel, list) and len(merge_kernel) == 2 and merge_kernel[0] == merge_kernel[1]):
+                raise ValueError(f"Kimi K2.5 requires a square merge_kernel_size, got {merge_kernel!r}")
+            if vision_cfg.get("mm_projector_type") != "patchmerger":
+                raise ValueError(
+                    "Kimi K2.5 vision modeling requires mm_projector_type='patchmerger', "
+                    f"got {vision_cfg.get('mm_projector_type')!r}"
+                )
+            if vision_cfg.get("merge_type") != "sd2_tpool":
+                raise ValueError(
+                    f"Kimi K2.5 vision modeling requires merge_type='sd2_tpool', got {vision_cfg.get('merge_type')!r}"
+                )
+            if vision_cfg.get("video_attn_type") != "spatial_temporal":
+                raise ValueError(
+                    "Kimi K2.5 vision modeling requires video_attn_type='spatial_temporal', "
+                    f"got {vision_cfg.get('video_attn_type')!r}"
+                )
+
+            # Quantization is scoped independently for the language and vision
+            # towers. The Moonshot checkpoint nests its compressed-tensors config
+            # under text_config; NVIDIA's model-level NVFP4 config explicitly
+            # excludes both vision_tower* and mm_projector*. In both target
+            # checkpoints the complete encoder therefore remains BF16.
+            nested_text_quant_cfg = (
+                text_cfg.get("quantization_config") if text_key and isinstance(text_cfg, dict) else None
+            )
+            quant_is_text_only = root_quant_cfg is not None and root_quant_cfg == nested_text_quant_cfg
+            if root_quant_cfg and not quant_is_text_only:
+                ignore = tuple(str(pattern).lower() for pattern in root_quant_cfg.get("ignore", []))
+                vision_ignored = any("vision_tower" in pattern for pattern in ignore)
+                projector_ignored = any("mm_projector" in pattern for pattern in ignore)
+                if not (vision_ignored and projector_ignored):
+                    raise ValueError(
+                        "Kimi K2.5 has model-level quantization but does not explicitly exclude both "
+                        "vision_tower and mm_projector; refusing to infer encoder precision from the language model"
+                    )
+
+            hidden_vit = vision_cfg["vt_hidden_size"]
+            spatial_merge_size = int(merge_kernel[0])
+            merger_dim = hidden_vit * spatial_merge_size**2
+            out_hidden_size = vision_cfg["text_hidden_size"]
+            if out_hidden_size != hidden_size:
+                raise ValueError(
+                    f"Kimi K2.5 vision text_hidden_size ({out_hidden_size}) does not match "
+                    f"text_config.hidden_size ({hidden_size})"
+                )
+            encoder_config = VisionEncoderConfig(
+                depth=vision_cfg["vt_num_hidden_layers"],
+                hidden_size=hidden_vit,
+                num_heads=vision_cfg["vt_num_attention_heads"],
+                intermediate_size=vision_cfg["vt_intermediate_size"],
+                patch_size=vision_cfg["patch_size"],
+                temporal_patch_size=1,
+                spatial_merge_size=spatial_merge_size,
+                out_hidden_size=out_hidden_size,
+                projector_dims=((merger_dim, merger_dim), (merger_dim, out_hidden_size)),
+                partial_rotary_factor=1.0,
+                gemm_quant_mode="bfloat16",
+                fmha_quant_mode="bfloat16",
+                patch_embed_input_channels=3,
+                final_norm=True,
+                projector_pre_norm=True,
+                pool_temporal=True,
+                video_attention_type=vision_cfg["video_attn_type"],
+            )
+            logger.info(
+                "Kimi K2.5 vision encoder config: depth=%d, hidden=%d, patch=%d, "
+                "merge=%d, video_attention=%s, gemm=%s, fmha=%s",
+                encoder_config.depth,
+                encoder_config.hidden_size,
+                encoder_config.patch_size,
+                encoder_config.spatial_merge_size,
+                encoder_config.video_attention_type,
+                encoder_config.gemm_quant_mode,
+                encoder_config.fmha_quant_mode,
+            )
     elif architecture == "KimiK3ForConditionalGeneration":
         # Kimi-K3: hybrid KDA linear attention + MLA full attention with LatentMoE.
         # linear_attn_config.kda_layers / full_attn_layers are 1-based layer ids.
@@ -924,6 +1003,7 @@ def _parse_hf_config_json(config: dict) -> dict:
                 projector_n_instances=1 + len(deepstack_visual_indexes),
                 partial_rotary_factor=0.5,
             )
+            encoder_config = extra_params
             logger.info(
                 "Qwen3VL vision encoder config: depth=%d, hidden=%d, patch=%d, spatial_merge=%d",
                 extra_params.depth,
@@ -945,6 +1025,7 @@ def _parse_hf_config_json(config: dict) -> dict:
         "num_experts": num_experts,
         "moe_inter_size": moe_inter_size,
         "extra_params": extra_params,
+        "encoder_config": encoder_config,
     }
 
 

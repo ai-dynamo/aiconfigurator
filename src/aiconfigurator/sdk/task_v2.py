@@ -464,7 +464,7 @@ class Task:
     isl: int = 4000
     osl: int = 1000
     prefix: int = 0
-    # Multimodal image inputs (folded into the effective ISL by RuntimeConfig).
+    # Multimodal inputs (folded into the effective ISL by RuntimeConfig).
     image_height: int = 0
     image_width: int = 0
     num_images_per_request: int = 1
@@ -634,6 +634,10 @@ class Task:
     afd_ttft_correction_factor: float | None = None
     afd_decode_latency_correction: float = 1.0
 
+    # Keep new public fields at the end so existing positional construction is stable.
+    # 1 models an image; >1 models a video clip per visual input.
+    num_frames_per_visual: int = 1
+
     # ====== 11. Internal — resolved in __post_init__ ======
     _is_moe: bool = field(default=False, repr=False, init=False)
     _model_family: str = field(default="", repr=False, init=False)
@@ -745,6 +749,16 @@ class Task:
 
     def __post_init__(self) -> None:
         self._check_prefix_discipline()
+        if (
+            isinstance(self.num_frames_per_visual, bool)
+            or not isinstance(self.num_frames_per_visual, int)
+            or self.num_frames_per_visual <= 0
+        ):
+            raise ValueError(
+                f"num_frames_per_visual must be a positive non-boolean integer, got {self.num_frames_per_visual!r}"
+            )
+        if self.num_frames_per_visual > 1 and not (self.image_height > 0 and self.image_width > 0):
+            raise ValueError("num_frames_per_visual > 1 requires positive image_height and image_width")
         # Validate the MTP pair BEFORE model-identity resolution: the latter is
         # skipped when no primary model path is set, and the check must not
         # depend on it (non-negative integer nextn; finite acceptance in range).
@@ -1505,6 +1519,7 @@ class Task:
             image_height=self.image_height,
             image_width=self.image_width,
             num_images_per_request=self.num_images_per_request,
+            num_frames_per_visual=self.num_frames_per_visual,
             ttft=self.ttft,
             tpot=self.tpot,
             request_latency=self.request_latency,
