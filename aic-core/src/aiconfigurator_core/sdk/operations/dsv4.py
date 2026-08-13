@@ -1158,38 +1158,50 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
 
     @classmethod
     def _load_csa_topk_top_last(cls, database: PerfDatabase, native_heads: int) -> dict:
-        """{bs: {(isl, step): top_last_latency}} from dsv4_csa_topk_calib."""
+        """{bs: {(isl, step): top_last_latency}} from dsv4_csa_topk_calib.
+
+        Reuse-aware (issue #1498): resolves the table through the same
+        ``_build_op_sources`` + ``load_dsv4_sparse_op_data`` machinery as its
+        DELTA sibling ``_get_dsv4_topk_calib``, so approved ``reuse.yaml``
+        donors serve the CP top_last rows too (the loader previously read the
+        version-pinned primary path only and raised on every reuse-dependent
+        version).
+        """
         # Full database identity so two systems under the same root/backend/
         # version don't reuse each other's dsv4_csa_topk_calib table.
+        # ``strict_provenance`` is part of the identity because
+        # ``_build_op_sources`` admits rows fail-closed under strict mode: a
+        # permissive warm must not serve a strict database (the two coexist
+        # in one process — ``databases_cache`` itself keys on the flag).
         key = (
             database.systems_root,
             database.system,
             database.backend,
             database.version,
             database.enable_shared_layer,
+            database.strict_provenance,
             native_heads,
         )
         if key in cls._csa_topk_abs_cache:
             return cls._csa_topk_abs_cache[key]
         import os
 
-        import pandas as pd
-
         from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-        path = resolve_op_data_path(
-            system_data_root, database.backend, database.version, PerfDataFilename.dsv4_csa_topk_calib.value
-        )
+        enum = PerfDataFilename.dsv4_csa_topk_calib
+        primary_path = resolve_op_data_path(system_data_root, database.backend, database.version, enum.value)
+        sources = database._build_op_sources(enum, primary_path, system_data_root)
+        by_mode = load_dsv4_sparse_op_data(sources, _TOPK_CALIB_KEYS)
         by_bs: dict = {}
-        if os.path.exists(path):
-            df = pd.read_parquet(path)
-            if "num_heads" in df:
-                df = df[df["num_heads"] == native_heads]
-            # CP is a context-branch consumer; context topk is the v1 selector.
-            tl = df[df["score_mode"].astype(str) == "v1_top_last"]
-            for _, r in tl.iterrows():
-                by_bs.setdefault(int(r["batch_size"]), {})[(int(r["isl"]), int(r["step"]))] = float(r["latency"])
+        # _TOPK_CALIB_KEYS nesting: data[num_heads][step][isl][batch_size][score_mode].
+        # CP is a context-branch consumer; context topk is the v1 selector.
+        for step, by_isl in ((by_mode or {}).get(native_heads) or {}).items():
+            for isl, by_b in by_isl.items():
+                for bs, by_score in by_b.items():
+                    leaf = by_score.get("v1_top_last")
+                    if isinstance(leaf, dict):
+                        by_bs.setdefault(int(bs), {})[(int(isl), int(step))] = float(leaf["latency"])
         cls._csa_topk_abs_cache[key] = by_bs
         return by_bs
 

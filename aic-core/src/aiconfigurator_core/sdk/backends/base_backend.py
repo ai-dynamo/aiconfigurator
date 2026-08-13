@@ -7,6 +7,7 @@ import inspect
 import logging
 import math
 from collections import defaultdict
+from collections.abc import Callable
 from typing import ClassVar
 
 import numpy as np
@@ -409,7 +410,16 @@ class BaseBackend:
         prefix: int,
         *,
         include_energy: bool = True,
+        op_filter: Callable[[str], bool] | None = None,
     ) -> tuple[dict[str, float], dict[str, float], dict[str, str]]:
+        """One pass over ``model.context_ops``.
+
+        ``op_filter`` (by op name) lets ``run_mixed``'s passes query ONLY the
+        ops whose values they consume — the exact sets the rust mixed step
+        walks (`ContextOpFilter::{Skip,Only}ContextAttention`). Querying and
+        discarding the rest is not free: a raise in a discarded query blocks
+        an otherwise-computable estimate, one-sidedly vs the compiled engine.
+        """
         context_latency_dict = defaultdict(float)
         context_energy_wms_dict = defaultdict(float)
         # Per-op data source, accumulated by merging across calls to the same op.
@@ -421,6 +431,8 @@ class BaseBackend:
             raise ValueError(f"isl must be greater than 0 after removing prefix, but got {effective_isl}")
 
         for op in model.context_ops:
+            if op_filter is not None and not op_filter(op._name):
+                continue
             x = batch_size * effective_isl if "logits_gemm" not in op._name else batch_size
             result = op.query(
                 database,
@@ -455,7 +467,10 @@ class BaseBackend:
         stride: int,
         *,
         include_energy: bool = True,
+        op_filter: Callable[[str], bool] | None = None,
     ) -> tuple[dict[str, float], dict[str, float], dict[str, str]]:
+        """One pass over ``model.generation_ops``. ``op_filter`` as in
+        :meth:`_run_context_phase` (rust twin: ``only_generation_attention``)."""
         generation_latency_dict = defaultdict(float)
         generation_energy_wms_dict = defaultdict(float)
         generation_source_dict: dict[str, str] = {}
@@ -467,6 +482,8 @@ class BaseBackend:
             energy_wms_dict = defaultdict(float)
 
             for op in model.generation_ops:
+                if op_filter is not None and not op_filter(op._name):
+                    continue
                 result = op.query(
                     database,
                     x=batch_size * beam_width,
@@ -1235,58 +1252,70 @@ class BaseBackend:
         ctx_scale = runtime_config.seq_imbalance_correction_scale
         gen_scale = runtime_config.gen_seq_imbalance_correction_scale
 
-        # Pass 1: combined single-batch inference to extract non-attention latency.
+        # The three passes below query ONLY the ops whose values they consume
+        # (pass 1: everything but context_attention; pass 2/3: the attention
+        # bucket alone) — the exact op sets the rust mixed step walks
+        # (`ContextOpFilter::SkipContextAttention` / `OnlyContextAttention` /
+        # `only_generation_attention`). The passes previously ran the full
+        # lists through `run_static` and discarded the rest, so a raise in a
+        # discarded query (e.g. a generation-MoE low-token miss in pass 3)
+        # blocked the estimate on the Python side only — a one-sided error
+        # surface vs the compiled engine (issue #1498 follow-through).
+
+        # Pass 1: combined single-batch inference for the non-attention latency.
         # Every decode request verifies one target token plus all scheduled
         # drafts. Acceptance does not reduce this current-iteration work.
         num_tokens_combined = step.context_tokens + decode_query_tokens
-        summary = self.run_static(
+        # num tokens for gemm needs to be adjusted for prefix, depends on the
+        # avg prefix len per request. int(): np.floor yields a float64 that
+        # contaminates the ops' s = isl - prefix (the DSV4 CP composition
+        # chunks s with range()); the product is integral, so the cast is
+        # lossless.
+        prefix_combined = int(prefix * np.floor(step.context_tokens / isl))
+        pass1_config = RuntimeConfig(
+            batch_size=1,
+            beam_width=1,
+            isl=num_tokens_combined,
+            osl=1,
+            prefix=prefix_combined,
+            seq_imbalance_correction_scale=ctx_scale,
+        )
+        latency_dict, energy_wms_dict, source_dict = self._run_context_phase(
             model,
             database,
-            # num tokens for gemm needs to be adjusted for prefix, depends on the avg prefix len per request
-            RuntimeConfig(
-                batch_size=1,
-                beam_width=1,
-                isl=num_tokens_combined,
-                osl=1,
-                prefix=prefix * np.floor(step.context_tokens / isl),
-                seq_imbalance_correction_scale=ctx_scale,
-                engine_step_backend=runtime_config.engine_step_backend,
-            ),
-            mode="static_ctx",
+            pass1_config,
+            1,
+            num_tokens_combined,
+            prefix_combined,
+            op_filter=lambda name: name != "context_attention",
         )
-        latency_dict = summary.get_context_latency_dict()
-        energy_wms_dict = summary.get_context_energy_wms_dict()
-        source_dict = summary.get_context_source_dict()
-        non_attention_latency_ms = 0.0
-        non_attention_energy_wms = 0.0
-        mix_non_attn_ops: dict[str, float] = {}
-        mix_non_attn_sources: dict[str, str] = {}
-        for layer_name, latency in latency_dict.items():
-            if layer_name != "context_attention":
-                non_attention_latency_ms += latency
-                non_attention_energy_wms += energy_wms_dict.get(layer_name, 0.0)
-                mix_non_attn_ops[layer_name] = latency
-                mix_non_attn_sources[layer_name] = source_dict.get(layer_name, "silicon")
+        non_attention_latency_ms = float(sum(latency_dict.values()))
+        non_attention_energy_wms = float(sum(energy_wms_dict.values()))
+        mix_non_attn_ops: dict[str, float] = dict(latency_dict)
+        mix_non_attn_sources: dict[str, str] = {
+            layer_name: source_dict.get(layer_name, "silicon") for layer_name in latency_dict
+        }
 
         # Pass 2: context attention split full isl over num_steps and averaged.
         batch_size = np.ceil(step.context_tokens / isl)
-        summary = self.run_static(
+        pass2_config = RuntimeConfig(
+            batch_size=batch_size,
+            beam_width=1,
+            isl=isl,
+            osl=1,
+            prefix=prefix,
+            seq_imbalance_correction_scale=ctx_scale,
+        )
+        latency_dict, energy_wms_dict, source_dict = self._run_context_phase(
             model,
             database,
-            RuntimeConfig(
-                batch_size=batch_size,
-                beam_width=1,
-                isl=isl,
-                osl=1,
-                prefix=prefix,
-                seq_imbalance_correction_scale=ctx_scale,
-                engine_step_backend=runtime_config.engine_step_backend,
-            ),
-            mode="static_ctx",
+            pass2_config,
+            batch_size,
+            isl,
+            prefix,
+            op_filter=lambda name: name == "context_attention",
         )
-        latency_dict = summary.get_context_latency_dict()
-        energy_wms_dict = summary.get_context_energy_wms_dict()
-        ctx_attn_source = summary.get_context_source_dict().get("context_attention", "silicon")
+        ctx_attn_source = source_dict.get("context_attention", "silicon")
         scale_factor = np.ceil(isl / step.context_tokens)
         ctx_attention_latency_ms = latency_dict["context_attention"] / scale_factor
         ctx_attention_energy_wms = energy_wms_dict.get("context_attention", 0.0) / scale_factor
@@ -1296,24 +1325,27 @@ class BaseBackend:
         gen_attention_energy_wms = 0.0
         gen_attn_source = "silicon"
         if step.num_decode_requests > 0:
-            summary = self.run_static(
+            pass3_config = RuntimeConfig(
+                batch_size=step.num_decode_requests,
+                beam_width=1,
+                isl=isl + osl // 2,
+                osl=2,
+                gen_seq_imbalance_correction_scale=gen_scale,
+            )
+            latency_dict, energy_wms_dict, source_dict = self._run_generation_phase(
                 model,
                 database,
-                RuntimeConfig(
-                    batch_size=step.num_decode_requests,
-                    beam_width=1,
-                    isl=isl + osl // 2,
-                    osl=2,
-                    gen_seq_imbalance_correction_scale=gen_scale,
-                    engine_step_backend=runtime_config.engine_step_backend,
-                ),
-                mode="static_gen",
+                pass3_config,
+                step.num_decode_requests,
+                1,
+                isl + osl // 2,
+                2,
+                1,
+                op_filter=lambda name: name == "generation_attention",
             )
-            latency_dict = summary.get_generation_latency_dict()
-            energy_wms_dict = summary.get_generation_energy_wms_dict()
             gen_attention_latency_ms = latency_dict["generation_attention"]
             gen_attention_energy_wms = energy_wms_dict.get("generation_attention", 0.0)
-            gen_attn_source = summary.get_generation_source_dict().get("generation_attention", "silicon")
+            gen_attn_source = source_dict.get("generation_attention", "silicon")
 
         per_ops_step_data: dict[str, float] = {
             **mix_non_attn_ops,

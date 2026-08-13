@@ -115,7 +115,10 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 # - 9: the Rust `Op::FpmForward` whole-model variant (forward_model="fpm").
 #   Claimed 5, 7 and 8 concurrently with other landings; renumbered at each
 #   merge (same precedent as the v3/v4 collision).
-ENGINE_SPEC_SCHEMA_VERSION = 9
+# - 10 (issue #1498): `Mhc` payload gained `seq_split` (CP per-rank token
+#   division) — a bincode op-layout change. Claimed 7 concurrently with
+#   `attn_ar_modeled`; renumbered at the rebase.
+ENGINE_SPEC_SCHEMA_VERSION = 10
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)
@@ -525,6 +528,9 @@ def _mhc_module(op: DeepSeekV4MHCModule, *, architecture: str) -> dict:
         # anchor; mirrors `_query_mhc_table.get_sol`).
         "sinkhorn_iters": op._sinkhorn_iters,
         "quant_mode": _quant_name(op._quant_mode),
+        # CP: token-major module, per-rank tokens = ceil(x / seq_split)
+        # (issue #1498 — the missing division was the DSV4 CSA CP divergence).
+        "seq_split": op._seq_split,
     }
 
 
