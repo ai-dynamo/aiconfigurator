@@ -83,7 +83,9 @@ mod tests {
         // v6: Kda op variant appended (Kimi-K3; renumbered at the merge).
         // v7: MoEDispatchOp gained attn_ar_modeled.
         // v8: GemmOp gained below_grid_sol.
-        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 8);
+        // v9: FpmForward whole-model variant appended (renumbered at each
+        // merge from concurrent claims of v5/v7/v8).
+        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 9);
         assert_eq!(FPM_VERSION, 1);
         assert_eq!(ForwardPassMetrics::default().version, FPM_VERSION);
     }

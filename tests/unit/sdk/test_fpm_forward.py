@@ -5,7 +5,7 @@
 model rewrite, and the explicit mixed-step branch.
 
 Synthetic parquet/metadata pairs are written directly from the documented
-``aic_fpm_forward_perf`` schema (v6) — deliberately NOT via collector code, so
+``aic_fpm_forward_perf`` schema (v5) — deliberately NOT via collector code, so
 this suite doubles as the producer/consumer contract test on the modeling
 side of the module boundary.
 """
@@ -253,6 +253,221 @@ class TestFPMForwardOpQuery:
         with pytest.raises(PerfDataNotAvailableError, match="No FPM cell matches"):
             op.query(fake_db(), batch_size=2, s=1024)
 
+    def test_prefill_batch_flatness_certificate(self):
+        from aiconfigurator_core.sdk.operations.fpm_forward import _prefill_batch_axis_is_flat
+
+        flat = {
+            1: {1024: {0: 10.0}, 2048: {0: 20.0}, 4096: {0: 40.0}},
+            2: {1024: {0: 10.2}, 2048: {0: 20.4}, 4096: {0: 40.8}},
+            4: {1024: {0: 10.4}, 2048: {0: 20.8}, 4096: {0: 41.6}},
+        }
+        assert _prefill_batch_axis_is_flat(flat)
+        # A real batch effect (>5% median) fails the certificate.
+        bumpy = {1: flat[1], 2: {t: {0: v[0] * 1.2} for t, v in flat[1].items()}}
+        assert not _prefill_batch_axis_is_flat(bumpy)
+        # A single collected batch offers no evidence.
+        assert not _prefill_batch_axis_is_flat({1: flat[1]})
+        # Fewer than 3 overlapping points: insufficient evidence.
+        assert not _prefill_batch_axis_is_flat({1: {1024: {0: 10.0}, 2048: {0: 20.0}}, 2: {2048: {0: 20.2}}})
+
+    def _flat_prefill_rows(self):
+        rows = []
+        for b, bump in ((1, 1.0), (2, 1.02), (4, 1.04)):
+            for total, lat in ((1024, 10.0), (2048, 20.0), (4096, 40.0)):
+                rows.append(_row("prefill", b, total, 0, lat * bump))
+            # a high-KV slice so pressure >= 2 queries stay inside the box
+            rows.append(_row("prefill", b, 1024, 4096, 50.0 * bump))
+        return rows
+
+    def test_certified_prefill_batch_clamp_answers_above_the_ceiling(self, fake_db):
+        # Real steps can schedule more whole prefills than the collected
+        # batch ceiling (short sequences). With the flatness certificate the
+        # query clamps its batch coordinate to the ceiling, keeping the TRUE
+        # token total — the regime coordinate — untouched.
+        db = fake_db(self._flat_prefill_rows() + [r for r in _default_rows() if r["workload_kind"] == "decode"])
+        op = _make_op("prefill")
+        assert op._load_cell(db)["prefill_batch_clamp_max"] == 4
+        clamped = float(op.query_totals(db, batch_size=16, total_prefill_tokens=4096, total_kv_read_tokens=0))
+        ceiling = float(op.query_totals(db, batch_size=4, total_prefill_tokens=4096, total_kv_read_tokens=0))
+        assert clamped == pytest.approx(ceiling) == pytest.approx(41.6)
+        # The other axes stay honestly gated: totals beyond the box still miss.
+        with pytest.raises(PerfDataNotAvailableError, match="outside the collected domain"):
+            op.query_totals(db, batch_size=16, total_prefill_tokens=16384, total_kv_read_tokens=0)
+
+    def test_clamp_tiers_on_the_kv_pressure_ceiling(self, fake_db):
+        # LOO-measured boundary (batch_clamp_loo): below kv/T=2 the raw clamp
+        # is median <=2% and is served as-is (measured value, no SOL); at or
+        # above it the ceiling row is SOL-rescaled instead (the raw bound
+        # would loosen to p90 96%).
+        rows = []
+        for b, bump in ((1, 1.0), (2, 1.02), (4, 1.04)):
+            for total, lat in ((1024, 10.0), (2048, 20.0), (4096, 40.0)):
+                rows.append(_row("prefill", b, total, 0, lat * bump))
+                rows.append(_row("prefill", b, total, total, lat * bump * 1.2))
+                rows.append(_row("prefill", b, total, 4 * total, lat * bump * 1.8))
+        db = fake_db(rows)
+        op = _make_op("prefill")
+        # kv/T = 1 (< 2): pure clamp to the ceiling row, no rescale.
+        low = float(op.query_totals(db, batch_size=16, total_prefill_tokens=4096, total_kv_read_tokens=4096))
+        assert low == pytest.approx(40.0 * 1.04 * 1.2)
+        # kv/T = 4 (>= 2): the ceiling row is deflated by the SOL ratio.
+        sol = lambda b, tp, tk: tp * (1.0 + (tp + tk) / max(b, 1.0))
+        high = float(op.query_totals(db, batch_size=16, total_prefill_tokens=4096, total_kv_read_tokens=16384))
+        assert high == pytest.approx(40.0 * 1.04 * 1.8 * sol(16, 4096, 16384) / sol(4, 4096, 16384))
+
+    def test_high_kv_pressure_clamp_rescales_by_the_sol_ratio(self, fake_db):
+        # kv/T = 4 >= 2: the measured ceiling row is rescaled by the
+        # whole-model SOL ratio between the true and clamped shapes (the
+        # coarser split's attention overprice is corrected at the roofline-
+        # predicted share). sol_fn here is the injected test roofline.
+        db = fake_db(self._flat_prefill_rows() + [r for r in _default_rows() if r["workload_kind"] == "decode"])
+        op = _make_op("prefill")
+        ceiling = float(op.query_totals(db, batch_size=4, total_prefill_tokens=1024, total_kv_read_tokens=4096))
+        assert ceiling == pytest.approx(52.0)  # exact row (4, 1024, 4096)
+        sol = lambda b, tp, tk: tp * (1.0 + (tp + tk) / max(b, 1.0))
+        expected = ceiling * (sol(16, 1024, 4096) / sol(4, 1024, 4096))
+        got = float(op.query_totals(db, batch_size=16, total_prefill_tokens=1024, total_kv_read_tokens=4096))
+        assert got == pytest.approx(expected)
+        assert got < ceiling  # the correction always deflates the upper bound
+
+    def test_high_kv_pressure_without_usable_sol_stays_hard_gated(self, fake_db):
+        # A model whose roofline is unusable (empty sol op list -> SOL 0)
+        # answers nothing above the ceiling at high pressure — no
+        # half-modeled value.
+        db = fake_db(self._flat_prefill_rows() + [r for r in _default_rows() if r["workload_kind"] == "decode"])
+        op = FPMForwardOp("prefill", _model_config(), MODEL_PATH, sol_fn=lambda *coords: 0.0, weight_bytes=1.0)
+        with pytest.raises(PerfDataNotAvailableError, match="outside the collected domain"):
+            op.query_totals(db, batch_size=16, total_prefill_tokens=1024, total_kv_read_tokens=4096)
+        # ...while the low-pressure pure clamp needs no SOL at all.
+        low = float(op.query_totals(db, batch_size=16, total_prefill_tokens=4096, total_kv_read_tokens=0))
+        assert low == pytest.approx(41.6)
+
+    def test_uncertified_prefill_batch_stays_hard_gated(self, fake_db):
+        # Default fixture rows carry a single sparse batch pair -> no
+        # certificate -> the domain gate rejects exactly as before.
+        db = fake_db()
+        op = _make_op("prefill")
+        assert op._load_cell(db)["prefill_batch_clamp_max"] is None
+        with pytest.raises(PerfDataNotAvailableError, match="outside the collected domain"):
+            op.query_totals(db, batch_size=16, total_prefill_tokens=512, total_kv_read_tokens=0)
+
+    def test_decode_batch_is_never_clamped(self, fake_db):
+        # The decode batch axis carries a REAL regime cliff (the Task B
+        # partition); a flat-prefill certificate must not leak into it.
+        db = fake_db(self._flat_prefill_rows() + [r for r in _default_rows() if r["workload_kind"] == "decode"])
+        op = _make_op("decode")
+        with pytest.raises(PerfDataNotAvailableError, match="outside the collected domain"):
+            op.query_totals(db, batch_size=4096, total_kv_read_tokens=4096)
+
+    def test_decode_rung_metadata(self, fake_db):
+        # Capture rungs are the batches whose (x, x+1) pair the collector
+        # deliberately sampled; per-row curve bounds feed the coverage guard.
+        db = fake_db(self._cliff_rows())
+        cell = _make_op("decode")._load_cell(db)
+        assert cell["decode_rungs"] == [496, 512]
+        assert cell["decode_batches"] == [496, 497, 512, 513, 1024]
+        assert cell["decode_curve_bounds"][513] == (1024, 4096)
+
+    def _cliff_rows(self):
+        rows = []
+        for b, base in ((496, 9.5), (497, 10.0), (512, 10.5)):
+            for i, kv in enumerate((1024, 2048, 4096)):
+                rows.append(_row("decode", b, 0, kv, base + i))
+        for b, base in ((513, 31.0), (1024, 62.0)):
+            for i, kv in enumerate((1024, 2048, 4096)):
+                rows.append(_row("decode", b, 0, kv, base + 3 * i))
+        return rows
+
+    def test_decode_bracket_resolution(self, fake_db):
+        # The b=600 pathology: k-NN mixed one eager vote (513) with three
+        # graph votes (496/497/512) and answered ~44% of truth. Bracket
+        # resolution interpolates between the segment's own rows only.
+        db = fake_db(self._cliff_rows())
+        op = _make_op("decode")
+        # Own-site hits are untouched.
+        assert float(op.query_totals(db, batch_size=512, total_kv_read_tokens=2048)) == pytest.approx(11.5)
+        assert float(op.query_totals(db, batch_size=513, total_kv_read_tokens=2048)) == pytest.approx(34.0)
+        # b=600 > last rung (512): eager bracket {513, 1024}, linear blend.
+        w = (600 - 513) / (1024 - 513)
+        expected = 34.0 + (65.0 - 34.0) * w
+        assert float(op.query_totals(db, batch_size=600, total_kv_read_tokens=2048)) == pytest.approx(expected)
+        # b=500 in segment (496, 512]: bracket {497, 512} — same padded graph.
+        w = (500 - 497) / (512 - 497)
+        expected = 11.0 + (11.5 - 11.0) * w
+        assert float(op.query_totals(db, batch_size=500, total_kv_read_tokens=2048)) == pytest.approx(expected)
+
+    def test_decode_bracket_coverage_guard(self, fake_db):
+        # Bracket rows with disjoint KV coverage must degrade to the covered
+        # side — or miss loudly — NEVER fall back to cross-batch k-NN.
+        rows = self._cliff_rows()
+        # replace the 1024 row set with a far-KV-only curve
+        rows = [r for r in rows if r["batch_size"] != 1024]
+        for i, kv in enumerate((8192, 16384)):
+            rows.append(_row("decode", 1024, 0, kv, 62.0 + 3 * i))
+        db = fake_db(rows)
+        op = _make_op("decode")
+        # kv covered only by the low row (513): single-sided value.
+        assert float(op.query_totals(db, batch_size=600, total_kv_read_tokens=2048)) == pytest.approx(34.0)
+        # kv covered only by the high row (1024): single-sided value.
+        assert float(op.query_totals(db, batch_size=600, total_kv_read_tokens=8192)) == pytest.approx(62.0)
+        # kv covered by NEITHER bracket row (in-domain gap): loud miss — the
+        # legacy k-NN would have silently answered here.
+        with pytest.raises(PerfDataNotAvailableError, match="bracket rows"):
+            op.query_totals(db, batch_size=600, total_kv_read_tokens=6000)
+
+    def test_decode_without_rungs_keeps_the_legacy_path(self, fake_db):
+        # No (x, x+1) pairs collected -> no bracket structure: off-lattice
+        # queries keep today's scattered-sites transfer.
+        rows = []
+        for b, base in ((8, 6.0), (64, 12.0)):
+            for i, kv in enumerate((1024, 2048, 4096)):
+                rows.append(_row("decode", b, 0, kv, base + i))
+        db = fake_db(rows)
+        op = _make_op("decode")
+        cell = op._load_cell(db)
+        assert cell["decode_rungs"] == []
+        # off-lattice: legacy transfer answers (value between the two sites'
+        # magnitudes; exact math is the interp engine's).
+        got = float(op.query_totals(db, batch_size=20, total_kv_read_tokens=2048))
+        assert 5.0 < got < 15.0
+
+    def test_query_totals_addresses_raw_coordinates(self, fake_db):
+        # Totals a mixed step schedules (chunk + riders) are generally not
+        # divisible into a per-request (b, s, prefix) shape; query_totals
+        # addresses the collected coordinates directly.
+        db = fake_db()
+        pre = _make_op("prefill").query_totals(db, batch_size=1, total_prefill_tokens=512, total_kv_read_tokens=0)
+        assert float(pre) == pytest.approx(10.0)
+        dec = _make_op("decode").query_totals(db, batch_size=2, total_kv_read_tokens=2048)
+        assert float(dec) == pytest.approx(8.0)
+
+    def test_query_totals_validates_phase_coordinates(self, fake_db):
+        db = fake_db()
+        with pytest.raises(ValueError, match="total_prefill_tokens"):
+            _make_op("prefill").query_totals(db, batch_size=1, total_prefill_tokens=0, total_kv_read_tokens=0)
+        with pytest.raises(ValueError, match="no prefill tokens"):
+            _make_op("decode").query_totals(db, batch_size=2, total_prefill_tokens=8, total_kv_read_tokens=2048)
+        with pytest.raises(ValueError, match="invalid FPM totals query"):
+            _make_op("decode").query_totals(db, batch_size=0, total_kv_read_tokens=2048)
+
+    @pytest.mark.parametrize(
+        "identity,config_overrides",
+        [
+            ({"moe_backend": "flashinfer_cutlass"}, {"moe_backend": "flashinfer_cutlass"}),
+            ({"attention_backend": "fa3"}, {"attention_backend": "fa3"}),
+            ({"enable_eplb": True}, {"enable_eplb": True}),
+        ],
+    )
+    def test_unemittable_vllm_identity_is_rejected_before_cell_selection(self, fake_db, identity, config_overrides):
+        # Exercise the producer-to-consumer boundary with a row that exactly
+        # matches a direct SDK request. The standard Task-to-generator path
+        # cannot emit these vLLM settings yet, so selection must fail closed
+        # instead of pricing a deployment AIC would not reproduce.
+        rows = [_row("decode", 2, 0, 2048, 8.0, identity=identity)]
+        op = _make_op("decode", model_config=_model_config(**config_overrides))
+        with pytest.raises(PerfDataNotAvailableError, match="Task-to-generator"):
+            op.query(fake_db(rows), batch_size=2, s=1024)
+
     def test_model_path_mismatch_never_falls_back(self, fake_db):
         # The identity match is unique, but the identity carries no model
         # fingerprint: borrowing the sole collected path would silently
@@ -277,24 +492,6 @@ class TestFPMForwardOpQuery:
         with pytest.raises(PerfDataNotAvailableError, match="No FPM cell matches"):
             _make_op("decode").query(fake_db(rows), batch_size=2, s=1024)
 
-    @pytest.mark.parametrize(
-        "identity,config_overrides",
-        [
-            ({"moe_backend": "flashinfer_cutlass"}, {"moe_backend": "flashinfer_cutlass"}),
-            ({"attention_backend": "fa3"}, {"attention_backend": "fa3"}),
-            ({"enable_eplb": True}, {"enable_eplb": True}),
-        ],
-    )
-    def test_unemittable_vllm_identity_is_rejected_before_cell_selection(self, fake_db, identity, config_overrides):
-        # Exercise the producer-to-consumer boundary with a row that exactly
-        # matches a direct SDK request. The standard Task-to-generator path
-        # cannot emit these vLLM settings yet, so selection must fail closed
-        # instead of pricing a deployment AIC would not reproduce.
-        rows = [_row("decode", 2, 0, 2048, 8.0, identity=identity)]
-        op = _make_op("decode", model_config=_model_config(**config_overrides))
-        with pytest.raises(PerfDataNotAvailableError, match="Task-to-generator"):
-            op.query(fake_db(rows), batch_size=2, s=1024)
-
     def test_backend_knob_data_answers_matching_config(self, fake_db):
         # v6 backend knobs are ordinary identity columns: wideep-collected
         # rows answer a wideep config — and only that config.
@@ -307,17 +504,25 @@ class TestFPMForwardOpQuery:
             _make_op("decode").query(db, batch_size=2, s=1024)
 
     @pytest.mark.parametrize(
-        "overrides",
+        "overrides,message",
         [
-            {"enable_wideep": True, "moe_tp_size": 1, "moe_ep_size": 1},
+            # wideep is generator-emittable, so it reaches cell selection and
+            # fails as an ordinary identity miss...
+            ({"enable_wideep": True, "moe_tp_size": 1, "moe_ep_size": 1}, "No FPM cell matches"),
+            # ...while pinned backends / EPLB are rejected earlier by the
+            # deployment-identity gate (the standard Task-to-generator path
+            # cannot emit them yet).
+            ({"enable_eplb": True}, "Task-to-generator"),
+            ({"moe_backend": "megamoe"}, "Task-to-generator"),
+            ({"attention_backend": "fa3"}, "Task-to-generator"),
         ],
     )
-    def test_off_baseline_config_is_a_data_miss(self, fake_db, overrides):
+    def test_off_baseline_config_is_a_data_miss(self, fake_db, overrides, message):
         # Backend knobs are identity columns: a config whose knob identity
         # was never collected fails as a data miss (sweeps skip the point) —
         # never silently rides on auto-collected curves.
         op = _make_op("decode", model_config=_model_config(**overrides))
-        with pytest.raises(PerfDataNotAvailableError, match="No FPM cell matches"):
+        with pytest.raises(PerfDataNotAvailableError, match=message):
             op.query(fake_db(), batch_size=2, s=1024)
 
     def test_dp_identity_uses_local_batch(self, fake_db):
@@ -533,6 +738,19 @@ def fpm_session(tmp_path):
         # mixed/genonly route through run_static(isl=isl+osl//2, osl=2), whose
         # decode step lands at s = isl + osl//2 + 1.
         _row("decode", 2, 0, 2 * (isl + osl // 2 + 1), 7.0, model_path=model.model_path, identity=identity),
+        # Totals-coordinate rows for the mixed-step composition: the prefill
+        # component queries (batch, chunk + gen_tokens, past_kv).
+        _row("prefill", 1, isl + 2, 0, 23.0, model_path=model.model_path, identity=identity),
+        _row("prefill", 1, 258, 0, 11.0, model_path=model.model_path, identity=identity),
+        _row("prefill", 1, 258, 256, 13.0, model_path=model.model_path, identity=identity),
+        # CUDA-graph cliff pair at capture=2048 plus the eager plateau: the
+        # regime is encoded in the data, the formula only addresses it.
+        _row("prefill", 1, 2048, 0, 47.0, model_path=model.model_path, identity=identity),
+        _row("prefill", 1, 2049, 0, 99.0, model_path=model.model_path, identity=identity),
+        _row("prefill", 1, 4096, 0, 99.0, model_path=model.model_path, identity=identity),
+        # Decode coverage for the cliff test (gen=8 at isl=2048, osl=2).
+        _row("decode", 8, 0, 1026, 6.5, model_path=model.model_path, identity=identity),
+        _row("decode", 8, 0, 16400, 9.5, model_path=model.model_path, identity=identity),
     ]
     # data_dir comes from the system yaml ("data/h200_sxm").
     data_dir = os.path.join(systems_root, "data", SYSTEM, BACKEND, VERSION)
@@ -552,7 +770,8 @@ class TestFPMStaticAndMixed:
         model, database, backend, isl, osl = fpm_session
         session = InferenceSession(model, database, backend)
         summary = session.run_static(
-            runtime_config=RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl), mode="static_ctx"
+            runtime_config=RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl, engine_step_backend="python"),
+            mode="static_ctx",
         )
         latency_dict = summary.get_context_latency_dict()
         assert list(latency_dict) == ["fpm_forward_prefill"]
@@ -565,7 +784,8 @@ class TestFPMStaticAndMixed:
         model, database, backend, isl, osl = fpm_session
         session = InferenceSession(model, database, backend)
         summary = session.run_static(
-            runtime_config=RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl), mode="static_gen"
+            runtime_config=RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl, engine_step_backend="python"),
+            mode="static_gen",
         )
         latency_dict = summary.get_generation_latency_dict()
         assert list(latency_dict) == ["fpm_forward_decode"]
@@ -576,38 +796,102 @@ class TestFPMStaticAndMixed:
         from aiconfigurator.sdk.config import RuntimeConfig
 
         model, database, backend, isl, osl = fpm_session
-        runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl)
+        runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl, engine_step_backend="python")
         total, energy, per_op, per_src = backend._get_mix_step_latency(
             model, database, runtime_config, ctx_tokens=isl, gen_tokens=2, isl=isl, osl=osl, prefix=0
         )
-        # ctx component: ceil(isl/isl)=1 request of isl tokens -> 22.0 (no chunk scaling).
+        # ctx component prices the step's SCHEDULED TOTAL: one whole prefill
+        # (isl tokens) plus 2 decode riders -> totals (1, isl+2, 0) = 23.0.
         # gen component rides the prefill pass, so only its marginal counts:
         # full decode at s=isl+osl//2+1 (7.0) minus the pass baseline at the
         # KV-domain floor (the 2*(isl+1)=1026 row, 6.0) -> 1.0.
-        assert per_op["fpm_forward_prefill"] == pytest.approx(22.0)
+        assert per_op["fpm_forward_prefill"] == pytest.approx(23.0)
         assert per_op["fpm_forward_decode"] == pytest.approx(1.0)
-        assert total == pytest.approx(23.0)
+        assert total == pytest.approx(24.0)
         assert energy == 0.0
         assert set(per_src.values()) == {"silicon"}
 
-    def test_genonly_mixed_call_keeps_full_decode_pass(self, fpm_session):
-        # With no prefill work in the step there is no pass to ride on: the
-        # decode component must keep its full standalone latency.
+    def test_mixed_step_total_crosses_the_graph_cliff(self, fpm_session):
+        # Spec tests 1+2: the engine picks its regime from the step's TOTAL
+        # scheduled tokens. ctx=2048 alone sits ON the capture boundary
+        # (graph side, 47 ms); the same chunk with 8 decode riders crosses
+        # it and must price on the eager plateau (99 ms).
         from aiconfigurator.sdk.config import RuntimeConfig
 
         model, database, backend, isl, osl = fpm_session
-        runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl)
-        total, _energy, per_op, _src = backend._get_mix_step_latency(
-            model, database, runtime_config, ctx_tokens=0, gen_tokens=2, isl=isl, osl=osl, prefix=0
+        runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=2048, osl=osl, engine_step_backend="python")
+        _, _, graph_ops, _ = backend._get_mix_step_latency(
+            model, database, runtime_config, ctx_tokens=2048, gen_tokens=0, isl=2048, osl=osl, prefix=0
+        )
+        assert graph_ops["fpm_forward_prefill"] == pytest.approx(47.0)
+        _, _, eager_ops, _ = backend._get_mix_step_latency(
+            model, database, runtime_config, ctx_tokens=2048, gen_tokens=8, isl=2048, osl=osl, prefix=0
+        )
+        assert eager_ops["fpm_forward_prefill"] == pytest.approx(99.0)
+        assert eager_ops["fpm_forward_prefill"] > 2 * graph_ops["fpm_forward_prefill"]
+
+    def test_mixed_step_chunks_average_exact_coordinates(self, fpm_session):
+        # Spec tests 3+4: a chunked request prices each chunk at its own
+        # (chunk + gen, past_kv) coordinates — (1, 258, 0)=11.0 and
+        # (1, 258, 256)=13.0 for ctx=256 of isl=512 — and the component is
+        # their per-iteration average, identical to querying the chunks
+        # independently (no double billing, no averaging artifacts).
+        from aiconfigurator.sdk.config import RuntimeConfig
+
+        model, database, backend, isl, osl = fpm_session
+        runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl, engine_step_backend="python")
+        total, _, per_op, _ = backend._get_mix_step_latency(
+            model, database, runtime_config, ctx_tokens=256, gen_tokens=2, isl=isl, osl=osl, prefix=0
+        )
+        prefill_op = model.context_ops[0]
+        chunk1 = float(
+            prefill_op.query_totals(database, batch_size=1, total_prefill_tokens=258, total_kv_read_tokens=0)
+        )
+        chunk2 = float(
+            prefill_op.query_totals(database, batch_size=1, total_prefill_tokens=258, total_kv_read_tokens=256)
+        )
+        assert per_op["fpm_forward_prefill"] == pytest.approx((chunk1 + chunk2) / 2) == pytest.approx(12.0)
+        assert total == pytest.approx(12.0 + 1.0)
+
+    def test_mixed_step_gen_zero_prices_pure_chunk(self, fpm_session):
+        # Spec test 5 (gen=0 degenerate): a pure-prefill step prices its own
+        # totals with no decode marginal term.
+        from aiconfigurator.sdk.config import RuntimeConfig
+
+        model, database, backend, isl, osl = fpm_session
+        runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl, engine_step_backend="python")
+        total, _, per_op, _ = backend._get_mix_step_latency(
+            model, database, runtime_config, ctx_tokens=isl, gen_tokens=0, isl=isl, osl=osl, prefix=0
+        )
+        assert per_op == {"fpm_forward_prefill": pytest.approx(22.0)}
+        assert total == pytest.approx(22.0)
+
+    def test_genonly_step_keeps_full_decode_pass(self, fpm_session):
+        # With no prefill work in the step there is no pass to ride on: the
+        # decode component must keep its full standalone latency. A step
+        # without prefill work is a GENONLY step now — `MixedStepInput`
+        # requires context_tokens > 0, so the gen-only contract lives behind
+        # `_get_genonly_step_latency` (the mixed entry raises instead of
+        # silently rerouting).
+        from aiconfigurator.sdk.config import RuntimeConfig
+
+        model, database, backend, isl, osl = fpm_session
+        runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl, engine_step_backend="python")
+        total, _energy, per_op, _src = backend._get_genonly_step_latency(
+            model, database, runtime_config, gen_tokens=2, isl=isl, osl=osl
         )
         assert per_op["fpm_forward_decode"] == pytest.approx(7.0)
         assert total == pytest.approx(7.0)
+        with pytest.raises(ValueError, match="context_tokens must be positive"):
+            backend._get_mix_step_latency(
+                model, database, runtime_config, ctx_tokens=0, gen_tokens=2, isl=isl, osl=osl, prefix=0
+            )
 
     def test_genonly_step_works_with_single_op(self, fpm_session):
         from aiconfigurator.sdk.config import RuntimeConfig
 
         model, database, backend, isl, osl = fpm_session
-        runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl)
+        runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl, engine_step_backend="python")
         total, energy, per_op, _ = backend._get_genonly_step_latency(
             model, database, runtime_config, gen_tokens=2, isl=isl, osl=osl
         )

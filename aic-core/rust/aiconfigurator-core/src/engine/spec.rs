@@ -591,6 +591,31 @@ mod tests {
         }
     }
 
+    fn fpm_forward() -> crate::operators::FpmForwardOp {
+        // Recursive like Overlap/Fallback: sol_ops carries the model's
+        // original granular list, so the round-trip must preserve nesting.
+        crate::operators::FpmForwardOp {
+            name: "fpm_forward_prefill".into(),
+            phase: crate::operators::FpmPhase::Prefill,
+            model_path: "org/model-a".into(),
+            match_identity: vec![
+                "nvfp4".into(),
+                "nvfp4".into(),
+                "bfloat16".into(),
+                "half".into(),
+                "fp8".into(),
+                "4".into(),
+                "1".into(),
+                "1".into(),
+                "4".into(),
+                "1".into(),
+                "1".into(),
+            ],
+            weight_bytes: 1.5e10,
+            sol_ops: vec![OpSpec::Gemm(gemm()), OpSpec::ContextAttention(context_attention())],
+        }
+    }
+
     fn fallback() -> FallbackOp {
         // Recursive: a primary module op with a granular per-kernel fallback
         // chain that itself contains a nested Overlap.
@@ -640,6 +665,7 @@ mod tests {
             OpSpec::WideEpGenerationMla(wideep_generation_mla()),
             OpSpec::WideEpMoe(wideep_moe()),
             OpSpec::WideEpMoeDispatch(wideep_moe_dispatch()),
+            OpSpec::FpmForward(fpm_forward()),
             OpSpec::Overlap(overlap()),
             OpSpec::Fallback(fallback()),
             // Appended AFTER Fallback (bincode enum indices are positional;
@@ -683,6 +709,7 @@ mod tests {
                 | OpSpec::WideEpGenerationMla(_)
                 | OpSpec::WideEpMoe(_)
                 | OpSpec::WideEpMoeDispatch(_)
+                | OpSpec::FpmForward(_)
                 | OpSpec::Overlap(_)
                 | OpSpec::Fallback(_)
                 | OpSpec::Dsv4MegaMoe(_)
@@ -700,6 +727,7 @@ mod tests {
             systems_path: None,
             backend: crate::BackendKind::Trtllm,
             backend_version: Some("1.0.0rc3".into()),
+            forward_model: None,
             kv_block_size: Some(64),
             parallel: ParallelMapping {
                 tp_size: 8,
