@@ -247,16 +247,42 @@ def test_hardware_incompatible_to_fail_is_blocking_transition():
 
 @pytest.mark.parametrize("old_status", [STATUS_PASS, STATUS_HYBRID_PASS, STATUS_HW_INCOMPATIBLE])
 def test_explicit_encoder_unsupported_migration_is_not_blocking(old_status):
-    changed = _changed(old_status, STATUS_FAIL)
     old_row = _row(old_status)
+    old_row[:2] = ["Qwen/Qwen3.5-27B", "Qwen3_5ForConditionalGeneration"]
     new_row = _row(
         STATUS_FAIL,
         "ENCODER_UNSUPPORTED: checkpoint declares vision but AIC has no encoder implementation",
     )
+    new_row[:2] = old_row[:2]
+    changed = (*old_row[:6], old_status, STATUS_FAIL)
 
     errors = find_blocking_status_transitions([changed], [new_row], [old_row])
 
     assert errors == []
+
+
+def test_text_only_model_cannot_claim_encoder_unsupported_migration():
+    new_row = _row(
+        STATUS_FAIL,
+        "ENCODER_UNSUPPORTED: bogus classification",
+        command=(
+            "uv run python tools/support_matrix/generate_support_matrix.py "
+            "--model Qwen/Qwen3-32B-FP8 --system a100_sxm --backend trtllm "
+            "--backend-version 1.0.0 --mode agg --max-workers 1 --no-save "
+            "--expect-status FAIL --expect-error-prefix ENCODER_UNSUPPORTED:"
+        ),
+    )
+
+    sanity_errors = check_csv_sanity(HEADER, [new_row])
+    transition_errors = find_blocking_status_transitions(
+        [_changed(STATUS_PASS, STATUS_FAIL)],
+        [new_row],
+        [_row(STATUS_PASS)],
+    )
+
+    assert any("declared but unimplemented encoder" in error for error in sanity_errors)
+    assert len(transition_errors) == 1
+    assert "PASS -> FAIL" in transition_errors[0]
 
 
 def test_encoder_unsupported_after_image_backed_pass_is_blocking():

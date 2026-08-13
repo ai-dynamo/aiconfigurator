@@ -58,6 +58,14 @@ SUPPORTED_HEADERS = (
 )
 
 
+def _has_declared_unimplemented_encoder(model: str) -> bool:
+    try:
+        coverage = _get_encoder_coverage(model)
+    except Exception:
+        return False
+    return coverage.checkpoint_declares_encoder and not coverage.aic_encoder_implemented
+
+
 def _read_single_csv(csv_path: Path) -> tuple[list[str], list[list[str]]]:
     """
     Read a CSV file and return header and data rows.
@@ -196,6 +204,10 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
                 encoder_unsupported_replay = err_msg.startswith("ENCODER_UNSUPPORTED:") and (
                     "tools/support_matrix/generate_support_matrix.py" in command_parts
                 )
+                if err_msg.startswith("ENCODER_UNSUPPORTED:") and not _has_declared_unimplemented_encoder(row[0]):
+                    errors.append(
+                        f"Row {i}: ENCODER_UNSUPPORTED requires a checkpoint with a declared but unimplemented encoder"
+                    )
 
                 def _option_values(flag: str) -> list[str]:
                     values = []
@@ -440,6 +452,7 @@ def find_blocking_status_transitions(
             and row[6] == STATUS_FAIL
             and row[7].strip().startswith("ENCODER_UNSUPPORTED:")
             and _is_legacy_backbone_only_row(old_rows.get(key))
+            and _has_declared_unimplemented_encoder(row[0])
         ):
             encoder_migration_keys.add(key)
     for huggingface_id, architecture, system, backend, version, mode, old_status, new_status in changed_rows:

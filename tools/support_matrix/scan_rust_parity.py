@@ -187,15 +187,18 @@ class Entry:
     image_workload: ImageWorkload | None = None
 
     @property
+    def base_key(self) -> str:
+        return f"{self.model}|{self.system}|{self.backend}|{self.version}|{self.mode}"
+
+    @property
     def key(self) -> str:
         workload = self.image_workload
-        base_key = f"{self.model}|{self.system}|{self.backend}|{self.version}|{self.mode}"
         if workload is None:
             # Keep text-only keys stable so --continue-across-commits can reuse
             # results written before image workloads became part of the key.
-            return base_key
+            return self.base_key
         workload_key = f"image={workload.image_height}x{workload.image_width}x{workload.num_images}"
-        return f"{base_key}|{workload_key}"
+        return f"{self.base_key}|{workload_key}"
 
 
 @dataclass
@@ -359,11 +362,18 @@ def init_db(db_path: Path) -> None:
 
 
 def seed_entries(db_path: Path, entries: list[Entry]) -> int:
-    """Insert new entries; return count newly inserted."""
+    """Insert new entries, retiring superseded text-only multimodal rows."""
     inserted = 0
     with closing(_connect(db_path)) as conn:
         conn.execute("BEGIN")
         for entry in entries:
+            if entry.image_workload is not None:
+                # Pre-image scans used the base key for multimodal rows. Once
+                # encoder coverage is required, remove that stale text-only
+                # certification and its results before inserting the image key.
+                conn.execute("DELETE FROM probe_results WHERE entry_key = ?", (entry.base_key,))
+                conn.execute("DELETE FROM pareto_results WHERE entry_key = ?", (entry.base_key,))
+                conn.execute("DELETE FROM entries WHERE entry_key = ?", (entry.base_key,))
             cur = conn.execute(
                 """
                 INSERT OR IGNORE INTO entries
@@ -709,7 +719,9 @@ def pareto_entry(entry: Entry) -> ParetoRecord:
 
     # Regression: baseline says PASS but Python or Rust failed this run.
     if not python_ok:
-        outcome = PARETO_STATUS_ERROR
+        outcome = (
+            PARETO_STATUS_REGRESSION if python_err and "ENCODER_NOT_EXERCISED:" in python_err else PARETO_STATUS_ERROR
+        )
         return ParetoRecord(
             entry_key=entry.key,
             python_status="ERROR" if python_err else "EMPTY",
@@ -1154,9 +1166,10 @@ def cmd_report(args: argparse.Namespace) -> int:
         regressions = list(
             conn.execute(
                 """
-                SELECT entry_key, status, COALESCE(rust_err, '') AS rust_err
+                SELECT entry_key, status,
+                       COALESCE(NULLIF(python_err, ''), NULLIF(rust_err, ''), '') AS error_msg
                 FROM probe_results
-                WHERE status = 'RUST_ERROR_ONLY'
+                WHERE status IN ('RUST_ERROR_ONLY', 'ENCODER_EVIDENCE_ERROR')
                 ORDER BY entry_key
                 LIMIT 100
                 """
@@ -1196,9 +1209,9 @@ def cmd_report(args: argparse.Namespace) -> int:
         print()
 
     if regressions:
-        print(f"Probe regressions (Rust-only error, baseline PASS): {len(regressions)}")
-        for entry_key, status, rust_err in regressions[:20]:
-            print(f"  {entry_key}: {rust_err}")
+        print(f"Probe regressions (baseline PASS): {len(regressions)}")
+        for entry_key, status, error_msg in regressions[:20]:
+            print(f"  [{status}] {entry_key}: {error_msg}")
         if len(regressions) > 20:
             print(f"  ... and {len(regressions) - 20} more")
         print()

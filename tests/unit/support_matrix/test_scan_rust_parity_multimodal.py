@@ -8,14 +8,21 @@ import pandas as pd
 import pytest
 
 from tools.support_matrix.scan_rust_parity import (
+    PARETO_STATUS_REGRESSION,
     PARETO_STATUS_STRICT_PASS,
     PROBE_STATUS_ENCODER_EVIDENCE_ERROR,
     Entry,
+    ProbeRecord,
     _bucket_probe,
+    _connect,
     _run_probe,
+    cmd_report,
+    init_db,
     load_entries,
     pareto_entry,
     probe_entry,
+    seed_entries,
+    write_probe_record,
 )
 from tools.support_matrix.support_matrix import (
     STATUS_PASS,
@@ -122,6 +129,46 @@ def test_text_only_parity_key_remains_backward_compatible():
     assert entry.key == "Qwen/Qwen3-8B|b200_sxm|vllm|0.24.0|agg"
 
 
+def test_image_entry_retires_superseded_text_only_sqlite_result(tmp_path):
+    db_path = tmp_path / "scan.sqlite"
+    legacy_entry = Entry(
+        model=_entry().model,
+        architecture=_entry().architecture,
+        system=_entry().system,
+        backend=_entry().backend,
+        version=_entry().version,
+        mode=_entry().mode,
+        baseline_status=STATUS_PASS,
+    )
+    init_db(db_path)
+    seed_entries(db_path, [legacy_entry])
+    with _connect(db_path) as conn:
+        write_probe_record(
+            conn,
+            ProbeRecord(
+                entry_key=legacy_entry.key,
+                probe_shape="legacy-text-only",
+                python_ttft_ms=1.0,
+                python_tpot_ms=1.0,
+                rust_ttft_ms=1.0,
+                rust_tpot_ms=1.0,
+                ttft_drift_pct=0.0,
+                tpot_drift_pct=0.0,
+                python_err=None,
+                rust_err=None,
+                status="PASS",
+                duration_ms=1.0,
+                completed_at="2026-01-01T00:00:00+00:00",
+            ),
+        )
+
+    seed_entries(db_path, [_entry()])
+
+    with _connect(db_path) as conn:
+        assert conn.execute("SELECT entry_key FROM entries").fetchall() == [(_entry().key,)]
+        assert conn.execute("SELECT entry_key FROM probe_results").fetchall() == []
+
+
 def test_parity_probe_passes_image_arguments(monkeypatch):
     calls = []
 
@@ -165,6 +212,37 @@ def test_parity_probe_fails_when_both_engines_omit_encoder_evidence(monkeypatch)
     assert "ENCODER_NOT_EXERCISED:" in record.rust_err
 
 
+def test_parity_report_includes_encoder_evidence_regression_details(tmp_path, capsys):
+    db_path = tmp_path / "scan.sqlite"
+    init_db(db_path)
+    seed_entries(db_path, [_entry()])
+    with _connect(db_path) as conn:
+        write_probe_record(
+            conn,
+            ProbeRecord(
+                entry_key=_entry().key,
+                probe_shape="canonical-image",
+                python_ttft_ms=None,
+                python_tpot_ms=None,
+                rust_ttft_ms=None,
+                rust_tpot_ms=None,
+                ttft_drift_pct=None,
+                tpot_drift_pct=None,
+                python_err="RuntimeError: ENCODER_NOT_EXERCISED: missing encoder_latency",
+                rust_err="RuntimeError: ENCODER_NOT_EXERCISED: missing encoder_latency",
+                status=PROBE_STATUS_ENCODER_EVIDENCE_ERROR,
+                duration_ms=1.0,
+                completed_at="2026-01-01T00:00:00+00:00",
+            ),
+        )
+
+    assert cmd_report(SimpleNamespace(db_path=str(db_path), top=20, csv=None)) == 0
+
+    report = capsys.readouterr().out
+    assert "[ENCODER_EVIDENCE_ERROR]" in report
+    assert "ENCODER_NOT_EXERCISED: missing encoder_latency" in report
+
+
 def test_parity_pareto_runs_both_engines_with_encoder_evidence(monkeypatch):
     calls = []
 
@@ -190,3 +268,21 @@ def test_parity_pareto_runs_both_engines_with_encoder_evidence(monkeypatch):
     assert record.comparison_outcome == PARETO_STATUS_STRICT_PASS
     assert [call["engine_step_backend"] for call in calls] == ["python", "rust"]
     assert all(call["image_workload"] == SUPPORT_MATRIX_IMAGE_WORKLOAD for call in calls)
+
+
+def test_parity_pareto_missing_encoder_evidence_is_regression(monkeypatch):
+    monkeypatch.setattr("tools.support_matrix.scan_rust_parity._get_worker_matrix", lambda: None)
+    monkeypatch.setattr(
+        "tools.support_matrix.scan_rust_parity._get_test_constraints",
+        lambda _model: TestConstraints(4, 256, 256, 128, 1500.0, 50.0),
+    )
+    monkeypatch.setattr(
+        SupportMatrix,
+        "_run_mode",
+        staticmethod(lambda **_kwargs: pd.DataFrame({"request_rate": [1.0]})),
+    )
+
+    record = pareto_entry(_entry())
+
+    assert record.comparison_outcome == PARETO_STATUS_REGRESSION
+    assert "ENCODER_NOT_EXERCISED:" in record.error_msg
