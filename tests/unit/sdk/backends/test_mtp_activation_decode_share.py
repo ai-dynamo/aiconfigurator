@@ -83,3 +83,11 @@ def test_all_decode_share_equals_full_multiplier(setup):
     base = _memory(backend, model, database, nextn=0, num_tokens=512, mtp_scaled_tokens=512)
     spec = _memory(backend, model, database, nextn=3, num_tokens=512, mtp_scaled_tokens=512)
     assert spec / base == pytest.approx(4.0, rel=1e-6)
+
+
+def test_prefill_only_step_does_not_scale(setup):
+    """mtp_scaled_tokens=0 (static_ctx / disagg prefill worker): no draft share."""
+    backend, model, database = setup
+    base = _memory(backend, model, database, nextn=0, num_tokens=65_536, mtp_scaled_tokens=0)
+    spec = _memory(backend, model, database, nextn=3, num_tokens=65_536, mtp_scaled_tokens=0)
+    assert spec == pytest.approx(base, rel=1e-9)

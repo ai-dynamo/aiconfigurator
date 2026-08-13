@@ -68,3 +68,17 @@ def test_gptoss_kv_max_tokens_inverts_the_piecewise_curve():
     budget = model.get_kvcache_bytes_per_sequence(seq_len)
     max_tokens = model.get_kvcache_max_tokens(budget)
     assert abs(max_tokens - seq_len) <= 1
+
+
+def test_gptoss_deepep_path_also_gets_hybrid_layout():
+    """SGLangEPMOEModel subclasses BaseModel directly and must not regress to linear KV."""
+    model_config = sdk_config.ModelConfig(tp_size=1, moe_tp_size=1, moe_ep_size=1)
+    model_config.kvcache_quant_mode = sdk_config.common.KVCacheQuantMode.fp8
+    model_config.moe_backend = "deepep_moe"
+    model = get_model(GPTOSS, model_config, "sglang")
+    assert type(model).__name__ == "SGLangEPMOEModel"
+    seq_len = 65_936
+    got = model.get_kvcache_bytes_per_sequence(seq_len)
+    assert got == pytest.approx(_expected_bytes(seq_len), rel=1e-9)
+    budget = model.get_kvcache_bytes_per_sequence(50_000)
+    assert abs(model.get_kvcache_max_tokens(budget) - 50_000) <= 1

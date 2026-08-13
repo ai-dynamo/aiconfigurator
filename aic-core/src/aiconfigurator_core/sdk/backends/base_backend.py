@@ -768,6 +768,8 @@ class BaseBackend:
         )
 
         if mode == "static_ctx":
+            # Prefill-only step: no decode tokens, so no share of the activation
+            # footprint verifies nextn+1 draft tokens (mtp_scaled_tokens=0).
             memory = self._get_memory_usage(
                 model,
                 database,
@@ -777,6 +779,7 @@ class BaseBackend:
                 1,
                 prefix=prefix,
                 encoder_memory=encoder_memory,
+                mtp_scaled_tokens=0,
             )
         elif mode == "static_gen":
             memory = self._get_memory_usage(
@@ -1780,8 +1783,9 @@ class BaseBackend:
             # correction in _get_memory_usage).
             mtp_scaled_tokens = int(num_gen_requests)
         else:
+            # b == 1: context-only step, no decode share to scale.
             num_tokens = ctx_tokens
-            mtp_scaled_tokens = None
+            mtp_scaled_tokens = 0
 
         memory = self._get_memory_usage(
             model,

@@ -14,6 +14,31 @@ from aiconfigurator_core.sdk.utils import _load_model_config_from_model_path
 logger = logging.getLogger(__name__)
 
 
+# gpt-oss alternates banded (window 128) and global attention, half the layers
+# each. The timing paths already model this (see the GptOssForCausalLM branches
+# in MOEModel and SGLangEPMOEModel: attn_scale_factor = 2, window_size = 128);
+# these constants and helpers keep the memory path consistent with them.
+_GPTOSS_WINDOW_SIZE = 128
+_GPTOSS_ATTN_SCALE_FACTOR = 2
+
+
+def _gptoss_hybrid_kv_bytes_per_sequence(model: BaseModel, seq_len: int) -> float:
+    """Hybrid SWA/global KV bytes for one gpt-oss sequence on one GPU.
+
+    SWA layers cap at the 128-token window while global layers grow with
+    ``seq_len``. Without this, gpt-oss is billed full context on every layer
+    (~2x at long ISL), which false-OOMs configs that fit on real GPUs.
+    """
+    seq_len = max(0, seq_len)
+    bytes_per_elem = model.config.kvcache_quant_mode.value.memory
+    num_kv_heads_per_gpu = (model._num_kv_heads + model.config.tp_size - 1) // model.config.tp_size
+    per_layer_per_token = num_kv_heads_per_gpu * model._head_size * 2 * bytes_per_elem
+    num_swa = model._num_layers // _GPTOSS_ATTN_SCALE_FACTOR
+    num_global = model._num_layers - num_swa
+    swa_seq = min(seq_len, _GPTOSS_WINDOW_SIZE)
+    return float(per_layer_per_token * (num_swa * swa_seq + num_global * seq_len))
+
+
 @register_model("MOE")
 class MOEModel(BaseModel):
     """
@@ -58,32 +83,11 @@ class MOEModel(BaseModel):
             return SGLangEPMOEModel(*moe_args, *base_args, extra_params)
         return cls(*moe_args, *base_args, extra_params)
 
-    # gpt-oss alternates banded (window 128) and global attention, half the
-    # layers each. The timing path already models this (see the
-    # GptOssForCausalLM branch below: attn_scale_factor = 2, window_size = 128);
-    # these constants keep the memory path consistent with it.
-    _GPTOSS_WINDOW_SIZE = 128
-    _GPTOSS_ATTN_SCALE_FACTOR = 2
-
     def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
-        """KV cache bytes for one sequence on one GPU.
-
-        gpt-oss SWA layers cap at the 128-token window while global layers grow
-        with ``seq_len`` — mirroring the hybrid split the timing ops already
-        use. Without this, gpt-oss is billed full context on every layer
-        (~2x at long ISL), which false-OOMs configs that fit on real GPUs.
-        Non-gpt-oss MoE models keep the linear base behavior.
-        """
+        """KV cache bytes for one sequence on one GPU (gpt-oss: hybrid SWA layout)."""
         if self.architecture != "GptOssForCausalLM":
             return super().get_kvcache_bytes_per_sequence(seq_len)
-        seq_len = max(0, seq_len)
-        bytes_per_elem = self.config.kvcache_quant_mode.value.memory
-        num_kv_heads_per_gpu = (self._num_kv_heads + self.config.tp_size - 1) // self.config.tp_size
-        per_layer_per_token = num_kv_heads_per_gpu * self._head_size * 2 * bytes_per_elem
-        num_swa = self._num_layers // self._GPTOSS_ATTN_SCALE_FACTOR
-        num_global = self._num_layers - num_swa
-        swa_seq = min(seq_len, self._GPTOSS_WINDOW_SIZE)
-        return float(per_layer_per_token * (num_swa * swa_seq + num_global * seq_len))
+        return _gptoss_hybrid_kv_bytes_per_sequence(self, seq_len)
 
     def get_kvcache_max_tokens(self, kv_budget_bytes: float) -> int:
         """Capacity inverse over the window-capped KV curve (non-linear past the window)."""
@@ -418,6 +422,23 @@ class SGLangEPMOEModel(BaseModel):
     Models fused all-to-all dispatch+compute with no post-dispatch ops.
     Uses wideep/deepep perf tables for MoE kernel latency.
     """
+
+    def get_kvcache_bytes_per_sequence(self, seq_len: int) -> float:
+        """KV cache bytes for one sequence on one GPU (gpt-oss: hybrid SWA layout).
+
+        SGLangEPMOEModel subclasses BaseModel directly, so it does not inherit
+        MOEModel's override; without this, gpt-oss served through the DeepEP
+        path keeps the ~2x linear KV overcharge its own timing branch avoids.
+        """
+        if self.architecture != "GptOssForCausalLM":
+            return super().get_kvcache_bytes_per_sequence(seq_len)
+        return _gptoss_hybrid_kv_bytes_per_sequence(self, seq_len)
+
+    def get_kvcache_max_tokens(self, kv_budget_bytes: float) -> int:
+        """Capacity inverse over the window-capped KV curve (non-linear past the window)."""
+        if self.architecture != "GptOssForCausalLM":
+            return super().get_kvcache_max_tokens(kv_budget_bytes)
+        return self._binary_search_kvcache_max_tokens(kv_budget_bytes)
 
     @classmethod
     def supports_cp(cls, backend_name: str) -> bool:
