@@ -286,14 +286,30 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
                         encoder_coverage = _get_encoder_coverage(row[0])
                     except Exception:
                         encoder_coverage = None
-                    if status in {STATUS_PASS, STATUS_HYBRID_PASS} and encoder_coverage is not None:
-                        if (
-                            encoder_coverage.checkpoint_declares_encoder
-                            and not encoder_coverage.aic_encoder_implemented
-                        ):
-                            errors.append(f"Row {i}: encoder-unsupported checkpoint cannot use pass status {status}")
-                        elif encoder_coverage.aic_encoder_implemented and not populated_image_values:
-                            errors.append(f"Row {i}: encoder PASS requires persisted image workload metadata")
+                    if encoder_coverage is not None:
+                        workload = encoder_coverage.workload
+                        actual_image_values = tuple(value.strip() for value in image_values)
+                        if workload is None and populated_image_values:
+                            errors.append(
+                                f"Row {i}: model has no AIC encoder workload; "
+                                "ImageHeight, ImageWidth, and NumImages must be empty"
+                            )
+                        elif workload is not None and actual_image_values != workload.csv_values():
+                            if status in {STATUS_PASS, STATUS_HYBRID_PASS} and not populated_image_values:
+                                errors.append(f"Row {i}: encoder PASS requires persisted image workload metadata")
+                            else:
+                                errors.append(
+                                    f"Row {i}: image workload metadata must match the canonical encoder workload "
+                                    f"{workload.csv_values()}; found {actual_image_values}"
+                                )
+
+                    if (
+                        status in {STATUS_PASS, STATUS_HYBRID_PASS}
+                        and encoder_coverage is not None
+                        and encoder_coverage.checkpoint_declares_encoder
+                        and not encoder_coverage.aic_encoder_implemented
+                    ):
+                        errors.append(f"Row {i}: encoder-unsupported checkpoint cannot use pass status {status}")
 
     return errors
 

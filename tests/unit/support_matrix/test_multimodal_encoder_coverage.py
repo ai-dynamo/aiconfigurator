@@ -328,6 +328,56 @@ def test_encoder_pass_without_command_or_metadata_evidence_is_invalid():
     assert any("encoder PASS requires persisted image workload metadata" in error for error in errors)
 
 
+def test_encoder_pass_with_noncanonical_image_workload_is_invalid():
+    row = [
+        "Qwen/Qwen3-VL-8B-Instruct",
+        "Qwen3VLForConditionalGeneration",
+        "b200_sxm",
+        "vllm",
+        "0.24.0",
+        "agg",
+        STATUS_PASS,
+        "",
+        (
+            "uv run aiconfigurator cli default --database-mode SILICON "
+            "--image-height 448 --image-width 448 --num-images 1"
+        ),
+        "silicon",
+        "448",
+        "448",
+        "1",
+    ]
+
+    errors = check_csv_sanity(SUPPORT_MATRIX_HEADER, [row])
+
+    assert any("must match the canonical encoder workload ('1024', '1024', '1')" in error for error in errors)
+
+
+def test_text_only_model_cannot_persist_image_workload_metadata():
+    row = [
+        "Qwen/Qwen3-8B",
+        "Qwen3ForCausalLM",
+        "b200_sxm",
+        "vllm",
+        "0.24.0",
+        "agg",
+        STATUS_PASS,
+        "",
+        (
+            "uv run aiconfigurator cli default --database-mode SILICON "
+            "--image-height 1024 --image-width 1024 --num-images 1"
+        ),
+        "silicon",
+        "1024",
+        "1024",
+        "1",
+    ]
+
+    errors = check_csv_sanity(SUPPORT_MATRIX_HEADER, [row])
+
+    assert any("model has no AIC encoder workload" in error for error in errors)
+
+
 def test_legacy_encoder_pass_cannot_be_upgraded_without_image_evidence(tmp_path):
     row = (
         "Qwen/Qwen3-VL-8B-Instruct",
