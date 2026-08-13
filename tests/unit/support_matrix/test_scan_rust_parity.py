@@ -103,6 +103,7 @@ def test_probe_record_identifies_visual_shape(monkeypatch):
     record = probe_entry(_gemma_entry())
 
     assert "image_height=672,image_width=960,num_images=1" in record.probe_shape
+    assert "encoder_evidence_schema=2" in record.probe_shape
 
 
 def test_visual_probe_fails_closed_without_encoder_evidence(monkeypatch):
@@ -179,3 +180,35 @@ def test_resumed_visual_probe_keeps_current_workload_result(tmp_path):
 
     assert _retire_stale_visual_probe_results(db_path, [entry]) == 0
     assert pending_entries_for_probe(db_path) == set()
+
+
+def test_resumed_visual_probe_retires_previous_evidence_schema(tmp_path):
+    db_path = tmp_path / "scan.sqlite"
+    entry = _gemma_entry(mode="disagg")
+    init_db(db_path)
+    seed_entries(db_path, [entry])
+    previous_shape = _probe_shape(_visual_constraints()).replace(
+        "encoder_evidence_schema=2", "encoder_evidence_schema=1"
+    )
+    with _connect(db_path) as conn:
+        write_probe_record(
+            conn,
+            ProbeRecord(
+                entry_key=entry.key,
+                probe_shape=previous_shape,
+                python_ttft_ms=None,
+                python_tpot_ms=None,
+                rust_ttft_ms=None,
+                rust_tpot_ms=None,
+                ttft_drift_pct=None,
+                tpot_drift_pct=None,
+                python_err="ENCODER_NOT_EXERCISED: missing positive encoder_memory",
+                rust_err="ENCODER_NOT_EXERCISED: missing positive encoder_memory",
+                status=PROBE_STATUS_ENCODER_EVIDENCE_ERROR,
+                duration_ms=1.0,
+                completed_at="2026-08-13T00:00:00+00:00",
+            ),
+        )
+
+    assert _retire_stale_visual_probe_results(db_path, [entry]) == 1
+    assert pending_entries_for_probe(db_path) == {entry.key}

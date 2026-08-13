@@ -110,6 +110,8 @@ PARETO_STATUS_DRIFT = "DRIFT"
 PARETO_STATUS_REGRESSION = "REGRESSION"
 PARETO_STATUS_ERROR = "ERROR"
 
+_VISUAL_PROBE_EVIDENCE_SCHEMA = 2
+
 # Default per-entry wall-clock budget (a wide MoE disagg sweep can spike a few
 # minutes; 15 min should comfortably cover the tail).
 DEFAULT_PER_ENTRY_TIMEOUT_SEC = 900
@@ -386,11 +388,14 @@ def _has_visual_workload(constraints: TestConstraints) -> bool:
 
 
 def _probe_shape(constraints: TestConstraints) -> str:
-    return (
+    shape = (
         f"isl={constraints.isl},osl={constraints.osl},prefix={constraints.prefix},"
         f"total_gpus={constraints.total_gpus},image_height={constraints.image_height},"
         f"image_width={constraints.image_width},num_images={constraints.num_images}"
     )
+    if _has_visual_workload(constraints):
+        shape += f",encoder_evidence_schema={_VISUAL_PROBE_EVIDENCE_SCHEMA}"
+    return shape
 
 
 def _retire_stale_visual_probe_results(db_path: Path, entries: list[Entry]) -> int:
