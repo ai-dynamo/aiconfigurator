@@ -634,10 +634,17 @@ def create_kv_cache_and_metadata(
         seq_len_q = seq_len
         kv_cache_len = prefix_len
     else:
-        max_seq = seq_len + 1
+        # Generation KV coordinate contract: the getter's `kv_cache_len` is
+        # the CACHED length, the current token decodes at position seq_len,
+        # and the measured total is seq_len + 1 — exactly the coordinate the
+        # loader keys the row at (s = isl + step = 1 + seq_len). An earlier
+        # revision cached seq_len - 1 tokens, which measured total seq_len
+        # while persisting the seq_len + 1 coordinate (one-token key skew;
+        # shipped rows from that revision were re-keyed step -> step - 1).
+        max_seq = seq_len + 2
         total_tokens = batch_size
         seq_len_q = 1
-        kv_cache_len = seq_len - 1
+        kv_cache_len = seq_len
 
     # 2x headroom: KVCacheManagerV2 draws the M3 INDEX_KEY side-cache pages
     # from the same max_tokens page budget as main K/V, and the is_gen dummy
@@ -683,7 +690,7 @@ def create_kv_cache_and_metadata(
     # token_nums = past_kv_len + input_len (kv_cache_manager_v2.py
     # add_dummy_requests docstring); is_gen marks decode requests so the
     # committed-history hint matches a decode step's cache state.
-    token_nums = [prefix_len + seq_len_q] * batch_size if is_context else [seq_len] * batch_size
+    token_nums = [prefix_len + seq_len_q] * batch_size if is_context else [seq_len + 1] * batch_size
     dummy_result = kv_cache_manager.add_dummy_requests(
         token_nums=token_nums, request_ids=request_ids, is_gen=not is_context
     )
@@ -865,7 +872,7 @@ def run_msa_module(
         num_tokens = batch_size
         position_ids = torch.full(
             (batch_size,),
-            seq_len - 1,
+            seq_len,
             device=torch_device,
             dtype=torch.long,
         )

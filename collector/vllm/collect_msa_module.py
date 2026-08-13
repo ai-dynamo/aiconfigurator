@@ -571,8 +571,17 @@ def _create_kv_caches_and_metadata(
             query_lens=[seq_len] * batch_size,
         )
     else:
+        # Generation KV coordinate contract: `seq_len` is the CACHED length
+        # (the getter's kv_cache_len), the current token decodes at position
+        # seq_len, and the measured total is seq_len + 1 — the coordinate the
+        # loader keys the row at (s = isl + step = 1 + seq_len).
+        # create_common_attn_metadata derives num_computed_tokens =
+        # seq_lens - query_lens, so seq_lens must carry the TOTAL. An earlier
+        # revision passed seq_lens=[seq_len] (cached seq_len - 1, total
+        # seq_len) while persisting the seq_len + 1 coordinate (one-token key
+        # skew; shipped rows from that revision were re-keyed step -> step-1).
         batch_spec = BatchSpec(
-            seq_lens=[seq_len] * batch_size,
+            seq_lens=[seq_len + 1] * batch_size,
             query_lens=[1] * batch_size,
         )
 
@@ -745,7 +754,7 @@ def run_msa_module(
         )
     else:
         num_tokens = batch_size
-        positions = torch.full((batch_size,), seq_len - 1, device=torch_device, dtype=torch.long)
+        positions = torch.full((batch_size,), seq_len, device=torch_device, dtype=torch.long)
 
     hidden_states = torch.full(
         (num_tokens, hidden_size),
@@ -772,58 +781,60 @@ def run_msa_module(
     exit_stack.enter_context(set_current_vllm_config(vllm_config))
     exit_stack.enter_context(set_forward_context(attn_metadata_dict, vllm_config, slot_mapping=slot_mapping_dict))
 
-    # 5. Dry run
+    # Steps 5-7 run under one try/finally: collect.py reuses this worker
+    # process for later cases, so the workspace singleton and CUDA
+    # allocations must be released on EVERY exit path — a leak here turns
+    # one failure into misleading follow-on OOMs.
     try:
-        with torch.inference_mode():
+        # 5. Dry run
+        try:
+            with torch.inference_mode():
+                attn_module.forward(positions, hidden_states)
+        except torch.cuda.OutOfMemoryError as e:
+            print(f"  Dry run OOM: {e}")
+            raise
+        except Exception as e:
+            print(f"  Dry run failed: {e}")
+            traceback.print_exc()
+            # Propagate to collect.py's worker so the failure is recorded in
+            # the error queue (no silent skip).
+            raise
+
+        # 6. Benchmark. CUDA graph capture is mandatory (allow_graph_fail=False):
+        # the M3 Triton kernels are capture-safe (no host syncs; the builders
+        # declare AttentionCGSupport.UNIFORM_BATCH, common/sparse_attention.py
+        # :161-167, common/indexer.py:214-219@v0.24.0), verified on SM90.
+        def kernel_func():
             attn_module.forward(positions, hidden_states)
-    except torch.cuda.OutOfMemoryError as e:
-        print(f"  Dry run OOM: {e}")
-        _cleanup()
-        raise
-    except Exception as e:
-        print(f"  Dry run failed: {e}")
-        traceback.print_exc()
-        _cleanup()
-        # Propagate to collect.py's worker so the failure is recorded in the
-        # error queue (no silent skip).
-        raise
 
-    # 6. Benchmark. CUDA graph capture is mandatory (allow_graph_fail=False):
-    # the M3 Triton kernels are capture-safe (no host syncs; the builders
-    # declare AttentionCGSupport.UNIFORM_BATCH, common/sparse_attention.py
-    # :161-167, common/indexer.py:214-219@v0.24.0), verified on SM90.
-    def kernel_func():
-        attn_module.forward(positions, hidden_states)
+        with benchmark_with_power(
+            device=torch_device,
+            kernel_func=kernel_func,
+            num_warmups=warming_up,
+            num_runs=test_ite,
+            repeat_n=1,
+            allow_graph_fail=False,
+        ) as results:
+            pass
 
-    with benchmark_with_power(
-        device=torch_device,
-        kernel_func=kernel_func,
-        num_warmups=warming_up,
-        num_runs=test_ite,
-        repeat_n=1,
-        allow_graph_fail=False,
-    ) as results:
-        pass
+        latency = results["latency_ms"]
 
-    latency = results["latency_ms"]
+        # 7. Log results — schema aligned with TRT-LLM's collect_msa_module.
+        if is_context:
+            isl = seq_len
+            step = prefix_len
+        else:
+            isl = 1
+            step = seq_len
 
-    # 7. Log results — schema aligned with TRT-LLM's collect_msa_module.
-    if is_context:
-        isl = seq_len
-        step = prefix_len
-    else:
-        isl = 1
-        step = seq_len
+        op_name = f"msa_{phase}_module"
 
-    op_name = f"msa_{phase}_module"
+        # Ground truth: the impl class the framework's own dispatch selected at
+        # construction (select_main_impl_cls — Triton off-SM100, MSA on SM100).
+        kernel_source = type(attn_module.impl).__name__
 
-    # Ground truth: the impl class the framework's own dispatch selected at
-    # construction (select_main_impl_cls — Triton off-SM100, MSA on SM100).
-    kernel_source = type(attn_module.impl).__name__
-
-    log_perf(
-        item_list=[
-            {
+        _persist_msa_row(
+            item={
                 "model": model_path,
                 "architecture": original_architecture,
                 "mla_dtype": compute_dtype,
@@ -835,25 +846,24 @@ def run_msa_module(
                 "tp_size": 1,
                 "step": step,
                 "latency": f"{latency:.4f}",
-            }
-        ],
-        framework="VLLM",
-        version=vllm_version,
-        device_name=torch.cuda.get_device_name(device),
-        op_name=op_name,
-        kernel_source=kernel_source,
-        perf_filename=perf_filename,
-        power_stats=results["power_stats"],
-    )
+            },
+            vllm_version=vllm_version,
+            device_name=torch.cuda.get_device_name(device),
+            op_name=op_name,
+            kernel_source=kernel_source,
+            perf_filename=perf_filename,
+            power_stats=results["power_stats"],
+        )
 
-    print(
-        f"  [{phase}] b={batch_size}, s={seq_len}, heads={num_heads}, "
-        f"prefix={prefix_len}, gemm={gemm_type}, kv={kv_cache_dtype} "
-        f"(cache storage {kv_cache.dtype}), backend={kernel_source}: {latency:.4f} ms"
-    )
+        print(
+            f"  [{phase}] b={batch_size}, s={seq_len}, heads={num_heads}, "
+            f"prefix={prefix_len}, gemm={gemm_type}, kv={kv_cache_dtype} "
+            f"(cache storage {kv_cache.dtype}), backend={kernel_source}: {latency:.4f} ms"
+        )
 
-    _cleanup()
-    return latency
+        return latency
+    finally:
+        _cleanup()
 
 
 def run_msa_module_worker(
@@ -893,6 +903,35 @@ def _cleanup():
     _ws_mod._manager = None
     gc.collect()
     torch.cuda.empty_cache()
+
+
+def _persist_msa_row(
+    *,
+    item: dict,
+    vllm_version: str,
+    device_name: str,
+    op_name: str,
+    kernel_source: str,
+    perf_filename: str,
+    power_stats: dict | None,
+) -> None:
+    """Persist one MSA perf row, failing the case when the write fails.
+
+    ``log_perf`` returns False after lock exhaustion or a write/fsync
+    exception; discarding that would let the worker return normally and the
+    checkpoint advance with no row persisted (a silently shrunk dataset).
+    Mirrors the TRT-LLM and SGLang collectors."""
+    if not log_perf(
+        item_list=[item],
+        framework="VLLM",
+        version=vllm_version,
+        device_name=device_name,
+        op_name=op_name,
+        kernel_source=kernel_source,
+        perf_filename=perf_filename,
+        power_stats=power_stats,
+    ):
+        raise RuntimeError(f"failed to persist MSA row to {perf_filename}")
 
 
 # ═══════════════════════════════════════════════════════════════════════

@@ -1689,3 +1689,39 @@ def test_qwen35_gemm_model_rows_add_exact_below_grid_widths():
     assert {case.x for case in specs if (case.n, case.k) == (1, 2048)} == base_tokens
 
     assert len(specs) == len({(case.x, case.n, case.k) for case in specs})
+
+
+def test_vllm_msa_persist_row_raises_when_log_perf_fails():
+    """A false return from log_perf (lock exhaustion / write failure) must
+    fail the case: a worker that returns normally lets the checkpoint advance
+    with no row persisted, silently shrinking the dataset. Mirrors the
+    TRT-LLM/SGLang collectors' behavior."""
+    source_path = REPO_ROOT / "collector/vllm/collect_msa_module.py"
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_persist_msa_row")
+
+    def run(log_perf_result):
+        calls = {}
+
+        def fake_log_perf(**kwargs):
+            calls.update(kwargs)
+            return log_perf_result
+
+        namespace = {"log_perf": fake_log_perf}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), str(source_path), "exec"), namespace)
+        namespace["_persist_msa_row"](
+            item={"latency": "1.0"},
+            vllm_version="0.24.0",
+            device_name="test-device",
+            op_name="msa_generation_module",
+            kernel_source="MiniMaxM3SparseTritonImpl",
+            perf_filename="msa_generation_module_perf.txt",
+            power_stats=None,
+        )
+        return calls
+
+    calls = run(True)
+    assert calls["perf_filename"] == "msa_generation_module_perf.txt"
+
+    with pytest.raises(RuntimeError, match="failed to persist MSA row"):
+        run(False)

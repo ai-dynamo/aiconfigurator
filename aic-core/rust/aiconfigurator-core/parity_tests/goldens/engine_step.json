@@ -185,9 +185,9 @@
     "deepseek-v32-b200-vllm-019-empirical": {
       "agg": {
         "values": {
-          "agg_request": 402.25838002040837,
-          "agg_tpot": 163.46276706842747,
-          "agg_ttft": 238.7956129519809
+          "agg_request": 402.2583800204085,
+          "agg_tpot": 163.46276706842752,
+          "agg_ttft": 238.79561295198098
         }
       },
       "disagg": {
@@ -199,7 +199,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 163.46276706842747
+          "mixed_step": 163.46276706842752
         }
       },
       "static": {
@@ -420,9 +420,9 @@
     "kimi-k25-b200-vllm-019-empirical": {
       "agg": {
         "values": {
-          "agg_request": 396.3907052607566,
-          "agg_tpot": 160.70150835800308,
-          "agg_ttft": 235.68919690275348
+          "agg_request": 396.3907052607567,
+          "agg_tpot": 160.70150835800314,
+          "agg_ttft": 235.68919690275354
         }
       },
       "disagg": {
@@ -434,7 +434,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 160.70150835800308
+          "mixed_step": 160.70150835800314
         }
       },
       "static": {
@@ -953,9 +953,9 @@
     "minimax-m25-b200-vllm-019-empirical": {
       "agg": {
         "values": {
-          "agg_request": 129.33261794214425,
-          "agg_tpot": 34.603584913950236,
-          "agg_ttft": 94.72903302819401
+          "agg_request": 129.33261794214428,
+          "agg_tpot": 34.60358491395025,
+          "agg_ttft": 94.72903302819404
         }
       },
       "disagg": {
@@ -967,7 +967,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 34.603584913950236
+          "mixed_step": 34.60358491395025
         }
       },
       "static": {
@@ -1177,28 +1177,28 @@
     "minimax-m3-b200-sglang-0514-hybrid-xop": {
       "agg": {
         "values": {
-          "agg_request": 121.80698536871577,
-          "agg_tpot": 41.29050351481891,
-          "agg_ttft": 80.51648185389686
+          "agg_request": 166.5146849856586,
+          "agg_tpot": 56.445655927341896,
+          "agg_ttft": 110.0690290583167
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 85.485,
-          "disagg_tpot": 7.295,
-          "disagg_ttft": 78.19
+          "disagg_request": 118.749,
+          "disagg_tpot": 10.627,
+          "disagg_ttft": 108.122
         }
       },
       "mixed": {
         "values": {
-          "mixed_step": 41.176839515364186
+          "mixed_step": 56.31369489762832
         }
       },
       "static": {
         "values": {
-          "static_ctx": 39.49,
-          "static_gen": 2.994,
-          "static_total": 42.484
+          "static_ctx": 54.608,
+          "static_gen": 7.84,
+          "static_total": 62.44799999999999
         }
       }
     },
@@ -1233,8 +1233,8 @@
     "minimax-m3-b200-vllm-019-hybrid-xop": {
       "agg": {
         "values": {
-          "agg_request": 209.93175912860633,
-          "agg_tpot": 73.37965135463827,
+          "agg_request": 209.93175912860636,
+          "agg_tpot": 73.37965135463828,
           "agg_ttft": 136.55210777396806
         }
       },
@@ -1247,7 +1247,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 73.37965135463827
+          "mixed_step": 73.37965135463828
         }
       },
       "static": {
@@ -1555,9 +1555,9 @@
     "qwen3-235b-a22b-b200-vllm-019-empirical": {
       "agg": {
         "values": {
-          "agg_request": 180.70708434268087,
-          "agg_tpot": 45.226863220085114,
-          "agg_ttft": 135.48022112259576
+          "agg_request": 180.70708434268093,
+          "agg_tpot": 45.22686322008514,
+          "agg_ttft": 135.4802211225958
         }
       },
       "disagg": {
@@ -1569,7 +1569,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 45.226863220085114
+          "mixed_step": 45.22686322008514
         }
       },
       "static": {
@@ -1583,8 +1583,8 @@
     "qwen3-235b-a22b-b200-vllm-019-hybrid-xprofile": {
       "agg": {
         "values": {
-          "agg_request": 188.04944834526566,
-          "agg_tpot": 48.68209333894854,
+          "agg_request": 188.0494483452657,
+          "agg_tpot": 48.68209333894856,
           "agg_ttft": 139.36735500631713
         }
       },
@@ -1597,7 +1597,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 48.68209333894854
+          "mixed_step": 48.68209333894856
         }
       },
       "static": {
@@ -1611,9 +1611,9 @@
     "qwen3-235b-a22b-b200-vllm-019-hybrid-xquant": {
       "agg": {
         "values": {
-          "agg_request": 278.953394985933,
-          "agg_tpot": 91.46042116985082,
-          "agg_ttft": 187.49297381608218
+          "agg_request": 278.95339498593313,
+          "agg_tpot": 91.46042116985087,
+          "agg_ttft": 187.49297381608224
         }
       },
       "disagg": {
@@ -1625,7 +1625,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 91.46042116985082
+          "mixed_step": 91.46042116985087
         }
       },
       "static": {
@@ -1922,7 +1922,7 @@
       "agg": {
         "values": {
           "agg_request": 95.062174059207,
-          "agg_tpot": 17.629258380803297,
+          "agg_tpot": 17.629258380803293,
           "agg_ttft": 77.4329156784037
         }
       },
@@ -1935,7 +1935,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 17.629258380803297
+          "mixed_step": 17.629258380803293
         }
       },
       "static": {
@@ -2322,8 +2322,8 @@
     "case_count": 93,
     "command": "python aic-core/rust/aiconfigurator-core/parity_tests/regenerate_goldens.py",
     "engine_step_backend": "python",
-    "git_describe": "5eacbcaab",
-    "git_head": "5eacbcaab0c27b3f52d48398ccce0739203d4f50",
+    "git_describe": "2b243b13",
+    "git_head": "2b243b134e18c5ada6f8f9e8f844336910306986",
     "surface_count": 346,
     "thread_caps": {
       "MKL_NUM_THREADS": "1",

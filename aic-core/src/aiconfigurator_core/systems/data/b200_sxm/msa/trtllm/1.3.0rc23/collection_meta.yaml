@@ -28,6 +28,12 @@
 #    sibling gemm-type rows of identical attention shapes vary widely.
 #    Kernel-truth floors (graph-captured diagnostic runs): ctx b=2
 #    s=512 0.53ms / b=1 s=16384 6.57ms / b=8 s=4096 12.38ms.
+# 2026-08-13: generation rows re-keyed step -> step - 1 (PR #1507 review
+# 4911044624): the collector cached kv-1 tokens so each measurement's true
+# total decode length is one below the previously persisted coordinate
+# (loader key s = isl + step). The measurements themselves are valid; only
+# the key was shifted to the measured coordinate. New collections use the
+# corrected construction (kv cached tokens, current token at position kv).
 schema_version: 1
 provenance: collected
 runtime:
