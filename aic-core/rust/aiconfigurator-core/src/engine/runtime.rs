@@ -1514,17 +1514,10 @@ mod tests {
     /// prefill], generation = [FpmForward decode], empty sol_ops (grid-exact
     /// queries never call SOL).
     fn build_fpm_engine(tmp: &std::path::Path, nextn: Option<u32>) -> Result<Engine, AicError> {
-        use crate::perf_database::fpm_forward::tests::{
-            default_identity, default_rows, write_pair,
-        };
+        use crate::perf_database::fpm_forward::tests::{default_identity, default_rows, write_pair};
         write_pair(tmp, &default_rows());
         let mut db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
-        db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(
-            tmp.to_path_buf(),
-            "b200_sxm",
-            "vllm",
-            "0.25.1",
-        ));
+        db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(tmp.to_path_buf(), "b200_sxm", "vllm", "0.25.1"));
         let fpm_op = |phase: FpmPhase| {
             Op::FpmForward(FpmForwardOp {
                 name: format!("fpm_forward_{}", phase.as_str()),
@@ -1582,9 +1575,7 @@ mod tests {
         // gen: batch 8; osl=0 clamps to 1 -> isl' = 2048, one step at
         // s = 2049 -> kv = 8*2049 = 16392: lerp between (8,4096)->7.0 and
         // (8,65536)->9.0, minus baseline (8, kv_floor=8) -> 6.0.
-        let ms = engine
-            .mixed_step_latency(2048, 8, 2048, 0, 0, 1.0, 1.0)
-            .unwrap();
+        let ms = engine.mixed_step_latency(2048, 8, 2048, 0, 0, 1.0, 1.0).unwrap();
         let pre = 20.0 + (40.0 - 20.0) * (2056.0 - 2048.0) / (4096.0 - 2048.0);
         let w = (16392.0 - 4096.0) / (65536.0 - 4096.0);
         let decode = 7.0 + (9.0 - 7.0) * w;
@@ -1601,12 +1592,7 @@ mod tests {
         use crate::perf_database::fpm_forward::tests::{default_identity, write_pair};
         write_pair(tmp, rows);
         let mut db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
-        db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(
-            tmp.to_path_buf(),
-            "b200_sxm",
-            "vllm",
-            "0.25.1",
-        ));
+        db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(tmp.to_path_buf(), "b200_sxm", "vllm", "0.25.1"));
         let fpm_op = |phase: FpmPhase| {
             Op::FpmForward(FpmForwardOp {
                 name: format!("fpm_forward_{}", phase.as_str()),
@@ -1657,23 +1643,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let engine = build_fpm_engine_with_rows(tmp.path(), &cliff_rows()).unwrap();
         // In-graph: pure prefill step, totals (1, 2048, 0) -> exact 47.0.
-        let graph = engine
-            .mixed_step_breakdown(2048, 0, 2048, 0, 0, 1.0, 1.0)
-            .unwrap();
-        assert!(
-            (graph[1] - 47.0).abs() < 1e-9,
-            "graph-side prefill {}",
-            graph[1]
-        );
+        let graph = engine.mixed_step_breakdown(2048, 0, 2048, 0, 0, 1.0, 1.0).unwrap();
+        assert!((graph[1] - 47.0).abs() < 1e-9, "graph-side prefill {}", graph[1]);
         // Crossing: 8 decode riders push the total to 2056 -> eager plateau.
-        let eager = engine
-            .mixed_step_breakdown(2048, 8, 2048, 0, 0, 1.0, 1.0)
-            .unwrap();
-        assert!(
-            (eager[1] - 99.0).abs() < 1e-9,
-            "eager-side prefill {}",
-            eager[1]
-        );
+        let eager = engine.mixed_step_breakdown(2048, 8, 2048, 0, 0, 1.0, 1.0).unwrap();
+        assert!((eager[1] - 99.0).abs() < 1e-9, "eager-side prefill {}", eager[1]);
         assert!(eager[1] > graph[1] * 2.0 - 1e-9);
     }
 
@@ -1685,9 +1659,7 @@ mod tests {
         let engine = build_fpm_engine_with_rows(tmp.path(), &cliff_rows()).unwrap();
         // ctx=1024 of isl=2048: chunk 1 -> (1, 1032, 0) = 10.0,
         // chunk 2 -> (1, 1032, 1024) = 14.0; average 12.0.
-        let parts = engine
-            .mixed_step_breakdown(1024, 8, 2048, 0, 0, 1.0, 1.0)
-            .unwrap();
+        let parts = engine.mixed_step_breakdown(1024, 8, 2048, 0, 0, 1.0, 1.0).unwrap();
         assert!((parts[1] - 12.0).abs() < 1e-9, "chunk average {}", parts[1]);
     }
 
@@ -1702,9 +1674,7 @@ mod tests {
         let ms = engine.decode_step_latency(8, 511, 0, 1.0).unwrap();
         assert!((ms - 7.0).abs() < 1e-12, "got {ms}");
         // mixed with ctx_tokens=0 must agree with the genonly convention
-        let mixed = engine
-            .mixed_step_latency(0, 8, 511, 0, 0, 1.0, 1.0)
-            .unwrap();
+        let mixed = engine.mixed_step_latency(0, 8, 511, 0, 0, 1.0, 1.0).unwrap();
         assert!((mixed - 7.0).abs() < 1e-12, "got {mixed}");
         assert_eq!(engine.decode_step_latency(0, 511, 0, 1.0).unwrap(), 0.0);
     }
@@ -1813,8 +1783,7 @@ mod tests {
         let spec = EngineSpec::new(fixture_engine_config(None), vec![hidden], generation_ops());
         let err = Engine::build(spec, Arc::new(db)).unwrap_err();
         assert!(
-            err.to_string()
-                .contains("exactly one FpmForward op per phase"),
+            err.to_string().contains("exactly one FpmForward op per phase"),
             "{err}"
         );
     }

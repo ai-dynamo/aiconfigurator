@@ -681,8 +681,8 @@ mod tests {
             // Appended AFTER Fallback (bincode enum indices are positional;
             // appending shifts nothing, so no ENGINE_SPEC_SCHEMA_VERSION bump).
             OpSpec::Dsv4MegaMoe(dsv4_megamoe()),
-            // Appended in wire order: Kda, then FpmForward (main's v9), then
-            // the large-EP pair appended after them by this PR's re-bump.
+            // Appended in wire order: Kda, FpmForward, then this PR's
+            // large-EP pair.
             OpSpec::Kda(kda()),
             OpSpec::FpmForward(fpm_forward()),
             OpSpec::MoeAllToAll(moe_all_to_all()),
@@ -776,8 +776,8 @@ mod tests {
     #[test]
     fn op_variant_indices_are_pinned() {
         const GEMM_INDEX: u32 = 0;
-        // Re-derived after main's Kda (Kimi-K3) and FpmForward (v9) appends
-        // shifted the tail.
+        // Re-derived after current main's Kda and FpmForward tail variants,
+        // and after retiring the two mid-enum wideEP MoE variants.
         const MOE_ALL_TO_ALL_INDEX: u32 = 33;
         const MOE_EXPERT_COMPUTE_INDEX: u32 = 34;
 

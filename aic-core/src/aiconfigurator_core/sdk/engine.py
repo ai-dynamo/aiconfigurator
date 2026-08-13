@@ -122,9 +122,8 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   `WideEpMoeDispatch`) were removed mid-enum, shifting every later bincode
 #   enum index; large-EP is now modeled natively by the `MoeAllToAll` /
 #   `MoeExpertCompute` variants appended after `FpmForward`, and
-#   `MoeExpertComputeOp` carries the `enable_eplb` legacy-fidelity field.
-#   Claimed 7 concurrently with `attn_ar_modeled` and friends; renumbered
-#   at this merge.
+#   `MoeExpertComputeOp` carries the
+#   `enable_eplb` legacy-fidelity field.
 ENGINE_SPEC_SCHEMA_VERSION = 11
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
@@ -741,7 +740,7 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
 
     # Unified large-EP ops (AIC-1601): one Python class per table, the phase
     # is a constructor field. Rust `Op::MoeAllToAll` / `Op::MoeExpertCompute` are
-    # APPENDED after `Dsv4MegaMoe` (bincode enum indices are positional;
+    # APPENDED after `FpmForward` (bincode enum indices are positional;
     # appending shifts nothing), so no ENGINE_SPEC_SCHEMA_VERSION bump.
     if isinstance(op, MoEAllToAll):
         return {"MoeAllToAll": _moe_all_to_all(op)}

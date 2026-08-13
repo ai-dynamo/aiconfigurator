@@ -49,8 +49,7 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 //   bincode enum index; large-EP is now modeled natively by the
 //   `MoeAllToAll` / `MoeExpertCompute` variants appended after
 //   `FpmForward`, and `MoeExpertComputeOp` carries the `enable_eplb`
-//   legacy-fidelity field. Claimed 7 concurrently with attn_ar_modeled
-//   and friends; renumbered at this merge (v3/v4 precedent).
+//   legacy-fidelity field.
 pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 11;
 
 /// Static engine identity and setup information carried by an

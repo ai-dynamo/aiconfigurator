@@ -2,8 +2,8 @@
   "header": {
     "command": "python aic-core/rust/aiconfigurator-core/parity_tests/regenerate_goldens.py",
     "engine_step_backend": "python",
-    "git_describe": "7269634d",
-    "git_head": "7269634dd74b2d34c481bda3f582f7233b4f5e10",
+    "git_describe": "996917fb",
+    "git_head": "996917fb71f5aa1a98e4b765cf1345e2ed056127",
     "reference_count": 53,
     "thread_caps": {
       "MKL_NUM_THREADS": "1",

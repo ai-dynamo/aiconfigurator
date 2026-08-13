@@ -78,7 +78,7 @@ def _ep_rows(phases=(("context", _HT_PAIRS), ("generation", _LL_PAIRS))) -> list
             for num_tokens in (128, 1024):
                 rows.append(
                     {
-                        "kernel_source": "deepep",
+                        "kernel_source": "deepep_moe",
                         "moe_dtype": _EP_QUANT,
                         "distribution": "power_law_1.2",
                         "inference_phase": phase,

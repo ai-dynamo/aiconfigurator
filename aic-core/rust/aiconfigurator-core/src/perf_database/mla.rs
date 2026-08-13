@@ -1512,8 +1512,8 @@ mod tests {
 
         // db.query_context_mla_module(b, s, prefix=0, num_heads=128, bf16^3)
         let ctx_mod_cases: &[(u32, u32, f64)] = &[
-            (2, 4096, 2.6503),              // exact hit
-            (2, 5000, 3.532393382077576),   // seq interior (sqrt blend)
+            (2, 4096, 2.6503),             // exact hit
+            (2, 5000, 3.532393382077576),  // seq interior (sqrt blend)
             (2, 100000, 705.5935422351143), // beyond seq range (tapered util-hold)
         ];
         for &(b, s, expected) in ctx_mod_cases {

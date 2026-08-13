@@ -88,7 +88,7 @@ use super::axis_curve::AxisCurve;
 use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
-use crate::common::system_spec::SystemSpec;
+use crate::common::system_spec::{quant_tc_flops, SystemSpec};
 use crate::config::{PerfDbSources, PerfSource};
 use crate::perf_database::parquet_loader::PerfReader;
 
@@ -271,6 +271,11 @@ impl MoeExpertComputeTable {
         num_tokens: u32,
         is_gated: bool,
     ) -> Result<f64, AicError> {
+        // Python's WideEP SOL indexes the bf16 tensor-core rate directly.
+        // Resolve it before any perf-data lookup so a missing, non-finite,
+        // or non-positive hardware fact is never replaced by a fabricated
+        // divisor in the roofline calculation.
+        let tc_flops = quant_tc_flops(&self.spec, MoeQuantMode::Bfloat16.mapping())?;
         let grids = self.load()?;
         let quant_name = quant.name();
         // `require_data_slice(data, kernel_source, quant_mode)`: both levels
@@ -388,6 +393,7 @@ impl MoeExpertComputeTable {
                 moe_ep_size,
                 tokens.round() as u32,
                 is_gated,
+                tc_flops,
             )
         };
         token_axis_curve(curve).query(f64::from(num_tokens), &sol)
@@ -468,6 +474,7 @@ fn ep_sol_latency_ms(
     moe_ep_size: u32,
     tokens: u32,
     is_gated: bool,
+    tc_flops: f64,
 ) -> f64 {
     // moe_comm.py:1224: `total_tokens = tokens * topk`.
     let total_tokens = tokens as u64 * topk as u64;
@@ -489,10 +496,8 @@ fn ep_sol_latency_ms(
         + h * inter * num_gemms / moe_tp
             * std::cmp::min(slots / moe_expert_compute, total_tokens / moe_expert_compute); // weights, num_slots-aware (:1229-1233)
     let mem_bytes = (mem_bytes_int as f64) * quant.mapping().memory;
-    // moe_comm.py:1235: Python indexes `bfloat16_tc_flops` directly (KeyError
-    // if absent); every shipped system populates it — the same fallback
-    // convention the retired `operators/wideep_moe.rs` used.
-    let tc_flops = spec.gpu.bfloat16_tc_flops.unwrap_or(1.0);
+    // moe_comm.py:1235: Python indexes `bfloat16_tc_flops` directly. The
+    // caller resolves the same field through the strict shared resolver.
     let sol_math = (ops as f64) / (tc_flops * quant.mapping().compute) * 1000.0;
     // moe_comm.py:1236.
     let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
@@ -1455,14 +1460,13 @@ mod tests {
         )
         .is_err());
 
-        // Cross-adapter overwrite: the trtllm adapter loads AFTER the sglang
-        // ones, so a colliding key takes the trtllm value. The sglang leg
-        // fixes moe_dtype=fp8_block / slots=experts; collide by giving the
-        // trtllm file a deepep_moe kernel row on that exact coordinate — the
-        // dtypes differ, so ALSO write a matching-quant sglang-shaped store
-        // via the trtllm file's own dtype axis is impossible; instead pin
-        // the semantic on a second tmp dir with an nvfp4-matching... (see
-        // the dedicated merge test below for the legacy-vs-new layering).
+        // Cross-adapter ordering: all three legacy adapters keep the FIRST
+        // stored row (#1423), so the trtllm adapter — which loads last —
+        // cannot displace an sglang-adapted leaf. The two writers pin
+        // different moe_dtype axes (sglang fp8_block, trtllm nvfp4), so the
+        // shared `deepep_moe` kernel key below exercises the adapter order
+        // while the sglang fp8_block leaf stays untouched. Legacy-vs-new
+        // layering is pinned by the dedicated merge test below.
         let tmp2 = tempfile::tempdir().unwrap();
         write_legacy_sglang_parquet(
             &tmp2.path().join("wideep_context_moe_perf.parquet"),
@@ -1882,6 +1886,45 @@ mod tests {
     fn hand_sol_ms(tokens: u64) -> f64 {
         let mem_int = 81920 * tokens + 44040192 * (4 * tokens).min(128);
         (mem_int as f64) * 2.0 / 1e9 * 1000.0
+    }
+
+    #[test]
+    fn query_rejects_missing_or_invalid_bfloat16_flops() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_moe_ep_parquet(
+            &tmp.path().join("moe_expert_compute_perf.parquet"),
+            &[ep_row(
+                "deepep_moe",
+                "bfloat16",
+                "uniform",
+                "context",
+                256,
+                2,
+                32,
+                0.5,
+            )],
+        );
+
+        for value in [None, Some(0.0), Some(f64::NAN)] {
+            let mut spec = test_spec();
+            spec.gpu.bfloat16_tc_flops = value;
+            let table = MoeExpertComputeTable::new(tmp.path().to_path_buf(), spec);
+            match q(
+                &table,
+                "deepep_moe",
+                MoeQuantMode::Bfloat16,
+                "uniform",
+                "context",
+                256,
+                2,
+                32,
+            ) {
+                Err(AicError::MissingSystemFlops(message)) => {
+                    assert!(message.contains("bfloat16_tc_flops"), "got: {message}");
+                }
+                other => panic!("expected MissingSystemFlops, got {other:?}"),
+            }
+        }
     }
 
     /// In-range token queries are RAW lerp on the measured points (the SOL

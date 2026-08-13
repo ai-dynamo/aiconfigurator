@@ -21,8 +21,9 @@ bytes as the Python → Rust wire format, and the Rust `Engine` deserializes and
 interprets it — closer to a compiled query plan than a compiled executable. The
 one-time compile just resolves the model into a fixed, serializable op list so
 the hot path never re-walks the model or re-enters Python. The wire format is
-versioned: both sides carry `ENGINE_SPEC_SCHEMA_VERSION` (currently 5, bumped
-from 4 when the wideEP op variants were removed), the wheel and crate move in
+versioned: both sides carry `ENGINE_SPEC_SCHEMA_VERSION` (currently 11, bumped
+from 10 when the wideEP MoE variants were removed and the native large-EP
+variants were appended), the wheel and crate move in
 lockstep, and the Rust `Engine` rejects a spec with any other version.
 
 - `AicEngineBuilder` is the preferred Rust → Python (`compile_engine`) → Rust
@@ -157,8 +158,6 @@ code should not be "cleaned up" in ways that diverge from the pinned reference.
   CSA/top_last/mHC grids (other systems/versions, or rows absent from the
   approved reuse donors) still surfaces as symmetric
   `PerfDataNotAvailableError` on both engines.
-- Request-level FPM v2 fields and further WideEP accuracy work are left for later
-  PRs.
 - Request-level FPM v2 fields are left for later PRs. The legacy wideEP MoE
   surface (`wideep_moe` op and table, deepep dispatch flavors) was retired in
   favor of the large-EP `MoeAllToAll`/`MoeExpertCompute` path above.

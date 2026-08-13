@@ -422,16 +422,18 @@ SMOKE_CASES = [
         ),
         id="gpt-oss-20b-b200-trtllm-130rc10-isl1024-osl2",
     ),
-    # Phase 4 D7-C: data-gap families. Python errors with
-    # `PerfDataNotAvailableError` because the perf DB doesn't ship the
-    # required tables for these shapes; Rust errors at the equivalent
-    # query point (`AicError::PerfDatabase`). The error-symmetry contract
-    # asserts both engines fail together — same outcome, even if the
-    # exact failure point in the op graph differs.
+    # Phase 4 D7-C: Llama-4 Scout was originally a data-gap case, but the
+    # tracked perf data now gives it full numeric parity on all four surfaces.
     pytest.param(
         EngineStepParityCase(model_path="meta-llama/Llama-4-Scout-17B-16E-Instruct"),
         id="llama4-scout-b200-vllm-019-isl1024-osl2",
     ),
+    # DeepSeek-V4 Flash remains a data-gap case. Python errors with
+    # `PerfDataNotAvailableError` because the perf DB doesn't ship the
+    # required tables for this shape; Rust errors at the equivalent
+    # query point (`AicError::PerfDatabase`). The error-symmetry contract
+    # asserts both engines fail together — same outcome, even if the
+    # exact failure point in the op graph differs.
     pytest.param(
         EngineStepParityCase(model_path="deepseek-ai/DeepSeek-V4-Flash"),
         id="deepseek-v4-flash-b200-vllm-019-isl1024-osl2",

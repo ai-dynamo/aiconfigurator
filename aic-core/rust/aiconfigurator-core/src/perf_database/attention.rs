@@ -1166,8 +1166,8 @@ mod tests {
     fn encoder_attention_query_matches_python_v2_engine() {
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let cases: &[(u32, u32, f64)] = &[
-            (1, 1024, 0.03258133431275686),  // exact hit
-            (2, 1400, 0.0779337721462867),   // seq interp (sqrt blend)
+            (1, 1024, 0.03258133431275686), // exact hit
+            (2, 1400, 0.0779337721462867),  // seq interp (sqrt blend)
             (64, 65536, 10944.346873534367), // batch beyond staircase (tapered util-hold)
         ];
         for &(b, s, expected) in cases {

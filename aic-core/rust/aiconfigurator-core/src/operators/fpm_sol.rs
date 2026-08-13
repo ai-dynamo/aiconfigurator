@@ -430,12 +430,6 @@ fn moe_dispatch_sol(op: &MoEDispatchOp, spec: &SystemSpec, x: f64) -> Result<f64
                 }
             }
         },
-        // The DeepEP dispatch flavors were retired with AIC-1601 (large-EP is
-        // modeled by MoeAllToAll/MoeExpertCompute; the Python engine raises
-        // OpConversionError for moe_backend="deepep_moe" before any spec
-        // reaches this SOL), so no arm exists for them here — their Python
-        // SOL raised NotImplementedError anyway (moe.py:986-987, :1031-1032).
-        //
         // trtllm SM100 (moe.py:1095-1193).
         DispatchFlavor::TrtllmAlltoall => {
             let is_nvl72 = spec.node.num_gpus_per_node >= 72;
@@ -767,9 +761,6 @@ mod tests {
             moe_dispatch_sol(&op, &s, 8192.0).unwrap(),
             2.0 * volume * 2.0 / 4.0 * 3.0 / bw * 1000.0,
         );
-        // The DeepEP dispatch flavors are retired (AIC-1601) — no enum
-        // variant remains to construct, so their NotImplementedError-parity
-        // probe retired with them.
     }
 
     #[test]

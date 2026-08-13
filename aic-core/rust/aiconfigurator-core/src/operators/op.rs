@@ -158,7 +158,7 @@ pub enum Op {
     /// NOT related to the `crate::fpm` (ForwardPassPerfModel) module.
     /// APPENDED at the end (see the bincode note on `Dsv4MegaMoe`); claimed
     /// `ENGINE_SPEC_SCHEMA_VERSION` 5 concurrently with #1460/#1435 and was
-    /// renumbered to 7 at the merge.
+    /// renumbered to 9 across the intervening wire-format landings.
     FpmForward(FpmForwardOp),
     /// Unified large-EP MoE all-to-all comm phase (Python
     /// `operations.moe_comm.MoEAllToAll`) — one variant serves every backend
