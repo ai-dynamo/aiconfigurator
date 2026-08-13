@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from .dynamo_ci import adapt_dynamo_ci, is_dynamo_ci_recipe
 from .schema import (
+    AGGREGATED_REPLICAS_LOWERING_ASSUMPTION,
     AdaptationDiagnostic,
     AdaptationOutcome,
     AdaptationReport,
@@ -80,11 +81,7 @@ def _documents(value: DocumentInput | None) -> list[Mapping[str, Any]]:
         text = value.read_text()
         loaded = list(yaml.safe_load_all(text))
     elif isinstance(value, str):
-        path = Path(value)
-        if "\n" not in value and path.is_file():
-            loaded = list(yaml.safe_load_all(path.read_text()))
-        else:
-            loaded = list(yaml.safe_load_all(value))
+        loaded = list(yaml.safe_load_all(value))
     elif isinstance(value, Mapping):
         loaded = [value]
     else:
@@ -220,10 +217,11 @@ def _mounted_config(service: Mapping[str, Any], config_maps: Mapping[str, Any]) 
     if flags.get("extra-engine-args") not in (None, True):
         engine_path = flags["extra-engine-args"]
     engine_path = str(engine_path)
+    engine_basename = Path(engine_path).name if engine_path else ""
     candidates: list[Mapping[str, Any]] = []
     for name in names:
         for filename, config in config_maps.get(name, {}).items():
-            if not engine_path or engine_path.endswith(filename):
+            if not engine_path or engine_basename == filename:
                 candidates.append(config)
     if len(candidates) > 1:
         raise ValueError("worker mounts multiple ambiguous engine ConfigMap files")
@@ -294,6 +292,8 @@ def _service_records(dgd: Mapping[str, Any], config_maps: Mapping[str, Any]) -> 
 def _as_int(value: Any, label: str) -> int:
     if isinstance(value, bool) or value is None:
         raise ValueError(f"{label} must be an integer")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"{label} must be an integer")
     try:
         result = int(value)
     except (TypeError, ValueError) as error:
@@ -301,6 +301,18 @@ def _as_int(value: Any, label: str) -> int:
     if result <= 0:
         raise ValueError(f"{label} must be positive")
     return result
+
+
+def _as_bool(value: Any, label: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no", ""}:
+            return False
+    raise ValueError(f"{label} must be a boolean")
 
 
 def _as_float(value: Any, label: str) -> float:
@@ -433,18 +445,15 @@ def _worker_settings(
         assumptions.append(f"{service.name} pipeline parallelism defaults to 1.")
     dp_raw = _flag(service, "data-parallel-size", "dp-size", "dp")
     config_attention_dp = _config_value(service, "enable_attention_dp")
-    flag_attention_dp = service.flags.get("enable-dp-attention") or service.flags.get("enable-attention-dp")
-    enabled_attention_dp = str(
+    flag_attention_dp = _flag(service, "enable-dp-attention", "enable-attention-dp")
+    enabled_attention_dp = _as_bool(
         _coalesce(
             "attention DP",
             (("command", flag_attention_dp), ("engine ConfigMap", config_attention_dp)),
             False,
-        )
-    ).lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+        ),
+        f"{service.name} attention DP",
+    )
     if backend == "sglang" and enabled_attention_dp:
         if tp * pp != gpus:
             raise ValueError(f"{service.name} SGLang TP*PP ({tp * pp}) does not match GPUs per replica ({gpus})")
@@ -472,7 +481,8 @@ def _worker_settings(
             ("engine ConfigMap", _config_value(service, "expert_parallel_size")),
         ),
     )
-    expert_enabled = service.flags.get("enable-expert-parallel") is not None
+    expert_flag = service.flags.get("enable-expert-parallel")
+    expert_enabled = _as_bool(expert_flag, f"{service.name} expert parallelism") if expert_flag is not None else False
     if ep_raw is None:
         moe_ep = gpus // pp if expert_enabled else 1
     else:
@@ -679,6 +689,7 @@ def _request_for_point(
                 assumptions=assumptions,
             )
         )
+        assumptions.append(AGGREGATED_REPLICAS_LOWERING_ASSUMPTION)
         systems = SystemSettingsV1(prefill=system)
     else:
         topology = DisaggregatedTopologyV1(

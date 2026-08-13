@@ -12,6 +12,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SCHEMA_VERSION = "aic-estimate-request/1.0.0"
 ADAPTER_VERSION = "1.0.0"
+AGGREGATED_REPLICAS_LOWERING_ASSUMPTION = (
+    "Aggregated worker replicas are omitted during cli_estimate lowering because "
+    "cli_estimate has no aggregated worker-count parameter."
+)
 
 
 class _StrictModel(BaseModel):

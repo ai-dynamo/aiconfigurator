@@ -24,7 +24,7 @@ def _deployment(*, disagg: bool) -> str:
       resources: {limits: {gpu: 2}}
       extraPodSpec:
         mainContainer:
-          args: ["python -m dynamo.trtllm --model-path QWEN/QWEN3-32B --tensor-parallel-size 2"]
+          args: ["python -m dynamo.trtllm --model-path Qwen/Qwen3-32B --tensor-parallel-size 2"]
 """
     else:
         services = """
@@ -36,7 +36,7 @@ def _deployment(*, disagg: bool) -> str:
         mainContainer:
           args:
             - >-
-              python -m dynamo.trtllm --model-path QWEN/QWEN3-32B
+              python -m dynamo.trtllm --model-path Qwen/Qwen3-32B
               --tensor-parallel-size 2 --max-batch-size 1
               --disaggregation-mode prefill
     decode:
@@ -47,7 +47,7 @@ def _deployment(*, disagg: bool) -> str:
         mainContainer:
           args:
             - >-
-              python -m dynamo.trtllm --model-path QWEN/QWEN3-32B
+              python -m dynamo.trtllm --model-path Qwen/Qwen3-32B
               --tensor-parallel-size 2 --disaggregation-mode decode
 """
     return f"""
@@ -73,9 +73,12 @@ def test_adapted_request_runs_real_estimate(disagg, expected_mode):
         ),
     )
 
-    result = cli_estimate(**to_cli_estimate_kwargs(report.requests[0]))
+    outcome = report.outcomes[0]
+    assert outcome.status == "adapted", outcome.diagnostics
+    assert outcome.request is not None
+    result = cli_estimate(**to_cli_estimate_kwargs(outcome.request))
 
     assert isinstance(result, EstimateResult)
     assert result.mode == expected_mode
     assert result.ttft > 0
-    assert result.tpot >= 0
+    assert result.tpot > 0

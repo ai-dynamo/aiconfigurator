@@ -66,7 +66,17 @@ def _verify_core(*, exercise_engine: bool) -> str:
     )
     _forbid_distribution_files(
         "aiconfigurator-core",
-        ("config_adapter", "gap_analysis", "auto-gap-analysis", "/skills/", "/tools/"),
+        (
+            "config_adapter",
+            "gap_analysis",
+            "auto-gap-analysis",
+            "datasets/",
+            "reports/",
+            "/skills/",
+            "/tools/",
+            "web/",
+            "webapp/",
+        ),
     )
 
     core = importlib.import_module("aiconfigurator_core")
@@ -156,7 +166,17 @@ def _verify_upper(*, import_runtime: bool) -> str:
     )
     _forbid_distribution_files(
         "aiconfigurator",
-        ("gap_analysis", "auto-gap-analysis", "/skills/", "/tools/", ".agents/"),
+        (
+            "gap_analysis",
+            "auto-gap-analysis",
+            "datasets/",
+            "reports/",
+            "/skills/",
+            "/tools/",
+            "web/",
+            "webapp/",
+            ".agents/",
+        ),
     )
     config_adapter = importlib.import_module("aiconfigurator.sdk.config_adapter")
     if config_adapter.EstimateRequestV1.schema_path().is_file() is False:

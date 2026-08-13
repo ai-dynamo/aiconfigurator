@@ -9,6 +9,8 @@ commands.
 Import the API from `aiconfigurator.sdk.config_adapter`:
 
 ```python
+from pathlib import Path
+
 from aiconfigurator.cli.api import cli_estimate
 from aiconfigurator.sdk.config_adapter import (
     AdapterOverrides,
@@ -19,7 +21,7 @@ from aiconfigurator.sdk.config_adapter import (
 )
 
 report = adapt_config(
-    DynamoRecipeSource("deploy.yaml", "perf.yaml"),
+    DynamoRecipeSource(Path("deploy.yaml"), Path("perf.yaml")),
     AdapterOverrides(system_name="h200_sxm", backend_version="0.19.0"),
 )
 
@@ -33,6 +35,11 @@ for outcome in report.outcomes:
 `aic-estimate-request/1.0.0`. The packaged snapshot is available through
 `EstimateRequestV1.schema_path()`. Unknown versions and unknown canonical fields
 are rejected.
+
+The generated JSON Schema is the language-neutral structural contract for field
+types and bounds. `EstimateRequestV1` remains authoritative for cross-field
+rules, including prefix versus ISL, topology and MoE width, and the
+`nextn`/`nextn_accepted` pairing.
 
 ## Request groups
 
@@ -49,7 +56,9 @@ are rejected.
 
 The topology records source replicas and GPUs per replica. Lowering converts
 source concurrency into each worker's active batch while preserving the original
-concurrency in the request.
+concurrency in the request. `cli_estimate` has no aggregated worker-count
+argument, so aggregated replicas are omitted during lowering and that limitation
+is recorded in source provenance.
 
 ## Precedence and failure behavior
 
@@ -76,14 +85,18 @@ precision aliases, workload, concurrency, and worker topology.
 
 InferenceX does not expose pipeline parallelism, so PP defaults to 1. A
 disaggregated prefill batch defaults to 1 unless overridden. Both assumptions are
-recorded in provenance. MTP rows require explicit `nextn` and `nextn_accepted`
-overrides.
+recorded in provenance. Aggregated exports use `decode_num_workers=0` as an
+irrelevant sentinel for one replica; non-positive disaggregated worker counts are
+rejected. MTP rows require explicit `nextn` and `nextn_accepted` overrides.
 
 ## Dynamo recipes
 
 `DynamoRecipeSource` safely parses multi-document YAML containing ConfigMaps,
 one DynamoGraphDeployment, and optional performance Jobs. It supports standard
 agg and P/D-disaggregated vLLM, SGLang, and TRT-LLM workers.
+
+Pass a `Path` to load a YAML file. A plain `str` is always parsed as YAML text
+and is never resolved as a filesystem path.
 
 It also accepts concrete `dynamo-ci` SGLang benchmark recipes with top-level
 `model`, `resources`, `backend.sglang_config`, and `benchmark` sections. The

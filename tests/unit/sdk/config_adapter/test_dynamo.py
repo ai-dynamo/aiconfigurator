@@ -8,10 +8,10 @@ import pytest
 from aiconfigurator.sdk.config_adapter import (
     AdapterOverrides,
     DynamoRecipeSource,
+    WorkloadPointOverride,
     adapt_config,
     to_cli_estimate_kwargs,
 )
-from aiconfigurator.sdk.config_adapter.schema import WorkloadPointOverride
 
 pytestmark = pytest.mark.unit
 
@@ -114,6 +114,10 @@ def test_agg_backends_support_string_and_list_arguments(backend, args_as_string)
     assert request.model.path == "QWEN/QWEN3-32B"
     assert request.systems.prefill == "h200_sxm"
     assert request.topology.worker.gpus_per_replica == 2
+    assert request.provenance.assumptions[-1] == (
+        "Aggregated worker replicas are omitted during cli_estimate lowering because "
+        "cli_estimate has no aggregated worker-count parameter."
+    )
 
 
 def test_disagg_env_substitution_and_role_sizing():
@@ -259,6 +263,79 @@ spec:
     assert outcome.request.topology.worker.tp_size == 2
 
 
+def test_configmap_filename_match_does_not_accept_suffixes():
+    deployment = """
+kind: ConfigMap
+metadata: {name: engine}
+data:
+  selected.yaml: |
+    tensor_parallel_size: 2
+---
+kind: DynamoGraphDeployment
+metadata: {name: wrong-config}
+spec:
+  backendFramework: trtllm
+  services:
+    worker:
+      componentType: worker
+      resources: {limits: {gpu: "2"}}
+      extraPodSpec:
+        nodeSelector: {nvidia.com/gpu.product: NVIDIA-H200}
+        volumes: [{name: engine, configMap: {name: engine}}]
+        mainContainer:
+          args:
+            - >-
+              python -m dynamo.trtllm --model-path QWEN/QWEN3-32B
+              --extra-engine-args /config/my-selected.yaml
+"""
+    outcome = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=8),
+    ).outcomes[0]
+
+    assert outcome.status == "rejected"
+    assert "does not declare tensor parallelism" in outcome.diagnostics[-1].message
+
+
+def test_non_integral_gpu_count_is_rejected():
+    deployment = _agg_yaml().replace('gpu: "2"', "gpu: 2.9")
+    outcome = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=8),
+    ).outcomes[0]
+
+    assert outcome.status == "rejected"
+    assert "GPU limit must be an integer" in outcome.diagnostics[-1].message
+
+
+def test_false_expert_parallel_flag_does_not_enable_ep():
+    deployment = _agg_yaml(args_as_string=True).replace(
+        "--gpu-memory-utilization 0.9",
+        "--enable-expert-parallel false --gpu-memory-utilization 0.9",
+    )
+    outcome = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=8),
+    ).outcomes[0]
+
+    assert outcome.request is not None
+    assert outcome.request.topology.worker.moe_ep_size == 1
+    assert outcome.request.topology.worker.moe_tp_size == 2
+
+
+def test_plain_string_is_yaml_text_not_an_implicit_file_path(tmp_path):
+    deployment = tmp_path / "deployment.yaml"
+    deployment.write_text(_agg_yaml())
+
+    outcome = adapt_config(
+        DynamoRecipeSource(str(deployment)),
+        AdapterOverrides(isl=1024, osl=128, concurrency=8),
+    ).outcomes[0]
+
+    assert outcome.status == "rejected"
+    assert "must be an object" in outcome.diagnostics[-1].message
+
+
 def test_multiple_points_preserve_order_and_rejections():
     performance = {
         "points": [
@@ -310,6 +387,54 @@ def test_helm_benchmark_values_expand_literal_tool_pipeline_points():
         ("4k_500-concurrency-8", "adapted"),
     ]
     assert [request.workload.concurrency for request in report.requests] == [4, 8]
+
+
+def test_run_perf_workload_is_discovered_without_execution():
+    performance = {
+        "spec": {
+            "containers": [
+                {"args": ["run_perf 8 1024 128"]},
+            ]
+        }
+    }
+
+    outcome = adapt_config(DynamoRecipeSource(_agg_yaml(), performance)).outcomes[0]
+
+    assert outcome.request is not None
+    assert outcome.request.workload.isl == 1024
+    assert outcome.request.workload.osl == 128
+    assert outcome.request.workload.concurrency == 8
+
+
+def test_concurrency_per_gpu_workload_is_expanded():
+    performance = {
+        "spec": {
+            "containers": [
+                {
+                    "env": [
+                        {"name": "ISL", "value": "1024"},
+                        {"name": "OSL", "value": "128"},
+                        {"name": "CONCURRENCY_PER_GPU", "value": "4"},
+                        {"name": "DEPLOYMENT_GPU_COUNT", "value": "2"},
+                    ]
+                }
+            ]
+        }
+    }
+
+    outcome = adapt_config(DynamoRecipeSource(_agg_yaml(), performance)).outcomes[0]
+
+    assert outcome.request is not None
+    assert outcome.request.workload.isl == 1024
+    assert outcome.request.workload.osl == 128
+    assert outcome.request.workload.concurrency == 8
+
+
+def test_missing_workload_fallback_preserves_one_rejected_point():
+    report = adapt_config(DynamoRecipeSource(_agg_yaml()))
+
+    assert [(outcome.point_id, outcome.status) for outcome in report.outcomes] == [("point-0", "rejected")]
+    assert "workload ISL must be an integer" in report.outcomes[0].diagnostics[-1].message
 
 
 def test_configmap_command_conflict_is_rejected():
@@ -434,6 +559,19 @@ def test_dynamo_ci_role_specific_memory_requires_override():
     assert "different memory fractions" in rejected.diagnostics[-1].message
     assert adapted.request is not None
     assert adapted.request.runtime.free_gpu_memory_fraction == 0.85
+
+
+def test_dynamo_ci_declared_unsupported_quantization_is_rejected_even_for_fp8_model():
+    recipe = _dynamo_ci_recipe()
+    recipe["benchmark"]["concurrencies"] = "8"
+    recipe["model"]["precision"] = "fp8"
+    recipe["backend"]["sglang_config"]["prefill"]["quantization"] = "awq"
+    recipe["backend"]["sglang_config"]["decode"]["quantization"] = "awq"
+
+    outcome = adapt_config(DynamoRecipeSource(recipe)).outcomes[0]
+
+    assert outcome.status == "rejected"
+    assert "unsupported dynamo-ci quantization mode 'awq'" in outcome.diagnostics[-1].message
 
 
 def test_dynamo_ci_resource_parallelism_mismatch_is_rejected_for_every_point():

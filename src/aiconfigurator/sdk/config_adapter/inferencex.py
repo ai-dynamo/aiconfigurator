@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from .schema import (
+    AGGREGATED_REPLICAS_LOWERING_ASSUMPTION,
     AdaptationDiagnostic,
     AdaptationOutcome,
     AdaptationReport,
@@ -123,7 +124,11 @@ def _worker(
     workers_key = f"{role}_num_workers"
     gpus = _integer(config, gpu_key)
     source_workers = _integer(config, workers_key)
-    replicas = max(1, source_workers)
+    if source_workers < 0 or (disagg and source_workers == 0):
+        raise ValueError(f"{workers_key} must be positive when it identifies worker replicas")
+    # InferenceX aggregated exports use zero as an irrelevant sentinel because
+    # they describe one replica and AIC has no aggregated replica CLI knob.
+    replicas = source_workers or 1
     if gpus <= 0 or gpus % replicas:
         raise ValueError(f"{gpu_key} must be positive and divisible by {workers_key}")
     gpus_per_replica = gpus // replicas
@@ -139,9 +144,13 @@ def _worker(
         attention_tp = tp
         attention_dp = gpus_per_replica // tp
     elif attention_dp_enabled:
+        if tp not in {1, gpus_per_replica}:
+            raise ValueError(f"{role} declared TP ({tp}) conflicts with attention-DP width ({gpus_per_replica})")
         attention_tp = 1
         attention_dp = gpus_per_replica
     else:
+        if tp != gpus_per_replica:
+            raise ValueError(f"{role} declared TP ({tp}) does not match GPUs per worker ({gpus_per_replica})")
         attention_tp = gpus_per_replica
         attention_dp = 1
 
@@ -243,6 +252,11 @@ def adapt_inferencex(source: InferenceXSource, overrides: AdapterOverrides) -> A
             )
             systems = SystemSettingsV1(prefill=system, decode=decode_system)
         else:
+            if _integer(config, "decode_num_workers") == 0:
+                assumptions.append(
+                    "InferenceX aggregated decode_num_workers=0 is an irrelevant sentinel; replicas defaults to 1."
+                )
+            assumptions.append(AGGREGATED_REPLICAS_LOWERING_ASSUMPTION)
             topology = AggregatedTopologyV1(
                 worker=_worker(
                     config,

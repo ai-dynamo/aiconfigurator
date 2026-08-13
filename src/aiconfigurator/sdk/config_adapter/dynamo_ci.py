@@ -63,6 +63,8 @@ def _mapping(value: Any, label: str) -> Mapping[str, Any]:
 def _positive_int(value: Any, label: str) -> int:
     if isinstance(value, bool) or value is None:
         raise ValueError(f"{label} must be an integer")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"{label} must be an integer")
     try:
         result = int(value)
     except (TypeError, ValueError) as error:
@@ -227,7 +229,7 @@ def _quantization(
     source_quant = next(iter(role_quant), precision)
     if source_quant in {"fp4", "nvfp4", "modelopt_fp4"}:
         gemm, moe = "nvfp4", "nvfp4"
-    elif source_quant in {"fp8", "modelopt_fp8"} or precision == "fp8":
+    elif source_quant in {"fp8", "modelopt_fp8"}:
         gemm, moe = "fp8", "fp8_block"
     elif source_quant in {"", "bf16", "none"}:
         gemm, moe = None, None

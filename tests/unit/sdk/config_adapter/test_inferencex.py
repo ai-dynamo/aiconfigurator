@@ -56,6 +56,9 @@ def test_dense_agg_alias_quantization_and_topology():
     assert outcome.request.quantization.moe is None
     assert outcome.request.provenance.assumptions == (
         "InferenceX does not expose pipeline parallelism; pp_size defaults to 1.",
+        "InferenceX aggregated decode_num_workers=0 is an irrelevant sentinel; replicas defaults to 1.",
+        "Aggregated worker replicas are omitted during cli_estimate lowering because "
+        "cli_estimate has no aggregated worker-count parameter.",
     )
     assert to_cli_estimate_kwargs(outcome.request)["batch_size"] == 16
 
@@ -93,16 +96,22 @@ def test_moe_disagg_backend_folding_and_worker_arithmetic():
 
 
 @pytest.mark.parametrize(
-    ("config", "message"),
+    ("config", "concurrency", "message"),
     [
-        (_config(hardware="amd-mi300x"), "hardware"),
-        (_config(silicon_model="unknown"), "model/precision"),
-        (_config(decode_tp=2, num_decode_gpu=4), "divisible"),
+        (_config(hardware="amd-mi300x"), 16, "hardware"),
+        (_config(silicon_model="unknown"), 16, "model/precision"),
+        (_config(decode_tp=2, num_decode_gpu=4), 3, "divisible"),
+        (
+            _config(framework="dynamo-trtllm", decode_tp=2, num_decode_gpu=4),
+            4,
+            "does not match GPUs per worker",
+        ),
+        (_config(decode_num_workers=-1), 16, "must be positive"),
+        (_config(disagg=True, prefill_num_workers=0, decode_num_workers=1), 16, "must be positive"),
     ],
 )
-def test_invalid_sources_are_rejected(config, message):
-    benchmark = _benchmark(conc=3) if config["decode_tp"] == 2 else _benchmark()
-    outcome = adapt_config(InferenceXSource(config, benchmark)).outcomes[0]
+def test_invalid_sources_are_rejected(config, concurrency, message):
+    outcome = adapt_config(InferenceXSource(config, _benchmark(conc=concurrency))).outcomes[0]
 
     assert outcome.status == "rejected"
     assert message in outcome.diagnostics[-1].message

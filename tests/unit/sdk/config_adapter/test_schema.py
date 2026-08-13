@@ -9,7 +9,12 @@ import jsonschema
 import pytest
 from pydantic import ValidationError
 
-from aiconfigurator.sdk.config_adapter import EstimateRequestV1, to_cli_estimate_kwargs
+from aiconfigurator.sdk.config_adapter import (
+    AdaptationDiagnostic,
+    AdaptationOutcome,
+    EstimateRequestV1,
+    to_cli_estimate_kwargs,
+)
 from aiconfigurator.sdk.config_adapter.schema import (
     AggregatedTopologyV1,
     BackendSettingsV1,
@@ -62,6 +67,57 @@ def test_unknown_schema_version_and_fields_are_rejected():
     payload["unknown"] = True
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         EstimateRequestV1.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"nextn": 1},
+        {"nextn": 0, "nextn_accepted": 0.5},
+        {"nextn": 1, "nextn_accepted": 1.5},
+        {"nextn": "auto"},
+    ],
+)
+def test_model_speculation_invariants_are_enforced(values):
+    with pytest.raises(ValidationError):
+        ModelSettingsV1(path="QWEN/QWEN3-32B", **values)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"isl": 128, "osl": 16, "concurrency": 1, "prefix": 129},
+        {"isl": 128, "osl": 16, "concurrency": 1, "image_height": 32, "image_width": 0},
+    ],
+)
+def test_workload_cross_field_invariants_are_enforced(values):
+    with pytest.raises(ValidationError):
+        WorkloadSettingsV1(**values)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"gpus_per_replica": 2, "tp_size": 1},
+        {"gpus_per_replica": 2, "tp_size": 2, "moe_tp_size": 2},
+        {"gpus_per_replica": 2, "tp_size": 2, "moe_tp_size": 1, "moe_ep_size": 1},
+    ],
+)
+def test_worker_width_invariants_are_enforced(values):
+    with pytest.raises(ValidationError):
+        WorkerSettingsV1(replicas=1, batch_size=1, **values)
+
+
+def test_adaptation_outcome_status_invariants_are_enforced():
+    error = AdaptationDiagnostic(severity="error", code="invalid", message="invalid")
+    warning = AdaptationDiagnostic(severity="warning", code="warning", message="warning")
+
+    with pytest.raises(ValidationError, match="adapted outcome must contain a request"):
+        AdaptationOutcome(point_id="point", status="adapted")
+    with pytest.raises(ValidationError, match="rejected outcome cannot contain a request"):
+        AdaptationOutcome(point_id="point", status="rejected", request=_request(), diagnostics=(error,))
+    with pytest.raises(ValidationError, match="rejected outcome must contain an error diagnostic"):
+        AdaptationOutcome(point_id="point", status="rejected", diagnostics=(warning,))
 
 
 def test_packaged_json_schema_does_not_drift_from_python_model():

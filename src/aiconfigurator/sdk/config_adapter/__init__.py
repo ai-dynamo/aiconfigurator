@@ -12,6 +12,7 @@ from .schema import (
     AdaptationReport,
     AdapterOverrides,
     EstimateRequestV1,
+    WorkloadPointOverride,
 )
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "DynamoRecipeSource",
     "EstimateRequestV1",
     "InferenceXSource",
+    "WorkloadPointOverride",
     "adapt_config",
     "to_cli_estimate_kwargs",
 ]

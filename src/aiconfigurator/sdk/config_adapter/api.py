@@ -64,6 +64,9 @@ def to_cli_estimate_kwargs(request: EstimateRequestV1) -> dict[str, Any]:
 
     if request.topology.kind == "agg":
         worker = request.topology.worker
+        # cli_estimate has no aggregated worker-count argument. Source adapters
+        # preserve worker.replicas in the canonical request and record that
+        # lowering limitation in provenance.
         kwargs.update(
             batch_size=worker.batch_size,
             tp_size=worker.tp_size,

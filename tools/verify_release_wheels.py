@@ -51,9 +51,11 @@ def _spica_entries(names: set[str]) -> list[str]:
 
 def _infra_entries(names: set[str]) -> list[str]:
     """Return gap-analysis, skill, tool, dataset, report, and web payloads."""
-    forbidden_roots = (".agents/", "tools/", "datasets/", "reports/", "web/")
+    forbidden_roots = (".agents/", "tools/", "datasets/", "reports/", "web/", "webapp/")
     forbidden_package_roots = (
+        "aiconfigurator/datasets/",
         "aiconfigurator/gap_analysis/",
+        "aiconfigurator/reports/",
         "aiconfigurator/skills/",
         "aiconfigurator/tools/",
         "aiconfigurator/web/",
@@ -63,7 +65,18 @@ def _infra_entries(names: set[str]) -> list[str]:
         name
         for name in names
         if name.startswith(forbidden_roots + forbidden_package_roots)
-        or any(segment in name for segment in ("/gap_analysis/", "/skills/", "/tools/", "/web/"))
+        or any(
+            segment in name
+            for segment in (
+                "/datasets/",
+                "/gap_analysis/",
+                "/reports/",
+                "/skills/",
+                "/tools/",
+                "/web/",
+                "/webapp/",
+            )
+        )
         or "auto_gap_analysis" in name
         or "auto-gap-analysis" in name
     )
@@ -114,7 +127,7 @@ def _verify_rust_crate_package() -> None:
     forbidden = sorted(
         entry
         for entry in entries
-        if entry.startswith((".agents/", "aiconfigurator/", "tools/", "web/"))
+        if entry.startswith((".agents/", "aiconfigurator/", "datasets/", "reports/", "tools/", "web/", "webapp/"))
         or "config_adapter" in entry
         or "gap_analysis" in entry
         or "auto-gap-analysis" in entry

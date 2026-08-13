@@ -55,6 +55,15 @@ def test_known_format_helper_is_deterministic_and_validates_schema(tmp_path):
     assert payload["outcomes"][0]["status"] == "adapted"
     assert payload["outcomes"][0]["request"]["schema_version"] == "aic-estimate-request/1.0.0"
 
+    config["hardware"] = "unsupported"
+    config_path.write_text(json.dumps(config))
+    malformed = subprocess.run(command, cwd=REPO_ROOT, check=False, capture_output=True, text=True)
+    malformed_payload = json.loads(malformed.stdout)
+
+    assert malformed.returncode == 1
+    assert malformed_payload["outcomes"][0]["status"] == "rejected"
+    assert malformed_payload["outcomes"][0]["request"] is None
+
 
 def test_known_format_helper_adapts_concrete_dynamo_ci_recipe(tmp_path):
     deployment = tmp_path / "recipe.yaml"
@@ -79,7 +88,7 @@ backend:
       served-model-name: Qwen/Qwen3-32B
       tensor-parallel-size: 1
       mem-fraction-static: 0.9
-benchmark: {isl: 128, osl: 16, concurrencies: '1'}
+benchmark: {isl: 128, osl: 16, concurrencies: '1x2'}
 """
     )
     command = [
@@ -96,8 +105,14 @@ benchmark: {isl: 128, osl: 16, concurrencies: '1'}
     payload = json.loads(first.stdout)
 
     assert first.stdout == second.stdout
-    assert payload["outcomes"][0]["status"] == "adapted"
-    assert payload["outcomes"][0]["request"]["provenance"]["source_ids"]["format"] == "dynamo-ci-concrete"
+    assert [outcome["point_id"] for outcome in payload["outcomes"]] == ["concurrency-1", "concurrency-2"]
+    assert [outcome["status"] for outcome in payload["outcomes"]] == ["adapted", "adapted"]
+    assert [outcome["request"]["workload"]["concurrency"] for outcome in payload["outcomes"]] == [1, 2]
+    for outcome in payload["outcomes"]:
+        request = outcome["request"]
+        assert request["topology"]["prefill"]["tp_size"] == 1
+        assert request["topology"]["decode"]["tp_size"] == 1
+        assert request["provenance"]["source_ids"]["format"] == "dynamo-ci-concrete"
 
 
 def test_skill_contains_confirmation_and_explicit_estimate_guards():
