@@ -23,7 +23,7 @@ from aiconfigurator.cli.main import (
     build_experiment_tasks,
 )
 from aiconfigurator.cli.report_and_save import save_results
-from aiconfigurator.sdk.config import ModelConfig
+from aiconfigurator.sdk.config import ModelConfig, has_video_input
 from aiconfigurator.sdk.config_builders import apply_nextn as _apply_nextn
 from aiconfigurator.sdk.config_builders import build_model_config as _build_model_config
 from aiconfigurator.sdk.config_builders import resolve_nextn_auto as _resolve_nextn_auto
@@ -1377,7 +1377,12 @@ def cli_estimate(
                 "across workers, which is incompatible with whole-model forward-pass data."
             )
         has_image_workload = num_images > 0 and image_height > 0 and image_width > 0
-        has_video_workload = num_videos > 0 and video_frames > 0 and video_height > 0 and video_width > 0
+        has_video_workload = has_video_input(
+            num_videos=num_videos,
+            video_height=video_height,
+            video_width=video_width,
+            video_frames=video_frames,
+        )
         if has_image_workload or has_video_workload:
             raise NotImplementedError(
                 "AFD does not support image/video encoder workloads; use agg or disagg serving mode."

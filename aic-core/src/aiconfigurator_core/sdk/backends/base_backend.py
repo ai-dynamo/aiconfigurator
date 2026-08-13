@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from aiconfigurator_core.sdk import common
-from aiconfigurator_core.sdk.config import RuntimeConfig
+from aiconfigurator_core.sdk.config import RuntimeConfig, has_video_input
 from aiconfigurator_core.sdk.inference_summary import InferenceSummary
 from aiconfigurator_core.sdk.models import BaseModel
 from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -254,8 +254,12 @@ class BaseBackend:
         video_height = runtime_config.video_height
         video_width = runtime_config.video_width
         video_token_override = runtime_config.num_video_tokens
-        has_any_video_input = any(
-            value > 0 for value in (video_count, video_frames, video_height, video_width, video_token_override)
+        has_any_video_input = has_video_input(
+            num_videos=video_count,
+            video_height=video_height,
+            video_width=video_width,
+            video_frames=video_frames,
+            num_video_tokens=video_token_override,
         )
         has_video_dims = video_frames > 0 and video_height > 0 and video_width > 0
         has_video_override = video_token_override > 0

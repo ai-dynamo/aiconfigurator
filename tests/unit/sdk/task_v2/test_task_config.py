@@ -342,6 +342,20 @@ def test_afd_rejects_visual_encoder_workload():
         task.validate()
 
 
+def test_afd_rejects_partial_video_workload():
+    task = Task(
+        serving_mode="afd",
+        model_path="Qwen/Qwen3.5-27B",
+        system_name="h200_sxm",
+        total_gpus=16,
+        video_frames=8,
+        num_videos_per_request=0,
+    )
+
+    with pytest.raises(NotImplementedError, match="AFD does not support image/video encoder workloads"):
+        task.validate()
+
+
 def test_build_model_config_agg_uses_resolved_quant():
     t = Task(
         serving_mode="agg",

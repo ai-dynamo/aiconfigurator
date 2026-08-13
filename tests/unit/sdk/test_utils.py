@@ -246,7 +246,9 @@ class TestParseHFConfig:
                 "temporal_patch_size": 2,
                 "spatial_merge_size": 2,
                 "out_hidden_size": 5120,
-                "deepstack_visual_indexes": [],
+                # Qwen3.5 ignores inherited deepstack metadata and keeps one merger.
+                "deepstack_visual_indexes": [8, 16, 24],
+                "in_channels": 4,
             },
             "text_config": {
                 "num_hidden_layers": 64,
@@ -306,6 +308,7 @@ class TestParseHFConfig:
             projector_dims=((4608, 4608), (4608, 5120)),
             projector_n_instances=1,
             partial_rotary_factor=1.0,
+            in_channels=4,
         )
 
     def test_parse_qwen35_moe_config(self):

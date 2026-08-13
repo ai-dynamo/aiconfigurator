@@ -21,7 +21,11 @@ from aiconfigurator.sdk.picking import (
 )
 from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
 from aiconfigurator.sdk.step_estimate import MixedStepInput, StepEstimate
-from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, get_model_config_from_model_path
+from aiconfigurator.sdk.utils import (
+    enumerate_ttft_tpot_constraints,
+    get_model_config_from_model_path,
+    get_vision_encoder_config_from_model_info,
+)
 
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -827,7 +831,8 @@ class DisaggInferenceSession:
             decode_batch_size_range = [i for i in decode_batch_size_list_default if i <= decode_max_num_tokens]
 
         try:
-            enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
+            model_info = get_model_config_from_model_path(model_path)
+            enc_cfg = get_vision_encoder_config_from_model_info(model_info)
         except Exception:
             logger.debug("Could not resolve model config for VL effective ISL; using text ISL", exc_info=True)
             enc_cfg = None

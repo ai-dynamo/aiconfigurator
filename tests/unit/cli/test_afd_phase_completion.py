@@ -949,6 +949,16 @@ def test_cli_estimate_afd_rejects_visual_encoder_workload():
         )
 
 
+def test_cli_estimate_afd_rejects_partial_video_workload():
+    with pytest.raises(NotImplementedError, match="AFD does not support image/video encoder workloads"):
+        api.cli_estimate(
+            **_afd_cli_estimate_kwargs(
+                video_frames=8,
+                num_videos=0,
+            ),
+        )
+
+
 def test_cli_estimate_afd_combined_with_pd_true_runs_static_combine(monkeypatch):
     """``combined_with_pd=True`` (the default) must invoke the static path.
 

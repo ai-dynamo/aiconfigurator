@@ -1683,8 +1683,11 @@ class Task:
         if self.effective_total_gpus is None:
             raise ValueError("afd mode requires total_gpus or afd_total_gpus")
         has_image_workload = self.num_images_per_request > 0 and self.image_height > 0 and self.image_width > 0
-        has_video_workload = (
-            self.num_videos_per_request > 0 and self.video_frames > 0 and self.video_height > 0 and self.video_width > 0
+        has_video_workload = config.has_video_input(
+            num_videos=self.num_videos_per_request,
+            video_height=self.video_height,
+            video_width=self.video_width,
+            video_frames=self.video_frames,
         )
         if has_image_workload or has_video_workload:
             raise NotImplementedError(

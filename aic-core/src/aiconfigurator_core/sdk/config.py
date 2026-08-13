@@ -7,6 +7,22 @@ from typing import Union
 from aiconfigurator_core.sdk import common
 
 
+def has_video_input(
+    *,
+    num_videos: int = 0,
+    video_height: int = 0,
+    video_width: int = 0,
+    video_frames: int = 0,
+    num_video_tokens: int = 0,
+) -> bool:
+    """Return whether any video workload field was configured.
+
+    Unsupported boundaries use this partial-input-aware predicate so an
+    incomplete video request cannot silently degrade to a text-only request.
+    """
+    return any((value or 0) > 0 for value in (num_videos, video_height, video_width, video_frames, num_video_tokens))
+
+
 @dataclass
 class ModelConfig:
     """

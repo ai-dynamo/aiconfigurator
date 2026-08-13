@@ -426,7 +426,9 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--video-height`, `--video-width`: Video frame dimensions in pixels. Default: `0` (disabled).
 - `--video-frames`: Number of frames per video. Default: `0` (disabled).
 - `--num-videos`: Number of videos per request. Default: `0`.
-- `--disable-encoder-dp`: Model the vision encoder as TP-sharded instead of the default data-parallel. Also available in `estimate` mode (alongside the visual-input flags above).
+- `--disable-encoder-dp`: Model the vision encoder as TP-sharded instead of the default data-parallel. Available in `default` and `estimate` modes.
+
+The image and video input flags are also available in `recommend` mode.
 
 Image and video workloads must currently be estimated separately. Video token accounting uses the model's temporal patch size before the spatial merge.
 Visual encoder workloads are not supported by AFD mode. Video estimates are supported for functional estimation, but saving deployment artifacts for a video workload is rejected until the generator has a video benchmark schema; run without `--save-dir`.

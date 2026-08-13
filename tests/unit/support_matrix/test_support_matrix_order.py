@@ -177,3 +177,31 @@ def test_qwen35_support_matrix_runs_and_replays_with_image_workload(monkeypatch)
     assert captured_kwargs["image_width"] == 448
     assert captured_kwargs["num_images_per_request"] == 1
     assert "--image-height 448 --image-width 448 --num-images 1" in command
+
+
+def test_run_single_test_keeps_encoder_metadata_failures_fail_fast(monkeypatch):
+    monkeypatch.setattr(
+        support_matrix_module,
+        "_get_model_info",
+        lambda _model: {"architecture": "Qwen3_5ForConditionalGeneration"},
+    )
+    monkeypatch.setattr(
+        support_matrix_module,
+        "_has_modeled_encoder",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("broken encoder metadata")),
+    )
+    monkeypatch.setattr(
+        SupportMatrix,
+        "_run_mode",
+        lambda **_kwargs: pytest.fail("metadata failure must abort before support attempts"),
+    )
+
+    with pytest.raises(RuntimeError, match="broken encoder metadata"):
+        SupportMatrix.run_single_test(
+            "Qwen/Qwen3.5-27B",
+            "b200_sxm",
+            "vllm",
+            "0.24.0",
+            system_spec={},
+            modes_to_test=("agg",),
+        )

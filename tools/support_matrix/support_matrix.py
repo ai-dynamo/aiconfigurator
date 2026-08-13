@@ -775,6 +775,7 @@ class SupportMatrix:
         constraints: TestConstraints,
         engine_step_backend: str | None,
         database_mode: str | None = None,
+        has_modeled_encoder: bool | None = None,
     ) -> Task:
         # ``database_mode`` is supplied per-pass by run_single_test's silicon-first /
         # hybrid-rescue two-pass ("SILICON" then "HYBRID"); the env is only a fallback
@@ -793,7 +794,9 @@ class SupportMatrix:
             # (e.g. AIC_SM_TRANSFERS="off" or "xshape,xquant"). None -> all kinds on.
             "transfer_policy": os.environ.get("AIC_SM_TRANSFERS") or None,
         }
-        if _has_modeled_encoder(model):
+        if has_modeled_encoder is None:
+            has_modeled_encoder = _has_modeled_encoder(model)
+        if has_modeled_encoder:
             # A text-only request never queries encoder_ops and would produce a
             # false-positive matrix row for multimodal support.
             common_kwargs.update(
@@ -835,6 +838,7 @@ class SupportMatrix:
         constraints: TestConstraints,
         engine_step_backend: str | None,
         database_mode: str | None = None,
+        has_modeled_encoder: bool | None = None,
     ) -> pd.DataFrame | None:
         task = SupportMatrix._create_task(
             mode=mode,
@@ -845,6 +849,7 @@ class SupportMatrix:
             constraints=constraints,
             engine_step_backend=engine_step_backend,
             database_mode=database_mode,
+            has_modeled_encoder=has_modeled_encoder,
         )
         pareto_df = task.run()
         if pareto_df is None:
@@ -896,6 +901,12 @@ class SupportMatrix:
             unsupported_modes = set(modes_to_test) - {"agg", "disagg"}
             if unsupported_modes:
                 raise ValueError(f"Unsupported support-matrix mode(s): {sorted(unsupported_modes)}")
+        # Model identity and architecture lookups are support-matrix
+        # infrastructure preflight. Keep them outside _attempt's catch-all so
+        # broken metadata aborts generation instead of becoming a FAIL row or
+        # triggering a misleading HYBRID retry.
+        architecture = dict(_get_model_info(model))["architecture"]
+        has_modeled_encoder = _has_modeled_encoder(model, architecture=architecture)
         constraints = _get_test_constraints(model)
         statuses: dict[str, str] = {}
         error_messages = {}
@@ -904,6 +915,7 @@ class SupportMatrix:
         commands = {
             mode: _support_matrix_row_command(
                 model=model,
+                architecture=architecture,
                 system=system,
                 backend=backend,
                 version=version,
@@ -966,6 +978,7 @@ class SupportMatrix:
                         constraints=constraints,
                         engine_step_backend="python" if compare_engine_step_backends else None,
                         database_mode=db_mode,
+                        has_modeled_encoder=has_modeled_encoder,
                     )
                 # pareto_frontier_df is non-empty iff pareto_df is, so we only check pareto_df.
                 if python_pareto_df is None or python_pareto_df.empty:
@@ -982,6 +995,7 @@ class SupportMatrix:
                             constraints=constraints,
                             engine_step_backend="rust",
                             database_mode=db_mode,
+                            has_modeled_encoder=has_modeled_encoder,
                         )
                     if rust_pareto_df is None or rust_pareto_df.empty:
                         raise RuntimeError("Rust engine-step backend returned no results")
@@ -1043,6 +1057,7 @@ class SupportMatrix:
                     tier = h_tier if h_tier and h_tier != "silicon" else "empirical"
                     commands[mode] = _support_matrix_row_command(
                         model=model,
+                        architecture=architecture,
                         system=system,
                         backend=backend,
                         version=version,

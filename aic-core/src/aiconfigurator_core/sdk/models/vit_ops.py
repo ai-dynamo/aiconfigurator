@@ -75,7 +75,8 @@ def _patch_embedding_ops(enc_cfg: common.VisionEncoderConfig) -> list:
     vit_gemm_mode = common.GEMMQuantMode.bfloat16
     return [
         ops.GEMM("encoder_patch_embed_gemm", 1, enc_cfg.hidden_size, patch_volume, vit_gemm_mode),
-        ops.ElementWise("encoder_position_embed", 1, enc_cfg.hidden_size, enc_cfg.hidden_size, 0.8),
+        # Reads the patch embedding and interpolated position table, then writes their sum.
+        ops.ElementWise("encoder_position_embed", 1, 2 * enc_cfg.hidden_size, enc_cfg.hidden_size, 0.8),
     ]
 
 

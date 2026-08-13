@@ -207,6 +207,78 @@ def _run(
     )
 
 
+def test_legacy_disagg_sweep_uses_nested_qwen35_vision_config(monkeypatch, model_config):
+    vision_config = common.VisionEncoderConfig(
+        depth=27,
+        hidden_size=1152,
+        num_heads=16,
+        intermediate_size=4304,
+        patch_size=16,
+        temporal_patch_size=2,
+        spatial_merge_size=2,
+        out_hidden_size=5120,
+    )
+    qwen_config = common.Qwen35Config(
+        layer_types=("full_attention",),
+        linear_num_key_heads=16,
+        linear_key_head_dim=128,
+        linear_num_value_heads=48,
+        linear_value_head_dim=128,
+        linear_conv_kernel_dim=4,
+        vision_config=vision_config,
+    )
+    monkeypatch.setattr(
+        "aiconfigurator.sdk.inference_session.get_model_config_from_model_path",
+        lambda _model_path: {"extra_params": qwen_config},
+    )
+
+    prefill_backend = _build_mock_backend()
+    decode_backend = _build_mock_backend()
+    original_run_static = prefill_backend.run_static
+    prefill_batch_sizes: list[int] = []
+
+    def _record_prefill(model, database, runtime_config, mode, *args, **kwargs):
+        if mode == "static_ctx":
+            prefill_batch_sizes.append(runtime_config.batch_size)
+        return original_run_static(model, database, runtime_config, mode, *args, **kwargs)
+
+    prefill_backend.run_static = _record_prefill
+    session = DisaggInferenceSession(
+        prefill_database=MagicMock(),
+        prefill_backend=prefill_backend,
+        decode_database=MagicMock(),
+        decode_backend=decode_backend,
+    )
+
+    result = session.find_best_disagg_result_under_constraints(
+        model_path="Qwen/Qwen3.5-27B",
+        runtime_config=RuntimeConfig(
+            isl=4000,
+            osl=500,
+            ttft=2000.0,
+            tpot=30.0,
+            image_height=448,
+            image_width=448,
+            num_images_per_request=1,
+        ),
+        prefill_model_config=model_config,
+        prefill_parallel_config_list=[(1, 1, 1, 1, 1, 1)],
+        prefill_max_num_tokens=8000,
+        prefill_num_worker_list=[1],
+        decode_model_config=model_config,
+        decode_parallel_config_list=[(1, 1, 1, 1, 1, 1)],
+        decode_max_num_tokens=1,
+        decode_num_worker_list=[1],
+        num_gpu_list=None,
+        require_same_tp=False,
+    )
+
+    assert result is not None
+    # 4,000 text + 196 post-merge image tokens means an 8,000-token budget
+    # fits one prefill request, not the two admitted by the old top-level read.
+    assert prefill_batch_sizes == [1]
+
+
 class TestRequireSameTPFiltering:
     """Verify the TP-matching filter inside find_best_disagg_result_under_constraints."""
 

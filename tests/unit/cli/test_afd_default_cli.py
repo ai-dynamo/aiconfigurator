@@ -736,6 +736,27 @@ def test_save_results_skips_afd_deployment_artifacts(tmp_path, monkeypatch, capl
     assert "Skipping deployment artifact generation for AFD experiment 'afd'" in caplog.text
 
 
+def test_save_results_propagates_partial_video_rejection_before_writing(tmp_path):
+    task = SimpleNamespace(
+        num_videos_per_request=0,
+        video_height=0,
+        video_width=0,
+        video_frames=8,
+        num_video_tokens=0,
+    )
+
+    with pytest.raises(NotImplementedError, match="Saved deployment artifacts do not support video"):
+        save_results(
+            SimpleNamespace(inclusive_tpot=False),
+            best_configs={},
+            pareto_fronts={},
+            tasks={"agg": task},
+            save_dir=str(tmp_path),
+        )
+
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_save_results_auto_handles_asymmetric_backends_by_mode(tmp_path):
     tasks = {
         "agg_trtllm": Task(

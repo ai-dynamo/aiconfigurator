@@ -141,3 +141,17 @@ def test_video_workload_rejects_saved_deployment_artifact():
 
     with pytest.raises(NotImplementedError, match="Saved deployment artifacts do not support video"):
         task_config_to_generator_config(task, row, num_gpus_per_node=4)
+
+
+def test_partial_video_workload_rejects_saved_deployment_artifact():
+    task = _task(
+        image_height=0,
+        image_width=0,
+        num_images_per_request=0,
+        video_frames=8,
+        num_videos_per_request=0,
+    )
+    row = pd.Series({"workers": 1, "tp": 1})
+
+    with pytest.raises(NotImplementedError, match="Saved deployment artifacts do not support video"):
+        task_config_to_generator_config(task, row, num_gpus_per_node=4)
