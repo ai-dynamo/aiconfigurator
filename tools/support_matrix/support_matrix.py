@@ -284,6 +284,13 @@ def _is_known_framework_incompatible_gap(
     if "unsupported gemm quant mode 'fp8_static'" in normalized:
         return True
 
+    # W4A16 NVFP4 MoE is intentionally data-less: its scale-aware profile is
+    # estimated through XPROFILE from a collected sibling. A SILICON run must
+    # therefore fail admission, while the standard HYBRID retry is the
+    # supported execution path.
+    if "unsupported moe quant mode 'w4a16_nvfp4'" in normalized:
+        return True
+
     if system == "rtx_pro_6000_server":
         if (
             "rtx_pro_6000_server/nccl/" in normalized

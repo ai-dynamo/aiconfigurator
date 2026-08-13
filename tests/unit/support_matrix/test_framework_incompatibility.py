@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+from aiconfigurator.sdk.operations.util_empirical import note_provenance
 from tools.support_matrix import support_matrix as support_matrix_module
 from tools.support_matrix.support_matrix import (
     STATUS_FAIL,
@@ -51,6 +52,38 @@ def _patch_large_constraints(monkeypatch) -> None:
         "_get_test_constraints",
         lambda _model: TestConstraints(total_gpus=128, isl=256, osl=256, prefix=128, ttft=2_000_000, tpot=50_000),
     )
+
+
+def test_w4a16_nvfp4_moe_silicon_gap_is_rescued_by_hybrid(monkeypatch):
+    calls: list[str] = []
+
+    def fake_run_mode(**kwargs):
+        calls.append(kwargs["database_mode"])
+        if kwargs["database_mode"] == "SILICON":
+            raise ValueError(
+                "Unsupported moe quant mode 'w4a16_nvfp4' for system='b200_sxm', backend='vllm', version='0.22.0'."
+            )
+        note_provenance("xprofile")
+        return pd.DataFrame({"x": [1.0]})
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors, commands, provenance = SupportMatrix.run_single_test(
+        model="nvidia/Qwen3.6-35B-A3B-NVFP4",
+        system="b200_sxm",
+        backend="vllm",
+        version="0.22.0",
+        system_spec=_b200_system_spec(),
+        modes_to_test=["agg"],
+        include_commands=True,
+    )
+
+    assert statuses == {"agg": STATUS_HYBRID_PASS}
+    assert errors == {"agg": None}
+    assert provenance == {"agg": "xprofile"}
+    assert calls == ["SILICON", "HYBRID"]
+    assert "--database-mode HYBRID" in commands["agg"]
 
 
 def test_dsv4_vllm_019_unsupported_mxfp8_quant_is_framework_incompatible(monkeypatch):
