@@ -178,6 +178,20 @@ def test_csv_sanity_accepts_replay_contract(_case, status, command, source):
             "silicon",
             "exactly one effective --database-mode SILICON",
         ),
+        (
+            "duplicate-trailing-bare-database-mode",
+            STATUS_PASS,
+            f"{SILICON_REPLAY} --database-mode",
+            "silicon",
+            "exactly one effective --database-mode SILICON",
+        ),
+        (
+            "duplicate-empty-equals-database-mode",
+            STATUS_PASS,
+            f"{SILICON_REPLAY} --database-mode=",
+            "silicon",
+            "exactly one effective --database-mode SILICON",
+        ),
         ("malformed-command", STATUS_PASS, "uv run 'unterminated", "silicon", "not valid shell syntax"),
         (
             "nonpass-with-hybrid-command",

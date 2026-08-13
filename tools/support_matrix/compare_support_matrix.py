@@ -256,7 +256,7 @@ def check_csv_sanity(
                     if "--no-save" not in command_parts:
                         errors.append(f"Row {i}: encoder-unsupported replay command must include --no-save")
                 else:
-                    database_modes = [value.upper() for value in _option_values("--database-mode") if value]
+                    database_modes = [value.upper() for value in _option_values("--database-mode")]
                     if database_modes != [expected_database_mode]:
                         errors.append(
                             f"Row {i}: replay command must include exactly one effective "
