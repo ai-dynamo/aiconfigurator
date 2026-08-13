@@ -133,6 +133,7 @@ def _support_matrix_row_command(
     engine_step_comparison_atol: float = DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
     engine_step_frontier_rtol: float = DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
     engine_step_frontier_atol: float = DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
+    image_size: int | None = None,
 ) -> str:
     """Return the repo-local CLI command that checks this model/system/backend path."""
     if constraints is None:
@@ -169,6 +170,10 @@ def _support_matrix_row_command(
         "1",
         "--no-color",
     ]
+    if image_size is None:
+        image_size = _get_support_matrix_image_size(model)
+    if image_size > 0:
+        parts.extend(["--image-height", str(image_size), "--image-width", str(image_size), "--num-images", "1"])
     if transfer_policy:
         parts.extend(["--transfer-policy", transfer_policy])
     if compare_engine_step_backends:
@@ -196,6 +201,35 @@ _SIZE_TIERS: list[tuple[float, TestConstraints]] = [
     (100e9, _MEDIUM),  # 10B - 100B params
 ]
 _DEFAULT_TIER = _LARGE  # > 100B params
+
+
+def _get_support_matrix_llama4_encoder_config(model_path: str) -> common.VisionEncoderConfig | None:
+    """Return the Llama 4 encoder config, propagating metadata failures."""
+    model_info = _get_model_info(model_path)
+    if model_info.get("architecture") != "Llama4ForConditionalGeneration":
+        return None
+    extra_params = model_info.get("extra_params")
+    if isinstance(extra_params, common.HybridMoEConfig):
+        return extra_params.vision_config
+    return None
+
+
+def _get_support_matrix_image_size(model_path: str) -> int:
+    """Pick the checkpoint-fixed Llama 4 image workload for live checks."""
+    enc_cfg = _get_support_matrix_llama4_encoder_config(model_path)
+    if enc_cfg is None:
+        return 0
+    return enc_cfg.image_size
+
+
+def _require_nonzero_encoder_result(model_path: str, pareto_df: pd.DataFrame) -> None:
+    """Reject a nominal matrix PASS that silently skipped a declared encoder."""
+    if _get_support_matrix_llama4_encoder_config(model_path) is None:
+        return
+    if "encoder_latency" not in pareto_df.columns or not (pareto_df["encoder_latency"] > 0).any():
+        raise RuntimeError(
+            f"{model_path} declares a vision encoder but the support-matrix run produced no nonzero encoder work"
+        )
 
 
 def _get_test_constraints(model_path: str) -> TestConstraints:
@@ -766,6 +800,13 @@ class SupportMatrix:
             # (e.g. AIC_SM_TRANSFERS="off" or "xshape,xquant"). None -> all kinds on.
             "transfer_policy": os.environ.get("AIC_SM_TRANSFERS") or None,
         }
+        image_size = _get_support_matrix_image_size(model)
+        if image_size > 0:
+            common_kwargs.update(
+                image_height=image_size,
+                image_width=image_size,
+                num_images_per_request=1,
+            )
         if mode == "disagg":
             # v2 disagg forbids shared top-level worker fields; fan out to both roles.
             return Task(
@@ -935,6 +976,7 @@ class SupportMatrix:
                 # pareto_frontier_df is non-empty iff pareto_df is, so we only check pareto_df.
                 if python_pareto_df is None or python_pareto_df.empty:
                     raise RuntimeError("Configuration returned no results, failed to catch traceback")
+                _require_nonzero_encoder_result(model, python_pareto_df)
 
                 if compare_engine_step_backends:
                     with _rust_core_autobuild_enabled():
@@ -950,6 +992,7 @@ class SupportMatrix:
                         )
                     if rust_pareto_df is None or rust_pareto_df.empty:
                         raise RuntimeError("Rust engine-step backend returned no results")
+                    _require_nonzero_encoder_result(model, rust_pareto_df)
                     mismatch = _compare_pareto_dfs(
                         python_pareto_df,
                         rust_pareto_df,
@@ -1373,6 +1416,9 @@ class SupportMatrix:
                     version=version,
                     mode=mode,
                     constraints=_DEFAULT_TIER,
+                    # Arbitrary legacy rows do not retain image workload
+                    # metadata and must remain renderable without model I/O.
+                    image_size=0,
                     compare_engine_step_backends=getattr(self, "compare_engine_step_backends", False),
                     engine_step_comparison_rtol=getattr(
                         self, "engine_step_comparison_rtol", DEFAULT_ENGINE_STEP_COMPARISON_RTOL

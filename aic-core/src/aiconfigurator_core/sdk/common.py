@@ -153,6 +153,10 @@ class HybridMoEConfig:
     swa_num_heads: int = 0
     use_qk_norm: bool = False
     use_head_wise_attn_gate: bool = False
+    # Llama 4 is a multimodal wrapper around this hybrid text backbone.  Keep
+    # the exact vision-tower metadata beside the text layer plan instead of
+    # flattening it away when ``text_config`` is unwrapped.
+    vision_config: "VisionEncoderConfig | None" = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +187,22 @@ class VisionEncoderConfig:
             rotated fraction — the 2-axis vision RoPE always rotates the full
             head_dim (vLLM ApplyRotaryEmb / SGLang cat([cos, cos])). Only gates
             the encoder_rope_apply op; 0.0 means no RoPE.
+        image_size (int): Fixed square image-tile size in pixels. Zero denotes
+            a dynamic-resolution encoder such as Qwen3-VL.
+        num_channels (int): Number of channels consumed by patch embedding.
+        has_cls_token (bool): Whether each tile appends a CLS token before the
+            transformer and removes it before pixel shuffle/projector work.
+        max_num_tiles (int): Maximum tile count selected by the checkpoint's
+            image processor. Zero means the input is not tiled.
+        resize_to_max_canvas (bool): Whether processor tiling chooses the
+            largest viable upscaling canvas instead of the smallest one.
+        add_global_tile (bool): Whether the image processor adds a global
+            thumbnail whenever the selected canvas contains multiple tiles.
+        prompt_image_tokens (int): Fixed non-embedding tokens emitted around
+            each image by the multimodal processor (for Llama 4: image start,
+            global-image marker, and image end).
+        prompt_tokens_per_local_tile (int): Structural separator tokens emitted
+            per local tile when a tiled prompt also contains a global tile.
     """
 
     depth: int
@@ -197,6 +217,14 @@ class VisionEncoderConfig:
     projector_dims: tuple[tuple[int, int], ...] = ()
     projector_n_instances: int = 1
     partial_rotary_factor: float = 0.0
+    image_size: int = 0
+    num_channels: int = 3
+    has_cls_token: bool = False
+    max_num_tiles: int = 0
+    resize_to_max_canvas: bool = False
+    add_global_tile: bool = False
+    prompt_image_tokens: int = 0
+    prompt_tokens_per_local_tile: int = 0
 
 
 @dataclass(frozen=True)

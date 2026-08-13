@@ -7,6 +7,7 @@ import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
 from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor
+from aiconfigurator_core.sdk.models.vit_ops import build_llama4_encoder_ops
 from aiconfigurator_core.sdk.utils import _load_model_config_from_model_path
 
 
@@ -49,7 +50,17 @@ class HybridMoEModel(BaseModel):
             model_info["context"],
             model_config,
         )
-        model.set_hybrid_config(model_info["extra_params"])
+        hybrid_config = model_info["extra_params"]
+        model.set_hybrid_config(hybrid_config)
+        if model_info["architecture"] == "Llama4ForConditionalGeneration" and hybrid_config.vision_config:
+            model.encoder_config = hybrid_config.vision_config
+            model.encoder_ops.extend(
+                build_llama4_encoder_ops(
+                    hybrid_config.vision_config,
+                    model.config.tp_size,
+                    model.config.enable_encoder_dp,
+                )
+            )
         return model
 
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:

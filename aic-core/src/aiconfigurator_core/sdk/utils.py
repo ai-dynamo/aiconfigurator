@@ -502,6 +502,105 @@ def _parse_nemotron_block_configs(block_configs: list[dict]) -> list[BlockConfig
     return grouped_configs if grouped_configs else None
 
 
+def _parse_llama4_vision_config(
+    vision_cfg: dict,
+    image_processor_cfg: dict | None,
+    text_hidden_size: int,
+) -> VisionEncoderConfig:
+    """Translate the published Llama 4 tower + connector shapes without defaults.
+
+    The Llama 4 engine pixel-shuffles ``1 / ratio`` patches along each spatial
+    axis, feeds the concatenated width to the two-layer vision adaptor, and
+    then applies a separate connector into the text hidden size.  Requiring
+    the checkpoint fields here prevents a partial curated config from silently
+    falling back to Transformers' generic Llama4VisionConfig defaults.
+    """
+    required = (
+        "hidden_size",
+        "num_hidden_layers",
+        "num_attention_heads",
+        "num_channels",
+        "intermediate_size",
+        "image_size",
+        "patch_size",
+        "pixel_shuffle_ratio",
+        "projector_input_dim",
+        "projector_output_dim",
+        "vision_output_dim",
+    )
+    missing = [key for key in required if key not in vision_cfg]
+    if missing:
+        raise ValueError(f"Llama 4 vision_config is missing required fields: {', '.join(missing)}")
+
+    processor_required = ("max_patches", "resize_to_max_canvas", "add_global_tile")
+    if not isinstance(image_processor_cfg, dict):
+        raise TypeError("Llama 4 config must preserve image_processor_config metadata")
+    processor_missing = [key for key in processor_required if key not in image_processor_cfg]
+    if processor_missing:
+        raise ValueError(f"Llama 4 image_processor_config is missing required fields: {', '.join(processor_missing)}")
+    max_patches = image_processor_cfg["max_patches"]
+    if not isinstance(max_patches, int) or isinstance(max_patches, bool) or max_patches <= 0:
+        raise ValueError(f"Llama 4 image_processor_config.max_patches must be a positive integer, got {max_patches!r}")
+    for key in ("resize_to_max_canvas", "add_global_tile"):
+        if not isinstance(image_processor_cfg[key], bool):
+            raise TypeError(f"Llama 4 image_processor_config.{key} must be boolean")
+
+    ratio = vision_cfg["pixel_shuffle_ratio"]
+    if not isinstance(ratio, (int, float)) or ratio <= 0:
+        raise ValueError(f"Llama 4 pixel_shuffle_ratio must be positive, got {ratio!r}")
+    spatial_merge_size = round(1.0 / float(ratio))
+    if spatial_merge_size <= 0 or abs(float(ratio) * spatial_merge_size - 1.0) > 1e-9:
+        raise ValueError(f"Llama 4 pixel_shuffle_ratio must have an integral reciprocal, got {ratio!r}")
+
+    hidden = vision_cfg["hidden_size"]
+    merge_dim = hidden * spatial_merge_size**2
+    if merge_dim != vision_cfg["intermediate_size"]:
+        raise ValueError(
+            "Llama 4 pixel-shuffle width must equal vision intermediate_size: "
+            f"{hidden} * {spatial_merge_size}^2 = {merge_dim}, "
+            f"config has {vision_cfg['intermediate_size']}"
+        )
+    if vision_cfg["projector_output_dim"] != vision_cfg["vision_output_dim"]:
+        raise ValueError(
+            "Llama 4 vision adaptor output must match multimodal projector input: "
+            f"projector_output_dim={vision_cfg['projector_output_dim']} "
+            f"vision_output_dim={vision_cfg['vision_output_dim']}"
+        )
+
+    adapter_hidden = vision_cfg["projector_input_dim"]
+    adapter_out = vision_cfg["projector_output_dim"]
+    return VisionEncoderConfig(
+        depth=vision_cfg["num_hidden_layers"],
+        hidden_size=hidden,
+        num_heads=vision_cfg["num_attention_heads"],
+        intermediate_size=vision_cfg["intermediate_size"],
+        patch_size=vision_cfg["patch_size"],
+        temporal_patch_size=1,
+        spatial_merge_size=spatial_merge_size,
+        out_hidden_size=text_hidden_size,
+        projector_dims=(
+            (merge_dim, adapter_hidden),
+            (adapter_hidden, adapter_out),
+            (vision_cfg["vision_output_dim"], text_hidden_size),
+        ),
+        projector_n_instances=1,
+        # vLLM's mllama4 rotary implementation fixes this to 0.5; like the
+        # shared ViT path, AIC uses it as a RoPE-stage gate, not a dim shrink.
+        partial_rotary_factor=0.5,
+        image_size=vision_cfg["image_size"],
+        num_channels=vision_cfg["num_channels"],
+        has_cls_token=True,
+        max_num_tiles=max_patches,
+        resize_to_max_canvas=image_processor_cfg["resize_to_max_canvas"],
+        add_global_tile=image_processor_cfg["add_global_tile"],
+        # Llama4Processor._prompt_split_image emits image start, global-image,
+        # and image end tokens, plus one x/y separator per local tile whenever
+        # the prompt contains a local-tile grid and a global tile.
+        prompt_image_tokens=3,
+        prompt_tokens_per_local_tile=1,
+    )
+
+
 def _parse_hf_config_json(config: dict) -> dict:
     """
     Convert a HuggingFace config.json dictionary into model configuration parameters.
@@ -517,6 +616,7 @@ def _parse_hf_config_json(config: dict) -> dict:
     """
     architecture = config["architectures"][0]
     vision_cfg = config.get("vision_config")
+    image_processor_cfg = config.get("image_processor_config")
 
     # For multimodal models, unwrap the nested text config so that all LLM
     # parameters (layers, hidden_size, MoE fields, etc.) are read from the
@@ -650,18 +750,23 @@ def _parse_hf_config_json(config: dict) -> dict:
             raise ValueError(f"interleave_moe_layer_step must be a positive integer, got {step}")
         attn_pattern = tuple(i % 2 for i in range(layers))
         moe_freq = tuple(1 if (i + 1) % step == 0 else 0 for i in range(layers))
+        if not isinstance(vision_cfg, dict):
+            raise TypeError("Llama 4 config must preserve vision_config metadata")
+        llama4_vision_config = _parse_llama4_vision_config(vision_cfg, image_processor_cfg, hidden_size)
         extra_params = HybridMoEConfig(
             attn_layer_pattern=attn_pattern,
             moe_layer_freq=moe_freq,
             # All attention dims are uniform (0 → fall back to model-level defaults).
             sliding_window_size=config.get("attention_chunk_size", 0),
             dense_inter_size=config.get("intermediate_size_mlp", 0),
+            vision_config=llama4_vision_config,
         )
         logger.info(
             f"Llama4 hybrid config: interleave_moe_layer_step={step}, "
             f"global_attn_layers={sum(attn_pattern)}, local_attn_layers={attn_pattern.count(0)}, "
             f"moe_layers={sum(moe_freq)}, dense_layers={moe_freq.count(0)}, "
-            f"sliding_window_size={extra_params.sliding_window_size}"
+            f"sliding_window_size={extra_params.sliding_window_size}, "
+            f"vision_encoder={'enabled' if llama4_vision_config else 'absent'}"
         )
     elif architecture == "KimiK25ForConditionalGeneration":
         # KIMI K2.5 wraps a DeepSeek-V3-style MLA text model. Store v_head_dim so

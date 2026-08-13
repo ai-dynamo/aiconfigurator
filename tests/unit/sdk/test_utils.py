@@ -358,6 +358,24 @@ class TestParseHFConfig:
         config = {
             "architectures": ["Llama4ForConditionalGeneration"],
             "model_type": "llama4",
+            "image_processor_config": {
+                "add_global_tile": True,
+                "max_patches": 16,
+                "resize_to_max_canvas": False,
+            },
+            "vision_config": {
+                "hidden_size": 1408,
+                "num_hidden_layers": 34,
+                "num_attention_heads": 16,
+                "num_channels": 3,
+                "intermediate_size": 5632,
+                "image_size": 336,
+                "patch_size": 14,
+                "pixel_shuffle_ratio": 0.5,
+                "projector_input_dim": 4096,
+                "projector_output_dim": 4096,
+                "vision_output_dim": 4096,
+            },
             "text_config": {
                 "num_hidden_layers": 48,
                 "hidden_size": 5120,
@@ -389,6 +407,8 @@ class TestParseHFConfig:
         assert cfg.attn_layer_pattern == tuple(i % 2 for i in range(48))
         assert cfg.sliding_window_size == 8192
         assert cfg.dense_inter_size == 16384
+        assert cfg.vision_config is not None
+        assert cfg.vision_config.image_size == 336
         # Llama 4 uses same dims for all layers → all four dim fields are 0
         assert cfg.swa_num_kv_heads == 0
         assert cfg.swa_head_dim == 0
@@ -398,6 +418,24 @@ class TestParseHFConfig:
         config = {
             "architectures": ["Llama4ForConditionalGeneration"],
             "model_type": "llama4",
+            "image_processor_config": {
+                "add_global_tile": True,
+                "max_patches": 16,
+                "resize_to_max_canvas": False,
+            },
+            "vision_config": {
+                "hidden_size": 1408,
+                "num_hidden_layers": 34,
+                "num_attention_heads": 16,
+                "num_channels": 3,
+                "intermediate_size": 5632,
+                "image_size": 336,
+                "patch_size": 14,
+                "pixel_shuffle_ratio": 0.5,
+                "projector_input_dim": 4096,
+                "projector_output_dim": 4096,
+                "vision_output_dim": 4096,
+            },
             "text_config": {
                 "num_hidden_layers": 48,
                 "hidden_size": 5120,
@@ -424,6 +462,8 @@ class TestParseHFConfig:
         assert sum(cfg.moe_layer_freq) == 24  # 24 MoE layers
         assert cfg.moe_layer_freq.count(0) == 24  # 24 dense layers
         assert cfg.dense_inter_size == 16384
+        assert cfg.vision_config is not None
+        assert cfg.vision_config.image_size == 336
 
     def test_parse_mimov2flash_config(self):
         """Test MiMo-V2-Flash (explicit per-layer patterns, different SWA/global dims) → HybridMoEConfig."""
