@@ -10,9 +10,9 @@ twins (which pin the same literals against the actual writers) are:
 
 - ``tests/unit/collector/test_collect_moe_a2a.py::MOE_A2A_HEADER``
 - ``tests/unit/collector/test_collect_trtllm_alltoall.py::MOE_A2A_HEADER``
-- ``tests/unit/collector/sglang/test_collect_moe_ep.py::MOE_EXPERT_COMPUTE_HEADER``
-- ``tests/unit/collector/trtllm/test_collect_moe_ep.py::MOE_EXPERT_COMPUTE_HEADER``
-- ``tests/unit/collector/test_vllm_collect_moe_ep.py::MOE_EXPERT_COMPUTE_HEADER``
+- ``tests/unit/collector/sglang/test_collect_moe_ep.py::MOE_EP_HEADER``
+- ``tests/unit/collector/trtllm/test_collect_moe_ep.py::MOE_EP_HEADER``
+- ``tests/unit/collector/test_vllm_collect_moe_ep.py::MOE_EP_HEADER``
 
 This file MUST NOT import anything from ``collector`` (module-boundary rule:
 SDK tests do not reach into the collector). The twin literals are verified by
@@ -55,7 +55,7 @@ MOE_A2A_HEADER = (
 )
 
 # Copied verbatim from the collector-side writer pins:
-# tests/unit/collector/sglang/test_collect_moe_ep.py::MOE_EXPERT_COMPUTE_HEADER, repeated
+# tests/unit/collector/sglang/test_collect_moe_ep.py::MOE_EP_HEADER, repeated
 # verbatim by tests/unit/collector/trtllm/test_collect_moe_ep.py and
 # tests/unit/collector/test_vllm_collect_moe_ep.py — all three moe_ep writers
 # emit this exact header.
@@ -69,11 +69,11 @@ MOE_EXPERT_COMPUTE_HEADER = (
 # to the repo root; existence itself is part of the contract (Tasks 2-5 landed
 # the writers and their pins).
 _TWIN_PINS = {
-    "tests/unit/collector/test_collect_moe_a2a.py": MOE_A2A_HEADER,
-    "tests/unit/collector/test_collect_trtllm_alltoall.py": MOE_A2A_HEADER,
-    "tests/unit/collector/sglang/test_collect_moe_ep.py": MOE_EXPERT_COMPUTE_HEADER,
-    "tests/unit/collector/trtllm/test_collect_moe_ep.py": MOE_EXPERT_COMPUTE_HEADER,
-    "tests/unit/collector/test_vllm_collect_moe_ep.py": MOE_EXPERT_COMPUTE_HEADER,
+    "tests/unit/collector/test_collect_moe_a2a.py": ("MOE_A2A_HEADER", MOE_A2A_HEADER),
+    "tests/unit/collector/test_collect_trtllm_alltoall.py": ("MOE_A2A_HEADER", MOE_A2A_HEADER),
+    "tests/unit/collector/sglang/test_collect_moe_ep.py": ("MOE_EP_HEADER", MOE_EXPERT_COMPUTE_HEADER),
+    "tests/unit/collector/trtllm/test_collect_moe_ep.py": ("MOE_EP_HEADER", MOE_EXPERT_COMPUTE_HEADER),
+    "tests/unit/collector/test_vllm_collect_moe_ep.py": ("MOE_EP_HEADER", MOE_EXPERT_COMPUTE_HEADER),
 }
 
 
@@ -163,22 +163,29 @@ def test_collector_side_twin_pins_exist_and_freeze_the_same_literals():
     # Text-level check only — this SDK test may not import collector modules.
     # Each twin must contain this file's literal verbatim, so a header change
     # on either side fails one pin before data can drift across the boundary.
-    for relative_path, literal in _TWIN_PINS.items():
+    for relative_path, (symbol_name, literal) in _TWIN_PINS.items():
         twin = REPO_ROOT / relative_path
         assert twin.is_file(), f"missing collector-side twin {relative_path}"
         # The frozen literal is a parenthesized implicit concatenation in the
-        # twins; compare against the twin's parsed string constants (the
-        # parser folds the concatenation) instead of raw text.
-        constants = _string_constants(twin.read_text(), str(twin))
-        assert literal in constants, f"{relative_path} does not pin the shared header literal"
+        # twins; compare the named assignment after the parser folds that
+        # concatenation instead of accepting the literal under a stale name.
+        assignments = _string_assignments(twin.read_text(), str(twin))
+        assert assignments.get(symbol_name) == literal, (
+            f"{relative_path}::{symbol_name} does not pin the shared header literal"
+        )
 
 
-def _string_constants(source: str, filename: str) -> set[str]:
-    """All string constants in the module, implicit concatenation folded."""
+def _string_assignments(source: str, filename: str) -> dict[str, str]:
+    """Top-level named string assignments, implicit concatenation folded."""
     import ast
 
-    return {
-        node.value
-        for node in ast.walk(ast.parse(source, filename=filename))
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
-    }
+    assignments = {}
+    for node in ast.parse(source, filename=filename).body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+            continue
+        if not isinstance(node.value.value, str):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                assignments[target.id] = node.value.value
+    return assignments

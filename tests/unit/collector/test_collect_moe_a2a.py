@@ -346,7 +346,8 @@ def test_latency_is_transmit_plus_notify():
         transmit_us=101.25,
         notify_us=9.75,
     )
-    assert row["latency"] == pytest.approx(row["transmit_us"] + row["notify_us"]) == pytest.approx(111.0)
+    assert row["latency"] == pytest.approx(row["transmit_us"] + row["notify_us"])
+    assert row["latency"] == pytest.approx(111.0)
 
 
 def test_ll_rows_carry_no_notify_split_and_no_sm_budget():

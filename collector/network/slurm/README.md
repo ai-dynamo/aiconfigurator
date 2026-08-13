@@ -47,7 +47,7 @@ sbatch -N 1 ./slurm_custom_ar_4gpu.sh
 
 # 3. TensorRT-LLM MoE AlltoAll collection (NVLink)
 
-Benchmarks MoE alltoall **prepare**, **dispatch** and **combine** over NVLink. Supports two kernel sources: **NVLinkTwoSided** (WideEP/MNNVL) and **NVLinkOneSided** (CutlassFusedMoE). Results are written per job in the unified `moe_a2a` schema to `results/moe_a2a_<kernel-source>.<N>gpu/moe_a2a_perf.parquet` with a `collection_meta.yaml` provenance sidecar. The default container image is the manifest `trtllm` pin. Run from `collector/network/slurm/` and configure `CONTAINER_IMAGE`, `CONTAINER_MOUNTS`, `ACCOUNT`, `PARTITION`, `GPU_LIST`, and `GPUS_PER_NODE` in `submit_trtllm_alltoall.sh` before running.
+Benchmarks MoE alltoall **prepare**, **dispatch** and **combine** over NVLink. Supports two kernel sources: **NVLinkTwoSided** (WideEP/MNNVL) and **NVLinkOneSided** (CutlassFusedMoE). Results are written per job in the unified `moe_a2a` schema to `results/moe_a2a_<kernel-source>.<N>gpu/job_<jobid>/moe_a2a_perf.parquet` with a `collection_meta.yaml` provenance sidecar. The default container image is the manifest `trtllm` pin. Run from `collector/network/slurm/` and configure `CONTAINER_IMAGE`, `CONTAINER_MOUNTS`, `ACCOUNT`, `PARTITION`, `GPU_LIST`, and `GPUS_PER_NODE` in `submit_trtllm_alltoall.sh` before running.
 
 ## 3.1 Parameters (edit in `submit_trtllm_alltoall.sh`)
 
@@ -57,13 +57,15 @@ Benchmarks MoE alltoall **prepare**, **dispatch** and **combine** over NVLink. S
 | `CONTAINER_MOUNTS` | Container mount paths (src:dst) | `/yourdata:/yourdata` |
 | `ACCOUNT` | Slurm account name | `your account` |
 | `PARTITION` | Slurm partition name | `your partition` |
-| `GPU_COUNTS` | Array of GPU counts to test | `(2 4 8 16 32 48 64 72)` |
+| `GPU_LIST` | Comma-separated GPU counts to test | `2,4,8,16,32,64` |
 | `GPUS_PER_NODE` | Number of GPUs per node | `4` (e.g. GB200 NVL72) |
 
 ## 3.2 Run the collector
 
 ```bash
-# Default: NVLinkTwoSided, GPU counts 2,4,8,16,32,48,64,72
+# Default: NVLinkTwoSided, GPU counts 2,4,8,16,32,64. The 48- and 72-GPU
+# worlds are absent because the declared 256-expert shape does not shard
+# evenly into either world, so both expand to zero cases.
 bash submit_trtllm_alltoall.sh
 
 # NVLinkOneSided, only 2 and 4 GPUs
@@ -76,7 +78,7 @@ bash submit_trtllm_alltoall.sh --gpu-list 4,8,16
 ## 3.3 Check results
 ```bash
 squeue -u $USER
-ls results/moe_a2a_NVLinkTwoSided.*gpu/
+ls results/moe_a2a_NVLinkTwoSided.*gpu/job_*/
 ```
 
 # 4. MoE all-to-all (DeepEP HT + LL) collection
@@ -87,7 +89,9 @@ its own output directory and provenance sidecar. The default container image
 is the manifest `wideep_sglang` pin.
 
 ```bash
-# Default: 8,16,32,48,64,72 GPUs at 4 GPUs/node (GB200)
+# Default: 8,16,32,48,64 GPUs at 4 GPUs/node (GB200). The 72-GPU world is
+# absent because no declared wideep shape has an expert count divisible by
+# 72, so it expands to zero cases.
 bash submit_moe_a2a.sh
 
 # Custom worlds / kernel families
@@ -102,12 +106,12 @@ and raises on a non-integral node count).
 ## 4.1 Per-job output directories
 
 Each world size runs as its own Slurm job writing to its own
-`results/moe_a2a_<N>gpu/` directory: the collector finalizes
+`results/moe_a2a_<N>gpu/job_<jobid>/` directory: the collector finalizes
 `moe_a2a_perf.parquet` and attests a world-specific `collection_meta.yaml`
 per run, so jobs must not share one output file across worlds (within a job,
 all cases append to that job's single staging CSV via `helper.log_perf`'s
 lockfile). The trtllm alltoall launcher (section 3) uses the same per-job
-layout under `results/moe_a2a_<kernel-source>.<N>gpu/`.
+layout under `results/moe_a2a_<kernel-source>.<N>gpu/job_<jobid>/`.
 
 ## 4.2 MASTER_PORT collision on co-scheduled jobs
 

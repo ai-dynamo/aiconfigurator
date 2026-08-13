@@ -220,6 +220,6 @@ Results are saved to:
   column (`context` / `generation`)
 
 Output format:
-```
+```csv
 framework,version,device,op_name,kernel_source,moe_dtype,distribution,inference_phase,num_tokens,hidden_size,inter_size,topk,num_experts,num_slots,moe_tp_size,moe_ep_size,latency
 ```

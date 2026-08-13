@@ -43,6 +43,28 @@ def test_log_perf_returns_true_after_durable_write(tmp_path):
     ]
 
 
+@pytest.mark.parametrize("first_has_power", [False, True])
+def test_log_perf_rejects_optional_column_schema_changes_before_append(tmp_path, first_has_power):
+    perf_path = tmp_path / "mla_perf.txt"
+    kwargs = {
+        "item_list": [{"batch_size": 1, "latency": "1.25"}],
+        "framework": "SGLang",
+        "version": "0.5.14",
+        "device_name": "Fake GPU",
+        "op_name": "mla_context_module",
+        "kernel_source": "mla_fa3",
+        "perf_filename": str(perf_path),
+    }
+    power_stats = {"power": 400.0, "power_limit": 700.0}
+
+    assert helper.log_perf(**kwargs, power_stats=power_stats if first_has_power else None)
+    original = perf_path.read_bytes()
+
+    assert helper.log_perf(**kwargs, power_stats=None if first_has_power else power_stats) is False
+    assert perf_path.read_bytes() == original
+    assert not perf_path.with_suffix(".txt.lock").exists()
+
+
 def test_log_perf_returns_false_when_lock_is_held(tmp_path, monkeypatch):
     perf_path = tmp_path / "mla_perf.txt"
     lock_path = tmp_path / "mla_perf.txt.lock"

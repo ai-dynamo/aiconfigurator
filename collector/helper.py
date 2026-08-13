@@ -729,7 +729,7 @@ def log_perf(
         return False
 
     try:
-        with open(perf_filename, "a", newline="") as f:
+        with open(perf_filename, "a+", newline="") as f:
             # Add header only if file is empty
             is_empty = os.fstat(f.fileno()).st_size == 0
 
@@ -750,6 +750,24 @@ def log_perf(
                 for key in ["power", "power_limit"]:
                     if key not in fieldnames:
                         fieldnames.append(key)
+
+            # The first row freezes the staging schema. A resumed or batched
+            # run must never append with a different optional-column setting
+            # (most notably --measure_power), because DictWriter would emit
+            # values in the NEW order under the OLD header. Validate under the
+            # same writer lock before appending so the file remains unchanged
+            # on mismatch and the caller can classify the failed persistence.
+            if not is_empty:
+                f.seek(0)
+                existing_header = next(csv.reader(f), [])
+                if existing_header != fieldnames:
+                    print(
+                        f"Error writing log: schema mismatch for {perf_filename}: "
+                        f"existing header {existing_header}, requested header {fieldnames}. "
+                        "Use the same measurement settings when resuming or start a fresh staging file."
+                    )
+                    return False
+                f.seek(0, os.SEEK_END)
 
             writer = csv.DictWriter(f, fieldnames=fieldnames)
 

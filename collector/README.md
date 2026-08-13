@@ -552,13 +552,13 @@ geometry rather than reading it:
   rows overwrite only at 4 GPUs/node; a row with an explicit `num_nodes`
   column is honored as written.
 
-**`log_perf` freezes the CSV header from the first row**, so optional
-columns are all-or-nothing per file. In particular, power columns exist in a
-staging CSV only if the very first logged row had them: flipping
-`--measure_power` across a `--resume` of the same staging file appends rows
-whose fields no longer match the frozen header — misaligned columns or empty
-cells that fail at load time. Collect any one file with a single power
-setting end to end. This property is also why the `moe_a2a` collector ships
+**`log_perf` freezes and validates the CSV header from the first row**, so
+optional columns are all-or-nothing per file. In particular, power columns
+exist in a staging CSV only if the very first logged row had them: flipping
+`--measure_power` across a `--resume` of the same staging file is rejected
+under the writer lock before any incompatible row is appended. Keep one power
+setting for a file end to end, or start with a fresh staging file. This
+property is also why the `moe_a2a` collector ships
 **no power column at all** (owner ruling during PR review): its low-latency
 timing covers one round-trip rather than a per-phase region, and meaningful
 per-phase power would need winning-config re-runs — a measurement-method

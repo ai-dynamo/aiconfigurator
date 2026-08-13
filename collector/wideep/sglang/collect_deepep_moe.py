@@ -275,11 +275,15 @@ def get_moe_prefill_test_cases(rank, *, topk, num_experts):
     num_tokens = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
     power_law_alphas = [0.6, 0.8, 1.01, 1.02, 1.2]
 
+    dropped_small_workload = []
+    dropped_oversized = []
     dropped_empty_uniform = []
     for num_token in sorted(num_tokens):
         if num_token * 8 < 128:
+            dropped_small_workload.append(num_token)
             continue
         if num_token * rank > 256 * 2048:
+            dropped_oversized.append(num_token)
             continue
         # Uniform
         if int(num_token * topk * rank // num_experts) <= 0:
@@ -296,6 +300,18 @@ def get_moe_prefill_test_cases(rank, *, topk, num_experts):
                 }
             )
 
+    if dropped_small_workload:
+        print(
+            f"moe_ep context: dropped {len(dropped_small_workload)} token points "
+            f"{dropped_small_workload} below the minimum measurable workload "
+            "(num_token * 8 < 128)"
+        )
+    if dropped_oversized:
+        print(
+            f"moe_ep context: dropped {len(dropped_oversized)} token points "
+            f"{dropped_oversized} above the per-rank token budget "
+            f"(num_token * ep={rank} > 256 * 2048)"
+        )
     if dropped_empty_uniform:
         print(
             f"moe_ep context: dropped {len(dropped_empty_uniform)} uniform token points "

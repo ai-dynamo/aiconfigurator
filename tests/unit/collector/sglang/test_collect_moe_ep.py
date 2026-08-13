@@ -153,7 +153,7 @@ def test_cases_resolve_their_own_declared_model(moe_ep_symbols):
             os.environ["COLLECTOR_MODEL_PATH"] = os_environ_backup
 
 
-def test_prefill_manifest_excludes_empty_uniform_workloads_at_generation():
+def test_prefill_manifest_excludes_empty_uniform_workloads_at_generation(capsys):
     # F15 twin: `num_token * topk * ep // num_experts == 0` is pure declared
     # arithmetic, so the empty uniform points are resolved in the token-list
     # builder — the benchmark loop runs the manifest exactly (reaching the
@@ -171,6 +171,14 @@ def test_prefill_manifest_excludes_empty_uniform_workloads_at_generation():
     assert {"num_tokens": 16, "distributed": "uniform", "power_law_alpha": None} not in kimi
     assert {"num_tokens": 16, "distributed": "power_law", "power_law_alpha": 0.8} in kimi
     assert {"num_tokens": 32, "distributed": "uniform", "power_law_alpha": None} in kimi
+
+    # Every unconditional generation-time filter is also counted and logged.
+    # EP 64 drops 4/8 below the measurable floor and 16384 above the per-rank
+    # token budget; neither point may disappear silently from the plan.
+    loaded["get_moe_prefill_test_cases"](64, topk=8, num_experts=256)
+    output = capsys.readouterr().out
+    assert "dropped 2 token points [4, 8] below the minimum measurable workload" in output
+    assert "dropped 1 token points [16384] above the per-rank token budget" in output
 
 
 def test_models_without_a_declared_wideep_row_expand_to_zero(monkeypatch, moe_ep_symbols):
