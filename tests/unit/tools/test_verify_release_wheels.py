@@ -92,6 +92,13 @@ def test_infra_scan_rejects_gap_skill_tool_dataset_report_and_web_payloads(verif
     assert verifier._infra_entries(names) == sorted(names)
 
 
+def test_config_adapter_readme_remains_repository_only(verifier):
+    upper, _ = verifier._source_payloads()
+
+    assert "aiconfigurator/sdk/config_adapter/README.md" not in upper
+    assert "aiconfigurator/sdk/config_adapter/schemas/estimate-request-v1.schema.json" in upper
+
+
 def test_rust_crate_package_rejects_upper_payload(verifier, monkeypatch):
     result = subprocess.CompletedProcess(
         args=["cargo"],

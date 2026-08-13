@@ -109,6 +109,9 @@ def _source_payloads() -> tuple[set[str], set[str]]:
             upper.add((Path("aiconfigurator") / path.name).as_posix())
     for package in ("cli", "generator", "sdk"):
         _add_source_tree(upper, upper_package / package, f"aiconfigurator/{package}")
+    # Package-level developer documentation remains repository-only. The upper
+    # wheel intentionally owns adapter Python modules and its canonical schema.
+    upper.discard("aiconfigurator/sdk/config_adapter/README.md")
     _add_source_tree(core, core_source / "aiconfigurator_core", "aiconfigurator_core")
     return upper, core
 
