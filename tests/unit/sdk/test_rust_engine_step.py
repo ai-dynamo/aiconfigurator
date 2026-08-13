@@ -902,6 +902,57 @@ def test_engine_config_json_identity_disambiguates_collapsed_quant_modes():
     assert key_sq != key_deepep, "moe_backend must participate in the cache identity"
 
 
+def test_engine_config_json_identity_includes_database_policy():
+    """Two views of the SAME on-disk identity that differ only in the
+    shared-layer or strict-provenance policy must get DISTINCT handle-cache
+    keys: ``build_engine_spec_json`` bakes the policy-dependent
+    ``perf_db_sources`` into the compiled handle, so aliasing them makes the
+    reuse-aware behavior call-order-dependent (whichever view warms the cache
+    answers — or fails — for the other)."""
+    from aiconfigurator.sdk import common
+
+    def _model():
+        cfg = SimpleNamespace(
+            tp_size=1,
+            pp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=1,
+            cp_size=8,
+            gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+            moe_quant_mode=None,
+            fmha_quant_mode=None,
+            kvcache_quant_mode=None,
+            comm_quant_mode=None,
+            moe_backend=None,
+            attention_backend=None,
+            enable_wideep=False,
+            enable_eplb=False,
+            wideep_num_slots=None,
+            cp_style=None,
+            workload_distribution=None,
+            overwrite_num_layers=None,
+            sms=None,
+        )
+        return SimpleNamespace(model_path="test/model", architecture=None, config=cfg, _nextn=None)
+
+    def _view(*, shared_layer: bool, strict_provenance: bool):
+        return SimpleNamespace(
+            system="test_sxm",
+            backend="sglang",
+            version="0.5.12",
+            enable_shared_layer=shared_layer,
+            strict_provenance=strict_provenance,
+        )
+
+    base = rust_engine_step._engine_config_json(_model(), _view(shared_layer=False, strict_provenance=False))
+    shared_on = rust_engine_step._engine_config_json(_model(), _view(shared_layer=True, strict_provenance=False))
+    strict_on = rust_engine_step._engine_config_json(_model(), _view(shared_layer=False, strict_provenance=True))
+    assert base != shared_on, "enable_shared_layer must participate in the cache identity"
+    assert base != strict_on, "strict_provenance must participate in the cache identity"
+    assert shared_on != strict_on
+
+
 def test_op_conversion_error_falls_back_to_python_step(monkeypatch):
     """An OpConversionError (op graph not expressible in Rust) must be
     surfaced as RustEngineUnsupportedError, cached per engine identity, and
