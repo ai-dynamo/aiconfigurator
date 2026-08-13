@@ -209,8 +209,10 @@ class BaseBackend:
         Default: pass the locally-computed ``num_tokens`` plus the decode-token
         share for MTP activation scaling. TRT-LLM passes ``max_num_tokens``
         (BuildConfig.max_num_tokens) for activation sizing and forwards
-        ``max_seq_len`` for KV cache sizing; that budget already includes draft
-        tokens, so it does not forward ``mtp_scaled_tokens``.
+        ``max_seq_len`` for KV cache sizing; it does not forward
+        ``mtp_scaled_tokens``, which RETAINS the legacy full ``(nextn+1)``
+        multiplier on that path pending its own analysis (see the comment in
+        ``TRTLLMBackend._memory_usage_kwargs_for_agg``).
         """
         return {"num_tokens": num_tokens, "mtp_scaled_tokens": mtp_scaled_tokens}
 
