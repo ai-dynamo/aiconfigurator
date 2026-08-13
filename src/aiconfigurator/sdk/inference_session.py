@@ -573,6 +573,8 @@ class DisaggInferenceSession:
             target_ttft=target_ttft,
             target_tpot=target_tpot,
             top_n=top_n,
+            prefill_degradation_factor=self._rate_matching_prefill_degradation_factor,
+            decode_degradation_factor=self._rate_matching_decode_degradation_factor,
         )
 
         disagg_summary_df = result["best_config_df"]
@@ -867,7 +869,7 @@ class DisaggInferenceSession:
             logger.debug(f"No prefill or decode workers found for {model_path} with given configs.")
             return disagg_summary
 
-        # ----- autoscale mode: pick P and D independently, no rate matching -----
+        # ----- autoscale mode: pick P and D independently, no worker-count rate matching -----
         if autoscale:
             return self._pick_autoscale(
                 prefill_summary_df=prefill_summary_df,

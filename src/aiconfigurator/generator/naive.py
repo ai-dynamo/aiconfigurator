@@ -247,8 +247,8 @@ def _estimate_model_weight_bytes(model_path: str, *, model_metadata: dict[str, A
             weight_bytes = estimator.weight_bytes()
             if weight_bytes is None:
                 raise ValueError(
-                    "insufficient raw model metadata; expected hidden_size, "
-                    "num_hidden_layers, vocab_size, and intermediate_size"
+                    "insufficient raw model metadata; expected hidden/layer/vocab "
+                    "dimensions and FFN geometry (canonical or Hugging Face aliases)"
                 )
             logger.info(
                 "Estimated model weight size from raw config for %s: %.2f GiB",

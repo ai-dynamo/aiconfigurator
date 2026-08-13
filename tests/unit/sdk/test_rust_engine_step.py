@@ -902,6 +902,57 @@ def test_engine_config_json_identity_disambiguates_collapsed_quant_modes():
     assert key_sq != key_deepep, "moe_backend must participate in the cache identity"
 
 
+def test_engine_config_json_identity_includes_database_policy():
+    """Two views of the SAME on-disk identity that differ only in the
+    shared-layer or strict-provenance policy must get DISTINCT handle-cache
+    keys: ``build_engine_spec_json`` bakes the policy-dependent
+    ``perf_db_sources`` into the compiled handle, so aliasing them makes the
+    reuse-aware behavior call-order-dependent (whichever view warms the cache
+    answers — or fails — for the other)."""
+    from aiconfigurator.sdk import common
+
+    def _model():
+        cfg = SimpleNamespace(
+            tp_size=1,
+            pp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=1,
+            cp_size=8,
+            gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+            moe_quant_mode=None,
+            fmha_quant_mode=None,
+            kvcache_quant_mode=None,
+            comm_quant_mode=None,
+            moe_backend=None,
+            attention_backend=None,
+            enable_wideep=False,
+            enable_eplb=False,
+            wideep_num_slots=None,
+            cp_style=None,
+            workload_distribution=None,
+            overwrite_num_layers=None,
+            sms=None,
+        )
+        return SimpleNamespace(model_path="test/model", architecture=None, config=cfg, _nextn=None)
+
+    def _view(*, shared_layer: bool, strict_provenance: bool):
+        return SimpleNamespace(
+            system="test_sxm",
+            backend="sglang",
+            version="0.5.12",
+            enable_shared_layer=shared_layer,
+            strict_provenance=strict_provenance,
+        )
+
+    base = rust_engine_step._engine_config_json(_model(), _view(shared_layer=False, strict_provenance=False))
+    shared_on = rust_engine_step._engine_config_json(_model(), _view(shared_layer=True, strict_provenance=False))
+    strict_on = rust_engine_step._engine_config_json(_model(), _view(shared_layer=False, strict_provenance=True))
+    assert base != shared_on, "enable_shared_layer must participate in the cache identity"
+    assert base != strict_on, "strict_provenance must participate in the cache identity"
+    assert shared_on != strict_on
+
+
 def test_op_conversion_error_falls_back_to_python_step(monkeypatch):
     """An OpConversionError (op graph not expressible in Rust) must be
     surfaced as RustEngineUnsupportedError, cached per engine identity, and
@@ -988,6 +1039,70 @@ def test_every_selectable_database_mode_routes_to_rust():
     assert should_use_rust_engine_step(rc, _DB(_Mode.SOL))
     assert not should_use_rust_engine_step(rc, _DB(_Mode.SOL_FULL))
     assert should_use_rust_engine_step(rc)  # no database context -> unchanged
+
+
+@pytest.mark.unit
+def test_rust_perf_db_misses_translate_to_perf_data_not_available():
+    """The PyO3 boundary collapses every Rust error into ValueError; the
+    perf-DB miss class (prefix "perf database error: ") must re-surface as
+    PerfDataNotAvailableError so sweep.py can mark the point unanswerable
+    instead of aborting the whole parallel config. Other ValueErrors pass
+    through untouched."""
+    from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+    from aiconfigurator_core.sdk.rust_engine_step import _reraise_engine_error
+
+    miss = ValueError(
+        "perf database error: FPM decode query total_kv_read_tokens=4013448 is outside the collected domain"
+    )
+    with pytest.raises(PerfDataNotAvailableError):
+        _reraise_engine_error(miss)
+
+    genuine = ValueError("invalid engine config: isl must be greater than 0")
+    with pytest.raises(ValueError) as excinfo:
+        _reraise_engine_error(genuine)
+    # PerfDataNotAvailableError subclasses RuntimeError, so pytest.raises
+    # (ValueError) alone can never catch a translated error — assert the
+    # exact object passed through untouched instead.
+    assert excinfo.value is genuine
+
+
+@pytest.mark.unit
+def test_engine_handle_cache_key_distinguishes_raw_quant_identity():
+    """FPM cell identity keys on the five RAW quant enum names, including
+    comm_quant_mode; the collapsed DataType strings under-key it (fp8 vs
+    fp8_ootb -> "fp8", no comm axis at all)."""
+    from types import SimpleNamespace
+
+    from aiconfigurator_core.sdk.rust_engine_step import _engine_config_json
+
+    def make(comm, gemm):
+        config = SimpleNamespace(
+            tp_size=4,
+            pp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=4,
+            attention_dp_size=1,
+            cp_size=None,
+            gemm_quant_mode=SimpleNamespace(name=gemm, value=None),
+            moe_quant_mode=SimpleNamespace(name="nvfp4", value=None),
+            fmha_quant_mode=SimpleNamespace(name="bfloat16", value=None),
+            comm_quant_mode=SimpleNamespace(name=comm, value=None),
+            kvcache_quant_mode=SimpleNamespace(name="fp8", value=None),
+        )
+        model = SimpleNamespace(
+            config=config,
+            model_path="org/model-a",
+            architecture="X",
+            forward_model="fpm",
+            _nextn=None,
+            _nextn_accepted=None,
+        )
+        database = SimpleNamespace(system="b200_sxm", backend="vllm", version="0.25.1", systems_root="/tmp/x")
+        return _engine_config_json(model, database)
+
+    assert make("half", "fp8") != make("int8", "fp8")
+    assert make("half", "fp8") != make("half", "fp8_ootb")
+    assert make("half", "fp8") == make("half", "fp8")
 
 
 def test_python_step_fallback_telemetry_counts_and_warns_once(caplog) -> None:

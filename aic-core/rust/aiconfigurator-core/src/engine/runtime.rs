@@ -22,7 +22,7 @@ use crate::common::enums::TransferPolicy;
 use crate::common::error::AicError;
 use crate::engine::spec::EngineSpec;
 use crate::operators::base::PerformanceResult;
-use crate::operators::Op;
+use crate::operators::{FpmForwardOp, FpmPhase, Op};
 use crate::perf_database::PerfDatabase;
 use crate::session::{
     get_mix_step_ops, query_context_op, query_generation_op, run_context_ops, run_context_ops_with,
@@ -194,12 +194,63 @@ impl Engine {
             .as_ref()
             .and_then(|s| s.nextn)
             .unwrap_or(0);
+        // FPM whole-model specs must be exactly one op per phase (the Python
+        // rewrite guarantees this shape) and never carry MTP: the Python model
+        // builder rejects `nextn > 0` for forward_model="fpm" (commit
+        // ad93e75f) and the collected data has no speculative points. Guarding
+        // here keeps a hand-built or skewed spec from silently mis-composing.
+        // The scan is RECURSIVE: an FpmForward nested inside Overlap/Fallback
+        // (never produced by the Python rewrite, but expressible in a
+        // hand-built spec) would evade a top-level check and ride the
+        // name-filtered mix-step passes with the wrong workload shape — and
+        // FallbackOp swallows the op's PerfDatabase-class misses silently.
+        fn contains_fpm(ops: &[Op]) -> bool {
+            ops.iter().any(|op| match op {
+                Op::FpmForward(_) => true,
+                Op::Overlap(o) => contains_fpm(&o.group_a) || contains_fpm(&o.group_b),
+                Op::Fallback(o) => {
+                    contains_fpm(std::slice::from_ref(&o.primary)) || contains_fpm(&o.fallback)
+                }
+                _ => false,
+            })
+        }
+        let any_fpm = contains_fpm(&spec.context_ops) || contains_fpm(&spec.generation_ops);
+        if any_fpm {
+            let shape_ok = matches!(
+                spec.context_ops.as_slice(),
+                [Op::FpmForward(p)] if p.phase == FpmPhase::Prefill
+            ) && matches!(
+                spec.generation_ops.as_slice(),
+                [Op::FpmForward(d)] if d.phase == FpmPhase::Decode
+            );
+            if !shape_ok {
+                return Err(AicError::InvalidEngineConfig(
+                    "forward_model='fpm' spec must contain exactly one FpmForward op per phase \
+                     (prefill in context_ops, decode in generation_ops)"
+                        .to_string(),
+                ));
+            }
+            if nextn > 0 {
+                return Err(AicError::InvalidEngineConfig(format!(
+                    "forward_model='fpm' does not support MTP speculative decoding (nextn={nextn})"
+                )));
+            }
+        }
         Ok(Engine {
             context_ops: spec.context_ops,
             generation_ops: spec.generation_ops,
             db,
             nextn,
         })
+    }
+
+    /// FPM whole-model engine: both phase lists are exactly one `FpmForward`
+    /// (validated in [`Engine::build`]). Returns `(prefill_op, decode_op)`.
+    fn fpm_ops(&self) -> Option<(&FpmForwardOp, &FpmForwardOp)> {
+        match (self.context_ops.as_slice(), self.generation_ops.as_slice()) {
+            ([Op::FpmForward(p)], [Op::FpmForward(d)]) => Some((p, d)),
+            _ => None,
+        }
     }
 
     /// Convenience constructor: deserialize a bincode `EngineSpec` and load the
@@ -437,9 +488,13 @@ impl Engine {
     }
 
     /// One mixed (chunked-prefill + decode) step latency. LITERAL mirror of
-    /// Python `_get_mix_step_latency` (`base_backend.py:925-1050`), which
-    /// composes three `run_static` calls and filters the per-op breakdown by
-    /// name:
+    /// Python `_get_mix_step_latency` / `run_mixed`, which composes three
+    /// filtered phase passes (`_run_context_phase` / `_run_generation_phase`
+    /// with `op_filter`) that query ONLY the ops each pass consumes — the
+    /// same name-keyed sets the `ContextOpFilter` /
+    /// `only_generation_attention` walks below visit (issue #1498
+    /// follow-through: Python used to run the full lists and discard, so a
+    /// raise in a discarded query was a one-sided error surface):
     ///
     /// ```text
     /// // Pass 1 — combined non-attention work:
@@ -534,6 +589,31 @@ impl Engine {
     ) -> Result<[f64; 4], AicError> {
         if ctx_tokens == 0 && gen_tokens == 0 {
             return Ok([0.0; 4]);
+        }
+        // Whole-model FPM ops must never reach the name-filtered three-pass
+        // composition below (they match neither attention filter and would
+        // ride pass 1 with the wrong workload shape). Python branches the
+        // same way at `_get_mix_step_latency` -> `_get_fpm_mix_step_latency`.
+        // Component mapping: FPM has no non-attention/attention split, so the
+        // breakdown reports [total, prefill_component, 0, marginal_decode].
+        // The component consumers (speculative agg scheduling) only read the
+        // split under MTP, which FPM rejects at build time.
+        if let Some((prefill_op, decode_op)) = self.fpm_ops() {
+            let (prefill_ms, marginal_decode_ms) = self.fpm_mixed_step_components(
+                prefill_op,
+                decode_op,
+                ctx_tokens,
+                gen_tokens,
+                isl.max(1),
+                osl.max(1),
+                prefix,
+            )?;
+            return Ok([
+                prefill_ms + marginal_decode_ms,
+                prefill_ms,
+                0.0,
+                marginal_decode_ms,
+            ]);
         }
         // Python divides by `isl` (`floor(ctx/isl)`, `ceil(ctx/isl)`) without
         // a guard — callers always pass isl >= 1. Clamp to avoid a Rust
@@ -641,6 +721,20 @@ impl Engine {
         if gen_tokens == 0 {
             return Ok(0.0);
         }
+        // FPM keeps the PYTHON static-path convention `s = isl + osl/2 + 1`
+        // (via `run_generation_phase`), not this method's op-level
+        // `isl + osl/2` packing — a documented divergence the FPM port must
+        // not inherit (its parity target is the Python FPM branch, which
+        // routes through `run_static(mode="static_gen")`).
+        if self.fpm_ops().is_some() {
+            let rt = RuntimeConfig {
+                batch_size: gen_tokens,
+                isl: isl.saturating_add(osl / 2),
+                osl: 2,
+                ..Default::default()
+            };
+            return self.run_generation_phase(&rt, DEFAULT_STATIC_STRIDE);
+        }
         let effective_batch = gen_tokens.saturating_mul(self.nextn.saturating_add(1));
         let s = isl.max(1).saturating_add(osl.max(1) / 2).saturating_add(1);
         run_generation_ops_step(
@@ -651,6 +745,92 @@ impl Engine {
             gen_seq_imbalance_correction_scale,
             false,
         )
+    }
+
+    /// Mixed-step composition, mirroring Python
+    /// `_get_fpm_mix_step_latency` exactly: the prefill component prices the
+    /// iteration's REAL scheduled totals (chunk + decode tokens — the count
+    /// the engine picks its CUDA-graph/eager regime and GEMM width from) via
+    /// `query_totals`; chunked requests are priced per chunk at their own
+    /// `(chunk + gen, past_kv)` coordinates and averaged. The decode
+    /// component stays the pass-baseline marginal. Correct only when the
+    /// deployed engine configuration (especially the CUDA-graph capture
+    /// surface) matches the collection — the cliffs live in the data.
+    fn fpm_mixed_step_components(
+        &self,
+        prefill_op: &FpmForwardOp,
+        decode_op: &FpmForwardOp,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+    ) -> Result<(f64, f64), AicError> {
+        let mut prefill_component = 0.0_f64;
+        if ctx_tokens > 0 {
+            let new_tokens = isl.saturating_sub(prefix);
+            if new_tokens == 0 {
+                return Err(AicError::PerfDatabase(format!(
+                    "isl must be greater than prefix, got isl={isl} prefix={prefix}"
+                )));
+            }
+            if ctx_tokens >= new_tokens {
+                // Whole prefills this iteration: the scheduled total picks
+                // the regime row.
+                let batch = ctx_tokens.div_ceil(new_tokens);
+                prefill_component = prefill_op
+                    .query_totals(
+                        &self.db,
+                        &[
+                            batch as f64,
+                            (ctx_tokens + gen_tokens) as f64,
+                            (batch * prefix) as f64,
+                        ],
+                    )?
+                    .latency_ms;
+            } else {
+                // Chunked prefill: per-chunk totals, per-iteration average.
+                let mut total = 0.0_f64;
+                let mut chunks = 0u32;
+                let mut done = 0u32;
+                while done < new_tokens {
+                    let chunk = ctx_tokens.min(new_tokens - done);
+                    total += prefill_op
+                        .query_totals(
+                            &self.db,
+                            &[1.0, (chunk + gen_tokens) as f64, (prefix + done) as f64],
+                        )?
+                        .latency_ms;
+                    done += chunk;
+                    chunks += 1;
+                }
+                prefill_component = total / chunks as f64;
+            }
+        }
+        let mut marginal_decode = 0.0_f64;
+        if gen_tokens > 0 {
+            let rt = RuntimeConfig {
+                batch_size: gen_tokens,
+                isl: isl.saturating_add(osl / 2),
+                osl: 2,
+                ..Default::default()
+            };
+            let gen_ms = self.run_generation_phase(&rt, DEFAULT_STATIC_STRIDE)?;
+            let baseline_ms = if ctx_tokens > 0 {
+                // run_generation_phase scaled the batch by (nextn + 1); the
+                // baseline must be sampled at the same effective batch.
+                decode_op
+                    .query_pass_baseline(
+                        &self.db,
+                        gen_tokens.saturating_mul(self.nextn.saturating_add(1)),
+                    )?
+                    .latency_ms
+            } else {
+                0.0
+            };
+            marginal_decode = (gen_ms - baseline_ms).max(0.0);
+        }
+        Ok((prefill_component, marginal_decode))
     }
 
     /// [`Self::run_static`] with the per-op values kept instead of summed:
@@ -705,6 +885,32 @@ impl Engine {
         seq_imbalance_correction_scale: f64,
         gen_seq_imbalance_correction_scale: f64,
     ) -> Result<(Vec<PerOpValue>, Vec<PerOpValue>, Vec<PerOpValue>), AicError> {
+        // Whole-model FPM: never the name-filtered three-pass split (see
+        // mixed_step_breakdown_with). Report the scalar path's component
+        // mapping as per-op entries — the prefill component under the
+        // prefill op's name in the shared bucket, the decode marginal under
+        // the decode op's name — so the Python fold sees the same keys as
+        // its own FPM branch.
+        if let Some((prefill_op, decode_op)) = self.fpm_ops() {
+            let (prefill_ms, marginal_decode_ms) = self.fpm_mixed_step_components(
+                prefill_op,
+                decode_op,
+                ctx_tokens,
+                gen_tokens,
+                isl.max(1),
+                osl.max(1),
+                prefix,
+            )?;
+            let mut shared: Vec<PerOpValue> = Vec::new();
+            if ctx_tokens > 0 {
+                shared.push((prefill_op.name.clone(), prefill_ms, 0.0, "silicon"));
+            }
+            let mut dec_attn: Vec<PerOpValue> = Vec::new();
+            if gen_tokens > 0 {
+                dec_attn.push((decode_op.name.clone(), marginal_decode_ms, 0.0, "silicon"));
+            }
+            return Ok((shared, Vec::new(), dec_attn));
+        }
         let mut shared = PerOpFold::default();
         let mut ctx_attn = PerOpFold::default();
         let mut dec_attn = PerOpFold::default();
@@ -929,8 +1135,65 @@ impl Engine {
     /// [`Self::forward_pass_time_ms`]).
     fn rank_latency_ms(&self, metrics: &ForwardPassMetrics) -> Result<f64, AicError> {
         let sched = &metrics.scheduled_requests;
-        let has_prefill = sched.num_prefill_requests > 0;
-        let has_decode = sched.num_decode_requests > 0;
+        // Token-based dispatch, aligned with `IterationFeatures` (fpm/model.rs):
+        // a fully prefix-cached payload can retain prefill request/KV metadata
+        // (`num_prefill_requests = 1, sum_prefill_tokens = 0`) while scheduling
+        // no fresh prefill compute — that iteration is decode-only. A count
+        // check would query prefill at zero tokens (outside the FPM domain)
+        // and price decode as marginal work riding a pass that does not exist.
+        let has_prefill = sched.sum_prefill_tokens > 0;
+        let has_decode = sched.num_decode_requests > 0 || sched.sum_decode_kv_tokens > 0;
+
+        // FPM engines never enter the three-pass mix composition (its op-name
+        // filters cannot see a whole-model op). Prefill-only and decode-only
+        // dispatch through the same shared free fns as op-level (the FpmForward
+        // op consumes batch/s/prefix from the RuntimeContext naturally); a
+        // mixed rank composes prefill + marginal decode, mirroring
+        // `_get_fpm_mix_step_latency` at the telemetry counts (already packed,
+        // so no `(nextn + 1)` anywhere — and FPM engines enforce nextn == 0).
+        if let Some((prefill_op, decode_op)) = self.fpm_ops() {
+            // The telemetry sums ARE the fpm_forward tables' native coordinate
+            // system (per-rank iteration totals) — query them via
+            // `query_totals` instead of the op-level per-request-average
+            // convention, which loses up to (n - 1) tokens to integer
+            // division on each axis.
+            let mut total = 0.0_f64;
+            if has_prefill {
+                total += prefill_op
+                    .query_totals(
+                        &self.db,
+                        &[
+                            sched.num_prefill_requests as f64,
+                            sched.sum_prefill_tokens as f64,
+                            sched.sum_prefill_kv_tokens as f64,
+                        ],
+                    )?
+                    .latency_ms;
+            }
+            if has_decode {
+                let decode_ms = decode_op
+                    .query_totals(
+                        &self.db,
+                        &[
+                            sched.num_decode_requests as f64,
+                            sched.sum_decode_kv_tokens as f64,
+                        ],
+                    )?
+                    .latency_ms;
+                if has_prefill {
+                    // Mixed rank: marginal-decode composition, mirroring
+                    // `_get_fpm_mix_step_latency` (counts already packed, no
+                    // `(nextn + 1)` — FPM engines enforce nextn == 0).
+                    let baseline_ms = decode_op
+                        .query_pass_baseline(&self.db, sched.num_decode_requests)?
+                        .latency_ms;
+                    total += (decode_ms - baseline_ms).max(0.0);
+                } else {
+                    total += decode_ms;
+                }
+            }
+            return Ok(total);
+        }
 
         if has_prefill && has_decode {
             // Mix step (continuous batching): compose like Python's
@@ -1032,6 +1295,7 @@ mod tests {
                 scale_num_tokens: 0,
                 low_precision_input: false,
                 seq_split: 1,
+                below_grid_sol: false,
             }),
             Op::ContextAttention(ContextAttentionOp {
                 name: "context_attention".into(),
@@ -1077,6 +1341,7 @@ mod tests {
             systems_path: None,
             backend: BackendKind::Vllm,
             backend_version: Some("0.19.0".to_string()),
+            forward_model: None,
             kv_block_size: None,
             parallel: ParallelMapping {
                 tp_size: 8,
@@ -1241,6 +1506,286 @@ mod tests {
             .unwrap();
         assert_eq!(breakdown[0], breakdown[1] + breakdown[2] + breakdown[3]);
         assert_eq!(ms, breakdown[0]);
+    }
+
+    // ---- FPM whole-model engine branches ----
+
+    /// FPM engine over the synthetic pair fixture: context = [FpmForward
+    /// prefill], generation = [FpmForward decode], empty sol_ops (grid-exact
+    /// queries never call SOL).
+    fn build_fpm_engine(tmp: &std::path::Path, nextn: Option<u32>) -> Result<Engine, AicError> {
+        use crate::perf_database::fpm_forward::tests::{default_identity, default_rows, write_pair};
+        write_pair(tmp, &default_rows());
+        let mut db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
+        db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(tmp.to_path_buf(), "b200_sxm", "vllm", "0.25.1"));
+        let fpm_op = |phase: FpmPhase| {
+            Op::FpmForward(FpmForwardOp {
+                name: format!("fpm_forward_{}", phase.as_str()),
+                phase,
+                model_path: "org/model-a".to_string(),
+                match_identity: default_identity(4),
+                weight_bytes: 0.0,
+                sol_ops: vec![],
+            })
+        };
+        let spec = EngineSpec::new(
+            fixture_engine_config(nextn),
+            vec![fpm_op(FpmPhase::Prefill)],
+            vec![fpm_op(FpmPhase::Decode)],
+        );
+        Engine::build(spec, Arc::new(db))
+    }
+
+    #[test]
+    fn fpm_build_rejects_mtp_and_bad_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = build_fpm_engine(tmp.path(), Some(1)).unwrap_err();
+        assert!(err.to_string().contains("MTP"), "{err}");
+
+        // Mixed granular + FPM list is invalid.
+        use crate::perf_database::fpm_forward::tests::default_identity;
+        let db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
+        let fpm_op = Op::FpmForward(FpmForwardOp {
+            name: "fpm_forward_prefill".into(),
+            phase: FpmPhase::Prefill,
+            model_path: "org/model-a".into(),
+            match_identity: default_identity(4),
+            weight_bytes: 0.0,
+            sol_ops: vec![],
+        });
+        let spec = EngineSpec::new(
+            fixture_engine_config(None),
+            vec![fpm_op, context_ops().remove(0)],
+            generation_ops(),
+        );
+        let err = Engine::build(spec, Arc::new(db)).unwrap_err();
+        assert!(err.to_string().contains("exactly one FpmForward"), "{err}");
+    }
+
+    /// The marginal-decode mixed composition, exact arithmetic over the
+    /// fixture rows: the prefill component prices the step's SCHEDULED TOTAL
+    /// (ctx + gen tokens) on the prefill curve; decode is the in-curve lerp
+    /// minus the (8, 8) -> 6.0 baseline floor.
+    #[test]
+    fn fpm_mixed_step_is_prefill_plus_marginal_decode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = build_fpm_engine(tmp.path(), None).unwrap();
+        // ctx: 2048 tokens / isl 2048 -> batch 1, totals (1, 2048+8, 0):
+        // in-curve lerp between (1,2048)->20.0 and (1,4096)->40.0.
+        // gen: batch 8; osl=0 clamps to 1 -> isl' = 2048, one step at
+        // s = 2049 -> kv = 8*2049 = 16392: lerp between (8,4096)->7.0 and
+        // (8,65536)->9.0, minus baseline (8, kv_floor=8) -> 6.0.
+        let ms = engine.mixed_step_latency(2048, 8, 2048, 0, 0, 1.0, 1.0).unwrap();
+        let pre = 20.0 + (40.0 - 20.0) * (2056.0 - 2048.0) / (4096.0 - 2048.0);
+        let w = (16392.0 - 4096.0) / (65536.0 - 4096.0);
+        let decode = 7.0 + (9.0 - 7.0) * w;
+        let expected = pre + (decode - 6.0);
+        assert!((ms - expected).abs() < 1e-9, "got {ms}, want {expected}");
+    }
+
+    /// FPM engine over CUSTOM rows (cliff pair + chunk coordinates); same
+    /// wiring as [`build_fpm_engine`].
+    fn build_fpm_engine_with_rows(
+        tmp: &std::path::Path,
+        rows: &[crate::perf_database::fpm_forward::tests::RowSpec],
+    ) -> Result<Engine, AicError> {
+        use crate::perf_database::fpm_forward::tests::{default_identity, write_pair};
+        write_pair(tmp, rows);
+        let mut db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
+        db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(tmp.to_path_buf(), "b200_sxm", "vllm", "0.25.1"));
+        let fpm_op = |phase: FpmPhase| {
+            Op::FpmForward(FpmForwardOp {
+                name: format!("fpm_forward_{}", phase.as_str()),
+                phase,
+                model_path: "org/model-a".to_string(),
+                match_identity: default_identity(4),
+                weight_bytes: 0.0,
+                sol_ops: vec![],
+            })
+        };
+        let spec = EngineSpec::new(
+            fixture_engine_config(None),
+            vec![fpm_op(FpmPhase::Prefill)],
+            vec![fpm_op(FpmPhase::Decode)],
+        );
+        Engine::build(spec, Arc::new(db))
+    }
+
+    fn cliff_rows() -> Vec<crate::perf_database::fpm_forward::tests::RowSpec> {
+        use crate::perf_database::fpm_forward::tests::RowSpec;
+        let mk = |kind: &'static str, batch: u32, prefill: u32, kv: u32, lat: f64| RowSpec {
+            workload_kind: kind,
+            batch_size: batch,
+            total_prefill_tokens: prefill,
+            total_kv_read_tokens: kv,
+            latency_ms: lat,
+            ..RowSpec::default()
+        };
+        vec![
+            // CUDA-graph cliff pair at capture=2048, plus the eager plateau.
+            mk("prefill", 1, 2048, 0, 47.0),
+            mk("prefill", 1, 2049, 0, 99.0),
+            mk("prefill", 1, 4096, 0, 99.0),
+            // Chunk coordinates for the multi-chunk average test.
+            mk("prefill", 1, 1032, 0, 10.0),
+            mk("prefill", 1, 1032, 1024, 14.0),
+            mk("decode", 8, 0, 8, 6.0),
+            mk("decode", 8, 0, 4096, 7.0),
+            mk("decode", 8, 0, 65536, 9.0),
+        ]
+    }
+
+    /// Spec test 1+2: the step's total (ctx + gen) picks the regime side.
+    /// ctx=2048 alone sits ON the capture boundary (graph side, 47 ms); the
+    /// same chunk with ANY decode riders crosses it and must price eager.
+    #[test]
+    fn fpm_mixed_step_total_crosses_the_graph_cliff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = build_fpm_engine_with_rows(tmp.path(), &cliff_rows()).unwrap();
+        // In-graph: pure prefill step, totals (1, 2048, 0) -> exact 47.0.
+        let graph = engine.mixed_step_breakdown(2048, 0, 2048, 0, 0, 1.0, 1.0).unwrap();
+        assert!((graph[1] - 47.0).abs() < 1e-9, "graph-side prefill {}", graph[1]);
+        // Crossing: 8 decode riders push the total to 2056 -> eager plateau.
+        let eager = engine.mixed_step_breakdown(2048, 8, 2048, 0, 0, 1.0, 1.0).unwrap();
+        assert!((eager[1] - 99.0).abs() < 1e-9, "eager-side prefill {}", eager[1]);
+        assert!(eager[1] > graph[1] * 2.0 - 1e-9);
+    }
+
+    /// Spec test 4: chunked requests price each chunk at its own
+    /// (chunk + gen, past_kv) coordinates; the component is their average.
+    #[test]
+    fn fpm_mixed_step_chunks_average_exact_coordinates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = build_fpm_engine_with_rows(tmp.path(), &cliff_rows()).unwrap();
+        // ctx=1024 of isl=2048: chunk 1 -> (1, 1032, 0) = 10.0,
+        // chunk 2 -> (1, 1032, 1024) = 14.0; average 12.0.
+        let parts = engine.mixed_step_breakdown(1024, 8, 2048, 0, 0, 1.0, 1.0).unwrap();
+        assert!((parts[1] - 12.0).abs() < 1e-9, "chunk average {}", parts[1]);
+    }
+
+    /// A generation-only step keeps the FULL decode latency (no pass to ride
+    /// on) and uses the Python static-path convention s = isl + osl/2 + 1.
+    #[test]
+    fn fpm_genonly_step_keeps_full_decode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = build_fpm_engine(tmp.path(), None).unwrap();
+        // gen_tokens=8, isl=511, osl=0 -> isl'=511, one step at s=512 ->
+        // kv = 8*512 = 4096: exact decode row -> 7.0, NOT 7.0 - 6.0.
+        let ms = engine.decode_step_latency(8, 511, 0, 1.0).unwrap();
+        assert!((ms - 7.0).abs() < 1e-12, "got {ms}");
+        // mixed with ctx_tokens=0 must agree with the genonly convention
+        let mixed = engine.mixed_step_latency(0, 8, 511, 0, 0, 1.0, 1.0).unwrap();
+        assert!((mixed - 7.0).abs() < 1e-12, "got {mixed}");
+        assert_eq!(engine.decode_step_latency(0, 511, 0, 1.0).unwrap(), 0.0);
+    }
+
+    /// A fully prefix-cached payload retains prefill request/KV metadata
+    /// while scheduling no fresh prefill compute: dispatch must be
+    /// token-based (aligned with `IterationFeatures`) — a count-based check
+    /// would query prefill at zero tokens (outside the FPM domain) and
+    /// price decode as marginal work riding a pass that does not exist.
+    #[test]
+    fn fpm_rank_prefix_cached_payload_is_decode_only() {
+        use crate::fpm::{ForwardPassMetrics, ScheduledRequestMetrics};
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = build_fpm_engine(tmp.path(), None).unwrap();
+        let metrics = ForwardPassMetrics {
+            scheduled_requests: ScheduledRequestMetrics {
+                num_prefill_requests: 1,
+                sum_prefill_tokens: 0,
+                sum_prefill_kv_tokens: 4096,
+                num_decode_requests: 8,
+                sum_decode_kv_tokens: 4096, // exact decode row -> 7.0
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // FULL decode latency (decode-only), not the marginal composition.
+        let ms = engine.forward_pass_time_ms(&[metrics]).unwrap();
+        assert!((ms - 7.0).abs() < 1e-12, "{ms}");
+    }
+
+    /// Telemetry dispatch: single-workload FPM ranks flow through the shared
+    /// free fns; a mixed rank composes prefill + marginal decode.
+    #[test]
+    fn fpm_rank_latency_marginal_composition() {
+        use crate::fpm::{ForwardPassMetrics, ScheduledRequestMetrics};
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = build_fpm_engine(tmp.path(), None).unwrap();
+
+        let mixed = ForwardPassMetrics {
+            scheduled_requests: ScheduledRequestMetrics {
+                num_prefill_requests: 2,
+                sum_prefill_tokens: 2 * 1024,
+                sum_prefill_kv_tokens: 0,
+                num_decode_requests: 8,
+                sum_decode_kv_tokens: 8 * 4096,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // prefill: totals coords (2, 2048, 0) -> exact 21.0. decode: totals
+        // coords (8, 32768): lerp between (8,4096)->7.0 and (8,65536)->9.0,
+        // minus baseline (8, 8) -> 6.0.
+        let w = (32768.0 - 4096.0) / (65536.0 - 4096.0);
+        let decode = 7.0 + (9.0 - 7.0) * w;
+        let expected = 21.0 + (decode - 6.0);
+        let got = engine.forward_pass_time_ms(&[mixed]).unwrap();
+        assert!((got - expected).abs() < 1e-9, "got {got}, want {expected}");
+    }
+
+    /// The FPM rank dispatch queries RAW iteration totals — the tables'
+    /// native coordinate system — not the op-level per-request averages,
+    /// which floor-divide away up to (n - 1) tokens per axis.
+    #[test]
+    fn fpm_rank_uses_iteration_totals_not_averages() {
+        use crate::fpm::{ForwardPassMetrics, ScheduledRequestMetrics};
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = build_fpm_engine(tmp.path(), None).unwrap();
+
+        // 8 decode requests, 32,773 total KV: NOT divisible by 8. Totals
+        // convention queries (8, 32773); the old average convention floored
+        // to kv_per_req = 4096 -> (8, 32768).
+        let decode_only = ForwardPassMetrics {
+            scheduled_requests: ScheduledRequestMetrics {
+                num_decode_requests: 8,
+                sum_decode_kv_tokens: 32_773,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let w = (32_773.0 - 4096.0) / (65_536.0 - 4096.0);
+        let expected = 7.0 + (9.0 - 7.0) * w;
+        let got = engine.forward_pass_time_ms(&[decode_only]).unwrap();
+        assert!((got - expected).abs() < 1e-9, "got {got}, want {expected}");
+    }
+
+    /// The FPM shape guard must see through Overlap/Fallback nesting: a
+    /// hand-built spec hiding an FpmForward inside a composite would
+    /// otherwise ride the name-filtered mix-step passes with the wrong
+    /// workload shape (and FallbackOp swallows its PerfDatabase misses).
+    #[test]
+    fn nested_fpm_op_is_rejected_at_build() {
+        use crate::perf_database::fpm_forward::tests::default_identity;
+        let db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
+        let hidden = Op::Overlap(crate::operators::OverlapOp::new(
+            "hidden",
+            vec![Op::FpmForward(FpmForwardOp {
+                name: "fpm_forward_prefill".into(),
+                phase: FpmPhase::Prefill,
+                model_path: "org/model-a".into(),
+                match_identity: default_identity(4),
+                weight_bytes: 0.0,
+                sol_ops: vec![],
+            })],
+            vec![],
+        ));
+        let spec = EngineSpec::new(fixture_engine_config(None), vec![hidden], generation_ops());
+        let err = Engine::build(spec, Arc::new(db)).unwrap_err();
+        assert!(
+            err.to_string().contains("exactly one FpmForward op per phase"),
+            "{err}"
+        );
     }
 
     /// Lock the one piece of orchestration that lives ONLY in the Engine: the
