@@ -60,23 +60,25 @@ def test_log_perf_rejects_optional_column_schema_changes_before_append(tmp_path,
     assert helper.log_perf(**kwargs, power_stats=power_stats if first_has_power else None)
     original = perf_path.read_bytes()
 
-    assert helper.log_perf(**kwargs, power_stats=None if first_has_power else power_stats) is False
+    with pytest.raises(helper.PerfLogError, match="Schema mismatch"):
+        helper.log_perf(**kwargs, power_stats=None if first_has_power else power_stats)
     assert perf_path.read_bytes() == original
     assert not perf_path.with_suffix(".txt.lock").exists()
 
 
-def test_log_perf_returns_false_when_lock_is_held(tmp_path, monkeypatch):
+def test_log_perf_raises_when_lock_is_held(tmp_path, monkeypatch):
     perf_path = tmp_path / "mla_perf.txt"
     lock_path = tmp_path / "mla_perf.txt.lock"
     lock_path.touch()
     monkeypatch.setattr(helper.time, "sleep", lambda _seconds: None)
 
-    assert _log_perf(str(perf_path)) is False
+    with pytest.raises(helper.PerfLogError, match="Can not get lock"):
+        _log_perf(str(perf_path))
     assert not perf_path.exists()
     assert lock_path.exists()
 
 
-def test_log_perf_returns_false_and_releases_lock_on_fsync_failure(tmp_path, monkeypatch):
+def test_log_perf_raises_and_releases_lock_on_fsync_failure(tmp_path, monkeypatch):
     perf_path = tmp_path / "mla_perf.txt"
     lock_path = tmp_path / "mla_perf.txt.lock"
 
@@ -85,7 +87,8 @@ def test_log_perf_returns_false_and_releases_lock_on_fsync_failure(tmp_path, mon
 
     monkeypatch.setattr(helper.os, "fsync", fail_fsync)
 
-    assert _log_perf(str(perf_path)) is False
+    with pytest.raises(helper.PerfLogError, match="fsync failed"):
+        _log_perf(str(perf_path))
     assert not lock_path.exists()
 
 
@@ -132,6 +135,7 @@ def test_log_perf_losing_breaker_never_unlinks_the_fresh_lock(tmp_path, monkeypa
 
     monkeypatch.setattr(helper.os, "rename", racing_rename)
 
-    assert _log_perf(str(perf_path)) is False
+    with pytest.raises(helper.PerfLogError, match="Can not get lock"):
+        _log_perf(str(perf_path))
     assert lock_path.exists()
     assert not perf_path.exists()

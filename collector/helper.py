@@ -49,6 +49,17 @@ class WorkerRestartSignal:
 
 WORKER_RESTART = WorkerRestartSignal()
 
+
+class PerfLogError(RuntimeError):
+    """A measured performance row could not be durably persisted.
+
+    Persistence is part of task completion, so this exception must propagate to
+    the collector executor and classify the case as failed.  Keeping the
+    fail-closed behavior here protects older callers that do not inspect the
+    successful ``True`` return value from :func:`log_perf`.
+    """
+
+
 # Global NVML state per worker process
 _NVML_INITIALIZED = False
 _NVML_LOCK = threading.Lock()
@@ -725,8 +736,9 @@ def log_perf(
             time.sleep(0.1)
 
     if not got_lock:
-        print(f"Skipping log: can not get lock for {perf_filename}")
-        return False
+        message = f"Can not get lock for {perf_filename}"
+        print(f"Error writing log: {message}")
+        raise PerfLogError(message)
 
     try:
         with open(perf_filename, "a+", newline="") as f:
@@ -761,12 +773,13 @@ def log_perf(
                 f.seek(0)
                 existing_header = next(csv.reader(f), [])
                 if existing_header != fieldnames:
-                    print(
-                        f"Error writing log: schema mismatch for {perf_filename}: "
+                    message = (
+                        f"Schema mismatch for {perf_filename}: "
                         f"existing header {existing_header}, requested header {fieldnames}. "
                         "Use the same measurement settings when resuming or start a fresh staging file."
                     )
-                    return False
+                    print(f"Error writing log: {message}")
+                    raise PerfLogError(message)
                 f.seek(0, os.SEEK_END)
 
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -785,9 +798,11 @@ def log_perf(
             # Force disk write (for NFS)
             f.flush()
             os.fsync(f.fileno())
+    except PerfLogError:
+        raise
     except Exception as e:
         print(f"Error writing log: {e}")
-        return False
+        raise PerfLogError(f"Failed to write {perf_filename}: {e}") from e
     finally:
         # Delete the lock file, even if writing crashed
         if got_lock and os.path.exists(lock_file):
