@@ -156,9 +156,9 @@ class RuntimeConfig:
     image_height: int = 0
     image_width: int = 0
     num_images_per_request: int = 1
+    num_image_tokens: int = 0  # override: ViT output tokens per image; ignored when image_height/width are set
     # Frames in each visual input. 1 models an image; >1 models a video clip.
     num_frames_per_visual: int = 1
-    num_image_tokens: int = 0  # override: ViT output tokens per image; ignored when image_height/width are set
 
 
 @dataclass

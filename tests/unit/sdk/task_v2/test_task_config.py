@@ -8,6 +8,8 @@ against the legacy CLI; these tests focus on construction, defaulting,
 prefix discipline, and the build_* helpers.
 """
 
+from dataclasses import fields
+
 import pytest
 
 from aiconfigurator.sdk import common
@@ -28,6 +30,12 @@ def test_default_task_config_is_agg_with_default_workload():
     assert t.osl == 1000
     assert t.ttft == 1000.0
     assert t.tpot == 50.0
+
+
+def test_new_video_field_preserves_legacy_positional_order():
+    init_fields = [field.name for field in fields(Task) if field.init]
+    assert init_fields[-2:] == ["afd_decode_latency_correction", "num_frames_per_visual"]
+    assert init_fields.index("enable_encoder_dp") == init_fields.index("num_images_per_request") + 1
 
 
 def test_agg_with_model_resolves_identity_and_backend():

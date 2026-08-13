@@ -468,8 +468,6 @@ class Task:
     image_height: int = 0
     image_width: int = 0
     num_images_per_request: int = 1
-    # 1 models an image; >1 models a video clip per visual input.
-    num_frames_per_visual: int = 1
     # Vision encoder data parallelism (ModelConfig default).
     enable_encoder_dp: bool = True
     ttft: float = 1000.0
@@ -635,6 +633,10 @@ class Task:
     afd_decode_degradation: float | None = None
     afd_ttft_correction_factor: float | None = None
     afd_decode_latency_correction: float = 1.0
+
+    # Keep new public fields at the end so existing positional construction is stable.
+    # 1 models an image; >1 models a video clip per visual input.
+    num_frames_per_visual: int = 1
 
     # ====== 11. Internal — resolved in __post_init__ ======
     _is_moe: bool = field(default=False, repr=False, init=False)
