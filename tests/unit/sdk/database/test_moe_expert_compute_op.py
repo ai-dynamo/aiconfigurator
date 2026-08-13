@@ -3,7 +3,7 @@
 
 """Unit tests for the unified ``MoEExpertCompute`` op and ``query_moe_expert_compute``.
 
-Query semantics against an injected ``db._moe_ep_data`` store (the
+Query semantics against an injected expert-compute store (the
 ``__dict__``-gated bind in ``load_data`` honors pre-set attributes): ADP token
 scaling + interpolation and scale_factor, the ``num_slots`` default, the
 distribution fallback chain (requested -> "uniform" -> first-available in

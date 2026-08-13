@@ -12,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import ClassVar
 
@@ -286,6 +287,33 @@ def _sparse_value(latency: float) -> dict[str, float]:
     return {"latency": latency}
 
 
+def _pair_sol(past: float, isl: float, bs: float) -> float:
+    """The sparse kernel's pair-count SOL: bs * (past*isl + isl^2/2)."""
+    return bs * (past * isl + isl * isl / 2)
+
+
+def _knn_hold(leaves, sol, query, k=4):
+    """Independent reference for the multi-axis past-frontier hold: the k
+    nearest leaves in joint log2 space, blended with tapered modified-Shepard
+    weights w = ((R-d)/(R*d))^2, support radius R at the (k+1)-th distance
+    (R = inf -> plain 1/d^2)."""
+    logq = [math.log2(max(v, 1e-12)) for v in query]
+    scored = sorted((math.dist([math.log2(max(v, 1e-12)) for v in c], logq), sol(*c) / lat) for c, lat in leaves)
+    picked, rest = scored[:k], scored[k:]
+    support_r = rest[0][0] if rest else math.inf
+
+    def weight(d):
+        if math.isinf(support_r):
+            return 1.0 / (d * d + 1e-12)
+        return (max(0.0, support_r - d) / (support_r * d + 1e-12)) ** 2
+
+    weights = [weight(d) for d, _ in picked]
+    if sum(weights) <= 0:  # all picked sit on the support boundary
+        weights = [1.0 / (d * d + 1e-12) for d, _ in picked]
+    util = sum(w * u for w, (_, u) in zip(weights, picked, strict=True)) / sum(weights)
+    return sol(*query) / util
+
+
 def _sparse_sampled_batch_caps_grid(*, offset: float = 0.0) -> dict:
     """Mock sparse-kernel data with sampled DeepSeek-V4 batch caps."""
     return {
@@ -428,11 +456,13 @@ def test_lookup_sparse_kernel_holds_util_on_isolated_leaves():
     """Two isolated leaves that bracket past_kv but share no (isl, batch) grid.
 
     Neither past_kv branch can resolve (isl=1536, bs=2) in-data, so the engine
-    falls to util-hold: snap outer axes to the nearest collected path
-    (past=0 -> isl=1024), anchor util on its boundary leaf b=1
-    (util = SOL(0,1024,1)/1.0 = 1024^2/2), and scale by the pair-count SOL at
-    the query: SOL(2048,1536,2)/util = 8650752/524288 = 16.5.
-    (Previously this cloud went to scattered cubic griddata.)
+    falls to util-hold: blend utils from the nearest leaves in joint log2
+    space. (4096, 2048, 2) is ~1 octave away while (0, 1024, 1) is ~50 "octaves"
+    away on the past axis (0 vs 2048 is a regime change, not a distance), so
+    the fully-specified leaf dominates. The earlier nearest-path snap picked
+    the past=0 leaf on a coin-flip tie (|0-2048| == |4096-2048|) and answered
+    with a 10x-different util. (Before that, this cloud went to scattered
+    cubic griddata.)
     """
 
     class _DB:
@@ -461,9 +491,12 @@ def test_lookup_sparse_kernel_holds_util_on_isolated_leaves():
         native_heads=_FLASH_NATIVE_HEADS,
     )
 
-    sol_q = 2 * (2048 * 1536 + 1536**2 / 2)
-    anchor_util = 1 * (1024**2 / 2) / 1.0
-    assert val == pytest.approx(sol_q / anchor_util)  # 16.5
+    expected = _knn_hold(
+        [((0, 1024, 1), 1.0), ((4096, 2048, 2), 4.0)],
+        _pair_sol,
+        (2048, 1536, 2),
+    )
+    assert val == pytest.approx(expected)  # ~1.65, dominated by the near leaf
 
 
 def test_lookup_sparse_kernel_brackets_batch_and_drops_ragged_isl_branch():
@@ -499,10 +532,11 @@ def test_lookup_sparse_kernel_holds_util_beyond_all_batches():
     """bs=5 exceeds every collected batch at every isl -> util-hold.
 
     No isl branch covers bs=5 so in-data resolution fails entirely. The hold
-    snaps isl to the nearest collected row (2048), anchors util on its
-    boundary batch b=4 (util = SOL(0,2048,4)/8.0), and scales by the
-    pair-count SOL at the query, so the isl growth 2048->2682 rides the
-    quadratic SOL rather than a linear batch extrapolation.
+    blends utils from the nearest measured leaves in joint log2 space (the
+    (2048, 4) corner dominates, with its (2048, 2) and (1024, 8) neighbours
+    contributing) and scales by the pair-count SOL at the query, so the isl
+    growth 2048->2682 rides the quadratic SOL rather than a linear batch
+    extrapolation.
     """
     db = _make_sparse_db_from_grid({0: _sparse_sampled_batch_caps_grid()})
     val = ContextDeepSeekV4AttentionModule._lookup_sparse_kernel(
@@ -515,9 +549,10 @@ def test_lookup_sparse_kernel_holds_util_beyond_all_batches():
         native_heads=_FLASH_NATIVE_HEADS,
     )
 
-    anchor_util = 4 * (2048**2 / 2) / 8.00
-    sol_q = 5 * (2682**2 / 2)
-    assert val == pytest.approx(sol_q / anchor_util, rel=1e-4)  # ~17.15
+    grid = _sparse_sampled_batch_caps_grid()
+    leaves = [((0, isl, b), grid[isl][b]["latency"]) for isl in grid for b in grid[isl]]
+    expected = _knn_hold(leaves, _pair_sol, (0, 2682, 5))
+    assert val == pytest.approx(expected, rel=1e-4)  # ~15.9
 
 
 def test_lookup_sparse_kernel_brackets_batch_within_covering_isl_row():

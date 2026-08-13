@@ -38,16 +38,16 @@ The large-EP MoE communication family is exposed as an explicit module path
 (it is not part of the facade):
 
 ```python
-from aiconfigurator_core.sdk.operations.moe_comm import MOE_A2A_BACKENDS, EPMoE, MoEAllToAll
+from aiconfigurator_core.sdk.operations.moe_comm import MOE_A2A_BACKENDS, MoEAllToAll, MoEExpertCompute
 ```
 
 `MOE_A2A_BACKENDS` maps each supported MoE all-to-all comm backend to its
 `MoECommBackendSpec` (framework and phase applicability plus feasibility
-rules). `MoEAllToAll` and `EPMoE` are the operation classes over the unified
-`moe_a2a_perf` comm and `moe_ep_perf` expert-compute tables. `PerfDatabase`
+rules). `MoEAllToAll` and `MoEExpertCompute` are the operation classes over the
+unified `moe_a2a_perf` comm and `moe_expert_compute_perf` expert-compute tables. `PerfDatabase`
 (`aiconfigurator_core.sdk.perf_database`) forwards to them through
-`query_moe_a2a(...)` and `query_moe_ep(...)` and adds the read-only coverage
-probes `moe_a2a_coverage(...)` and `moe_ep_compute_coverage(...)`. These
+`query_moe_a2a(...)` and `query_moe_expert_compute(...)` and adds the read-only
+coverage probes `moe_a2a_coverage(...)` and `moe_expert_compute_coverage(...)`. These
 queries serve measured silicon data only: SOL and empirical database modes
 raise `EmpiricalNotImplementedError`, with an estimation tier as a planned
 follow-up.
@@ -77,7 +77,7 @@ attn_cp_size=1, gpus_per_node=8, shared_gemm_quant_mode=None)` is the one
 place MoE blocks are wired. It returns the block's op list for one inference
 phase — router GEMM, shared-expert GEMMs, and either the fused
 dispatch/compute/combine pipeline or, when `cfg.moe_comm_backend` names a
-comm backend for `inference_phase`, the large-EP `MoEAllToAll`/`EPMoE`
+comm backend for `inference_phase`, the large-EP `MoEAllToAll`/`MoEExpertCompute`
 emission. `scale_factor` is deliberately model-owned (legacy model classes
 scale their MoE ops by their own layer count, not `shape.num_moe_layers`),
 and `shared_gemm_quant_mode` overrides `cfg.gemm_quant_mode` for the
@@ -117,7 +117,7 @@ node width would silently mis-price the cross-node all-to-all.
 
 Enumeration follows the coverage probes. A parallel tuple with `moe_tp == 1`
 and `moe_ep > 1` participates in the large-EP regime when
-`moe_a2a_coverage(...)` and `moe_ep_compute_coverage(...)` cover its EP size
+`moe_a2a_coverage(...)` and `moe_expert_compute_coverage(...)` cover its EP size
 — at this system's `nodes_for(ep, gpus_per_node)` topology and the run's MoE
 quant mode — for every phase the worker runs, plus the context phase for
 every role (a worker's weights are sized from its context ops). Coverage is

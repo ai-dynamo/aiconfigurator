@@ -157,6 +157,7 @@ pub mod communication;
 pub mod dsa;
 pub mod dsv4;
 pub mod dsv4_megamoe;
+pub mod fpm_forward;
 pub mod gemm;
 mod interpolation;
 pub mod mhc;
@@ -175,6 +176,7 @@ pub use communication::CommunicationTable;
 pub use dsa::DsaTable;
 pub use dsv4::{AttnKind, Dsv4Table};
 pub use dsv4_megamoe::Dsv4MegaMoeTable;
+pub use fpm_forward::FpmForwardTable;
 pub use gemm::GemmTable;
 pub use mhc::MhcTable;
 pub use mla::MlaTable;
@@ -207,6 +209,7 @@ pub struct PerfTables {
     pub wideep_mla: WideEpMlaTable,
     pub wideep_moe: WideEpMoeTable,
     pub state_space: StateSpaceTable,
+    pub fpm_forward: FpmForwardTable,
 }
 
 /// Modular performance database for a specific
@@ -259,6 +262,16 @@ impl std::ops::Deref for PerfDatabase {
 }
 
 impl PerfDatabase {
+    /// Test-only: swap the fpm_forward table so fixtures can point it at a
+    /// temp collector pair while every other table stays on the checked-in
+    /// fixture DB. The fixture db must be uniquely owned (no clones yet).
+    #[cfg(test)]
+    pub(crate) fn set_fpm_forward_for_test(&mut self, table: FpmForwardTable) {
+        Arc::get_mut(&mut self.tables)
+            .expect("test fixture db must be uniquely owned")
+            .fpm_forward = table;
+    }
+
     /// Resolve and parse the system YAML, locate the per-version data
     /// directory, and construct lazy table owners.
     ///
@@ -373,6 +386,9 @@ impl PerfDatabase {
                 version,
                 perf_db_sources,
             ),
+            // Deliberately NOT shared-layer aware: FPM whole-model data is
+            // valid only for its exact backend/version (fpm_forward.rs).
+            fpm_forward: FpmForwardTable::new(data_root.clone(), system, backend, version),
             system_spec: spec,
             data_root,
         };

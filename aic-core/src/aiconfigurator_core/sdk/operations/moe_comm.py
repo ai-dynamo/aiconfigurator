@@ -169,6 +169,28 @@ def _store_a2a_leaf(data: defaultdict, key: tuple, leaf: dict, *, overwrite: boo
     bucket[num_tokens] = leaf
 
 
+def _sum_phase_grids(first: dict, second: dict) -> dict:
+    """Build the aligned ``[sms][tokens]`` grid for two communication phases."""
+    combined = {}
+    for sms, first_tokens in first.items():
+        second_tokens = second.get(sms, {})
+        token_sums = {}
+        for num_tokens, first_leaf in first_tokens.items():
+            second_leaf = second_tokens.get(num_tokens)
+            if second_leaf is None:
+                continue
+            latency = float(first_leaf["latency"]) + float(second_leaf["latency"])
+            energy = float(first_leaf.get("energy", 0.0)) + float(second_leaf.get("energy", 0.0))
+            token_sums[num_tokens] = {
+                "latency": latency,
+                "power": energy / latency if latency > 0 else 0.0,
+                "energy": energy,
+            }
+        if token_sums:
+            combined[sms] = token_sums
+    return combined
+
+
 def _normalize_sms(raw: object) -> int:
     """Normalize the ``sms`` column to an int key; null/NaN/absent -> 0.
 
@@ -183,7 +205,7 @@ def _normalize_sms(raw: object) -> int:
 
 
 def _row_power(row: dict) -> float:
-    """Normalize the optional ``power`` cell to watts; null/NaN/absent -> 0.0.
+    """Normalize optional ``power`` to watts; null/NaN/absent -> 0.0.
 
     A present-but-null power cell means "not measured", exactly like an absent
     column — but ``float(row.get("power", 0.0))`` raised ``ValueError`` on it:
@@ -198,11 +220,15 @@ def _row_power(row: dict) -> float:
     if raw is None or raw == "":
         return 0.0
     value = float(raw)
-    return 0.0 if math.isnan(value) else value
+    if math.isnan(value):
+        return 0.0
+    if not math.isfinite(value):
+        raise ValueError("non-finite power cell in perf data: power must be finite when measured")
+    return value
 
 
 def _require_latency(row: dict, table: str) -> float:
-    """Read the schema-required ``latency`` cell; a null is corrupt data.
+    """Read schema-required finite ``latency``; invalid values are corrupt.
 
     Unlike ``power`` (optional — see ``_row_power``), a latency-less row has
     no meaning: coercing null to 0.0 would silently poison every consumer, so
@@ -213,9 +239,16 @@ def _require_latency(row: dict, table: str) -> float:
     raw = row.get("latency")
     if raw is None or raw == "":
         raise ValueError(
-            f"null latency cell in a {table} row: latency is schema-required; refusing to load corrupt perf data"
+            f"null latency cell in a {table} row: latency is schema-required and must be finite; "
+            "refusing to load corrupt perf data"
         )
-    return float(raw)
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError(
+            f"non-finite latency cell in a {table} row: latency is schema-required and must be finite; "
+            "refusing to load corrupt perf data"
+        )
+    return value
 
 
 def _adapt_legacy_deepep(data: defaultdict, rows, *, comm_backend: str, phase_columns: dict) -> None:
@@ -672,7 +705,14 @@ class MoEAllToAll(Operation):
             # tokens (hidden/topk/dtype fixed), so the proxy is
             # ratio-equivalent to any bandwidth roofline (see the DeepEP notes
             # in operations/moe.py).
-            if sms in by_sms:
+            # Preserve the legacy DeepEP-HT lookup contract: only the node-1,
+            # sms=20 slice is a 1-D token curve. Other HT requests, including
+            # exact sms keys on larger node counts, use the 2-D (sms, tokens)
+            # grid. This distinction matters beyond the token frontier now
+            # that Grid extrapolation blends nearby leaves instead of snapping
+            # to one outer-axis path. LL and TRT-LLM keep exact-sms 1-D curves.
+            use_token_curve = sms in by_sms and (comm_backend != "deepep_ht" or (node_num == 1 and sms == 20))
+            if use_token_curve:
                 config = perf_interp.OpInterpConfig(
                     axes=("num_tokens",), resolver=perf_interp.Grid(), sol_fn=lambda t: float(t)
                 )
@@ -684,6 +724,35 @@ class MoEAllToAll(Operation):
                 result = perf_interp.query(config, by_sms, sms, num_tokens)
             lat = perf_interp.get_value(result, "latency")
             energy = perf_interp.get_value(result, "energy")
+
+            if comm_backend == "deepep_ht" and phase in ("dispatch", "combine") and not use_token_curve:
+                # The current Grid frontier hold blends utilisation and is
+                # therefore nonlinear in latency. Preserve the legacy DeepEP
+                # contract by resolving the summed dispatch+combine curve,
+                # then apportioning its result using the independently
+                # resolved phase shares. Querying each phase independently
+                # and adding afterward would drift at the token frontier.
+                other_phase = "combine" if phase == "dispatch" else "dispatch"
+                other_phase_slice = util_empirical.require_data_slice(database._moe_a2a_data, comm_backend, other_phase)
+                other_dtype_slice = _resolve_comm_dtype_slice(other_phase_slice, comm_dtype, query_context)
+                other_by_sms = util_empirical.require_data_slice(
+                    other_dtype_slice, ep_size, node_num, hidden_size, topk, num_experts
+                )
+                combined = _sum_phase_grids(by_sms, other_by_sms)
+                if combined:
+                    other_result = perf_interp.query(config, other_by_sms, sms, num_tokens)
+                    combined_result = perf_interp.query(config, combined, sms, num_tokens)
+                    other_lat = perf_interp.get_value(other_result, "latency")
+                    combined_lat = perf_interp.get_value(combined_result, "latency")
+                    phase_lat_sum = lat + other_lat
+                    if phase_lat_sum > 0:
+                        lat *= combined_lat / phase_lat_sum
+
+                    other_energy = perf_interp.get_value(other_result, "energy")
+                    combined_energy = perf_interp.get_value(combined_result, "energy")
+                    phase_energy_sum = energy + other_energy
+                    if phase_energy_sum > 0:
+                        energy *= combined_energy / phase_energy_sum
             return database._interp_pr(lat, energy=energy)
 
         def get_empirical() -> float:

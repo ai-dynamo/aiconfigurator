@@ -322,6 +322,29 @@ class TestRateMatchingDegradationFactors:
         assert disagg_session._rate_matching_prefill_degradation_factor == 0.9
         assert disagg_session._rate_matching_decode_degradation_factor == 0.8
 
+    def test_factors_forwarded_to_autoscale_picker(self, monkeypatch, disagg_session, runtime_config):
+        """The session setter must affect the autoscale picker path."""
+        captured = {}
+
+        def fake_pick_autoscale(**kwargs):
+            captured.update(kwargs)
+            return {"best_config_df": pd.DataFrame()}
+
+        monkeypatch.setattr("aiconfigurator.sdk.picking.pick_autoscale", fake_pick_autoscale)
+        disagg_session.set_rate_matching_degradation_factors(0.61, 0.73)
+        summary = InferenceSummary(runtime_config=runtime_config)
+
+        result = disagg_session._pick_autoscale(
+            prefill_summary_df=pd.DataFrame(),
+            decode_summary_df=pd.DataFrame(),
+            runtime_config=runtime_config,
+            disagg_summary=summary,
+        )
+
+        assert result is summary
+        assert captured["prefill_degradation_factor"] == 0.61
+        assert captured["decode_degradation_factor"] == 0.73
+
     def test_factors_used_in_disagg_result(self, disagg_session, runtime_config, model_config):
         """Custom factors propagate into find_best_disagg_result_under_constraints output."""
         disagg_session.set_rate_matching_degradation_factors(1.0, 1.0)

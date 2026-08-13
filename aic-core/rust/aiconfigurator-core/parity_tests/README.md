@@ -24,6 +24,9 @@ golden workflow below) for:
   which sit on the power-carrying database identities)
 - `mixed_step`: Rust `estimate_mixed_step_latency_with_rust` vs the frozen
   Python `_get_mix_step_latency` for the same shape
+- `cp_static_ctx`: the context-phase static sum through the cp-aware model
+  builder (`cli_estimate` has no cp knob, so the plain "static" surface
+  cannot express a cp>1 case; issue #1498 anchor)
 - `agg`: public `cli_estimate(mode="agg")`
 - `disagg`: public `cli_estimate(mode="disagg")`
 - `afd`: public `cli_estimate(mode="afd")` (ttft/tpot; the AFD session's
@@ -31,10 +34,12 @@ golden workflow below) for:
 
 The case matrix has grown far past the original 3-case/12-surface smoke set:
 `SMOKE_CASES` (61) x 4 surfaces, `POWER_CASES` (5, energy/power coverage) x 4,
-`CP_CASES` (3, mixed only), `HYBRID_CASES` (17) x 4 at a 1e-4 rtol,
+`CP_CASES` (3, mixed only), `DSV4_CP_CASES` (1, cp_static_ctx + mixed —
+the issue #1498 adjudicated repro on the reuse-carrying 0.5.12),
+`HYBRID_CASES` (17) x 4 at a 1e-4 rtol,
 `SOL_CASES` (4, static+mixed) at 1e-4, the two #1456 site-transfer
 tie-break anchors (`TIE_AGG_CASES`/`TIE_DISAGG_CASES`), and `AFD_CASES`
-(1, afd only) — 346 golden-backed (case, surface) pairs, plus the
+(1, afd only) — 348 golden-backed (case, surface) pairs, plus the
 typed-error/provenance contract tests and the anti-vacuous golden guards. If a parity assertion fails, the message prints
 the golden (Python) value, Rust value, absolute delta, percent delta,
 tolerance, and status for each metric.

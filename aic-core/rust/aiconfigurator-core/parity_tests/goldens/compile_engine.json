@@ -2,9 +2,9 @@
   "header": {
     "command": "python aic-core/rust/aiconfigurator-core/parity_tests/regenerate_goldens.py",
     "engine_step_backend": "python",
-    "git_describe": "52f428e",
-    "git_head": "52f428e3387ad5952f877ae138998272f7aaa607",
-    "reference_count": 47,
+    "git_describe": "57a18a90",
+    "git_head": "57a18a90d659df9ddbe700d504d8ef0db3378e7b",
+    "reference_count": 53,
     "thread_caps": {
       "MKL_NUM_THREADS": "1",
       "NUMEXPR_NUM_THREADS": "1",
@@ -15,8 +15,8 @@
   },
   "references": {
     "chunked_prefill::ctx300_gen7_isl1000_osl64_prefix100::mixed_step": 21.17940829999926,
-    "chunked_prefill::ctx512_gen4_isl4096_osl128_prefix0::mixed_step": 24.46939386663115,
-    "chunked_prefill::ctx512_gen4_isl4096_osl128_prefix256::mixed_step": 24.46769330669942,
+    "chunked_prefill::ctx512_gen4_isl4096_osl128_prefix0::mixed_step": 24.469393866631147,
+    "chunked_prefill::ctx512_gen4_isl4096_osl128_prefix256::mixed_step": 24.467693306699417,
     "gpt-oss-20b-b200-trtllm-130rc10-isl1024-osl2::decode_step": 2.3092604195061406,
     "gpt-oss-20b-b200-trtllm-130rc10-isl1024-osl2::mixed_step": 12.304908511632803,
     "gpt-oss-20b-b200-trtllm-130rc10-isl1024-osl2::static_ctx": 11.930530156576555,
@@ -30,11 +30,11 @@
     "kimi-k25-b200-sglang-0510-isl1024-osl2::static_ctx": 161.92707964076595,
     "kimi-k25-b200-sglang-0510-isl1024-osl2::static_gen": 9.217910242716439,
     "kimi-k25-b200-vllm-019-isl1024-osl2::decode_step": 13.162053953949238,
-    "kimi-k25-b200-vllm-019-isl1024-osl2::mixed_step": 160.744987226646,
+    "kimi-k25-b200-vllm-019-isl1024-osl2::mixed_step": 160.74498722664603,
     "kimi-k25-b200-vllm-019-isl1024-osl2::static_ctx": 160.74293744121107,
     "kimi-k25-b200-vllm-019-isl1024-osl2::static_gen": 13.162036082855488,
     "minimax-m25-b200-sglang-0510-isl1024-osl2::decode_step": 6.687690244940993,
-    "minimax-m25-b200-sglang-0510-isl1024-osl2::mixed_step": 30.134022806499893,
+    "minimax-m25-b200-sglang-0510-isl1024-osl2::mixed_step": 30.13402280649989,
     "minimax-m25-b200-sglang-0510-isl1024-osl2::static_ctx": 29.561798442410005,
     "minimax-m25-b200-sglang-0510-isl1024-osl2::static_gen": 6.68769288962382,
     "minimax-m25-b200-vllm-019-isl1024-osl2::decode_step": 6.297107075813486,
@@ -50,7 +50,7 @@
     "minimax-m27-b200-vllm-019-isl1024-osl2::static_ctx": 34.8649877552443,
     "minimax-m27-b200-vllm-019-isl1024-osl2::static_gen": 6.297053826855687,
     "nemotron-nas-b200-trtllm-130rc10-isl1024-osl2::decode_step": 4.879157060157568,
-    "nemotron-nas-b200-trtllm-130rc10-isl1024-osl2::mixed_step": 25.03670932896598,
+    "nemotron-nas-b200-trtllm-130rc10-isl1024-osl2::mixed_step": 25.036709328965976,
     "nemotron-nas-b200-trtllm-130rc10-isl1024-osl2::static_ctx": 24.458457258032528,
     "nemotron-nas-b200-trtllm-130rc10-isl1024-osl2::static_gen": 4.879159357026289,
     "qwen3-30b-a3b-b200-vllm-019-isl1024-osl2::decode_step": 3.4504225465136176,
@@ -60,6 +60,12 @@
     "qwen3-30b-a3b-b200-vllm-022-power::decode_step": 3.314493163403432,
     "qwen3-30b-a3b-b200-vllm-022-power::mixed_step": 15.364723323911948,
     "qwen3-30b-a3b-b200-vllm-022-power::static_ctx": 14.939366024779778,
-    "qwen3-30b-a3b-b200-vllm-022-power::static_gen": 3.3144931673015763
+    "qwen3-30b-a3b-b200-vllm-022-power::static_gen": 3.3144931673015763,
+    "wideep_sglang::decode_step": 11.651700656031192,
+    "wideep_sglang::mixed_step": 102.11955248944133,
+    "wideep_sglang::static_ctx": 99.42331852569644,
+    "wideep_sglang::static_gen": 32.82787657651461,
+    "wideep_trtllm::static_ctx": 80.41054370779536,
+    "wideep_trtllm::static_gen": 48.217231523625635
   }
 }

@@ -57,6 +57,7 @@ from aiconfigurator_core.sdk.operations import (
     Embedding,
     EncoderAttention,
     FallbackOp,
+    FPMForwardOp,
     GDNKernel,
     GenerationAttention,
     GenerationDeepSeekV4AttentionModule,
@@ -107,7 +108,17 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   `native_num_heads` (always serialized — bincode decodes positionally).
 # - 6: `Kda` op variant appended (Kimi-K3 KDA kernels; draft_tokens field).
 #   Claimed version 5 concurrently with #1460; renumbered at the merge.
-ENGINE_SPEC_SCHEMA_VERSION = 6
+# - 7: `MoEDispatchOp` gained `attn_ar_modeled` (always serialized — bincode
+#   decodes positionally).
+# - 8: `GemmOp` gained `below_grid_sol` (always serialized — bincode decodes
+#   positionally).
+# - 9: the Rust `Op::FpmForward` whole-model variant (forward_model="fpm").
+#   Claimed 5, 7 and 8 concurrently with other landings; renumbered at each
+#   merge (same precedent as the v3/v4 collision).
+# - 10 (issue #1498): `Mhc` payload gained `seq_split` (CP per-rank token
+#   division) — a bincode op-layout change. Claimed 7 concurrently with
+#   `attn_ar_modeled`; renumbered at the rebase.
+ENGINE_SPEC_SCHEMA_VERSION = 10
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)
@@ -149,6 +160,7 @@ def _gemm(op: GEMM) -> dict:
         "scale_num_tokens": op._scale_num_tokens,
         "low_precision_input": op._low_precision_input,
         "seq_split": op._seq_split,
+        "below_grid_sol": op._below_grid_sol,
     }
 
 
@@ -324,6 +336,7 @@ def _moe_dispatch(op: MoEDispatch, *, backend: str) -> dict:
         "moe_ep_size": op._moe_ep_size,
         "attention_dp_size": op._attention_dp_size,
         "pre_dispatch": op._pre_dispatch,
+        "attn_ar_modeled": op._attn_ar_modeled,
         "backend": backend,
         "flavor": _dispatch_flavor(backend, op),
         # DeepEP branches divide the dispatch token count by this (Python
@@ -515,6 +528,9 @@ def _mhc_module(op: DeepSeekV4MHCModule, *, architecture: str) -> dict:
         # anchor; mirrors `_query_mhc_table.get_sol`).
         "sinkhorn_iters": op._sinkhorn_iters,
         "quant_mode": _quant_name(op._quant_mode),
+        # CP: token-major module, per-rank tokens = ceil(x / seq_split)
+        # (issue #1498 — the missing division was the DSV4 CSA CP divergence).
+        "seq_split": op._seq_split,
     }
 
 
@@ -653,6 +669,27 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
                 "name": op._name,
                 "primary": recurse(op._primary),
                 "fallback": [recurse(c) for c in op._fallback],
+            }
+        }
+
+    # Whole-model FPM op (forward_model="fpm"): recursive like the composites —
+    # `sol_ops` carries the model's original granular list as the roofline
+    # source. The identity strings were normalized by _norm_identity at op
+    # construction; Rust compares them verbatim.
+    if isinstance(op, FPMForwardOp):
+        if op._sol_ops is None:
+            raise OpConversionError(
+                "FPMForwardOp with an injected sol_fn cannot compile to an EngineSpec; "
+                "build the model through get_model (sol_ops) instead."
+            )
+        return {
+            "FpmForward": {
+                "name": op._name,
+                "phase": op._phase,
+                "model_path": op._model_path,
+                "match_identity": list(op._match_identity),
+                "weight_bytes": op._weight_bytes,
+                "sol_ops": [recurse(c) for c in op._sol_ops],
             }
         }
 
@@ -912,6 +949,7 @@ def compile_engine(
     nextn: int = 0,
     kv_block_size: int | None = None,
     systems_path: str | None = None,
+    forward_model: str | None = None,
 ) -> bytes:
     """Compile a model into bincoded ``EngineSpec`` bytes.
 
@@ -936,6 +974,7 @@ def compile_engine(
         fmha_quant_mode=fmha_quant_mode,
         moe_quant_mode=moe_quant_mode,
         comm_quant_mode=comm_quant_mode,
+        forward_model=forward_model,
     )
     # Apply MTP BEFORE get_model so the walked op lists carry the
     # (L+nextn)/L compute scale; accepted-token progress is applied above core.
