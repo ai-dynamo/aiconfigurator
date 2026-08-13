@@ -1189,28 +1189,28 @@
     "minimax-m3-b200-sglang-0514-hybrid-xop": {
       "agg": {
         "values": {
-          "agg_request": 121.80698536871574,
-          "agg_tpot": 41.2905035148189,
-          "agg_ttft": 80.51648185389685
+          "agg_request": 166.5146849856586,
+          "agg_tpot": 56.445655927341896,
+          "agg_ttft": 110.0690290583167
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 85.485,
-          "disagg_tpot": 7.295,
-          "disagg_ttft": 78.19
+          "disagg_request": 118.749,
+          "disagg_tpot": 10.627,
+          "disagg_ttft": 108.122
         }
       },
       "mixed": {
         "values": {
-          "mixed_step": 41.17683951536419
+          "mixed_step": 56.31369489762832
         }
       },
       "static": {
         "values": {
-          "static_ctx": 39.49,
-          "static_gen": 2.994,
-          "static_total": 42.484
+          "static_ctx": 54.608,
+          "static_gen": 7.84,
+          "static_total": 62.44799999999999
         }
       }
     },
@@ -2334,8 +2334,8 @@
     "case_count": 94,
     "command": "python aic-core/rust/aiconfigurator-core/parity_tests/regenerate_goldens.py",
     "engine_step_backend": "python",
-    "git_describe": "57a18a90",
-    "git_head": "57a18a90d659df9ddbe700d504d8ef0db3378e7b",
+    "git_describe": "d21e24e5",
+    "git_head": "d21e24e53be49af9c4630042d7e3f7879efc95ed",
     "surface_count": 348,
     "thread_caps": {
       "MKL_NUM_THREADS": "1",
