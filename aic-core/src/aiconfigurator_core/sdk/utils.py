@@ -759,7 +759,6 @@ def _parse_hf_config_json(config: dict) -> dict:
             # All attention dims are uniform (0 → fall back to model-level defaults).
             sliding_window_size=config.get("attention_chunk_size", 0),
             dense_inter_size=config.get("intermediate_size_mlp", 0),
-            use_qk_norm=bool(config.get("use_qk_norm", False)),
             vision_config=llama4_vision_config,
         )
         logger.info(

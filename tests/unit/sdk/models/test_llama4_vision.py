@@ -49,6 +49,9 @@ def test_checkpoint_configs_preserve_text_and_exact_vision_shapes(model_id, num_
     assert isinstance(hybrid, common.HybridMoEConfig)
     assert sum(hybrid.moe_layer_freq) == moe_layers
     assert hybrid.moe_layer_freq.count(0) == dense_layers
+    # AIC-1740 adds the vision phase without changing the established Llama 4
+    # hybrid-MoE text model (whose Rust parity goldens predate this feature).
+    assert not hybrid.use_qk_norm
 
     vision = hybrid.vision_config
     assert isinstance(vision, common.VisionEncoderConfig)
