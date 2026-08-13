@@ -22,7 +22,8 @@ def test_should_use_rust_engine_step_supports_runtime_config_and_env(monkeypatch
 
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig())
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="rust"))
-    # The retired escape hatch is a deprecation no-op: it still routes rust.
+    # The retired escape hatch is a deprecation no-op: the config value is
+    # ignored and the env's "rust" wins the re-resolution.
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"))
 
 
@@ -53,6 +54,13 @@ def test_python_backend_value_warns_once_and_noops(monkeypatch, caplog) -> None:
     assert len(deprecations) == 1
     # A no-op is not a python-step use: telemetry must not count it.
     assert "explicit_python" not in rust_engine_step.python_step_fallback_counts()
+    # "No-op" means AS IF UNSET — the non-PerfDatabase delegation still
+    # applies (an early True would upgrade the retired escape hatch into an
+    # explicit-rust request and bypass the synthetic-database delegation).
+    assert not rust_engine_step.should_use_rust_engine_step(
+        RuntimeConfig(engine_step_backend="python"),
+        SimpleNamespace(system="mock", backend="vllm", version="1.0.0"),
+    )
 
 
 def _real_database():

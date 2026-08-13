@@ -314,15 +314,25 @@ def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = N
     left to delegate to).
 
     ``engine_step_backend="python"`` (config or env) is a deprecated no-op:
-    it warns once and routes to the compiled engine anyway, retained one
-    release cycle. Any other unknown value raises — silently computing on an
-    engine the caller did not ask for would be worse than failing.
+    it warns once and then behaves exactly as if the value were UNSET —
+    including the non-``PerfDatabase`` delegation below (an early ``return
+    True`` here would silently upgrade the retired escape hatch into an
+    explicit-rust request and bypass the synthetic-database delegation).
+    Retained one release cycle. Any other unknown value raises — silently
+    computing on an engine the caller did not ask for would be worse than
+    failing.
     """
     backend = getattr(runtime_config, "engine_step_backend", None) or os.environ.get(ENGINE_STEP_BACKEND_ENV)
     requested = str(backend).lower() if backend else None
     if requested == "python":
         _warn_python_backend_deprecated(requested)
-        return True
+        # The no-op contract: ignore the retired value entirely and
+        # re-resolve the remaining signal (a config-level "python" no longer
+        # shadows the env), then proceed as if it were never set.
+        env_value = os.environ.get(ENGINE_STEP_BACKEND_ENV)
+        requested = str(env_value).lower() if env_value else None
+        if requested == "python":
+            requested = None
     if requested is not None and requested != "rust":
         raise ValueError(
             f"unknown engine_step_backend {backend!r}: the compiled Rust engine is the only "
