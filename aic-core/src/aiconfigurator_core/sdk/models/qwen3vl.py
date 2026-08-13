@@ -7,7 +7,8 @@ from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
 from aiconfigurator_core.sdk.models.llama import LLAMAModel
 from aiconfigurator_core.sdk.models.moe import MOEModel
-from aiconfigurator_core.sdk.models.vit_ops import build_encoder_ops
+
+from .blocks.vit import build_encoder_ops
 
 
 @register_model("QWEN3VL")

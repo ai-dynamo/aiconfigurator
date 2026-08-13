@@ -49,6 +49,12 @@ class ModelConfig:
     # fpm_forward op backed by collected forward-pass data (see
     # operations/fpm_forward.py). Validated in models.get_model.
     forward_model: str = "op_level"
+    # internal — per-phase comm backend {"context": ..., "generation": ...}; set by the enumerator, never a user flag
+    moe_comm_backend: dict | None = None
+    # internal — set alongside moe_comm_backend by the enumerator (system topology).
+    # No default: a wrong node width silently mis-prices cross-node all-to-all, so
+    # large-EP construction raises when it is missing (models.helpers.large_ep_gpus_per_node).
+    num_gpus_per_node: int | None = None
 
     def resolve_moe_parallelism(self) -> tuple[int, int]:
         """Resolve and validate MoE parallelism dimensions in-place.

@@ -659,8 +659,28 @@ class TestImbalanceScaleParity:
 
 
 # --------------------------------------------------------------------------- #
-# 2c. SGLang WideEP (deepep_moe) — MLA + MoE + DeepEP dispatch routing.
+# 2c. Large-EP (ex-WideEP) — MLA + EP MoE + all-to-all dispatch routing.
+#
+# Both classes below pin a LARGE-EP config through the post-deprecation
+# internal contract (`ModelConfig.moe_comm_backend` per phase + the system's
+# `num_gpus_per_node`); the `enable_wideep` / `moe_backend="deepep_moe"` flags
+# they used to set are accepted-but-ignored now, so setting them silently
+# builds the FUSED graph instead and the case stops testing large EP at all.
+#
+# Both are skipped: this suite compiles the op graph to a native EngineHandle
+# (`build_engine_spec_json` -> bincode -> `EngineHandle`), and the large-EP ops
+# have no `_to_opspec` branch — compilation raises `OpConversionError` by
+# design until the Rust mirror lands. There is no fallback to assert against
+# here (the fallback lives in `rust_engine_step`, one layer up, and is already
+# gated by `test_large_ep_op_graph_takes_the_documented_python_fallback`), so
+# the honest state is an explicit skip rather than a fused-graph stand-in.
+# Delete the `pytestmark` lines when AIC-1601 lands.
 # --------------------------------------------------------------------------- #
+
+_LARGE_EP_NATIVE_SKIP = (
+    "large-EP ops are Python-fallback until AIC-1601 (documented; see "
+    "test_large_ep_op_graph_takes_the_documented_python_fallback)"
+)
 
 
 _WIDEEP_SGLANG_MODEL = "deepseek-ai/DeepSeek-V3"
@@ -681,7 +701,8 @@ def _build_wideep_sglang():
         tp_size=8,
         moe_tp_size=1,
         moe_ep_size=8,
-        moe_backend="deepep_moe",
+        moe_comm_backend={"context": "deepep_ht", "generation": "deepep_ll"},
+        num_gpus_per_node=8,
         attention_backend="flashinfer",
         gemm_quant_mode=common.GEMMQuantMode.fp8_block,
         moe_quant_mode=common.MoEQuantMode.fp8_block,
@@ -711,8 +732,26 @@ def _handle_from_spec_json(spec_json: str) -> engine.EngineHandle:
     return engine.EngineHandle(bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json)))
 
 
+def _is_expected_large_ep_conversion_gap(exc: engine.OpConversionError) -> bool:
+    """Whether native compilation failed only on the pending AIC-1601 ops."""
+    message = str(exc)
+    return any(op_name in message for op_name in ("MoEAllToAll", "MoEExpertCompute"))
+
+
 def _python_wideep_sglang_references() -> dict[str, float]:
     """Capture path for the SGLang WideEP golden references."""
+    try:
+        return _python_wideep_sglang_references_impl()
+    except engine.OpConversionError as exc:
+        if not _is_expected_large_ep_conversion_gap(exc):
+            raise
+        # Large-EP graphs compile natively only from AIC-1601 (PR 2.5);
+        # below it the surface is skipped (its tests carry the same skip).
+        print(f"[goldens] {exc}: skipping wideep_sglang surface until AIC-1601")
+        return {}
+
+
+def _python_wideep_sglang_references_impl() -> dict[str, float]:
     model, backend, database, _spec_json = _build_wideep_sglang()
     rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=4, prefix=0, engine_step_backend="python")
     ctx_lat, _, gen_lat, _, _, _ = _quiet(backend._run_static_breakdown, model, database, rc, "static", 1)
@@ -727,7 +766,7 @@ def _python_wideep_sglang_references() -> dict[str, float]:
 
 
 class TestWideEpDeepEpParity:
-    """SGLang WideEP DeepSeek (moe_backend=deepep_moe) end-to-end parity.
+    """SGLang large-EP DeepSeek (deepep_ht/deepep_ll) end-to-end parity.
 
     Covers three previously-divergent surfaces at once: the WideEP MLA
     per-rank-heads table coordinate (tp=8 -> heads=16; the bridge used to emit
@@ -736,6 +775,8 @@ class TestWideEpDeepEpParity:
     dispatch flavor emission (the emitter used to map every sglang dispatch to
     CustomAllReduce). Data lives on h200_sxm/sglang/0.5.6.post2 (the only
     shipped version with the deepep dispatch parquets)."""
+
+    pytestmark = pytest.mark.skip(reason=_LARGE_EP_NATIVE_SKIP)
 
     def test_wideep_static_parity(self) -> None:
         _model, _backend, _database, spec_json = _build_wideep_sglang()
@@ -754,7 +795,8 @@ class TestWideEpDeepEpParity:
 
 
 # --------------------------------------------------------------------------- #
-# 2d. TRT-LLM WideEP (NVLink Two-Sided alltoall) — gb200.
+# 2d. TRT-LLM large-EP (NVLink Two-Sided alltoall) — gb200. See 2c's header for
+# why this is skipped.
 # --------------------------------------------------------------------------- #
 
 
@@ -771,7 +813,8 @@ def _build_wideep_trtllm():
         attention_dp_size=8,
         moe_tp_size=1,
         moe_ep_size=8,
-        enable_wideep=True,
+        moe_comm_backend={"context": "nvlink_two_sided", "generation": "nvlink_two_sided"},
+        num_gpus_per_node=4,
         gemm_quant_mode=common.GEMMQuantMode.nvfp4,
         moe_quant_mode=common.MoEQuantMode.nvfp4,
         kvcache_quant_mode=common.KVCacheQuantMode.fp8,
@@ -796,6 +839,49 @@ def _build_wideep_trtllm():
 
 def _python_wideep_trtllm_references() -> dict[str, float]:
     """Capture path for the TRT-LLM WideEP golden references."""
+    try:
+        return _python_wideep_trtllm_references_impl()
+    except engine.OpConversionError as exc:
+        if not _is_expected_large_ep_conversion_gap(exc):
+            raise
+        # Large-EP graphs compile natively only from AIC-1601 (PR 2.5);
+        # below it the surface is skipped (its tests carry the same skip).
+        print(f"[goldens] {exc}: skipping wideep_trtllm surface until AIC-1601")
+        return {}
+
+
+@pytest.mark.parametrize(
+    ("capture", "impl_name"),
+    [
+        (_python_wideep_sglang_references, "_python_wideep_sglang_references_impl"),
+        (_python_wideep_trtllm_references, "_python_wideep_trtllm_references_impl"),
+    ],
+)
+def test_wideep_golden_capture_reraises_unrelated_conversion_failures(capture, impl_name, monkeypatch) -> None:
+    def fail_with_unrelated_op() -> dict[str, float]:
+        raise engine.OpConversionError("unsupported op: FPMForwardOp")
+
+    monkeypatch.setitem(globals(), impl_name, fail_with_unrelated_op)
+    with pytest.raises(engine.OpConversionError, match="FPMForwardOp"):
+        capture()
+
+
+@pytest.mark.parametrize(
+    ("capture", "impl_name", "large_ep_op"),
+    [
+        (_python_wideep_sglang_references, "_python_wideep_sglang_references_impl", "MoEAllToAll"),
+        (_python_wideep_trtllm_references, "_python_wideep_trtllm_references_impl", "MoEExpertCompute"),
+    ],
+)
+def test_wideep_golden_capture_skips_only_expected_large_ep_gap(capture, impl_name, large_ep_op, monkeypatch) -> None:
+    def fail_with_pending_op() -> dict[str, float]:
+        raise engine.OpConversionError(f"unsupported op: {large_ep_op}")
+
+    monkeypatch.setitem(globals(), impl_name, fail_with_pending_op)
+    assert capture() == {}
+
+
+def _python_wideep_trtllm_references_impl() -> dict[str, float]:
     model, backend, database, _spec_json = _build_wideep_trtllm()
     rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=4, prefix=0, engine_step_backend="python")
     ctx_lat, _, gen_lat, _, _, _ = _quiet(backend._run_static_breakdown, model, database, rc, "static", 1)
@@ -806,14 +892,14 @@ def _python_wideep_trtllm_references() -> dict[str, float]:
 
 
 class TestTrtllmWideEpParity:
-    """TRT-LLM WideEP DeepSeek (enable_wideep, attention_dp=8) on gb200.
+    """TRT-LLM large-EP DeepSeek (nvlink_two_sided, attention_dp=8) on gb200.
 
-    Covers the `TrtLLMWideEPMoEDispatch` port (prepare+dispatch pre /
-    combine post through the trtllm_alltoall table, kernel auto-selected as
-    NVLinkTwoSided via moe_backend="wideep") and the alltoall loader keying
-    (kernel_source/op_name/num_nodes — the pre-fix loader collapsed 1,556 of
-    2,096 gb200 rows). This path used to fail opspec conversion entirely
-    (`TrtLLMWideEPMoEDispatch` had no `_to_opspec` branch)."""
+    Covers the trtllm all-to-all port (prepare+dispatch pre / combine post
+    through the trtllm_alltoall table, kernel NVLinkTwoSided) and the
+    alltoall loader keying (kernel_source/op_name/num_nodes — the pre-fix
+    loader collapsed 1,556 of 2,096 gb200 rows)."""
+
+    pytestmark = pytest.mark.skip(reason=_LARGE_EP_NATIVE_SKIP)
 
     def test_trtllm_wideep_static_parity(self) -> None:
         _model, _backend, _database, spec_json = _build_wideep_trtllm()

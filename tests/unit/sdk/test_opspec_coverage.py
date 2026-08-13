@@ -39,12 +39,15 @@ EXEMPT: dict[str, str] = {
     # Dead class: no model instantiates it (Mamba2Kernel is the live op and
     # converts). Remove the class or this entry together.
     "Mamba2": "dead code — never instantiated; Mamba2Kernel is the live op",
-    # Large-EP SDK foundation (AIC-1438 PR 1): no model instantiates this op
-    # yet — PR 2 wires the consumers. The _to_opspec branch, Rust mirror, and
-    # parity case land with that wiring; until then the op is unreachable
-    # from the engine step.
-    "MoEAllToAll": "large-EP op has no model consumer until PR 2; Rust mirror lands with the consumer wiring",
-    "MoEExpertCompute": "large-EP op has no model consumer until PR 2; Rust mirror lands with the consumer wiring",
+    # Large-EP ops (AIC-1438): PR 2 wired the consumers (models/blocks/moe.py
+    # emits them when the enumerator sets ModelConfig.moe_comm_backend), but
+    # the _to_opspec branch, Rust mirror, and parity case are deliberately
+    # deferred to AIC-1601 (PR 2.5). Until then a large-EP graph fails engine
+    # compilation with OpConversionError and the base_backend gates fall back
+    # to the Python step — the documented behavior pinned by
+    # test_rust_engine_step.py::test_large_ep_op_graph_takes_the_documented_python_fallback.
+    "MoEAllToAll": "large-EP consumer wired in PR 2; Rust port deferred to AIC-1601 (Python-step fallback until then)",
+    "MoEExpertCompute": "large-EP consumer wired in PR 2; Rust port deferred to AIC-1601 (Python fallback until then)",
 }
 
 

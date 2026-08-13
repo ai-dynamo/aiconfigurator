@@ -6,8 +6,11 @@
 Query semantics against an injected ``db._moe_a2a_data`` store (the
 ``__dict__``-gated bind in ``load_data`` honors pre-set attributes): token
 interpolation and scale_factor, comm_dtype fallback to the sole collected
-dtype, typed misses, phase/backend validation, and the silicon-only tier
-contract (SOL/SOL_FULL/EMPIRICAL raise ``EmpiricalNotImplementedError``).
+dtype, typed misses, phase/backend validation, the silicon-only tier
+contract (SOL/SOL_FULL/EMPIRICAL raise ``EmpiricalNotImplementedError``),
+the ``attention_tp_size`` token divide (legacy fidelity with MoEDispatch's
+``num_tokens // scale_num_tokens``), and the off-grid-sms 2-D interpolation
+path against the legacy ``query_wideep_deepep_normal`` oracle.
 
 The shipped-data section pins the comm-family placement: the legacy comm
 sources feeding ``load_moe_a2a_data`` resolve under the ``comm/`` family dir
@@ -17,12 +20,15 @@ and the comm hard-exclusion keeps them primary-only (design §6.5 rule 5).
 import os
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations import MoEAllToAll
 from aiconfigurator_core.sdk.operations.base import resolve_op_data_path
+from aiconfigurator_core.sdk.operations.moe import load_wideep_deepep_normal_data
+from aiconfigurator_core.sdk.operations.moe_comm import load_moe_a2a_data
 
 pytestmark = pytest.mark.unit
 
@@ -215,6 +221,91 @@ def test_hybrid_missing_slice_raises_empirical_not_implemented(a2a_db):
 
 
 # ---------------------------------------------------------------------------
+# attention_tp_size token divide (legacy fidelity: MoEDispatch applies
+# ``num_tokens // self._scale_num_tokens`` before its table lookups)
+# ---------------------------------------------------------------------------
+
+
+def test_attention_tp_size_divides_token_key(a2a_db):
+    # x=64 under attention_tp_size=2 must query the same 32-token key as x=32
+    # under the default.
+    scaled = _make_op(attention_tp_size=2).query(a2a_db, x=64)
+    assert float(scaled) == float(_make_op().query(a2a_db, x=32))
+    assert float(scaled) == pytest.approx(0.10, rel=1e-12)
+
+
+def test_attention_tp_size_uses_plain_floor_division(a2a_db):
+    # 65 // 2 = 32: plain floor exactly like the legacy divide (no rounding,
+    # no max(1, ...) guard).
+    assert float(_make_op(attention_tp_size=2).query(a2a_db, x=65)) == pytest.approx(0.10, rel=1e-12)
+
+
+def test_attention_tp_size_default_is_noop(a2a_db):
+    # Byte-for-byte: the default op and an explicit tp=1 op reproduce the
+    # pre-parameter midpoint lerp of the {32, 64} curve exactly.
+    default_result = _make_op().query(a2a_db, x=48)
+    explicit_result = _make_op(attention_tp_size=1).query(a2a_db, x=48)
+    assert float(default_result) == float(explicit_result)
+    assert default_result.energy == explicit_result.energy
+    assert float(default_result) == pytest.approx(0.15, rel=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Off-grid sms: 2-D (sms x tokens) interpolation vs the legacy oracle
+# ---------------------------------------------------------------------------
+
+
+def test_off_grid_sms_2d_interpolation_matches_legacy(stub_perf_db, tmp_path):
+    """Inherited off-grid-sms gate: sms=24 on a {16, 32} HT grid must take the
+    2-D (sms x tokens) interpolation path — strictly between the two grid
+    values at the same token count — and match the legacy
+    ``query_wideep_deepep_normal`` 2-D behavior on the same synthetic rows
+    (rel tolerance covers only the us-vs-ms rounding split; see the L1 sweep).
+    """
+    rows = []
+    for sms, base_us in ((16, 100.0), (32, 200.0)):
+        for tok, tok_scale in ((32, 1.0), (64, 2.0)):
+            rows.append(
+                {
+                    "node_num": 1,
+                    "hidden_size": 4096,
+                    "num_token": tok,
+                    "num_topk": 8,
+                    "num_experts": 64,
+                    "dispatch_sms": sms,
+                    "dispatch_transmit_us": base_us * tok_scale,
+                    "dispatch_notify_us": 10.0,
+                    "combine_transmit_us": 1.5 * base_us * tok_scale,
+                    "combine_notify_us": 20.0,
+                }
+            )
+    path = tmp_path / "wideep_deepep_normal_perf.parquet"
+    pd.DataFrame(rows).to_parquet(path, index=False)
+
+    # The same synthetic rows through both loaders; the ``__dict__`` gates in
+    # MoEAllToAll.load_data / MoEDispatch.load_data keep the injected tables.
+    stub_perf_db._moe_a2a_data = load_moe_a2a_data(
+        [(str(tmp_path / "moe_a2a_perf.parquet"), None)], legacy_normal_sources=[(str(path), None)]
+    )
+    stub_perf_db._wideep_deepep_normal_data = load_wideep_deepep_normal_data(str(path))
+
+    def unified(phase, sms):
+        # ep_size = node_num * 8 (legacy 8-GPU HGX fleets) at the collected
+        # 32-token point, so only the sms axis interpolates.
+        return float(stub_perf_db.query_moe_a2a("deepep_ht", phase, "default", 8, 1, 4096, 8, 64, 32, sms=sms))
+
+    for phase in ("dispatch", "combine"):
+        assert unified(phase, 16) < unified(phase, 24) < unified(phase, 32)
+
+    legacy = float(
+        stub_perf_db.query_wideep_deepep_normal(
+            node_num=1, num_tokens=32, num_experts=64, topk=8, hidden_size=4096, sms=24
+        )
+    )
+    assert unified("dispatch", 24) + unified("combine", 24) == pytest.approx(legacy, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
 # Validation and tier contract
 # ---------------------------------------------------------------------------
 
@@ -294,6 +385,58 @@ def test_shipped_legacy_comm_sources_resolve_in_comm_family_dir():
         assert [record["channel"] for record in records] == ["primary"]
         assert comm_dir_fragment in records[0]["path"]
         assert records[0]["exists"]
+
+
+@pytest.mark.skipif(
+    not os.path.exists(DEEPEP_NORMAL_PATH),
+    reason="shipped h200_sxm sglang 0.5.6.post2 DeepEP normal parquet not present",
+)
+def test_attention_tp_default_noop_on_shipped_l1_case():
+    """Rerun one L1 sweep case through the op: with the default
+    ``attention_tp_size`` the op must be byte-identical to the direct
+    ``query_moe_a2a`` lookup and reproduce the legacy DeepEP-normal query
+    (dispatch + combine) at the L1 tolerance."""
+    from aiconfigurator_core.sdk.perf_database import get_database
+
+    db = get_database("h200_sxm", "sglang", "0.5.6.post2")
+    assert db is not None
+
+    # First slice of the legacy table, deterministically (min at each level).
+    legacy_table = load_wideep_deepep_normal_data(DEEPEP_NORMAL_PATH)
+    assert legacy_table
+    node = min(legacy_table)
+    hidden = min(legacy_table[node])
+    topk = min(legacy_table[node][hidden])
+    experts = min(legacy_table[node][hidden][topk])
+    sms = min(legacy_table[node][hidden][topk][experts])
+    tok = min(legacy_table[node][hidden][topk][experts][sms])
+    ep = node * 8  # legacy 8-GPU HGX fleets
+
+    total = 0.0
+    for phase in ("dispatch", "combine"):
+        op = MoEAllToAll(
+            f"tp_noop_{phase}",
+            1.0,
+            phase=phase,
+            comm_backend="deepep_ht",
+            hidden_size=hidden,
+            topk=topk,
+            num_experts=experts,
+            moe_ep_size=ep,
+            node_num=node,
+            sms=sms,
+        )
+        op_value = float(op.query(db, x=tok))
+        direct = float(db.query_moe_a2a("deepep_ht", phase, "default", ep, node, hidden, topk, experts, tok, sms=sms))
+        assert op_value == direct  # default attention_tp_size: byte-identical no-op
+        total += op_value
+
+    legacy = float(
+        db.query_wideep_deepep_normal(
+            node_num=node, num_tokens=tok, num_experts=experts, topk=topk, hidden_size=hidden, sms=sms
+        )
+    )
+    assert total == pytest.approx(legacy, rel=1e-9)
 
 
 if __name__ == "__main__":
