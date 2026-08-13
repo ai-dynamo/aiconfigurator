@@ -53,6 +53,7 @@ def _build_model(attention_backend):
         32768,  # context_length
         model_config,
         _qwen35_config(),
+        backend_name="sglang",
     )
 
 
