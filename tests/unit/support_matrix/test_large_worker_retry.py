@@ -231,6 +231,17 @@ def test_metadata_failure_aborts_sequential_retry(monkeypatch):
 def test_metadata_failure_from_parallel_worker_is_not_retried(monkeypatch):
     combo = ("example/model", "b200_sxm", "vllm", "0.24.0")
 
+    class FakeProcess:
+        terminated = False
+
+        def is_alive(self):
+            return True
+
+        def terminate(self):
+            self.terminated = True
+
+    process = FakeProcess()
+
     class FailedFuture:
         def result(self):
             raise ModelMetadataError("metadata unavailable")
@@ -239,22 +250,27 @@ def test_metadata_failure_from_parallel_worker_is_not_retried(monkeypatch):
             return True
 
     class FakeExecutor:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
+        def __init__(self):
+            self._processes = {1: process}
+            self.shutdown_calls = []
 
         def submit(self, *_args):
             return FailedFuture()
+
+        def shutdown(self, *, wait, cancel_futures=False):
+            self.shutdown_calls.append((wait, cancel_futures))
 
     class FakeProgress:
         def update(self, _count):
             raise AssertionError("fatal metadata failures must not be counted as completed or retried")
 
     matrix = object.__new__(SupportMatrix)
-    monkeypatch.setattr(support_matrix_module, "ProcessPoolExecutor", lambda **_kwargs: FakeExecutor())
+    executor = FakeExecutor()
+    monkeypatch.setattr(support_matrix_module, "ProcessPoolExecutor", lambda **_kwargs: executor)
     monkeypatch.setattr(support_matrix_module, "as_completed", lambda futures: futures)
 
     with pytest.raises(ModelMetadataError, match="metadata unavailable"):
         matrix._run_parallel_combinations([combo], max_workers=1, pbar=FakeProgress())
+
+    assert process.terminated
+    assert executor.shutdown_calls == [(True, True)]

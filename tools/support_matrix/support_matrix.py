@@ -826,6 +826,23 @@ def _process_combination_worker(
     ]
 
 
+def _terminate_process_pool(executor: ProcessPoolExecutor) -> None:
+    """Stop active workers before shutting down a pool after a fatal error.
+
+    Python 3.10-3.13 do not expose ``terminate_workers()``, so use the
+    executor-owned process table rather than terminating unrelated active
+    children. The normal completion path continues to use graceful shutdown.
+    """
+    processes = list((getattr(executor, "_processes", None) or {}).values())
+    for process in processes:
+        try:
+            if process.is_alive():
+                process.terminate()
+        except Exception:
+            logger.exception("Failed to terminate support-matrix worker process %s", process.pid)
+    executor.shutdown(wait=True, cancel_futures=True)
+
+
 class SupportMatrix:
     """
     Helper to generate and validate the model/system/backend/version support matrix.
@@ -1252,10 +1269,12 @@ class SupportMatrix:
         retry_combos: set[tuple[str, str, str, str]] = set()
         processed_futures = set()
 
-        with ProcessPoolExecutor(
+        executor = ProcessPoolExecutor(
             max_workers=min(max_workers, len(combinations)),
             mp_context=_fork_ctx,
-        ) as executor:
+        )
+        pool_terminated = False
+        try:
             futures = {executor.submit(_process_combination_worker, combo): combo for combo in combinations}
             for future in as_completed(futures):
                 combo = futures[future]
@@ -1275,6 +1294,11 @@ class SupportMatrix:
                         backend,
                         version,
                     )
+                    pool_terminated = True
+                    try:
+                        _terminate_process_pool(executor)
+                    except Exception:
+                        logger.exception("Failed to cleanly terminate the support-matrix process pool")
                     raise
                 except BrokenExecutor:
                     logger.warning(
@@ -1303,6 +1327,9 @@ class SupportMatrix:
                     retry_combos.add(combo)
                     processed_futures.add(future)
                     pbar.update(1)
+        finally:
+            if not pool_terminated:
+                executor.shutdown(wait=True)
 
         return group_results, retry_combos
 

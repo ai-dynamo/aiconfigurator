@@ -372,17 +372,15 @@ def seed_entries(db_path: Path, entries: list[Entry]) -> int:
         # existing database records too so reports cannot keep certifying the
         # stale text-backbone run.
         coverage_by_model = {}
-        retired_keys = []
-        for entry_key, model in conn.execute("SELECT entry_key, model FROM entries"):
+        stored_entries = list(conn.execute("SELECT entry_key, model FROM entries"))
+        for entry_key, model in stored_entries:
             if model not in coverage_by_model:
                 coverage_by_model[model] = _get_encoder_coverage(model)
             coverage = coverage_by_model[model]
             if coverage.checkpoint_declares_encoder and not coverage.aic_encoder_implemented:
-                retired_keys.append(entry_key)
-        for entry_key in retired_keys:
-            conn.execute("DELETE FROM probe_results WHERE entry_key = ?", (entry_key,))
-            conn.execute("DELETE FROM pareto_results WHERE entry_key = ?", (entry_key,))
-            conn.execute("DELETE FROM entries WHERE entry_key = ?", (entry_key,))
+                conn.execute("DELETE FROM probe_results WHERE entry_key = ?", (entry_key,))
+                conn.execute("DELETE FROM pareto_results WHERE entry_key = ?", (entry_key,))
+                conn.execute("DELETE FROM entries WHERE entry_key = ?", (entry_key,))
 
         for entry in entries:
             if entry.image_workload is not None:

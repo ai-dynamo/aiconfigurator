@@ -28,6 +28,7 @@ from tools.support_matrix.support_matrix import (
     STATUS_PASS,
     SUPPORT_MATRIX_HEADER_WITH_SOURCE,
     SUPPORT_MATRIX_IMAGE_WORKLOAD,
+    EncoderCoverage,
     SupportMatrix,
     TestConstraints,
 )
@@ -222,7 +223,7 @@ def test_resumed_scan_retires_skipped_encoder_unsupported_result(tmp_path):
 
 def test_resumed_scan_fails_closed_when_encoder_coverage_is_unresolvable(tmp_path, monkeypatch):
     db_path = tmp_path / "scan.sqlite"
-    legacy_entry = Entry(
+    unsupported_entry = Entry(
         model="Qwen/Qwen3.5-27B",
         architecture="Qwen3_5ForConditionalGeneration",
         system="b200_sxm",
@@ -231,20 +232,63 @@ def test_resumed_scan_fails_closed_when_encoder_coverage_is_unresolvable(tmp_pat
         mode="agg",
         baseline_status=STATUS_PASS,
     )
-    init_db(db_path)
-    seed_entries(db_path, [legacy_entry])
-    monkeypatch.setattr(
-        "tools.support_matrix.scan_rust_parity._get_encoder_coverage",
-        lambda _model: (_ for _ in ()).throw(RuntimeError("metadata unavailable")),
+    unresolvable_entry = Entry(
+        model="example/unresolvable",
+        architecture="ExampleForCausalLM",
+        system="b200_sxm",
+        backend="vllm",
+        version="0.24.0",
+        mode="agg",
+        baseline_status=STATUS_PASS,
     )
+    init_db(db_path)
+    seed_entries(db_path, [unsupported_entry, unresolvable_entry])
+    with _connect(db_path) as conn:
+        for entry in (unsupported_entry, unresolvable_entry):
+            write_probe_record(
+                conn,
+                ProbeRecord(
+                    entry_key=entry.key,
+                    probe_shape="legacy-text-only",
+                    python_ttft_ms=1.0,
+                    python_tpot_ms=1.0,
+                    rust_ttft_ms=1.0,
+                    rust_tpot_ms=1.0,
+                    ttft_drift_pct=0.0,
+                    tpot_drift_pct=0.0,
+                    python_err=None,
+                    rust_err=None,
+                    status="PASS",
+                    duration_ms=1.0,
+                    completed_at="2026-01-01T00:00:00+00:00",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO pareto_results
+                    (entry_key, comparison_outcome, completed_at)
+                VALUES (?, ?, ?)
+                """,
+                (entry.key, PARETO_STATUS_STRICT_PASS, "2026-01-01T00:00:00+00:00"),
+            )
+
+    def resolve_coverage(model):
+        if model == unsupported_entry.model:
+            return EncoderCoverage(True, False, unsupported_entry.architecture)
+        raise RuntimeError("metadata unavailable")
+
+    monkeypatch.setattr("tools.support_matrix.scan_rust_parity._get_encoder_coverage", resolve_coverage)
 
     with pytest.raises(RuntimeError, match="metadata unavailable"):
         seed_entries(db_path, [])
 
-    # The failed retirement transaction leaves the database unchanged for an
-    # operator to diagnose; it is never reported by this aborted scan.
+    # The first entry and its results are retired before the second lookup
+    # fails. Closing the failed transaction must roll every mutation back.
     with _connect(db_path) as conn:
-        assert conn.execute("SELECT entry_key FROM entries").fetchall() == [(legacy_entry.key,)]
+        expected_keys = [(unsupported_entry.key,), (unresolvable_entry.key,)]
+        assert conn.execute("SELECT entry_key FROM entries ORDER BY rowid").fetchall() == expected_keys
+        assert conn.execute("SELECT entry_key FROM probe_results ORDER BY rowid").fetchall() == expected_keys
+        assert conn.execute("SELECT entry_key FROM pareto_results ORDER BY rowid").fetchall() == expected_keys
 
 
 def test_parity_probe_passes_image_arguments(monkeypatch):
