@@ -139,7 +139,10 @@ def _expand_literal(command: str, env: Mapping[str, str]) -> str:
             raise ValueError(f"environment variable {name!r} is shell-derived, not literal")
         return value
 
-    return _ENV_PATTERN.sub(replace, command)
+    expanded = _ENV_PATTERN.sub(replace, command)
+    if "$" in expanded:
+        raise ValueError("command contains an unsupported shell parameter expansion")
+    return expanded
 
 
 def _flags(command: str) -> dict[str, str | bool]:
@@ -565,7 +568,12 @@ def _discover_points(documents: Sequence[Mapping[str, Any]], overrides: AdapterO
     for document in documents:
         points = document.get("points")
         if isinstance(points, list):
-            explicit.extend(_point_from_mapping(point, len(explicit)) for point in points if isinstance(point, Mapping))
+            for point in points:
+                point_index = len(explicit)
+                if isinstance(point, Mapping):
+                    explicit.append(_point_from_mapping(point, point_index))
+                else:
+                    explicit.append(_Point(f"point-{point_index}", None, None, None))
     if explicit:
         return explicit
 
@@ -710,16 +718,26 @@ def _request_for_point(
         )
         systems = SystemSettingsV1(prefill=system, decode=overrides.decode_system_name or system)
 
+    speculative_flag_names = {"num-speculative-tokens", "speculative-num-steps", "speculative-token-num"}
     speculative_values = [
         _flag(service, "num-speculative-tokens", "speculative-num-steps", "speculative-token-num")
         for service in services
     ]
-    active_speculation = any(value not in (None, False, "0", 0) for value in speculative_values) or any(
-        any("specul" in key for key in service.flags) for service in services
-    )
+    speculative_enable_values = [
+        value
+        for service in services
+        for key, value in service.flags.items()
+        if "specul" in key and key not in speculative_flag_names
+    ]
+    speculation_disabled = {"", "0", "false", "none", "disabled"}
+
+    def speculation_enabled(value: Any) -> bool:
+        return value is not None and value is not False and str(value).lower() not in speculation_disabled
+
+    active_speculation = any(speculation_enabled(value) for value in (*speculative_values, *speculative_enable_values))
     if active_speculation and overrides.nextn_accepted is None:
         raise ValueError("speculative decoding requires an explicit nextn_accepted override")
-    source_nextn = next((value for value in speculative_values if value not in (None, False)), None)
+    source_nextn = next((value for value in speculative_values if speculation_enabled(value)), None)
     nextn = (
         overrides.nextn
         if overrides.nextn is not None
@@ -730,7 +748,7 @@ def _request_for_point(
     if free_fraction is None:
         raw_fraction = _runtime_value(
             services,
-            ("free-gpu-memory-fraction", "gpu-memory-utilization"),
+            ("free-gpu-memory-fraction", "gpu-memory-utilization", "mem-fraction-static"),
             ("kv_cache_config", "free_gpu_memory_fraction"),
         )
         free_fraction = _as_float(raw_fraction, "free GPU memory fraction") if raw_fraction is not None else None
@@ -738,7 +756,7 @@ def _request_for_point(
     if max_seq_len is None:
         raw_max_seq = _runtime_value(
             services,
-            ("max-model-len", "max-seq-len"),
+            ("max-model-len", "max-seq-len", "context-length"),
             ("max_seq_len",),
         )
         max_seq_len = _as_int(raw_max_seq, "max sequence length") if raw_max_seq is not None else None

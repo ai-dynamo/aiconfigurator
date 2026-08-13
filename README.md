@@ -197,6 +197,8 @@ an estimate. InferenceX DB records, DynamoGraphDeployments, and concrete
 `dynamo-ci` SGLang benchmark recipes are supported:
 
 ```python
+from pathlib import Path
+
 from aiconfigurator.sdk.config_adapter import (
     AdapterOverrides,
     DynamoRecipeSource,
@@ -205,7 +207,7 @@ from aiconfigurator.sdk.config_adapter import (
 )
 
 report = adapt_config(
-    DynamoRecipeSource("deploy.yaml", "perf.yaml"),
+    DynamoRecipeSource(Path("deploy.yaml"), Path("perf.yaml")),
     AdapterOverrides(system_name="h200_sxm"),
 )
 for request in report.requests:

@@ -227,6 +227,24 @@ def test_sglang_dp_attention_world_size_maps_to_attention_dp():
     assert outcome.request.topology.worker.batch_size == 4
 
 
+def test_sglang_runtime_flags_are_preserved():
+    deployment = _agg_yaml("sglang", args_as_string=True).replace(
+        "--gpu-memory-utilization 0.9",
+        "--mem-fraction-static 0.73 --context-length 4096",
+    )
+    outcome = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=8),
+    ).outcomes[0]
+
+    assert outcome.request is not None
+    assert outcome.request.runtime.free_gpu_memory_fraction == 0.73
+    assert outcome.request.runtime.max_seq_len == 4096
+    kwargs = to_cli_estimate_kwargs(outcome.request)
+    assert kwargs["free_gpu_memory_fraction"] == 0.73
+    assert kwargs["max_seq_len"] == 4096
+
+
 def test_extra_engine_args_selects_one_file_from_multi_file_configmap():
     deployment = """
 kind: ConfigMap
@@ -355,6 +373,25 @@ def test_multiple_points_preserve_order_and_rejections():
     ]
     assert len(report.requests) == 1
     assert len(report.rejections) == 1
+
+
+def test_malformed_explicit_point_preserves_order_and_rejection():
+    performance = {
+        "points": [
+            {"point_id": "first", "isl": 1024, "osl": 128, "concurrency": 8},
+            "malformed",
+            {"point_id": "last", "isl": 2048, "osl": 256, "concurrency": 16},
+        ]
+    }
+
+    report = adapt_config(DynamoRecipeSource(_agg_yaml(), performance))
+
+    assert [(outcome.point_id, outcome.status) for outcome in report.outcomes] == [
+        ("first", "adapted"),
+        ("point-1", "rejected"),
+        ("last", "adapted"),
+    ]
+    assert "workload ISL must be an integer" in report.outcomes[1].diagnostics[-1].message
 
 
 def test_explicit_workload_points_override_perf_points():
@@ -520,6 +557,50 @@ def test_missing_system_and_arbitrary_shell_values_are_rejected():
     assert "system is missing" in system_outcome.diagnostics[-1].message
     assert shell_outcome.status == "rejected"
     assert "shell-derived" in shell_outcome.diagnostics[-1].message
+
+
+@pytest.mark.parametrize("shell_parameter", ["${MODEL_PATH:-QWEN/QWEN3-32B}", "$1"])
+def test_shell_parameter_expansions_are_rejected(shell_parameter):
+    deployment = _agg_yaml(args_as_string=True).replace("$MODEL_PATH", shell_parameter)
+
+    outcome = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=8),
+    ).outcomes[0]
+
+    assert outcome.status == "rejected"
+    assert "unsupported shell parameter expansion" in outcome.diagnostics[-1].message
+
+
+def test_zero_speculative_depth_remains_disabled():
+    deployment = _agg_yaml(args_as_string=True).replace(
+        "--gpu-memory-utilization 0.9",
+        "--num-speculative-tokens 0 --gpu-memory-utilization 0.9",
+    )
+
+    outcome = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=8),
+    ).outcomes[0]
+
+    assert outcome.request is not None
+    assert outcome.request.model.nextn == 0
+    assert outcome.request.model.nextn_accepted is None
+
+
+def test_speculative_model_flag_remains_active():
+    deployment = _agg_yaml(args_as_string=True).replace(
+        "--gpu-memory-utilization 0.9",
+        "--speculative-model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.9",
+    )
+
+    outcome = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=8),
+    ).outcomes[0]
+
+    assert outcome.status == "rejected"
+    assert "nextn_accepted" in outcome.diagnostics[-1].message
 
 
 def test_dynamo_ci_concrete_recipe_expands_points_and_maps_topology():
