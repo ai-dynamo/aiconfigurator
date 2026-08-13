@@ -138,6 +138,8 @@ def test_enumerate_dense_cp_sweep():
 
 def test_enumerate_moe_cp_width_match():
     # tp*cp*dp == moe_tp*moe_ep : tp1 cp8 dp1 == 1*8.
+    # (enable_wideep=True dropped: the deprecated flag is ignored by
+    # enumerate_parallel_config and was incidental to the CP-width intent.)
     r = enumerate_parallel_config(
         num_gpu_list=[8],
         tp_list=[1],
@@ -148,7 +150,6 @@ def test_enumerate_moe_cp_width_match():
         cp_list=[1, 8],
         is_moe=True,
         backend=common.BackendName.sglang,
-        enable_wideep=True,
     )
     assert [1, 1, 1, 1, 8, 8] in r
     assert [1, 1, 1, 1, 8, 1] not in r  # cp1 -> attn_width 1 != moe_ep 8

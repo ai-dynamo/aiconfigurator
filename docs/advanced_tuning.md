@@ -37,7 +37,9 @@ agg_full:
   osl: 1000
   ttft: 1000.0
   tpot: 40.0
-  enable_wideep: false
+  # Large-EP (wideEP) is explored automatically when perf data covers the model
+  # shape; restrict with *_moe_ep_candidates (see "large-EP exploration" below).
+  moe_backend: null
   # Speculative decoding (MTP): opt-in only; nextn_accepted is required
   # when nextn > 0 and must lie in [0, nextn].
   nextn: 1
@@ -67,12 +69,14 @@ disagg_full:
   # MTP is opt-in; nextn_accepted required when nextn > 0, in [0, nextn].
   nextn: 1
   nextn_accepted: 0.85
+  # MoE kernel backend (shared). Large-EP (wideEP) is explored automatically
+  # when perf data covers the model shape; restrict with *_moe_ep_candidates.
+  moe_backend: null
 
   # --- Prefill worker ---
   prefill_model_path: deepseek-ai/DeepSeek-V3
   prefill_system_name: h200_sxm
   prefill_backend_name: trtllm
-  prefill_enable_wideep: false
   prefill_gemm_quant_mode: fp8_block
   prefill_moe_quant_mode: fp8_block
   prefill_kvcache_quant_mode: bfloat16
@@ -89,7 +93,6 @@ disagg_full:
   decode_model_path: deepseek-ai/DeepSeek-V3
   decode_system_name: h200_sxm
   decode_backend_name: trtllm
-  decode_enable_wideep: false
   decode_gemm_quant_mode: fp8_block
   decode_moe_quant_mode: fp8_block
   decode_kvcache_quant_mode: bfloat16
@@ -149,6 +152,17 @@ Here's the pseudo code about how we enumerate valid configs based on the various
 ```
 All the valid combinations will print a line of log for each like this: `Enumerated Disagg decode parallel config: tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1`  
 We will then find a best one among these enumrations.
+### large-EP (wideEP) exploration
+Large-EP — multi-node, EP-only MoE parallelism, formerly gated behind the `enable_wideep` flag — no longer has a switch. For every MoE model, aiconfigurator probes whether the role's performance database covers the model's MoE shape (the MoE all-to-all dispatch/combine data plus the EP compute data, under the resolved `moe_quant_mode`). When it does, the default search lists are widened with a multi-node EP ladder (`moe_ep` up to 64) and the large-EP tuples compete with the fused configs inside the same search; the MoE communication backend is resolved per tuple from data coverage.
+
+When the shape is not covered, large-EP exploration stays off for that model/system and a one-time INFO log tells you exactly what to collect:
+```
+large-EP exploration is OFF for deepseek-ai/DeepSeek-V3 on h200_sxm/trtllm: no MoE all-to-all + EP-compute coverage for this model shape (hidden=7168, topk=8, experts=256) under moe_quant_mode=fp8_block. Run the moe_a2a and moe_ep collectors for this model/system to enable it; the fused (small-EP) path is unaffected.
+```
+Run the named collectors (see `collector/`) for the model/system to enable it — no config change is needed afterwards.
+
+To restrict or force EP sizes, set `*_moe_ep_candidates` explicitly: `decode_moe_ep_candidates: [16, 32, 64]` pins decode to large-EP tuples only, while `[1, 2, 4, 8]` keeps the search single-node. The deprecated keys (`enable_wideep`, `prefill_enable_wideep`, `decode_enable_wideep`, `moe_backend: deepep_moe`) are still accepted with a one-time warning and have no modeling effect; the one search-default residue is on SGLang, where spelling them still narrows the *default* `moe_tp` candidates to `[1]` — an explicit `*_moe_tp_candidates` list always wins.
+The recommend-mode CLI spellings `--enable-wideep` and `--moe-backend deepep_moe` follow the same deprecated-and-ignored behavior.
 ## advanced tuning config
 The final tuning config is for some correction and deployment purpose.  
 `prefill_latency_correction` / `decode_latency_correction` scale the predicted prefill/decode worker perf. If you find the predicted latency too optimistic, set a factor to make it more realistic: `latency_corrected = latency_predicted * latency_correction`. This adjusts the generated configs for better alignment with real deployment.  

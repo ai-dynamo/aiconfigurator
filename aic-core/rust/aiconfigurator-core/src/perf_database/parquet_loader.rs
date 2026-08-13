@@ -236,6 +236,17 @@ impl PerfRow {
         ))
     }
 
+    /// BOOLEAN column with NO type coercion: identity flags (FPM schema v6
+    /// `enable_*`) must be real booleans — Python's loader rejects anything
+    /// else, so coercing a stringly-typed flag here would silently diverge
+    /// from it. A type mismatch is a loud data bug.
+    pub fn bool_strict(&self, col: usize) -> Result<bool, AicError> {
+        self.row.get_bool(col).map_err(|source| AicError::Parquet {
+            path: self.path.clone(),
+            source,
+        })
+    }
+
     /// Optional double. Returns None when the column lookup is None OR the
     /// cell is null. Used by dispatch tables whose split-latency columns
     /// can legitimately be absent for one mode of the schema (DeepEP normal

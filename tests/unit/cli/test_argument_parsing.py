@@ -96,6 +96,22 @@ class TestCLIArgumentParsing:
         action = next(action for action in cli_parser._actions if action.dest == "mode")
         assert set(action.choices.keys()) == {"default", "exp", "generate", "support", "estimate", "recommend"}
 
+    @pytest.mark.parametrize("mode", ["default", "recommend", "estimate"])
+    def test_free_gpu_memory_fraction_defaults_to_backend_default(self, cli_parser, mode):
+        """``--free-gpu-memory-fraction`` must default to None, not a hardcoded number.
+
+        The backend resolves None to the framework's own default, version-aware for
+        vLLM (``gpu_memory_utilization`` 0.92 on 0.22+). A concrete argparse default
+        is never None and therefore bypasses that resolution entirely: the sweep then
+        packs KV to the hardcoded fraction and recommends decode batch sizes the
+        engine cannot admit (ai-dynamo/aiconfigurator#1396).
+        """
+        subparser_action = next(action for action in cli_parser._actions if action.dest == "mode")
+        mode_parser = subparser_action.choices[mode]
+
+        action = next(a for a in mode_parser._actions if a.dest == "free_gpu_memory_fraction")
+        assert action.default is None
+
     def test_generate_mode_required_args(self, cli_parser):
         """Test that generate mode requires the correct arguments."""
         subparsers = [action for action in cli_parser._actions if action.dest == "mode"]

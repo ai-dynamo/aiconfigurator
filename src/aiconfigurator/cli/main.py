@@ -28,13 +28,10 @@ from aiconfigurator.sdk.config_builders import resolve_nextn_auto
 from aiconfigurator.sdk.errors import (
     ExperimentOutcome,
     NoFeasibleConfigError,
-    UnsupportedWideepConfigError,
     is_expected_cli_error,
 )
-from aiconfigurator.sdk.models import check_is_moe
-from aiconfigurator.sdk.operations.base import resolve_op_data_path
 from aiconfigurator.sdk.speculative import normalize_speculative_decoding
-from aiconfigurator.sdk.task_v2 import Task, _lookup_num_gpus_per_node
+from aiconfigurator.sdk.task_v2 import Task, _lookup_num_gpus_per_node, _warn_large_ep_flag
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -498,8 +495,12 @@ def _add_default_mode_arguments(parser):
     parser.add_argument(
         "--free-gpu-memory-fraction",
         type=float,
-        default=1.0,
-        help="Fraction of free GPU memory TRT-LLM allocates for KV cache (default: 1.0). "
+        default=None,
+        help="Fraction of GPU memory the framework allocates for KV cache "
+        "(default: the framework's own default for the selected backend -- vLLM's "
+        "gpu_memory_utilization, resolved by backend version; TRT-LLM's "
+        "free_gpu_memory_fraction; SGLang's mem_fraction_static, derived from device "
+        "capacity where known and 0.88 otherwise). "
         "Used to filter batch sizes that would exceed KV cache capacity.",
     )
     parser.add_argument(
@@ -514,16 +515,16 @@ def _add_default_mode_arguments(parser):
         "--enable-wideep",
         action="store_true",
         default=False,
-        help="Enable Wide Expert Parallelism (WideEP) for MoE models. "
-        "When set, MoE models use EP-only parallelism with deepep_moe backend. "
-        "Applies to both DeepSeek and Qwen3-235B on SGLang.",
+        help="Deprecated and ignored: large-EP is explored automatically from data coverage. "
+        "Restrict with *_moe_ep_candidates in an exp YAML.",
     )
     parser.add_argument(
         "--moe-backend",
         type=str,
         choices=["deepep_moe", "megamoe"],
         default=None,
-        help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell.",
+        help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell. "
+        "'deepep_moe' is deprecated and ignored (large-EP is explored automatically from data coverage).",
     )
 
 
@@ -681,8 +682,12 @@ def _add_recommend_mode_arguments(parser):
     parser.add_argument(
         "--free-gpu-memory-fraction",
         type=float,
-        default=1.0,
-        help="Fraction of free GPU memory allocated for KV cache (default: 1.0).",
+        default=None,
+        help="Fraction of GPU memory the framework allocates for KV cache "
+        "(default: the framework's own default for the selected backend -- vLLM's "
+        "gpu_memory_utilization, resolved by backend version; TRT-LLM's "
+        "free_gpu_memory_fraction; SGLang's mem_fraction_static, derived from device "
+        "capacity where known and 0.88 otherwise).",
     )
     parser.add_argument(
         "--max-seq-len",
@@ -694,14 +699,16 @@ def _add_recommend_mode_arguments(parser):
         "--enable-wideep",
         action="store_true",
         default=False,
-        help="Enable Wide Expert Parallelism (WideEP) for MoE models.",
+        help="Deprecated and ignored: large-EP is explored automatically from data coverage. "
+        "Restrict with *_moe_ep_candidates in an exp YAML.",
     )
     parser.add_argument(
         "--moe-backend",
         type=str,
         choices=["deepep_moe", "megamoe"],
         default=None,
-        help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell.",
+        help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell. "
+        "'deepep_moe' is deprecated and ignored (large-EP is explored automatically from data coverage).",
     )
 
 
@@ -1197,8 +1204,12 @@ def _add_estimate_mode_arguments(parser):
     parser.add_argument(
         "--free-gpu-memory-fraction",
         type=float,
-        default=0.9,
-        help="Fraction of free GPU memory available for KV cache (default: 0.9). "
+        default=None,
+        help="Fraction of GPU memory the framework allocates for KV cache "
+        "(default: the framework's own default for the selected backend -- vLLM's "
+        "gpu_memory_utilization, resolved by backend version; TRT-LLM's "
+        "free_gpu_memory_fraction; SGLang's mem_fraction_static, derived from device "
+        "capacity where known and 0.88 otherwise). "
         "Used to estimate max concurrent sequences and warn when batch_size "
         "exceeds KV cache capacity.",
     )
@@ -1369,65 +1380,11 @@ def _get_system_data_root(system_name: str) -> str | None:
     return None
 
 
-def _get_backend_data_path(system_name: str, backend_name: str, backend_version: str, op_filename: str) -> str | None:
-    """Resolve one perf-data file's on-disk path for (system, backend, version),
-    across both the family-first and legacy tree layouts (see resolve_op_data_path)."""
-    system_data_root = _get_system_data_root(system_name)
-    if system_data_root is None:
-        return None
-    return resolve_op_data_path(system_data_root, backend_name, backend_version, op_filename)
-
-
-_SGLANG_DEEPEP_REQUIRED_FILES = (
-    common.PerfDataFilename.wideep_deepep_normal.value,
-    common.PerfDataFilename.wideep_deepep_ll.value,
-)
-
-
 def _database_mode_requires_declared_perf_database(database_mode: str | None) -> bool:
     return (database_mode or "").upper() in {
         common.DatabaseMode.SILICON.name,
         common.DatabaseMode.HYBRID.name,
     }
-
-
-def _sglang_deepep_perf_data_skip_reason(
-    system_name: str,
-    decode_system_name: str | None,
-    backend_version: str | None,
-) -> str | None:
-    """Return a concise skip reason when optional SGLang DeepEP data is absent."""
-    missing_paths: list[str] = []
-    missing_versions: list[str] = []
-
-    systems_to_check = [system_name]
-    if decode_system_name and decode_system_name != system_name:
-        systems_to_check.append(decode_system_name)
-
-    for system_to_check in systems_to_check:
-        resolved_version = backend_version or perf_database.get_latest_database_version(
-            system=system_to_check,
-            backend=common.BackendName.sglang.value,
-        )
-        if resolved_version is None:
-            missing_versions.append(f"{system_to_check}/{common.BackendName.sglang.value}")
-            continue
-
-        for filename in _SGLANG_DEEPEP_REQUIRED_FILES:
-            resolved_path = _get_backend_data_path(
-                system_to_check, common.BackendName.sglang.value, resolved_version, filename
-            )
-            if resolved_path is None or not os.path.isfile(resolved_path):
-                missing_paths.append(
-                    resolved_path
-                    or f"{system_to_check}/{common.BackendName.sglang.value}/{resolved_version}/{filename}"
-                )
-
-    if missing_versions:
-        return "no database version available for " + ", ".join(missing_versions)
-    if missing_paths:
-        return "missing required DeepEP perf data: " + ", ".join(missing_paths)
-    return None
 
 
 def _ensure_backend_version_available(
@@ -1571,15 +1528,16 @@ def build_default_tasks(
             (0 <= nextn_accepted <= nextn). Required when the draft depth
             resolves to > 0; never inferred.
         enable_chunked_prefill: Whether to enable chunked prefill for finer context token sweep.
-        enable_wideep: Whether to enable Wide Expert Parallelism (WideEP) for MoE models.
-        moe_backend: Explicit SGLang MoE backend override.
+        enable_wideep: DEPRECATED and ignored (warns once): large-EP is explored
+            automatically from data coverage inside the single MoE task per
+            serving mode. Restrict with *_moe_ep_candidates in an exp YAML.
+        moe_backend: Explicit SGLang MoE backend override ('deepep_moe' is
+            deprecated and ignored; 'megamoe' is a real kernel selection).
         engine_step_backend: Engine-step latency backend ("python" or "rust");
             unset defaults to the compiled Rust engine (SDK callers passing
             synthetic database objects the compiled engine cannot re-load
             from disk still delegate to the Python step).
-        forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None
-            keeps the default. "fpm" always runs on the Python step (it
-            compiles to no Rust op variant yet).
+        forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None keeps the default.
         serving_mode: Serving modes to build. ``"auto"`` builds agg and disagg,
             ``"all"`` also includes AFD, and an explicit mode builds only that mode.
         afd_max_a_batch_size: Maximum attention batch size considered by AFD.
@@ -1589,6 +1547,14 @@ def build_default_tasks(
     Returns:
         Task objects keyed by serving mode and, when requested, backend.
     """
+    # Deprecated large-EP knobs: warn once, then ignore (the flag is NOT
+    # forwarded to the tasks; an explicit moe_backend value still passes
+    # through unchanged — 'deepep_moe' is inert in modeling, 'megamoe' real).
+    if enable_wideep:
+        _warn_large_ep_flag("enable_wideep")
+    if moe_backend == "deepep_moe":
+        _warn_large_ep_flag("moe_backend=deepep_moe")
+
     decode_system = decode_system or system
     if serving_mode not in ("auto", "all", "agg", "disagg", "afd"):
         raise ValueError(f"Invalid serving_mode: {serving_mode!r}. Use 'auto', 'all', 'agg', 'disagg', or 'afd'.")
@@ -1734,10 +1700,12 @@ def build_default_tasks(
         global_kwargs["enable_encoder_dp"] = False
 
     def _sglang_moe_backend_override(backend_name: str) -> str | None:
+        # An explicit --moe-backend applies to SGLang tasks only (matches the
+        # legacy behavior); the deprecated enable_wideep flag no longer spells
+        # deepep_moe here — large EP is coverage-driven inside the one task.
         if backend_name != common.BackendName.sglang.value:
             return None
-        # Auto-set the DeepEP MoE runner for SGLang WideEP unless explicitly overridden.
-        return moe_backend or ("deepep_moe" if enable_wideep else None)
+        return moe_backend
 
     def _make_agg(backend_name: str, moe_backend_value: str | None) -> Task:
         return Task(
@@ -1746,7 +1714,6 @@ def build_default_tasks(
             system_name=system,
             backend_name=backend_name,
             backend_version=backend_version,
-            enable_wideep=enable_wideep,
             enable_chunked_prefill=enable_chunked_prefill,
             moe_backend=moe_backend_value,
             **global_kwargs,
@@ -1763,16 +1730,17 @@ def build_default_tasks(
             decode_backend_name=backend_name,
             prefill_backend_version=backend_version,
             decode_backend_version=backend_version,
-            prefill_enable_wideep=enable_wideep,
-            decode_enable_wideep=enable_wideep,
             prefill_enable_chunked_prefill=enable_chunked_prefill,
             moe_backend=moe_backend_value,
             **global_kwargs,
         )
 
-    tasks: dict[str, Any] = {}
-    is_moe_model = check_is_moe(model_path)
-
+    # ONE task per (model, serving mode): the flag-driven wideep/non-wideep
+    # variants and the flag-conditioned extra SGLang DeepEP sweeps are gone.
+    # Each MoE task auto-explores the fused AND (when perf data covers the
+    # model shape) the multi-node large-EP regimes per parallel tuple, so the
+    # frontier is the union of what the removed variants produced.
+    tasks: dict[str, Task] = {}
     afd_feasible = False
     if "afd" in modes_to_sweep:
         afd_gpus_per_node = _lookup_num_gpus_per_node(system)
@@ -1795,19 +1763,6 @@ def build_default_tasks(
         if "agg" in modes_to_sweep:
             exp_name = f"agg_{backend_name}" if backend == "auto" else "agg"
             tasks[exp_name] = _make_agg(backend_name, backend_moe)
-
-            if backend_name == "sglang" and not enable_wideep and moe_backend is None and is_moe_model:
-                skip_reason = _sglang_deepep_perf_data_skip_reason(system, None, backend_version)
-                if skip_reason:
-                    logger.info("Skipping SGLang DeepEP agg sweep: %s", skip_reason)
-                else:
-                    try:
-                        deepep_task = _make_agg(backend_name, "deepep_moe")
-                    except UnsupportedWideepConfigError as exc:
-                        logger.info("Skipping SGLang DeepEP agg sweep: %s", exc)
-                    else:
-                        deepep_name = f"agg_{backend_name}_deepep" if backend == "auto" else "agg_deepep"
-                        tasks[deepep_name] = deepep_task
 
         if "afd" in modes_to_sweep and afd_feasible:
             try:
@@ -1841,19 +1796,6 @@ def build_default_tasks(
 
         exp_name = f"disagg_{backend_name}" if backend == "auto" else "disagg"
         tasks[exp_name] = _make_disagg(backend_name, backend_moe)
-
-        if backend_name == "sglang" and not enable_wideep and moe_backend is None and is_moe_model:
-            skip_reason = _sglang_deepep_perf_data_skip_reason(system, decode_system, backend_version)
-            if skip_reason:
-                logger.info("Skipping SGLang DeepEP disagg sweep: %s", skip_reason)
-            else:
-                try:
-                    deepep_disagg_task = _make_disagg(backend_name, "deepep_moe")
-                except UnsupportedWideepConfigError as exc:
-                    logger.info("Skipping SGLang DeepEP disagg sweep: %s", exc)
-                else:
-                    deepep_name = f"disagg_{backend_name}_deepep" if backend == "auto" else "disagg_deepep"
-                    tasks[deepep_name] = deepep_disagg_task
 
     if not tasks:
         logger.error("No task configs could be built for serving_mode=%s.", serving_mode)

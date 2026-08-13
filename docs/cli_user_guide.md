@@ -17,7 +17,7 @@ These flags are shared across modes (a few are sweep-only, as noted):
 - `--systems-paths`: System search paths (comma-separated). Use `default` for the built-in systems path; the first match wins for an identical system/backend/version. (`default`, `exp`, `generate`, `estimate`)
 - `--deployment-target`: Generated-artifact platform — `dynamo-j2` (default), `dynamo-python`, `llm-d-helm`, `llm-d-kustomize`, or `fpm`. See [Deployment Target Selection](#deployment-target-selection). (`default`, `exp`, `generate`, `estimate`)
 - `--engine-step-backend`: Engine-step latency backend — unset defaults to the compiled Rust engine (databases with measured power data delegate to the Python step until energy crosses the FFI); `python` is the escape hatch, `rust` forces the compiled engine. Accepted by all modes but inert in `generate`, which performs no latency estimation. (`default`, `exp`, `generate`, `estimate`)
-- `--forward-model`: Forward-pass modeling mode — `op_level` (default; granular per-op modeling) or `fpm` (predicts from collected whole-model forward-pass data; requires `fpm_forward_perf` data for the exact model/system/backend/version and never extrapolates outside the collected domain). When `--forward-model fpm` is selected, AIC evaluates step latency using the Python implementation; `--engine-step-backend rust` does not take effect because the compiled engine does not yet have an FPM operation (Rust support is tracked separately in PR #1461). V1 accepts only vLLM identities the standard deployment path can reproduce: automatic MoE/attention backend selection with EPLB disabled. Pinned backend or EPLB identities are rejected until structured generator support lands. Not supported in the `afd` estimate mode. (`default`, `exp`, `generate`, `estimate`)
+- `--forward-model`: Forward-pass modeling mode — `op_level` (default; granular per-op modeling) or `fpm` (predicts from collected whole-model forward-pass data; requires `fpm_forward_perf` data for the exact model/system/backend/version and never extrapolates outside the collected domain). Runs on either engine-step backend (the compiled engine has a native FPM operation). `fpm` predictions are only as accurate as the match between the deployed engine configuration and the collected data — in particular the CUDA-graph capture surface: regime cliffs are encoded in the data, not modeled, so a deployment whose capture config differs from the collection will mispredict. V1 accepts only vLLM identities the standard deployment path can reproduce: automatic MoE/attention backend selection with EPLB disabled. Pinned backend or EPLB identities are rejected until structured generator support lands. Not supported in the `afd` estimate mode. (`default`, `exp`, `generate`, `estimate`)
 
 The `support` mode accepts only `--log-level`, `--debug`, and `--no-color` from this list. Generator-artifact flags (`--generator-config`, `--generator-set`, `--generator-help`, `--generator-help-backend`, `--generated-config-version`, `--generator-dynamo-version`) are documented under [Default mode](#default-mode).
 
@@ -416,8 +416,17 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--free-gpu-memory-fraction`: Fraction of free GPU memory TRT-LLM allocates for KV cache (default: `1.0`). Filters batch sizes that would exceed KV cache capacity.
 - `--max-seq-len`: TRT-LLM `--max_seq_len` (default: `isl + osl`). Controls how many KV blocks are pre-allocated per sequence; set to match your deployment for accurate KV-capacity filtering.
 - `--enable-chunked-prefill`: Enable chunked prefill for a finer-grained context-token sweep. When off (default), the context-token stride is aligned to ISL for faster sweeping.
-- `--enable-wideep`: Enable Wide Expert Parallelism (WideEP) for MoE models — EP-only parallelism via the `deepep_moe` backend. Applies to DeepSeek and Qwen3-235B on SGLang.
-- `--moe-backend`: Explicit SGLang MoE backend — `deepep_moe` or `megamoe` (use `megamoe` to model DeepSeek-V4 MegaMoE on Blackwell).
+- `--enable-wideep`: **Deprecated and ignored** (accepted with a one-time warning). Large-EP (wideEP) is explored automatically — see the note below.
+- `--moe-backend`: Explicit SGLang MoE backend. `megamoe` is a real kernel selection (use it to model DeepSeek-V4 MegaMoE on Blackwell); `deepep_moe` is deprecated and ignored (large-EP is explored automatically from data coverage).
+
+> **Large-EP (wideEP) is explored automatically.** For MoE models, multi-node EP-only
+> parallelism joins the search whenever the performance database covers the model's MoE
+> shape on the target system/backend — both the MoE all-to-all (dispatch/combine) data
+> and the EP compute data must be present. No flag is needed: fused and large-EP
+> configurations compete in the same search. To restrict or force EP sizes, set
+> `*_moe_ep_candidates` in an exp YAML ([Exp mode](#exp-mode)); when a model's shape has
+> no coverage, a one-time INFO log names the collectors to run
+> (see [Advanced Tuning](advanced_tuning.md#large-ep-wideep-exploration)).
 
 **Vision-language inputs** (multimodal models such as Qwen3-VL and Qwen3.5):
 
@@ -1047,11 +1056,15 @@ disagg_full:
   nextn: 1
   nextn_accepted: 0.85
 
+  # MoE kernel backend (shared; e.g. "megamoe" for DeepSeek-V4 on Blackwell SGLang).
+  # Large-EP (wideEP) is explored automatically when perf data covers the model
+  # shape; restrict with *_moe_ep_candidates.
+  moe_backend: null
+
   # --- Prefill role ---
   prefill_model_path: deepseek-ai/DeepSeek-V3   # required
   prefill_system_name: h200_sxm                 # required
   prefill_backend_name: trtllm                  # trtllm (default) | vllm | sglang
-  prefill_enable_wideep: false
   # Quant override (default: inferred from the HF model config)
   prefill_gemm_quant_mode: fp8_block            # fp8 | fp8_block | bfloat16
   prefill_moe_quant_mode: fp8_block             # fp8 | fp8_block | w4afp8 | bfloat16
@@ -1070,7 +1083,6 @@ disagg_full:
   decode_model_path: deepseek-ai/DeepSeek-V3    # required
   decode_system_name: h200_sxm                  # required
   decode_backend_name: trtllm
-  decode_enable_wideep: false
   decode_gemm_quant_mode: fp8_block
   decode_moe_quant_mode: fp8_block
   decode_kvcache_quant_mode: bfloat16
@@ -1100,28 +1112,25 @@ This is long; the basics:
     - For `agg`, the same fields are top-level (`model_path`, `system_name`, `gemm_quant_mode`, `agg_tp_candidates`, ...) — see `agg_full` in the template.  
     - `backend_name`: `trtllm` (default), `vllm`, or `sglang`.  
     - `backend_version`, `isl`, `osl`, `ttft`, `tpot`: same meaning as in `default` mode (shared, top-level).  
-    - `*_enable_wideep`: enables wide-EP for fine-grained MoE models.  
+    - Large-EP (wideEP) has no key: it is explored automatically whenever the performance database covers the model's MoE shape on the role's system/backend (MoE all-to-all dispatch/combine plus EP compute data). Restrict or force EP sizes with `*_moe_ep_candidates`. The deprecated keys (`enable_wideep`, `prefill_enable_wideep`, `decode_enable_wideep`, `moe_backend: deepep_moe`) are still accepted with a one-time warning and have no modeling effect. One search-default residue remains: on SGLang, a config that spells `enable_wideep` / `moe_backend: deepep_moe` still narrows the *default* `moe_tp` candidates to `[1]` (a resolved-config compatibility behavior) — an explicit `*_moe_tp_candidates` list always wins.
     - `nextn` / `nextn_accepted`: MTP speculative decoding (never auto-enabled; `nextn_accepted` is required when the resolved `nextn > 0`).
     - The replica/correction knobs (`num_gpu_per_replica`, `max_*_workers`, `*_latency_correction`, ...) are covered in [Advanced Tuning](advanced_tuning.md). Typically the only thing you need to touch is the quantization.
 
 Quantization override order: explicit `*_quant_mode` fields take precedence; any mode left unset is filled from the model's HF quantization metadata.
 
-You can drop everything optional and keep just the required fields plus the few knobs you care about. Here's a minimal disagg with wide-EP:
+You can drop everything optional and keep just the required fields plus the few knobs you care about. Here's a minimal disagg for a large-EP (wideEP) study — no flag needed, the multi-node EP ladder joins the search automatically because the gb200 database covers this model's MoE shape:
 ```yaml
 disagg_simplified:
   serving_mode: disagg
   total_gpus: 512
   nextn: 2
   nextn_accepted: 1.1
-  prefill_model_path: deepseek-ai/DeepSeek-V3
+  prefill_model_path: nvidia/DeepSeek-V3.1-NVFP4
   prefill_system_name: gb200
-  prefill_enable_wideep: true        # wide-EP for prefill
-  decode_model_path: deepseek-ai/DeepSeek-V3
+  decode_model_path: nvidia/DeepSeek-V3.1-NVFP4
   decode_system_name: gb200
-  decode_enable_wideep: true         # wide-EP for decode
-  max_gpu_per_replica: 512           # wide-EP needs a larger replica budget
 ```
-Everything omitted falls back to defaults / HF inference.
+Everything omitted falls back to defaults / HF inference. With large-EP candidates in play the replica budget widens automatically (`max_gpu_per_replica` defaults to 512). To pin a role to large EP sizes only, add e.g. `decode_moe_ep_candidates: [16, 32, 64]`.
 
 Let's go through some pre-defined experiments for reference.
 1. homegeneous vs. heterogenous  

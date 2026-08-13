@@ -290,6 +290,57 @@ def test_run_mixed_returns_components_and_counts_speculative_query_tokens(
     assert calls[0]["x"] == 12
 
 
+def test_run_mixed_python_passes_filter_discarded_ops_and_keep_prefix_integral(
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    """Live-Python regression for the issue #1498 follow-through pair.
+
+    1. The three passes query ONLY the ops they consume: a raise in a
+       DISCARDED query (the generation-MoE low-token miss class) must not
+       block the estimate — pass 3 walks generation_attention alone, so the
+       raising non-attention generation op is never consulted.
+    2. Pass 1's prefix stays integral: `np.floor` yields a float64 that
+       would contaminate the ops' `s = isl - prefix`; a strict-int consumer
+       (the DSV4 CP composition chunks `s` with `range()`) is emulated by an
+       op that runs `range(s)` and rejects float coordinates.
+    """
+
+    class _RaisingDiscardedOp:
+        _name = "generation_moe"
+
+        def query(self, *args, **kwargs):
+            raise RuntimeError("low-token miss in a DISCARDED query must not block the estimate")
+
+    class _StrictIntOp(_StaticOp):
+        def query(self, *args, **kwargs) -> _LatencyResult:
+            assert not isinstance(kwargs["prefix"], float), "pass-1 prefix leaked as float"
+            range(kwargs["s"])  # raises TypeError on a float-contaminated s
+            return super().query(*args, **kwargs)
+
+    model.context_ops = [
+        _StaticOp("context_attention", latency_ms=11.0, energy_wms=110.0),
+        _StrictIntOp("context_mlp", latency_ms=3.0, energy_wms=30.0),
+    ]
+    model.generation_ops = [
+        _StaticOp("generation_attention", latency_ms=2.0, energy_wms=20.0),
+        _RaisingDiscardedOp(),
+    ]
+
+    estimate = backend.run_mixed(
+        model,
+        database,
+        RuntimeConfig(isl=8, osl=5, prefix=2),
+        MixedStepInput(context_tokens=8, num_decode_requests=2),
+    )
+
+    assert estimate.latency_ms > 0
+    # The discarded op was never queried (it would have raised), and its
+    # value is genuinely absent rather than smuggled in as 0.0.
+    assert "generation_moe" not in estimate.per_op_latency_ms
+
+
 def test_run_mixed_rust_path_returns_the_same_structured_contract(
     monkeypatch,
     backend: BaseBackend,

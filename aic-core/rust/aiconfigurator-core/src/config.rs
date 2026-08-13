@@ -38,7 +38,13 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 //   change (same class as v5).
 // - 8: `GemmOp` gained `below_grid_sol` — a bincode op-layout change (same
 //   class as v5).
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 8;
+// - 9: `Op::FpmForward` whole-model variant added (forward_model="fpm").
+//   Claimed 5, 7 and 8 concurrently with other landings; renumbered at
+//   each merge (same precedent as the v3/v4 collision above).
+// - 10 (issue #1498): `MhcModuleOp` gained `seq_split` (CP per-rank token
+//   division) — a bincode op-layout change. Claimed 7 concurrently with
+//   `attn_ar_modeled`; renumbered at the rebase.
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 10;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].
@@ -65,6 +71,13 @@ pub struct EngineConfig {
     // Backend
     pub backend: BackendKind,
     pub backend_version: Option<String>,
+
+    /// Forward-pass modeling mode (`"op_level"` | `"fpm"`); `None` keeps
+    /// Python's default (op_level). Threaded to `compile_engine` so the FPM
+    /// arena can select the whole-model engine through the supported
+    /// predictor API (additive-optional: absent in older payloads).
+    #[serde(default)]
+    pub forward_model: Option<String>,
 
     // KV
     pub kv_block_size: Option<u32>,

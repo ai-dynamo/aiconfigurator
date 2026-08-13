@@ -3,8 +3,8 @@
     "deepseek-r1-b200-vllm-019-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 228.86368389739886,
-          "agg_tpot": 81.86526301054063,
+          "agg_request": 228.86368389739883,
+          "agg_tpot": 81.86526301054062,
           "agg_ttft": 146.9984208868582
         }
       },
@@ -17,7 +17,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 81.86526301054063
+          "mixed_step": 81.86526301054062
         }
       },
       "static": {
@@ -59,8 +59,8 @@
     "deepseek-v3-b200-vllm-019-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 228.86368389739886,
-          "agg_tpot": 81.86526301054063,
+          "agg_request": 228.86368389739883,
+          "agg_tpot": 81.86526301054062,
           "agg_ttft": 146.9984208868582
         }
       },
@@ -73,7 +73,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 81.86526301054063
+          "mixed_step": 81.86526301054062
         }
       },
       "static": {
@@ -115,7 +115,7 @@
     "deepseek-v3-b200-vllm-019-sol": {
       "mixed": {
         "values": {
-          "mixed_step": 19.7504912474505
+          "mixed_step": 19.750491247450505
         }
       },
       "static": {
@@ -157,37 +157,37 @@
     "deepseek-v32-b200-sglang-0510-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 306.56702717088723,
-          "agg_tpot": 103.9210261596228,
-          "agg_ttft": 202.64600101126445
+          "agg_request": 299.400688258558,
+          "agg_tpot": 101.49175873171457,
+          "agg_ttft": 197.9089295268434
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 209.275,
-          "disagg_tpot": 15.743,
+          "disagg_request": 206.493,
+          "disagg_tpot": 12.961,
           "disagg_ttft": 193.532
         }
       },
       "mixed": {
         "values": {
-          "mixed_step": 103.53059891701972
+          "mixed_step": 101.4148691192112
         }
       },
       "static": {
         "values": {
           "static_ctx": 97.744,
-          "static_gen": 11.123,
-          "static_total": 108.867
+          "static_gen": 9.007,
+          "static_total": 106.751
         }
       }
     },
     "deepseek-v32-b200-vllm-019-empirical": {
       "agg": {
         "values": {
-          "agg_request": 402.2583800204085,
-          "agg_tpot": 163.46276706842752,
-          "agg_ttft": 238.79561295198098
+          "agg_request": 402.25838002040837,
+          "agg_tpot": 163.46276706842747,
+          "agg_ttft": 238.7956129519809
         }
       },
       "disagg": {
@@ -199,7 +199,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 163.46276706842752
+          "mixed_step": 163.46276706842747
         }
       },
       "static": {
@@ -250,6 +250,18 @@
       },
       "static": {
         "error": "PerfDataNotAvailableError"
+      }
+    },
+    "dsv4-flash-b200-sglang-0512-cp8-reuse": {
+      "cp_static_ctx": {
+        "values": {
+          "cp_static_ctx": 42.4307555484161
+        }
+      },
+      "mixed": {
+        "values": {
+          "mixed_step": 46.0492671363915
+        }
       }
     },
     "glm5-b200-sglang-0514-empirical": {
@@ -329,7 +341,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 65.90014960181428
+          "mixed_step": 65.90014960181429
         }
       },
       "static": {
@@ -420,9 +432,9 @@
     "kimi-k25-b200-vllm-019-empirical": {
       "agg": {
         "values": {
-          "agg_request": 396.3907052607567,
-          "agg_tpot": 160.70150835800314,
-          "agg_ttft": 235.68919690275354
+          "agg_request": 396.3907052607566,
+          "agg_tpot": 160.7015083580031,
+          "agg_ttft": 235.6891969027535
         }
       },
       "disagg": {
@@ -434,7 +446,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 160.70150835800314
+          "mixed_step": 160.7015083580031
         }
       },
       "static": {
@@ -448,9 +460,9 @@
     "kimi-k25-b200-vllm-019-hybrid-invariant": {
       "agg": {
         "values": {
-          "agg_request": 396.48309785662275,
-          "agg_tpot": 160.744987226646,
-          "agg_ttft": 235.73811062997677
+          "agg_request": 396.48309785662286,
+          "agg_tpot": 160.74498722664603,
+          "agg_ttft": 235.7381106299768
         }
       },
       "disagg": {
@@ -462,7 +474,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 160.744987226646
+          "mixed_step": 160.74498722664603
         }
       },
       "static": {
@@ -476,9 +488,9 @@
     "kimi-k25-b200-vllm-019-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 396.48309785662275,
-          "agg_tpot": 160.744987226646,
-          "agg_ttft": 235.73811062997677
+          "agg_request": 396.48309785662286,
+          "agg_tpot": 160.74498722664603,
+          "agg_ttft": 235.7381106299768
         }
       },
       "disagg": {
@@ -490,7 +502,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 160.744987226646
+          "mixed_step": 160.74498722664603
         }
       },
       "static": {
@@ -560,9 +572,9 @@
     "kimi-k25-h100-vllm-019-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 494.778556088936,
-          "agg_tpot": 207.00167345361695,
-          "agg_ttft": 287.77688263531905
+          "agg_request": 494.77855608893606,
+          "agg_tpot": 207.00167345361697,
+          "agg_ttft": 287.7768826353191
         }
       },
       "disagg": {
@@ -570,7 +582,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 207.00167345361695
+          "mixed_step": 207.00167345361697
         }
       },
       "static": {
@@ -584,9 +596,9 @@
     "kimi-k25-h200-sglang-0510-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 512.1819602637345,
-          "agg_tpot": 173.62100347923206,
-          "agg_ttft": 338.5609567845025
+          "agg_request": 512.1819602637346,
+          "agg_tpot": 173.6210034792321,
+          "agg_ttft": 338.56095678450254
         }
       },
       "disagg": {
@@ -598,7 +610,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 173.39651258641103
+          "mixed_step": 173.39651258641106
         }
       },
       "static": {
@@ -612,9 +624,9 @@
     "kimi-k25-h200-vllm-014-scan-coverage": {
       "agg": {
         "values": {
-          "agg_request": 521.5538418818197,
-          "agg_tpot": 219.60180794438574,
-          "agg_ttft": 301.95203393743395
+          "agg_request": 521.5538418818198,
+          "agg_tpot": 219.60180794438577,
+          "agg_ttft": 301.952033937434
         }
       },
       "disagg": {
@@ -626,7 +638,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 219.60180794438574
+          "mixed_step": 219.60180794438577
         }
       },
       "static": {
@@ -640,9 +652,9 @@
     "kimi-k25-h200-vllm-019-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 487.27521140709916,
-          "agg_tpot": 203.47068772098783,
-          "agg_ttft": 283.80452368611134
+          "agg_request": 487.27521140709905,
+          "agg_tpot": 203.4706877209878,
+          "agg_ttft": 283.8045236861113
         }
       },
       "disagg": {
@@ -654,7 +666,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 203.47068772098783
+          "mixed_step": 203.4706877209878
         }
       },
       "static": {
@@ -860,37 +872,37 @@
     "llama4-scout-b200-vllm-019-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 86.85553858397297,
-          "agg_tpot": 20.543782863046108,
-          "agg_ttft": 66.31175572092687
+          "agg_request": 87.79945956540416,
+          "agg_tpot": 20.9879809719549,
+          "agg_ttft": 66.81147859344927
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 41.778,
-          "disagg_tpot": 2.14,
-          "disagg_ttft": 39.638
+          "disagg_request": 42.481,
+          "disagg_tpot": 2.262,
+          "disagg_ttft": 40.219
         }
       },
       "mixed": {
         "values": {
-          "mixed_step": 20.543782863046108
+          "mixed_step": 20.9879809719549
         }
       },
       "static": {
         "values": {
-          "static_ctx": 20.019,
-          "static_gen": 1.962,
-          "static_total": 21.980999999999998
+          "static_ctx": 20.313,
+          "static_gen": 2.061,
+          "static_total": 22.374
         }
       }
     },
     "llama4-scout-gb200-vllm-024-tiebreak-disagg": {
       "disagg": {
         "values": {
-          "disagg_request": 53.056,
-          "disagg_tpot": 6.351,
-          "disagg_ttft": 46.705
+          "disagg_request": 53.72,
+          "disagg_tpot": 6.466,
+          "disagg_ttft": 47.254
         }
       }
     },
@@ -925,9 +937,9 @@
     "minimax-m25-b200-sglang-0510-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 88.95334746739773,
-          "agg_tpot": 30.153677107592454,
-          "agg_ttft": 58.79967035980528
+          "agg_request": 88.95334746739775,
+          "agg_tpot": 30.153677107592458,
+          "agg_ttft": 58.79967035980529
         }
       },
       "disagg": {
@@ -939,7 +951,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 30.134022806499893
+          "mixed_step": 30.13402280649989
         }
       },
       "static": {
@@ -953,9 +965,9 @@
     "minimax-m25-b200-vllm-019-empirical": {
       "agg": {
         "values": {
-          "agg_request": 129.33261794214428,
-          "agg_tpot": 34.60358491395025,
-          "agg_ttft": 94.72903302819404
+          "agg_request": 129.33261794214425,
+          "agg_tpot": 34.603584913950236,
+          "agg_ttft": 94.72903302819401
         }
       },
       "disagg": {
@@ -967,7 +979,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 34.60358491395025
+          "mixed_step": 34.603584913950236
         }
       },
       "static": {
@@ -1177,9 +1189,9 @@
     "minimax-m3-b200-sglang-0514-hybrid-xop": {
       "agg": {
         "values": {
-          "agg_request": 121.80698536871577,
-          "agg_tpot": 41.29050351481891,
-          "agg_ttft": 80.51648185389686
+          "agg_request": 121.80698536871574,
+          "agg_tpot": 41.2905035148189,
+          "agg_ttft": 80.51648185389685
         }
       },
       "disagg": {
@@ -1191,7 +1203,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 41.17683951536419
+          "mixed_step": 41.176839515364186
         }
       },
       "static": {
@@ -1233,9 +1245,9 @@
     "minimax-m3-b200-vllm-019-hybrid-xop": {
       "agg": {
         "values": {
-          "agg_request": 209.93175912860636,
-          "agg_tpot": 73.37965135463828,
-          "agg_ttft": 136.55210777396806
+          "agg_request": 209.9317591286063,
+          "agg_tpot": 73.37965135463826,
+          "agg_ttft": 136.55210777396803
         }
       },
       "disagg": {
@@ -1247,7 +1259,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 73.37965135463828
+          "mixed_step": 73.37965135463826
         }
       },
       "static": {
@@ -1261,9 +1273,9 @@
     "nemotron-h-56b-b200-sglang-0510-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 82.52346030102953,
-          "agg_tpot": 27.974054339332046,
-          "agg_ttft": 54.54940596169749
+          "agg_request": 82.52346030102954,
+          "agg_tpot": 27.97405433933205,
+          "agg_ttft": 54.549405961697495
         }
       },
       "disagg": {
@@ -1275,7 +1287,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 27.954036470973453
+          "mixed_step": 27.95403647097345
         }
       },
       "static": {
@@ -1289,9 +1301,9 @@
     "nemotron-h-56b-b200-sglang-0510-shape-batch8": {
       "agg": {
         "values": {
-          "agg_request": 90.91567660282915,
-          "agg_tpot": 27.974054339332046,
-          "agg_ttft": 62.9416222634971
+          "agg_request": 90.91567660282917,
+          "agg_tpot": 27.97405433933205,
+          "agg_ttft": 62.94162226349711
         }
       },
       "disagg": {
@@ -1331,7 +1343,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 24.165926910624346
+          "mixed_step": 24.16592691062435
         }
       },
       "static": {
@@ -1346,7 +1358,7 @@
       "agg": {
         "values": {
           "agg_request": 152.26876127475035,
-          "agg_tpot": 21.679417070470755,
+          "agg_tpot": 21.679417070470752,
           "agg_ttft": 130.5893442042796
         }
       },
@@ -1359,7 +1371,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 21.679417070470755
+          "mixed_step": 21.679417070470752
         }
       },
       "static": {
@@ -1457,9 +1469,9 @@
     "nemotron-nas-b200-trtllm-130rc10-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 73.94986590561307,
-          "agg_tpot": 25.06775115444511,
-          "agg_ttft": 48.88211475116796
+          "agg_request": 73.94986590561308,
+          "agg_tpot": 25.067751154445112,
+          "agg_ttft": 48.88211475116797
         }
       },
       "disagg": {
@@ -1471,7 +1483,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 25.03670932896598
+          "mixed_step": 25.036709328965976
         }
       },
       "static": {
@@ -1486,7 +1498,7 @@
       "agg": {
         "values": {
           "agg_request": 117.89715771852498,
-          "agg_tpot": 21.598662455776463,
+          "agg_tpot": 21.598662455776466,
           "agg_ttft": 96.29849526274852
         }
       },
@@ -1499,7 +1511,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 21.598662455776463
+          "mixed_step": 21.598662455776466
         }
       },
       "static": {
@@ -1541,23 +1553,23 @@
     "qwen3-235b-a22b-b200-sglang-0510-cp4": {
       "mixed": {
         "values": {
-          "mixed_step": 61.048324870744665
+          "mixed_step": 61.04832487074466
         }
       }
     },
     "qwen3-235b-a22b-b200-sglang-0510-cp8": {
       "mixed": {
         "values": {
-          "mixed_step": 48.67948557037911
+          "mixed_step": 48.67948557037909
         }
       }
     },
     "qwen3-235b-a22b-b200-vllm-019-empirical": {
       "agg": {
         "values": {
-          "agg_request": 180.70708434268093,
-          "agg_tpot": 45.22686322008514,
-          "agg_ttft": 135.4802211225958
+          "agg_request": 180.70708434268087,
+          "agg_tpot": 45.226863220085114,
+          "agg_ttft": 135.48022112259576
         }
       },
       "disagg": {
@@ -1569,7 +1581,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 45.22686322008514
+          "mixed_step": 45.226863220085114
         }
       },
       "static": {
@@ -1583,8 +1595,8 @@
     "qwen3-235b-a22b-b200-vllm-019-hybrid-xprofile": {
       "agg": {
         "values": {
-          "agg_request": 188.0494483452657,
-          "agg_tpot": 48.68209333894856,
+          "agg_request": 188.04944834526566,
+          "agg_tpot": 48.68209333894854,
           "agg_ttft": 139.36735500631713
         }
       },
@@ -1597,7 +1609,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 48.68209333894856
+          "mixed_step": 48.68209333894854
         }
       },
       "static": {
@@ -1611,9 +1623,9 @@
     "qwen3-235b-a22b-b200-vllm-019-hybrid-xquant": {
       "agg": {
         "values": {
-          "agg_request": 278.95339498593313,
-          "agg_tpot": 91.46042116985087,
-          "agg_ttft": 187.49297381608224
+          "agg_request": 278.9533949859331,
+          "agg_tpot": 91.46042116985083,
+          "agg_ttft": 187.4929738160822
         }
       },
       "disagg": {
@@ -1625,7 +1637,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 91.46042116985087
+          "mixed_step": 91.46042116985083
         }
       },
       "static": {
@@ -1769,9 +1781,9 @@
     "qwen3-30b-a3b-b60-vllm-012-scan-coverage": {
       "agg": {
         "values": {
-          "agg_request": 343.94617574808143,
-          "agg_tpot": 141.5276121167442,
-          "agg_ttft": 202.41856363133724
+          "agg_request": 343.9461757480814,
+          "agg_tpot": 141.52761211674417,
+          "agg_ttft": 202.41856363133718
         }
       },
       "disagg": {
@@ -1783,7 +1795,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 141.5276121167442
+          "mixed_step": 141.52761211674417
         }
       },
       "static": {
@@ -1839,7 +1851,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 19.4154569425558
+          "mixed_step": 19.415456942555803
         }
       },
       "static": {
@@ -1922,7 +1934,7 @@
       "agg": {
         "values": {
           "agg_request": 95.062174059207,
-          "agg_tpot": 17.629258380803293,
+          "agg_tpot": 17.629258380803297,
           "agg_ttft": 77.4329156784037
         }
       },
@@ -1935,7 +1947,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 17.629258380803293
+          "mixed_step": 17.629258380803297
         }
       },
       "static": {
@@ -1991,9 +2003,9 @@
     "qwen3-32b-fp8-h200-vllm-019-tiebreak-agg": {
       "agg": {
         "values": {
-          "agg_request": 118.89491583398184,
-          "agg_tpot": 28.844666274814987,
-          "agg_ttft": 90.05024955916686
+          "agg_request": 118.89491583398186,
+          "agg_tpot": 28.84466627481499,
+          "agg_ttft": 90.05024955916687
         }
       }
     },
@@ -2032,8 +2044,8 @@
     "qwen3-32b-gb200-vllm-022-power": {
       "agg": {
         "values": {
-          "agg_request": 102.83921366712401,
-          "agg_tpot": 21.28904172570542,
+          "agg_request": 102.83921366712403,
+          "agg_tpot": 21.289041725705424,
           "agg_ttft": 81.5501719414186
         }
       },
@@ -2046,7 +2058,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 21.28904172570542
+          "mixed_step": 21.289041725705424
         }
       },
       "static": {
@@ -2065,7 +2077,7 @@
       "agg": {
         "values": {
           "agg_request": 117.90602181837271,
-          "agg_tpot": 28.37930438511657,
+          "agg_tpot": 28.379304385116573,
           "agg_ttft": 89.52671743325614
         }
       },
@@ -2078,7 +2090,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 28.37930438511657
+          "mixed_step": 28.379304385116573
         }
       },
       "static": {
@@ -2096,9 +2108,9 @@
     "qwen3-8b-b200-trtllm-120rc5-scan-coverage": {
       "agg": {
         "values": {
-          "agg_request": 31.656875902494733,
-          "agg_tpot": 10.731144373727028,
-          "agg_ttft": 20.925731528767706
+          "agg_request": 31.65687590249474,
+          "agg_tpot": 10.73114437372703,
+          "agg_ttft": 20.92573152876771
         }
       },
       "disagg": {
@@ -2166,7 +2178,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 19.818351035251716
+          "mixed_step": 19.818351035251712
         }
       },
       "static": {
@@ -2236,9 +2248,9 @@
     "qwen35-397b-a17b-b200-sglang-0510-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 125.89474262268749,
-          "agg_tpot": 42.67618393989407,
-          "agg_ttft": 83.21855868279343
+          "agg_request": 125.89474262268747,
+          "agg_tpot": 42.67618393989406,
+          "agg_ttft": 83.21855868279341
         }
       },
       "disagg": {
@@ -2250,7 +2262,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 42.66145492816378
+          "mixed_step": 42.661454928163764
         }
       },
       "static": {
@@ -2264,9 +2276,9 @@
     "qwen35-397b-a17b-b200-trtllm-130rc10-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 111.5111252410655,
-          "agg_tpot": 37.80038143764932,
-          "agg_ttft": 73.71074380341618
+          "agg_request": 111.51112524106551,
+          "agg_tpot": 37.80038143764933,
+          "agg_ttft": 73.7107438034162
         }
       },
       "disagg": {
@@ -2278,7 +2290,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 37.78706905361734
+          "mixed_step": 37.787069053617344
         }
       },
       "static": {
@@ -2292,9 +2304,9 @@
     "qwen35-397b-a17b-b200-vllm-019-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 149.6163657180586,
-          "agg_tpot": 44.99593680849817,
-          "agg_ttft": 104.62042890956045
+          "agg_request": 149.61636571805863,
+          "agg_tpot": 44.99593680849818,
+          "agg_ttft": 104.62042890956046
         }
       },
       "disagg": {
@@ -2306,7 +2318,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 44.99593680849817
+          "mixed_step": 44.99593680849818
         }
       },
       "static": {
@@ -2319,12 +2331,12 @@
     }
   },
   "header": {
-    "case_count": 93,
+    "case_count": 94,
     "command": "python aic-core/rust/aiconfigurator-core/parity_tests/regenerate_goldens.py",
     "engine_step_backend": "python",
-    "git_describe": "0a2c249c",
-    "git_head": "0a2c249c510230f9649895f78d32b1264d331c5a",
-    "surface_count": 346,
+    "git_describe": "21781b68",
+    "git_head": "21781b68f80f758ffadc0ab85f07e419efcaa50b",
+    "surface_count": 348,
     "thread_caps": {
       "MKL_NUM_THREADS": "1",
       "NUMEXPR_NUM_THREADS": "1",

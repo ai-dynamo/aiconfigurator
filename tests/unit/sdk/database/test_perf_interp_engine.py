@@ -266,6 +266,143 @@ def test_grid_empty_table_is_a_miss():
         perf_interp.query(_attn_cfg(), {}, 8, 512, 1)
 
 
+# ---------------------------------------------------------------------------
+# Multi-axis hold: joint-log kNN util transfer (the B200 gen-attn report case)
+# ---------------------------------------------------------------------------
+#
+# Staircase with a REGIME SPLIT: the deep row (b=128) is collected at exact
+# physics (saturated, util 1) while the short row (b=256) ends early in a
+# 1.4x-latency regime (unsaturated row end, like the real 128K-token-capped
+# b>=256 rows). Every query below is past the frontier on both rows.
+
+
+def _gen_lat(n, b, s):
+    return 1e-6 * n * b * s  # decode physics: linear in both
+
+
+def _gen_cfg():
+    return perf_interp.generation_attention_config(sol_fn=_gen_lat)
+
+
+def _gen_split_table():
+    table = {64: {}}
+    table[64][128] = {s: {"latency": _gen_lat(64, 128, s), "energy": 0.0} for s in (512, 1024, 2048)}
+    table[64][256] = {s: {"latency": 1.4 * _gen_lat(64, 256, s), "energy": 0.0} for s in (128, 256, 512)}
+    return table
+
+
+def test_grid_hold_is_continuous_across_outer_midpoint():
+    """The nearest-path snap flipped anchors at the bracket midpoint (b=192 ->
+    row 128, b=193 -> row 256), a +36.9% cliff on the real B200 table where
+    measured hardware moves +0.17%. The kNN hold must stay continuous: the
+    192->193 step may not exceed the SOL growth by more than a percent."""
+    table = _gen_split_table()
+    lat_192 = _lat(perf_interp.query(_gen_cfg(), table, 64, 192, 4096))
+    lat_193 = _lat(perf_interp.query(_gen_cfg(), table, 64, 193, 4096))
+    sol_step = _gen_lat(64, 193, 4096) / _gen_lat(64, 192, 4096)
+    assert lat_193 / lat_192 == pytest.approx(sol_step, abs=0.01)
+
+
+def test_grid_hold_prefers_nearby_saturated_evidence():
+    """A query deep past the short row's end (b=256, s=4096) must not inherit
+    that row's unsaturated 1.4x boundary util verbatim (the old snap did,
+    +41% on the reported B200 case): the joint-log nearest leaves are the deep
+    saturated ones, so the answer lands near physics."""
+    lat = _lat(perf_interp.query(_gen_cfg(), _gen_split_table(), 64, 256, 4096))
+    assert lat / _gen_lat(64, 256, 4096) < 1.15  # snap gave 1.4x
+    assert lat / _gen_lat(64, 256, 4096) > 0.95
+
+
+def test_grid_hold_is_axis_order_independent():
+    """The hold works on joint coordinates, not the nesting order: the same
+    data nested [n][b][s] and [n][s][b] must answer a past-frontier query
+    identically (this is what makes the generation and context table layouts
+    behave the same past the staircase)."""
+    table = _gen_split_table()
+    swapped = {64: {}}
+    for b, row in table[64].items():
+        for s, leaf in row.items():
+            swapped[64].setdefault(s, {})[b] = leaf
+    cfg_swapped = perf_interp.OpInterpConfig(
+        axes=("num_heads", "seq_len", "batch"),
+        resolver=perf_interp.Grid(),
+        sol_fn=lambda n, s, b: _gen_lat(n, b, s),
+    )
+    lat = _lat(perf_interp.query(_gen_cfg(), table, 64, 200, 4096))
+    lat_swapped = _lat(perf_interp.query(cfg_swapped, swapped, 64, 4096, 200))
+    assert lat == pytest.approx(lat_swapped, rel=1e-9)
+
+
+def test_grid_hold_boundary_ties_carry_zero_weight():
+    """Power-of-two grids produce EXACT distance ties. Under the tapered
+    weights, leaves sitting exactly on the support radius R (the 5th valid
+    distance) contribute ZERO — so which side of the nn_leaves cutoff a tied
+    leaf lands on cannot matter, and the blend is independent of axis order
+    and table insertion order without any tie-ordering rule.
+
+    Fixture: query (n=64, b=32, s=1) sits below the collected s range (hold).
+    One leaf at distance 1, then a FOUR-way tie at sqrt(2); the 5th valid
+    distance IS sqrt(2), so every tie member weighs 0 and the answer equals
+    the nearest anchor's held util exactly. The b/s-swapped nesting must
+    answer identically."""
+    lat_of = {
+        (64, 32, 2): 1.00,  # d=1: the only anchor with non-zero weight
+        (64, 16, 2): 1.10,  # d=sqrt(2) x4, distinct latencies so any leaked
+        (64, 64, 2): 1.30,  # tie weight would shift the blend
+        (32, 32, 2): 1.50,
+        (128, 32, 2): 1.70,
+        (64, 32, 4): 2.00,  # d=2, beyond the support: excluded
+    }
+    table = {}
+    for (n, b, s), lat in lat_of.items():
+        table.setdefault(n, {}).setdefault(b, {})[s] = {"latency": lat, "energy": 0.0}
+
+    def sol(n, b, s):
+        return 1.0  # constant SOL isolates the anchor selection
+
+    cfg = perf_interp.OpInterpConfig(axes=("num_heads", "batch", "seq_len"), resolver=perf_interp.Grid(), sol_fn=sol)
+
+    expected = lat_of[(64, 32, 2)]  # util held from the single live anchor
+    lat = _lat(perf_interp.query(cfg, table, 64, 32, 1))
+    assert lat == pytest.approx(expected, rel=1e-9)
+
+    swapped = {}
+    for (n, b, s), leaf_lat in lat_of.items():
+        swapped.setdefault(n, {}).setdefault(s, {})[b] = {"latency": leaf_lat, "energy": 0.0}
+    cfg_swapped = perf_interp.OpInterpConfig(
+        axes=("num_heads", "seq_len", "batch"),
+        resolver=perf_interp.Grid(),
+        sol_fn=lambda n, s, b: 1.0,
+    )
+    lat_swapped = _lat(perf_interp.query(cfg_swapped, swapped, 64, 1, 32))
+    assert lat == pytest.approx(lat_swapped, rel=1e-12)
+
+
+def test_grid_hold_is_continuous_across_rank_swaps():
+    """The support-radius taper sends a neighbour's weight to ZERO as it
+    leaves the nn_leaves selection, so the estimate is continuous when leaves
+    4 and 5 exchange rank — a hard cutoff traded them at full weight (review
+    finding: epsilon steps across the swap moved the estimate ~10x on an
+    adversarial fixture).
+
+    Fixture: five (a, b) leaves at b=8, query (x, 32) beyond the b range;
+    L4=(16,.) and L5=(1024,.) swap ranks at x=128 and their latencies differ
+    100x, so any leaked full-weight swap is a huge jump. The estimate across
+    x = 128*(1 +- 1e-6) must move by less than 0.01%."""
+    lat_of = {(128, 8): 1.0, (96, 8): 1.1, (160, 8): 1.2, (16, 8): 0.5, (1024, 8): 50.0}
+    table = {}
+    for (a, b), lat in lat_of.items():
+        table.setdefault(a, {})[b] = {"latency": lat, "energy": 0.0}
+
+    def sol(a, b):
+        return 1.0
+
+    cfg = perf_interp.OpInterpConfig(axes=("a", "b"), resolver=perf_interp.Grid(), sol_fn=sol)
+    lo = _lat(perf_interp.query(cfg, table, 128.0 * (1 - 1e-6), 32))
+    hi = _lat(perf_interp.query(cfg, table, 128.0 * (1 + 1e-6), 32))
+    assert abs(hi - lo) / lo < 1e-4, f"rank swap discontinuity: {lo} vs {hi}"
+
+
 def test_config_rejects_bad_transform_axis_and_k_tail():
     with pytest.raises(ValueError, match="transform_axis"):
         perf_interp.OpInterpConfig(
@@ -279,6 +416,12 @@ def test_config_rejects_bad_transform_axis_and_k_tail():
         perf_interp.OpInterpConfig(
             axes=("num_heads", "seq_len", "batch"),
             resolver=perf_interp.Grid(k_tail=0),
+            sol_fn=_attn_lat,
+        )
+    with pytest.raises(ValueError, match="nn_leaves"):
+        perf_interp.OpInterpConfig(
+            axes=("num_heads", "seq_len", "batch"),
+            resolver=perf_interp.Grid(nn_leaves=0),
             sol_fn=_attn_lat,
         )
     with pytest.raises(ValueError, match="duplicate"):

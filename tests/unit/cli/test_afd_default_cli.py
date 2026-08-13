@@ -684,7 +684,9 @@ def test_hybrid_auto_mode_skips_missing_decode_backend(monkeypatch):
             },
         },
     )
-    monkeypatch.setattr(cli_main, "check_is_moe", lambda _: False)
+    # The MoE gate for afd moved out of build_default_tasks (cli/api.py drops
+    # "afd" from the sweep for non-MoE models before this function runs); at
+    # 8 GPUs the node-granular topology check excludes afd here regardless.
     monkeypatch.setattr(cli_main, "Task", lambda **kwargs: SimpleNamespace(**kwargs))
 
     tasks = cli_main.build_default_tasks(
