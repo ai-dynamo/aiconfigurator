@@ -834,6 +834,13 @@ ColumnsAgg = [
     "version",
     "system",
     "power_w",  # NEW: E2E weighted average power in watts
+    # operating-point step timings, recorded so result rows are
+    # self-contained for post-processing refinement (sdk/closed_loop_ttft)
+    "mix_step_ms",
+    "genonly_step_ms",
+    "prefill_step_ms",
+    "num_mix_steps",
+    "num_genonly_steps",
 ]
 
 """
@@ -862,6 +869,10 @@ ColumnsDisagg = [
     "tokens/s/gpu",
     "tokens/s/user",
     "(p)seq/s/worker",
+    # raw solo context latency of one prefill worker (pre-correction),
+    # recorded so disagg rows are self-contained for post-processing
+    # refinement (sdk/closed_loop_ttft)
+    "(p)prefill_step_ms",
     "(d)seq/s/worker",
     "num_total_gpus",
     "(p)tp",

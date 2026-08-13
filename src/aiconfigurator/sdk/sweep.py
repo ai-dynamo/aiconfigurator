@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import itertools
 import logging
 from typing import Any
 
@@ -41,6 +42,7 @@ import pandas as pd
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.backends.factory import get_backend
+from aiconfigurator.sdk.closed_loop_ttft import price_closed_loop_row
 from aiconfigurator.sdk.errors import (
     InsufficientMemoryError,
     KVCacheCapacityError,
@@ -70,6 +72,10 @@ _DECODE_FILTER_RATIO_MIN = 0.0
 _DECODE_FILTER_RATIO_MAX = 1.0
 _MAX_DECODE_WORKERS_PER_CATEGORY = 16
 _MAX_PREFILL_WORKERS = 32
+
+# refined-SLA mode: how many top combos per decode-parallel category get the
+# concurrency knee search (each search is ~10 tandem pricings).
+_REFINED_KNEE_TOP_K = 3
 
 # Default decode batch-size schedule for disagg worker enumeration.
 _DEFAULT_DECODE_BATCH_SCHEDULE: list[int] = (
@@ -161,6 +167,8 @@ def _rate_match_dict(
         "tokens/s/gpu": tokens_s_gpu,
         "tokens/s/user": d["tokens/s/user"],
         "(p)seq/s/worker": p["seq/s"],
+        # float-or-None mirrors picking._build_disagg_summary_dict (parity)
+        "(p)prefill_step_ms": (float(p["prefill_step_ms"]) if p.get("prefill_step_ms") is not None else None),
         "(d)seq/s/worker": d["seq/s"],
         "num_total_gpus": num_total_gpus,
         "(p)tp": p["tp"],
@@ -268,6 +276,7 @@ def _sweep_one_parallel_agg(
     max_seq_len: int | None,
     predictor: Any = None,
     speculative_profile: SpeculativeDecodingProfile | None = None,
+    refined_sla: bool = False,
 ) -> tuple[pd.DataFrame, bool, bool]:
     """Sweep batch_size x ctx_tokens for one fixed parallel choice.
 
@@ -351,7 +360,27 @@ def _sweep_one_parallel_agg(
             if model_oom or kv_cache_oom:
                 break  # ctx_tokens monotonic → larger will also OOM
             result_dict = summary.get_result_dict()
-            if result_dict and result_dict["tpot"] <= tpot_target and result_dict["ttft"] <= ttft_target:
+            keep = bool(result_dict) and result_dict["tpot"] <= tpot_target
+            if keep and refined_sla:
+                # the static ttft is NOT a bound on the refined value (deep
+                # saturation moves cycle time from TTFT into TPOT), so gate
+                # on the true lower bound — the solo chunked prefill time —
+                # then enforce the SLA on the refined values. Unpriceable
+                # points (NaN) fall back to the legacy verdict.
+                eff = max(1, isl - int(result_dict.get("prefix", 0) or 0))
+                chunk = max(1, min(int(result_dict["ctx_tokens"]), eff))
+                solo_ms = float(result_dict["prefill_step_ms"]) * -(-eff // chunk)
+                if solo_ms > ttft_target:
+                    keep = False
+                else:
+                    ttft_r, tpot_r, _ = price_closed_loop_row(result_dict)
+                    if ttft_r == ttft_r:  # priced
+                        keep = ttft_r <= ttft_target and tpot_r <= tpot_target
+                    else:
+                        keep = result_dict["ttft"] <= ttft_target
+            elif keep:
+                keep = result_dict["ttft"] <= ttft_target
+            if keep:
                 results_dict_list.append(result_dict)
                 results_per_ops_source.append(summary.get_per_ops_source())
 
@@ -382,6 +411,7 @@ def sweep_agg(
     max_seq_len: int | None = None,
     predictor: Any = None,
     speculative_profile: SpeculativeDecodingProfile | None = None,
+    refined_sla: bool = False,
 ) -> pd.DataFrame:
     """Sweep parallel x batch x ctx_tokens for agg; return feasible-candidate DataFrame.
 
@@ -496,6 +526,7 @@ def sweep_agg(
                     max_seq_len=max_seq_len,
                     predictor=predictor,
                     speculative_profile=speculative_profile,
+                    refined_sla=refined_sla,
                 )
                 saw_model_fit |= point_saw_model_fit
                 saw_memory_fit |= point_saw_memory_fit
@@ -654,6 +685,103 @@ def _get_disagg_worker_candidates(
     return pd.concat(result_rows, axis=0, ignore_index=True)
 
 
+def _decode_step_from_ladder(ladder: list[tuple[float, float]], n_d: float, default: float) -> float:
+    """Interpolate the decode step (ms) at per-worker occupancy ``n_d`` from
+    the decode ladder's (concurrency, tpot) rungs; clamped at the ends."""
+    if not ladder:
+        return default
+    if n_d <= ladder[0][0]:
+        return ladder[0][1]
+    for (b0, t0), (b1, t1) in itertools.pairwise(ladder):
+        if n_d <= b1:
+            return t0 + (t1 - t0) * (n_d - b0) / (b1 - b0) if b1 > b0 else t1
+    return ladder[-1][1]
+
+
+def _refined_tune_combo(
+    cand: dict,
+    ttft_target: float,
+    tpot_target: float,
+    ladder: list[tuple[float, float]] | None = None,
+) -> dict | None:
+    """Knee-tune one rate-matched combo under the refined closed-loop SLA.
+
+    Searches the largest concurrency <= the inherited one whose refined
+    TTFT/TPOT meet the targets, then reprices the row's latency/throughput
+    columns from the tandem estimate at that point. The inherited
+    concurrency is the decode ladder's memory-validated operating point, so
+    the search never exceeds it (decode steps are priced at that point's
+    batch — conservative below it); pushing beyond it is represented by the
+    ladder's next rung, which is its own combo. Returns ``None`` when no
+    concurrency complies and the combo unchanged when it cannot be priced
+    (legacy verdict, fail-open).
+    """
+    c_inh = int(cand["concurrency"])
+    osl = cand["osl"]
+    d_workers = max(1, int(cand.get("(d)workers", 1) or 1))
+
+    def priced(c: int):
+        # occupancy-consistent decode step: the row's tpot is priced at its
+        # ladder point's batch, but the tandem's actual decode occupancy at
+        # concurrency c can sit well below it (Little: n_d = X*osl*step) —
+        # iterate step lookup on the decode ladder to the fixed point.
+        # Real-metal arbitration measured the scalar variant off by ~29% on
+        # TPOT at the knee, with cycle conservation pushing it into TTFT.
+        step = float(cand["tpot"])
+        t = p = x = float("nan")
+        for _ in range(3):
+            t, p, x = price_closed_loop_row(dict(cand, concurrency=c, tpot=step))
+            if t != t:
+                return None
+            n_d = x * osl * step / 1000.0 / d_workers
+            new_step = _decode_step_from_ladder(ladder, n_d, step) if ladder else step
+            if abs(new_step - step) < 0.3:
+                break
+            step = new_step
+        return (t, p, x)
+
+    def ok(tpx) -> bool:
+        return tpx is not None and tpx[0] <= ttft_target and tpx[1] <= tpot_target
+
+    at_inh = priced(c_inh)
+    if at_inh is None:
+        return dict(cand)  # unpriceable — keep the legacy verdict
+    if ok(at_inh):
+        best_c, best = c_inh, at_inh
+    else:
+        best_c, best = None, None
+        lo, hi = 1, c_inh  # hi is known non-compliant
+        while lo < hi:
+            mid = (lo + hi) // 2
+            tpx = priced(mid)
+            if ok(tpx):
+                best_c, best = mid, tpx
+                lo = mid + 1
+            else:
+                hi = mid
+        if best_c is None:
+            return None
+    ttft_r, tpot_r, x_r = best
+    gpus = cand.get("num_total_gpus") or 0
+    osl = cand["osl"]
+    out = dict(cand)
+    out.update(
+        {
+            "concurrency": best_c,
+            "ttft": ttft_r,
+            "tpot": tpot_r,
+            "request_latency": ttft_r + tpot_r * max(osl - 1, 0),
+            "request_rate": x_r,
+            "seq/s": x_r,
+            "seq/s/gpu": x_r / gpus if gpus else 0.0,
+            "tokens/s": x_r * osl,
+            "tokens/s/gpu": x_r * osl / gpus if gpus else 0.0,
+            "tokens/s/user": 1000.0 / tpot_r if tpot_r > 0 else 0.0,
+        }
+    )
+    return out
+
+
 def _find_best_disagg_under_constraint(
     *,
     ttft_target: float,
@@ -671,6 +799,7 @@ def _find_best_disagg_under_constraint(
     decode_degradation: float,
     match_workers: Any,
     autoscale_ttft_correction_factor: float = _AUTOSCALE_TTFT_CORRECTION_FACTOR,
+    refined_sla: bool = False,
 ) -> pd.DataFrame | None:
     """For one (ttft, tpot) pair, filter + rate-match + pick best per decode parallel.
 
@@ -683,7 +812,16 @@ def _find_best_disagg_under_constraint(
     matches.
     """
 
-    p_corrected = prefill_summary_df.assign(ttft=prefill_summary_df["ttft"] * autoscale_ttft_correction_factor)
+    # refined mode gates on the raw solo TTFT only (a necessary condition:
+    # the refined closed-loop TTFT is never below solo), then enforces the
+    # SLA on the refined value of each rate-matched combination below —
+    # applying the fixed factor here would pre-kill combinations the
+    # refined check accepts.
+    gate_factor = 1.0 if refined_sla else autoscale_ttft_correction_factor
+    p_corrected = prefill_summary_df.assign(
+        prefill_step_ms=prefill_summary_df["ttft"] - prefill_summary_df.get("encoder_latency", 0.0),  # raw solo context
+        ttft=prefill_summary_df["ttft"] * gate_factor,
+    )
     p_candidates = p_corrected[p_corrected["ttft"] < ttft_target]
     if len(p_candidates) == 0:
         logger.debug("sweep_disagg: no prefill candidates meet ttft<%sms", ttft_target)
@@ -712,6 +850,11 @@ def _find_best_disagg_under_constraint(
             .head(_MAX_DECODE_WORKERS_PER_CATEGORY)
         )
         decode_records = group_sorted.to_dict("records")
+        # per-worker (concurrency, tpot) rungs for occupancy-consistent
+        # decode-step lookup in the refined knee search
+        ladder = sorted(
+            zip(parallel_group["concurrency"].astype(float), parallel_group["tpot"].astype(float), strict=True)
+        )
         category_results: list[dict] = []
         for d_worker in decode_records:
             d_throughput = float(d_worker["seq/s"])
@@ -740,7 +883,28 @@ def _find_best_disagg_under_constraint(
                     decode_degradation=decode_degradation,
                 )
                 category_results.append(disagg_dict)
-        if category_results:
+        if refined_sla and category_results:
+            # knee-tune the top combos of the category (max compliant
+            # concurrency + tandem repricing), keep the best; fall back to a
+            # best-first accept/reject walk over the rest if none complies.
+            ranked = sorted(category_results, key=lambda x: (x["tokens/s/gpu"], -x["num_total_gpus"]), reverse=True)
+            tuned = []
+            for cand in ranked[:_REFINED_KNEE_TOP_K]:
+                t = _refined_tune_combo(cand, ttft_target, tpot_target, ladder=ladder)
+                if t is not None:
+                    tuned.append(t)
+            best = max(tuned, key=lambda x: (x["tokens/s/gpu"], -x["num_total_gpus"])) if tuned else None
+            if best is None:
+                for cand in ranked[_REFINED_KNEE_TOP_K:]:
+                    ttft_r, tpot_r, _ = price_closed_loop_row(cand)
+                    if not (ttft_r > ttft_target or tpot_r > tpot_target):
+                        best = cand
+                        break
+            if best is not None:
+                all_category_results.append(best)
+            else:
+                logger.debug("sweep_disagg: no refined-SLA result for decode parallel %s", parallel_value)
+        elif category_results:
             best = max(category_results, key=lambda x: (x["tokens/s/gpu"], -x["num_total_gpus"]))
             all_category_results.append(best)
         else:
@@ -782,6 +946,7 @@ def sweep_disagg(
     rate_matching_prefill_degradation: float | None = None,
     rate_matching_decode_degradation: float | None = None,
     autoscale_ttft_correction_factor: float | None = None,
+    refined_sla: bool = False,
     predictor: Any = None,
     speculative_profile: SpeculativeDecodingProfile | None = None,
     free_gpu_memory_fraction: float | None = None,
@@ -974,6 +1139,7 @@ def sweep_disagg(
             decode_degradation=d_deg,
             match_workers=_match_workers,
             autoscale_ttft_correction_factor=ttft_corr,
+            refined_sla=refined_sla,
         )
         if partial is not None:
             disagg_df = pd.concat([disagg_df, partial], axis=0, ignore_index=True)

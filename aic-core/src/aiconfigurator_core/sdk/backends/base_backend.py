@@ -1811,6 +1811,15 @@ class BaseBackend:
             "version": database.version,
             "system": database.system,
             "power_w": agg_power_avg_w,
+            # operating-point step timings: already computed above (through
+            # the compiled engine step when routed there — these are the
+            # FFI-returned scalars, identical under either engine), recorded
+            # so post-processing can refine without re-querying timing
+            "mix_step_ms": mix_step_latency_ms,
+            "genonly_step_ms": genonly_step_latency_ms,
+            "prefill_step_ms": _prefill_step_ms,
+            "num_mix_steps": num_mix_steps,
+            "num_genonly_steps": num_genonly_steps,
         }
         summary = InferenceSummary(RuntimeConfig(isl=isl, osl=osl))
         summary.set_memory_and_check_oom(
