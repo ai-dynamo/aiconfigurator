@@ -157,6 +157,11 @@ class RuntimeConfig:
     image_width: int = 0
     num_images_per_request: int = 1
     num_image_tokens: int = 0  # override: ViT output tokens per image; ignored when image_height/width are set
+    video_height: int = 0
+    video_width: int = 0
+    video_frames: int = 0
+    num_videos_per_request: int = 0
+    num_video_tokens: int = 0  # override: ViT output tokens per video; ignored when video dimensions are set
 
 
 @dataclass

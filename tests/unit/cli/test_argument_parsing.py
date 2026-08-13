@@ -437,6 +437,39 @@ class TestCLIArgumentParsing:
         args = cli_parser.parse_args(["estimate", *common_args, "--disable-encoder-dp"])
         assert args.disable_encoder_dp is True
 
+    @pytest.mark.parametrize(
+        ("mode", "extra_args"),
+        [
+            ("default", ["--total-gpus", "8"]),
+            ("recommend", ["--target-request-rate", "1.0"]),
+            ("estimate", []),
+        ],
+    )
+    def test_video_input_flags(self, cli_parser, mode, extra_args):
+        args = cli_parser.parse_args(
+            [
+                mode,
+                "--model-path",
+                "Qwen/Qwen3.5-27B",
+                "--system",
+                "h200_sxm",
+                *extra_args,
+                "--video-height",
+                "448",
+                "--video-width",
+                "336",
+                "--video-frames",
+                "8",
+                "--num-videos",
+                "2",
+            ]
+        )
+
+        assert args.video_height == 448
+        assert args.video_width == 336
+        assert args.video_frames == 8
+        assert args.num_videos == 2
+
     def test_recommend_mode_parses_request_rate(self, cli_parser):
         args = cli_parser.parse_args(
             [

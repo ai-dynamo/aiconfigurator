@@ -170,6 +170,11 @@ def test_sweep_agg_point_config_preserves_multimodal_fields(monkeypatch):
         image_width=1024,
         num_images_per_request=2,
         num_image_tokens=333,
+        video_height=720,
+        video_width=1280,
+        video_frames=16,
+        num_videos_per_request=3,
+        num_video_tokens=444,
         seq_imbalance_correction_scale=1.5,
         engine_step_backend="rust",
     )
@@ -191,6 +196,11 @@ def test_sweep_agg_point_config_preserves_multimodal_fields(monkeypatch):
         assert point_rt.image_width == 1024
         assert point_rt.num_images_per_request == 2
         assert point_rt.num_image_tokens == 333
+        assert point_rt.video_height == 720
+        assert point_rt.video_width == 1280
+        assert point_rt.video_frames == 16
+        assert point_rt.num_videos_per_request == 3
+        assert point_rt.num_video_tokens == 444
         # Non-multimodal fields must survive too (the deep-copy carries them all).
         assert point_rt.seq_imbalance_correction_scale == 1.5
         assert point_rt.engine_step_backend == "rust"

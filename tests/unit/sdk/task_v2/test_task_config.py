@@ -304,13 +304,26 @@ def test_from_yaml_disagg_rejects_legacy_shared_model_path():
 
 
 def test_build_runtime_config_carries_workload():
-    t = Task(isl=2048, osl=512, ttft=300.0, tpot=20.0)
+    t = Task(
+        isl=2048,
+        osl=512,
+        ttft=300.0,
+        tpot=20.0,
+        video_height=448,
+        video_width=448,
+        video_frames=8,
+        num_videos_per_request=2,
+    )
     rt = t.build_runtime_config(batch_size=64)
     assert rt.isl == 2048
     assert rt.osl == 512
     assert rt.ttft == 300.0
     assert rt.tpot == 20.0
     assert rt.batch_size == 64
+    assert rt.video_height == 448
+    assert rt.video_width == 448
+    assert rt.video_frames == 8
+    assert rt.num_videos_per_request == 2
 
 
 def test_build_model_config_agg_uses_resolved_quant():

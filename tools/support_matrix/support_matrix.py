@@ -90,6 +90,15 @@ _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
 _NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
 _DSV4_VLLM_NATIVE_W4A8_MIN_VERSION = Version("0.24.0")
+_ENCODER_ARCHITECTURES = frozenset(
+    {
+        "Qwen3VLForConditionalGeneration",
+        "Qwen3VLMoeForConditionalGeneration",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+    }
+)
+_ENCODER_CHECK_IMAGE_SIZE = 448
 
 
 def _combination_sort_key(combo: tuple[str, str, str, str]) -> tuple[tuple[int, str], str, str, str]:
@@ -121,6 +130,7 @@ class HardwareIncompatibility:
 def _support_matrix_row_command(
     *,
     model: str,
+    architecture: str | None = None,
     system: str,
     backend: str,
     version: str,
@@ -169,6 +179,17 @@ def _support_matrix_row_command(
         "1",
         "--no-color",
     ]
+    if _has_modeled_encoder(model, architecture=architecture):
+        parts.extend(
+            [
+                "--image-height",
+                str(_ENCODER_CHECK_IMAGE_SIZE),
+                "--image-width",
+                str(_ENCODER_CHECK_IMAGE_SIZE),
+                "--num-images",
+                "1",
+            ]
+        )
     if transfer_policy:
         parts.extend(["--transfer-policy", transfer_policy])
     if compare_engine_step_backends:
@@ -184,6 +205,12 @@ def _support_matrix_row_command(
         engine_step_frontier_atol,
     )
     return " ".join(shlex.quote(str(part)) for part in parts)
+
+
+def _has_modeled_encoder(model: str, *, architecture: str | None = None) -> bool:
+    """Whether support-matrix execution must include a real visual workload."""
+    resolved_architecture = architecture or dict(_get_model_info(model))["architecture"]
+    return resolved_architecture in _ENCODER_ARCHITECTURES
 
 
 # Tiered constraints by model size (parameter count)
@@ -766,6 +793,14 @@ class SupportMatrix:
             # (e.g. AIC_SM_TRANSFERS="off" or "xshape,xquant"). None -> all kinds on.
             "transfer_policy": os.environ.get("AIC_SM_TRANSFERS") or None,
         }
+        if _has_modeled_encoder(model):
+            # A text-only request never queries encoder_ops and would produce a
+            # false-positive matrix row for multimodal support.
+            common_kwargs.update(
+                image_height=_ENCODER_CHECK_IMAGE_SIZE,
+                image_width=_ENCODER_CHECK_IMAGE_SIZE,
+                num_images_per_request=1,
+            )
         if mode == "disagg":
             # v2 disagg forbids shared top-level worker fields; fan out to both roles.
             return Task(
@@ -1368,6 +1403,7 @@ class SupportMatrix:
                 huggingface_id, architecture, system, backend, version, mode, status, err_msg = row
                 command = _support_matrix_row_command(
                     model=huggingface_id,
+                    architecture=architecture,
                     system=system,
                     backend=backend,
                     version=version,

@@ -14,6 +14,7 @@ from tools.support_matrix.support_matrix import (
     STATUS_PASS,
     SupportMatrix,
     TestConstraints,
+    _support_matrix_row_command,
 )
 
 pytestmark = pytest.mark.unit
@@ -142,3 +143,37 @@ def test_task_uses_silicon_database_mode(monkeypatch):
     )
 
     assert captured_kwargs["database_mode"] == common.DatabaseMode.SILICON.name
+
+
+def test_qwen35_support_matrix_runs_and_replays_with_image_workload(monkeypatch):
+    captured_kwargs = {}
+
+    class FakeTask:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(support_matrix_module, "Task", FakeTask)
+    constraints = TestConstraints(total_gpus=32, isl=256, osl=256, prefix=128, ttft=2000.0, tpot=50.0)
+
+    SupportMatrix._create_task(
+        mode="agg",
+        model="Qwen/Qwen3.5-27B",
+        system="b200_sxm",
+        backend="vllm",
+        version="0.24.0",
+        constraints=constraints,
+        engine_step_backend=None,
+    )
+    command = _support_matrix_row_command(
+        model="Qwen/Qwen3.5-27B",
+        system="b200_sxm",
+        backend="vllm",
+        version="0.24.0",
+        mode="agg",
+        constraints=constraints,
+    )
+
+    assert captured_kwargs["image_height"] == 448
+    assert captured_kwargs["image_width"] == 448
+    assert captured_kwargs["num_images_per_request"] == 1
+    assert "--image-height 448 --image-width 448 --num-images 1" in command

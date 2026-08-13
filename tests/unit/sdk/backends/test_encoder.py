@@ -16,6 +16,7 @@ Covers:
 import pytest
 
 from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.models import get_model
 
@@ -161,6 +162,57 @@ class TestEncoderTokenFormula:
         # total encoder input tokens = batch_size * num_images * num_image_tokens
         total = rc.batch_size * rc.num_images_per_request * rc.num_image_tokens
         assert total == 1176  # 2 * 3 * 196
+
+
+class TestEncoderVideoTokenFormula:
+    @pytest.fixture
+    def enc_cfg(self):
+        return common.VisionEncoderConfig(
+            depth=27,
+            hidden_size=1152,
+            num_heads=16,
+            intermediate_size=4304,
+            patch_size=16,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            out_hidden_size=5120,
+        )
+
+    def test_video_frames_contribute_temporal_patches(self, enc_cfg):
+        rc = RuntimeConfig(
+            video_height=448,
+            video_width=448,
+            video_frames=8,
+            num_videos_per_request=2,
+        )
+
+        post_merge, pre_merge, num_visuals = BaseBackend._encoder_pre_merge_per_visual(rc, enc_cfg)
+
+        assert pre_merge == (8 // 2) * (448 // 16) * (448 // 16) == 3136
+        assert post_merge == (8 // 2) * (448 // 32) * (448 // 32) == 784
+        assert num_visuals == 2
+        assert BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, rc) == 1568
+
+    def test_num_video_tokens_override_is_per_video(self, enc_cfg):
+        rc = RuntimeConfig(num_video_tokens=300, num_videos_per_request=3)
+
+        post_merge, pre_merge, num_visuals = BaseBackend._encoder_pre_merge_per_visual(rc, enc_cfg)
+
+        assert (post_merge, pre_merge, num_visuals) == (300, 1200, 3)
+
+    def test_mixed_image_video_workload_fails_loudly(self, enc_cfg):
+        rc = RuntimeConfig(
+            image_height=448,
+            image_width=448,
+            num_images_per_request=1,
+            video_height=448,
+            video_width=448,
+            video_frames=8,
+            num_videos_per_request=1,
+        )
+
+        with pytest.raises(ValueError, match="Mixed image/video"):
+            BaseBackend._encoder_pre_merge_per_visual(rc, enc_cfg)
 
 
 class TestFixBEffectiveISL:
@@ -550,3 +602,94 @@ class TestEncoderMemoryInSummary:
         assert enc_mem["kvcache"] == 0.0
         assert enc_mem["weights"] > 0.0
         assert enc_mem["activations"] > 0.0
+
+    @pytest.mark.parametrize("model_name", ["Qwen/Qwen3.5-27B", "Qwen/Qwen3.5-35B-A3B"])
+    def test_qwen35_image_estimate_executes_nonzero_encoder_work(self, model_name):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
+
+        model_config = config.ModelConfig(moe_tp_size=1) if "A3B" in model_name else config.ModelConfig()
+        model = get_model(model_name, model_config, "trtllm")
+        database = SimpleNamespace(
+            backend="trtllm",
+            version="10.0",
+            system="h200_sxm",
+            system_spec={
+                "gpu": {"mem_capacity": 640 * (1 << 30)},
+                "misc": {
+                    "nccl_mem": {1: 500 * 1024 * 1024, 8: 1024 * 1024 * 1024},
+                    "other_mem": 200 * 1024 * 1024,
+                },
+            },
+        )
+        for op in model.context_ops + model.generation_ops:
+            op.query = MagicMock(return_value=MagicMock(__float__=lambda _self: 1.0, energy=3.0, source="silicon"))
+        for op in model.encoder_ops:
+            op.query = MagicMock(return_value=MagicMock(__float__=lambda _self: 2.0, energy=5.0, source="silicon"))
+
+        summary = TRTLLMBackend().run_static(
+            model,
+            database,
+            RuntimeConfig(
+                batch_size=1,
+                isl=256,
+                osl=16,
+                image_height=448,
+                image_width=448,
+                num_images_per_request=1,
+            ),
+            mode="static",
+        )
+
+        encoder_latency = sum(summary.get_encoder_latency_dict().values())
+        encoder_energy = sum(summary.get_encoder_energy_wms_dict().values())
+        context_latency = sum(summary.get_context_latency_dict().values())
+        assert encoder_latency > 0
+        assert encoder_energy > 0
+        assert summary.get_encoder_memory()["total"] > 0
+        assert summary.get_summary_df().iloc[0]["ttft"] == pytest.approx(encoder_latency + context_latency)
+
+    def test_qwen35_video_estimate_executes_encoder_and_adds_video_tokens_to_context(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
+
+        model = get_model("Qwen/Qwen3.5-27B", config.ModelConfig(), "trtllm")
+        database = SimpleNamespace(
+            backend="trtllm",
+            version="10.0",
+            system="h200_sxm",
+            system_spec={
+                "gpu": {"mem_capacity": 640 * (1 << 30)},
+                "misc": {
+                    "nccl_mem": {1: 500 * 1024 * 1024, 8: 1024 * 1024 * 1024},
+                    "other_mem": 200 * 1024 * 1024,
+                },
+            },
+        )
+        for op in model.context_ops + model.generation_ops + model.encoder_ops:
+            op.query = MagicMock(return_value=MagicMock(__float__=lambda _self: 1.0, energy=2.0, source="silicon"))
+        rc = RuntimeConfig(
+            batch_size=1,
+            isl=256,
+            osl=16,
+            video_height=448,
+            video_width=448,
+            video_frames=8,
+            num_videos_per_request=1,
+        )
+
+        summary = TRTLLMBackend().run_static(model, database, rc, mode="static")
+
+        encoder_latency = sum(summary.get_encoder_latency_dict().values())
+        encoder_energy = sum(summary.get_encoder_energy_wms_dict().values())
+        context_latency = sum(summary.get_context_latency_dict().values())
+        assert encoder_latency > 0
+        assert encoder_energy > 0
+        assert summary.get_encoder_memory()["total"] > 0
+        assert summary.get_summary_df().iloc[0]["ttft"] == pytest.approx(encoder_latency + context_latency)
+        assert BaseBackend._visual_context_tokens(model, rc) == 784
+        assert summary.get_summary_df().iloc[0]["isl"] == 256

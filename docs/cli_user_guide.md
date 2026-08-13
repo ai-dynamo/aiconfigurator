@@ -419,11 +419,16 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--enable-wideep`: Enable Wide Expert Parallelism (WideEP) for MoE models — EP-only parallelism via the `deepep_moe` backend. Applies to DeepSeek and Qwen3-235B on SGLang.
 - `--moe-backend`: Explicit SGLang MoE backend — `deepep_moe` or `megamoe` (use `megamoe` to model DeepSeek-V4 MegaMoE on Blackwell).
 
-**Vision-language inputs** (multimodal models such as Qwen3-VL):
+**Vision-language inputs** (multimodal models such as Qwen3-VL and Qwen3.5):
 
 - `--image-height`, `--image-width`: Image dimensions in pixels. Default: `0` (disabled — the request is modeled as text-only).
 - `--num-images`: Number of images per request. Default: `1`.
-- `--disable-encoder-dp`: Model the vision encoder as TP-sharded instead of the default data-parallel. Also available in `estimate` mode (alongside the image flags above).
+- `--video-height`, `--video-width`: Video frame dimensions in pixels. Default: `0` (disabled).
+- `--video-frames`: Number of frames per video. Default: `0` (disabled).
+- `--num-videos`: Number of videos per request. Default: `0`.
+- `--disable-encoder-dp`: Model the vision encoder as TP-sharded instead of the default data-parallel. Also available in `estimate` mode (alongside the visual-input flags above).
+
+Image and video workloads must currently be estimated separately. Video token accounting uses the model's temporal patch size before the spatial merge.
 
 The SLA, precision, and speculative-decoding flags (`--strict-sla`, `--request-latency`, `--inclusive-tpot`, `--nextn`, `--nextn-accepted`, `--database-mode`) have dedicated subsections below. Shared flags such as `--save-dir`, `--top-n`, and `--systems-paths` are described in [Common Arguments](#common-arguments-all-modes).
 

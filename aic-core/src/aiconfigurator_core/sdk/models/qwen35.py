@@ -7,12 +7,13 @@ import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
 from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor
+from aiconfigurator_core.sdk.models.vit_ops import build_encoder_ops
 
 
 @register_model("QWEN35")
 class Qwen35Model(BaseModel):
     """
-    Qwen3.5 hybrid GDN + full-attention model (dense and MoE variants).
+    Qwen3.5 multimodal hybrid GDN + full-attention model (dense and MoE variants).
 
     Handles two layer types from Qwen35Config.layer_types:
       - "linear_attention": Gated DeltaNet (GDN) layers using chunk_gated_delta_rule
@@ -80,6 +81,11 @@ class Qwen35Model(BaseModel):
 
         self._build_context_ops()
         self._build_generation_ops()
+        if cfg.vision_config is not None:
+            self.encoder_config = cfg.vision_config
+            self.encoder_ops.extend(
+                build_encoder_ops(cfg.vision_config, self.config.tp_size, self.config.enable_encoder_dp)
+            )
 
     def _count_layer_types(self) -> dict[str, int]:
         cfg: common.Qwen35Config = self.extra_params

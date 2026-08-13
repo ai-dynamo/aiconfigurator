@@ -183,6 +183,8 @@ class VisionEncoderConfig:
             rotated fraction — the 2-axis vision RoPE always rotates the full
             head_dim (vLLM ApplyRotaryEmb / SGLang cat([cos, cos])). Only gates
             the encoder_rope_apply op; 0.0 means no RoPE.
+        in_channels (int): Number of image/video input channels consumed by the
+            patch embedding projection.
     """
 
     depth: int
@@ -197,6 +199,7 @@ class VisionEncoderConfig:
     projector_dims: tuple[tuple[int, int], ...] = ()
     projector_n_instances: int = 1
     partial_rotary_factor: float = 0.0
+    in_channels: int = 3
 
 
 @dataclass(frozen=True)
@@ -226,12 +229,15 @@ class Gemma4MixConfig:
 
 @dataclass(frozen=True)
 class Qwen35Config:
-    """Config for Qwen3.5 hybrid GDN + full-attention model (dense and MoE).
+    """Config for Qwen3.5's multimodal hybrid model (dense and MoE).
 
     layer_types: per-layer tuple of "linear_attention" (GDN) or "full_attention" (standard GQA)
     linear_*: GDN layer dimensions (linear_key_head_dim=128, linear_value_head_dim=128,
               linear_conv_kernel_dim=4, linear_num_key_heads=16 across all current models)
     MoE fields default to 0 for the dense 27B; populated for 35B-A3B and 397B-A17B.
+    vision_config: the separate Qwen3-VL-derived ViT + single patch-merger contract.
+    image_token_id/video_token_id: top-level multimodal token identities retained
+        when the nested text_config is unwrapped.
     """
 
     layer_types: tuple[str, ...]  # per-layer: "linear_attention" (GDN) or "full_attention"
@@ -245,6 +251,9 @@ class Qwen35Config:
     num_experts: int = 0
     moe_inter_size: int = 0
     shared_expert_inter_size: int = 0
+    vision_config: VisionEncoderConfig | None = None
+    image_token_id: int = 0
+    video_token_id: int = 0
 
 
 @dataclass(frozen=True)

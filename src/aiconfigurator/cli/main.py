@@ -414,6 +414,10 @@ def _add_default_mode_arguments(parser):
     parser.add_argument(
         "--num-images", type=int, default=1, help="Number of images per request for vision-language models. Default: 1."
     )
+    parser.add_argument("--video-height", type=int, default=0, help="Video frame height in pixels. Default: 0.")
+    parser.add_argument("--video-width", type=int, default=0, help="Video frame width in pixels. Default: 0.")
+    parser.add_argument("--video-frames", type=int, default=0, help="Frames per video. Default: 0 (disabled).")
+    parser.add_argument("--num-videos", type=int, default=0, help="Number of videos per request. Default: 0.")
     parser.add_argument(
         "--disable-encoder-dp",
         action="store_true",
@@ -609,6 +613,10 @@ def _add_recommend_mode_arguments(parser):
     parser.add_argument(
         "--num-images", type=int, default=1, help="Number of images per request for vision-language models. Default: 1."
     )
+    parser.add_argument("--video-height", type=int, default=0, help="Video frame height in pixels. Default: 0.")
+    parser.add_argument("--video-width", type=int, default=0, help="Video frame width in pixels. Default: 0.")
+    parser.add_argument("--video-frames", type=int, default=0, help="Frames per video. Default: 0 (disabled).")
+    parser.add_argument("--num-videos", type=int, default=0, help="Number of videos per request. Default: 0.")
     parser.add_argument(
         "--ttft",
         type=float,
@@ -808,6 +816,10 @@ def _add_estimate_mode_arguments(parser):
     parser.add_argument(
         "--num-images", type=int, default=1, help="Number of images per request for vision-language models. Default: 1."
     )
+    parser.add_argument("--video-height", type=int, default=0, help="Video frame height in pixels. Default: 0.")
+    parser.add_argument("--video-width", type=int, default=0, help="Video frame width in pixels. Default: 0.")
+    parser.add_argument("--video-frames", type=int, default=0, help="Frames per video. Default: 0 (disabled).")
+    parser.add_argument("--num-videos", type=int, default=0, help="Number of videos per request. Default: 0.")
     parser.add_argument(
         "--disable-encoder-dp",
         action="store_true",
@@ -1487,6 +1499,10 @@ def build_default_tasks(
     image_height: int = 0,
     image_width: int = 0,
     num_images: int = 1,
+    video_height: int = 0,
+    video_width: int = 0,
+    video_frames: int = 0,
+    num_videos: int = 0,
     enable_encoder_dp: bool = True,
     ttft: float = 2000.0,
     tpot: float = 30.0,
@@ -1683,6 +1699,11 @@ def build_default_tasks(
         global_kwargs["image_height"] = image_height
         global_kwargs["image_width"] = image_width
         global_kwargs["num_images_per_request"] = num_images
+    if video_height or video_width or video_frames or num_videos:
+        global_kwargs["video_height"] = video_height
+        global_kwargs["video_width"] = video_width
+        global_kwargs["video_frames"] = video_frames
+        global_kwargs["num_videos_per_request"] = num_videos
     if not enable_encoder_dp:
         global_kwargs["enable_encoder_dp"] = False
 
@@ -2462,6 +2483,10 @@ def _run_estimate_mode(args):
         image_height=args.image_height,
         image_width=args.image_width,
         num_images=args.num_images,
+        video_height=args.video_height,
+        video_width=args.video_width,
+        video_frames=args.video_frames,
+        num_videos=args.num_videos,
         enable_encoder_dp=not args.disable_encoder_dp,
         batch_size=args.batch_size,
         ctx_tokens=args.ctx_tokens,
@@ -2543,6 +2568,12 @@ def _run_estimate_mode(args):
     print(f"  OSL:              {result.osl}")
     if args.image_height > 0 and args.image_width > 0 and args.num_images > 0:
         print(f"  Images:           {args.num_images} x {args.image_height}x{args.image_width}")
+        print(f"  Encoder parallel: {'TP (weight-sharded)' if args.disable_encoder_dp else 'DP (data-parallel)'}")
+    if args.video_frames > 0 and args.video_height > 0 and args.video_width > 0 and args.num_videos > 0:
+        print(
+            f"  Videos:           {args.num_videos} x {args.video_frames} frames x "
+            f"{args.video_height}x{args.video_width}"
+        )
         print(f"  Encoder parallel: {'TP (weight-sharded)' if args.disable_encoder_dp else 'DP (data-parallel)'}")
 
     # ``--prefix`` and ``--nextn`` are common parameters applied to every
@@ -2764,6 +2795,10 @@ def _run_recommend(args) -> None:
             image_height=args.image_height,
             image_width=args.image_width,
             num_images=args.num_images,
+            video_height=args.video_height,
+            video_width=args.video_width,
+            video_frames=args.video_frames,
+            num_videos=args.num_videos,
             ttft=args.ttft,
             tpot=args.tpot,
             request_latency=args.request_latency,
@@ -2918,6 +2953,10 @@ def main(args):
             image_height=args.image_height,
             image_width=args.image_width,
             num_images=args.num_images,
+            video_height=args.video_height,
+            video_width=args.video_width,
+            video_frames=args.video_frames,
+            num_videos=args.num_videos,
             enable_encoder_dp=not args.disable_encoder_dp,
             ttft=args.ttft,
             tpot=args.tpot,
