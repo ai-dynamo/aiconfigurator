@@ -39,9 +39,6 @@ EXEMPT: dict[str, str] = {
     # Dead class: no model instantiates it (Mamba2Kernel is the live op and
     # converts). Remove the class or this entry together.
     "Mamba2": "dead code — never instantiated; Mamba2Kernel is the live op",
-    # forward_model="fpm" is forced onto the Python engine step in
-    # base_backend (no Rust op variant yet); the Rust port lands separately.
-    "FPMForwardOp": "FPM forces the Python route; Rust port is a separate PR",
     # Retained Python op classes kept purely as L0/L1 equivalence oracles for
     # the large-EP redesign; no model emits them any more.
     "TrtLLMWideEPMoE": (

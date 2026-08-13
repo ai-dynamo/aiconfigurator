@@ -2,9 +2,9 @@
   "header": {
     "command": "python aic-core/rust/aiconfigurator-core/parity_tests/regenerate_goldens.py",
     "engine_step_backend": "python",
-    "git_describe": "21781b68",
-    "git_head": "21781b68f80f758ffadc0ab85f07e419efcaa50b",
-    "reference_count": 47,
+    "git_describe": "b37e8fd5",
+    "git_head": "b37e8fd5ce609594d880c1ef0f03bb8c36b588dd",
+    "reference_count": 53,
     "thread_caps": {
       "MKL_NUM_THREADS": "1",
       "NUMEXPR_NUM_THREADS": "1",
@@ -60,6 +60,12 @@
     "qwen3-30b-a3b-b200-vllm-022-power::decode_step": 3.314493163403432,
     "qwen3-30b-a3b-b200-vllm-022-power::mixed_step": 15.364723323911948,
     "qwen3-30b-a3b-b200-vllm-022-power::static_ctx": 14.939366024779778,
-    "qwen3-30b-a3b-b200-vllm-022-power::static_gen": 3.3144931673015763
+    "qwen3-30b-a3b-b200-vllm-022-power::static_gen": 3.3144931673015763,
+    "wideep_sglang::decode_step": 11.651700656031192,
+    "wideep_sglang::mixed_step": 102.11955248944133,
+    "wideep_sglang::static_ctx": 99.42331852569644,
+    "wideep_sglang::static_gen": 32.82787657651461,
+    "wideep_trtllm::static_ctx": 80.41054370779536,
+    "wideep_trtllm::static_gen": 48.217231523625635
   }
 }
