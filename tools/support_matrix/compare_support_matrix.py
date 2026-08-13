@@ -43,6 +43,7 @@ from tools.support_matrix.support_matrix import (
     VALID_PROVENANCE_SOURCES,
     VALID_STATUSES,
     SupportMatrix,
+    _get_encoder_coverage,
 )
 
 # Accept the previous 10-col header, transitional 9-col header, and legacy
@@ -254,6 +255,19 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
                             f"Row {i}: replay command includes image arguments but image workload metadata is empty"
                         )
 
+                    try:
+                        encoder_coverage = _get_encoder_coverage(row[0])
+                    except Exception:
+                        encoder_coverage = None
+                    if status in {STATUS_PASS, STATUS_HYBRID_PASS} and encoder_coverage is not None:
+                        if (
+                            encoder_coverage.checkpoint_declares_encoder
+                            and not encoder_coverage.aic_encoder_implemented
+                        ):
+                            errors.append(f"Row {i}: encoder-unsupported checkpoint cannot use pass status {status}")
+                        elif encoder_coverage.aic_encoder_implemented and not populated_image_values:
+                            errors.append(f"Row {i}: encoder PASS requires persisted image workload metadata")
+
     return errors
 
 
@@ -371,7 +385,9 @@ def find_metadata_changes(old_data_rows: list[list[str]], new_data_rows: list[li
     return changes
 
 
-def find_blocking_status_transitions(changed_rows: list[tuple]) -> list[str]:
+def find_blocking_status_transitions(
+    changed_rows: list[tuple], new_data_rows: list[list[str]] | None = None
+) -> list[str]:
     """
     Return status transitions that should block an automated support-matrix PR.
 
@@ -382,7 +398,18 @@ def find_blocking_status_transitions(changed_rows: list[tuple]) -> list[str]:
     investigated explicitly.
     """
     errors = []
+    encoder_migration_keys = {
+        tuple(row[:6])
+        for row in new_data_rows or []
+        if len(row) > 7 and row[6] == STATUS_FAIL and row[7].strip().startswith("ENCODER_UNSUPPORTED:")
+    }
     for huggingface_id, architecture, system, backend, version, mode, old_status, new_status in changed_rows:
+        key = (huggingface_id, architecture, system, backend, version, mode)
+        if new_status == STATUS_FAIL and key in encoder_migration_keys:
+            # AIC-1738 intentionally replaces stale backbone-only coverage with
+            # an explicit encoder-unsupported classification. This narrow,
+            # evidence-bearing transition is a migration, not a regression.
+            continue
         if old_status == STATUS_PASS and new_status != STATUS_PASS:
             errors.append(
                 f"Unexpected PASS -> {new_status} transition: "
@@ -726,7 +753,7 @@ def main():
     added_rows, removed_rows, changed_rows = compare_csv_files(old_data_rows, new_data_rows)
     metadata_changes = find_metadata_changes(old_data_rows, new_data_rows)
     header_changed = old_header != new_header
-    transition_errors = find_blocking_status_transitions(changed_rows)
+    transition_errors = find_blocking_status_transitions(changed_rows, new_data_rows)
     validation_errors.extend(transition_errors)
 
     regression_count = len([r for r in changed_rows if r[6] == STATUS_PASS and r[7] != STATUS_PASS])

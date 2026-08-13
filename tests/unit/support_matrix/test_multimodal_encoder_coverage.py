@@ -151,7 +151,15 @@ def test_encoder_model_cannot_pass_with_zero_encoder_evidence(monkeypatch, mode,
     assert len(calls) == 1
 
 
-def test_declared_but_unimplemented_encoder_is_explicit_failure(monkeypatch):
+@pytest.mark.parametrize(
+    "model",
+    [
+        "Qwen/Qwen3.5-27B",
+        "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+        "stepfun-ai/Step-3.7-Flash",
+    ],
+)
+def test_declared_but_unimplemented_encoder_is_explicit_failure(monkeypatch, model):
     def fail_if_run(**_kwargs):
         pytest.fail("an unsupported encoder must fail before running the text backbone")
 
@@ -159,14 +167,14 @@ def test_declared_but_unimplemented_encoder_is_explicit_failure(monkeypatch):
     _patch_constraints(monkeypatch)
 
     statuses, errors = SupportMatrix.run_single_test(
-        model="Qwen/Qwen3.5-27B",
+        model=model,
         system="b200_sxm",
         backend="vllm",
         version="0.24.0",
         system_spec=_b200_system_spec(),
     )
 
-    coverage = _get_encoder_coverage("Qwen/Qwen3.5-27B")
+    coverage = _get_encoder_coverage(model)
     assert coverage.checkpoint_declares_encoder
     assert not coverage.aic_encoder_implemented
     assert statuses == {"agg": STATUS_FAIL, "disagg": STATUS_FAIL}
@@ -253,3 +261,43 @@ def test_image_command_without_persisted_workload_metadata_is_invalid():
     errors = check_csv_sanity(SUPPORT_MATRIX_HEADER, [row])
 
     assert any("image arguments but image workload metadata is empty" in error for error in errors)
+
+
+def test_encoder_pass_without_command_or_metadata_evidence_is_invalid():
+    row = [
+        "Qwen/Qwen3-VL-8B-Instruct",
+        "Qwen3VLForConditionalGeneration",
+        "b200_sxm",
+        "vllm",
+        "0.24.0",
+        "agg",
+        STATUS_PASS,
+        "",
+        "uv run aiconfigurator cli default --database-mode SILICON",
+        "silicon",
+        "",
+        "",
+        "",
+    ]
+
+    errors = check_csv_sanity(SUPPORT_MATRIX_HEADER, [row])
+
+    assert any("encoder PASS requires persisted image workload metadata" in error for error in errors)
+
+
+def test_legacy_encoder_pass_cannot_be_upgraded_without_image_evidence(tmp_path):
+    row = (
+        "Qwen/Qwen3-VL-8B-Instruct",
+        "Qwen3VLForConditionalGeneration",
+        "b200_sxm",
+        "vllm",
+        "0.24.0",
+        "agg",
+        STATUS_PASS,
+        None,
+        "uv run aiconfigurator cli default --database-mode SILICON",
+        "silicon",
+    )
+
+    with pytest.raises(ValueError, match="Legacy multimodal PASS rows cannot be upgraded"):
+        SupportMatrix.__new__(SupportMatrix).save_results_to_csv([row], str(tmp_path / "support.csv"))

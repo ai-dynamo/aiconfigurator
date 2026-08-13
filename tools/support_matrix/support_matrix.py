@@ -162,7 +162,13 @@ def _get_encoder_coverage(model: str) -> EncoderCoverage:
     model_info = _get_model_info(model)
     raw_config = model_info.get("raw_config") or {}
     vision_config = raw_config.get("vision_config")
-    checkpoint_declares_encoder = isinstance(vision_config, dict) and bool(vision_config)
+    architecture = model_info["architecture"]
+    # Some bundled configs intentionally retain only the normalized text fields
+    # needed by AIC.  The architecture registry is the durable declaration for
+    # those trimmed multimodal checkpoints (for example Llama 4 and Step-3.7).
+    checkpoint_declares_encoder = (isinstance(vision_config, dict) and bool(vision_config)) or (
+        architecture in common.MULTIMODAL_TEXT_CONFIG_KEY
+    )
 
     # ``VisionEncoderConfig`` is emitted only when the config parser knows how to
     # normalize this architecture's encoder. The subsequent nonzero evidence gate
@@ -173,7 +179,7 @@ def _get_encoder_coverage(model: str) -> EncoderCoverage:
     return EncoderCoverage(
         checkpoint_declares_encoder=checkpoint_declares_encoder,
         aic_encoder_implemented=aic_encoder_implemented,
-        architecture=model_info["architecture"],
+        architecture=architecture,
     )
 
 
@@ -1575,6 +1581,20 @@ class SupportMatrix:
                 )
             else:
                 raise ValueError(f"Invalid support-matrix result row length: {len(row)}")
+
+            if len(row) != 13 and status in {STATUS_PASS, STATUS_HYBRID_PASS}:
+                try:
+                    encoder_coverage = _get_encoder_coverage(huggingface_id)
+                except Exception:
+                    # Preserve generic legacy-row upgrades whose model config is
+                    # not locally available. Known multimodal roster entries are
+                    # resolvable and must never be upgraded without evidence.
+                    encoder_coverage = None
+                if encoder_coverage is not None and encoder_coverage.checkpoint_declares_encoder:
+                    raise ValueError(
+                        "Legacy multimodal PASS rows cannot be upgraded without explicit "
+                        "ImageHeight, ImageWidth, and NumImages evidence; provide a 13-column row."
+                    )
 
             if legacy_source_row:
                 if status == STATUS_PASS:

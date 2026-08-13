@@ -37,6 +37,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 sys.path.insert(0, str(_REPO_ROOT))
@@ -67,9 +69,12 @@ for _name in _DEFAULTED_THREAD_CAPS:
 
 from tools.support_matrix.support_matrix import (
     DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
+    ImageWorkload,
     SupportMatrix,
     TestConstraints,
+    _assert_encoder_evidence,
     _compare_pareto_dfs,
+    _get_encoder_coverage,
     _get_test_constraints,
 )
 
@@ -178,10 +183,17 @@ class Entry:
     version: str
     mode: str
     baseline_status: str
+    image_workload: ImageWorkload | None = None
 
     @property
     def key(self) -> str:
-        return f"{self.model}|{self.system}|{self.backend}|{self.version}|{self.mode}"
+        workload = self.image_workload
+        workload_key = (
+            "text"
+            if workload is None
+            else f"image={workload.image_height}x{workload.image_width}x{workload.num_images}"
+        )
+        return f"{self.model}|{self.system}|{self.backend}|{self.version}|{self.mode}|{workload_key}"
 
 
 @dataclass
@@ -272,6 +284,28 @@ def load_entries(baseline_dir: Path, *, status_filter: tuple[str, ...] = ("PASS"
                 status = row.get("Status", "").strip()
                 if status_filter and status not in status_filter:
                     continue
+                image_values = [row.get(name, "").strip() for name in ("ImageHeight", "ImageWidth", "NumImages")]
+                if any(image_values):
+                    if not all(image_values):
+                        raise ValueError(f"Incomplete image workload metadata in {csv_path}: {row}")
+                    try:
+                        image_height, image_width, num_images = (int(value) for value in image_values)
+                    except ValueError as exc:
+                        raise ValueError(f"Invalid image workload metadata in {csv_path}: {row}") from exc
+                    if min(image_height, image_width, num_images) <= 0:
+                        raise ValueError(f"Non-positive image workload metadata in {csv_path}: {row}")
+                    image_workload = ImageWorkload(image_height, image_width, num_images)
+                else:
+                    coverage = _get_encoder_coverage(row["HuggingFaceID"].strip())
+                    if coverage.checkpoint_declares_encoder and not coverage.aic_encoder_implemented:
+                        raise ValueError(
+                            "ENCODER_UNSUPPORTED baseline PASS cannot be parity-certified: "
+                            f"{row['HuggingFaceID'].strip()} ({coverage.architecture})"
+                        )
+                    # Legacy matrices predate explicit image columns. Infer the
+                    # canonical workload for supported encoders so a resumed
+                    # parity scan cannot silently certify their text backbone.
+                    image_workload = coverage.workload
                 entries.append(
                     Entry(
                         model=row["HuggingFaceID"].strip(),
@@ -281,6 +315,7 @@ def load_entries(baseline_dir: Path, *, status_filter: tuple[str, ...] = ("PASS"
                         version=row["Version"].strip(),
                         mode=row["Mode"].strip(),
                         baseline_status=status,
+                        image_workload=image_workload,
                     )
                 )
     return entries
@@ -466,6 +501,12 @@ def _run_probe(
         moe_ep_size=moe_ep,
         engine_step_backend=backend_label,
     )
+    if entry.image_workload is not None:
+        common_kwargs.update(
+            image_height=entry.image_workload.image_height,
+            image_width=entry.image_workload.image_width,
+            num_images=entry.image_workload.num_images,
+        )
 
     try:
         if entry.mode == "agg":
@@ -481,6 +522,16 @@ def _run_probe(
             )
         else:
             return None, None, f"unsupported mode {entry.mode!r}"
+        if entry.image_workload is not None:
+            raw = getattr(result, "raw", None)
+            if not isinstance(raw, dict):
+                raise RuntimeError("ENCODER_NOT_EXERCISED: parity probe returned no raw encoder evidence")
+            _assert_encoder_evidence(
+                pd.DataFrame([raw]),
+                mode=entry.mode,
+                workload=entry.image_workload,
+                engine_step_backend=backend_label,
+            )
     except Exception as exc:
         return None, None, _format_exc(exc)
 
@@ -494,6 +545,11 @@ def probe_entry(entry: Entry) -> ProbeRecord:
     shape_str = (
         f"isl={constraints.isl},osl={constraints.osl},prefix={constraints.prefix},total_gpus={constraints.total_gpus}"
     )
+    if entry.image_workload is not None:
+        shape_str += (
+            f",images={entry.image_workload.num_images}x"
+            f"{entry.image_workload.image_height}x{entry.image_workload.image_width}"
+        )
 
     python_ttft, python_tpot, python_err = _run_probe(entry, constraints, backend_label="python")
     rust_ttft, rust_tpot, rust_err = _run_probe(entry, constraints, backend_label="rust")
@@ -593,7 +649,15 @@ def pareto_entry(entry: Entry) -> ParetoRecord:
             version=entry.version,
             constraints=constraints,
             engine_step_backend="python",
+            image_workload=entry.image_workload,
         )
+        if entry.image_workload is not None and python_df is not None and not python_df.empty:
+            _assert_encoder_evidence(
+                python_df,
+                mode=entry.mode,
+                workload=entry.image_workload,
+                engine_step_backend="python",
+            )
     except Exception as exc:
         python_err = _format_exc(exc)
 
@@ -606,7 +670,15 @@ def pareto_entry(entry: Entry) -> ParetoRecord:
             version=entry.version,
             constraints=constraints,
             engine_step_backend="rust",
+            image_workload=entry.image_workload,
         )
+        if entry.image_workload is not None and rust_df is not None and not rust_df.empty:
+            _assert_encoder_evidence(
+                rust_df,
+                mode=entry.mode,
+                workload=entry.image_workload,
+                engine_step_backend="rust",
+            )
     except Exception as exc:
         rust_err = _format_exc(exc)
 

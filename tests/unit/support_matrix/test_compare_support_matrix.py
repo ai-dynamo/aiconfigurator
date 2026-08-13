@@ -245,6 +245,29 @@ def test_hardware_incompatible_to_fail_is_blocking_transition():
     assert "HW_INCOMPATIBLE -> FAIL" in errors[0]
 
 
+@pytest.mark.parametrize("old_status", [STATUS_PASS, STATUS_HYBRID_PASS, STATUS_HW_INCOMPATIBLE])
+def test_explicit_encoder_unsupported_migration_is_not_blocking(old_status):
+    changed = _changed(old_status, STATUS_FAIL)
+    new_row = _row(
+        STATUS_FAIL,
+        "ENCODER_UNSUPPORTED: checkpoint declares vision but AIC has no encoder implementation",
+    )
+
+    errors = find_blocking_status_transitions([changed], [new_row])
+
+    assert errors == []
+
+
+def test_plain_pass_to_fail_remains_blocking_with_new_rows():
+    errors = find_blocking_status_transitions(
+        [_changed(STATUS_PASS, STATUS_FAIL)],
+        [_row(STATUS_FAIL, "unrelated runtime failure")],
+    )
+
+    assert len(errors) == 1
+    assert "PASS -> FAIL" in errors[0]
+
+
 def test_framework_incompatible_to_fail_is_blocking_transition():
     errors = find_blocking_status_transitions([_changed(STATUS_FRAMEWORK_INCOMPATIBLE, STATUS_FAIL)])
 
