@@ -799,38 +799,74 @@ def log_perf(
         return False
 
     try:
+        base_data = {
+            "framework": framework,
+            "version": version,
+            "device": device_name,
+            "op_name": op_name,
+            "kernel_source": kernel_source,
+        }
+
+        expected_fieldnames = list(base_data.keys())
+        if item_list:
+            expected_fieldnames += list(item_list[0].keys())
+
+        power_columns = ["power", "power_limit"]
+        requested_power_cols = bool(power_stats) or _parse_bool_env("COLLECTOR_MEASURE_POWER", default=False)
+        is_empty = not os.path.exists(perf_filename) or os.path.getsize(perf_filename) == 0
+        fieldnames = list(expected_fieldnames)
+        include_power_cols = requested_power_cols
+
+        if not is_empty:
+            with open(perf_filename, newline="") as existing_file:
+                existing_fieldnames = next(csv.reader(existing_file), [])
+
+            existing_non_power = [name for name in existing_fieldnames if name not in power_columns]
+            existing_power = [name for name in power_columns if name in existing_fieldnames]
+            if existing_non_power != expected_fieldnames or len(existing_power) not in (0, len(power_columns)):
+                raise ValueError(
+                    f"Existing CSV schema does not match this row: {existing_fieldnames} != {expected_fieldnames}"
+                )
+
+            # A retained power-disabled CSV may be resumed with power enabled.
+            # Upgrade its header and pad existing rows before appending so the
+            # staging file remains rectangular and finalizes cleanly.
+            if requested_power_cols and not existing_power:
+                upgrade_file = f"{perf_filename}.power-schema-{os.getpid()}.tmp"
+                try:
+                    with (
+                        open(perf_filename, newline="") as source,
+                        open(upgrade_file, "w", newline="") as destination,
+                    ):
+                        reader = csv.reader(source)
+                        writer = csv.writer(destination)
+                        header = next(reader)
+                        writer.writerow(header + power_columns)
+                        for row in reader:
+                            if len(row) != len(header):
+                                raise ValueError(
+                                    f"Existing CSV row has {len(row)} columns but header has {len(header)}"
+                                )
+                            writer.writerow(row + ["", ""])
+                        destination.flush()
+                        os.fsync(destination.fileno())
+                    os.replace(upgrade_file, perf_filename)
+                finally:
+                    if os.path.exists(upgrade_file):
+                        os.unlink(upgrade_file)
+                existing_fieldnames += power_columns
+                existing_power = power_columns
+
+            fieldnames = existing_fieldnames
+            include_power_cols = bool(existing_power)
+        elif include_power_cols:
+            fieldnames += power_columns
+
         with open(perf_filename, "a", newline="") as f:
             # Add header only if file is empty
             is_empty = os.fstat(f.fileno()).st_size == 0
-
-            base_data = {
-                "framework": framework,
-                "version": version,
-                "device": device_name,
-                "op_name": op_name,
-                "kernel_source": kernel_source,
-            }
-
-            # Get headers from first item if exists
-            fieldnames = list(base_data.keys())
-            if item_list:
-                fieldnames += list(item_list[0].keys())
-            # Include power columns when either:
-            #   (a) this call has valid power_stats, or
-            #   (b) COLLECTOR_MEASURE_POWER is set in the environment.
-            # Checking the env var — rather than the file's existing header —
-            # guarantees consistent column counts for BOTH orderings:
-            #   (power row first, missing-power row later) and
-            #   (missing-power row first, power row later).
-            # When power_stats is None in a power-enabled run, an empty string is
-            # written so the row is parseable but the zero-sample root cause
-            # (tracked in the failure ledger) remains visible and actionable.
-            include_power_cols = bool(power_stats) or _parse_bool_env("COLLECTOR_MEASURE_POWER", default=False)
-            if include_power_cols:
-                for key in ["power", "power_limit"]:
-                    if key not in fieldnames:
-                        fieldnames.append(key)
-
+            # Empty power cells preserve rows whose measurement had no sample;
+            # the failure ledger retains the zero-sample root cause.
             writer = csv.DictWriter(f, fieldnames=fieldnames)
 
             if is_empty:
@@ -839,7 +875,7 @@ def log_perf(
             for item in item_list:
                 row = base_data | item
                 if include_power_cols:
-                    for key in ["power", "power_limit"]:
+                    for key in power_columns:
                         row[key] = power_stats.get(key, "") if power_stats else ""
                 writer.writerow(row)
 

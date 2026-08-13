@@ -197,6 +197,29 @@ def test_log_perf_missing_power_row_then_power_row_consistent_columns(tmp_path, 
     assert rows[1]["power_limit"] == "1000.0"
 
 
+def test_log_perf_upgrades_existing_power_off_csv_before_power_append(tmp_path, monkeypatch):
+    """A resumed power run must not append wider rows under a legacy header."""
+    monkeypatch.delenv("COLLECTOR_MEASURE_POWER", raising=False)
+    perf_path = str(tmp_path / "moe_perf.txt")
+
+    assert _log_perf_with_power(perf_path, None) is True
+    with open(perf_path, newline="") as f:
+        assert "power" not in next(csv.reader(f))
+
+    monkeypatch.setenv("COLLECTOR_MEASURE_POWER", "true")
+    assert _log_perf_with_power(perf_path, _POWER_STATS) is True
+
+    with open(perf_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    assert len(rows) == 2
+    assert rows[0]["power"] == ""
+    assert rows[0]["power_limit"] == ""
+    assert rows[1]["power"] == "450.0"
+    assert rows[1]["power_limit"] == "1000.0"
+    assert helper.convert_perf_csv_to_parquet(perf_path, delete_source=False).exists()
+
+
 def test_aggregate_latency_weighted_power_is_energy_equivalent():
     result = helper.aggregate_latency_weighted_power(
         [
