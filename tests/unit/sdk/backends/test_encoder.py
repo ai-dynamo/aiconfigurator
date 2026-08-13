@@ -193,6 +193,21 @@ class TestEncoderVideoTokenFormula:
         assert num_visuals == 2
         assert BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, rc) == 1568
 
+    @pytest.mark.parametrize(("frames", "temporal_patches"), [(1, 1), (3, 2)])
+    def test_partial_temporal_patch_repeats_last_frame(self, enc_cfg, frames, temporal_patches):
+        rc = RuntimeConfig(
+            video_height=448,
+            video_width=448,
+            video_frames=frames,
+            num_videos_per_request=1,
+        )
+
+        post_merge, pre_merge, num_visuals = BaseBackend._encoder_pre_merge_per_visual(rc, enc_cfg)
+
+        assert pre_merge == temporal_patches * (448 // 16) * (448 // 16)
+        assert post_merge == temporal_patches * (448 // 32) * (448 // 32)
+        assert num_visuals == 1
+
     def test_num_video_tokens_override_is_per_video(self, enc_cfg):
         rc = RuntimeConfig(num_video_tokens=300, num_videos_per_request=3)
 
@@ -693,3 +708,9 @@ class TestEncoderMemoryInSummary:
         assert summary.get_summary_df().iloc[0]["ttft"] == pytest.approx(encoder_latency + context_latency)
         assert BaseBackend._visual_context_tokens(model, rc) == 784
         assert summary.get_summary_df().iloc[0]["isl"] == 256
+
+        attention_op = next(op for op in model.encoder_ops if "encoder_attention" in op._name)
+        attention_call = attention_op.query.call_args.kwargs
+        assert attention_call["batch_size"] == 4
+        assert attention_call["s"] == (448 // 16) * (448 // 16) == 784
+        assert attention_call["x"] == 4 * 784

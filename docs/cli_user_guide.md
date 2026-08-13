@@ -429,6 +429,7 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--disable-encoder-dp`: Model the vision encoder as TP-sharded instead of the default data-parallel. Also available in `estimate` mode (alongside the visual-input flags above).
 
 Image and video workloads must currently be estimated separately. Video token accounting uses the model's temporal patch size before the spatial merge.
+Visual encoder workloads are not supported by AFD mode. Video estimates are supported for functional estimation, but saving deployment artifacts for a video workload is rejected until the generator has a video benchmark schema; run without `--save-dir`.
 
 The SLA, precision, and speculative-decoding flags (`--strict-sla`, `--request-latency`, `--inclusive-tpot`, `--nextn`, `--nextn-accepted`, `--database-mode`) have dedicated subsections below. Shared flags such as `--save-dir`, `--top-n`, and `--systems-paths` are described in [Common Arguments](#common-arguments-all-modes).
 

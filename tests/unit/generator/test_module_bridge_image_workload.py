@@ -13,6 +13,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from aiconfigurator.generator.module_bridge import task_config_to_generator_config
 
@@ -23,6 +24,10 @@ def _task(
     image_width: int,
     num_images_per_request: int,
     enable_encoder_dp: bool = True,
+    video_height: int = 0,
+    video_width: int = 0,
+    video_frames: int = 0,
+    num_videos_per_request: int = 0,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         primary_backend_name="vllm",
@@ -43,6 +48,10 @@ def _task(
         image_height=image_height,
         image_width=image_width,
         num_images_per_request=num_images_per_request,
+        video_height=video_height,
+        video_width=video_width,
+        video_frames=video_frames,
+        num_videos_per_request=num_videos_per_request,
         enable_encoder_dp=enable_encoder_dp,
     )
 
@@ -116,3 +125,19 @@ def test_text_only_workload_omits_encoder_dp():
     result = task_config_to_generator_config(task, row, num_gpus_per_node=4)
 
     assert "enable_encoder_dp" not in result["params"]["agg"]
+
+
+def test_video_workload_rejects_saved_deployment_artifact():
+    task = _task(
+        image_height=0,
+        image_width=0,
+        num_images_per_request=0,
+        video_height=448,
+        video_width=448,
+        video_frames=8,
+        num_videos_per_request=1,
+    )
+    row = pd.Series({"workers": 1, "tp": 1})
+
+    with pytest.raises(NotImplementedError, match="Saved deployment artifacts do not support video"):
+        task_config_to_generator_config(task, row, num_gpus_per_node=4)

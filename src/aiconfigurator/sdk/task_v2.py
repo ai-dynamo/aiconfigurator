@@ -1669,6 +1669,14 @@ class Task:
             raise ValueError("afd mode requires system_name")
         if self.effective_total_gpus is None:
             raise ValueError("afd mode requires total_gpus or afd_total_gpus")
+        has_image_workload = self.num_images_per_request > 0 and self.image_height > 0 and self.image_width > 0
+        has_video_workload = (
+            self.num_videos_per_request > 0 and self.video_frames > 0 and self.video_height > 0 and self.video_width > 0
+        )
+        if has_image_workload or has_video_workload:
+            raise NotImplementedError(
+                "AFD does not support image/video encoder workloads; use agg or disagg serving mode."
+            )
         if (
             isinstance(self.afd_max_a_batch_size, bool)
             or not isinstance(self.afd_max_a_batch_size, int)

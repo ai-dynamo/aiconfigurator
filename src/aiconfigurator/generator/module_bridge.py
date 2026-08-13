@@ -93,6 +93,19 @@ def task_config_to_generator_config(
 
     overrides = copy.deepcopy(generator_overrides or {})
 
+    # The deployment generator has no video benchmark schema yet. Refuse to
+    # save a text-only artifact for a task whose estimate included video
+    # encoder work; callers may still estimate it normally without --save-dir.
+    _num_videos = getattr(task_config, "num_videos_per_request", 0) or 0
+    _has_video_workload = _num_videos > 0 and any(
+        (getattr(task_config, field, 0) or 0) > 0 for field in ("video_height", "video_width", "video_frames")
+    )
+    if _has_video_workload:
+        raise NotImplementedError(
+            "Saved deployment artifacts do not support video workloads yet; "
+            "run without --save-dir or use an image workload."
+        )
+
     # Encoder parallelism is deployment-relevant only when the task models an
     # image workload (same gate as the BenchConfig seeding below); text-only
     # tasks must not grow multimodal engine flags.

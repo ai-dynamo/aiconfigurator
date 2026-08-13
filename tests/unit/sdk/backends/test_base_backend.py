@@ -474,6 +474,41 @@ def test_run_agg_records_progress_only_when_explicitly_supplied(
     assert explicit is not summary
 
 
+def test_run_agg_cache_separates_video_workloads(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    mixed_calls: list[int] = []
+
+    def _run_mixed(*args, **kwargs):
+        mixed_calls.append(args[2].video_frames)
+        return StepEstimate(latency_ms=1.0, energy_wms=1.0)
+
+    monkeypatch.setattr(backend, "run_mixed", _run_mixed)
+    monkeypatch.setattr(
+        backend,
+        "_get_genonly_step_latency",
+        lambda *args, **kwargs: (1.0, 1.0, {}, {}),
+    )
+
+    common_kwargs = dict(
+        batch_size=2,
+        beam_width=1,
+        isl=8,
+        osl=5,
+        video_height=448,
+        video_width=448,
+        num_videos_per_request=1,
+    )
+    backend.run_agg(model, database, RuntimeConfig(**common_kwargs, video_frames=8), ctx_tokens=8)
+    backend.run_agg(model, database, RuntimeConfig(**common_kwargs, video_frames=10), ctx_tokens=8)
+
+    assert mixed_calls == [8, 10]
+    assert len(backend._agg_cache) == 2
+
+
 @pytest.mark.parametrize("progress", [0.0, 3.0, float("inf"), float("nan")])
 def test_run_agg_rejects_invalid_speculative_progress(
     progress,

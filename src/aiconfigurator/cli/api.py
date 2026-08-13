@@ -1376,6 +1376,12 @@ def cli_estimate(
                 "forward_model='fpm' is not supported in afd mode: AFD splits attention and FFN "
                 "across workers, which is incompatible with whole-model forward-pass data."
             )
+        has_image_workload = num_images > 0 and image_height > 0 and image_width > 0
+        has_video_workload = num_videos > 0 and video_frames > 0 and video_height > 0 and video_width > 0
+        if has_image_workload or has_video_workload:
+            raise NotImplementedError(
+                "AFD does not support image/video encoder workloads; use agg or disagg serving mode."
+            )
         for name, val in [
             ("n_a_nodes", n_a_nodes),
             ("n_f_nodes", n_f_nodes),

@@ -263,7 +263,9 @@ class BaseBackend:
                 runtime_config.video_frames > 0 and runtime_config.video_height > 0 and runtime_config.video_width > 0
             )
             if has_video_dims:
-                temporal_patches = runtime_config.video_frames // enc_cfg.temporal_patch_size
+                # Qwen pads a short final temporal group by repeating its last
+                # frame, so a partial group still produces one temporal patch.
+                temporal_patches = -(-runtime_config.video_frames // enc_cfg.temporal_patch_size)
                 spatial_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
                 tokens_per_visual = (
                     temporal_patches
@@ -337,21 +339,34 @@ class BaseBackend:
         # Per-op shape rules (the encoder orchestration — this token math —
         # stays Python-side; only the per-op values may come from the
         # compiled engine below). Projector ops and the DP exit AllGather run
-        # on post-merge tokens; ViT attention uses cu_seqlens (each visual is an
-        # independent varlen sequence of pre-merge patches).
-        def _encoder_eff_s(op) -> int:
+        # on post-merge tokens. ViT attention uses cu_seqlens: each image is an
+        # independent sequence, and each temporal patch of a video is an
+        # independent spatial sequence.
+        has_video_dims = (
+            runtime_config.num_videos_per_request > 0
+            and runtime_config.video_frames > 0
+            and runtime_config.video_height > 0
+            and runtime_config.video_width > 0
+        )
+        temporal_sequences_per_visual = (
+            -(-runtime_config.video_frames // enc_cfg.temporal_patch_size) if has_video_dims else 1
+        )
+
+        def _encoder_shape(op) -> tuple[int, int]:
             use_post = "encoder_projector" in op._name or "all_gather" in op._name
             use_varlen = "encoder_attention" in op._name
             if use_varlen:
-                return pre_merge_per_visual
-            return tokens_per_visual if use_post else pre_merge_per_visual
+                return (
+                    visuals_local * temporal_sequences_per_visual,
+                    pre_merge_per_visual // temporal_sequences_per_visual,
+                )
+            return visuals_local, tokens_per_visual if use_post else pre_merge_per_visual
 
         if should_use_rust_engine_step(runtime_config, database):
             rust = self._run_encoder_phase_with_rust(
                 model,
                 database,
-                visuals_local,
-                _encoder_eff_s,
+                _encoder_shape,
                 include_energy=include_energy,
             )
             if rust is not None:
@@ -359,7 +374,7 @@ class BaseBackend:
                 return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, visual_context_tokens
 
         for op in model.encoder_ops:
-            eff_batch, eff_s = visuals_local, _encoder_eff_s(op)
+            eff_batch, eff_s = _encoder_shape(op)
             x = eff_batch * eff_s
             result = op.query(
                 database,
@@ -381,8 +396,7 @@ class BaseBackend:
         self,
         model: BaseModel,
         database: PerfDatabase,
-        visuals_local: int,
-        eff_s_of,
+        shape_of,
         *,
         include_energy: bool,
     ) -> tuple[dict[str, float], dict[str, float], dict[str, str]] | None:
@@ -392,8 +406,8 @@ class BaseBackend:
         Encoder ops are deliberately NOT in the compiled ``EngineSpec`` (the
         compile path threads no image configuration), so they travel through
         the ad-hoc op-list evaluation FFI: ops are grouped by their resolved
-        ``eff_s`` (the shape math above), each group serialized to OpSpec
-        JSON and evaluated at ``batch=visuals_local, s=eff_s, x=batch*s``.
+        ``(batch, eff_s)`` (the shape math above), each group serialized to
+        OpSpec JSON and evaluated at ``x=batch*s``.
         Accumulation matches the Python loop for the shipped encoder op
         lists (unique names): latency/energy fold with ``+=``; sources are
         last-wins ACROSS shape groups, while duplicate names WITHIN one
@@ -404,26 +418,27 @@ class BaseBackend:
         from aiconfigurator_core.sdk.engine import OpConversionError, build_ops_json
         from aiconfigurator_core.sdk.rust_engine_step import evaluate_ops_json_with_rust
 
-        groups: dict[int, list] = {}
+        groups: dict[tuple[int, int], list] = {}
         for op in model.encoder_ops:
-            groups.setdefault(int(eff_s_of(op)), []).append(op)
+            eff_batch, eff_s = shape_of(op)
+            groups.setdefault((int(eff_batch), int(eff_s)), []).append(op)
 
         latency_dict: dict[str, float] = defaultdict(float)
         energy_dict: dict[str, float] = defaultdict(float)
         source_dict: dict[str, str] = {}
         backend_name = getattr(database.backend, "value", database.backend)
         try:
-            for eff_s, ops in groups.items():
+            for (eff_batch, eff_s), ops in groups.items():
                 ops_json = build_ops_json(ops, model=model, backend=str(backend_name), database=database)
                 entries = evaluate_ops_json_with_rust(
                     model,
                     database,
                     ops_json=ops_json,
                     is_context=True,
-                    batch_size=visuals_local,
+                    batch_size=eff_batch,
                     s=eff_s,
                     prefix=0,
-                    x=visuals_local * eff_s,
+                    x=eff_batch * eff_s,
                 )
                 for name, latency_ms, energy_wms, source in entries:
                     latency_dict[name] += float(latency_ms)
@@ -1627,6 +1642,12 @@ class BaseBackend:
             runtime_config.image_height,
             runtime_config.image_width,
             runtime_config.num_images_per_request,
+            runtime_config.num_image_tokens,
+            runtime_config.video_height,
+            runtime_config.video_width,
+            runtime_config.video_frames,
+            runtime_config.num_videos_per_request,
+            runtime_config.num_video_tokens,
         )
         cache_key = (
             self._make_agg_cache_key(isl, osl, b, ctx_tokens, engine_step_backend_key, agg_extra),
