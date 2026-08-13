@@ -750,9 +750,9 @@ def _parse_hf_config_json(config: dict) -> dict:
             raise ValueError(f"interleave_moe_layer_step must be a positive integer, got {step}")
         attn_pattern = tuple(i % 2 for i in range(layers))
         moe_freq = tuple(1 if (i + 1) % step == 0 else 0 for i in range(layers))
-        llama4_vision_config = (
-            _parse_llama4_vision_config(vision_cfg, image_processor_cfg, hidden_size) if vision_cfg else None
-        )
+        if not isinstance(vision_cfg, dict):
+            raise TypeError("Llama 4 config must preserve vision_config metadata")
+        llama4_vision_config = _parse_llama4_vision_config(vision_cfg, image_processor_cfg, hidden_size)
         extra_params = HybridMoEConfig(
             attn_layer_pattern=attn_pattern,
             moe_layer_freq=moe_freq,

@@ -244,6 +244,34 @@ def test_llama4_parser_rejects_missing_processor_metadata():
         _parse_hf_config_json(raw_config)
 
 
+def test_llama4_parser_rejects_missing_vision_metadata_schema_drift():
+    model_id = LLAMA4_CHECKPOINTS[0][0]
+    raw_config = dict(get_model_config_from_model_path(model_id)["raw_config"])
+    raw_config.pop("vision_config")
+
+    with pytest.raises(TypeError, match="must preserve vision_config metadata"):
+        _parse_hf_config_json(raw_config)
+
+
+@pytest.mark.parametrize("invalid_value", [None, [], "", 0])
+def test_llama4_parser_rejects_nondict_vision_metadata(invalid_value):
+    model_id = LLAMA4_CHECKPOINTS[0][0]
+    raw_config = dict(get_model_config_from_model_path(model_id)["raw_config"])
+    raw_config["vision_config"] = invalid_value
+
+    with pytest.raises(TypeError, match="must preserve vision_config metadata"):
+        _parse_hf_config_json(raw_config)
+
+
+def test_llama4_parser_rejects_empty_vision_metadata():
+    model_id = LLAMA4_CHECKPOINTS[0][0]
+    raw_config = dict(get_model_config_from_model_path(model_id)["raw_config"])
+    raw_config["vision_config"] = {}
+
+    with pytest.raises(ValueError, match="vision_config is missing required fields"):
+        _parse_hf_config_json(raw_config)
+
+
 @pytest.mark.parametrize("model_id", LLAMA4_MODEL_IDS)
 def test_nonzero_image_workload_reaches_encoder_and_text_context(model_id):
     model = get_model(model_id, _model_config(), "trtllm")
