@@ -828,6 +828,8 @@ class DisaggInferenceSession:
 
         try:
             enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
+            if isinstance(enc_cfg, common.Gemma4MixConfig):
+                enc_cfg = enc_cfg.vision_config
         except Exception:
             logger.debug("Could not resolve model config for VL effective ISL; using text ISL", exc_info=True)
             enc_cfg = None

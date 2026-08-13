@@ -573,6 +573,7 @@ class TestParseHFConfig:
         """Gemma 4 keeps its fixed-budget pooled ViT contract beside the text/MoE config."""
         layer_types = (["sliding_attention"] * 5 + ["full_attention"]) * 5
         hf_config = self._gemma4_text_config(layer_types)
+        hf_config["text_config"]["use_bidirectional_attention"] = "vision"
         hf_config["vision_soft_tokens_per_image"] = 280
         hf_config["vision_config"] = {
             "model_type": "gemma4_vision",
@@ -594,6 +595,7 @@ class TestParseHFConfig:
         cfg = result["extra_params"]
         assert isinstance(cfg, common.Gemma4MixConfig)
         assert cfg.layer_types == tuple(layer_types)
+        assert cfg.use_bidirectional_vision_attention is True
         vision = cfg.vision_config
         assert isinstance(vision, common.Gemma4VisionEncoderConfig)
         assert vision.depth == 27

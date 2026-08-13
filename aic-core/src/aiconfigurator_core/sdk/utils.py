@@ -860,6 +860,7 @@ def _parse_hf_config_json(config: dict) -> dict:
             global_head_dim=global_hd,
             sliding_window_size=config.get("sliding_window", 0),
             attention_k_eq_v=bool(config.get("attention_k_eq_v", False)),
+            use_bidirectional_vision_attention=config.get("use_bidirectional_attention") == "vision",
             vision_config=gemma4_vision_config,
         )
         logger.info(
@@ -868,6 +869,7 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"global_layers={extra_params.layer_types.count('full_attention')}, "
             f"num_experts={num_experts}, top_k={topk}, "
             f"sw={extra_params.sliding_window_size}, k_eq_v_global={extra_params.attention_k_eq_v}, "
+            f"bidir_vision={extra_params.use_bidirectional_vision_attention}, "
             f"vision={'enabled' if gemma4_vision_config is not None else 'disabled'}"
         )
     elif architecture in {

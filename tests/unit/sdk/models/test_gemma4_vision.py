@@ -36,6 +36,7 @@ def test_gemma4_model_builds_checkpoint_accurate_vision_graph():
     assert enc.pooling_kernel_size == 3
     assert enc.soft_tokens_per_image == 280
     assert enc.projector_dims == ((1152, 2816),)
+    assert model._gemma4_config.use_bidirectional_vision_attention is True
 
     names = {op._name for op in model.encoder_ops}
     assert {
@@ -66,6 +67,13 @@ def test_gemma4_model_builds_checkpoint_accurate_vision_graph():
         1152,
     )
 
+    visual_attention = model.visual_context_ops
+    assert len(visual_attention) == 1
+    assert visual_attention[0]._name == "context_swa_visual_block_attention"
+    assert visual_attention[0]._scale_factor == 25
+    assert (visual_attention[0]._n, visual_attention[0]._head_size) == (16, 256)
+    assert (visual_attention[0]._n_kv, visual_attention[0]._window_size) == (8, 1024)
+
 
 def test_gemma4_encoder_weights_include_patch_position_vit_and_adapter():
     model = get_model(MODEL, _model_config(), "trtllm")
@@ -83,6 +91,36 @@ def test_gemma4_encoder_weights_include_patch_position_vit_and_adapter():
         + 2816 * 1152  # vision-to-language projection
     )
     assert sum(op.get_weights() for op in model.encoder_ops) == expected_bf16_weights * 2
+
+
+def test_gemma4_visual_block_attention_scales_only_the_collected_attention_kernel():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from aiconfigurator.sdk.performance_result import PerformanceResult
+
+    model = get_model(MODEL, _model_config(), "trtllm")
+    op = model.visual_context_ops[0]
+    database = SimpleNamespace(
+        query_context_attention=MagicMock(return_value=PerformanceResult(10.0, energy=20.0, source="silicon"))
+    )
+
+    result = op.query(database, batch_size=2, s=280, seq_imbalance_correction_scale=1.0)
+
+    expected_scale = 25 * 279 / 280
+    assert float(result) == pytest.approx(10.0 * expected_scale)
+    assert result.energy == pytest.approx(20.0 * expected_scale)
+    database.query_context_attention.assert_called_once_with(
+        2,
+        280,
+        0,
+        16,
+        8,
+        common.KVCacheQuantMode.bfloat16,
+        common.FMHAQuantMode.bfloat16,
+        window_size=1024,
+        head_size=256,
+    )
 
 
 def test_gemma4_encoder_dp_replicates_compute_and_gathers_soft_tokens():

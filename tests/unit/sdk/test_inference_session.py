@@ -207,6 +207,46 @@ def _run(
     )
 
 
+def test_gemma4_disagg_batch_sizing_includes_nested_visual_tokens(monkeypatch, disagg_session, model_config):
+    from aiconfigurator.sdk.utils import get_model_config_from_model_path
+
+    gemma_extra = get_model_config_from_model_path("google/gemma-4-26B-A4B")["extra_params"]
+    monkeypatch.setattr(
+        "aiconfigurator.sdk.inference_session.get_model_config_from_model_path",
+        lambda _: {"extra_params": gemma_extra},
+    )
+    candidate_calls = []
+
+    def _capture_candidates(**kwargs):
+        candidate_calls.append(kwargs)
+        return pd.DataFrame()
+
+    disagg_session.get_worker_candidates = _capture_candidates
+    runtime = RuntimeConfig(
+        isl=256,
+        osl=64,
+        image_height=672,
+        image_width=960,
+        num_images_per_request=1,
+    )
+
+    disagg_session.find_best_disagg_result_under_constraints(
+        model_path="google/gemma-4-26B-A4B",
+        runtime_config=runtime,
+        prefill_model_config=model_config,
+        prefill_parallel_config_list=[(1, 1, 1, 1, 1, 1)],
+        prefill_max_num_tokens=1024,
+        prefill_num_worker_list=[1],
+        decode_model_config=model_config,
+        decode_parallel_config_list=[(1, 1, 1, 1, 1, 1)],
+        decode_max_num_tokens=1,
+        decode_num_worker_list=[1],
+        num_gpu_list=None,
+    )
+
+    assert list(candidate_calls[0]["b_list"]) == [1]
+
+
 class TestRequireSameTPFiltering:
     """Verify the TP-matching filter inside find_best_disagg_result_under_constraints."""
 

@@ -247,6 +247,9 @@ class Gemma4MixConfig:
     global_head_dim: int  # Q/K/V head dim on full_attention layers
     sliding_window_size: int  # token window for sliding_attention layers
     attention_k_eq_v: bool = False  # true means global layers reuse K as V (no v_proj)
+    # Gemma 4 multimodal prefill makes each contiguous vision-token block
+    # bidirectional inside sliding-attention layers. Global layers stay causal.
+    use_bidirectional_vision_attention: bool = False
     # Present on multimodal Gemma 4 checkpoints; None preserves the existing
     # text-only/dense Gemma 4 path.
     vision_config: Gemma4VisionEncoderConfig | None = None

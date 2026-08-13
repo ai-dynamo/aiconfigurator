@@ -222,6 +222,13 @@ class BaseBackend:
         )
 
     @staticmethod
+    def _has_visual_context_work(model: BaseModel, runtime_config: RuntimeConfig) -> bool:
+        return (
+            bool(getattr(model, "visual_context_ops", ()))
+            and BaseBackend._visual_context_tokens(model, runtime_config) > 0
+        )
+
+    @staticmethod
     def _encoder_pre_merge_per_visual(
         runtime_config: RuntimeConfig,
         enc_cfg,
@@ -233,11 +240,14 @@ class BaseBackend:
             1. image_height + image_width (computed from patch/merge sizes)
             2. num_image_tokens (explicit per-image override)
 
-        Gemma 4 instead follows its fixed-budget processor/engine contract:
-        image dimensions indicate that an image is present, while the checkpoint
-        ``soft_tokens_per_image`` determines the post-pool budget.  The SDK-only
-        ``num_image_tokens`` field can override that budget for Gemma 4's
-        supported dynamic soft-token modes.
+        Gemma 4 instead treats the checkpoint ``soft_tokens_per_image`` as a
+        maximum. Its processor resizes to an aspect-ratio-preserving grid whose
+        sides are divisible by ``patch_size * pooling_kernel_size``; the actual
+        post-pool count can therefore be below that maximum. The processor pads
+        the patch tensor back to the maximum before running the vision tower, so
+        the returned pre-pool count is the padded maximum while the post-pool
+        count remains the number of valid soft tokens. The SDK-only
+        ``num_image_tokens`` field selects a supported alternate maximum.
 
         Returns ``(tokens_post_merge_per_image, pre_merge_per_image)``.
         Returns ``(0, 0)`` when neither is set (text-only path).
@@ -246,16 +256,49 @@ class BaseBackend:
         if isinstance(enc_cfg, common.Gemma4VisionEncoderConfig):
             if not has_image_dims and runtime_config.num_image_tokens <= 0:
                 return 0, 0
-            tokens_per_image = runtime_config.num_image_tokens or enc_cfg.soft_tokens_per_image
-            if tokens_per_image not in enc_cfg.supported_soft_token_budgets:
+            max_soft_tokens = runtime_config.num_image_tokens or enc_cfg.soft_tokens_per_image
+            if max_soft_tokens not in enc_cfg.supported_soft_token_budgets:
                 raise ValueError(
                     f"Gemma 4 num_image_tokens must be one of {enc_cfg.supported_soft_token_budgets}, "
-                    f"got {tokens_per_image}"
+                    f"got {max_soft_tokens}"
                 )
-            pre_merge_per_image = tokens_per_image * enc_cfg.pooling_kernel_size**2
-            if tokens_per_image <= 0 or pre_merge_per_image <= 0:
+            if not has_image_dims:
+                tokens_per_image = max_soft_tokens
+                pre_merge_per_image = tokens_per_image * enc_cfg.pooling_kernel_size**2
+                return tokens_per_image, pre_merge_per_image
+
+            # Keep this arithmetic aligned with Gemma4ImageProcessor's
+            # get_aspect_ratio_preserving_size. The target area is the maximum
+            # patch budget, but rounding both sides down to the pooling stride
+            # determines the actual patch and pooled-token counts.
+            patch_size = enc_cfg.patch_size
+            pooling_size = enc_cfg.pooling_kernel_size
+            max_patches = max_soft_tokens * pooling_size**2
+            target_pixels = max_patches * patch_size**2
+            scale = math.sqrt(target_pixels / (runtime_config.image_height * runtime_config.image_width))
+            side_multiple = pooling_size * patch_size
+            target_height = math.floor(scale * runtime_config.image_height / side_multiple) * side_multiple
+            target_width = math.floor(scale * runtime_config.image_width / side_multiple) * side_multiple
+            max_side_length = (max_patches // pooling_size**2) * side_multiple
+            if target_height == 0 and target_width == 0:
+                raise ValueError("Gemma 4 image dimensions resize to 0x0; increase the dimensions or soft-token budget")
+            if target_height == 0:
+                target_height = side_multiple
+                target_width = min(
+                    math.floor(runtime_config.image_width / runtime_config.image_height) * side_multiple,
+                    max_side_length,
+                )
+            elif target_width == 0:
+                target_width = side_multiple
+                target_height = min(
+                    math.floor(runtime_config.image_height / runtime_config.image_width) * side_multiple,
+                    max_side_length,
+                )
+            resized_patches = (target_height // patch_size) * (target_width // patch_size)
+            tokens_per_image = resized_patches // pooling_size**2
+            if tokens_per_image <= 0 or resized_patches <= 0:
                 return 0, 0
-            return tokens_per_image, pre_merge_per_image
+            return tokens_per_image, max_patches
 
         if has_image_dims:
             img_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
@@ -453,7 +496,61 @@ class BaseBackend:
             else:
                 context_source_dict[op._name] = "mixed"
 
+        visual_latency, visual_energy, visual_source = self._run_visual_context_phase(
+            model,
+            database,
+            runtime_config,
+            batch_size,
+            include_energy=include_energy,
+        )
+        context_latency_dict.update(visual_latency)
+        context_energy_wms_dict.update(visual_energy)
+        context_source_dict.update(visual_source)
+
         return context_latency_dict, context_energy_wms_dict, context_source_dict
+
+    def _run_visual_context_phase(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        runtime_config: RuntimeConfig,
+        batch_size: int,
+        *,
+        include_energy: bool = True,
+    ) -> tuple[dict[str, float], dict[str, float], dict[str, str]]:
+        """Model Gemma 4's extra upper-triangle attention per visual block.
+
+        Regular ``ContextAttention`` already includes the causal half. Gemma's
+        visual block overlay makes tokens within each image bidirectional on
+        sliding layers, so query each image as an independent full-attention
+        sequence and retain only the strict upper-triangle fraction.
+        """
+        latency_dict: dict[str, float] = {}
+        energy_dict: dict[str, float] = {}
+        source_dict: dict[str, str] = {}
+        visual_ops = getattr(model, "visual_context_ops", ())
+        enc_cfg = getattr(model, "encoder_config", None)
+        if not visual_ops or runtime_config.num_images_per_request <= 0 or enc_cfg is None:
+            return latency_dict, energy_dict, source_dict
+        tokens_per_image, _ = self._encoder_pre_merge_per_visual(runtime_config, enc_cfg)
+        if tokens_per_image <= 1:
+            return latency_dict, energy_dict, source_dict
+
+        image_batch = batch_size * runtime_config.num_images_per_request
+        for op in visual_ops:
+            result = op.query(
+                database,
+                x=image_batch * tokens_per_image,
+                batch_size=image_batch,
+                beam_width=1,
+                s=tokens_per_image,
+                prefix=0,
+                seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
+            )
+            latency_dict[op._name] = float(result)
+            energy_dict[op._name] = getattr(result, "energy", 0.0) if include_energy else 0.0
+            source_dict[op._name] = getattr(result, "source", "silicon")
+        return latency_dict, energy_dict, source_dict
 
     def _run_generation_phase(
         self,
@@ -540,7 +637,15 @@ class BaseBackend:
 
         # FPM models compile to no Rust op variant yet; force the Python phases
         # (which handle the single whole-model op naturally).
-        if model.forward_model != "fpm" and should_use_rust_engine_step(runtime_config, database):
+        # Gemma 4's visual-block overlay has a runtime-derived per-image shape,
+        # which the compiled context walk cannot express yet. Keep its prefill
+        # on the Python orchestrator; encoder and decode ops can still use Rust.
+        has_visual_context_work = mode != "static_gen" and self._has_visual_context_work(model, runtime_config)
+        if (
+            model.forward_model != "fpm"
+            and not has_visual_context_work
+            and should_use_rust_engine_step(runtime_config, database)
+        ):
             try:
                 rust_runtime_config = runtime_config
                 if img_ctx_tokens:
@@ -1222,7 +1327,9 @@ class BaseBackend:
                 num_decode_requests=step.num_decode_requests,
                 num_decode_query_tokens=decode_query_tokens,
             )
-        if should_use_rust_engine_step(runtime_config, database):
+        if not self._has_visual_context_work(model, runtime_config) and should_use_rust_engine_step(
+            runtime_config, database
+        ):
             try:
                 components = estimate_mixed_step_breakdown_with_rust(
                     model,
@@ -1309,6 +1416,20 @@ class BaseBackend:
         ctx_attention_latency_ms = latency_dict["context_attention"] / scale_factor
         ctx_attention_energy_wms = energy_wms_dict.get("context_attention", 0.0) / scale_factor
 
+        # The two synthetic static passes above intentionally omit image fields:
+        # token-major and causal attention work already sees ``isl`` with visual
+        # tokens included, while Gemma's extra bidirectional upper triangle must
+        # be queried once per independent image block at the same context-step
+        # batch and averaged when a request spans several chunks.
+        visual_context_latency, visual_context_energy, visual_context_source = self._run_visual_context_phase(
+            model,
+            database,
+            runtime_config,
+            int(batch_size),
+        )
+        visual_context_latency = {name: value / scale_factor for name, value in visual_context_latency.items()}
+        visual_context_energy = {name: value / scale_factor for name, value in visual_context_energy.items()}
+
         # Pass 3: generation attention (use isl + osl//2 for the avg seq len).
         gen_attention_latency_ms = 0.0
         gen_attention_energy_wms = 0.0
@@ -1336,22 +1457,24 @@ class BaseBackend:
         per_ops_step_data: dict[str, float] = {
             **mix_non_attn_ops,
             "context_attention (scaled)": ctx_attention_latency_ms,
+            **visual_context_latency,
             "generation_attention": gen_attention_latency_ms,
         }
         per_ops_step_source = {
             **mix_non_attn_sources,
             "context_attention (scaled)": ctx_attn_source,
+            **visual_context_source,
             "generation_attention": gen_attn_source,
         }
 
         component_latency_ms = {
             "shared_non_attention": non_attention_latency_ms,
-            "context_attention": ctx_attention_latency_ms,
+            "context_attention": ctx_attention_latency_ms + sum(visual_context_latency.values()),
             "decode_attention": gen_attention_latency_ms,
         }
         component_energy_wms = {
             "shared_non_attention": non_attention_energy_wms,
-            "context_attention": ctx_attention_energy_wms,
+            "context_attention": ctx_attention_energy_wms + sum(visual_context_energy.values()),
             "decode_attention": gen_attention_energy_wms,
         }
         return StepEstimate(
@@ -1527,9 +1650,13 @@ class BaseBackend:
         activations = 0.0
         if isinstance(enc_cfg, common.VisionEncoderConfig) and num_tokens > 0:
             if isinstance(enc_cfg, common.Gemma4VisionEncoderConfig):
-                # Peak gated-MLP workspace: input plus gate/up intermediates.
-                peak_patch_width = enc_cfg.hidden_size + 2 * enc_cfg.intermediate_size
-                activations = 2 * num_tokens * max(3 * enc_cfg.hidden_size, peak_patch_width)
+                # Encoder TP shards QKV and gated-MLP intermediates while the
+                # residual stream stays replicated. Encoder DP instead builds
+                # a complete tower on each rank and shards whole images.
+                encoder_tp = 1 if model.config.enable_encoder_dp else model.config.tp_size
+                qkv_width = 3 * enc_cfg.hidden_size // encoder_tp
+                gated_mlp_width = enc_cfg.hidden_size + 2 * enc_cfg.intermediate_size // encoder_tp
+                activations = 2 * num_tokens * max(qkv_width, gated_mlp_width)
                 # Pooled tower output, normalized projection input, and final
                 # language-space embeddings coexist at the adapter boundary.
                 activations += 2 * embed_tokens * (2 * enc_cfg.hidden_size + enc_cfg.out_hidden_size)

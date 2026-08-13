@@ -10,6 +10,37 @@ from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor
 from aiconfigurator_core.sdk.models.vit_ops import build_gemma4_vision_encoder_ops
 
 
+class _Gemma4VisualBlockAttention(ops.ContextAttention):
+    """Incremental SWA work from Gemma's bidirectional visual-block mask.
+
+    The ordinary language ``ContextAttention`` already models projections,
+    RoPE, KV writes, and causal attention over the combined sequence. This op
+    reuses only its collected kernel curve and scales that latency/energy to the
+    additional strict-upper-triangle pairs unmasked within each image block.
+    """
+
+    def query(self, database, **kwargs):
+        batch_size = kwargs["batch_size"]
+        tokens = kwargs["s"]
+        result = database.query_context_attention(
+            batch_size,
+            tokens,
+            0,
+            self._n,
+            self._n_kv,
+            self._kvcache_quant_mode,
+            self._fmha_quant_mode,
+            window_size=self._window_size,
+            head_size=self._head_size,
+        )
+        modeled_causal_pairs = (
+            tokens**2 / 2 if self._window_size <= 0 or tokens <= self._window_size else tokens * self._window_size
+        )
+        upper_triangle_pairs = tokens * (tokens - 1) / 2
+        seq_scale = float(kwargs.get("seq_imbalance_correction_scale", 1.0))
+        return result * (self._scale_factor * upper_triangle_pairs / modeled_causal_pairs * seq_scale)
+
+
 @register_model("GEMMA4MIX")
 class Gemma4MixModel(BaseModel):
     """
@@ -92,6 +123,9 @@ class Gemma4MixModel(BaseModel):
         self._moe_inter_size = moe_inter_size
         self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
         self._gemma4_config: common.Gemma4MixConfig | None = None
+        # These run during LM prefill but use one independent vision-token
+        # block per image, rather than the full text+vision sequence shape.
+        self.visual_context_ops: list = []
         self._power_law_alpha = 1.01
 
     def set_gemma4_config(self, cfg: common.Gemma4MixConfig) -> None:
@@ -113,6 +147,7 @@ class Gemma4MixModel(BaseModel):
         self._gemma4_config = cfg
         self._build_context_ops()
         self._build_generation_ops()
+        self.visual_context_ops = []
         self.encoder_ops = []
         self.encoder_config = cfg.vision_config
         if cfg.vision_config is not None:
@@ -123,6 +158,25 @@ class Gemma4MixModel(BaseModel):
                     self.config.enable_encoder_dp,
                 )
             )
+            if cfg.use_bidirectional_vision_attention:
+                # The ordinary SWA ContextAttention already accounts for the
+                # causal half of each visual block. Gemma's blockwise overlay
+                # additionally unmasks the upper triangle for every SWA layer.
+                # BaseBackend supplies the per-image pooled length; the op
+                # scales Gemma's collected causal curve to the added pairs.
+                d = self._resolve_dims(self.config.tp_size)
+                self.visual_context_ops.append(
+                    _Gemma4VisualBlockAttention(
+                        "context_swa_visual_block_attention",
+                        self._count_layer_types()["swa"] / self.config.cp_size,
+                        self._num_heads // self.config.tp_size,
+                        d["swa_n_kv_per_gpu"],
+                        self.config.kvcache_quant_mode,
+                        self.config.fmha_quant_mode,
+                        window_size=cfg.sliding_window_size,
+                        head_size=cfg.swa_head_dim,
+                    )
+                )
         if self.config.cp_size > 1:
             # decode never runs CP. Route the generation MoEDispatch ops to their
             # decode-CP comm path (pre=0 / post=all_reduce) rather than prefill's
