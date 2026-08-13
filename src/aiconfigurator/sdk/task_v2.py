@@ -55,7 +55,11 @@ from aiconfigurator.sdk.speculative import (
     SpeculativeDecodingProfile,
     normalize_speculative_decoding,
 )
-from aiconfigurator.sdk.utils import enumerate_parallel_config, get_model_config_from_model_path
+from aiconfigurator.sdk.utils import (
+    enumerate_parallel_config,
+    get_model_config_from_model_path,
+    get_vision_encoder_config_from_model_info,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1522,6 +1526,15 @@ class Task:
             rt.batch_size = batch_size
         return rt
 
+    def _effective_isl(self, runtime_config: config.RuntimeConfig | None = None) -> int:
+        """Text ISL plus post-merge visual tokens for one request."""
+        from aiconfigurator.sdk.backends.base_backend import BaseBackend
+
+        model_info = get_model_config_from_model_path(self.primary_model_path)
+        enc_cfg = get_vision_encoder_config_from_model_info(model_info)
+        rt = runtime_config or self.build_runtime_config()
+        return self.isl + BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, rt)
+
     def build_model_config(self, *, role: Literal["agg", "prefill", "decode"]) -> config.ModelConfig:
         """Build a ModelConfig template for the given role (parallelism unset).
 
@@ -2020,7 +2033,7 @@ class Task:
             "decode_parallel_config_list": decode_parallel,
             "decode_latency_correction": self.decode_latency_correction,
             "free_gpu_memory_fraction": self.free_gpu_memory_fraction,
-            "prefill_max_num_tokens": max(self.prefill_max_batch_size, 1) * self.isl,
+            "prefill_max_num_tokens": max(self.prefill_max_batch_size, 1) * self._effective_isl(runtime_config),
             "decode_max_num_tokens": self.decode_max_batch_size,
             "prefill_num_worker_list": prefill_worker_list,
             "decode_num_worker_list": decode_worker_list,
@@ -2235,7 +2248,7 @@ class Task:
             backend=backend,
             database=database,
             runtime_config=runtime_config,
-            ctx_tokens=ctx_tokens if ctx_tokens is not None else self.isl,
+            ctx_tokens=ctx_tokens if ctx_tokens is not None else self._effective_isl(runtime_config),
             predictor=self.predictor,
             speculative_profile=self.build_speculative_profile(),
             **backend_kwargs,

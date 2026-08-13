@@ -43,6 +43,20 @@ _NEMOTRONH_LAYER_BLOCK_PATTERN = {
 }
 
 
+def get_vision_encoder_config_from_model_info(model_info: dict) -> VisionEncoderConfig | None:
+    """Return the vision tower config without discarding family-specific extras.
+
+    Most VL families store :class:`VisionEncoderConfig` directly in
+    ``extra_params``. Qwen3.5 must retain its language/GDN/MoE configuration
+    there and therefore nests the vision contract under ``vision_config``.
+    """
+    extra_params = model_info.get("extra_params")
+    if isinstance(extra_params, VisionEncoderConfig):
+        return extra_params
+    vision_config = getattr(extra_params, "vision_config", None)
+    return vision_config if isinstance(vision_config, VisionEncoderConfig) else None
+
+
 def _load_json_with_infinity(file_path) -> dict:
     """
     Load JSON file with support for JavaScript-style Infinity and NaN values.

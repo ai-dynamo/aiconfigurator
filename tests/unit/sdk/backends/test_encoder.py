@@ -209,11 +209,17 @@ class TestEncoderVideoTokenFormula:
         assert num_visuals == 1
 
     def test_num_video_tokens_override_is_per_video(self, enc_cfg):
-        rc = RuntimeConfig(num_video_tokens=300, num_videos_per_request=3)
+        rc = RuntimeConfig(video_frames=8, num_video_tokens=300, num_videos_per_request=3)
 
         post_merge, pre_merge, num_visuals = BaseBackend._encoder_pre_merge_per_visual(rc, enc_cfg)
 
         assert (post_merge, pre_merge, num_visuals) == (300, 1200, 3)
+
+    def test_num_video_tokens_override_requires_temporal_metadata(self, enc_cfg):
+        rc = RuntimeConfig(num_video_tokens=300, num_videos_per_request=1)
+
+        with pytest.raises(ValueError, match="requires video_frames"):
+            BaseBackend._encoder_pre_merge_per_visual(rc, enc_cfg)
 
     def test_mixed_image_video_workload_fails_loudly(self, enc_cfg):
         rc = RuntimeConfig(
@@ -714,3 +720,19 @@ class TestEncoderMemoryInSummary:
         assert attention_call["batch_size"] == 4
         assert attention_call["s"] == (448 // 16) * (448 // 16) == 784
         assert attention_call["x"] == 4 * 784
+
+        # The explicit post-merge token override still needs the frame count
+        # to preserve Qwen's one-spatial-sequence-per-temporal-patch contract.
+        override_rc = RuntimeConfig(
+            batch_size=1,
+            isl=256,
+            osl=16,
+            video_frames=8,
+            num_video_tokens=196,
+            num_videos_per_request=1,
+        )
+        TRTLLMBackend().run_static(model, database, override_rc, mode="static")
+        override_attention_call = attention_op.query.call_args.kwargs
+        assert override_attention_call["batch_size"] == 4
+        assert override_attention_call["s"] == 196
+        assert override_attention_call["x"] == 4 * 196

@@ -51,7 +51,11 @@ from aiconfigurator.sdk.perf_database import PerfDatabase
 from aiconfigurator.sdk.picking import parallel_dim, worker_gpus
 from aiconfigurator.sdk.predict import predict_agg_worker, predict_disagg_worker
 from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
-from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
+from aiconfigurator.sdk.utils import (
+    enumerate_ttft_tpot_constraints,
+    get_model_config_from_model_path,
+    get_vision_encoder_config_from_model_info,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -282,7 +286,8 @@ def _sweep_one_parallel_agg(
     ``backend.find_best_agg_result_under_constraints``; parity is enforced by
     the integration test.
     """
-    isl = runtime_config.isl
+    text_isl = runtime_config.isl
+    isl = text_isl + BaseBackend._visual_context_tokens(model, runtime_config)
     osl = runtime_config.osl
     ttft_target = runtime_config.ttft
     tpot_target = runtime_config.tpot
@@ -842,10 +847,19 @@ def sweep_disagg(
     else:
         decode_batch_range = [b for b in _DEFAULT_DECODE_BATCH_SCHEDULE if b <= decode_max_num_tokens]
 
-    if prefill_max_num_tokens < runtime_config.isl:
-        logger.warning("prefill_max_num_tokens < runtime_config.isl, clamping to isl")
-        prefill_max_num_tokens = runtime_config.isl
-    max_prefill_batch_size = prefill_max_num_tokens // runtime_config.isl
+    try:
+        model_info = get_model_config_from_model_path(model_path)
+        enc_cfg = get_vision_encoder_config_from_model_info(model_info)
+    except Exception:
+        logger.debug("Could not resolve model config for visual effective ISL; using text ISL", exc_info=True)
+        enc_cfg = None
+    prefill_effective_isl = runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(
+        enc_cfg, runtime_config
+    )
+    if prefill_max_num_tokens < prefill_effective_isl:
+        logger.warning("prefill_max_num_tokens < effective prefill ISL, clamping to effective prefill ISL")
+        prefill_max_num_tokens = prefill_effective_isl
+    max_prefill_batch_size = prefill_max_num_tokens // prefill_effective_isl
     prefill_batch_range = range(1, max_prefill_batch_size + 1)
 
     prefill_summary_df = _get_disagg_worker_candidates(

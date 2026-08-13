@@ -1277,7 +1277,7 @@ def cli_estimate(
             num_videos=num_videos,
             enable_encoder_dp=enable_encoder_dp,
             batch_size=batch_size,
-            ctx_tokens=ctx_tokens if ctx_tokens is not None else isl,
+            ctx_tokens=ctx_tokens,
             tp_size=tp_size,
             pp_size=pp_size,
             attention_dp_size=attention_dp_size,
@@ -1541,6 +1541,7 @@ def _run_agg_estimate(
     nextn_accepted: float | None = None,
 ) -> EstimateResult:
     """Run aggregated (IFB) estimation."""
+    from aiconfigurator.sdk.backends.base_backend import BaseBackend
     from aiconfigurator.sdk.config import RuntimeConfig
     from aiconfigurator.sdk.inference_session import InferenceSession
 
@@ -1585,6 +1586,8 @@ def _run_agg_estimate(
     )
 
     model = get_model(model_path, model_config, backend_name)
+    if ctx_tokens is None:
+        ctx_tokens = isl + BaseBackend._visual_context_tokens(model, runtime_config)
     database = load_database(system_name)
     backend = get_backend(backend_name)
     session = InferenceSession(model, database, backend)

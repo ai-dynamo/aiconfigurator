@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from aiconfigurator.sdk import config, sweep
+from aiconfigurator.sdk import common, config, sweep
 from aiconfigurator.sdk.errors import (
     InsufficientMemoryError,
     KVCacheCapacityError,
@@ -259,6 +259,55 @@ def test_sweep_agg_disables_gen_dedup_for_speculative_schedules(monkeypatch):
     assert (6, 1024) not in baseline
     assert (6, 1024) in speculative
     assert len(speculative) == len(set(speculative))
+
+
+def test_sweep_agg_uses_visual_effective_isl_for_context_budget(monkeypatch):
+    points: list[tuple[int, int]] = []
+
+    def _record(*, runtime_config, ctx_tokens, **_kwargs):
+        points.append((runtime_config.batch_size, ctx_tokens))
+        summary = MagicMock()
+        summary.check_oom.return_value = False
+        summary.check_kv_cache_oom.return_value = False
+        summary.get_result_dict.return_value = {"ttft": 1.0, "tpot": 1.0}
+        summary.get_per_ops_source.return_value = {}
+        return summary
+
+    monkeypatch.setattr(sweep, "predict_agg_worker", _record)
+    model = MagicMock()
+    model.encoder_config = common.VisionEncoderConfig(
+        depth=27,
+        hidden_size=1152,
+        num_heads=16,
+        intermediate_size=4304,
+        patch_size=16,
+        temporal_patch_size=2,
+        spatial_merge_size=2,
+        out_hidden_size=5120,
+    )
+    sweep._sweep_one_parallel_agg(
+        model=model,
+        backend=MagicMock(),
+        database=MagicMock(),
+        runtime_config=config.RuntimeConfig(
+            isl=256,
+            osl=16,
+            ttft=1e9,
+            tpot=1e9,
+            video_height=448,
+            video_width=448,
+            video_frames=8,
+            num_videos_per_request=1,
+        ),
+        top_k=0,
+        max_batch_size=1,
+        ctx_stride=512,
+        enable_chunked_prefill=False,
+        free_gpu_memory_fraction=None,
+        max_seq_len=None,
+    )
+
+    assert points == [(1, 1040)]  # 256 text + 784 post-merge video tokens
 
 
 # ---------------------------------------------------------------------------

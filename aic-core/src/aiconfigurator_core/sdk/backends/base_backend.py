@@ -278,6 +278,10 @@ class BaseBackend:
                     * (runtime_config.video_width // enc_cfg.patch_size)
                 )
             else:
+                if runtime_config.video_frames <= 0:
+                    raise ValueError(
+                        "num_video_tokens requires video_frames so temporal attention sequences can be modeled."
+                    )
                 tokens_per_visual = runtime_config.num_video_tokens
                 pre_merge_per_visual = tokens_per_visual * (enc_cfg.spatial_merge_size**2)
             num_visuals = runtime_config.num_videos_per_request
@@ -342,15 +346,23 @@ class BaseBackend:
         # on post-merge tokens. ViT attention uses cu_seqlens: each image is an
         # independent sequence, and each temporal patch of a video is an
         # independent spatial sequence.
-        has_video_dims = (
+        has_video_workload = (
             runtime_config.num_videos_per_request > 0
             and runtime_config.video_frames > 0
-            and runtime_config.video_height > 0
-            and runtime_config.video_width > 0
+            and (
+                runtime_config.num_video_tokens > 0
+                or (runtime_config.video_height > 0 and runtime_config.video_width > 0)
+            )
         )
         temporal_sequences_per_visual = (
-            -(-runtime_config.video_frames // enc_cfg.temporal_patch_size) if has_video_dims else 1
+            -(-runtime_config.video_frames // enc_cfg.temporal_patch_size) if has_video_workload else 1
         )
+        if pre_merge_per_visual % temporal_sequences_per_visual != 0:
+            raise ValueError(
+                "Video pre-merge tokens must divide evenly across temporal attention sequences: "
+                f"pre_merge_tokens={pre_merge_per_visual}, "
+                f"temporal_sequences={temporal_sequences_per_visual}."
+            )
 
         def _encoder_shape(op) -> tuple[int, int]:
             use_post = "encoder_projector" in op._name or "all_gather" in op._name

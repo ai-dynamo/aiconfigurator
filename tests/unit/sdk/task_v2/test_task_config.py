@@ -396,6 +396,30 @@ def test_sweep_disagg_kwargs_shape():
     assert kwargs["autoscale_ttft_correction_factor"] == 1.8
 
 
+def test_sweep_disagg_sizes_prefill_token_budget_with_visual_effective_isl():
+    t = Task(
+        serving_mode="disagg",
+        prefill_model_path="Qwen/Qwen3.5-27B",
+        prefill_system_name="b200_sxm",
+        prefill_backend_name="vllm",
+        decode_model_path="Qwen/Qwen3.5-27B",
+        decode_system_name="b200_sxm",
+        decode_backend_name="vllm",
+        total_gpus=32,
+        database_mode="SOL",
+        isl=256,
+        video_height=448,
+        video_width=448,
+        video_frames=8,
+        num_videos_per_request=1,
+        prefill_max_batch_size=4,
+    )
+
+    kwargs = t.sweep_disagg_kwargs(prefill_database=None, decode_database=None)
+
+    assert kwargs["prefill_max_num_tokens"] == 4 * 1040
+
+
 def test_sweep_disagg_require_same_tp_sglang_non_wideep():
     """SGLang non-wideep disagg must enforce prefill/decode TP equality (dynamo#5870).
 
