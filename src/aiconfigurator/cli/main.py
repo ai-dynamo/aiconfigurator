@@ -2596,11 +2596,18 @@ def _run_estimate_mode(args):
     if args.image_height > 0 and args.image_width > 0 and args.num_images > 0:
         print(f"  Images:           {args.num_images} x {args.image_height}x{args.image_width}")
         print(f"  Encoder parallel: {'TP (weight-sharded)' if args.disable_encoder_dp else 'DP (data-parallel)'}")
-    if args.video_frames > 0 and args.video_height > 0 and args.video_width > 0 and args.num_videos > 0:
-        print(
-            f"  Videos:           {args.num_videos} x {args.video_frames} frames x "
-            f"{args.video_height}x{args.video_width}"
-        )
+    has_video_dimensions = args.video_height > 0 and args.video_width > 0
+    if args.video_frames > 0 and args.num_videos > 0 and (has_video_dimensions or args.num_video_tokens > 0):
+        if has_video_dimensions:
+            print(
+                f"  Videos:           {args.num_videos} x {args.video_frames} frames x "
+                f"{args.video_height}x{args.video_width}"
+            )
+        else:
+            print(
+                f"  Videos:           {args.num_videos} x {args.video_frames} frames x "
+                f"{args.num_video_tokens} tokens/video"
+            )
         print(f"  Encoder parallel: {'TP (weight-sharded)' if args.disable_encoder_dp else 'DP (data-parallel)'}")
 
     # ``--prefix`` and ``--nextn`` are common parameters applied to every
