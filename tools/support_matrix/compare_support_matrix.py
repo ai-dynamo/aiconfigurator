@@ -129,7 +129,12 @@ def read_csv(matrix_path: str) -> tuple[list[str], list[list[str]]]:
     return combined_header or [], combined_rows
 
 
-def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]:
+def check_csv_sanity(
+    header: list[str],
+    data_rows: list[list[str]],
+    *,
+    allow_legacy_header: bool = False,
+) -> list[str]:
     """
     Validate CSV structure and data.
 
@@ -144,6 +149,12 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
     if header not in SUPPORTED_HEADERS:
         errors.append(f"Invalid header: expected {SUPPORT_MATRIX_HEADER}, got {header}")
         return errors  # Can't continue without valid header
+    if header != SUPPORT_MATRIX_HEADER and not allow_legacy_header:
+        errors.append(
+            "New support matrix must use the current image-evidence header: "
+            f"expected {SUPPORT_MATRIX_HEADER}, got {header}"
+        )
+        return errors
 
     if len(data_rows) == 0:
         errors.append("CSV file has header but no data rows")

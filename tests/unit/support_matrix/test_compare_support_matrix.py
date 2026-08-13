@@ -96,15 +96,22 @@ def test_csv_sanity_requires_hardware_incompatible_reason():
     assert any("must include a hardware incompatibility reason" in err for err in errors)
 
 
-def test_csv_sanity_accepts_transitional_9col_header():
-    """Committed per-system CSVs generated at the base+Command (9-col, pre-Source) stage
-    must still validate -- compare rejecting them would break the daily diff."""
+def test_csv_sanity_keeps_transitional_header_readable_for_legacy_input():
+    """Legacy inputs can be inspected, but cannot be accepted as newly generated output."""
     from tools.support_matrix.support_matrix import SUPPORT_MATRIX_BASE_HEADER
 
     header9 = SUPPORT_MATRIX_BASE_HEADER + ["Command"]
     row9 = _row(STATUS_PASS)[:9]  # drop the Source column
-    errors = check_csv_sanity(header9, [row9])
+    errors = check_csv_sanity(header9, [row9], allow_legacy_header=True)
     assert errors == []
+
+
+def test_csv_sanity_rejects_legacy_header_for_new_matrix():
+    from tools.support_matrix.support_matrix import SUPPORT_MATRIX_HEADER_WITH_SOURCE
+
+    errors = check_csv_sanity(SUPPORT_MATRIX_HEADER_WITH_SOURCE, [_row(STATUS_PASS)[:10]])
+
+    assert any("must use the current image-evidence header" in error for error in errors)
 
 
 def test_csv_sanity_rejects_hybrid_pass_without_source_column():
@@ -112,7 +119,7 @@ def test_csv_sanity_rejects_hybrid_pass_without_source_column():
 
     header9 = SUPPORT_MATRIX_BASE_HEADER + ["Command"]
     row9 = _row(STATUS_HYBRID_PASS)[:9]
-    errors = check_csv_sanity(header9, [row9])
+    errors = check_csv_sanity(header9, [row9], allow_legacy_header=True)
 
     assert any("HYBRID_PASS requires the current header" in err for err in errors)
 

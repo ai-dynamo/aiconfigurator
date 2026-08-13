@@ -57,3 +57,28 @@ def test_compare_pareto_dfs_allows_different_rows_with_similar_frontier_envelope
     rust_df = pd.DataFrame([{"model": "model-a", "tp": 4, "tokens/s/user": 95.0, "ttft": 115.0, "tpot": 10.5}])
 
     assert _compare_pareto_dfs(python_df, rust_df) is None
+
+
+@pytest.mark.parametrize("memory_column", ["encoder_memory", "(e)memory"])
+def test_compare_pareto_dfs_rejects_encoder_metric_drift_before_frontier_fallback(memory_column):
+    python_df = pd.DataFrame(
+        [
+            {
+                "model": "model-a",
+                "tp": 1,
+                "encoder_latency": 1.0,
+                memory_column: 2.0,
+                "tokens/s/user": 100.0,
+                "ttft": 100.0,
+                "tpot": 10.0,
+            }
+        ]
+    )
+    rust_df = python_df.copy()
+    rust_df.loc[0, memory_column] = 2000.0
+
+    mismatch = _compare_pareto_dfs(python_df, rust_df, rtol=0.05, atol=1e-3)
+
+    assert mismatch is not None
+    assert "Rust encoder evidence differs beyond tolerance" in mismatch
+    assert memory_column in mismatch

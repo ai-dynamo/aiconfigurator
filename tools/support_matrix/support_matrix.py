@@ -89,6 +89,7 @@ _FRONTIER_ENVELOPE_COLUMNS = {
     "tpot": "min",
     "request_latency": "min",
 }
+_ENCODER_EVIDENCE_COLUMNS = frozenset({"encoder_latency", "encoder_memory", "(e)memory"})
 _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
 _NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
@@ -694,6 +695,46 @@ def _compare_frontier_envelope(
     return None
 
 
+def _compare_encoder_evidence(
+    python_df: pd.DataFrame,
+    rust_df: pd.DataFrame,
+    *,
+    rtol: float,
+    atol: float,
+) -> str | None:
+    """Compare encoder metrics before any relaxed Pareto-envelope fallback."""
+    mismatches: list[str] = []
+    for column in sorted(_ENCODER_EVIDENCE_COLUMNS & set(python_df.columns) & set(rust_df.columns)):
+        python_values = sorted(float(value) for value in pd.to_numeric(python_df[column], errors="coerce").dropna())
+        rust_values = sorted(float(value) for value in pd.to_numeric(rust_df[column], errors="coerce").dropna())
+
+        if len(python_values) == len(rust_values):
+            comparisons = zip(python_values, rust_values, strict=True)
+        elif python_values and rust_values:
+            # Different Pareto row counts can still be accepted by the relaxed
+            # frontier comparison, but their encoder envelopes must agree first.
+            comparisons = ((python_values[0], rust_values[0]), (python_values[-1], rust_values[-1]))
+        else:
+            mismatches.append(f"{column} evidence count differs: python={len(python_values)} rust={len(rust_values)}")
+            continue
+
+        for index, (python_value, rust_value) in enumerate(comparisons):
+            if _values_are_close(python_value, rust_value, rtol=rtol, atol=atol):
+                continue
+            denominator = max(abs(python_value), abs(rust_value), atol)
+            relative_diff = abs(python_value - rust_value) / denominator
+            mismatches.append(
+                f"{column}[{index}] python={python_value:.6g} rust={rust_value:.6g} rel_diff={relative_diff:.3%}"
+            )
+            break
+
+    if mismatches:
+        return f"Rust encoder evidence differs beyond tolerance rtol={rtol:g}, atol={atol:g}: " + "; ".join(
+            mismatches[:5]
+        )
+    return None
+
+
 def _compare_pareto_dfs(
     python_df: pd.DataFrame,
     rust_df: pd.DataFrame,
@@ -711,6 +752,10 @@ def _compare_pareto_dfs(
 
     if python_df.empty and rust_df.empty:
         return None
+
+    encoder_mismatch = _compare_encoder_evidence(python_df, rust_df, rtol=rtol, atol=atol)
+    if encoder_mismatch:
+        return encoder_mismatch
 
     approximate_columns = [col for col in python_columns if col in _APPROXIMATE_ENGINE_STEP_COLUMNS]
     identity_columns = [col for col in python_columns if col not in _APPROXIMATE_ENGINE_STEP_COLUMNS]
