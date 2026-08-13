@@ -38,6 +38,12 @@ def test_new_video_field_preserves_legacy_positional_order():
     assert init_fields.index("enable_encoder_dp") == init_fields.index("num_images_per_request") + 1
 
 
+@pytest.mark.parametrize("value", [0, -1, 1.5, True, False])
+def test_num_frames_per_visual_requires_positive_non_boolean_integer(value):
+    with pytest.raises(ValueError, match="positive non-boolean integer"):
+        Task(num_frames_per_visual=value)
+
+
 def test_agg_with_model_resolves_identity_and_backend():
     t = Task(
         serving_mode="agg",

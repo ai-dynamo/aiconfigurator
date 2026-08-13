@@ -1097,7 +1097,9 @@ def cli_estimate(
             ``'decode'`` (default), or ``'both'``. AFD is orthogonal to P/D
             disaggregation: ``'decode'`` models AFD on decode only, ``'prefill'``
             on the context phase (reports TTFT), and ``'both'`` reports TTFT+TPOT
-            with AFD on both phases.
+            with AFD on both phases. Visual workloads currently require
+            ``'decode'`` with ``afd_combined_with_pd=True`` so encoder work is
+            modeled by the regular prefill complement.
         afd_combined_with_pd: (afd-only) When True (default), combine the
             single-phase AFD estimate with a regular static estimate for the
             other phase (merging TTFT/TPOT, rate-matched throughput, and GPU
@@ -1357,6 +1359,13 @@ def cli_estimate(
                 "'both' means AFD covers prefill+decode internally; there is no "
                 "separate static pool to combine with. Pass --no-afd-combined-with-pd, "
                 "or pick afd_phase in {'prefill','decode'}."
+            )
+        has_visual_workload = image_height > 0 and image_width > 0 and num_images > 0
+        if has_visual_workload and afd_phase in ("prefill", "both"):
+            raise ValueError(
+                "Visual encoder modeling is not supported when AFD covers the prefill phase. "
+                "Use afd_phase='decode' with afd_combined_with_pd=True so the regular prefill "
+                "path accounts for encoder latency, memory, energy, and visual tokens."
             )
 
         resolved_version = _resolve_version_for(system_name)

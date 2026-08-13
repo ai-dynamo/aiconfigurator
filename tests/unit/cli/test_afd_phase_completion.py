@@ -984,7 +984,13 @@ def test_cli_estimate_afd_combined_with_pd_true_runs_static_combine(monkeypatch)
     monkeypatch.setattr(api, "_run_static_estimate", fake_run_static_estimate)
 
     result = api.cli_estimate(
-        **_afd_cli_estimate_kwargs(afd_combined_with_pd=True, enable_encoder_dp=False),
+        **_afd_cli_estimate_kwargs(
+            afd_combined_with_pd=True,
+            image_height=448,
+            image_width=448,
+            num_frames_per_visual=8,
+            enable_encoder_dp=False,
+        ),
     )
 
     # Merged result should reflect static_ctx TTFT and AFD TPOT, plus the
@@ -994,6 +1000,9 @@ def test_cli_estimate_afd_combined_with_pd_true_runs_static_combine(monkeypatch)
     # The encoder-parallelism choice must reach the static complement: a
     # non-default value proves forwarding rather than the callee default.
     assert captured["static_kwargs"]["enable_encoder_dp"] is False
+    assert captured["static_kwargs"]["image_height"] == 448
+    assert captured["static_kwargs"]["image_width"] == 448
+    assert captured["static_kwargs"]["num_frames_per_visual"] == 8
     assert result.ttft == 50.0
     assert result.tpot == 5.0
     assert result.num_total_gpus == 12
@@ -1012,6 +1021,25 @@ def test_cli_estimate_afd_phase_both_with_combined_with_pd_raises(monkeypatch):
     with pytest.raises(ValueError, match="afd_combined_with_pd=True is incompatible with afd_phase='both'"):
         api.cli_estimate(
             **_afd_cli_estimate_kwargs(afd_phase="both", afd_combined_with_pd=True),
+        )
+
+
+@pytest.mark.parametrize("afd_phase", ["prefill", "both"])
+def test_cli_estimate_rejects_visual_workload_when_afd_covers_prefill(monkeypatch, afd_phase):
+    """AFD prefill does not yet account for vision encoder work."""
+    _install_estimate_perf_db_stubs(monkeypatch)
+    monkeypatch.setattr(api, "_run_afd_estimate", lambda **_kwargs: _estimate_result(raw={}))
+
+    with pytest.raises(ValueError, match="Visual encoder modeling is not supported when AFD covers the prefill"):
+        api.cli_estimate(
+            **_afd_cli_estimate_kwargs(
+                afd_phase=afd_phase,
+                afd_combined_with_pd=False,
+                image_height=448,
+                image_width=448,
+                num_images=1,
+                num_frames_per_visual=8,
+            ),
         )
 
 

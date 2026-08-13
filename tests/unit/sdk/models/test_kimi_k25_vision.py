@@ -146,7 +146,8 @@ def test_encoder_parallelism_models_required_communication():
 
 def test_video_frame_count_must_be_positive():
     enc = get_model_config_from_model_path("moonshotai/Kimi-K2.5")["encoder_config"]
-    runtime = config.RuntimeConfig(image_height=448, image_width=448, num_frames_per_visual=0)
+    runtime = config.RuntimeConfig(image_height=448, image_width=448)
+    runtime.num_frames_per_visual = 0
 
     with pytest.raises(ValueError, match="num_frames_per_visual must be positive"):
         BaseBackend._encoder_pre_merge_per_visual(runtime, enc)

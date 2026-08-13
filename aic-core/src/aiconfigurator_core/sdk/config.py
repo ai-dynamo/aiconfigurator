@@ -160,6 +160,16 @@ class RuntimeConfig:
     # Frames in each visual input. 1 models an image; >1 models a video clip.
     num_frames_per_visual: int = 1
 
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.num_frames_per_visual, bool)
+            or not isinstance(self.num_frames_per_visual, int)
+            or self.num_frames_per_visual <= 0
+        ):
+            raise ValueError(
+                f"num_frames_per_visual must be a positive non-boolean integer, got {self.num_frames_per_visual!r}"
+            )
+
 
 @dataclass
 class AFDConfig:
