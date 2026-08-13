@@ -6,7 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 # Phase 2 Execution Plan — Rust-default flip and Python latency-path removal
 
 **Status (2026-08-14): PR-1 (#1454), PR-2 (#1496) and PR-2.5 (#1508) MERGED;
-PR-3 delivered as the ENGINE-STEP-path retirement — see "PR-3 disposition"
+PR-3 (#1521 — the PR carrying this text) delivers the ENGINE-STEP-path
+retirement and is in flight until it merges — see "PR-3 disposition"
 below.** The original PR-3 scope ("delete the per-call query stack
 wholesale") was revised after FPM (#1384) landed a live consumer of that
 stack; #1461's Rust FPM port (Op::FpmForward + fpm_sol.rs) then let PR-3

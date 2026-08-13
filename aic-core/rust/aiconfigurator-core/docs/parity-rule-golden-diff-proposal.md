@@ -18,6 +18,11 @@ Gate 3), the current rule is wrong in three ways —
    FPM runs on the compiled engine (#1461 + the walk deletion in this PR).
 3. It does not describe the post-freeze golden workflow (`pin_goldens.py`,
    provenance-marked pins, golden-diff review).
+4. Its `paths:` predate the aic-core restructure: they name the
+   `src/aiconfigurator/sdk/**` compatibility shims instead of the real
+   sources under `aic-core/src/aiconfigurator_core/sdk/**` (and the crate
+   moved under `aic-core/rust/`). The proposal below uses the
+   repository-root-relative real locations.
 
 One thing the rule must KEEP: the per-call Python query stack
 (`operations/*.py` `_query_*_table` bodies, `perf_database.query_*`,
@@ -39,12 +44,12 @@ description: >
   diff. Per-op query math is still dual-implemented (AFD/tooling) until
   the #1357 Phase-3 retirement.
 paths:
-  - "rust/aiconfigurator-core/**"
-  - "src/aiconfigurator/sdk/operations/**"
-  - "src/aiconfigurator/sdk/perf_database.py"
-  - "src/aiconfigurator/sdk/perf_interp/**"
-  - "src/aiconfigurator/sdk/engine.py"
-  - "src/aiconfigurator/sdk/rust_engine_step.py"
+  - "aic-core/rust/aiconfigurator-core/**"
+  - "aic-core/src/aiconfigurator_core/sdk/operations/**"
+  - "aic-core/src/aiconfigurator_core/sdk/perf_database.py"
+  - "aic-core/src/aiconfigurator_core/sdk/perf_interp/**"
+  - "aic-core/src/aiconfigurator_core/sdk/engine.py"
+  - "aic-core/src/aiconfigurator_core/sdk/rust_engine_step.py"
   - "tests/unit/sdk/test_opspec_coverage.py"
 ---
 

@@ -135,6 +135,10 @@ def _support_matrix_row_command(
         "--top-n",
         "1",
         "--no-color",
+        # Mirror the executed path: the matrix pins the compiled engine, so
+        # the replay command must too.
+        "--engine-step-backend",
+        "rust",
     ]
     if transfer_policy:
         parts.extend(["--transfer-policy", transfer_policy])
@@ -687,6 +691,10 @@ class SupportMatrix:
                 # capture_provenance spans task.run() (the contextvar propagates down the
                 # call stack), so we learn the worst empirical transfer tier that fired.
                 with capture_provenance() as prov_tags:
+                    # Pinned (not None): the config value outranks the ambient
+                    # AICONFIGURATOR_ENGINE_STEP_BACKEND env var, so PASS/FAIL
+                    # cannot become host-dependent (an unknown ambient value
+                    # would raise in should_use_rust_engine_step).
                     pareto_df = SupportMatrix._run_mode(
                         mode=mode,
                         model=model,
@@ -694,7 +702,7 @@ class SupportMatrix:
                         backend=backend,
                         version=version,
                         constraints=constraints,
-                        engine_step_backend=None,
+                        engine_step_backend="rust",
                         database_mode=db_mode,
                     )
                 # pareto_frontier_df is non-empty iff pareto_df is, so we only check pareto_df.

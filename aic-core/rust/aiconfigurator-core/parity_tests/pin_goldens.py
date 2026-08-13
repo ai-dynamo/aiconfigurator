@@ -82,11 +82,14 @@ _GOLDEN_REL_PREFIX = "aic-core/rust/aiconfigurator-core/parity_tests/goldens/"
 
 
 def _dirty_paths(porcelain: str) -> list[str]:
-    """Tracked-file modifications other than the goldens themselves (this
-    script's output) and untracked files."""
+    """Every porcelain entry except the goldens themselves (this script's
+    output). Untracked files count as dirty too — unlike `git describe`,
+    a pin's VALUE can depend on them (an untracked parquet under
+    systems/data changes what the live engine loads), so a clean header
+    must mean a fully committed input state."""
     dirty: list[str] = []
     for line in porcelain.splitlines():
-        if not line.strip() or line.startswith("??"):
+        if not line.strip():
             continue
         paths = line[3:].split(" -> ")
         if all(path.strip().strip('"').startswith(_GOLDEN_REL_PREFIX) for path in paths):
