@@ -1071,7 +1071,7 @@ class Task:
         tuple is large-EP -- i.e. on the search space, which is resolved in
         between (see ``__post_init__``).
         """
-        roles = ["agg"] if self.serving_mode == "agg" else ["prefill", "decode"]
+        roles = ["agg"] if self.serving_mode in ("agg", "afd") else ["prefill", "decode"]
         fmha_explicit = self._fmha_explicit
 
         # Data-driven FMHA resolution: if an inferred fp8 has no fp8 slice in
@@ -1138,6 +1138,13 @@ class Task:
         a per-tuple gap is pruned by the sweep, not fatal here. Fused first, so
         the universally-reachable regime leads the diagnostics. Mapping lives in
         ``models.attention_op_keys``."""
+        # AFD partitions the aggregate model across its A/F topology and does
+        # not enumerate the standard agg TP/DP/EP candidate lists. It also
+        # never assigns the standard per-tuple MoE comm backend, so its
+        # attention surface is the fused aggregate one.
+        if self.serving_mode == "afd" and role == "agg":
+            return [attention_op_keys(self._model_family, self.backend_name, False)]
+
         regimes: set[bool] = set()
         for tup in self.iter_parallel(role):
             regimes.add(self._resolve_moe_comm_backend(role, tup) is not None)

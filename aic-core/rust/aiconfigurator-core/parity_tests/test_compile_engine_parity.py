@@ -732,11 +732,19 @@ def _handle_from_spec_json(spec_json: str) -> engine.EngineHandle:
     return engine.EngineHandle(bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json)))
 
 
+def _is_expected_large_ep_conversion_gap(exc: engine.OpConversionError) -> bool:
+    """Whether native compilation failed only on the pending AIC-1601 ops."""
+    message = str(exc)
+    return any(op_name in message for op_name in ("MoEAllToAll", "MoEExpertCompute"))
+
+
 def _python_wideep_sglang_references() -> dict[str, float]:
     """Capture path for the SGLang WideEP golden references."""
     try:
         return _python_wideep_sglang_references_impl()
     except engine.OpConversionError as exc:
+        if not _is_expected_large_ep_conversion_gap(exc):
+            raise
         # Large-EP graphs compile natively only from AIC-1601 (PR 2.5);
         # below it the surface is skipped (its tests carry the same skip).
         print(f"[goldens] {exc}: skipping wideep_sglang surface until AIC-1601")
@@ -834,10 +842,43 @@ def _python_wideep_trtllm_references() -> dict[str, float]:
     try:
         return _python_wideep_trtllm_references_impl()
     except engine.OpConversionError as exc:
+        if not _is_expected_large_ep_conversion_gap(exc):
+            raise
         # Large-EP graphs compile natively only from AIC-1601 (PR 2.5);
         # below it the surface is skipped (its tests carry the same skip).
         print(f"[goldens] {exc}: skipping wideep_trtllm surface until AIC-1601")
         return {}
+
+
+@pytest.mark.parametrize(
+    ("capture", "impl_name"),
+    [
+        (_python_wideep_sglang_references, "_python_wideep_sglang_references_impl"),
+        (_python_wideep_trtllm_references, "_python_wideep_trtllm_references_impl"),
+    ],
+)
+def test_wideep_golden_capture_reraises_unrelated_conversion_failures(capture, impl_name, monkeypatch) -> None:
+    def fail_with_unrelated_op() -> dict[str, float]:
+        raise engine.OpConversionError("unsupported op: FPMForwardOp")
+
+    monkeypatch.setitem(globals(), impl_name, fail_with_unrelated_op)
+    with pytest.raises(engine.OpConversionError, match="FPMForwardOp"):
+        capture()
+
+
+@pytest.mark.parametrize(
+    ("capture", "impl_name", "large_ep_op"),
+    [
+        (_python_wideep_sglang_references, "_python_wideep_sglang_references_impl", "MoEAllToAll"),
+        (_python_wideep_trtllm_references, "_python_wideep_trtllm_references_impl", "MoEExpertCompute"),
+    ],
+)
+def test_wideep_golden_capture_skips_only_expected_large_ep_gap(capture, impl_name, large_ep_op, monkeypatch) -> None:
+    def fail_with_pending_op() -> dict[str, float]:
+        raise engine.OpConversionError(f"unsupported op: {large_ep_op}")
+
+    monkeypatch.setitem(globals(), impl_name, fail_with_pending_op)
+    assert capture() == {}
 
 
 def _python_wideep_trtllm_references_impl() -> dict[str, float]:

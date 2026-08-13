@@ -313,6 +313,7 @@ class DeepSeekV32Model(BaseModel):
                         cp_size=self.config.cp_size,
                         index_topk_freq=self.extra_params.get("index_topk_freq", 1),
                         dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
+                        attn_projection_quant_modes=dsa_attn_quant_modes,
                     ),
                     ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
                 ]
@@ -342,6 +343,7 @@ class DeepSeekV32Model(BaseModel):
                         architecture=self.architecture,
                         index_topk_freq=self.extra_params.get("index_topk_freq", 1),
                         dsa_full_layer_fraction=self.extra_params.get("dsa_full_layer_fraction"),
+                        attn_projection_quant_modes=dsa_attn_quant_modes,
                     ),
                     ops.ElementWise("generation_add_norm_2", generation_scale, 2 * h, 2 * h, 0.8),
                 ]

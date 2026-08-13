@@ -73,12 +73,14 @@ non-MoE checkpoint.
 
 `build_moe_block_ops(prefix, shape, cfg, quant_mode, workload_distribution,
 *, scale_factor, backend_name, inference_phase, model_family="*",
-attn_cp_size=1, gpus_per_node=8, shared_gemm_quant_mode=None)` is the one
+attn_cp_size=1, gpus_per_node=None, shared_gemm_quant_mode=None)` is the one
 place MoE blocks are wired. It returns the block's op list for one inference
 phase — router GEMM, shared-expert GEMMs, and either the fused
 dispatch/compute/combine pipeline or, when `cfg.moe_comm_backend` names a
 comm backend for `inference_phase`, the large-EP `MoEAllToAll`/`MoEExpertCompute`
-emission. `scale_factor` is deliberately model-owned (legacy model classes
+emission. An omitted `gpus_per_node` resolves from `cfg.num_gpus_per_node`
+for large-EP configs and raises when that field is unset. `scale_factor` is
+deliberately model-owned (legacy model classes
 scale their MoE ops by their own layer count, not `shape.num_moe_layers`),
 and `shared_gemm_quant_mode` overrides `cfg.gemm_quant_mode` for the
 shared-expert GEMMs only.

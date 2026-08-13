@@ -208,6 +208,16 @@ class DeepSeekModel(BaseModel):
             if gemm_quant_mode != common.GEMMQuantMode.bfloat16
             else common.GEMMQuantMode.bfloat16
         )
+        extra = self.extra_params if isinstance(self.extra_params, dict) else {}
+        q_lora_rank = int(extra.get("q_lora_rank") or 1536)
+        kv_lora_rank = int(extra.get("kv_lora_rank") or 512)
+        qk_nope_head_dim = int(extra.get("qk_nope_head_dim") or 128)
+        qk_rope_head_dim = int(extra.get("qk_rope_head_dim") or 64)
+        v_head_dim = int(extra.get("v_head_dim") or 128)
+        q_projection_width = self._num_heads * (qk_nope_head_dim + qk_rope_head_dim)
+        kv_projection_width = self._num_heads * (qk_nope_head_dim + v_head_dim)
+        o_projection_width = self._num_heads * v_head_dim
+        downscale_width = q_lora_rank + kv_lora_rank + qk_rope_head_dim
 
         # Perf-row key for the profiled MLA attention module. When the
         # checkpoint keeps attention projections unquantized (every NVFP4
@@ -280,22 +290,22 @@ class DeepSeekModel(BaseModel):
                 [
                     ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
                     ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
-                    # kv_a_proj_with_mqa: hidden_size -> compressed_dim (1536+512+64=2112)
-                    ops.GEMM("context_downscale_gemm", self._num_layers, 2112, h, gemm_quant_mode),
-                    # q_a_layernorm: RMSNorm on q_compressed (dim=1536)
-                    ops.ElementWise("context_q_a_layernorm", self._num_layers, 1536, 1536, 0.8),
+                    # kv_a_proj_with_mqa: hidden_size -> q_lora + kv_lora + qk_rope.
+                    ops.GEMM("context_downscale_gemm", self._num_layers, downscale_width, h, gemm_quant_mode),
+                    # q_a_layernorm: RMSNorm on q_compressed.
+                    ops.ElementWise("context_q_a_layernorm", self._num_layers, q_lora_rank, q_lora_rank, 0.8),
                     ops.GEMM(
                         "context_q_b_proj_gemm",
                         self._num_layers,
-                        24576 // tp_size,
-                        1536,
+                        q_projection_width // tp_size,
+                        q_lora_rank,
                         gemm_quant_mode,
                     ),
                     ops.GEMM(
                         "context_kv_b_proj_gemm",
                         self._num_layers,
-                        32768 // tp_size,
-                        512,
+                        kv_projection_width // tp_size,
+                        kv_lora_rank,
                         gemm_quant_mode,
                     ),
                     ops.ContextMLA(
@@ -305,7 +315,13 @@ class DeepSeekModel(BaseModel):
                         kvcache_quant_mode,
                         fmha_quant_mode,
                     ),
-                    ops.GEMM("context_proj_gemm", self._num_layers, h, 128 * 128 // tp_size, gemm_quant_mode),
+                    ops.GEMM(
+                        "context_proj_gemm",
+                        self._num_layers,
+                        h,
+                        o_projection_width // tp_size,
+                        gemm_quant_mode,
+                    ),
                     ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
                 ]
             )
@@ -326,12 +342,18 @@ class DeepSeekModel(BaseModel):
                 [
                     ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
                     ops.ElementWise("generation_add_norm_1", gen_scale, 2 * h, 2 * h, 0.8),
-                    ops.GEMM("generation_downscale_gemm", gen_scale, 2112, h, gemm_quant_mode),
-                    # q_a_layernorm: RMSNorm on q_compressed (dim=1536). In TRT-LLM
-                    # kv_a_layernorm (dim=512) runs in parallel but is much smaller,
+                    ops.GEMM("generation_downscale_gemm", gen_scale, downscale_width, h, gemm_quant_mode),
+                    # q_a_layernorm: RMSNorm on q_compressed. In TRT-LLM
+                    # kv_a_layernorm runs in parallel but is much smaller,
                     # so we model only q_a_layernorm as the dominant one.
-                    ops.ElementWise("generation_q_a_layernorm", gen_scale, 1536, 1536, 0.8),
-                    ops.GEMM("generation_q_b_proj_gemm", gen_scale, 24576 // tp_size, 1536, gemm_quant_mode),
+                    ops.ElementWise("generation_q_a_layernorm", gen_scale, q_lora_rank, q_lora_rank, 0.8),
+                    ops.GEMM(
+                        "generation_q_b_proj_gemm",
+                        gen_scale,
+                        q_projection_width // tp_size,
+                        q_lora_rank,
+                        gemm_quant_mode,
+                    ),
                     # BMM_pre (Absorption) || RoPE+KV cache prep (overlap on two streams)
                     # Main stream: q_nope * W_absorption -> absorbed_q
                     # Aux stream: RoPE(q_pe) + write compressed_kv to KV cache
@@ -352,8 +374,8 @@ class DeepSeekModel(BaseModel):
                             ops.ElementWise(
                                 "generation_rope_kvcache",
                                 gen_scale,
-                                576,  # kv_lora_rank(512) + qk_rope_head_dim(64)
-                                576,
+                                kv_lora_rank + qk_rope_head_dim,
+                                kv_lora_rank + qk_rope_head_dim,
                                 0.8,
                             ),
                         ],
@@ -366,7 +388,13 @@ class DeepSeekModel(BaseModel):
                         mla_bmm_quant_mode,
                         if_pre=False,
                     ),
-                    ops.GEMM("generation_proj_gemm", gen_scale, h, h // tp_size, gemm_quant_mode),
+                    ops.GEMM(
+                        "generation_proj_gemm",
+                        gen_scale,
+                        h,
+                        o_projection_width // tp_size,
+                        gemm_quant_mode,
+                    ),
                     ops.ElementWise("generation_add_norm_2", gen_scale, 2 * h, 2 * h, 0.8),
                 ]
             )

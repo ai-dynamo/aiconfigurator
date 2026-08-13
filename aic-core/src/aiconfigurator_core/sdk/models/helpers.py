@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import warnings
 from functools import cache
 from typing import Optional
 
@@ -110,7 +111,13 @@ def attention_modules_excluded_from_quant(raw_config: dict) -> bool:
     return bool(attention_projection_exclusions(raw_config))
 
 
-def attention_op_keys(model_family: str, backend_name: str, is_large_ep: bool = False) -> tuple[str, str]:
+def attention_op_keys(
+    model_family: str,
+    backend_name: str,
+    is_large_ep: bool = False,
+    *,
+    enable_wideep: bool | None = None,
+) -> tuple[str, str]:
     """(context_op, generation_op) support-matrix keys for a model family /
     backend / large-EP combination.
 
@@ -119,6 +126,14 @@ def attention_op_keys(model_family: str, backend_name: str, is_large_ep: bool = 
     (:func:`resolve_context_fmha_by_data`). Every context op keys on fmha at
     the top level; every generation op keys on kv dtype.
     """
+    if enable_wideep is not None:
+        warnings.warn(
+            "'enable_wideep' is deprecated; use 'is_large_ep' instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        is_large_ep = enable_wideep
+
     if model_family == "DEEPSEEKV4":
         return "deepseek_v4_context_module", "deepseek_v4_generation_module"
     if model_family == "DEEPSEEKV32":

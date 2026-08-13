@@ -540,7 +540,10 @@ def _large_ep_block_ops(
         "moe_ep_size": cfg.moe_ep_size,
         "node_num": node_num,
         "sms": cfg.sms if comm_backend == "deepep_ht" else 0,
-        "attention_tp_size": cfg.tp_size if is_deepep and is_context else 1,
+        # DeepEP context receives per-attention-rank tokens. Context
+        # parallelism contributes to that attention width just like TP does;
+        # generation remains unsharded here.
+        "attention_tp_size": cfg.tp_size * cfg.cp_size if is_deepep and is_context else 1,
     }
 
     # Routed path: router GEMM (spec section 4.4.4 — always emitted here; the
