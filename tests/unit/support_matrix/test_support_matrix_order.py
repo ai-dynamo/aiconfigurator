@@ -167,6 +167,12 @@ def test_matrix_model_metadata_failure_is_fatal(monkeypatch):
 
 
 def test_parallel_model_metadata_failure_aborts_without_retry(monkeypatch):
+    class ActiveProcess:
+        terminated = False
+
+        def terminate(self):
+            self.terminated = True
+
     class MetadataFailureFuture:
         cancelled = False
 
@@ -192,6 +198,7 @@ def test_parallel_model_metadata_failure_aborts_without_retry(monkeypatch):
             self.all_futures = [MetadataFailureFuture(), PendingFuture()]
             self.futures_to_submit = list(self.all_futures)
             self.shutdown_calls = []
+            self._processes = {1: ActiveProcess()}
 
         def submit(self, _fn, _combo):
             return self.futures_to_submit.pop(0)
@@ -218,7 +225,8 @@ def test_parallel_model_metadata_failure_aborts_without_retry(monkeypatch):
         matrix._run_parallel_combinations(combos, max_workers=2, pbar=None)
 
     executor = executors[0]
-    assert executor.shutdown_calls == [(False, True)]
+    assert executor.shutdown_calls == [(True, True)]
+    assert executor._processes[1].terminated is True
     assert executor.all_futures[1].cancelled is True
 
 

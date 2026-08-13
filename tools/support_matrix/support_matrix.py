@@ -89,6 +89,22 @@ _FRONTIER_ENVELOPE_COLUMNS = {
 }
 
 
+def _terminate_process_pool(executor: ProcessPoolExecutor) -> None:
+    """Stop active workers before abandoning a fatal matrix run."""
+    terminate_workers = getattr(executor, "terminate_workers", None)
+    if terminate_workers is not None:
+        terminate_workers()
+        return
+
+    # ProcessPoolExecutor.terminate_workers() is only available on Python 3.14+.
+    # Terminate the processes explicitly on older supported Python versions,
+    # then join them so they cannot outlive the fatal error.
+    processes = getattr(executor, "_processes", None) or {}
+    for process in processes.values():
+        process.terminate()
+    executor.shutdown(wait=True, cancel_futures=True)
+
+
 class ModelMetadataResolutionError(RuntimeError):
     """Fatal support-matrix error while resolving a model's configuration."""
 
@@ -1128,7 +1144,7 @@ class SupportMatrix:
             max_workers=min(max_workers, len(combinations)),
             mp_context=_fork_ctx,
         )
-        shutdown_without_wait = False
+        executor_shutdown = False
         try:
             futures = {executor.submit(_process_combination_worker, combo): combo for combo in combinations}
             for future in as_completed(futures):
@@ -1158,10 +1174,8 @@ class SupportMatrix:
                     for remaining in futures:
                         if remaining is not future:
                             remaining.cancel()
-                    # A context-manager exit would wait for already-running
-                    # workers, defeating the fatal metadata fail-fast contract.
-                    shutdown_without_wait = True
-                    executor.shutdown(wait=False, cancel_futures=True)
+                    _terminate_process_pool(executor)
+                    executor_shutdown = True
                     raise
                 except Exception:
                     logger.exception(
@@ -1175,7 +1189,7 @@ class SupportMatrix:
                     processed_futures.add(future)
                     pbar.update(1)
         finally:
-            if not shutdown_without_wait:
+            if not executor_shutdown:
                 executor.shutdown()
 
         return group_results, retry_combos
