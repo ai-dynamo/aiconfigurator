@@ -48,6 +48,9 @@ collector.sglang.collect_dsv4_attn:
 collector.sglang.collect_dsv4_megamoe:
   # Standalone multi-node Slurm/Kubernetes flow: include every script that
   # expands, renders, executes, merges, or validates the published table.
+  # The vLLM lane wrapper rewrites argv (framework label, pre-dispatch lane),
+  # directly bending the collected rows' identity — it belongs in the closure
+  # even though it is not an OpEntry module.
   - collector/sglang/dsv4_megamoe/finalize_validated.py
   - collector/sglang/dsv4_megamoe_workload.py
   - collector/sglang/dsv4_megamoe/render_k8s_indexed_job.py
@@ -56,6 +59,7 @@ collector.sglang.collect_dsv4_megamoe:
   - collector/sglang/dsv4_megamoe/run_slurm_full_collection.sh
   - collector/sglang/dsv4_megamoe/run_torchrun.sh
   - collector/sglang/dsv4_megamoe/validate_perf.py
+  - collector/vllm/collect_k3_megamoe.py
 collector.sglang.collect_gdn:
   - collector/cases/base_ops/gdn.yaml
   - __model_cases__

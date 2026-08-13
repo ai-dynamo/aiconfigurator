@@ -149,7 +149,15 @@ def test_kimi_k3_moe_remaps_to_w4a8_on_blackwell_only():
         assert mode is common.MoEQuantMode.w4a8_mxfp4_mxfp8
     for system in ("h200_sxm", "h100_sxm"):
         assert resolve_kimi_k3_moe_arch_mode("moonshotai/Kimi-K3", system, "sglang") is None
+    # vLLM's default lane stays the W4A16 marlin label...
     assert resolve_kimi_k3_moe_arch_mode("moonshotai/Kimi-K3", "b300_sxm", "vllm") is None
+    # ...but the vLLM MegaMoE lane runs the same fused fp8_fp4 kernel, so on
+    # Blackwell it shares SGLang's w4a8_mxfp4_mxfp8 key (Hopper stays silent).
+    assert (
+        resolve_kimi_k3_moe_arch_mode("moonshotai/Kimi-K3", "b300_sxm", "vllm", "megamoe")
+        is common.MoEQuantMode.w4a8_mxfp4_mxfp8
+    )
+    assert resolve_kimi_k3_moe_arch_mode("moonshotai/Kimi-K3", "h200_sxm", "vllm", "megamoe") is None
     assert resolve_kimi_k3_moe_arch_mode("moonshotai/Kimi-K2.5", "b300_sxm", "sglang") is None
 
 

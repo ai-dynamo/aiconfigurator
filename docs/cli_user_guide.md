@@ -437,7 +437,7 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--enable-chunked-prefill`: Enable chunked prefill for a finer-grained context-token sweep. When off (default), the context-token stride is aligned to ISL for faster sweeping.
 - `--enable-wideep`: **Deprecated and ignored for large-EP modeling** (accepted with a one-time warning). On SGLang, it still narrows the default `moe_tp` candidates to `[1]`; explicit `*_moe_tp_candidates` values take precedence. Large-EP (wideEP) is explored automatically — see the note below.
 - `--attention-backend`: Attention kernel backend — one of `fa3`, `triton`, `trtllm_mha`, `flashinfer`, `fla`, or `default`. It applies to every model graph with standard dense `ContextAttention`/`GenerationAttention` operations and to supported DeepSeek MLA/WideEP paths. Support is backend-, performance-table-, and version-specific; unsupported named values fail closed. For modeling, unset or `default` uses the mapped framework default when available and otherwise the safe `default` fallback. SGLang WideEP maps unset/`default` to `flashinfer` and also supports `fa3`. The deployment generator emits supported named SGLang values, omits unset/`default`, and rejects `fla` for SGLang 0.5.14.
-- `--moe-backend`: Explicit SGLang MoE backend. `megamoe` is a real kernel selection (use it to model DeepSeek-V4 MegaMoE on Blackwell); `deepep_moe` is deprecated: it is ignored for modeling (large-EP is explored automatically from data coverage), but on SGLang it still narrows the default `moe_tp` candidates to `[1]` — explicit `*_moe_tp_candidates` always win.
+- `--moe-backend`: Explicit MoE backend. `megamoe` is a real kernel selection (use it to model DeepSeek-V4 or Kimi-K3 MegaMoE on Blackwell; packaged data: DeepSeek-V4 on Blackwell SGLang, Kimi-K3 on GB300 SGLang plus GB300 vLLM 0.27.0); `deepep_moe` is deprecated: it is ignored for modeling (large-EP is explored automatically from data coverage), but on SGLang it still narrows the default `moe_tp` candidates to `[1]` — explicit `*_moe_tp_candidates` always win.
 
 > **Large-EP (wideEP) is explored automatically.** For MoE models, multi-node EP-only
 > parallelism joins the search whenever the performance database covers the model's MoE
@@ -1077,7 +1077,8 @@ disagg_full:
   nextn: 1
   nextn_accepted: 0.85
 
-  # MoE kernel backend (shared; e.g. "megamoe" for DeepSeek-V4 on Blackwell SGLang).
+  # MoE kernel backend (shared). "megamoe" covers packaged lanes: DeepSeek-V4
+  # on Blackwell SGLang, and Kimi-K3 on gb300 SGLang + vLLM 0.27.0.
   # Large-EP (wideEP) is explored automatically when perf data covers the model
   # shape; restrict with *_moe_ep_candidates.
   moe_backend: null

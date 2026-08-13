@@ -851,8 +851,9 @@ def test_moe_backend_flows_into_model_config():
 def test_dsv4_native_sglang_moe_remap():
     """Native DeepSeek-V4 (Pro AND Flash) on sglang remaps MoE to the arch-specific
     kernel (v1 dsv4pro-moe-arch): Blackwell -> w4a8_mxfp4_mxfp8_trtllm; on Hopper
-    the native FP4-expert checkpoints are rejected outright. megamoe, non-sglang
-    backends, and the sgl-project FP8 requant artifacts are exempt.
+    the native FP4-expert checkpoints are rejected outright. megamoe (its own
+    quant table), non-sglang backends, and the sgl-project FP8 requant
+    artifacts are exempt.
     """
     from aiconfigurator.sdk import common
 
@@ -1094,7 +1095,7 @@ def test_large_pipeline_parallel_augments_dsv32_blackwell_defaults():
 
 def test_megamoe_sglang_parallel_lists_and_validation():
     """SGLang MegaMoE (initial support): DeepSeek-V4-Pro on Blackwell gets EP-only parallel
-    lists; non-sglang / non-DeepSeek-V4 are rejected (v1 _validate_megamoe_backend_support)."""
+    lists; non-sglang/vllm backends and non-megamoe models are rejected."""
     t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V4-Pro",
@@ -1104,7 +1105,7 @@ def test_megamoe_sglang_parallel_lists_and_validation():
     )
     assert t.agg_moe_tp_candidates == [1]  # EP-only
     assert t.agg_moe_ep_candidates  # populated from the megamoe lists
-    with pytest.raises(ValueError, match="SGLang backend"):
+    with pytest.raises(ValueError, match="SGLang and vLLM"):
         Task(
             serving_mode="agg",
             model_path="deepseek-ai/DeepSeek-V4-Pro",
@@ -1112,12 +1113,57 @@ def test_megamoe_sglang_parallel_lists_and_validation():
             backend_name="trtllm",
             moe_backend="megamoe",
         )
-    with pytest.raises(ValueError, match="DeepSeek-V4"):
+    with pytest.raises(ValueError, match="DeepSeek-V4 and Kimi-K3"):
         Task(
             serving_mode="agg",
             model_path="deepseek-ai/DeepSeek-V3",
             system_name="b200_sxm",
             backend_name="sglang",
+            moe_backend="megamoe",
+        )
+
+
+def test_megamoe_kimi_k3_allowed_on_sglang_and_vllm():
+    t = Task(
+        serving_mode="agg",
+        model_path="moonshotai/Kimi-K3",
+        system_name="gb300",
+        backend_name="sglang",
+        moe_backend="megamoe",
+    )
+    assert t.agg_moe_tp_candidates == [1]
+    assert 16 in t.agg_moe_ep_candidates
+    # vLLM megamoe is measured on gb300 @ 0.27.0 (EP-only lists too); trtllm stays rejected.
+    t_vllm = Task(
+        serving_mode="agg",
+        model_path="moonshotai/Kimi-K3",
+        system_name="gb300",
+        backend_name="vllm",
+        moe_backend="megamoe",
+    )
+    assert t_vllm.agg_moe_tp_candidates == [1]
+    assert 16 in t_vllm.agg_moe_ep_candidates
+    with pytest.raises(ValueError, match="SGLang and vLLM"):
+        Task(
+            serving_mode="agg",
+            model_path="moonshotai/Kimi-K3",
+            system_name="gb300",
+            backend_name="trtllm",
+            moe_backend="megamoe",
+        )
+
+
+def test_megamoe_rejects_models_without_shipped_rows(monkeypatch):
+    """Mirroring the DSv4 allowlist: a Kimi-K3 checkpoint without measured
+    MegaMoE rows must fail at Task build, not silently query shapes nobody
+    measured (offline-fixture stand-in: the identity probe reports non-K3)."""
+    monkeypatch.setattr("aiconfigurator.sdk.models.helpers._is_kimi_k3_checkpoint", lambda _p: False)
+    with pytest.raises(ValueError, match="packaged performance data only for Kimi-K3"):
+        Task(
+            serving_mode="agg",
+            model_path="moonshotai/Kimi-K3",
+            system_name="gb300",
+            backend_name="vllm",
             moe_backend="megamoe",
         )
 

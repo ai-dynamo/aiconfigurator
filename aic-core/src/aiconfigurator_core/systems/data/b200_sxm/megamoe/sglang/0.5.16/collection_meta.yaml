@@ -24,5 +24,8 @@ tables:
   # would show identical latencies at both clamps.
   # K3 rows share the DSV4 megamoe schema (no model column); shapes
   # (3584/3072, 896x16) distinguish them from DSV4.
+  # Moved moe/ -> megamoe/ family 2026-08-13 (owner decision 2026-08-02: the
+  # fused module gets its own family so its framework pin never hijacks the
+  # `moe` family's image selection).
   dsv4_megamoe_module_perf:
     status: complete

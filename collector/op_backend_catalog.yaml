@@ -122,11 +122,30 @@ families:
       - glm5_mqa_logits_module_perf
       - glm5_topk_module_perf
 
+  # Split out of `moe` (owner decision 2026-08-02 forbids a family pin on vllm's
+  # `moe`, because that would hijack image selection for every MoE model). The
+  # fused MegaMoE module is a different kernel, a different runtime requirement
+  # (DeepGEMM present) and a different framework pin, so it gets its own family
+  # and its own manifest override instead.
+  - family: megamoe
+    op_files:
+      - dsv4_megamoe_module_perf
+    frameworks:
+      sglang:
+        selector: "SGLANG_OPT_USE_DEEPGEMM_MEGA_MOE=1 (env; DeepSeek-V4/Kimi-K3 latent MoE only)"
+        default: "off; the DeepSeek-V4 / kimi-k3 branch images opt in via env"
+        choices:
+          - {backend: deepgemm, framework_name: deep_gemm.fp8_fp4_mega_moe, constraints: "w4a8_mxfp4_mxfp8; SM100-family; EP-only (moe_tp=1); pre-dispatch = deep_gemm JIT symmetric-buffer copy; K3 SiTU selected by activation_clamp==0.03125 sentinel", source: "srt/layers/moe/mega_moe.py:24 @ kimi-k3 branch"}
+      vllm:
+        selector: "--moe-backend deep_gemm_mega_moe (KernelConfig.moe_backend; requires --enable-expert-parallel)"
+        default: "not selected by auto; must be requested explicitly"
+        choices:
+          - {backend: deepgemm, framework_name: deep_gemm_mega_moe, constraints: "w4a8_mxfp4_mxfp8; get_device_capability major==10 (SM100/103); EP-only, raises without enable_expert_parallel; pre-dispatch = vLLM's own triton prepare_megamoe_inputs; K3 SiTU passed as activation='situ' with activation_clamp=None; DeepGEMM vendored as vllm.third_party.deep_gemm", source: "vllm/models/kimi_k3/nvidia/model.py:98,395,408,741 + vllm/models/deepseek_v4/nvidia/model.py:314-317 @ v0.27.0"}
+
   - family: moe
     op_files:
       - moe_perf
       - moe_expert_compute_perf
-      - dsv4_megamoe_module_perf
       - wideep_moe_perf
       - wideep_context_moe_perf
       - wideep_generation_moe_perf
