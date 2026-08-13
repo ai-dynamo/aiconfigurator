@@ -596,11 +596,11 @@ def test_opspec_lane_order_without_a_database_falls_back_to_default():
     assert gen_spec["lane_order"] == ["default"]
 
 
-def test_engine_spec_schema_version_is_nine():
+def test_engine_spec_schema_version_is_ten():
     """The lane_order field is an always-serialized positional payload change."""
     from aiconfigurator.sdk import engine
 
-    assert engine.ENGINE_SPEC_SCHEMA_VERSION == 9
+    assert engine.ENGINE_SPEC_SCHEMA_VERSION == 10
 
 
 def test_lanes_outside_the_known_vocabulary_stay_reachable(lane_systems_root, no_op_load_data):
