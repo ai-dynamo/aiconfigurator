@@ -661,18 +661,18 @@ class TestGemma4VisionRuntime:
         )
         enc_cfg = model.encoder_config
 
-        memory = BaseBackend()._get_encoder_component_memory(model, num_tokens=2520, embed_tokens=280)
+        memory = BaseBackend()._get_encoder_component_memory(model, num_tokens=5040, embed_tokens=280)
 
         qkv_width = 3 * enc_cfg.hidden_size // model.config.tp_size
-        gated_mlp_width = enc_cfg.hidden_size + 2 * enc_cfg.intermediate_size // model.config.tp_size
-        expected_bytes = 2 * 2520 * max(qkv_width, gated_mlp_width)
+        gated_mlp_width = enc_cfg.hidden_size + (2 * enc_cfg.intermediate_size) // model.config.tp_size
+        expected_bytes = 2 * 5040 * max(qkv_width, gated_mlp_width)
         expected_bytes += 2 * 280 * (2 * enc_cfg.hidden_size + enc_cfg.out_hidden_size)
-        expected_bytes = max(expected_bytes, 32 * 1024 * 1024)
+        assert expected_bytes > 32 * 1024 * 1024
         assert memory["activations"] == pytest.approx(expected_bytes / (1 << 30))
 
         unsharded_bytes = (
             2
-            * 2520
+            * 5040
             * max(
                 3 * enc_cfg.hidden_size,
                 enc_cfg.hidden_size + 2 * enc_cfg.intermediate_size,

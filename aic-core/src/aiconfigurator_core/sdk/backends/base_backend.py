@@ -1655,7 +1655,7 @@ class BaseBackend:
                 # a complete tower on each rank and shards whole images.
                 encoder_tp = 1 if model.config.enable_encoder_dp else model.config.tp_size
                 qkv_width = 3 * enc_cfg.hidden_size // encoder_tp
-                gated_mlp_width = enc_cfg.hidden_size + 2 * enc_cfg.intermediate_size // encoder_tp
+                gated_mlp_width = enc_cfg.hidden_size + (2 * enc_cfg.intermediate_size) // encoder_tp
                 activations = 2 * num_tokens * max(qkv_width, gated_mlp_width)
                 # Pooled tower output, normalized projection input, and final
                 # language-space embeddings coexist at the adapter boundary.
