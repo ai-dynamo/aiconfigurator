@@ -19,6 +19,8 @@ tables:
     case_plan_hash: sha256:1e658e78c925cba9773688165ecec208c0c2c2f0b931268cc15a245fc878ac48
     collected_at: '2026-08-10'
     rows: 8820
+    # rows above is this 2026-08-10 collector run's count; the 2026-08-13
+    # append (comment above, AIC-1745) brings the table total to 8874.
     # All 32 failed tasks are strict-completeness raises on the largest
     # batch x seq inner points (memory-bound sweep tail); collected rows
     # are unaffected.
