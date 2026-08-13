@@ -8,8 +8,6 @@ import pytest
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk import operations as ops
 from aiconfigurator.sdk.backends.sglang_backend import SGLANGBackend
-from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
-from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.operations.attention import generation_attn_mode
 from aiconfigurator.sdk.operations.dsv4 import (
@@ -679,14 +677,13 @@ class TestDeepSeekV4AttentionModule:
         assert result.energy >= 0
 
 
-def test_deepseek_v4_per_op_sol_walk_runs_end_to_end(mutable_comprehensive_perf_db):
-    """Every DSV4 op must answer a per-op SOL query through the Python phase
-    walk. This is the surface FPM rooflines stand on (``_oplevel_sol_fn``
-    queries the model's original op list in DatabaseMode.SOL); the engine-step
+def test_deepseek_v4_per_op_sol_queries_run_end_to_end(mutable_comprehensive_perf_db):
+    """Every DSV4 op must answer a per-op SOL query through the per-call
+    ``op.query()`` surface (the sanity notebook's substrate; the engine-step
     SOL path itself is rust-routed and covered by the parity suite on real
-    databases, so the walk is exercised directly here — the fixture is a real
-    PerfDatabase stuffed with synthetic in-memory data the compiled engine
-    could not resolve from disk."""
+    databases). The fixture is a real PerfDatabase stuffed with synthetic
+    in-memory data the compiled engine could not resolve from disk, so the
+    per-call queries are looped directly."""
     db = mutable_comprehensive_perf_db
     db.system_spec["gpu"]["mem_capacity"] = 288400343040
     db.system_spec["misc"]["nccl_mem"] = {1: 0, 2: 0, 4: 0, 8: 0}
@@ -699,14 +696,14 @@ def test_deepseek_v4_per_op_sol_walk_runs_end_to_end(mutable_comprehensive_perf_
         overwrite_num_layers=2,
     )
     model = get_model("sgl-project/DeepSeek-V4-Flash-FP8", model_config, backend_name="trtllm")
-    backend = TRTLLMBackend()
-    runtime = RuntimeConfig(batch_size=1, beam_width=1, isl=128, osl=4, prefix=0)
-
     db.set_default_database_mode(common.DatabaseMode.SOL)
-    context_latency, _, _ = backend._run_context_phase(model, db, runtime, batch_size=1, isl=128, prefix=0)
-    generation_latency, _, _ = backend._run_generation_phase(model, db, runtime, 1, 1, 128, 4, 1)
-    assert sum(context_latency.values()) > 0
-    assert sum(generation_latency.values()) > 0
+
+    context_total = sum(
+        float(op.query(db, x=128, batch_size=1, beam_width=1, s=128, prefix=0)) for op in model.context_ops
+    )
+    generation_total = sum(float(op.query(db, x=2, batch_size=2, beam_width=1, s=129)) for op in model.generation_ops)
+    assert context_total > 0
+    assert generation_total > 0
 
 
 def test_sglang_deepseek_v4_pro_moe_workspace_uses_residual_hidden_size(mutable_comprehensive_perf_db):

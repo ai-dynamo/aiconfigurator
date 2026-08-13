@@ -406,7 +406,7 @@ def _fold_per_op(
     (it also keeps duck-typed handles in tests correct): duplicate names
     accumulate with ``+=`` and sources merge to ``"mixed"`` on mismatch —
     byte-for-byte the accumulation semantics of
-    ``base_backend._run_context_phase``. ``scale`` is the flat
+    the retired Python phase runners. ``scale`` is the flat
     ``latency_correction_scale`` post-multiply, applied to latency AND energy
     per key exactly like the Python phase runners' downstream scaling. The
     three dicts share one key set (the power-coverage gate pairs latency and
@@ -446,7 +446,7 @@ def estimate_static_latency_breakdown_with_rust(
     Routes through ``EngineHandle.run_static_per_op`` (the "Python builds,
     Rust executes" path). The engine performs the decode stride quadrature and
     the ``(nextn + 1)`` decode-batch scaling internally (mirroring
-    ``base_backend._run_generation_phase``) and returns every queried op's
+    the retired Python ``_run_generation_phase``) and returns every queried op's
     ``(name, latency_ms, energy_wms, source)``; this side folds them into the
     same name-keyed dicts the Python phase runners produce — real op names,
     real energies, real provenance tags. Returns ``(context_latency,

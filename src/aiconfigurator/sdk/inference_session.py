@@ -1417,7 +1417,7 @@ class AFDInferenceSession:
         return summary
 
     # Stride for sampling KV-cache length ``s`` along the decode trace.
-    # Mirrors ``base_backend._run_generation_phase`` so the AFD path
+    # Mirrors the retired ``base_backend._run_generation_phase`` walk so the AFD path
     # uses the same numerical integration grid as agg/disagg.
     _AFD_DECODE_STRIDE = 32
 
@@ -1443,7 +1443,7 @@ class AFDInferenceSession:
 
         Attention is the only op whose latency reads ``s``; sampling at
         ``stride = _AFD_DECODE_STRIDE`` mirrors the trapezoidal rule
-        used by ``_run_generation_phase`` and recovers the average
+        used by the retired ``_run_generation_phase`` walk and recovers the average
         per-step latency over the full decode trace.
 
         Returns ``(t_a_layer_avg, t_f_layer_avg, t_cycle_avg,
@@ -1562,7 +1562,7 @@ class AFDInferenceSession:
 
         Decode integrates per-step compute along the KV-cache length
         ``s`` (sampled every ``_AFD_DECODE_STRIDE`` tokens, mirroring
-        ``base_backend._run_generation_phase``). Attention is the only
+        the retired ``base_backend._run_generation_phase`` walk). Attention is the only
         op that reads ``s`` — sampling at a single ``s = isl + 1`` would
         under-count A-side latency by ~33% in the typical ``osl ~ isl``
         regime and several-fold for ``osl ≫ isl``, which silently flips

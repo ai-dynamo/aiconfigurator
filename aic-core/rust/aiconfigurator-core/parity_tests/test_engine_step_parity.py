@@ -2371,8 +2371,6 @@ def _fpm_write_pair(data_dir) -> None:
 def fpm_systems_root(tmp_path_factory):
     import shutil
 
-    from aiconfigurator_core.sdk.operations.fpm_forward import FPMForwardOp
-
     root = tmp_path_factory.mktemp("fpm_systems")
     pkg_systems = perf_database.get_systems_paths()[-1]
     shutil.copy(f"{pkg_systems}/b200_sxm.yaml", root / "b200_sxm.yaml")
@@ -2381,18 +2379,51 @@ def fpm_systems_root(tmp_path_factory):
     _fpm_write_pair(data_dir)
 
     perf_database.set_systems_paths(f"{root},default")
-    FPMForwardOp.clear_cache()
     rust_engine_step._engine_handle_cache_clear()
     try:
         yield root
     finally:
         perf_database.set_systems_paths("default")
-        FPMForwardOp.clear_cache()
         rust_engine_step._engine_handle_cache_clear()
 
 
+# Frozen Python-side references for the FPM parity class, captured from the
+# live Python FPM walk immediately before its deletion (Phase 2 PR-3) on the
+# deterministic synthetic fixture above — the same freeze-then-delete pattern
+# as the golden fixtures. This class sits outside ENGINE_STEP_GOLDEN_MATRIX
+# because its dataset is generated per-run (`_FPM_ROWS`), so the frozen
+# values live inline; string entries are expected exception kinds
+# (error-symmetry contract).
+_FPM_STATIC_FROZEN = {
+    ("static_ctx", 1, 1024, 1, 0): 18.0,
+    ("static_ctx", 1, 2048, 1, 1024): 21.0,
+    ("static_ctx", 2, 1500, 1, 0): 50.8046875,
+    ("static_ctx", 3, 1024, 1, 0): 51.37999771084165,
+    ("static_gen", 1, 1024, 2, 0): 2.2,
+    ("static_gen", 4, 1024, 2, 0): 4.5,
+    ("static_gen", 2, 1024, 2, 0): 2.8812035914364387,
+    ("static_gen", 4, 9_000_000, 2, 0): "PerfDataNotAvailableError",
+    ("static_ctx", 16, 256, 1, 0): 68.0,
+    ("static_ctx", 16, 320, 1, 256): "PerfDataNotAvailableError",
+}
+_FPM_MIXED_FROZEN = {
+    (1024, 4, 1024, 2): 18.562552704189983,
+    (512, 4, 1024, 2): 10.587744831848209,
+    # ctx_tokens == 0 raises at MixedStepInput construction on both engines.
+    (0, 4, 1024, 2): "ValueError",
+    (0, 600, 100, 2): "ValueError",
+    (1024, 0, 1024, 2): 18.0,
+    (4096, 0, 256, 1): 68.0,
+}
+_FPM_GENONLY_FROZEN = 4.5
+
+
 class TestRustEngineStepFpmParity:
-    """forward_model='fpm' engine-step parity (plan §M2 item 5)."""
+    """forward_model='fpm' regression vs the frozen Python reference.
+
+    The Python FPM walk is gone (Phase 2 PR-3); the live side below is the
+    compiled engine (Op::FpmForward), compared against `_FPM_*_FROZEN`.
+    """
 
     def _build(self):
         from aiconfigurator.sdk.config_builders import build_model_config
@@ -2414,9 +2445,8 @@ class TestRustEngineStepFpmParity:
         database = _quiet_call(perf_database.get_database, "b200_sxm", "vllm", _FPM_VERSION)
         return model, get_backend("vllm"), database
 
-    def _static(self, model, backend, database, mode, batch, isl, osl, prefix, eng):
+    def _static(self, model, backend, database, mode, batch, isl, osl, prefix):
         rc = config.RuntimeConfig(batch_size=batch, beam_width=1, isl=isl, osl=osl, prefix=prefix)
-        rc.engine_step_backend = eng
 
         def thunk():
             summary = backend.run_static(model, database, rc, mode=mode)
@@ -2426,14 +2456,15 @@ class TestRustEngineStepFpmParity:
         return _safe_value(thunk)
 
     @staticmethod
-    def _assert_pair(py, rs, point):
-        if isinstance(py, _ErrorSentinel) or isinstance(rs, _ErrorSentinel):
-            assert isinstance(py, _ErrorSentinel) and isinstance(rs, _ErrorSentinel), (
-                f"{point}: asymmetric error py={py!r} rs={rs!r}"
+    def _assert_frozen(frozen, rs, point):
+        if isinstance(frozen, str):
+            assert isinstance(rs, _ErrorSentinel) and rs.kind == frozen, (
+                f"{point}: expected symmetric {frozen}, got {rs!r}"
             )
             return
-        allowed = max(abs(py) * PARITY_RTOL, 1e-9)
-        assert abs(rs - py) <= allowed, f"{point}: py={py} rs={rs} delta={abs(rs - py)}"
+        assert not isinstance(rs, _ErrorSentinel), f"{point}: frozen={frozen} but live raised {rs!r}"
+        allowed = max(abs(frozen) * PARITY_RTOL, 1e-9)
+        assert abs(rs - frozen) <= allowed, f"{point}: frozen={frozen} rs={rs} delta={abs(rs - frozen)}"
 
     def test_fpm_arena_selects_the_fpm_engine(self, fpm_systems_root, monkeypatch):
         # Review finding (#1461): from_native() dropped forward_model, so the
@@ -2524,9 +2555,9 @@ class TestRustEngineStepFpmParity:
     def test_fpm_static_parity(self, fpm_systems_root, monkeypatch, mode, batch, isl, osl, prefix):
         _prepare_rust_core(monkeypatch)
         model, backend, database = self._build()
-        py = self._static(model, backend, database, mode, batch, isl, osl, prefix, "python")
-        rs = self._static(model, backend, database, mode, batch, isl, osl, prefix, "rust")
-        self._assert_pair(py, rs, f"{mode} B={batch} isl={isl} prefix={prefix}")
+        rs = self._static(model, backend, database, mode, batch, isl, osl, prefix)
+        frozen = _FPM_STATIC_FROZEN[(mode, batch, isl, osl, prefix)]
+        self._assert_frozen(frozen, rs, f"{mode} B={batch} isl={isl} prefix={prefix}")
 
     @pytest.mark.parametrize(
         ("ctx_tokens", "gen_tokens", "isl", "osl"),
@@ -2543,22 +2574,17 @@ class TestRustEngineStepFpmParity:
         _prepare_rust_core(monkeypatch)
         model, backend, database = self._build()
 
-        def run(eng):
-            rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=isl, osl=osl, prefix=0)
-            rc.engine_step_backend = eng
-            return _safe_value(
-                lambda: backend._get_mix_step_latency(model, database, rc, ctx_tokens, gen_tokens, isl, osl, 0)[0]
-            )
-
-        self._assert_pair(run("python"), run("rust"), f"mixed ctx={ctx_tokens} gen={gen_tokens}")
+        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=isl, osl=osl, prefix=0)
+        rs = _safe_value(
+            lambda: backend._get_mix_step_latency(model, database, rc, ctx_tokens, gen_tokens, isl, osl, 0)[0]
+        )
+        frozen = _FPM_MIXED_FROZEN[(ctx_tokens, gen_tokens, isl, osl)]
+        self._assert_frozen(frozen, rs, f"mixed ctx={ctx_tokens} gen={gen_tokens}")
 
     def test_fpm_genonly_step_parity(self, fpm_systems_root, monkeypatch):
         _prepare_rust_core(monkeypatch)
         model, backend, database = self._build()
 
-        def run(eng):
-            rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=2, prefix=0)
-            rc.engine_step_backend = eng
-            return _safe_value(lambda: backend._get_genonly_step_latency(model, database, rc, 4, 1023, 2)[0])
-
-        self._assert_pair(run("python"), run("rust"), "genonly gen=4")
+        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=2, prefix=0)
+        rs = _safe_value(lambda: backend._get_genonly_step_latency(model, database, rc, 4, 1023, 2)[0])
+        self._assert_frozen(_FPM_GENONLY_FROZEN, rs, "genonly gen=4")

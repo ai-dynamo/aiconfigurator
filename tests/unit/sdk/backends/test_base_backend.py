@@ -248,12 +248,6 @@ def test_run_static_can_route_to_rust_engine_step_backend(
         _fake_rust_breakdown,
     )
 
-    def _phase_runner_trap(*args, **kwargs):
-        raise AssertionError("the rust path must never re-run the Python phase runners (not even for energy)")
-
-    monkeypatch.setattr(backend, "_run_context_phase", _phase_runner_trap)
-    monkeypatch.setattr(backend, "_run_generation_phase", _phase_runner_trap)
-
     summary = backend.run_static(
         model,
         database,
@@ -726,15 +720,15 @@ def test_mix_step_efficiency_base_default_is_one(backend: BaseBackend) -> None:
     assert backend._mix_step_efficiency(ctx_tokens=0, gen_tokens=0) == 1.0
 
 
-def test_run_static_latency_only_skips_python_phase_runners_for_rust_path(
+def test_run_static_latency_only_zeroes_energy_with_paired_keys(
     monkeypatch,
     backend: BaseBackend,
     model,
     database,
 ) -> None:
-    """include_energy=False must not invoke _run_context_phase or
-    _run_generation_phase, and must zero the energy dicts while keeping their
-    key sets identical to the latency dicts."""
+    """include_energy=False must zero the energy dicts while keeping their
+    key sets identical to the latency dicts (the power coverage gate pairs
+    latency and energy by name)."""
     from aiconfigurator.sdk.backends import base_backend as base_backend_module
 
     monkeypatch.setattr(
@@ -749,11 +743,6 @@ def test_run_static_latency_only_skips_python_phase_runners_for_rust_path(
             {"generation_qkv_gemm": "silicon", "generation_attention": "mixed"},
         ),
     )
-
-    ctx_phase = MagicMock(wraps=backend._run_context_phase)
-    gen_phase = MagicMock(wraps=backend._run_generation_phase)
-    monkeypatch.setattr(backend, "_run_context_phase", ctx_phase)
-    monkeypatch.setattr(backend, "_run_generation_phase", gen_phase)
 
     runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, prefix=2, engine_step_backend="rust")
     latency = backend.run_static_latency_only(
@@ -779,11 +768,6 @@ def test_run_static_latency_only_skips_python_phase_runners_for_rust_path(
     assert generation_energy == {"generation_qkv_gemm": 0.0, "generation_attention": 0.0}
     assert context_energy.keys() == context_latency.keys()
     assert generation_energy.keys() == generation_latency.keys()
-
-    # The old rust-path energy compensation re-ran the Python phases "for
-    # energy only"; that double evaluation is gone on every rust-path call.
-    ctx_phase.assert_not_called()
-    gen_phase.assert_not_called()
 
 
 def test_step_requires_a_real_perf_database(

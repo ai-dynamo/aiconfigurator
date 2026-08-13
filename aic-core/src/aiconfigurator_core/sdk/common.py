@@ -1182,7 +1182,7 @@ class PerfDataFilename(Enum):
     dsv4_megamoe_module = "dsv4_megamoe_module_perf.parquet"
     # Whole-model forward-pass data (forward_model="fpm"). Paired with a
     # mandatory ``fpm_forward_perf.metadata.json`` sidecar; loaded/validated by
-    # ``operations.fpm_forward``, never through the shared layer.
+    # the Rust core (perf_database/fpm_forward.rs), never through the shared layer.
     fpm_forward = "fpm_forward_perf.parquet"
 
 

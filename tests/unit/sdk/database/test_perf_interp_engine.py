@@ -524,6 +524,13 @@ def test_data_unavailable_error_subclasses_value_error():
     assert issubclass(InterpolationDataNotAvailableError, ValueError)
 
 
+def test_own_curve_coverage_fallback_defaults_off():
+    """Sites answer for their whole curve axis unless a caller opts into the
+    degenerate-site coverage fallback explicitly (part of the perf_interp
+    contract: the default engine behavior must not change under it)."""
+    assert perf_interp.ScatteredSites(site_axes=("n", "k"), curve_axis="m").own_curve_coverage_fallback is False
+
+
 def test_get_value_dict_and_legacy_float_leaves():
     leaf = {"latency": 1.5, "power": 2.0}
     assert perf_interp.get_value(leaf) == 1.5
