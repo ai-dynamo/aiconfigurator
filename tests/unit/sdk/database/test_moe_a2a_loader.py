@@ -129,7 +129,8 @@ def test_present_but_null_power_cells_load_as_no_power(tmp_path):
     # like an absent column (parquet null -> "" used to raise ValueError).
     rows = [
         _row(power=None),
-        _row(num_tokens=256, latency=300.0, power=400.0),
+        _row(num_tokens=256, latency=250.0, power=float("nan")),
+        _row(num_tokens=512, latency=300.0, power=400.0),
     ]
     path = _write_parquet(tmp_path, rows)
 
@@ -139,7 +140,18 @@ def test_present_but_null_power_cells_load_as_no_power(tmp_path):
     assert by_tokens[128]["latency"] == pytest.approx(0.150)  # latency survives
     assert by_tokens[128]["power"] == 0.0
     assert by_tokens[128]["energy"] == 0.0
-    assert by_tokens[256]["power"] == 400.0  # measured rows keep their power
+    assert by_tokens[256]["latency"] == pytest.approx(0.250)
+    assert by_tokens[256]["power"] == 0.0
+    assert by_tokens[256]["energy"] == 0.0
+    assert by_tokens[512]["power"] == 400.0  # measured rows keep their power
+
+
+@pytest.mark.parametrize("power", [float("inf"), float("-inf")])
+def test_non_finite_measured_power_refuses_load(power, tmp_path):
+    path = _write_parquet(tmp_path, [_row(power=power)])
+
+    with pytest.raises(ValueError, match="power must be finite"):
+        load_moe_a2a_data([(path, None)])
 
 
 def test_null_latency_cell_refuses_load_with_named_error(tmp_path):
@@ -149,6 +161,14 @@ def test_null_latency_cell_refuses_load_with_named_error(tmp_path):
     path = _write_parquet(tmp_path, [_row(latency=None)])
 
     with pytest.raises(ValueError, match="latency is schema-required"):
+        load_moe_a2a_data([(path, None)])
+
+
+@pytest.mark.parametrize("latency", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_latency_cell_refuses_load(latency, tmp_path):
+    path = _write_parquet(tmp_path, [_row(latency=latency)])
+
+    with pytest.raises(ValueError, match="latency is schema-required and must be finite"):
         load_moe_a2a_data([(path, None)])
 
 

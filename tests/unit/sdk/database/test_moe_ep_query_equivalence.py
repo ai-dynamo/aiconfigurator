@@ -214,10 +214,6 @@ def test_l1_trtllm_wideep_moe_compute_query_equivalence():
     assert any(dist.endswith("_eplb") for dist in dists_seen)
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 # ---------------------------------------------------------------------------
 # (c) Review follow-ups: eplb / is_gated / per-call quant override parity
 # ---------------------------------------------------------------------------
@@ -349,7 +345,7 @@ def test_l1_sglang_non_gated_overflow_equivalence():
     not os.path.exists(SGLANG_CONTEXT_PATH),
     reason="shipped h200 sglang 0.5.6.post2 wideep parquets not present",
 )
-def test_epmoe_per_call_quant_mode_override_reaches_the_walk():
+def test_moe_expert_compute_per_call_quant_mode_override_reaches_the_walk():
     # Legacy expert-compute ops honor kwargs.get("quant_mode"); the op-level
     # override must reach both kernel resolution and the table walk. Construct
     # with an uncollected ctor mode and query with the collected one: only the
@@ -381,3 +377,7 @@ def test_epmoe_per_call_quant_mode_override_reaches_the_walk():
         "deepep_moe", quant, dist, "context", topk, experts, experts, hidden, inter, tp, ep, min(tokens)
     )
     assert float(overridden) == pytest.approx(float(direct), rel=1e-12)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
