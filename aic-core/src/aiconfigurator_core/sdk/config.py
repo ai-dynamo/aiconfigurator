@@ -156,7 +156,10 @@ class RuntimeConfig:
     image_height: int = 0
     image_width: int = 0
     num_images_per_request: int = 1
-    num_image_tokens: int = 0  # override: ViT output tokens per image; ignored when image_height/width are set
+    # Optional per-image ViT output-token override. Qwen uses it only when image
+    # dimensions are absent; fixed-budget models such as Gemma 4 use it to
+    # select a supported processor soft-token budget even when dimensions exist.
+    num_image_tokens: int = 0
 
 
 @dataclass

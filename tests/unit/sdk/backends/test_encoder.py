@@ -16,6 +16,7 @@ Covers:
 import pytest
 
 from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.models import get_model
 
@@ -236,6 +237,17 @@ class TestEncoderRuntime:
     @pytest.fixture
     def model_config(self):
         return config.ModelConfig()
+
+    def test_qwen_encoder_dp_all_gather_uses_per_rank_payload(self):
+        model = get_model(
+            "Qwen/Qwen3-VL-32B-Instruct",
+            config.ModelConfig(tp_size=4, enable_encoder_dp=True),
+            "trtllm",
+        )
+
+        gather = next(op for op in model.encoder_ops if op._name == "encoder_dp_all_gather")
+        expected_per_rank_width = model.encoder_config.out_hidden_size * model.encoder_config.projector_n_instances
+        assert gather._num_elements_per_token == expected_per_rank_width
 
     def test_text_only_model_has_empty_encoder_ops(self, model_config):
         model = get_model("Qwen/Qwen3-32B", model_config, "trtllm")
@@ -550,3 +562,162 @@ class TestEncoderMemoryInSummary:
         assert enc_mem["kvcache"] == 0.0
         assert enc_mem["weights"] > 0.0
         assert enc_mem["activations"] > 0.0
+
+
+class TestGemma4VisionRuntime:
+    """Gemma 4 derives a pooled grid from its own aspect-ratio resize contract."""
+
+    @staticmethod
+    def _model():
+        return get_model(
+            "google/gemma-4-26B-A4B",
+            config.ModelConfig(moe_tp_size=1, moe_ep_size=1),
+            "trtllm",
+        )
+
+    def test_checkpoint_default_maps_one_image_to_280_soft_tokens_and_2520_patches(self):
+        model = self._model()
+        rc = RuntimeConfig(
+            batch_size=1,
+            isl=512,
+            osl=64,
+            image_height=672,
+            image_width=960,
+            num_images_per_request=1,
+        )
+
+        post_pool, pre_pool = BaseBackend._encoder_pre_merge_per_visual(rc, model.encoder_config)
+
+        assert post_pool == 280
+        assert pre_pool == 2520
+        assert BaseBackend._visual_context_tokens(model, rc) == 280
+
+    def test_square_image_keeps_padded_tower_budget_but_fewer_soft_tokens(self):
+        model = self._model()
+        rc = RuntimeConfig(
+            batch_size=1,
+            isl=512,
+            osl=64,
+            image_height=448,
+            image_width=448,
+            num_images_per_request=1,
+        )
+
+        post_pool, pre_pool = BaseBackend._encoder_pre_merge_per_visual(rc, model.encoder_config)
+
+        # Gemma4ImageProcessor upsizes this to 768x768: 48x48 patches,
+        # then 3x3 average pooling gives a 16x16 soft-token grid.
+        assert post_pool == 256
+        # Gemma4ImageProcessor pads the resized 2304-patch image back to the
+        # checkpoint's 2520-patch tower input, then strips invalid pool outputs.
+        assert pre_pool == 2520
+        assert BaseBackend._visual_context_tokens(model, rc) == 256
+
+    def test_dynamic_soft_token_override_follows_supported_gemma_budget(self):
+        model = self._model()
+        rc = RuntimeConfig(
+            batch_size=1,
+            isl=512,
+            osl=64,
+            image_height=672,
+            image_width=960,
+            num_images_per_request=2,
+            num_image_tokens=560,
+        )
+
+        post_pool, pre_pool = BaseBackend._encoder_pre_merge_per_visual(rc, model.encoder_config)
+
+        # 560 is a maximum budget, not an unconditional output length. The
+        # 672x960 aspect ratio rounds to 912x1344 and yields 532 soft tokens;
+        # the tower input remains padded to the 560-token/5040-patch budget.
+        assert post_pool == 532
+        assert pre_pool == 5040
+        assert BaseBackend._visual_context_tokens(model, rc) == 1064
+
+    def test_invalid_soft_token_budget_is_rejected(self):
+        model = self._model()
+        rc = RuntimeConfig(
+            batch_size=1,
+            isl=512,
+            osl=64,
+            image_height=672,
+            image_width=960,
+            num_image_tokens=281,
+        )
+
+        with pytest.raises(ValueError, match="must be one of"):
+            BaseBackend._encoder_pre_merge_per_visual(rc, model.encoder_config)
+
+    def test_encoder_tp_memory_uses_rank_local_activation_widths(self):
+        model = get_model(
+            "google/gemma-4-26B-A4B",
+            config.ModelConfig(
+                tp_size=4,
+                moe_tp_size=1,
+                moe_ep_size=4,
+                enable_encoder_dp=False,
+            ),
+            "trtllm",
+        )
+        enc_cfg = model.encoder_config
+
+        memory = BaseBackend()._get_encoder_component_memory(model, num_tokens=5040, embed_tokens=280)
+
+        qkv_width = 3 * enc_cfg.hidden_size // model.config.tp_size
+        gated_mlp_width = enc_cfg.hidden_size + (2 * enc_cfg.intermediate_size) // model.config.tp_size
+        expected_bytes = 2 * 5040 * max(qkv_width, gated_mlp_width)
+        expected_bytes += 2 * 280 * (2 * enc_cfg.hidden_size + enc_cfg.out_hidden_size)
+        assert expected_bytes > 32 * 1024 * 1024
+        assert memory["activations"] == pytest.approx(expected_bytes / (1 << 30))
+
+        unsharded_bytes = (
+            2
+            * 5040
+            * max(
+                3 * enc_cfg.hidden_size,
+                enc_cfg.hidden_size + 2 * enc_cfg.intermediate_size,
+            )
+        )
+        unsharded_bytes += 2 * 280 * (2 * enc_cfg.hidden_size + enc_cfg.out_hidden_size)
+        assert memory["activations"] < unsharded_bytes / (1 << 30)
+
+    def test_image_estimate_reports_encoder_latency_memory_energy_and_ttft(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
+        from aiconfigurator.sdk.performance_result import PerformanceResult
+
+        model = self._model()
+        database = SimpleNamespace(
+            backend="trtllm",
+            version="1.3.0rc20",
+            system="b200_sxm",
+            system_spec={
+                "gpu": {"mem_capacity": 192 * (1 << 30)},
+                "misc": {"nccl_mem": {1: 0}, "other_mem": 0},
+            },
+        )
+        result = PerformanceResult(1.0, energy=2.0, source="silicon")
+        for op in model.encoder_ops + model.context_ops + model.visual_context_ops + model.generation_ops:
+            op.query = MagicMock(return_value=result)
+
+        rc = RuntimeConfig(
+            batch_size=1,
+            isl=512,
+            osl=2,
+            image_height=672,
+            image_width=960,
+            num_images_per_request=1,
+        )
+        summary = TRTLLMBackend().run_static(model, database, rc, mode="static")
+        metrics = summary.get_result_dict()
+
+        assert metrics["encoder_latency"] > 0.0
+        assert metrics["encoder_memory"] > 0.0
+        assert sum(summary.get_encoder_energy_wms_dict().values()) > 0.0
+        assert summary.get_encoder_power_avg() > 0.0
+        assert metrics["ttft"] == pytest.approx(metrics["encoder_latency"] + metrics["context_latency"])
+        assert summary.get_context_latency_dict()["context_swa_visual_block_attention"] == pytest.approx(1.0)
+        assert summary.get_encoder_memory()["weights"] > 0.0
+        assert summary.get_encoder_memory()["activations"] > 0.0

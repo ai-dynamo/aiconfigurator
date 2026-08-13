@@ -83,6 +83,11 @@ configs:
     kwargs: {model_path: Qwen/Qwen3-VL-32B-Instruct, system_name: h200_sxm, backend_name: trtllm,
              mode: agg, tp_size: 4, batch_size: 16, isl: 2048, osl: 512,
              image_height: 1024, image_width: 1024, num_images: 1}
+  - id: gemma4_vision_encoder
+    kwargs: {model_path: google/gemma-4-26B-A4B, system_name: b200_sxm, backend_name: trtllm,
+             mode: agg, tp_size: 4, moe_tp_size: 1, moe_ep_size: 4,
+             batch_size: 16, isl: 2048, osl: 512,
+             image_height: 672, image_width: 960, num_images: 1}
 
   # --- backend coverage for the agg scheduler variants ---
   - id: vllm_dense_agg

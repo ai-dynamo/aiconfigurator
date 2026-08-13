@@ -200,6 +200,31 @@ class VisionEncoderConfig:
 
 
 @dataclass(frozen=True)
+class Gemma4VisionEncoderConfig(VisionEncoderConfig):
+    """Gemma 4 ``gemma4_vision`` encoder and soft-token contract.
+
+    Gemma 4 deliberately has its own configuration instead of being flattened
+    into the Qwen3-VL PatchMerger assumptions carried by
+    :class:`VisionEncoderConfig`.  Its ViT uses full two-dimensional RoPE and a
+    gated MLP, then performs position-aware ``pooling_kernel_size`` square
+    average pooling, standardizes the pooled features, and applies a single
+    projection into the language hidden size.
+
+    The inherited ``spatial_merge_size`` is set to ``pooling_kernel_size`` so
+    the shared encoder runtime can still express pre/post-pooling token counts;
+    it does *not* imply pixel-shuffle concatenation for this subclass.
+    """
+
+    num_key_value_heads: int = 0
+    head_dim: int = 0
+    pooling_kernel_size: int = 0
+    position_embedding_size: int = 0
+    soft_tokens_per_image: int = 0
+    supported_soft_token_budgets: tuple[int, ...] = (70, 140, 280, 560, 1120)
+    standardize: bool = False
+
+
+@dataclass(frozen=True)
 class Gemma4MixConfig:
     """Config for Google Gemma 4 (gemma4_text) hybrid attention + dense-MLP-plus-MoE FFN.
 
@@ -222,6 +247,12 @@ class Gemma4MixConfig:
     global_head_dim: int  # Q/K/V head dim on full_attention layers
     sliding_window_size: int  # token window for sliding_attention layers
     attention_k_eq_v: bool = False  # true means global layers reuse K as V (no v_proj)
+    # Gemma 4 multimodal prefill makes each contiguous vision-token block
+    # bidirectional inside sliding-attention layers. Global layers stay causal.
+    use_bidirectional_vision_attention: bool = False
+    # Present on multimodal Gemma 4 checkpoints; None preserves the existing
+    # text-only/dense Gemma 4 path.
+    vision_config: Gemma4VisionEncoderConfig | None = None
 
 
 @dataclass(frozen=True)

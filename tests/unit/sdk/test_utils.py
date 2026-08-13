@@ -567,6 +567,52 @@ class TestParseHFConfig:
         assert cfg.global_head_dim == 512
         assert cfg.sliding_window_size == 1024
         assert cfg.attention_k_eq_v is True
+        assert cfg.vision_config is None
+
+    def test_parse_gemma4_vision_config_alongside_text_config(self):
+        """Gemma 4 keeps its fixed-budget pooled ViT contract beside the text/MoE config."""
+        layer_types = (["sliding_attention"] * 5 + ["full_attention"]) * 5
+        hf_config = self._gemma4_text_config(layer_types)
+        hf_config["text_config"]["use_bidirectional_attention"] = "vision"
+        hf_config["vision_soft_tokens_per_image"] = 280
+        hf_config["vision_config"] = {
+            "model_type": "gemma4_vision",
+            "num_hidden_layers": 27,
+            "hidden_size": 1152,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 16,
+            "head_dim": 72,
+            "intermediate_size": 4304,
+            "patch_size": 16,
+            "pooling_kernel_size": 3,
+            "position_embedding_size": 10240,
+            "default_output_length": 280,
+            "standardize": True,
+        }
+
+        result = _parse_hf_config_json(hf_config)
+
+        cfg = result["extra_params"]
+        assert isinstance(cfg, common.Gemma4MixConfig)
+        assert cfg.layer_types == tuple(layer_types)
+        assert cfg.use_bidirectional_vision_attention is True
+        vision = cfg.vision_config
+        assert isinstance(vision, common.Gemma4VisionEncoderConfig)
+        assert vision.depth == 27
+        assert vision.hidden_size == 1152
+        assert vision.num_heads == vision.num_key_value_heads == 16
+        assert vision.head_dim == 72
+        assert vision.intermediate_size == 4304
+        assert vision.patch_size == 16
+        assert vision.pooling_kernel_size == vision.spatial_merge_size == 3
+        assert vision.position_embedding_size == 10240
+        assert vision.soft_tokens_per_image == 280
+        assert vision.supported_soft_token_budgets == (70, 140, 280, 560, 1120)
+        assert vision.out_hidden_size == 2816
+        assert vision.projector_dims == ((1152, 2816),)
+        assert vision.projector_n_instances == 1
+        assert vision.partial_rotary_factor == 1.0
+        assert vision.standardize is True
 
     def test_gemma4_layer_types_length_mismatch_raises(self):
         """layer_types length must equal num_hidden_layers."""

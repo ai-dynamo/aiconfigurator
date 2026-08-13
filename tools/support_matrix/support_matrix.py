@@ -18,7 +18,8 @@ import shlex
 import traceback
 from concurrent.futures import BrokenExecutor, ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import cache
 from itertools import groupby
 from pathlib import Path
 
@@ -86,6 +87,44 @@ _FRONTIER_ENVELOPE_COLUMNS = {
     "tpot": "min",
     "request_latency": "min",
 }
+
+
+def _terminate_process_pool(executor: ProcessPoolExecutor) -> None:
+    """Stop active workers before abandoning a fatal matrix run."""
+    terminate_workers = getattr(executor, "terminate_workers", None)
+    if terminate_workers is not None:
+        terminate_workers()
+        return
+
+    # ProcessPoolExecutor.terminate_workers() is only available on Python 3.14+.
+    # Terminate the processes explicitly on older supported Python versions,
+    # then join them so they cannot outlive the fatal error.
+    processes = getattr(executor, "_processes", None) or {}
+    for process in processes.values():
+        process.terminate()
+    executor.shutdown(wait=True, cancel_futures=True)
+
+
+class ModelMetadataResolutionError(RuntimeError):
+    """Fatal support-matrix error while resolving a model's configuration."""
+
+
+def _resolve_test_constraints(model: str) -> "TestConstraints":
+    """Resolve model-derived constraints and classify failures as fatal."""
+    try:
+        return _get_test_constraints(model)
+    except Exception as exc:
+        raise ModelMetadataResolutionError(f"Failed to resolve model metadata for {model}: {exc}") from exc
+
+
+def _resolve_architecture(matrix: "SupportMatrix", model: str) -> str:
+    """Resolve an architecture without converting metadata failures into rows."""
+    try:
+        return matrix.get_architecture(model)
+    except Exception as exc:
+        raise ModelMetadataResolutionError(f"Failed to resolve architecture for {model}: {exc}") from exc
+
+
 _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
 _NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
@@ -110,6 +149,9 @@ class TestConstraints:
     prefix: int
     ttft: float
     tpot: float
+    image_height: int = 0
+    image_width: int = 0
+    num_images: int = 0
 
 
 @dataclass(frozen=True)
@@ -176,6 +218,17 @@ def _support_matrix_row_command(
         # comparator; use the default Python engine-step path for the public
         # replay command.
         parts.extend(["--engine-step-backend", "python"])
+    if constraints.image_height > 0 and constraints.image_width > 0 and constraints.num_images > 0:
+        parts.extend(
+            [
+                "--image-height",
+                str(constraints.image_height),
+                "--image-width",
+                str(constraints.image_width),
+                "--num-images",
+                str(constraints.num_images),
+            ]
+        )
     _ = (
         mode,
         engine_step_comparison_rtol,
@@ -198,26 +251,66 @@ _SIZE_TIERS: list[tuple[float, TestConstraints]] = [
 _DEFAULT_TIER = _LARGE  # > 100B params
 
 
+@cache
+def _get_matrix_visual_workload(model_path: str) -> tuple[int, int, int] | None:
+    """Return one representative image workload when AIC models an encoder.
+
+    Matrix rows used to exercise multimodal architectures as text-only, which
+    could report PASS without querying any encoder op.  Derive this workload
+    from the parsed model configuration so both agg and disagg checks cover the
+    encoder automatically whenever ``encoder_ops`` are expected.
+    """
+    model_info = _get_model_info(model_path)
+    extra = model_info.get("extra_params")
+    if isinstance(extra, common.Gemma4MixConfig):
+        enc_cfg = extra.vision_config
+    elif isinstance(extra, common.VisionEncoderConfig):
+        enc_cfg = extra
+    else:
+        enc_cfg = None
+    if enc_cfg is None:
+        return None
+
+    stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
+    if isinstance(enc_cfg, common.Gemma4VisionEncoderConfig):
+        # Choose the closest-to-square exact factorization of the checkpoint's
+        # soft-token budget.  For 280 tokens this is a 14x20 pooled grid, or a
+        # processor-aligned 672x960 image at patch=16/pool=3.
+        soft_tokens = enc_cfg.soft_tokens_per_image
+        pooled_h = int(soft_tokens**0.5)
+        while pooled_h > 1 and soft_tokens % pooled_h:
+            pooled_h -= 1
+        pooled_w = soft_tokens // pooled_h
+        return pooled_h * stride, pooled_w * stride, 1
+
+    # 14x14 post-merge tokens is the standard 448x448 Qwen3-VL workload.
+    return 14 * stride, 14 * stride, 1
+
+
 def _get_test_constraints(model_path: str) -> TestConstraints:
     """Return the appropriate test constraints based on estimated model size."""
     weight_bytes = _estimate_model_weight_bytes(model_path)
     num_params = weight_bytes / _BYTES_PER_PARAM
+    selected = _DEFAULT_TIER
     for threshold, constraints in _SIZE_TIERS:
         if num_params < threshold:
-            logger.info(
-                "Model %s: ~%.1fB params → %s",
-                model_path,
-                num_params / 1e9,
-                constraints,
-            )
-            return constraints
+            selected = constraints
+            break
+    visual_workload = _get_matrix_visual_workload(model_path)
+    if visual_workload is not None:
+        selected = replace(
+            selected,
+            image_height=visual_workload[0],
+            image_width=visual_workload[1],
+            num_images=visual_workload[2],
+        )
     logger.info(
         "Model %s: ~%.1fB params → %s",
         model_path,
         num_params / 1e9,
-        _DEFAULT_TIER,
+        selected,
     )
-    return _DEFAULT_TIER
+    return selected
 
 
 def _is_known_framework_incompatible_gap(
@@ -650,7 +743,7 @@ def _process_combination_worker(
         engine_step_frontier_atol=_worker_matrix.engine_step_frontier_atol,
         include_commands=True,
     )
-    architecture = _worker_matrix.get_architecture(model)
+    architecture = _resolve_architecture(_worker_matrix, model)
     return [
         (
             model,
@@ -766,6 +859,12 @@ class SupportMatrix:
             # (e.g. AIC_SM_TRANSFERS="off" or "xshape,xquant"). None -> all kinds on.
             "transfer_policy": os.environ.get("AIC_SM_TRANSFERS") or None,
         }
+        if constraints.image_height > 0 and constraints.image_width > 0 and constraints.num_images > 0:
+            common_kwargs.update(
+                image_height=constraints.image_height,
+                image_width=constraints.image_width,
+                num_images_per_request=constraints.num_images,
+            )
         if mode == "disagg":
             # v2 disagg forbids shared top-level worker fields; fan out to both roles.
             return Task(
@@ -861,7 +960,7 @@ class SupportMatrix:
             unsupported_modes = set(modes_to_test) - {"agg", "disagg"}
             if unsupported_modes:
                 raise ValueError(f"Unsupported support-matrix mode(s): {sorted(unsupported_modes)}")
-        constraints = _get_test_constraints(model)
+        constraints = _resolve_test_constraints(model)
         statuses: dict[str, str] = {}
         error_messages = {}
         provenance: dict[str, str] = dict.fromkeys(modes_to_test, "")
@@ -1041,10 +1140,12 @@ class SupportMatrix:
         retry_combos: set[tuple[str, str, str, str]] = set()
         processed_futures = set()
 
-        with ProcessPoolExecutor(
+        executor = ProcessPoolExecutor(
             max_workers=min(max_workers, len(combinations)),
             mp_context=_fork_ctx,
-        ) as executor:
+        )
+        executor_shutdown = False
+        try:
             futures = {executor.submit(_process_combination_worker, combo): combo for combo in combinations}
             for future in as_completed(futures):
                 combo = futures[future]
@@ -1069,6 +1170,13 @@ class SupportMatrix:
                         retry_combos.add(futures[remaining])
                     pbar.update(len(unprocessed_futures))
                     break
+                except ModelMetadataResolutionError:
+                    for remaining in futures:
+                        if remaining is not future:
+                            remaining.cancel()
+                    _terminate_process_pool(executor)
+                    executor_shutdown = True
+                    raise
                 except Exception:
                     logger.exception(
                         "Unexpected error retrieving result for %s/%s/%s/%s",
@@ -1080,6 +1188,9 @@ class SupportMatrix:
                     retry_combos.add(combo)
                     processed_futures.add(future)
                     pbar.update(1)
+        finally:
+            if not executor_shutdown:
+                executor.shutdown()
 
         return group_results, retry_combos
 
@@ -1203,7 +1314,7 @@ class SupportMatrix:
                                     engine_step_frontier_atol=self.engine_step_frontier_atol,
                                     include_commands=True,
                                 )
-                                architecture = self.get_architecture(model)
+                                architecture = _resolve_architecture(self, model)
                                 for mode in status_dict:
                                     results.append(
                                         (
@@ -1219,6 +1330,8 @@ class SupportMatrix:
                                             provenance_dict.get(mode, ""),
                                         )
                                     )
+                            except ModelMetadataResolutionError:
+                                raise
                             except Exception:
                                 logger.exception(
                                     "Sequential retry also failed for %s/%s/%s/%s",
@@ -1227,7 +1340,7 @@ class SupportMatrix:
                                     backend,
                                     version,
                                 )
-                                architecture = self.get_architecture(model)
+                                architecture = _resolve_architecture(self, model)
                                 for mode in modes_to_test:
                                     command = _support_matrix_row_command(
                                         model=model,

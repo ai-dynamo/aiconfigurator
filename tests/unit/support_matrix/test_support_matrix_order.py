@@ -12,8 +12,12 @@ from tools.support_matrix.support_matrix import (
     STATUS_FAIL,
     STATUS_HYBRID_PASS,
     STATUS_PASS,
+    ModelMetadataResolutionError,
     SupportMatrix,
     TestConstraints,
+    _get_matrix_visual_workload,
+    _resolve_test_constraints,
+    _support_matrix_row_command,
 )
 
 pytestmark = pytest.mark.unit
@@ -142,3 +146,129 @@ def test_task_uses_silicon_database_mode(monkeypatch):
     )
 
     assert captured_kwargs["database_mode"] == common.DatabaseMode.SILICON.name
+
+
+def test_matrix_derives_gemma4_fixed_budget_image_workload():
+    _get_matrix_visual_workload.cache_clear()
+
+    assert _get_matrix_visual_workload("google/gemma-4-26B-A4B") == (672, 960, 1)
+    assert _get_matrix_visual_workload("Qwen/Qwen3-VL-32B-Instruct") == (448, 448, 1)
+    assert _get_matrix_visual_workload("Qwen/Qwen3-32B") is None
+
+
+def test_matrix_model_metadata_failure_is_fatal(monkeypatch):
+    def fail_metadata(_model):
+        raise ValueError("bad model metadata")
+
+    monkeypatch.setattr(support_matrix_module, "_get_test_constraints", fail_metadata)
+
+    with pytest.raises(ModelMetadataResolutionError, match="test/bad-model"):
+        _resolve_test_constraints("test/bad-model")
+
+
+def test_parallel_model_metadata_failure_aborts_without_retry(monkeypatch):
+    class ActiveProcess:
+        terminated = False
+
+        def terminate(self):
+            self.terminated = True
+
+    class MetadataFailureFuture:
+        cancelled = False
+
+        def result(self):
+            raise ModelMetadataResolutionError("bad model metadata")
+
+        def cancel(self):
+            self.cancelled = True
+            return True
+
+    class PendingFuture:
+        cancelled = False
+
+        def result(self):
+            raise AssertionError("pending work must not be awaited")
+
+        def cancel(self):
+            self.cancelled = True
+            return True
+
+    class FakeExecutor:
+        def __init__(self, **_kwargs):
+            self.all_futures = [MetadataFailureFuture(), PendingFuture()]
+            self.futures_to_submit = list(self.all_futures)
+            self.shutdown_calls = []
+            self._processes = {1: ActiveProcess()}
+
+        def submit(self, _fn, _combo):
+            return self.futures_to_submit.pop(0)
+
+        def shutdown(self, *, wait=True, cancel_futures=False):
+            self.shutdown_calls.append((wait, cancel_futures))
+
+    executors = []
+
+    def make_executor(**kwargs):
+        executor = FakeExecutor(**kwargs)
+        executors.append(executor)
+        return executor
+
+    monkeypatch.setattr(support_matrix_module, "ProcessPoolExecutor", make_executor)
+    monkeypatch.setattr(support_matrix_module, "as_completed", lambda futures: list(futures))
+    matrix = SupportMatrix.__new__(SupportMatrix)
+    combos = [
+        ("test/bad-model", "b200_sxm", "trtllm", "1.0"),
+        ("test/pending-model", "b200_sxm", "trtllm", "1.0"),
+    ]
+
+    with pytest.raises(ModelMetadataResolutionError, match="bad model metadata"):
+        matrix._run_parallel_combinations(combos, max_workers=2, pbar=None)
+
+    executor = executors[0]
+    assert executor.shutdown_calls == [(True, True)]
+    assert executor._processes[1].terminated is True
+    assert executor.all_futures[1].cancelled is True
+
+
+def test_matrix_image_constraints_reach_task_and_replay_command(monkeypatch):
+    captured_kwargs = {}
+
+    class FakeTask:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(support_matrix_module, "Task", FakeTask)
+    constraints = TestConstraints(
+        total_gpus=32,
+        isl=256,
+        osl=256,
+        prefix=128,
+        ttft=2000.0,
+        tpot=50.0,
+        image_height=672,
+        image_width=960,
+        num_images=1,
+    )
+
+    SupportMatrix._create_task(
+        mode="disagg",
+        model="google/gemma-4-26B-A4B",
+        system="b200_sxm",
+        backend="trtllm",
+        version="1.3.0rc20",
+        constraints=constraints,
+        engine_step_backend=None,
+    )
+    command = _support_matrix_row_command(
+        model="google/gemma-4-26B-A4B",
+        system="b200_sxm",
+        backend="trtllm",
+        version="1.3.0rc20",
+        mode="disagg",
+        constraints=constraints,
+    )
+
+    assert captured_kwargs["image_height"] == 672
+    assert captured_kwargs["image_width"] == 960
+    assert captured_kwargs["num_images_per_request"] == 1
+    assert "--image-height 672 --image-width 960 --num-images 1" in command
