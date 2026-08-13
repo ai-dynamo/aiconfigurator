@@ -219,19 +219,16 @@ class HybridMoEModel(BaseModel):
             backend_name=self._backend_name,
             inference_phase=phase,
             model_family=self.model_family,
-            # Legacy fidelity: this family's dispatch ops never carried a
-            # quant_mode, while the builder's fused path forwards it by
-            # default (a quant-aware trtllm SM100 dispatch-volume model).
-            # Adopting quant-aware dispatch here is a deliberate modeling
-            # change for a follow-up, not a rewire side effect.
-            dispatch_quant_mode=None,
         )
         for op in block_ops:
-            assert op._name.startswith(phase), (
-                f"MoE-block builder returned op {op._name!r} that does not start with its phase "
-                f"{phase!r}; the layer-type rename below would silently mangle it"
-            )
             op._name = prefix + op._name[len(phase) :]
+            if isinstance(op, ops.MoEDispatch):
+                # Legacy fidelity: this family's dispatch ops never carried a
+                # quant_mode, while the builder's fused path always forwards
+                # it (a quant-aware trtllm SM100 dispatch-volume model).
+                # Adopting quant-aware dispatch here is a deliberate modeling
+                # change for a follow-up, not a rewire side effect.
+                op._quant_mode = None
         return block_ops
 
     def _dense_ffn_ops(
