@@ -118,6 +118,43 @@ class HardwareIncompatibility:
     reason: str
 
 
+def _representative_visual_workload(model: str) -> dict[str, int]:
+    """Return a small real encoder workload for multimodal matrix checks.
+
+    A text-only support-matrix request can construct encoder ops yet execute
+    none of them, yielding a false PASS for multimodal support. Use a square
+    input with 16 post-merge patches per side for any model whose parsed
+    config actually exposes a VisionEncoderConfig. Kimi K2.5 intentionally
+    remains absent until its distinct PatchMerger-v1 path is modeled.
+    """
+    # The generated matrix is built from the curated model catalog. Avoid a
+    # network lookup while upgrading arbitrary legacy/test rows.
+    if model not in common.DefaultHFModels:
+        return {}
+    try:
+        extra = _get_model_info(model).get("extra_params")
+    except Exception:
+        # Command rendering also upgrades legacy/test rows whose model ID may
+        # not be resolvable. The actual support check resolves the model before
+        # execution, so visual-workload enrichment stays best-effort here.
+        logger.debug("Could not resolve encoder config for %s", model, exc_info=True)
+        return {}
+    if isinstance(extra, common.VisionEncoderConfig):
+        encoder_config = extra
+    elif isinstance(extra, common.KimiK3Config):
+        encoder_config = extra.vision_config
+    else:
+        encoder_config = None
+    if not isinstance(encoder_config, common.VisionEncoderConfig):
+        return {}
+    side = encoder_config.patch_size * encoder_config.spatial_merge_size * 16
+    return {
+        "image_height": side,
+        "image_width": side,
+        "num_images_per_request": 1,
+    }
+
+
 def _support_matrix_row_command(
     *,
     model: str,
@@ -171,6 +208,18 @@ def _support_matrix_row_command(
     ]
     if transfer_policy:
         parts.extend(["--transfer-policy", transfer_policy])
+    visual_workload = _representative_visual_workload(model)
+    if visual_workload:
+        parts.extend(
+            [
+                "--image-height",
+                str(visual_workload["image_height"]),
+                "--image-width",
+                str(visual_workload["image_width"]),
+                "--num-images",
+                str(visual_workload["num_images_per_request"]),
+            ]
+        )
     if compare_engine_step_backends:
         # ``cli default`` does not expose the support-matrix Python/Rust
         # comparator; use the default Python engine-step path for the public
@@ -766,6 +815,7 @@ class SupportMatrix:
             # (e.g. AIC_SM_TRANSFERS="off" or "xshape,xquant"). None -> all kinds on.
             "transfer_policy": os.environ.get("AIC_SM_TRANSFERS") or None,
         }
+        common_kwargs.update(_representative_visual_workload(model))
         if mode == "disagg":
             # v2 disagg forbids shared top-level worker fields; fan out to both roles.
             return Task(

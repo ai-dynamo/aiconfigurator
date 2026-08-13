@@ -183,6 +183,23 @@ class VisionEncoderConfig:
             rotated fraction — the 2-axis vision RoPE always rotates the full
             head_dim (vLLM ApplyRotaryEmb / SGLang cat([cos, cos])). Only gates
             the encoder_rope_apply op; 0.0 means no RoPE.
+        qkv_hidden_size (int): Absolute Q/K/V width before head splitting. Zero
+            means ``hidden_size``. Kimi K3 deliberately uses 1536-wide Q/K/V
+            projections around a 1024-wide residual stream.
+        temporal_pool_all (bool): Whether all temporal patches are pooled into
+            one output time step after attention. Kimi K3 ``sd2_tpool`` does;
+            Qwen3-VL retains one output step per temporal patch group.
+        max_temporal_patches (int): Maximum temporal grid length supported by
+            the checkpoint's positional embedding. Zero means unspecified.
+        model_patch_embed/model_pos_embed/model_final_norm (bool): Include the
+            corresponding vision-tower work in ``encoder_ops``. These remain
+            false for the historical Qwen3-VL model to preserve its calibrated
+            op graph, while Kimi K3 enables all three.
+        projector_post_norm (bool): Model the output norm after the projector.
+            Kimi K3 PatchMergerV2 applies RMSNorm after its second linear.
+        encoder_type (str): Architecture-specific semantic tag. Runtime token
+            accounting uses this only for diagnostics; behavior is represented
+            by the explicit fields above.
     """
 
     depth: int
@@ -197,6 +214,14 @@ class VisionEncoderConfig:
     projector_dims: tuple[tuple[int, int], ...] = ()
     projector_n_instances: int = 1
     partial_rotary_factor: float = 0.0
+    qkv_hidden_size: int = 0
+    temporal_pool_all: bool = False
+    max_temporal_patches: int = 0
+    model_patch_embed: bool = False
+    model_pos_embed: bool = False
+    model_final_norm: bool = False
+    projector_post_norm: bool = False
+    encoder_type: str = "generic_vit"
 
 
 @dataclass(frozen=True)
@@ -281,6 +306,7 @@ class KimiK3Config:
     first_k_dense_replace: int = 0
     dense_inter_size: int = 0
     attn_res_block_size: int = 0
+    vision_config: VisionEncoderConfig | None = None
 
 
 @dataclass(frozen=True)

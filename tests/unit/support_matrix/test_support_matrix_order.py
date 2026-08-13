@@ -142,3 +142,46 @@ def test_task_uses_silicon_database_mode(monkeypatch):
     )
 
     assert captured_kwargs["database_mode"] == common.DatabaseMode.SILICON.name
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_visual"),
+    [
+        (
+            "moonshotai/Kimi-K3",
+            {"image_height": 448, "image_width": 448, "num_images_per_request": 1},
+        ),
+        ("moonshotai/Kimi-K2.5", {}),
+    ],
+)
+@pytest.mark.parametrize("mode", ["agg", "disagg"])
+def test_support_matrix_runs_real_kimi_k3_encoder_but_not_k25_semantics(monkeypatch, model, expected_visual, mode):
+    captured_kwargs = {}
+
+    class FakeTask:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(support_matrix_module, "Task", FakeTask)
+    SupportMatrix._create_task(
+        mode=mode,
+        model=model,
+        system="b200_sxm",
+        backend="sglang",
+        version="0.5.16",
+        constraints=TestConstraints(
+            total_gpus=128,
+            isl=256,
+            osl=256,
+            prefix=128,
+            ttft=2_000_000.0,
+            tpot=50_000.0,
+        ),
+        engine_step_backend=None,
+    )
+
+    for key in ("image_height", "image_width", "num_images_per_request"):
+        if key in expected_visual:
+            assert captured_kwargs[key] == expected_visual[key]
+        else:
+            assert key not in captured_kwargs
