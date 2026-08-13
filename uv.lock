@@ -38,7 +38,6 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pyyaml" },
-    { name = "tqdm" },
 ]
 
 [package.optional-dependencies]
@@ -55,6 +54,7 @@ dev = [
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
     { name = "ruff" },
+    { name = "tqdm" },
     { name = "uv" },
 ]
 service = [
@@ -94,7 +94,7 @@ requires-dist = [
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = "==3.8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.14.1" },
-    { name = "tqdm", specifier = ">=4.0.0" },
+    { name = "tqdm", marker = "extra == 'dev'", specifier = ">=4.0.0" },
     { name = "uv", marker = "extra == 'dev'" },
     { name = "uvicorn", marker = "extra == 'service'", specifier = ">=0.34.2" },
 ]
