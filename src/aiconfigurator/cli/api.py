@@ -1008,6 +1008,7 @@ def cli_estimate(
     decode_max_seq_len: int | None = None,
     engine_step_backend: str | None = None,
     forward_model: str | None = None,
+    moe_backend: str | None = None,
     # Static-mode (and shared) extras
     prefix: int = 0,
     nextn: int | str = 0,
@@ -1073,6 +1074,9 @@ def cli_estimate(
         fmha_quant_mode: FMHA quantization mode. Default is None (auto-inferred).
         moe_quant_mode: MoE quantization mode. Default is None (auto-inferred).
         comm_quant_mode: Communication quantization mode. Default is None (auto-inferred).
+        moe_backend: Explicit MoE backend override ('deepep_moe' is deprecated and
+            inert; 'megamoe' selects the fused MegaMoE modeling lane for
+            DeepSeek-V4-Pro / moonshotai/Kimi-K3 where packaged data exists).
         decode_system_name: System for disagg decode workers. Defaults to ``system_name``.
         prefill_tp_size: Prefill TP size (disagg). Defaults to ``tp_size``.
         prefill_pp_size: Prefill PP size (disagg). Defaults to ``pp_size``.
@@ -1259,6 +1263,7 @@ def cli_estimate(
             fmha_quant_mode=fmha_quant_mode,
             moe_quant_mode=moe_quant_mode,
             comm_quant_mode=comm_quant_mode,
+            moe_backend=moe_backend,
             nextn=nextn,
             nextn_accepted=nextn_accepted,
             stride=stride,
@@ -1294,6 +1299,7 @@ def cli_estimate(
             fmha_quant_mode=fmha_quant_mode,
             moe_quant_mode=moe_quant_mode,
             comm_quant_mode=comm_quant_mode,
+            moe_backend=moe_backend,
             load_database=_load_database,
             get_backend=get_backend,
             get_model=get_model,
@@ -1368,6 +1374,7 @@ def cli_estimate(
             fmha_quant_mode=fmha_quant_mode,
             moe_quant_mode=moe_quant_mode,
             comm_quant_mode=comm_quant_mode,
+            moe_backend=moe_backend,
             load_database=_load_database,
             get_backend=get_backend,
             get_model=get_model,
@@ -1429,6 +1436,7 @@ def cli_estimate(
             fmha_quant_mode=fmha_quant_mode,
             moe_quant_mode=moe_quant_mode,
             comm_quant_mode=comm_quant_mode,
+            moe_backend=moe_backend,
             load_database=_load_database,
             get_backend=get_backend,
             get_model=get_model,
@@ -1472,6 +1480,7 @@ def cli_estimate(
             fmha_quant_mode=fmha_quant_mode,
             moe_quant_mode=moe_quant_mode,
             comm_quant_mode=comm_quant_mode,
+            moe_backend=moe_backend,
             nextn=nextn,
             nextn_accepted=nextn_accepted,
             stride=stride,
@@ -1521,6 +1530,7 @@ def _run_agg_estimate(
     fmha_quant_mode,
     moe_quant_mode,
     comm_quant_mode,
+    moe_backend=None,
     load_database,
     get_backend,
     get_model,
@@ -1552,6 +1562,7 @@ def _run_agg_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        moe_backend=moe_backend,
         forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
     )
@@ -1561,7 +1572,9 @@ def _run_agg_estimate(
     resolve_context_fmha_by_data(
         model_config, model_path, load_database(system_name), backend_name, is_context_role=True
     )
-    resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
+    resolve_dsv4_moe_arch(
+        model_config, model_path, system_name=system_name, backend_name=backend_name, moe_backend=moe_backend
+    )
     resolve_nvfp4_for_system(model_config, system_name, model_path)
     runtime_config = RuntimeConfig(
         isl=isl,
@@ -1658,6 +1671,7 @@ def _run_static_estimate(
     fmha_quant_mode,
     moe_quant_mode,
     comm_quant_mode,
+    moe_backend=None,
     nextn,
     nextn_accepted,
     stride,
@@ -1695,6 +1709,7 @@ def _run_static_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        moe_backend=moe_backend,
         forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
     )
@@ -1708,7 +1723,9 @@ def _run_static_estimate(
         backend_name,
         is_context_role=static_mode != "static_gen",
     )
-    resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
+    resolve_dsv4_moe_arch(
+        model_config, model_path, system_name=system_name, backend_name=backend_name, moe_backend=moe_backend
+    )
     resolve_nvfp4_for_system(model_config, system_name, model_path)
 
     runtime_config = RuntimeConfig(
@@ -1807,6 +1824,7 @@ def _run_disagg_estimate(
     fmha_quant_mode,
     moe_quant_mode,
     comm_quant_mode,
+    moe_backend=None,
     load_database,
     get_backend,
     get_model,
@@ -1854,6 +1872,7 @@ def _run_disagg_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        moe_backend=moe_backend,
         forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
     )
@@ -1868,6 +1887,7 @@ def _run_disagg_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        moe_backend=moe_backend,
         forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
     )
@@ -1880,13 +1900,16 @@ def _run_disagg_estimate(
     resolve_context_fmha_by_data(
         prefill_model_config, model_path, load_database(system_name), backend_name, is_context_role=True
     )
-    resolve_dsv4_moe_arch(prefill_model_config, model_path, system_name=system_name, backend_name=backend_name)
+    resolve_dsv4_moe_arch(
+        prefill_model_config, model_path, system_name=system_name, backend_name=backend_name, moe_backend=moe_backend
+    )
     resolve_nvfp4_for_system(prefill_model_config, system_name, model_path)
     resolve_dsv4_moe_arch(
         decode_model_config,
         model_path,
         system_name=decode_system_name or system_name,
         backend_name=backend_name,
+        moe_backend=moe_backend,
     )
     resolve_nvfp4_for_system(decode_model_config, decode_system_name or system_name, model_path)
 
@@ -2112,6 +2135,7 @@ def _run_afd_estimate(
     fmha_quant_mode,
     moe_quant_mode,
     comm_quant_mode,
+    moe_backend=None,
     load_database,
     get_backend,
     get_model,
@@ -2161,17 +2185,35 @@ def _run_afd_estimate(
         )
     f_moe_tp_size = f_tp_size // f_moe_ep_size
 
+    if moe_backend == "megamoe":
+        # The fused MegaMoE kernel is EP-only (moe_tp==1 is enforced by the
+        # model constructors, e.g. Kimi-K3). The A (attention-only) pool never
+        # runs MoE, so its irrelevant MoE dims are pinned to moe_tp=1 /
+        # moe_ep=a_tp to satisfy the product constraint without tripping the
+        # megamoe validation; the F (FFN) pool must itself be EP-only.
+        if f_moe_tp_size != 1:
+            raise ValueError(
+                "moe_backend='megamoe' is EP-only: AFD F workers require "
+                f"f_moe_ep_size == f_tp_size (n_f_nodes * gpus_per_node), got "
+                f"f_moe_ep_size={f_moe_ep_size} with f_tp_size={f_tp_size} "
+                f"(f_moe_tp={f_moe_tp_size}). Pass --f-moe-ep-size {f_tp_size}."
+            )
+        a_moe_tp_size, a_moe_ep_size = 1, a_tp_size
+    else:
+        a_moe_tp_size, a_moe_ep_size = a_tp_size, 1
+
     a_model_config = _build_model_config(
         a_tp_size,
         1,
         1,
-        a_tp_size,
-        1,
+        a_moe_tp_size,
+        a_moe_ep_size,
         gemm_quant_mode,
         kvcache_quant_mode,
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        moe_backend=moe_backend,
     )
     f_model_config = _build_model_config(
         f_tp_size,
@@ -2184,6 +2226,7 @@ def _run_afd_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        moe_backend=moe_backend,
     )
     # Pass speculative decode knobs through to A/F model configs. TODO:
     # AFDTransfer still models committed decode-token volume only; recalibrate
@@ -2197,9 +2240,13 @@ def _run_afd_estimate(
     resolve_context_fmha_by_data(
         a_model_config, model_path, database, backend_name, is_context_role=afd_phase in ("prefill", "both")
     )
-    resolve_dsv4_moe_arch(a_model_config, model_path, system_name=system_name, backend_name=backend_name)
+    resolve_dsv4_moe_arch(
+        a_model_config, model_path, system_name=system_name, backend_name=backend_name, moe_backend=moe_backend
+    )
     resolve_nvfp4_for_system(a_model_config, system_name, model_path)
-    resolve_dsv4_moe_arch(f_model_config, model_path, system_name=system_name, backend_name=backend_name)
+    resolve_dsv4_moe_arch(
+        f_model_config, model_path, system_name=system_name, backend_name=backend_name, moe_backend=moe_backend
+    )
     resolve_nvfp4_for_system(f_model_config, system_name, model_path)
 
     afd_config = AFDConfig(

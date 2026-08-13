@@ -613,29 +613,32 @@ class KimiK3Model(BaseModel):
 
         # LatentMoE layers
         if num_moe > 0 and cfg.num_experts > 0:
-            ops_list.extend(
-                [
-                    # router in hidden space
-                    ops.GEMM(f"{prefix}_router_gemm", num_moe, cfg.num_experts, h, common.GEMMQuantMode.bfloat16),
-                    # replicated hidden -> latent down projection (bf16, unsharded)
-                    ops.GEMM(f"{prefix}_latent_down_gemm", num_moe, latent, h, common.GEMMQuantMode.bfloat16),
-                    ops.ElementWise(f"{prefix}_latent_norm", num_moe, 2 * latent, 2 * latent, 0.8),
-                    ops.MoEDispatch(
-                        f"{prefix}_moe_pre_dispatch",
-                        num_moe,
-                        latent,
-                        cfg.topk,
-                        cfg.num_experts,
-                        moe_tp,
-                        moe_ep,
-                        attn_dp,
-                        True,
-                        quant_mode=moe_q,
-                        backend=self._backend_name,
-                    ),
-                    # routed experts entirely in latent space (3584 / 3072)
-                    ops.MoE(
-                        f"{prefix}_moe",
+            use_megamoe = self.config.moe_backend == "megamoe"
+            if use_megamoe:
+                if self._backend_name not in ("sglang", "vllm"):
+                    raise ValueError(
+                        "Kimi-K3 MegaMoE modeling is only supported with the SGLang and vLLM "
+                        f"backends; got {self._backend_name!r}."
+                    )
+                if moe_tp != 1:
+                    raise ValueError(f"Kimi-K3 MegaMoE requires moe_tp_size=1, got {moe_tp}.")
+                if moe_ep <= 1:
+                    raise ValueError(f"Kimi-K3 MegaMoE requires moe_ep_size > 1, got {moe_ep}.")
+            routed: list = [
+                # router in hidden space
+                ops.GEMM(f"{prefix}_router_gemm", num_moe, cfg.num_experts, h, common.GEMMQuantMode.bfloat16),
+                # replicated hidden -> latent down projection (bf16, unsharded)
+                ops.GEMM(f"{prefix}_latent_down_gemm", num_moe, latent, h, common.GEMMQuantMode.bfloat16),
+                ops.ElementWise(f"{prefix}_latent_norm", num_moe, 2 * latent, 2 * latent, 0.8),
+            ]
+            if use_megamoe:
+                # Same measured boundary as DSv4 MegaMoE: dispatch/combine live
+                # inside deep_gemm.fp8_fp4_mega_moe. Gate/top-k, latent
+                # projections, and shared experts stay outside.
+                pre_dispatch = "vllm" if self._backend_name == "vllm" else "sglang_jit"
+                routed.append(
+                    ops.DeepSeekV4MegaMoEModule(
+                        f"{prefix}_megamoe",
                         num_moe,
                         latent,
                         cfg.moe_inter_size,
@@ -645,25 +648,60 @@ class KimiK3Model(BaseModel):
                         moe_ep,
                         moe_q,
                         workload_dist,
-                        attn_dp,
-                    ),
-                    ops.MoEDispatch(
-                        f"{prefix}_moe_post_dispatch",
-                        num_moe,
-                        latent,
-                        cfg.topk,
-                        cfg.num_experts,
-                        moe_tp,
-                        moe_ep,
-                        attn_dp,
-                        False,
-                        quant_mode=moe_q,
-                        backend=self._backend_name,
-                    ),
-                    # replicated latent -> hidden up projection (bf16, unsharded)
-                    ops.GEMM(f"{prefix}_latent_up_gemm", num_moe, h, latent, common.GEMMQuantMode.bfloat16),
-                ]
+                        is_context=context,
+                        pre_dispatch=pre_dispatch,
+                    )
+                )
+            else:
+                routed.extend(
+                    [
+                        ops.MoEDispatch(
+                            f"{prefix}_moe_pre_dispatch",
+                            num_moe,
+                            latent,
+                            cfg.topk,
+                            cfg.num_experts,
+                            moe_tp,
+                            moe_ep,
+                            attn_dp,
+                            True,
+                            quant_mode=moe_q,
+                            backend=self._backend_name,
+                        ),
+                        # routed experts entirely in latent space (3584 / 3072)
+                        ops.MoE(
+                            f"{prefix}_moe",
+                            num_moe,
+                            latent,
+                            cfg.moe_inter_size,
+                            cfg.topk,
+                            cfg.num_experts,
+                            moe_tp,
+                            moe_ep,
+                            moe_q,
+                            workload_dist,
+                            attn_dp,
+                        ),
+                        ops.MoEDispatch(
+                            f"{prefix}_moe_post_dispatch",
+                            num_moe,
+                            latent,
+                            cfg.topk,
+                            cfg.num_experts,
+                            moe_tp,
+                            moe_ep,
+                            attn_dp,
+                            False,
+                            quant_mode=moe_q,
+                            backend=self._backend_name,
+                        ),
+                    ]
+                )
+            routed.append(
+                # replicated latent -> hidden up projection (bf16, unsharded)
+                ops.GEMM(f"{prefix}_latent_up_gemm", num_moe, h, latent, common.GEMMQuantMode.bfloat16),
             )
+            ops_list.extend(routed)
             # shared experts in full hidden space (bf16, TP sharded)
             if shared_inter > 0:
                 ops_list.extend(

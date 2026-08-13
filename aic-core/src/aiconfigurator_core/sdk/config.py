@@ -47,7 +47,7 @@ class ModelConfig:
     overwrite_num_layers: int = 0
     # model builder falvors
     sms: int = 20
-    moe_backend: str = None  # SGLang MoE backend: deepep_moe, megamoe, or None
+    moe_backend: str = None  # MoE backend override: deepep_moe (SGLang only), megamoe (SGLang/vLLM), or None
     attention_backend: str = "flashinfer"  # 'flashinfer' or 'fa3', for sglang wideep only
     # DEPRECATED and ignored (large-EP is selected per tuple via
     # moe_comm_backend); kept for a compatibility window because ModelConfig

@@ -581,6 +581,22 @@ class TestHFModelSupport:
         generation_megamoe = next(op for op in generation_overlap._group_a if op._name == "generation_megamoe")
         assert generation_megamoe._workload_distribution == "balanced"
 
+    def test_deepseek_v4_vllm_megamoe_rejected_until_vllm_rows_ship(self):
+        """No measured DeepSeek-V4 vLLM MegaMoE rows exist (the vLLM lane ships
+        for Kimi-K3 only); admitting vllm here would delay the failure to the
+        strict exact-key table lookup, so construction rejects outright."""
+        model_config = config.ModelConfig(
+            tp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=8,
+            moe_backend="megamoe",
+            workload_distribution="uniform",
+            nextn=1,
+        )
+        with pytest.raises(ValueError, match="only supported with the SGLang backend"):
+            get_model("deepseek-ai/DeepSeek-V4-Pro", model_config, backend_name="vllm")
+
     def test_deepseek_v4_sglang_deepep_backend_keeps_decomposed_moe(self):
         model_config = config.ModelConfig(
             tp_size=1,

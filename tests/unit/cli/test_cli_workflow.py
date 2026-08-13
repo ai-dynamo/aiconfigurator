@@ -625,7 +625,11 @@ class TestBuildDefaultTaskConfigs:
     @patch("aiconfigurator.cli.main.Task")
     @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
     def test_auto_megamoe_sweeps_only_sglang(self, mock_supported_databases, mock_task_config):
-        """The SGLang-only MegaMoE override must not be passed to TRT-LLM or vLLM."""
+        """The MegaMoE sweep must not enumerate backends with no measured MegaMoE rows.
+
+        Here the vLLM probe misses (gb200 has no megamoe/vllm table), so the
+        sweep stays SGLang-only.
+        """
         mock_supported_databases.return_value = {
             "gb200": {
                 "trtllm": ["0.5.10"],
@@ -655,6 +659,72 @@ class TestBuildDefaultTaskConfigs:
     # The flag-conditioned SGLang DeepEP task variants (agg_deepep/disagg_deepep)
     # and their perf-data skip probe are gone: large-EP/DeepEP participation is
     # coverage-driven per tuple inside the ONE task per (model, serving mode).
+    @patch("aiconfigurator.cli.main._vllm_megamoe_perf_data_available", return_value=True)
+    @patch("aiconfigurator.cli.main.Task")
+    @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
+    def test_auto_megamoe_includes_vllm_when_rows_exist(
+        self, mock_supported_databases, mock_task_config, _mock_vllm_megamoe_available
+    ):
+        """Where measured vLLM MegaMoE rows resolve (gb300 @ 0.27.0), the auto
+        sweep must include vLLM; the data probe is the seam that decides."""
+        mock_supported_databases.return_value = {
+            "gb300": {
+                "trtllm": ["0.5.10"],
+                "sglang": ["0.5.16"],
+                "vllm": ["0.27.0"],
+            }
+        }
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        result = build_default_tasks(
+            model_path="moonshotai/Kimi-K3",
+            total_gpus=2,
+            system="gb300",
+            backend="auto",
+            moe_backend="megamoe",
+        )
+
+        assert set(result) == {"agg_sglang", "disagg_sglang", "agg_vllm", "disagg_vllm"}
+        assert mock_task_config.call_count == 4
+        for call in mock_task_config.call_args_list:
+            backend = call.kwargs.get("backend_name") or call.kwargs.get("prefill_backend_name")
+            assert backend in {"sglang", "vllm"}
+            assert call.kwargs["moe_backend"] == "megamoe"
+
+    @patch("aiconfigurator.cli.main._vllm_megamoe_perf_data_available", return_value=True)
+    @patch("aiconfigurator.cli.main.Task")
+    @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
+    def test_auto_megamoe_vllm_probe_is_model_gated(
+        self, mock_supported_databases, mock_task_config, _mock_vllm_megamoe_available
+    ):
+        """vLLM MegaMoE rows exist only for Kimi-K3. On systems holding those
+        rows (gb300), a DeepSeek-V4-Pro auto sweep would otherwise gain two
+        guaranteed-dead vLLM experiments (rows exist on disk, but not for the
+        DSv4 shape) — the probe gates on the model, not just file presence."""
+        mock_supported_databases.return_value = {
+            "gb300": {
+                "trtllm": ["0.5.10"],
+                "sglang": ["0.5.16"],
+                "vllm": ["0.27.0"],
+            }
+        }
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        result = build_default_tasks(
+            model_path="deepseek-ai/DeepSeek-V4-Pro",
+            total_gpus=2,
+            system="gb300",
+            backend="auto",
+            moe_backend="megamoe",
+        )
+
+        assert set(result) == {"agg_sglang", "disagg_sglang"}
+        assert mock_task_config.call_count == 2
+        for call in mock_task_config.call_args_list:
+            backend = call.kwargs.get("backend_name") or call.kwargs.get("prefill_backend_name")
+            assert backend == "sglang"
+            assert call.kwargs["moe_backend"] == "megamoe"
+
     @patch("aiconfigurator.cli.main.Task")
     def test_moe_sglang_builds_one_task_per_mode(self, mock_task_config):
         """No DeepEP fan-out: an sglang MoE model yields exactly one agg and one
