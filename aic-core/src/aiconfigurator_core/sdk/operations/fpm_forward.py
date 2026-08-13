@@ -92,7 +92,8 @@ class FPMForwardOp(Operation):
         model_config,
         model_path: str,
         weight_bytes: float = 0.0,
-        sol_ops: list | None = None,
+        *,
+        sol_ops: list,
     ) -> None:
         """``sol_ops`` — the model's ORIGINAL op-level list for this phase —
         rides the compiled spec so the Rust FPM SOL roofline derives from the
@@ -101,8 +102,6 @@ class FPMForwardOp(Operation):
         quant)."""
         if phase not in _PHASES:
             raise ValueError(f"unknown FPM phase: {phase!r}")
-        if sol_ops is None:
-            raise ValueError("sol_ops is required (the original op-level list for this phase)")
         super().__init__(f"fpm_forward_{phase}", 1.0)
         self._phase = phase
         self._model_path = str(model_path)

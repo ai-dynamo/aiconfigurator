@@ -70,6 +70,15 @@ import test_engine_step_parity as engine_parity
 GOLDEN_DIR = _PARITY_DIR / "goldens"
 PIN_MAP_KEY = "post_freeze_pins"
 
+# The reused suite helpers surface a missing perf database as ``pytest.skip``
+# — a ``Skipped`` outcome that subclasses BaseException and would leak out of
+# this script as a cryptic traceback. Caught in ``main`` and converted into a
+# clear before-any-write abort.
+try:
+    from _pytest.outcomes import Skipped as _PytestSkipped
+except Exception:  # pragma: no cover — pytest is a hard dependency here
+    _PytestSkipped = ()  # type: ignore[assignment]
+
 
 def _git(*args: str) -> str:
     try:
@@ -155,8 +164,7 @@ def _load(filename: str) -> dict:
 
 
 def _engine_step_record(case, surface: str) -> dict:
-    engine_parity.rust_engine_step._engine_handle_cache_clear()
-    metrics = engine_parity._surface_metrics(case, surface, engine_step_backend="rust")
+    metrics = engine_parity._surface_metrics(case, surface)
     return _encode_metrics(metrics)
 
 
@@ -233,6 +241,8 @@ def _compile_scenario_references() -> dict[str, float]:
     references["wideep_trtllm::static_ctx"] = float(wt_ctx)
     references["wideep_trtllm::static_gen"] = float(wt_gen)
 
+    missing = [key for key in _SCENARIO_KEYS if key not in references]
+    assert not missing, f"scenario compute drifted from _SCENARIO_KEYS: {missing}"
     return references
 
 
@@ -272,6 +282,24 @@ def _engine_step_population() -> dict[tuple[str, str], object]:
     return population
 
 
+# Single source for the fixed-scenario reference keys: consumed by BOTH the
+# population (planner) and `_compile_scenario_references` (compute), so a
+# key can never exist in one and not the other. Keep in lockstep with the
+# corresponding test classes in test_compile_engine_parity.py.
+_SCENARIO_KEYS = (
+    "imbalance_scale::static_ctx",
+    "imbalance_scale::static_gen",
+    "imbalance_scale::mixed_step",
+    "imbalance_scale::decode_step",
+    "wideep_sglang::static_ctx",
+    "wideep_sglang::static_gen",
+    "wideep_sglang::mixed_step",
+    "wideep_sglang::decode_step",
+    "wideep_trtllm::static_ctx",
+    "wideep_trtllm::static_gen",
+)
+
+
 def _compile_reference_population() -> dict[str, object]:
     population: dict[str, object] = {}
     for param in compile_parity._SUBSET_CASES:
@@ -280,33 +308,19 @@ def _compile_reference_population() -> dict[str, object]:
             population[f"{param.id}::{metric}"] = ("case", case)
     for ctx_tokens, gen_tokens, isl, osl, prefix in compile_parity._CHUNKED_PREFILL_SHAPES:
         population[compile_parity._chunked_prefill_key(ctx_tokens, gen_tokens, isl, osl, prefix)] = ("scenario", None)
-    for key in (
-        "imbalance_scale::static_ctx",
-        "imbalance_scale::static_gen",
-        "imbalance_scale::mixed_step",
-        "imbalance_scale::decode_step",
-        "wideep_sglang::static_ctx",
-        "wideep_sglang::static_gen",
-        "wideep_sglang::mixed_step",
-        "wideep_sglang::decode_step",
-        "wideep_trtllm::static_ctx",
-        "wideep_trtllm::static_gen",
-    ):
+    for key in _SCENARIO_KEYS:
         population[key] = ("scenario", None)
     return population
 
 
-def _plan(existing: set, population: set, refresh: set[str], refresh_all: bool, encode, matched: set[str]) -> list:
+def _plan(existing: set, population: set, refresh: set[str], refresh_all: bool, encode) -> list:
     """Resolve which keys to (re)compute: missing ones always; existing ones
-    only when named by ``--refresh`` (or ``--refresh-all``). Keys consumed
-    from ``refresh`` are recorded in ``matched`` so ``main`` can reject
-    unmatched names globally (a key may belong to any of the three files)."""
+    only when named by ``--refresh`` (or ``--refresh-all``). ``refresh`` keys
+    were validated against the full key universe up front in ``main`` —
+    BEFORE any live-engine evaluation — so a typo aborts in milliseconds
+    instead of after the compute loops."""
     missing = population - existing
-    if refresh_all:
-        named = population
-    else:
-        named = {key for key in population if encode(key) in refresh}
-        matched.update(encode(key) for key in named)
+    named = population if refresh_all else {key for key in population if encode(key) in refresh}
     return sorted(missing | (named & existing), key=encode)
 
 
@@ -336,51 +350,74 @@ def main(argv: list[str] | None = None) -> int:
     per_op = _load("per_op.json")
 
     pinned: dict[str, list[str]] = {"engine_step.json": [], "compile_engine.json": [], "per_op.json": []}
-    matched_refresh: set[str] = set()
 
-    # --- engine_step.json -------------------------------------------------
+    # Build every key population FIRST and reject unknown --refresh names
+    # BEFORE any live-engine evaluation (with or without --refresh-all): a
+    # typo must abort in milliseconds, not after the compute loops.
     population = _engine_step_population()
-    existing = {(case_id, surface) for case_id, surfaces in engine_step["cases"].items() for surface in surfaces}
-    encode = lambda key: f"{key[0]}::{key[1]}"
-    for case_id, surface in _plan(existing, set(population), refresh, args.refresh_all, encode, matched_refresh):
-        case = population[(case_id, surface)]
-        record_started = time.monotonic()
-        engine_step["cases"].setdefault(case_id, {})[surface] = _engine_step_record(case, surface)
-        pinned["engine_step.json"].append(f"{case_id}::{surface}")
-        _log(f"[engine_step] pinned {case_id} :: {surface} ({time.monotonic() - record_started:.1f}s)")
-
-    # --- compile_engine.json ----------------------------------------------
     ref_population = _compile_reference_population()
-    references = compile_engine["references"]
-    todo = _plan(set(references), set(ref_population), refresh, args.refresh_all, str, matched_refresh)
-    case_cache: dict[str, dict[str, float]] = {}
-    scenario_refs: dict[str, float] | None = None
-    for key in todo:
-        kind, case = ref_population[key]
-        if kind == "case":
-            case_id, metric = key.rsplit("::", 1)
-            values = case_cache.get(case_id)
-            if values is None:
-                values = case_cache[case_id] = _compile_case_references(case)
-            references[key] = _require_finite(values[metric], key)
-        else:
-            if scenario_refs is None:
-                scenario_refs = _compile_scenario_references()
-            references[key] = _require_finite(scenario_refs[key], key)
-        pinned["compile_engine.json"].append(key)
-        _log(f"[compile_engine] pinned {key}")
-
-    # --- per_op.json --------------------------------------------------------
     per_op_population = {param.id: param.values[0] for param in compile_parity._SUBSET_CASES}
-    for case_id in _plan(set(per_op["cases"]), set(per_op_population), refresh, args.refresh_all, str, matched_refresh):
-        record_started = time.monotonic()
-        per_op["cases"][case_id] = _per_op_record(per_op_population[case_id])
-        pinned["per_op.json"].append(case_id)
-        _log(f"[per_op] pinned {case_id} ({time.monotonic() - record_started:.1f}s)")
-
-    unmatched = refresh - matched_refresh
+    encode = lambda key: f"{key[0]}::{key[1]}"
+    key_universe = {encode(key) for key in population} | set(ref_population) | set(per_op_population)
+    unmatched = refresh - key_universe
     if unmatched:
         raise SystemExit(f"--refresh names keys outside every test matrix: {sorted(unmatched)}")
+
+    # Compute ALL records before writing ANY file (a mid-run failure leaves
+    # the committed goldens byte-untouched). The reused test helpers surface
+    # a missing dataset as pytest.skip — a BaseException that would
+    # otherwise escape as a cryptic traceback, so convert it into a clear
+    # abort (same guard the retired regenerate_goldens.py carried).
+    try:
+        # --- engine_step.json ---------------------------------------------
+        existing = {(case_id, surface) for case_id, surfaces in engine_step["cases"].items() for surface in surfaces}
+        last_cleared_case_id = None
+        for case_id, surface in _plan(existing, set(population), refresh, args.refresh_all, encode):
+            case = population[(case_id, surface)]
+            if case_id != last_cleared_case_id:
+                # One clear per CASE (the plan is case-sorted): the surfaces
+                # of one case share the engine handle instead of redoing the
+                # compile + Rust perf-DB load four times.
+                engine_parity.rust_engine_step._engine_handle_cache_clear()
+                last_cleared_case_id = case_id
+            record_started = time.monotonic()
+            engine_step["cases"].setdefault(case_id, {})[surface] = _engine_step_record(case, surface)
+            pinned["engine_step.json"].append(f"{case_id}::{surface}")
+            _log(f"[engine_step] pinned {case_id} :: {surface} ({time.monotonic() - record_started:.1f}s)")
+
+        # --- compile_engine.json --------------------------------------------
+        references = compile_engine["references"]
+        todo = _plan(set(references), set(ref_population), refresh, args.refresh_all, str)
+        case_cache: dict[str, dict[str, float]] = {}
+        scenario_refs: dict[str, float] | None = None
+        for key in todo:
+            kind, case = ref_population[key]
+            if kind == "case":
+                case_id, metric = key.rsplit("::", 1)
+                values = case_cache.get(case_id)
+                if values is None:
+                    values = case_cache[case_id] = _compile_case_references(case)
+                references[key] = _require_finite(values[metric], key)
+            else:
+                if scenario_refs is None:
+                    scenario_refs = _compile_scenario_references()
+                references[key] = _require_finite(scenario_refs[key], key)
+            pinned["compile_engine.json"].append(key)
+            _log(f"[compile_engine] pinned {key}")
+
+        # --- per_op.json ----------------------------------------------------
+        for case_id in _plan(set(per_op["cases"]), set(per_op_population), refresh, args.refresh_all, str):
+            record_started = time.monotonic()
+            per_op["cases"][case_id] = _per_op_record(per_op_population[case_id])
+            pinned["per_op.json"].append(case_id)
+            _log(f"[per_op] pinned {case_id} ({time.monotonic() - record_started:.1f}s)")
+    except _PytestSkipped as exc:
+        raise RuntimeError(
+            "golden pinning aborted BEFORE any write — a reused test helper "
+            f"skipped ({exc}). Pinning these records requires the FULL systems "
+            "data set (e.g. the WideEP databases); the committed goldens are "
+            "untouched."
+        ) from exc
 
     total = sum(len(keys) for keys in pinned.values())
     if total == 0:

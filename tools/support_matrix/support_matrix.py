@@ -96,7 +96,6 @@ def _support_matrix_row_command(
     system: str,
     backend: str,
     version: str,
-    mode: str,
     database_mode: str = "SILICON",
     transfer_policy: str | None = None,
     constraints: TestConstraints | None = None,
@@ -142,7 +141,6 @@ def _support_matrix_row_command(
     ]
     if transfer_policy:
         parts.extend(["--transfer-policy", transfer_policy])
-    _ = mode
     return " ".join(shlex.quote(str(part)) for part in parts)
 
 
@@ -530,7 +528,6 @@ class SupportMatrix:
         backend: str,
         version: str,
         constraints: TestConstraints,
-        engine_step_backend: str | None,
         database_mode: str | None = None,
     ) -> Task:
         # ``database_mode`` is supplied per-pass by run_single_test's silicon-first /
@@ -544,7 +541,11 @@ class SupportMatrix:
             "prefix": constraints.prefix,
             "ttft": constraints.ttft,
             "tpot": constraints.tpot,
-            "engine_step_backend": engine_step_backend,
+            # Hardcoded (not a parameter): the config value outranks the ambient
+            # AICONFIGURATOR_ENGINE_STEP_BACKEND env var, so PASS/FAIL cannot
+            # become host-dependent (an unknown ambient value would raise in
+            # should_use_rust_engine_step).
+            "engine_step_backend": "rust",
             "database_mode": resolved_mode,
             # Optional fine-grained HYBRID transfer policy for coverage experiments
             # (e.g. AIC_SM_TRANSFERS="off" or "xshape,xquant"). None -> all kinds on.
@@ -582,7 +583,6 @@ class SupportMatrix:
         backend: str,
         version: str,
         constraints: TestConstraints,
-        engine_step_backend: str | None,
         database_mode: str | None = None,
     ) -> pd.DataFrame | None:
         task = SupportMatrix._create_task(
@@ -592,7 +592,6 @@ class SupportMatrix:
             backend=backend,
             version=version,
             constraints=constraints,
-            engine_step_backend=engine_step_backend,
             database_mode=database_mode,
         )
         pareto_df = task.run()
@@ -646,7 +645,6 @@ class SupportMatrix:
                 system=system,
                 backend=backend,
                 version=version,
-                mode=mode,
                 database_mode="SILICON",
                 transfer_policy=transfer_policy,
                 constraints=constraints,
@@ -691,10 +689,6 @@ class SupportMatrix:
                 # capture_provenance spans task.run() (the contextvar propagates down the
                 # call stack), so we learn the worst empirical transfer tier that fired.
                 with capture_provenance() as prov_tags:
-                    # Pinned (not None): the config value outranks the ambient
-                    # AICONFIGURATOR_ENGINE_STEP_BACKEND env var, so PASS/FAIL
-                    # cannot become host-dependent (an unknown ambient value
-                    # would raise in should_use_rust_engine_step).
                     pareto_df = SupportMatrix._run_mode(
                         mode=mode,
                         model=model,
@@ -702,7 +696,6 @@ class SupportMatrix:
                         backend=backend,
                         version=version,
                         constraints=constraints,
-                        engine_step_backend="rust",
                         database_mode=db_mode,
                     )
                 # pareto_frontier_df is non-empty iff pareto_df is, so we only check pareto_df.
@@ -759,7 +752,6 @@ class SupportMatrix:
                         system=system,
                         backend=backend,
                         version=version,
-                        mode=mode,
                         database_mode="HYBRID",
                         transfer_policy=transfer_policy,
                         constraints=constraints,
@@ -966,7 +958,6 @@ class SupportMatrix:
                                         system=system,
                                         backend=backend,
                                         version=version,
-                                        mode=mode,
                                     )
                                     results.append(
                                         (
@@ -1098,7 +1089,6 @@ class SupportMatrix:
                     system=system,
                     backend=backend,
                     version=version,
-                    mode=mode,
                     constraints=_DEFAULT_TIER,
                 )
             else:

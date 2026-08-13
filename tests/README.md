@@ -74,12 +74,11 @@ The compiled Rust engine is the only engine-step executor (the Python step
 path was removed after the golden fixtures froze its reference values —
 see `aic-core/rust/aiconfigurator-core/parity_tests/README.md`). The
 maturin-built `aiconfigurator_core` extension must be importable; build it
-on demand with:
+the same way the CI job does:
 
 ```bash
-python3 -m pytest tests/unit/sdk/test_rust_engine_step.py \
-  --aic-engine-step-backend=rust \
-  --aic-rust-core-autobuild
+cd aic-core && ../.venv/bin/maturin develop --release && cd ..
+python3 -m pytest tests/unit/sdk/test_rust_engine_step.py
 ```
 
 The support-matrix PR regression runs on the compiled engine:

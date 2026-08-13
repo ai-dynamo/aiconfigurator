@@ -10,7 +10,7 @@ the golden fixtures captured from it while it was alive are now the
 Run the engine-step golden checks:
 
 ```bash
-AICONFIGURATOR_RUST_CORE_AUTOBUILD=1 uv run pytest -q -rx aic-core/rust/aiconfigurator-core/parity_tests/test_engine_step_parity.py
+uv run pytest -q -rx aic-core/rust/aiconfigurator-core/parity_tests/test_engine_step_parity.py
 ```
 
 The suite compares the live Rust engine against **golden fixtures** for:

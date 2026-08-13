@@ -31,20 +31,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "live value (the Python step path was removed; 'python' is a deprecated "
         "runtime no-op and not offered here).",
     )
-    parser.addoption(
-        "--aic-rust-core-autobuild",
-        action="store_true",
-        default=False,
-        help="Build the Rust core shared library on demand when --aic-engine-step-backend=rust is used.",
-    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
     engine_step_backend = config.getoption("--aic-engine-step-backend")
     if engine_step_backend:
         os.environ["AICONFIGURATOR_ENGINE_STEP_BACKEND"] = engine_step_backend
-    if config.getoption("--aic-rust-core-autobuild"):
-        os.environ["AICONFIGURATOR_RUST_CORE_AUTOBUILD"] = "1"
 
 
 @pytest.fixture

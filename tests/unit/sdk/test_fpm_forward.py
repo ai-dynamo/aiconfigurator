@@ -166,7 +166,9 @@ class TestForwardModelRewrite:
         assert model.context_ops[0].get_weights() == pytest.approx(expected_weights)
 
     def test_fpm_rejects_construction_without_sol_ops(self):
-        with pytest.raises(ValueError, match="sol_ops is required"):
+        # Required keyword-only parameter: omitting it is a signature error,
+        # not a runtime branch (the sol_fn-injection alternative is gone).
+        with pytest.raises(TypeError, match="sol_ops"):
             FPMForwardOp("prefill", _model_config(), MODEL_PATH, weight_bytes=1.0)
 
     def test_fpm_rejects_unknown_phase(self):

@@ -808,7 +808,6 @@ def _safe_value(thunk) -> float | _ErrorSentinel:
 def _static_metrics(
     case: EngineStepParityCase,
     *,
-    engine_step_backend: str,
     osl: int | None = None,
 ) -> dict[str, float | _ErrorSentinel]:
     kwargs = {
@@ -826,7 +825,9 @@ def _static_metrics(
         "moe_tp_size": case.moe_tp_size,
         "moe_ep_size": case.moe_ep_size,
         "stride": 1,
-        "engine_step_backend": engine_step_backend,
+        # The compiled engine is the only step executor; pinned so an ambient
+        # env override can never flip the harness off it.
+        "engine_step_backend": "rust",
         "database_mode": case.database_mode,
         "transfer_policy": case.transfer_policy,
         "moe_quant_mode": case.moe_quant_mode,
@@ -859,7 +860,7 @@ def _static_metrics(
     return metrics
 
 
-def _agg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dict[str, float | _ErrorSentinel]:
+def _agg_metrics(case: EngineStepParityCase) -> dict[str, float | _ErrorSentinel]:
     def call():
         return _quiet_call(
             cli_estimate,
@@ -878,7 +879,7 @@ def _agg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dic
             attention_dp_size=case.attention_dp_size,
             moe_tp_size=case.moe_tp_size,
             moe_ep_size=case.moe_ep_size,
-            engine_step_backend=engine_step_backend,
+            engine_step_backend="rust",
             database_mode=case.database_mode,
             transfer_policy=case.transfer_policy,
             moe_quant_mode=case.moe_quant_mode,
@@ -901,7 +902,7 @@ def _agg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dic
     }
 
 
-def _disagg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dict[str, float | _ErrorSentinel]:
+def _disagg_metrics(case: EngineStepParityCase) -> dict[str, float | _ErrorSentinel]:
     def call():
         return _quiet_call(
             cli_estimate,
@@ -922,7 +923,7 @@ def _disagg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> 
             prefill_num_workers=case.disagg_prefill_num_workers,
             decode_batch_size=case.disagg_decode_batch_size,
             decode_num_workers=case.disagg_decode_num_workers,
-            engine_step_backend=engine_step_backend,
+            engine_step_backend="rust",
             database_mode=case.database_mode,
             transfer_policy=case.transfer_policy,
             moe_quant_mode=case.moe_quant_mode,
@@ -943,7 +944,7 @@ def _disagg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> 
     }
 
 
-def _afd_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dict[str, float | _ErrorSentinel]:
+def _afd_metrics(case: EngineStepParityCase) -> dict[str, float | _ErrorSentinel]:
     """AFD (attention-FFN disaggregation) estimate for the case's topology.
 
     Mirrors how ``cli/main.py`` maps the AFD flags onto
@@ -982,7 +983,7 @@ def _afd_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dic
             a_tp_size=case.afd_a_tp_size,
             a_batch_size=case.afd_a_batch_size,
             f_moe_ep_size=case.afd_f_moe_ep_size,
-            engine_step_backend=engine_step_backend,
+            engine_step_backend="rust",
             database_mode=case.database_mode,
             transfer_policy=case.transfer_policy,
             moe_quant_mode=case.moe_quant_mode,
@@ -1050,7 +1051,7 @@ def _case_model_config(case: EngineStepParityCase) -> config.ModelConfig:
     )
 
 
-def _cp_static_ctx_ms(case: EngineStepParityCase, *, engine_step_backend: str) -> float:
+def _cp_static_ctx_ms(case: EngineStepParityCase) -> float:
     """Context-phase static sum through the cp-aware model builder.
 
     The "static" surface goes through `cli_estimate`, which has no cp knob —
@@ -1073,7 +1074,7 @@ def _cp_static_ctx_ms(case: EngineStepParityCase, *, engine_step_backend: str) -
         isl=case.isl,
         osl=max(case.osl, 2),
         prefix=case.prefix,
-        engine_step_backend=engine_step_backend,
+        engine_step_backend="rust",
     )
     ctx_lat, _ctx_e, _gen_lat, _gen_e, _ctx_src, _gen_src = _quiet_call(
         backend._run_static_breakdown, model, database, runtime_config, "static_ctx", 1
@@ -1179,12 +1180,16 @@ ENGINE_STEP_SURFACES = ("static", "mixed", "agg", "disagg")
 def _surface_metrics(
     case: EngineStepParityCase,
     surface: str,
-    *,
-    engine_step_backend: str,
 ) -> dict[str, float | _ErrorSentinel]:
-    """Comparison metrics for one engine side of a (case, surface) pair."""
+    """LIVE compiled-engine metrics for a (case, surface) pair.
+
+    There is no engine selector anymore: the helpers pin
+    ``engine_step_backend="rust"`` internally (passing "python" would be a
+    silent rust-vs-rust self-comparison via the deprecation no-op — exactly
+    the vacuous-comparison class the golden rewiring exists to prevent).
+    """
     if surface == "static":
-        metrics = _static_metrics(case, engine_step_backend=engine_step_backend)
+        metrics = _static_metrics(case)
         out: dict[str, float | _ErrorSentinel] = {
             "static_ctx": metrics["context_ms"],
             "static_gen": metrics["generation_ms"],
@@ -1199,23 +1204,23 @@ def _surface_metrics(
     if surface == "mixed":
         return {"mixed_step": _safe_value(lambda: _rust_mixed_step_ms(case))}
     if surface == "cp_static_ctx":
-        return {"cp_static_ctx": _safe_value(lambda: _cp_static_ctx_ms(case, engine_step_backend=engine_step_backend))}
+        return {"cp_static_ctx": _safe_value(lambda: _cp_static_ctx_ms(case))}
     if surface == "agg":
-        metrics = _agg_metrics(case, engine_step_backend=engine_step_backend)
+        metrics = _agg_metrics(case)
         return {
             "agg_ttft": metrics["ttft_ms"],
             "agg_tpot": metrics["tpot_ms"],
             "agg_request": metrics["request_latency_ms"],
         }
     if surface == "disagg":
-        metrics = _disagg_metrics(case, engine_step_backend=engine_step_backend)
+        metrics = _disagg_metrics(case)
         return {
             "disagg_ttft": metrics["ttft_ms"],
             "disagg_tpot": metrics["tpot_ms"],
             "disagg_request": metrics["request_latency_ms"],
         }
     if surface == "afd":
-        metrics = _afd_metrics(case, engine_step_backend=engine_step_backend)
+        metrics = _afd_metrics(case)
         return {
             "afd_ttft": metrics["ttft_ms"],
             "afd_tpot": metrics["tpot_ms"],
@@ -1228,7 +1233,7 @@ def _comparison_metrics(
     surface: str,
 ) -> dict[str, tuple[float | _ErrorSentinel, float | _ErrorSentinel]]:
     """(python-golden, live-rust) pairs for every metric of the surface."""
-    rust_metrics = _surface_metrics(case, surface, engine_step_backend="rust")
+    rust_metrics = _surface_metrics(case, surface)
     python_metrics = _golden_python_metrics(case, surface, rust_metrics)
     return {name: (python_metrics[name], rust_metrics[name]) for name in rust_metrics}
 
@@ -2211,7 +2216,7 @@ class TestRustProvenanceCapture:
         _prepare_rust_core(monkeypatch)
         case = EngineStepParityCase(model_path="MiniMaxAI/MiniMax-M3", database_mode="HYBRID")
         with util_empirical.capture_provenance() as tags:
-            metrics = _static_metrics(case, engine_step_backend="rust")
+            metrics = _static_metrics(case)
         assert not isinstance(metrics["total_ms"], _ErrorSentinel), repr(metrics)
         assert util_empirical.worst_provenance(tags) == "xop", tags
 
@@ -2224,7 +2229,7 @@ class TestRustProvenanceCapture:
         _prepare_rust_core(monkeypatch)
         case = EngineStepParityCase(model_path="moonshotai/Kimi-K2.5")
         with util_empirical.capture_provenance() as tags:
-            metrics = _static_metrics(case, engine_step_backend="rust")
+            metrics = _static_metrics(case)
         assert not isinstance(metrics["total_ms"], _ErrorSentinel), repr(metrics)
         assert util_empirical.worst_provenance(tags) == "silicon", tags
 
