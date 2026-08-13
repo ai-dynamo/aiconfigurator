@@ -168,32 +168,58 @@ def test_matrix_model_metadata_failure_is_fatal(monkeypatch):
 
 def test_parallel_model_metadata_failure_aborts_without_retry(monkeypatch):
     class MetadataFailureFuture:
+        cancelled = False
+
         def result(self):
             raise ModelMetadataResolutionError("bad model metadata")
 
         def cancel(self):
+            self.cancelled = True
+            return True
+
+    class PendingFuture:
+        cancelled = False
+
+        def result(self):
+            raise AssertionError("pending work must not be awaited")
+
+        def cancel(self):
+            self.cancelled = True
             return True
 
     class FakeExecutor:
         def __init__(self, **_kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
+            self.all_futures = [MetadataFailureFuture(), PendingFuture()]
+            self.futures_to_submit = list(self.all_futures)
+            self.shutdown_calls = []
 
         def submit(self, _fn, _combo):
-            return MetadataFailureFuture()
+            return self.futures_to_submit.pop(0)
 
-    monkeypatch.setattr(support_matrix_module, "ProcessPoolExecutor", FakeExecutor)
+        def shutdown(self, *, wait=True, cancel_futures=False):
+            self.shutdown_calls.append((wait, cancel_futures))
+
+    executors = []
+
+    def make_executor(**kwargs):
+        executor = FakeExecutor(**kwargs)
+        executors.append(executor)
+        return executor
+
+    monkeypatch.setattr(support_matrix_module, "ProcessPoolExecutor", make_executor)
     monkeypatch.setattr(support_matrix_module, "as_completed", lambda futures: list(futures))
     matrix = SupportMatrix.__new__(SupportMatrix)
-    combo = ("test/bad-model", "b200_sxm", "trtllm", "1.0")
+    combos = [
+        ("test/bad-model", "b200_sxm", "trtllm", "1.0"),
+        ("test/pending-model", "b200_sxm", "trtllm", "1.0"),
+    ]
 
     with pytest.raises(ModelMetadataResolutionError, match="bad model metadata"):
-        matrix._run_parallel_combinations([combo], max_workers=1, pbar=None)
+        matrix._run_parallel_combinations(combos, max_workers=2, pbar=None)
+
+    executor = executors[0]
+    assert executor.shutdown_calls == [(False, True)]
+    assert executor.all_futures[1].cancelled is True
 
 
 def test_matrix_image_constraints_reach_task_and_replay_command(monkeypatch):

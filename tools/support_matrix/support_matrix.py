@@ -1124,10 +1124,12 @@ class SupportMatrix:
         retry_combos: set[tuple[str, str, str, str]] = set()
         processed_futures = set()
 
-        with ProcessPoolExecutor(
+        executor = ProcessPoolExecutor(
             max_workers=min(max_workers, len(combinations)),
             mp_context=_fork_ctx,
-        ) as executor:
+        )
+        shutdown_without_wait = False
+        try:
             futures = {executor.submit(_process_combination_worker, combo): combo for combo in combinations}
             for future in as_completed(futures):
                 combo = futures[future]
@@ -1156,6 +1158,10 @@ class SupportMatrix:
                     for remaining in futures:
                         if remaining is not future:
                             remaining.cancel()
+                    # A context-manager exit would wait for already-running
+                    # workers, defeating the fatal metadata fail-fast contract.
+                    shutdown_without_wait = True
+                    executor.shutdown(wait=False, cancel_futures=True)
                     raise
                 except Exception:
                     logger.exception(
@@ -1168,6 +1174,9 @@ class SupportMatrix:
                     retry_combos.add(combo)
                     processed_futures.add(future)
                     pbar.update(1)
+        finally:
+            if not shutdown_without_wait:
+                executor.shutdown()
 
         return group_results, retry_combos
 
