@@ -15,6 +15,12 @@ Context (prefill) phase:
 Generation (decode) phase:
     - causal_conv1d_update: Single-step conv state update
     - fused_recurrent_gated_delta_rule_packed_decode: Packed GDN recurrence
+      (fla/triton fp32-state lane; every SM)
+    - flashinfer_gated_delta_rule_decode: FlashInfer bf16-state decode via
+      flashinfer.gdn_decode.gated_delta_rule_decode_pretranspose (SM100+
+      only; sglang serving makes this the mandatory decode kernel once
+      mamba_ssm_dtype defaults to bfloat16 — server_args.py
+      _handle_linear_attn_backend, :4884-4915 @0.5.14)
 
 The in_proj and out_proj GEMMs are standard linear layers modeled by the
 existing GEMM infrastructure. This collector focuses on the unique GDN ops.
@@ -329,6 +335,41 @@ def run_gdn_context_benchmark(
         raise RuntimeError(f"SGLang GDN context collection failed strict completeness: {summary}")
 
 
+def _resolve_flashinfer_gdn_decode():
+    """
+    Resolve the FlashInfer bf16-state GDN decode kernel for the SM100+
+    lane, or return None (after logging why) when this process can't
+    produce it.
+
+    SM100+ sglang serving makes this the mandatory decode kernel:
+    server_args.py's _handle_linear_attn_backend (server_args.py:4884-4915
+    @0.5.14) defaults linear_attn_decode_backend=flashinfer on SM100+ once
+    mamba_ssm_dtype == "bfloat16" (the model default) and hard-errors a
+    non-bf16 state on that backend. The lazy import mirrors sglang's own
+    guard for this kernel (gdn_flashinfer.py:34-56 @0.5.14,
+    _get_flashinfer_gdn_kernels -> gated_delta_rule_decode_pretranspose).
+    """
+    sm_version = get_sm_version()
+    if sm_version < 100:
+        print(
+            f"  SM{sm_version}: FlashInfer bf16 GDN decode lane not applicable "
+            "(SM100+ only; SM90 keeps the fla/triton fp32-state lane, no "
+            "auto-flip there per server_args.py:4884-4915); skipping "
+            "flashinfer_gated_delta_rule_decode rows for this case."
+        )
+        return None
+    try:
+        from flashinfer.gdn_decode import gated_delta_rule_decode_pretranspose
+    except ImportError as e:
+        print(
+            f"  SM{sm_version}: FlashInfer bf16 GDN decode lane unavailable "
+            f"(flashinfer.gdn_decode import failed: {e}); skipping "
+            "flashinfer_gated_delta_rule_decode rows for this case."
+        )
+        return None
+    return gated_delta_rule_decode_pretranspose
+
+
 def run_gdn_generation_benchmark(
     d_model: int,
     d_conv: int,
@@ -348,6 +389,10 @@ def run_gdn_generation_benchmark(
     Benchmarks:
     1. causal_conv1d_update  — Single-step conv state update
     2. fused_recurrent_gated_delta_rule_packed_decode — Packed GDN recurrence
+       (fla/triton fp32-state lane; every SM)
+    3. flashinfer_gated_delta_rule_decode — FlashInfer bf16-state decode,
+       SIBLING lane collected only when SM100+ and flashinfer are available
+       (see _resolve_flashinfer_gdn_decode)
     """
     device = torch.device(device)
     torch.cuda.set_device(device)
@@ -365,6 +410,11 @@ def run_gdn_generation_benchmark(
         )
 
     conv_weight = torch.randn(conv_channels, d_conv, dtype=dtype, device=device)
+    # SIBLING lane, resolved once per test case (same shape/batch grid as the
+    # fla lane below): SM100+ + flashinfer-importable also benchmarks the
+    # FlashInfer bf16-state decode kernel serving mandates there. See
+    # _resolve_flashinfer_gdn_decode for the serving citation.
+    flashinfer_gdn_decode_fn = _resolve_flashinfer_gdn_decode()
     successful_points = 0
     failed_points = 0
 
@@ -373,7 +423,7 @@ def run_gdn_generation_benchmark(
             print(f"  Benchmarking batch_size={batch_size}")
 
         a = a_log = b = conv_state = dt_bias = mixed_qkv = None
-        output = recurrent_state = state_indices = None
+        output = recurrent_state = state_indices = flashinfer_recurrent_state = None
         try:
             num_warmups = 3
             num_runs = 10
@@ -485,6 +535,71 @@ def run_gdn_generation_benchmark(
                     power_stats=results["power_stats"],
                 ):
                     raise RuntimeError(f"failed to persist SGLang GDN generation row to {perf_filename}")
+
+            if flashinfer_gdn_decode_fn is not None:
+                # Sibling of the fla decode benchmark above: same mixed_qkv/
+                # a/b/state_indices tensors, same batch grid, new
+                # kernel_source. Mirrors FlashInferGDNKernel.decode's
+                # use_state_pool=True branch argument-for-argument
+                # (gdn_flashinfer.py:180-193 @0.5.14 — SM100+ always takes
+                # this branch, use_state_pool = sm_major >= 10), which is fed
+                # q/k/v split+reshaped from mixed_qkv exactly as
+                # GDNAttnBackend.forward_decode does (gdn_backend.py:348-357
+                # @0.5.14) before calling the kernel_dispatcher. The state
+                # pool is bf16 here (not fp32 like the fla lane's
+                # recurrent_state above) because server_args.py:4884-4915
+                # hard-requires bf16 state on this backend on SM100+.
+                flashinfer_query, flashinfer_key, flashinfer_value = torch.split(
+                    mixed_qkv, [qk_dim, qk_dim, value_dim], dim=-1
+                )
+                flashinfer_query = flashinfer_query.view(batch_size, 1, num_k_heads, head_k_dim)
+                flashinfer_key = flashinfer_key.view(batch_size, 1, num_k_heads, head_k_dim)
+                flashinfer_value = flashinfer_value.view(batch_size, 1, num_v_heads, head_v_dim)
+                flashinfer_a = a.view(batch_size, 1, num_v_heads)
+                flashinfer_b = b.view(batch_size, 1, num_v_heads)
+                flashinfer_recurrent_state = torch.zeros(
+                    batch_size,
+                    num_v_heads,
+                    head_v_dim,
+                    head_k_dim,
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+
+                def run_gdn_update_flashinfer():
+                    flashinfer_gdn_decode_fn(
+                        q=flashinfer_query,
+                        k=flashinfer_key,
+                        v=flashinfer_value,
+                        state=None,
+                        A_log=a_log.detach().float(),
+                        a=flashinfer_a,
+                        dt_bias=dt_bias.detach(),
+                        b=flashinfer_b,
+                        use_qk_l2norm=True,
+                        initial_state=flashinfer_recurrent_state,
+                        initial_state_indices=state_indices,
+                    )
+
+                with benchmark_with_power(
+                    device=device,
+                    kernel_func=run_gdn_update_flashinfer,
+                    num_warmups=num_warmups,
+                    num_runs=num_runs,
+                    repeat_n=10,
+                ) as results:
+                    if not log_perf(
+                        item_list=[{**common_log_data, "latency": results["latency_ms"]}],
+                        framework="SGLang",
+                        version=sglang_version,
+                        device_name=torch.cuda.get_device_name(device),
+                        op_name="gdn",
+                        kernel_source="flashinfer_gated_delta_rule_decode",
+                        perf_filename=perf_filename,
+                        power_stats=results["power_stats"],
+                    ):
+                        raise RuntimeError(f"failed to persist SGLang GDN generation row to {perf_filename}")
+
             successful_points += 1
 
         except Exception as e:
@@ -493,7 +608,7 @@ def run_gdn_generation_benchmark(
             continue
         finally:
             a = a_log = b = conv_state = dt_bias = mixed_qkv = None
-            output = recurrent_state = state_indices = None
+            output = recurrent_state = state_indices = flashinfer_recurrent_state = None
             cleanup_errors = []
             for cleanup_name, cleanup_fn in (
                 ("gc.collect", gc.collect),
