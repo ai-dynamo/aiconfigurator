@@ -74,16 +74,14 @@ model_case_values:
         trtllm:
           allowed_modes: [nvfp4]
         vllm:
-          # Not the topk restriction (topk=6 is fine) -- vLLM's moe getter
-          # additionally requires a packaged HF config at
-          # src/aiconfigurator/model_configs/nvidia--NVIDIA-Nemotron-3.5-
-          # Lightning-30B-A3B-NVFP4_config.json (collect_moe.py
-          # _load_model_moe_config); that file lives outside collector/'s
-          # module boundary (layer_permissions.md: collector task may only
-          # modify collector/ + tests/unit/collector/), so adding it is a
-          # separate, human-approved follow-up rather than bundled here.
-          # AIC-1743/AIC-1748.
-          allowed_modes: []
+          # Not the topk restriction (topk=6 is fine). vLLM's moe getter
+          # additionally needs a packaged HF config
+          # (collect_moe.py::_load_model_moe_config) at
+          # model_configs/nvidia--NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4_config.json
+          # -- outside collector/'s module boundary, so it was added as its
+          # own human-approved commit (layer_permissions.md) rather than
+          # bundled with this row. AIC-1743/AIC-1748.
+          allowed_modes: [nvfp4]
     - model_path: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
       hidden_size: 4096
       inter_size: 2688
