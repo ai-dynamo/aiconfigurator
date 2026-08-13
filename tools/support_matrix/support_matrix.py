@@ -166,7 +166,7 @@ def _get_encoder_coverage(model: str) -> EncoderCoverage:
     try:
         model_info = _get_model_info(model)
     except Exception as exc:
-        raise ModelMetadataError(f"Failed to load model metadata for {model!r}") from exc
+        raise ModelMetadataError(f"Failed to load model metadata for {model!r}: {exc}") from exc
     raw_config = model_info.get("raw_config") or {}
     vision_config = raw_config.get("vision_config")
     architecture = model_info["architecture"]
@@ -862,7 +862,7 @@ class SupportMatrix:
         try:
             return _get_model_info(huggingface_id)["architecture"]
         except Exception as exc:
-            raise ModelMetadataError(f"Failed to load model metadata for {huggingface_id!r}") from exc
+            raise ModelMetadataError(f"Failed to load model metadata for {huggingface_id!r}: {exc}") from exc
 
     def get_systems(self):
         return set(common.SupportedSystems)
@@ -1034,7 +1034,7 @@ class SupportMatrix:
         try:
             constraints = _get_test_constraints(model)
         except Exception as exc:
-            raise ModelMetadataError(f"Failed to load model sizing metadata for {model!r}") from exc
+            raise ModelMetadataError(f"Failed to load model sizing metadata for {model!r}: {exc}") from exc
         encoder_coverage = _get_encoder_coverage(model)
         image_workload = encoder_coverage.workload
         statuses: dict[str, str] = {}
@@ -1375,7 +1375,7 @@ class SupportMatrix:
             try:
                 _get_test_constraints(model)
             except Exception as exc:
-                raise ModelMetadataError(f"Failed to load model sizing metadata for {model!r}") from exc
+                raise ModelMetadataError(f"Failed to load model sizing metadata for {model!r}: {exc}") from exc
             _get_encoder_coverage(model)
         print(f"Total combinations to test: {len(combinations)}")
         print(f"Modes: {', '.join(modes_to_test)}")
