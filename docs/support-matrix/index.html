@@ -234,10 +234,10 @@ function supportMatrixCommand(model, system, backend, version, mode) {
 
 function rowCommand(row) {
   const command = (row.Command || '').trim();
+  if (command.includes('tools/support_matrix/generate_support_matrix.py')) return command;
   if (
     command &&
-    !command.startsWith('aiconfigurator cli default') &&
-    !command.includes('tools/support_matrix/generate_support_matrix.py')
+    !command.startsWith('aiconfigurator cli default')
   ) return command;
   return supportMatrixCommand(row.HuggingFaceID, row.System, row.Backend, row.Version, row.Mode);
 }

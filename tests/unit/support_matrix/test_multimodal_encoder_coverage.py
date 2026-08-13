@@ -420,7 +420,8 @@ def test_text_only_model_cannot_persist_image_workload_metadata():
     assert any("model has no AIC encoder workload" in error for error in errors)
 
 
-def test_legacy_encoder_pass_cannot_be_upgraded_without_image_evidence(tmp_path):
+@pytest.mark.parametrize("status", [STATUS_PASS, STATUS_FAIL])
+def test_legacy_encoder_row_cannot_be_upgraded_without_image_evidence(tmp_path, status):
     row = (
         "Qwen/Qwen3-VL-8B-Instruct",
         "Qwen3VLForConditionalGeneration",
@@ -428,11 +429,11 @@ def test_legacy_encoder_pass_cannot_be_upgraded_without_image_evidence(tmp_path)
         "vllm",
         "0.24.0",
         "agg",
-        STATUS_PASS,
-        None,
+        status,
+        None if status == STATUS_PASS else "encoder execution failed",
         "uv run aiconfigurator cli default --database-mode SILICON",
-        "silicon",
+        "silicon" if status == STATUS_PASS else "",
     )
 
-    with pytest.raises(ValueError, match="Legacy multimodal PASS rows cannot be upgraded"):
+    with pytest.raises(ValueError, match="Legacy multimodal rows cannot be upgraded"):
         SupportMatrix.__new__(SupportMatrix).save_results_to_csv([row], str(tmp_path / "support.csv"))

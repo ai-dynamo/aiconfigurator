@@ -781,6 +781,8 @@ def pareto_entry(entry: Entry) -> ParetoRecord:
         atol=PARETO_STRICT_ATOL,
         frontier_rtol=PARETO_ENVELOPE_RTOL,
         frontier_atol=PARETO_ENVELOPE_ATOL,
+        encoder_rtol=PARETO_STRICT_RTOL,
+        encoder_atol=PARETO_STRICT_ATOL,
     )
 
     if mismatch is None:
@@ -809,6 +811,8 @@ def pareto_entry(entry: Entry) -> ParetoRecord:
         atol=1.0,
         frontier_rtol=PARETO_ENVELOPE_RTOL,
         frontier_atol=PARETO_ENVELOPE_ATOL,
+        encoder_rtol=PARETO_STRICT_RTOL,
+        encoder_atol=PARETO_STRICT_ATOL,
     )
     outcome = PARETO_STATUS_ENVELOPE_PASS if envelope_only is None else PARETO_STATUS_DRIFT
 

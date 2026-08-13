@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from tools.support_matrix.scan_rust_parity import (
+    PARETO_STATUS_DRIFT,
     PARETO_STATUS_REGRESSION,
     PARETO_STATUS_STRICT_PASS,
     PROBE_STATUS_ENCODER_EVIDENCE_ERROR,
@@ -459,3 +460,29 @@ def test_parity_pareto_missing_encoder_evidence_is_regression(monkeypatch):
 
     assert record.comparison_outcome == PARETO_STATUS_REGRESSION
     assert "ENCODER_NOT_EXERCISED:" in record.error_msg
+
+
+def test_parity_pareto_encoder_drift_cannot_fall_back_to_envelope_pass(monkeypatch):
+    def fake_run_mode(**kwargs):
+        encoder_latency = 1.0 if kwargs["engine_step_backend"] == "python" else 2.0
+        return pd.DataFrame(
+            {
+                "encoder_latency": [encoder_latency],
+                "encoder_memory": [0.5],
+                "tokens/s/user": [100.0],
+                "ttft": [10.0],
+                "tpot": [1.0],
+            }
+        )
+
+    monkeypatch.setattr("tools.support_matrix.scan_rust_parity._get_worker_matrix", lambda: None)
+    monkeypatch.setattr(
+        "tools.support_matrix.scan_rust_parity._get_test_constraints",
+        lambda _model: TestConstraints(4, 256, 256, 128, 1500.0, 50.0),
+    )
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+
+    record = pareto_entry(_entry())
+
+    assert record.comparison_outcome == PARETO_STATUS_DRIFT
+    assert "Rust encoder evidence differs beyond tolerance" in record.error_msg

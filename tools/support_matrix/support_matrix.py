@@ -743,6 +743,8 @@ def _compare_pareto_dfs(
     atol: float = DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
     frontier_rtol: float = DEFAULT_ENGINE_STEP_FRONTIER_RTOL,
     frontier_atol: float = DEFAULT_ENGINE_STEP_FRONTIER_ATOL,
+    encoder_rtol: float | None = None,
+    encoder_atol: float | None = None,
 ) -> str | None:
     """Return a mismatch description when Rust and Python Pareto results drift."""
     python_columns = list(python_df.columns)
@@ -753,7 +755,12 @@ def _compare_pareto_dfs(
     if python_df.empty and rust_df.empty:
         return None
 
-    encoder_mismatch = _compare_encoder_evidence(python_df, rust_df, rtol=rtol, atol=atol)
+    encoder_mismatch = _compare_encoder_evidence(
+        python_df,
+        rust_df,
+        rtol=rtol if encoder_rtol is None else encoder_rtol,
+        atol=atol if encoder_atol is None else encoder_atol,
+    )
     if encoder_mismatch:
         return encoder_mismatch
 
@@ -1737,7 +1744,7 @@ class SupportMatrix:
             else:
                 raise ValueError(f"Invalid support-matrix result row length: {len(row)}")
 
-            if len(row) != 13 and status in {STATUS_PASS, STATUS_HYBRID_PASS}:
+            if len(row) != 13:
                 try:
                     encoder_coverage = _get_encoder_coverage(huggingface_id)
                 except Exception:
@@ -1747,7 +1754,7 @@ class SupportMatrix:
                     encoder_coverage = None
                 if encoder_coverage is not None and encoder_coverage.checkpoint_declares_encoder:
                     raise ValueError(
-                        "Legacy multimodal PASS rows cannot be upgraded without explicit "
+                        "Legacy multimodal rows cannot be upgraded without explicit "
                         "ImageHeight, ImageWidth, and NumImages evidence; provide a 13-column row."
                     )
 
