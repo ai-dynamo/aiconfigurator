@@ -188,6 +188,17 @@ def test_csv_sanity_rejects_invalid_replay_contract(_case, status, command, sour
     assert any(expected_error in error for error in errors)
 
 
+def test_csv_sanity_rejects_duplicate_image_flag_with_trailing_bare_occurrence():
+    command = f"{SILICON_REPLAY} --image-height 1024 --image-width 1024 --num-images 1 --image-height"
+
+    errors = check_csv_sanity(
+        HEADER,
+        [_row(STATUS_PASS, command=command, image_height="1024", image_width="1024", num_images="1")],
+    )
+
+    assert any("exactly one --image-height 1024" in error for error in errors)
+
+
 def test_csv_sanity_rejects_duplicate_configuration_key():
     errors = check_csv_sanity(HEADER, [_row(STATUS_PASS), _row(STATUS_HYBRID_PASS, source="xshape")])
 

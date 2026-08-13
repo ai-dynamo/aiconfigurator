@@ -35,10 +35,12 @@ image workload and produced strictly positive encoder latency and encoder
 memory for every result row. `ImageHeight`, `ImageWidth`, and `NumImages` in the
 generated CSV, plus the matching replay-command arguments, record that workload.
 
-If a checkpoint declares `vision_config` but AIC cannot normalize and build its
-encoder operations, the row fails with an `ENCODER_UNSUPPORTED` reason. It must
-not inherit PASS from a successful text-backbone-only estimate. Text-only
-checkpoints keep their existing workload and leave the image metadata empty.
+If a checkpoint declares `vision_config` but AIC cannot normalize its encoder
+configuration, the row fails with an `ENCODER_UNSUPPORTED` reason. If
+normalization succeeds but execution emits no positive encoder evidence, the
+row fails with `ENCODER_NOT_EXERCISED`. It must not inherit PASS from a
+successful text-backbone-only estimate. Text-only checkpoints keep their
+existing workload and leave the image metadata empty.
 
 ## Retired from default generation
 

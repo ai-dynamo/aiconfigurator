@@ -8,7 +8,14 @@ import pytest
 
 from tools.support_matrix import generate_support_matrix
 from tools.support_matrix import support_matrix as support_matrix_module
-from tools.support_matrix.support_matrix import STATUS_FAIL, STATUS_PASS, SupportMatrix, TestConstraints
+from tools.support_matrix.support_matrix import (
+    STATUS_FAIL,
+    STATUS_PASS,
+    EncoderCoverage,
+    ModelMetadataError,
+    SupportMatrix,
+    TestConstraints,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -184,3 +191,70 @@ def test_generate_support_matrix_replay_asserts_status_and_error_prefix(monkeypa
     generate_support_matrix.main()
 
     assert "Observed support-matrix result:" in capsys.readouterr().out
+
+
+def test_metadata_failure_aborts_sequential_retry(monkeypatch):
+    combo = ("example/model", "b200_sxm", "vllm", "0.24.0")
+    matrix = object.__new__(SupportMatrix)
+    matrix.compare_engine_step_backends = False
+    matrix.engine_step_comparison_rtol = 0.05
+    matrix.engine_step_comparison_atol = 1e-3
+    matrix.engine_step_frontier_rtol = 0.75
+    matrix.engine_step_frontier_atol = 1e-3
+    monkeypatch.setattr(matrix, "get_architecture", lambda _model: "ExampleForCausalLM")
+    monkeypatch.setattr(
+        matrix,
+        "_run_parallel_combinations",
+        lambda *_args, **_kwargs: ([], {combo}),
+    )
+    monkeypatch.setattr(
+        support_matrix_module,
+        "_get_test_constraints",
+        lambda _model: TestConstraints(4, 256, 256, 128, 1500.0, 50.0),
+    )
+    monkeypatch.setattr(
+        support_matrix_module,
+        "_get_encoder_coverage",
+        lambda _model: EncoderCoverage(False, False, "ExampleForCausalLM"),
+    )
+    monkeypatch.setattr(
+        SupportMatrix,
+        "run_single_test",
+        staticmethod(lambda **_kwargs: (_ for _ in ()).throw(ModelMetadataError("metadata unavailable"))),
+    )
+    monkeypatch.setattr(support_matrix_module.perf_database, "unload_database", lambda *_args: None)
+
+    with pytest.raises(ModelMetadataError, match="metadata unavailable"):
+        matrix.test_support_matrix(max_workers=1, combinations=[combo], modes_to_test=("agg",))
+
+
+def test_metadata_failure_from_parallel_worker_is_not_retried(monkeypatch):
+    combo = ("example/model", "b200_sxm", "vllm", "0.24.0")
+
+    class FailedFuture:
+        def result(self):
+            raise ModelMetadataError("metadata unavailable")
+
+        def cancel(self):
+            return True
+
+    class FakeExecutor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def submit(self, *_args):
+            return FailedFuture()
+
+    class FakeProgress:
+        def update(self, _count):
+            raise AssertionError("fatal metadata failures must not be counted as completed or retried")
+
+    matrix = object.__new__(SupportMatrix)
+    monkeypatch.setattr(support_matrix_module, "ProcessPoolExecutor", lambda **_kwargs: FakeExecutor())
+    monkeypatch.setattr(support_matrix_module, "as_completed", lambda futures: futures)
+
+    with pytest.raises(ModelMetadataError, match="metadata unavailable"):
+        matrix._run_parallel_combinations([combo], max_workers=1, pbar=FakeProgress())

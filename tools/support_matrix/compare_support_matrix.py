@@ -212,8 +212,8 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
                 def _option_values(flag: str) -> list[str]:
                     values = []
                     for part_index, part in enumerate(command_parts):
-                        if part == flag and part_index + 1 < len(command_parts):
-                            values.append(command_parts[part_index + 1])
+                        if part == flag:
+                            values.append(command_parts[part_index + 1] if part_index + 1 < len(command_parts) else "")
                         elif part.startswith(f"{flag}="):
                             values.append(part.partition("=")[2])
                     return values
@@ -267,12 +267,7 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
                                 "--num-images": expected_image_values[2],
                             }
                             for flag, expected_value in image_flags.items():
-                                actual_values = []
-                                for part_index, part in enumerate(command_parts):
-                                    if part == flag and part_index + 1 < len(command_parts):
-                                        actual_values.append(command_parts[part_index + 1])
-                                    elif part.startswith(f"{flag}="):
-                                        actual_values.append(part.partition("=")[2])
+                                actual_values = _option_values(flag)
                                 if actual_values != [expected_value]:
                                     errors.append(
                                         f"Row {i}: replay command must include exactly one {flag} {expected_value}; "

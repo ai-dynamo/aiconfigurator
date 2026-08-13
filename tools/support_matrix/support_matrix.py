@@ -95,6 +95,10 @@ _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
 _DSV4_VLLM_NATIVE_W4A8_MIN_VERSION = Version("0.24.0")
 
 
+class ModelMetadataError(RuntimeError):
+    """Fatal failure while loading metadata needed to generate trustworthy rows."""
+
+
 def _combination_sort_key(combo: tuple[str, str, str, str]) -> tuple[tuple[int, str], str, str, str]:
     model, system, backend, version = combo
     return common.get_support_matrix_system_sort_key(system), backend, version, model
@@ -159,7 +163,10 @@ SUPPORT_MATRIX_IMAGE_WORKLOAD = ImageWorkload(image_height=1024, image_width=102
 
 def _get_encoder_coverage(model: str) -> EncoderCoverage:
     """Return checkpoint declaration and AIC implementation state separately."""
-    model_info = _get_model_info(model)
+    try:
+        model_info = _get_model_info(model)
+    except Exception as exc:
+        raise ModelMetadataError(f"Failed to load model metadata for {model!r}") from exc
     raw_config = model_info.get("raw_config") or {}
     vision_config = raw_config.get("vision_config")
     architecture = model_info["architecture"]
@@ -852,7 +859,10 @@ class SupportMatrix:
 
     def get_architecture(self, huggingface_id: str) -> str:
         """Get the HuggingFace architecture for a model."""
-        return _get_model_info(huggingface_id)["architecture"]
+        try:
+            return _get_model_info(huggingface_id)["architecture"]
+        except Exception as exc:
+            raise ModelMetadataError(f"Failed to load model metadata for {huggingface_id!r}") from exc
 
     def get_systems(self):
         return set(common.SupportedSystems)
@@ -1021,7 +1031,10 @@ class SupportMatrix:
             unsupported_modes = set(modes_to_test) - {"agg", "disagg"}
             if unsupported_modes:
                 raise ValueError(f"Unsupported support-matrix mode(s): {sorted(unsupported_modes)}")
-        constraints = _get_test_constraints(model)
+        try:
+            constraints = _get_test_constraints(model)
+        except Exception as exc:
+            raise ModelMetadataError(f"Failed to load model sizing metadata for {model!r}") from exc
         encoder_coverage = _get_encoder_coverage(model)
         image_workload = encoder_coverage.workload
         statuses: dict[str, str] = {}
@@ -1251,6 +1264,18 @@ class SupportMatrix:
                     group_results.extend(future.result())
                     processed_futures.add(future)
                     pbar.update(1)
+                except ModelMetadataError:
+                    for remaining in futures:
+                        if remaining is not future:
+                            remaining.cancel()
+                    logger.exception(
+                        "Fatal model metadata failure for %s/%s/%s/%s; aborting matrix generation",
+                        model,
+                        system,
+                        backend,
+                        version,
+                    )
+                    raise
                 except BrokenExecutor:
                     logger.warning(
                         "Process pool broken while running %s/%s/%s/%s. "
@@ -1341,6 +1366,17 @@ class SupportMatrix:
         combinations = (
             self.generate_combinations() if combinations is None else sorted(combinations, key=_combination_sort_key)
         )
+        # Validate deterministic model metadata in the parent before workers
+        # start. A missing/malformed checkpoint config invalidates every row for
+        # that model and must abort generation instead of becoming a retryable
+        # per-row failure.
+        for model in sorted({combo[0] for combo in combinations}):
+            self.get_architecture(model)
+            try:
+                _get_test_constraints(model)
+            except Exception as exc:
+                raise ModelMetadataError(f"Failed to load model sizing metadata for {model!r}") from exc
+            _get_encoder_coverage(model)
         print(f"Total combinations to test: {len(combinations)}")
         print(f"Modes: {', '.join(modes_to_test)}")
         results: list[tuple[str, ...]] = []
@@ -1421,6 +1457,8 @@ class SupportMatrix:
                                             *image_values,
                                         )
                                     )
+                            except ModelMetadataError:
+                                raise
                             except Exception:
                                 logger.exception(
                                     "Sequential retry also failed for %s/%s/%s/%s",
