@@ -62,6 +62,7 @@ class _Point:
     osl: Any
     concurrency: Any
     prefix: Any = 0
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -573,7 +574,15 @@ def _discover_points(documents: Sequence[Mapping[str, Any]], overrides: AdapterO
                 if isinstance(point, Mapping):
                     explicit.append(_point_from_mapping(point, point_index))
                 else:
-                    explicit.append(_Point(f"point-{point_index}", None, None, None))
+                    explicit.append(
+                        _Point(
+                            f"point-{point_index}",
+                            None,
+                            None,
+                            None,
+                            error=f"workload point {point_index} must be an object",
+                        )
+                    )
     if explicit:
         return explicit
 
@@ -661,6 +670,9 @@ def _request_for_point(
     source: DynamoRecipeSource,
     diagnostics: list[AdaptationDiagnostic],
 ) -> EstimateRequestV1:
+    if point.error is not None:
+        raise ValueError(point.error)
+
     isl = _as_int(overrides.isl if overrides.isl is not None else point.isl, "workload ISL")
     osl = _as_int(overrides.osl if overrides.osl is not None else point.osl, "workload OSL")
     concurrency = _as_int(

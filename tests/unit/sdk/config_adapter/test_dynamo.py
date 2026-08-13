@@ -375,7 +375,7 @@ def test_multiple_points_preserve_order_and_rejections():
     assert len(report.rejections) == 1
 
 
-def test_malformed_explicit_point_preserves_order_and_rejection():
+def test_workload_overrides_do_not_heal_malformed_explicit_point():
     performance = {
         "points": [
             {"point_id": "first", "isl": 1024, "osl": 128, "concurrency": 8},
@@ -384,14 +384,17 @@ def test_malformed_explicit_point_preserves_order_and_rejection():
         ]
     }
 
-    report = adapt_config(DynamoRecipeSource(_agg_yaml(), performance))
+    report = adapt_config(
+        DynamoRecipeSource(_agg_yaml(), performance),
+        AdapterOverrides(isl=512, osl=64, concurrency=4),
+    )
 
     assert [(outcome.point_id, outcome.status) for outcome in report.outcomes] == [
         ("first", "adapted"),
         ("point-1", "rejected"),
         ("last", "adapted"),
     ]
-    assert "workload ISL must be an integer" in report.outcomes[1].diagnostics[-1].message
+    assert "workload point 1 must be an object" in report.outcomes[1].diagnostics[-1].message
 
 
 def test_explicit_workload_points_override_perf_points():
