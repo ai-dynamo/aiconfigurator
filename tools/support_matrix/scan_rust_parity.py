@@ -384,12 +384,23 @@ def seed_entries(db_path: Path, entries: list[Entry]) -> int:
 
         for entry in entries:
             if entry.image_workload is not None:
-                # Pre-image scans used the base key for multimodal rows. Once
-                # encoder coverage is required, remove that stale text-only
-                # certification and its results before inserting the image key.
-                conn.execute("DELETE FROM probe_results WHERE entry_key = ?", (entry.base_key,))
-                conn.execute("DELETE FROM pareto_results WHERE entry_key = ?", (entry.base_key,))
-                conn.execute("DELETE FROM entries WHERE entry_key = ?", (entry.base_key,))
+                # Retire both the pre-image base key and any older image-workload
+                # siblings before inserting the current canonical workload.
+                image_prefix = f"{entry.base_key}|image="
+                superseded_keys = [
+                    row[0]
+                    for row in conn.execute(
+                        """
+                        SELECT entry_key FROM entries
+                        WHERE substr(entry_key, 1, ?) = ? AND entry_key != ?
+                        """,
+                        (len(image_prefix), image_prefix, entry.key),
+                    )
+                ]
+                for retired_key in [entry.base_key, *superseded_keys]:
+                    conn.execute("DELETE FROM probe_results WHERE entry_key = ?", (retired_key,))
+                    conn.execute("DELETE FROM pareto_results WHERE entry_key = ?", (retired_key,))
+                    conn.execute("DELETE FROM entries WHERE entry_key = ?", (retired_key,))
             cur = conn.execute(
                 """
                 INSERT OR IGNORE INTO entries

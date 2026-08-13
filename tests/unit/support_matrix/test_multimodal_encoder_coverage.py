@@ -224,6 +224,48 @@ def test_encoder_unsupported_row_persists_a_valid_preflight_replay_command(monke
     assert check_csv_sanity(SUPPORT_MATRIX_HEADER, [row]) == []
 
 
+@pytest.mark.parametrize(
+    ("status", "command", "expected_error"),
+    [
+        (
+            STATUS_FAIL,
+            "uv run aiconfigurator cli default --database-mode SILICON",
+            "must invoke tools/support_matrix/generate_support_matrix.py",
+        ),
+        (
+            "HW_INCOMPATIBLE",
+            (
+                "uv run python tools/support_matrix/generate_support_matrix.py "
+                "--model Qwen/Qwen3.5-27B --system b200_sxm --backend vllm "
+                "--backend-version 0.24.0 --mode agg --no-save --expect-status FAIL "
+                "--expect-error-prefix ENCODER_UNSUPPORTED:"
+            ),
+            "ENCODER_UNSUPPORTED rows must use status FAIL",
+        ),
+    ],
+)
+def test_encoder_unsupported_row_requires_failure_preflight_contract(status, command, expected_error):
+    row = [
+        "Qwen/Qwen3.5-27B",
+        "Qwen3_5ForConditionalGeneration",
+        "b200_sxm",
+        "vllm",
+        "0.24.0",
+        "agg",
+        status,
+        "ENCODER_UNSUPPORTED: no AIC encoder implementation",
+        command,
+        "",
+        "",
+        "",
+        "",
+    ]
+
+    errors = check_csv_sanity(SUPPORT_MATRIX_HEADER, [row])
+
+    assert any(expected_error in error for error in errors)
+
+
 def test_text_only_model_keeps_existing_workload_and_command(monkeypatch):
     calls = []
 

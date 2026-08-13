@@ -201,13 +201,20 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
             except ValueError as exc:
                 errors.append(f"Row {i}: Command is not valid shell syntax: {exc}")
             else:
-                encoder_unsupported_replay = err_msg.startswith("ENCODER_UNSUPPORTED:") and (
-                    "tools/support_matrix/generate_support_matrix.py" in command_parts
-                )
-                if err_msg.startswith("ENCODER_UNSUPPORTED:") and not _has_declared_unimplemented_encoder(row[0]):
-                    errors.append(
-                        f"Row {i}: ENCODER_UNSUPPORTED requires a checkpoint with a declared but unimplemented encoder"
-                    )
+                encoder_unsupported_replay = err_msg.startswith("ENCODER_UNSUPPORTED:")
+                if encoder_unsupported_replay:
+                    if status != STATUS_FAIL:
+                        errors.append(f"Row {i}: ENCODER_UNSUPPORTED rows must use status {STATUS_FAIL}")
+                    if "tools/support_matrix/generate_support_matrix.py" not in command_parts:
+                        errors.append(
+                            f"Row {i}: ENCODER_UNSUPPORTED replay command must invoke "
+                            "tools/support_matrix/generate_support_matrix.py"
+                        )
+                    if not _has_declared_unimplemented_encoder(row[0]):
+                        errors.append(
+                            f"Row {i}: ENCODER_UNSUPPORTED requires a checkpoint with a declared "
+                            "but unimplemented encoder"
+                        )
 
                 def _option_values(flag: str) -> list[str]:
                     values = []

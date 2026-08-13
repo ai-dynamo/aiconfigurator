@@ -29,6 +29,7 @@ from tools.support_matrix.support_matrix import (
     SUPPORT_MATRIX_HEADER_WITH_SOURCE,
     SUPPORT_MATRIX_IMAGE_WORKLOAD,
     EncoderCoverage,
+    ImageWorkload,
     SupportMatrix,
     TestConstraints,
 )
@@ -168,6 +169,56 @@ def test_image_entry_retires_superseded_text_only_sqlite_result(tmp_path):
     with _connect(db_path) as conn:
         assert conn.execute("SELECT entry_key FROM entries").fetchall() == [(_entry().key,)]
         assert conn.execute("SELECT entry_key FROM probe_results").fetchall() == []
+
+
+def test_image_entry_retires_superseded_image_workload_sqlite_result(tmp_path):
+    db_path = tmp_path / "scan.sqlite"
+    stale_entry = Entry(
+        model=_entry().model,
+        architecture=_entry().architecture,
+        system=_entry().system,
+        backend=_entry().backend,
+        version=_entry().version,
+        mode=_entry().mode,
+        baseline_status=STATUS_PASS,
+        image_workload=ImageWorkload(448, 448, 1),
+    )
+    init_db(db_path)
+    seed_entries(db_path, [stale_entry])
+    with _connect(db_path) as conn:
+        write_probe_record(
+            conn,
+            ProbeRecord(
+                entry_key=stale_entry.key,
+                probe_shape="stale-image-workload",
+                python_ttft_ms=1.0,
+                python_tpot_ms=1.0,
+                rust_ttft_ms=1.0,
+                rust_tpot_ms=1.0,
+                ttft_drift_pct=0.0,
+                tpot_drift_pct=0.0,
+                python_err=None,
+                rust_err=None,
+                status="PASS",
+                duration_ms=1.0,
+                completed_at="2026-01-01T00:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO pareto_results
+                (entry_key, comparison_outcome, completed_at)
+            VALUES (?, ?, ?)
+            """,
+            (stale_entry.key, PARETO_STATUS_STRICT_PASS, "2026-01-01T00:00:00+00:00"),
+        )
+
+    seed_entries(db_path, [_entry()])
+
+    with _connect(db_path) as conn:
+        assert conn.execute("SELECT entry_key FROM entries").fetchall() == [(_entry().key,)]
+        assert conn.execute("SELECT entry_key FROM probe_results").fetchall() == []
+        assert conn.execute("SELECT entry_key FROM pareto_results").fetchall() == []
 
 
 def test_resumed_scan_retires_skipped_encoder_unsupported_result(tmp_path):
