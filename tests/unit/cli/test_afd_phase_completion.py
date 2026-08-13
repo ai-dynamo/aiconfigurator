@@ -1043,6 +1043,24 @@ def test_cli_estimate_rejects_visual_workload_when_afd_covers_prefill(monkeypatc
         )
 
 
+def test_cli_estimate_rejects_visual_afd_decode_without_prefill_complement(monkeypatch):
+    """Visual AFD decode alone would omit all prefill-side encoder work."""
+    _install_estimate_perf_db_stubs(monkeypatch)
+    monkeypatch.setattr(api, "_run_afd_estimate", lambda **_kwargs: _estimate_result(raw={}))
+
+    with pytest.raises(ValueError, match="afd_combined_with_pd=False"):
+        api.cli_estimate(
+            **_afd_cli_estimate_kwargs(
+                afd_phase="decode",
+                afd_combined_with_pd=False,
+                image_height=448,
+                image_width=448,
+                num_images=1,
+                num_frames_per_visual=8,
+            ),
+        )
+
+
 def test_cli_main_estimate_value_error_exits_without_traceback(monkeypatch):
     """Estimate-mode validation errors surface as a concise CLI error.
 

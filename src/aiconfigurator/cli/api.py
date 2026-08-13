@@ -1375,9 +1375,10 @@ def cli_estimate(
                 "or pick afd_phase in {'prefill','decode'}."
             )
         has_visual_workload = image_height > 0 and image_width > 0 and num_images > 0
-        if has_visual_workload and afd_phase in ("prefill", "both"):
+        if has_visual_workload and (afd_phase != "decode" or not afd_combined_with_pd):
             raise ValueError(
-                "Visual encoder modeling is not supported when AFD covers the prefill phase. "
+                "Visual encoder modeling is not supported when AFD covers the prefill phase "
+                "or when afd_combined_with_pd=False. "
                 "Use afd_phase='decode' with afd_combined_with_pd=True so the regular prefill "
                 "path accounts for encoder latency, memory, energy, and visual tokens."
             )
