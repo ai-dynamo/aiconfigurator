@@ -9,6 +9,11 @@ runtime:
   image_digest: sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3
 tables:
   gdn_perf:
+    # 2026-08-13: appended 54 flashinfer_gated_delta_rule_decode rows
+    # (AIC-1745) — the SM100+ serving-mandated FlashInfer bf16-state decode
+    # lane (sglang v0.5.14 hard-errors on flashinfer decode with non-bf16
+    # state). Measures ~0.50x the fla fp32-state lane at matched keys,
+    # exactly the state-bytes ratio. Keys disjoint from prior rows.
     collector_ref: 5a1834df2865d291f84f5fc1fbf6f3c99b69afba
     collector_hash: sha256:e18b5b3a83ff649f4955a271b0d3b3680be2c43a5e07e68882b4e91a6991d075
     case_plan_hash: sha256:1e658e78c925cba9773688165ecec208c0c2c2f0b931268cc15a245fc878ac48
