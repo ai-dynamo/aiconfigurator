@@ -356,7 +356,8 @@ def test_kimi_encoder_unsupported_cannot_be_hybrid_rescued_by_text_backbone(monk
     assert statuses == {"agg": STATUS_FAIL}
     assert errors["agg"].startswith("ENCODER_UNSUPPORTED:")
     assert sources == {"agg": ""}
-    assert "--database-mode SILICON" in commands["agg"]
+    assert "tools/support_matrix/generate_support_matrix.py" in commands["agg"]
+    assert "--expect-error-prefix ENCODER_UNSUPPORTED:" in commands["agg"]
     assert calls == []
 
 

@@ -193,25 +193,45 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
             except ValueError as exc:
                 errors.append(f"Row {i}: Command is not valid shell syntax: {exc}")
             else:
-                database_modes: list[str] = []
-                missing_database_mode_value = False
-                for part_index, part in enumerate(command_parts):
-                    if part == "--database-mode":
-                        if part_index + 1 >= len(command_parts) or command_parts[part_index + 1].startswith("-"):
-                            missing_database_mode_value = True
-                        else:
-                            database_modes.append(command_parts[part_index + 1].upper())
-                    elif part.startswith("--database-mode="):
-                        value = part.partition("=")[2]
-                        if value:
-                            database_modes.append(value.upper())
-                        else:
-                            missing_database_mode_value = True
-                if missing_database_mode_value or database_modes != [expected_database_mode]:
-                    errors.append(
-                        f"Row {i}: replay command must include exactly one effective "
-                        f"--database-mode {expected_database_mode}; found {database_modes or 'none'}"
-                    )
+                encoder_unsupported_replay = err_msg.startswith("ENCODER_UNSUPPORTED:") and (
+                    "tools/support_matrix/generate_support_matrix.py" in command_parts
+                )
+
+                def _option_values(flag: str) -> list[str]:
+                    values = []
+                    for part_index, part in enumerate(command_parts):
+                        if part == flag and part_index + 1 < len(command_parts):
+                            values.append(command_parts[part_index + 1])
+                        elif part.startswith(f"{flag}="):
+                            values.append(part.partition("=")[2])
+                    return values
+
+                if encoder_unsupported_replay:
+                    required_values = {
+                        "--model": row[0],
+                        "--system": row[2],
+                        "--backend": row[3],
+                        "--backend-version": row[4],
+                        "--mode": row[5],
+                        "--expect-status": STATUS_FAIL,
+                        "--expect-error-prefix": "ENCODER_UNSUPPORTED:",
+                    }
+                    for flag, expected_value in required_values.items():
+                        actual_values = _option_values(flag)
+                        if actual_values != [expected_value]:
+                            errors.append(
+                                f"Row {i}: encoder-unsupported replay command must include exactly one "
+                                f"{flag} {expected_value}; found {actual_values or 'none'}"
+                            )
+                    if "--no-save" not in command_parts:
+                        errors.append(f"Row {i}: encoder-unsupported replay command must include --no-save")
+                else:
+                    database_modes = [value.upper() for value in _option_values("--database-mode") if value]
+                    if database_modes != [expected_database_mode]:
+                        errors.append(
+                            f"Row {i}: replay command must include exactly one effective "
+                            f"--database-mode {expected_database_mode}; found {database_modes or 'none'}"
+                        )
 
                 if header == SUPPORT_MATRIX_HEADER:
                     image_values = row[10:13]

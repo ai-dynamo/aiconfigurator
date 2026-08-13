@@ -64,6 +64,47 @@ def test_legacy_parity_entry_infers_canonical_image_workload(tmp_path):
     assert entry.key.endswith("image=1024x1024x1")
 
 
+def test_legacy_encoder_unsupported_pass_is_skipped_without_blocking_scan(tmp_path, caplog):
+    csv_path = tmp_path / "b200_sxm.csv"
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(SUPPORT_MATRIX_HEADER_WITH_SOURCE)
+        writer.writerow(
+            [
+                "Qwen/Qwen3.5-27B",
+                "Qwen3_5ForConditionalGeneration",
+                "b200_sxm",
+                "vllm",
+                "0.24.0",
+                "agg",
+                STATUS_PASS,
+                "",
+                "uv run aiconfigurator cli default --database-mode SILICON",
+                "silicon",
+            ]
+        )
+        writer.writerow(
+            [
+                "Qwen/Qwen3-8B",
+                "Qwen3ForCausalLM",
+                "b200_sxm",
+                "vllm",
+                "0.24.0",
+                "agg",
+                STATUS_PASS,
+                "",
+                "uv run aiconfigurator cli default --database-mode SILICON",
+                "silicon",
+            ]
+        )
+
+    entries = load_entries(tmp_path)
+
+    assert [entry.model for entry in entries] == ["Qwen/Qwen3-8B"]
+    assert entries[0].image_workload is None
+    assert "text backbones were not parity-certified" in caplog.text
+
+
 def test_parity_probe_passes_image_arguments(monkeypatch):
     calls = []
 

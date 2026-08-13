@@ -8,7 +8,7 @@ import pytest
 
 from tools.support_matrix import generate_support_matrix
 from tools.support_matrix import support_matrix as support_matrix_module
-from tools.support_matrix.support_matrix import STATUS_PASS, SupportMatrix, TestConstraints
+from tools.support_matrix.support_matrix import STATUS_FAIL, STATUS_PASS, SupportMatrix, TestConstraints
 
 pytestmark = pytest.mark.unit
 
@@ -129,3 +129,58 @@ def test_generate_support_matrix_reports_empty_filter(monkeypatch, capsys):
 
     assert exc.value.code == 2
     assert "No support-matrix combinations matched the provided filters." in capsys.readouterr().err
+
+
+def test_generate_support_matrix_replay_asserts_status_and_error_prefix(monkeypatch, capsys):
+    class ReplaySupportMatrix:
+        def __init__(self, **_kwargs):
+            pass
+
+        def generate_combinations(self):
+            return [("Qwen/Qwen3.5-27B", "b200_sxm", "vllm", "0.24.0")]
+
+        def test_support_matrix(self, **_kwargs):
+            return [
+                (
+                    "Qwen/Qwen3.5-27B",
+                    "Qwen3_5ForConditionalGeneration",
+                    "b200_sxm",
+                    "vllm",
+                    "0.24.0",
+                    "agg",
+                    STATUS_FAIL,
+                    "ENCODER_UNSUPPORTED: no AIC encoder implementation",
+                    "replay",
+                    "",
+                    "",
+                    "",
+                    "",
+                )
+            ]
+
+    monkeypatch.setattr(generate_support_matrix, "SupportMatrix", ReplaySupportMatrix)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "generate_support_matrix.py",
+            "--model",
+            "Qwen/Qwen3.5-27B",
+            "--system",
+            "b200_sxm",
+            "--backend",
+            "vllm",
+            "--backend-version",
+            "0.24.0",
+            "--mode",
+            "agg",
+            "--no-save",
+            "--expect-status",
+            STATUS_FAIL,
+            "--expect-error-prefix",
+            "ENCODER_UNSUPPORTED:",
+        ],
+    )
+
+    generate_support_matrix.main()
+
+    assert "Observed support-matrix result:" in capsys.readouterr().out

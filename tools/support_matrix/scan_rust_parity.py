@@ -37,8 +37,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pandas as pd
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 sys.path.insert(0, str(_REPO_ROOT))
@@ -66,6 +64,8 @@ _WORKER_THREAD_CAPS = {
 _DEFAULTED_THREAD_CAPS = [name for name in _WORKER_THREAD_CAPS if name not in os.environ]
 for _name in _DEFAULTED_THREAD_CAPS:
     os.environ[_name] = _WORKER_THREAD_CAPS[_name]
+
+import pandas as pd
 
 from tools.support_matrix.support_matrix import (
     DEFAULT_ENGINE_STEP_COMPARISON_ATOL,
@@ -277,6 +277,7 @@ def _git_head_sha() -> str:
 def load_entries(baseline_dir: Path, *, status_filter: tuple[str, ...] = ("PASS",)) -> list[Entry]:
     """Read every per-system support-matrix CSV and return matching rows."""
     entries: list[Entry] = []
+    skipped_unsupported: dict[str, int] = {}
     for csv_path in sorted(baseline_dir.glob("*.csv")):
         with csv_path.open("r", encoding="utf-8") as fh:
             reader = csv.DictReader(fh)
@@ -298,10 +299,14 @@ def load_entries(baseline_dir: Path, *, status_filter: tuple[str, ...] = ("PASS"
                 else:
                     coverage = _get_encoder_coverage(row["HuggingFaceID"].strip())
                     if coverage.checkpoint_declares_encoder and not coverage.aic_encoder_implemented:
-                        raise ValueError(
-                            "ENCODER_UNSUPPORTED baseline PASS cannot be parity-certified: "
-                            f"{row['HuggingFaceID'].strip()} ({coverage.architecture})"
-                        )
+                        # The published baseline predates AIC-1738 and still has
+                        # backbone-only PASS rows for unsupported encoders. Do
+                        # not certify those rows, but let the rest of a default
+                        # parity scan proceed until the daily matrix migration
+                        # replaces them with ENCODER_UNSUPPORTED failures.
+                        model = row["HuggingFaceID"].strip()
+                        skipped_unsupported[model] = skipped_unsupported.get(model, 0) + 1
+                        continue
                     # Legacy matrices predate explicit image columns. Infer the
                     # canonical workload for supported encoders so a resumed
                     # parity scan cannot silently certify their text backbone.
@@ -318,6 +323,14 @@ def load_entries(baseline_dir: Path, *, status_filter: tuple[str, ...] = ("PASS"
                         image_workload=image_workload,
                     )
                 )
+    if skipped_unsupported:
+        logger.warning(
+            "Skipped %d legacy PASS rows for %d encoder-unsupported checkpoints; "
+            "their text backbones were not parity-certified: %s",
+            sum(skipped_unsupported.values()),
+            len(skipped_unsupported),
+            ", ".join(sorted(skipped_unsupported)),
+        )
     return entries
 
 

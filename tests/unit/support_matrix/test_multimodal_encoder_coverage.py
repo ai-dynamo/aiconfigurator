@@ -166,12 +166,13 @@ def test_declared_but_unimplemented_encoder_is_explicit_failure(monkeypatch, mod
     monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fail_if_run))
     _patch_constraints(monkeypatch)
 
-    statuses, errors = SupportMatrix.run_single_test(
+    statuses, errors, commands, _sources = SupportMatrix.run_single_test(
         model=model,
         system="b200_sxm",
         backend="vllm",
         version="0.24.0",
         system_spec=_b200_system_spec(),
+        include_commands=True,
     )
 
     coverage = _get_encoder_coverage(model)
@@ -179,6 +180,48 @@ def test_declared_but_unimplemented_encoder_is_explicit_failure(monkeypatch, mod
     assert not coverage.aic_encoder_implemented
     assert statuses == {"agg": STATUS_FAIL, "disagg": STATUS_FAIL}
     assert all(error.startswith("ENCODER_UNSUPPORTED:") for error in errors.values())
+    for mode, command in commands.items():
+        assert "tools/support_matrix/generate_support_matrix.py" in command
+        assert f"--mode {mode}" in command
+        assert "--no-save" in command
+        assert "--expect-status FAIL" in command
+        assert "--expect-error-prefix ENCODER_UNSUPPORTED:" in command
+        assert "aiconfigurator cli default" not in command
+
+
+def test_encoder_unsupported_row_persists_a_valid_preflight_replay_command(monkeypatch):
+    monkeypatch.setattr(
+        SupportMatrix,
+        "_run_mode",
+        staticmethod(lambda **_kwargs: pytest.fail("unsupported encoder must not run")),
+    )
+    _patch_constraints(monkeypatch)
+
+    statuses, errors, commands, _sources = SupportMatrix.run_single_test(
+        model="Qwen/Qwen3.5-27B",
+        system="b200_sxm",
+        backend="vllm",
+        version="0.24.0",
+        modes_to_test=("agg",),
+        include_commands=True,
+    )
+    row = [
+        "Qwen/Qwen3.5-27B",
+        "Qwen3_5ForConditionalGeneration",
+        "b200_sxm",
+        "vllm",
+        "0.24.0",
+        "agg",
+        statuses["agg"],
+        errors["agg"],
+        commands["agg"],
+        "",
+        "",
+        "",
+        "",
+    ]
+
+    assert check_csv_sanity(SUPPORT_MATRIX_HEADER, [row]) == []
 
 
 def test_text_only_model_keeps_existing_workload_and_command(monkeypatch):

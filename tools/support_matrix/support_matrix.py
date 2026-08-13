@@ -186,7 +186,7 @@ def _get_encoder_coverage(model: str) -> EncoderCoverage:
 def _encoder_unsupported_error(model: str, coverage: EncoderCoverage) -> str:
     return (
         "ENCODER_UNSUPPORTED: checkpoint "
-        f"{model!r} declares vision_config, but AIC has no encoder implementation "
+        f"{model!r} declares a vision encoder, but AIC has no encoder implementation "
         f"for architecture {coverage.architecture!r}."
     )
 
@@ -264,6 +264,41 @@ def _support_matrix_row_command(
         engine_step_frontier_rtol,
         engine_step_frontier_atol,
     )
+    return " ".join(shlex.quote(str(part)) for part in parts)
+
+
+def _encoder_unsupported_row_command(
+    *,
+    model: str,
+    system: str,
+    backend: str,
+    version: str,
+    mode: str,
+) -> str:
+    """Return a replay command for the support-matrix encoder preflight."""
+    parts = [
+        "uv",
+        "run",
+        "python",
+        "tools/support_matrix/generate_support_matrix.py",
+        "--model",
+        model,
+        "--system",
+        system,
+        "--backend",
+        backend,
+        "--backend-version",
+        version,
+        "--mode",
+        mode,
+        "--max-workers",
+        "1",
+        "--no-save",
+        "--expect-status",
+        STATUS_FAIL,
+        "--expect-error-prefix",
+        "ENCODER_UNSUPPORTED:",
+    ]
     return " ".join(shlex.quote(str(part)) for part in parts)
 
 
@@ -1017,6 +1052,16 @@ class SupportMatrix:
             reason = _encoder_unsupported_error(model, encoder_coverage)
             statuses = dict.fromkeys(modes_to_test, STATUS_FAIL)
             error_messages = dict.fromkeys(modes_to_test, reason)
+            commands = {
+                mode: _encoder_unsupported_row_command(
+                    model=model,
+                    system=system,
+                    backend=backend,
+                    version=version,
+                    mode=mode,
+                )
+                for mode in modes_to_test
+            }
             if include_commands:
                 return statuses, error_messages, commands, provenance
             return statuses, error_messages
