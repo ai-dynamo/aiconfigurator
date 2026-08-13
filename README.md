@@ -47,7 +47,8 @@ Let's get started.
 pip3 install aiconfigurator
 ```
 
-The upper `aiconfigurator` wheel contains the CLI and generator.
+The upper `aiconfigurator` wheel contains the CLI, generator, and versioned
+server-config adapter.
 It depends on the exact matching `aiconfigurator-core` wheel, which independently
 owns the SDK, model/system data, and native extension. Installing
 `aiconfigurator` therefore installs the complete product, while core-only
@@ -190,6 +191,31 @@ print(result["parallelism"]) # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8}
 agg, disagg = cli_support(model_path="Qwen/Qwen3-32B-FP8", system="h200_sxm")
 print(f"Agg supported: {agg}, Disagg supported: {disagg}")
 ```
+
+Serving configs can be adapted into validated estimate requests without running
+an estimate. InferenceX DB records, DynamoGraphDeployments, and concrete
+`dynamo-ci` SGLang benchmark recipes are supported:
+
+```python
+from pathlib import Path
+
+from aiconfigurator.sdk.config_adapter import (
+    AdapterOverrides,
+    DynamoRecipeSource,
+    adapt_config,
+    to_cli_estimate_kwargs,
+)
+
+report = adapt_config(
+    DynamoRecipeSource(Path("deploy.yaml"), Path("perf.yaml")),
+    AdapterOverrides(system_name="h200_sxm"),
+)
+for request in report.requests:
+    kwargs = to_cli_estimate_kwargs(request)
+```
+
+See the [Config Adapter Guide](docs/config_adapter.md) for schema, precedence,
+supported recipe shapes, diagnostics, and explicit estimate execution.
 
 An example here,
 ```bash
