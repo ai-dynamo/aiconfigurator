@@ -45,6 +45,7 @@ pytestmark = pytest.mark.unit
 
 DSR1 = "deepseek-ai/DeepSeek-R1"
 DSV32 = "deepseek-ai/DeepSeek-V3.2-Exp"
+KIMIK25 = "nvidia/Kimi-K2.5-NVFP4"
 QWEN3 = "Qwen/Qwen3-235B-A22B"
 
 SGLANG_COMM = {"context": "deepep_ht", "generation": "deepep_ll"}
@@ -93,9 +94,9 @@ def _deepseek_sglang(tp_size=1, attention_dp_size=32, **extra):
     )
 
 
-def _deepseek_trtllm(**extra):
+def _deepseek_trtllm(model_path=DSR1, **extra):
     return _build(
-        DSR1,
+        model_path,
         "trtllm",
         tp_size=1,
         moe_tp_size=1,
@@ -340,6 +341,21 @@ class TestDeepSeekTrtllmLargeEP:
             "generation_shared_ffn2_gemm",
         ]
 
+    @pytest.mark.parametrize(
+        ("model_path", "q_width", "kv_width", "o_width"),
+        [
+            (DSR1, 128 * 192, 128 * 256, 128 * 128),
+            (KIMIK25, 64 * 192, 64 * 256, 64 * 128),
+        ],
+    )
+    def test_mla_projection_widths_follow_checkpoint_head_count(self, model_path, q_width, kv_width, o_width):
+        model = _deepseek_trtllm(model_path=model_path)
+        assert _op(model.context_ops, "context_q_b_proj_gemm")._n == q_width
+        assert _op(model.context_ops, "context_kv_b_proj_gemm")._n == kv_width
+        assert _op(model.context_ops, "context_proj_gemm")._k == o_width
+        assert _op(model.generation_ops, "generation_q_b_proj_gemm")._n == q_width
+        assert _op(model.generation_ops, "generation_proj_gemm")._k == o_width
+
     def test_legacy_pdl_factor_scales_the_whole_decode_stack(self):
         model = _deepseek_trtllm()
         assert _op(model.context_ops, "context_moe")._scale_factor == DS_LAYERS
@@ -553,6 +569,27 @@ class TestDeepSeekV32LargeEP:
         for name in ("generation_add_norm_1", "generation_attention", "generation_add_norm_2"):
             assert _op(model.generation_ops, name)._scale_factor == DS_LAYERS * PDL_FACTOR, name
 
+    def test_trtllm_nvfp4_preserves_per_projection_dsa_weight_dtypes(self):
+        model = _build(
+            "nvidia/DeepSeek-V3.2-NVFP4",
+            "trtllm",
+            tp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=16,
+            attention_dp_size=16,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            moe_comm_backend=dict(TRTLLM_COMM),
+            num_gpus_per_node=GB200_GPUS_PER_NODE,
+        )
+        context = _op(model.context_ops, "context_attention")
+        generation = _op(model.generation_ops, "generation_attention")
+        # q/kv/indexer are BF16 while o_proj is NVFP4: 13.15 GiB over 61 layers.
+        assert context.get_weights() / (1 << 30) == pytest.approx(13.15, abs=0.1)
+        assert generation._weights == context._weights
+
     def test_trtllm_validation_applies(self):
         with pytest.raises(ValueError, match="must equal"):
             _v32_trtllm(enable_eplb=False, wideep_num_slots=288)
@@ -669,6 +706,25 @@ class TestMOEModelLargeEP:
         # prefill-only inside MoEExpertCompute (moe_comm.py:1295).
         assert model.generation_ops[8]._workload_distribution == "power_law_1.2"
         assert model.generation_ops[8]._inference_phase == "generation"
+
+    def test_trtllm_eplb_uses_suffixed_family_distribution_in_both_phases(self):
+        model = _build(
+            QWEN3,
+            "trtllm",
+            tp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=8,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            moe_quant_mode=common.MoEQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            enable_eplb=True,
+            moe_comm_backend=dict(TRTLLM_COMM),
+            num_gpus_per_node=GB200_GPUS_PER_NODE,
+        )
+        assert _op(model.context_ops, "context_moe")._workload_distribution == "power_law_1.2_eplb"
+        assert _op(model.generation_ops, "generation_moe")._workload_distribution == "power_law_1.2_eplb"
 
     def test_deepep_backend_alone_no_longer_switches_the_graph(self):
         # moe_backend=deepep_moe without moe_comm_backend is the FUSED graph
@@ -888,6 +944,11 @@ class TestAttentionOpKeys:
             "context_attention",
             "generation_attention",
         )
+
+    def test_deprecated_enable_wideep_keyword_alias_is_preserved(self):
+        with pytest.warns(DeprecationWarning, match="enable_wideep"):
+            old_keyword = attention_op_keys("DEEPSEEK", "sglang", enable_wideep=True)
+        assert old_keyword == attention_op_keys("DEEPSEEK", "sglang", is_large_ep=True)
 
 
 if __name__ == "__main__":

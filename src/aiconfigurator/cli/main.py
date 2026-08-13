@@ -679,14 +679,16 @@ def _add_recommend_mode_arguments(parser):
         "--enable-wideep",
         action="store_true",
         default=False,
-        help="Enable Wide Expert Parallelism (WideEP) for MoE models.",
+        help="Deprecated and ignored: large-EP is explored automatically from data coverage. "
+        "Restrict with *_moe_ep_candidates in an exp YAML.",
     )
     parser.add_argument(
         "--moe-backend",
         type=str,
         choices=["deepep_moe", "megamoe"],
         default=None,
-        help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell.",
+        help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell. "
+        "'deepep_moe' is deprecated and ignored (large-EP is explored automatically from data coverage).",
     )
 
 

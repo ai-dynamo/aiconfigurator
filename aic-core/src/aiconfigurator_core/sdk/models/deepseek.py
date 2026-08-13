@@ -197,6 +197,16 @@ class DeepSeekModel(BaseModel):
             if gemm_quant_mode != common.GEMMQuantMode.bfloat16
             else common.GEMMQuantMode.bfloat16
         )
+        extra = self.extra_params if isinstance(self.extra_params, dict) else {}
+        q_lora_rank = int(extra.get("q_lora_rank") or 1536)
+        kv_lora_rank = int(extra.get("kv_lora_rank") or 512)
+        qk_nope_head_dim = int(extra.get("qk_nope_head_dim") or 128)
+        qk_rope_head_dim = int(extra.get("qk_rope_head_dim") or 64)
+        v_head_dim = int(extra.get("v_head_dim") or 128)
+        q_projection_width = self._num_heads * (qk_nope_head_dim + qk_rope_head_dim)
+        kv_projection_width = self._num_heads * (qk_nope_head_dim + v_head_dim)
+        o_projection_width = self._num_heads * v_head_dim
+        downscale_width = q_lora_rank + kv_lora_rank + qk_rope_head_dim
 
         # Perf-row key for the profiled MLA attention module. When the
         # checkpoint keeps attention projections unquantized (every NVFP4
@@ -344,8 +354,8 @@ class DeepSeekModel(BaseModel):
                             ops.ElementWise(
                                 "generation_rope_kvcache",
                                 gen_scale,
-                                576,  # kv_lora_rank(512) + qk_rope_head_dim(64)
-                                576,
+                                kv_lora_rank + qk_rope_head_dim,
+                                kv_lora_rank + qk_rope_head_dim,
                                 0.8,
                             ),
                         ],
