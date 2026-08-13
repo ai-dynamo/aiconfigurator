@@ -574,7 +574,11 @@ impl MoeOp {
     }
 
     /// This op's own-slice token curve on the selected table.
-    fn slice_points(&self, db: &PerfDatabase, table: MoeTableSel) -> Result<Vec<(u32, f64)>, AicError> {
+    fn slice_points(
+        &self,
+        db: &PerfDatabase,
+        table: MoeTableSel,
+    ) -> Result<Vec<(u32, f64)>, AicError> {
         db.moe.slice_points(
             moe_kernel(table),
             self.quant_mode.name(),

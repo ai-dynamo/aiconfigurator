@@ -112,7 +112,10 @@ so the wire JSON stays the flat object Python emits.
 - MLA attention (context + generation) and DeepSeek-family models, including MTP
   speculative decoding (`nextn`).
 - Context parallelism: dense GQA/MoE (seq-split token-major ops + zigzag
-  `ContextAttention`) and MLA prefill (zigzag `ContextMLA`).
+  `ContextAttention`), MLA prefill (zigzag `ContextMLA`), and the DSV4-Flash
+  CSA CP slice (issue #1498): the CP attention composition, seq-split-aware
+  mHC ops, and the reuse-aware CSA `top_last` loader (approved `reuse.yaml`
+  donors serve the CP rows on both engines).
 - MoE attention-DP token scaling (SGLang all-gathers DP-sharded tokens before
   the MoE) and DSA generation boundary-utilization extrapolation, both matched
   to Python.
@@ -146,9 +149,16 @@ code should not be "cleaned up" in ways that diverge from the pinned reference.
 
 ## Known limits
 
-- Full context-parallel modeling for DSA (DeepSeek-V3.2) and dsv4
-  (DeepSeek-V4-Flash) is blocked on missing sparse mqa/topk/dsa perf tables; the
-  dense and MLA CP paths are complete.
+- Context-parallel modeling for DSA (DeepSeek-V3.2) remains blocked on
+  missing sparse mqa/topk perf tables; the dense and MLA CP paths are
+  complete. The DSV4-Flash CSA CP slice is supported (issue #1498: adjudicated
+  and parity-anchored on `b200_sxm/sglang` 0.5.12/0.5.14), with the remaining
+  qualification that sparse-table coverage beyond the shipped
+  CSA/top_last/mHC grids (other systems/versions, or rows absent from the
+  approved reuse donors) still surfaces as symmetric
+  `PerfDataNotAvailableError` on both engines.
+- Request-level FPM v2 fields and further WideEP accuracy work are left for later
+  PRs.
 - Request-level FPM v2 fields are left for later PRs. The legacy wideEP MoE
   surface (`wideep_moe` op and table, deepep dispatch flavors) was retired in
   favor of the large-EP `MoeAllToAll`/`MoeExpertCompute` path above.

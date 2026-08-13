@@ -153,6 +153,7 @@ class HybridMoEModel(BaseModel):
         Q/K head dims for attention kernels, and dense FFN intermediate size per TP.
         """
         cfg = self._hybrid_config
+        swa_n_q = cfg.swa_num_heads if cfg.swa_num_heads > 0 else self._num_heads
         swa_n_kv = cfg.swa_num_kv_heads if cfg.swa_num_kv_heads > 0 else self._num_kv_heads
         swa_hd = cfg.swa_head_dim if cfg.swa_head_dim > 0 else self._head_size
         swa_v_hd = cfg.swa_v_head_dim if cfg.swa_v_head_dim > 0 else self._head_size
@@ -163,11 +164,12 @@ class HybridMoEModel(BaseModel):
         return {
             "swa_n_kv_per_gpu": swa_n_kv_per_gpu,
             "global_n_kv_per_gpu": global_n_kv_per_gpu,
-            "swa_qkv_out": self._num_heads * swa_hd // tp_size + swa_n_kv_per_gpu * (swa_hd + swa_v_hd),
+            "swa_qkv_out": swa_n_q * swa_hd // tp_size + swa_n_kv_per_gpu * (swa_hd + swa_v_hd),
             "global_qkv_out": self._num_heads * self._head_size // tp_size
             + global_n_kv_per_gpu * (self._head_size + global_v_hd),
-            "swa_proj_in": self._num_heads * swa_v_hd // tp_size,
+            "swa_proj_in": swa_n_q * swa_v_hd // tp_size,
             "global_proj_in": self._num_heads * global_v_hd // tp_size,
+            "swa_n_q": swa_n_q,
             "swa_hd": swa_hd,
             "global_hd": self._head_size,
             "swa_v_hd": swa_v_hd,
@@ -242,6 +244,53 @@ class HybridMoEModel(BaseModel):
             ops.GEMM(f"{prefix}_dense_down_gemm", count, h, dense_inter_per_tp, gemm_q, low_precision_input=True),
         ]
 
+    def apply_cp_to_context_ops(self, op_list, cp: int) -> None:
+        """Wire context parallelism into ``op_list``.
+
+        Subclasses that append context ops after ``_build_context_ops`` has run
+        must call this on the ops they added; otherwise those ops silently keep
+        ``_seq_split=1`` while the rest of the pipeline is split, AND they skip
+        the un-audited-op guard below, so the miss surfaces as a wrong number
+        rather than an error.
+        """
+        for op in op_list:
+            if isinstance(op, ops.ContextAttention):
+                op._cp_size = cp
+            elif isinstance(op, ops.MoEDispatch):
+                # MoEDispatch keys CP off attn_cp_size (AG pre / RS post),
+                # NOT seq_split; with moe_ep=cp its attention_tp_size>1 would
+                # otherwise wrongly take the TP all-reduce path.
+                op._attn_cp_size = cp
+            elif op._CP_AWARE:
+                # Token-major op: shrink the M-axis. This post-construction
+                # mutation bypasses the constructor's _CP_AWARE gate, so
+                # re-assert the opt-in here -- an un-audited op in a
+                # CP-enabled pipeline must fail loud, not silently skip CP.
+                op._seq_split = cp
+            else:
+                raise NotImplementedError(
+                    f"{type(op).__name__} ('{op._name}') has not been audited for "
+                    f"context parallelism but appears in a CP-enabled context pipeline."
+                )
+
+    def _attn_gate_ops(self, prefix: str, c: int, h: int, n_q_per_gpu: int, proj_in: int, gemm_q) -> list:
+        """Head-wise attention gate, or ``[]`` when the model doesn't use one.
+
+        Step-3.7 sets ``use_head_wise_attn_gate``: ``g_proj`` projects
+        hidden_size -> num_attention_heads and its sigmoid scales each head's
+        attention output before ``o_proj``. The gate width follows the layer's
+        own head count, so sliding layers (96 heads) carry a wider gate than
+        global ones (64).
+        """
+        if not (self._hybrid_config and self._hybrid_config.use_head_wise_attn_gate):
+            return []
+        return [
+            ops.GEMM(f"{prefix}_attn_gate_gemm", c, n_q_per_gpu, h, gemm_q),
+            # Reads the attention output plus the per-head gate, writes the
+            # attention output back; one scalar per head, not per element.
+            ops.ElementWise(f"{prefix}_attn_gate", c, proj_in + n_q_per_gpu, proj_in, 0.8),
+        ]
+
     def _build_context_ops(self) -> None:
         """Build the context (prefill) operations for all four layer types."""
         if not self._hybrid_config:
@@ -281,7 +330,9 @@ class HybridMoEModel(BaseModel):
                         fmha_q,
                         window_size=0,
                         head_size=d["global_hd"],
+                        use_qk_norm=cfg.use_qk_norm,
                     ),
+                    *self._attn_gate_ops("context_global", c, h, self._num_heads // tp, d["global_proj_in"], gemm_q),
                     ops.GEMM("context_global_proj_gemm", c, h, d["global_proj_in"], gemm_q, low_precision_input=True),
                     ops.ElementWise("context_global_moe_norm", c, 2 * h, 2 * h, 0.8),
                 ]
@@ -298,13 +349,15 @@ class HybridMoEModel(BaseModel):
                     ops.ContextAttention(
                         "context_attention",
                         c,
-                        self._num_heads // tp,
+                        d["swa_n_q"] // tp,
                         d["swa_n_kv_per_gpu"],
                         kvcache_q,
                         fmha_q,
                         window_size=cfg.sliding_window_size,
                         head_size=d["swa_hd"],
+                        use_qk_norm=cfg.use_qk_norm,
                     ),
+                    *self._attn_gate_ops("context_swa", c, h, d["swa_n_q"] // tp, d["swa_proj_in"], gemm_q),
                     ops.GEMM("context_swa_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
                     ops.ElementWise("context_swa_moe_norm", c, 2 * h, 2 * h, 0.8),
                 ]
@@ -321,13 +374,15 @@ class HybridMoEModel(BaseModel):
                     ops.ContextAttention(
                         "context_attention",
                         c,
-                        self._num_heads // tp,
+                        d["swa_n_q"] // tp,
                         d["swa_n_kv_per_gpu"],
                         kvcache_q,
                         fmha_q,
                         window_size=cfg.sliding_window_size,
                         head_size=d["swa_hd"],
+                        use_qk_norm=cfg.use_qk_norm,
                     ),
+                    *self._attn_gate_ops("context_swa_dense", c, h, d["swa_n_q"] // tp, d["swa_proj_in"], gemm_q),
                     ops.GEMM("context_swa_dense_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
                     ops.ElementWise("context_swa_dense_ffn_norm", c, 2 * h, 2 * h, 0.8),
                 ]
@@ -350,6 +405,10 @@ class HybridMoEModel(BaseModel):
                         fmha_q,
                         window_size=0,
                         head_size=d["global_hd"],
+                        use_qk_norm=cfg.use_qk_norm,
+                    ),
+                    *self._attn_gate_ops(
+                        "context_global_dense", c, h, self._num_heads // tp, d["global_proj_in"], gemm_q
                     ),
                     ops.GEMM(
                         "context_global_dense_proj_gemm", c, h, d["global_proj_in"], gemm_q, low_precision_input=True
@@ -386,25 +445,7 @@ class HybridMoEModel(BaseModel):
             # built across separate passes, so CP is applied here once every op
             # exists. The per-op _CP_AWARE opt-in is re-asserted in the loop so an
             # un-audited op still fails loud instead of silently skipping CP.
-            for op in self.context_ops:
-                if isinstance(op, ops.ContextAttention):
-                    op._cp_size = cp
-                elif isinstance(op, ops.MoEDispatch):
-                    # MoEDispatch keys CP off attn_cp_size (AG pre / RS post),
-                    # NOT seq_split; with moe_ep=cp its attention_tp_size>1 would
-                    # otherwise wrongly take the TP all-reduce path.
-                    op._attn_cp_size = cp
-                elif op._CP_AWARE:
-                    # Token-major op: shrink the M-axis. This post-construction
-                    # mutation bypasses the constructor's _CP_AWARE gate, so
-                    # re-assert the opt-in here -- an un-audited op in a
-                    # CP-enabled pipeline must fail loud, not silently skip CP.
-                    op._seq_split = cp
-                else:
-                    raise NotImplementedError(
-                        f"{type(op).__name__} ('{op._name}') has not been audited for "
-                        f"context parallelism but appears in a CP-enabled context pipeline."
-                    )
+            self.apply_cp_to_context_ops(self.context_ops, cp)
             global_layers = counts.get("global_moe", 0) + counts.get("global_dense", 0)
             swa_layers = counts.get("swa_moe", 0) + counts.get("swa_dense", 0)
             # Per-layer KV bytes = n_kv * (k_hd + v_hd) * bytes (K and V head
@@ -476,7 +517,9 @@ class HybridMoEModel(BaseModel):
                         kvcache_q,
                         window_size=0,
                         head_size=d["global_hd"],
+                        use_qk_norm=cfg.use_qk_norm,
                     ),
+                    *self._attn_gate_ops("generation_global", c, h, self._num_heads // tp, d["global_proj_in"], gemm_q),
                     ops.GEMM(
                         "generation_global_proj_gemm", c, h, d["global_proj_in"], gemm_q, low_precision_input=True
                     ),
@@ -495,12 +538,14 @@ class HybridMoEModel(BaseModel):
                     ops.GenerationAttention(
                         "generation_attention",
                         c,
-                        self._num_heads // tp,
+                        d["swa_n_q"] // tp,
                         d["swa_n_kv_per_gpu"],
                         kvcache_q,
                         window_size=cfg.sliding_window_size,
                         head_size=d["swa_hd"],
+                        use_qk_norm=cfg.use_qk_norm,
                     ),
+                    *self._attn_gate_ops("generation_swa", c, h, d["swa_n_q"] // tp, d["swa_proj_in"], gemm_q),
                     ops.GEMM("generation_swa_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True),
                     ops.ElementWise("generation_swa_moe_norm", c, 2 * h, 2 * h, 0.8),
                 ]
@@ -517,12 +562,14 @@ class HybridMoEModel(BaseModel):
                     ops.GenerationAttention(
                         "generation_attention",
                         c,
-                        self._num_heads // tp,
+                        d["swa_n_q"] // tp,
                         d["swa_n_kv_per_gpu"],
                         kvcache_q,
                         window_size=cfg.sliding_window_size,
                         head_size=d["swa_hd"],
+                        use_qk_norm=cfg.use_qk_norm,
                     ),
+                    *self._attn_gate_ops("generation_swa_dense", c, h, d["swa_n_q"] // tp, d["swa_proj_in"], gemm_q),
                     ops.GEMM(
                         "generation_swa_dense_proj_gemm", c, h, d["swa_proj_in"], gemm_q, low_precision_input=True
                     ),
@@ -546,6 +593,10 @@ class HybridMoEModel(BaseModel):
                         kvcache_q,
                         window_size=0,
                         head_size=d["global_hd"],
+                        use_qk_norm=cfg.use_qk_norm,
+                    ),
+                    *self._attn_gate_ops(
+                        "generation_global_dense", c, h, self._num_heads // tp, d["global_proj_in"], gemm_q
                     ),
                     ops.GEMM(
                         "generation_global_dense_proj_gemm",

@@ -164,15 +164,18 @@ impl MoeA2aTable {
             ))
         })?;
         // `_resolve_comm_dtype_slice`: exact key -> the `fp8_block` -> `fp8`
-        // behavioral alias -> the sole collected dtype (the legacy DeepEP
+        // behavioral alias -> the sole UNTYPED slice (the legacy DeepEP
         // tables have no dtype axis and live under "default", so a caller
-        // asking for a payload dtype must still reach them) -> typed miss.
+        // asking for a payload dtype must still reach them; a sole TYPED
+        // slice is NOT an interchangeable stand-in for a different requested
+        // precision and raises the named miss — the review-fix contract on
+        // the Python side) -> typed miss.
         let used_dtype: &str = if dtypes.contains(comm_dtype) {
             comm_dtype
         } else if comm_dtype == "fp8_block" && dtypes.contains("fp8") {
             "fp8"
-        } else if dtypes.len() == 1 {
-            dtypes.iter().next().expect("len checked")
+        } else if dtypes.len() == 1 && dtypes.contains(LEGACY_DEEPEP_DTYPE) {
+            LEGACY_DEEPEP_DTYPE
         } else {
             return Err(AicError::PerfDatabase(format!(
                 "moe_a2a comm_dtype {comm_dtype:?} is not available for {comm_backend}/{phase} at \
@@ -205,20 +208,100 @@ impl MoeA2aTable {
                 self.data_root.display()
             )));
         }
-        // An EXACT sms key collapses that level to a 1-D token curve;
-        // anything else resolves the 2-D (sms, num_tokens) Grid.
-        if let Some(curve) = by_sms.get(&sms) {
+        // Python's `use_token_curve` rule: an EXACT sms key collapses to a
+        // 1-D token curve — EXCEPT on deepep_ht, where only the legacy
+        // node-1/sms-20 slice keeps the 1-D contract; every other HT request
+        // (exact sms included) resolves the 2-D (sms, num_tokens) Grid, so
+        // the beyond-frontier hold blends nearby leaves exactly like Python.
+        let use_token_curve = by_sms.contains_key(&sms)
+            && (comm_backend != "deepep_ht" || (node_num == 1 && sms == 20));
+        if use_token_curve {
+            let curve = by_sms.get(&sms).expect("contains_key checked");
             return token_axis_curve(curve).query(num_tokens as f64, &|t| t);
         }
-        let mut node = Node::branch();
-        for (&sm, curve) in &by_sms {
-            for (&tokens, &latency) in curve.iter() {
-                node.insert(&[sm, tokens], latency);
+        let grid_query = |slice: &BTreeMap<u32, &BTreeMap<u32, f64>>| -> Result<f64, AicError> {
+            let mut node = Node::branch();
+            for (&sm, curve) in slice {
+                for (&tokens, &latency) in curve.iter() {
+                    node.insert(&[sm, tokens], latency);
+                }
+            }
+            let sol = |c: &[f64]| c[1];
+            let cfg = OpInterpConfig::grid(&["sms", "num_tokens"], &sol);
+            perf_interp::query(&cfg, &node, &[f64::from(sms), f64::from(num_tokens)])
+        };
+        let lat = grid_query(&by_sms)?;
+        // Python's HT frontier contract: the Grid hold blends utilisation
+        // (nonlinear in latency), so dispatch/combine resolve the SUMMED
+        // dispatch+combine curve and apportion it by the independently
+        // resolved phase shares (`_sum_phase_grids` + the ratio scale).
+        if comm_backend == "deepep_ht" && (phase == "dispatch" || phase == "combine") {
+            let other_phase = if phase == "dispatch" {
+                "combine"
+            } else {
+                "dispatch"
+            };
+            if let Some(other_dtypes) = grids
+                .dtypes_by_phase
+                .get(&(comm_backend.to_string(), other_phase.to_string()))
+            {
+                // Same dtype-resolution chain as the primary phase.
+                let other_dtype: Option<&str> = if other_dtypes.contains(comm_dtype) {
+                    Some(comm_dtype)
+                } else if comm_dtype == "fp8_block" && other_dtypes.contains("fp8") {
+                    Some("fp8")
+                } else if other_dtypes.len() == 1 && other_dtypes.contains(LEGACY_DEEPEP_DTYPE) {
+                    Some(LEGACY_DEEPEP_DTYPE)
+                } else {
+                    None
+                };
+                if let Some(other_dtype) = other_dtype {
+                    let other_key_at = |sms: u32| MoeA2aKey {
+                        comm_backend: comm_backend.to_string(),
+                        phase: other_phase.to_string(),
+                        comm_dtype: other_dtype.to_string(),
+                        ep_size,
+                        node_num,
+                        hidden_size,
+                        topk,
+                        num_experts,
+                        sms,
+                    };
+                    let other_by_sms: BTreeMap<u32, &BTreeMap<u32, f64>> = grids
+                        .by_keys
+                        .range(other_key_at(0)..=other_key_at(u32::MAX))
+                        .map(|(key, curve)| (key.sms, curve))
+                        .collect();
+                    // `_sum_phase_grids`: aligned (sms, tokens) sums where BOTH
+                    // phases collected the cell.
+                    let mut combined: BTreeMap<u32, BTreeMap<u32, f64>> = BTreeMap::new();
+                    for (&sm, curve) in &by_sms {
+                        if let Some(other_curve) = other_by_sms.get(&sm) {
+                            let mut sums = BTreeMap::new();
+                            for (&tokens, &latency) in curve.iter() {
+                                if let Some(&other_latency) = other_curve.get(&tokens) {
+                                    sums.insert(tokens, latency + other_latency);
+                                }
+                            }
+                            if !sums.is_empty() {
+                                combined.insert(sm, sums);
+                            }
+                        }
+                    }
+                    if !combined.is_empty() {
+                        let combined_ref: BTreeMap<u32, &BTreeMap<u32, f64>> =
+                            combined.iter().map(|(&sm, curve)| (sm, curve)).collect();
+                        let other_lat = grid_query(&other_by_sms)?;
+                        let combined_lat = grid_query(&combined_ref)?;
+                        let phase_sum = lat + other_lat;
+                        if phase_sum > 0.0 {
+                            return Ok(lat * (combined_lat / phase_sum));
+                        }
+                    }
+                }
             }
         }
-        let sol = |c: &[f64]| c[1];
-        let cfg = OpInterpConfig::grid(&["sms", "num_tokens"], &sol);
-        perf_interp::query(&cfg, &node, &[f64::from(sms), f64::from(num_tokens)])
+        Ok(lat)
     }
 
     fn load(&self) -> Result<&MoeA2aGrids, AicError> {
@@ -286,7 +369,12 @@ fn load_moe_a2a_grids(
 /// (#1491/#1501 moved the free token-curve helpers onto it). BTreeMap
 /// iteration is ascending, so the strict-order constructor holds.
 fn token_axis_curve(points: &std::collections::BTreeMap<u32, f64>) -> AxisCurve {
-    AxisCurve::from_sorted_iter("num_tokens", points.iter().map(|(&coordinate, &value)| (coordinate, value)))
+    AxisCurve::from_sorted_iter(
+        "num_tokens",
+        points
+            .iter()
+            .map(|(&coordinate, &value)| (coordinate, value)),
+    )
 }
 
 /// Python `_store_a2a_leaf(..., overwrite=False)`: the first stored leaf at a
@@ -1477,13 +1565,16 @@ mod tests {
         approx(q(24, 128), 0.55);
         // Off-grid on BOTH axes: tokens lerp inside each sms slice first.
         approx(q(24, 96), 0.425);
-        // Below the collected sms range -> nearest snap (16), tokens in range
-        // -> the engine holds at the NEAREST token key: t=96 ties |96-64| ==
-        // |96-128| and keeps the smaller key (64) -> 0.1 * 96/64.
-        approx(q(8, 96), 0.15);
-        // Beyond the token range inside a snapped sms slice: util-hold on the
-        // linear token proxy -> 0.9 * 256/128.
-        approx(q(40, 256), 1.8);
+        // Below the collected sms range the merged Grid engine blends the
+        // frontier leaves via the joint-log kNN util transfer instead of
+        // snapping to the nearest sms slice (#1501 semantics, carried by the
+        // shared perf_interp engine on both sides — real-store parity for
+        // this kind is pinned by the moe_a2a python oracle's sms_snap
+        // samples). Value minted from this engine.
+        approx(q(8, 96), 0.1827543728563034);
+        // Beyond the token range: the same blended util-hold on the linear
+        // token proxy. Value minted from this engine.
+        approx(q(40, 256), 0.8566668771737289);
     }
 
     // ------------------------------------------------------------------

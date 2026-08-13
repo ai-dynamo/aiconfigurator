@@ -22,12 +22,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use super::axis_curve::AxisCurve;
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
-use super::{kernel_source_ok, resolve_op_sources};
-use super::axis_curve::AxisCurve;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct TrtllmAlltoallTable {
@@ -74,7 +74,11 @@ impl TrtllmAlltoallTable {
     pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
         let alltoall_sources =
             resolve_op_sources(perf_db_sources, "trtllm_alltoall_perf.parquet", &data_root);
-        Self { data_root, alltoall_sources, trtllm_alltoall: OnceLock::new() }
+        Self {
+            data_root,
+            alltoall_sources,
+            trtllm_alltoall: OnceLock::new(),
+        }
     }
 
     /// TRT-LLM alltoall latency for one phase op. Mirrors Python
@@ -226,7 +230,9 @@ pub(crate) fn select_alltoall_kernel(
         }
     }
     let supports_mnnvl = spec.gpu.sm_version.unwrap_or(0) >= 100;
-    let is_wideep = moe_backend.map(|b| b.to_uppercase() == "WIDEEP").unwrap_or(false);
+    let is_wideep = moe_backend
+        .map(|b| b.to_uppercase() == "WIDEEP")
+        .unwrap_or(false);
     if is_wideep {
         if supports_mnnvl {
             return "NVLinkTwoSided";
@@ -251,7 +257,12 @@ pub(crate) fn select_alltoall_kernel(
 /// (#1491/#1501 moved the free token-curve helpers onto it). BTreeMap
 /// iteration is ascending, so the strict-order constructor holds.
 fn token_axis_curve(points: &std::collections::BTreeMap<u32, f64>) -> AxisCurve {
-    AxisCurve::from_sorted_iter("num_tokens", points.iter().map(|(&coordinate, &value)| (coordinate, value)))
+    AxisCurve::from_sorted_iter(
+        "num_tokens",
+        points
+            .iter()
+            .map(|(&coordinate, &value)| (coordinate, value)),
+    )
 }
 
 /// Load the TRT-LLM alltoall table from an ordered source list. Mirrors
@@ -317,7 +328,10 @@ fn load_alltoall_parquet(sources: &[PerfSource]) -> Result<AlltoallGrids, AicErr
         return Err(AicError::PerfDatabase(format!(
             "no TRT-LLM alltoall rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     Ok(AlltoallGrids { by_keys })
@@ -350,12 +364,31 @@ mod tests {
     fn alltoall_kernel_selection_matches_python() {
         let spec = gb200_spec();
         assert_eq!(select_alltoall_kernel(&spec, 4, 8, None), "NVLinkOneSided");
-        assert_eq!(select_alltoall_kernel(&spec, 4, 8, Some("WIDEEP")), "NVLinkTwoSided");
-        assert_eq!(select_alltoall_kernel(&spec, 4, 8, Some("DeepGemm")), "NotEnabled");
-        assert_eq!(select_alltoall_kernel(&spec, 4, 8, Some("cute_dsl")), "NotEnabled");
+        assert_eq!(
+            select_alltoall_kernel(&spec, 4, 8, Some("WIDEEP")),
+            "NVLinkTwoSided"
+        );
+        assert_eq!(
+            select_alltoall_kernel(&spec, 4, 8, Some("DeepGemm")),
+            "NotEnabled"
+        );
+        assert_eq!(
+            select_alltoall_kernel(&spec, 4, 8, Some("cute_dsl")),
+            "NotEnabled"
+        );
         let table = gb200_trtllm_table();
         let zero = table
-            .query_trtllm_alltoall(&spec, "alltoall_dispatch", 1, 7168, 8, 256, 4, MoeQuantMode::Fp8, Some("DEEPGEMM"))
+            .query_trtllm_alltoall(
+                &spec,
+                "alltoall_dispatch",
+                1,
+                7168,
+                8,
+                256,
+                4,
+                MoeQuantMode::Fp8,
+                Some("DEEPGEMM"),
+            )
             .expect("NotEnabled short-circuits");
         assert_eq!(zero, 0.0);
     }
@@ -370,24 +403,73 @@ mod tests {
         let table = gb200_trtllm_table();
         // WideEP -> NVLinkTwoSided; fp8 dispatch row (ep=4 -> node_num=1).
         let dispatch = table
-            .query_trtllm_alltoall(&spec, "alltoall_dispatch", 1, 7168, 8, 256, 4, MoeQuantMode::Fp8, Some("WIDEEP"))
+            .query_trtllm_alltoall(
+                &spec,
+                "alltoall_dispatch",
+                1,
+                7168,
+                8,
+                256,
+                4,
+                MoeQuantMode::Fp8,
+                Some("WIDEEP"),
+            )
             .expect("dispatch row");
-        assert!((dispatch - 0.011_372_800_171_375_274).abs() < 1e-12, "got {dispatch}");
+        assert!(
+            (dispatch - 0.011_372_800_171_375_274).abs() < 1e-12,
+            "got {dispatch}"
+        );
         // Same slice, combine phase: distinct value proves op_name keys the table.
         let combine = table
-            .query_trtllm_alltoall(&spec, "alltoall_combine", 1, 7168, 8, 256, 4, MoeQuantMode::Fp8, Some("WIDEEP"))
+            .query_trtllm_alltoall(
+                &spec,
+                "alltoall_combine",
+                1,
+                7168,
+                8,
+                256,
+                4,
+                MoeQuantMode::Fp8,
+                Some("WIDEEP"),
+            )
             .expect("combine row");
-        assert!((combine - 0.012_921_600_043_773_651).abs() < 1e-12, "got {combine}");
+        assert!(
+            (combine - 0.012_921_600_043_773_651).abs() < 1e-12,
+            "got {combine}"
+        );
         // fp8_block reuses the fp8 tables (Python `_normalize_quant_mode_for_table`).
         let block = table
-            .query_trtllm_alltoall(&spec, "alltoall_dispatch", 1, 7168, 8, 256, 4, MoeQuantMode::Fp8Block, Some("WIDEEP"))
+            .query_trtllm_alltoall(
+                &spec,
+                "alltoall_dispatch",
+                1,
+                7168,
+                8,
+                256,
+                4,
+                MoeQuantMode::Fp8Block,
+                Some("WIDEEP"),
+            )
             .expect("fp8_block reroutes to fp8");
         assert_eq!(block, dispatch);
         // Non-WideEP -> NVLinkOneSided (nvfp4-only slice, ep=2 -> node_num=1).
         let one_sided = table
-            .query_trtllm_alltoall(&spec, "alltoall_dispatch", 1, 7168, 8, 256, 2, MoeQuantMode::Nvfp4, None)
+            .query_trtllm_alltoall(
+                &spec,
+                "alltoall_dispatch",
+                1,
+                7168,
+                8,
+                256,
+                2,
+                MoeQuantMode::Nvfp4,
+                None,
+            )
             .expect("one-sided row");
-        assert!((one_sided - 0.012_895_999_848_842_621).abs() < 1e-12, "got {one_sided}");
+        assert!(
+            (one_sided - 0.012_895_999_848_842_621).abs() < 1e-12,
+            "got {one_sided}"
+        );
     }
 
     #[test]

@@ -268,6 +268,14 @@ impl GemmTable {
         })
     }
 
+    /// Whether the quant mode (after `fp8_static` normalization) has a
+    /// loaded GEMM table. Lets `GemmOp`'s below-grid SOL degrade stay
+    /// scoped to shape misses — a quant-mode miss keeps the strict error.
+    pub fn has_quant(&self, quant: GemmQuantMode) -> Result<bool, AicError> {
+        let lookup_quant = normalize_fp8_static_quant(quant);
+        Ok(self.load_gemm()?.by_quant.contains_key(lookup_quant.name()))
+    }
+
     /// Query compute-scale measured value — used by `fp8_static` GEMM only.
     ///
     /// Like the main GEMM table, the compute_scale data is keyed by `fp8`
@@ -568,6 +576,7 @@ fn gemm_engine_config<'a>(sol: &'a dyn Fn(&[f64]) -> f64) -> OpInterpConfig<'a> 
             max_site_distance: Some(2.0),
             require_curve_coverage: true,
             k_tail: 3,
+            own_curve_coverage_fallback: false,
         },
         sol_fn: sol,
         value_transform: ValueTransform::Raw,

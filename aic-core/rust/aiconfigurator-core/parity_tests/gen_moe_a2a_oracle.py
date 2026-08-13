@@ -147,7 +147,11 @@ def candidates_for(db):
         collected = dtypes_by_phase[(coord[0], coord[1])]
         if "fp8" in collected and "fp8_block" not in collected:
             out["dtype_alias"].append((coord, tokens[len(tokens) // 2], "dtype_alias", "fp8_block"))
-        if len(collected) == 1:
+        # Sole-dtype fallback samples exist only for the UNTYPED legacy slice:
+        # a sole TYPED dtype raises the named miss (the review-fix contract in
+        # `_resolve_comm_dtype_slice`), so typed-sole coordinates produce no
+        # resolvable oracle sample.
+        if len(collected) == 1 and "default" in collected:
             for requested in ("fp8", "nvfp4", "fp8_block"):
                 if requested not in collected:
                     out["dtype_sole"].append((coord, tokens[len(tokens) // 2], "dtype_sole", requested))
