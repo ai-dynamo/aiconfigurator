@@ -740,7 +740,7 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
 
     # Unified large-EP ops (AIC-1601): one Python class per table, the phase
     # is a constructor field. Rust `Op::MoeAllToAll` / `Op::MoeExpertCompute` are
-    # APPENDED after `Dsv4MegaMoe` (bincode enum indices are positional;
+    # APPENDED after `FpmForward` (bincode enum indices are positional;
     # appending shifts nothing), so no ENGINE_SPEC_SCHEMA_VERSION bump.
     if isinstance(op, MoEAllToAll):
         return {"MoeAllToAll": _moe_all_to_all(op)}
