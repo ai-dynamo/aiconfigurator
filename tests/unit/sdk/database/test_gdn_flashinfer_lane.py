@@ -307,3 +307,29 @@ def test_flashinfer_lane_sol_census_anchor_qwen35_397b_tp4_gb300():
     expected_us = total_flashinfer / mem_bw * 1000 * 1000
 
     assert sol_flashinfer * 1000 == pytest.approx(expected_us, rel=1e-9)
+
+
+def test_flashinfer_lane_sol_matches_census_at_bs128():
+    """Census anchor (L3 audit, gb300): measured flashinfer GDN decode at bs=128 is
+    ~20.9 us/layer; the bf16-state SOL must land at ~80% of that. Guards the
+    state-bytes term at a batch size where the kernel is genuinely memory-bound
+    (bs=1 is launch-floor territory where SOL is far below measured).
+    """
+    db = get_database("gb300", "sglang", "0.5.14")
+    assert db.system_spec["gpu"]["sm_version"] >= 100
+
+    tp = 4
+    num_k_heads_full, head_k_dim, num_v_heads_full, head_v_dim = 16, 128, 64, 128
+    num_k_heads = num_k_heads_full // tp
+    num_v_heads = num_v_heads_full // tp
+    batch = 128
+
+    sol_flashinfer_ms = _query_gdn_generation(
+        db,
+        "flashinfer_gated_delta_rule_decode",
+        batch,
+        (8192, num_k_heads, head_k_dim, num_v_heads, head_v_dim, 4),
+    )
+
+    sol_us = sol_flashinfer_ms * 1000
+    assert 12.0 <= sol_us <= 22.0
