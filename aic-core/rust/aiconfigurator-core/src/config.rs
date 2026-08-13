@@ -44,7 +44,13 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 // - 10 (issue #1498): `MhcModuleOp` gained `seq_split` (CP per-rank token
 //   division) — a bincode op-layout change. Claimed 7 concurrently with
 //   `attn_ar_modeled`; renumbered at the rebase.
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 10;
+// - 11 (AIC-1601): the wideEP MoE op variants (`WideEpMoe` /
+//   `WideEpMoeDispatch`) were removed mid-enum, shifting every later
+//   bincode enum index; large-EP is now modeled natively by the
+//   `MoeAllToAll` / `MoeExpertCompute` variants appended after
+//   `FpmForward`, and `MoeExpertComputeOp` carries the `enable_eplb`
+//   legacy-fidelity field.
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 11;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].

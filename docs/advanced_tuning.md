@@ -156,7 +156,7 @@ We will then find a best one among these enumrations.
 Large-EP — multi-node, EP-only MoE parallelism, formerly gated behind the `enable_wideep` flag — no longer has a switch. For every MoE model, aiconfigurator probes whether the role's performance database covers the model's MoE shape (the MoE all-to-all dispatch/combine data plus the EP compute data, under the resolved `moe_quant_mode`). When it does, the default search lists are widened with a multi-node EP ladder (`moe_ep` up to 64) and the large-EP tuples compete with the fused configs inside the same search; the MoE communication backend is resolved per tuple from data coverage.
 
 When the shape is not covered, large-EP exploration stays off for that model/system and a one-time INFO log tells you exactly what to collect:
-```
+```text
 large-EP exploration is OFF for deepseek-ai/DeepSeek-V3 on h200_sxm/trtllm: no MoE all-to-all + EP-compute coverage for this model shape (hidden=7168, topk=8, experts=256) under moe_quant_mode=fp8_block. Run the moe_a2a and moe_ep collectors for this model/system to enable it; the fused (small-EP) path is unaffected.
 ```
 Run the named collectors (see `collector/`) for the model/system to enable it — no config change is needed afterwards.

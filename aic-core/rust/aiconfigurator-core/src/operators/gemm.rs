@@ -638,7 +638,9 @@ mod tests {
             below_grid_sol: true,
             ..strict
         };
-        let result = op.query(&db, 8, None).expect("below-grid opt-in must degrade to SOL");
+        let result = op
+            .query(&db, 8, None)
+            .expect("below-grid opt-in must degrade to SOL");
         assert_eq!(result.source, Source::Sol);
         assert!(
             (result.latency_ms - 4.78961038961039e-06).abs() < 1e-15,

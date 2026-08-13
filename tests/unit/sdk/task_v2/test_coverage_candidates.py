@@ -78,7 +78,7 @@ def _ep_rows(phases=(("context", _HT_PAIRS), ("generation", _LL_PAIRS))) -> list
             for num_tokens in (128, 1024):
                 rows.append(
                     {
-                        "kernel_source": "deepep",
+                        "kernel_source": "deepep_moe",
                         "moe_dtype": _EP_QUANT,
                         "distribution": "power_law_1.2",
                         "inference_phase": phase,
@@ -538,7 +538,9 @@ def test_single_regime_tasks_match_the_pre_change_key_logic(kwargs, expect_large
     assert pairs[0] == attention_op_keys(t.model_family, t.backend_name, expect_large_ep)
     assert t._attention_op_keys("agg") == pairs[0]
     if expect_raises:
-        with pytest.raises(Exception):  # noqa: B017 - type pinned in test_run_validates_by_default
+        from aiconfigurator.sdk.errors import UnsupportedWideepConfigError
+
+        with pytest.raises(UnsupportedWideepConfigError):
             t.validate()
     else:
         t.validate()

@@ -63,8 +63,8 @@ CASES = {
         tp_size=4,
         moe_ep_size=1,
     ),
-    # MoE family (non-DeepSeek). Smoke uses tp=4, moe_ep=4 for this model;
-    # tp=8/moe_ep=8 misses perf data.
+    # MoE family (non-DeepSeek). Smoke uses tp=4, moe_expert_compute=4 for this model;
+    # tp=8/moe_expert_compute=8 misses perf data.
     "qwen3-30b-a3b": BenchmarkCase(
         model_path="Qwen/Qwen3-30B-A3B",
         tp_size=4,

@@ -156,9 +156,14 @@ impl FpmForwardTable {
     /// path, mirroring `LoadedOpData.raise_if_not_loaded`) or when the pair
     /// is structurally invalid.
     pub fn cells(&self) -> Result<&[FpmForwardCell], AicError> {
-        let loaded = self
-            .cells
-            .get_or_init(|| load_pair(&self.parquet_path, &self.system, &self.backend, &self.version));
+        let loaded = self.cells.get_or_init(|| {
+            load_pair(
+                &self.parquet_path,
+                &self.system,
+                &self.backend,
+                &self.version,
+            )
+        });
         match loaded {
             Ok(Some(cells)) => Ok(cells),
             Ok(None) => Err(AicError::PerfDatabase(format!(
@@ -378,7 +383,8 @@ fn load_pair(
         return Ok(None);
     }
     let metadata_path = parquet_path.with_extension("metadata.json");
-    let sidecar_row_count = validate_sidecar(&metadata_path, parquet_path, system, backend, version)?;
+    let sidecar_row_count =
+        validate_sidecar(&metadata_path, parquet_path, system, backend, version)?;
 
     let reader = PerfReader::open(parquet_path)?;
     // Physical row-key columns (collector contract), in order.
@@ -452,7 +458,10 @@ fn load_pair(
         let row = row?;
         let get_str = |name: &str| -> Result<String, AicError> {
             // Null identity cells normalize to "" (Python _norm_identity).
-            Ok(row.str_optional(Some(str_idx[name]))?.unwrap_or("").to_string())
+            Ok(row
+                .str_optional(Some(str_idx[name]))?
+                .unwrap_or("")
+                .to_string())
         };
         // Workload coordinates: required, loud on null/overflow.
         let get_int = |name: &str| -> Result<u32, AicError> { row.u32(int_idx[name]) };
@@ -470,10 +479,14 @@ fn load_pair(
         // compare as "true" vs the request side's "True"). Normalized to
         // Python str(bool) capitalization.
         let get_bool_identity = |name: &str| -> Result<String, AicError> {
-            let value = row.bool_strict(bool_idx[name]).map_err(|_| {
-                structural(format!("FPM row {index} {name} must be a boolean"))
-            })?;
-            Ok(if value { "True".to_string() } else { "False".to_string() })
+            let value = row
+                .bool_strict(bool_idx[name])
+                .map_err(|_| structural(format!("FPM row {index} {name} must be a boolean")))?;
+            Ok(if value {
+                "True".to_string()
+            } else {
+                "False".to_string()
+            })
         };
 
         let workload_kind = get_str("workload_kind")?;
@@ -636,7 +649,10 @@ fn load_pair(
                 "FPM row {index} collides with an earlier row at the same cell coordinates \
                  (phase={:?}, batch_size={}, total_prefill_tokens={}, total_kv_read_tokens={}); \
                  refusing to silently overwrite latencies.",
-                row.workload_kind, row.batch_size, row.total_prefill_tokens, row.total_kv_read_tokens
+                row.workload_kind,
+                row.batch_size,
+                row.total_prefill_tokens,
+                row.total_kv_read_tokens
             )));
         }
     }
@@ -949,21 +965,21 @@ pub(crate) mod tests {
     /// `FPM_CELL_MATCH_COLUMNS` order.
     pub(crate) fn default_identity(tp: u32) -> Vec<String> {
         vec![
-            "nvfp4".to_string(),          // gemm_quant_mode
-            "nvfp4".to_string(),          // moe_quant_mode
-            "bfloat16".to_string(),       // fmha_quant_mode
-            "half".to_string(),           // comm_quant_mode
-            "fp8".to_string(),            // kv_cache_dtype
-            tp.to_string(),               // tp
-            "1".to_string(),              // pp
-            "1".to_string(),              // dp
-            tp.to_string(),               // moe_tp
-            "1".to_string(),              // moe_ep
-            "1".to_string(),              // cp
-            "auto".to_string(),           // moe_backend
-            "auto".to_string(),           // attention_backend
-            "False".to_string(),          // enable_wideep (str(bool))
-            "False".to_string(),          // enable_eplb
+            "nvfp4".to_string(),    // gemm_quant_mode
+            "nvfp4".to_string(),    // moe_quant_mode
+            "bfloat16".to_string(), // fmha_quant_mode
+            "half".to_string(),     // comm_quant_mode
+            "fp8".to_string(),      // kv_cache_dtype
+            tp.to_string(),         // tp
+            "1".to_string(),        // pp
+            "1".to_string(),        // dp
+            tp.to_string(),         // moe_tp
+            "1".to_string(),        // moe_ep
+            "1".to_string(),        // cp
+            "auto".to_string(),     // moe_backend
+            "auto".to_string(),     // attention_backend
+            "False".to_string(),    // enable_wideep (str(bool))
+            "False".to_string(),    // enable_eplb
         ]
     }
 
@@ -1022,14 +1038,19 @@ pub(crate) mod tests {
 
         let identity = |r: &RowSpec| default_identity(r.tp);
         let str_col = |f: &dyn Fn(&RowSpec) -> String| -> Vec<ByteArray> {
-            rows.iter().map(|r| ByteArray::from(f(r).as_str())).collect()
+            rows.iter()
+                .map(|r| ByteArray::from(f(r).as_str()))
+                .collect()
         };
         let str_batches: Vec<Vec<ByteArray>> = vec![
             str_col(&|r| {
                 r.cell_id.map(str::to_string).unwrap_or_else(|| {
                     format!(
                         "fpm-{}-{}-{}-{}",
-                        r.workload_kind, r.batch_size, r.total_prefill_tokens, r.total_kv_read_tokens
+                        r.workload_kind,
+                        r.batch_size,
+                        r.total_prefill_tokens,
+                        r.total_kv_read_tokens
                     )
                 })
             }),
@@ -1041,14 +1062,18 @@ pub(crate) mod tests {
         ];
         for values in &str_batches {
             let mut col = rg.next_column().expect("next col").expect("str col");
-            col.typed::<ByteArrayType>().write_batch(values, None, None).expect("write");
+            col.typed::<ByteArrayType>()
+                .write_batch(values, None, None)
+                .expect("write");
             col.close().expect("close");
         }
         // gemm/moe/fmha/comm/kv identity string columns
         for idx in 0..5usize {
             let values = str_col(&|r| identity(r)[idx].clone());
             let mut col = rg.next_column().expect("next col").expect("str col");
-            col.typed::<ByteArrayType>().write_batch(&values, None, None).expect("write");
+            col.typed::<ByteArrayType>()
+                .write_batch(&values, None, None)
+                .expect("write");
             col.close().expect("close");
         }
         // tp pp dp moe_tp moe_ep cp
@@ -1058,7 +1083,9 @@ pub(crate) mod tests {
                 .map(|r| identity(r)[idx].parse::<i64>().unwrap())
                 .collect();
             let mut col = rg.next_column().expect("next col").expect("int col");
-            col.typed::<Int64Type>().write_batch(&values, None, None).expect("write");
+            col.typed::<Int64Type>()
+                .write_batch(&values, None, None)
+                .expect("write");
             col.close().expect("close");
         }
         for values in [
@@ -1066,7 +1093,9 @@ pub(crate) mod tests {
             str_col(&|r| r.attention_backend.to_string()),
         ] {
             let mut col = rg.next_column().expect("next col").expect("str col");
-            col.typed::<ByteArrayType>().write_batch(&values, None, None).expect("write");
+            col.typed::<ByteArrayType>()
+                .write_batch(&values, None, None)
+                .expect("write");
             col.close().expect("close");
         }
         for values in [
@@ -1074,34 +1103,46 @@ pub(crate) mod tests {
             rows.iter().map(|r| r.enable_eplb).collect::<Vec<bool>>(),
         ] {
             let mut col = rg.next_column().expect("next col").expect("bool col");
-            col.typed::<BoolType>().write_batch(&values, None, None).expect("write");
+            col.typed::<BoolType>()
+                .write_batch(&values, None, None)
+                .expect("write");
             col.close().expect("close");
         }
         {
             let values = str_col(&|r| r.workload_kind.to_string());
             let mut col = rg.next_column().expect("next col").expect("str col");
-            col.typed::<ByteArrayType>().write_batch(&values, None, None).expect("write");
+            col.typed::<ByteArrayType>()
+                .write_batch(&values, None, None)
+                .expect("write");
             col.close().expect("close");
         }
         for values in [
-            rows.iter().map(|r| r.batch_size as i64).collect::<Vec<i64>>(),
+            rows.iter()
+                .map(|r| r.batch_size as i64)
+                .collect::<Vec<i64>>(),
             rows.iter().map(|r| r.total_prefill_tokens as i64).collect(),
             rows.iter().map(|r| r.total_kv_read_tokens as i64).collect(),
         ] {
             let mut col = rg.next_column().expect("next col").expect("int col");
-            col.typed::<Int64Type>().write_batch(&values, None, None).expect("write");
+            col.typed::<Int64Type>()
+                .write_batch(&values, None, None)
+                .expect("write");
             col.close().expect("close");
         }
         {
             let values = str_col(&|r| r.partition_policy.to_string());
             let mut col = rg.next_column().expect("next col").expect("str col");
-            col.typed::<ByteArrayType>().write_batch(&values, None, None).expect("write");
+            col.typed::<ByteArrayType>()
+                .write_batch(&values, None, None)
+                .expect("write");
             col.close().expect("close");
         }
         {
             let values: Vec<f64> = rows.iter().map(|r| r.latency_ms).collect();
             let mut col = rg.next_column().expect("next col").expect("f64 col");
-            col.typed::<DoubleType>().write_batch(&values, None, None).expect("write");
+            col.typed::<DoubleType>()
+                .write_batch(&values, None, None)
+                .expect("write");
             col.close().expect("close");
         }
         rg.close().expect("close row group");
@@ -1121,7 +1162,10 @@ pub(crate) mod tests {
             "parquet_sha256".into(),
             sha256_file(&parquet_path).expect("sha256").into(),
         );
-        sidecar.insert("row_count".into(), serde_json::Value::from(rows.len() as u64));
+        sidecar.insert(
+            "row_count".into(),
+            serde_json::Value::from(rows.len() as u64),
+        );
         sidecar.insert(
             "measurement_policy".into(),
             FPM_FORWARD_MEASUREMENT_POLICY.into(),
@@ -1174,7 +1218,10 @@ pub(crate) mod tests {
         let parquet = write_pair(tmp.path(), &default_rows());
         std::fs::remove_file(parquet.with_extension("metadata.json")).unwrap();
         let err = loaded_table(tmp.path()).cells().unwrap_err();
-        assert!(err.to_string().contains("missing its metadata sidecar"), "{err}");
+        assert!(
+            err.to_string().contains("missing its metadata sidecar"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1183,7 +1230,8 @@ pub(crate) mod tests {
             (
                 Box::new(|m: &mut serde_json::Map<String, serde_json::Value>| {
                     m.insert("schema_name".into(), "other".into());
-                }) as Box<dyn FnOnce(&mut serde_json::Map<String, serde_json::Value>)>,
+                })
+                    as Box<dyn FnOnce(&mut serde_json::Map<String, serde_json::Value>)>,
                 "unsupported FPM schema_name",
             ),
             (
@@ -1214,7 +1262,10 @@ pub(crate) mod tests {
             let tmp = tempfile::tempdir().expect("tmpdir");
             write_pair_with(tmp.path(), &default_rows(), mutate);
             let err = loaded_table(tmp.path()).cells().unwrap_err();
-            assert!(err.to_string().contains(needle), "wanted {needle:?} in {err}");
+            assert!(
+                err.to_string().contains(needle),
+                "wanted {needle:?} in {err}"
+            );
         }
     }
 
@@ -1254,7 +1305,10 @@ pub(crate) mod tests {
                 Box::new(|r: &mut RowSpec| r.backend_version = "0.19.0"),
                 "does not match the database version directory",
             ),
-            (Box::new(|r: &mut RowSpec| r.latency_ms = 0.0), "non-positive latency_ms"),
+            (
+                Box::new(|r: &mut RowSpec| r.latency_ms = 0.0),
+                "non-positive latency_ms",
+            ),
             (
                 Box::new(|r: &mut RowSpec| r.latency_ms = f64::NAN),
                 "non-finite/non-positive latency_ms",
@@ -1279,7 +1333,10 @@ pub(crate) mod tests {
             mutate(&mut rows[5]);
             write_pair(tmp.path(), &rows);
             let err = loaded_table(tmp.path()).cells().unwrap_err();
-            assert!(err.to_string().contains(needle), "wanted {needle:?} in {err}");
+            assert!(
+                err.to_string().contains(needle),
+                "wanted {needle:?} in {err}"
+            );
         }
     }
 
@@ -1298,7 +1355,10 @@ pub(crate) mod tests {
         rows.push(dup);
         write_pair(tmp.path(), &rows);
         let err = loaded_table(tmp.path()).cells().unwrap_err();
-        assert!(err.to_string().contains("duplicate physical row key"), "{err}");
+        assert!(
+            err.to_string().contains("duplicate physical row key"),
+            "{err}"
+        );
     }
 
     /// Python compares sidecar numbers by VALUE (`5.0 == 5`); a writer that
@@ -1336,14 +1396,22 @@ pub(crate) mod tests {
         rows[0].system = "gb200_nvl72";
         write_pair(tmp.path(), &rows);
         let err = loaded_table(tmp.path()).cells().unwrap_err();
-        assert!(err.to_string().contains("does not match the database system"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("does not match the database system"),
+            "{err}"
+        );
 
         let tmp = tempfile::tempdir().expect("tmpdir");
         let mut rows = default_rows();
         rows[0].backend = "sglang";
         write_pair(tmp.path(), &rows);
         let err = loaded_table(tmp.path()).cells().unwrap_err();
-        assert!(err.to_string().contains("does not match the database backend"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("does not match the database backend"),
+            "{err}"
+        );
     }
 
     /// Same cell identity + same coordinates but a different cell_id passes
@@ -1365,7 +1433,10 @@ pub(crate) mod tests {
         rows.push(clash);
         write_pair(tmp.path(), &rows);
         let err = loaded_table(tmp.path()).cells().unwrap_err();
-        assert!(err.to_string().contains("collides with an earlier row"), "{err}");
+        assert!(
+            err.to_string().contains("collides with an earlier row"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1545,10 +1616,13 @@ pub(crate) mod tests {
         let table = loaded_table(tmp.path());
         let mut wideep_identity = default_identity(4);
         wideep_identity[13] = "True".to_string();
-        let cell = table.select_cell(&wideep_identity, "org/model-a").expect("select");
+        let cell = table
+            .select_cell(&wideep_identity, "org/model-a")
+            .expect("select");
         assert_eq!(cell.match_identity[13], "True");
-        let err = table.select_cell(&default_identity(4), "org/model-a").unwrap_err();
+        let err = table
+            .select_cell(&default_identity(4), "org/model-a")
+            .unwrap_err();
         assert!(err.to_string().contains("No FPM cell matches"), "{err}");
     }
-
 }

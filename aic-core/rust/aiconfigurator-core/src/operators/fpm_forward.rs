@@ -31,9 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::error::AicError;
 use crate::operators::op::{Op, RuntimeContext};
 use crate::operators::{PerformanceResult, Source};
-use crate::perf_database::fpm_forward::{
-    FpmForwardCell, FPM_DECODE_AXES, FPM_PREFILL_AXES,
-};
+use crate::perf_database::fpm_forward::{FpmForwardCell, FPM_DECODE_AXES, FPM_PREFILL_AXES};
 use crate::perf_database::perf_interp::{OpInterpConfig, Resolver, ValueTransform};
 use crate::perf_database::PerfDatabase;
 
@@ -241,13 +239,21 @@ impl FpmForwardOp {
                 let Some(domain) = cell.prefill_domain.as_ref() else {
                     return Err(self.no_rows_err(cell));
                 };
-                (&FPM_PREFILL_AXES, domain.as_slice(), cell.prefill_index.as_ref())
+                (
+                    &FPM_PREFILL_AXES,
+                    domain.as_slice(),
+                    cell.prefill_index.as_ref(),
+                )
             }
             FpmPhase::Decode => {
                 let Some(domain) = cell.decode_domain.as_ref() else {
                     return Err(self.no_rows_err(cell));
                 };
-                (&FPM_DECODE_AXES, domain.as_slice(), cell.decode_index.as_ref())
+                (
+                    &FPM_DECODE_AXES,
+                    domain.as_slice(),
+                    cell.decode_index.as_ref(),
+                )
             }
         };
         for (axis_index, (axis_name, &value)) in axes.iter().zip(coords).enumerate() {
@@ -297,11 +303,9 @@ impl FpmForwardOp {
         let latency = index
             .resolve_value(&cfg, coords)
             .map(|value| value.latency * clamp_scale)
-            .map_err(|err| {
-                match sol_failure.borrow_mut().take() {
-                    Some(sol_err) => data_err(format!("{err}; SOL roofline unavailable: {sol_err}")),
-                    None => err,
-                }
+            .map_err(|err| match sol_failure.borrow_mut().take() {
+                Some(sol_err) => data_err(format!("{err}; SOL roofline unavailable: {sol_err}")),
+                None => err,
             })?;
         if !latency.is_finite() || latency <= 0.0 {
             return Err(data_err(format!(
@@ -336,7 +340,11 @@ impl FpmForwardOp {
         {
             return Ok(None);
         }
-        let Some(&lower_rung) = cell.decode_rungs.iter().rev().find(|&&r| (r as f64) < batch)
+        let Some(&lower_rung) = cell
+            .decode_rungs
+            .iter()
+            .rev()
+            .find(|&&r| (r as f64) < batch)
         else {
             // Between the domain floor and the first rung: no pair structure
             // to bracket with — keep the legacy path.
@@ -442,7 +450,12 @@ pub(crate) fn sol_total(
     let (batch, s, prefix, default_x) = match phase {
         FpmPhase::Prefill => {
             let (batch, total_prefill, total_kv) = (coords[0], coords[1], coords[2]);
-            ((batch), (total_prefill / batch).max(1.0), total_kv / batch, total_prefill)
+            (
+                (batch),
+                (total_prefill / batch).max(1.0),
+                total_kv / batch,
+                total_prefill,
+            )
         }
         FpmPhase::Decode => {
             let (batch, total_kv) = (coords[0], coords[1]);
@@ -466,8 +479,10 @@ mod tests {
     use super::*;
     use crate::perf_database::fpm_forward::tests::{default_identity, default_rows, write_pair};
 
-    const SYSTEMS_ROOT: &str =
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../../src/aiconfigurator_core/systems");
+    const SYSTEMS_ROOT: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/aiconfigurator_core/systems"
+    );
 
     /// A PerfDatabase whose fpm_forward table points at a temp pair; the rest
     /// of the tables point at the real checked-in b200/vllm/0.19.0 fixture
@@ -535,12 +550,19 @@ mod tests {
         let clamped = op(FpmPhase::Prefill)
             .query_totals(&db, &[16.0, 4096.0, 0.0])
             .unwrap();
-        assert!((clamped.latency_ms - 41.6).abs() < 1e-9, "{}", clamped.latency_ms);
+        assert!(
+            (clamped.latency_ms - 41.6).abs() < 1e-9,
+            "{}",
+            clamped.latency_ms
+        );
         // The token axis stays honestly gated.
         let err = op(FpmPhase::Prefill)
             .query_totals(&db, &[16.0, 16384.0, 0.0])
             .unwrap_err();
-        assert!(err.to_string().contains("outside the collected domain"), "{err}");
+        assert!(
+            err.to_string().contains("outside the collected domain"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -569,14 +591,21 @@ mod tests {
         let low = op(FpmPhase::Prefill)
             .query_totals(&db, &[16.0, 4096.0, 4096.0])
             .unwrap();
-        assert!((low.latency_ms - 40.0 * 1.04 * 1.2).abs() < 1e-9, "{}", low.latency_ms);
+        assert!(
+            (low.latency_ms - 40.0 * 1.04 * 1.2).abs() < 1e-9,
+            "{}",
+            low.latency_ms
+        );
         // kv/T = 4 (>= 2): this op has NO usable SOL (empty sol_ops -> 0),
         // so the high-pressure tier refuses rather than serve a
         // half-modeled value.
         let err = op(FpmPhase::Prefill)
             .query_totals(&db, &[16.0, 4096.0, 16384.0])
             .unwrap_err();
-        assert!(err.to_string().contains("outside the collected domain"), "{err}");
+        assert!(
+            err.to_string().contains("outside the collected domain"),
+            "{err}"
+        );
         // With a usable roofline the same query answers, rescaled by the
         // SOL ratio (elementwise SOL depends on the total alone -> ratio 1,
         // proving the arm activates; the ratio math itself is pinned
@@ -590,7 +619,11 @@ mod tests {
             seq_split: 0,
         })];
         let high = sol_op.query_totals(&db, &[16.0, 4096.0, 16384.0]).unwrap();
-        assert!((high.latency_ms - 40.0 * 1.04 * 1.8).abs() < 1e-9, "{}", high.latency_ms);
+        assert!(
+            (high.latency_ms - 40.0 * 1.04 * 1.8).abs() < 1e-9,
+            "{}",
+            high.latency_ms
+        );
     }
 
     #[test]
@@ -623,7 +656,11 @@ mod tests {
         // b=500 in segment (496, 512]: bracket {497, 512}, linear blend.
         let got = dec.query_totals(&db, &[500.0, 2048.0]).unwrap();
         let expected = 11.0 + (11.5 - 11.0) * (500.0 - 497.0) / (512.0 - 497.0);
-        assert!((got.latency_ms - expected).abs() < 1e-9, "{}", got.latency_ms);
+        assert!(
+            (got.latency_ms - expected).abs() < 1e-9,
+            "{}",
+            got.latency_ms
+        );
         // b=600 above the last rung: bracket {513, 1024}; kv=2048 covered
         // only by 513 -> single-sided (never the cross-batch k-NN).
         let got = dec.query_totals(&db, &[600.0, 2048.0]).unwrap();
@@ -656,7 +693,9 @@ mod tests {
         write_pair(tmp.path(), &default_rows());
         let db = db_with_pair(tmp.path());
         // prefill row (1, 2048, 2048) -> 24.0: B=1, s=2048 new tokens, prefix=2048
-        let r = op(FpmPhase::Prefill).query(&db, &ctx(1, 2048, 2048)).unwrap();
+        let r = op(FpmPhase::Prefill)
+            .query(&db, &ctx(1, 2048, 2048))
+            .unwrap();
         assert_eq!(r.latency_ms, 24.0);
     }
 
@@ -679,11 +718,21 @@ mod tests {
         write_pair(tmp.path(), &default_rows());
         let db = db_with_pair(tmp.path());
         // decode kv domain is [8, 65536]; B=8, s=16384 -> kv=131072 > max
-        let err = op(FpmPhase::Decode).query(&db, &ctx(8, 16384, 0)).unwrap_err();
-        assert!(err.to_string().contains("outside the collected domain"), "{err}");
+        let err = op(FpmPhase::Decode)
+            .query(&db, &ctx(8, 16384, 0))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("outside the collected domain"),
+            "{err}"
+        );
         // batch below domain min
-        let err = op(FpmPhase::Decode).query(&db, &ctx(1, 512, 0)).unwrap_err();
-        assert!(err.to_string().contains("outside the collected domain"), "{err}");
+        let err = op(FpmPhase::Decode)
+            .query(&db, &ctx(1, 512, 0))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("outside the collected domain"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -691,7 +740,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_pair(tmp.path(), &default_rows());
         let db = db_with_pair(tmp.path());
-        let err = op(FpmPhase::Decode).query(&db, &ctx(0, 512, 0)).unwrap_err();
+        let err = op(FpmPhase::Decode)
+            .query(&db, &ctx(0, 512, 0))
+            .unwrap_err();
         assert!(err.to_string().contains("invalid FPM query"), "{err}");
         let mut c = ctx(8, 512, 0);
         c.beam_width = 4;
@@ -706,12 +757,12 @@ mod tests {
         let db = db_with_pair(tmp.path());
         // decode domain kv min is 8; batch=8 -> kv_floor = max(8, 8) = 8,
         // which is the exact collected point (8, 8) -> 6.0.
-        let r = op(FpmPhase::Decode)
-            .query_pass_baseline(&db, 8)
-            .unwrap();
+        let r = op(FpmPhase::Decode).query_pass_baseline(&db, 8).unwrap();
         assert_eq!(r.latency_ms, 6.0);
         // prefill op: decode-only API
-        let err = op(FpmPhase::Prefill).query_pass_baseline(&db, 8).unwrap_err();
+        let err = op(FpmPhase::Prefill)
+            .query_pass_baseline(&db, 8)
+            .unwrap_err();
         assert!(err.to_string().contains("decode-only"), "{err}");
     }
 
@@ -740,7 +791,10 @@ mod tests {
         // Uncollected batch -> site transfer NEEDS the roofline -> structured
         // miss naming the unported op (not a panic, not a silent number).
         let err = o.query(&db, &ctx(12, 512, 0)).unwrap_err();
-        assert!(err.to_string().contains("SOL roofline unavailable"), "{err}");
+        assert!(
+            err.to_string().contains("SOL roofline unavailable"),
+            "{err}"
+        );
         assert!(err.to_string().contains("no Rust implementation"), "{err}");
     }
 }

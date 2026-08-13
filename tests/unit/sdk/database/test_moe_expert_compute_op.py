@@ -99,10 +99,13 @@ def _build_injected_store():
             # eplb-correction slices (num_experts=128 keeps them disjoint from
             # the shared 256-expert shapes): context tokens include 80 so the
             # corrected int(100 * 0.8) = 80 lands on a measured point, plus
-            # generation and deepgemm curves that must stay uncorrected.
+            # generation and deepgemm curves that must stay uncorrected. The
+            # adjacent 160/161 points pin the truncation ORDER: globalize by
+            # attention_dp first, truncate second (int(101*2*0.8) = 161, not
+            # int(101*0.8)*2 = 160).
             (
                 ("deepep_moe", common.MoEQuantMode.fp8_block, "uniform", "context", 8, 128, 128, 7168, 2048, 1, 16),
-                {64: _leaf(0.15), 80: _leaf(0.25), 100: _leaf(0.40)},
+                {64: _leaf(0.15), 80: _leaf(0.25), 100: _leaf(0.40), 160: _leaf(0.62), 161: _leaf(0.66)},
             ),
             (
                 ("deepep_moe", common.MoEQuantMode.fp8_block, "uniform", "generation", 8, 128, 128, 7168, 2048, 1, 16),
@@ -331,6 +334,15 @@ def test_eplb_context_correction_on_sglang_leg(ep_db):
     result = eplb_on.query(ep_db, x=100)
     assert float(result) == float(eplb_off.query(ep_db, x=80))
     assert float(result) == pytest.approx(0.25, rel=1e-12)
+
+
+def test_eplb_correction_globalizes_tokens_before_truncating(ep_db):
+    # Order pin: the legacy sglang query scales x by attention_dp_size FIRST
+    # and truncates SECOND — x=101 * adp=2 = 202 -> int(202 * 0.8) = 161. The
+    # reversed order would give int(101 * 0.8) * 2 = 160, a measured point
+    # with a different latency, so a drift lands exactly on the wrong leaf.
+    op = _make_op(num_experts=128, attention_dp_size=2, enable_eplb=True)
+    assert float(op.query(ep_db, x=101)) == pytest.approx(0.66, rel=1e-12)
 
 
 def test_eplb_default_off_is_noop(ep_db):
