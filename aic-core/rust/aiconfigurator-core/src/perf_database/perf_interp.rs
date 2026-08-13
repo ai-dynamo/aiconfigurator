@@ -16,8 +16,13 @@
 //!                             util space (log2 IDW, curve-coverage filter,
 //!                             distance gate; the gate is waived for a site
 //!                             beyond the scale-up frontier).
-//! 3. beyond the range      -> hold the boundary util (k_tail-median anchor),
-//!                             latency = SOL(query) / util
+//! 3. beyond the range      -> hold a boundary util, latency = SOL(query)/util.
+//!                             Multi-axis grids transfer the util from the
+//!                             `nn_leaves` nearest collected points in joint
+//!                             log2 space with tapered (modified-Shepard)
+//!                             weights — continuous across rank swaps, no
+//!                             nearest-path snap; 1-D curves anchor on the
+//!                             k_tail-median boundary points.
 //! 4. nothing to anchor on  -> Err (structured miss; never fabricate)
 //!
 //! Differences from the Python engine, all deliberate:
@@ -191,7 +196,9 @@ fn from_space(vt: ValueTransform, v: f64) -> f64 {
 /// Which of the two table shapes an op is (see the Python config module).
 pub enum Resolver {
     /// Grid-like, possibly corner-truncated tables (attention/MLA/DSA/...).
-    Grid { k_tail: usize },
+    /// `k_tail` anchors 1-D boundary holds; `nn_leaves` is the multi-axis
+    /// hold's tapered joint-log blend width (4 won the frontier-holdout LOO).
+    Grid { k_tail: usize, nn_leaves: usize },
     /// Scattered-sites-plus-curve tables (GEMM): `site_axes` identify a
     /// collected shape, each owning a sweep along `curve_axis`.
     ScatteredSites {
@@ -201,6 +208,12 @@ pub enum Resolver {
         max_site_distance: Option<f64>,
         require_curve_coverage: bool,
         k_tail: usize,
+        /// A collected site whose own curve does NOT cover the query defers to
+        /// neighbour-site transfer with the own site excluded, instead of
+        /// util-holding its own tail (degenerate sites must not anchor far
+        /// extrapolation). Mirrors the Python config flag of the same name;
+        /// `false` preserves the historical behaviour (GEMM).
+        own_curve_coverage_fallback: bool,
     },
 }
 
@@ -223,7 +236,10 @@ impl<'a> OpInterpConfig<'a> {
     pub fn grid(axes: &'static [&'static str], sol_fn: &'a dyn Fn(&[f64]) -> f64) -> Self {
         OpInterpConfig {
             axes,
-            resolver: Resolver::Grid { k_tail: 1 },
+            resolver: Resolver::Grid {
+                k_tail: 1,
+                nn_leaves: 4,
+            },
             sol_fn,
             value_transform: ValueTransform::Raw,
             transform_axis: None,
@@ -239,7 +255,10 @@ impl<'a> OpInterpConfig<'a> {
         assert!(transform_axis < axes.len());
         OpInterpConfig {
             axes,
-            resolver: Resolver::Grid { k_tail: 1 },
+            resolver: Resolver::Grid {
+                k_tail: 1,
+                nn_leaves: 4,
+            },
             sol_fn,
             value_transform: ValueTransform::Sqrt,
             transform_axis: Some(transform_axis),
@@ -449,53 +468,70 @@ fn grid_interior(
     }
 }
 
-/// Anchor past-the-frontier queries: snap to the nearest collected path, hold
-/// the boundary util (k_tail median along the innermost axis), and let
-/// SOL(query) carry the growth.
+/// Anchor past-the-frontier queries: transfer util from the `nn_leaves`
+/// nearest collected points in joint log2 space, blended with tapered
+/// modified-Shepard weights; latency = SOL(query)/util, power blended with
+/// the same weights (intensive, not SOL-rescaled).
+///
+/// Weights are `w = ((R - d) / (R * d))^2` with the support radius R at the
+/// (nn_leaves+1)-th valid leaf's distance (R = inf degrades smoothly to plain
+/// 1/d^2). A neighbour enters/leaves the selection AT ZERO WEIGHT as the
+/// query moves, so the estimate is continuous across rank swaps, and distance
+/// ties need no ordering rule (weights are pure functions of distance —
+/// independent of axis order and table insertion order).
+///
+/// This replaces the earlier nearest-path snap, which was discontinuous at
+/// outer-axis midpoints (a +36.9% cliff between batch 192 and 193 on the B200
+/// generation-attention staircase) and could anchor on a frontier point in a
+/// different efficiency regime. Mirrors the Python engine's `_grid_hold`
+/// exactly. Single-axis tables keep the k_tail-median boundary hold.
 fn grid_hold(cfg: &OpInterpConfig, data: &Node, coords: &[f64]) -> Result<(f64, f64), AicError> {
-    let k_tail = match &cfg.resolver {
-        Resolver::Grid { k_tail } => *k_tail,
+    let (k_tail, nn_leaves) = match &cfg.resolver {
+        Resolver::Grid { k_tail, nn_leaves } => (*k_tail, *nn_leaves),
         Resolver::ScatteredSites { .. } => unreachable!("grid_hold on scattered resolver"),
     };
-    let n_axes = cfg.axes.len();
-    let mut node = data;
-    let mut snapped: Vec<f64> = Vec::with_capacity(n_axes - 1);
-    for depth in 0..n_axes - 1 {
-        let map = node
-            .as_branch()
-            .ok_or_else(|| miss(cfg, coords, "table shallower than axes"))?;
-        if map.is_empty() {
-            return Err(miss(
-                cfg,
-                coords,
-                &format!("empty branch at axis '{}'", cfg.axes[depth]),
-            ));
-        }
-        let c = coords[depth];
-        let key = nearest_key(map, c);
-        snapped.push(key as f64);
-        node = &map[&key];
+    if cfg.axes.len() == 1 {
+        return grid_hold_1d(cfg, data, coords, k_tail);
     }
-    let map = node
+
+    let anchors = hold_anchor_weights(cfg, data, coords, nn_leaves)?;
+    let wsum: f64 = anchors.iter().map(|a| a.weight).sum();
+    if wsum <= 0.0 {
+        return Err(miss(cfg, coords, "no positive-util boundary anchor"));
+    }
+    let u_acc: f64 = anchors.iter().map(|a| a.weight * (a.sol / a.latency)).sum();
+    let p_acc: f64 = anchors.iter().map(|a| a.weight * a.power).sum();
+    let sol_q = (cfg.sol_fn)(coords);
+    if !(sol_q.is_finite() && sol_q > 0.0) {
+        return Err(miss(cfg, coords, "non-positive SOL at query"));
+    }
+    Ok((sol_q / (u_acc / wsum), p_acc / wsum))
+}
+
+/// 1-D curve past the sweep end: hold the k_tail-median boundary util; power
+/// is the median of the tail anchors' powers (intensive, not SOL-rescaled).
+fn grid_hold_1d(
+    cfg: &OpInterpConfig,
+    data: &Node,
+    coords: &[f64],
+    k_tail: usize,
+) -> Result<(f64, f64), AicError> {
+    let map = data
         .as_branch()
         .ok_or_else(|| miss(cfg, coords, "table shallower than axes"))?;
     if map.is_empty() {
         return Err(miss(
             cfg,
             coords,
-            &format!("empty branch at axis '{}'", cfg.axes[n_axes - 1]),
+            &format!("empty branch at axis '{}'", cfg.axes[0]),
         ));
     }
-
     let keys: Vec<u32> = map.keys().copied().collect();
-    let c = coords[n_axes - 1];
+    let c = coords[0];
     let tail: Vec<u32> = if c > keys[keys.len() - 1] as f64 {
         keys[keys.len().saturating_sub(k_tail)..].to_vec()
-    } else if c < keys[0] as f64 {
-        keys[..k_tail.min(keys.len())].to_vec()
     } else {
-        // innermost is in range; an OUTER axis was snapped
-        vec![nearest_key(map, c)]
+        keys[..k_tail.min(keys.len())].to_vec()
     };
 
     let mut utils: Vec<f64> = Vec::with_capacity(tail.len());
@@ -504,12 +540,9 @@ fn grid_hold(cfg: &OpInterpConfig, data: &Node, coords: &[f64]) -> Result<(f64, 
         let Some(leaf) = map[&t].as_leaf() else {
             continue;
         };
-        let lat = leaf.latency;
-        let mut anchor = snapped.clone();
-        anchor.push(t as f64);
-        let sol = (cfg.sol_fn)(&anchor);
-        if lat > 0.0 && sol > 0.0 {
-            utils.push(sol / lat);
+        let sol = (cfg.sol_fn)(&[t as f64]);
+        if leaf.latency > 0.0 && sol > 0.0 {
+            utils.push(sol / leaf.latency);
             powers.push(leaf.blend_power());
         }
     }
@@ -517,10 +550,193 @@ fn grid_hold(cfg: &OpInterpConfig, data: &Node, coords: &[f64]) -> Result<(f64, 
         return Err(miss(cfg, coords, "no positive-util boundary anchor"));
     }
     let sol_q = (cfg.sol_fn)(coords);
-    if !(sol_q > 0.0) {
+    if !(sol_q.is_finite() && sol_q > 0.0) {
         return Err(miss(cfg, coords, "non-positive SOL at query"));
     }
     Ok((sol_q / median(&mut utils), median(&mut powers)))
+}
+
+/// One selected hold anchor: a measured leaf with its blend weight.
+pub(crate) struct HoldAnchor {
+    pub(crate) coords: Vec<u32>,
+    pub(crate) latency: f64,
+    pub(crate) power: f64,
+    pub(crate) sol: f64,
+    pub(crate) weight: f64,
+}
+
+/// The multi-axis hold's anchor selection: the `nn_leaves` nearest valid
+/// leaves in joint log2 space, with tapered modified-Shepard weights (support
+/// radius R = the next valid leaf's distance; leaves at d == R weigh zero, so
+/// no tie-ordering rule is needed).
+/// `pub(crate)` so owners that must split a summed leaf into components
+/// (wideep dispatch) reuse the engine's exact selection and weights.
+///
+/// Selection is a single pass over the tree with a small best-M buffer —
+/// no full leaf vector, no full sort, and coordinate paths are cloned only
+/// when a leaf enters the buffer. The buffer carries `SLACK` extra candidates
+/// so validity filtering (lat/sol > 0) almost never needs the full-collect
+/// fallback below.
+pub(crate) fn hold_anchor_weights(
+    cfg: &OpInterpConfig,
+    data: &Node,
+    coords: &[f64],
+    nn_leaves: usize,
+) -> Result<Vec<HoldAnchor>, AicError> {
+    const SLACK: usize = 8;
+    let m = nn_leaves + SLACK;
+    let q_log: Vec<f64> = coords.iter().map(|&v| v.max(1e-12).log2()).collect();
+
+    // (distance, coords, leaf), ascending by distance, at most m entries.
+    let mut best: Vec<(f64, Vec<u32>, LeafValue)> = Vec::with_capacity(m + 1);
+    let mut n_leaves = 0usize;
+    visit_leaves(
+        data,
+        &mut Vec::new(),
+        &mut |path: &[u32], leaf: LeafValue| {
+            n_leaves += 1;
+            let mut dd = 0.0;
+            for (i, &v) in path.iter().enumerate() {
+                let delta = ((v as f64).max(1e-12)).log2() - q_log[i];
+                dd += delta * delta;
+            }
+            let d = dd.sqrt();
+            if best.len() == m {
+                if d >= best[m - 1].0 {
+                    return;
+                }
+                best.pop();
+            }
+            let pos = best.partition_point(|e| e.0 <= d);
+            best.insert(pos, (d, path.to_vec(), leaf));
+        },
+    );
+    if n_leaves == 0 {
+        return Err(miss(
+            cfg,
+            coords,
+            &format!("empty branch at axis '{}'", cfg.axes[0]),
+        ));
+    }
+
+    // Validity-check in distance order: the first nn_leaves valid candidates
+    // are the anchors; the NEXT valid distance is the support radius R.
+    let mut picked: Vec<HoldAnchor> = Vec::with_capacity(nn_leaves);
+    let mut support_r = f64::INFINITY;
+    let mut support_found = false;
+    for (d, c, leaf) in &best {
+        let anchor: Vec<f64> = c.iter().map(|&v| v as f64).collect();
+        let sol = (cfg.sol_fn)(&anchor);
+        if !(leaf.latency.is_finite() && leaf.latency > 0.0 && sol.is_finite() && sol > 0.0) {
+            continue;
+        }
+        if picked.len() < nn_leaves {
+            picked.push(HoldAnchor {
+                coords: c.clone(),
+                latency: leaf.latency,
+                power: leaf.blend_power(),
+                sol,
+                weight: *d, // distance for now; weights assigned below
+            });
+        } else {
+            support_r = *d;
+            support_found = true;
+            break;
+        }
+    }
+    // The buffer proved too small to certify the selection (pathological
+    // invalid density): fall back to the exhaustive path for correctness.
+    if n_leaves > m && !support_found && picked.len() <= nn_leaves {
+        return hold_anchor_weights_exhaustive(cfg, data, coords, nn_leaves, &q_log);
+    }
+    finish_hold_anchors(cfg, coords, picked, support_r)
+}
+
+/// Exhaustive fallback: collect and sort every leaf. Only reached when more
+/// than `SLACK` of the nearest candidates were invalid (lat/sol <= 0).
+fn hold_anchor_weights_exhaustive(
+    cfg: &OpInterpConfig,
+    data: &Node,
+    coords: &[f64],
+    nn_leaves: usize,
+    q_log: &[f64],
+) -> Result<Vec<HoldAnchor>, AicError> {
+    let mut leaves: Vec<(Vec<u32>, LeafValue)> = Vec::new();
+    walk_leaves(data, &mut Vec::new(), &mut leaves);
+    let mut ranked: Vec<(f64, usize)> = leaves
+        .iter()
+        .enumerate()
+        .map(|(i, (c, _))| {
+            let dd: f64 = c
+                .iter()
+                .zip(q_log)
+                .map(|(&v, ql)| {
+                    let delta = ((v as f64).max(1e-12)).log2() - ql;
+                    delta * delta
+                })
+                .sum();
+            (dd.sqrt(), i)
+        })
+        .collect();
+    ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let mut picked: Vec<HoldAnchor> = Vec::with_capacity(nn_leaves);
+    let mut support_r = f64::INFINITY;
+    for &(d, i) in &ranked {
+        let (c, leaf) = &leaves[i];
+        let anchor: Vec<f64> = c.iter().map(|&v| v as f64).collect();
+        let sol = (cfg.sol_fn)(&anchor);
+        if !(leaf.latency.is_finite() && leaf.latency > 0.0 && sol.is_finite() && sol > 0.0) {
+            continue;
+        }
+        if picked.len() < nn_leaves {
+            picked.push(HoldAnchor {
+                coords: c.clone(),
+                latency: leaf.latency,
+                power: leaf.blend_power(),
+                sol,
+                weight: d,
+            });
+        } else {
+            support_r = d;
+            break;
+        }
+    }
+    finish_hold_anchors(cfg, coords, picked, support_r)
+}
+
+/// Turn `(distance in .weight)` candidates into tapered anchors:
+/// w = ((R-d)/(R*d))^2, degrading to plain 1/d^2 when R = inf, and to equal
+/// weights when every candidate sits exactly on the support boundary (equal
+/// distances -> plain inverse-distance after normalization, order-invariant).
+fn finish_hold_anchors(
+    cfg: &OpInterpConfig,
+    coords: &[f64],
+    mut picked: Vec<HoldAnchor>,
+    support_r: f64,
+) -> Result<Vec<HoldAnchor>, AicError> {
+    if picked.is_empty() {
+        return Err(miss(cfg, coords, "no positive-util boundary anchor"));
+    }
+    let taper = |d: f64| -> f64 {
+        if support_r.is_infinite() {
+            1.0 / (d * d + 1e-12)
+        } else {
+            let t = (support_r - d).max(0.0) / (support_r * d + 1e-12);
+            t * t
+        }
+    };
+    let mut wsum = 0.0;
+    for a in &mut picked {
+        a.weight = taper(a.weight); // .weight carried the distance until here
+        wsum += a.weight;
+    }
+    if wsum <= 0.0 {
+        for a in &mut picked {
+            a.weight = 1.0;
+        }
+    }
+    Ok(picked)
 }
 
 fn nearest_key(map: &BTreeMap<u32, Node>, c: f64) -> u32 {
@@ -549,6 +765,7 @@ fn median(values: &mut [f64]) -> f64 {
 
 /// Site index for a scattered-sites table. Tables are immutable after load,
 /// so owners build this once (e.g. in a `OnceLock`) and reuse it.
+#[derive(Debug)]
 pub struct SiteIndex {
     /// site key -> sorted (curve coordinate, measured leaf) sweep
     sites: BTreeMap<Vec<u32>, Vec<(u32, LeafValue)>>,
@@ -574,9 +791,15 @@ impl SiteIndex {
         let (site_logs, curve_bounds): (Vec<(Vec<u32>, Vec<f64>)>, Vec<(u32, u32)>) = sites
             .iter()
             .map(|(k, curve)| {
+                // Python `_site_index`: `log2(max(v, 1e-12))` — the SAME floor
+                // as the query logs in `resolve`. A zero site coordinate (FPM
+                // prefill KV=0 sites) must land at ~-39.86 on BOTH sides so
+                // P=0 queries stay near P=0 sites; flooring sites at 1 (the
+                // old GEMM-era shortcut, identical for v >= 1) pushed those
+                // sites ~40 log2-units away from their own queries.
                 let logs = k
                     .iter()
-                    .map(|&v| (v.max(1) as f64).log2())
+                    .map(|&v| (v as f64).max(1e-12).log2())
                     .collect::<Vec<f64>>();
                 let bounds = (curve[0].0, curve[curve.len() - 1].0);
                 ((k.clone(), logs), bounds)
@@ -654,6 +877,7 @@ impl SiteIndex {
             nn_sites,
             max_site_distance,
             require_curve_coverage,
+            own_curve_coverage_fallback,
             ..
         } = &cfg.resolver
         else {
@@ -662,12 +886,19 @@ impl SiteIndex {
 
         let q = coords[*curve_axis];
         // Collected shape (integer site coords present in the index): its own
-        // curve answers alone.
+        // curve answers alone... unless the curve does not cover the query and
+        // the config opted into coverage fallback: treat the own site as
+        // absent for the transfer below.
+        let mut excluded_site: Option<&[u32]> = None;
         let site_ints: Option<Vec<u32>> =
             site_axes.iter().map(|&p| as_exact_key(coords[p])).collect();
         if let Some(key) = &site_ints {
             if let Some(curve) = self.sites.get(key) {
-                return self.eval_curve(cfg, curve, key, q, coords);
+                let covers = (curve[0].0 as f64) <= q && q <= (curve[curve.len() - 1].0 as f64);
+                if !(*own_curve_coverage_fallback && !covers) {
+                    return self.eval_curve(cfg, curve, key, q, coords);
+                }
+                excluded_site = self.sites.get_key_value(key).map(|(k, _)| k.as_slice());
             }
         }
 
@@ -695,20 +926,25 @@ impl SiteIndex {
         // comparator, plus separate dists/candidates/covering vecs, made this
         // resolve the dominant engine-step cost for query-heavy models (e.g.
         // per-block puzzle nets whose GEMM shapes miss the collected sites).
+        let is_excluded =
+            |i: usize| excluded_site.is_some_and(|e| self.site_logs[i].0.as_slice() == e);
         let mut ranked: Vec<(f64, usize)> = Vec::with_capacity(self.site_logs.len());
         if *require_curve_coverage {
             for (i, (_, logs)) in self.site_logs.iter().enumerate() {
                 let (lo, hi) = self.curve_bounds[i];
-                if (lo as f64) <= q && q <= (hi as f64) {
+                if (lo as f64) <= q && q <= (hi as f64) && !is_excluded(i) {
                     ranked.push((dist(logs), i));
                 }
             }
         }
         // No coverage requirement, or nothing covered q -> fall back to all
-        // sites (each later held at its own curve end).
+        // sites (each later held at its own curve end), still minus the
+        // coverage-fallback-excluded own site.
         if ranked.is_empty() {
             for (i, (_, logs)) in self.site_logs.iter().enumerate() {
-                ranked.push((dist(logs), i));
+                if !is_excluded(i) {
+                    ranked.push((dist(logs), i));
+                }
             }
         }
 
@@ -773,7 +1009,7 @@ impl SiteIndex {
             return Err(miss(cfg, coords, "no usable neighbour site"));
         }
         let sol_q = (cfg.sol_fn)(coords);
-        if !(sol_q > 0.0) {
+        if !(sol_q.is_finite() && sol_q > 0.0) {
             return Err(miss(cfg, coords, "non-positive SOL at query"));
         }
         // Latency transfers util (SOL-rescaled); power is the plain IDW mean
@@ -907,7 +1143,7 @@ impl SiteIndex {
                 return Err(miss(cfg, coords, "no positive-util boundary anchor"));
             }
             let sol_q = (cfg.sol_fn)(&full_coords(q));
-            if !(sol_q > 0.0) {
+            if !(sol_q.is_finite() && sol_q > 0.0) {
                 return Err(miss(cfg, coords, "non-positive SOL at query"));
             }
             return Ok((sol_q / median(&mut utils), median(&mut powers)));
@@ -942,6 +1178,22 @@ pub(crate) fn node_points(node: &Node) -> Vec<(Vec<f64>, f64)> {
     out.into_iter()
         .map(|(coords, leaf)| (coords.into_iter().map(|c| c as f64).collect(), leaf.latency))
         .collect()
+}
+
+/// Visit every leaf without materializing a leaf vector (the hold path's
+/// single-pass selection uses this; `walk_leaves` remains for callers that
+/// genuinely need the full collection).
+fn visit_leaves(node: &Node, prefix: &mut Vec<u32>, f: &mut impl FnMut(&[u32], LeafValue)) {
+    match node {
+        Node::Leaf(v) => f(prefix, *v),
+        Node::Branch(map) => {
+            for (&k, child) in map {
+                prefix.push(k);
+                visit_leaves(child, prefix, f);
+                prefix.pop();
+            }
+        }
+    }
 }
 
 fn walk_leaves(node: &Node, prefix: &mut Vec<u32>, out: &mut Vec<(Vec<u32>, LeafValue)>) {
@@ -1130,6 +1382,13 @@ mod tests {
     }
 
     fn gemm_cfg(sol: &dyn Fn(&[f64]) -> f64) -> OpInterpConfig<'_> {
+        gemm_cfg_with_fallback(sol, false)
+    }
+
+    fn gemm_cfg_with_fallback(
+        sol: &dyn Fn(&[f64]) -> f64,
+        own_curve_coverage_fallback: bool,
+    ) -> OpInterpConfig<'_> {
         OpInterpConfig {
             axes: &["m", "n", "k"],
             resolver: Resolver::ScatteredSites {
@@ -1139,6 +1398,7 @@ mod tests {
                 max_site_distance: Some(2.0),
                 require_curve_coverage: true,
                 k_tail: 3,
+                own_curve_coverage_fallback,
             },
             sol_fn: sol,
             value_transform: ValueTransform::Raw,
@@ -1197,6 +1457,106 @@ mod tests {
         let cfg = gemm_cfg(&gemm_lat);
         // (64, 64): > 2 octaves from every collected site -> miss, not a guess.
         assert!(query(&cfg, &t, &[64.0, 64.0, 64.0]).is_err());
+    }
+
+    /// Own site (4096, 1024) sweeps only m<=64 and its measured latencies run
+    /// at 2x the formula (util 0.5); neighbour (5120, 2048) covers the full
+    /// sweep at util 1. A query at the own site beyond its sweep must:
+    /// - fallback=false: util-hold the OWN tail -> 2x the formula;
+    /// - fallback=true: exclude the own site and transfer from the clean
+    ///   neighbour -> the formula exactly (Python own_curve_coverage_fallback).
+    fn short_own_site_table() -> Node {
+        let mut t = Node::branch();
+        for m in [16u32, 32, 64] {
+            t.insert(
+                &[m, 4096, 1024],
+                2.0 * gemm_lat(&[m as f64, 4096.0, 1024.0]),
+            );
+        }
+        for m in [16u32, 32, 64, 128, 256, 512, 1024] {
+            t.insert(&[m, 5120, 2048], gemm_lat(&[m as f64, 5120.0, 2048.0]));
+        }
+        t
+    }
+
+    #[test]
+    fn own_curve_fallback_off_holds_own_tail() {
+        let t = short_own_site_table();
+        let cfg = gemm_cfg_with_fallback(&gemm_lat, false);
+        approx(
+            query(&cfg, &t, &[512.0, 4096.0, 1024.0]).unwrap(),
+            2.0 * gemm_lat(&[512.0, 4096.0, 1024.0]),
+        );
+    }
+
+    #[test]
+    fn own_curve_fallback_on_transfers_from_neighbours() {
+        let t = short_own_site_table();
+        let cfg = gemm_cfg_with_fallback(&gemm_lat, true);
+        approx(
+            query(&cfg, &t, &[512.0, 4096.0, 1024.0]).unwrap(),
+            gemm_lat(&[512.0, 4096.0, 1024.0]),
+        );
+    }
+
+    #[test]
+    fn own_curve_fallback_in_range_still_answers_from_own_curve() {
+        // Inside the own sweep the flag must change nothing: m=48 lerps on the
+        // own (distorted) curve.
+        let t = short_own_site_table();
+        let cfg = gemm_cfg_with_fallback(&gemm_lat, true);
+        approx(
+            query(&cfg, &t, &[48.0, 4096.0, 1024.0]).unwrap(),
+            2.0 * gemm_lat(&[48.0, 4096.0, 1024.0]),
+        );
+    }
+
+    /// FPM prefill tables have legitimate KV=0 sites. A query at an
+    /// uncollected batch with KV=0 must transfer from the KV=0 neighbours
+    /// (both floored at 1e-12 -> distance is the batch axis alone), exactly
+    /// like Python `_site_index`.
+    #[test]
+    fn zero_valued_site_axis_stays_near_zero_valued_queries() {
+        // FPM-prefill-shaped table: axes (batch, P, KV), sites (batch, KV).
+        let mut t = Node::branch();
+        for b in [2u32, 4] {
+            for p in [1024u32, 2048, 4096] {
+                t.insert(&[b, p, 0], 1e-3 * (b * p) as f64);
+            }
+        }
+        let lat = |c: &[f64]| 1e-3 * c[0] * c[1];
+        let cfg = OpInterpConfig {
+            axes: &["batch_size", "total_prefill_tokens", "total_kv_read_tokens"],
+            resolver: Resolver::ScatteredSites {
+                site_axes: vec![0, 2],
+                curve_axis: 1,
+                nn_sites: 4,
+                max_site_distance: Some(2.0),
+                require_curve_coverage: true,
+                k_tail: 3,
+                own_curve_coverage_fallback: true,
+            },
+            sol_fn: &lat,
+            value_transform: ValueTransform::Raw,
+            transform_axis: None,
+        };
+        // B=3 is uncollected; KV=0 matches the collected sites' zero axis.
+        approx(
+            query(&cfg, &t, &[3.0, 2048.0, 0.0]).unwrap(),
+            lat(&[3.0, 2048.0]),
+        );
+    }
+
+    #[test]
+    fn own_curve_fallback_sole_site_is_a_structured_miss() {
+        // The excluded own site is the ONLY site: no candidates survive the
+        // distance gate -> miss, never self-anchor.
+        let mut t = Node::branch();
+        for m in [16u32, 32, 64] {
+            t.insert(&[m, 4096, 1024], gemm_lat(&[m as f64, 4096.0, 1024.0]));
+        }
+        let cfg = gemm_cfg_with_fallback(&gemm_lat, true);
+        assert!(query(&cfg, &t, &[512.0, 4096.0, 1024.0]).is_err());
     }
 
     #[test]
@@ -1344,7 +1704,10 @@ mod tests {
         let sol: &dyn Fn(&[f64]) -> f64 = &lat1;
         let cfg = OpInterpConfig {
             axes: &["size"],
-            resolver: Resolver::Grid { k_tail: 3 },
+            resolver: Resolver::Grid {
+                k_tail: 3,
+                nn_leaves: 4,
+            },
             sol_fn: sol,
             value_transform: ValueTransform::Raw,
             transform_axis: None,
@@ -1484,6 +1847,7 @@ mod tests {
                 nn_sites: 1,
                 max_site_distance: Some(2.0),
                 require_curve_coverage: true,
+                own_curve_coverage_fallback: false,
                 k_tail: 3,
             },
             sol_fn: &sol,
@@ -1507,5 +1871,207 @@ mod tests {
             ordered_index.resolve_value(&cfg, &coords).unwrap().latency,
             sol_q / 0.5,
         );
+    }
+
+    // Multi-axis hold: joint-log2 kNN util transfer (the B200 gen-attn report
+    // case). Staircase with a REGIME SPLIT: the deep b=128 row is collected at
+    // exact physics while the short b=256 row ends early in a 1.4x-latency
+    // regime (like the real 128K-token-capped b>=256 rows). Every query below
+    // is past the frontier on both rows.
+    fn gen_lat(c: &[f64]) -> f64 {
+        1e-6 * c[0] * c[1] * c[2] // decode physics: [n][b][s], linear in both
+    }
+
+    fn gen_split_table() -> Node {
+        let mut root = Node::branch();
+        for s in [512u32, 1024, 2048] {
+            root.insert(&[64, 128, s], gen_lat(&[64.0, 128.0, s as f64]));
+        }
+        for s in [128u32, 256, 512] {
+            root.insert(&[64, 256, s], 1.4 * gen_lat(&[64.0, 256.0, s as f64]));
+        }
+        root
+    }
+
+    #[test]
+    fn grid_hold_is_continuous_across_outer_midpoint() {
+        // The nearest-path snap flipped anchors at the bracket midpoint
+        // (b=192 -> row 128, b=193 -> row 256), a +36.9% cliff on the real
+        // B200 table where measured hardware moves +0.17%. The kNN hold must
+        // stay continuous: the 192->193 step may not exceed the SOL growth by
+        // more than a percent.
+        let t = gen_split_table();
+        let cfg = OpInterpConfig::grid(&["num_heads", "batch", "seq_len"], &gen_lat);
+        let lat_192 = query(&cfg, &t, &[64.0, 192.0, 4096.0]).unwrap();
+        let lat_193 = query(&cfg, &t, &[64.0, 193.0, 4096.0]).unwrap();
+        let sol_step = gen_lat(&[64.0, 193.0, 4096.0]) / gen_lat(&[64.0, 192.0, 4096.0]);
+        assert!((lat_193 / lat_192 - sol_step).abs() < 0.01);
+    }
+
+    #[test]
+    fn grid_hold_prefers_nearby_saturated_evidence() {
+        // A query deep past the short row's end (b=256, s=4096) must not
+        // inherit that row's unsaturated 1.4x boundary util verbatim (the old
+        // snap did, +41% on the reported B200 case): the joint-log nearest
+        // leaves are the deep saturated ones, so the answer lands near physics.
+        let t = gen_split_table();
+        let cfg = OpInterpConfig::grid(&["num_heads", "batch", "seq_len"], &gen_lat);
+        let lat = query(&cfg, &t, &[64.0, 256.0, 4096.0]).unwrap();
+        let ratio = lat / gen_lat(&[64.0, 256.0, 4096.0]);
+        assert!(ratio < 1.15, "snap gave 1.4x, got {ratio}");
+        assert!(ratio > 0.95, "got {ratio}");
+    }
+
+    /// Perf comparison for the hold selection (review P2): single-pass
+    /// best-M buffer vs the former collect-all + full-sort. Not asserted (CI
+    /// timing is flaky); run manually:
+    /// `cargo test -p aiconfigurator-core --release hold_selection_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn hold_selection_bench() {
+        use std::time::Instant;
+        // ~1.9k leaves, the size of the real b200 gen-attention slice.
+        let mut t = Node::branch();
+        for n in [8u32, 16, 32, 64] {
+            for b in [1u32, 2, 4, 8, 16, 32, 64, 128, 256, 512] {
+                for s in [
+                    2u32, 8, 32, 128, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
+                ] {
+                    t.insert(&[n, b, s], 1e-6 * (n * b) as f64 * s as f64);
+                }
+            }
+        }
+        let sol = |c: &[f64]| c[0] * c[1] * c[2];
+        let cfg = OpInterpConfig::grid(&["n", "b", "s"], &sol);
+        let coords: [f64; 3] = [64.0, 192.0, 131072.0]; // past-frontier hold query
+
+        let old_selection = || {
+            let mut leaves: Vec<(Vec<u32>, LeafValue)> = Vec::new();
+            walk_leaves(&t, &mut Vec::new(), &mut leaves);
+            let q_log: Vec<f64> = coords.iter().map(|&v: &f64| v.max(1e-12).log2()).collect();
+            let mut ranked: Vec<(f64, usize)> = leaves
+                .iter()
+                .enumerate()
+                .map(|(i, (c, _))| {
+                    let dd: f64 = c
+                        .iter()
+                        .zip(&q_log)
+                        .map(|(&v, ql)| {
+                            let delta = ((v as f64).max(1e-12)).log2() - ql;
+                            delta * delta
+                        })
+                        .sum();
+                    (dd.sqrt(), i)
+                })
+                .collect();
+            ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+            ranked[..5].to_vec()
+        };
+
+        const ITERS: usize = 10_000;
+        let start = Instant::now();
+        for _ in 0..ITERS {
+            std::hint::black_box(old_selection());
+        }
+        let old_ns = start.elapsed().as_nanos() / ITERS as u128;
+        let start = Instant::now();
+        for _ in 0..ITERS {
+            std::hint::black_box(hold_anchor_weights(&cfg, &t, &coords, 4).unwrap());
+        }
+        let new_ns = start.elapsed().as_nanos() / ITERS as u128;
+        println!("hold selection on 1920 leaves: collect+sort {old_ns} ns/query, single-pass {new_ns} ns/query");
+    }
+
+    #[test]
+    fn grid_hold_boundary_ties_carry_zero_weight() {
+        // Power-of-two grids tie EXACTLY. Under the tapered weights, leaves
+        // sitting on the support radius R (the 5th valid distance) weigh
+        // ZERO, so which side of the nn_leaves cutoff a tied leaf lands on
+        // cannot matter — no tie-ordering rule needed, and the blend is
+        // independent of axis order and table insertion order.
+        // Query (64,32,1) is below the collected s range: one leaf at d=1,
+        // then a FOUR-way tie at sqrt(2) == R -> every tie member weighs 0
+        // and the answer equals the nearest anchor's held util exactly.
+        let lat_of: &[(&[u32; 3], f64)] = &[
+            (&[64, 32, 2], 1.00), // d=1: the only anchor with non-zero weight
+            (&[64, 16, 2], 1.10), // d=sqrt(2) x4, distinct latencies so any
+            (&[64, 64, 2], 1.30), // leaked tie weight would shift the blend
+            (&[32, 32, 2], 1.50),
+            (&[128, 32, 2], 1.70),
+            (&[64, 32, 4], 2.00), // d=2, beyond the support: excluded
+        ];
+        let mut t = Node::branch();
+        for (c, lat) in lat_of {
+            t.insert(*c, *lat);
+        }
+        let sol = |_: &[f64]| 1.0; // constant SOL isolates the anchor selection
+        let cfg = OpInterpConfig::grid(&["num_heads", "batch", "seq_len"], &sol);
+
+        let expected = 1.00; // util held from the single live anchor
+        let lat = query(&cfg, &t, &[64.0, 32.0, 1.0]).unwrap();
+        assert!(
+            (lat - expected).abs() <= 1e-9 * expected,
+            "got {lat}, want {expected}"
+        );
+
+        let mut swapped = Node::branch();
+        for (c, lat) in lat_of {
+            swapped.insert(&[c[0], c[2], c[1]], *lat);
+        }
+        let cfg_swapped = OpInterpConfig::grid(&["num_heads", "seq_len", "batch"], &sol);
+        let lat_swapped = query(&cfg_swapped, &swapped, &[64.0, 1.0, 32.0]).unwrap();
+        assert!(
+            (lat - lat_swapped).abs() <= 1e-12 * lat,
+            "nesting changed the tie blend"
+        );
+    }
+
+    #[test]
+    fn grid_hold_is_continuous_across_rank_swaps() {
+        // The support-radius taper sends a neighbour's weight to ZERO as it
+        // leaves the nn_leaves selection, so the estimate is continuous when
+        // leaves 4 and 5 exchange rank — the hard cutoff traded them at full
+        // weight. L4=(16,.) and L5=(1024,.) swap ranks at x=128 with 100x
+        // different latencies; epsilon steps across the swap must move the
+        // estimate by less than 0.01%.
+        let lat_of: &[(&[u32; 2], f64)] = &[
+            (&[128, 8], 1.0),
+            (&[96, 8], 1.1),
+            (&[160, 8], 1.2),
+            (&[16, 8], 0.5),
+            (&[1024, 8], 50.0),
+        ];
+        let mut t = Node::branch();
+        for (c, lat) in lat_of {
+            t.insert(*c, *lat);
+        }
+        let sol = |_: &[f64]| 1.0;
+        let cfg = OpInterpConfig::grid(&["a", "b"], &sol);
+        let lo = query(&cfg, &t, &[128.0 * (1.0 - 1e-6), 32.0]).unwrap();
+        let hi = query(&cfg, &t, &[128.0 * (1.0 + 1e-6), 32.0]).unwrap();
+        assert!(
+            (hi - lo).abs() / lo < 1e-4,
+            "rank swap discontinuity: {lo} vs {hi}"
+        );
+    }
+
+    #[test]
+    fn grid_hold_is_axis_order_independent() {
+        // The hold works on joint coordinates, not the nesting order: the
+        // same data nested [n][b][s] and [n][s][b] must answer a past-frontier
+        // query identically.
+        let t = gen_split_table();
+        let cfg = OpInterpConfig::grid(&["num_heads", "batch", "seq_len"], &gen_lat);
+        let mut swapped = Node::branch();
+        let mut leaves: Vec<(Vec<u32>, LeafValue)> = Vec::new();
+        walk_leaves(&t, &mut Vec::new(), &mut leaves);
+        for (c, leaf) in &leaves {
+            swapped.insert_value(&[c[0], c[2], c[1]], *leaf);
+        }
+        let sol_swapped = |c: &[f64]| gen_lat(&[c[0], c[2], c[1]]);
+        let cfg_swapped = OpInterpConfig::grid(&["num_heads", "seq_len", "batch"], &sol_swapped);
+        let lat = query(&cfg, &t, &[64.0, 200.0, 4096.0]).unwrap();
+        let lat_swapped = query(&cfg_swapped, &swapped, &[64.0, 4096.0, 200.0]).unwrap();
+        assert!((lat - lat_swapped).abs() <= 1e-12 * lat.abs());
     }
 }

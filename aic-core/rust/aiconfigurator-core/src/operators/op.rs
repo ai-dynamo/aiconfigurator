@@ -18,11 +18,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::error::AicError;
 use crate::operators::{
-    ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
-    Dsv4ModuleOp, ElementwiseOp, EmbeddingOp, EncoderAttentionOp, MoeExpertComputeOp, GdnOp, GemmOp,
+    ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp, Dsv4ModuleOp,
+    ElementwiseOp, EmbeddingOp, EncoderAttentionOp, FpmForwardOp, GdnOp, GemmOp,
     GenerationAttentionOp, GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp,
-    MoEDispatchOp, MoeAllToAllOp, MoeOp, MsaModuleOp, NcclOp, P2POp, PerformanceResult, Source,
-    VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp,
+    MoEDispatchOp, MoeAllToAllOp, MoeExpertComputeOp, MoeOp, MsaModuleOp, NcclOp, P2POp,
+    PerformanceResult, Source, VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp,
 };
 use crate::perf_database::PerfDatabase;
 
@@ -149,15 +149,23 @@ pub enum Op {
     /// layers — Python `KDAKernel` (a `GDNKernel` subclass with a distinct
     /// `kda_perf` table, an fp32-state SOL byte model, a "verify" phase and
     /// a `draft_tokens` field). APPENDED at the end (see the bincode note on
-    /// `Dsv4MegaMoe`); the new serialized variant carried main's
-    /// `ENGINE_SPEC_SCHEMA_VERSION` bump.
+    /// `Dsv4MegaMoe`); the new serialized variant bumped
+    /// `ENGINE_SPEC_SCHEMA_VERSION` to 5 (renumbered to 6 at its merge).
     Kda(KdaOp),
+    /// Whole-model forward pass (Python `forward_model="fpm"`): with the FPM
+    /// rewrite each phase op list is exactly one of these, answering from the
+    /// collected `fpm_forward_perf` cells instead of a granular composition.
+    /// NOT related to the `crate::fpm` (ForwardPassPerfModel) module.
+    /// APPENDED at the end (see the bincode note on `Dsv4MegaMoe`); claimed
+    /// `ENGINE_SPEC_SCHEMA_VERSION` 5 concurrently with #1460/#1435 and was
+    /// renumbered to 9 across the intervening wire-format landings.
+    FpmForward(FpmForwardOp),
     /// Unified large-EP MoE all-to-all comm phase (Python
     /// `operations.moe_comm.MoEAllToAll`) — one variant serves every backend
     /// and every phase; the op's `phase` / `comm_backend` fields select the
     /// slice. Measured-SILICON-only; see `operators/moe_a2a.rs`.
     ///
-    /// APPENDED after `Kda` — same positional-index rule as above.
+    /// APPENDED after `FpmForward` — same positional-index rule as above.
     MoeAllToAll(MoeAllToAllOp),
     /// Unified large-EP MoE expert compute (Python
     /// `operations.moe_comm.MoEExpertCompute`) — one variant for both inference phases;
@@ -239,6 +247,7 @@ impl Op {
             Op::Gdn(o) => &o.name,
             Op::WideEpContextMla(o) => &o.name,
             Op::WideEpGenerationMla(o) => &o.name,
+            Op::FpmForward(o) => &o.name,
             Op::Overlap(o) => &o.name,
             Op::Fallback(o) => &o.name,
             Op::Dsv4MegaMoe(o) => &o.name,
@@ -324,6 +333,9 @@ impl Op {
             Op::Gdn(op) => op.query(db, ctx.batch_size, ctx.s),
             Op::WideEpContextMla(op) => op.query(db, ctx.batch_size, ctx.s, ctx.prefix),
             Op::WideEpGenerationMla(op) => op.query(db, ctx.batch_size, ctx.s),
+            // Whole-model op: consumes batch_size/s/prefix/beam_width from the
+            // context (num_tokens is ignored, mirroring Python's kwargs use).
+            Op::FpmForward(op) => op.query(db, ctx),
             Op::Overlap(op) => {
                 // Mirrors Python `OverlapOp.query`: each group is summed
                 // independently, then latency = max(group_a_total,

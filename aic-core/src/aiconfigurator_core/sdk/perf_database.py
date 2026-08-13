@@ -405,11 +405,27 @@ def _load_collection_meta_yaml(path: str) -> dict:
     return raw
 
 
-def _collection_meta_has_partial_table(meta: dict) -> bool:
+def _collection_meta_partial_tables(meta: dict) -> frozenset[str]:
+    """Return tables whose collection coverage is incomplete.
+
+    ``status: partial`` is table/shape coverage metadata, not a statement that
+    the successfully collected rows are invalid.  Those rows remain eligible
+    as the primary source; older versions only fill coordinates they do not
+    contain (design §6.1/§6.2 first-wins semantics).
+    """
     tables = meta.get("tables")
     if not isinstance(tables, dict):
-        return False
-    return any(isinstance(table, dict) and table.get("status") == "partial" for table in tables.values())
+        return frozenset()
+    return frozenset(
+        name
+        for name, table in tables.items()
+        if isinstance(name, str) and isinstance(table, dict) and table.get("status") == "partial"
+    )
+
+
+def _collection_meta_has_partial_table(meta: dict) -> bool:
+    """Compatibility predicate for metadata/reporting callers."""
+    return bool(_collection_meta_partial_tables(meta))
 
 
 def _version_dir_state(version_path: str, *, data_dir: str | None = None) -> dict[str, object]:
@@ -418,9 +434,12 @@ def _version_dir_state(version_path: str, *, data_dir: str | None = None) -> dic
     - ``declared_reuse``: parsed ``reuse.yaml`` contents (design §6.3) when it has
       >=1 entry; the legacy marker-only sentinel when only ``SHARED_LAYER_REUSE.txt``
       is present; ``None`` when neither declares reuse.
-    - ``partial``: True when ``collection_meta.yaml`` has any table with
-      ``status: partial`` (whole-dir discovery parity with today; per-table nuance
-      is PR 4 scope), or (fallback) ``INCOMPLETE.txt`` is present.
+    - ``partial`` / ``partial_tables``: informational collection-coverage
+      state from ``collection_meta.yaml``. Partial tables still contribute all
+      successfully collected rows; older versions fill only missing shapes.
+    - ``unusable``: whole-directory exclusion. This is reserved for the legacy
+      ``INCOMPLETE.txt`` marker, which has no table/shape granularity. A present
+      ``collection_meta.yaml`` supersedes that legacy marker.
     - ``has_perf``: whether the dir holds real perf output files.
 
     ``data_dir`` scopes the one-time-per-tree legacy-marker deprecation warning
@@ -439,18 +458,24 @@ def _version_dir_state(version_path: str, *, data_dir: str | None = None) -> dic
         _warn_legacy_marker_once(warn_scope, SHARED_LAYER_REUSE_MARKER, REUSE_YAML_MARKER)
         declared_reuse = {"entries": [], "legacy": True}
 
-    partial = False
+    partial_tables: frozenset[str] = frozenset()
+    unusable = False
     meta_yaml_path = os.path.join(version_path, COLLECTION_META_MARKER)
     legacy_incomplete_path = os.path.join(version_path, INCOMPLETE_MARKER)
     if os.path.isfile(meta_yaml_path):
-        partial = _collection_meta_has_partial_table(_load_collection_meta_yaml(meta_yaml_path))
+        partial_tables = _collection_meta_partial_tables(_load_collection_meta_yaml(meta_yaml_path))
     elif os.path.isfile(legacy_incomplete_path):
         _warn_legacy_marker_once(warn_scope, INCOMPLETE_MARKER, COLLECTION_META_MARKER)
-        partial = True
+        # INCOMPLETE.txt predates per-table provenance, so there is no safe way
+        # to identify which rows/tables succeeded. Keep the legacy fail-closed
+        # whole-directory behavior only for this unstructured marker.
+        unusable = True
 
     return {
         "declared_reuse": declared_reuse,
-        "partial": partial,
+        "partial": bool(partial_tables) or unusable,
+        "partial_tables": partial_tables,
+        "unusable": unusable,
         "has_perf": _database_version_dir_has_perf_files(version_path),
     }
 
@@ -459,7 +484,7 @@ def _database_version_dir_is_declared(version_path: str, *, data_dir: str | None
     if not os.path.isdir(version_path):
         return False
     state = _version_dir_state(version_path, data_dir=data_dir)
-    if state["partial"]:
+    if state["unusable"]:
         return False
     return bool(state["has_perf"]) or state["declared_reuse"] is not None
 
@@ -532,7 +557,7 @@ def is_shared_layer_marker_only_version(
     saw_marker = False
     for version_path, data_dir in _iter_database_version_paths(system, backend, version, systems_paths=systems_paths):
         state = _version_dir_state(version_path, data_dir=data_dir)
-        if state["partial"]:
+        if state["unusable"]:
             continue
         if state["has_perf"]:
             return False
@@ -845,17 +870,19 @@ def _check_strict_provenance_for_request(paths: list[str], backend: str, data_di
             _check_strict_provenance_coverage(os.path.dirname(donor_path), strict=strict, only_table=entry["table"])
 
 
-def _version_dir_partial_for_request(version_path: str, data_dir: str, *, strict: bool) -> bool:
-    """``get_database()``'s request-scoped wrapper around
-    ``_version_dir_state``'s ``partial`` flag: a malformed sidecar under it
-    raises in strict mode (same ``ValueError``), and in non-strict mode is
-    logged and treated as "not partial" rather than aborting the whole
-    lookup. ``_version_dir_state``'s OTHER call sites (discovery/listing,
-    e.g. ``_declared_versions``) are out of this per-request hook's scope and
-    keep their pre-existing unconditional raise.
+def _version_dir_unusable_for_request(version_path: str, data_dir: str, *, strict: bool) -> bool:
+    """Return whether a request must reject the whole version directory.
+
+    Structured ``collection_meta.yaml`` partial status is intentionally *not*
+    grounds for rejection: valid primary rows are loaded and sibling versions
+    fill only missing shapes. Whole-directory rejection remains only for the
+    unstructured legacy ``INCOMPLETE.txt`` marker.
+
+    A malformed sidecar raises in strict mode; non-strict mode warns and lets
+    normal loading continue, matching the existing request-scoped behavior.
     """
     try:
-        return bool(_version_dir_state(version_path, data_dir=data_dir)["partial"])
+        return bool(_version_dir_state(version_path, data_dir=data_dir)["unusable"])
     except ValueError as e:
         if strict:
             raise
@@ -942,7 +969,7 @@ def get_database(
         data_dir_abs = os.path.join(systems_root, data_dir)
         paths = [p for v, p in _iter_backend_version_dirs(data_dir_abs, backend) if v == version]
         is_incomplete = bool(paths) and all(
-            _version_dir_partial_for_request(p, data_dir_abs, strict=effective_strict) for p in paths
+            _version_dir_unusable_for_request(p, data_dir_abs, strict=effective_strict) for p in paths
         )
         if paths and not is_incomplete:
             request_key = (tuple(sorted(paths)), backend)
@@ -1191,7 +1218,7 @@ def _iter_database_refs_for_system(systems_root: str, system: str, system_spec: 
 
         for version in sorted(version_paths):
             paths = version_paths[version]
-            if all(_version_dir_state(p, data_dir=data_dir)["partial"] for p in paths):
+            if all(_version_dir_state(p, data_dir=data_dir)["unusable"] for p in paths):
                 continue
             yield system, backend_name, version, systems_root
 
@@ -2263,10 +2290,10 @@ class PerfDatabase:
         `self.data_provenance[op_file_basename]` — see that attribute's
         docstring for the granularity contract.
 
-        An existing primary whose containing version dir is marked partial
-        (legacy-layout fallback only — the resolver already skips partial
-        family dirs) is refused entirely: no record, no source tuple, only a
-        warning; channels 2-4 still fill.
+        A structured ``status: partial`` primary is admitted normally: its
+        successful rows win and channels 2-4 fill missing shapes. Only a
+        legacy ``INCOMPLETE.txt`` directory is refused wholesale because that
+        marker carries no table/shape-level coverage information.
 
         Returns just the primary tuple (still recorded) when the shared layer
         is disabled, when the op file is framework-agnostic (nccl / oneccl),
@@ -2282,23 +2309,19 @@ class PerfDatabase:
         op_file_basename = op_filename_enum.value
         records: list[dict[str, object]] = []
         primary_version_dir = os.path.dirname(primary_path)
-        if os.path.isfile(primary_path) and _version_dir_partial_for_request(
+        if os.path.isfile(primary_path) and _version_dir_unusable_for_request(
             primary_version_dir, system_data_root, strict=self.strict_provenance
         ):
-            # Only the LEGACY-layout fallback can get here: resolve_op_data_path
-            # already skips partial FAMILY dirs, so a family-layout primary is
-            # never partial (pinned by test_reuse_ordering.py's
-            # test_partial_family_dir_is_skipped_by_resolver_not_the_admission_guard).
-            # Partial dirs are excluded from discovery and every reuse channel
-            # (design §5/§6) — refuse the primary too; channels 2-4 below still
-            # fill, and data_provenance keeps listing admitted sources only.
+            # Only the unstructured legacy marker is a whole-directory veto.
+            # Structured partial tables are admitted above fallback sources so
+            # their successful rows remain authoritative for covered shapes.
             logger.warning(
-                "Not admitting primary source %s for %s: version dir %s is marked partial "
-                "(collection_meta.yaml status: partial, or legacy INCOMPLETE.txt); partial "
-                "dirs are excluded from data loading (Collector V3 design §5/§6).",
+                "Not admitting primary source %s for %s: version dir %s carries legacy %s "
+                "without table/shape-level coverage metadata; sibling sources may still fill.",
                 primary_path,
                 op_file_basename,
                 primary_version_dir,
+                INCOMPLETE_MARKER,
             )
         else:
             records.append({"version": self.version, "path": primary_path, "channel": "primary", "ks_filter": None})
@@ -2347,6 +2370,10 @@ class PerfDatabase:
             donor_path = resolve_op_data_path(system_data_root, backend_lower, from_version, op_file_basename)
             if not os.path.isfile(donor_path):
                 continue
+            if _version_dir_unusable_for_request(
+                os.path.dirname(donor_path), system_data_root, strict=self.strict_provenance
+            ):
+                continue
             records.append(
                 {
                     "version": from_version,
@@ -2383,6 +2410,10 @@ class PerfDatabase:
             for _, sibling_version in earlier_versions:
                 sibling_path = resolve_op_data_path(system_data_root, backend_lower, sibling_version, op_file_basename)
                 if not os.path.isfile(sibling_path):
+                    continue
+                if _version_dir_unusable_for_request(
+                    os.path.dirname(sibling_path), system_data_root, strict=self.strict_provenance
+                ):
                     continue
                 records.append(
                     {"version": sibling_version, "path": sibling_path, "channel": "fallback", "ks_filter": None}
@@ -2428,6 +2459,10 @@ class PerfDatabase:
             for sibling_version in fw_versions:
                 sibling_path = resolve_op_data_path(system_data_root, framework, sibling_version, op_file_basename)
                 if not os.path.isfile(sibling_path):
+                    continue
+                if _version_dir_unusable_for_request(
+                    os.path.dirname(sibling_path), system_data_root, strict=self.strict_provenance
+                ):
                     continue
                 records.append(
                     {
@@ -2594,6 +2629,7 @@ class PerfDatabase:
         k: int,
         quant_mode: common.GEMMQuantMode,
         database_mode: common.DatabaseMode | None = None,
+        below_grid_sol: bool = False,
     ) -> PerformanceResult | tuple[float, float, float]:
         """
         Query GEMM operation latency and energy. Delegates to ``GEMM``;
@@ -2612,7 +2648,7 @@ class PerfDatabase:
         """
         from aiconfigurator_core.sdk.operations.gemm import GEMM
 
-        return GEMM._query_gemm_table(self, m, n, k, quant_mode, database_mode)
+        return GEMM._query_gemm_table(self, m, n, k, quant_mode, database_mode, below_grid_sol=below_grid_sol)
 
     @functools.lru_cache(maxsize=32768)
     def query_compute_scale(

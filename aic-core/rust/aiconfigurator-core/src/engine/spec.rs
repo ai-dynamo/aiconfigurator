@@ -164,10 +164,10 @@ mod tests {
     use crate::operators::op::{FallbackOp, OverlapOp};
     use crate::operators::{
         ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
-        Dsv4ModuleOp, ElementwiseOp, EmbeddingOp, EncoderAttentionOp, MoeExpertComputeOp, GdnOp, GemmOp,
+        Dsv4ModuleOp, ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp,
         GenerationAttentionOp, GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp,
-        MlaModuleOp, MoEDispatchOp, MoeAllToAllOp, MoeOp, NcclOp, P2POp, VisionEncoderOp,
-        WideEpContextMlaOp, WideEpGenerationMlaOp,
+        MlaModuleOp, MoEDispatchOp, MoeAllToAllOp, MoeExpertComputeOp, MoeOp, NcclOp, P2POp,
+        VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp,
     };
     use crate::perf_database::dsv4::AttnKind;
     use crate::{
@@ -187,6 +187,7 @@ mod tests {
             scale_num_tokens: 0,
             low_precision_input: true,
             seq_split: 1,
+            below_grid_sol: false,
         }
     }
 
@@ -330,6 +331,7 @@ mod tests {
             is_context: false,
             sms: 12,
             scale_num_tokens: 1,
+            attn_ar_modeled: false,
         }
     }
 
@@ -473,6 +475,7 @@ mod tests {
             architecture: "DeepseekV4ForCausalLM".into(),
             sinkhorn_iters: 20,
             quant_mode: GemmQuantMode::Bfloat16,
+            seq_split: 1,
         }
     }
 
@@ -598,6 +601,34 @@ mod tests {
         }
     }
 
+    fn fpm_forward() -> crate::operators::FpmForwardOp {
+        // Recursive like Overlap/Fallback: sol_ops carries the model's
+        // original granular list, so the round-trip must preserve nesting.
+        crate::operators::FpmForwardOp {
+            name: "fpm_forward_prefill".into(),
+            phase: crate::operators::FpmPhase::Prefill,
+            model_path: "org/model-a".into(),
+            match_identity: vec![
+                "nvfp4".into(),
+                "nvfp4".into(),
+                "bfloat16".into(),
+                "half".into(),
+                "fp8".into(),
+                "4".into(),
+                "1".into(),
+                "1".into(),
+                "4".into(),
+                "1".into(),
+                "1".into(),
+            ],
+            weight_bytes: 1.5e10,
+            sol_ops: vec![
+                OpSpec::Gemm(gemm()),
+                OpSpec::ContextAttention(context_attention()),
+            ],
+        }
+    }
+
     fn fallback() -> FallbackOp {
         // Recursive: a primary module op with a granular per-kernel fallback
         // chain that itself contains a nested Overlap.
@@ -650,9 +681,10 @@ mod tests {
             // Appended AFTER Fallback (bincode enum indices are positional;
             // appending shifts nothing, so no ENGINE_SPEC_SCHEMA_VERSION bump).
             OpSpec::Dsv4MegaMoe(dsv4_megamoe()),
-            // Appended in wire order: Kda (main's Kimi-K3 bump), then the
-            // large-EP pair appended after it by this PR's re-bump.
+            // Appended in wire order: Kda, FpmForward, then this PR's
+            // large-EP pair.
             OpSpec::Kda(kda()),
+            OpSpec::FpmForward(fpm_forward()),
             OpSpec::MoeAllToAll(moe_all_to_all()),
             OpSpec::MoeExpertCompute(moe_expert_compute()),
         ];
@@ -689,6 +721,7 @@ mod tests {
                 | OpSpec::Gdn(_)
                 | OpSpec::WideEpContextMla(_)
                 | OpSpec::WideEpGenerationMla(_)
+                | OpSpec::FpmForward(_)
                 | OpSpec::Overlap(_)
                 | OpSpec::Fallback(_)
                 | OpSpec::Dsv4MegaMoe(_)
@@ -708,6 +741,7 @@ mod tests {
             systems_path: None,
             backend: crate::BackendKind::Trtllm,
             backend_version: Some("1.0.0rc3".into()),
+            forward_model: None,
             kv_block_size: Some(64),
             parallel: ParallelMapping {
                 tp_size: 8,
@@ -742,22 +776,31 @@ mod tests {
     #[test]
     fn op_variant_indices_are_pinned() {
         const GEMM_INDEX: u32 = 0;
-        // Re-derived after main's Kda append (Kimi-K3) shifted the tail.
-        const MOE_ALL_TO_ALL_INDEX: u32 = 32;
-        const MOE_EXPERT_COMPUTE_INDEX: u32 = 33;
+        // Re-derived after current main's Kda and FpmForward tail variants,
+        // and after retiring the two mid-enum wideEP MoE variants.
+        const MOE_ALL_TO_ALL_INDEX: u32 = 33;
+        const MOE_EXPERT_COMPUTE_INDEX: u32 = 34;
 
         let index_of = |op: &OpSpec| -> u32 {
             let bytes = bincode::serialize(op).expect("serialize op");
             u32::from_le_bytes(bytes[..4].try_into().expect("4-byte variant index prefix"))
         };
 
-        assert_eq!(index_of(&OpSpec::Gemm(gemm())), GEMM_INDEX, "first variant moved");
+        assert_eq!(
+            index_of(&OpSpec::Gemm(gemm())),
+            GEMM_INDEX,
+            "first variant moved"
+        );
         assert_eq!(
             index_of(&OpSpec::MoeAllToAll(moe_all_to_all())),
             MOE_ALL_TO_ALL_INDEX,
             "MoeAllToAll index moved"
         );
-        assert_eq!(index_of(&OpSpec::MoeExpertCompute(moe_expert_compute())), MOE_EXPERT_COMPUTE_INDEX, "MoeExpertCompute index moved");
+        assert_eq!(
+            index_of(&OpSpec::MoeExpertCompute(moe_expert_compute())),
+            MOE_EXPERT_COMPUTE_INDEX,
+            "MoeExpertCompute index moved"
+        );
 
         // The two last variants must stay adjacent and terminal: appending is
         // the only safe growth direction.

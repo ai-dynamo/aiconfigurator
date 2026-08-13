@@ -34,12 +34,23 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 // - 6: `Kda` op variant appended (Kimi-K3). Claimed version 5 on its own
 //   branch concurrently with #1460, so the merge renumbered it (same
 //   precedent as the v3/v4 collision above).
-// - 7 (AIC-1601): the wideEP MoE op variants (`WideEpMoe` /
+// - 7: `MoEDispatchOp` gained `attn_ar_modeled` — a bincode op-layout
+//   change (same class as v5).
+// - 8: `GemmOp` gained `below_grid_sol` — a bincode op-layout change (same
+//   class as v5).
+// - 9: `Op::FpmForward` whole-model variant added (forward_model="fpm").
+//   Claimed 5, 7 and 8 concurrently with other landings; renumbered at
+//   each merge (same precedent as the v3/v4 collision above).
+// - 10 (issue #1498): `MhcModuleOp` gained `seq_split` (CP per-rank token
+//   division) — a bincode op-layout change. Claimed 7 concurrently with
+//   `attn_ar_modeled`; renumbered at the rebase.
+// - 11 (AIC-1601): the wideEP MoE op variants (`WideEpMoe` /
 //   `WideEpMoeDispatch`) were removed mid-enum, shifting every later
 //   bincode enum index; large-EP is now modeled natively by the
-//   `MoeAllToAll` / `MoeExpertCompute` variants appended after `Kda`, and `MoeExpertComputeOp`
-//   carries the `enable_eplb` legacy-fidelity field.
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 7;
+//   `MoeAllToAll` / `MoeExpertCompute` variants appended after
+//   `FpmForward`, and `MoeExpertComputeOp` carries the `enable_eplb`
+//   legacy-fidelity field.
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 11;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].
@@ -66,6 +77,13 @@ pub struct EngineConfig {
     // Backend
     pub backend: BackendKind,
     pub backend_version: Option<String>,
+
+    /// Forward-pass modeling mode (`"op_level"` | `"fpm"`); `None` keeps
+    /// Python's default (op_level). Threaded to `compile_engine` so the FPM
+    /// arena can select the whole-model engine through the supported
+    /// predictor API (additive-optional: absent in older payloads).
+    #[serde(default)]
+    pub forward_model: Option<String>,
 
     // KV
     pub kv_block_size: Option<u32>,

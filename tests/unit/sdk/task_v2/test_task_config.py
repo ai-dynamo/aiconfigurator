@@ -476,6 +476,25 @@ def test_fmha_data_fallback_unknown_arch_downgrades_with_warning(caplog):
     assert not any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
 
 
+def test_fmha_data_fallback_afd_uses_the_aggregate_role(caplog):
+    import logging
+
+    from aiconfigurator.sdk import common
+
+    with caplog.at_level(logging.WARNING):
+        task = Task(
+            serving_mode="afd",
+            model_path="Qwen/Qwen3-32B-FP8-Static-PerTensor",
+            system_name="a100_sxm",
+            backend_name="sglang",
+            total_gpus=16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+        )
+    assert task.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    fallback_msgs = [r.message for r in caplog.records if "falling back to bfloat16 FMHA" in r.message]
+    assert len(fallback_msgs) == 1 and fallback_msgs[0].startswith("agg ")
+
+
 def test_fmha_data_fallback_skips_generation_only_decode(caplog):
     """A generic-attention decode role never reads fmha data (generation tables
     key on kv dtype; validate checks fmha only for context roles), so the

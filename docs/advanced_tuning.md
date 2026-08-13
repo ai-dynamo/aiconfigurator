@@ -162,6 +162,7 @@ large-EP exploration is OFF for deepseek-ai/DeepSeek-V3 on h200_sxm/trtllm: no M
 Run the named collectors (see `collector/`) for the model/system to enable it — no config change is needed afterwards.
 
 To restrict or force EP sizes, set `*_moe_ep_candidates` explicitly: `decode_moe_ep_candidates: [16, 32, 64]` pins decode to large-EP tuples only, while `[1, 2, 4, 8]` keeps the search single-node. The deprecated keys (`enable_wideep`, `prefill_enable_wideep`, `decode_enable_wideep`, `moe_backend: deepep_moe`) are still accepted with a one-time warning and have no modeling effect; the one search-default residue is on SGLang, where spelling them still narrows the *default* `moe_tp` candidates to `[1]` — an explicit `*_moe_tp_candidates` list always wins.
+The recommend-mode CLI spellings `--enable-wideep` and `--moe-backend deepep_moe` follow the same deprecated-and-ignored behavior.
 ## advanced tuning config
 The final tuning config is for some correction and deployment purpose.  
 `prefill_latency_correction` / `decode_latency_correction` scale the predicted prefill/decode worker perf. If you find the predicted latency too optimistic, set a factor to make it more realistic: `latency_corrected = latency_predicted * latency_correction`. This adjusts the generated configs for better alignment with real deployment.  

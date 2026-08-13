@@ -255,7 +255,8 @@ def test_new_schema_present_but_null_power_cells_load_as_no_power(tmp_path):
     # raise ValueError (parquet null -> "" -> float("")).
     rows = [
         _row(NEW_ROW, power=None),
-        _row(NEW_ROW, num_tokens=256, power=400.0),
+        _row(NEW_ROW, num_tokens=256, power=float("nan")),
+        _row(NEW_ROW, num_tokens=512, power=400.0),
     ]
     path = _write_parquet(tmp_path, rows, "moe_expert_compute_perf.parquet")
 
@@ -265,8 +266,24 @@ def test_new_schema_present_but_null_power_cells_load_as_no_power(tmp_path):
     assert null_leaf["latency"] == 0.25  # the row still contributes latency
     assert null_leaf["power"] == 0.0
     assert null_leaf["energy"] == 0.0
-    measured_leaf = _leaf(data, (*NEW_KEY[:-1], 256))
+    nan_leaf = _leaf(data, (*NEW_KEY[:-1], 256))
+    assert nan_leaf["latency"] == 0.25
+    assert nan_leaf["power"] == 0.0
+    assert nan_leaf["energy"] == 0.0
+    measured_leaf = _leaf(data, (*NEW_KEY[:-1], 512))
     assert measured_leaf["power"] == 400.0  # measured rows keep their power
+
+
+@pytest.mark.parametrize("power", [float("inf"), float("-inf")])
+def test_new_schema_non_finite_measured_power_refuses_load(power, tmp_path):
+    path = _write_parquet(
+        tmp_path,
+        [_row(NEW_ROW, power=power)],
+        "moe_expert_compute_perf.parquet",
+    )
+
+    with pytest.raises(ValueError, match="power must be finite"):
+        load_moe_expert_compute_data([(path, None)])
 
 
 def test_new_schema_null_latency_cell_refuses_load_with_named_error(tmp_path):
@@ -275,6 +292,18 @@ def test_new_schema_null_latency_cell_refuses_load_with_named_error(tmp_path):
     path = _write_parquet(tmp_path, [_row(NEW_ROW, latency=None)], "moe_expert_compute_perf.parquet")
 
     with pytest.raises(ValueError, match="latency is schema-required"):
+        load_moe_expert_compute_data([(path, None)])
+
+
+@pytest.mark.parametrize("latency", [float("nan"), float("inf"), float("-inf")])
+def test_new_schema_non_finite_latency_cell_refuses_load(latency, tmp_path):
+    path = _write_parquet(
+        tmp_path,
+        [_row(NEW_ROW, latency=latency)],
+        "moe_expert_compute_perf.parquet",
+    )
+
+    with pytest.raises(ValueError, match="latency is schema-required and must be finite"):
         load_moe_expert_compute_data([(path, None)])
 
 

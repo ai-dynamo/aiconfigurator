@@ -765,12 +765,13 @@ class TestDeepEPAttentionTpTokenScaling:
     linear in tokens, so expectations are hand-computable (see vllm_toy_db).
     """
 
-    def _build_tp2(self, phase):
+    def _build_tp2(self, phase, cp_size=1):
         cfg = config.ModelConfig(
             tp_size=2,
+            cp_size=cp_size,
             moe_tp_size=1,
             moe_ep_size=8,
-            attention_dp_size=4,
+            attention_dp_size=4 // cp_size,
             gemm_quant_mode=common.GEMMQuantMode.bfloat16,
             moe_quant_mode=common.MoEQuantMode.bfloat16,
         )
@@ -809,6 +810,13 @@ class TestDeepEPAttentionTpTokenScaling:
         # dispatch 50 us * 128/64 = 100 us, combine 200 us; ms x10 scale.
         assert _lat(dispatch, vllm_toy_db, 128) == pytest.approx(100.0 / 1000.0 * 10, rel=1e-9)
         assert _lat(combine, vllm_toy_db, 128) == pytest.approx(200.0 / 1000.0 * 10, rel=1e-9)
+
+    def test_context_divisor_includes_context_parallelism(self, vllm_toy_db):
+        dispatch, combine = self._build_tp2("context", cp_size=2)
+        assert dispatch._attention_tp_size == combine._attention_tp_size == 4
+        # x=256 -> 256 // (tp2 * cp2) = 64, the exact collected point.
+        assert _lat(dispatch, vllm_toy_db, 256) == pytest.approx(100.0 / 1000.0 * 10, rel=1e-9)
+        assert _lat(combine, vllm_toy_db, 256) == pytest.approx(200.0 / 1000.0 * 10, rel=1e-9)
 
 
 if __name__ == "__main__":

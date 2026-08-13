@@ -157,14 +157,15 @@ pub mod communication;
 pub mod dsa;
 pub mod dsv4;
 pub mod dsv4_megamoe;
+pub mod fpm_forward;
 pub mod gemm;
 mod interpolation;
 pub mod mhc;
 pub mod mla;
 pub mod moe;
-mod moe_index;
 pub mod moe_a2a;
 pub mod moe_expert_compute;
+mod moe_index;
 pub mod parquet_loader;
 pub mod perf_interp;
 pub mod state_space;
@@ -176,6 +177,7 @@ pub use communication::CommunicationTable;
 pub use dsa::DsaTable;
 pub use dsv4::{AttnKind, Dsv4Table};
 pub use dsv4_megamoe::Dsv4MegaMoeTable;
+pub use fpm_forward::FpmForwardTable;
 pub use gemm::GemmTable;
 pub use mhc::MhcTable;
 pub use mla::MlaTable;
@@ -210,6 +212,7 @@ pub struct PerfTables {
     pub trtllm_alltoall: TrtllmAlltoallTable,
     pub wideep_mla: WideEpMlaTable,
     pub state_space: StateSpaceTable,
+    pub fpm_forward: FpmForwardTable,
 }
 
 /// Modular performance database for a specific
@@ -262,6 +265,16 @@ impl std::ops::Deref for PerfDatabase {
 }
 
 impl PerfDatabase {
+    /// Test-only: swap the fpm_forward table so fixtures can point it at a
+    /// temp collector pair while every other table stays on the checked-in
+    /// fixture DB. The fixture db must be uniquely owned (no clones yet).
+    #[cfg(test)]
+    pub(crate) fn set_fpm_forward_for_test(&mut self, table: FpmForwardTable) {
+        Arc::get_mut(&mut self.tables)
+            .expect("test fixture db must be uniquely owned")
+            .fpm_forward = table;
+    }
+
     /// Resolve and parse the system YAML, locate the per-version data
     /// directory, and construct lazy table owners.
     ///
@@ -351,7 +364,11 @@ impl PerfDatabase {
             mla: MlaTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
             moe: MoeTable::with_sources(data_root.clone(), perf_db_sources),
             moe_a2a: MoeA2aTable::with_sources(data_root.clone(), perf_db_sources),
-            moe_expert_compute: MoeExpertComputeTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
+            moe_expert_compute: MoeExpertComputeTable::with_sources(
+                data_root.clone(),
+                spec.clone(),
+                perf_db_sources,
+            ),
             communication: CommunicationTable::with_sources(
                 data_root.clone(),
                 nccl_root,
@@ -366,13 +383,20 @@ impl PerfDatabase {
             dsv4_megamoe: Dsv4MegaMoeTable::new(data_root.clone()),
             mhc: MhcTable::with_sources(data_root.clone(), perf_db_sources),
             trtllm_alltoall: TrtllmAlltoallTable::with_sources(data_root.clone(), perf_db_sources),
-            wideep_mla: WideEpMlaTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
+            wideep_mla: WideEpMlaTable::with_sources(
+                data_root.clone(),
+                spec.clone(),
+                perf_db_sources,
+            ),
             state_space: StateSpaceTable::with_sources(
                 data_root.clone(),
                 backend,
                 version,
                 perf_db_sources,
             ),
+            // Deliberately NOT shared-layer aware: FPM whole-model data is
+            // valid only for its exact backend/version (fpm_forward.rs).
+            fpm_forward: FpmForwardTable::new(data_root.clone(), system, backend, version),
             system_spec: spec,
             data_root,
         };

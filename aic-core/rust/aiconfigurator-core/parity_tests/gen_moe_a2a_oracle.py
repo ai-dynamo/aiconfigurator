@@ -147,7 +147,9 @@ def candidates_for(db):
         collected = dtypes_by_phase[(coord[0], coord[1])]
         if "fp8" in collected and "fp8_block" not in collected:
             out["dtype_alias"].append((coord, tokens[len(tokens) // 2], "dtype_alias", "fp8_block"))
-        if len(collected) == 1:
+        # The compatibility fallback applies only to the untyped legacy
+        # DeepEP "default" slice. A sole typed slice is an exact dtype miss.
+        if collected == {"default"}:
             for requested in ("fp8", "nvfp4", "fp8_block"):
                 if requested not in collected:
                     out["dtype_sole"].append((coord, tokens[len(tokens) // 2], "dtype_sole", requested))
