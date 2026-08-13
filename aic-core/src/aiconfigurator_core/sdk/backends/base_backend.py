@@ -795,6 +795,11 @@ class BaseBackend:
                 prefix=prefix,
             )
         else:
+            # "static": activations default to the context token count
+            # ((isl - prefix) * batch_size), i.e. the prefill peak -- the decode
+            # steps of a static batch only ever process
+            # batch_size * beam_width * (nextn + 1) tokens, far fewer. So this
+            # footprint has no decode share either (mtp_scaled_tokens=0).
             memory = self._get_memory_usage(
                 model,
                 database,
@@ -804,6 +809,7 @@ class BaseBackend:
                 osl,
                 prefix=prefix,
                 encoder_memory=encoder_memory,
+                mtp_scaled_tokens=0,
             )
 
         # Calculate total latencies and energies (simple sums - decoupled!)
@@ -1022,13 +1028,22 @@ class BaseBackend:
         AFD uses the same backend activation/KV/NCCL/other memory model as
         agg/disagg, then substitutes the weights that actually live on the
         A- or F-worker pool.
+
+        ``num_tokens=0`` (AFD's ``phase == "prefill"`` callers) makes
+        ``_get_memory_usage`` derive the count from ``(isl - prefix) * batch_size``
+        -- a prefill-only footprint, so it carries no decode share that verifies
+        nextn+1 draft tokens. Decode callers pass ``num_tokens > 0`` (one token
+        per request) and keep the full ``(nextn+1)`` multiplier.
         """
         kwargs = {
             "num_tokens": num_tokens,
             "prefix": prefix,
         }
-        if "max_seq_len" in inspect.signature(self._get_memory_usage).parameters:
+        memory_usage_params = inspect.signature(self._get_memory_usage).parameters
+        if "max_seq_len" in memory_usage_params:
             kwargs["max_seq_len"] = max_seq_len
+        if num_tokens == 0 and "mtp_scaled_tokens" in memory_usage_params:
+            kwargs["mtp_scaled_tokens"] = 0
 
         memory = self._get_memory_usage(
             model,

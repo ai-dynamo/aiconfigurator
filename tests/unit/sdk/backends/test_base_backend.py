@@ -216,6 +216,42 @@ def test_run_static_can_route_to_rust_engine_step_backend(
     assert summary.get_generation_source_dict() == {"generation_qkv_gemm": "silicon", "generation_attention": "mixed"}
 
 
+@pytest.mark.parametrize(
+    ("mode", "expected_share"),
+    [
+        # "static" and "static_ctx" both size activations from the DERIVED
+        # context token count ((isl - prefix) * batch_size), so no share of that
+        # footprint verifies nextn+1 draft tokens.
+        ("static", 0),
+        ("static_ctx", 0),
+        # Decode-only step (num_tokens = batch_size * beam_width): every token is
+        # verified, so the full (nextn+1) multiplier stays (no decode-share cap).
+        ("static_gen", None),
+    ],
+)
+def test_run_static_declares_mtp_decode_share_per_mode(
+    backend: BaseBackend,
+    model,
+    database,
+    runtime_config: RuntimeConfig,
+    monkeypatch,
+    mode: str,
+    expected_share: int | None,
+) -> None:
+    """Each static mode must declare its decode-token share to ``_get_memory_usage``."""
+    captured: dict = {}
+
+    def _record(*args, **kwargs):
+        captured.update(kwargs)
+        return {"total": 1.0}
+
+    monkeypatch.setattr(backend, "_get_memory_usage", _record)
+
+    backend.run_static(model, database, runtime_config, mode=mode, stride=2)
+
+    assert captured.get("mtp_scaled_tokens") == expected_share
+
+
 def test_run_agg_with_osl_one_does_not_divide_by_zero(
     backend: BaseBackend,
     model,

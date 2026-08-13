@@ -91,3 +91,60 @@ def test_prefill_only_step_does_not_scale(setup):
     base = _memory(backend, model, database, nextn=0, num_tokens=65_536, mtp_scaled_tokens=0)
     spec = _memory(backend, model, database, nextn=3, num_tokens=65_536, mtp_scaled_tokens=0)
     assert spec == pytest.approx(base, rel=1e-9)
+
+
+def _partition_activations(backend, model, database, *, nextn, num_tokens):
+    """Activation GiB through the AFD path (``get_partition_memory_usage``)."""
+    model.config.nextn = nextn
+    return backend.get_partition_memory_usage(
+        model,
+        database,
+        partition_ops=[],
+        batch_size=4,
+        beam_width=1,
+        isl=65_536,
+        osl=400,
+        num_tokens=num_tokens,
+        max_seq_len=65_536,
+    )["activations"]
+
+
+def test_afd_prefill_partition_does_not_scale(setup):
+    """AFD prefill workers (``num_tokens=0``) size activations from the context tokens.
+
+    ``InferenceSession._estimate_{a,f}_memory_dict`` passes ``num_tokens=0`` for
+    ``phase == "prefill"``, which ``_get_memory_usage`` expands to
+    ``(isl - prefix) * batch_size`` -- a prefill-only footprint that never
+    verifies nextn+1 draft tokens.
+    """
+    backend, model, database = setup
+    base = _partition_activations(backend, model, database, nextn=0, num_tokens=0)
+    spec = _partition_activations(backend, model, database, nextn=3, num_tokens=0)
+    assert spec == pytest.approx(base, rel=1e-9)
+
+
+def test_afd_decode_partition_keeps_full_multiplier(setup):
+    """AFD decode workers pass ``num_tokens=batch_size``: every token is verified."""
+    backend, model, database = setup
+    base = _partition_activations(backend, model, database, nextn=0, num_tokens=4)
+    spec = _partition_activations(backend, model, database, nextn=3, num_tokens=4)
+    assert spec / base == pytest.approx(4.0, rel=1e-6)
+
+
+def test_trtllm_budget_path_ignores_the_decode_share():
+    """TRT-LLM's agg override intentionally drops ``mtp_scaled_tokens`` (AIC-1746).
+
+    Its ``num_tokens`` is ``BuildConfig.max_num_tokens`` (a per-iteration budget),
+    not the agg-derived mixed-step count, so the decode-share correction is not
+    forwarded and the legacy full ``(nextn+1)`` multiplier is retained on that
+    path pending its own analysis.
+    """
+    from aiconfigurator_core.sdk.backends.factory import get_backend
+
+    agg_extra = {"max_num_tokens": 8192, "max_seq_len": 4096, "free_gpu_memory_fraction": 0.9}
+    kwargs = get_backend("trtllm")._memory_usage_kwargs_for_agg(
+        num_tokens=65_539,
+        agg_extra=agg_extra,
+        mtp_scaled_tokens=3,
+    )
+    assert kwargs == {"num_tokens": 8192, "max_seq_len": 4096}
