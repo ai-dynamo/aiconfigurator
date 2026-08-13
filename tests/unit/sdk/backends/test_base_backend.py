@@ -69,6 +69,7 @@ class _TestBackend(BaseBackend):
         num_tokens=0,
         prefix=0,
         encoder_memory=None,
+        mtp_scaled_tokens=None,
     ) -> dict[str, float]:
         return {"total": 1.0}
 
