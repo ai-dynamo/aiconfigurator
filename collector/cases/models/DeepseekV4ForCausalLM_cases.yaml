@@ -327,10 +327,16 @@ framework_specific_op_cases:
     # after the csa module entries).
     dsv4_csa_topk_calib:
       cases: all
-    # Standalone paged_mqa/hca_attn/csa_attn rows are experimental-only: the
-    # production SDK has no query call-site for them. Keep their registry
-    # entries available for explicit research runs, but do not schedule them in
-    # the default model plan.
+    # Complete DSV4 sparse-kernel coverage. CP modeling consumes paged MQA
+    # logits + topK calibration directly; HCA/CSA leaf tables keep the executed
+    # FlashMLA sparse kernel independently measurable and prevent model plans
+    # from silently omitting part of the sparse-attention family.
+    dsv4_paged_mqa_logits_module:
+      cases: all
+    dsv4_hca_attn_module:
+      cases: all
+    dsv4_csa_attn_module:
+      cases: all
     mhc_module:
       cases: all
   vllm:

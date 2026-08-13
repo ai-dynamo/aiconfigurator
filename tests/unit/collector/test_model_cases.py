@@ -1089,7 +1089,8 @@ def test_model_cases_path_can_infer_model_path():
         "dsv4_paged_mqa_logits_module",
         "dsv4_hca_attn_module",
         "dsv4_csa_attn_module",
-    }.isdisjoint(plan.selected_ops)
+        "dsv4_csa_topk_calib",
+    } <= plan.selected_ops
 
 
 def test_plan_rejects_model_declared_ops_unknown_to_backend_registry(tmp_path):

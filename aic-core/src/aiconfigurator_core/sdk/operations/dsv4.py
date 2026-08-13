@@ -1053,15 +1053,14 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
 
     # ------------------------------------------------------------------
     # Context-Parallel (CP) prefill model — DeepSeek-V4 CSA / HCA.
-    # Self-contained branch (does NOT reuse the non-CP topk-DELTA correction).
-    # Mirrors GLM-5 ContextDSAModule._query_cp: per-card monolithic base +
-    # full/cp swap of the super-linear sub-kernels + CP all-gathers.
-    #   CSA (compress_ratio==4): base(per_card) + mqa full/cp + topk full/cp
-    #       + AG(indexer key) + AG(compressed KV).
-    #   HCA (compress_ratio==128 / SWA): base(per_card) + AG(windowed dense KV)
-    #       + AG(compressed KV)  — windowed dense, no indexer/topk selection.
-    # AG sizes follow DeepSeekV4Model.get_kvcache_bytes_per_sequence (head_dim
-    # entries; indexer index_head_dim; compressed isl//ratio; window-capped).
+    # The compute correction mirrors GLM-5 DSA (per-card module base + full/cp
+    # mqa/topk swap), but DSV4 communication follows the actual SGLang 0.5.16
+    # implementation rather than the GLM latent/LSE tensors:
+    #   every layer: bf16 current-chunk KV AG, shape [isl, head_dim];
+    #   HCA: fp32 attention-compressor kv_score AG, width 2*head_dim;
+    #   CSA: fp32 indexer-compressor kv_score AG, width 4*index_head_dim,
+    #        plus fp32 attention-compressor kv_score AG, width 4*head_dim.
+    # AG_hidden + ReduceScatter around MoE are modeled by MoEDispatch.
     # ------------------------------------------------------------------
     _csa_topk_abs_cache: ClassVar[dict] = {}
 
@@ -1096,11 +1095,20 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         latency = float(self._module_base(database, b, per_card, prefix))
         head_dim = self._head_dim
 
-        # x b throughout: mqa/topk are linear in batch (b independent sequences)
-        # and the all-gather moves b sequences' worth of KV. The sparse lookups
-        # are at bs=1, so x b matches the batch-b base. (b==1 -> unchanged.)
-        def ag(message_elems):
+        # NCCL table message_size is the GLOBAL tensor element count. The
+        # SGLang CP input is local isl/cp and all-gather reconstructs b*isl.
+        # CommQuantMode has no fp32 entry, so fp32 payloads are represented by
+        # twice as many half elements (same bytes on the wire).
+        def ag_half(message_elems):
             return float(database.query_nccl(common.CommQuantMode.half, cp, "all_gather", int(b * message_elems)))
+
+        def ag_fp32(message_elems):
+            return ag_half(2 * message_elems)
+
+        # All DSV4 CP attention layers gather the full current-chunk bf16 KV
+        # before writing the FlashMLA cache: [b*isl, head_dim]. Prefix KV is
+        # already cached and is not communicated here.
+        latency += ag_half(isl * head_dim)
 
         if ratio == 4:
             # CSA: super-linear indexer (mqa) + topk -> full/cp swap (GLM-5 form).
@@ -1131,16 +1139,18 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     "collect dsv4_paged_mqa_logits_module / dsv4_csa_topk_calib first."
                 )
             latency += (mqa_full / cp - mqa_perc) + (tl_full / cp - tl_perc)
-            latency += ag(isl * self._index_head_dim)  # AG indexer key (mqa stage)
-        else:
-            # HCA (128) / SWA: windowed dense; no indexer/topk selection.
-            window = self._window_size or isl
-            latency += ag(min(isl, window) * head_dim)  # AG windowed dense KV (the HCA "+1")
 
-        # Compressed-KV all-gather: both CSA and HCA gather the isl//ratio
-        # compressed entries (the fmha-stage KV). Common to both branches.
-        if ratio:
-            latency += ag((isl // ratio) * head_dim)
+            # CSA has two fp32 compressor-score gathers in addition to KV:
+            # indexer compressor [isl, 4*index_head_dim] and attention
+            # compressor [isl, 4*head_dim] (coff=2 for ratio=4).
+            latency += ag_fp32(isl * 4 * self._index_head_dim)
+            latency += ag_fp32(isl * 4 * head_dim)
+        else:
+            # HCA has no indexer/topk, but its attention compressor gathers the
+            # uncompressed fp32 kv_score [isl, 2*head_dim] before compression.
+            # Sliding-window/compress ratios affect attention/cache work, not
+            # this CP communication volume.
+            latency += ag_fp32(isl * 2 * head_dim)
 
         return PerformanceResult(latency * self._scale_factor, energy=0.0, source="estimated")
 

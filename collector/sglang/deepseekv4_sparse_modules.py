@@ -561,7 +561,7 @@ def _bench_flash_mla_sparse(
          ``tp_slice`` is filled from ``q_local``; other heads are zeros.
       3. FlashMLA always receives the full native head count.
     """
-    from flash_mla import flash_mla_with_kvcache, get_mla_metadata
+    from sgl_kernel.flash_mla import flash_mla_with_kvcache, get_mla_metadata
 
     # rank-local head count (what the upstream projection actually produces)
     n_local_heads = max(1, native_heads // tp_size)
@@ -601,14 +601,10 @@ def _bench_flash_mla_sparse(
     extra_indices = _expand_indices(extra_K, batch_size, M_per_req, device)
     extra_topk_lengths = torch.full((batch_size,), K_per_query, dtype=torch.int32, device=device)
 
-    sched_meta, _ = get_mla_metadata(
-        cache_seqlens=cache_seqlens,
-        num_q_tokens_per_head_k=M_per_req * n_local_heads,
-        num_heads_k=1,
-        num_heads_q=n_local_heads,
-        is_fp8_kvcache=True,
-        topk=swa_indices.size(-1),
-    )
+    # SGLang 0.5.16 sparse FlashMLA uses the reusable scheduler object;
+    # it owns shape-specific metadata internally and supports the extra-cache
+    # arguments used by DeepSeek-V4 HCA/CSA.
+    sched_meta = get_mla_metadata()[0]
 
     softmax_scale = 1.0 / (FMLA_D_QK**0.5)
     attn_sink = torch.zeros(n_local_heads, dtype=torch.float32, device=device)

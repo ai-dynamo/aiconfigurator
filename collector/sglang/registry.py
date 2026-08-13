@@ -192,38 +192,29 @@ REGISTRY: list[OpEntry] = [
         # L40S probe 2026-07-07: see dsv4_hca_context_module — SM89 parked.
         unverified_sms=(89,),
     ),
-    # DeepSeek-V4 currently models CSA/HCA through full attention-module data
-    # above.  Keep these kernel-level collectors as supporting data for future
-    # prefix/past_kv correction and residual analysis; they are not the primary
-    # modeling path.
+    # Complete DeepSeek-V4 sparse-kernel family. The CP model consumes paged
+    # MQA + topK directly; HCA/CSA leaves provide independently measured
+    # production FlashMLA sparse-attention costs.
     OpEntry(
         op="dsv4_paged_mqa_logits_module",
         module="collector.sglang.deepseekv4_sparse_modules",
         get_func="get_dsv4_paged_mqa_logits_test_cases",
         run_func="run_dsv4_sparse_kernel_worker",
         perf_filename=PerfFile.DSV4_PAGED_MQA_LOGITS_MODULE,
-        # SM120 selects the Torch/v1 indexer paths and its whole DSV4 module
-        # family is source-derived, hardware-unvalidated; pre-Hopper is
-        # excluded by the op_min_sm=90 capability floor.  The 2026-07 RTX
-        # 6000 Pro bring-up left this marker in place: the op is
-        # experimental-only (no default-plan scheduling, no SDK call-site —
-        # see DeepseekV4ForCausalLM_cases.yaml), so there is nothing to
-        # hardware-validate through the sanctioned plan.
+        # SM120 selects a different Torch/v1 indexer path; keep it parked
+        # until that path has matching silicon evidence.
         unverified_sms=(120,),
     ),
-    # The standalone HCA/CSA FMLA sub-kernel collectors require the
-    # ``flash_mla`` package, which the pinned 0.5.14 image does not ship (the
-    # serving path uses the bundled sgl-kernel FlashMLA instead); no platform
-    # has ever produced rows for them. Keep them parked as unverified until a
-    # wired backend exists, instead of letting the getter silently enumerate
-    # zero cases.
+    # HCA/CSA use the bundled ``sgl_kernel.flash_mla`` API, matching the
+    # SGLang 0.5.16 production backend. SM120 remains parked because its sparse
+    # attention implementation differs from the SM90/100/103 path.
     OpEntry(
         op="dsv4_hca_attn_module",
         module="collector.sglang.deepseekv4_sparse_modules",
         get_func="get_dsv4_hca_attn_test_cases",
         run_func="run_dsv4_sparse_kernel_worker",
         perf_filename=PerfFile.DSV4_HCA_ATTN_MODULE,
-        unverified=True,
+        unverified_sms=(120,),
     ),
     OpEntry(
         op="dsv4_csa_attn_module",
@@ -231,7 +222,7 @@ REGISTRY: list[OpEntry] = [
         get_func="get_dsv4_csa_attn_test_cases",
         run_func="run_dsv4_sparse_kernel_worker",
         perf_filename=PerfFile.DSV4_CSA_ATTN_MODULE,
-        unverified=True,
+        unverified_sms=(120,),
     ),
     # CSA topk_512 DELTA calibration (flat vs top_last) — feeds the
     # degenerate->representative topK correction in perf_database.

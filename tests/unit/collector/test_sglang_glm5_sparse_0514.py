@@ -120,9 +120,8 @@ def test_glm5_sparse_platform_gating_lives_outside_the_getter():
 
 
 def test_dsv4_sparse_platform_gating_lives_outside_the_getter():
-    """Same contract for the DSV4 sparse sub-kernel family; the flash_mla-less
-    HCA/CSA collectors are parked whole-op unverified instead of silently
-    enumerating zero cases."""
+    """All DSV4 sparse collectors are scheduled on supported GPUs; SM120 is
+    parked explicitly instead of silently dropping the family from model plans."""
     from collector.capabilities import _load_capabilities
     from collector.sglang.registry import REGISTRY
 
@@ -137,5 +136,7 @@ def test_dsv4_sparse_platform_gating_lives_outside_the_getter():
     by_op = {entry.op: entry for entry in REGISTRY}
     assert by_op["dsv4_paged_mqa_logits_module"].unverified_sms == (120,)
     assert by_op["dsv4_csa_topk_calib"].unverified_sms == (120,)
-    assert by_op["dsv4_hca_attn_module"].unverified is True
-    assert by_op["dsv4_csa_attn_module"].unverified is True
+    assert by_op["dsv4_hca_attn_module"].unverified is False
+    assert by_op["dsv4_csa_attn_module"].unverified is False
+    assert by_op["dsv4_hca_attn_module"].unverified_sms == (120,)
+    assert by_op["dsv4_csa_attn_module"].unverified_sms == (120,)

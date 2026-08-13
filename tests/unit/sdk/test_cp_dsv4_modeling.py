@@ -7,8 +7,8 @@ Mirrors ``test_cp_dsa_modeling.py``: the components (base module, sparse
 kernel, topk calib, nccl) are stubbed with known values so the tests lock the
 COMPOSITION arithmetic — per-card monolithic base + full/cp swap of the
 super-linear sub-kernels + CP all-gathers — independent of table data.
-(End-to-end CP is currently data-blocked everywhere: no system ships
-``csa_topk_calib``.)
+The communication assertions mirror the SGLang 0.5.16 DSV4 tensor shapes
+and dtypes, including fp32 compressor-score gathers.
 """
 
 from unittest.mock import MagicMock
@@ -69,12 +69,21 @@ def test_query_cp_csa_composition(monkeypatch):
     # mqa_full = 900 + 700 = 1600 (two in-grid chunks); mqa_perc = 25
     # delta_mqa  = 1600/8 - 25  = 175
     # delta_topk = 800/8  - 100 = 0
-    # latency = base 4300 + 175 + 0 + ag(indexer) 50 + ag(compressed) 50 = 4575
-    assert float(res) == pytest.approx(4575.0)
+    # latency = base 4300 + 175 + 0 + three DSV4 attention AGs * 50 = 4625
+    assert float(res) == pytest.approx(4625.0)
     assert res.source == "estimated"
-    # AG volumes: indexer key isl*index_head_dim; compressed (isl//4)*head_dim.
+    # Global payloads, expressed as half elements:
+    #   KV bf16 [isl,512]
+    #   indexer kv_score fp32 [isl,4*128] -> x2 half elements
+    #   attention kv_score fp32 [isl,4*512] -> x2 half elements
     ag_sizes = sorted(call.args[3] for call in db.query_nccl.call_args_list)
-    assert ag_sizes == sorted([b * isl * 128, b * (isl // 4) * 512])
+    assert ag_sizes == sorted(
+        [
+            b * isl * 512,
+            b * isl * 4 * 128 * 2,
+            b * isl * 4 * 512 * 2,
+        ]
+    )
 
 
 def test_query_cp_hca_composition(monkeypatch):
@@ -92,10 +101,15 @@ def test_query_cp_hca_composition(monkeypatch):
 
     res = m._query_cp(db, b=b, isl=isl, prefix=0)
 
-    # HCA: no indexer/topk swap; base + ag(windowed dense KV) + ag(compressed)
+    # HCA: base + bf16 KV AG + fp32 attention-compressor kv_score AG.
     assert float(res) == pytest.approx(1000.0 + 30.0 + 30.0)
     ag_sizes = sorted(call.args[3] for call in db.query_nccl.call_args_list)
-    assert ag_sizes == sorted([b * min(isl, window) * 512, b * (isl // 128) * 512])
+    assert ag_sizes == sorted(
+        [
+            b * isl * 512,
+            b * isl * 2 * 512 * 2,
+        ]
+    )
 
 
 def test_query_cp_fails_loud_without_sparse_tables(monkeypatch):

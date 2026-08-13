@@ -14,3 +14,12 @@ tables:
     status: partial
   dsv4_hca_generation_module_perf:
     status: partial
+  dsv4_paged_mqa_logits_module_perf:
+    rows: 2395
+    status: complete
+  dsv4_hca_attn_module_perf:
+    rows: 2395
+    status: complete
+  dsv4_csa_attn_module_perf:
+    rows: 2395
+    status: complete
