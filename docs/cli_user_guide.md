@@ -435,7 +435,7 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--max-seq-len`: TRT-LLM `--max_seq_len` (default: `isl + osl`). Controls how many KV blocks are pre-allocated per sequence; set to match your deployment for accurate KV-capacity filtering.
 - `--enable-chunked-prefill`: Enable chunked prefill for a finer-grained context-token sweep. When off (default), the context-token stride is aligned to ISL for faster sweeping.
 - `--enable-wideep`: **Deprecated and ignored for large-EP modeling** (accepted with a one-time warning). On SGLang, it still narrows the default `moe_tp` candidates to `[1]`; explicit `*_moe_tp_candidates` values take precedence. Large-EP (wideEP) is explored automatically — see the note below.
-- `--moe-backend`: Explicit SGLang MoE backend. `megamoe` is a real kernel selection (use it to model DeepSeek-V4 MegaMoE on Blackwell); `deepep_moe` is deprecated: it is ignored for modeling (large-EP is explored automatically from data coverage), but on SGLang it still narrows the default `moe_tp` candidates to `[1]` — explicit `*_moe_tp_candidates` always win.
+- `--moe-backend`: Explicit MoE backend. `megamoe` is a real kernel selection (use it to model DeepSeek-V4 or Kimi-K3 MegaMoE on Blackwell; packaged data: DeepSeek-V4 on Blackwell SGLang, Kimi-K3 on GB300 SGLang plus GB300 vLLM 0.27.0); `deepep_moe` is deprecated: it is ignored for modeling (large-EP is explored automatically from data coverage), but on SGLang it still narrows the default `moe_tp` candidates to `[1]` — explicit `*_moe_tp_candidates` always win.
 
 > **Large-EP (wideEP) is explored automatically.** For MoE models, multi-node EP-only
 > parallelism joins the search whenever the performance database covers the model's MoE
@@ -1073,7 +1073,8 @@ disagg_full:
   nextn: 1
   nextn_accepted: 0.85
 
-  # MoE kernel backend (shared; e.g. "megamoe" for DeepSeek-V4 on Blackwell SGLang).
+  # MoE kernel backend (shared). "megamoe" covers packaged lanes: DeepSeek-V4
+  # on Blackwell SGLang, and Kimi-K3 on gb300 SGLang + vLLM 0.27.0.
   # Large-EP (wideEP) is explored automatically when perf data covers the model
   # shape; restrict with *_moe_ep_candidates.
   moe_backend: null

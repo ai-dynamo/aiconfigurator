@@ -1094,7 +1094,16 @@ def balanced_logits(num_tokens, num_experts, topk):
     else:
         h_selected_experts = (token_indices * stride / num_tokens + topk_indices * stride) % num_experts
 
-    expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
+    # Equivalent to `F.one_hot(..., num_experts).sum(1)` but without materializing
+    # the [num_tokens, topk, num_experts] one-hot cube: at 1M tokens x topk 16 x
+    # 896 experts that intermediate alone is 112GiB of int64 (it OOM-killed the
+    # EP=32 MegaMoE collection). scatter_add_ accumulates duplicates the same way
+    # the summed one-hot did, so the result is bit-identical.
+    selected = h_selected_experts.long()
+    expert_map = torch.zeros(
+        (selected.shape[0], num_experts),
+        dtype=torch.long,
+    ).scatter_add_(1, selected, torch.ones_like(selected))
     router_logits = F.softmax(expert_map.bfloat16(), dim=1)
     return router_logits
 

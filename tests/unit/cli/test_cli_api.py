@@ -255,6 +255,133 @@ class TestCLIEstimateUnit:
         assert hybrid_default.mode is common.DatabaseMode.HYBRID
         assert hybrid_default.transfer_policy == common.ALL_TRANSFERS
 
+    def test_moe_backend_forwards_into_estimate_modes(self, monkeypatch):
+        """cli_estimate threads moe_backend into every sub-mode runner (agg,
+        static, disagg, afd) — the MegaMoE lane depends on it reaching the
+        ModelConfig."""
+        import aiconfigurator.cli.api as api
+        import aiconfigurator.sdk.perf_database as perf_database
+
+        monkeypatch.setattr(perf_database, "get_latest_database_version", lambda **kwargs: "v9.9")
+        monkeypatch.setattr(perf_database, "get_database_view", lambda *args, **kwargs: "db")
+
+        calls = []
+        for runner in ("_run_agg_estimate", "_run_static_estimate", "_run_disagg_estimate", "_run_afd_estimate"):
+            monkeypatch.setattr(
+                api, runner, lambda _r=runner, **kwargs: calls.append((_r, kwargs.get("moe_backend"))) or _r
+            )
+
+        base = dict(
+            model_path="moonshotai/Kimi-K3",
+            system_name="gb300",
+            backend_name="vllm",
+            moe_backend="megamoe",
+        )
+        assert api.cli_estimate(mode="agg", **base) == "_run_agg_estimate"
+        assert api.cli_estimate(mode="static", **base) == "_run_static_estimate"
+        assert (
+            api.cli_estimate(
+                mode="disagg",
+                prefill_batch_size=1,
+                prefill_num_workers=1,
+                decode_batch_size=1,
+                decode_num_workers=1,
+                **base,
+            )
+            == "_run_disagg_estimate"
+        )
+        assert (
+            api.cli_estimate(
+                mode="afd", n_a_nodes=1, n_f_nodes=4, afd_phase="decode", afd_combined_with_pd=False, **base
+            )
+            == "_run_afd_estimate"
+        )
+
+        assert [runner for runner, _ in calls] == [
+            "_run_agg_estimate",
+            "_run_static_estimate",
+            "_run_disagg_estimate",
+            "_run_afd_estimate",
+        ]
+        assert {got for _, got in calls} == {"megamoe"}
+
+    def test_estimate_sol_detail_degrades_when_measured_only(self, monkeypatch, cli_parser, caplog):
+        """--detail time triggers a second SOL-side estimate; measured-only
+        lanes (the fused MegaMoE module has no analytic SOL form) must degrade
+        to the no-SOL breakdown instead of failing the whole estimate."""
+        import logging
+        from types import SimpleNamespace
+
+        from aiconfigurator.cli import main as cli_main
+        from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+
+        estimate_calls = []
+        fake_result = SimpleNamespace(
+            mode="agg",
+            model_path="moonshotai/Kimi-K3",
+            system_name="gb300",
+            backend_name="vllm",
+            backend_version="0.27.0",
+            isl=4000,
+            osl=1000,
+            ttft=1046.9,
+            tpot=29.0,
+            request_latency=30011.5,
+            tokens_per_second=3728.2,
+            tokens_per_second_per_gpu=233.0,
+            tokens_per_second_per_user=34.5,
+            seq_per_second=3.7,
+            concurrency=112,
+            memory=204.7,
+            power_w=None,
+            power_coverage=0.0,
+            batch_size=7,
+            ctx_tokens=4000,
+            tp_size=1,
+            pp_size=1,
+            raw={},
+            kv_cache_warning=None,
+            per_ops_data=None,
+        )
+
+        def fake_cli_estimate(**kwargs):
+            estimate_calls.append(kwargs.get("database_mode"))
+            if kwargs.get("database_mode") == "SOL":
+                raise PerfDataNotAvailableError("DSv4 MegaMoE module only supports measured SILICON data")
+            return fake_result
+
+        # main._run_estimate_mode imports cli_estimate at call time — patch at
+        # the source module.
+        monkeypatch.setattr("aiconfigurator.cli.api.cli_estimate", fake_cli_estimate)
+        captured = {}
+        monkeypatch.setattr(
+            cli_main,
+            "format_estimate_detail_report",
+            lambda result, sol_result, detail: captured.setdefault("sol_result", sol_result) or "## breakdown",
+        )
+
+        args = cli_parser.parse_args(
+            [
+                "estimate",
+                "--model-path",
+                "moonshotai/Kimi-K3",
+                "--system",
+                "gb300",
+                "--backend",
+                "vllm",
+                "--moe-backend",
+                "megamoe",
+                "--detail",
+                "time",
+            ]
+        )
+        with caplog.at_level(logging.WARNING):
+            cli_main._run_estimate_mode(args)
+
+        assert estimate_calls == ["SILICON", "SOL"]
+        assert captured["sol_result"] is None
+        assert any("SOL detail comparison unavailable" in rec.message for rec in caplog.records)
+
 
 class TestCLIDefaultNextn:
     """cli_default exposes MTP control with the same semantics as the CLI flags."""
