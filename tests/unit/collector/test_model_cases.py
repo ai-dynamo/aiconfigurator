@@ -748,7 +748,11 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # +114 for Kimi-K3's LatentMoE row (3584/3072, 896x16, w4a16_mxfp4).
     # +198 from Step-3.7-Flash: 99 cases for each physical BF16/FP8 artifact.
     # +117 for the vLLM Nemotron Super FP8 latent-MoE row (1024/2688, 512x22).
-    assert len(moe_cases) == 5340
+    # +114 for nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4, the nvfp4
+    # checkpoint release of the 30B/A3B shape (AIC-1743/AIC-1748); same
+    # topk=6/e128/h2688/i1856 geometry as Nano-BF16, hence the identical
+    # per-model case count (114).
+    assert len(moe_cases) == 5454
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
