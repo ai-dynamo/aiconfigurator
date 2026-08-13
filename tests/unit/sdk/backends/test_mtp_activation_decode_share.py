@@ -19,7 +19,6 @@ import pytest
 from aiconfigurator_core.sdk import config as sdk_config
 from aiconfigurator_core.sdk.models import get_model
 
-
 GPTOSS = "openai/gpt-oss-120b"  # any registered model works; we only need activations
 
 
