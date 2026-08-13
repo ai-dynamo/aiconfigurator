@@ -211,6 +211,14 @@ class BaseBackend:
     @staticmethod
     def _visual_context_tokens_from_encoder_config(enc_cfg, runtime_config: RuntimeConfig) -> int:
         if not isinstance(enc_cfg, common.VisionEncoderConfig):
+            if has_video_input(
+                num_videos=runtime_config.num_videos_per_request,
+                video_height=runtime_config.video_height,
+                video_width=runtime_config.video_width,
+                video_frames=runtime_config.video_frames,
+                num_video_tokens=runtime_config.num_video_tokens,
+            ):
+                raise ValueError("Video workloads require a model with a supported vision encoder configuration.")
             return 0
         post_merge, _, num_visuals = BaseBackend._encoder_pre_merge_per_visual(runtime_config, enc_cfg)
         return post_merge * num_visuals
@@ -323,6 +331,12 @@ class BaseBackend:
                 pre_merge_per_visual = tokens_per_visual * (enc_cfg.spatial_merge_size**2)
             else:
                 return 0, 0, 0
+        if has_videos and (tokens_per_visual <= 0 or pre_merge_per_visual <= 0):
+            spatial_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
+            raise ValueError(
+                "Video dimensions resolve to zero encoder tokens; "
+                f"height and width must each be at least {spatial_stride} pixels."
+            )
         if tokens_per_visual <= 0 or pre_merge_per_visual <= 0 or num_visuals <= 0:
             return 0, 0, 0
         return tokens_per_visual, pre_merge_per_visual, num_visuals
@@ -341,11 +355,11 @@ class BaseBackend:
         encoder_energy_wms_dict = defaultdict(float)
         encoder_source_dict = {}
 
-        if not model.encoder_ops:
-            return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, 0
-
         enc_cfg = getattr(model, "encoder_config", None)
-        if not isinstance(enc_cfg, common.VisionEncoderConfig):
+        if not model.encoder_ops or not isinstance(enc_cfg, common.VisionEncoderConfig):
+            # Reuse the visual-input guard so a configured video can never
+            # degrade silently to a text-only estimate on an unsupported model.
+            self._visual_context_tokens_from_encoder_config(enc_cfg, runtime_config)
             return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, 0
 
         tokens_per_visual, pre_merge_per_visual, num_visuals = self._encoder_pre_merge_per_visual(

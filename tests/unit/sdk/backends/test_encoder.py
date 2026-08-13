@@ -221,6 +221,32 @@ class TestEncoderVideoTokenFormula:
         assert (post_merge, pre_merge, num_visuals) == (560, 2240, 1)
         assert pre_merge == post_merge * enc_cfg.spatial_merge_size**2
 
+    def test_video_grid_too_small_for_spatial_merge_fails_loudly(self, enc_cfg):
+        rc = RuntimeConfig(
+            video_height=16,
+            video_width=16,
+            video_frames=1,
+            num_videos_per_request=1,
+        )
+
+        with pytest.raises(ValueError, match="resolve to zero encoder tokens"):
+            BaseBackend._encoder_pre_merge_per_visual(rc, enc_cfg)
+
+    def test_video_input_requires_a_supported_vision_encoder(self):
+        rc = RuntimeConfig(
+            video_height=448,
+            video_width=448,
+            video_frames=8,
+            num_videos_per_request=1,
+        )
+
+        with pytest.raises(ValueError, match="supported vision encoder"):
+            BaseBackend._visual_context_tokens_from_encoder_config(None, rc)
+
+        text_only_model = type("TextOnlyModel", (), {"encoder_ops": [], "encoder_config": None})()
+        with pytest.raises(ValueError, match="supported vision encoder"):
+            BaseBackend()._run_encoder_phase(text_only_model, None, rc, batch_size=1)
+
     def test_num_video_tokens_override_is_per_video(self, enc_cfg):
         rc = RuntimeConfig(video_frames=8, num_video_tokens=300, num_videos_per_request=3)
 
