@@ -201,14 +201,18 @@ class BaseBackend:
     def _runtime_config_for_agg_candidate(runtime_config: RuntimeConfig, batch_size: int) -> RuntimeConfig:
         return dataclasses.replace(runtime_config, batch_size=batch_size)
 
-    def _memory_usage_kwargs_for_agg(self, num_tokens: int, agg_extra: dict) -> dict:
+    def _memory_usage_kwargs_for_agg(
+        self, num_tokens: int, agg_extra: dict, mtp_scaled_tokens: int | None = None
+    ) -> dict:
         """Kwargs for the ``_get_memory_usage`` call from ``run_agg``.
 
-        Default: pass the locally-computed ``num_tokens``. TRT-LLM passes
-        ``max_num_tokens`` (BuildConfig.max_num_tokens) for activation sizing
-        and forwards ``max_seq_len`` for KV cache sizing.
+        Default: pass the locally-computed ``num_tokens`` plus the decode-token
+        share for MTP activation scaling. TRT-LLM passes ``max_num_tokens``
+        (BuildConfig.max_num_tokens) for activation sizing and forwards
+        ``max_seq_len`` for KV cache sizing; that budget already includes draft
+        tokens, so it does not forward ``mtp_scaled_tokens``.
         """
-        return {"num_tokens": num_tokens}
+        return {"num_tokens": num_tokens, "mtp_scaled_tokens": mtp_scaled_tokens}
 
     def _oom_check_kwargs(self, agg_extra: dict) -> dict:
         """Extra kwargs for ``InferenceSummary.set_memory_and_check_oom``.
@@ -1803,8 +1807,13 @@ class BaseBackend:
             # will not be corrected by balance score when it's larger than 1.0
             # in order to indicate what's happening
             num_tokens = num_gen_requests + ctx_tokens
+            # Only the decode requests' tokens verify nextn+1 under speculative
+            # decoding; the context share is processed once (see the MTP
+            # correction in _get_memory_usage).
+            mtp_scaled_tokens = int(num_gen_requests)
         else:
             num_tokens = ctx_tokens
+            mtp_scaled_tokens = None
 
         memory = self._get_memory_usage(
             model,
@@ -1815,7 +1824,11 @@ class BaseBackend:
             osl,
             prefix=prefix,
             encoder_memory=encoder_memory,
-            **self._memory_usage_kwargs_for_agg(num_tokens=num_tokens, agg_extra=agg_extra),
+            **self._memory_usage_kwargs_for_agg(
+                num_tokens=num_tokens,
+                agg_extra=agg_extra,
+                mtp_scaled_tokens=mtp_scaled_tokens,
+            ),
         )
         tp = model.config.tp_size
         pp = model.config.pp_size
@@ -2070,6 +2083,7 @@ class BaseBackend:
         max_seq_len: int | None = None,
         encoder_memory: dict[str, float] | None = None,
         mtp_activation_scaling: bool = True,
+        mtp_scaled_tokens: int | None = None,
     ) -> dict[str, float]:
         """
         Get the memory usage of the backend.
@@ -2128,7 +2142,22 @@ class BaseBackend:
         # (draft tokens included) -- re-multiplying there double-counts and can drive the
         # prefill worker's KV budget negative.
         if mtp_activation_scaling and model.config.nextn > 0:
-            activations = activations * (model.config.nextn + 1)
+            if mtp_scaled_tokens is not None and num_tokens > 0:
+                # Mixed context+decode step (agg): only the decode-token share
+                # verifies nextn+1 tokens; context tokens are processed once.
+                # Scaling the whole footprint models (nextn+1)*(context+decode)
+                # instead of context+(nextn+1)*decode, which at long ISL
+                # inflates activations ~(nextn+1)x and over-prunes concurrency.
+                decode_share = min(max(mtp_scaled_tokens, 0), num_tokens)
+                activations = (
+                    activations
+                    * (num_tokens - decode_share + decode_share * (model.config.nextn + 1))
+                    / num_tokens
+                )
+            else:
+                # Decode-only steps (disagg decode worker): every token in the
+                # step is part of verification, so the full multiplier applies.
+                activations = activations * (model.config.nextn + 1)
 
         # Backend-level activation overhead (SGLang only by default).
         if self.ACTIVATION_OVERHEAD_FRAC > 0:

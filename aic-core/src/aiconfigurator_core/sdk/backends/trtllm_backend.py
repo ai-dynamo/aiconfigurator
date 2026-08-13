@@ -124,9 +124,13 @@ class TRTLLMBackend(BaseBackend):
             agg_extra["free_gpu_memory_fraction"],
         )
 
-    def _memory_usage_kwargs_for_agg(self, num_tokens: int, agg_extra: dict) -> dict:
+    def _memory_usage_kwargs_for_agg(
+        self, num_tokens: int, agg_extra: dict, mtp_scaled_tokens: int | None = None
+    ) -> dict:
         # Activation memory tracks BuildConfig.max_num_tokens, not the agg-derived
-        # num_tokens. KV cache tracks max_seq_len per slot.
+        # num_tokens. KV cache tracks max_seq_len per slot. max_num_tokens is the
+        # engine's per-iteration budget (draft tokens included), so the decode-share
+        # MTP scaling does not apply; mtp_scaled_tokens is intentionally dropped.
         return {
             "num_tokens": agg_extra["max_num_tokens"],
             "max_seq_len": agg_extra["max_seq_len"],
