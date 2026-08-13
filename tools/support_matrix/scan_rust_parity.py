@@ -70,6 +70,7 @@ from tools.support_matrix.support_matrix import (
     SupportMatrix,
     TestConstraints,
     _compare_pareto_dfs,
+    _get_matrix_visual_workload,
     _get_test_constraints,
 )
 
@@ -100,6 +101,7 @@ PROBE_STATUS_DRIFT = "DRIFT"
 PROBE_STATUS_PY_ERROR = "PY_ERROR_ONLY"
 PROBE_STATUS_RUST_ERROR = "RUST_ERROR_ONLY"
 PROBE_STATUS_BOTH_ERROR = "BOTH_ERROR_PASS"
+PROBE_STATUS_ENCODER_EVIDENCE_ERROR = "ENCODER_EVIDENCE_ERROR"
 PROBE_STATUS_SKIPPED = "SKIPPED"
 
 PARETO_STATUS_STRICT_PASS = "STRICT_PASS"
@@ -379,6 +381,42 @@ def pending_entries_for_pareto(db_path: Path) -> set[str]:
     return all_keys - done
 
 
+def _has_visual_workload(constraints: TestConstraints) -> bool:
+    return constraints.image_height > 0 and constraints.image_width > 0 and constraints.num_images > 0
+
+
+def _probe_shape(constraints: TestConstraints) -> str:
+    return (
+        f"isl={constraints.isl},osl={constraints.osl},prefix={constraints.prefix},"
+        f"total_gpus={constraints.total_gpus},image_height={constraints.image_height},"
+        f"image_width={constraints.image_width},num_images={constraints.num_images}"
+    )
+
+
+def _retire_stale_visual_probe_results(db_path: Path, entries: list[Entry]) -> int:
+    """Remove resumed probe results that did not run the current image workload."""
+    constraints_by_model: dict[str, TestConstraints] = {}
+    expected_shapes: dict[str, str] = {}
+    for entry in entries:
+        if _get_matrix_visual_workload(entry.model) is None:
+            continue
+        if entry.model not in constraints_by_model:
+            constraints_by_model[entry.model] = _get_test_constraints(entry.model)
+        expected_shapes[entry.key] = _probe_shape(constraints_by_model[entry.model])
+
+    removed = 0
+    with closing(_connect(db_path)) as conn:
+        conn.execute("BEGIN")
+        for entry_key, expected_shape in expected_shapes.items():
+            cursor = conn.execute(
+                "DELETE FROM probe_results WHERE entry_key = ? AND probe_shape <> ?",
+                (entry_key, expected_shape),
+            )
+            removed += cursor.rowcount
+        conn.execute("COMMIT")
+    return removed
+
+
 def write_probe_record(conn: sqlite3.Connection, record: ProbeRecord) -> None:
     conn.execute(
         """
@@ -484,6 +522,20 @@ def _run_probe(
             )
         else:
             return None, None, f"unsupported mode {entry.mode!r}"
+        if _has_visual_workload(constraints):
+            raw = getattr(result, "raw", None)
+            if not isinstance(raw, dict):
+                raise RuntimeError("ENCODER_NOT_EXERCISED: parity probe returned no raw encoder evidence")
+            missing = []
+            for field in ("encoder_latency", "encoder_memory"):
+                try:
+                    value = float(raw.get(field, 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    value = 0.0
+                if value <= 0.0:
+                    missing.append(field)
+            if missing:
+                raise RuntimeError(f"ENCODER_NOT_EXERCISED: missing positive {', '.join(missing)}")
     except Exception as exc:
         return None, None, _format_exc(exc)
 
@@ -494,11 +546,7 @@ def probe_entry(entry: Entry) -> ProbeRecord:
     """Probe one entry: cli_estimate(python) vs cli_estimate(rust)."""
     started = time.monotonic()
     constraints = _get_test_constraints(entry.model)
-    shape_str = (
-        f"isl={constraints.isl},osl={constraints.osl},prefix={constraints.prefix},total_gpus={constraints.total_gpus},"
-        f"image_height={constraints.image_height},image_width={constraints.image_width},"
-        f"num_images={constraints.num_images}"
-    )
+    shape_str = _probe_shape(constraints)
 
     python_ttft, python_tpot, python_err = _run_probe(entry, constraints, backend_label="python")
     rust_ttft, rust_tpot, rust_err = _run_probe(entry, constraints, backend_label="rust")
@@ -537,6 +585,8 @@ def _classify_probe(
     ttft_drift: float | None,
     tpot_drift: float | None,
 ) -> str:
+    if any("ENCODER_NOT_EXERCISED:" in error for error in (python_err, rust_err) if error):
+        return PROBE_STATUS_ENCODER_EVIDENCE_ERROR
     if python_err and rust_err:
         return PROBE_STATUS_BOTH_ERROR
     if python_err and not rust_err:
@@ -779,6 +829,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 4
     new_count = seed_entries(db_path, entries)
     print(f"Loaded {len(entries)} PASS entries ({new_count} newly seeded).")
+    retired_count = _retire_stale_visual_probe_results(db_path, entries)
+    if retired_count:
+        print(f"Retired {retired_count} stale text-only visual probe result(s).")
 
     work = _select_work(db_path, entries, args.scan_mode, limit=args.limit)
     if not work:
@@ -902,7 +955,7 @@ def _bucket_probe(status: str) -> str:
         return "PASS"
     if status == PROBE_STATUS_DRIFT:
         return "DRIFT"
-    if status in (PROBE_STATUS_RUST_ERROR,):
+    if status in (PROBE_STATUS_RUST_ERROR, PROBE_STATUS_ENCODER_EVIDENCE_ERROR):
         return "REGRESSION"
     if status == PROBE_STATUS_PY_ERROR:
         return "ERROR"
@@ -1042,7 +1095,8 @@ def cmd_report(args: argparse.Namespace) -> int:
                        COUNT(p.entry_key) AS probed,
                        SUM(CASE WHEN p.status IN ('PASS','BOTH_ERROR_PASS') THEN 1 ELSE 0 END) AS passed,
                        SUM(CASE WHEN p.status = 'DRIFT' THEN 1 ELSE 0 END) AS drifted,
-                       SUM(CASE WHEN p.status = 'RUST_ERROR_ONLY' THEN 1 ELSE 0 END) AS regressed
+                       SUM(CASE WHEN p.status IN ('RUST_ERROR_ONLY','ENCODER_EVIDENCE_ERROR') THEN 1 ELSE 0 END)
+                           AS regressed
                 FROM entries e LEFT JOIN probe_results p ON e.entry_key = p.entry_key
                 GROUP BY e.system
                 ORDER BY e.system
@@ -1068,7 +1122,7 @@ def cmd_report(args: argparse.Namespace) -> int:
                 """
                 SELECT entry_key, status, COALESCE(rust_err, '') AS rust_err
                 FROM probe_results
-                WHERE status = 'RUST_ERROR_ONLY'
+                WHERE status IN ('RUST_ERROR_ONLY', 'ENCODER_EVIDENCE_ERROR')
                 ORDER BY entry_key
                 LIMIT 100
                 """
