@@ -249,42 +249,60 @@ class BaseBackend:
         has_images = runtime_config.num_images_per_request > 0 and (
             (runtime_config.image_height > 0 and runtime_config.image_width > 0) or runtime_config.num_image_tokens > 0
         )
-        has_videos = runtime_config.num_videos_per_request > 0 and (
-            (runtime_config.video_frames > 0 and runtime_config.video_height > 0 and runtime_config.video_width > 0)
-            or runtime_config.num_video_tokens > 0
+        video_count = runtime_config.num_videos_per_request
+        video_frames = runtime_config.video_frames
+        video_height = runtime_config.video_height
+        video_width = runtime_config.video_width
+        video_token_override = runtime_config.num_video_tokens
+        has_any_video_input = any(
+            value > 0 for value in (video_count, video_frames, video_height, video_width, video_token_override)
         )
+        has_video_dims = video_frames > 0 and video_height > 0 and video_width > 0
+        has_video_override = video_token_override > 0
+        if has_any_video_input:
+            if video_count <= 0:
+                raise ValueError("Video workloads require num_videos_per_request > 0.")
+            if not has_video_dims and not has_video_override:
+                raise ValueError(
+                    "Video workloads require video_frames + video_height + video_width, "
+                    "or num_video_tokens + video_frames."
+                )
+            if has_video_override and video_frames <= 0:
+                raise ValueError(
+                    "num_video_tokens requires video_frames so temporal attention sequences can be modeled."
+                )
+            if has_video_override and (video_height > 0) != (video_width > 0):
+                raise ValueError("Video height and width must either both be provided or both be omitted.")
+        has_videos = has_any_video_input
         if has_images and has_videos:
             raise ValueError(
                 "Mixed image/video encoder workloads are not modeled yet; estimate images and videos separately."
             )
 
         if has_videos:
-            has_video_dims = (
-                runtime_config.video_frames > 0 and runtime_config.video_height > 0 and runtime_config.video_width > 0
-            )
             if has_video_dims:
                 # Qwen pads a short final temporal group by repeating its last
                 # frame, so a partial group still produces one temporal patch.
-                temporal_patches = -(-runtime_config.video_frames // enc_cfg.temporal_patch_size)
+                temporal_patches = -(-video_frames // enc_cfg.temporal_patch_size)
                 spatial_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
                 tokens_per_visual = (
-                    temporal_patches
-                    * (runtime_config.video_height // spatial_stride)
-                    * (runtime_config.video_width // spatial_stride)
+                    temporal_patches * (video_height // spatial_stride) * (video_width // spatial_stride)
                 )
-                pre_merge_per_visual = (
-                    temporal_patches
-                    * (runtime_config.video_height // enc_cfg.patch_size)
-                    * (runtime_config.video_width // enc_cfg.patch_size)
-                )
-            else:
-                if runtime_config.video_frames <= 0:
-                    raise ValueError(
-                        "num_video_tokens requires video_frames so temporal attention sequences can be modeled."
-                    )
-                tokens_per_visual = runtime_config.num_video_tokens
+                # Derive both sides of the merger from the same aligned grid.
+                # This keeps the exact merge^2 relationship even when callers
+                # provide raw dimensions that are not multiples of the full
+                # patch-and-merge stride.
                 pre_merge_per_visual = tokens_per_visual * (enc_cfg.spatial_merge_size**2)
-            num_visuals = runtime_config.num_videos_per_request
+            else:
+                temporal_patches = -(-video_frames // enc_cfg.temporal_patch_size)
+                tokens_per_visual = video_token_override
+                if tokens_per_visual % temporal_patches != 0:
+                    raise ValueError(
+                        "num_video_tokens must divide evenly across temporal attention sequences: "
+                        f"num_video_tokens={tokens_per_visual}, temporal_sequences={temporal_patches}."
+                    )
+                pre_merge_per_visual = tokens_per_visual * (enc_cfg.spatial_merge_size**2)
+            num_visuals = video_count
         else:
             num_visuals = runtime_config.num_images_per_request
             has_image_dims = runtime_config.image_height > 0 and runtime_config.image_width > 0
@@ -357,10 +375,10 @@ class BaseBackend:
         temporal_sequences_per_visual = (
             -(-runtime_config.video_frames // enc_cfg.temporal_patch_size) if has_video_workload else 1
         )
-        if pre_merge_per_visual % temporal_sequences_per_visual != 0:
+        if tokens_per_visual % temporal_sequences_per_visual != 0:
             raise ValueError(
-                "Video pre-merge tokens must divide evenly across temporal attention sequences: "
-                f"pre_merge_tokens={pre_merge_per_visual}, "
+                "Video post-merge tokens must divide evenly across temporal attention sequences: "
+                f"post_merge_tokens={tokens_per_visual}, "
                 f"temporal_sequences={temporal_sequences_per_visual}."
             )
 

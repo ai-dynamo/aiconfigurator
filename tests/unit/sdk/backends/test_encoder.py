@@ -208,6 +208,19 @@ class TestEncoderVideoTokenFormula:
         assert post_merge == temporal_patches * (448 // 32) * (448 // 32)
         assert num_visuals == 1
 
+    def test_video_pre_and_post_merge_use_the_same_aligned_grid(self, enc_cfg):
+        rc = RuntimeConfig(
+            video_height=448,
+            video_width=336,
+            video_frames=8,
+            num_videos_per_request=1,
+        )
+
+        post_merge, pre_merge, num_visuals = BaseBackend._encoder_pre_merge_per_visual(rc, enc_cfg)
+
+        assert (post_merge, pre_merge, num_visuals) == (560, 2240, 1)
+        assert pre_merge == post_merge * enc_cfg.spatial_merge_size**2
+
     def test_num_video_tokens_override_is_per_video(self, enc_cfg):
         rc = RuntimeConfig(video_frames=8, num_video_tokens=300, num_videos_per_request=3)
 
@@ -219,6 +232,24 @@ class TestEncoderVideoTokenFormula:
         rc = RuntimeConfig(num_video_tokens=300, num_videos_per_request=1)
 
         with pytest.raises(ValueError, match="requires video_frames"):
+            BaseBackend._encoder_pre_merge_per_visual(rc, enc_cfg)
+
+    def test_num_video_tokens_override_must_split_across_temporal_sequences(self, enc_cfg):
+        rc = RuntimeConfig(video_frames=8, num_video_tokens=301, num_videos_per_request=1)
+
+        with pytest.raises(ValueError, match="divide evenly across temporal attention sequences"):
+            BaseBackend._encoder_pre_merge_per_visual(rc, enc_cfg)
+
+    @pytest.mark.parametrize(
+        "rc",
+        [
+            RuntimeConfig(video_height=448, video_width=448, num_videos_per_request=1),
+            RuntimeConfig(video_frames=8, video_height=448, num_videos_per_request=1),
+            RuntimeConfig(video_frames=8, video_height=448, video_width=448),
+        ],
+    )
+    def test_incomplete_video_workload_fails_loudly(self, enc_cfg, rc):
+        with pytest.raises(ValueError, match=r"Video workloads require|Video height and width"):
             BaseBackend._encoder_pre_merge_per_visual(rc, enc_cfg)
 
     def test_mixed_image_video_workload_fails_loudly(self, enc_cfg):
