@@ -1746,7 +1746,7 @@ def load_mhc_module_data(mhc_file: str):
         hidden_size = int(row["hidden_size"])
         num_tokens = int(row["num_tokens"])
         latency = float(row["latency"])
-        power = float(row.get("power", 0.0)) if has_power else 0.0
+        power = float(row.get("power") or 0.0) if has_power else 0.0
         energy = power * latency
 
         try:
@@ -2088,7 +2088,7 @@ def load_context_dsv4_kind_module_data(file_path: str):
             tp_size = max(1, int(row.get("tp_size", 1) or 1))
         except (TypeError, ValueError, KeyError):
             continue
-        power = float(row.get("power", 0.0)) if has_power else 0.0
+        power = float(row.get("power") or 0.0) if has_power else 0.0
 
         num_heads_local = heads_col
         num_heads_native = heads_col * tp_size
@@ -2153,7 +2153,7 @@ def load_generation_dsv4_kind_module_data(file_path: str):
             tp_size = max(1, int(row.get("tp_size", 1) or 1))
         except (TypeError, ValueError, KeyError):
             continue
-        power = float(row.get("power", 0.0)) if has_power else 0.0
+        power = float(row.get("power") or 0.0) if has_power else 0.0
 
         num_heads_local = heads_col
         num_heads_native = heads_col * tp_size

@@ -132,6 +132,7 @@ def test_gdn_decode_recurrence_names_alias_to_canonical_key():
         "head_v_dim",
         "model_name",
         "latency",
+        "power",
     ]
 
     def row(kernel_source, batch, latency):
@@ -153,6 +154,7 @@ def test_gdn_decode_recurrence_names_alias_to_canonical_key():
             "head_v_dim": 128,
             "model_name": "Qwen/Qwen3.5-27B",
             "latency": latency,
+            "power": "",
         }
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -170,6 +172,7 @@ def test_gdn_decode_recurrence_names_alias_to_canonical_key():
     assert set(data.keys()) == {"fused_sigmoid_gating_delta_rule_update"}
     leaves = data["fused_sigmoid_gating_delta_rule_update"]["generation"][(2048, 16, 128, 32, 128, 4)]
     assert {b: leaves[b]["latency"] for b in sorted(leaves)} == {1: 0.5, 2: 0.7, 4: 0.9}
+    assert {b: leaves[b]["power"] for b in sorted(leaves)} == {1: 0.0, 2: 0.0, 4: 0.0}
 
 
 # --- D1: topk calib pairs v1/v2 phase variants separately --------------------

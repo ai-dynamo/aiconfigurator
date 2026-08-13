@@ -971,7 +971,7 @@ def load_gemm_data(gemm_file):
         latency = float(latency)
 
         # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
         # Note: power_limit is available in row.get("power_limit") if needed for validation
 
         # NEW: Calculate energy from power and latency
@@ -1025,7 +1025,7 @@ def load_compute_scale_data(compute_scale_file):
         latency = float(latency)
 
         # Read power with backward compatibility
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
 
         # Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds (W·ms)
@@ -1078,7 +1078,7 @@ def load_scale_matrix_data(scale_matrix_file):
         latency = float(latency)
 
         # Read power with backward compatibility
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
 
         # Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds (W·ms)

@@ -1766,7 +1766,7 @@ def load_context_mla_data(context_mla_file):
         latency = float(latency)
 
         # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
 
         # NEW: Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds
@@ -1832,7 +1832,7 @@ def load_generation_mla_data(generation_mla_file):
         latency = float(latency)
 
         # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
 
         # NEW: Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds
@@ -1887,7 +1887,7 @@ def load_mla_bmm_data(mla_bmm_file):
         latency = float(latency)
 
         # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
 
         # NEW: Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds
@@ -1955,7 +1955,7 @@ def load_wideep_context_mla_data(wideep_context_mla_file):
         latency = float(latency)
 
         # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
 
         # NEW: Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds
@@ -2027,7 +2027,7 @@ def load_wideep_generation_mla_data(wideep_generation_mla_file):
         latency = float(latency)
 
         # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
 
         # NEW: Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds
@@ -2085,7 +2085,7 @@ def load_context_mla_module_data(mla_module_file: str):
         b = int(row["batch_size"])
         s = int(row["isl"])
         latency = float(row["latency"])
-        power = float(row.get("power", 0.0)) if has_power else 0.0
+        power = float(row.get("power") or 0.0) if has_power else 0.0
         energy = power * latency
 
         fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
@@ -2144,7 +2144,7 @@ def load_generation_mla_module_data(mla_module_file: str):
         b = int(row["batch_size"])
         s = int(row["isl"]) + int(row["step"])
         latency = float(row["latency"])
-        power = float(row.get("power", 0.0)) if has_power else 0.0
+        power = float(row.get("power") or 0.0) if has_power else 0.0
         energy = power * latency
 
         gemm_mode = common.GEMMQuantMode[row["gemm_type"]]

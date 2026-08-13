@@ -2528,7 +2528,7 @@ def load_moe_data(moe_file):
         latency = float(latency)
 
         # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
 
         # NEW: Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds
@@ -2623,7 +2623,7 @@ def load_wideep_context_moe_data(wideep_context_moe_file):
         quant_mode = common.MoEQuantMode[quant_mode]
 
         # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
 
         # NEW: Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds
@@ -2703,7 +2703,7 @@ def load_wideep_generation_moe_data(wideep_generation_moe_file):
         quant_mode = common.MoEQuantMode[quant_mode]
 
         # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
 
         # NEW: Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds
@@ -2768,7 +2768,7 @@ def load_wideep_deepep_ll_data(wideep_deepep_ll_file):
         lat = combine_avg_t_us + dispatch_avg_t_us
 
         # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
 
         # NEW: Calculate energy from power and latency
         energy = power * lat  # watt-milliseconds
@@ -2827,7 +2827,7 @@ def load_wideep_deepep_normal_data(wideep_deepep_normal_file):
         lat = dispatch_transmit_us + dispatch_notify_us + combine_transmit_us + combine_notify_us
 
         # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
 
         # NEW: Calculate energy from power and latency
         energy = power * lat  # watt-milliseconds
@@ -2915,7 +2915,7 @@ def load_wideep_moe_compute_data(wideep_moe_compute_file):
         kernel_source = row.get("kernel_source", "moe_torch_flow")
 
         # Read power with backward compatibility
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
         energy = power * latency  # watt-milliseconds
 
         try:
@@ -3029,7 +3029,7 @@ def load_trtllm_alltoall_data(trtllm_alltoall_file):
             num_nodes = max(1, moe_ep_size // 4)
 
         # Read power with backward compatibility
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
         energy = power * latency  # watt-milliseconds
 
         try:
