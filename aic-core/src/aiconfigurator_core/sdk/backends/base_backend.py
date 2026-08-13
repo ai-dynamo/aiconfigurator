@@ -161,16 +161,24 @@ class BaseBackend:
         """
         return step_throughput
 
-    def _resolve_agg_kwargs(self, kwargs: dict, isl: int, osl: int) -> dict:
+    def _resolve_agg_kwargs(self, kwargs: dict, isl: int, osl: int, backend_version: str | None = None) -> dict:
         """Resolve backend-specific run_agg kwargs to defaults.
 
-        Default: returns an empty dict. TRT-LLM resolves ``max_seq_len`` /
-        ``max_num_tokens`` / ``free_gpu_memory_fraction`` here so both
-        ``run_agg`` and ``find_best_agg_result_under_constraints`` see the
-        same values when forwarding. Idempotent — calling with already-resolved
-        kwargs returns the same values.
+        Default: resolves ``free_gpu_memory_fraction`` — an explicit kwarg
+        wins, else the backend default (possibly version-dependent, see
+        ``get_default_free_gpu_memory_fraction``). Backends without a default
+        return an empty dict. TRT-LLM overrides to also resolve
+        ``max_seq_len`` / ``max_num_tokens``, so both ``run_agg`` and
+        ``find_best_agg_result_under_constraints`` see the same values when
+        forwarding. Idempotent — calling with already-resolved kwargs returns
+        the same values.
         """
-        return {}
+        fraction = kwargs.get("free_gpu_memory_fraction")
+        if fraction is None:
+            fraction = self.get_default_free_gpu_memory_fraction(backend_version)
+        if fraction is None:
+            return {}
+        return {"free_gpu_memory_fraction": fraction}
 
     def _make_agg_cache_key(
         self,
@@ -181,8 +189,12 @@ class BaseBackend:
         engine_step_backend_key: str,
         agg_extra: dict,
     ) -> tuple:
-        """Build the cache key for ``run_agg`` results."""
-        return (isl, osl, b, ctx_tokens, engine_step_backend_key)
+        """Build the cache key for ``run_agg`` results.
+
+        The resolved fraction is part of the key: the cached summary embeds
+        the KV-budget OOM verdict, which depends on it.
+        """
+        return (isl, osl, b, ctx_tokens, engine_step_backend_key, agg_extra.get("free_gpu_memory_fraction"))
 
     @staticmethod
     def _runtime_config_for_agg_candidate(runtime_config: RuntimeConfig, batch_size: int) -> RuntimeConfig:
@@ -1599,8 +1611,8 @@ class BaseBackend:
         balance_score = isl * b / ctx_tokens / decode_iterations
 
         # Backend-specific kwargs (TRT-LLM: max_seq_len / max_num_tokens /
-        # free_gpu_memory_fraction; others: {}).
-        agg_extra = self._resolve_agg_kwargs(kwargs, isl=isl, osl=osl)
+        # free_gpu_memory_fraction; vLLM / SGLang: free_gpu_memory_fraction).
+        agg_extra = self._resolve_agg_kwargs(kwargs, isl=isl, osl=osl, backend_version=database.version)
 
         visual_cache_key = (
             runtime_config.image_height,
@@ -1930,7 +1942,7 @@ class BaseBackend:
 
         # Resolve backend-specific kwargs once; forward into run_agg so each
         # (b, ctx_tokens) point sees the same backend params.
-        sweep_extra = self._resolve_agg_kwargs(kwargs, isl=isl_eff, osl=osl)
+        sweep_extra = self._resolve_agg_kwargs(kwargs, isl=isl_eff, osl=osl, backend_version=database.version)
 
         # when b is larger than 1024, the result is not good as the data collection is not enough
         # to cover this.
