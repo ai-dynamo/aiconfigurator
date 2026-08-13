@@ -8,6 +8,10 @@ runtime:
   version: 0.24.0
 tables:
   moe_perf:
+    # 2026-08-12: appended 1,134 Nemotron-3 Super FP8 rows (hidden=1024,
+    # inter=2688, 512 experts, topk=22) from auto-collector pipeline 62422303,
+    # job 395118396. All 42 tasks completed with zero errors using
+    # ModelOptFp8MoE -> FLASHINFER_CUTLASS -> FlashInferExperts.
     # 2026-08-02: appended 972 Kimi-K3 w4a16_mxfp4 rows (kernel_source
     # vllm_compressedtensorsw4a4mxfp4moe_marlin_marlinexperts_situ_as_silu)
     # collected on H100 in the STOCK v0.24.0 image via the
