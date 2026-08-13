@@ -278,8 +278,14 @@ def build_kimi_k3_encoder_ops(
     """
     if enc_cfg.encoder_type != "kimi_k3_moonvit3d_patchmergerv2":
         raise ValueError(f"Expected Kimi K3 encoder config, got {enc_cfg.encoder_type!r}")
-    if not enc_cfg.temporal_pool_all or not enc_cfg.projector_post_norm:
-        raise ValueError("Kimi K3 requires sd2_tpool and PatchMergerV2 post-norm semantics")
+    if not (
+        enc_cfg.model_patch_embed
+        and enc_cfg.model_pos_embed
+        and enc_cfg.model_final_norm
+        and enc_cfg.temporal_pool_all
+        and enc_cfg.projector_post_norm
+    ):
+        raise ValueError("Kimi K3 requires complete MoonViT3D and PatchMergerV2 operation semantics")
     if enc_cfg.qkv_hidden_size <= 0:
         raise ValueError("Kimi K3 requires an explicit architecture-specific qkv_hidden_size")
     return build_encoder_ops(enc_cfg, tp_size, enable_encoder_dp)

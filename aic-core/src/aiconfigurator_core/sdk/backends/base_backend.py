@@ -360,6 +360,10 @@ class BaseBackend:
         # busiest rank (ceil share) gates the phase.
         encoder_dp_size = model.config.tp_size if model.config.enable_encoder_dp else 1
 
+        def _record_encoder_source(name: str, source: str) -> None:
+            existing = encoder_source_dict.get(name)
+            encoder_source_dict[name] = source if existing is None or existing == source else "mixed"
+
         for workload in workloads:
             visuals_local = -(-batch_size * workload.count_per_request // encoder_dp_size)
 
@@ -387,7 +391,8 @@ class BaseBackend:
                         encoder_latency_dict[name] += value
                     for name, value in energy.items():
                         encoder_energy_wms_dict[name] += value
-                    encoder_source_dict.update(sources)
+                    for name, source in sources.items():
+                        _record_encoder_source(name, source)
                     continue
 
             for op in model.encoder_ops:
@@ -405,7 +410,7 @@ class BaseBackend:
                 encoder_latency_dict[op._name] += float(result)
                 if include_energy:
                     encoder_energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
-                encoder_source_dict[op._name] = getattr(result, "source", "silicon")
+                _record_encoder_source(op._name, getattr(result, "source", "silicon"))
 
         return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, visual_context_tokens
 

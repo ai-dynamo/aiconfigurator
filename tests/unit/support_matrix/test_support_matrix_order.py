@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -185,3 +186,15 @@ def test_support_matrix_runs_real_kimi_k3_encoder_but_not_k25_semantics(monkeypa
             assert captured_kwargs[key] == expected_visual[key]
         else:
             assert key not in captured_kwargs
+
+
+def test_representative_visual_workload_fails_fast_for_curated_model_load_error(monkeypatch):
+    monkeypatch.setattr(support_matrix_module.common, "DefaultHFModels", {"test/curated-model"})
+    monkeypatch.setattr(
+        support_matrix_module,
+        "_get_model_info",
+        MagicMock(side_effect=RuntimeError("model metadata unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="model metadata unavailable"):
+        support_matrix_module._representative_visual_workload("test/curated-model")

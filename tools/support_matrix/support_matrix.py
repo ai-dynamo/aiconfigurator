@@ -131,14 +131,7 @@ def _representative_visual_workload(model: str) -> dict[str, int]:
     # network lookup while upgrading arbitrary legacy/test rows.
     if model not in common.DefaultHFModels:
         return {}
-    try:
-        extra = _get_model_info(model).get("extra_params")
-    except Exception:
-        # Command rendering also upgrades legacy/test rows whose model ID may
-        # not be resolvable. The actual support check resolves the model before
-        # execution, so visual-workload enrichment stays best-effort here.
-        logger.debug("Could not resolve encoder config for %s", model, exc_info=True)
-        return {}
+    extra = _get_model_info(model).get("extra_params")
     if isinstance(extra, common.VisionEncoderConfig):
         encoder_config = extra
     elif isinstance(extra, common.KimiK3Config):

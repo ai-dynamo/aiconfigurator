@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import dataclasses
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -10,6 +11,7 @@ from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.models import _get_model_info, get_model
 from aiconfigurator.sdk.models.kimi_k3 import KimiK3Model
+from aiconfigurator.sdk.models.vit_ops import build_kimi_k3_encoder_ops
 
 pytestmark = pytest.mark.unit
 
@@ -106,12 +108,29 @@ class TestKimiK3VisionModel:
 
         assert "encoder_dp_all_gather" in {op._name for op in model.encoder_ops}
 
+    @pytest.mark.parametrize(
+        "disabled_flag",
+        [
+            "model_patch_embed",
+            "model_pos_embed",
+            "model_final_norm",
+            "temporal_pool_all",
+            "projector_post_norm",
+        ],
+    )
+    def test_kimi_k3_builder_rejects_incomplete_encoder_semantics(self, disabled_flag):
+        vision = _get_model_info("moonshotai/Kimi-K3")["extra_params"].vision_config
+        incomplete = dataclasses.replace(vision, **{disabled_flag: False})
+
+        with pytest.raises(ValueError, match="complete MoonViT3D"):
+            build_kimi_k3_encoder_ops(incomplete, tp_size=1)
+
 
 class _LatencyResult:
-    def __init__(self, latency: float = 1.0, energy: float = 2.0):
+    def __init__(self, latency: float = 1.0, energy: float = 2.0, source: str = "test"):
         self.latency = latency
         self.energy = energy
-        self.source = "test"
+        self.source = source
 
     def __float__(self) -> float:
         return self.latency
@@ -197,6 +216,32 @@ class TestKimiK3VisionRuntime:
         projector = next(op for op in kimi_k3_model.encoder_ops if op._name == "encoder_projector_fc0_gemm")
         assert attention.query.call_args.kwargs["s"] == 4 * 32 * 32
         assert projector.query.call_args.kwargs["s"] == 16 * 16
+
+    def test_mixed_image_video_workloads_preserve_mixed_source(self, kimi_k3_model, synthetic_database):
+        for op in kimi_k3_model.encoder_ops:
+            op.query = MagicMock(
+                side_effect=lambda *args, **kwargs: _LatencyResult(
+                    source="silicon" if kwargs["s"] == 32 * 32 else "sol"
+                )
+            )
+        runtime = config.RuntimeConfig(
+            batch_size=1,
+            isl=64,
+            osl=2,
+            image_height=448,
+            image_width=448,
+            num_images_per_request=1,
+            video_height=448,
+            video_width=448,
+            video_num_frames=4,
+            num_videos_per_request=1,
+            engine_step_backend="python",
+        )
+
+        _, _, sources, _ = _TestBackend()._run_encoder_phase(kimi_k3_model, synthetic_database, runtime, batch_size=1)
+
+        assert sources["encoder_attention"] == "mixed"
+        assert sources["encoder_projector_fc0_gemm"] == "sol"
 
     def test_video_rejects_more_frames_than_k3_temporal_embedding(self, kimi_k3_model, synthetic_database):
         runtime = config.RuntimeConfig(
