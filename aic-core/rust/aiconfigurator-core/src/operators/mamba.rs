@@ -193,16 +193,36 @@ impl GdnOp {
                 x * conv_channels * (d_conv + 1.0) * 2.0,
                 x * conv_channels * 2.0,
             ),
-            // q/k/v reads are 2K + V wide; the recurrent state is FP32 (Qwen3.5
-            // pins mamba_ssm_dtype=float32) while h_chunks stay input-dtype BF16.
+            // q/k/v reads are 2K + V wide; the recurrent state is always FP32
+            // here (Qwen3.5 pins mamba_ssm_dtype=float32 for the fla/triton
+            // lane, and the FlashInfer bf16-state lane below -- see the decode
+            // arm -- is decode-only, so context scan never sees it) while
+            // h_chunks stay input-dtype BF16.
             "chunk_gated_delta_rule" => (
                 x * (2.0 * nk * hk + nv * hv) * 2.0 + state_size * 4.0 * bs + h_chunks_bytes,
                 x * nv * hv * 2.0 + state_size * 4.0 * bs + h_chunks_bytes,
             ),
-            "fused_sigmoid_gating_delta_rule_update" => (
-                x * (2.0 * nk * hk + nv * hv) * 2.0 + state_size * 4.0 * bs,
-                x * nv * hv * 2.0 + state_size * 4.0 * bs,
-            ),
+            // GDN single-step decode: reads q/k/v (2K + V wide) plus the
+            // recurrent state. Two lanes, two state dtypes: the fla/triton lane
+            // (fused_sigmoid_gating_delta_rule_update) keeps Qwen3.5's pinned
+            // mamba_ssm_dtype=float32 state (4 bytes); the FlashInfer lane
+            // (flashinfer_gated_delta_rule_decode, SM100+ sglang) runs a bf16
+            // state (2 bytes) -- sglang's server_args.py
+            // _handle_linear_attn_backend (server_args.py:4884-4915 @ pinned
+            // v0.5.14 clone) auto-selects this backend on SM100+ and
+            // hard-errors a non-bf16 state there. q/k/v activation terms stay
+            // 2-byte bf16 for both lanes.
+            "fused_sigmoid_gating_delta_rule_update" | "flashinfer_gated_delta_rule_decode" => {
+                let state_bytes = if self.kernel_source == "flashinfer_gated_delta_rule_decode" {
+                    2.0
+                } else {
+                    4.0
+                };
+                (
+                    x * (2.0 * nk * hk + nv * hv) * 2.0 + state_size * state_bytes * bs,
+                    x * nv * hv * 2.0 + state_size * state_bytes * bs,
+                )
+            }
             _ => (x * d_model * 2.0, x * d_model * 2.0),
         };
         let mem_bw = db.system_spec.gpu.mem_bw.max(1.0);
@@ -479,6 +499,57 @@ impl KdaOp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    /// Census anchor for the SM100+ sglang GDN FlashInfer decode lane
+    /// (AIC-1745 Task 4, Rust twin of Task 3's
+    /// `test_flashinfer_lane_sol_matches_census_at_bs128`,
+    /// `tests/unit/sdk/database/test_gdn_flashinfer_lane.py`). Same shape:
+    /// Qwen3.5-397B GDN dims (num_k_heads=16, head_k_dim=128, num_v_heads=64,
+    /// head_v_dim=128) tp4-sharded (head COUNTS only, per qwen35.py's
+    /// `gdn_nk_per_tp = nk // tp` / `gdn_nv_per_tp = nv // tp`: nk=4, nv=16),
+    /// batch_size=128, real gb300/sglang/0.5.14 spec (mem_bw=8e12,
+    /// sm_version=103). No `flashinfer_gated_delta_rule_decode` rows exist
+    /// yet in the packaged gb300 table (Task 2 added the collector lane but
+    /// no GPU was available to re-collect), so this is a pure-SOL closed-form
+    /// check -- exactly the case the Python anchor covers.
+    ///
+    /// Hand-derived expectation (state_bytes=2 for this lane):
+    ///   state_size = nv*hk*hv = 16*128*128 = 262144
+    ///   read  = b*(2*nk*hk + nv*hv)*2 + state_size*2*b
+    ///         = 128*(2*4*128 + 16*128)*2 + 262144*2*128 = 786432 + 67108864 = 67895296
+    ///   write = b*nv*hv*2 + state_size*2*b = 128*16*128*2 + 67108864 = 524288 + 67108864 = 67633152
+    ///   sol_us = (read+write) / mem_bw * 1e6 = 135528448 / 8e12 * 1e6 = 16.941056
+    /// matches Python's pinned "16.94 us/layer" at this exact shape
+    /// (task-3-report.md Sec. 7, commit 21a4938).
+    #[test]
+    fn gdn_flashinfer_lane_sol_matches_python_bs128_census_anchor() {
+        let systems_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
+        let db = PerfDatabase::load(&systems_root, "gb300", "sglang", "0.5.14")
+            .expect("gb300/sglang/0.5.14 must load");
+        assert_eq!(db.system_spec.gpu.sm_version, Some(103));
+
+        let op = GdnOp {
+            name: "gdn".into(),
+            scale_factor: 1.0,
+            kernel_source: "flashinfer_gated_delta_rule_decode".into(),
+            phase: "generation".into(),
+            d_model: 8192,
+            d_conv: 4,
+            num_k_heads: 4,
+            head_k_dim: 128,
+            num_v_heads: 16,
+            head_v_dim: 128,
+        };
+
+        let sol_us = op.sol_latency_ms(&db, 128.0, 0.0) * 1000.0;
+        assert!(
+            (sol_us - 16.941056).abs() < 1e-6,
+            "sol_us = {sol_us}, expected 16.941056"
+        );
+    }
 
     fn kda_op(kernel_source: &str, phase: &str, draft_tokens: i64) -> KdaOp {
         KdaOp {

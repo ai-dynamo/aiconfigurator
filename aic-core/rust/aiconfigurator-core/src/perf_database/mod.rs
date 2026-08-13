@@ -537,6 +537,7 @@ impl PerfDatabase {
                 data_root.clone(),
                 backend,
                 version,
+                spec.gpu.sm_version,
                 &resolver,
             )?,
             // Deliberately NOT shared-layer aware: FPM whole-model data is
