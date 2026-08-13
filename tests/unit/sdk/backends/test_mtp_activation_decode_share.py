@@ -136,7 +136,7 @@ def test_trtllm_budget_path_ignores_the_decode_share():
     Its ``num_tokens`` is ``BuildConfig.max_num_tokens`` (a per-iteration budget),
     not the agg-derived mixed-step count, so the decode-share correction is not
     forwarded and the legacy full ``(nextn+1)`` multiplier is retained on that
-    path pending its own analysis.
+    path pending its own analysis (tracked in AIC-1755).
     """
     from aiconfigurator_core.sdk.backends.factory import get_backend
 

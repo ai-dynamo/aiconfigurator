@@ -252,6 +252,57 @@ def test_run_static_declares_mtp_decode_share_per_mode(
     assert captured.get("mtp_scaled_tokens") == expected_share
 
 
+@pytest.mark.parametrize(
+    ("batch_size", "ctx_tokens", "expected_share"),
+    [
+        # b > 1: mixed step; only the num_gen_requests decode requests verify
+        # nextn+1 draft tokens (the context share is processed once).
+        (4, 8, 3),
+        # b == 1: context-only step, no decode share to scale.
+        (1, 8, 0),
+    ],
+)
+def test_run_agg_declares_mtp_decode_share_at_call_site(
+    backend: BaseBackend,
+    model,
+    database,
+    monkeypatch,
+    batch_size: int,
+    ctx_tokens: int,
+    expected_share: int,
+) -> None:
+    """run_agg must pass the decode-request share of num_tokens as
+    mtp_scaled_tokens to _get_memory_usage (the run_agg counterpart of
+    test_run_static_declares_mtp_decode_share_per_mode above: pins the CALL
+    SITE, not just the _get_memory_usage formula covered elsewhere)."""
+    captured: dict = {}
+
+    def _record(*args, **kwargs):
+        captured.update(kwargs)
+        return {"total": 1.0}
+
+    monkeypatch.setattr(backend, "_get_memory_usage", _record)
+    monkeypatch.setattr(
+        backend,
+        "run_mixed",
+        lambda *args, **kwargs: StepEstimate(latency_ms=1.0, energy_wms=1.0),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_genonly_step_latency",
+        lambda *args, **kwargs: (1.0, 1.0, {}, {}),
+    )
+
+    backend.run_agg(
+        model,
+        database,
+        RuntimeConfig(batch_size=batch_size, beam_width=1, isl=8, osl=5, prefix=2),
+        ctx_tokens=ctx_tokens,
+    )
+
+    assert captured.get("mtp_scaled_tokens") == expected_share
+
+
 def test_run_agg_with_osl_one_does_not_divide_by_zero(
     backend: BaseBackend,
     model,
