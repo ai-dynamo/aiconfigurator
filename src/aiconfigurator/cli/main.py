@@ -1536,9 +1536,7 @@ def build_default_tasks(
             unset defaults to the compiled Rust engine (SDK callers passing
             synthetic database objects the compiled engine cannot re-load
             from disk still delegate to the Python step).
-        forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None
-            keeps the default. "fpm" always runs on the Python step (it
-            compiles to no Rust op variant yet).
+        forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None keeps the default.
         serving_mode: Serving modes to build. ``"auto"`` builds agg and disagg,
             ``"all"`` also includes AFD, and an explicit mode builds only that mode.
         afd_max_a_batch_size: Maximum attention batch size considered by AFD.

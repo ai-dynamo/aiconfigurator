@@ -269,7 +269,11 @@ forced off, and `tests/unit/sdk/test_fpm_forward.py` (33 tests). D1 shipped as
 exact-model-path-only (the interim unique-path fallback was removed in review); D2 shipped as ScatteredSites (per-phase configs,
 one-line swap to Grid for the LOO bake-off); D3 shipped as zero-energy; D4 deferred to M2.
 The mixed step ships the marginal-decode composition (§M3), replacing the original plan's
-plain prefill+decode sum. M2 (Rust op + schema bump + parity) and real-data LOO
+plain prefill+decode sum; its prefill component prices the iteration's REAL scheduled
+totals (chunk + decode tokens, per chunk) via ``query_totals``, so the CUDA-graph/eager
+regime encoded in the collected rows is addressed at the correct coordinate (the
+2026-08-11 e2e campaign measured -38%..-44% on capture-boundary rows under the earlier
+ISL-row/chunk-count averaging). M2 (Rust op + schema bump + parity) and real-data LOO
 qualification remain.
 
 ## 5. Open decisions (need owner sign-off before implementation)

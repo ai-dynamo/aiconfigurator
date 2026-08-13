@@ -57,6 +57,7 @@ from aiconfigurator_core.sdk.operations import (
     Embedding,
     EncoderAttention,
     FallbackOp,
+    FPMForwardOp,
     GDNKernel,
     GenerationAttention,
     GenerationDeepSeekV4AttentionModule,
@@ -111,7 +112,10 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   decodes positionally).
 # - 8: `GemmOp` gained `below_grid_sol` (always serialized — bincode decodes
 #   positionally).
-ENGINE_SPEC_SCHEMA_VERSION = 8
+# - 9: the Rust `Op::FpmForward` whole-model variant (forward_model="fpm").
+#   Claimed 5, 7 and 8 concurrently with other landings; renumbered at each
+#   merge (same precedent as the v3/v4 collision).
+ENGINE_SPEC_SCHEMA_VERSION = 9
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)
@@ -662,6 +666,27 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
             }
         }
 
+    # Whole-model FPM op (forward_model="fpm"): recursive like the composites —
+    # `sol_ops` carries the model's original granular list as the roofline
+    # source. The identity strings were normalized by _norm_identity at op
+    # construction; Rust compares them verbatim.
+    if isinstance(op, FPMForwardOp):
+        if op._sol_ops is None:
+            raise OpConversionError(
+                "FPMForwardOp with an injected sol_fn cannot compile to an EngineSpec; "
+                "build the model through get_model (sol_ops) instead."
+            )
+        return {
+            "FpmForward": {
+                "name": op._name,
+                "phase": op._phase,
+                "model_path": op._model_path,
+                "match_identity": list(op._match_identity),
+                "weight_bytes": op._weight_bytes,
+                "sol_ops": [recurse(c) for c in op._sol_ops],
+            }
+        }
+
     # MLAModule: one class, two Rust variants by phase.
     if isinstance(op, MLAModule):
         tag = "MlaModuleContext" if op._is_context else "MlaModuleGeneration"
@@ -918,6 +943,7 @@ def compile_engine(
     nextn: int = 0,
     kv_block_size: int | None = None,
     systems_path: str | None = None,
+    forward_model: str | None = None,
 ) -> bytes:
     """Compile a model into bincoded ``EngineSpec`` bytes.
 
@@ -942,6 +968,7 @@ def compile_engine(
         fmha_quant_mode=fmha_quant_mode,
         moe_quant_mode=moe_quant_mode,
         comm_quant_mode=comm_quant_mode,
+        forward_model=forward_model,
     )
     # Apply MTP BEFORE get_model so the walked op lists carry the
     # (L+nextn)/L compute scale; accepted-token progress is applied above core.

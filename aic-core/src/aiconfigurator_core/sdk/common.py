@@ -638,6 +638,7 @@ DefaultHFModels = {
     "google/gemma-4-26B-A4B",
     # StepFun Step-3.7 Models
     "stepfun-ai/Step-3.7-Flash",
+    "stepfun-ai/Step-3.7-Flash-FP8",
 }
 
 # Bundled model configs and the default support-matrix roster intentionally have
