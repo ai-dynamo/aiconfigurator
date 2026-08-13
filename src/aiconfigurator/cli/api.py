@@ -167,6 +167,7 @@ def cli_default(
     image_height: int = 0,
     image_width: int = 0,
     num_images: int = 1,
+    num_frames_per_visual: int = 1,
     enable_encoder_dp: bool = True,
     ttft: float = 2000.0,
     tpot: float = 30.0,
@@ -203,6 +204,10 @@ def cli_default(
             ('SILICON', 'HYBRID', 'EMPIRICAL', 'SOL'). Default is 'SILICON'.
         isl: Input sequence length. Default is 4000.
         osl: Output sequence length. Default is 1000.
+        image_height: Height of each visual input. Zero disables encoder modeling.
+        image_width: Width of each visual input. Zero disables encoder modeling.
+        num_images: Number of visual inputs per request.
+        num_frames_per_visual: Frames per visual input; 1 is an image and >1 is video.
         enable_encoder_dp: Model the vision encoder data-parallel (default True;
             vLLM mm_encoder_tp_mode="data" / SGLang --mm-enable-dp-encoder semantics).
             False models the legacy TP-sharded encoder.
@@ -293,6 +298,7 @@ def cli_default(
         image_height=image_height,
         image_width=image_width,
         num_images=num_images,
+        num_frames_per_visual=num_frames_per_visual,
         enable_encoder_dp=enable_encoder_dp,
         ttft=ttft,
         tpot=tpot,
@@ -327,6 +333,7 @@ def cli_default(
         mock_args.image_height = image_height
         mock_args.image_width = image_width
         mock_args.num_images = num_images
+        mock_args.num_frames_per_visual = num_frames_per_visual
         mock_args.ttft = ttft
         mock_args.tpot = tpot
         mock_args.request_latency = request_latency
@@ -388,6 +395,7 @@ def cli_recommend(
     image_height: int = 0,
     image_width: int = 0,
     num_images: int = 1,
+    num_frames_per_visual: int = 1,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -436,6 +444,7 @@ def cli_recommend(
         image_height: Image height for vision-language models.
         image_width: Image width for vision-language models.
         num_images: Number of images per request.
+        num_frames_per_visual: Frames per visual input; 1 is an image and >1 is video.
         ttft: Time to first token SLA target in ms. Default is 2000.
         tpot: Time per output token SLA target in ms. Default is 30.
         request_latency: Optional end-to-end request latency target (ms).
@@ -506,6 +515,7 @@ def cli_recommend(
         image_height=image_height,
         image_width=image_width,
         num_images=num_images,
+        num_frames_per_visual=num_frames_per_visual,
         ttft=ttft,
         tpot=tpot,
         request_latency=request_latency,
@@ -573,6 +583,7 @@ def cli_recommend(
         mock_args.image_height = image_height
         mock_args.image_width = image_width
         mock_args.num_images = num_images
+        mock_args.num_frames_per_visual = num_frames_per_visual
         mock_args.ttft = ttft
         mock_args.tpot = tpot
         mock_args.request_latency = request_latency
@@ -933,6 +944,7 @@ def cli_estimate(
     image_height: int = 0,
     image_width: int = 0,
     num_images: int = 1,
+    num_frames_per_visual: int = 1,
     enable_encoder_dp: bool = True,
     batch_size: int = 128,
     ctx_tokens: int | None = None,
@@ -1011,6 +1023,7 @@ def cli_estimate(
         image_height: Image height in pixels for VL models. Default 0 disables encoder modeling.
         image_width: Image width in pixels for VL models. Default 0 disables encoder modeling.
         num_images: Number of images per request for VL models. Default 1.
+        num_frames_per_visual: Frames per visual input. Default 1 models images; >1 models video.
         enable_encoder_dp: Model the vision encoder data-parallel (default True;
             vLLM mm_encoder_tp_mode="data" / SGLang --mm-enable-dp-encoder semantics).
             False models the legacy TP-sharded encoder.
@@ -1190,6 +1203,7 @@ def cli_estimate(
             image_height=image_height,
             image_width=image_width,
             num_images=num_images,
+            num_frames_per_visual=num_frames_per_visual,
             enable_encoder_dp=enable_encoder_dp,
             batch_size=batch_size,
             prefix=prefix,
@@ -1225,6 +1239,7 @@ def cli_estimate(
             image_height=image_height,
             image_width=image_width,
             num_images=num_images,
+            num_frames_per_visual=num_frames_per_visual,
             enable_encoder_dp=enable_encoder_dp,
             batch_size=batch_size,
             ctx_tokens=ctx_tokens if ctx_tokens is not None else isl,
@@ -1280,6 +1295,7 @@ def cli_estimate(
             image_height=image_height,
             image_width=image_width,
             num_images=num_images,
+            num_frames_per_visual=num_frames_per_visual,
             enable_encoder_dp=enable_encoder_dp,
             # Prefill config (fall back to shared args)
             prefill_tp_size=prefill_tp_size if prefill_tp_size is not None else tp_size,
@@ -1398,6 +1414,7 @@ def cli_estimate(
             image_height=image_height,
             image_width=image_width,
             num_images=num_images,
+            num_frames_per_visual=num_frames_per_visual,
             enable_encoder_dp=enable_encoder_dp,
             batch_size=batch_size,
             prefix=prefix,
@@ -1447,6 +1464,7 @@ def _run_agg_estimate(
     image_height,
     image_width,
     num_images,
+    num_frames_per_visual,
     enable_encoder_dp,
     batch_size,
     ctx_tokens,
@@ -1508,6 +1526,7 @@ def _run_agg_estimate(
         image_height=image_height,
         image_width=image_width,
         num_images_per_request=num_images,
+        num_frames_per_visual=num_frames_per_visual,
         prefix=prefix,
         engine_step_backend=engine_step_backend,
     )
@@ -1583,6 +1602,7 @@ def _run_static_estimate(
     image_height,
     image_width,
     num_images,
+    num_frames_per_visual,
     enable_encoder_dp,
     batch_size,
     prefix,
@@ -1655,6 +1675,7 @@ def _run_static_estimate(
         image_height=image_height,
         image_width=image_width,
         num_images_per_request=num_images,
+        num_frames_per_visual=num_frames_per_visual,
         prefix=prefix,
         engine_step_backend=engine_step_backend,
     )
@@ -1724,6 +1745,7 @@ def _run_disagg_estimate(
     image_height,
     image_width,
     num_images,
+    num_frames_per_visual,
     enable_encoder_dp,
     prefill_tp_size,
     prefill_pp_size,
@@ -1826,6 +1848,7 @@ def _run_disagg_estimate(
         image_height=image_height,
         image_width=image_width,
         num_images_per_request=num_images,
+        num_frames_per_visual=num_frames_per_visual,
         prefix=prefix,
         engine_step_backend=engine_step_backend,
     )

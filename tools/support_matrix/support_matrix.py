@@ -118,6 +118,26 @@ class HardwareIncompatibility:
     reason: str
 
 
+_KIMI_K25_VISION_MODELS = frozenset({"moonshotai/Kimi-K2.5", "nvidia/Kimi-K2.5-NVFP4"})
+
+
+def _representative_vision_workload(model: str) -> dict[str, int]:
+    """Return the visual workload required to exercise encoder support.
+
+    Support-matrix rows historically used text-only RuntimeConfig values even
+    for multimodal checkpoints. Kimi K2.5 rows use a representative 448x448
+    image so both agg and disagg checks query the newly modeled encoder path.
+    """
+    if model not in _KIMI_K25_VISION_MODELS:
+        return {}
+    return {
+        "image_height": 448,
+        "image_width": 448,
+        "num_images_per_request": 1,
+        "num_frames_per_visual": 1,
+    }
+
+
 def _support_matrix_row_command(
     *,
     model: str,
@@ -165,10 +185,20 @@ def _support_matrix_row_command(
         str(constraints.ttft),
         "--tpot",
         str(constraints.tpot),
-        "--top-n",
-        "1",
-        "--no-color",
     ]
+    workload = _representative_vision_workload(model)
+    if workload:
+        parts.extend(
+            [
+                "--image-height",
+                str(workload["image_height"]),
+                "--image-width",
+                str(workload["image_width"]),
+                "--num-images",
+                str(workload["num_images_per_request"]),
+            ]
+        )
+    parts.extend(["--top-n", "1", "--no-color"])
     if transfer_policy:
         parts.extend(["--transfer-policy", transfer_policy])
     if compare_engine_step_backends:
@@ -766,6 +796,7 @@ class SupportMatrix:
             # (e.g. AIC_SM_TRANSFERS="off" or "xshape,xquant"). None -> all kinds on.
             "transfer_policy": os.environ.get("AIC_SM_TRANSFERS") or None,
         }
+        common_kwargs.update(_representative_vision_workload(model))
         if mode == "disagg":
             # v2 disagg forbids shared top-level worker fields; fan out to both roles.
             return Task(

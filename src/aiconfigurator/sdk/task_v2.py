@@ -464,10 +464,12 @@ class Task:
     isl: int = 4000
     osl: int = 1000
     prefix: int = 0
-    # Multimodal image inputs (folded into the effective ISL by RuntimeConfig).
+    # Multimodal inputs (folded into the effective ISL by RuntimeConfig).
     image_height: int = 0
     image_width: int = 0
     num_images_per_request: int = 1
+    # 1 models an image; >1 models a video clip per visual input.
+    num_frames_per_visual: int = 1
     # Vision encoder data parallelism (ModelConfig default).
     enable_encoder_dp: bool = True
     ttft: float = 1000.0
@@ -1505,6 +1507,7 @@ class Task:
             image_height=self.image_height,
             image_width=self.image_width,
             num_images_per_request=self.num_images_per_request,
+            num_frames_per_visual=self.num_frames_per_visual,
             ttft=self.ttft,
             tpot=self.tpot,
             request_latency=self.request_latency,

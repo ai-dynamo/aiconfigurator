@@ -415,6 +415,12 @@ def _add_default_mode_arguments(parser):
         "--num-images", type=int, default=1, help="Number of images per request for vision-language models. Default: 1."
     )
     parser.add_argument(
+        "--num-frames-per-visual",
+        type=int,
+        default=1,
+        help="Frames per visual input. Use 1 for images and >1 for video clips. Default: 1.",
+    )
+    parser.add_argument(
         "--disable-encoder-dp",
         action="store_true",
         help="Model the vision encoder as TP-sharded instead of the default data-parallel "
@@ -608,6 +614,12 @@ def _add_recommend_mode_arguments(parser):
     )
     parser.add_argument(
         "--num-images", type=int, default=1, help="Number of images per request for vision-language models. Default: 1."
+    )
+    parser.add_argument(
+        "--num-frames-per-visual",
+        type=int,
+        default=1,
+        help="Frames per visual input. Use 1 for images and >1 for video clips. Default: 1.",
     )
     parser.add_argument(
         "--ttft",
@@ -807,6 +819,12 @@ def _add_estimate_mode_arguments(parser):
     )
     parser.add_argument(
         "--num-images", type=int, default=1, help="Number of images per request for vision-language models. Default: 1."
+    )
+    parser.add_argument(
+        "--num-frames-per-visual",
+        type=int,
+        default=1,
+        help="Frames per visual input. Use 1 for images and >1 for video clips. Default: 1.",
     )
     parser.add_argument(
         "--disable-encoder-dp",
@@ -1487,6 +1505,7 @@ def build_default_tasks(
     image_height: int = 0,
     image_width: int = 0,
     num_images: int = 1,
+    num_frames_per_visual: int = 1,
     enable_encoder_dp: bool = True,
     ttft: float = 2000.0,
     tpot: float = 30.0,
@@ -1519,6 +1538,10 @@ def build_default_tasks(
         database_mode: Database mode for performance estimation.
         isl: Input sequence length.
         osl: Output sequence length.
+        image_height: Height of each visual input. Zero disables encoder modeling.
+        image_width: Width of each visual input. Zero disables encoder modeling.
+        num_images: Number of visual inputs per request.
+        num_frames_per_visual: Frames per visual input; 1 is an image and >1 is video.
         ttft: Time to first token target in ms.
         tpot: Time per output token target in ms.
         request_latency: Optional end-to-end request latency target (ms).
@@ -1679,10 +1702,11 @@ def build_default_tasks(
         global_kwargs["nextn"] = nextn
         global_kwargs["nextn_accepted"] = nextn_accepted
 
-    if image_height or image_width or (num_images and num_images != 1):
+    if image_height or image_width or (num_images and num_images != 1) or num_frames_per_visual != 1:
         global_kwargs["image_height"] = image_height
         global_kwargs["image_width"] = image_width
         global_kwargs["num_images_per_request"] = num_images
+        global_kwargs["num_frames_per_visual"] = num_frames_per_visual
     if not enable_encoder_dp:
         global_kwargs["enable_encoder_dp"] = False
 
@@ -2462,6 +2486,7 @@ def _run_estimate_mode(args):
         image_height=args.image_height,
         image_width=args.image_width,
         num_images=args.num_images,
+        num_frames_per_visual=args.num_frames_per_visual,
         enable_encoder_dp=not args.disable_encoder_dp,
         batch_size=args.batch_size,
         ctx_tokens=args.ctx_tokens,
@@ -2542,7 +2567,9 @@ def _run_estimate_mode(args):
     print(f"  ISL:              {result.isl}")
     print(f"  OSL:              {result.osl}")
     if args.image_height > 0 and args.image_width > 0 and args.num_images > 0:
-        print(f"  Images:           {args.num_images} x {args.image_height}x{args.image_width}")
+        media = "Images" if args.num_frames_per_visual == 1 else "Video clips"
+        frames = "" if args.num_frames_per_visual == 1 else f" x {args.num_frames_per_visual} frames"
+        print(f"  {media + ':':<18}{args.num_images} x {args.image_height}x{args.image_width}{frames}")
         print(f"  Encoder parallel: {'TP (weight-sharded)' if args.disable_encoder_dp else 'DP (data-parallel)'}")
 
     # ``--prefix`` and ``--nextn`` are common parameters applied to every
@@ -2764,6 +2791,7 @@ def _run_recommend(args) -> None:
             image_height=args.image_height,
             image_width=args.image_width,
             num_images=args.num_images,
+            num_frames_per_visual=args.num_frames_per_visual,
             ttft=args.ttft,
             tpot=args.tpot,
             request_latency=args.request_latency,
@@ -2918,6 +2946,7 @@ def main(args):
             image_height=args.image_height,
             image_width=args.image_width,
             num_images=args.num_images,
+            num_frames_per_visual=args.num_frames_per_visual,
             enable_encoder_dp=not args.disable_encoder_dp,
             ttft=args.ttft,
             tpot=args.tpot,

@@ -9,6 +9,7 @@ import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
 from aiconfigurator_core.sdk.models.helpers import attention_projection_exclusions, mtp_scale_factor
+from aiconfigurator_core.sdk.models.vit_ops import build_encoder_ops
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,7 @@ class DeepSeekModel(BaseModel):
                 extra_params,
                 backend_name=backend_name,
                 attention_quant_exclusions=attn_exclusions,
+                encoder_config=model_info.get("encoder_config"),
             )
 
         # DEEPSEEK family — three-way dispatch on WideEP.
@@ -110,8 +112,14 @@ class DeepSeekModel(BaseModel):
         *args,
         backend_name: str = "",
         attention_quant_exclusions: frozenset = frozenset(),
+        encoder_config: common.VisionEncoderConfig | None = None,
     ) -> None:
         super().__init__(*args)
+        if encoder_config is not None:
+            self.encoder_config = encoder_config
+            self.encoder_ops.extend(
+                build_encoder_ops(encoder_config, self.config.tp_size, self.config.enable_encoder_dp)
+            )
         # Resolve vLLM attention head size. MLA models (e.g., KIMI K2.5) store v_head_dim=128
         # in extra_params; generic hidden_size // n_heads would give the wrong value (e.g., 112).
         self._vllm_head_size = (
