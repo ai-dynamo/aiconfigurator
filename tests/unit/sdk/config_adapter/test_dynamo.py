@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from aiconfigurator.sdk.config_adapter import (
@@ -14,6 +16,8 @@ from aiconfigurator.sdk.config_adapter import (
 )
 
 pytestmark = pytest.mark.unit
+
+_NIGHTLY_FIXTURES = Path(__file__).parents[3] / "fixtures" / "config_adapter" / "dynamo_nightly"
 
 
 def _dynamo_ci_recipe() -> dict:
@@ -118,6 +122,103 @@ def test_agg_backends_support_string_and_list_arguments(backend, args_as_string)
         "Aggregated worker replicas are omitted during cli_estimate lowering because "
         "cli_estimate has no aggregated worker-count parameter."
     )
+
+
+def test_resolved_dsv4_shell_comments_do_not_change_engine_arguments():
+    fixture = _NIGHTLY_FIXTURES / "dsv4"
+
+    outcome = adapt_config(
+        DynamoRecipeSource(fixture / "deployment.yaml", fixture / "benchmark-job.yaml"),
+        AdapterOverrides(
+            system_name="gb200",
+            free_gpu_memory_fraction=0.9,
+            workload_points=(WorkloadPointOverride(point_id="concurrency-8", isl=8192, osl=1024, concurrency=8),),
+        ),
+    ).outcomes[0]
+
+    assert outcome.status == "adapted"
+    assert outcome.request is not None
+    assert outcome.request.topology.kind == "disagg"
+
+
+def test_resolved_dsv4_sweep_preserves_all_points_and_fail_closed_diagnostics():
+    fixture = _NIGHTLY_FIXTURES / "dsv4"
+
+    report = adapt_config(
+        DynamoRecipeSource(fixture / "deployment.yaml", fixture / "benchmark-job.yaml"),
+        AdapterOverrides(system_name="gb200"),
+    )
+
+    assert [outcome.point_id for outcome in report.outcomes] == [
+        "concurrency-1",
+        "concurrency-8",
+        "concurrency-64",
+        "concurrency-128",
+        "concurrency-256",
+        "concurrency-512",
+        "concurrency-1024",
+    ]
+    assert all(outcome.status == "rejected" for outcome in report.outcomes)
+    assert "must be divisible" in report.outcomes[0].diagnostics[-1].message
+    assert all(
+        "conflicting free-gpu-memory-fraction" in outcome.diagnostics[-1].message for outcome in report.outcomes[1:]
+    )
+
+
+def test_resolved_kimi_engine_config_requires_speculative_acceptance():
+    fixture = _NIGHTLY_FIXTURES / "kimi"
+
+    outcome = adapt_config(
+        DynamoRecipeSource(fixture / "deployment.yaml", fixture / "benchmark-job.yaml"),
+        AdapterOverrides(
+            system_name="gb200",
+            workload_points=(WorkloadPointOverride(point_id="concurrency-3", isl=1000, osl=1500, concurrency=3),),
+        ),
+    ).outcomes[0]
+
+    assert outcome.status == "rejected"
+    assert "nextn_accepted" in outcome.diagnostics[-1].message
+
+
+def test_resolved_kimi_sweep_preserves_all_points_and_uneven_distribution_diagnostics():
+    fixture = _NIGHTLY_FIXTURES / "kimi"
+
+    report = adapt_config(
+        DynamoRecipeSource(fixture / "deployment.yaml", fixture / "benchmark-job.yaml"),
+        AdapterOverrides(system_name="gb200"),
+    )
+
+    assert [outcome.point_id for outcome in report.outcomes] == [
+        "concurrency-1",
+        "concurrency-2",
+        "concurrency-4",
+        "concurrency-8",
+        "concurrency-16",
+        "concurrency-32",
+        "concurrency-64",
+        "concurrency-128",
+        "concurrency-256",
+    ]
+    assert all(outcome.status == "rejected" for outcome in report.outcomes)
+    assert all("must be divisible" in outcome.diagnostics[-1].message for outcome in report.outcomes)
+
+
+def test_resolved_kimi_engine_speculation_is_preserved_with_explicit_acceptance():
+    fixture = _NIGHTLY_FIXTURES / "kimi"
+
+    outcome = adapt_config(
+        DynamoRecipeSource(fixture / "deployment.yaml", fixture / "benchmark-job.yaml"),
+        AdapterOverrides(
+            system_name="gb200",
+            nextn_accepted=1.5,
+            workload_points=(WorkloadPointOverride(point_id="concurrency-3", isl=1000, osl=1500, concurrency=3),),
+        ),
+    ).outcomes[0]
+
+    assert outcome.status == "adapted"
+    assert outcome.request is not None
+    assert outcome.request.model.nextn == 3
+    assert outcome.request.model.nextn_accepted == 1.5
 
 
 def test_disagg_env_substitution_and_role_sizing():

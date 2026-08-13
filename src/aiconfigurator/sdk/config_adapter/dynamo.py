@@ -150,7 +150,7 @@ def _flags(command: str) -> dict[str, str | bool]:
     if "$(" in command or "`" in command:
         raise ValueError("engine arguments contain a shell-derived value")
     try:
-        tokens = shlex.split(command)
+        tokens = shlex.split(command, comments=True)
     except ValueError as error:
         raise ValueError(f"cannot parse engine arguments: {error}") from error
     result: dict[str, str | bool] = {}
@@ -625,6 +625,42 @@ def _discover_points(documents: Sequence[Mapping[str, Any]], overrides: AdapterO
             for concurrency, isl, osl in calls:
                 explicit.append(_Point(f"point-{len(explicit)}", isl, osl, concurrency))
             continue
+        if "CONCURRENCIES" in env:
+            raw_concurrencies = env["CONCURRENCIES"]
+            if "$" in raw_concurrencies or "`" in raw_concurrencies:
+                explicit.append(
+                    _Point(
+                        "concurrency-sweep",
+                        env.get("ISL"),
+                        env.get("OSL"),
+                        None,
+                        error="CONCURRENCIES must contain literal integers",
+                    )
+                )
+                continue
+            concurrencies = raw_concurrencies.split()
+            if not concurrencies:
+                explicit.append(
+                    _Point(
+                        "concurrency-sweep",
+                        env.get("ISL"),
+                        env.get("OSL"),
+                        None,
+                        error="CONCURRENCIES must contain at least one integer",
+                    )
+                )
+                continue
+            explicit.extend(
+                _Point(
+                    f"concurrency-{concurrency}",
+                    env.get("ISL"),
+                    env.get("OSL"),
+                    concurrency,
+                    env.get("PREFIX", 0),
+                )
+                for concurrency in concurrencies
+            )
+            continue
         if not any(key in env for key in ("ISL", "OSL", "TOTAL_CONCURRENCY", "CONCURRENCY", "CONCURRENCY_PER_GPU")):
             continue
         concurrency: Any = env.get("TOTAL_CONCURRENCY", env.get("CONCURRENCY"))
@@ -731,19 +767,40 @@ def _request_for_point(
         systems = SystemSettingsV1(prefill=system, decode=overrides.decode_system_name or system)
 
     speculative_flag_names = {"num-speculative-tokens", "speculative-num-steps", "speculative-token-num"}
-    speculative_values = [
-        _flag(service, "num-speculative-tokens", "speculative-num-steps", "speculative-token-num")
-        for service in services
-    ]
+    speculative_values: list[Any] = []
+    speculative_configs: list[Mapping[str, Any]] = []
+    for service in services:
+        config = service.engine_config.get("speculative_config")
+        speculative_config = config if isinstance(config, Mapping) else {}
+        if speculative_config:
+            speculative_configs.append(speculative_config)
+        speculative_values.append(
+            _coalesce(
+                "speculative depth",
+                (
+                    (
+                        f"{service.name} command",
+                        _flag(service, "num-speculative-tokens", "speculative-num-steps", "speculative-token-num"),
+                    ),
+                    (f"{service.name} engine ConfigMap", speculative_config.get("max_draft_len")),
+                    (
+                        f"{service.name} engine ConfigMap",
+                        speculative_config.get("num_nextn_predict_layers"),
+                    ),
+                ),
+            )
+        )
     speculative_enable_values = [
         value
         for service in services
         for key, value in service.flags.items()
         if "specul" in key and key not in speculative_flag_names
-    ]
+    ] + speculative_configs
     speculation_disabled = {"", "0", "false", "none", "disabled"}
 
     def speculation_enabled(value: Any) -> bool:
+        if isinstance(value, Mapping):
+            return bool(value)
         return value is not None and value is not False and str(value).lower() not in speculation_disabled
 
     active_speculation = any(speculation_enabled(value) for value in (*speculative_values, *speculative_enable_values))

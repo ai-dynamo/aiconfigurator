@@ -108,10 +108,18 @@ current flat estimate API, so they require an explicit shared
 `free_gpu_memory_fraction` override.
 
 Worker sizing uses replicas, `multinode.nodeCount`, GPU limits, and literal engine
-parallelism flags. Literal environment substitutions are supported. A known
-numeric `CONCURRENCY_PER_GPU * DEPLOYMENT_GPU_COUNT` performance point is
-expanded without executing shell. Multiple explicit points create multiple
-outcomes.
+parallelism flags. Literal environment substitutions are supported. Shell
+comments are discarded while parsing worker commands, and no command is
+executed. A literal space-separated `CONCURRENCIES` environment value expands
+to ordered operating points. A known numeric
+`CONCURRENCY_PER_GPU * DEPLOYMENT_GPU_COUNT` performance point is expanded
+without executing shell. Multiple explicit points create multiple outcomes.
+
+TRT-LLM speculative settings are read from mounted engine ConfigMaps as well as
+worker flags. Active speculation requires an explicit `nextn_accepted`
+override; the adapter never guesses an acceptance rate. Uneven concurrency
+distribution and conflicting role-specific memory fractions remain rejected
+with stable diagnostics.
 
 For Helm-based benchmark infrastructure, render `recipe-values.yaml` into a
 DynamoGraphDeployment before adaptation. The matching unrendered
