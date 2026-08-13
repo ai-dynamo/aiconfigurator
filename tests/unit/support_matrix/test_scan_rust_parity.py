@@ -40,14 +40,14 @@ def _visual_constraints() -> TestConstraints:
     )
 
 
-def _gemma_entry() -> Entry:
+def _gemma_entry(*, mode: str = "agg") -> Entry:
     return Entry(
         model="google/gemma-4-26B-A4B",
         architecture="Gemma4ForConditionalGeneration",
         system="b200_sxm",
         backend="trtllm",
         version="1.3.0rc20",
-        mode="agg",
+        mode=mode,
         baseline_status="PASS",
     )
 
@@ -70,6 +70,28 @@ def test_probe_passes_visual_constraints_to_estimator(monkeypatch):
     assert captured["image_height"] == 672
     assert captured["image_width"] == 960
     assert captured["num_images"] == 1
+
+
+def test_disagg_probe_reads_encoder_memory_from_disagg_schema(monkeypatch):
+    captured = {}
+
+    def fake_cli_estimate(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            ttft=12.0,
+            tpot=3.0,
+            raw={"encoder_latency": 1.25, "(e)memory": 0.5},
+        )
+
+    monkeypatch.setattr(cli_api, "cli_estimate", fake_cli_estimate)
+
+    assert _run_probe(_gemma_entry(mode="disagg"), _visual_constraints(), backend_label="rust") == (
+        12.0,
+        3.0,
+        None,
+    )
+    assert captured["mode"] == "disagg"
+    assert captured["image_height"] == 672
 
 
 def test_probe_record_identifies_visual_shape(monkeypatch):

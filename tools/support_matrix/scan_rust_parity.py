@@ -526,8 +526,9 @@ def _run_probe(
             raw = getattr(result, "raw", None)
             if not isinstance(raw, dict):
                 raise RuntimeError("ENCODER_NOT_EXERCISED: parity probe returned no raw encoder evidence")
+            memory_field = "(e)memory" if entry.mode == "disagg" else "encoder_memory"
             missing = []
-            for field in ("encoder_latency", "encoder_memory"):
+            for field in ("encoder_latency", memory_field):
                 try:
                     value = float(raw.get(field, 0.0) or 0.0)
                 except (TypeError, ValueError):
