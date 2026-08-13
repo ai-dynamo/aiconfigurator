@@ -31,7 +31,7 @@ def _config(**overrides):
         "decode_tp": 4,
         "decode_ep": 1,
         "decode_dp_attention": False,
-        "decode_num_workers": 0,
+        "decode_num_workers": 1,
         "num_prefill_gpu": 4,
         "num_decode_gpu": 4,
     }
@@ -56,11 +56,21 @@ def test_dense_agg_alias_quantization_and_topology():
     assert outcome.request.quantization.moe is None
     assert outcome.request.provenance.assumptions == (
         "InferenceX does not expose pipeline parallelism; pp_size defaults to 1.",
-        "InferenceX aggregated decode_num_workers=0 is an irrelevant sentinel; replicas defaults to 1.",
         "Aggregated worker replicas are omitted during cli_estimate lowering because "
         "cli_estimate has no aggregated worker-count parameter.",
     )
     assert to_cli_estimate_kwargs(outcome.request)["batch_size"] == 16
+
+
+def test_agg_zero_worker_sentinel_is_normalized_before_worker_validation():
+    outcome = adapt_config(InferenceXSource(_config(decode_num_workers=0), _benchmark())).outcomes[0]
+
+    assert outcome.request is not None
+    assert outcome.request.topology.worker.replicas == 1
+    assert (
+        "InferenceX aggregated decode_num_workers=0 is an irrelevant sentinel; replicas default to 1."
+        in outcome.request.provenance.assumptions
+    )
 
 
 def test_moe_disagg_backend_folding_and_worker_arithmetic():

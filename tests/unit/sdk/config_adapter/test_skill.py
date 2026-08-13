@@ -28,7 +28,7 @@ def test_known_format_helper_is_deterministic_and_validates_schema(tmp_path):
         "decode_tp": 2,
         "decode_ep": 1,
         "decode_dp_attention": False,
-        "decode_num_workers": 0,
+        "decode_num_workers": 1,
         "num_decode_gpu": 2,
     }
     benchmark = {"id": "bench", "isl": 1024, "osl": 128, "conc": 8}
@@ -63,6 +63,10 @@ def test_known_format_helper_is_deterministic_and_validates_schema(tmp_path):
     assert malformed.returncode == 1
     assert malformed_payload["outcomes"][0]["status"] == "rejected"
     assert malformed_payload["outcomes"][0]["request"] is None
+    diagnostic = malformed_payload["outcomes"][0]["diagnostics"][0]
+    assert diagnostic["severity"] == "error"
+    assert diagnostic["code"] == "inferencex_mapping_failed"
+    assert "unsupported or missing InferenceX hardware" in diagnostic["message"]
 
 
 def test_known_format_helper_adapts_concrete_dynamo_ci_recipe(tmp_path):
@@ -110,6 +114,12 @@ benchmark: {isl: 128, osl: 16, concurrencies: '1x2'}
     assert [outcome["request"]["workload"]["concurrency"] for outcome in payload["outcomes"]] == [1, 2]
     for outcome in payload["outcomes"]:
         request = outcome["request"]
+        assert request["model"]["path"] == "Qwen/Qwen3-32B"
+        assert request["backend"]["name"] == "sglang"
+        assert request["workload"]["isl"] == 128
+        assert request["workload"]["osl"] == 16
+        assert request["quantization"]["gemm"] is None
+        assert request["quantization"]["moe"] is None
         assert request["topology"]["prefill"]["tp_size"] == 1
         assert request["topology"]["decode"]["tp_size"] == 1
         assert request["provenance"]["source_ids"]["format"] == "dynamo-ci-concrete"

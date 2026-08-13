@@ -86,8 +86,9 @@ precision aliases, workload, concurrency, and worker topology.
 InferenceX does not expose pipeline parallelism, so PP defaults to 1. A
 disaggregated prefill batch defaults to 1 unless overridden. Both assumptions are
 recorded in provenance. Aggregated exports use `decode_num_workers=0` as an
-irrelevant sentinel for one replica; non-positive disaggregated worker counts are
-rejected. MTP rows require explicit `nextn` and `nextn_accepted` overrides.
+irrelevant sentinel; it is normalized to one replica before worker validation.
+All actual worker counts must be positive. MTP rows require explicit `nextn` and
+`nextn_accepted` overrides.
 
 ## Dynamo recipes
 
