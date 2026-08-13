@@ -105,6 +105,7 @@ PROBE_STATUS_DRIFT = "DRIFT"
 PROBE_STATUS_PY_ERROR = "PY_ERROR_ONLY"
 PROBE_STATUS_RUST_ERROR = "RUST_ERROR_ONLY"
 PROBE_STATUS_BOTH_ERROR = "BOTH_ERROR_PASS"
+PROBE_STATUS_ENCODER_EVIDENCE_ERROR = "ENCODER_EVIDENCE_ERROR"
 PROBE_STATUS_SKIPPED = "SKIPPED"
 
 PARETO_STATUS_STRICT_PASS = "STRICT_PASS"
@@ -188,12 +189,13 @@ class Entry:
     @property
     def key(self) -> str:
         workload = self.image_workload
-        workload_key = (
-            "text"
-            if workload is None
-            else f"image={workload.image_height}x{workload.image_width}x{workload.num_images}"
-        )
-        return f"{self.model}|{self.system}|{self.backend}|{self.version}|{self.mode}|{workload_key}"
+        base_key = f"{self.model}|{self.system}|{self.backend}|{self.version}|{self.mode}"
+        if workload is None:
+            # Keep text-only keys stable so --continue-across-commits can reuse
+            # results written before image workloads became part of the key.
+            return base_key
+        workload_key = f"image={workload.image_height}x{workload.image_width}x{workload.num_images}"
+        return f"{base_key}|{workload_key}"
 
 
 @dataclass
@@ -601,6 +603,10 @@ def _classify_probe(
     ttft_drift: float | None,
     tpot_drift: float | None,
 ) -> str:
+    if any("ENCODER_NOT_EXERCISED:" in error for error in (python_err, rust_err) if error):
+        # Matching failures are normally parity-compatible, but missing encoder
+        # evidence is the coverage failure this scan exists to catch.
+        return PROBE_STATUS_ENCODER_EVIDENCE_ERROR
     if python_err and rust_err:
         return PROBE_STATUS_BOTH_ERROR
     if python_err and not rust_err:
@@ -982,7 +988,7 @@ def _bucket_probe(status: str) -> str:
         return "PASS"
     if status == PROBE_STATUS_DRIFT:
         return "DRIFT"
-    if status in (PROBE_STATUS_RUST_ERROR,):
+    if status in (PROBE_STATUS_RUST_ERROR, PROBE_STATUS_ENCODER_EVIDENCE_ERROR):
         return "REGRESSION"
     if status == PROBE_STATUS_PY_ERROR:
         return "ERROR"
@@ -1122,7 +1128,9 @@ def cmd_report(args: argparse.Namespace) -> int:
                        COUNT(p.entry_key) AS probed,
                        SUM(CASE WHEN p.status IN ('PASS','BOTH_ERROR_PASS') THEN 1 ELSE 0 END) AS passed,
                        SUM(CASE WHEN p.status = 'DRIFT' THEN 1 ELSE 0 END) AS drifted,
-                       SUM(CASE WHEN p.status = 'RUST_ERROR_ONLY' THEN 1 ELSE 0 END) AS regressed
+                       SUM(
+                           CASE WHEN p.status IN ('RUST_ERROR_ONLY','ENCODER_EVIDENCE_ERROR') THEN 1 ELSE 0 END
+                       ) AS regressed
                 FROM entries e LEFT JOIN probe_results p ON e.entry_key = p.entry_key
                 GROUP BY e.system
                 ORDER BY e.system

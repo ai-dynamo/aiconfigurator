@@ -406,7 +406,9 @@ def find_metadata_changes(old_data_rows: list[list[str]], new_data_rows: list[li
 
 
 def find_blocking_status_transitions(
-    changed_rows: list[tuple], new_data_rows: list[list[str]] | None = None
+    changed_rows: list[tuple],
+    new_data_rows: list[list[str]] | None = None,
+    old_data_rows: list[list[str]] | None = None,
 ) -> list[str]:
     """
     Return status transitions that should block an automated support-matrix PR.
@@ -418,17 +420,34 @@ def find_blocking_status_transitions(
     investigated explicitly.
     """
     errors = []
-    encoder_migration_keys = {
-        tuple(row[:6])
-        for row in new_data_rows or []
-        if len(row) > 7 and row[6] == STATUS_FAIL and row[7].strip().startswith("ENCODER_UNSUPPORTED:")
-    }
+    old_rows = {tuple(row[:6]): row for row in old_data_rows or []}
+
+    def _is_legacy_backbone_only_row(row: list[str] | None) -> bool:
+        if row is None:
+            return False
+        if len(row) < len(SUPPORT_MATRIX_HEADER):
+            return True
+        try:
+            return not (int(row[10]) > 0 and int(row[11]) > 0 and int(row[12]) > 0)
+        except (TypeError, ValueError):
+            return True
+
+    encoder_migration_keys = set()
+    for row in new_data_rows or []:
+        key = tuple(row[:6])
+        if (
+            len(row) > 7
+            and row[6] == STATUS_FAIL
+            and row[7].strip().startswith("ENCODER_UNSUPPORTED:")
+            and _is_legacy_backbone_only_row(old_rows.get(key))
+        ):
+            encoder_migration_keys.add(key)
     for huggingface_id, architecture, system, backend, version, mode, old_status, new_status in changed_rows:
         key = (huggingface_id, architecture, system, backend, version, mode)
         if new_status == STATUS_FAIL and key in encoder_migration_keys:
             # AIC-1738 intentionally replaces stale backbone-only coverage with
-            # an explicit encoder-unsupported classification. This narrow,
-            # evidence-bearing transition is a migration, not a regression.
+            # an explicit encoder-unsupported classification. Only rows without
+            # prior image evidence receive this one-time migration waiver.
             continue
         if old_status == STATUS_PASS and new_status != STATUS_PASS:
             errors.append(
@@ -773,7 +792,7 @@ def main():
     added_rows, removed_rows, changed_rows = compare_csv_files(old_data_rows, new_data_rows)
     metadata_changes = find_metadata_changes(old_data_rows, new_data_rows)
     header_changed = old_header != new_header
-    transition_errors = find_blocking_status_transitions(changed_rows, new_data_rows)
+    transition_errors = find_blocking_status_transitions(changed_rows, new_data_rows, old_data_rows)
     validation_errors.extend(transition_errors)
 
     regression_count = len([r for r in changed_rows if r[6] == STATUS_PASS and r[7] != STATUS_PASS])

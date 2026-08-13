@@ -248,14 +248,32 @@ def test_hardware_incompatible_to_fail_is_blocking_transition():
 @pytest.mark.parametrize("old_status", [STATUS_PASS, STATUS_HYBRID_PASS, STATUS_HW_INCOMPATIBLE])
 def test_explicit_encoder_unsupported_migration_is_not_blocking(old_status):
     changed = _changed(old_status, STATUS_FAIL)
+    old_row = _row(old_status)
     new_row = _row(
         STATUS_FAIL,
         "ENCODER_UNSUPPORTED: checkpoint declares vision but AIC has no encoder implementation",
     )
 
-    errors = find_blocking_status_transitions([changed], [new_row])
+    errors = find_blocking_status_transitions([changed], [new_row], [old_row])
 
     assert errors == []
+
+
+def test_encoder_unsupported_after_image_backed_pass_is_blocking():
+    old_row = _row(STATUS_PASS, image_height="1024", image_width="1024", num_images="1")
+    new_row = _row(
+        STATUS_FAIL,
+        "ENCODER_UNSUPPORTED: checkpoint declares vision but AIC has no encoder implementation",
+    )
+
+    errors = find_blocking_status_transitions(
+        [_changed(STATUS_PASS, STATUS_FAIL)],
+        [new_row],
+        [old_row],
+    )
+
+    assert len(errors) == 1
+    assert "PASS -> FAIL" in errors[0]
 
 
 def test_plain_pass_to_fail_remains_blocking_with_new_rows():

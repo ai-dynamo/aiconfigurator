@@ -9,10 +9,13 @@ import pytest
 
 from tools.support_matrix.scan_rust_parity import (
     PARETO_STATUS_STRICT_PASS,
+    PROBE_STATUS_ENCODER_EVIDENCE_ERROR,
     Entry,
+    _bucket_probe,
     _run_probe,
     load_entries,
     pareto_entry,
+    probe_entry,
 )
 from tools.support_matrix.support_matrix import (
     STATUS_PASS,
@@ -105,6 +108,20 @@ def test_legacy_encoder_unsupported_pass_is_skipped_without_blocking_scan(tmp_pa
     assert "text backbones were not parity-certified" in caplog.text
 
 
+def test_text_only_parity_key_remains_backward_compatible():
+    entry = Entry(
+        model="Qwen/Qwen3-8B",
+        architecture="Qwen3ForCausalLM",
+        system="b200_sxm",
+        backend="vllm",
+        version="0.24.0",
+        mode="agg",
+        baseline_status=STATUS_PASS,
+    )
+
+    assert entry.key == "Qwen/Qwen3-8B|b200_sxm|vllm|0.24.0|agg"
+
+
 def test_parity_probe_passes_image_arguments(monkeypatch):
     calls = []
 
@@ -128,6 +145,24 @@ def test_parity_probe_passes_image_arguments(monkeypatch):
     assert calls[0]["image_height"] == 1024
     assert calls[0]["image_width"] == 1024
     assert calls[0]["num_images"] == 1
+
+
+def test_parity_probe_fails_when_both_engines_omit_encoder_evidence(monkeypatch):
+    monkeypatch.setattr(
+        "aiconfigurator.cli.api.cli_estimate",
+        lambda **_kwargs: SimpleNamespace(ttft=10.0, tpot=2.0, raw={}),
+    )
+    monkeypatch.setattr(
+        "tools.support_matrix.scan_rust_parity._get_test_constraints",
+        lambda _model: TestConstraints(4, 256, 256, 128, 1500.0, 50.0),
+    )
+
+    record = probe_entry(_entry())
+
+    assert record.status == PROBE_STATUS_ENCODER_EVIDENCE_ERROR
+    assert _bucket_probe(record.status) == "REGRESSION"
+    assert "ENCODER_NOT_EXERCISED:" in record.python_err
+    assert "ENCODER_NOT_EXERCISED:" in record.rust_err
 
 
 def test_parity_pareto_runs_both_engines_with_encoder_evidence(monkeypatch):
