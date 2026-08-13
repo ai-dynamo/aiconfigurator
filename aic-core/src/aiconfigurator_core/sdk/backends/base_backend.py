@@ -601,9 +601,10 @@ class BaseBackend:
         context_latency_dict, context_energy_wms_dict, context_source_dict = {}, {}, {}
         generation_latency_dict, generation_energy_wms_dict, generation_source_dict = {}, {}, {}
 
-        # FPM models compile to no Rust op variant yet; force the Python phases
-        # (which handle the single whole-model op naturally).
-        if model.forward_model != "fpm" and should_use_rust_engine_step(runtime_config, database):
+        # FPM models compile to Op::FpmForward (#1461); like run_mixed, the
+        # compiled engine is attempted first and the Python walk remains the
+        # gate/unsupported fallback.
+        if should_use_rust_engine_step(runtime_config, database):
             try:
                 rust_runtime_config = runtime_config
                 if img_ctx_tokens:
@@ -1584,7 +1585,9 @@ class BaseBackend:
         """
         if gen_tokens <= 0:
             return 0.0, 0.0, {}, {}
-        if model.forward_model != "fpm" and should_use_rust_engine_step(runtime_config, database):
+        # FPM models included (#1461's Op::FpmForward): the compiled engine is
+        # attempted first; the Python walk remains the gate/unsupported fallback.
+        if should_use_rust_engine_step(runtime_config, database):
             try:
                 return estimate_decode_step_breakdown_with_rust(
                     model,
