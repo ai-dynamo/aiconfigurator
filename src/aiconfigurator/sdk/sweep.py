@@ -897,6 +897,8 @@ def sweep_disagg(
             target_tpot=target_tpot_v,
             top_n=5,
             ttft_correction_factor=ttft_corr,
+            prefill_degradation_factor=p_deg,
+            decode_degradation_factor=d_deg,
         )
         df = result["best_config_df"]
         if df is None or df.empty:

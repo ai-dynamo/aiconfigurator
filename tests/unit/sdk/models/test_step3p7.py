@@ -1,0 +1,470 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""
+Unit tests for StepFun Step-3.7-Flash (STEP3P7).
+
+Covers the three things this model adds on top of HybridMoEModel:
+  * architecture -> family mapping (Step3p7 / Step3p5 -> STEP3P7),
+  * the hybrid layer split parsed from ``layer_types`` (33 SWA + 12 global at
+    the real 45-layer 1:3 recipe) plus dense-first-K MoE frequency, and
+  * the window-capped KV curve: at 16K context the SWA-512 layers cap while the
+    global layers grow, giving ~0.29x the KV of an all-global model.
+"""
+
+import pytest
+
+from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.models import _architecture_to_model_family
+from aiconfigurator.sdk.models.base import _MODEL_REGISTRY
+from aiconfigurator.sdk.models.step3p7 import Step3p7Model
+from aiconfigurator.sdk.utils import _parse_hf_config_json
+
+pytestmark = pytest.mark.unit
+
+
+def _step37_hf_config():
+    """Real Step-3.7-Flash shape: 45 layers, 1:3 global:SWA, SWA window 512.
+
+    layer_types is ``full`` every 4th layer (indices 0,4,8,...,44) -> 12 global,
+    33 sliding. first_k_dense_replace=3 -> first 3 layers dense, rest MoE.
+    """
+    layer_types = ["full_attention" if i % 4 == 0 else "sliding_attention" for i in range(45)]
+    return {
+        "architectures": ["Step3p7FlashForCausalLM"],
+        "num_hidden_layers": 45,
+        "hidden_size": 4096,
+        "num_attention_heads": 64,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "vocab_size": 128896,
+        "max_position_embeddings": 65536,
+        "intermediate_size": 11264,
+        "sliding_window": 512,
+        "layer_types": layer_types,
+        "first_k_dense_replace": 3,
+        "num_experts": 288,
+        "num_experts_per_tok": 8,
+        "moe_intermediate_size": 1280,
+        "share_expert_dim": 1280,
+        "n_shared_experts": 1,
+        "num_nextn_predict_layers": 3,
+    }
+
+
+class TestStep3p7ArchMapping:
+    def test_architecture_maps_to_step3p7_family(self):
+        assert _architecture_to_model_family("Step3p7FlashForCausalLM") == "STEP3P7"
+        assert _architecture_to_model_family("Step3p5FlashForCausalLM") == "STEP3P7"
+
+    def test_registered_class_is_step3p7_model(self):
+        assert _MODEL_REGISTRY.get("STEP3P7") is Step3p7Model
+        assert "STEP3P7" in common.ModelFamily
+
+
+class TestStep3p7ConfigParse:
+    def test_parse_yields_hybrid_config(self):
+        result = _parse_hf_config_json(_step37_hf_config())
+
+        assert result["architecture"] == "Step3p7FlashForCausalLM"
+        assert result["layers"] == 45
+        assert result["n"] == 64
+        assert result["n_kv"] == 8
+        assert result["d"] == 128
+        assert result["topk"] == 8
+        assert result["num_experts"] == 288
+        assert result["moe_inter_size"] == 1280
+
+        cfg = result["extra_params"]
+        assert isinstance(cfg, common.HybridMoEConfig)
+        # 1:3 global:SWA -> 12 global, 33 sliding.
+        assert sum(cfg.attn_layer_pattern) == 12
+        assert cfg.attn_layer_pattern.count(0) == 33
+        # first_k_dense_replace=3 -> first 3 dense, remaining 42 MoE.
+        assert cfg.moe_layer_freq.count(0) == 3
+        assert sum(cfg.moe_layer_freq) == 42
+        assert cfg.sliding_window_size == 512
+
+    def test_layer_types_length_mismatch_raises(self):
+        cfg = _step37_hf_config()
+        cfg["layer_types"] = cfg["layer_types"][:10]  # 10 != 45
+        with pytest.raises(ValueError, match="layer_types length"):
+            _parse_hf_config_json(cfg)
+
+    def test_invalid_layer_type_raises(self):
+        cfg = _step37_hf_config()
+        cfg["layer_types"][1] = "linear_attention"
+        with pytest.raises(ValueError, match="must contain only"):
+            _parse_hf_config_json(cfg)
+
+
+class TestStep3p7KVCache:
+    @staticmethod
+    def _make_model(tp_size=1):
+        result = _parse_hf_config_json(_step37_hf_config())
+        model_config = config.ModelConfig(
+            tp_size=tp_size,
+            pp_size=1,
+            moe_tp_size=tp_size,
+            moe_ep_size=1,
+            attention_dp_size=1,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            moe_quant_mode=common.MoEQuantMode.bfloat16,
+        )
+        model = Step3p7Model(
+            result["topk"],
+            result["num_experts"],
+            result["moe_inter_size"],
+            "stepfun-ai/Step-3.7-Flash",
+            "STEP3P7",
+            result["architecture"],
+            result["layers"],
+            result["n"],
+            result["n_kv"],
+            result["d"],
+            result["hidden_size"],
+            result["inter_size"],
+            result["vocab"],
+            result["context"],
+            model_config,
+        )
+        model._share_expert_dim = 1280
+        model.set_hybrid_config(result["extra_params"])
+        return model
+
+    def test_swa_global_counts(self):
+        model = self._make_model()
+        assert model._swa_global_counts() == (33, 12)
+
+    def test_kv_ratio_at_16k_is_about_0_29(self):
+        """SWA-512 layers cap while global layers grow -> ~0.29x an all-global model."""
+        model = self._make_model()
+        seq = 16384
+        step_kv = model.get_kvcache_bytes_per_sequence(seq)
+        # All-global reference at the same head geometry: every layer grows linearly.
+        per = model._kv_per_layer_per_token()
+        full_kv = model._num_layers * per * seq
+        # 33*512 + 12*16384 = 213504 window-token-layers vs 45*16384 = 737280.
+        assert step_kv == 33 * per * 512 + 12 * per * seq
+        assert step_kv / full_kv == pytest.approx(0.2896, abs=1e-3)
+
+    def test_kv_below_window_is_linear(self):
+        model = self._make_model()
+        per_token = model.get_kvcache_bytes_per_sequence(1)
+        budget = model.get_kvcache_bytes_per_sequence(512)  # <= window, still linear
+        assert model.get_kvcache_max_tokens(budget) == int(budget // per_token) == 512
+
+    def test_max_tokens_follows_window_capped_curve(self):
+        model = self._make_model()
+        budget = model.get_kvcache_bytes_per_sequence(65536)
+        tokens = model.get_kvcache_max_tokens(budget)
+        assert model.get_kvcache_bytes_per_sequence(tokens) <= budget
+        assert model.get_kvcache_bytes_per_sequence(tokens + 1) > budget
+
+    def test_shared_expert_ops_appended(self):
+        model = self._make_model()
+        ctx = [o for o in model.context_ops if "shared_expert" in getattr(o, "_name", "")]
+        gen = [o for o in model.generation_ops if "shared_expert" in getattr(o, "_name", "")]
+        # dense gate_up + act + down = 3 ops on each side.
+        assert len(ctx) == 3
+        assert len(gen) == 3
+
+
+def test_step3p7_parses_the_published_checkpoint_schema():
+    """Parse the schema the published checkpoint actually ships.
+
+    Four things differ from the curated fixture and each one silently broke the
+    model: the architecture strings are Step3p7ForConditionalGeneration /
+    Step3p5ForCausalLM (not the *Flash* spellings this repo invented), the decoder
+    is nested under text_config, layer_types is sized over the decoder PLUS the 3
+    MTP predict layers, and MoE placement comes from moe_layers_enum rather than
+    first_k_dense_replace.
+    """
+    hf_config = {
+        "architectures": ["Step3p7ForConditionalGeneration"],
+        "model_type": "step3p7",
+        "text_config": {
+            "architectures": ["Step3p5ForCausalLM"],
+            "model_type": "step3p5",
+            "num_hidden_layers": 6,
+            "num_nextn_predict_layers": 2,
+            "hidden_size": 4096,
+            "num_attention_heads": 64,
+            "num_key_value_heads": 8,
+            "head_dim": 128,
+            "intermediate_size": 11264,
+            "sliding_window": 512,
+            "vocab_size": 128896,
+            "max_position_embeddings": 65536,
+            # 8 entries = 6 decoder layers + 2 MTP predict layers
+            "layer_types": [
+                "full_attention",
+                "sliding_attention",
+                "sliding_attention",
+                "full_attention",
+                "sliding_attention",
+                "sliding_attention",
+                "sliding_attention",
+                "full_attention",
+            ],
+            "moe_layers_enum": "2,3,4,5",
+            "moe_num_experts": 288,
+            "num_experts": 288,
+            "num_experts_per_tok": 8,
+            "moe_intermediate_size": 1280,
+            "attention_other_setting": {"num_attention_heads": 96, "head_dim": 128},
+        },
+    }
+
+    parsed = _parse_hf_config_json(hf_config)
+    extra = parsed["extra_params"]
+
+    # sliding layers take the declared 96 query heads, not the global 64
+    assert extra.swa_num_heads == 96
+    assert extra.swa_head_dim == 128
+    # layer_types trimmed to the 6 decoder layers, MTP tail dropped
+    assert len(extra.attn_layer_pattern) == 6
+    assert extra.attn_layer_pattern == (1, 0, 0, 1, 0, 0)
+    # MoE placement from moe_layers_enum, so layers 0-1 stay dense
+    assert extra.moe_layer_freq == (0, 0, 1, 1, 1, 1)
+    assert extra.sliding_window_size == 512
+
+
+def test_shared_expert_ops_are_cp_audited():
+    """Shared-expert ops must carry the same seq_split as the rest of the pipeline.
+
+    They are appended after ``_build_context_ops`` has already wired context
+    parallelism. Before the fix they kept ``_seq_split=1`` while the inherited
+    dense FFN ops carried ``cp``, so every rank was charged the full
+    shared-expert token count; they also bypassed the un-audited-op guard, so it
+    surfaced as a wrong number rather than an error.
+    """
+    cp = 2
+    result = _parse_hf_config_json(_step37_hf_config())
+    model_config = config.ModelConfig(
+        tp_size=1,
+        pp_size=1,
+        moe_tp_size=1,
+        moe_ep_size=cp,  # tp * dp * cp must equal moe_tp * moe_ep
+        attention_dp_size=1,
+        cp_size=cp,
+        gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+        kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+        fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        moe_quant_mode=common.MoEQuantMode.bfloat16,
+    )
+    model = Step3p7Model(
+        result["topk"],
+        result["num_experts"],
+        result["moe_inter_size"],
+        "stepfun-ai/Step-3.7-Flash",
+        "STEP3P7",
+        result["architecture"],
+        result["layers"],
+        result["n"],
+        result["n_kv"],
+        result["d"],
+        result["hidden_size"],
+        result["inter_size"],
+        result["vocab"],
+        result["context"],
+        model_config,
+    )
+    model._share_expert_dim = 1280
+    model.set_hybrid_config(result["extra_params"])
+
+    shared = [o for o in model.context_ops if "context_shared_expert" in getattr(o, "_name", "")]
+    assert shared, "expected shared-expert context ops"
+    split = {getattr(o, "_seq_split", None) for o in shared}
+    assert split == {cp}, f"shared-expert ops must split by cp={cp}, got {split}"
+
+
+def test_sliding_attention_ops_use_the_swa_query_head_count():
+    """The SWA head count must reach the attention ops, not just the GEMM widths.
+
+    Step-3.7 widens sliding layers to 96 query heads while global layers keep 64
+    (``attention_other_setting``). An earlier fix resized only the QKV/out-proj
+    GEMMs in ``_resolve_dims``; the ContextAttention/GenerationAttention ops kept
+    passing the global ``num_attention_heads``, so FMHA cost -- the dominant term
+    for sliding layers -- was still charged at 64 heads. Assert on the ops.
+    """
+    hf_config = dict(_step37_hf_config())
+    hf_config["attention_other_setting"] = {"num_attention_heads": 96, "head_dim": 128}
+
+    result = _parse_hf_config_json(hf_config)
+    assert result["extra_params"].swa_num_heads == 96
+
+    model_config = config.ModelConfig(
+        tp_size=1,
+        pp_size=1,
+        moe_tp_size=1,
+        moe_ep_size=1,
+        attention_dp_size=1,
+        cp_size=1,
+        gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+        kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+        fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        moe_quant_mode=common.MoEQuantMode.bfloat16,
+    )
+    model = Step3p7Model(
+        result["topk"],
+        result["num_experts"],
+        result["moe_inter_size"],
+        "stepfun-ai/Step-3.7-Flash",
+        "STEP3P7",
+        result["architecture"],
+        result["layers"],
+        result["n"],
+        result["n_kv"],
+        result["d"],
+        result["hidden_size"],
+        result["inter_size"],
+        result["vocab"],
+        result["context"],
+        model_config,
+    )
+    model._share_expert_dim = 1280
+    model.set_hybrid_config(result["extra_params"])
+
+    for label, op_list in (("context", model.context_ops), ("generation", model.generation_ops)):
+        attn = [o for o in op_list if hasattr(o, "_window_size") and hasattr(o, "_n")]
+        sliding = {o._n for o in attn if o._window_size == 512}
+        globals_ = {o._n for o in attn if o._window_size == 0}
+        assert sliding == {96}, f"{label}: sliding attention should use 96 query heads, got {sliding}"
+        assert globals_ == {64}, f"{label}: global attention should use 64 query heads, got {globals_}"
+
+
+def test_step_expert_field_spellings_are_parsed():
+    """Step-3.7 spells the MoE width moe_num_experts / moe_top_k.
+
+    Neither was read, so ``num_experts`` resolved to 0 and building the model
+    asserted out on ``ep size cannot be larger than num_experts 0``.
+    """
+    hf_config = dict(_step37_hf_config())
+    del hf_config["num_experts"]
+    del hf_config["num_experts_per_tok"]
+    hf_config["moe_num_experts"] = 288
+    hf_config["moe_top_k"] = 8
+
+    parsed = _parse_hf_config_json(hf_config)
+    assert parsed["num_experts"] == 288
+    assert parsed["topk"] == 8
+
+
+def _build_step37(hf_config):
+    result = _parse_hf_config_json(hf_config)
+    model_config = config.ModelConfig(
+        tp_size=1,
+        pp_size=1,
+        moe_tp_size=1,
+        moe_ep_size=1,
+        attention_dp_size=1,
+        cp_size=1,
+        gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+        kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+        fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        moe_quant_mode=common.MoEQuantMode.bfloat16,
+    )
+    model = Step3p7Model(
+        result["topk"],
+        result["num_experts"],
+        result["moe_inter_size"],
+        "stepfun-ai/Step-3.7-Flash",
+        "STEP3P7",
+        result["architecture"],
+        result["layers"],
+        result["n"],
+        result["n_kv"],
+        result["d"],
+        result["hidden_size"],
+        result["inter_size"],
+        result["vocab"],
+        result["context"],
+        model_config,
+    )
+    model._share_expert_dim = 1280
+    model.set_hybrid_config(result["extra_params"])
+    return model
+
+
+def test_qk_norm_is_enabled_on_every_attention_op():
+    """Step3p7Attention builds q_norm/k_norm unconditionally, so every layer pays it.
+
+    The flag has a real cost (extra mem-ops over Q and K in ContextAttention /
+    GenerationAttention). BaseModel only reads ``use_qk_norm`` when extra_params
+    is a dict, and the hybrid path passes a HybridMoEConfig, so it was never set.
+    """
+    model = _build_step37(_step37_hf_config())
+    attn = [o for o in model.context_ops + model.generation_ops if hasattr(o, "_use_qk_norm")]
+    assert attn, "expected attention ops"
+    assert all(o._use_qk_norm for o in attn)
+
+
+def test_head_wise_attn_gate_emits_g_proj_sized_per_layer_type():
+    """use_head_wise_attn_gate adds g_proj: hidden_size -> that layer's head count.
+
+    Sliding layers declare 96 heads and global 64, so the gate is not one shared
+    width -- asserting on both catches a gate wired off the global head count.
+    """
+    hf_config = dict(_step37_hf_config())
+    hf_config["attention_other_setting"] = {"num_attention_heads": 96, "head_dim": 128}
+    hf_config["use_head_wise_attn_gate"] = True
+    model = _build_step37(hf_config)
+
+    h = 4096
+    by_name = {o._name: o for o in model.context_ops + model.generation_ops}
+    for prefix, heads in (
+        ("context_global", 64),
+        ("context_swa", 96),
+        ("generation_global", 64),
+        ("generation_swa", 96),
+    ):
+        gemm = by_name.get(f"{prefix}_attn_gate_gemm")
+        assert gemm is not None, f"missing {prefix}_attn_gate_gemm"
+        assert gemm._n == heads, f"{prefix} gate should project to {heads} heads, got {gemm._n}"
+        assert gemm._k == h
+        # one gate scalar per head, so the gate weight is head_dim times smaller
+        # than the out-projection it scales
+        assert by_name[f"{prefix}_attn_gate"]._dim_out == heads * 128
+
+
+def test_head_wise_attn_gate_is_off_by_default():
+    """HybridMoEModel is shared with MiMo-V2-Flash, Llama 4 and Gemma 4.
+
+    None of them have this gate, so a config that does not ask for it must emit
+    no gate ops at all.
+    """
+    model = _build_step37(_step37_hf_config())
+    assert not [o for o in model.context_ops + model.generation_ops if "attn_gate" in o._name]
+
+
+def test_hybrid_moe_config_positional_layout_is_stable():
+    """New HybridMoEConfig fields must be appended, never inserted.
+
+    The dataclass has a generated positional constructor, so inserting a field
+    ahead of an existing optional one silently changes the meaning of a legacy
+    positional call -- swa_num_kv_heads would start receiving a query-head
+    count. Pin the prefix that predates the Step-3.7 work.
+    """
+    import dataclasses
+
+    names = [f.name for f in dataclasses.fields(common.HybridMoEConfig)]
+    assert names[:8] == [
+        "attn_layer_pattern",
+        "moe_layer_freq",
+        "swa_num_kv_heads",
+        "swa_head_dim",
+        "swa_v_head_dim",
+        "global_v_head_dim",
+        "sliding_window_size",
+        "dense_inter_size",
+    ]
+
+    # A legacy positional call keeps its original meaning.
+    cfg = common.HybridMoEConfig((1, 0), (1, 1), 4, 128, 128, 128, 512, 2048)
+    assert cfg.swa_num_kv_heads == 4
+    assert cfg.sliding_window_size == 512
+    assert cfg.dense_inter_size == 2048
+    assert cfg.swa_num_heads == 0

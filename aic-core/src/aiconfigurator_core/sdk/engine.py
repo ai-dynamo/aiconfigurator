@@ -107,7 +107,11 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   `native_num_heads` (always serialized — bincode decodes positionally).
 # - 6: `Kda` op variant appended (Kimi-K3 KDA kernels; draft_tokens field).
 #   Claimed version 5 concurrently with #1460; renumbered at the merge.
-ENGINE_SPEC_SCHEMA_VERSION = 6
+# - 7: `MoEDispatchOp` gained `attn_ar_modeled` (always serialized — bincode
+#   decodes positionally).
+# - 8: `GemmOp` gained `below_grid_sol` (always serialized — bincode decodes
+#   positionally).
+ENGINE_SPEC_SCHEMA_VERSION = 8
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)
@@ -149,6 +153,7 @@ def _gemm(op: GEMM) -> dict:
         "scale_num_tokens": op._scale_num_tokens,
         "low_precision_input": op._low_precision_input,
         "seq_split": op._seq_split,
+        "below_grid_sol": op._below_grid_sol,
     }
 
 
@@ -324,6 +329,7 @@ def _moe_dispatch(op: MoEDispatch, *, backend: str) -> dict:
         "moe_ep_size": op._moe_ep_size,
         "attention_dp_size": op._attention_dp_size,
         "pre_dispatch": op._pre_dispatch,
+        "attn_ar_modeled": op._attn_ar_modeled,
         "backend": backend,
         "flavor": _dispatch_flavor(backend, op),
         # DeepEP branches divide the dispatch token count by this (Python
