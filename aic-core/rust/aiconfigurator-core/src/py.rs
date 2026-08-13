@@ -1313,6 +1313,7 @@ mod tests {
             systems_path: None,
             backend: BackendKind::Vllm,
             backend_version: Some("0.19.0".to_string()),
+            forward_model: None,
             kv_block_size: None,
             parallel: ParallelMapping {
                 tp_size: 8,
