@@ -704,16 +704,43 @@ def _compare_encoder_evidence(
 ) -> str | None:
     """Compare encoder metrics before any relaxed Pareto-envelope fallback."""
     mismatches: list[str] = []
-    for column in sorted(_ENCODER_EVIDENCE_COLUMNS & set(python_df.columns) & set(rust_df.columns)):
-        python_values = sorted(float(value) for value in pd.to_numeric(python_df[column], errors="coerce").dropna())
-        rust_values = sorted(float(value) for value in pd.to_numeric(rust_df[column], errors="coerce").dropna())
+    config_columns = [
+        column
+        for column in python_df.columns
+        if column not in _APPROXIMATE_ENGINE_STEP_COLUMNS and column not in _ENCODER_EVIDENCE_COLUMNS
+    ]
+    aligned_python = python_df
+    aligned_rust = rust_df
+    configurations_match = False
+    if config_columns and len(python_df) == len(rust_df):
+        aligned_python = _normalize_pareto_df_for_comparison(python_df, config_columns)
+        aligned_rust = _normalize_pareto_df_for_comparison(rust_df, config_columns)
+        try:
+            pd.testing.assert_frame_equal(
+                aligned_python[config_columns],
+                aligned_rust[config_columns],
+                check_dtype=False,
+                check_exact=True,
+            )
+        except AssertionError:
+            pass
+        else:
+            configurations_match = True
 
-        if len(python_values) == len(rust_values):
+    for column in sorted(_ENCODER_EVIDENCE_COLUMNS & set(python_df.columns) & set(rust_df.columns)):
+        python_values = [float(value) for value in pd.to_numeric(aligned_python[column], errors="coerce").dropna()]
+        rust_values = [float(value) for value in pd.to_numeric(aligned_rust[column], errors="coerce").dropna()]
+
+        if configurations_match:
             comparisons = zip(python_values, rust_values, strict=True)
         elif python_values and rust_values:
-            # Different Pareto row counts can still be accepted by the relaxed
-            # frontier comparison, but their encoder envelopes must agree first.
-            comparisons = ((python_values[0], rust_values[0]), (python_values[-1], rust_values[-1]))
+            # Different Pareto configurations can still be accepted by the
+            # relaxed frontier comparison, but their encoder envelopes must
+            # agree first. Preserve row association whenever configurations do.
+            comparisons = (
+                (min(python_values), min(rust_values)),
+                (max(python_values), max(rust_values)),
+            )
         else:
             mismatches.append(f"{column} evidence count differs: python={len(python_values)} rust={len(rust_values)}")
             continue

@@ -386,6 +386,24 @@ def test_parity_probe_fails_when_both_engines_omit_encoder_evidence(monkeypatch)
     assert "ENCODER_NOT_EXERCISED:" in record.rust_err
 
 
+def test_parity_probe_fails_when_both_engines_raise_encoder_execution_error(monkeypatch):
+    monkeypatch.setattr(
+        "tools.support_matrix.scan_rust_parity._get_test_constraints",
+        lambda _model: TestConstraints(4, 256, 256, 128, 1500.0, 50.0),
+    )
+    monkeypatch.setattr(
+        "tools.support_matrix.scan_rust_parity._run_probe",
+        lambda *_args, **_kwargs: (None, None, "RuntimeError: missing encoder operation profile"),
+    )
+
+    record = probe_entry(_entry())
+
+    assert record.status == PROBE_STATUS_ENCODER_EVIDENCE_ERROR
+    assert _bucket_probe(record.status) == "REGRESSION"
+    assert "missing encoder operation profile" in record.python_err
+    assert "missing encoder operation profile" in record.rust_err
+
+
 def test_parity_report_includes_encoder_evidence_regression_details(tmp_path, capsys):
     db_path = tmp_path / "scan.sqlite"
     init_db(db_path)
@@ -486,3 +504,23 @@ def test_parity_pareto_encoder_drift_cannot_fall_back_to_envelope_pass(monkeypat
 
     assert record.comparison_outcome == PARETO_STATUS_DRIFT
     assert "Rust encoder evidence differs beyond tolerance" in record.error_msg
+
+
+def test_parity_pareto_image_python_execution_error_is_regression(monkeypatch):
+    monkeypatch.setattr("tools.support_matrix.scan_rust_parity._get_worker_matrix", lambda: None)
+    monkeypatch.setattr(
+        "tools.support_matrix.scan_rust_parity._get_test_constraints",
+        lambda _model: TestConstraints(4, 256, 256, 128, 1500.0, 50.0),
+    )
+
+    def fake_run_mode(**kwargs):
+        if kwargs["engine_step_backend"] == "python":
+            raise RuntimeError("missing encoder operation profile")
+        return pd.DataFrame({"encoder_latency": [1.0], "encoder_memory": [0.5], "ttft": [10.0]})
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+
+    record = pareto_entry(_entry())
+
+    assert record.comparison_outcome == PARETO_STATUS_REGRESSION
+    assert "missing encoder operation profile" in record.error_msg

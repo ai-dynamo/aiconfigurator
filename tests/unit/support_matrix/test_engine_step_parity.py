@@ -82,3 +82,30 @@ def test_compare_pareto_dfs_rejects_encoder_metric_drift_before_frontier_fallbac
     assert mismatch is not None
     assert "Rust encoder evidence differs beyond tolerance" in mismatch
     assert memory_column in mismatch
+
+
+def test_compare_pareto_dfs_rejects_encoder_metrics_swapped_between_configurations():
+    python_df = pd.DataFrame(
+        [
+            {"model": "model-a", "tp": 1, "encoder_latency": 1.0, "encoder_memory": 2.0, "ttft": 10.0},
+            {"model": "model-a", "tp": 2, "encoder_latency": 3.0, "encoder_memory": 4.0, "ttft": 11.0},
+        ]
+    )
+    rust_df = python_df.copy()
+    rust_df[["encoder_latency", "encoder_memory"]] = (
+        rust_df[["encoder_latency", "encoder_memory"]].iloc[::-1].to_numpy()
+    )
+
+    mismatch = _compare_pareto_dfs(
+        python_df,
+        rust_df,
+        rtol=0.01,
+        atol=1e-3,
+        frontier_rtol=0.05,
+        frontier_atol=1e-3,
+        encoder_rtol=0.01,
+        encoder_atol=1e-3,
+    )
+
+    assert mismatch is not None
+    assert "Rust encoder evidence differs beyond tolerance" in mismatch

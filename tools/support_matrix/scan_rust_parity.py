@@ -614,6 +614,7 @@ def probe_entry(entry: Entry) -> ProbeRecord:
         rust_err=rust_err,
         ttft_drift=ttft_drift,
         tpot_drift=tpot_drift,
+        require_success=entry.image_workload is not None,
     )
     duration_ms = (time.monotonic() - started) * 1000.0
     return ProbeRecord(
@@ -639,7 +640,12 @@ def _classify_probe(
     rust_err: str | None,
     ttft_drift: float | None,
     tpot_drift: float | None,
+    require_success: bool = False,
 ) -> str:
+    if require_success and (python_err or rust_err):
+        # A matching error is parity-compatible for legacy text probes, but an
+        # image probe must actually complete before it can certify an encoder.
+        return PROBE_STATUS_ENCODER_EVIDENCE_ERROR
     if any("ENCODER_NOT_EXERCISED:" in error for error in (python_err, rust_err) if error):
         # Matching failures are normally parity-compatible, but missing encoder
         # evidence is the coverage failure this scan exists to catch.
@@ -747,7 +753,9 @@ def pareto_entry(entry: Entry) -> ParetoRecord:
     # Regression: baseline says PASS but Python or Rust failed this run.
     if not python_ok:
         outcome = (
-            PARETO_STATUS_REGRESSION if python_err and "ENCODER_NOT_EXERCISED:" in python_err else PARETO_STATUS_ERROR
+            PARETO_STATUS_REGRESSION
+            if entry.image_workload is not None or (python_err and "ENCODER_NOT_EXERCISED:" in python_err)
+            else PARETO_STATUS_ERROR
         )
         return ParetoRecord(
             entry_key=entry.key,
