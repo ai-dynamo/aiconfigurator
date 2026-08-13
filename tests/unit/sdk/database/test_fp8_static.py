@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
+
 import pytest
 
 from aiconfigurator.sdk import common
@@ -332,7 +334,7 @@ def test_gemm_query_subtracts_overheads_for_fp8_static():
             self.backend = common.BackendName.sglang.value
             self.calls: list[tuple[str, common.GEMMQuantMode]] = []
 
-        def query_gemm(self, m, n, k, quant_mode, database_mode=None):
+        def query_gemm(self, m, n, k, quant_mode, database_mode=None, below_grid_sol=False):
             if database_mode == common.DatabaseMode.SOL:
                 return PerformanceResult(2.0, energy=0.0, source="sol")
             self.calls.append(("gemm", quant_mode))
@@ -398,12 +400,15 @@ def test_gemm_query_subtracts_overheads_for_fp8_static():
     assert db3.calls == [("gemm", common.GEMMQuantMode.fp8)]
 
 
-def test_gemm_query_fp8_static_uses_gemm_sol_latency_floor():
+def test_gemm_query_fp8_static_uses_gemm_sol_latency_floor(caplog):
     class FakeDatabase:
-        def query_gemm(self, m, n, k, quant_mode, database_mode=None):
+        def __init__(self, base_source="silicon"):
+            self.base_source = base_source
+
+        def query_gemm(self, m, n, k, quant_mode, database_mode=None, below_grid_sol=False):
             if database_mode == common.DatabaseMode.SOL:
                 return PerformanceResult(2.5, energy=0.0, source="sol")
-            return PerformanceResult(4.0, energy=40.0)
+            return PerformanceResult(4.0, energy=40.0, source=self.base_source)
 
         def query_compute_scale(self, m, k, quant_mode, database_mode=None):
             return PerformanceResult(1.0, energy=10.0)
@@ -420,7 +425,8 @@ def test_gemm_query_fp8_static_uses_gemm_sol_latency_floor():
         low_precision_input=True,
     )
 
-    result = op.query(FakeDatabase(), x=64)
+    with caplog.at_level(logging.WARNING):
+        result = op.query(FakeDatabase(), x=64)
 
     # 4 - 1 - 5 is negative, but GEMM-only latency cannot be below its
     # 2.5-ms roofline bound. The operation scale factor is applied afterward.
@@ -428,3 +434,10 @@ def test_gemm_query_fp8_static_uses_gemm_sol_latency_floor():
     # There is no energy SOL model from which to synthesize a floor.
     assert result.energy == 0.0
     assert result.source == "estimated"
+    # A measured base crossing the floor is an anomaly worth warning about;
+    # a SOL base (below_grid_sol) clamps to its own floor silently.
+    assert "applied latency SOL floor" in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert float(op.query(FakeDatabase("sol"), x=64)) == pytest.approx(7.5)
+    assert "applied latency SOL floor" not in caplog.text

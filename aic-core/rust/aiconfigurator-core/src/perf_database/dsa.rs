@@ -1392,10 +1392,10 @@ mod tests {
         approx_rel(q(3, 1024, 0, 128, dsv32), 3.0913);
         // interior prefix blend on the GLM step axis (0 < 64 < 128)
         approx_rel(q(1, 128, 64, 16, glm), 1.2492999999999999);
-        // seq util-hold beyond the 32768 frontier (validates the context SOL)
-        approx_rel(q(1, 65536, 0, 128, dsv32), 89.56218926395842);
-        // prefix util-hold beyond the 128 step frontier
-        approx_rel(q(1, 2048, 4096, 128, dsv32), 3.2580009866421995);
+        // seq tapered util-hold beyond the 32768 frontier (validates the context SOL)
+        approx_rel(q(1, 65536, 0, 128, dsv32), 93.51797494885695);
+        // prefix tapered util-hold beyond the 128 step frontier
+        approx_rel(q(1, 2048, 4096, 128, dsv32), 3.270467722991338);
     }
 
     // ------------------------------------------------------------------
@@ -1636,8 +1636,8 @@ mod tests {
         approx_rel(q(16, 3000), 0.261390380859375);
         // interior batch blend (16 < 24 < 32)
         approx_rel(q(24, 4097), 0.27545);
-        // seq util-hold beyond the frontier (validates the decode SOL)
-        approx_rel(q(16, 300000), 0.5461828075504237);
+        // seq tapered util-hold beyond the frontier (validates the decode SOL)
+        approx_rel(q(16, 300000), 0.5491372293318538);
     }
 
     /// Write one synthetic DSA module parquet with the collector's column set

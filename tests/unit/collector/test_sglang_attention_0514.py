@@ -178,8 +178,9 @@ def test_sglang_sm90_full_structural_population_is_stable(monkeypatch):
         # 151/137 since the Kimi-K3 declarations added 8 SM90 head configs
         # (DSPARK draft GQA shards 64/32/16/8 q-heads @hd64 + MLA 96-family
         # 96/48/24/12 @hd128, all fa3-routed; net +4 context / +5 generation).
-        ("context", get_attention_context_shape_sweeps, 151),
-        ("generation", get_attention_generation_shape_sweeps, 137),
+        # +4 context / +4 generation from Step-3.7-Flash's hybrid SWA/global head shapes.
+        ("context", get_attention_context_shape_sweeps, 155),
+        ("generation", get_attention_generation_shape_sweeps, 141),
     ):
         configs = [
             config

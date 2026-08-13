@@ -58,6 +58,7 @@ class BaseBackend:
     # the base activation budget.
     MOE_WORKSPACE_FAMILIES: ClassVar[tuple[str, ...]] = (
         "GEMMA4MIX",
+        "STEP3P7",
         "DEEPSEEK",
         "DEEPSEEKV32",
         "DEEPSEEKV4",
@@ -160,16 +161,24 @@ class BaseBackend:
         """
         return step_throughput
 
-    def _resolve_agg_kwargs(self, kwargs: dict, isl: int, osl: int) -> dict:
+    def _resolve_agg_kwargs(self, kwargs: dict, isl: int, osl: int, backend_version: str | None = None) -> dict:
         """Resolve backend-specific run_agg kwargs to defaults.
 
-        Default: returns an empty dict. TRT-LLM resolves ``max_seq_len`` /
-        ``max_num_tokens`` / ``free_gpu_memory_fraction`` here so both
-        ``run_agg`` and ``find_best_agg_result_under_constraints`` see the
-        same values when forwarding. Idempotent — calling with already-resolved
-        kwargs returns the same values.
+        Default: resolves ``free_gpu_memory_fraction`` — an explicit kwarg
+        wins, else the backend default (possibly version-dependent, see
+        ``get_default_free_gpu_memory_fraction``). Backends without a default
+        return an empty dict. TRT-LLM overrides to also resolve
+        ``max_seq_len`` / ``max_num_tokens``, so both ``run_agg`` and
+        ``find_best_agg_result_under_constraints`` see the same values when
+        forwarding. Idempotent — calling with already-resolved kwargs returns
+        the same values.
         """
-        return {}
+        fraction = kwargs.get("free_gpu_memory_fraction")
+        if fraction is None:
+            fraction = self.get_default_free_gpu_memory_fraction(backend_version)
+        if fraction is None:
+            return {}
+        return {"free_gpu_memory_fraction": fraction}
 
     def _make_agg_cache_key(
         self,
@@ -180,8 +189,12 @@ class BaseBackend:
         engine_step_backend_key: str,
         agg_extra: dict,
     ) -> tuple:
-        """Build the cache key for ``run_agg`` results."""
-        return (isl, osl, b, ctx_tokens, engine_step_backend_key)
+        """Build the cache key for ``run_agg`` results.
+
+        The resolved fraction is part of the key: the cached summary embeds
+        the KV-budget OOM verdict, which depends on it.
+        """
+        return (isl, osl, b, ctx_tokens, engine_step_backend_key, agg_extra.get("free_gpu_memory_fraction"))
 
     @staticmethod
     def _runtime_config_for_agg_candidate(runtime_config: RuntimeConfig, batch_size: int) -> RuntimeConfig:
@@ -1120,14 +1133,6 @@ class BaseBackend:
         ``isl`` must be the text-only isl; :meth:`run_mixed` derives the visual
         context tokens from ``runtime_config``'s image fields.
         """
-        if model.forward_model == "fpm":
-            # The 3-pass split below recognizes granular attention op NAMES
-            # ("context_attention"/"generation_attention"); a whole-model op
-            # matches neither and would be mis-accounted. FPM must take the
-            # explicit pure-prefill + pure-decode branch instead.
-            return self._get_fpm_mix_step_latency(
-                model, database, runtime_config, ctx_tokens, gen_tokens, isl, osl, prefix
-            )
         mixed_runtime_config = copy.copy(runtime_config)
         mixed_runtime_config.isl = isl
         mixed_runtime_config.osl = osl
@@ -1172,31 +1177,6 @@ class BaseBackend:
         isl += self._visual_context_tokens(model, runtime_config)
 
         decode_query_tokens = step.num_decode_requests * (model._nextn + 1)
-        if model.forward_model == "fpm":
-            # The 3-pass split below recognizes granular attention op NAMES
-            # ("context_attention"/"generation_attention"); a whole-model op
-            # matches neither and would be mis-accounted. FPM also compiles to
-            # no Rust op variant yet, so always take the explicit
-            # pure-prefill + marginal-decode composition.
-            latency_ms, energy_wms, per_op_latency_ms, per_op_source = self._get_fpm_mix_step_latency(
-                model,
-                database,
-                runtime_config,
-                step.context_tokens,
-                step.num_decode_requests,
-                isl,
-                osl,
-                prefix,
-            )
-            return StepEstimate(
-                latency_ms=latency_ms,
-                energy_wms=energy_wms,
-                per_op_latency_ms=per_op_latency_ms,
-                per_op_source=per_op_source,
-                context_tokens=step.context_tokens,
-                num_decode_requests=step.num_decode_requests,
-                num_decode_query_tokens=decode_query_tokens,
-            )
         if should_use_rust_engine_step(runtime_config, database):
             try:
                 components = estimate_mixed_step_breakdown_with_rust(
@@ -1224,6 +1204,33 @@ class BaseBackend:
                     num_decode_requests=step.num_decode_requests,
                     num_decode_query_tokens=decode_query_tokens,
                 )
+
+        if model.forward_model == "fpm":
+            # The 3-pass split below recognizes granular attention op NAMES
+            # ("context_attention"/"generation_attention"); a whole-model op
+            # matches neither and would be mis-accounted. Compose pure
+            # prefill + the decode work's MARGINAL cost instead. The Rust
+            # route above already branches identically inside
+            # Engine::mixed_step_breakdown.
+            latency_ms, energy_wms, per_op_latency, per_op_source = self._get_fpm_mix_step_latency(
+                model,
+                database,
+                runtime_config,
+                step.context_tokens,
+                step.num_decode_requests,
+                isl,
+                osl,
+                prefix,
+            )
+            return StepEstimate(
+                latency_ms=latency_ms,
+                energy_wms=energy_wms,
+                per_op_latency_ms=per_op_latency,
+                per_op_source=per_op_source,
+                context_tokens=step.context_tokens,
+                num_decode_requests=step.num_decode_requests,
+                num_decode_query_tokens=decode_query_tokens,
+            )
 
         ctx_scale = runtime_config.seq_imbalance_correction_scale
         gen_scale = runtime_config.gen_seq_imbalance_correction_scale
@@ -1352,8 +1359,9 @@ class BaseBackend:
         osl: int,
         prefix: int,
     ) -> tuple[float, float, dict, dict]:
-        """Mixed step for FPM models: pure-prefill query plus the decode
-        work's MARGINAL cost. No mixed database row exists or is synthesized.
+        """Mixed step for FPM models: the step's SCHEDULED TOTALS priced on
+        the prefill curve, plus the decode work's MARGINAL cost. No mixed
+        database row exists or is synthesized.
 
         A mixed step is one shared forward pass: weight reads, kernel
         launches, and per-step fixed overheads are paid once, by the prefill
@@ -1365,11 +1373,24 @@ class BaseBackend:
         generation-only step (``ctx_tokens == 0``) has no pass to ride on and
         keeps the full decode latency.
 
-        The workload mapping mirrors the op-level passes: the prefill
-        component runs ``ceil(ctx_tokens/isl)`` requests of ``isl`` tokens and
-        is divided by the chunk count when ``ctx_tokens < isl`` (average
-        per-chunk cost); the decode component runs ``gen_tokens`` requests at
-        the average sequence length ``isl + osl//2``.
+        The prefill component is addressed at the iteration's REAL scheduled
+        totals via ``query_totals``: the engine picks its execution regime
+        (CUDA-graph vs eager) and its GEMM width from the step's total token
+        count — prefill chunk PLUS decode tokens — so the query coordinate
+        must carry both, and the collected rows (which encode the regime
+        cliffs) answer on the correct side. When ``ctx_tokens`` is a chunk of
+        a longer request, each chunk is priced at its own
+        ``(chunk + gen_tokens, past_kv)`` coordinates and the per-iteration
+        AVERAGE is returned (callers treat the mixed step as the steady-state
+        iteration); the decode tokens' GEMM/weights are then counted exactly
+        once, because the baseline subtraction removed them from the decode
+        term.
+
+        CONTRACT PREREQUISITE: this pricing is only as correct as the match
+        between the deployed engine configuration and the collected data —
+        in particular the CUDA-graph capture surface. The cliff positions are
+        not modeled; they are encoded in the data. A deployment whose capture
+        config differs from the collection cannot be rescued by this formula.
         """
         per_ops_step_data: dict[str, float] = {}
         per_ops_step_source: dict[str, str] = {}
@@ -1377,28 +1398,46 @@ class BaseBackend:
         total_energy_wms = 0.0
 
         if ctx_tokens > 0:
-            summary = self.run_static(
-                model,
-                database,
-                RuntimeConfig(
-                    batch_size=np.ceil(ctx_tokens / isl),
-                    beam_width=1,
-                    isl=isl,
-                    osl=1,
-                    prefix=prefix,
-                    seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
-                ),
-                mode="static_ctx",
-            )
-            chunk_scale = np.ceil(isl / ctx_tokens)
-            energy_dict = summary.get_context_energy_wms_dict()
-            source_dict = summary.get_context_source_dict()
-            for op_name, latency in summary.get_context_latency_dict().items():
-                latency = latency / chunk_scale
-                per_ops_step_data[op_name] = latency
-                per_ops_step_source[op_name] = source_dict.get(op_name, "silicon")
-                total_latency_ms += latency
-                total_energy_wms += energy_dict.get(op_name, 0.0) / chunk_scale
+            prefill_op = model.context_ops[0]
+            new_tokens = isl - prefix
+            if new_tokens <= 0:
+                raise ValueError(f"isl must be greater than prefix, got isl={isl} prefix={prefix}")
+            if ctx_tokens >= new_tokens:
+                # One or more whole prefills scheduled in this iteration (no
+                # chunking): the step's scheduled total (ctx + decode tokens)
+                # picks the regime row.
+                batch = int(np.ceil(ctx_tokens / new_tokens))
+                results = [
+                    prefill_op.query_totals(
+                        database,
+                        batch_size=batch,
+                        total_prefill_tokens=ctx_tokens + gen_tokens,
+                        total_kv_read_tokens=batch * prefix,
+                    )
+                ]
+            else:
+                # Chunked prefill: one request spread over ceil(new/ctx)
+                # iterations. Price each chunk at ITS scheduled totals —
+                # chunk + decode tokens over the chunk's already-computed
+                # context — and report the per-iteration average.
+                results = []
+                done = 0
+                while done < new_tokens:
+                    chunk = min(ctx_tokens, new_tokens - done)
+                    results.append(
+                        prefill_op.query_totals(
+                            database,
+                            batch_size=1,
+                            total_prefill_tokens=chunk + gen_tokens,
+                            total_kv_read_tokens=prefix + done,
+                        )
+                    )
+                    done += chunk
+            pre_ms = sum(float(r) for r in results) / len(results)
+            sources = {getattr(r, "source", "silicon") for r in results}
+            per_ops_step_data[prefill_op._name] = pre_ms
+            per_ops_step_source[prefill_op._name] = sources.pop() if len(sources) == 1 else "mixed"
+            total_latency_ms += pre_ms
 
         if gen_tokens > 0:
             summary = self.run_static(
@@ -1409,6 +1448,7 @@ class BaseBackend:
                     beam_width=1,
                     isl=isl + osl // 2,
                     osl=2,
+                    engine_step_backend=runtime_config.engine_step_backend,
                     gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
                 ),
                 mode="static_gen",
@@ -1469,8 +1509,8 @@ class BaseBackend:
                 beam_width=1,
                 isl=isl + osl // 2,
                 osl=2,
-                gen_seq_imbalance_correction_scale=gen_scale,
                 engine_step_backend=runtime_config.engine_step_backend,
+                gen_seq_imbalance_correction_scale=gen_scale,
             ),
             mode="static_gen",
         )
@@ -1571,8 +1611,8 @@ class BaseBackend:
         balance_score = isl * b / ctx_tokens / decode_iterations
 
         # Backend-specific kwargs (TRT-LLM: max_seq_len / max_num_tokens /
-        # free_gpu_memory_fraction; others: {}).
-        agg_extra = self._resolve_agg_kwargs(kwargs, isl=isl, osl=osl)
+        # free_gpu_memory_fraction; vLLM / SGLang: free_gpu_memory_fraction).
+        agg_extra = self._resolve_agg_kwargs(kwargs, isl=isl, osl=osl, backend_version=database.version)
 
         visual_cache_key = (
             runtime_config.image_height,
@@ -1902,7 +1942,7 @@ class BaseBackend:
 
         # Resolve backend-specific kwargs once; forward into run_agg so each
         # (b, ctx_tokens) point sees the same backend params.
-        sweep_extra = self._resolve_agg_kwargs(kwargs, isl=isl_eff, osl=osl)
+        sweep_extra = self._resolve_agg_kwargs(kwargs, isl=isl_eff, osl=osl, backend_version=database.version)
 
         # when b is larger than 1024, the result is not good as the data collection is not enough
         # to cover this.

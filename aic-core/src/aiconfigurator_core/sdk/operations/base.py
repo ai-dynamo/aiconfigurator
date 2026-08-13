@@ -121,12 +121,30 @@ def _version_dir_is_partial(version_dir: str) -> bool:
     return os.path.isfile(os.path.join(version_dir, "INCOMPLETE.txt"))
 
 
+def _version_dir_is_unusable(version_dir: str) -> bool:
+    """Whether the whole directory must be excluded from data loading.
+
+    ``collection_meta.yaml`` with ``status: partial`` is structured coverage
+    metadata: successfully collected rows are valid and must remain primary,
+    while older versions fill missing coordinates. Only legacy
+    ``INCOMPLETE.txt`` lacks enough granularity to admit any of its rows.
+
+    A structured sidecar supersedes a stale legacy marker. Parse validation is
+    owned by perf_database's admission layer; this hot-path resolver only needs
+    to know that the structured sidecar exists.
+    """
+    if os.path.isfile(os.path.join(version_dir, "collection_meta.yaml")):
+        return False
+    return os.path.isfile(os.path.join(version_dir, "INCOMPLETE.txt"))
+
+
 def resolve_op_data_path(system_data_root: str, backend: str, version: str, op_filename: str) -> str:
     """Resolve one op table under the family-first layout, legacy fallback.
 
     Family dirs are discovered structurally (any first-level dir that is not
-    a known backend dir); dirs marked partial (yaml-first, txt fallback — see
-    ``_version_dir_is_partial``) are skipped. Candidates run through the
+    a known backend dir). Structured partial tables are loadable and use
+    older-version shape fill; only legacy whole-dir-incomplete directories
+    (see ``_version_dir_is_unusable``) are skipped. Candidates run through the
     .parquet->.txt fallback. When nothing exists, returns the legacy-shaped
     path so callers keep their missing-file semantics.
     """
@@ -139,7 +157,7 @@ def resolve_op_data_path(system_data_root: str, backend: str, version: str, op_f
         if entry.startswith(".") or entry in _KNOWN_BACKEND_DIRS:
             continue
         version_dir = os.path.join(system_data_root, entry, backend, version)
-        if not os.path.isdir(version_dir) or _version_dir_is_partial(version_dir):
+        if not os.path.isdir(version_dir) or _version_dir_is_unusable(version_dir):
             continue
         candidate = _resolve_perf_data_path(os.path.join(version_dir, op_filename))
         if os.path.exists(candidate):
