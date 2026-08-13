@@ -169,6 +169,57 @@ def test_image_entry_retires_superseded_text_only_sqlite_result(tmp_path):
         assert conn.execute("SELECT entry_key FROM probe_results").fetchall() == []
 
 
+def test_resumed_scan_retires_skipped_encoder_unsupported_result(tmp_path):
+    db_path = tmp_path / "scan.sqlite"
+    legacy_entry = Entry(
+        model="Qwen/Qwen3.5-27B",
+        architecture="Qwen3_5ForConditionalGeneration",
+        system="b200_sxm",
+        backend="vllm",
+        version="0.24.0",
+        mode="agg",
+        baseline_status=STATUS_PASS,
+    )
+    init_db(db_path)
+    seed_entries(db_path, [legacy_entry])
+    with _connect(db_path) as conn:
+        write_probe_record(
+            conn,
+            ProbeRecord(
+                entry_key=legacy_entry.key,
+                probe_shape="legacy-text-only",
+                python_ttft_ms=1.0,
+                python_tpot_ms=1.0,
+                rust_ttft_ms=1.0,
+                rust_tpot_ms=1.0,
+                ttft_drift_pct=0.0,
+                tpot_drift_pct=0.0,
+                python_err=None,
+                rust_err=None,
+                status="PASS",
+                duration_ms=1.0,
+                completed_at="2026-01-01T00:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO pareto_results
+                (entry_key, comparison_outcome, completed_at)
+            VALUES (?, ?, ?)
+            """,
+            (legacy_entry.key, PARETO_STATUS_STRICT_PASS, "2026-01-01T00:00:00+00:00"),
+        )
+
+    # ``load_entries`` now skips this baseline row, so a resumed scan seeds
+    # no replacement entry. Seeding must still retire its historical results.
+    seed_entries(db_path, [])
+
+    with _connect(db_path) as conn:
+        assert conn.execute("SELECT entry_key FROM entries").fetchall() == []
+        assert conn.execute("SELECT entry_key FROM probe_results").fetchall() == []
+        assert conn.execute("SELECT entry_key FROM pareto_results").fetchall() == []
+
+
 def test_parity_probe_passes_image_arguments(monkeypatch):
     calls = []
 

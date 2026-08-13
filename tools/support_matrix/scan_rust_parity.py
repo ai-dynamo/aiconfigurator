@@ -362,10 +362,34 @@ def init_db(db_path: Path) -> None:
 
 
 def seed_entries(db_path: Path, entries: list[Entry]) -> int:
-    """Insert new entries, retiring superseded text-only multimodal rows."""
+    """Insert new entries and retire parity results that no longer prove coverage."""
     inserted = 0
     with closing(_connect(db_path)) as conn:
         conn.execute("BEGIN")
+        # A database resumed across commits can contain PASS results for a
+        # checkpoint that is now known to declare an unimplemented encoder.
+        # Those rows are intentionally omitted by ``load_entries``; purge the
+        # existing database records too so reports cannot keep certifying the
+        # stale text-backbone run.
+        coverage_by_model = {}
+        retired_keys = []
+        for entry_key, model in conn.execute("SELECT entry_key, model FROM entries"):
+            if model not in coverage_by_model:
+                try:
+                    coverage_by_model[model] = _get_encoder_coverage(model)
+                except Exception:
+                    # Historical scan databases can outlive bundled configs.
+                    # Leave an unresolvable entry alone rather than preventing
+                    # the rest of the resumable scan from starting.
+                    coverage_by_model[model] = None
+            coverage = coverage_by_model[model]
+            if coverage is not None and coverage.checkpoint_declares_encoder and not coverage.aic_encoder_implemented:
+                retired_keys.append(entry_key)
+        for entry_key in retired_keys:
+            conn.execute("DELETE FROM probe_results WHERE entry_key = ?", (entry_key,))
+            conn.execute("DELETE FROM pareto_results WHERE entry_key = ?", (entry_key,))
+            conn.execute("DELETE FROM entries WHERE entry_key = ?", (entry_key,))
+
         for entry in entries:
             if entry.image_workload is not None:
                 # Pre-image scans used the base key for multimodal rows. Once
