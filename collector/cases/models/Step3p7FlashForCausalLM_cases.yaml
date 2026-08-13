@@ -60,8 +60,8 @@ model_case_values:
       window_size: 512
       tensor_parallel_sizes: [1, 2, 4, 8]
   moe:
-    - model_path: stepfun-ai/Step-3.7-Flash-FP8
-      model_aliases:
+    - model_paths:
+        - stepfun-ai/Step-3.7-Flash-FP8
         - stepfun-ai/Step-3.7-Flash
       hidden_size: 4096
       inter_size: 1280

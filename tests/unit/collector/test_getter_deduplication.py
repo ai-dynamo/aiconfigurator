@@ -386,7 +386,8 @@ def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkey
     }
 
     # 1887 pre-Kimi-K3, +39 K3 w4a16_mxfp4 cases (grouped-topk mapping for
-    # model_type kimi_linear), +99 Step-3.7-Flash (FP8 + BF16 aliases).
+    # model_type kimi_linear), +99 Step-3.7-Flash executions after identical
+    # physical invocations are deduplicated by their consumer key.
     assert len(cases) == 2025
     assert sum(len(case[1]) for case in cases) == 54675
     # Native artifacts stay excluded on SM90 (vLLM 0.24.0 serves them there
@@ -396,6 +397,26 @@ def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkey
     assert not any(case[8] in native_dsv4_models for case in cases)
     converted_modes = {case[0] for case in cases if case[8] in converted_dsv4_models}
     assert converted_modes == {"fp8_block"}
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "stepfun-ai/Step-3.7-Flash",
+        "stepfun-ai/Step-3.7-Flash-FP8",
+    ],
+)
+def test_vllm_step3p7_filter_preserves_physical_artifact_identity(monkeypatch, model_path):
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+    _install_vllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
+    monkeypatch.setattr(module, "get_sm_version", lambda: 90)
+
+    cases = module.get_moe_test_cases()
+
+    assert cases
+    assert {case[8] for case in cases} == {model_path}
+    assert {tuple(case[2:6]) for case in cases} == {(4096, 1280, 8, 288)}
 
 
 def test_vllm_sm100_repository_moe_getter_expands_native_dsv4_w4a8_cases(monkeypatch):
