@@ -46,10 +46,10 @@ from importlib.metadata import version as get_version
 import torch
 
 try:
-    from helper import benchmark_with_power, get_sm_version, log_perf
+    from helper import benchmark_with_power, get_sm_version, log_perf, power_monitoring_only
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from helper import benchmark_with_power, get_sm_version, log_perf
+    from helper import benchmark_with_power, get_sm_version, log_perf, power_monitoring_only
 
 try:
     from collector.case_generator import (
@@ -1190,6 +1190,27 @@ def load_model_runner(
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def _measure_back_to_back_power(device, run_target, avg_time_ms: float, minimum_runs: int) -> dict | None:
+    """Sample power over repeated executions without changing latency timing.
+
+    DSA context intentionally times an eager/module-graph target back-to-back
+    with one terminal synchronize. Re-run that exact target under NVML for the
+    configured minimum duration, but keep the original CUDA-event latency.
+    """
+    torch_device = torch.device(device)
+    with power_monitoring_only(torch_device) as power_monitor:
+        if power_monitor is None:
+            return None
+        target_duration_ms = 1000.0 * float(os.environ.get("COLLECTOR_POWER_MIN_DURATION", "1.0"))
+        estimated_runs = int(target_duration_ms / max(float(avg_time_ms), 1e-9)) + 1
+        power_runs = max(int(minimum_runs), estimated_runs)
+        with torch.no_grad():
+            for _ in range(power_runs):
+                run_target()
+        torch.cuda.synchronize()
+        return power_monitor.stop_sampling()
+
+
 def run_attention_torch(
     model_runner,
     test_cases,
@@ -1933,6 +1954,9 @@ def _run_prefill(
         torch.cuda.synchronize()
         avg_time_ms = start_event.elapsed_time(end_event) / num_iterations
 
+        power_target = module_cuda_graph.replay if module_cuda_graph is not None else call_target
+        power_stats = _measure_back_to_back_power(device, power_target, avg_time_ms, num_iterations)
+
         # Log perf — wideep MLA uses old filename/op_name/kernel_source conventions
         try:
             if is_wideep_mla:
@@ -1969,6 +1993,7 @@ def _run_prefill(
                 op_name=op_name,
                 kernel_source=kernel_source,
                 perf_filename=perf_filename,
+                power_stats=power_stats,
             ):
                 raise PerfLogWriteError(f"failed to persist prefill row to {perf_filename}")
         except PerfLogWriteError:
@@ -2193,7 +2218,7 @@ def _run_decode(
         print(f"  Decode module CUDA graph: {use_benchmark_cuda_graph} (tokens={batch_size})")
 
         with benchmark_with_power(
-            device=device,
+            device=torch.device(device),
             kernel_func=kernel_func,
             num_warmups=num_warmup,
             num_runs=num_iterations,

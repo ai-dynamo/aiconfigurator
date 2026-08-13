@@ -44,6 +44,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from helper import PowerMonitor, get_device_module, get_device_str, log_perf
 
 
+def _stamp_measure_power_env(measure_power: bool) -> None:
+    """Make log schema selection deterministic for this CLI invocation."""
+    os.environ["COLLECTOR_MEASURE_POWER"] = "true" if measure_power else "false"
+
+
 def _init_process_group_with_device_id(backend: str, init_method: str, world_size: int, rank: int, local_rank: int):
     """Pre-initialize torch.distributed with explicit device_id.
 
@@ -1062,6 +1067,14 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
+    # Mirror collect.py: stamp the env var so log_perf writes power columns
+    # consistently across all message sizes, even when a single size yields
+    # power_stats=None (NVML failure).  Without this, missing→power ordering
+    # produces a CSV column-count mismatch that crashes pyarrow at finalization.
+    # Direct assignment (not setdefault) avoids preserving a stale inherited
+    # "true" value when --measure_power is absent.
+    _stamp_measure_power_env(args.measure_power)
 
     allreduce_benchmark(
         args.backend,
