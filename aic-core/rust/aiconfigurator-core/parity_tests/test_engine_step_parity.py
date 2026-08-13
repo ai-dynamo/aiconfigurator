@@ -1569,8 +1569,10 @@ class TestRustEngineStepCpStaticCtxParity:
     Pins the adjudicated DSV4 CSA CP repro shape end to end on a
     reuse-carrying version: the composition's four sparse-gate lookups
     resolve through approved donors, the mHC ops divide by seq_split, and
-    the static_ctx sums agree. See DSV4_CP_CASES for why the mixed surface
-    is deliberately not used here.
+    the static_ctx sums agree. The same case is ALSO exercised on the mixed
+    surface (`TestRustEngineStepCpMixedStepParity` parametrizes
+    DSV4_CP_CASES) — this surface exists because `cli_estimate` has no cp
+    knob, so the plain "static" surface cannot express a cp>1 case.
     """
 
     @pytest.mark.parametrize("case", DSV4_CP_CASES)
@@ -1583,6 +1585,65 @@ class TestRustEngineStepCpStaticCtxParity:
 
         reason = _parity_mismatch_reason(_comparison_metrics(case, "cp_static_ctx"))
         assert reason is None, reason
+
+
+class TestRustEngineHandleDatabasePolicyIdentity:
+    """Handle-cache isolation across database-policy views (review finding).
+
+    `build_engine_spec_json` bakes the database's policy-dependent
+    `perf_db_sources` into the compiled handle, so a shared-layer-off view
+    and a shared-layer-on view of the SAME on-disk identity must not alias
+    one cached handle. The cache is cleared ONCE per ordering (not between
+    the two queries — that is the point): whichever view warms the cache
+    must not answer, or fail, for the other. Guards both directions on the
+    adjudicated DSV4 CP shape: the false FAILURE (off-warmed cache raising
+    for the reuse-carrying on-view) and the false SUCCESS (on-warmed cache
+    computing for the primary-only off-view that must raise).
+    """
+
+    ANCHOR_MS = 42.4307555484161  # the issue #1498 adjudicated static_ctx sum
+
+    def _static_ctx_ms(self, model, view) -> float:
+        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=8192, osl=8, prefix=0, engine_step_backend="rust")
+        ctx_latency, _gen, *_ = rust_engine_step.estimate_static_latency_breakdown_with_rust(
+            model, view, rc, "static_ctx", 1, 1.0
+        )
+        return float(sum(ctx_latency.values()))
+
+    def _build(self):
+        (case,) = DSV4_CP_CASES[0].values
+        model = _quiet_call(get_model, case.model_path, _case_model_config(case), case.backend_name)
+        off = _quiet_call(
+            perf_database.get_database_view,
+            case.system_name,
+            case.backend_name,
+            case.backend_version,
+            shared_layer=False,
+        )
+        on = _quiet_call(
+            perf_database.get_database_view,
+            case.system_name,
+            case.backend_name,
+            case.backend_version,
+            shared_layer=True,
+        )
+        if off is None or on is None:
+            pytest.skip("no perf database for the DSV4 CP case identity")
+        return model, off, on
+
+    def test_off_warmed_cache_does_not_fail_the_shared_on_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _prepare_rust_core(monkeypatch)  # the ONLY cache clear in this ordering
+        model, off, on = self._build()
+        with pytest.raises(errors.PerfDataNotAvailableError):
+            self._static_ctx_ms(model, off)
+        assert self._static_ctx_ms(model, on) == pytest.approx(self.ANCHOR_MS, rel=1e-9)
+
+    def test_on_warmed_cache_does_not_answer_for_the_shared_off_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _prepare_rust_core(monkeypatch)  # the ONLY cache clear in this ordering
+        model, off, on = self._build()
+        assert self._static_ctx_ms(model, on) == pytest.approx(self.ANCHOR_MS, rel=1e-9)
+        with pytest.raises(errors.PerfDataNotAvailableError):
+            self._static_ctx_ms(model, off)
 
 
 # HYBRID / EMPIRICAL parity cases: the util-space empirical layer

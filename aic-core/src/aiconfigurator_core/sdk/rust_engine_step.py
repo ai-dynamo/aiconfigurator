@@ -957,6 +957,17 @@ def _engine_config_json(model: Any, database: Any) -> str:
                         "enable_eplb": bool(getattr(model_config, "enable_eplb", False)),
                         "wideep_num_slots": getattr(model_config, "wideep_num_slots", None),
                     },
+                    # Data-resolution policy. `build_engine_spec_json` bakes the
+                    # database's policy-dependent `perf_db_sources` into the
+                    # compiled handle, so two views of the same on-disk identity
+                    # that differ only in shared-layer or strict-provenance
+                    # policy must not share a cached handle — a warmed
+                    # primary-only handle would otherwise answer (or fail) for
+                    # the reuse-carrying view depending on call order.
+                    "database_policy": {
+                        "enable_shared_layer": bool(getattr(database, "enable_shared_layer", False)),
+                        "strict_provenance": bool(getattr(database, "strict_provenance", False)),
+                    },
                 },
                 sort_keys=True,
                 separators=(",", ":"),
