@@ -87,6 +87,28 @@ _FRONTIER_ENVELOPE_COLUMNS = {
     "tpot": "min",
     "request_latency": "min",
 }
+
+
+class ModelMetadataResolutionError(RuntimeError):
+    """Fatal support-matrix error while resolving a model's configuration."""
+
+
+def _resolve_test_constraints(model: str) -> "TestConstraints":
+    """Resolve model-derived constraints and classify failures as fatal."""
+    try:
+        return _get_test_constraints(model)
+    except Exception as exc:
+        raise ModelMetadataResolutionError(f"Failed to resolve model metadata for {model}: {exc}") from exc
+
+
+def _resolve_architecture(matrix: "SupportMatrix", model: str) -> str:
+    """Resolve an architecture without converting metadata failures into rows."""
+    try:
+        return matrix.get_architecture(model)
+    except Exception as exc:
+        raise ModelMetadataResolutionError(f"Failed to resolve architecture for {model}: {exc}") from exc
+
+
 _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
 _NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
@@ -705,7 +727,7 @@ def _process_combination_worker(
         engine_step_frontier_atol=_worker_matrix.engine_step_frontier_atol,
         include_commands=True,
     )
-    architecture = _worker_matrix.get_architecture(model)
+    architecture = _resolve_architecture(_worker_matrix, model)
     return [
         (
             model,
@@ -922,7 +944,7 @@ class SupportMatrix:
             unsupported_modes = set(modes_to_test) - {"agg", "disagg"}
             if unsupported_modes:
                 raise ValueError(f"Unsupported support-matrix mode(s): {sorted(unsupported_modes)}")
-        constraints = _get_test_constraints(model)
+        constraints = _resolve_test_constraints(model)
         statuses: dict[str, str] = {}
         error_messages = {}
         provenance: dict[str, str] = dict.fromkeys(modes_to_test, "")
@@ -1130,6 +1152,11 @@ class SupportMatrix:
                         retry_combos.add(futures[remaining])
                     pbar.update(len(unprocessed_futures))
                     break
+                except ModelMetadataResolutionError:
+                    for remaining in futures:
+                        if remaining is not future:
+                            remaining.cancel()
+                    raise
                 except Exception:
                     logger.exception(
                         "Unexpected error retrieving result for %s/%s/%s/%s",
@@ -1264,7 +1291,7 @@ class SupportMatrix:
                                     engine_step_frontier_atol=self.engine_step_frontier_atol,
                                     include_commands=True,
                                 )
-                                architecture = self.get_architecture(model)
+                                architecture = _resolve_architecture(self, model)
                                 for mode in status_dict:
                                     results.append(
                                         (
@@ -1280,6 +1307,8 @@ class SupportMatrix:
                                             provenance_dict.get(mode, ""),
                                         )
                                     )
+                            except ModelMetadataResolutionError:
+                                raise
                             except Exception:
                                 logger.exception(
                                     "Sequential retry also failed for %s/%s/%s/%s",
@@ -1288,7 +1317,7 @@ class SupportMatrix:
                                     backend,
                                     version,
                                 )
-                                architecture = self.get_architecture(model)
+                                architecture = _resolve_architecture(self, model)
                                 for mode in modes_to_test:
                                     command = _support_matrix_row_command(
                                         model=model,

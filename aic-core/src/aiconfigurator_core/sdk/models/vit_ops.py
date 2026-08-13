@@ -215,7 +215,7 @@ def build_encoder_ops(enc_cfg: common.VisionEncoderConfig, tp_size: int, enable_
                 "encoder_dp_all_gather",
                 1,
                 "all_gather",
-                num_elements_per_token=enc_cfg.out_hidden_size * enc_cfg.projector_n_instances * tp_size,
+                num_elements_per_token=enc_cfg.out_hidden_size * enc_cfg.projector_n_instances,
                 num_gpus=tp_size,
                 comm_quant_mode=common.CommQuantMode.half,
             )
@@ -380,7 +380,7 @@ def build_gemma4_vision_encoder_ops(
                 "encoder_dp_all_gather",
                 1,
                 "all_gather",
-                num_elements_per_token=enc_cfg.out_hidden_size * tp_size,
+                num_elements_per_token=enc_cfg.out_hidden_size,
                 num_gpus=tp_size,
                 comm_quant_mode=common.CommQuantMode.half,
             )

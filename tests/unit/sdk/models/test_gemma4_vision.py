@@ -130,7 +130,9 @@ def test_gemma4_encoder_dp_replicates_compute_and_gathers_soft_tokens():
     assert _op(model, "encoder_ffn_gate_up_gemm")._n == 2 * 4304
     gather = _op(model, "encoder_dp_all_gather")
     assert gather._num_gpus == 4
-    assert gather._num_elements_per_token == 2816 * 4
+    # NCCL's all-gather message size is the per-rank send payload; the backend
+    # already queries this op with the rank-local image/token count.
+    assert gather._num_elements_per_token == 2816
 
 
 def test_gemma4_encoder_tp_shards_tower_but_replicates_adapter_and_communicates():

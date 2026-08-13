@@ -12,9 +12,11 @@ from tools.support_matrix.support_matrix import (
     STATUS_FAIL,
     STATUS_HYBRID_PASS,
     STATUS_PASS,
+    ModelMetadataResolutionError,
     SupportMatrix,
     TestConstraints,
     _get_matrix_visual_workload,
+    _resolve_test_constraints,
     _support_matrix_row_command,
 )
 
@@ -152,6 +154,46 @@ def test_matrix_derives_gemma4_fixed_budget_image_workload():
     assert _get_matrix_visual_workload("google/gemma-4-26B-A4B") == (672, 960, 1)
     assert _get_matrix_visual_workload("Qwen/Qwen3-VL-32B-Instruct") == (448, 448, 1)
     assert _get_matrix_visual_workload("Qwen/Qwen3-32B") is None
+
+
+def test_matrix_model_metadata_failure_is_fatal(monkeypatch):
+    def fail_metadata(_model):
+        raise ValueError("bad model metadata")
+
+    monkeypatch.setattr(support_matrix_module, "_get_test_constraints", fail_metadata)
+
+    with pytest.raises(ModelMetadataResolutionError, match="test/bad-model"):
+        _resolve_test_constraints("test/bad-model")
+
+
+def test_parallel_model_metadata_failure_aborts_without_retry(monkeypatch):
+    class MetadataFailureFuture:
+        def result(self):
+            raise ModelMetadataResolutionError("bad model metadata")
+
+        def cancel(self):
+            return True
+
+    class FakeExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def submit(self, _fn, _combo):
+            return MetadataFailureFuture()
+
+    monkeypatch.setattr(support_matrix_module, "ProcessPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(support_matrix_module, "as_completed", lambda futures: list(futures))
+    matrix = SupportMatrix.__new__(SupportMatrix)
+    combo = ("test/bad-model", "b200_sxm", "trtllm", "1.0")
+
+    with pytest.raises(ModelMetadataResolutionError, match="bad model metadata"):
+        matrix._run_parallel_combinations([combo], max_workers=1, pbar=None)
 
 
 def test_matrix_image_constraints_reach_task_and_replay_command(monkeypatch):

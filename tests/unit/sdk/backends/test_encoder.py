@@ -238,6 +238,17 @@ class TestEncoderRuntime:
     def model_config(self):
         return config.ModelConfig()
 
+    def test_qwen_encoder_dp_all_gather_uses_per_rank_payload(self):
+        model = get_model(
+            "Qwen/Qwen3-VL-32B-Instruct",
+            config.ModelConfig(tp_size=4, enable_encoder_dp=True),
+            "trtllm",
+        )
+
+        gather = next(op for op in model.encoder_ops if op._name == "encoder_dp_all_gather")
+        expected_per_rank_width = model.encoder_config.out_hidden_size * model.encoder_config.projector_n_instances
+        assert gather._num_elements_per_token == expected_per_rank_width
+
     def test_text_only_model_has_empty_encoder_ops(self, model_config):
         model = get_model("Qwen/Qwen3-32B", model_config, "trtllm")
         assert model.encoder_ops == []
