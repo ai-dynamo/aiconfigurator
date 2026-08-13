@@ -4,6 +4,8 @@
 import pandas as pd
 import pytest
 
+from aiconfigurator.sdk.utils import HuggingFaceDownloadError
+from tools.support_matrix import support_matrix
 from tools.support_matrix.support_matrix import (
     SupportMatrix,
     TestConstraints,
@@ -70,3 +72,51 @@ def test_matrix_rejects_skipped_llama4_encoder(model_id):
 @pytest.mark.parametrize("model_id", [SCOUT, MAVERICK])
 def test_matrix_accepts_nonzero_llama4_encoder(model_id):
     _require_nonzero_encoder_result(model_id, pd.DataFrame({"encoder_latency": [1.0]}))
+
+
+@pytest.mark.parametrize("model_id", [SCOUT, MAVERICK])
+def test_matrix_rejects_missing_encoder_latency_column(model_id):
+    with pytest.raises(RuntimeError, match="produced no nonzero encoder work"):
+        _require_nonzero_encoder_result(model_id, pd.DataFrame({"ttft": [1.0]}))
+
+
+def test_live_matrix_paths_surface_metadata_failures_but_explicit_legacy_rendering_remains_tolerant(monkeypatch):
+    def _boom(_model_path):
+        raise HuggingFaceDownloadError("offline")
+
+    monkeypatch.setattr(support_matrix, "_get_model_info", _boom)
+
+    with pytest.raises(HuggingFaceDownloadError, match="offline"):
+        _require_nonzero_encoder_result(SCOUT, pd.DataFrame({"encoder_latency": [0.0]}))
+
+    with pytest.raises(HuggingFaceDownloadError, match="offline"):
+        SupportMatrix._create_task(
+            mode="agg",
+            model=SCOUT,
+            system="h200_sxm",
+            backend="trtllm",
+            version="1.3.0rc20",
+            constraints=CONSTRAINTS,
+            engine_step_backend=None,
+        )
+
+    with pytest.raises(HuggingFaceDownloadError, match="offline"):
+        _support_matrix_row_command(
+            model=SCOUT,
+            system="h200_sxm",
+            backend="trtllm",
+            version="1.3.0rc20",
+            mode="agg",
+            constraints=CONSTRAINTS,
+        )
+
+    command = _support_matrix_row_command(
+        model="arbitrary/legacy-model",
+        system="h200_sxm",
+        backend="trtllm",
+        version="1.3.0rc20",
+        mode="agg",
+        constraints=CONSTRAINTS,
+        image_size=0,
+    )
+    assert "--image-height" not in command

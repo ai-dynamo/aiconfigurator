@@ -13,7 +13,7 @@ from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.models import HybridMoEModel, get_model
-from aiconfigurator.sdk.utils import get_model_config_from_model_path
+from aiconfigurator.sdk.utils import _parse_hf_config_json, get_model_config_from_model_path
 
 pytestmark = pytest.mark.unit
 
@@ -21,6 +21,7 @@ LLAMA4_CHECKPOINTS = (
     ("meta-llama/Llama-4-Scout-17B-16E-Instruct", 16, 48, 0),
     ("meta-llama/Llama-4-Maverick-17B-128E-Instruct", 128, 24, 24),
 )
+LLAMA4_MODEL_IDS = tuple(checkpoint[0] for checkpoint in LLAMA4_CHECKPOINTS)
 
 
 def _model_config(**overrides):
@@ -64,10 +65,12 @@ def test_checkpoint_configs_preserve_text_and_exact_vision_shapes(model_id, num_
     assert vision.has_cls_token
     assert vision.max_num_tiles == 16
     assert vision.add_global_tile
+    assert vision.prompt_image_tokens == 3
+    assert vision.prompt_tokens_per_local_tile == 1
 
 
-@pytest.mark.parametrize("model_id,_,__,___", LLAMA4_CHECKPOINTS)
-def test_bundled_checkpoint_json_preserves_llama4_special_tokens_and_vision_metadata(model_id, _, __, ___):
+@pytest.mark.parametrize("model_id", LLAMA4_MODEL_IDS)
+def test_bundled_checkpoint_json_preserves_llama4_special_tokens_and_vision_metadata(model_id):
     config_path = (
         pkg_resources.files("aiconfigurator_core") / "model_configs" / (f"{model_id.replace('/', '--')}_config.json")
     )
@@ -76,6 +79,11 @@ def test_bundled_checkpoint_json_preserves_llama4_special_tokens_and_vision_meta
     assert checkpoint["boi_token_index"] == 200080
     assert checkpoint["eoi_token_index"] == 200081
     assert checkpoint["image_token_index"] == 200092
+    assert checkpoint["image_processor_config"] == {
+        "add_global_tile": True,
+        "max_patches": 16,
+        "resize_to_max_canvas": False,
+    }
     assert checkpoint["vision_config"] == {
         "attention_dropout": 0.0,
         "hidden_act": "gelu",
@@ -102,8 +110,8 @@ def test_bundled_checkpoint_json_preserves_llama4_special_tokens_and_vision_meta
     }
 
 
-@pytest.mark.parametrize("model_id,_,__,___", LLAMA4_CHECKPOINTS)
-def test_both_checkpoints_build_vision_and_hybrid_text_ops(model_id, _, __, ___):
+@pytest.mark.parametrize("model_id", LLAMA4_MODEL_IDS)
+def test_both_checkpoints_build_vision_and_hybrid_text_ops(model_id):
     model = get_model(model_id, _model_config(), "trtllm")
 
     assert isinstance(model, HybridMoEModel)
@@ -179,31 +187,62 @@ def test_llama4_encoder_dp_models_exit_all_gather_only():
 
 def test_single_tile_image_produces_nonzero_engine_and_text_tokens():
     enc_cfg = get_model_config_from_model_path(LLAMA4_CHECKPOINTS[0][0])["extra_params"].vision_config
-    workload = BaseBackend._encoder_workload_per_visual(
-        RuntimeConfig(image_height=336, image_width=336, num_images_per_request=1),
-        enc_cfg,
-    )
+    runtime_config = RuntimeConfig(image_height=336, image_width=336, num_images_per_request=1)
+    workload = BaseBackend._encoder_workload_per_visual(runtime_config, enc_cfg)
 
     assert workload.patch_tokens_per_sequence == 576
     assert workload.transformer_tokens_per_sequence == 577
     assert workload.output_tokens_per_sequence == 144
     assert workload.output_tokens_per_image == 144
+    assert workload.context_tokens_per_image == 147
     assert workload.sequences_per_image == 1
+    assert BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, runtime_config) == 147
 
 
 def test_four_local_tiles_add_engine_global_tile_and_720_text_tokens():
     enc_cfg = get_model_config_from_model_path(LLAMA4_CHECKPOINTS[0][0])["extra_params"].vision_config
-    workload = BaseBackend._encoder_workload_per_visual(
-        RuntimeConfig(image_height=672, image_width=672, num_images_per_request=1),
-        enc_cfg,
-    )
+    runtime_config = RuntimeConfig(image_height=672, image_width=672, num_images_per_request=1)
+    workload = BaseBackend._encoder_workload_per_visual(runtime_config, enc_cfg)
 
     assert workload.sequences_per_image == 5
     assert workload.output_tokens_per_image == 5 * 144
+    assert workload.context_tokens_per_image == 5 * 144 + 4 + 3
+    assert BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, runtime_config) == 727
 
 
-@pytest.mark.parametrize("model_id,_,__,___", LLAMA4_CHECKPOINTS)
-def test_nonzero_image_workload_reaches_encoder_and_text_context(model_id, _, __, ___):
+def test_token_only_override_preserves_non_chunk_aligned_sdk_workload():
+    enc_cfg = get_model_config_from_model_path(LLAMA4_CHECKPOINTS[0][0])["extra_params"].vision_config
+    runtime_config = RuntimeConfig(num_image_tokens=333, num_images_per_request=1)
+
+    workload = BaseBackend._encoder_workload_per_visual(runtime_config, enc_cfg)
+
+    assert workload.output_tokens_per_image == 333
+    assert workload.context_tokens_per_image == 336
+    assert workload.output_tokens_per_sequence == 333
+    assert workload.patch_tokens_per_sequence == 1332
+    assert workload.transformer_tokens_per_sequence == 1333
+    assert workload.sequences_per_image == 1
+
+
+@pytest.mark.parametrize("height,width", [(0, 336), (336, 0), (-1, 336)])
+def test_tiled_sequence_count_rejects_nonpositive_image_geometry(height, width):
+    enc_cfg = get_model_config_from_model_path(LLAMA4_CHECKPOINTS[0][0])["extra_params"].vision_config
+
+    with pytest.raises(ValueError, match="requires positive geometry"):
+        BaseBackend._tiled_encoder_sequence_count(height, width, enc_cfg)
+
+
+def test_llama4_parser_rejects_missing_processor_metadata():
+    model_id = LLAMA4_CHECKPOINTS[0][0]
+    raw_config = dict(get_model_config_from_model_path(model_id)["raw_config"])
+    raw_config.pop("image_processor_config")
+
+    with pytest.raises(TypeError, match="must preserve image_processor_config metadata"):
+        _parse_hf_config_json(raw_config)
+
+
+@pytest.mark.parametrize("model_id", LLAMA4_MODEL_IDS)
+def test_nonzero_image_workload_reaches_encoder_and_text_context(model_id):
     model = get_model(model_id, _model_config(), "trtllm")
     result = MagicMock(__float__=lambda self: 1.0, energy=2.0, source="silicon")
     for op in model.encoder_ops:
@@ -213,7 +252,7 @@ def test_nonzero_image_workload_reaches_encoder_and_text_context(model_id, _, __
 
     latency, energy, source, image_tokens = TRTLLMBackend()._run_encoder_phase(model, database, runtime, 1)
 
-    assert image_tokens == 144
+    assert image_tokens == 147
     assert sum(latency.values()) > 0
     assert sum(energy.values()) > 0
     assert source
@@ -253,3 +292,4 @@ def test_static_ttft_memory_and_energy_include_llama4_encoder():
     assert summary.get_encoder_power_avg() > 0
     assert row["encoder_memory"] > 0
     assert row["ttft"] == pytest.approx(row["encoder_latency"] + row["context_latency"])
+    assert model.context_ops[0].query.call_args.kwargs["s"] == runtime.isl + 147

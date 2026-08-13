@@ -502,7 +502,11 @@ def _parse_nemotron_block_configs(block_configs: list[dict]) -> list[BlockConfig
     return grouped_configs if grouped_configs else None
 
 
-def _parse_llama4_vision_config(vision_cfg: dict, text_hidden_size: int) -> VisionEncoderConfig:
+def _parse_llama4_vision_config(
+    vision_cfg: dict,
+    image_processor_cfg: dict | None,
+    text_hidden_size: int,
+) -> VisionEncoderConfig:
     """Translate the published Llama 4 tower + connector shapes without defaults.
 
     The Llama 4 engine pixel-shuffles ``1 / ratio`` patches along each spatial
@@ -527,6 +531,19 @@ def _parse_llama4_vision_config(vision_cfg: dict, text_hidden_size: int) -> Visi
     missing = [key for key in required if key not in vision_cfg]
     if missing:
         raise ValueError(f"Llama 4 vision_config is missing required fields: {', '.join(missing)}")
+
+    processor_required = ("max_patches", "resize_to_max_canvas", "add_global_tile")
+    if not isinstance(image_processor_cfg, dict):
+        raise TypeError("Llama 4 config must preserve image_processor_config metadata")
+    processor_missing = [key for key in processor_required if key not in image_processor_cfg]
+    if processor_missing:
+        raise ValueError(f"Llama 4 image_processor_config is missing required fields: {', '.join(processor_missing)}")
+    max_patches = image_processor_cfg["max_patches"]
+    if not isinstance(max_patches, int) or isinstance(max_patches, bool) or max_patches <= 0:
+        raise ValueError(f"Llama 4 image_processor_config.max_patches must be a positive integer, got {max_patches!r}")
+    for key in ("resize_to_max_canvas", "add_global_tile"):
+        if not isinstance(image_processor_cfg[key], bool):
+            raise TypeError(f"Llama 4 image_processor_config.{key} must be boolean")
 
     ratio = vision_cfg["pixel_shuffle_ratio"]
     if not isinstance(ratio, (int, float)) or ratio <= 0:
@@ -573,10 +590,14 @@ def _parse_llama4_vision_config(vision_cfg: dict, text_hidden_size: int) -> Visi
         image_size=vision_cfg["image_size"],
         num_channels=vision_cfg["num_channels"],
         has_cls_token=True,
-        # Published Llama4ImageProcessor metadata for Scout and Maverick.
-        max_num_tiles=16,
-        resize_to_max_canvas=False,
-        add_global_tile=True,
+        max_num_tiles=max_patches,
+        resize_to_max_canvas=image_processor_cfg["resize_to_max_canvas"],
+        add_global_tile=image_processor_cfg["add_global_tile"],
+        # Llama4Processor._prompt_split_image emits image start, global-image,
+        # and image end tokens, plus one x/y separator per local tile whenever
+        # the prompt contains a local-tile grid and a global tile.
+        prompt_image_tokens=3,
+        prompt_tokens_per_local_tile=1,
     )
 
 
@@ -595,6 +616,7 @@ def _parse_hf_config_json(config: dict) -> dict:
     """
     architecture = config["architectures"][0]
     vision_cfg = config.get("vision_config")
+    image_processor_cfg = config.get("image_processor_config")
 
     # For multimodal models, unwrap the nested text config so that all LLM
     # parameters (layers, hidden_size, MoE fields, etc.) are read from the
@@ -728,7 +750,9 @@ def _parse_hf_config_json(config: dict) -> dict:
             raise ValueError(f"interleave_moe_layer_step must be a positive integer, got {step}")
         attn_pattern = tuple(i % 2 for i in range(layers))
         moe_freq = tuple(1 if (i + 1) % step == 0 else 0 for i in range(layers))
-        llama4_vision_config = _parse_llama4_vision_config(vision_cfg, hidden_size) if vision_cfg else None
+        llama4_vision_config = (
+            _parse_llama4_vision_config(vision_cfg, image_processor_cfg, hidden_size) if vision_cfg else None
+        )
         extra_params = HybridMoEConfig(
             attn_layer_pattern=attn_pattern,
             moe_layer_freq=moe_freq,

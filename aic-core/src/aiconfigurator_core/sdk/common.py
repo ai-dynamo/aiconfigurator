@@ -198,6 +198,11 @@ class VisionEncoderConfig:
             largest viable upscaling canvas instead of the smallest one.
         add_global_tile (bool): Whether the image processor adds a global
             thumbnail whenever the selected canvas contains multiple tiles.
+        prompt_image_tokens (int): Fixed non-embedding tokens emitted around
+            each image by the multimodal processor (for Llama 4: image start,
+            global-image marker, and image end).
+        prompt_tokens_per_local_tile (int): Structural separator tokens emitted
+            per local tile when a tiled prompt also contains a global tile.
     """
 
     depth: int
@@ -218,6 +223,8 @@ class VisionEncoderConfig:
     max_num_tiles: int = 0
     resize_to_max_canvas: bool = False
     add_global_tile: bool = False
+    prompt_image_tokens: int = 0
+    prompt_tokens_per_local_tile: int = 0
 
 
 @dataclass(frozen=True)

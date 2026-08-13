@@ -4,6 +4,11 @@
   ],
   "boi_token_index": 200080,
   "eoi_token_index": 200081,
+  "image_processor_config": {
+    "add_global_tile": true,
+    "max_patches": 16,
+    "resize_to_max_canvas": false
+  },
   "image_token_index": 200092,
   "model_type": "llama4",
   "text_config": {

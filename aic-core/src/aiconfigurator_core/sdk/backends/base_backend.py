@@ -35,6 +35,7 @@ class _EncoderVisualWorkload:
     """Per-request-image token geometry after checkpoint preprocessing."""
 
     output_tokens_per_image: int
+    context_tokens_per_image: int
     output_tokens_per_sequence: int
     transformer_tokens_per_sequence: int
     patch_tokens_per_sequence: int
@@ -224,7 +225,7 @@ class BaseBackend:
         if not isinstance(enc_cfg, common.VisionEncoderConfig) or runtime_config.num_images_per_request <= 0:
             return 0
         workload = BaseBackend._encoder_workload_per_visual(runtime_config, enc_cfg)
-        return workload.output_tokens_per_image * runtime_config.num_images_per_request
+        return workload.context_tokens_per_image * runtime_config.num_images_per_request
 
     @staticmethod
     def _visual_context_tokens(model: BaseModel, runtime_config: RuntimeConfig) -> int:
@@ -258,6 +259,11 @@ class BaseBackend:
     def _tiled_encoder_sequence_count(height: int, width: int, enc_cfg: common.VisionEncoderConfig) -> int:
         """Mirror Llama4ImageProcessor's best-fit canvas and global-tile rule."""
         tile = enc_cfg.image_size
+        if height <= 0 or width <= 0 or tile <= 0 or enc_cfg.max_num_tiles <= 0:
+            raise ValueError(
+                "tiled sequence count requires positive geometry: "
+                f"height={height}, width={width}, tile={tile}, max_num_tiles={enc_cfg.max_num_tiles}"
+            )
         candidates: list[tuple[int, int]] = []
         for chunk_count in range(enc_cfg.max_num_tiles, 0, -1):
             for factor in range(1, int(chunk_count**0.5) + 1):
@@ -293,7 +299,7 @@ class BaseBackend:
         selection, run each local/global tile as an independent ViT sequence,
         and account for the per-tile CLS token separately from patch embedding.
         """
-        zero = _EncoderVisualWorkload(0, 0, 0, 0, 0)
+        zero = _EncoderVisualWorkload(0, 0, 0, 0, 0, 0)
         has_image_dims = runtime_config.image_height > 0 and runtime_config.image_width > 0
 
         if enc_cfg.image_size > 0 and enc_cfg.max_num_tiles > 0:
@@ -310,15 +316,30 @@ class BaseBackend:
             elif runtime_config.num_image_tokens > 0:
                 output_tokens = runtime_config.num_image_tokens
                 if output_tokens % post_per_sequence != 0:
-                    raise ValueError(
-                        "num_image_tokens must be a whole number of Llama 4 image chunks: "
-                        f"got {output_tokens}, chunk output is {post_per_sequence} tokens"
+                    # ``num_image_tokens`` is a public workload-level override,
+                    # not a declaration of processor tile geometry. Preserve
+                    # its legacy arbitrary-token approximation as one synthetic
+                    # sequence when the count cannot describe whole Llama 4
+                    # chunks. Image dimensions still take the exact tiled path.
+                    patch_tokens = output_tokens * enc_cfg.spatial_merge_size**2
+                    return _EncoderVisualWorkload(
+                        output_tokens,
+                        output_tokens + enc_cfg.prompt_image_tokens,
+                        output_tokens,
+                        patch_tokens + int(enc_cfg.has_cls_token),
+                        patch_tokens,
+                        1,
                     )
                 sequences = output_tokens // post_per_sequence
             else:
                 return zero
+            local_tiles = sequences - int(enc_cfg.add_global_tile and sequences > 1)
+            context_tokens = output_tokens + enc_cfg.prompt_image_tokens
+            if local_tiles > 1:
+                context_tokens += local_tiles * enc_cfg.prompt_tokens_per_local_tile
             return _EncoderVisualWorkload(
                 output_tokens,
+                context_tokens,
                 post_per_sequence,
                 transformer_per_sequence,
                 patch_per_sequence,
@@ -339,6 +360,7 @@ class BaseBackend:
         if tokens_per_image <= 0 or pre_merge_per_image <= 0:
             return zero
         return _EncoderVisualWorkload(
+            tokens_per_image,
             tokens_per_image,
             tokens_per_image,
             pre_merge_per_image,
@@ -373,7 +395,7 @@ class BaseBackend:
             # No image dimensions specified; skip encoder modeling.
             return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, 0
 
-        n_img_post = workload.output_tokens_per_image * num_images  # post-merge: injected into LLM context
+        n_img_context = workload.context_tokens_per_image * num_images
 
         # Encoder DP: whole images are sharded across the tp_size ranks and the
         # busiest rank (ceil share) gates the phase.
@@ -387,13 +409,14 @@ class BaseBackend:
         # on post-merge tokens; ViT attention uses cu_seqlens (each tile is an
         # independent varlen sequence containing its raw patches plus CLS).
         def _encoder_eff_s(op) -> int:
-            if "encoder_patch_embedding" in op._name:
+            name = op._name
+            if "encoder_patch_embedding" in name:
                 return workload.patch_tokens_per_sequence
-            use_post = "encoder_projector" in op._name or op._name == "encoder_dp_all_gather"
-            use_varlen = "encoder_attention" in op._name
-            if use_varlen:
+            if "encoder_attention" in name:
                 return workload.transformer_tokens_per_sequence
-            return workload.output_tokens_per_sequence if use_post else workload.transformer_tokens_per_sequence
+            if "encoder_projector" in name or name == "encoder_dp_all_gather":
+                return workload.output_tokens_per_sequence
+            return workload.transformer_tokens_per_sequence
 
         if should_use_rust_engine_step(runtime_config, database):
             rust = self._run_encoder_phase_with_rust(
@@ -405,7 +428,7 @@ class BaseBackend:
             )
             if rust is not None:
                 encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict = rust
-                return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, n_img_post
+                return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, n_img_context
 
         for op in model.encoder_ops:
             eff_batch, eff_s = sequences_local, _encoder_eff_s(op)
@@ -424,7 +447,7 @@ class BaseBackend:
                 encoder_energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
             encoder_source_dict[op._name] = getattr(result, "source", "silicon")
 
-        return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, n_img_post
+        return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, n_img_context
 
     def _run_encoder_phase_with_rust(
         self,

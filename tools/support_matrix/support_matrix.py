@@ -33,7 +33,6 @@ from aiconfigurator.sdk.models import _get_model_info
 from aiconfigurator.sdk.models.helpers import _apply_model_quant_defaults
 from aiconfigurator.sdk.operations.util_empirical import PROVENANCE_ORDER, capture_provenance, worst_provenance
 from aiconfigurator.sdk.task_v2 import Task
-from aiconfigurator.sdk.utils import HuggingFaceDownloadError
 
 logger = logging.getLogger(__name__)
 
@@ -205,14 +204,8 @@ _DEFAULT_TIER = _LARGE  # > 100B params
 
 
 def _get_support_matrix_llama4_encoder_config(model_path: str) -> common.VisionEncoderConfig | None:
-    """Return the Llama 4 encoder config used by this issue's matrix guard."""
-    try:
-        model_info = _get_model_info(model_path)
-    except HuggingFaceDownloadError:
-        # Legacy result rows can name an arbitrary model and only need a replay
-        # command rendered. Preserve that offline behavior; real matrix runs
-        # resolve their model before reaching this helper.
-        return None
+    """Return the Llama 4 encoder config, propagating metadata failures."""
+    model_info = _get_model_info(model_path)
     if model_info.get("architecture") != "Llama4ForConditionalGeneration":
         return None
     extra_params = model_info.get("extra_params")
@@ -222,7 +215,7 @@ def _get_support_matrix_llama4_encoder_config(model_path: str) -> common.VisionE
 
 
 def _get_support_matrix_image_size(model_path: str) -> int:
-    """Pick the checkpoint-fixed Llama 4 image workload for automatic checks."""
+    """Pick the checkpoint-fixed Llama 4 image workload for live checks."""
     enc_cfg = _get_support_matrix_llama4_encoder_config(model_path)
     if enc_cfg is None:
         return 0
