@@ -140,7 +140,25 @@ def test_sweep_agg_classifies_no_result_outcomes(monkeypatch, memory_states, exp
         )
 
 
-def test_sweep_agg_point_config_preserves_multimodal_fields(monkeypatch):
+@pytest.mark.parametrize(
+    "visual_kwargs",
+    [
+        {
+            "image_height": 1024,
+            "image_width": 1024,
+            "num_images_per_request": 2,
+            "num_image_tokens": 333,
+        },
+        {
+            "video_height": 720,
+            "video_width": 1280,
+            "video_frames": 16,
+            "num_videos_per_request": 3,
+            "num_video_tokens": 448,
+        },
+    ],
+)
+def test_sweep_agg_point_config_preserves_multimodal_fields(monkeypatch, visual_kwargs):
     """Regression for NVBug 6401839: the agg per-batch RuntimeConfig must carry
     every multimodal field from the base runtime_config. The old field-by-field
     construction dropped image_height/width, num_images_per_request, and
@@ -157,8 +175,19 @@ def test_sweep_agg_point_config_preserves_multimodal_fields(monkeypatch):
         summary.get_per_ops_source.return_value = {}
         return summary
 
+    model = MagicMock()
+    model.encoder_config = common.VisionEncoderConfig(
+        depth=27,
+        hidden_size=1152,
+        num_heads=16,
+        intermediate_size=4304,
+        patch_size=16,
+        temporal_patch_size=2,
+        spatial_merge_size=2,
+        out_hidden_size=5120,
+    )
     monkeypatch.setattr(sweep, "get_backend", lambda _backend_name: MagicMock())
-    monkeypatch.setattr(sweep, "get_model", lambda **_kwargs: MagicMock())
+    monkeypatch.setattr(sweep, "get_model", lambda **_kwargs: model)
     monkeypatch.setattr(sweep, "predict_agg_worker", _record)
 
     base_rt = config.RuntimeConfig(
@@ -166,17 +195,9 @@ def test_sweep_agg_point_config_preserves_multimodal_fields(monkeypatch):
         osl=256,
         ttft=1e9,
         tpot=1e9,
-        image_height=1024,
-        image_width=1024,
-        num_images_per_request=2,
-        num_image_tokens=333,
-        video_height=720,
-        video_width=1280,
-        video_frames=16,
-        num_videos_per_request=3,
-        num_video_tokens=444,
         seq_imbalance_correction_scale=1.5,
         engine_step_backend="rust",
+        **visual_kwargs,
     )
 
     sweep.sweep_agg(
@@ -192,15 +213,8 @@ def test_sweep_agg_point_config_preserves_multimodal_fields(monkeypatch):
 
     assert captured, "expected at least one agg point to be evaluated"
     for point_rt in captured:
-        assert point_rt.image_height == 1024
-        assert point_rt.image_width == 1024
-        assert point_rt.num_images_per_request == 2
-        assert point_rt.num_image_tokens == 333
-        assert point_rt.video_height == 720
-        assert point_rt.video_width == 1280
-        assert point_rt.video_frames == 16
-        assert point_rt.num_videos_per_request == 3
-        assert point_rt.num_video_tokens == 444
+        for field, value in visual_kwargs.items():
+            assert getattr(point_rt, field) == value
         # Non-multimodal fields must survive too (the deep-copy carries them all).
         assert point_rt.seq_imbalance_correction_scale == 1.5
         assert point_rt.engine_step_backend == "rust"

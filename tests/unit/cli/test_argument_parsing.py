@@ -462,6 +462,8 @@ class TestCLIArgumentParsing:
                 "8",
                 "--num-videos",
                 "2",
+                "--num-video-tokens",
+                "560",
             ]
         )
 
@@ -469,6 +471,7 @@ class TestCLIArgumentParsing:
         assert args.video_width == 336
         assert args.video_frames == 8
         assert args.num_videos == 2
+        assert args.num_video_tokens == 560
 
     def test_recommend_mode_parses_request_rate(self, cli_parser):
         args = cli_parser.parse_args(

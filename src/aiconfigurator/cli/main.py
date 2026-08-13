@@ -419,6 +419,12 @@ def _add_default_mode_arguments(parser):
     parser.add_argument("--video-frames", type=int, default=0, help="Frames per video. Default: 0 (disabled).")
     parser.add_argument("--num-videos", type=int, default=0, help="Number of videos per request. Default: 0.")
     parser.add_argument(
+        "--num-video-tokens",
+        type=int,
+        default=0,
+        help="Explicit post-merge tokens per video; requires --video-frames. Default: 0 (derive from dimensions).",
+    )
+    parser.add_argument(
         "--disable-encoder-dp",
         action="store_true",
         help="Model the vision encoder as TP-sharded instead of the default data-parallel "
@@ -617,6 +623,12 @@ def _add_recommend_mode_arguments(parser):
     parser.add_argument("--video-width", type=int, default=0, help="Video frame width in pixels. Default: 0.")
     parser.add_argument("--video-frames", type=int, default=0, help="Frames per video. Default: 0 (disabled).")
     parser.add_argument("--num-videos", type=int, default=0, help="Number of videos per request. Default: 0.")
+    parser.add_argument(
+        "--num-video-tokens",
+        type=int,
+        default=0,
+        help="Explicit post-merge tokens per video; requires --video-frames. Default: 0 (derive from dimensions).",
+    )
     parser.add_argument(
         "--ttft",
         type=float,
@@ -820,6 +832,12 @@ def _add_estimate_mode_arguments(parser):
     parser.add_argument("--video-width", type=int, default=0, help="Video frame width in pixels. Default: 0.")
     parser.add_argument("--video-frames", type=int, default=0, help="Frames per video. Default: 0 (disabled).")
     parser.add_argument("--num-videos", type=int, default=0, help="Number of videos per request. Default: 0.")
+    parser.add_argument(
+        "--num-video-tokens",
+        type=int,
+        default=0,
+        help="Explicit post-merge tokens per video; requires --video-frames. Default: 0 (derive from dimensions).",
+    )
     parser.add_argument(
         "--disable-encoder-dp",
         action="store_true",
@@ -1499,10 +1517,6 @@ def build_default_tasks(
     image_height: int = 0,
     image_width: int = 0,
     num_images: int = 1,
-    video_height: int = 0,
-    video_width: int = 0,
-    video_frames: int = 0,
-    num_videos: int = 0,
     enable_encoder_dp: bool = True,
     ttft: float = 2000.0,
     tpot: float = 30.0,
@@ -1521,6 +1535,11 @@ def build_default_tasks(
     afd_max_a_batch_size: int = 1024,
     afd_max_candidates: int = 10_000,
     afd_candidate_overflow: str = "error",
+    video_height: int = 0,
+    video_width: int = 0,
+    video_frames: int = 0,
+    num_videos: int = 0,
+    num_video_tokens: int = 0,
 ) -> dict[str, Task]:
     """Build task configs for the selected default-mode serving modes.
 
@@ -1535,6 +1554,12 @@ def build_default_tasks(
         database_mode: Database mode for performance estimation.
         isl: Input sequence length.
         osl: Output sequence length.
+        video_height: Video frame height in pixels.
+        video_width: Video frame width in pixels.
+        video_frames: Frames per video.
+        num_videos: Number of videos per request.
+        num_video_tokens: Explicit post-merge tokens per video. Requires
+            ``video_frames``; zero derives the token count from dimensions.
         ttft: Time to first token target in ms.
         tpot: Time per output token target in ms.
         request_latency: Optional end-to-end request latency target (ms).
@@ -1699,11 +1724,12 @@ def build_default_tasks(
         global_kwargs["image_height"] = image_height
         global_kwargs["image_width"] = image_width
         global_kwargs["num_images_per_request"] = num_images
-    if video_height or video_width or video_frames or num_videos:
+    if video_height or video_width or video_frames or num_videos or num_video_tokens:
         global_kwargs["video_height"] = video_height
         global_kwargs["video_width"] = video_width
         global_kwargs["video_frames"] = video_frames
         global_kwargs["num_videos_per_request"] = num_videos
+        global_kwargs["num_video_tokens"] = num_video_tokens
     if not enable_encoder_dp:
         global_kwargs["enable_encoder_dp"] = False
 
@@ -2487,6 +2513,7 @@ def _run_estimate_mode(args):
         video_width=args.video_width,
         video_frames=args.video_frames,
         num_videos=args.num_videos,
+        num_video_tokens=args.num_video_tokens,
         enable_encoder_dp=not args.disable_encoder_dp,
         batch_size=args.batch_size,
         ctx_tokens=args.ctx_tokens,
@@ -2799,6 +2826,7 @@ def _run_recommend(args) -> None:
             video_width=args.video_width,
             video_frames=args.video_frames,
             num_videos=args.num_videos,
+            num_video_tokens=args.num_video_tokens,
             ttft=args.ttft,
             tpot=args.tpot,
             request_latency=args.request_latency,
@@ -2957,6 +2985,7 @@ def main(args):
             video_width=args.video_width,
             video_frames=args.video_frames,
             num_videos=args.num_videos,
+            num_video_tokens=args.num_video_tokens,
             enable_encoder_dp=not args.disable_encoder_dp,
             ttft=args.ttft,
             tpot=args.tpot,

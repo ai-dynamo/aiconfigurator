@@ -292,6 +292,19 @@ class TestEncoderVideoTokenFormula:
         with pytest.raises(ValueError, match="Mixed image/video"):
             BaseBackend._encoder_pre_merge_per_visual(rc, enc_cfg)
 
+    def test_mixed_image_video_token_override_fails_loudly(self, enc_cfg):
+        rc = RuntimeConfig(
+            image_height=448,
+            image_width=448,
+            num_images_per_request=1,
+            video_frames=8,
+            num_video_tokens=196,
+            num_videos_per_request=1,
+        )
+
+        with pytest.raises(ValueError, match="Mixed image/video"):
+            BaseBackend._encoder_pre_merge_per_visual(rc, enc_cfg)
+
 
 class TestFixBEffectiveISL:
     """Fix B: post-merge image tokens must be added to the LLM context ISL."""

@@ -171,6 +171,7 @@ def cli_default(
     video_width: int = 0,
     video_frames: int = 0,
     num_videos: int = 0,
+    num_video_tokens: int = 0,
     enable_encoder_dp: bool = True,
     ttft: float = 2000.0,
     tpot: float = 30.0,
@@ -215,6 +216,8 @@ def cli_default(
         video_frames: Number of frames per video.
         num_videos: Number of videos per request. Images and videos must be
             estimated separately until mixed visual packing is modeled.
+        num_video_tokens: Explicit post-merge tokens per video. Requires
+            ``video_frames`` so temporal attention sequences can be modeled.
         ttft: Time to first token target in ms. Default is 2000.
         tpot: Time per output token target in ms. Default is 30.
         request_latency: Optional end-to-end request latency target (ms).
@@ -306,6 +309,7 @@ def cli_default(
         video_width=video_width,
         video_frames=video_frames,
         num_videos=num_videos,
+        num_video_tokens=num_video_tokens,
         enable_encoder_dp=enable_encoder_dp,
         ttft=ttft,
         tpot=tpot,
@@ -344,6 +348,7 @@ def cli_default(
         mock_args.video_width = video_width
         mock_args.video_frames = video_frames
         mock_args.num_videos = num_videos
+        mock_args.num_video_tokens = num_video_tokens
         mock_args.ttft = ttft
         mock_args.tpot = tpot
         mock_args.request_latency = request_latency
@@ -409,6 +414,7 @@ def cli_recommend(
     video_width: int = 0,
     video_frames: int = 0,
     num_videos: int = 0,
+    num_video_tokens: int = 0,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -462,6 +468,8 @@ def cli_recommend(
         video_frames: Number of frames per video.
         num_videos: Number of videos per request. Images and videos must be
             estimated separately until mixed visual packing is modeled.
+        num_video_tokens: Explicit post-merge tokens per video. Requires
+            ``video_frames`` so temporal attention sequences can be modeled.
         ttft: Time to first token SLA target in ms. Default is 2000.
         tpot: Time per output token SLA target in ms. Default is 30.
         request_latency: Optional end-to-end request latency target (ms).
@@ -536,6 +544,7 @@ def cli_recommend(
         video_width=video_width,
         video_frames=video_frames,
         num_videos=num_videos,
+        num_video_tokens=num_video_tokens,
         ttft=ttft,
         tpot=tpot,
         request_latency=request_latency,
@@ -607,6 +616,7 @@ def cli_recommend(
         mock_args.video_width = video_width
         mock_args.video_frames = video_frames
         mock_args.num_videos = num_videos
+        mock_args.num_video_tokens = num_video_tokens
         mock_args.ttft = ttft
         mock_args.tpot = tpot
         mock_args.request_latency = request_latency
@@ -971,6 +981,7 @@ def cli_estimate(
     video_width: int = 0,
     video_frames: int = 0,
     num_videos: int = 0,
+    num_video_tokens: int = 0,
     enable_encoder_dp: bool = True,
     batch_size: int = 128,
     ctx_tokens: int | None = None,
@@ -1053,6 +1064,8 @@ def cli_estimate(
         video_width: Video frame width for VL models. Default 0.
         video_frames: Frames per video. Default 0 disables video modeling.
         num_videos: Number of videos per request. Default 0.
+        num_video_tokens: Explicit post-merge tokens per video. Requires
+            ``video_frames``. Default 0 derives tokens from video dimensions.
         enable_encoder_dp: Model the vision encoder data-parallel (default True;
             vLLM mm_encoder_tp_mode="data" / SGLang --mm-enable-dp-encoder semantics).
             False models the legacy TP-sharded encoder.
@@ -1236,6 +1249,7 @@ def cli_estimate(
             video_width=video_width,
             video_frames=video_frames,
             num_videos=num_videos,
+            num_video_tokens=num_video_tokens,
             enable_encoder_dp=enable_encoder_dp,
             batch_size=batch_size,
             prefix=prefix,
@@ -1275,6 +1289,7 @@ def cli_estimate(
             video_width=video_width,
             video_frames=video_frames,
             num_videos=num_videos,
+            num_video_tokens=num_video_tokens,
             enable_encoder_dp=enable_encoder_dp,
             batch_size=batch_size,
             ctx_tokens=ctx_tokens,
@@ -1334,6 +1349,7 @@ def cli_estimate(
             video_width=video_width,
             video_frames=video_frames,
             num_videos=num_videos,
+            num_video_tokens=num_video_tokens,
             enable_encoder_dp=enable_encoder_dp,
             # Prefill config (fall back to shared args)
             prefill_tp_size=prefill_tp_size if prefill_tp_size is not None else tp_size,
@@ -1382,6 +1398,7 @@ def cli_estimate(
             video_height=video_height,
             video_width=video_width,
             video_frames=video_frames,
+            num_video_tokens=num_video_tokens,
         )
         if has_image_workload or has_video_workload:
             raise NotImplementedError(
@@ -1467,6 +1484,7 @@ def cli_estimate(
             video_width=video_width,
             video_frames=video_frames,
             num_videos=num_videos,
+            num_video_tokens=num_video_tokens,
             enable_encoder_dp=enable_encoder_dp,
             batch_size=batch_size,
             prefix=prefix,
@@ -1520,6 +1538,7 @@ def _run_agg_estimate(
     video_width,
     video_frames,
     num_videos,
+    num_video_tokens,
     enable_encoder_dp,
     batch_size,
     ctx_tokens,
@@ -1586,6 +1605,7 @@ def _run_agg_estimate(
         video_width=video_width,
         video_frames=video_frames,
         num_videos_per_request=num_videos,
+        num_video_tokens=num_video_tokens,
         prefix=prefix,
         engine_step_backend=engine_step_backend,
     )
@@ -1667,6 +1687,7 @@ def _run_static_estimate(
     video_width,
     video_frames,
     num_videos,
+    num_video_tokens,
     enable_encoder_dp,
     batch_size,
     prefix,
@@ -1743,6 +1764,7 @@ def _run_static_estimate(
         video_width=video_width,
         video_frames=video_frames,
         num_videos_per_request=num_videos,
+        num_video_tokens=num_video_tokens,
         prefix=prefix,
         engine_step_backend=engine_step_backend,
     )
@@ -1816,6 +1838,7 @@ def _run_disagg_estimate(
     video_width,
     video_frames,
     num_videos,
+    num_video_tokens,
     enable_encoder_dp,
     prefill_tp_size,
     prefill_pp_size,
@@ -1922,6 +1945,7 @@ def _run_disagg_estimate(
         video_width=video_width,
         video_frames=video_frames,
         num_videos_per_request=num_videos,
+        num_video_tokens=num_video_tokens,
         prefix=prefix,
         engine_step_backend=engine_step_backend,
     )

@@ -480,6 +480,7 @@ def test_run_agg_cache_separates_video_workloads(
     model,
     database,
 ) -> None:
+    model.encoder_config = _vision_encoder_config()
     mixed_calls: list[int] = []
 
     def _run_mixed(*args, **kwargs):

@@ -426,6 +426,8 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--video-height`, `--video-width`: Video frame dimensions in pixels. Default: `0` (disabled).
 - `--video-frames`: Number of frames per video. Default: `0` (disabled).
 - `--num-videos`: Number of videos per request. Default: `0`.
+- `--num-video-tokens`: Explicit post-merge tokens per video; requires `--video-frames`.
+  Default: `0` (derive from dimensions).
 - `--disable-encoder-dp`: Model the vision encoder as TP-sharded instead of the default data-parallel. Available in `default` and `estimate` modes.
 
 The image and video input flags are also available in `recommend` mode.

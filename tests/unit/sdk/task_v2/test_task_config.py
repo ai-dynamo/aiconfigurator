@@ -313,6 +313,7 @@ def test_build_runtime_config_carries_workload():
         video_width=448,
         video_frames=8,
         num_videos_per_request=2,
+        num_video_tokens=784,
     )
     rt = t.build_runtime_config(batch_size=64)
     assert rt.isl == 2048
@@ -324,6 +325,7 @@ def test_build_runtime_config_carries_workload():
     assert rt.video_width == 448
     assert rt.video_frames == 8
     assert rt.num_videos_per_request == 2
+    assert rt.num_video_tokens == 784
 
 
 def test_afd_rejects_visual_encoder_workload():
@@ -350,6 +352,19 @@ def test_afd_rejects_partial_video_workload():
         total_gpus=16,
         video_frames=8,
         num_videos_per_request=0,
+    )
+
+    with pytest.raises(NotImplementedError, match="AFD does not support image/video encoder workloads"):
+        task.validate()
+
+
+def test_afd_rejects_token_only_video_workload():
+    task = Task(
+        serving_mode="afd",
+        model_path="Qwen/Qwen3.5-27B",
+        system_name="h200_sxm",
+        total_gpus=16,
+        num_video_tokens=196,
     )
 
     with pytest.raises(NotImplementedError, match="AFD does not support image/video encoder workloads"):

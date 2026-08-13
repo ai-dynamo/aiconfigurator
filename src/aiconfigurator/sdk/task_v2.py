@@ -476,6 +476,7 @@ class Task:
     video_width: int = 0
     video_frames: int = 0
     num_videos_per_request: int = 0
+    num_video_tokens: int = 0
     # Vision encoder data parallelism (ModelConfig default).
     enable_encoder_dp: bool = True
     ttft: float = 1000.0
@@ -1517,6 +1518,7 @@ class Task:
             video_width=self.video_width,
             video_frames=self.video_frames,
             num_videos_per_request=self.num_videos_per_request,
+            num_video_tokens=self.num_video_tokens,
             ttft=self.ttft,
             tpot=self.tpot,
             request_latency=self.request_latency,
@@ -1688,6 +1690,7 @@ class Task:
             video_height=self.video_height,
             video_width=self.video_width,
             video_frames=self.video_frames,
+            num_video_tokens=self.num_video_tokens,
         )
         if has_image_workload or has_video_workload:
             raise NotImplementedError(
