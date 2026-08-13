@@ -109,3 +109,23 @@ def test_compare_pareto_dfs_rejects_encoder_metrics_swapped_between_configuratio
 
     assert mismatch is not None
     assert "Rust encoder evidence differs beyond tolerance" in mismatch
+
+
+def test_compare_pareto_dfs_does_not_relax_other_metrics_for_tolerated_encoder_drift():
+    python_df = pd.DataFrame([{"model": "model-a", "tp": 1, "encoder_latency": 1.0, "tpot": 100.0}])
+    rust_df = pd.DataFrame([{"model": "model-a", "tp": 1, "encoder_latency": 1.005, "tpot": 104.0}])
+
+    mismatch = _compare_pareto_dfs(
+        python_df,
+        rust_df,
+        rtol=0.01,
+        atol=1e-3,
+        frontier_rtol=0.05,
+        frontier_atol=1e-3,
+        encoder_rtol=0.01,
+        encoder_atol=1e-3,
+    )
+
+    assert mismatch is not None
+    assert "tpot[0]" in mismatch
+    assert "beyond tolerance" in mismatch

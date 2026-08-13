@@ -792,7 +792,11 @@ def _compare_pareto_dfs(
         return encoder_mismatch
 
     approximate_columns = [col for col in python_columns if col in _APPROXIMATE_ENGINE_STEP_COLUMNS]
-    identity_columns = [col for col in python_columns if col not in _APPROXIMATE_ENGINE_STEP_COLUMNS]
+    identity_columns = [
+        col
+        for col in python_columns
+        if col not in _APPROXIMATE_ENGINE_STEP_COLUMNS and col not in _ENCODER_EVIDENCE_COLUMNS
+    ]
 
     def _compare_relaxed_frontier(reason: str) -> str | None:
         mismatch = _compare_frontier_envelope(
