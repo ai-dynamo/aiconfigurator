@@ -20,7 +20,17 @@ def has_video_input(
     Unsupported boundaries use this partial-input-aware predicate so an
     incomplete video request cannot silently degrade to a text-only request.
     """
-    return any((value or 0) > 0 for value in (num_videos, video_height, video_width, video_frames, num_video_tokens))
+    fields = {
+        "num_videos": num_videos,
+        "video_height": video_height,
+        "video_width": video_width,
+        "video_frames": video_frames,
+        "num_video_tokens": num_video_tokens,
+    }
+    for name, value in fields.items():
+        if value is not None and value < 0:
+            raise ValueError(f"{name} must be nonnegative, got {value}.")
+    return any((value or 0) > 0 for value in fields.values())
 
 
 @dataclass

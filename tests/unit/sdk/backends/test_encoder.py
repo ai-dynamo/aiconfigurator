@@ -178,6 +178,20 @@ class TestEncoderVideoTokenFormula:
             out_hidden_size=5120,
         )
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("num_videos", -1),
+            ("video_height", -448),
+            ("video_width", -448),
+            ("video_frames", -1),
+            ("num_video_tokens", -196),
+        ],
+    )
+    def test_negative_video_workload_fields_fail_loudly(self, field, value):
+        with pytest.raises(ValueError, match=rf"{field} must be nonnegative"):
+            config.has_video_input(**{field: value})
+
     def test_video_frames_contribute_temporal_patches(self, enc_cfg):
         rc = RuntimeConfig(
             video_height=448,
