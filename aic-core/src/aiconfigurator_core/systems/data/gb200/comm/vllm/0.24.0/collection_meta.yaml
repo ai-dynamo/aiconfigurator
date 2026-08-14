@@ -9,3 +9,32 @@ runtime:
 tables:
   custom_allreduce_perf:
     status: complete
+  moe_a2a_perf:
+    collector_ref: 1dfc3c48e18461463f45cf9c3cc0e26461aaa7dc
+    collector_hash: sha256:21c3ba287c0fc30edaf6b12920e549536896f35a8d441fcfcef040fb02ed10c1
+    collected_at: '2026-08-13'
+    rows: 632
+    status: complete
+    runtime:
+      runtime_framework: wideep_vllm
+      runtime_version: 0.26.1rc1.dev587
+      image: vllm/vllm-openai:nightly
+      image_digest: sha256:280746355f613abb45b3a89deabff4b63a51ae0936a22325ea8d49c89134f801
+      source_commit: d8c70f22434afcbd6644aa43d3f23aecb6e5a09f
+      abi:
+        build_mode: source-wheel-over-pinned-base
+        cuda: '13.0'
+        deep_ep: d4f41e4e93
+        nccl_v2: '>=2.30.4'
+        nvshmem: 3.3.24
+        torch: 2.13.0
+    backends:
+      deepep_ht:
+        case_plan_hash: sha256:ad204d1462e8042a0dc3db7fb492d93380f08cd93c52ee4537e107bdbeef9f70
+        rows: 156
+      deepep_ll:
+        case_plan_hash: sha256:248f4640ad76e45e5a55869136b20976c9cde8b08b2b5f3a52bb06e1ab491f5f
+        rows: 168
+      deepep_v2:
+        case_plan_hash: sha256:f4ce06ad5a92fdc7a3e156b4360d354ac07007a8ff6a85843ec7c43709673b3c
+        rows: 308
