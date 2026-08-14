@@ -855,8 +855,10 @@ def _request_for_point(
         detail = ", ".join(f"{service_name}={value}" for service_name, value in active_depths)
         raise ValueError(f"worker services use different speculative depths: {detail}")
     source_nextn = next(iter(depth_values), None)
-    active_speculation = source_nextn is not None or any(
-        speculation_enabled(value) for value in speculative_enable_values
+    active_speculation = (
+        speculation_enabled(overrides.nextn)
+        or source_nextn is not None
+        or any(speculation_enabled(value) for value in speculative_enable_values)
     )
     if active_speculation and overrides.nextn_accepted is None:
         raise ValueError("speculative decoding requires an explicit nextn_accepted override")

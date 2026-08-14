@@ -125,6 +125,16 @@ def test_agg_backends_support_string_and_list_arguments(backend, args_as_string)
     )
 
 
+def test_override_only_speculation_requires_explicit_acceptance():
+    outcome = adapt_config(
+        DynamoRecipeSource(_agg_yaml("trtllm")),
+        AdapterOverrides(isl=1024, osl=128, concurrency=16, nextn=1, nextn_accepted=None),
+    ).outcomes[0]
+
+    assert outcome.status == "rejected"
+    assert outcome.diagnostics[-1].message == "speculative decoding requires an explicit nextn_accepted override"
+
+
 def test_resolved_dsv4_shell_comments_do_not_change_engine_arguments():
     fixture = _NIGHTLY_FIXTURES / "dsv4"
 
