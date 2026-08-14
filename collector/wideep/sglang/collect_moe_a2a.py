@@ -1144,6 +1144,7 @@ def _emit_case_rows(
             kernel_source=KERNEL_SOURCE,
             perf_filename=perf_path,
             power_stats=_power_columns(),
+            include_power_columns=False,
         ):
             raise MoeA2ABenchmarkError(
                 f"helper.log_perf failed to persist the measured {case.comm_backend}/{phase} row "

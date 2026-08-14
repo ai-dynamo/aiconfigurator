@@ -58,9 +58,9 @@ def test_allreduce_stamps_true_and_overwrites_stale_true(monkeypatch):
     source_path = REPO_ROOT / "collector" / "network" / "collect_all_reduce.py"
     stamp = _load_functions(source_path, "_stamp_measure_power_env", namespace={"os": os})["_stamp_measure_power_env"]
 
+    monkeypatch.setenv("COLLECTOR_MEASURE_POWER", "false")
     stamp(True)
     assert os.environ["COLLECTOR_MEASURE_POWER"] == "true"
-    monkeypatch.setenv("COLLECTOR_MEASURE_POWER", "true")
     stamp(False)
     assert os.environ["COLLECTOR_MEASURE_POWER"] == "false"
 

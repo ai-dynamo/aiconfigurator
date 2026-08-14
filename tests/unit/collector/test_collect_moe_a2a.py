@@ -437,6 +437,7 @@ def test_no_power_column_is_emitted(tmp_path, monkeypatch):
         kernel_source=a2a.KERNEL_SOURCE,
         perf_filename=str(perf_file),
         power_stats=a2a._power_columns(),
+        include_power_columns=False,
     )
     header = perf_file.read_text().splitlines()[0]
     assert "power" not in header

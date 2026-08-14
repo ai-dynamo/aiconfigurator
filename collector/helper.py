@@ -767,6 +767,7 @@ def log_perf(
     kernel_source: str,
     perf_filename: str,
     power_stats: dict | None = None,
+    include_power_columns: bool | None = None,
 ) -> bool:
     lock_file = perf_filename + ".lock"
 
@@ -824,7 +825,13 @@ def log_perf(
             expected_fieldnames += list(item_list[0].keys())
 
         power_columns = ["power", "power_limit"]
-        requested_power_cols = bool(power_stats) or _parse_bool_env("COLLECTOR_MEASURE_POWER", default=False)
+        if include_power_columns is False and power_stats:
+            raise ValueError("Cannot omit power columns when power_stats contains measurements")
+        requested_power_cols = (
+            bool(power_stats) or _parse_bool_env("COLLECTOR_MEASURE_POWER", default=False)
+            if include_power_columns is None
+            else include_power_columns
+        )
         is_empty = not os.path.exists(perf_filename) or os.path.getsize(perf_filename) == 0
         fieldnames = list(expected_fieldnames)
         include_power_cols = requested_power_cols
@@ -838,6 +845,10 @@ def log_perf(
             if existing_non_power != expected_fieldnames or len(existing_power) not in (0, len(power_columns)):
                 raise ValueError(
                     f"Existing CSV schema does not match this row: {existing_fieldnames} != {expected_fieldnames}"
+                )
+            if include_power_columns is False and existing_power:
+                raise ValueError(
+                    f"Existing CSV contains power columns that this table explicitly omits: {perf_filename}"
                 )
 
             # A retained power-disabled CSV may be resumed with power enabled.
