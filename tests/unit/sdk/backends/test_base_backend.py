@@ -296,7 +296,7 @@ def test_run_agg_with_osl_one_does_not_divide_by_zero(
     summary = backend.run_agg(
         model,
         database,
-        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=1, prefix=2),
+        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=1, prefix=2, engine_step_backend="rust"),
         ctx_tokens=8,
     )
 
@@ -354,7 +354,7 @@ def test_run_agg_b1_uses_scheduled_activation_peak(
     summary = backend.run_agg(
         model,
         database,
-        RuntimeConfig(batch_size=1, beam_width=1, isl=8, osl=osl),
+        RuntimeConfig(batch_size=1, beam_width=1, isl=8, osl=osl, engine_step_backend="rust"),
         ctx_tokens=8,
     )
 
@@ -538,7 +538,7 @@ def test_run_agg_applies_speculative_progress_in_scheduler(
     summary = backend.run_agg(
         model,
         database,
-        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5),
+        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, engine_step_backend="rust"),
         ctx_tokens=8,
         decode_tokens_per_iteration=2.0,
     )
@@ -578,7 +578,7 @@ def test_run_agg_records_progress_only_when_explicitly_supplied(
     summary = backend.run_agg(
         model,
         database,
-        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5),
+        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, engine_step_backend="rust"),
         ctx_tokens=8,
     )
     assert "decode_tokens_per_iteration" not in summary.get_step_estimates()["scheduling"]
@@ -586,7 +586,7 @@ def test_run_agg_records_progress_only_when_explicitly_supplied(
     explicit = backend.run_agg(
         model,
         database,
-        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5),
+        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, engine_step_backend="rust"),
         ctx_tokens=8,
         decode_tokens_per_iteration=1.0,
     )
@@ -594,6 +594,60 @@ def test_run_agg_records_progress_only_when_explicitly_supplied(
     # The two calls schedule identically but carry different projection
     # eligibility; they must not have shared a cache entry.
     assert explicit is not summary
+
+
+@pytest.mark.parametrize(
+    ("engine_step_backend", "error", "match"),
+    [
+        ("auto", ValueError, "unknown engine_step_backend 'auto'"),
+        (None, TypeError, "compiled engine is the only aggregate engine-step executor"),
+    ],
+)
+def test_run_agg_validates_backend_before_cache_hit(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+    engine_step_backend: str | None,
+    error: type[Exception],
+    match: str,
+) -> None:
+    """A cached Rust summary must not bypass request/database validation."""
+    monkeypatch.delenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", raising=False)
+    monkeypatch.setattr(
+        backend,
+        "run_mixed",
+        lambda *args, **kwargs: StepEstimate(latency_ms=10.0, energy_wms=100.0),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_genonly_step_latency",
+        lambda *args, **kwargs: (5.0, 50.0, {"decode": 5.0}, {"decode": "silicon"}),
+    )
+
+    cached = backend.run_agg(
+        model,
+        database,
+        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, engine_step_backend="rust"),
+        ctx_tokens=8,
+    )
+    assert (
+        backend.run_agg(
+            model,
+            database,
+            RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, engine_step_backend="rust"),
+            ctx_tokens=8,
+        )
+        is cached
+    )
+
+    with pytest.raises(error, match=match):
+        backend.run_agg(
+            model,
+            database,
+            RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, engine_step_backend=engine_step_backend),
+            ctx_tokens=8,
+        )
 
 
 @pytest.mark.parametrize("progress", [0.0, 3.0, float("inf"), float("nan")])
@@ -702,6 +756,7 @@ def test_run_agg_does_not_double_count_visual_tokens_in_run_mixed(
         osl=5,
         num_images_per_request=1,
         num_image_tokens=16,
+        engine_step_backend="rust",
     )
     backend.run_agg(model, database, runtime_config, ctx_tokens=8)
 

@@ -1197,6 +1197,11 @@ class BaseBackend:
             # share a cache entry.
             decode_tokens_per_iteration if speculative_scheduling else None,
         )
+        # Cache identity intentionally no longer includes the retired backend
+        # selector. Preserve the live request contract on hits nonetheless:
+        # unknown values must still raise, ``python`` must still warn, and a
+        # synthetic database must not inherit a prior PerfDatabase result.
+        self._require_rust_engine_step(runtime_config, database, surface="aggregate")
         cached = self._agg_cache.get(cache_key)
         if cached is not None:
             return cached
