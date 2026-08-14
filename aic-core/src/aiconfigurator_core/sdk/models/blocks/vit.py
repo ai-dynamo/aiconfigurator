@@ -232,9 +232,13 @@ class EncoderOnlyModel:
     Mirrors an encoder-only instance (e.g. SGLang ``--encoder-only``); only
     ViT-side rules govern its tensor parallelism.  Duck-types the slice of
     ``BaseModel`` the encoder phase reads: ``encoder_ops``,
-    ``encoder_config`` and ``config``.
+    ``encoder_config`` and ``config``.  The empty LM op lists satisfy the
+    compiled engine's spec-build contract (read unconditionally before any
+    ad-hoc op-list evaluation).
     """
 
     encoder_ops: list
     encoder_config: common.VisionEncoderConfig
     config: object
+    context_ops: list = dataclasses.field(default_factory=list)
+    generation_ops: list = dataclasses.field(default_factory=list)
