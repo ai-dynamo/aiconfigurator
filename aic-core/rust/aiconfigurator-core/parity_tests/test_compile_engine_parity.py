@@ -16,11 +16,12 @@ Three surfaces:
    sglang + trtllm) so backend-specific op-transfer divergences (the
    ``MoEDispatch`` flavor split, trtllm comm quant, the SGLang/TRT-LLM
    Fallback-MLA chain) are covered — compare the compiled-engine path against
-   the FROZEN Python ``BaseBackend`` reference (captured into
-   ``goldens/compile_engine.json`` by ``regenerate_goldens.py``, dedup-plan
-   Gate 2) for static_ctx, static_gen, mixed-step, and decode-step within
-   ``PARITY_RTOL``. The ``_python_*`` helpers in this file are the capture
-   path — the tests themselves never run the Python step.
+   the FROZEN Python ``BaseBackend`` reference in
+   ``goldens/compile_engine.json`` (captured by the retired
+   ``regenerate_goldens.py`` while the Python step path was alive; new
+   records are pinned from the live rust engine by ``pin_goldens.py``) for
+   static_ctx, static_gen, mixed-step, and decode-step within
+   ``PARITY_RTOL``.
 
 3. **Per-op FFI anchor.** ``EngineHandle.run_static_per_op`` folded by name
    must reproduce the frozen Python summary per-op dicts (latency + energy +
@@ -264,98 +265,12 @@ class TestOpTransferRoundTrip:
 # --------------------------------------------------------------------------- #
 # 2. Integration parity against the frozen Python BaseBackend reference.
 #
-# The `_python_*` helpers below are the golden CAPTURE path — they run the
-# live Python step and are called only by `regenerate_goldens.py`. Every
-# RuntimeConfig pins `engine_step_backend="python"`: since the rust default
-# flip (PR-1), a bare RuntimeConfig routes the step to the compiled engine,
-# which would silently capture rust-vs-rust goldens (same rationale as
-# tools/prediction_regression_gate/collect_static.py).
+# The Python side of every reference is a FROZEN golden value in
+# `goldens/compile_engine.json`, captured by the retired
+# `regenerate_goldens.py` while the Python step path was still alive. Only
+# the compiled-engine side runs live; `pin_goldens.py` appends records for
+# new cases (pinned from the live rust engine, provenance-marked).
 # --------------------------------------------------------------------------- #
-
-
-def _python_runtime_config(case: EngineStepParityCase, **overrides) -> config.RuntimeConfig:
-    kwargs = dict(
-        batch_size=case.batch_size,
-        beam_width=1,
-        isl=case.isl,
-        osl=max(case.osl, 2),
-        prefix=case.prefix,
-        engine_step_backend="python",  # pinned; see the section comment above
-    )
-    kwargs.update(overrides)
-    return config.RuntimeConfig(**kwargs)
-
-
-def _python_static(case: EngineStepParityCase, mode: str, stride: int) -> float:
-    model, backend, database = _build_python_model(case)
-    rc = _python_runtime_config(case)
-    (
-        ctx_lat,
-        _ctx_e,
-        gen_lat,
-        _gen_e,
-        _ctx_s,
-        _gen_s,
-    ) = _quiet(backend._run_static_breakdown, model, database, rc, mode, stride)
-    if mode == "static_ctx":
-        return float(sum(ctx_lat.values()))
-    if mode == "static_gen":
-        return float(sum(gen_lat.values()))
-    return float(sum(ctx_lat.values()) + sum(gen_lat.values()))
-
-
-def _python_mixed(case: EngineStepParityCase) -> float:
-    model, backend, database = _build_python_model(case)
-    rc = _python_runtime_config(case)
-    latency_ms, _, _, _ = _quiet(
-        backend._get_mix_step_latency,
-        model,
-        database,
-        rc,
-        case.isl,  # ctx_tokens
-        case.batch_size,  # gen_tokens
-        case.isl,
-        max(case.osl, 2),
-        case.prefix,
-    )
-    return float(latency_ms)
-
-
-def _python_decode(case: EngineStepParityCase) -> float:
-    model, backend, database = _build_python_model(case)
-    rc = _python_runtime_config(case)
-    latency_ms, _, _, _ = _quiet(
-        backend._get_genonly_step_latency,
-        model,
-        database,
-        rc,
-        case.batch_size,  # gen_tokens
-        case.isl,
-        max(case.osl, 2),
-    )
-    return float(latency_ms)
-
-
-def _python_static_per_op_reference(case: EngineStepParityCase) -> dict[str, dict[str, dict[str, float | str]]]:
-    """Capture path for ``goldens/per_op.json``: the Python summary per-op
-    dicts (latency + energy + source) for static ctx/gen at the case shape."""
-    model, backend, database = _build_python_model(case)
-    rc = _python_runtime_config(case)
-    ctx_lat, ctx_energy, gen_lat, gen_energy, ctx_src, gen_src = _quiet(
-        backend._run_static_breakdown, model, database, rc, "static", 1
-    )
-
-    def pack(latency: dict, energy: dict, source: dict) -> dict:
-        return {
-            name: {
-                "latency_ms": float(latency[name]),
-                "energy_wms": float(energy.get(name, 0.0)),
-                "source": str(source.get(name, "silicon")),
-            }
-            for name in latency
-        }
-
-    return {"context": pack(ctx_lat, ctx_energy, ctx_src), "generation": pack(gen_lat, gen_energy, gen_src)}
 
 
 def _assert_within(name: str, python_value: float, new_value: float, *, backend: str) -> None:
@@ -376,7 +291,7 @@ def _assert_within(name: str, python_value: float, new_value: float, *, backend:
 
 
 # Chunked-prefill shapes: shared by the parametrized test and the golden
-# capture (regenerate_goldens.py) so the fixture keys track the test matrix.
+# pin path (pin_goldens.py) so the fixture keys track the test matrix.
 _CHUNKED_PREFILL_CASE_ID = "minimax-m25-b200-vllm-019-isl1024-osl2"
 _CHUNKED_PREFILL_SHAPES = [
     (512, 4, 4096, 128, 0),  # chunked prefill: ctx_tokens < isl
@@ -387,20 +302,6 @@ _CHUNKED_PREFILL_SHAPES = [
 
 def _chunked_prefill_key(ctx_tokens: int, gen_tokens: int, isl: int, osl: int, prefix: int) -> str:
     return f"chunked_prefill::ctx{ctx_tokens}_gen{gen_tokens}_isl{isl}_osl{osl}_prefix{prefix}::mixed_step"
-
-
-def _python_chunked_prefill_references() -> dict[str, float]:
-    """Capture path for the chunked-prefill golden references."""
-    case = _SUBSET_BY_ID[_CHUNKED_PREFILL_CASE_ID].values[0]
-    model, backend, database = _build_python_model(case)
-    references = {}
-    for ctx_tokens, gen_tokens, isl, osl, prefix in _CHUNKED_PREFILL_SHAPES:
-        rc = _python_runtime_config(case, batch_size=1, isl=isl, osl=osl, prefix=prefix)
-        py_val, _, _, _ = _quiet(
-            backend._get_mix_step_latency, model, database, rc, ctx_tokens, gen_tokens, isl, osl, prefix
-        )
-        references[_chunked_prefill_key(ctx_tokens, gen_tokens, isl, osl, prefix)] = float(py_val)
-    return references
 
 
 class TestCompileEngineStaticParity:
@@ -550,48 +451,10 @@ class TestCompileEnginePerOpParity:
 # --------------------------------------------------------------------------- #
 
 
-# Shared by the imbalance tests and the golden capture.
+# Shared by the imbalance tests and the golden pin path.
 _IMBALANCE_CASE_ID = "minimax-m25-b200-vllm-019-isl1024-osl2"
 _IMBALANCE_CTX_SCALE = 1.3
 _IMBALANCE_GEN_SCALE = 0.85
-
-
-def _python_imbalance_scale_references() -> dict[str, float]:
-    """Capture path for the scaled (non-1.0 imbalance-correction) references."""
-    case = _SUBSET_BY_ID[_IMBALANCE_CASE_ID].values[0]
-    model, backend, database = _build_python_model(case)
-    rc = _python_runtime_config(
-        case,
-        seq_imbalance_correction_scale=_IMBALANCE_CTX_SCALE,
-        gen_seq_imbalance_correction_scale=_IMBALANCE_GEN_SCALE,
-    )
-    ctx_lat, _, gen_lat, _, _, _ = _quiet(backend._run_static_breakdown, model, database, rc, "static", 1)
-    py_mixed, _, _, _ = _quiet(
-        backend._get_mix_step_latency,
-        model,
-        database,
-        rc,
-        case.isl,
-        case.batch_size,
-        case.isl,
-        max(case.osl, 2),
-        case.prefix,
-    )
-    py_decode, _, _, _ = _quiet(
-        backend._get_genonly_step_latency,
-        model,
-        database,
-        rc,
-        case.batch_size,
-        case.isl,
-        max(case.osl, 2),
-    )
-    return {
-        "imbalance_scale::static_ctx": float(sum(ctx_lat.values())),
-        "imbalance_scale::static_gen": float(sum(gen_lat.values())),
-        "imbalance_scale::mixed_step": float(py_mixed),
-        "imbalance_scale::decode_step": float(py_decode),
-    }
 
 
 class TestImbalanceScaleParity:
@@ -718,39 +581,6 @@ def _handle_from_spec_json(spec_json: str) -> engine.EngineHandle:
     return engine.EngineHandle(bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json)))
 
 
-def _is_expected_large_ep_conversion_gap(exc: engine.OpConversionError) -> bool:
-    """Whether native compilation failed only on the pending AIC-1601 ops."""
-    message = str(exc)
-    return any(op_name in message for op_name in ("MoEAllToAll", "MoEExpertCompute"))
-
-
-def _python_wideep_sglang_references() -> dict[str, float]:
-    """Capture path for the SGLang WideEP golden references."""
-    try:
-        return _python_wideep_sglang_references_impl()
-    except engine.OpConversionError as exc:
-        if not _is_expected_large_ep_conversion_gap(exc):
-            raise
-        # Large-EP graphs compile natively only from AIC-1601 (PR 2.5);
-        # below it the surface is skipped (its tests carry the same skip).
-        print(f"[goldens] {exc}: skipping wideep_sglang surface until AIC-1601")
-        return {}
-
-
-def _python_wideep_sglang_references_impl() -> dict[str, float]:
-    model, backend, database, _spec_json = _build_wideep_sglang()
-    rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=4, prefix=0, engine_step_backend="python")
-    ctx_lat, _, gen_lat, _, _, _ = _quiet(backend._run_static_breakdown, model, database, rc, "static", 1)
-    py_mixed, _, _, _ = _quiet(backend._get_mix_step_latency, model, database, rc, 1024, 2, 1024, 4, 0)
-    py_decode, _, _, _ = _quiet(backend._get_genonly_step_latency, model, database, rc, 2, 1024, 4)
-    return {
-        "wideep_sglang::static_ctx": float(sum(ctx_lat.values())),
-        "wideep_sglang::static_gen": float(sum(gen_lat.values())),
-        "wideep_sglang::mixed_step": float(py_mixed),
-        "wideep_sglang::decode_step": float(py_decode),
-    }
-
-
 class TestWideEpDeepEpParity:
     """SGLang large-EP DeepSeek (deepep_ht/deepep_ll) end-to-end parity.
 
@@ -818,60 +648,6 @@ def _build_wideep_trtllm():
         database=database,
     )
     return model, backend, database, spec_json
-
-
-def _python_wideep_trtllm_references() -> dict[str, float]:
-    """Capture path for the TRT-LLM WideEP golden references."""
-    try:
-        return _python_wideep_trtllm_references_impl()
-    except engine.OpConversionError as exc:
-        if not _is_expected_large_ep_conversion_gap(exc):
-            raise
-        # Large-EP graphs compile natively only from AIC-1601 (PR 2.5);
-        # below it the surface is skipped (its tests carry the same skip).
-        print(f"[goldens] {exc}: skipping wideep_trtllm surface until AIC-1601")
-        return {}
-
-
-@pytest.mark.parametrize(
-    ("capture", "impl_name"),
-    [
-        (_python_wideep_sglang_references, "_python_wideep_sglang_references_impl"),
-        (_python_wideep_trtllm_references, "_python_wideep_trtllm_references_impl"),
-    ],
-)
-def test_wideep_golden_capture_reraises_unrelated_conversion_failures(capture, impl_name, monkeypatch) -> None:
-    def fail_with_unrelated_op() -> dict[str, float]:
-        raise engine.OpConversionError("unsupported op: FPMForwardOp")
-
-    monkeypatch.setitem(globals(), impl_name, fail_with_unrelated_op)
-    with pytest.raises(engine.OpConversionError, match="FPMForwardOp"):
-        capture()
-
-
-@pytest.mark.parametrize(
-    ("capture", "impl_name", "large_ep_op"),
-    [
-        (_python_wideep_sglang_references, "_python_wideep_sglang_references_impl", "MoEAllToAll"),
-        (_python_wideep_trtllm_references, "_python_wideep_trtllm_references_impl", "MoEExpertCompute"),
-    ],
-)
-def test_wideep_golden_capture_skips_only_expected_large_ep_gap(capture, impl_name, large_ep_op, monkeypatch) -> None:
-    def fail_with_pending_op() -> dict[str, float]:
-        raise engine.OpConversionError(f"unsupported op: {large_ep_op}")
-
-    monkeypatch.setitem(globals(), impl_name, fail_with_pending_op)
-    assert capture() == {}
-
-
-def _python_wideep_trtllm_references_impl() -> dict[str, float]:
-    model, backend, database, _spec_json = _build_wideep_trtllm()
-    rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=4, prefix=0, engine_step_backend="python")
-    ctx_lat, _, gen_lat, _, _, _ = _quiet(backend._run_static_breakdown, model, database, rc, "static", 1)
-    return {
-        "wideep_trtllm::static_ctx": float(sum(ctx_lat.values())),
-        "wideep_trtllm::static_gen": float(sum(gen_lat.values())),
-    }
 
 
 class TestTrtllmWideEpParity:

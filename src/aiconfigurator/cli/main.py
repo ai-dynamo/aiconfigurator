@@ -148,10 +148,9 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
         "--engine-step-backend",
         choices=["python", "rust"],
         default=None,
-        help="Engine-step latency backend. By default the compiled Rust engine answers "
-        "(energy crosses the FFI, so power-carrying databases run on the compiled "
-        "engine too); use 'python' as the escape hatch or 'rust' to force the "
-        "compiled engine.",
+        help="Engine-step latency backend. The compiled Rust engine is the only step "
+        "executor; 'python' is DEPRECATED and now a no-op (it warns once and runs on "
+        "the compiled engine anyway — accepted for one release cycle, then removed).",
     )
     common_parser.add_argument(
         "--forward-model",
@@ -1547,11 +1546,12 @@ def build_default_tasks(
             serving mode. Restrict with *_moe_ep_candidates in an exp YAML.
         moe_backend: Explicit SGLang MoE backend override ('deepep_moe' is
             deprecated and ignored; 'megamoe' is a real kernel selection).
-        engine_step_backend: Engine-step latency backend ("python" or "rust");
-            unset defaults to the compiled Rust engine (SDK callers passing
-            synthetic database objects the compiled engine cannot re-load
-            from disk still delegate to the Python step).
-        forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None keeps the default.
+        engine_step_backend: Engine-step latency backend. The compiled Rust
+            engine is the only step executor; "python" is a deprecated no-op
+            (warns once, runs on the compiled engine anyway).
+        forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None
+            keeps the default. Both evaluate on the compiled engine ("fpm"
+            through its native FpmForward operation).
         serving_mode: Serving modes to build. ``"auto"`` builds agg and disagg,
             ``"all"`` also includes AFD, and an explicit mode builds only that mode.
         afd_max_a_batch_size: Maximum attention batch size considered by AFD.

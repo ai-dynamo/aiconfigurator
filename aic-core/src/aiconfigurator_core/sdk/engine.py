@@ -692,11 +692,6 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
     # source. The identity strings were normalized by _norm_identity at op
     # construction; Rust compares them verbatim.
     if isinstance(op, FPMForwardOp):
-        if op._sol_ops is None:
-            raise OpConversionError(
-                "FPMForwardOp with an injected sol_fn cannot compile to an EngineSpec; "
-                "build the model through get_model (sol_ops) instead."
-            )
         return {
             "FpmForward": {
                 "name": op._name,

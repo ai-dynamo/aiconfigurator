@@ -10,9 +10,10 @@
 //! attention, mla, dsa, dsv4, mhc, moe, communication, state-space, and
 //! the TRT-LLM all-to-all table.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::common::enums::{DatabaseMode, TransferPolicy};
 use crate::common::error::AicError;
@@ -56,6 +57,32 @@ pub(crate) fn resolve_op_sources(
             vec![PerfSource(path, None)]
         }
     }
+}
+
+/// Stable identity string for one `load_with_sources` input set, used as the
+/// shared-tables memo key. Deterministic: `PerfDbSources` is a `BTreeMap` and
+/// each source list is ordered, so equal inputs always render equal keys.
+/// Built by hand (not serde) so non-UTF-8 paths degrade lossily instead of
+/// failing; `\x1f` (unit separator) keeps path/name boundaries unambiguous.
+fn shared_tables_key(
+    systems_root: &Path,
+    system: &str,
+    backend: &str,
+    version: &str,
+    perf_db_sources: &PerfDbSources,
+) -> String {
+    use std::fmt::Write as _;
+    let mut key = format!(
+        "{}\x1f{system}\x1f{backend}\x1f{version}",
+        systems_root.display()
+    );
+    for (basename, sources) in perf_db_sources {
+        let _ = write!(key, "\x1f{basename}=");
+        for PerfSource(path, kernel_sources) in sources {
+            let _ = write!(key, "{}|{kernel_sources:?};", path.display());
+        }
+    }
+    key
 }
 
 /// Scan family-first sibling dirs for `<family>/<backend>/<version>/<basename>`,
@@ -400,14 +427,68 @@ impl PerfDatabase {
             system_spec: spec,
             data_root,
         };
-        Ok(Self {
-            tables: Arc::new(tables),
+        Ok(Self::from_tables(Arc::new(tables)))
+    }
+
+    /// Like [`PerfDatabase::load_with_sources`], but shares the loaded
+    /// [`PerfTables`] across databases with the same load identity
+    /// (systems root, system, backend, version, shared-layer source map).
+    ///
+    /// The tables are the expensive half of a database: each family parses
+    /// its parquet files behind a `OnceLock` on first query, so every
+    /// separately-loaded instance re-parses the same files. Sharing them
+    /// amortizes that parse across the many single-use engines a sweep
+    /// compiles (one per model x parallelism x quant identity — the
+    /// prediction-regression gate builds hundreds per combo). Only the
+    /// immutable-after-load half is shared: every returned view gets fresh
+    /// mode/policy fields, memo caches, and a fresh provenance accumulator,
+    /// so two engines over the same tables never couple their runtime state.
+    ///
+    /// The memo holds `Weak` references and is swept on insert, so tables
+    /// live exactly as long as some database still uses them. Concurrent
+    /// first loads of the same identity may both build (benign: last insert
+    /// wins and both instances work; the memo is an amortization, not a
+    /// uniqueness guarantee).
+    pub fn load_with_sources_shared(
+        systems_root: &Path,
+        system: &str,
+        backend: &str,
+        version: &str,
+        perf_db_sources: &PerfDbSources,
+    ) -> Result<Self, AicError> {
+        static SHARED_TABLES: OnceLock<Mutex<HashMap<String, Weak<PerfTables>>>> = OnceLock::new();
+        let key = shared_tables_key(systems_root, system, backend, version, perf_db_sources);
+        let memo = SHARED_TABLES.get_or_init(Default::default);
+        if let Some(tables) = memo.lock().unwrap().get(&key).and_then(Weak::upgrade) {
+            return Ok(Self::from_tables(tables));
+        }
+        let db = Self::load_with_sources(systems_root, system, backend, version, perf_db_sources)?;
+        let mut map = memo.lock().unwrap();
+        map.retain(|_, weak| weak.strong_count() > 0);
+        map.insert(key, Arc::downgrade(&db.tables));
+        Ok(db)
+    }
+
+    /// Fresh default-mode view over `tables`. Per-view state (query mode,
+    /// transfer policy, memo caches, provenance accumulator) always starts
+    /// fresh here — the invariant [`PerfDatabase::load_with_sources_shared`]
+    /// relies on to share tables without coupling views.
+    fn from_tables(tables: Arc<PerfTables>) -> Self {
+        Self {
+            tables,
             database_mode: DatabaseMode::default(),
             transfer_policy: TransferPolicy::ALL,
             util_grids: Arc::new(UtilGridCache::new()),
             delta_lookups: Arc::new(DeltaLookupCache::new()),
             provenance: Arc::new(AtomicU8::new(ProvenanceTier::Silicon as u8)),
-        })
+        }
+    }
+
+    /// The shared tables `Arc` (the load identity of the underlying data).
+    /// Exposed for the engine layer's table-sharing tests.
+    #[cfg(test)]
+    pub(crate) fn tables_arc(&self) -> &Arc<PerfTables> {
+        &self.tables
     }
 
     /// Record that an empirical path of tier `tier` produced a value.
@@ -654,6 +735,90 @@ mod tests {
             gemm_sources[0].0.is_file(),
             "resolved GEMM parquet must exist: {}",
             gemm_sources[0].0.display()
+        );
+    }
+
+    #[test]
+    fn shared_load_reuses_tables_and_isolates_view_state() {
+        let sources = PerfDbSources::default();
+        let db1 = PerfDatabase::load_with_sources_shared(
+            &systems_root(),
+            "b200_sxm",
+            "vllm",
+            "0.19.0",
+            &sources,
+        )
+        .expect("shared load must succeed");
+        let db2 = PerfDatabase::load_with_sources_shared(
+            &systems_root(),
+            "b200_sxm",
+            "vllm",
+            "0.19.0",
+            &sources,
+        )
+        .expect("shared load must succeed");
+        assert!(
+            Arc::ptr_eq(&db1.tables, &db2.tables),
+            "same load identity must share the parsed tables"
+        );
+        // Per-view state must stay isolated: a provenance note (and memo
+        // caches) on one view never leaks into another view over the same
+        // shared tables.
+        db1.note_provenance(ProvenanceTier::Empirical);
+        assert_eq!(db2.worst_provenance(), ProvenanceTier::Silicon);
+        assert!(!Arc::ptr_eq(&db1.util_grids, &db2.util_grids));
+        assert!(!Arc::ptr_eq(&db1.delta_lookups, &db2.delta_lookups));
+    }
+
+    #[test]
+    fn shared_load_distinct_source_maps_load_fresh_tables() {
+        let db_default = PerfDatabase::load_with_sources_shared(
+            &systems_root(),
+            "b200_sxm",
+            "vllm",
+            "0.19.0",
+            &PerfDbSources::default(),
+        )
+        .expect("shared load must succeed");
+        let mut sources = PerfDbSources::default();
+        sources.insert(
+            "gemm_perf.parquet".to_string(),
+            vec![PerfSource(PathBuf::from("/nonexistent/gemm.parquet"), None)],
+        );
+        let db_override = PerfDatabase::load_with_sources_shared(
+            &systems_root(),
+            "b200_sxm",
+            "vllm",
+            "0.19.0",
+            &sources,
+        )
+        .expect("shared load must succeed (tables are lazy; the bad path only matters on query)");
+        assert!(
+            !Arc::ptr_eq(&db_default.tables, &db_override.tables),
+            "a different source map is a different load identity"
+        );
+    }
+
+    #[test]
+    fn shared_tables_are_dropped_with_their_last_view() {
+        // A unique tempdir root gives this test its own memo identity, so
+        // parallel tests holding the real-fixture tables can't keep this
+        // entry alive.
+        let tmp = tempfile::tempdir().unwrap();
+        energy_test_fixtures::write_energy_systems_root(tmp.path());
+        let db = PerfDatabase::load_with_sources_shared(
+            tmp.path(),
+            "testsys",
+            "vllm",
+            "1.0",
+            &PerfDbSources::default(),
+        )
+        .expect("fixture load must succeed");
+        let weak = Arc::downgrade(&db.tables);
+        drop(db);
+        assert!(
+            weak.upgrade().is_none(),
+            "the memo must hold Weak refs only — tables die with their last view"
         );
     }
 

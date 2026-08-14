@@ -145,6 +145,61 @@ def test_legacy_package_patch_updates_canonical_package(package_suffix: str, att
     assert getattr(canonical_package, attribute) is not mocked
 
 
+def test_operations_baseline_exports_survive() -> None:
+    """Frozen baseline of the public ``operations`` surface.
+
+    The facade tests above compare the two LIVE facades to each other, so
+    they stay green even when a previously exported name disappears from
+    both at once. This literal list pins the surface as of the Python
+    engine-step retirement (#1521): removing a name from it is a public-SDK
+    break and must be a deliberate, reviewed edit here — after a deprecation
+    window — never a side effect.
+    """
+    baseline = {
+        "Mamba2",  # deprecated composite, kept exported for the compat window
+        "FPMForwardOp",
+        "Mamba2Kernel",
+        "GDNKernel",
+        "KDAKernel",
+        "GEMM",
+        "MoE",
+        "ContextAttention",
+        "GenerationAttention",
+        "ContextMLA",
+        "GenerationMLA",
+        "CustomAllReduce",
+        "MoEAllToAll",
+        "AFDTransfer",
+        "AFDCombine",
+        "Embedding",
+        "ElementWise",
+        "P2P",
+    }
+    operations = importlib.import_module("aiconfigurator.sdk.operations")
+    exported = set(operations.__all__)
+    missing = baseline - exported
+    assert not missing, f"public operations exports removed without a deprecation window: {sorted(missing)}"
+    for name in sorted(baseline):
+        assert getattr(operations, name) is not None
+
+
+def test_fpm_forward_op_keeps_legacy_constructor_layout() -> None:
+    """Baseline signature pin for the exported ``FPMForwardOp``.
+
+    The legacy layout is ``(phase, model_config, model_path, sol_fn=None,
+    weight_bytes=0.0, sol_ops=None)``. The ``sol_fn`` slot is retired but
+    keeps its position so positional ``weight_bytes``/``sol_ops`` callers
+    keep their meaning; passing a callback raises a targeted migration
+    error instead of silently rebinding parameters.
+    """
+    import inspect
+
+    from aiconfigurator.sdk.operations import FPMForwardOp
+
+    params = list(inspect.signature(FPMForwardOp.__init__).parameters)
+    assert params == ["self", "phase", "model_config", "model_path", "sol_fn", "weight_bytes", "sol_ops"]
+
+
 def test_representative_from_imports_return_canonical_objects() -> None:
     """The user-facing from-import form remains backward compatible."""
     from aiconfigurator.sdk.config import ModelConfig as LegacyModelConfig

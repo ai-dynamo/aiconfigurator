@@ -276,7 +276,13 @@ impl Engine {
         let systems_root = spec.engine.systems_path.as_deref().unwrap_or(systems_root);
         let transfer_policy = TransferPolicy::from_wire(spec.engine.transfer_policy.as_deref())
             .map_err(AicError::InvalidEngineConfig)?;
-        let db = PerfDatabase::load_with_sources(
+        // The shared variant reuses already-parsed perf tables across engines
+        // with the same DB identity: a sweep compiles one engine per
+        // model/parallelism/quant point, and without sharing each of those
+        // engines would lazily re-parse the same parquet files on its first
+        // query (~0.5s per engine on data-rich systems). Mode/policy, memo
+        // caches, and the provenance accumulator stay per-engine.
+        let db = PerfDatabase::load_with_sources_shared(
             systems_root,
             &spec.engine.system_name,
             spec.engine.backend.as_str(),
@@ -1383,6 +1389,30 @@ mod tests {
             osl,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn from_spec_bytes_shares_parsed_tables_across_engines() {
+        use crate::operators::util_empirical::ProvenanceTier;
+
+        // Two DIFFERENT engine identities (nextn differs) over the SAME db
+        // identity: the sweep pattern that motivates the shared-tables memo.
+        let spec1 = EngineSpec::new(fixture_engine_config(None), context_ops(), generation_ops());
+        let spec2 = EngineSpec::new(
+            fixture_engine_config(Some(1)),
+            context_ops(),
+            generation_ops(),
+        );
+        let e1 = Engine::from_spec_bytes(&spec1.to_bincode().unwrap(), &systems_root()).unwrap();
+        let e2 = Engine::from_spec_bytes(&spec2.to_bincode().unwrap(), &systems_root()).unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(e1.database().tables_arc(), e2.database().tables_arc()),
+            "engines over the same db identity must share parsed tables"
+        );
+        // ... while their run state stays per-engine: provenance noted through
+        // one engine's database must not appear on the other's accumulator.
+        e1.database().note_provenance(ProvenanceTier::Empirical);
+        assert_eq!(e2.database().worst_provenance(), ProvenanceTier::Silicon);
     }
 
     #[test]

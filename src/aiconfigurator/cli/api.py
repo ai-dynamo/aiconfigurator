@@ -246,7 +246,8 @@ def cli_default(
             Equivalent to repeating ``--generator-set`` on the CLI.
         generator_config: Path to a unified generator YAML config file.
         generator_dynamo_version: Override Dynamo version used by the generator.
-        engine_step_backend: Experimental static latency backend ("python" or "rust").
+        engine_step_backend: Engine-step backend; "rust" (the compiled engine,
+            default and only executor) or the deprecated no-op "python".
         forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None keeps the default.
 
     Returns:
@@ -469,7 +470,8 @@ def cli_recommend(
         moe_backend: Explicit SGLang MoE backend override.
         top_n: Number of top configurations to return per mode. Default is 5.
         save_dir: Directory to save results. If None, results are not saved.
-        engine_step_backend: Experimental static latency backend.
+        engine_step_backend: Engine-step backend; "rust" (the compiled engine,
+            default and only executor) or the deprecated no-op "python".
         forward_model: Forward-pass modeling mode ("op_level" or "fpm").
             None keeps the default.
 
@@ -1083,7 +1085,8 @@ def cli_estimate(
         max_seq_len: The TRT-LLM ``--max_seq_len`` setting used at serving time.
             Controls how many KV blocks TRT-LLM pre-allocates per sequence. Defaults
             to ``isl + osl`` when ``None``.
-        engine_step_backend: Experimental static latency backend ("python" or "rust").
+        engine_step_backend: Engine-step backend; "rust" (the compiled engine,
+            default and only executor) or the deprecated no-op "python".
         prefix: (common) Prefix cache length (subset of ``isl`` already cached).
             Applied to agg, disagg, and all static modes. Default 0.
         nextn: (common) MTP draft length, or ``"auto"`` to use the checkpoint's

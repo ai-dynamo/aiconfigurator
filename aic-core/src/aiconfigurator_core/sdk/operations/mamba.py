@@ -892,6 +892,12 @@ class Mamba2(Operation):
     """
     Mamba2 operation for NemotronH hybrid models.
 
+    DEPRECATED: no in-repo model builds this composite (NemotronH hybrids
+    build ``Mamba2Kernel`` ops directly, and the compiled engine executes
+    them). It stays exported for the public-SDK compatibility window; its
+    disposition lands with the per-call query-stack retirement
+    (``docs/python-dedup-plan.md`` sequel).
+
     Composite op — no perf table of its own. Builds the full Mamba2Mixer
     layer cost from:
     - in_proj GEMM (``database.query_gemm``)

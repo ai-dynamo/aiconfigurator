@@ -138,7 +138,8 @@ def test_task_uses_silicon_database_mode(monkeypatch):
         backend="sglang",
         version="0.5.12",
         constraints=TestConstraints(total_gpus=4, isl=256, osl=256, prefix=128, ttft=1500.0, tpot=50.0),
-        engine_step_backend=None,
     )
 
     assert captured_kwargs["database_mode"] == common.DatabaseMode.SILICON.name
+    # The engine backend is hardcoded inside _create_task (host-independence pin).
+    assert captured_kwargs["engine_step_backend"] == "rust"
