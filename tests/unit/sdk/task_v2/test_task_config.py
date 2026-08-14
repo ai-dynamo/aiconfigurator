@@ -1012,8 +1012,8 @@ def test_sglang_agg_default_moe_ep_search():
     the union with the multi-node ladder instead (test_coverage_candidates)."""
     qwen = "Qwen/Qwen3-235B-A22B"
     t = Task(serving_mode="agg", model_path=qwen, system_name="h200_sxm", backend_name="sglang")
-    assert t.agg_moe_tp_candidates == [1, 2, 4, 8]
-    assert t.agg_moe_ep_candidates == [1, 2, 4, 8]
+    assert t.agg_moe_tp_candidates == [1, 2, 4, 8, 16]
+    assert t.agg_moe_ep_candidates == [1, 2, 4, 8, 16]
     t2 = Task(
         serving_mode="agg",
         model_path=qwen,

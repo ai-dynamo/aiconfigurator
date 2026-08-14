@@ -1592,18 +1592,19 @@ class Task:
 
         # Fused defaults: what a task without large-EP data explores today.
         if self.backend_name == "sglang":
+            x = [1, 2, 4, 8, 16] if self._is_moe else [1, 2, 4, 8]
             fused = {
-                "num_gpu": [1, 2, 4, 8],
-                "tp": [1, 2, 4, 8],
+                "num_gpu": x,
+                "tp": x,
                 "pp": [1],
-                "dp": [1, 2, 4, 8],
+                "dp": x,
                 # Intra-node DeepEP (ep 1-8, NVLink) is EP-only; standard comm
                 # (fused_moe + allgather/RS) also explores MoE TP.
-                "moe_tp": [1] if self.moe_backend == "deepep_moe" else [1, 2, 4, 8],
-                "moe_ep": [1, 2, 4, 8],
+                "moe_tp": [1] if self.moe_backend == "deepep_moe" else x,
+                "moe_ep": x,
             }
         else:
-            x = [1, 2, 4, 8]
+            x = [1, 2, 4, 8, 16] if self._is_moe else [1, 2, 4, 8]
             fused = {"num_gpu": x, "tp": x, "pp": [1], "dp": x, "moe_tp": x, "moe_ep": x}
 
         # Large-EP ladder, offered when the perf data covers this model shape on
