@@ -20,6 +20,12 @@ tables:
     # the replaced rows (vs 4 on gb300, 142 on b200_sxm). Median new/old
     # is 0.673, the same overall win as the sibling systems, so the
     # corrected rows still strictly improve on the packing-biased ones;
-    # a gb200 gemm re-collection is tracked as a follow-up. Same key grid;
+    # 2026-08-14 (AIC-1759): re-collected once more and landed the per-key
+    # MIN of the two independent runs (one-sided spike contamination: the
+    # runs agree at median 1.000 while ~6% of keys spike >1.3x in each,
+    # mostly at different keys). m=32 spike shapes drop 24 -> 7; the ~6
+    # surviving shapes (e.g. n5120xk4096, n4096xk2048) spike in BOTH runs
+    # at the same keys — reproduced platform behavior, kept as measured.
+    # Same key grid;
     # values-only replacement, deliberate append-only exception.
     status: complete
