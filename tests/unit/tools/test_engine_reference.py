@@ -69,13 +69,13 @@ def _assert_matches(py_value, engine_value):
 
 def _check_both_modes(query_facade, query_engine, **kwargs):
     """Compare SILICON and SOL_FULL. A facade data miss must reproduce as the
-    same typed error on the engine side (probe-and-skip keeps working)."""
+    SAME typed error on the engine side (probe-and-skip keeps working)."""
     checked = 0
     for mode in (DatabaseMode.SILICON, DatabaseMode.SOL_FULL):
         try:
             expected = query_facade(**kwargs, database_mode=mode)
-        except (PerfDataNotAvailableError, ValueError):
-            with pytest.raises((PerfDataNotAvailableError, ValueError)):
+        except (PerfDataNotAvailableError, ValueError) as exc:
+            with pytest.raises(type(exc)):
                 query_engine(**kwargs, database_mode=mode)
             continue
         _assert_matches(expected, query_engine(**kwargs, database_mode=mode))
@@ -140,8 +140,8 @@ def test_context_attention_matches_python_op(db_and_reference):
                 )
                 try:
                     expected = float(op.query(database, batch_size=1, s=s, prefix=prefix))
-                except (PerfDataNotAvailableError, ValueError):
-                    with pytest.raises((PerfDataNotAvailableError, ValueError)):
+                except (PerfDataNotAvailableError, ValueError) as exc:
+                    with pytest.raises(type(exc)):
                         reference.query_context_attention(**kwargs, database_mode=DatabaseMode.SILICON)
                     continue
                 _assert_matches(
