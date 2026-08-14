@@ -165,15 +165,15 @@ impl MoEDispatchOp {
                 let attn_dp = self.attention_dp_size.max(1);
                 let pre = self.pre_dispatch;
 
-                let comm_latency_ms = match self.backend {
+                let comm_result = match self.backend {
                     BackendKind::Vllm => {
-                        let mut total = 0.0;
+                        let mut total = PerformanceResult::zero();
                         // Pre-dispatch AR is a proxy for the attention-output
                         // all-reduce; skipped when the model prices it itself.
                         if attn_tp > 1 && !(pre && self.attn_ar_modeled) {
                             let ar =
                                 CustomAllReduceOp::new(&self.name, 1.0, self.hidden_size, num_gpus);
-                            total += ar.query(db, num_tokens)?.latency_ms;
+                            total = total.plus(ar.query(db, num_tokens)?);
                         }
                         if attn_dp > 1 {
                             let op_name = if pre { "all_gather" } else { "reduce_scatter" };
@@ -184,7 +184,7 @@ impl MoEDispatchOp {
                                 num_gpus,
                                 op_name,
                             );
-                            total += nccl.query(db, num_tokens * attn_dp)?.latency_ms;
+                            total = total.plus(nccl.query(db, num_tokens * attn_dp)?);
                         }
                         total
                     }
@@ -215,7 +215,7 @@ impl MoEDispatchOp {
                                 NcclOp::new(&self.name, 1.0, self.hidden_size as f64, gpus1, op1);
                             let n2 =
                                 NcclOp::new(&self.name, 1.0, self.hidden_size as f64, gpus2, op2);
-                            n1.query(db, tokens1)?.latency_ms + n2.query(db, tokens2)?.latency_ms
+                            n1.query(db, tokens1)?.plus(n2.query(db, tokens2)?)
                         } else if self.attn_cp_size > 1 {
                             // Context parallelism (Python moe.py:1279-1290 pre,
                             // :1318-1330 combine); volume = num_tokens * hidden:
@@ -238,9 +238,9 @@ impl MoEDispatchOp {
                                     num_gpus,
                                     op_name,
                                 );
-                                nccl.query(db, num_tokens)?.latency_ms
+                                nccl.query(db, num_tokens)?
                             } else if pre {
-                                0.0
+                                PerformanceResult::zero()
                             } else {
                                 let ar = CustomAllReduceOp::new(
                                     &self.name,
@@ -248,12 +248,12 @@ impl MoEDispatchOp {
                                     self.hidden_size,
                                     num_gpus,
                                 );
-                                ar.query(db, num_tokens)?.latency_ms
+                                ar.query(db, num_tokens)?
                             }
                         } else if attn_tp > 1 {
                             let ar =
                                 CustomAllReduceOp::new(&self.name, 1.0, self.hidden_size, num_gpus);
-                            ar.query(db, num_tokens)?.latency_ms
+                            ar.query(db, num_tokens)?
                         } else if attn_dp > 1 {
                             let op_name = if pre { "all_gather" } else { "reduce_scatter" };
                             let nccl = NcclOp::new(
@@ -263,9 +263,9 @@ impl MoEDispatchOp {
                                 num_gpus,
                                 op_name,
                             );
-                            nccl.query(db, num_tokens * attn_dp)?.latency_ms
+                            nccl.query(db, num_tokens * attn_dp)?
                         } else {
-                            0.0
+                            PerformanceResult::zero()
                         }
                     }
                     BackendKind::Trtllm => {
@@ -274,13 +274,11 @@ impl MoEDispatchOp {
                         // single-term behavior (custom_allreduce on attn_tp) so
                         // downstream callers don't panic if a model mis-routes.
                         let ar = CustomAllReduceOp::new(&self.name, 1.0, self.hidden_size, attn_tp);
-                        ar.query(db, num_tokens)?.latency_ms
+                        ar.query(db, num_tokens)?
                     }
                 };
 
-                Ok(PerformanceResult::new(comm_latency_ms, Source::Silicon)
-                    .clamp_non_negative()
-                    .scaled(self.scale_factor))
+                Ok(comm_result.clamp_non_negative().scaled(self.scale_factor))
             }
             DispatchFlavor::TrtllmAlltoall => {
                 // Full port of Python `MoEDispatch.query`'s trtllm branch
@@ -714,6 +712,52 @@ mod tests {
             .join("../..")
             .join("src/aiconfigurator_core/systems");
         PerfDatabase::load(&root, "b200_sxm", "sglang", "0.5.10").expect("db loads")
+    }
+
+    fn b200_vllm_db() -> PerfDatabase {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
+        PerfDatabase::load(&root, "b200_sxm", "vllm", "0.19.0").expect("db loads")
+    }
+
+    #[test]
+    fn vllm_dispatch_preserves_custom_allreduce_energy() {
+        use crate::perf_database::energy_test_fixtures::{write_parquet, Col};
+        use crate::perf_database::CommunicationTable;
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &tmp.path().join("custom_allreduce_perf.parquet"),
+            &[
+                Col::I64("num_gpus", vec![2, 2]),
+                Col::I64("message_size", vec![4096, 8192]),
+                Col::F64("latency", vec![2.0, 4.0]),
+                Col::F64("power", vec![100.0, 200.0]),
+            ],
+        );
+
+        let mut db = b200_vllm_db();
+        db.tables_mut().communication =
+            CommunicationTable::new(tmp.path().to_path_buf(), None, None);
+
+        for pre_dispatch in [true, false] {
+            let op = MoEDispatchOp::new(
+                "moe_dispatch",
+                1024,
+                8,
+                256,
+                2,
+                1,
+                1,
+                pre_dispatch,
+                BackendKind::Vllm,
+                DispatchFlavor::CustomAllReduce,
+            );
+            let result = op.query(&db, 4).expect("dispatch query");
+            assert_eq!(result.latency_ms, 2.0);
+            assert_eq!(result.energy_wms, 200.0);
+        }
     }
 
     fn cp_dispatch(pre_dispatch: bool, is_context: bool) -> MoEDispatchOp {
