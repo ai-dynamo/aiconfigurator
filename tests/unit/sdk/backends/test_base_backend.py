@@ -308,6 +308,63 @@ def test_run_agg_with_osl_one_does_not_divide_by_zero(
     assert row["tokens/s/user"] == 0.0
 
 
+@pytest.mark.parametrize(
+    ("osl", "expected_memory_calls", "expected_activations"),
+    [
+        (1, [(8, 0)], 0.068359375),
+        (5, [(8, 0), (1, None)], 0.2734375),
+    ],
+)
+def test_run_agg_b1_uses_scheduled_activation_peak(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+    osl: int,
+    expected_memory_calls: list[tuple[int, int | None]],
+    expected_activations: float,
+) -> None:
+    """A b=1 agg run retains a decode peak only when decode is scheduled."""
+    model._nextn = 3
+    model.config.nextn = 3
+    model.context_ops = [SimpleNamespace(get_weights=lambda: 0.0)]
+    model._num_heads = 32
+    model._head_size = 128
+    model._num_experts = 0
+    model.model_family = "test"
+    model.get_kvcache_bytes_per_sequence = lambda _seq_len: 0.0
+    model._cp_kv_memory_divisor = lambda: 1
+    database.system_spec["misc"] = {"nccl_mem": {1: 0}, "other_mem": 0}
+    monkeypatch.setattr(
+        backend,
+        "run_mixed",
+        lambda *args, **kwargs: StepEstimate(latency_ms=1.0, energy_wms=1.0),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_genonly_step_latency",
+        lambda *args, **kwargs: (1.0, 1.0, {"decode": 1.0}, {"decode": "silicon"}),
+    )
+
+    memory_calls: list[dict] = []
+
+    def _get_memory_usage(*args, **kwargs):
+        memory_calls.append(kwargs)
+        return BaseBackend._get_memory_usage(backend, *args, **kwargs)
+
+    monkeypatch.setattr(backend, "_get_memory_usage", _get_memory_usage)
+
+    summary = backend.run_agg(
+        model,
+        database,
+        RuntimeConfig(batch_size=1, beam_width=1, isl=8, osl=osl),
+        ctx_tokens=8,
+    )
+
+    assert [(call["num_tokens"], call["mtp_scaled_tokens"]) for call in memory_calls] == expected_memory_calls
+    assert summary.get_memory()["activations"] == pytest.approx(expected_activations)
+
+
 def test_run_mixed_returns_components_and_counts_speculative_query_tokens(
     backend: BaseBackend,
     model,

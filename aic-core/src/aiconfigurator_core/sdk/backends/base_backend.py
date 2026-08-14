@@ -1817,7 +1817,8 @@ class BaseBackend:
             # correction in _get_memory_usage).
             mtp_scaled_tokens = int(num_gen_requests)
         else:
-            # b == 1: context-only step, no decode share to scale.
+            # b == 1 starts with a context-only step; the later decode peak is
+            # compared below when the workload schedules output tokens.
             num_tokens = ctx_tokens
             mtp_scaled_tokens = 0
 
@@ -1836,6 +1837,27 @@ class BaseBackend:
                 mtp_scaled_tokens=mtp_scaled_tokens,
             ),
         )
+        if b == 1 and osl > 1:
+            # A single-request agg run starts with a context-only step but is
+            # followed by decode-only iterations. Peak HBM is the larger of
+            # those sequential footprints: the context step does not scale for
+            # MTP, while the decode step verifies nextn+1 tokens.
+            decode_memory = self._get_memory_usage(
+                model,
+                database,
+                b,
+                1,
+                isl,
+                osl,
+                prefix=prefix,
+                encoder_memory=encoder_memory,
+                **self._memory_usage_kwargs_for_agg(
+                    num_tokens=int(num_gen_requests),
+                    agg_extra=agg_extra,
+                    mtp_scaled_tokens=None,
+                ),
+            )
+            memory = max((memory, decode_memory), key=lambda footprint: footprint["total"])
         tp = model.config.tp_size
         pp = model.config.pp_size
         dp = model.config.attention_dp_size
