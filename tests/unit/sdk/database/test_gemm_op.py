@@ -16,6 +16,7 @@ import pytest
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.errors import MissingSystemFlopsError, PerfDataNotAvailableError
 from aiconfigurator.sdk.operations.gemm import GEMM
+from aiconfigurator.sdk.performance_result import PerformanceResult
 
 
 class TestGEMMCacheStructure:
@@ -186,6 +187,34 @@ class TestQueryDelegation:
             128, 256, common.GEMMQuantMode.fp8, database_mode=common.DatabaseMode.SOL
         )
         assert float(result) > 0
+
+
+def test_fp8_static_missing_base_energy_does_not_subtract_powered_overheads(caplog):
+    class MissingBasePowerDatabase:
+        def query_gemm(self, *_args, database_mode=None, **_kwargs):
+            if database_mode == common.DatabaseMode.SOL:
+                return PerformanceResult(0.5, energy=0.0, source="sol")
+            return PerformanceResult(2.0, energy=0.0, source="silicon")
+
+        def query_compute_scale(self, *_args, **_kwargs):
+            return PerformanceResult(0.2, energy=20.0, source="silicon")
+
+        def query_scale_matrix(self, *_args, **_kwargs):
+            return PerformanceResult(0.1, energy=10.0, source="silicon")
+
+    with caplog.at_level("WARNING"):
+        result = GEMM(
+            "gate",
+            1,
+            256,
+            256,
+            common.GEMMQuantMode.fp8_static,
+            low_precision_input=True,
+        ).query(MissingBasePowerDatabase(), x=128)
+
+    assert float(result) == pytest.approx(1.7)
+    assert result.energy == 0.0
+    assert "non-negative energy clamp" not in caplog.text
 
 
 class TestSolCorrection:

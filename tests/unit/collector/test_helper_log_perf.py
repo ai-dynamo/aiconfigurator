@@ -198,6 +198,32 @@ def test_power_monitor_rejects_noninteger_device_id():
         PowerMonitor("cuda:0")
 
 
+def test_power_monitoring_only_stops_sampler_when_body_raises(monkeypatch):
+    events = []
+
+    class FakePowerMonitor:
+        def __init__(self, device_id):
+            assert device_id == 2
+
+        def start_sampling(self):
+            events.append("start")
+            return True
+
+        def stop_sampling(self):
+            events.append("stop")
+            return None
+
+    monkeypatch.setattr(helper, "PowerMonitor", FakePowerMonitor)
+
+    with (
+        pytest.raises(RuntimeError, match="kernel failed"),
+        helper.power_monitoring_only(SimpleNamespace(index=2), measure_power=True),
+    ):
+        raise RuntimeError("kernel failed")
+
+    assert events == ["start", "stop"]
+
+
 def test_log_perf_missing_power_row_then_power_row_consistent_columns(tmp_path, monkeypatch):
     """
     Regression: row with power_stats=None written first, then a power-stats row.
@@ -255,9 +281,24 @@ def test_aggregate_latency_weighted_power_is_energy_equivalent():
     assert result == {"power": 250.0, "power_limit": 1000.0}
 
 
-def test_aggregate_latency_weighted_power_rejects_partial_samples():
-    with pytest.raises(RuntimeError, match="mixture of present and missing"):
-        helper.aggregate_latency_weighted_power([(1.0, _POWER_STATS), (2.0, None)])
+def test_aggregate_latency_weighted_power_drops_partial_power_but_keeps_latency(caplog):
+    with caplog.at_level("WARNING"):
+        result = helper.aggregate_latency_weighted_power([(1.0, _POWER_STATS), (2.0, None)])
+
+    assert result is None
+    assert "1 of 2 serial chunks have no power sample" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("power_stats", "message"),
+    [
+        ({"power": None, "power_limit": 1000.0}, "chunk power must be present"),
+        ({"power": 450.0, "power_limit": None}, "power limit must be present"),
+    ],
+)
+def test_aggregate_latency_weighted_power_rejects_missing_values(power_stats, message):
+    with pytest.raises(ValueError, match=message):
+        helper.aggregate_latency_weighted_power([(1.0, power_stats)])
 
 
 def test_zero_work_power_stats_uses_measured_limit(monkeypatch):

@@ -32,6 +32,7 @@ MEASUREMENT_COLUMNS = frozenset(
     {
         "latency",
         "power",
+        "power_limit",
         "energy",
         "avg_ms",
         "dispatch_avg_t_us",

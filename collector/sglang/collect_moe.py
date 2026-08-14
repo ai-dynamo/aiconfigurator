@@ -764,7 +764,7 @@ def _benchmark_framework_quantized_moe(
                     moe_layer(hidden_states, topk_layer(hidden_states, router_logits))
 
             with benchmark_with_power(
-                device=device,
+                device=torch.device(device),
                 kernel_func=kernel_func,
                 num_warmups=5,
                 num_runs=10,

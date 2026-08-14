@@ -449,8 +449,11 @@ def power_monitoring_only(device, measure_power: bool | None = None):
     try:
         yield power_monitor
     finally:
-        # Cleanup happens after yield returns
-        pass
+        # Callers stop the monitor themselves when they need the sampled
+        # statistics. This unconditional cleanup covers exceptions before
+        # that success-path call; stop_sampling() is intentionally idempotent.
+        if power_monitor is not None:
+            power_monitor.stop_sampling()
 
 
 def zero_work_power_stats(device, measure_power: bool | None = None) -> dict | None:
@@ -475,8 +478,9 @@ def aggregate_latency_weighted_power(measurements: Iterable[tuple[float, dict | 
     """Combine serial measurements using energy-equivalent average power.
 
     Each item is ``(latency_ms, power_stats)``. All-power-disabled input
-    returns ``None``. Mixed present/missing stats fail closed because silently
-    averaging only the successful chunks would bias the persisted row.
+    returns ``None``. Mixed present/missing stats also return ``None`` (with a
+    warning): the latency remains valid, while persisting a partial average
+    would bias the row's power.
     """
     measurements = list(measurements)
     if not measurements:
@@ -486,15 +490,26 @@ def aggregate_latency_weighted_power(measurements: Iterable[tuple[float, dict | 
     if not any(stats_present):
         return None
     if not all(stats_present):
-        raise RuntimeError("cannot aggregate a mixture of present and missing power statistics")
+        logging.getLogger(__name__).warning(
+            "Dropping aggregate power because %d of %d serial chunks have no power sample; latency remains valid",
+            stats_present.count(False),
+            len(stats_present),
+        )
+        return None
 
     total_latency_ms = 0.0
     energy_w_ms = 0.0
     power_limits = []
     for latency_ms, stats in measurements:
         latency_ms = float(latency_ms)
-        power = float(stats["power"])
-        power_limit = float(stats["power_limit"])
+        raw_power = stats.get("power")
+        raw_power_limit = stats.get("power_limit")
+        if raw_power is None:
+            raise ValueError("measured chunk power must be present, got None")
+        if raw_power_limit is None:
+            raise ValueError("measured chunk power limit must be present, got None")
+        power = float(raw_power)
+        power_limit = float(raw_power_limit)
         if not math.isfinite(latency_ms) or latency_ms <= 0:
             raise ValueError(f"power-bearing chunk latency must be finite and positive, got {latency_ms}")
         if not math.isfinite(power) or power <= 0:

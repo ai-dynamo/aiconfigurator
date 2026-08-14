@@ -860,6 +860,7 @@ class GEMM(Operation):
         result = database.query_gemm(x, self._n, self._k, quant_mode, below_grid_sol=self._below_grid_sol)
         latency = float(result)
         energy = result.energy
+        base_has_energy = energy > 0.0
         source = getattr(result, "source", "silicon")
         sol_base = source == "sol"
 
@@ -869,14 +870,16 @@ class GEMM(Operation):
         if is_fp8_static:
             compute_scale_result = database.query_compute_scale(x, self._k, quant_mode)
             latency -= float(compute_scale_result)
-            energy -= compute_scale_result.energy
+            if base_has_energy:
+                energy -= compute_scale_result.energy
             sub_src = getattr(compute_scale_result, "source", "silicon")
             if sub_src != source:
                 source = "mixed"
             if self._low_precision_input:
                 scale_matrix_result = database.query_scale_matrix(x, self._k, quant_mode)
                 latency -= float(scale_matrix_result)
-                energy -= scale_matrix_result.energy
+                if base_has_energy:
+                    energy -= scale_matrix_result.energy
                 sub_src = getattr(scale_matrix_result, "source", "silicon")
                 if sub_src != source:
                     source = "mixed"

@@ -735,6 +735,7 @@ def test_framework_moe_router_logits_are_explicitly_float32():
 
     assert "balanced_logits(num_tokens, num_experts, topk).to(device=device, dtype=torch.float32)" in source
     assert "device=device, dtype=torch.float32" in source.split("power_law_logits_v3", maxsplit=1)[1]
+    assert "device=torch.device(device)" in source
 
 
 def test_framework_int4_builds_grouped_compressed_tensors_config():

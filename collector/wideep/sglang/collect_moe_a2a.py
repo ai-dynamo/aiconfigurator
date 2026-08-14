@@ -51,7 +51,8 @@ cross-products documented on each bench function:
   routing must be reproducible from its own case identity instead of from how
   many cases happened to run before it. The cost is that consecutive cases
   sharing a shape see the same routing draw.
-* **No power column.** See :func:`_power_columns`.
+* **No power column.** HT tunes many configurations per emitted winner and LL
+  measures a combined round trip, so neither sampled region maps to one row.
 * **Buffer lifetime.** HT and LL DeepEP Buffers are never co-resident; see
   the run loop in :func:`main`.
 
@@ -523,31 +524,6 @@ def _build_moe_a2a_row(
         "notify_us": float(notify_us),
         "latency": float(transmit_us) + float(notify_us),
     }
-
-
-def _power_columns() -> None:
-    """D7: this table emits NO power column, and that is a measurement fact.
-
-    ``None`` is the loader's supported absent case
-    (``has_power = "power" in rows[0]``) — never a fabricated 0.0, never a
-    present-but-null column (which would crash ``float(row.get("power", 0.0))``).
-
-    Why absent rather than sampled: there is no region whose wall-clock power
-    average corresponds to a single emitted row's workload. An HT row's
-    latency is one winning config extracted from a kineto profile of a
-    116-configuration tuning sweep, and an LL row's latency is one phase of a
-    combined dispatch+combine round trip. Sampling NVML across either region
-    would hand the loader ``energy = power x latency`` computed from two
-    different workloads. And because ``helper.log_perf`` writes the header
-    from the first row while HT and LL share one file, power cannot be
-    emitted for one family only.
-
-    Adding real power here means per-phase, dedicated timed re-runs of the
-    winning configuration under the sampler — a change to the measurement
-    method that must be designed and validated on hardware, not bolted on
-    blind.
-    """
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1143,7 +1119,9 @@ def _emit_case_rows(
             op_name=OP_NAME,
             kernel_source=KERNEL_SOURCE,
             perf_filename=perf_path,
-            power_stats=_power_columns(),
+            # No power: an HT sample spans its tuning sweep, while an LL
+            # sample spans both phases, so either would mislabel this row.
+            power_stats=None,
             include_power_columns=False,
         ):
             raise MoeA2ABenchmarkError(

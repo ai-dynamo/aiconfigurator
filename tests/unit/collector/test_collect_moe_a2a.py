@@ -408,12 +408,10 @@ def test_no_power_column_is_emitted(tmp_path, monkeypatch):
     # D7: absent is the loader's supported case (has_power = "power" in
     # rows[0]); a fabricated 0.0 or a present-but-null column is not. This
     # table emits no power at all because no sampled region corresponds to a
-    # single row's workload -- see _power_columns' docstring.
+    # single row's workload.
     from collector.helper import log_perf
 
-    assert a2a._power_columns() is None
     monkeypatch.setenv("COLLECTOR_MEASURE_POWER", "1")
-    assert a2a._power_columns() is None
 
     perf_file = tmp_path / "moe_a2a_perf.txt"
     log_perf(
@@ -436,7 +434,7 @@ def test_no_power_column_is_emitted(tmp_path, monkeypatch):
         op_name=a2a.OP_NAME,
         kernel_source=a2a.KERNEL_SOURCE,
         perf_filename=str(perf_file),
-        power_stats=a2a._power_columns(),
+        power_stats=None,
         include_power_columns=False,
     )
     header = perf_file.read_text().splitlines()[0]
