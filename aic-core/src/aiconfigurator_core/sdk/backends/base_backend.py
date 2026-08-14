@@ -201,14 +201,20 @@ class BaseBackend:
     def _runtime_config_for_agg_candidate(runtime_config: RuntimeConfig, batch_size: int) -> RuntimeConfig:
         return dataclasses.replace(runtime_config, batch_size=batch_size)
 
-    def _memory_usage_kwargs_for_agg(self, num_tokens: int, agg_extra: dict) -> dict:
+    def _memory_usage_kwargs_for_agg(
+        self, num_tokens: int, agg_extra: dict, mtp_scaled_tokens: int | None = None
+    ) -> dict:
         """Kwargs for the ``_get_memory_usage`` call from ``run_agg``.
 
-        Default: pass the locally-computed ``num_tokens``. TRT-LLM passes
-        ``max_num_tokens`` (BuildConfig.max_num_tokens) for activation sizing
-        and forwards ``max_seq_len`` for KV cache sizing.
+        Default: pass the locally-computed ``num_tokens`` plus the decode-token
+        share for MTP activation scaling. TRT-LLM passes ``max_num_tokens``
+        (BuildConfig.max_num_tokens) for activation sizing and forwards
+        ``max_seq_len`` for KV cache sizing; it does not forward
+        ``mtp_scaled_tokens``, which RETAINS the legacy full ``(nextn+1)``
+        multiplier on that path pending its own analysis (see the comment in
+        ``TRTLLMBackend._memory_usage_kwargs_for_agg``).
         """
-        return {"num_tokens": num_tokens}
+        return {"num_tokens": num_tokens, "mtp_scaled_tokens": mtp_scaled_tokens}
 
     def _oom_check_kwargs(self, agg_extra: dict) -> dict:
         """Extra kwargs for ``InferenceSummary.set_memory_and_check_oom``.
@@ -229,6 +235,22 @@ class BaseBackend:
         return post_merge * runtime_config.num_images_per_request
 
     @staticmethod
+    def effective_prefill_isl(model_path: str, runtime_config: RuntimeConfig) -> int:
+        """Text ISL + vision context tokens for one request.
+
+        Single source for the effective prefill ISL: every token/batch budget
+        derived from it must divide by this same value, never a recomputed one.
+        """
+        from aiconfigurator_core.sdk.utils import get_model_config_from_model_path
+
+        try:
+            enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
+        except Exception:
+            logger.debug("Could not resolve model config for the effective ISL; using text ISL", exc_info=True)
+            enc_cfg = None
+        return runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, runtime_config)
+
+    @staticmethod
     def _visual_context_tokens(model: BaseModel, runtime_config: RuntimeConfig) -> int:
         return BaseBackend._visual_context_tokens_from_encoder_config(
             getattr(model, "encoder_config", None), runtime_config
@@ -243,7 +265,7 @@ class BaseBackend:
         RuntimeConfig + VisionEncoderConfig.
 
         Resolution order:
-            1. image_height + image_width (computed from patch/merge sizes)
+            1. image_height + image_width (smart-resized, then patch/merge sizes)
             2. num_image_tokens (explicit per-image override)
 
         Returns ``(tokens_post_merge_per_image, pre_merge_per_image)``.
@@ -251,11 +273,16 @@ class BaseBackend:
         """
         has_image_dims = runtime_config.image_height > 0 and runtime_config.image_width > 0
         if has_image_dims:
+            # Upstream VL processors (Qwen smart_resize) round each raw
+            # dimension to the *nearest* multiple of patch_size * merge_size
+            # before patchify; plain floor under-counts tokens for
+            # non-aligned inputs.  The processor's min/max_pixels rescaling
+            # is a preprocessor knob AIC does not model.
             img_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
-            tokens_per_image = (runtime_config.image_height // img_stride) * (runtime_config.image_width // img_stride)
-            pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (
-                runtime_config.image_width // enc_cfg.patch_size
-            )
+            h_bar = max(img_stride, round(runtime_config.image_height / img_stride) * img_stride)
+            w_bar = max(img_stride, round(runtime_config.image_width / img_stride) * img_stride)
+            tokens_per_image = (h_bar // img_stride) * (w_bar // img_stride)
+            pre_merge_per_image = (h_bar // enc_cfg.patch_size) * (w_bar // enc_cfg.patch_size)
         elif runtime_config.num_image_tokens > 0:
             tokens_per_image = runtime_config.num_image_tokens
             pre_merge_per_image = tokens_per_image * (enc_cfg.spatial_merge_size**2)
@@ -399,6 +426,37 @@ class BaseBackend:
             note_python_step_fallback("unsupported_op_graph:encoder", str(exc))
             return None
         return latency_dict, energy_dict, source_dict
+
+    def run_encoder_static(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        runtime_config: RuntimeConfig,
+        batch_size: int,
+        latency_correction_scale: float = 1.0,
+    ) -> tuple[float, float, dict[str, float], float]:
+        """Encoder-only static evaluation for a disaggregated encode (EPD) worker.
+
+        Runs just the vision-encoder phase for one batch of ``batch_size``
+        requests and returns ``(latency_ms, power_w, memory_dict,
+        power_coverage)``.  ``model`` may be any object carrying
+        ``encoder_ops``, ``encoder_config`` and ``config`` (e.g.
+        ``EncoderOnlyModel``); ``power_w`` is the phase-average power,
+        invariant to the correction.  ``power_coverage`` is the
+        latency-weighted fraction of ops with recorded energy, mirroring
+        ``InferenceSummary.get_power_data_coverage``.
+        """
+        encoder_latency_dict, encoder_energy_wms_dict, _, _ = self._run_encoder_phase(
+            model, database, runtime_config, batch_size
+        )
+        raw_latency = sum(encoder_latency_dict.values())
+        power_w = sum(encoder_energy_wms_dict.values()) / raw_latency if raw_latency > 0 else 0.0
+        covered_latency = sum(
+            latency for op, latency in encoder_latency_dict.items() if encoder_energy_wms_dict.get(op, 0.0) > 0
+        )
+        power_coverage = covered_latency / raw_latency if raw_latency > 0 else 0.0
+        memory = self._get_encoder_component_memory_for_runtime(model, runtime_config, batch_size)
+        return raw_latency * latency_correction_scale, power_w, memory, power_coverage
 
     def _run_context_phase(
         self,
@@ -664,7 +722,9 @@ class BaseBackend:
         This shares the same latency breakdown path as ``run_static`` but skips
         building an ``InferenceSummary``.
         """
-        if mode == "static_gen":
+        # Workers without encoder ops (text-only models, or EPD language-only
+        # prefill workers) still count vision tokens in the LLM context.
+        if mode == "static_gen" or not model.encoder_ops:
             encoder_latency = 0.0
             img_ctx_tokens = self._visual_context_tokens(model, runtime_config)
         else:
@@ -742,7 +802,9 @@ class BaseBackend:
             runtime_config.prefix,
         )
 
-        if mode == "static_gen":
+        # Workers without encoder ops (text-only models, or EPD language-only
+        # prefill workers) still count vision tokens in the LLM context.
+        if mode == "static_gen" or not model.encoder_ops:
             encoder_latency_dict, encoder_energy_wms_dict = defaultdict(float), defaultdict(float)
             encoder_source_dict = {}
             img_ctx_tokens = self._visual_context_tokens(model, runtime_config)
@@ -781,6 +843,8 @@ class BaseBackend:
         )
 
         if mode == "static_ctx":
+            # Prefill-only step: no decode tokens, so no share of the activation
+            # footprint verifies nextn+1 draft tokens (mtp_scaled_tokens=0).
             memory = self._get_memory_usage(
                 model,
                 database,
@@ -790,6 +854,7 @@ class BaseBackend:
                 1,
                 prefix=prefix,
                 encoder_memory=encoder_memory,
+                mtp_scaled_tokens=0,
             )
         elif mode == "static_gen":
             memory = self._get_memory_usage(
@@ -1803,8 +1868,15 @@ class BaseBackend:
             # will not be corrected by balance score when it's larger than 1.0
             # in order to indicate what's happening
             num_tokens = num_gen_requests + ctx_tokens
+            # Only the decode requests' tokens verify nextn+1 under speculative
+            # decoding; the context share is processed once (see the MTP
+            # correction in _get_memory_usage).
+            mtp_scaled_tokens = int(num_gen_requests)
         else:
+            # b == 1 starts with a context-only step; the later decode peak is
+            # compared below when the workload schedules output tokens.
             num_tokens = ctx_tokens
+            mtp_scaled_tokens = 0
 
         memory = self._get_memory_usage(
             model,
@@ -1815,8 +1887,33 @@ class BaseBackend:
             osl,
             prefix=prefix,
             encoder_memory=encoder_memory,
-            **self._memory_usage_kwargs_for_agg(num_tokens=num_tokens, agg_extra=agg_extra),
+            **self._memory_usage_kwargs_for_agg(
+                num_tokens=num_tokens,
+                agg_extra=agg_extra,
+                mtp_scaled_tokens=mtp_scaled_tokens,
+            ),
         )
+        if b == 1 and osl > 1:
+            # A single-request agg run starts with a context-only step but is
+            # followed by decode-only iterations. Peak HBM is the larger of
+            # those sequential footprints: the context step does not scale for
+            # MTP, while the decode step verifies nextn+1 tokens.
+            decode_memory = self._get_memory_usage(
+                model,
+                database,
+                b,
+                1,
+                isl,
+                osl,
+                prefix=prefix,
+                encoder_memory=encoder_memory,
+                **self._memory_usage_kwargs_for_agg(
+                    num_tokens=int(num_gen_requests),
+                    agg_extra=agg_extra,
+                    mtp_scaled_tokens=None,
+                ),
+            )
+            memory = max((memory, decode_memory), key=lambda footprint: footprint["total"])
         tp = model.config.tp_size
         pp = model.config.pp_size
         dp = model.config.attention_dp_size
@@ -2070,6 +2167,7 @@ class BaseBackend:
         max_seq_len: int | None = None,
         encoder_memory: dict[str, float] | None = None,
         mtp_activation_scaling: bool = True,
+        mtp_scaled_tokens: int | None = None,
     ) -> dict[str, float]:
         """
         Get the memory usage of the backend.
@@ -2128,7 +2226,20 @@ class BaseBackend:
         # (draft tokens included) -- re-multiplying there double-counts and can drive the
         # prefill worker's KV budget negative.
         if mtp_activation_scaling and model.config.nextn > 0:
-            activations = activations * (model.config.nextn + 1)
+            if mtp_scaled_tokens is not None and num_tokens > 0:
+                # Mixed context+decode step (agg): only the decode-token share
+                # verifies nextn+1 tokens; context tokens are processed once.
+                # Scaling the whole footprint models (nextn+1)*(context+decode)
+                # instead of context+(nextn+1)*decode, which at long ISL
+                # inflates activations ~(nextn+1)x and over-prunes concurrency.
+                decode_share = min(max(mtp_scaled_tokens, 0), num_tokens)
+                activations = (
+                    activations * (num_tokens - decode_share + decode_share * (model.config.nextn + 1)) / num_tokens
+                )
+            else:
+                # Decode-only steps (disagg decode worker): every token in the
+                # step is part of verification, so the full multiplier applies.
+                activations = activations * (model.config.nextn + 1)
 
         # Backend-level activation overhead (SGLang only by default).
         if self.ACTIVATION_OVERHEAD_FRAC > 0:

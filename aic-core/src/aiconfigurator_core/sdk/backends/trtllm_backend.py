@@ -124,9 +124,16 @@ class TRTLLMBackend(BaseBackend):
             agg_extra["free_gpu_memory_fraction"],
         )
 
-    def _memory_usage_kwargs_for_agg(self, num_tokens: int, agg_extra: dict) -> dict:
+    def _memory_usage_kwargs_for_agg(
+        self, num_tokens: int, agg_extra: dict, mtp_scaled_tokens: int | None = None
+    ) -> dict:
         # Activation memory tracks BuildConfig.max_num_tokens, not the agg-derived
-        # num_tokens. KV cache tracks max_seq_len per slot.
+        # num_tokens. KV cache tracks max_seq_len per slot. mtp_scaled_tokens is
+        # intentionally dropped (None), which RETAINS the legacy full (nextn+1)
+        # multiplier on this path: max_num_tokens is a per-iteration budget, and
+        # whether the decode-share correction applies to a budget-based footprint
+        # needs its own analysis (compare the AIC-1110 suppression on the
+        # KV-capacity path, which treats the budget as already draft-inclusive).
         return {
             "num_tokens": agg_extra["max_num_tokens"],
             "max_seq_len": agg_extra["max_seq_len"],

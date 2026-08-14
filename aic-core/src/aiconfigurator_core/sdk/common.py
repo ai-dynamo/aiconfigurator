@@ -598,6 +598,7 @@ DefaultHFModels = {
     # NVIDIA Nemotron
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
     "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
     "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
@@ -837,6 +838,18 @@ ColumnsAgg = [
     "power_w",  # NEW: E2E weighted average power in watts
 ]
 
+# E+agg (enable_epd) rows: ColumnsAgg plus the rate-matched cell columns
+# ((a)workers agg workers paired with an (e)* encode pool).
+ColumnsAggEpd = ColumnsAgg + [
+    "(a)workers",
+    "(e)workers",
+    "(e)tp",
+    "(e)pp",
+    "(e)bs",
+    "(e)parallel",
+    "(e)memory",
+]
+
 """
 Columns for disaggregated inference summary dataframe
 """
@@ -899,6 +912,7 @@ ColumnsDisagg = [
     "(e)workers",
     "(e)tp",
     "(e)pp",
+    "(e)bs",
     "(e)parallel",
     "(e)memory",
     "power_w",  # NEW: E2E weighted average power in watts
@@ -1126,6 +1140,9 @@ class PerfDataFilename(Enum):
     wideep_deepep_ll = "wideep_deepep_ll_perf.parquet"
     # TensorRT-LLM WideEP specific
     wideep_moe_compute = "wideep_moe_perf.parquet"
+    # Unified large-EP MoE comm family (SGLang / vLLM / TRT-LLM wideEP; see operations/moe_comm.py)
+    moe_a2a = "moe_a2a_perf.parquet"
+    moe_expert_compute = "moe_expert_compute_perf.parquet"
     # TensorRT-LLM AlltoAll (covers WideEP NVLinkTwoSided + CutlassFusedMoE NVLinkOneSided)
     trtllm_alltoall = "trtllm_alltoall_perf.parquet"
     compute_scale = "computescale_perf.parquet"

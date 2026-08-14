@@ -69,10 +69,10 @@ from aiconfigurator_core.sdk.operations import (
     MLABmm,
     MLAModule,
     MoE,
+    MoEAllToAll,
     MoEDispatch,
+    MoEExpertCompute,
     OverlapOp,
-    TrtLLMWideEPMoE,
-    TrtLLMWideEPMoEDispatch,
     WideEPContextMLA,
     WideEPGenerationMLA,
 )
@@ -118,7 +118,13 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 # - 10 (issue #1498): `Mhc` payload gained `seq_split` (CP per-rank token
 #   division) — a bincode op-layout change. Claimed 7 concurrently with
 #   `attn_ar_modeled`; renumbered at the rebase.
-ENGINE_SPEC_SCHEMA_VERSION = 10
+# - 11 (AIC-1601): the wideEP MoE op variants (`WideEpMoe` /
+#   `WideEpMoeDispatch`) were removed mid-enum, shifting every later bincode
+#   enum index; large-EP is now modeled natively by the `MoeAllToAll` /
+#   `MoeExpertCompute` variants appended after `FpmForward`, and
+#   `MoeExpertComputeOp` carries the
+#   `enable_eplb` legacy-fidelity field.
+ENGINE_SPEC_SCHEMA_VERSION = 11
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)
@@ -135,8 +141,8 @@ class OpConversionError(RuntimeError):
 # dispatch table below wraps it in `{"<VariantTag>": <fields>}`. All values
 # read directly off the Python instance attributes (every field is a
 # build-time instance attr); the few cat-2 derived fields
-# (Elementwise.bytes_per_token, DSv4.attn_kind, MoeDispatch.flavor,
-# WideEpMoe.kernel_source) replicate the Rust model-builder derivation.
+# (Elementwise.bytes_per_token, DSv4.attn_kind, MoeDispatch.flavor)
+# replicate the Rust model-builder derivation.
 # --------------------------------------------------------------------------- #
 
 
@@ -292,9 +298,10 @@ def _moe(op: MoE) -> dict:
         "quant_mode": _quant_name(op._quant_mode),
         "workload_distribution": op._workload_distribution,
         "is_gated": op._is_gated,
-        # SGLang MoE routing (Python `MoE.query` sglang branch): deepep_moe
-        # reads the wideep context/generation tables; EPLB corrects the
-        # prefill token count to int(x * 0.8).
+        # SGLang MoE routing (Python `MoE.query` sglang branch). The
+        # deepep_moe value is retired on the Rust side (AIC-1601 — it raises a
+        # typed retired-op error); the field stays on the wire because EPLB
+        # corrects the prefill token count to int(x * 0.8).
         "moe_backend": op._moe_backend,
         "enable_eplb": bool(op._enable_eplb),
         "is_context": bool(op._is_context),
@@ -307,17 +314,24 @@ def _dispatch_flavor(backend: str, op: MoEDispatch) -> str:
 
     - trtllm -> `TrtllmAlltoall` (the fine SM/NVL72 gating stays inside the
       Rust `MoEDispatchOp::query`);
-    - sglang with `moe_backend == "deepep_moe"` -> the WideEP DeepEP tables:
-      context ops use DeepEP-normal (high-throughput), decode ops use
-      DeepEP-low-latency — mirroring the Python branch split
-      (`operations/moe.py`: `if self._is_context: query_wideep_deepep_normal
-      else query_wideep_deepep_ll`);
     - everything else -> `CustomAllReduce`.
+
+    The sglang `moe_backend == "deepep_moe"` mapping to the DeepEP flavors
+    retired with AIC-1601 (large-EP comm is modeled by `MoEAllToAll`); those
+    Rust variants no longer exist — but Python still routes a direct/custom
+    `MoEDispatch(moe_backend="deepep_moe")` through the DeepEP tables, so
+    serializing that op as `CustomAllReduce` would silently change the
+    communication algorithm in the native engine. Raise `OpConversionError`
+    instead: the established contract for graphs the native engine cannot
+    represent, which delegates the step back to Python.
     """
+    if backend == "deepep_moe":
+        raise OpConversionError(
+            "MoEDispatch(moe_backend='deepep_moe') has no native variant (retired with "
+            "AIC-1601; large-EP comm is modeled by MoEAllToAll) — delegating to the Python step"
+        )
     if backend == "trtllm":
         return "TrtllmAlltoall"
-    if backend == "sglang" and getattr(op, "_moe_backend", None) == "deepep_moe":
-        return "DeepEpNormal" if op._is_context else "DeepEpLowLatency"
     return "CustomAllReduce"
 
 
@@ -339,15 +353,15 @@ def _moe_dispatch(op: MoEDispatch, *, backend: str) -> dict:
         "attn_ar_modeled": op._attn_ar_modeled,
         "backend": backend,
         "flavor": _dispatch_flavor(backend, op),
-        # DeepEP branches divide the dispatch token count by this (Python
-        # `num_tokens // self._scale_num_tokens`, moe.py sglang DeepEP path).
+        # Retained on the wire (the Rust struct still carries the field);
+        # inert since the DeepEP dispatch branches retired (AIC-1601).
         "scale_num_tokens": op._scale_num_tokens,
         "comm_quant": "half",
         "moe_quant": _quant_name(quant) if quant is not None else "bfloat16",
         "attn_cp_size": op._attn_cp_size,
         "is_context": op._is_context,
-        # DeepEP-normal dispatch SM count; the Rust table keys the sms axis
-        # and snaps off-grid values (mirrors `_query_wideep_deepep_normal_table`).
+        # Retained on the wire (the Rust struct still carries the field);
+        # inert since the DeepEP dispatch branches retired (AIC-1601).
         "sms": op._sms,
     }
 
@@ -596,16 +610,35 @@ def _wideep_generation_mla(op: WideEPGenerationMLA) -> dict:
     }
 
 
-def _wideep_moe(op: TrtLLMWideEPMoE, *, database: Any) -> dict:
-    # `kernel_source` is resolved in Python `_select_kernel(database, quant)` at
-    # query time. Pre-bake the resolved value so the Rust side doesn't rely on
-    # its hardcoded default + table-presence fallback.
-    kernel_source = "moe_torch_flow"
-    if database is not None:
-        try:
-            kernel_source = TrtLLMWideEPMoE._select_kernel(database, op._quant_mode)
-        except Exception:
-            kernel_source = "moe_torch_flow"
+def _moe_all_to_all(op: MoEAllToAll) -> dict:
+    """Unified large-EP all-to-all comm phase (Python `MoEAllToAll`). Field
+    names match the Rust `MoeAllToAllOp` (operators/moe_a2a.rs); the crate has
+    no deny_unknown_fields, so a key drift here would silently fall back to
+    the serde default — the key-set tripwire in test_rust_engine_step.py pins
+    the exact set."""
+    return {
+        "name": op._name,
+        "scale_factor": op._scale_factor,
+        "phase": op._phase,
+        "comm_backend": op._comm_backend,
+        "comm_dtype": op._comm_dtype,
+        "hidden_size": op._hidden_size,
+        "topk": op._topk,
+        "num_experts": op._num_experts,
+        "moe_ep_size": op._moe_ep_size,
+        "node_num": op._node_num,
+        "sms": op._sms,
+        "attention_tp_size": op._attention_tp_size,
+    }
+
+
+def _moe_expert_compute(op: MoEExpertCompute) -> dict:
+    """Unified large-EP expert compute (Python `MoEExpertCompute`). Field names match the
+    Rust `MoeExpertComputeOp` (operators/moe_expert_compute.rs). `kernel_source` crosses the wire
+    verbatim (null when unpinned — the production case): the Rust op ports
+    every `_resolve_kernel_source` leg and resolves at query time, so nothing
+    is pre-baked here. `num_slots` is the ctor-resolved value (Python already
+    collapsed None -> num_experts)."""
     return {
         "name": op._name,
         "scale_factor": op._scale_factor,
@@ -613,33 +646,15 @@ def _wideep_moe(op: TrtLLMWideEPMoE, *, database: Any) -> dict:
         "inter_size": op._inter_size,
         "topk": op._topk,
         "num_experts": op._num_experts,
-        "moe_tp_size": op._moe_tp_size,
         "moe_ep_size": op._moe_ep_size,
-        "attention_dp_size": op._attention_dp_size,
         "quant_mode": _quant_name(op._quant_mode),
         "workload_distribution": op._workload_distribution,
-        "num_slots": op._num_slots,
-        "kernel_source": kernel_source,
-    }
-
-
-def _wideep_moe_dispatch(op: TrtLLMWideEPMoEDispatch) -> dict:
-    """TRT-LLM WideEP All2All dispatch (Python `TrtLLMWideEPMoEDispatch`).
-    Field names match the Rust `TrtllmWideEpMoEDispatchOp`. `node_num` is
-    intentionally NOT on the wire: the model builders never set it and the
-    Rust query applies Python's default (`1 if ep < 4 else ep // 4`)."""
-    return {
-        "name": op._name,
-        "scale_factor": op._scale_factor,
-        "hidden_size": op._hidden_size,
-        "topk": op._topk,
-        "num_experts": op._num_experts,
-        "moe_tp_size": op._moe_tp_size,
-        "moe_ep_size": op._moe_ep_size,
         "attention_dp_size": op._attention_dp_size,
-        "pre_dispatch": op._pre_dispatch,
-        "quant_mode": _quant_name(op._quant_mode),
-        "use_low_precision_combine": bool(op._use_low_precision_combine),
+        "inference_phase": op._inference_phase,
+        "num_slots": op._num_slots,
+        "kernel_source": op._kernel_source,
+        "is_gated": bool(op._is_gated),
+        "enable_eplb": bool(op._enable_eplb),
     }
 
 
@@ -722,12 +737,15 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
         return {"WideEpContextMla": _wideep_context_mla(op)}
     if isinstance(op, WideEPGenerationMLA):
         return {"WideEpGenerationMla": _wideep_generation_mla(op)}
-    if isinstance(op, TrtLLMWideEPMoE):
-        return {"WideEpMoe": _wideep_moe(op, database=database)}
-    # MUST precede the MoEDispatch check: TrtLLMWideEPMoEDispatch is a direct
-    # `Operation` subclass (not a MoEDispatch), but keep the guard explicit.
-    if isinstance(op, TrtLLMWideEPMoEDispatch):
-        return {"WideEpMoeDispatch": _wideep_moe_dispatch(op)}
+
+    # Unified large-EP ops (AIC-1601): one Python class per table, the phase
+    # is a constructor field. Rust `Op::MoeAllToAll` / `Op::MoeExpertCompute` are
+    # APPENDED after `FpmForward` (bincode enum indices are positional;
+    # appending shifts nothing), so no ENGINE_SPEC_SCHEMA_VERSION bump.
+    if isinstance(op, MoEAllToAll):
+        return {"MoeAllToAll": _moe_all_to_all(op)}
+    if isinstance(op, MoEExpertCompute):
+        return {"MoeExpertCompute": _moe_expert_compute(op)}
 
     # Plain (single-variant) ops.
     if isinstance(op, GEMM):
@@ -981,9 +999,9 @@ def compile_engine(
     apply_nextn(model_config, nextn)
     model = get_model(model_path, model_config, backend)
 
-    # The database is only needed to pre-bake the WideEP MoE kernel selection
-    # (TRT-LLM only). Load lazily and tolerate failure; the converter falls back
-    # to "moe_torch_flow" when it's unavailable.
+    # The database supplies the shared-layer perf sources, the query mode and
+    # the transfer policy stamped into the compiled `EngineConfig`. Load lazily
+    # and tolerate failure; the Rust core falls back to its own defaults.
     database = _maybe_load_database(system, backend, backend_version, systems_path)
 
     spec_json = build_engine_spec_json(

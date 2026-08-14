@@ -20,10 +20,9 @@ use crate::common::error::AicError;
 use crate::operators::{
     ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp, Dsv4ModuleOp,
     ElementwiseOp, EmbeddingOp, EncoderAttentionOp, FpmForwardOp, GdnOp, GemmOp,
-    GenerationAttentionOp,
-    GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
-    MsaModuleOp, NcclOp, P2POp, PerformanceResult, Source, TrtllmWideEpMoEDispatchOp,
-    VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp, WideEpMoeOp,
+    GenerationAttentionOp, GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp,
+    MoEDispatchOp, MoeAllToAllOp, MoeExpertComputeOp, MoeOp, MsaModuleOp, NcclOp, P2POp,
+    PerformanceResult, Source, VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp,
 };
 use crate::perf_database::PerfDatabase;
 
@@ -126,14 +125,6 @@ pub enum Op {
     /// SGLang WideEP generation MLA — replaces `GenerationMlaOp` in the
     /// `WideEPDeepSeekModel` variant.
     WideEpGenerationMla(WideEpGenerationMlaOp),
-    /// TensorRT-LLM WideEP MoE compute. Used by the
-    /// `TrtllmWideEPDeepSeekModel` variant; dispatch / combine cost is
-    /// modeled separately by `WideEpMoeDispatch`.
-    WideEpMoe(WideEpMoeOp),
-    /// TensorRT-LLM WideEP All2All dispatch (prepare+dispatch / combine).
-    /// Mirrors Python `TrtLLMWideEPMoEDispatch` — a direct `Operation`
-    /// subclass, NOT a `MoEDispatch` flavor.
-    WideEpMoeDispatch(TrtllmWideEpMoEDispatchOp),
     /// Two op groups that execute in parallel on different CUDA streams.
     /// Mirrors Python `aiconfigurator.sdk.operations.overlap.OverlapOp`:
     /// `latency = max(sum(group_a), sum(group_b))`.
@@ -167,8 +158,20 @@ pub enum Op {
     /// NOT related to the `crate::fpm` (ForwardPassPerfModel) module.
     /// APPENDED at the end (see the bincode note on `Dsv4MegaMoe`); claimed
     /// `ENGINE_SPEC_SCHEMA_VERSION` 5 concurrently with #1460/#1435 and was
-    /// renumbered to 7 at the merge.
+    /// renumbered to 9 across the intervening wire-format landings.
     FpmForward(FpmForwardOp),
+    /// Unified large-EP MoE all-to-all comm phase (Python
+    /// `operations.moe_comm.MoEAllToAll`) — one variant serves every backend
+    /// and every phase; the op's `phase` / `comm_backend` fields select the
+    /// slice. Measured-SILICON-only; see `operators/moe_a2a.rs`.
+    ///
+    /// APPENDED after `FpmForward` — same positional-index rule as above.
+    MoeAllToAll(MoeAllToAllOp),
+    /// Unified large-EP MoE expert compute (Python
+    /// `operations.moe_comm.MoEExpertCompute`) — one variant for both inference phases;
+    /// the op's `inference_phase` field selects the slice.
+    /// Measured-SILICON-only; see `operators/moe_expert_compute.rs`.
+    MoeExpertCompute(MoeExpertComputeOp),
 }
 
 /// Inline-defined here (rather than a sibling module under `operators/`)
@@ -244,13 +247,13 @@ impl Op {
             Op::Gdn(o) => &o.name,
             Op::WideEpContextMla(o) => &o.name,
             Op::WideEpGenerationMla(o) => &o.name,
-            Op::WideEpMoe(o) => &o.name,
-            Op::WideEpMoeDispatch(o) => &o.name,
             Op::FpmForward(o) => &o.name,
             Op::Overlap(o) => &o.name,
             Op::Fallback(o) => &o.name,
             Op::Dsv4MegaMoe(o) => &o.name,
             Op::Kda(o) => &o.name,
+            Op::MoeAllToAll(o) => &o.name,
+            Op::MoeExpertCompute(o) => &o.name,
         }
     }
 
@@ -330,8 +333,6 @@ impl Op {
             Op::Gdn(op) => op.query(db, ctx.batch_size, ctx.s),
             Op::WideEpContextMla(op) => op.query(db, ctx.batch_size, ctx.s, ctx.prefix),
             Op::WideEpGenerationMla(op) => op.query(db, ctx.batch_size, ctx.s),
-            Op::WideEpMoe(op) => op.query(db, ctx.num_tokens),
-            Op::WideEpMoeDispatch(op) => op.query(db, ctx.num_tokens),
             // Whole-model op: consumes batch_size/s/prefix/beam_width from the
             // context (num_tokens is ignored, mirroring Python's kwargs use).
             Op::FpmForward(op) => op.query(db, ctx),
@@ -436,6 +437,13 @@ impl Op {
             // Like Gdn: the op derives its phase coordinates internally
             // (verify divides the (nextn+1)-scaled batch by draft_tokens).
             Op::Kda(op) => op.query(db, ctx.batch_size, ctx.s),
+            // Both large-EP ops take Python's `x` (moe_comm.py:657, :1291) —
+            // the same per-rank token count every other compute/comm op gets.
+            // The per-op token rescaling (`// attention_tp_size` for the comm
+            // side, `* attention_dp_size` for the compute side) happens INSIDE
+            // each `query`, exactly where Python does it.
+            Op::MoeAllToAll(op) => op.query(db, ctx.num_tokens),
+            Op::MoeExpertCompute(op) => op.query(db, ctx.num_tokens),
         }
     }
 }

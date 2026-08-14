@@ -18,11 +18,9 @@ exp_disagg_prefill_wideep_decode_standard:
   nextn: 0
   prefill_model_path: deepseek-ai/DeepSeek-V3
   prefill_backend_name: trtllm
-  prefill_enable_wideep: true
   prefill_enable_eplb: true
   decode_model_path: deepseek-ai/DeepSeek-V3
   decode_backend_name: trtllm
-  decode_enable_wideep: false
   decode_enable_eplb: false
   prefill_system_name: gb200
   decode_system_name: gb200
@@ -103,7 +101,6 @@ exp_disagg_prefill_standard_decode_wideep:
   decode_backend_name: trtllm
   prefill_system_name: gb200
   decode_system_name: gb200
-  prefill_enable_wideep: false
   prefill_enable_eplb: false
   prefill_gemm_quant_mode: nvfp4
   prefill_moe_quant_mode: nvfp4
@@ -122,7 +119,6 @@ exp_disagg_prefill_standard_decode_wideep:
   - 1
   prefill_moe_ep_candidates:
   - 4
-  decode_enable_wideep: true
   decode_enable_eplb: true
   decode_gemm_quant_mode: nvfp4
   decode_moe_quant_mode: nvfp4
@@ -169,10 +165,8 @@ exp_disagg_both_wideep:
   nextn_accepted: 0.85
   prefill_model_path: deepseek-ai/DeepSeek-V3
   prefill_backend_name: trtllm
-  prefill_enable_wideep: true
   decode_model_path: deepseek-ai/DeepSeek-V3
   decode_backend_name: trtllm
-  decode_enable_wideep: true
   prefill_system_name: gb200
   decode_system_name: gb200
   prefill_enable_eplb: true

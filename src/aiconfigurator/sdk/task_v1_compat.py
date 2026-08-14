@@ -213,6 +213,20 @@ def convert_v1_to_v2(v1: dict) -> dict:
     config = v1.get("config") or {}
     profiles = v1.get("profiles") or []
 
+    # Deprecated large-EP flag: still MAPPED (mechanics unchanged — the key
+    # passes through / fans out below, and Task keeps it), but warn once per
+    # process when a V1 config carries a truthy value anywhere it could live.
+    # Function-local import mirrors from_yaml's import of this module: the two
+    # modules stay decoupled at import time (this file must survive V1
+    # removal with plain dict ops only).
+    _wideep_sources = [v1] + [
+        config.get(k) or {} for k in ("worker_config", "prefill_worker_config", "decode_worker_config")
+    ]
+    if any(src.get("enable_wideep") for src in _wideep_sources):
+        from aiconfigurator.sdk.task_v2 import _warn_large_ep_flag
+
+        _warn_large_ep_flag("enable_wideep")
+
     # 1. Top-level scalars common to both modes.
     for key in _TOP_PASSTHROUGH:
         if key in v1:

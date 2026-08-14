@@ -69,6 +69,7 @@ class _TestBackend(BaseBackend):
         num_tokens=0,
         prefix=0,
         encoder_memory=None,
+        mtp_scaled_tokens=None,
     ) -> dict[str, float]:
         return {"total": 1.0}
 
@@ -121,6 +122,63 @@ def model():
 @pytest.fixture
 def runtime_config() -> RuntimeConfig:
     return RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, prefix=2)
+
+
+class TestMTPActivationMemoryScaling:
+    """MTP activation scaling applies only to the decode-token share."""
+
+    @staticmethod
+    def _model():
+        return SimpleNamespace(
+            context_ops=[SimpleNamespace(get_weights=lambda: 0.0)],
+            config=ModelConfig(
+                tp_size=1,
+                pp_size=1,
+                attention_dp_size=1,
+                moe_tp_size=1,
+                moe_ep_size=1,
+            ),
+            _num_heads=32,
+            _head_size=128,
+            _num_experts=0,
+            model_family="test",
+            get_kvcache_bytes_per_sequence=lambda _seq_len: 0.0,
+            _cp_kv_memory_divisor=lambda: 1,
+        )
+
+    @staticmethod
+    def _database():
+        return SimpleNamespace(system_spec={"misc": {"nccl_mem": {1: 0}, "other_mem": 0}})
+
+    def _activations(self, *, nextn: int, num_tokens: int, mtp_scaled_tokens: int | None) -> float:
+        model = self._model()
+        model.config.nextn = nextn
+        return BaseBackend()._get_memory_usage(
+            model,
+            self._database(),
+            batch_size=4,
+            beam_width=1,
+            isl=65_536,
+            osl=400,
+            num_tokens=num_tokens,
+            mtp_scaled_tokens=mtp_scaled_tokens,
+        )["activations"]
+
+    def test_mixed_step_scales_only_decode_share(self):
+        num_tokens = 65_536 + 3
+        base = self._activations(nextn=0, num_tokens=num_tokens, mtp_scaled_tokens=3)
+        spec = self._activations(nextn=3, num_tokens=num_tokens, mtp_scaled_tokens=3)
+        assert spec / base == pytest.approx((65_536 + 3 * 4) / num_tokens, rel=1e-6)
+
+    def test_decode_only_step_keeps_full_multiplier(self):
+        base = self._activations(nextn=0, num_tokens=512, mtp_scaled_tokens=None)
+        spec = self._activations(nextn=3, num_tokens=512, mtp_scaled_tokens=None)
+        assert spec / base == pytest.approx(4.0, rel=1e-6)
+
+    def test_prefill_only_step_does_not_scale(self):
+        base = self._activations(nextn=0, num_tokens=65_536, mtp_scaled_tokens=0)
+        spec = self._activations(nextn=3, num_tokens=65_536, mtp_scaled_tokens=0)
+        assert spec == pytest.approx(base, rel=1e-9)
 
 
 @pytest.mark.parametrize("mode", ["static", "static_ctx", "static_gen"])
@@ -248,6 +306,63 @@ def test_run_agg_with_osl_one_does_not_divide_by_zero(
     row = summary.get_summary_df().iloc[0]
     assert row["tpot"] > 0.0
     assert row["tokens/s/user"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("osl", "expected_memory_calls", "expected_activations"),
+    [
+        (1, [(8, 0)], 0.068359375),
+        (5, [(8, 0), (1, None)], 0.2734375),
+    ],
+)
+def test_run_agg_b1_uses_scheduled_activation_peak(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+    osl: int,
+    expected_memory_calls: list[tuple[int, int | None]],
+    expected_activations: float,
+) -> None:
+    """A b=1 agg run retains a decode peak only when decode is scheduled."""
+    model._nextn = 3
+    model.config.nextn = 3
+    model.context_ops = [SimpleNamespace(get_weights=lambda: 0.0)]
+    model._num_heads = 32
+    model._head_size = 128
+    model._num_experts = 0
+    model.model_family = "test"
+    model.get_kvcache_bytes_per_sequence = lambda _seq_len: 0.0
+    model._cp_kv_memory_divisor = lambda: 1
+    database.system_spec["misc"] = {"nccl_mem": {1: 0}, "other_mem": 0}
+    monkeypatch.setattr(
+        backend,
+        "run_mixed",
+        lambda *args, **kwargs: StepEstimate(latency_ms=1.0, energy_wms=1.0),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_genonly_step_latency",
+        lambda *args, **kwargs: (1.0, 1.0, {"decode": 1.0}, {"decode": "silicon"}),
+    )
+
+    memory_calls: list[dict] = []
+
+    def _get_memory_usage(*args, **kwargs):
+        memory_calls.append(kwargs)
+        return BaseBackend._get_memory_usage(backend, *args, **kwargs)
+
+    monkeypatch.setattr(backend, "_get_memory_usage", _get_memory_usage)
+
+    summary = backend.run_agg(
+        model,
+        database,
+        RuntimeConfig(batch_size=1, beam_width=1, isl=8, osl=osl),
+        ctx_tokens=8,
+    )
+
+    assert [(call["num_tokens"], call["mtp_scaled_tokens"]) for call in memory_calls] == expected_memory_calls
+    assert summary.get_memory()["activations"] == pytest.approx(expected_activations)
 
 
 def test_run_mixed_returns_components_and_counts_speculative_query_tokens(

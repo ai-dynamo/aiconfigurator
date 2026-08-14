@@ -49,6 +49,17 @@ class WorkerRestartSignal:
 
 WORKER_RESTART = WorkerRestartSignal()
 
+
+class PerfLogError(RuntimeError):
+    """A measured performance row could not be durably persisted.
+
+    Persistence is part of task completion, so this exception must propagate to
+    the collector executor and classify the case as failed.  Keeping the
+    fail-closed behavior here protects older callers that do not inspect the
+    successful ``True`` return value from :func:`log_perf`.
+    """
+
+
 # Global NVML state per worker process
 _NVML_INITIALIZED = False
 _NVML_LOCK = threading.Lock()
@@ -795,8 +806,9 @@ def log_perf(
             time.sleep(0.1)
 
     if not got_lock:
-        print(f"Skipping log: can not get lock for {perf_filename}")
-        return False
+        message = f"Can not get lock for {perf_filename}"
+        print(f"Error writing log: {message}")
+        raise PerfLogError(message)
 
     try:
         base_data = {
@@ -882,9 +894,11 @@ def log_perf(
             # Force disk write (for NFS)
             f.flush()
             os.fsync(f.fileno())
+    except PerfLogError:
+        raise
     except Exception as e:
         print(f"Error writing log: {e}")
-        return False
+        raise PerfLogError(f"Failed to write {perf_filename}: {e}") from e
     finally:
         # Delete the lock file, even if writing crashed
         if got_lock and os.path.exists(lock_file):
@@ -1064,6 +1078,24 @@ def find_perf_csv_outputs(output_root: str | os.PathLike = ".", *, recursive: bo
     root = Path(output_root)
     paths = root.rglob("*_perf.txt") if recursive else root.glob("*_perf.txt")
     return sorted(path for path in paths if path.name != "INCOMPLETE.txt")
+
+
+def stale_output_artifacts(output_dir: str | os.PathLike, perf_filename: str) -> list[str]:
+    """Artifacts a previous standalone-collector attempt left in ``output_dir``.
+
+    ``log_perf`` opens its staging CSV in append mode, so a rerun into a
+    directory holding a prior attempt's rows would append a second run after
+    the stale ones and finalize both under a sidecar that attests only the
+    current plan. Standalone multi-node collectors have no attempt/resume
+    validation, so their only safe behavior is to refuse such a directory.
+    Returns the offending names (relative to ``output_dir``), empty when clean.
+    """
+    directory = Path(output_dir)
+    stem = Path(perf_filename).stem
+    owned: list[str] = []
+    for pattern in (f"{stem}.*", "collection_meta.yaml", "errors_*.json"):
+        owned.extend(sorted(path.name for path in directory.glob(pattern)))
+    return owned
 
 
 def finalize_perf_files(

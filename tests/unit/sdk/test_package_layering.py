@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 SDK_ROOT = Path(__file__).parents[3] / "aic-core" / "src" / "aiconfigurator_core" / "sdk"
+UPPER_ADAPTER_ROOT = Path(__file__).parents[3] / "src" / "aiconfigurator" / "sdk" / "config_adapter"
 UPPER_MODULES = {"aiconfigurator"}
 
 
@@ -105,6 +106,11 @@ def test_sdk_modules_do_not_import_upper_layer() -> None:
         offenders.extend(_upper_import_offenders(path, path.read_text(encoding="utf-8"), SDK_ROOT))
 
     assert offenders == []
+
+
+def test_config_adapter_is_owned_only_by_the_upper_package() -> None:
+    assert (UPPER_ADAPTER_ROOT / "__init__.py").is_file()
+    assert not (SDK_ROOT / "config_adapter").exists()
 
 
 @pytest.mark.parametrize(
