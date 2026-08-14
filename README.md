@@ -41,6 +41,12 @@ Let's get started.
 > set to Artifactory when platform-wheel staging is enabled. These Artifactory
 > artifacts are separate from public PyPI: Linux aarch64 and macOS arm64 users
 > with access to the release artifacts can install the matching wheel set.
+> Each staged set publishes `_MANIFEST.json` with immutable wheel SHA-256 and
+> size metadata, then writes `_COMPLETE.json` last with the manifest checksum.
+> Consumers must verify both files before installing a wheel.
+> Copied pull-request workflows validate wheels only on isolated GitHub-hosted
+> runners. They do not use the persistent release runners, receive Artifactory
+> credentials, or publish wheel artifacts.
 > Windows has no supported installation path.
 
 ```bash
