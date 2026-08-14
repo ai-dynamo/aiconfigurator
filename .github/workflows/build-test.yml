@@ -90,7 +90,7 @@ jobs:
       - name: Verify Python and NumPy compatibility
         run: |
           uv pip check
-          uv run python -c 'import sys, numpy; assert sys.version_info[:2] == (3, 13); assert int(numpy.__version__.split(".")[0]) >= 2'
+          uv run python -c 'import sys, numpy; assert sys.version_info[:2] == (3, 13); assert int(numpy.__version__.split(".")[0]) == 2'
       - name: Test Python package contracts
         run: |
           uv run pytest -q \
