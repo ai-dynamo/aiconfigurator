@@ -85,10 +85,12 @@ _DEFAULT_DECODE_BATCH_SCHEDULE: list[int] = (
     list(range(1, 16, 1)) + list(range(16, 32, 2)) + list(range(32, 128, 4)) + list(range(128, 512, 8)) + [512]
 )
 
-# Default EPD encode-worker search space; the batch schedule is capped at
-# SGLang's default (SGLANG_ENCODER_MAX_BATCH_SIZE = 8).
+# Default EPD encode-worker search space; batches are capped at SGLang's
+# default (SGLANG_ENCODER_MAX_BATCH_SIZE = 8) — explicit candidates above
+# the cap would claim throughput the reference deployment cannot form.
 _DEFAULT_ENCODER_TP_LIST: list[int] = [1, 2, 4, 8]
 _DEFAULT_ENCODER_BATCH_SCHEDULE: list[int] = [1, 2, 4, 8]
+_MAX_ENCODER_BATCH = 8
 
 # E+agg: agg-worker replicas explored per rate-matched cell (mirrors the
 # disagg worker lists, range(1, 33)).
@@ -840,6 +842,12 @@ def _get_encoder_worker_candidates(
     other_mem = misc_spec["other_mem"] * (1.0 + backend.OTHERS_OVERHEAD_FRAC)
     # The dominance filter below relies on ascending batch order.
     b_schedule = sorted(set(b_list or _DEFAULT_ENCODER_BATCH_SCHEDULE))
+    if b_schedule[-1] > _MAX_ENCODER_BATCH:
+        raise ValueError(
+            f"encoder batch candidates {[b for b in b_schedule if b > _MAX_ENCODER_BATCH]} exceed "
+            f"the supported maximum {_MAX_ENCODER_BATCH} (SGLang's SGLANG_ENCODER_MAX_BATCH_SIZE "
+            "default); modeling a raised deployment cap needs an explicit knob."
+        )
     for etp in sorted(set(tp_list or _DEFAULT_ENCODER_TP_LIST)):
         if min(etp, 8) not in misc_spec["nccl_mem"]:
             logger.warning(
@@ -1015,10 +1023,11 @@ def _rate_match_agg_epd(
     SLA-feasible row set so a pre-cut cannot shadow the pairable rows.
     Each pairing sweeps cells of ``a`` agg + ``e`` encode workers (cell
     throughput = min of the two pools, applied by the overlay); cells whose
-    GPU total is not in ``num_gpu_set`` are skipped before the
-    throughput-per-GPU argmax, and ties keep the smaller cell.  Returned
-    rows are per-cell (``common.ColumnsAggEpd`` plus passthrough columns),
-    so the downstream replicas logic scales whole cells.
+    GPU total is not in ``num_gpu_set`` are skipped, and the nondominated
+    (cell gpus, cell rate) frontier is emitted — one row per surviving cell
+    size — so the cluster-aware picker sees every packing alternative.
+    Returned rows are per-cell (``common.ColumnsAggEpd`` plus passthrough
+    columns), so the downstream replicas logic scales whole cells.
     """
     records = agg_df.sort_values(by="seq/s", ascending=False).to_dict("records")
     e_workers_bound = max_encoder_workers or _MAX_ENCODE_WORKERS
@@ -1033,7 +1042,11 @@ def _rate_match_agg_epd(
             gpus_one = int(r["num_total_gpus"])
             if rate_one <= 0:
                 continue
-            best: tuple[tuple[float, int], int, int] | None = None
+            # Downstream picking packs whole cells (floor(total_gpus /
+            # cell_gpus)), so a single per-cell-efficiency argmax could
+            # discard the packed winner; keep the best rate per cell size
+            # and emit the nondominated (gpus, rate) frontier.
+            best_per_gpus: dict[int, tuple[float, int, int]] = {}
             for a_num in range(1, _MAX_AGG_WORKERS_EPD + 1):
                 agg_rate = rate_one * a_num
                 for e_num in _epd_e_num_candidates(
@@ -1048,31 +1061,40 @@ def _rate_match_agg_epd(
                     if num_gpu_set and num_gpu not in num_gpu_set:
                         continue
                     cell_rate = min(agg_rate, encoder_capacity * e_num)
-                    key = (cell_rate / num_gpu, -num_gpu)
-                    if best is None or key > best[0]:
-                        best = (key, a_num, e_num)
-            if best is None:
+                    incumbent = best_per_gpus.get(num_gpu)
+                    if incumbent is None or cell_rate > incumbent[0]:
+                        best_per_gpus[num_gpu] = (cell_rate, a_num, e_num)
+            if not best_per_gpus:
                 continue
-            _, a_num, e_num = best
-            cell = dict(r)
-            cell["(a)workers"] = a_num
-            cell["seq/s"] = rate_one * a_num
-            cell["tokens/s"] = float(r["tokens/s"]) * a_num
-            cell["request_rate"] = cell["seq/s"]
-            cell["concurrency"] = r["concurrency"] * a_num
-            cell["num_total_gpus"] = gpus_one * a_num
-            # Cell rate columns are the uncapped agg-side capacity; the
-            # overlay applies the min() with the encode pool.
-            rows.append(
-                _overlay_encoder_stage(
-                    cell,
-                    enc_worker,
-                    e_num,
-                    prefill_power=r.get("power_w", 0.0),
-                    decode_power=r.get("power_w", 0.0),
-                    encoder_degradation=encoder_degradation,
+            kept: list[tuple[int, float]] = []
+            for num_gpu in sorted(best_per_gpus):
+                cell_rate, a_num, e_num = best_per_gpus[num_gpu]
+                # Dominated at every cluster size: no rate gain over a
+                # smaller cell, or a proportional repeat of one.
+                if kept and cell_rate <= kept[-1][1]:
+                    continue
+                if any(num_gpu % gpus == 0 and cell_rate <= (num_gpu // gpus) * rate for gpus, rate in kept):
+                    continue
+                kept.append((num_gpu, cell_rate))
+                cell = dict(r)
+                cell["(a)workers"] = a_num
+                cell["seq/s"] = rate_one * a_num
+                cell["tokens/s"] = float(r["tokens/s"]) * a_num
+                cell["request_rate"] = cell["seq/s"]
+                cell["concurrency"] = r["concurrency"] * a_num
+                cell["num_total_gpus"] = gpus_one * a_num
+                # Cell rate columns are the uncapped agg-side capacity; the
+                # overlay applies the min() with the encode pool.
+                rows.append(
+                    _overlay_encoder_stage(
+                        cell,
+                        enc_worker,
+                        e_num,
+                        prefill_power=r.get("power_w", 0.0),
+                        decode_power=r.get("power_w", 0.0),
+                        encoder_degradation=encoder_degradation,
+                    )
                 )
-            )
             paired += 1
             if top_k and paired >= top_k:
                 break

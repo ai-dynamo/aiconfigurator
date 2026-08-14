@@ -813,6 +813,76 @@ def test_encoder_zero_latency_fails_loud(monkeypatch):
         )
 
 
+def test_encoder_batch_candidates_capped_at_sglang_max(monkeypatch):
+    """The batch cap (8) holds at every entry: explicit candidates at the
+    helper, Task validation, and the single-point arguments."""
+    from aiconfigurator.sdk.task_v2 import Task
+
+    database = _encoder_candidates_env(monkeypatch)
+    rows = sweep._get_encoder_worker_candidates(
+        model_path="m",
+        tp_list=[1],
+        b_list=[1, 8],
+        runtime_config=_ENC_RC,
+        database=database,
+        backend_name="sglang",
+        latency_correction=1.0,
+    )
+    assert max(r["bs"] for r in rows) == 8
+    with pytest.raises(ValueError, match="exceed the supported maximum"):
+        sweep._get_encoder_worker_candidates(
+            model_path="m",
+            tp_list=[1],
+            b_list=[9, 16],
+            runtime_config=_ENC_RC,
+            database=database,
+            backend_name="sglang",
+            latency_correction=1.0,
+        )
+    with pytest.raises(ValueError, match="encoder_batch_candidates must be <="):
+        Task(enable_epd=True, encoder_batch_candidates=[9]).validate()
+    with pytest.raises(ValueError, match="encoder_batch_size must be <="):
+        Task(enable_epd=True).run_single_agg(tp=1, batch_size=1, encoder_tp=1, encoder_batch_size=9)
+
+
+def test_rate_match_agg_epd_keeps_cluster_packing_winner():
+    """A larger cell can lose on per-cell efficiency yet win once whole cells
+    are packed into the cluster; the emitted frontier must retain it
+    (1a+2e = 16 GPUs @ 10/s vs 2a+2e = 24 GPUs @ 12/s, total_gpus = 24)."""
+    agg_row = {
+        "ttft": 100.0,
+        "tpot": 10.0,
+        "osl": 100,
+        "request_latency": 200.0,
+        "seq/s": 10.0,
+        "tokens/s": 1000.0,
+        "request_rate": 10.0,
+        "concurrency": 8,
+        "num_total_gpus": 8,
+        "power_w": 0.0,
+    }
+    enc_worker = {
+        "encoder_latency": 10.0,
+        "seq/s": 6.0,
+        "num_total_gpus": 4,
+        "tp": 4,
+        "bs": 1,
+        "memory": 1.0,
+    }
+    df = sweep._rate_match_agg_epd(
+        pd.DataFrame([agg_row]),
+        [enc_worker],
+        ttft_target=1000.0,
+        num_gpu_set={16, 24},
+        encoder_degradation=1.0,
+    )
+    cells = {int(r["num_total_gpus"]): float(r["seq/s"]) for r in df.to_dict("records")}
+    assert cells == {16: 10.0, 24: 12.0}
+    total_gpus = 24
+    packed = {gpus: (total_gpus // gpus) * rate for gpus, rate in cells.items()}
+    assert packed[24] > packed[16]
+
+
 def test_overlay_encoder_stage_degradation_knob_and_coverage_blend():
     """The overlay honors a custom encoder degradation and re-weights
     power_coverage with the same time weights as power_w; rows without a
@@ -906,8 +976,9 @@ def test_sweep_agg_epd_top_k_defers_to_encoder_pairing(monkeypatch):
 
     # The pairable row (ttft 60 + encode 50) wins the per-choice slot; a cut
     # before the pairing would have dropped it (fake returns rows seq/s-desc).
-    assert len(df) == 1
-    assert df.iloc[0]["ttft"] == pytest.approx(110.0)
+    # Every emitted frontier cell derives from that one pairable base row.
+    assert len(df) > 0
+    assert df["ttft"].eq(110.0).all()
 
 
 def test_sweep_disagg_rejects_empty_num_worker_lists():

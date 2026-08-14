@@ -2077,6 +2077,14 @@ class Task:
                 values = getattr(self, name)
                 if values and any(not isinstance(v, int) or v <= 0 for v in values):
                     raise ValueError(f"{name} must be a list of positive ints, got {values!r}.")
+            if self.encoder_batch_candidates:
+                from aiconfigurator.sdk.sweep import _MAX_ENCODER_BATCH
+
+                if max(self.encoder_batch_candidates) > _MAX_ENCODER_BATCH:
+                    raise ValueError(
+                        f"encoder_batch_candidates must be <= {_MAX_ENCODER_BATCH} (SGLang's "
+                        f"SGLANG_ENCODER_MAX_BATCH_SIZE default), got {self.encoder_batch_candidates!r}."
+                    )
             if self.max_encoder_workers is not None and self.max_encoder_workers <= 0:
                 raise ValueError(f"max_encoder_workers must be > 0, got {self.max_encoder_workers!r}.")
             self._validate_epd_knob_values()
@@ -2776,6 +2784,13 @@ class Task:
         ):
             if not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive int, got {value!r}.")
+        from aiconfigurator.sdk.sweep import _MAX_ENCODER_BATCH
+
+        if encoder_batch_size > _MAX_ENCODER_BATCH:
+            raise ValueError(
+                f"encoder_batch_size must be <= {_MAX_ENCODER_BATCH} (SGLang's "
+                f"SGLANG_ENCODER_MAX_BATCH_SIZE default), got {encoder_batch_size}."
+            )
 
     def _overlay_single_point_encoder(
         self,
