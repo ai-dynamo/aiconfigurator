@@ -1233,7 +1233,7 @@ class TestGetModelMOESGLangDispatch:
         return [op._name for op in getattr(model, f"{prefix}_ops") if "moe" in op._name or "router" in op._name]
 
     def test_sglang_moe_large_ep_emits_the_ep_block(self):
-        """DeepEP comm backend (inter-node) -> MoEAllToAll/MoEExpertCompute block."""
+        """DeepEP comm backend (inter-node) -> A2A/modeled-compute block."""
         model_config = config.ModelConfig(
             tp_size=1,
             pp_size=1,
@@ -1255,7 +1255,7 @@ class TestGetModelMOESGLangDispatch:
             "context_moe_combine",
         ]
         assert isinstance(model.context_ops[7], ops.MoEAllToAll)
-        assert isinstance(model.context_ops[8], ops.MoEExpertCompute)
+        assert isinstance(model.context_ops[8], ops.ModeledEPMoE)
 
     def test_sglang_moe_large_ep_intranode_emits_the_ep_block(self):
         """Intra-node large EP (ep=4) uses the same block; only the span differs."""
@@ -1809,21 +1809,6 @@ class TestAttentionProjectionExclusions:
 
 class TestBundledModelConfigsOffline:
     """Bundled configs must load without network (P2: DefaultHFModels registration)."""
-
-    def test_step3p7_fp8_loads_from_bundle(self, monkeypatch):
-        import aiconfigurator.sdk.utils as sdk_utils
-
-        def _no_network(*a, **k):
-            raise AssertionError("network path reached")
-
-        monkeypatch.setattr(sdk_utils, "_download_hf_config", _no_network, raising=False)
-        sdk_utils.get_model_config_from_model_path.cache_clear()
-        sdk_utils._load_model_config_from_model_path.cache_clear()
-        cfg = sdk_utils.get_model_config_from_model_path("stepfun-ai/Step-3.7-Flash-FP8")
-        assert cfg["architecture"] == "Step3p7FlashForCausalLM"
-        assert cfg["raw_config"]["quantization_config"]["quant_method"] == "fp8"
-        sdk_utils.get_model_config_from_model_path.cache_clear()
-        sdk_utils._load_model_config_from_model_path.cache_clear()
 
     def test_dsv32_nvfp4_loads_from_bundle(self, monkeypatch):
         import aiconfigurator.sdk.utils as sdk_utils

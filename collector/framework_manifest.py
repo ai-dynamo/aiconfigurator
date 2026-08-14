@@ -27,6 +27,8 @@ class CollectorRuntime:
     framework: str  # manifest key: sglang | trtllm | vllm | wideep_sglang | wideep_trtllm
     version: str
     images: dict[str, str]
+    source_commit: str | None = None
+    abi: dict[str, str] | None = None
     source_repo: str | None = None
     collector_dir: str | None = None
     data_backend: str | None = None
@@ -84,6 +86,8 @@ def _runtime_from_spec(
         framework=framework_key,
         version=runtime_spec["version"],
         images=dict(runtime_spec["images"]),
+        source_commit=runtime_spec.get("source_commit"),
+        abi=dict(runtime_spec["abi"]) if runtime_spec.get("abi") else None,
         source_repo=source_repo,
         collector_dir=spec.get("collector_dir"),
         data_backend=spec.get("data_backend"),
@@ -97,6 +101,7 @@ _REGISTRY_MODULES = {
     "trtllm": "collector.trtllm.registry",
     "vllm": "collector.vllm.registry",
     "wideep_sglang": "collector.wideep.sglang.registry",
+    "wideep_vllm": "collector.wideep.vllm.registry",
     "wideep_trtllm": "collector.wideep.trtllm.registry",
 }
 
@@ -152,17 +157,21 @@ def resolve_op_runtime(
     raise KeyError(f"{framework_key} registry has no op {op!r}")
 
 
-def _runtime_identity(runtime: CollectorRuntime) -> tuple[str, tuple[tuple[str, str], ...]]:
-    """Executor identity: version plus the pinned images. Two runtimes with the
-    same package version but different images are different containers. `family`
-    stays out — it is routing metadata, not an executor property."""
-    return runtime.version, tuple(sorted(runtime.images.items()))
+def _runtime_identity(runtime: CollectorRuntime) -> tuple:
+    """Immutable executor inputs; family is routing metadata, not identity."""
+    return (
+        runtime.version,
+        tuple(sorted(runtime.images.items())),
+        runtime.source_commit,
+        tuple(sorted((runtime.abi or {}).items())),
+    )
 
 
 def _describe_runtime(runtime: CollectorRuntime) -> str:
     """Version plus images, for errors where the version alone cannot distinguish."""
     images = ", ".join(f"{variant}={image}" for variant, image in sorted(runtime.images.items()))
-    return f"{runtime.version} [{images}]"
+    source = f", source={runtime.source_commit}" if runtime.source_commit else ""
+    return f"{runtime.version} [{images}{source}]"
 
 
 def require_collector_runtime(
@@ -199,14 +208,14 @@ def require_collector_runtime(
             missing = ops - {e.op for e in entries}
             if missing:
                 raise KeyError(f"{key} registry has no op(s): {sorted(missing)}")
-        by_identity: dict[tuple[str, tuple[tuple[str, str], ...]], CollectorRuntime] = {}
+        by_identity: dict[tuple, CollectorRuntime] = {}
         op_runtimes: dict[str, CollectorRuntime] = {}
         for entry in entries:
             runtime = _resolve_from(manifest, family_map, key, entry)
             by_identity.setdefault(_runtime_identity(runtime), runtime)
             op_runtimes[entry.op] = runtime
         if len(by_identity) > 1:
-            if len({version for version, _ in by_identity}) > 1:
+            if len({runtime.version for runtime in by_identity.values()}) > 1:
                 split = ", ".join(f"{op}→{rt.version}" for op, rt in sorted(op_runtimes.items()))
                 raise RuntimeError(
                     f"{framework} ops resolve to multiple runtime versions ({split}); "
@@ -333,3 +342,15 @@ def _validate_runtime_spec(name: str, spec: object) -> None:
                 f"{name}.images.{variant} must be digest-pinned (...@sha256:<64 hex>); "
                 "bare internal image names without '/' are exempt"
             )
+    source_commit = spec.get("source_commit")
+    if source_commit is not None and (
+        not isinstance(source_commit, str) or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None
+    ):
+        raise ValueError(f"{name}.source_commit must be a full 40-character lowercase git SHA")
+    abi = spec.get("abi")
+    if abi is not None and (
+        not isinstance(abi, dict)
+        or not abi
+        or not all(isinstance(key, str) and isinstance(value, str) and key and value for key, value in abi.items())
+    ):
+        raise ValueError(f"{name}.abi must map non-empty names to non-empty pinned values")

@@ -12,13 +12,6 @@ from collector.registry_types import OpEntry, PerfFile
 
 REGISTRY: list[OpEntry] = [
     OpEntry(
-        op="moe_ep",
-        module="collector.wideep.sglang.collect_deepep_moe",
-        get_func="get_moe_ep_test_cases",
-        run_func="run_moe_ep",
-        perf_filename=PerfFile.MOE_EXPERT_COMPUTE,
-    ),
-    OpEntry(
         op="deepep_ll",
         module="collector.wideep.sglang.collect_deepep_ll",
         get_func="get_deepep_ll_test_cases",

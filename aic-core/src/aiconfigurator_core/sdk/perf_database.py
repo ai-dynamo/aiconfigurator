@@ -396,27 +396,11 @@ def _load_collection_meta_yaml(path: str) -> dict:
     return raw
 
 
-def _collection_meta_partial_tables(meta: dict) -> frozenset[str]:
-    """Return tables whose collection coverage is incomplete.
-
-    ``status: partial`` is table/shape coverage metadata, not a statement that
-    the successfully collected rows are invalid.  Those rows remain eligible
-    as the primary source; older versions only fill coordinates they do not
-    contain (design §6.1/§6.2 first-wins semantics).
-    """
+def _collection_meta_has_partial_table(meta: dict) -> bool:
     tables = meta.get("tables")
     if not isinstance(tables, dict):
-        return frozenset()
-    return frozenset(
-        name
-        for name, table in tables.items()
-        if isinstance(name, str) and isinstance(table, dict) and table.get("status") == "partial"
-    )
-
-
-def _collection_meta_has_partial_table(meta: dict) -> bool:
-    """Compatibility predicate for metadata/reporting callers."""
-    return bool(_collection_meta_partial_tables(meta))
+        return False
+    return any(isinstance(table, dict) and table.get("status") == "partial" for table in tables.values())
 
 
 def _version_dir_state(version_path: str, *, data_dir: str | None = None) -> dict[str, object]:
@@ -425,12 +409,9 @@ def _version_dir_state(version_path: str, *, data_dir: str | None = None) -> dic
     - ``declared_reuse``: parsed ``reuse.yaml`` contents (design §6.3) when it has
       >=1 entry; the legacy marker-only sentinel when only ``SHARED_LAYER_REUSE.txt``
       is present; ``None`` when neither declares reuse.
-    - ``partial`` / ``partial_tables``: informational collection-coverage
-      state from ``collection_meta.yaml``. Partial tables still contribute all
-      successfully collected rows; older versions fill only missing shapes.
-    - ``unusable``: whole-directory exclusion. This is reserved for the legacy
-      ``INCOMPLETE.txt`` marker, which has no table/shape granularity. A present
-      ``collection_meta.yaml`` supersedes that legacy marker.
+    - ``partial``: True when ``collection_meta.yaml`` has any table with
+      ``status: partial`` (whole-dir discovery parity with today; per-table nuance
+      is PR 4 scope), or (fallback) ``INCOMPLETE.txt`` is present.
     - ``has_perf``: whether the dir holds real perf output files.
 
     ``data_dir`` scopes the one-time-per-tree legacy-marker deprecation warning
@@ -449,24 +430,21 @@ def _version_dir_state(version_path: str, *, data_dir: str | None = None) -> dic
         _warn_legacy_marker_once(warn_scope, SHARED_LAYER_REUSE_MARKER, REUSE_YAML_MARKER)
         declared_reuse = {"entries": [], "legacy": True}
 
-    partial_tables: frozenset[str] = frozenset()
-    unusable = False
+    partial = False
+    legacy_incomplete = False
     meta_yaml_path = os.path.join(version_path, COLLECTION_META_MARKER)
     legacy_incomplete_path = os.path.join(version_path, INCOMPLETE_MARKER)
     if os.path.isfile(meta_yaml_path):
-        partial_tables = _collection_meta_partial_tables(_load_collection_meta_yaml(meta_yaml_path))
+        partial = _collection_meta_has_partial_table(_load_collection_meta_yaml(meta_yaml_path))
     elif os.path.isfile(legacy_incomplete_path):
         _warn_legacy_marker_once(warn_scope, INCOMPLETE_MARKER, COLLECTION_META_MARKER)
-        # INCOMPLETE.txt predates per-table provenance, so there is no safe way
-        # to identify which rows/tables succeeded. Keep the legacy fail-closed
-        # whole-directory behavior only for this unstructured marker.
-        unusable = True
+        partial = True
+        legacy_incomplete = True
 
     return {
         "declared_reuse": declared_reuse,
-        "partial": bool(partial_tables) or unusable,
-        "partial_tables": partial_tables,
-        "unusable": unusable,
+        "partial": partial,
+        "legacy_incomplete": legacy_incomplete,
         "has_perf": _database_version_dir_has_perf_files(version_path),
     }
 
@@ -475,7 +453,11 @@ def _database_version_dir_is_declared(version_path: str, *, data_dir: str | None
     if not os.path.isdir(version_path):
         return False
     state = _version_dir_state(version_path, data_dir=data_dir)
-    if state["unusable"]:
+    # Legacy INCOMPLETE.txt hides the family path from discovery (whole-dir
+    # "not usable" marker). Structured collection_meta.yaml `status: partial`
+    # keeps successful rows usable — the version stays declared and older
+    # sibling versions may fill missing shapes at query time.
+    if state["legacy_incomplete"]:
         return False
     return bool(state["has_perf"]) or state["declared_reuse"] is not None
 
@@ -548,7 +530,7 @@ def is_shared_layer_marker_only_version(
     saw_marker = False
     for version_path, data_dir in _iter_database_version_paths(system, backend, version, systems_paths=systems_paths):
         state = _version_dir_state(version_path, data_dir=data_dir)
-        if state["unusable"]:
+        if state["partial"]:
             continue
         if state["has_perf"]:
             return False
@@ -862,8 +844,11 @@ def _check_strict_provenance_for_request(paths: list[str], backend: str, data_di
             _check_strict_provenance_coverage(os.path.dirname(donor_path), strict=strict, only_table=entry["table"])
 
 
-def _version_dir_unusable_for_request(version_path: str, data_dir: str, *, strict: bool) -> bool:
-    """Return whether a request must reject the whole version directory.
+def _version_dir_partial_for_request(version_path: str, data_dir: str, *, strict: bool) -> bool:
+    """``get_database()``'s request-scoped wrapper around ``_version_dir_state``:
+    a malformed sidecar raises in strict mode (same ``ValueError``); in
+    non-strict mode it is logged and treated as "not blocked" rather than
+    aborting the whole lookup.
 
     Structured ``collection_meta.yaml`` partial status is intentionally *not*
     grounds for rejection: valid primary rows are loaded and sibling versions
@@ -880,7 +865,7 @@ def _version_dir_unusable_for_request(version_path: str, data_dir: str, *, stric
     ``get_database`` request gate's incomplete-check.
     """
     try:
-        return bool(_version_dir_state(version_path, data_dir=data_dir)["unusable"])
+        return bool(_version_dir_state(version_path, data_dir=data_dir)["legacy_incomplete"])
     except ValueError as e:
         if strict:
             raise
@@ -967,7 +952,7 @@ def get_database(
         data_dir_abs = os.path.join(systems_root, data_dir)
         paths = [p for v, p in _iter_backend_version_dirs(data_dir_abs, backend) if v == version]
         is_incomplete = bool(paths) and all(
-            _version_dir_unusable_for_request(p, data_dir_abs, strict=effective_strict) for p in paths
+            _version_dir_partial_for_request(p, data_dir_abs, strict=effective_strict) for p in paths
         )
         if paths and not is_incomplete:
             request_key = (tuple(sorted(paths)), backend)
@@ -1048,29 +1033,16 @@ def _normalize_database_mode(database_mode: str | common.DatabaseMode | None) ->
     if database_mode is None:
         return common.DatabaseMode.SILICON
     if isinstance(database_mode, common.DatabaseMode):
-        _reject_retired_database_mode(database_mode)
-        return database_mode
-    mode = common.DatabaseMode[database_mode.upper()]
-    _reject_retired_database_mode(mode)
-    return mode
-
-
-def _reject_retired_database_mode(mode: common.DatabaseMode) -> None:
-    """SOL_FULL is a Python-side PER-CALL diagnostic, never a default mode.
-
-    Per-call ``query_*(..., database_mode=SOL_FULL)`` returns the raw
-    ``(sol_time, sol_math, sol_mem)`` tuple the sanity-check notebook
-    (``tools/sanity_check/validate_database.ipynb``) plots — that surface
-    stays, permanently Python-side per the freeze plan (#1357). As a
-    database's ACTIVE mode it has never worked (the phase runners cannot
-    consume a bare tuple), so mode entry rejects it with a clear error."""
-    if mode == common.DatabaseMode.SOL_FULL:
+        mode = database_mode
+    else:
+        mode = common.DatabaseMode[database_mode.upper()]
+    if mode is common.DatabaseMode.SOL_FULL:
         raise ValueError(
-            "DatabaseMode.SOL_FULL cannot be a database's default mode; it is "
-            "a per-call diagnostic (query_*(..., database_mode=SOL_FULL) "
-            "returns the raw (sol_time, sol_math, sol_mem) tuple). Use "
-            "DatabaseMode.SOL for engine-step speed-of-light estimates."
+            f"{mode.name} cannot be a database's default mode; it is a per-call diagnostic that "
+            "returns the raw (sol_time, sol_math, sol_mem) tuple. Pass database_mode=SOL_FULL to "
+            "the query itself instead."
         )
+    return mode
 
 
 @functools.cache
@@ -1216,7 +1188,9 @@ def _iter_database_refs_for_system(systems_root: str, system: str, system_spec: 
 
         for version in sorted(version_paths):
             paths = version_paths[version]
-            if all(_version_dir_state(p, data_dir=data_dir)["unusable"] for p in paths):
+            # Only the legacy INCOMPLETE.txt marker fully hides a version.
+            # Structured collection_meta.yaml partial rows remain usable.
+            if all(_version_dir_state(p, data_dir=data_dir)["legacy_incomplete"] for p in paths):
                 continue
             yield system, backend_name, version, systems_root
 
@@ -2261,7 +2235,12 @@ class PerfDatabase:
         """
         Set the default database mode
         """
-        _reject_retired_database_mode(mode)
+        if mode is common.DatabaseMode.SOL_FULL:
+            raise ValueError(
+                f"{mode.name} cannot be a database's default mode; it is a per-call diagnostic that "
+                "returns the raw (sol_time, sol_math, sol_mem) tuple. Pass database_mode=SOL_FULL to "
+                "the query itself instead."
+            )
         if getattr(self, "_is_query_view", False) and mode != self._default_database_mode:
             raise RuntimeError(
                 "A cached query view has immutable mode/policy state; request a different view with "
@@ -2363,41 +2342,6 @@ class PerfDatabase:
             if covered:
                 coverage[comm_backend] = covered
         return coverage
-
-    def moe_expert_compute_coverage(
-        self,
-        hidden_size: int,
-        inter_size: int,
-        topk: int,
-        num_experts: int,
-        quant_mode: common.MoEQuantMode,
-        inference_phase: str,
-    ) -> set[int]:
-        """Probe moe_ep compute coverage for one model shape (PR 2's enumerator contract).
-
-        Returns the ``{moe_ep_size}`` set with a non-empty token curve for
-        the shape, unioned across ANY ``kernel_source``, ANY workload
-        distribution, and ANY ``num_slots``, with ``moe_tp_size`` fixed to 1
-        (the large-EP family is EP-only). Same read-only, non-vivifying,
-        never-raising contract as :meth:`moe_a2a_coverage`; an absent or
-        unloaded table yields an empty set. Deliberately not lru_cached: the
-        returned set is mutable.
-        """
-        from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
-
-        MoEExpertCompute.load_data(self)
-        table = self._moe_ep_data
-        if not table:
-            return set()
-
-        covered: set[int] = set()
-        for by_quant in table.values():  # ANY kernel_source
-            for by_phase in (by_quant.get(quant_mode) or {}).values():  # ANY distribution
-                by_slots = ((by_phase.get(inference_phase) or {}).get(topk) or {}).get(num_experts) or {}
-                for by_hidden in by_slots.values():  # ANY num_slots
-                    by_ep = ((by_hidden.get(hidden_size) or {}).get(inter_size) or {}).get(1) or {}  # moe_tp == 1
-                    covered.update(ep_size for ep_size, tokens in by_ep.items() if tokens)
-        return covered
 
     # ═══════════════════════════════════════════════════════════════════
     # DSA (DeepSeek Sparse Attention) Queries

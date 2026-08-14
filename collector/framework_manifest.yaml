@@ -137,11 +137,44 @@ frameworks:
     notes: >
       Requires an SGLang image with DeepSeek-V4/DeepEP modules; stock
       lmsysorg/sglang images may not include them.
+  wideep_vllm:
+    base_framework: vllm
+    collector_dir: "collector/wideep/vllm"
+    data_backend: vllm
+    default:
+      version: "0.26.1rc1.dev587"
+      source_commit: "d8c70f22434afcbd6644aa43d3f23aecb6e5a09f"
+      abi:
+        build_mode: "source-wheel-over-pinned-base"
+        torch: "2.13.0"
+        cuda: "13.0"
+        deep_ep: "d4f41e4e93"
+        nvshmem: "3.3.24"
+        nccl_v2: ">=2.30.4"
+      images:
+        default: "vllm/vllm-openai:nightly@sha256:706bf464bb0c774ef820a5c6426b04481203a1d60b5590e0a377c685dc3ffdfc"
+        grace_blackwell: "vllm/vllm-openai:nightly@sha256:280746355f613abb45b3a89deabff4b63a51ae0936a22325ea8d49c89134f801"
+    notes: >
+      The digest-pinned nightly image is the build base, not the framework
+      identity. Collection must install and attest the exact source_commit and
+      ABI above before importing vllm; the image's bundled vllm build is not
+      accepted as the target runtime.
   wideep_trtllm:
     base_framework: trtllm
     collector_dir: "collector/wideep/trtllm"
     data_backend: trtllm
     default:
-      version: "1.3.0rc20"
+      version: "1.3.0rc11"
+      source_commit: "14efb6ac673c0cbe828e1206cc5c7d5748d05ffa"
+      abi:
+        build_mode: "source-wheel-over-pinned-base"
+        deep_ep: "5be51b228a7c82dbdb213ea58e77bffd12b38af8"
+        nvshmem: "3.2.5-1"
+        nvshmem_archive_sha256: "eb2c8fb3b7084c2db86bd9fd905387909f1dfd483e7b45f7b3c3d5fcf5374b5a"
       images:
         default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20@sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88"
+    notes: >
+      The rc20 image is an immutable build base only. Collection must build
+      and attest source_commit 14efb6ac (package version 1.3.0rc11), including
+      its vendored DeepEP/NVSHMEM ABI; rows from the bundled rc20 package are
+      rejected for this workload.

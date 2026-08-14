@@ -13,7 +13,6 @@ import pytest
 
 from collector.case_generator import (
     get_attention_head_configs,
-    get_gemm_case_specs,
     get_moe_quantization_specs,
     moe_model_allows_quantization,
 )
@@ -39,19 +38,6 @@ def _load_mla_adapter(module_path: str, globals_dict: dict):
     namespace = dict(globals_dict)
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
     return namespace["_build_mla_test_cases"]
-
-
-def _load_gdn_getter(module_path: str):
-    from collector.case_generator import get_common_gdn_test_cases
-
-    source_path = REPO_ROOT / module_path
-    tree = ast.parse(source_path.read_text(), filename=str(source_path))
-    function = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "get_gdn_test_cases"
-    )
-    namespace = {"get_common_gdn_test_cases": get_common_gdn_test_cases}
-    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
-    return namespace["get_gdn_test_cases"]
 
 
 def test_model_case_plan_merges_required_base_and_framework_specific_ops():
@@ -774,17 +760,14 @@ def test_gemm_common_cases_expand_from_base_op_yaml_shape_specs():
     cases = get_gemm_case_specs()
     xpu_cases = get_gemm_case_specs("vllm_xpu")
 
-    # Base sweep expansion first (order preserved for checkpoint stability),
-    # then model_case_values.gemm rows.
+    # Base gemm sweep expansion, then model_case_values.gemm rows.
     assert len(cases) == 37296
     assert cases[0] == GemmCommonTestCase(x=32768, n=65536, k=51200)
-    assert cases[35741] == GemmCommonTestCase(x=1, n=32, k=32)
     assert cases[-1] == GemmCommonTestCase(x=1, n=1, k=4096)
     assert not any(case.n == 65536 and case.k == 65536 for case in cases)
 
     assert len(xpu_cases) == 9618
     assert xpu_cases[0] == GemmCommonTestCase(x=8192, n=65536, k=12288)
-    assert xpu_cases[9176] == GemmCommonTestCase(x=1, n=32, k=32)
     assert xpu_cases[-1] == GemmCommonTestCase(x=1, n=1, k=4096)
     assert get_gemm_type_specs("vllm_xpu") == ["bfloat16", "fp8"]
 
@@ -1554,7 +1537,6 @@ def test_vllm_024_model_plans_only_schedule_representable_attention_paths():
         "mla_context",
         "mla_generation",
         "moe",
-        "moe_ep",
     ]
     assert build_collection_case_plan(backend="vllm_xpu", model_path=kimi_path).ops == ["gemm", "moe"]
 

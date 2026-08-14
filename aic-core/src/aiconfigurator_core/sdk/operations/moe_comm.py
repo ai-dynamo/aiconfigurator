@@ -95,6 +95,24 @@ MOE_A2A_BACKENDS: dict[str, MoECommBackendSpec] = {
         inference_phases=("generation",),
         comm_phases=("dispatch", "combine"),
     ),
+    "deepep_v2": MoECommBackendSpec(
+        name="deepep_v2",
+        frameworks=("vllm",),
+        inference_phases=("context", "generation"),
+        comm_phases=("dispatch", "combine"),
+    ),
+    "trtllm_deepep_ht": MoECommBackendSpec(
+        name="trtllm_deepep_ht",
+        frameworks=("trtllm",),
+        inference_phases=("context",),
+        comm_phases=("dispatch", "combine"),
+    ),
+    "trtllm_deepep_ll": MoECommBackendSpec(
+        name="trtllm_deepep_ll",
+        frameworks=("trtllm",),
+        inference_phases=("generation",),
+        comm_phases=("dispatch", "combine"),
+    ),
     "nvlink_two_sided": MoECommBackendSpec(
         name="nvlink_two_sided",
         frameworks=("trtllm",),

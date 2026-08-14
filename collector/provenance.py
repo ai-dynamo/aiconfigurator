@@ -50,6 +50,8 @@ STANDALONE_COLLECTOR_MODULES: frozenset[str] = frozenset(
     {
         "collector.sglang.collect_dsv4_megamoe",
         "collector.wideep.sglang.collect_moe_a2a",
+        "collector.wideep.vllm.collect_moe_a2a",
+        "collector.wideep.trtllm.collect_moe_a2a",
         "collector.network.slurm.collect_trtllm_alltoall",
     }
 )
@@ -57,7 +59,7 @@ STANDALONE_COLLECTOR_MODULES: frozenset[str] = frozenset(
 STATUS_COMPLETE = "complete"
 STATUS_PARTIAL = "partial"
 
-_RUNTIME_FIELD_ORDER = ("framework", "version", "image", "image_variant", "image_digest")
+_RUNTIME_FIELD_ORDER = ("framework", "version", "image", "image_digest", "source_commit", "abi")
 _TABLE_FIELD_ORDER = ("collector_ref", "collector_hash", "case_plan_hash", "collected_at", "rows", "status")
 
 

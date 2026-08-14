@@ -220,19 +220,6 @@ def build_moe_block_ops(
         f"prefix {prefix!r} must equal the inference_phase-derived prefix {inference_phase!r} "
         "(context->'context', generation->'generation'); a mismatch is a caller bug"
     )
-    if gpus_per_node is None:
-        if getattr(cfg, "moe_comm_backend", None):
-            # Topology has no safe default (this PR's own rule): resolve the
-            # omitted argument from the config's validated value instead of a
-            # silent eight-GPU assumption — a GB200-style
-            # cfg.num_gpus_per_node=4 at EP16 is a four-node all-to-all, not
-            # two. Raises when the config carries no value either.
-            from aiconfigurator_core.sdk.models.helpers import large_ep_gpus_per_node
-
-            gpus_per_node = large_ep_gpus_per_node(cfg)
-        else:
-            # Fused block: no all-to-all is emitted, the coordinate is unused.
-            gpus_per_node = 0
     ctx = {
         "prefix": prefix,
         "shape": shape,
@@ -289,7 +276,7 @@ def _default_moe_block_ops(
     dispatch_cp_kwargs = {"attn_cp_size": attn_cp_size} if is_context else {}
 
     # Large-EP branch: a per-phase comm backend on cfg selects the
-    # MoEAllToAll + MoEExpertCompute emission (with its own shared-expert flavor).
+    # MoEAllToAll + modeled local-compute emission (with its own shared-expert flavor).
     # ``moe_comm_backend`` (dict[str, str] | None) is read with getattr on
     # purpose: the builder duck-types ``cfg`` (same contract as the optional
     # ``cfg.system`` registry axis), so lightweight config doubles without the
@@ -418,7 +405,7 @@ def _default_moe_block_ops(
 
 
 # ---------------------------------------------------------------------------
-# Large-EP emission (cfg.moe_comm_backend selects a MoEAllToAll/MoEExpertCompute graph)
+# Large-EP emission (cfg.moe_comm_backend selects A2A + modeled local compute)
 # ---------------------------------------------------------------------------
 
 
@@ -532,7 +519,7 @@ def _large_ep_block_ops(
     gpus_per_node: int | None,
     shared_gemm_quant_mode=None,
 ) -> list:
-    """Large-EP branch: router + shared experts + A2A dispatch/MoEExpertCompute/combine.
+    """Large-EP branch: router + shared experts + A2A/modelled compute/combine.
 
     Fidelity notes (each transcribed from the legacy wideEP graphs):
 
@@ -547,9 +534,9 @@ def _large_ep_block_ops(
       queried undivided tokens -> nvlink passes 1 in both phases.
     - ``sms`` rides only ``deepep_ht`` (the legacy normal-mode table keys an
       SM budget; LL and nvlink rows carry none).
-    - ``enable_eplb`` reaches MoEExpertCompute only for deepep backends: the sglang MoE
-      query corrects prefill tokens by 0.8 under EPLB, while trtllm EPLB
-      rides the ``_eplb`` workload-distribution suffix instead.
+    - Local expert compute is a marked approximation over stock ``moe_perf``:
+      uniformly balanced assignments, TP=1, EP-local expert geometry, and no
+      EPLB/redundant-slot model. Communication remains measured separately.
     - trtllm structure: when the shape has shared experts, a trailing
       ``{prefix}_moe_reduce_add`` ElementWise (deepseek.py:816-824 context,
       :1022-1032 generation — it models the routed-topk + SHARED add) and,
@@ -576,10 +563,7 @@ def _large_ep_block_ops(
         "moe_ep_size": cfg.moe_ep_size,
         "node_num": node_num,
         "sms": cfg.sms if comm_backend == "deepep_ht" else 0,
-        # DeepEP context receives per-attention-rank tokens. Context
-        # parallelism contributes to that attention width just like TP does;
-        # generation remains unsharded here.
-        "attention_tp_size": cfg.tp_size * cfg.cp_size if is_deepep and is_context else 1,
+        "attention_tp_size": cfg.tp_size if is_deepep and is_context else 1,
     }
 
     # Routed path: router GEMM (spec section 4.4.4 — always emitted here; the
@@ -606,7 +590,7 @@ def _large_ep_block_ops(
             )
         )
     routed_ops.append(
-        ops.MoEExpertCompute(
+        ops.ModeledEPMoE(
             f"{prefix}_moe",
             scale_factor,
             hidden_size=shape.hidden_size,
@@ -615,12 +599,9 @@ def _large_ep_block_ops(
             num_experts=shape.num_experts,
             moe_ep_size=cfg.moe_ep_size,
             quant_mode=quant_mode,
-            workload_distribution=workload_distribution,
             attention_dp_size=cfg.attention_dp_size,
             inference_phase=inference_phase,
-            num_slots=cfg.wideep_num_slots or None,
             is_gated=shape.is_gated,
-            enable_eplb=cfg.enable_eplb and is_deepep,
         )
     )
     routed_ops.append(

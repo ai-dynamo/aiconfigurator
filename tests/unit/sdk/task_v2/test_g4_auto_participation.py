@@ -58,6 +58,9 @@ h200_large_ep_data_present = pytest.mark.skipif(
 
 DSR1 = "deepseek-ai/DeepSeek-R1"
 QWEN3 = "Qwen/Qwen3-235B-A22B"
+# Kimi-K2.5 has (hidden=4096, topk=6, num_experts=384) — a shape absent from
+# every shipped sglang moe_a2a table (all shipped rows use topk=8 / experts=256).
+KIMI = "moonshotai/Kimi-K2.5"
 
 
 def _h200_sglang_task(model_path: str, **overrides) -> Task:
@@ -104,11 +107,21 @@ def test_deepseek_r1_flagless_default_search_explores_large_ep():
 
 
 @h200_large_ep_data_present
-def test_qwen3_no_coverage_control_stays_fully_fused():
+def test_qwen3_no_coverage_control_stays_fully_fused(monkeypatch):
     """Negative control: same system, same backend, same (present) large-EP
-    tables -- but no rows for the Qwen3-235B shape. The task must keep the
-    fused defaults, resolve NO tuple to a comm backend, and hand every tuple
-    a ModelConfig without one (no spurious ``moe_comm_backend``)."""
+    tables -- but the coverage probe returns empty for this task. The task
+    must keep the fused defaults, resolve NO tuple to a comm backend, and
+    hand every tuple a ModelConfig without one (no spurious ``moe_comm_backend``).
+
+    Real coverage is stubbed to empty here because shipped sglang wideep tables
+    now cover the same (hidden, topk, experts) tuples every LARGE_EP_READY
+    model in the roster shares — there is no in-tree LARGE_EP_READY model
+    whose shape is absent from the shipped data — so the negative control
+    monkey-patches the coverage probe."""
+    from aiconfigurator.sdk import task_v2 as task_v2_module
+
+    monkeypatch.setattr(task_v2_module.Task, "_compute_large_ep_coverage", lambda self, role: {})
+
     t = _h200_sglang_task(QWEN3)
 
     assert t._large_ep_coverage("agg") == {}
