@@ -47,8 +47,14 @@ from aiconfigurator_core.sdk.operations.mla import (
     WideEPContextMLA,
     WideEPGenerationMLA,
 )
-from aiconfigurator_core.sdk.operations.moe import MoE, MoEDispatch, TrtLLMWideEPMoE, TrtLLMWideEPMoEDispatch
-from aiconfigurator_core.sdk.operations.moe_comm import MoEAllToAll, MoEExpertCompute
+from aiconfigurator_core.sdk.operations.moe import (
+    ModeledEPMoE,
+    MoE,
+    MoEDispatch,
+    TrtLLMWideEPMoE,
+    TrtLLMWideEPMoEDispatch,
+)
+from aiconfigurator_core.sdk.operations.moe_comm import MoEAllToAll
 from aiconfigurator_core.sdk.operations.msa import ContextMSAModule, GenerationMSAModule
 from aiconfigurator_core.sdk.operations.overlap import FallbackOp, OverlapOp
 
@@ -92,7 +98,7 @@ __all__ = [
     "MoE",
     "MoEAllToAll",
     "MoEDispatch",
-    "MoEExpertCompute",
+    "ModeledEPMoE",
     "Operation",
     "OverlapOp",
     "PerformanceResult",

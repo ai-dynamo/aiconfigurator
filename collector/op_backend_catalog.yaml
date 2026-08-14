@@ -125,7 +125,6 @@ families:
   - family: moe
     op_files:
       - moe_perf
-      - moe_expert_compute_perf
       - dsv4_megamoe_module_perf
       - wideep_moe_perf
       - wideep_context_moe_perf

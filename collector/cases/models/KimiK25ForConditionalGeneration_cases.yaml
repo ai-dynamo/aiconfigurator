@@ -163,8 +163,6 @@ framework_specific_op_cases:
       cases: all
     mla_bmm_gen_post:
       cases: all
-    moe_ep:
-      cases: all
   sglang:
     mla_context:
       cases: all

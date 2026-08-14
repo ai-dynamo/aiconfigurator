@@ -67,7 +67,6 @@ _LOADER_STUBS: dict[str, tuple[str, object]] = {
     "load_wideep_moe_compute_data": (f"{_OPS_PKG}.moe", None),
     "load_trtllm_alltoall_data": (f"{_OPS_PKG}.moe", None),
     "load_moe_a2a_data": (f"{_OPS_PKG}.moe_comm", None),
-    "load_moe_expert_compute_data": (f"{_OPS_PKG}.moe_comm", None),
     "load_context_mla_data": (f"{_OPS_PKG}.mla", None),
     "load_generation_mla_data": (f"{_OPS_PKG}.mla", None),
     "load_mla_bmm_data": (f"{_OPS_PKG}.mla", None),

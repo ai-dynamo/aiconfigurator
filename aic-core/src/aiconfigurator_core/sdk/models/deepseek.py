@@ -122,8 +122,8 @@ class DeepSeekModel(BaseModel):
 
         self._backend_name = backend_name
         # Large EP: the enumerator sets a per-phase MoE comm backend; the MoE
-        # block builder then emits the MoEAllToAll/MoEExpertCompute graph and sglang swaps
-        # in its deepep attention stack. No user flag selects it -- see
+        # block builder then emits the MoEAllToAll/ModeledEPMoE graph and
+        # sglang swaps in its deepep attention stack. No user flag selects it -- see
         # ``ModelConfig.moe_comm_backend``.
         self._is_large_ep = bool(self.config.moe_comm_backend)
         # Node width is a hardware fact with no default: an unset value would
@@ -324,7 +324,7 @@ class DeepSeekModel(BaseModel):
                 ]
             )
             # Shared experts (full size -- WideEP ADP mode, shared_tp_size=1),
-            # router, A2A dispatch/MoEExpertCompute/combine and moe_reduce_add.
+            # router, A2A dispatch/ModeledEPMoE/combine and moe_reduce_add.
             self.context_ops.extend(self._large_ep_moe_ops("context", moe_shape, self._num_layers))
             self.context_ops.append(
                 ops.GEMM(

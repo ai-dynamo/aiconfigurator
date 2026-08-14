@@ -57,7 +57,6 @@ from aiconfigurator_core.sdk.operations import (
     Embedding,
     EncoderAttention,
     FallbackOp,
-    FPMForwardOp,
     GDNKernel,
     GenerationAttention,
     GenerationDeepSeekV4AttentionModule,
@@ -68,15 +67,16 @@ from aiconfigurator_core.sdk.operations import (
     Mamba2Kernel,
     MLABmm,
     MLAModule,
+    ModeledEPMoE,
     MoE,
     MoEAllToAll,
     MoEDispatch,
-    MoEExpertCompute,
     OverlapOp,
     WideEPContextMLA,
     WideEPGenerationMLA,
 )
 from aiconfigurator_core.sdk.operations.dsa import DEFAULT_DSA_ARCHITECTURE, DSA_MODEL_DIMS
+from aiconfigurator_core.sdk.operations.fpm_forward import FPMForwardOp
 
 # Reuse the exact quant-mode -> Rust ``DataType`` serde-string mappers the live
 # ctypes bridge uses, so the compiled ``EngineConfig`` decodes the same way.
@@ -107,23 +107,13 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 # - 5 (PR #1460): `MlaModule{Context,Generation}` payloads gained
 #   `native_num_heads` (always serialized — bincode decodes positionally).
 # - 6: `Kda` op variant appended (Kimi-K3 KDA kernels; draft_tokens field).
-#   Claimed version 5 concurrently with #1460; renumbered at the merge.
-# - 7: `MoEDispatchOp` gained `attn_ar_modeled` (always serialized — bincode
-#   decodes positionally).
-# - 8: `GemmOp` gained `below_grid_sol` (always serialized — bincode decodes
-#   positionally).
-# - 9: the Rust `Op::FpmForward` whole-model variant (forward_model="fpm").
-#   Claimed 5, 7 and 8 concurrently with other landings; renumbered at each
-#   merge (same precedent as the v3/v4 collision).
-# - 10 (issue #1498): `Mhc` payload gained `seq_split` (CP per-rank token
-#   division) — a bincode op-layout change. Claimed 7 concurrently with
-#   `attn_ar_modeled`; renumbered at the rebase.
-# - 11 (AIC-1601): the wideEP MoE op variants (`WideEpMoe` /
+# - 7 (AIC-1601): the wideEP MoE op variants (`WideEpMoe` /
 #   `WideEpMoeDispatch`) were removed mid-enum, shifting every later bincode
-#   enum index; large-EP is now modeled natively by the `MoeAllToAll` /
-#   `MoeExpertCompute` variants appended after `FpmForward`, and
-#   `MoeExpertComputeOp` carries the
-#   `enable_eplb` legacy-fidelity field.
+#   enum index; large-EP is now modeled natively by the appended
+#   `MoeAllToAll` / `EpMoe` variants. The stacked branch independently
+#   claimed version 6, so the merge uses a fresh version.
+# - 11 (main rebase): reconcile with the Rust wire schema after the FPM,
+#   KDA, native large-EP, and modeled-EP op landings.
 ENGINE_SPEC_SCHEMA_VERSION = 11
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
@@ -166,6 +156,13 @@ def _gemm(op: GEMM) -> dict:
         "scale_num_tokens": op._scale_num_tokens,
         "low_precision_input": op._low_precision_input,
         "seq_split": op._seq_split,
+        # Small GDN-family GEMMs (e.g. Qwen3.5-397B / Qwen3-Next
+        # `context_gdn_in_proj_ba_gemm`, `*_shared_expert_gate_gemm`) sit
+        # below the collected grid on the n-axis (n=1). Python's
+        # `GEMM._query_gemm_table` degrades those to the SOL floor via
+        # `below_grid_sol`; the Rust op consumes the same field but
+        # #[serde(default)] silently sets it false when the wire spec omits
+        # it, which turns the miss into `PerfDataNotAvailableError`.
         "below_grid_sol": op._below_grid_sol,
     }
 
@@ -318,18 +315,8 @@ def _dispatch_flavor(backend: str, op: MoEDispatch) -> str:
 
     The sglang `moe_backend == "deepep_moe"` mapping to the DeepEP flavors
     retired with AIC-1601 (large-EP comm is modeled by `MoEAllToAll`); those
-    Rust variants no longer exist — but Python still routes a direct/custom
-    `MoEDispatch(moe_backend="deepep_moe")` through the DeepEP tables, so
-    serializing that op as `CustomAllReduce` would silently change the
-    communication algorithm in the native engine. Raise `OpConversionError`
-    instead: the established contract for graphs the native engine cannot
-    represent, which delegates the step back to Python.
+    Rust variants no longer exist.
     """
-    if backend == "deepep_moe":
-        raise OpConversionError(
-            "MoEDispatch(moe_backend='deepep_moe') has no native variant (retired with "
-            "AIC-1601; large-EP comm is modeled by MoEAllToAll) — delegating to the Python step"
-        )
     if backend == "trtllm":
         return "TrtllmAlltoall"
     return "CustomAllReduce"
@@ -350,7 +337,6 @@ def _moe_dispatch(op: MoEDispatch, *, backend: str) -> dict:
         "moe_ep_size": op._moe_ep_size,
         "attention_dp_size": op._attention_dp_size,
         "pre_dispatch": op._pre_dispatch,
-        "attn_ar_modeled": op._attn_ar_modeled,
         "backend": backend,
         "flavor": _dispatch_flavor(backend, op),
         # Retained on the wire (the Rust struct still carries the field);
@@ -542,8 +528,13 @@ def _mhc_module(op: DeepSeekV4MHCModule, *, architecture: str) -> dict:
         # anchor; mirrors `_query_mhc_table.get_sol`).
         "sinkhorn_iters": op._sinkhorn_iters,
         "quant_mode": _quant_name(op._quant_mode),
-        # CP: token-major module, per-rank tokens = ceil(x / seq_split)
-        # (issue #1498 — the missing division was the DSV4 CSA CP divergence).
+        # CP token-major shard factor. mHC is token-major, so Python's
+        # `DeepSeekV4MHCModule.query` divides `x` by `_seq_split` (= cp) BEFORE
+        # querying — the Rust op consumes the divided count via its own
+        # `seq_split` field. Without this emit the Rust side defaults to 1 and
+        # over-charges by `cp_size` on every CP context case (issue #1498 seq
+        # split anchor; the DSV4 CP `cp_static_ctx` parity anchor is the
+        # canonical repro).
         "seq_split": op._seq_split,
     }
 
@@ -632,13 +623,12 @@ def _moe_all_to_all(op: MoEAllToAll) -> dict:
     }
 
 
-def _moe_expert_compute(op: MoEExpertCompute) -> dict:
-    """Unified large-EP expert compute (Python `MoEExpertCompute`). Field names match the
-    Rust `MoeExpertComputeOp` (operators/moe_expert_compute.rs). `kernel_source` crosses the wire
-    verbatim (null when unpinned — the production case): the Rust op ports
-    every `_resolve_kernel_source` leg and resolves at query time, so nothing
-    is pre-baked here. `num_slots` is the ctor-resolved value (Python already
-    collapsed None -> num_experts)."""
+def _modeled_ep_moe(op: ModeledEPMoE) -> dict:
+    """Large-EP local compute mapped to stock MoE.
+
+    The trailing compatibility fields preserve the schema-v7 bincode layout;
+    the modeled Rust op intentionally ignores them.
+    """
     return {
         "name": op._name,
         "scale_factor": op._scale_factor,
@@ -648,13 +638,13 @@ def _moe_expert_compute(op: MoEExpertCompute) -> dict:
         "num_experts": op._num_experts,
         "moe_ep_size": op._moe_ep_size,
         "quant_mode": _quant_name(op._quant_mode),
-        "workload_distribution": op._workload_distribution,
+        "workload_distribution": "balanced",
         "attention_dp_size": op._attention_dp_size,
         "inference_phase": op._inference_phase,
-        "num_slots": op._num_slots,
-        "kernel_source": op._kernel_source,
+        "num_slots": None,
+        "kernel_source": None,
         "is_gated": bool(op._is_gated),
-        "enable_eplb": bool(op._enable_eplb),
+        "enable_eplb": False,
     }
 
 
@@ -733,14 +723,15 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
     if isinstance(op, WideEPGenerationMLA):
         return {"WideEpGenerationMla": _wideep_generation_mla(op)}
 
-    # Unified large-EP ops (AIC-1601): one Python class per table, the phase
-    # is a constructor field. Rust `Op::MoeAllToAll` / `Op::MoeExpertCompute` are
-    # APPENDED after `FpmForward` (bincode enum indices are positional;
-    # appending shifts nothing), so no ENGINE_SPEC_SCHEMA_VERSION bump.
+    # Large-EP communication remains measured; expert compute is an explicit
+    # stock-MoE approximation. Their Rust variants retain their existing
+    # bincode positions and field layouts, so schema v7 does not change.
     if isinstance(op, MoEAllToAll):
         return {"MoeAllToAll": _moe_all_to_all(op)}
-    if isinstance(op, MoEExpertCompute):
-        return {"MoeExpertCompute": _moe_expert_compute(op)}
+    if isinstance(op, ModeledEPMoE):
+        # Keep the schema-v7 enum tag/index stable; the Rust payload type and
+        # query semantics are ModeledEpMoeOp.
+        return {"EpMoe": _modeled_ep_moe(op)}
 
     # Plain (single-variant) ops.
     if isinstance(op, GEMM):
@@ -873,6 +864,7 @@ def _engine_config_dict(
         "systems_path": systems_path,
         "backend": backend,
         "backend_version": backend_version,
+        "forward_model": getattr(model, "forward_model", "op_level"),
         "kv_block_size": kv_block_size,
         # ParallelMapping (flattened)
         "tp_size": int(cfg.tp_size or 1),
@@ -1218,11 +1210,9 @@ class EngineHandle:
         mode: str = "static",
         stride: int = 32,
     ) -> tuple[list[tuple[str, float, float, str]], list[tuple[str, float, float, str]]]:
-        """``run_static`` with the per-op values kept: ``(context, generation)``
-        lists of ``(name, latency_ms, energy_wms, source)``, name-folded (each
-        name appears once, accumulated with Python's phase-dict semantics;
-        generation values are per-step-folded, then weighted by
-        ``repeat_count``)."""
+        """Per-op ``(name, latency_ms, energy_wms, source)`` from the compiled
+        engine's static-phase run, one list per phase — the input the Python
+        rust-engine-step bridge folds into name-keyed dicts."""
         return self._engine.run_static_per_op(
             int(batch_size),
             int(beam_width),
@@ -1249,9 +1239,11 @@ class EngineHandle:
         list[tuple[str, float, float, str]],
         list[tuple[str, float, float, str]],
     ]:
-        """``mixed_step_breakdown`` with the per-op values kept:
-        ``(shared_non_attention, context_attention, decode_attention)`` lists;
-        context-attention entries arrive already divided by ``ceil(isl/ctx)``."""
+        """Per-op ``(name, latency_ms, energy_wms, source)`` for the three
+        mixed-step passes (shared non-attention, context-attention, decode-
+        attention). Mirrors ``mixed_step_breakdown`` but retains per-op values
+        so the caller can build the same StepEstimate shape as the Python
+        step."""
         return self._engine.mixed_step_breakdown_per_op(
             int(ctx_tokens),
             int(gen_tokens),
@@ -1269,9 +1261,13 @@ class EngineHandle:
         osl: int,
         gen_seq_imbalance_correction_scale: float = 1.0,
     ) -> list[tuple[str, float, float, str]]:
-        """``decode_step_latency`` with the per-op values kept."""
+        """Per-op ``(name, latency_ms, energy_wms, source)`` for one decode-only
+        step — the per-op sibling of ``decode_step_latency``."""
         return self._engine.decode_step_per_op(
-            int(gen_tokens), int(isl), int(osl), float(gen_seq_imbalance_correction_scale)
+            int(gen_tokens),
+            int(isl),
+            int(osl),
+            float(gen_seq_imbalance_correction_scale),
         )
 
     def evaluate_context_ops(
@@ -1284,19 +1280,22 @@ class EngineHandle:
         seq_imbalance_correction_scale: float = 1.0,
         x: int | None = None,
     ) -> list[tuple[str, float, float, str]]:
-        """Thin op-list evaluation over the compiled CONTEXT op list: evaluate
-        the ops at ``indices`` (positions in the spec's ``context_ops``, which
-        mirror ``model.context_ops`` order) at the context-phase shape.
-        ``x`` overrides the per-op token count verbatim (callers with their
-        own x policy, e.g. AFD's uniform ``batch * s``); ``None`` keeps the
-        base-phase rule (``batch * s``, logits-GEMM exception)."""
+        """Thin op-list evaluation FFI over the compiled CONTEXT op list.
+
+        Consumed by the AFD orchestration in ``inference_session.py`` via
+        ``rust_engine_step.evaluate_context_ops_with_rust`` — Python selects
+        the A/F index partitions and this shells straight through to the
+        PyO3 method. See the Rust ``AicEngine::evaluate_context_ops`` doc
+        for value semantics (name-folded ``(name, latency_ms, energy_wms,
+        source)`` tuples).
+        """
         return self._engine.evaluate_context_ops(
-            [int(i) for i in indices],
+            list(indices),
             int(batch_size),
             int(s),
             int(prefix),
             float(seq_imbalance_correction_scale),
-            int(x) if x is not None else None,
+            x if x is None else int(x),
         )
 
     def evaluate_generation_ops(
@@ -1309,17 +1308,15 @@ class EngineHandle:
         prefix: int = 0,
         x: int | None = None,
     ) -> list[tuple[str, float, float, str]]:
-        """Thin op-list evaluation over the compiled GENERATION op list at the
-        decode-step shape (see :meth:`evaluate_context_ops`). The base decode
-        walk carries no prefix; ``prefix`` exists for orchestrations that
-        thread it (AFD)."""
+        """Thin op-list evaluation FFI over the compiled GENERATION op list
+        at the decode-step shape (see ``evaluate_context_ops``)."""
         return self._engine.evaluate_generation_ops(
-            [int(i) for i in indices],
+            list(indices),
             int(batch_size),
             int(s),
             float(gen_seq_imbalance_correction_scale),
             int(prefix),
-            int(x) if x is not None else None,
+            x if x is None else int(x),
         )
 
     def evaluate_ops_json(

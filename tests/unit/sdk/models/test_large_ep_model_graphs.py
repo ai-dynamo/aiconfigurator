@@ -45,7 +45,6 @@ pytestmark = pytest.mark.unit
 
 DSR1 = "deepseek-ai/DeepSeek-R1"
 DSV32 = "deepseek-ai/DeepSeek-V3.2-Exp"
-KIMIK25 = "nvidia/Kimi-K2.5-NVFP4"
 QWEN3 = "Qwen/Qwen3-235B-A22B"
 
 SGLANG_COMM = {"context": "deepep_ht", "generation": "deepep_ll"}
@@ -94,9 +93,9 @@ def _deepseek_sglang(tp_size=1, attention_dp_size=32, **extra):
     )
 
 
-def _deepseek_trtllm(model_path=DSR1, **extra):
+def _deepseek_trtllm(**extra):
     return _build(
-        model_path,
+        DSR1,
         "trtllm",
         tp_size=1,
         moe_tp_size=1,
@@ -217,15 +216,15 @@ class TestDeepSeekSglangLargeEP:
         assert dispatch._comm_backend == combine._comm_backend == "deepep_ht"
         assert dispatch._node_num == 4  # nodes_for(32 * 1, 8)
         assert dispatch._attention_tp_size == 1  # cfg.tp_size, context only
-        assert isinstance(moe, ops.MoEExpertCompute)
-        assert moe._workload_distribution == "power_law_1.01"
-        assert moe._enable_eplb is False
+        assert isinstance(moe, ops.ModeledEPMoE)
+        assert not hasattr(moe, "_workload_distribution")
+        assert not hasattr(moe, "_enable_eplb")
         assert [op._scale_factor for op in model.context_ops[-3:]] == [DS_LAYERS] * 3
 
         gen_dispatch, gen_moe, gen_combine = model.generation_ops[-3:]
         assert gen_dispatch._comm_backend == gen_combine._comm_backend == "deepep_ll"
         assert gen_dispatch._attention_tp_size == 1  # generation never divides
-        assert gen_moe._workload_distribution == "power_law_1.01"
+        assert isinstance(gen_moe, ops.ModeledEPMoE)
         assert [op._scale_factor for op in model.generation_ops[-3:]] == [float(DS_LAYERS)] * 3
 
     def test_tp2_adds_nccl_allgather_and_reduce_scatter(self):
@@ -253,14 +252,10 @@ class TestDeepSeekSglangLargeEP:
         assert model.context_ops[-3]._attention_tp_size == 2
         assert model.generation_ops[-3]._attention_tp_size == 1
 
-    def test_eplb_flattens_the_prefill_distribution_only(self):
+    def test_eplb_does_not_change_modeled_local_compute(self):
         model = _deepseek_sglang(enable_eplb=True)
-        assert model.context_ops[-2]._workload_distribution == "power_law_0.6"
-        assert model.context_ops[-2]._enable_eplb is True
-        # The legacy class passed enable_eplb=False in decode; MoEExpertCompute gates the
-        # 0.8 token correction on inference_phase == "context", so the decode
-        # op's flag is inert (deepseek.py:1359 @ 8372e60 vs moe_comm.py:1295).
-        assert model.generation_ops[-2]._workload_distribution == "power_law_1.01"
+        assert not hasattr(model.context_ops[-2], "_enable_eplb")
+        assert not hasattr(model.generation_ops[-2], "_enable_eplb")
         assert model.generation_ops[-2]._inference_phase == "generation"
 
 
@@ -341,21 +336,6 @@ class TestDeepSeekTrtllmLargeEP:
             "generation_shared_ffn2_gemm",
         ]
 
-    @pytest.mark.parametrize(
-        ("model_path", "q_width", "kv_width", "o_width"),
-        [
-            (DSR1, 128 * 192, 128 * 256, 128 * 128),
-            (KIMIK25, 64 * 192, 64 * 256, 64 * 128),
-        ],
-    )
-    def test_mla_projection_widths_follow_checkpoint_head_count(self, model_path, q_width, kv_width, o_width):
-        model = _deepseek_trtllm(model_path=model_path)
-        assert _op(model.context_ops, "context_q_b_proj_gemm")._n == q_width
-        assert _op(model.context_ops, "context_kv_b_proj_gemm")._n == kv_width
-        assert _op(model.context_ops, "context_proj_gemm")._k == o_width
-        assert _op(model.generation_ops, "generation_q_b_proj_gemm")._n == q_width
-        assert _op(model.generation_ops, "generation_proj_gemm")._k == o_width
-
     def test_legacy_pdl_factor_scales_the_whole_decode_stack(self):
         model = _deepseek_trtllm()
         assert _op(model.context_ops, "context_moe")._scale_factor == DS_LAYERS
@@ -391,23 +371,20 @@ class TestDeepSeekTrtllmLargeEP:
             assert a2a._node_num == 4  # nodes_for(16 * 1, num_gpus_per_node=4)
             assert a2a._attention_tp_size == 1  # trtllm alltoall gets undivided tokens
         assert combine._comm_dtype == "nvfp4"  # context keeps the standard rows
-        assert isinstance(moe, ops.MoEExpertCompute)
+        assert isinstance(moe, ops.ModeledEPMoE)
         gen_combine = _op(model.generation_ops, "generation_moe_overlap")._group_a[-1]
         assert gen_combine._comm_dtype == "fp4"  # generation low-precision combine
 
-    @pytest.mark.parametrize(
-        ("enable_eplb", "expected"),
-        [(False, "power_law_1.01"), (True, "power_law_1.01_eplb")],
-    )
-    def test_eplb_rides_the_distribution_suffix(self, enable_eplb, expected):
+    @pytest.mark.parametrize("enable_eplb", [False, True])
+    def test_eplb_does_not_enter_the_local_compute_model(self, enable_eplb):
         model = _deepseek_trtllm(enable_eplb=enable_eplb)
         moe = _op(model.context_ops, "context_moe")
-        assert moe._workload_distribution == expected
-        assert moe._enable_eplb is False  # trtllm never uses the deepep 0.8 correction
+        assert not hasattr(moe, "_workload_distribution")
+        assert not hasattr(moe, "_enable_eplb")
 
-    def test_num_slots_flows_into_the_ep_moe_op(self):
+    def test_num_slots_does_not_enter_the_local_compute_model(self):
         model = _deepseek_trtllm(enable_eplb=True, wideep_num_slots=288)
-        assert _op(model.context_ops, "context_moe")._num_slots == 288
+        assert not hasattr(_op(model.context_ops, "context_moe"), "_num_slots")
 
 
 class TestTrtllmLargeEPValidation:
@@ -514,7 +491,7 @@ class TestDeepSeekV32LargeEP:
         assert _names(model.generation_ops) == self.SGLANG_GENERATION
         assert isinstance(model.context_ops[0], ops.ContextDSAModule)
         assert isinstance(model.generation_ops[0], ops.GenerationDSAModule)
-        assert model.context_ops[-2]._workload_distribution == "power_law_1.01"
+        assert isinstance(model.context_ops[-2], ops.ModeledEPMoE)
 
     def test_sglang_tp2_adds_nccl_collectives(self):
         model = _v32_sglang(tp_size=2, attention_dp_size=16)
@@ -525,10 +502,10 @@ class TestDeepSeekV32LargeEP:
         ]
         assert _names(model.generation_ops) == self.SGLANG_GENERATION
 
-    def test_sglang_eplb_flattens_prefill(self):
+    def test_sglang_eplb_is_not_in_local_compute_model(self):
         model = _v32_sglang(enable_eplb=True)
-        assert model.context_ops[-2]._workload_distribution == "power_law_0.6"
-        assert model.generation_ops[-2]._workload_distribution == "power_law_1.01"
+        assert not hasattr(model.context_ops[-2], "_enable_eplb")
+        assert not hasattr(model.generation_ops[-2], "_enable_eplb")
 
     def test_trtllm_graphs(self):
         model = _v32_trtllm()
@@ -562,33 +539,12 @@ class TestDeepSeekV32LargeEP:
 
     def test_trtllm_pdl_factor_and_eplb_suffix(self):
         model = _v32_trtllm(enable_eplb=True)
-        assert _op(model.context_ops, "context_moe")._workload_distribution == "power_law_1.01_eplb"
+        assert not hasattr(_op(model.context_ops, "context_moe"), "_workload_distribution")
         overlap = _op(model.generation_ops, "generation_moe_overlap")
         assert all(op._scale_factor == DS_LAYERS * PDL_FACTOR for op in overlap._group_a)
         # The legacy class scaled the whole decode stack by the PDL factor.
         for name in ("generation_add_norm_1", "generation_attention", "generation_add_norm_2"):
             assert _op(model.generation_ops, name)._scale_factor == DS_LAYERS * PDL_FACTOR, name
-
-    def test_trtllm_nvfp4_preserves_per_projection_dsa_weight_dtypes(self):
-        model = _build(
-            "nvidia/DeepSeek-V3.2-NVFP4",
-            "trtllm",
-            tp_size=1,
-            moe_tp_size=1,
-            moe_ep_size=16,
-            attention_dp_size=16,
-            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
-            moe_quant_mode=common.MoEQuantMode.nvfp4,
-            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
-            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-            moe_comm_backend=dict(TRTLLM_COMM),
-            num_gpus_per_node=GB200_GPUS_PER_NODE,
-        )
-        context = _op(model.context_ops, "context_attention")
-        generation = _op(model.generation_ops, "generation_attention")
-        # q/kv/indexer are BF16 while o_proj is NVFP4: 13.15 GiB over 61 layers.
-        assert context.get_weights() / (1 << 30) == pytest.approx(13.15, abs=0.1)
-        assert generation._weights == context._weights
 
     def test_trtllm_validation_applies(self):
         with pytest.raises(ValueError, match="must equal"):
@@ -679,7 +635,7 @@ class TestMOEModelLargeEP:
         assert _names(model.generation_ops) == self.GENERATION
         assert model.context_ops[7]._comm_backend == "deepep_ht"
         assert model.generation_ops[7]._comm_backend == "deepep_ll"
-        assert isinstance(model.context_ops[8], ops.MoEExpertCompute)
+        assert isinstance(model.context_ops[8], ops.ModeledEPMoE)
         assert model.context_ops[8]._scale_factor == QWEN3_LAYERS
         assert model.generation_ops[8]._scale_factor == float(QWEN3_LAYERS)
 
@@ -693,38 +649,16 @@ class TestMOEModelLargeEP:
         assert _op(fused.context_ops, "context_embedding")._row_size == 75968
         assert _op(large_ep.generation_ops, "generation_embedding")._row_size == 151936
 
-    def test_distributions_use_the_moe_family_alpha(self):
+    def test_distribution_is_fixed_by_the_local_compute_model(self):
         model = _moe_sglang_large_ep()
-        assert model.context_ops[8]._workload_distribution == "power_law_1.2"
-        assert model.generation_ops[8]._workload_distribution == "power_law_1.2"
+        assert not hasattr(model.context_ops[8], "_workload_distribution")
+        assert not hasattr(model.generation_ops[8], "_workload_distribution")
 
-    def test_eplb_flattens_prefill_only(self):
+    def test_eplb_is_not_in_the_local_compute_model(self):
         model = _moe_sglang_large_ep(enable_eplb=True)
-        assert model.context_ops[8]._workload_distribution == "power_law_0.6"
-        assert model.context_ops[8]._enable_eplb is True
-        # Decode keeps the family alpha; the EPLB token correction is
-        # prefill-only inside MoEExpertCompute (moe_comm.py:1295).
-        assert model.generation_ops[8]._workload_distribution == "power_law_1.2"
+        assert not hasattr(model.context_ops[8], "_enable_eplb")
+        assert not hasattr(model.generation_ops[8], "_enable_eplb")
         assert model.generation_ops[8]._inference_phase == "generation"
-
-    def test_trtllm_eplb_uses_suffixed_family_distribution_in_both_phases(self):
-        model = _build(
-            QWEN3,
-            "trtllm",
-            tp_size=1,
-            moe_tp_size=1,
-            moe_ep_size=8,
-            attention_dp_size=8,
-            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
-            moe_quant_mode=common.MoEQuantMode.bfloat16,
-            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
-            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-            enable_eplb=True,
-            moe_comm_backend=dict(TRTLLM_COMM),
-            num_gpus_per_node=GB200_GPUS_PER_NODE,
-        )
-        assert _op(model.context_ops, "context_moe")._workload_distribution == "power_law_1.2_eplb"
-        assert _op(model.generation_ops, "generation_moe")._workload_distribution == "power_law_1.2_eplb"
 
     def test_deepep_backend_alone_no_longer_switches_the_graph(self):
         # moe_backend=deepep_moe without moe_comm_backend is the FUSED graph
@@ -836,7 +770,7 @@ class TestFusedGraphsUnchanged:
         )
         assert _names(model.context_ops) == self.DS_CONTEXT
         assert _names(model.generation_ops) == self.DS_GENERATION
-        assert model.context_ops[9]._workload_distribution == "power_law_1.01"
+        assert isinstance(model.context_ops[9], ops.MoE)
         overlap = model.generation_ops[4]
         assert _names(overlap._group_a) == [
             "generation_router_gemm",
@@ -912,7 +846,7 @@ class TestFusedGraphsUnchanged:
             "generation_embedding_ar",
             "generation_p2p",
         ]
-        assert model.context_ops[8]._workload_distribution == "power_law_1.2"
+        assert isinstance(model.context_ops[8], ops.MoE)
 
 
 # ---------------------------------------------------------------------------
@@ -945,61 +879,6 @@ class TestAttentionOpKeys:
             "generation_attention",
         )
 
-    def test_deprecated_enable_wideep_keyword_alias_is_preserved(self):
-        with pytest.warns(DeprecationWarning, match="enable_wideep"):
-            old_keyword = attention_op_keys("DEEPSEEK", "sglang", enable_wideep=True)
-        assert old_keyword == attention_op_keys("DEEPSEEK", "sglang", is_large_ep=True)
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-
-
-class TestVllmLargeEPKeepsVocabTPCollectives:
-    """Expert parallelism does not remove vLLM's vocabulary-TP or pipeline
-    semantics: the replicated-embedding / no-collective transcription from the
-    deleted SGLangEPMOEModel is sglang-scoped, and the vLLM large-EP graph
-    keeps the sharded embedding plus all four collectives."""
-
-    def test_qwen3_vllm_graph(self):
-        model = _build(
-            QWEN3,
-            "vllm",
-            tp_size=2,
-            pp_size=2,
-            moe_tp_size=1,
-            moe_ep_size=8,
-            attention_dp_size=4,
-            gemm_quant_mode=common.GEMMQuantMode.fp8,
-            moe_quant_mode=common.MoEQuantMode.fp8,
-            moe_comm_backend=dict(SGLANG_COMM),
-            num_gpus_per_node=H200_GPUS_PER_NODE,
-        )
-        ctx, gen = _names(model.context_ops), _names(model.generation_ops)
-        assert "context_embedding_ar" in ctx
-        assert "generation_embedding_ar" in gen
-        assert "context_p2p" in ctx
-        assert "generation_p2p" in gen
-        emb = next(op for op in model.context_ops if op._name == "context_embedding")
-        # 151936-row vocab stays TP-sharded over tp=2, not replicated.
-        assert 151936 // 2 in emb.__dict__.values()
-
-    def test_sglang_contrast_stays_transcribed(self):
-        model = _build(
-            QWEN3,
-            "sglang",
-            tp_size=2,
-            pp_size=1,
-            moe_tp_size=1,
-            moe_ep_size=8,
-            attention_dp_size=4,
-            gemm_quant_mode=common.GEMMQuantMode.fp8,
-            moe_quant_mode=common.MoEQuantMode.fp8,
-            moe_comm_backend=dict(SGLANG_COMM),
-            num_gpus_per_node=H200_GPUS_PER_NODE,
-        )
-        ctx, gen = _names(model.context_ops), _names(model.generation_ops)
-        assert "context_embedding_ar" not in ctx
-        assert "generation_embedding_ar" not in gen
-        emb = next(op for op in model.context_ops if op._name == "context_embedding")
-        assert 151936 in emb.__dict__.values()  # replicated

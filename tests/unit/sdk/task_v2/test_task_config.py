@@ -414,20 +414,20 @@ def test_sweep_disagg_require_same_tp_sglang_fused():
     the SGLang-specific constraint.
     """
 
-    def mk(backend, model="deepseek-ai/DeepSeek-V3", **extra):
+    def mk(backend, model="deepseek-ai/DeepSeek-V3", system="h200_sxm", **extra):
         return Task(
             serving_mode="disagg",
             prefill_model_path=model,
-            prefill_system_name="h200_sxm",
+            prefill_system_name=system,
             prefill_backend_name=backend,
             decode_model_path=model,
-            decode_system_name="h200_sxm",
+            decode_system_name=system,
             decode_backend_name=backend,
             **extra,
         ).sweep_disagg_kwargs(prefill_database=None, decode_database=None)
 
-    # Qwen3 has no large-EP coverage on h200/sglang -> nothing can be exempt.
-    assert mk("sglang", model="Qwen/Qwen3-235B-A22B")["require_same_tp"] is True
+    # Uncovered (a100_sxm carries no wideep DeepEP data) -> nothing can be exempt.
+    assert mk("sglang", model="Qwen/Qwen3-235B-A22B", system="a100_sxm")["require_same_tp"] is True
     # A covered model (DeepSeek on sglang) gets the per-pair predicate.
     assert callable(mk("sglang")["require_same_tp"])
     assert mk("trtllm")["require_same_tp"] is False
@@ -1043,16 +1043,16 @@ def test_sglang_agg_default_moe_ep_search():
     EP-only for deepep_moe (v1 standard vs deepep_moe branches). Was moe_ep=[1] — a bug
     masked by always passing explicit candidates, caught by default-path parity.
 
-    Probed on Qwen3 (no large-EP coverage on h200/sglang): a covered model gets
-    the union with the multi-node ladder instead (test_coverage_candidates)."""
+    Probed on Qwen3 with a100_sxm/sglang (no large-EP coverage of any shape),
+    so the fused defaults show through without the multi-node ladder union."""
     qwen = "Qwen/Qwen3-235B-A22B"
-    t = Task(serving_mode="agg", model_path=qwen, system_name="h200_sxm", backend_name="sglang")
+    t = Task(serving_mode="agg", model_path=qwen, system_name="a100_sxm", backend_name="sglang")
     assert t.agg_moe_tp_candidates == [1, 2, 4, 8]
     assert t.agg_moe_ep_candidates == [1, 2, 4, 8]
     t2 = Task(
         serving_mode="agg",
         model_path=qwen,
-        system_name="h200_sxm",
+        system_name="a100_sxm",
         backend_name="sglang",
         moe_backend="deepep_moe",
     )

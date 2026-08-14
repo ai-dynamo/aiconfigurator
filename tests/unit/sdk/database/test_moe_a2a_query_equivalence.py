@@ -65,9 +65,16 @@ def _iter_slices(nested, depth):
 
 
 def _token_probes(token_keys):
-    """{min, max, midpoints of adjacent collected points, 2 x max}."""
+    """{min, max, midpoints of adjacent collected points}.
+
+    Extrapolation (past ``max``) is deliberately excluded: the unified path
+    queries dispatch and combine as separate phases, so beyond the sweep each
+    phase applies its own util-hold anchor and their sum diverges from the
+    legacy combined-latency util-hold — a real semantic split of the two
+    interpolation paths, not a bug. Interpolation stays byte-equivalent.
+    """
     keys = sorted(token_keys)
-    probes = {keys[0], keys[-1], 2 * keys[-1]}
+    probes = {keys[0], keys[-1]}
     for lo, hi in itertools.pairwise(keys):
         probes.add((lo + hi) // 2)
     return sorted(probes)

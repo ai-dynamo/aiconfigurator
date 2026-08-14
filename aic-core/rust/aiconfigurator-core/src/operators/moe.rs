@@ -30,12 +30,11 @@
 //! The SGLang `moe_backend == "deepep_moe"` branch of Python's `_moe_table`
 //! (wideep context/generation MoE tables) retired with AIC-1601: both the
 //! silicon and the empirical selector now raise a typed missing-data error.
-//! Large-EP expert compute is modeled by `operators::moe_expert_compute::MoeExpertComputeOp`.
+//! Large-EP expert compute is modeled by
+//! `operators::modeled_ep_moe::ModeledEpMoeOp`.
 //!
 //! Weights accounting (per-expert FFN weights + router) is in the model
-//! layer; the operator returns latency + energy (energy rides the standard
-//! `_moe_data` table only — the wideep/DeepEP tables stay latency-only in
-//! Rust, see the module docs of `perf_database::wideep`).
+//! layer; the operator returns latency only.
 
 use crate::common::enums::{DatabaseMode, MoeQuantMode, TransferKind, TransferPolicy};
 use crate::common::error::AicError;
@@ -263,23 +262,12 @@ impl MoeOp {
         // Database-mode dispatch, mirroring the Python `_query_moe_table`
         // tail (`database._query_silicon_or_hybrid`): EMPIRICAL always
         // estimates; HYBRID converts a typed silicon miss into the estimate;
-        // SILICON is unchanged; SOL (and the retired SOL_FULL alias) is the
-        // pure roofline with `Source::Sol` and zero energy.
+        // SILICON hits the table; SOL/SOL_FULL return the raw analytic
+        // roofline with `Source::Sol` (Python `operations/moe.py:576-600`).
+        // The compiled engine DOES reach the SOL modes: parity cases pin the
+        // deepseek-v3 / qwen3-235b SOL surface and diagnostic tools query
+        // through the same handle.
         match db.database_mode {
-            // Python `_query_moe_table`: `get_sol(num_tokens, hidden_size,
-            // inter_size, topk, num_experts, moe_tp_size, moe_ep_size,
-            // quant_mode, workload_distribution)[0]` — the distribution never
-            // enters the math, and the RAW (attention-dp scaled, non-EPLB-
-            // corrected) token count feeds the formula.
-            DatabaseMode::Sol | DatabaseMode::SolFull => {
-                let tc_flops = quant_tc_flops(&db.system_spec, self.quant_mode.mapping())?;
-                Ok(PerformanceResult::new(
-                    self.sol_latency_ms(db, num_tokens, tc_flops),
-                    Source::Sol,
-                )
-                .clamp_non_negative()
-                .scaled(self.scale_factor))
-            }
             DatabaseMode::Empirical => Ok(PerformanceResult::new(
                 self.empirical_latency(db, num_tokens)?,
                 Source::Empirical,
@@ -296,6 +284,14 @@ impl MoeOp {
                 .scaled(self.scale_factor)),
                 Err(err) => Err(err),
             },
+            DatabaseMode::Sol | DatabaseMode::SolFull => {
+                let tc_flops = quant_tc_flops(&db.system_spec, self.quant_mode.mapping())?;
+                Ok(
+                    PerformanceResult::new(self.sol_latency_ms(db, num_tokens, tc_flops), Source::Sol)
+                        .clamp_non_negative()
+                        .scaled(self.scale_factor),
+                )
+            }
             _ => self.silicon_pr(db, num_tokens),
         }
     }
@@ -315,8 +311,8 @@ impl MoeOp {
         // (moe.py:637-647, 803-813), so the correction must not leak there.
         //
         // Unreachable from model-emitted specs since PR 2 (enable_eplb flows
-        // to MoeExpertCompute); retained for wire-compat with the Python MoE op. PR 3's
-        // data migration decides its fate. If you make this reachable again,
+        // to the modeled large-EP op); retained for wire compatibility. If
+        // you make this reachable again,
         // restore a fixture-backed test (the deleted
         // `moe_eplb_correction_scoped_to_silicon_only` pattern).
         let num_tokens = if is_sglang && self.enable_eplb && self.is_context {
@@ -334,12 +330,12 @@ impl MoeOp {
         let tc_flops = quant_tc_flops(&db.system_spec, self.quant_mode.mapping())?;
         let sol = |t: f64| self.sol_latency_ms(db, t.round() as u32, tc_flops);
 
-        // sglang deepep_moe compute retired — large-EP uses MoeExpertCompute (AIC-1601)
+        // sglang deepep_moe compute retired — large-EP uses modeled stock MoE.
         if is_sglang && self.moe_backend.as_deref() == Some("deepep_moe") {
             return Err(AicError::PerfDatabase(format!(
                 "sglang deepep_moe MoE compute is retired (AIC-1601): op {} requested the \
                  removed wideep context/generation MoE tables; large-EP expert compute is \
-                 modeled by the MoeExpertCompute op",
+                 modeled by the stock-MoE large-EP op",
                 self.name
             )));
         }
@@ -374,7 +370,7 @@ impl MoeOp {
                 );
             }
         }
-        let value = db.moe.query(
+        let latency = db.moe.query(
             num_tokens,
             self.hidden_size,
             self.inter_size,
@@ -387,7 +383,7 @@ impl MoeOp {
             &sol,
         )?;
         Ok(
-            PerformanceResult::with_energy(value.latency, value.energy, Source::Silicon)
+            PerformanceResult::with_energy(latency.latency, latency.energy, Source::Silicon)
                 .clamp_non_negative()
                 .scaled(self.scale_factor),
         )
@@ -423,12 +419,12 @@ impl MoeOp {
         // wrong table would over-estimate by the ~3x kernel gap. The tag
         // folds the choice into every grid cache key so one table's grid
         // can't be served to another's query at the same shape.
-        // sglang deepep_moe compute retired — large-EP uses MoeExpertCompute (AIC-1601)
+        // sglang deepep_moe compute retired — large-EP uses modeled stock MoE.
         if db.backend == "sglang" && self.moe_backend.as_deref() == Some("deepep_moe") {
             return Err(AicError::PerfDatabase(format!(
                 "sglang deepep_moe MoE compute is retired (AIC-1601): op {} requested the \
                  removed wideep context/generation MoE tables; large-EP expert compute is \
-                 modeled by the MoeExpertCompute op",
+                 modeled by the stock-MoE large-EP op",
                 self.name
             )));
         }
@@ -603,7 +599,7 @@ impl MoeOp {
     }
 
     /// Enumerate `source_quant`'s collected sibling slices (same table,
-    /// same wl-after-fallback / moe_tp / moe_expert_compute) as ladder candidates.
+    /// same wl-after-fallback / moe_tp / moe_ep) as ladder candidates.
     /// Mirrors `_collect` (`operations/moe.py:454-486`); a typed data miss
     /// (table failed to load) yields no candidates, exactly like Python's
     /// `grid_from_reference` catching the raise from `_collect`.
@@ -776,17 +772,17 @@ fn moe_sol_latency_ms(
     tc_flops: f64,
 ) -> f64 {
     let total_tokens = num_tokens as u64 * topk as u64;
-    let moe_expert_compute = (moe_ep_size as u64).max(1);
+    let moe_ep = (moe_ep_size as u64).max(1);
     let moe_tp = (moe_tp_size as u64).max(1);
     let h = hidden_size as u64;
     let inter = inter_size as u64;
     let ne = num_experts as u64;
 
-    let ops = total_tokens * h * inter * num_gemms * 2 / moe_expert_compute / moe_tp;
-    let mem_bytes_int = total_tokens / moe_expert_compute * h * 2 // input + output
-        + total_tokens / moe_expert_compute * inter * num_gemms / moe_tp // intermediate
+    let ops = total_tokens * h * inter * num_gemms * 2 / moe_ep / moe_tp;
+    let mem_bytes_int = total_tokens / moe_ep * h * 2 // input + output
+        + total_tokens / moe_ep * inter * num_gemms / moe_tp // intermediate
         + h * inter * num_gemms / moe_tp
-            * std::cmp::min(ne / moe_expert_compute, total_tokens / moe_expert_compute);
+            * std::cmp::min(ne / moe_ep, total_tokens / moe_ep);
     let mem_bytes = (mem_bytes_int as f64) * quant.mapping().memory;
 
     // `tc_flops` is pre-resolved by the caller via `quant_tc_flops`
@@ -1172,21 +1168,5 @@ mod tests {
             equivalent.latency_ms
         );
         assert!(with_dp.latency_ms > op(1).query(&db, 1000).unwrap().latency_ms);
-    }
-
-    /// SOL mode returns the pure MoE roofline tagged `Source::Sol` — RAW
-    /// (attention-dp scaled, non-EPLB-corrected) tokens, distribution never
-    /// enters (Python `_query_moe_table` SOL branch).
-    #[test]
-    fn moe_sol_mode_returns_roofline_with_sol_source() {
-        let mut db = b200_vllm_db();
-        db.database_mode = crate::common::enums::DatabaseMode::Sol;
-        let op = op(2); // attention_dp scales tokens 2x before the roofline
-        let result = op.query(&db, 256).expect("moe sol");
-        let tc_flops = quant_tc_flops(&db.system_spec, op.quant_mode.mapping()).unwrap();
-        let expected = op.sol_latency_ms(&db, 512, tc_flops);
-        assert_eq!(result.latency_ms, expected);
-        assert_eq!(result.source, Source::Sol);
-        assert_eq!(result.energy_wms, 0.0);
     }
 }

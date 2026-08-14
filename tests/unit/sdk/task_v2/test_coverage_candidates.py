@@ -41,9 +41,6 @@ SYNTH_VERSION = "9.9.9"
 # (deepep_ll) — the asymmetry every per-phase assertion below keys on.
 _HT_PAIRS = ((8, 1), (16, 2), (32, 4))
 _LL_PAIRS = ((8, 1), (16, 2))
-# Expert-compute rows exist for bfloat16 only: a task on another MoE quant has
-# comm coverage but no compute coverage, so it stays fused.
-_EP_QUANT = "bfloat16"
 
 
 def _a2a_rows(backends=(("deepep_ht", _HT_PAIRS), ("deepep_ll", _LL_PAIRS))) -> list[dict]:
@@ -68,32 +65,6 @@ def _a2a_rows(backends=(("deepep_ht", _HT_PAIRS), ("deepep_ll", _LL_PAIRS))) -> 
                             "power": 300.0,
                         }
                     )
-    return rows
-
-
-def _ep_rows(phases=(("context", _HT_PAIRS), ("generation", _LL_PAIRS))) -> list[dict]:
-    rows = []
-    for phase, pairs in phases:
-        for ep_size, _node in pairs:
-            for num_tokens in (128, 1024):
-                rows.append(
-                    {
-                        "kernel_source": "deepep_moe",
-                        "moe_dtype": _EP_QUANT,
-                        "distribution": "power_law_1.2",
-                        "inference_phase": phase,
-                        "topk": SYNTH_TOPK,
-                        "num_experts": SYNTH_EXPERTS,
-                        "num_slots": SYNTH_EXPERTS,
-                        "hidden_size": SYNTH_HIDDEN,
-                        "inter_size": SYNTH_INTER,
-                        "moe_tp_size": 1,
-                        "moe_ep_size": ep_size,
-                        "num_tokens": num_tokens,
-                        "latency": 1.5,
-                        "power": 400.0,
-                    }
-                )
     return rows
 
 
@@ -128,9 +99,8 @@ def _one_shot_log_state():
         task_v2._LARGE_EP_ASYMMETRIC_COVERAGE_WARNED.update(asym_before)
 
 
-def _build_synth_root(tmp_path, a2a_rows, ep_rows) -> str:
-    """A synthetic systems root (8 GPUs/node, SM 90) holding ONLY the two
-    large-EP tables, mounted alongside the shipped default systems path."""
+def _build_synth_root(tmp_path, a2a_rows) -> str:
+    """A synthetic systems root holding only the large-EP A2A table."""
     root = str(tmp_path / "systems")
     os.makedirs(root, exist_ok=True)
     with open(os.path.join(root, f"{SYNTH_SYSTEM}.yaml"), "w", encoding="utf-8") as f:
@@ -154,14 +124,13 @@ def _build_synth_root(tmp_path, a2a_rows, ep_rows) -> str:
             f,
         )
     _write_version_dir(root, "comm", "moe_a2a_perf.parquet", a2a_rows)
-    _write_version_dir(root, "moe", "moe_expert_compute_perf.parquet", ep_rows)
     return root
 
 
 @pytest.fixture
 def synth_systems(tmp_path):
     """Both phases collected (context via deepep_ht, generation via deepep_ll)."""
-    root = _build_synth_root(tmp_path, _a2a_rows(), _ep_rows())
+    root = _build_synth_root(tmp_path, _a2a_rows())
     databases_cache.clear()
     set_systems_paths(["default", root])
     try:
@@ -174,11 +143,10 @@ def synth_systems(tmp_path):
 @pytest.fixture
 def synth_systems_generation_only(tmp_path):
     """GENERATION rows only: the day a collection lands one phase ahead of the
-    other. No context comm/compute rows at all."""
+    other. No context communication rows at all."""
     root = _build_synth_root(
         tmp_path,
         _a2a_rows((("deepep_ll", _LL_PAIRS),)),
-        _ep_rows((("generation", _LL_PAIRS),)),
     )
     databases_cache.clear()
     set_systems_paths(["default", root])
@@ -249,12 +217,10 @@ def test_uncovered_ep_and_moe_tp_gt_1_stay_fused(synth_systems):
     assert t._resolve_moe_comm_backend("agg", _tuple(dp=1, moe_ep=1)) is None  # ep == 1 is fused
 
 
-def test_compute_coverage_is_quant_specific(synth_systems):
-    """Comm coverage alone is not enough: the EP expert-compute table is keyed
-    by the run's MoE quant mode, so another quant gets no large-EP tuples."""
+def test_a2a_coverage_is_independent_of_compute_quant(synth_systems):
     t = _synth_task(moe_quant_mode=common.MoEQuantMode.fp8_block)
-    assert t._resolve_moe_comm_backend("agg", _tuple(dp=8, moe_ep=8)) is None
-    assert t.agg_moe_ep_candidates == [1, 2, 4, 8]  # fused defaults
+    assert t._resolve_moe_comm_backend("agg", _tuple(dp=8, moe_ep=8))
+    assert 16 in t.agg_moe_ep_candidates
 
 
 def test_unready_family_never_resolves_a_backend(synth_systems, monkeypatch):
@@ -377,8 +343,11 @@ def test_disagg_replica_budget_follows_coverage(synth_systems):
 
 
 def test_uncovered_model_keeps_fused_defaults_and_logs_once(caplog):
-    """Shipped h200_sxm/sglang carries no moe_a2a rows for the Qwen3 shape, so
-    the task keeps the fused ladders and states which collector to run."""
+    """A model+system+backend combo whose shipped moe_a2a table doesn't cover
+    the shape keeps the fused ladders and states which collector to run.
+
+    Uses a100_sxm/sglang, which ships no wideep DeepEP data and therefore
+    can never adapt into moe_a2a coverage for any shape."""
     import aiconfigurator.sdk.task_v2 as task_v2
 
     task_v2._LARGE_EP_EMPTY_COVERAGE_LOGGED.clear()  # restored by the autouse fixture
@@ -386,7 +355,7 @@ def test_uncovered_model_keeps_fused_defaults_and_logs_once(caplog):
         t = Task(
             serving_mode="agg",
             model_path=SYNTH_MODEL,
-            system_name="h200_sxm",
+            system_name="a100_sxm",
             backend_name="sglang",
             total_gpus=8,
         )
@@ -496,8 +465,8 @@ def test_all_tables_uninformative_abstains(monkeypatch):
 @pytest.mark.parametrize(
     "kwargs, expect_large_ep, expect_raises",
     [
-        # No coverage for the Qwen3 shape -> fused regime only.
-        (dict(model_path=SYNTH_MODEL, system_name="h200_sxm", backend_name="sglang", total_gpus=8), False, False),
+        # No wideep DeepEP data on a100_sxm/sglang -> fused regime only.
+        (dict(model_path=SYNTH_MODEL, system_name="a100_sxm", backend_name="sglang", total_gpus=8), False, False),
         # Dense model -> never large EP.
         (
             dict(model_path="meta-llama/Meta-Llama-3.1-70B", system_name="h100_sxm", backend_name="sglang"),

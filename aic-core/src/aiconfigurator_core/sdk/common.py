@@ -1037,11 +1037,7 @@ class DatabaseMode(Enum):
     HYBRID = 1  # use silicon data when available, otherwise use SOL+empirical factor
     EMPIRICAL = 2  # SOL+empirical factor
     SOL = 3  # Provide SOL time only
-    # Python-side PER-CALL diagnostic only (permanently, per the freeze plan):
-    # query_*(..., database_mode=SOL_FULL) returns the raw (sol_time, sol_math,
-    # sol_mem) tuple the sanity-check notebook plots. Never valid as a
-    # database's DEFAULT mode — mode entry raises (perf_database).
-    SOL_FULL = 4
+    SOL_FULL = 4  # Provide SOL time and details
 
 
 class TransferKind(Enum):
@@ -1140,9 +1136,8 @@ class PerfDataFilename(Enum):
     wideep_deepep_ll = "wideep_deepep_ll_perf.parquet"
     # TensorRT-LLM WideEP specific
     wideep_moe_compute = "wideep_moe_perf.parquet"
-    # Unified large-EP MoE comm family (SGLang / vLLM / TRT-LLM wideEP; see operations/moe_comm.py)
+    # Large-EP MoE communication (SGLang / vLLM / TRT-LLM)
     moe_a2a = "moe_a2a_perf.parquet"
-    moe_expert_compute = "moe_expert_compute_perf.parquet"
     # TensorRT-LLM AlltoAll (covers WideEP NVLinkTwoSided + CutlassFusedMoE NVLinkOneSided)
     trtllm_alltoall = "trtllm_alltoall_perf.parquet"
     compute_scale = "computescale_perf.parquet"

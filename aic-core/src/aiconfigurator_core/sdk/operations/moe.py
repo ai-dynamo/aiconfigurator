@@ -820,6 +820,105 @@ class MoE(Operation):
         return self._weights * self._scale_factor
 
 
+class ModeledEPMoE(Operation):
+    """Large-EP local expert compute modeled from the stock ``moe_perf`` table.
+
+    This is deliberately an approximation, not a measured large-EP kernel
+    lookup.  The mapping assumes uniform routing balance:
+
+    ``global_tokens = x * attention_dp_size``
+    ``local_tokens = ceil(global_tokens / moe_ep_size)``
+    ``local_experts = num_experts / moe_ep_size``
+
+    The stock query retains ``topk`` and global ``num_experts``, and uses
+    ``moe_tp=1``, ``moe_ep=moe_ep_size`` and
+    ``workload_distribution="balanced"``. Stock ``moe_perf`` interprets that
+    geometry as one rank's local expert shard, so its assignment count is
+    ``local_tokens * topk``. EPLB and redundant slots are intentionally not
+    modeled.
+
+    Stock fused-MoE timings include router/top-k/finalization plumbing and
+    cannot isolate expert GEMMs from it. That unavoidable overlap with the
+    separately modeled router and A2A combine is a limitation of the stock
+    timing contract. Results are therefore always tagged ``source="estimated"``.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        scale_factor: float,
+        *,
+        hidden_size: int,
+        inter_size: int,
+        topk: int,
+        num_experts: int,
+        moe_ep_size: int,
+        quant_mode: common.MoEQuantMode,
+        attention_dp_size: int,
+        inference_phase: str,
+        is_gated: bool = True,
+    ) -> None:
+        super().__init__(name, scale_factor)
+        if inference_phase not in ("context", "generation"):
+            raise ValueError(f"invalid inference_phase {inference_phase!r}")
+        if moe_ep_size <= 1:
+            raise ValueError(f"ModeledEPMoE requires moe_ep_size > 1, got {moe_ep_size}")
+        if num_experts % moe_ep_size:
+            raise ValueError(f"num_experts ({num_experts}) must be divisible by moe_ep_size ({moe_ep_size})")
+        self._hidden_size = hidden_size
+        self._inter_size = inter_size
+        self._topk = topk
+        self._num_experts = num_experts
+        self._moe_ep_size = moe_ep_size
+        self._quant_mode = quant_mode
+        self._attention_dp_size = attention_dp_size
+        self._inference_phase = inference_phase
+        self._is_gated = is_gated
+        self._local_num_experts = num_experts // moe_ep_size
+        num_gemms = 3 if is_gated else 2
+        self._weights = hidden_size * inter_size * self._local_num_experts * quant_mode.value.memory * num_gemms
+
+    def modeled_coordinates(self, x: int) -> dict[str, int | str]:
+        """Return the explicit stock-MoE coordinates used for ``x``."""
+        global_tokens = int(x) * self._attention_dp_size
+        local_tokens = (global_tokens + self._moe_ep_size - 1) // self._moe_ep_size
+        return {
+            "global_tokens": global_tokens,
+            "num_tokens": local_tokens,
+            "topk": self._topk,
+            "num_experts": self._num_experts,
+            "moe_tp_size": 1,
+            "moe_ep_size": self._moe_ep_size,
+            "workload_distribution": "balanced",
+        }
+
+    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        coordinates = self.modeled_coordinates(kwargs["x"])
+        result = database.query_moe(
+            num_tokens=coordinates["num_tokens"],
+            hidden_size=self._hidden_size,
+            inter_size=self._inter_size,
+            topk=coordinates["topk"],
+            num_experts=coordinates["num_experts"],
+            moe_tp_size=coordinates["moe_tp_size"],
+            moe_ep_size=coordinates["moe_ep_size"],
+            quant_mode=self._quant_mode,
+            workload_distribution=coordinates["workload_distribution"],
+            is_context=self._inference_phase == "context",
+            moe_backend=None,
+            is_gated=self._is_gated,
+            enable_eplb=False,
+        )
+        return PerformanceResult(
+            float(result) * self._scale_factor,
+            energy=result.energy * self._scale_factor,
+            source="estimated",
+        )
+
+    def get_weights(self, **kwargs):
+        return self._weights * self._scale_factor
+
+
 # ───────────────────────────────────────────────────────────────────────
 # MoEDispatch
 # ───────────────────────────────────────────────────────────────────────
@@ -872,7 +971,6 @@ class MoEDispatch(Operation):
         self._quant_mode = kwargs.get("quant_mode")
         self._reduce_results = kwargs.get("reduce_results", True)
         self._attn_cp_size = kwargs.get("attn_cp_size", 1)
-        self._attn_ar_modeled = kwargs.get("attn_ar_modeled", False)
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -1125,11 +1223,10 @@ class MoEDispatch(Operation):
             else:
                 data = node_data
                 # 2-axis grid (sms, tokens). Only sm=20 is collected today, so an
-                # off-grid sms resolves through the hold path (joint-log kNN
-                # util transfer; the legacy 2-D scattered interp simply failed
-                # on a single-sms cloud); tokens use the linear proxy SOL (see
-                # the DeepEP ll note; SOL is constant in sms — no data supports
-                # an sms scaling story yet).
+                # off-grid sms snaps to the nearest collected value (the legacy
+                # 2-D scattered interp simply failed on a single-sms cloud);
+                # tokens use the linear proxy SOL (see the DeepEP ll note; SOL is
+                # constant in sms — no data supports an sms scaling story yet).
                 config = perf_interp.OpInterpConfig(
                     axes=("sms", "num_tokens"),
                     resolver=perf_interp.Grid(),
@@ -1295,11 +1392,8 @@ class MoEDispatch(Operation):
 
             comm_latency = 0
 
-            # vLLM's FusedMoE has no pre-dispatch collective when attention_dp == 1;
-            # the pre-dispatch AR here doubles as the attention-output all-reduce
-            # for models that do not compose it explicitly. Models that price that
-            # AR themselves pass attn_ar_modeled=True.
-            if self._attention_tp_size > 1 and not (self._pre_dispatch and self._attn_ar_modeled):
+            # Add allreduce latency when TP > 1
+            if self._attention_tp_size > 1:
                 comm_latency += database.query_custom_allreduce(common.CommQuantMode.half, self.num_gpus, volume)
 
             if self._attention_dp_size > 1:

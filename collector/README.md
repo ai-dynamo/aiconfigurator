@@ -460,10 +460,9 @@ This collects the stock SGLang ops, including:
 - MoE (Mixture of Experts) operations
 - Normal attention operations
 
-The retained `moe_ep` op remains pinned to its separate SGLang 0.5.10 image
-and is not part of the stock model plans. Request it explicitly in a separate
-run. WideEP MLA is not registered because its legacy wrapper now reaches the
-stock 0.5.14-only module implementation.
+Large-EP local expert compute reuses stock `moe_perf`; there is no separate
+expert-compute collector. WideEP MLA is not registered because its legacy
+wrapper now reaches the stock 0.5.14-only module implementation.
 
 ### DeepEP multi-node collector
 For models with DeepEP MoE, inter-node communication data requires a separate
@@ -476,33 +475,20 @@ story); do not add new data through it.
 
 # Supporting a new large-EP (WideEP) model
 
-Large-EP MoE performance for a model is two tables: `moe_expert_compute_perf` (expert
-compute, `moe` family) and `moe_a2a_perf` (dispatch/combine communication,
-`comm` family). To support model X end to end:
+Large-EP MoE uses stock `moe_perf` for modeled local expert compute and
+`moe_a2a_perf` for measured dispatch/combine communication. To support model X:
 
 1. **Declare the shapes.** Add the model to
    `cases/models/<Architecture>_cases.yaml` (new architecture: one new file;
    new model in an existing architecture: append to `model_paths`) and mark
-   its `model_case_values.moe` rows with `wideep: true` — that flag is what
-   activates the wideep `moe_ep` collectors for the model. Correlated MoE
-   dimensions (hidden/inter size, topk, expert count) stay together in one
-   row; never cross another model's values.
+   its `model_case_values.moe` rows with `wideep: true`. Correlated MoE
+   dimensions (hidden/inter size, topk, expert count) stay together in one row;
+   never cross another model's values. The `wideep` flag activates standalone
+   A2A shape population.
 
-2. **Collect `moe_ep` in the right runtime.**
-   - *sglang*: `moe_ep` is pinned to its own wideep image (the manifest
-     `wideep_sglang` entry, SGLang 0.5.10) and is NOT part of the stock
-     0.5.14 model plans. Run it as a separate, explicit-ops job inside that
-     container — `collect.py` fail-closes a run that mixes it with
-     stock-pinned ops:
-     ```bash
-     python3 collect.py --backend sglang --ops moe_ep --model-path <model> --gpu <gpu>
-     ```
-   - *trtllm*: `wideep_trtllm` pins the SAME image (identical digest) as
-     stock trtllm, so mixing is legal and `moe_ep` rides the default model
-     plan for wideep-declared models — no separate job needed:
-     ```bash
-     python3 collect.py --backend trtllm --model-path <model> --gpu <gpu>
-     ```
+2. **Ensure stock `moe_perf` coverage.** Local compute is modeled as a
+   uniformly balanced stream over EP-local experts, using TP=1 stock MoE
+   coordinates. Cross-version stock-table reuse is allowed.
 
 3. **Collect `moe_a2a` across nodes.** From `network/slurm/`:
    ```bash
@@ -514,29 +500,16 @@ compute, `moe` family) and `moe_a2a_perf` (dispatch/combine communication,
    runs; a new physical shape lands in the sweep automatically once declared
    in step 1.
 
-4. **Publish with sidecars.** Finalized parquet goes into the family tree
-   (`aic-core/src/aiconfigurator_core/systems/data/<system>/moe/<backend>/<version>/moe_expert_compute_perf.parquet`,
-   `.../<system>/comm/<backend>/<version>/moe_a2a_perf.parquet`) together
+4. **Publish with sidecars.** Finalized communication parquet goes into
+   `.../<system>/comm/<backend>/<version>/moe_a2a_perf.parquet` together
    with its `collection_meta.yaml` entry — never a parquet without its
    provenance. The per-world `moe_a2a` outputs need the cross-job merge
    procedure in `network/slurm/README.md` section 4.3.
 
 ## MoE table units and caveats
 
-**The two sibling tables disagree on latency units by design.**
-
-| table | `latency` column | loader behavior |
-|---|---|---|
-| `moe_a2a_perf` | **microseconds** | `load_moe_a2a_data` divides by 1000 (`aic-core/.../sdk/operations/moe_comm.py`: "collector records us; leaves are ms") |
-| `moe_expert_compute_perf` | **milliseconds** | `load_moe_expert_compute_data` stores it raw — no conversion |
-
-The µs convention matches the legacy DeepEP tables the a2a loader also
-adapts (their per-phase transmit/notify columns are µs); the ms convention
-matches the legacy wideep compute tables. Only the loaded leaf (always ms)
-is comparable across tables. Both conventions are frozen two-sided:
-collector writer tests pin the headers, and
-`tests/unit/sdk/database/test_collector_schema_contract.py` pins the same
-literals against the real loaders.
+`moe_a2a_perf` records latency in microseconds; `load_moe_a2a_data` converts
+leaves to milliseconds. Stock `moe_perf` retains its existing timing contract.
 
 **Legacy-overwrite caveats.** A new-schema row replaces a legacy-adapted
 leaf only at the *same* key, and the legacy adapters derive their node/EP
@@ -552,13 +525,13 @@ geometry rather than reading it:
   rows overwrite only at 4 GPUs/node; a row with an explicit `num_nodes`
   column is honored as written.
 
-**`log_perf` freezes and validates the CSV header from the first row**, so
-optional columns are all-or-nothing per file. In particular, power columns
-exist in a staging CSV only if the very first logged row had them: flipping
-`--measure_power` across a `--resume` of the same staging file is rejected
-under the writer lock before any incompatible row is appended. Keep one power
-setting for a file end to end, or start with a fresh staging file. This
-property is also why the `moe_a2a` collector ships
+**`log_perf` freezes the CSV header from the first row**, so optional
+columns are all-or-nothing per file. In particular, power columns exist in a
+staging CSV only if the very first logged row had them: flipping
+`--measure_power` across a `--resume` of the same staging file appends rows
+whose fields no longer match the frozen header — misaligned columns or empty
+cells that fail at load time. Collect any one file with a single power
+setting end to end. This property is also why the `moe_a2a` collector ships
 **no power column at all** (owner ruling during PR review): its low-latency
 timing covers one round-trip rather than a per-phase region, and meaningful
 per-phase power would need winning-config re-runs — a measurement-method
