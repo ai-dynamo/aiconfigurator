@@ -78,8 +78,8 @@ def _format_power(power_w: object) -> str:
     return "" if pd.isna(power_w) else f"{float(power_w):.1f}W"
 
 
-def _composed_worker_gpus(row: dict, role: str) -> int:
-    """Per-worker GPU count from a composed disagg row's ``(p)``/``(d)`` columns.
+def _composed_worker_gpus(row: dict, role: str = "") -> int:
+    """Per-worker GPU count from ``(p)``/``(d)``-prefixed or plain columns.
 
     Iterates :data:`aiconfigurator.sdk.picking.WORKER_GPU_DIMS` so every
     parallelism dimension lands here automatically; columns a row predates
@@ -87,7 +87,7 @@ def _composed_worker_gpus(row: dict, role: str) -> int:
     """
     gpus = 1
     for dim in WORKER_GPU_DIMS:
-        gpus *= parallel_dim(row.get(f"({role}){dim}"))
+        gpus *= parallel_dim(row.get(f"({role}){dim}" if role else dim))
     return gpus
 
 
@@ -392,7 +392,7 @@ def _plot_worker_setup_table(
             e_workers = int(row.get("(e)workers", 0) or 0)
             if e_workers:
                 # E+agg cell: (a)workers language-only agg workers + encode pool.
-                worker_gpus = row["pp"] * row["tp"] * row["dp"]
+                worker_gpus = _composed_worker_gpus(row)
                 gpus_replica = (
                     f"{row['num_total_gpus']} "
                     f"(={a_workers}x{worker_gpus}+{e_workers}x{int(row.get('(e)tp', 0) or 0)}(e))"

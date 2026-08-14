@@ -38,6 +38,13 @@ def test_enable_epd_pins_encoder_dp_off():
     assert Task(enable_epd=True).enable_encoder_dp is False
 
 
+def test_enable_epd_rejects_afd_serving_mode():
+    # sweep_afd carries no EPD parameters; accepting the combination would
+    # silently run a plain AFD sweep with every encoder knob dropped.
+    with pytest.raises(ValueError, match="serving_mode 'agg' or 'disagg'"):
+        Task(serving_mode="afd", enable_epd=True)
+
+
 def test_run_single_epd_arg_validation():
     with pytest.raises(ValueError, match="requires encoder_tp"):
         Task(enable_epd=True).run_single_agg(tp=1, batch_size=1)

@@ -863,13 +863,13 @@ def _add_estimate_mode_arguments(parser):
     parser.add_argument(
         "--encoder-batch-size",
         type=int,
-        default=1,
+        default=None,
         help="EPD encode-worker batch size. Default: 1.",
     )
     parser.add_argument(
         "--encoder-num-workers",
         type=int,
-        default=1,
+        default=None,
         help="EPD encode workers in the pool. Default: 1.",
     )
     parser.add_argument(
@@ -1578,6 +1578,8 @@ def build_default_tasks(
         modes_to_sweep = {"agg", "disagg", "afd"}
     else:
         modes_to_sweep = {serving_mode}
+    if enable_epd and not (modes_to_sweep & {"agg", "disagg"}):
+        raise ValueError("enable_epd requires an agg or disagg experiment; 'afd' does not support EPD.")
     needs_disagg = "disagg" in modes_to_sweep
 
     backends_to_sweep = [b.value for b in common.BackendName] if backend == "auto" else [backend]
@@ -2455,8 +2457,8 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
     workload.update({name: getattr(args, name) for name in _QUANT_ENUM_TABLES if getattr(args, name, None)})
     encoder_kwargs = dict(
         encoder_tp=args.encoder_tp,
-        encoder_batch_size=args.encoder_batch_size,
-        encoder_num_workers=args.encoder_num_workers,
+        encoder_batch_size=1 if args.encoder_batch_size is None else args.encoder_batch_size,
+        encoder_num_workers=1 if args.encoder_num_workers is None else args.encoder_num_workers,
     )
     if estimate_mode == "agg":
         task = Task.from_cli(
@@ -2551,6 +2553,11 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
 def _run_estimate_mode(args):
     """Run the estimate mode to predict TTFT, TPOT, and power for a single config."""
     from aiconfigurator.cli.api import cli_estimate
+
+    if not args.enable_epd and any(
+        v is not None for v in (args.encoder_tp, args.encoder_batch_size, args.encoder_num_workers)
+    ):
+        raise SystemExit("--encoder-tp/--encoder-batch-size/--encoder-num-workers require --enable-epd.")
 
     estimate_mode = args.estimate_mode
 

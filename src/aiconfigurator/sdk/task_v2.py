@@ -882,6 +882,8 @@ class Task:
         workers model the engines' encoder-instance default (weight-sharded
         ViT), and language-only P/agg workers host no ViT to shard."""
         if self.enable_epd:
+            if self.serving_mode not in ("agg", "disagg"):
+                raise ValueError(f"enable_epd requires serving_mode 'agg' or 'disagg', got {self.serving_mode!r}.")
             self.enable_encoder_dp = False
 
     def _validate_megamoe_backend_support(self) -> None:
