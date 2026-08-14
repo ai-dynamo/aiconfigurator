@@ -680,6 +680,74 @@ def test_forward_pass_perf_model_regression_marshalling(monkeypatch) -> None:
 
 
 @pytest.mark.integration
+def test_nemotron_super_fp8_native_estimation_uses_packaged_moe_data() -> None:
+    """Issue #1522: the exact deployed MoE key must estimate successfully."""
+    pytest.importorskip("aiconfigurator_core")
+    from aiconfigurator_core.sdk.rust_engine_step import RustForwardPassPerfModel
+
+    model = RustForwardPassPerfModel.from_native(
+        {
+            "schema_version": 1,
+            "model_name": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
+            "system_name": "h100_sxm",
+            "backend": "vllm",
+            "backend_version": "0.24.0",
+            "tp_size": 4,
+            "pp_size": 1,
+            "attention_dp_size": 1,
+            "cp_size": None,
+            "moe_tp_size": 1,
+            "moe_ep_size": 4,
+            "weight_dtype": "fp8",
+            "activation_dtype": None,
+            "moe_dtype": None,
+            "kv_cache_dtype": None,
+            "kv_block_size": 16,
+            "nextn": None,
+            "nextn_accept_rates": None,
+            "extra": {},
+        },
+        {
+            "bucket_count": 16,
+            "max_batch_size": 512,
+            "max_kv_tokens": 2_000_000,
+            "max_num_tokens": 8192,
+            "max_observations": 1024,
+            "min_observations": 5,
+        },
+    )
+
+    estimate_ms = model.estimate_forward_pass_time_ms(
+        {
+            "version": 1,
+            "worker_id": "repro",
+            "dp_rank": 0,
+            "counter_id": 0,
+            "scheduled_requests": {
+                "num_prefill_requests": 1,
+                "sum_prefill_tokens": 4224,
+                "var_prefill_length": 0.0,
+                "sum_prefill_kv_tokens": 0,
+                "num_decode_requests": 0,
+                "sum_decode_kv_tokens": 0,
+                "var_decode_kv_tokens": 0.0,
+            },
+            "queued_requests": {
+                "num_prefill_requests": 0,
+                "sum_prefill_tokens": 0,
+                "var_prefill_length": 0.0,
+                "num_decode_requests": 0,
+                "sum_decode_kv_tokens": 0,
+                "var_decode_kv_tokens": 0.0,
+            },
+        }
+    )
+
+    assert model.diagnostics()["readiness"] == "ready"
+    assert estimate_ms is not None and estimate_ms > 0.0
+
+
+@pytest.mark.integration
 def test_forward_pass_perf_model_native_default_directional_bounds_end_to_end() -> None:
     """End-to-end native forward-pass model with default bounds over a real fixture.
 

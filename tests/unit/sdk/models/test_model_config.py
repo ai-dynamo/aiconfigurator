@@ -51,6 +51,7 @@ class TestSupportedModels:
             "sgl-project/DeepSeek-V4-Pro-FP8",
             "zai-org/GLM-5-FP8",
             "nvidia/GLM-5-NVFP4",
+            "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
             "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
             "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
             "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
@@ -96,6 +97,7 @@ class TestSupportedModels:
             ("Qwen/Qwen3-VL-235B-A22B-Instruct", True),
             # NemotronH: check hybrid_override_pattern for 'E' (MoE layers)
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' in pattern
+            ("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8", True),  # Has 'E' in pattern
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", True),  # Has 'E' in derived pattern
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8", True),  # Has 'E' in derived pattern
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4", True),  # Has 'E' in derived pattern
@@ -262,6 +264,7 @@ class TestHFModelSupport:
             ("nvidia/GLM-5-NVFP4", "DEEPSEEKV32"),
             ("Qwen/Qwen3-30B-A3B", "MOE"),
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "NEMOTRONH"),
+            ("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8", "NEMOTRONH"),
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "NEMOTRONH"),
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8", "NEMOTRONH"),
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4", "NEMOTRONH"),
@@ -293,6 +296,7 @@ class TestHFModelSupport:
             ("Qwen/Qwen3-VL-235B-A22B-Instruct", True),
             # NemotronH: is_moe depends on 'E' in hybrid_override_pattern
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' (MoE layers)
+            ("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8", True),  # Has 'E' (MoE layers)
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", True),  # Has 'E' in derived pattern
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8", True),  # Has 'E' in derived pattern
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4", True),  # Has 'E' in derived pattern
@@ -330,15 +334,35 @@ class TestHFModelSupport:
         assert extra.mamba_head_dim == 64
         assert extra.moe_shared_expert_intermediate_size == 10240
 
+    def test_nemotron_super_fp8_config_shape(self):
+        """Test the cached Super FP8 config used by native estimation."""
+        model_info = get_model_config_from_model_path("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8")
+
+        assert model_info["architecture"] == "NemotronHForCausalLM"
+        assert model_info["layers"] == 88
+        assert model_info["hidden_size"] == 4096
+        assert model_info["inter_size"] == 2688
+        assert model_info["topk"] == 22
+        assert model_info["num_experts"] == 512
+
     @pytest.mark.parametrize(
-        "hf_id,expected_gemm_quant,expected_moe_quant,expected_kvcache_quant,expected_fmha_quant",
+        "hf_id,expected_gemm_quant,expected_moe_quant,expected_kvcache_quant,expected_fmha_quant,expected_block_counts",
         [
+            (
+                "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
+                common.GEMMQuantMode.fp8_static,
+                common.MoEQuantMode.fp8,
+                common.KVCacheQuantMode.fp8,
+                common.FMHAQuantMode.fp8,
+                (40, 40, 8),
+            ),
             (
                 "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
                 common.GEMMQuantMode.bfloat16,
                 common.MoEQuantMode.bfloat16,
                 common.KVCacheQuantMode.bfloat16,
                 common.FMHAQuantMode.bfloat16,
+                (48, 48, 12),
             ),
             (
                 "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
@@ -346,6 +370,7 @@ class TestHFModelSupport:
                 common.MoEQuantMode.fp8,
                 common.KVCacheQuantMode.fp8,
                 common.FMHAQuantMode.fp8,
+                (48, 48, 12),
             ),
             (
                 "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
@@ -353,18 +378,20 @@ class TestHFModelSupport:
                 common.MoEQuantMode.nvfp4,
                 common.KVCacheQuantMode.fp8,
                 common.FMHAQuantMode.fp8,
+                (48, 48, 12),
             ),
         ],
     )
-    def test_nemotron_ultra_quant_defaults(
+    def test_nemotron_quant_defaults(
         self,
         hf_id,
         expected_gemm_quant,
         expected_moe_quant,
         expected_kvcache_quant,
         expected_fmha_quant,
+        expected_block_counts,
     ):
-        """Test official Nemotron 3 Ultra precision-specific quant defaults."""
+        """Test official Nemotron 3 precision-specific quant defaults."""
         model_config = config.ModelConfig(
             tp_size=8,
             pp_size=1,
@@ -379,9 +406,10 @@ class TestHFModelSupport:
         assert model_config.moe_quant_mode == expected_moe_quant
         assert model_config.kvcache_quant_mode == expected_kvcache_quant
         assert model_config.fmha_quant_mode == expected_fmha_quant
-        assert sum(op._scale_factor for op in model.context_ops if op._name == "context_mamba_norm") == 48
-        assert sum(op._scale_factor for op in model.context_ops if op._name == "context_moe_norm") == 48
-        assert sum(op._scale_factor for op in model.context_ops if op._name == "context_attn_norm") == 12
+        mamba_blocks, moe_blocks, attention_blocks = expected_block_counts
+        assert sum(op._scale_factor for op in model.context_ops if op._name == "context_mamba_norm") == mamba_blocks
+        assert sum(op._scale_factor for op in model.context_ops if op._name == "context_moe_norm") == moe_blocks
+        assert sum(op._scale_factor for op in model.context_ops if op._name == "context_attn_norm") == attention_blocks
 
     @pytest.mark.parametrize(
         "hf_id,expected_layers,expected_hidden,expected_index_topk,expected_ratio_counts,expected_moe_quant",
