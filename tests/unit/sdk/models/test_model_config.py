@@ -785,16 +785,22 @@ class TestGptOssHybridKVCache:
     WINDOW = 128
 
     @classmethod
-    def _expected_bytes(cls, seq_len: int) -> float:
-        per_layer_token = cls.KV_HEADS * cls.HEAD_SIZE * 2
+    def _expected_bytes(cls, seq_len: int, *, tp_size: int = 1, bytes_per_elem: int = 1) -> float:
+        kv_heads_per_gpu = (cls.KV_HEADS + tp_size - 1) // tp_size
+        per_layer_token = kv_heads_per_gpu * cls.HEAD_SIZE * 2 * bytes_per_elem
         num_swa = cls.LAYERS // 2
         num_global = cls.LAYERS - num_swa
         return per_layer_token * (num_swa * min(seq_len, cls.WINDOW) + num_global * seq_len)
 
     @classmethod
-    def _model(cls):
-        model_config = config.ModelConfig(tp_size=1, moe_tp_size=1, moe_ep_size=1)
-        model_config.kvcache_quant_mode = common.KVCacheQuantMode.fp8
+    def _model(
+        cls,
+        *,
+        tp_size: int = 1,
+        kvcache_quant_mode: common.KVCacheQuantMode = common.KVCacheQuantMode.fp8,
+    ):
+        model_config = config.ModelConfig(tp_size=tp_size, moe_tp_size=tp_size, moe_ep_size=1)
+        model_config.kvcache_quant_mode = kvcache_quant_mode
         return get_model(cls.MODEL, model_config, backend_name="vllm")
 
     def test_long_sequence_uses_hybrid_layout(self):
@@ -805,6 +811,30 @@ class TestGptOssHybridKVCache:
 
         all_global = seq_len * self.LAYERS * 2 * self.KV_HEADS * self.HEAD_SIZE
         assert got < 0.52 * all_global
+
+    @pytest.mark.parametrize(
+        ("tp_size", "kvcache_quant_mode"),
+        [
+            (1, common.KVCacheQuantMode.bfloat16),
+            (16, common.KVCacheQuantMode.fp8),
+        ],
+    )
+    def test_storage_width_and_tp_partitioning(
+        self,
+        tp_size: int,
+        kvcache_quant_mode: common.KVCacheQuantMode,
+    ):
+        model = self._model(tp_size=tp_size, kvcache_quant_mode=kvcache_quant_mode)
+        seq_len = 50_000
+        got = model.get_kvcache_bytes_per_sequence(seq_len)
+        assert got == pytest.approx(
+            self._expected_bytes(
+                seq_len,
+                tp_size=tp_size,
+                bytes_per_elem=kvcache_quant_mode.value.memory,
+            ),
+            rel=1e-9,
+        )
 
     def test_below_window_matches_linear_layout(self):
         model = self._model()
