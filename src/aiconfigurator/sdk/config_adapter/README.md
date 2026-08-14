@@ -49,9 +49,10 @@ itself never invokes it.
 The adapters support vLLM, SGLang, and TRT-LLM. Unsupported or ambiguous
 topologies are returned as rejected outcomes with structured diagnostics.
 For Dynamo performance Jobs, literal `CONCURRENCIES` values are expanded in
-order and shell comments are ignored during command parsing. Mounted TRT-LLM
-engine ConfigMaps are inspected for speculative decoding; an active setting is
-rejected unless the caller supplies `nextn_accepted`.
+order and shell comments are ignored during command parsing. TRT-LLM engine
+ConfigMaps are inspected only when their volume mount resolves the exact engine
+argument path. Conflicting active depths are rejected, zero depth stays
+disabled, and active speculation requires a caller-supplied `nextn_accepted`.
 
 ## Contract
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from aiconfigurator.sdk.config_adapter import (
     AdapterOverrides,
@@ -221,6 +222,25 @@ def test_resolved_kimi_engine_speculation_is_preserved_with_explicit_acceptance(
     assert outcome.request.model.nextn_accepted == 1.5
 
 
+def test_resolved_kimi_unmounted_engine_config_is_rejected():
+    fixture = _NIGHTLY_FIXTURES / "kimi"
+    documents = list(yaml.safe_load_all((fixture / "deployment.yaml").read_text()))
+    deployment = next(document for document in documents if document.get("kind") == "DynamoGraphDeployment")
+    del deployment["spec"]["services"]["agg"]["extraPodSpec"]["mainContainer"]["volumeMounts"]
+
+    outcome = adapt_config(
+        DynamoRecipeSource(documents, fixture / "benchmark-job.yaml"),
+        AdapterOverrides(
+            system_name="gb200",
+            nextn_accepted=1.5,
+            workload_points=(WorkloadPointOverride(point_id="concurrency-3", isl=1000, osl=1500, concurrency=3),),
+        ),
+    ).outcomes[0]
+
+    assert outcome.status == "rejected"
+    assert "does not resolve to a mounted ConfigMap file" in outcome.diagnostics[-1].message
+
+
 def test_disagg_env_substitution_and_role_sizing():
     deployment = """
 kind: DynamoGraphDeployment
@@ -285,6 +305,7 @@ spec:
         nodeSelector: {nvidia.com/gpu.product: NVIDIA-B200}
         volumes: [{name: engine, configMap: {name: engine}}]
         mainContainer:
+          volumeMounts: [{name: engine, mountPath: /configs}]
           env:
             - {name: MODEL_PATH, value: QWEN/QWEN3-32B}
             - {name: ENGINE_ARGS, value: /configs/config.yaml}
@@ -368,6 +389,7 @@ spec:
         nodeSelector: {nvidia.com/gpu.product: NVIDIA-H200}
         volumes: [{name: engine, configMap: {name: engine}}]
         mainContainer:
+          volumeMounts: [{name: engine, mountPath: /config}]
           args:
             - >-
               python -m dynamo.trtllm --model-path QWEN/QWEN3-32B
@@ -402,6 +424,7 @@ spec:
         nodeSelector: {nvidia.com/gpu.product: NVIDIA-H200}
         volumes: [{name: engine, configMap: {name: engine}}]
         mainContainer:
+          volumeMounts: [{name: engine, mountPath: /config}]
           args:
             - >-
               python -m dynamo.trtllm --model-path QWEN/QWEN3-32B
@@ -413,7 +436,7 @@ spec:
     ).outcomes[0]
 
     assert outcome.status == "rejected"
-    assert "does not declare tensor parallelism" in outcome.diagnostics[-1].message
+    assert "does not resolve to a mounted ConfigMap file" in outcome.diagnostics[-1].message
 
 
 def test_non_integral_gpu_count_is_rejected():
@@ -598,6 +621,7 @@ spec:
         nodeSelector: {nvidia.com/gpu.product: NVIDIA-H200}
         volumes: [{name: engine, configMap: {name: engine}}]
         mainContainer:
+          volumeMounts: [{name: engine, mountPath: /configs}]
           env:
             - {name: MODEL_PATH, value: QWEN/QWEN3-32B}
             - {name: ENGINE_ARGS, value: /configs/config.yaml}
@@ -690,6 +714,104 @@ def test_zero_speculative_depth_remains_disabled():
     assert outcome.request is not None
     assert outcome.request.model.nextn == 0
     assert outcome.request.model.nextn_accepted is None
+
+
+def test_zero_speculative_depth_in_engine_config_remains_disabled():
+    deployment = """
+kind: ConfigMap
+metadata: {name: engine}
+data:
+  config.yaml: |
+    tensor_parallel_size: 2
+    speculative_config:
+      num_nextn_predict_layers: 0
+---
+kind: DynamoGraphDeployment
+metadata: {name: zero-speculation}
+spec:
+  backendFramework: trtllm
+  services:
+    worker:
+      componentType: worker
+      resources: {limits: {gpu: "2"}}
+      extraPodSpec:
+        nodeSelector: {nvidia.com/gpu.product: NVIDIA-H200}
+        volumes: [{name: engine, configMap: {name: engine}}]
+        mainContainer:
+          volumeMounts: [{name: engine, mountPath: /config}]
+          args:
+            - >-
+              python -m dynamo.trtllm --model-path QWEN/QWEN3-32B
+              --extra-engine-args /config/config.yaml
+"""
+
+    outcome = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=8),
+    ).outcomes[0]
+
+    assert outcome.status == "adapted"
+    assert outcome.request is not None
+    assert outcome.request.model.nextn == 0
+    assert outcome.request.model.nextn_accepted is None
+
+
+def test_conflicting_engine_config_speculative_depths_are_rejected():
+    deployment = """
+kind: ConfigMap
+metadata: {name: prefill-engine}
+data:
+  config.yaml: |
+    tensor_parallel_size: 1
+    speculative_config: {num_nextn_predict_layers: 2}
+---
+kind: ConfigMap
+metadata: {name: decode-engine}
+data:
+  config.yaml: |
+    tensor_parallel_size: 1
+    speculative_config: {num_nextn_predict_layers: 3}
+---
+kind: DynamoGraphDeployment
+metadata: {name: conflicting-speculation}
+spec:
+  backendFramework: trtllm
+  services:
+    prefill:
+      componentType: worker
+      subComponentType: prefill
+      resources: {limits: {gpu: "1"}}
+      extraPodSpec:
+        nodeSelector: {nvidia.com/gpu.product: NVIDIA-H200}
+        volumes: [{name: engine, configMap: {name: prefill-engine}}]
+        mainContainer:
+          volumeMounts: [{name: engine, mountPath: /config}]
+          args:
+            - >-
+              python -m dynamo.trtllm --model-path QWEN/QWEN3-32B
+              --disaggregation-mode prefill --extra-engine-args /config/config.yaml
+    decode:
+      componentType: worker
+      subComponentType: decode
+      resources: {limits: {gpu: "1"}}
+      extraPodSpec:
+        nodeSelector: {nvidia.com/gpu.product: NVIDIA-H200}
+        volumes: [{name: engine, configMap: {name: decode-engine}}]
+        mainContainer:
+          volumeMounts: [{name: engine, mountPath: /config}]
+          args:
+            - >-
+              python -m dynamo.trtllm --model-path QWEN/QWEN3-32B
+              --disaggregation-mode decode --extra-engine-args /config/config.yaml
+"""
+
+    outcome = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=8, nextn_accepted=1.5),
+    ).outcomes[0]
+
+    assert outcome.status == "rejected"
+    assert "different speculative depths" in outcome.diagnostics[-1].message
 
 
 def test_speculative_model_flag_remains_active():

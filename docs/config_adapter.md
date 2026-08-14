@@ -115,11 +115,13 @@ to ordered operating points. A known numeric
 `CONCURRENCY_PER_GPU * DEPLOYMENT_GPU_COUNT` performance point is expanded
 without executing shell. Multiple explicit points create multiple outcomes.
 
-TRT-LLM speculative settings are read from mounted engine ConfigMaps as well as
-worker flags. Active speculation requires an explicit `nextn_accepted`
-override; the adapter never guesses an acceptance rate. Uneven concurrency
-distribution and conflicting role-specific memory fractions remain rejected
-with stable diagnostics.
+TRT-LLM speculative settings are read from worker flags and engine ConfigMaps
+whose volume mount resolves the exact `--extra-engine-args` path. Unmounted
+files, conflicting active depths across roles, and ambiguous mounts are
+rejected. A zero depth remains disabled. Active speculation requires an
+explicit `nextn_accepted` override; the adapter never guesses an acceptance
+rate. Uneven concurrency distribution and conflicting role-specific memory
+fractions remain rejected with stable diagnostics.
 
 For Helm-based benchmark infrastructure, render `recipe-values.yaml` into a
 DynamoGraphDeployment before adaptation. The matching unrendered

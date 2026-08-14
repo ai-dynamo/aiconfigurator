@@ -9,7 +9,7 @@ import re
 import shlex
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -202,16 +202,28 @@ def _mounted_config(service: Mapping[str, Any], config_maps: Mapping[str, Any]) 
     main = _container(service)
     extra = service.get("extraPodSpec", {})
     volumes = extra.get("volumes", []) if isinstance(extra, Mapping) else []
-    names: list[str] = []
+    config_volumes: dict[str, tuple[str, Mapping[str, str] | None]] = {}
     if isinstance(volumes, list):
         for volume in volumes:
             if not isinstance(volume, Mapping):
                 continue
             config_map = volume.get("configMap", {})
-            if isinstance(config_map, Mapping) and isinstance(config_map.get("name"), str):
-                names.append(config_map["name"])
-    if not names:
-        return {}
+            volume_name = volume.get("name")
+            config_map_name = config_map.get("name") if isinstance(config_map, Mapping) else None
+            if not isinstance(volume_name, str) or not isinstance(config_map_name, str):
+                continue
+            projected_paths: dict[str, str] = {}
+            items = config_map.get("items")
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, Mapping):
+                        continue
+                    key = item.get("key")
+                    path = item.get("path")
+                    if isinstance(key, str) and isinstance(path, str):
+                        projected_paths[key] = path
+            config_volumes[volume_name] = (config_map_name, projected_paths or None)
+
     env = _env(main.get("env", []))
     engine_path: Any = env.get("ENGINE_ARGS", "")
     try:
@@ -221,12 +233,35 @@ def _mounted_config(service: Mapping[str, Any], config_maps: Mapping[str, Any]) 
     if flags.get("extra-engine-args") not in (None, True):
         engine_path = flags["extra-engine-args"]
     engine_path = str(engine_path)
-    engine_basename = Path(engine_path).name if engine_path else ""
     candidates: list[Mapping[str, Any]] = []
-    for name in names:
-        for filename, config in config_maps.get(name, {}).items():
-            if not engine_path or engine_basename == filename:
-                candidates.append(config)
+    mounts = main.get("volumeMounts", [])
+    if isinstance(mounts, list):
+        for mount in mounts:
+            if not isinstance(mount, Mapping):
+                continue
+            volume_name = mount.get("name")
+            mount_path = mount.get("mountPath")
+            if not isinstance(volume_name, str) or not isinstance(mount_path, str):
+                continue
+            volume_config = config_volumes.get(volume_name)
+            if volume_config is None:
+                continue
+            config_map_name, projected_paths = volume_config
+            sub_path = mount.get("subPath")
+            for filename, config in config_maps.get(config_map_name, {}).items():
+                if projected_paths is not None and filename not in projected_paths:
+                    continue
+                projected_path = projected_paths[filename] if projected_paths is not None else filename
+                if isinstance(sub_path, str):
+                    if sub_path != projected_path:
+                        continue
+                    resolved_path = PurePosixPath(mount_path)
+                else:
+                    resolved_path = PurePosixPath(mount_path) / projected_path
+                if not engine_path or resolved_path == PurePosixPath(engine_path):
+                    candidates.append(config)
+    if engine_path and not candidates:
+        raise ValueError(f"engine config path {engine_path!r} does not resolve to a mounted ConfigMap file")
     if len(candidates) > 1:
         raise ValueError("worker mounts multiple ambiguous engine ConfigMap files")
     return candidates[0] if candidates else {}
@@ -767,51 +802,65 @@ def _request_for_point(
         systems = SystemSettingsV1(prefill=system, decode=overrides.decode_system_name or system)
 
     speculative_flag_names = {"num-speculative-tokens", "speculative-num-steps", "speculative-token-num"}
-    speculative_values: list[Any] = []
-    speculative_configs: list[Mapping[str, Any]] = []
+    speculation_disabled = {"", "0", "false", "none", "disabled"}
+
+    def speculation_enabled(value: Any) -> bool:
+        return value is not None and value is not False and str(value).lower() not in speculation_disabled
+
+    speculative_values: list[tuple[str, Any]] = []
+    speculative_enable_values: list[Any] = []
     for service in services:
         config = service.engine_config.get("speculative_config")
         speculative_config = config if isinstance(config, Mapping) else {}
-        if speculative_config:
-            speculative_configs.append(speculative_config)
         speculative_values.append(
-            _coalesce(
-                "speculative depth",
-                (
+            (
+                service.name,
+                _coalesce(
+                    "speculative depth",
                     (
-                        f"{service.name} command",
-                        _flag(service, "num-speculative-tokens", "speculative-num-steps", "speculative-token-num"),
-                    ),
-                    (f"{service.name} engine ConfigMap", speculative_config.get("max_draft_len")),
-                    (
-                        f"{service.name} engine ConfigMap",
-                        speculative_config.get("num_nextn_predict_layers"),
+                        (
+                            f"{service.name} command",
+                            _flag(
+                                service,
+                                "num-speculative-tokens",
+                                "speculative-num-steps",
+                                "speculative-token-num",
+                            ),
+                        ),
+                        (f"{service.name} engine ConfigMap", speculative_config.get("max_draft_len")),
+                        (
+                            f"{service.name} engine ConfigMap",
+                            speculative_config.get("num_nextn_predict_layers"),
+                        ),
                     ),
                 ),
             )
         )
-    speculative_enable_values = [
+        speculative_enable_values.extend(
+            speculative_config.get(key) for key in ("decoding_type", "speculative_model_dir")
+        )
+    speculative_enable_values.extend(
         value
         for service in services
         for key, value in service.flags.items()
         if "specul" in key and key not in speculative_flag_names
-    ] + speculative_configs
-    speculation_disabled = {"", "0", "false", "none", "disabled"}
-
-    def speculation_enabled(value: Any) -> bool:
-        if isinstance(value, Mapping):
-            return bool(value)
-        return value is not None and value is not False and str(value).lower() not in speculation_disabled
-
-    active_speculation = any(speculation_enabled(value) for value in (*speculative_values, *speculative_enable_values))
+    )
+    active_depths = [
+        (service_name, _as_int(value, f"{service_name} speculative depth"))
+        for service_name, value in speculative_values
+        if speculation_enabled(value)
+    ]
+    depth_values = {value for _, value in active_depths}
+    if len(depth_values) > 1:
+        detail = ", ".join(f"{service_name}={value}" for service_name, value in active_depths)
+        raise ValueError(f"worker services use different speculative depths: {detail}")
+    source_nextn = next(iter(depth_values), None)
+    active_speculation = source_nextn is not None or any(
+        speculation_enabled(value) for value in speculative_enable_values
+    )
     if active_speculation and overrides.nextn_accepted is None:
         raise ValueError("speculative decoding requires an explicit nextn_accepted override")
-    source_nextn = next((value for value in speculative_values if speculation_enabled(value)), None)
-    nextn = (
-        overrides.nextn
-        if overrides.nextn is not None
-        else (_as_int(source_nextn, "speculative depth") if source_nextn else 0)
-    )
+    nextn = overrides.nextn if overrides.nextn is not None else (source_nextn if source_nextn is not None else 0)
 
     free_fraction = overrides.free_gpu_memory_fraction
     if free_fraction is None:
