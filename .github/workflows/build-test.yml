@@ -48,7 +48,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
-          python-version: '3.12'
+          python-version: '3.13'
       - name: Test crate without Python embedding
         run: cargo test --workspace --no-default-features
       - name: Install the local wheel and upper compatibility package
@@ -65,7 +65,7 @@ jobs:
         env:
           AIC_REQUIRE_EMBEDDED_ROUND_TRIP: '1'
           PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
-          PYTHONPATH: ${{ github.workspace }}/aic-core/src:${{ github.workspace }}/.venv/lib/python3.12/site-packages:${{ github.workspace }}/src
+          PYTHONPATH: ${{ github.workspace }}/aic-core/src:${{ github.workspace }}/.venv/lib/python3.13/site-packages:${{ github.workspace }}/src
         run: cargo test --workspace --all-features
 
   python-313-compatibility:
@@ -90,7 +90,7 @@ jobs:
       - name: Verify Python and NumPy compatibility
         run: |
           uv pip check
-          uv run python -c 'import sys, numpy; assert sys.version_info[:2] == (3, 13); assert int(numpy.__version__.split(".")[0]) == 2'
+          uv run python -c 'import sys, numpy; from packaging.version import Version; assert sys.version_info[:2] == (3, 13); assert Version("2.1") <= Version(numpy.__version__) < Version("3")'
       - name: Test Python package contracts
         run: |
           uv run pytest -q \
@@ -196,7 +196,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
-          python-version: '3.12'
+          python-version: '3.13'
       - name: Install AIC and test dependencies
         run: |
           python -m pip install uv

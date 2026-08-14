@@ -29,7 +29,7 @@
 //! `uv run maturin develop -m aic-core/rust/aiconfigurator-core/Cargo.toml --release`:
 //! ```text
 //! AIC_REQUIRE_EMBEDDED_ROUND_TRIP=1 \
-//!   PYTHONPATH="$PWD/aic-core/src:$PWD/.venv/lib/python3.12/site-packages:$PWD/src" \
+//!   PYTHONPATH="$PWD/aic-core/src:$PWD/.venv/lib/python3.13/site-packages:$PWD/src" \
 //!   cargo test -p aiconfigurator-core --test memory_round_trip -- --nocapture
 //! ```
 //!

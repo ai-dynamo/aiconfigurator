@@ -404,7 +404,7 @@ points.par_iter().for_each(|p| {
 
 <pre><code># one-time
 brew install rust
-python3.12 -m venv .venv &amp;&amp; source .venv/bin/activate
+python3.13 -m venv .venv &amp;&amp; source .venv/bin/activate
 pip install maturin pyarrow pytest
 
 # build PyO3 extension into the venv
@@ -562,7 +562,7 @@ layout. Extending: one new struct per op, ~50–200 lines each.</p>
   </li>
   <li>
     <strong>Production wheels</strong>: maturin CI for
-    macOS / Linux / Windows × Python 3.10–3.12. <code>uv add aic_step</code>-friendly.
+    macOS / Linux / Windows × Python 3.13. <code>uv add aic_step</code>-friendly.
   </li>
 </ol>
 
