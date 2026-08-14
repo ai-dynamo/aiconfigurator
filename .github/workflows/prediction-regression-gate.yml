@@ -77,10 +77,20 @@ jobs:
       - name: Git LFS Pull
         run: git lfs pull
 
+      - name: Select revision-compatible Python
+        id: python
+        shell: bash
+        run: |
+          if grep -Eq '^requires-python[[:space:]]*=[[:space:]]*">=3\.13' pyproject.toml; then
+            echo "version=3.13" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=3.12" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.13"
+          python-version: ${{ steps.python.outputs.version }}
 
       - name: Install dependencies
         run: |

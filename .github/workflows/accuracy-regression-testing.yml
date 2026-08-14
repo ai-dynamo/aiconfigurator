@@ -37,7 +37,14 @@ jobs:
       - name: Git LFS Pull
         run: git lfs pull
 
-      - name: Set up Python
+      - name: Set up Python 3.12 for legacy baselines
+        id: python312
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Set up Python 3.13
+        id: python313
         uses: actions/setup-python@v6
         with:
           python-version: "3.13"
@@ -64,10 +71,29 @@ jobs:
           git worktree add --detach ../aiconfigurator-old "${{ steps.old-ref.outputs.old_ref }}"
 
       - name: Install old revision dependencies
+        env:
+          PYTHON_312: ${{ steps.python312.outputs.python-path }}
+          PYTHON_313: ${{ steps.python313.outputs.python-path }}
         run: |
           OLD_ROOT="${{ github.workspace }}/../aiconfigurator-old"
           OLD_VENV="${OLD_ROOT}/.venv"
-          python -m venv "${OLD_VENV}"
+          if "${PYTHON_313}" - "${OLD_ROOT}/pyproject.toml" <<'PY'
+          import sys
+          import tomllib
+          from packaging.specifiers import SpecifierSet
+          from packaging.version import Version
+
+          with open(sys.argv[1], "rb") as pyproject:
+              requires_python = tomllib.load(pyproject)["project"].get("requires-python", ">=3.10")
+          raise SystemExit(0 if Version("3.12") in SpecifierSet(requires_python) else 1)
+          PY
+          then
+            OLD_PYTHON="${PYTHON_312}"
+          else
+            OLD_PYTHON="${PYTHON_313}"
+          fi
+          echo "Creating the baseline environment with ${OLD_PYTHON}"
+          "${OLD_PYTHON}" -m venv "${OLD_VENV}"
           "${OLD_VENV}/bin/python" -m pip install --upgrade pip
           # Split revisions need the payload-bearing Maturin core installed
           # before the upper root package. The conditional also supports older
