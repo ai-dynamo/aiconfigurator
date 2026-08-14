@@ -36,7 +36,8 @@ use pyo3::types::PyType;
 
 use crate::common::error::AicError;
 use crate::engine::runtime::{
-    Engine, PerOpValue, RuntimeConfig, StaticMode, StaticResult, DEFAULT_STATIC_STRIDE,
+    Engine, PerOpSolValue, PerOpValue, RuntimeConfig, StaticMode, StaticResult,
+    DEFAULT_STATIC_STRIDE,
 };
 use crate::{BackendKind, DataType, EngineConfig, ENGINE_CONFIG_SCHEMA_VERSION};
 
@@ -603,6 +604,41 @@ impl AicEngine {
         self.inner.reset_provenance();
         py.allow_threads(|| {
             self.inner.evaluate_ops_json(
+                ops_json,
+                is_context,
+                batch_size,
+                s,
+                prefix,
+                imbalance_correction_scale,
+                x,
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// `evaluate_ops_json` under the SOL_FULL view: every op is forced onto
+    /// its analytic SOL branch and the roofline decomposition is kept.
+    /// Returns ``(name, sol_time_ms, sol_math_ms, sol_mem_ms)`` tuples
+    /// (NAME-FOLDED, ``+=`` on all three) — the compiled-engine replacement
+    /// for Python's per-call ``query_*(..., database_mode=SOL_FULL)``
+    /// triples. Raises for op families whose SOL path does not export its
+    /// decomposition yet.
+    #[pyo3(signature = (ops_json, is_context, batch_size, s, prefix=0, imbalance_correction_scale=1.0, x=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_ops_sol_json(
+        &self,
+        py: Python<'_>,
+        ops_json: &str,
+        is_context: bool,
+        batch_size: u32,
+        s: u32,
+        prefix: u32,
+        imbalance_correction_scale: f64,
+        x: Option<u32>,
+    ) -> PyResult<Vec<PerOpSolValue>> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.evaluate_ops_sol_json(
                 ops_json,
                 is_context,
                 batch_size,

@@ -43,6 +43,7 @@ use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
+use crate::operators::base::SolComponents;
 use crate::config::{PerfDbSources, PerfSource};
 use crate::perf_database::parquet_loader::PerfReader;
 
@@ -700,7 +701,7 @@ fn indexer_cache_entry_bytes(index_head_dim: i64) -> i64 {
 /// attention group (fmha_quant) whose exact KV pair count is
 /// `sum_{i=0..s-1} min(prefix+i+1, index_topk)`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn dsa_context_sol_ms(
+pub(crate) fn dsa_context_sol(
     spec: &SystemSpec,
     dims: &DsaDims,
     index_topk: i64,
@@ -713,7 +714,7 @@ pub(crate) fn dsa_context_sol_ms(
     num_heads: i64,
     skip_indexer: bool,
     flops: DsaSolFlops,
-) -> f64 {
+) -> SolComponents {
     let (hidden, q_lora, kv_lora) = (dims.hidden_size, dims.q_lora_rank, dims.kv_lora_rank);
     let (inh, ihd) = (dims.index_n_heads, dims.index_head_dim);
     let qk_head_dim = dims.qk_nope_head_dim + dims.qk_rope_head_dim;
@@ -796,14 +797,47 @@ pub(crate) fn dsa_context_sol_ms(
         + sparse_attn_ops as f64 / attn_flops)
         * 1000.0;
     let sol_mem = total_mem / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    SolComponents::new(sol_math, sol_mem)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dsa_context_sol_ms(
+    spec: &SystemSpec,
+    dims: &DsaDims,
+    index_topk: i64,
+    kv_quant: KvCacheQuantMode,
+    fmha_quant: FmhaQuantMode,
+    gemm_quant: GemmQuantMode,
+    b: i64,
+    s: i64,
+    prefix: i64,
+    num_heads: i64,
+    skip_indexer: bool,
+    flops: DsaSolFlops,
+) -> f64 {
+    dsa_context_sol(
+        spec,
+        dims,
+        index_topk,
+        kv_quant,
+        fmha_quant,
+        gemm_quant,
+        b,
+        s,
+        prefix,
+        num_heads,
+        skip_indexer,
+        flops,
+    )
+    .time_ms()
 }
 
 /// Generation DSA analytic roofline. Verbatim port of Python
 /// `GenerationDSAModule._query_generation_dsa_module_table::get_sol`
 /// (1 token per request; the attention group is hardcoded bfloat16 in
 /// Python — `fmha_mode = FMHAQuantMode.bfloat16` — so no fmha arg here).
-pub(crate) fn dsa_generation_sol_ms(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dsa_generation_sol(
     spec: &SystemSpec,
     dims: &DsaDims,
     kv_quant: KvCacheQuantMode,
@@ -812,7 +846,7 @@ pub(crate) fn dsa_generation_sol_ms(
     s: i64,
     num_heads: i64,
     flops: DsaSolFlops,
-) -> f64 {
+) -> SolComponents {
     let (b, s, num_heads) = (b as i128, s as i128, num_heads as i128);
     let (hidden, q_lora, kv_lora) = (
         dims.hidden_size as i128,
@@ -869,7 +903,21 @@ pub(crate) fn dsa_generation_sol_ms(
         + sparse_attn_ops as f64 / attn_flops)
         * 1000.0;
     let sol_mem = total_mem / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    SolComponents::new(sol_math, sol_mem)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dsa_generation_sol_ms(
+    spec: &SystemSpec,
+    dims: &DsaDims,
+    kv_quant: KvCacheQuantMode,
+    gemm_quant: GemmQuantMode,
+    b: i64,
+    s: i64,
+    num_heads: i64,
+    flops: DsaSolFlops,
+) -> f64 {
+    dsa_generation_sol(spec, dims, kv_quant, gemm_quant, b, s, num_heads, flops).time_ms()
 }
 
 /// Load a DSA module table from an ordered, priority-sorted source list, with

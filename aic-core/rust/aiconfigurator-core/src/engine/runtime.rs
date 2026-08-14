@@ -112,6 +112,15 @@ pub const DEFAULT_STATIC_STRIDE: u32 = 32;
 /// tuple so pyo3 converts to `list[tuple[str, float, float, str]]`.
 pub type PerOpValue = (String, f64, f64, &'static str);
 
+/// One SOL-decomposed per-op value: `(name, sol_time_ms, sol_math_ms,
+/// sol_mem_ms)`, mirroring Python's SOL_FULL triple `(sol_time, sol_math,
+/// sol_mem)` per query. `sol_time` is the op's SOL-mode latency (scale
+/// factors and correction scales applied — for a single leaf query it is
+/// exactly the Python triple's `sol_time = max(sol_math, sol_mem)`);
+/// `sol_math`/`sol_mem` are the compute-/memory-bound components composed
+/// the same way. NAME-FOLDED like [`PerOpValue`] (`+=` on all three).
+pub type PerOpSolValue = (String, f64, f64, f64);
+
 /// Name-folding accumulator for [`PerOpValue`] streams. First-encounter
 /// order is preserved (mirrors Python dict insertion order). Linear scan on
 /// purpose: unique-name counts are a few dozen (per-block families repeat
@@ -138,6 +147,45 @@ impl PerOpFold {
     }
 
     fn into_values(self) -> Vec<PerOpValue> {
+        self.entries
+    }
+}
+
+/// Name-folding accumulator for [`PerOpSolValue`] streams (fold semantics of
+/// [`PerOpFold`]: first-encounter order, `+=` accumulation, linear scan).
+#[derive(Default)]
+struct PerOpSolFold {
+    entries: Vec<PerOpSolValue>,
+}
+
+impl PerOpSolFold {
+    fn add(&mut self, op: &Op, r: PerformanceResult) -> Result<(), AicError> {
+        let (sol_math, sol_mem) = match r.sol {
+            Some(c) => (c.math_ms, c.mem_ms),
+            // No-op short-circuits (tp_size=1 allreduce, pp_size=1 P2P)
+            // return plain zero results without a decomposition: a zero
+            // contribution is exact, not a coverage gap.
+            None if r.latency_ms == 0.0 && r.energy_wms == 0.0 => (0.0, 0.0),
+            None => {
+                return Err(AicError::InvalidEngineConfig(format!(
+                    "evaluate_ops_sol_json: op '{}' has no SOL decomposition \
+                     (family not exported yet — see PerformanceResult::sol)",
+                    op.name()
+                )))
+            }
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.0 == op.name()) {
+            entry.1 += r.latency_ms;
+            entry.2 += sol_math;
+            entry.3 += sol_mem;
+            return Ok(());
+        }
+        self.entries
+            .push((op.name().to_string(), r.latency_ms, sol_math, sol_mem));
+        Ok(())
+    }
+
+    fn into_values(self) -> Vec<PerOpSolValue> {
         self.entries
     }
 }
@@ -1090,6 +1138,59 @@ impl Engine {
         Ok(out.into_values())
     }
 
+    /// [`Self::evaluate_ops_json`] under the SOL_FULL view: evaluate an
+    /// ad-hoc op list (JSON array of `OpSpec` objects) with every operator
+    /// forced onto its analytic SOL branch, and keep the roofline
+    /// decomposition. Returns `(name, sol_time_ms, sol_math_ms, sol_mem_ms)`
+    /// per op (see [`PerOpSolValue`]) — the compiled-engine replacement for
+    /// Python's per-call `query_*(..., database_mode=SOL_FULL)` triples.
+    /// Errors when an op's family does not export its decomposition yet.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_ops_sol_json(
+        &self,
+        ops_json: &str,
+        is_context: bool,
+        batch_size: u32,
+        s: u32,
+        prefix: u32,
+        imbalance_correction_scale: f64,
+        x_override: Option<u32>,
+    ) -> Result<Vec<PerOpSolValue>, AicError> {
+        let ops: Vec<Op> = serde_json::from_str(ops_json).map_err(|e| {
+            AicError::InvalidEngineConfig(format!(
+                "evaluate_ops_sol_json: invalid op list JSON: {e}"
+            ))
+        })?;
+        let sol_db = self.db.sol_full_view();
+        let mut out = PerOpSolFold::default();
+        for op in &ops {
+            let r = if is_context {
+                query_context_op(
+                    op,
+                    &sol_db,
+                    batch_size,
+                    s,
+                    prefix,
+                    imbalance_correction_scale,
+                    x_override,
+                )?
+            } else {
+                query_generation_op(
+                    op,
+                    &sol_db,
+                    batch_size,
+                    1,
+                    s,
+                    imbalance_correction_scale,
+                    prefix,
+                    x_override,
+                )?
+            };
+            out.add(op, r)?;
+        }
+        Ok(out.into_values())
+    }
+
     /// Compute one forward-pass latency from a list of per-rank FPM entries.
     ///
     /// Re-platformed from the (deleted) `SessionEstimator::forward_pass_time_ms`
@@ -1820,6 +1921,154 @@ mod tests {
             "nextn=1 gen ({}) must equal the gen-step at 2*batch ({})",
             gen.generation_ms,
             doubled
+        );
+    }
+
+    /// The SOL-decomposition FFI must agree with a Sol-view evaluation of
+    /// the same ops: each entry's `sol_time` IS the op's Sol-mode latency
+    /// (shared query path, shared shape math), and for single-leaf ops the
+    /// leaf identity `sol_time = max(sol_math, sol_mem)` holds. The GEMM
+    /// triple is additionally pinned to its closed-form roofline — the
+    /// Python SOL_FULL `get_sol` verbatim.
+    #[test]
+    fn evaluate_ops_sol_json_matches_sol_view() {
+        use crate::perf_database::gemm::quant_tc_flops;
+        use crate::session::query_context_op;
+
+        let engine = build_engine(None);
+        let ops = context_ops();
+        let ops_json = serde_json::to_string(&ops).unwrap();
+        let (batch, s) = (4u32, 512u32);
+        let sol = engine
+            .evaluate_ops_sol_json(&ops_json, true, batch, s, 0, 1.0, None)
+            .unwrap();
+        assert_eq!(sol.len(), ops.len());
+
+        let sol_db = engine.database().sol_full_view();
+        for (op, entry) in ops.iter().zip(&sol) {
+            let r = query_context_op(op, &sol_db, batch, s, 0, 1.0, None).unwrap();
+            assert_eq!(entry.0, op.name());
+            assert!(
+                (entry.1 - r.latency_ms).abs() < 1e-12,
+                "{}: sol_time {} != Sol-view latency {}",
+                entry.0,
+                entry.1,
+                r.latency_ms
+            );
+        }
+
+        // Single-leaf ops: sol_time = max(sol_math, sol_mem). (Composed ops
+        // like context attention add fused-extras leaves AFTER the max, so
+        // the identity intentionally does not hold there.)
+        for entry in sol.iter().take(2) {
+            assert!(
+                (entry.1 - entry.2.max(entry.3)).abs() < 1e-12,
+                "{}: leaf max identity broken: {:?}",
+                entry.0,
+                entry
+            );
+        }
+
+        // GEMM triple == the closed-form roofline at m = batch * s
+        // (Python `GEMM._query_gemm_table::get_sol`).
+        let spec = &engine.database().system_spec;
+        let quant = GemmQuantMode::Fp8Block;
+        let tc_flops = quant_tc_flops(spec, quant.mapping()).unwrap();
+        let (m, n, k) = ((batch * s) as f64, 4096.0, 4096.0);
+        let math = 2.0 * m * n * k / tc_flops * 1000.0;
+        let mem = quant.mapping().memory * (m * n + m * k + n * k) / spec.gpu.mem_bw * 1000.0;
+        let gemm = &sol[1];
+        assert!((gemm.2 - math).abs() < 1e-12, "sol_math {} != {math}", gemm.2);
+        assert!((gemm.3 - mem).abs() < 1e-12, "sol_mem {} != {mem}", gemm.3);
+    }
+
+    /// GLM-5.2 DSA full/skip amortization (`full_frac < 1`) must blend the
+    /// SOL decomposition componentwise alongside the latency — the blended
+    /// result reaches `PerOpSolFold::add` with components, and each component
+    /// equals `w*full + (1-w)*skip` of the closed-form rooflines.
+    #[test]
+    fn evaluate_ops_sol_json_blends_dsa_full_skip() {
+        use crate::common::enums::{FmhaQuantMode, KvCacheQuantMode};
+        use crate::operators::DsaModuleOp;
+        use crate::perf_database::dsa::{dsa_context_sol, dsa_context_sol_flops, dsa_dims};
+
+        let engine = build_engine(None);
+        let spec = &engine.database().system_spec;
+        let mut op = DsaModuleOp::new(
+            "dsa_context",
+            128,
+            KvCacheQuantMode::Bfloat16,
+            FmhaQuantMode::Bfloat16,
+            GemmQuantMode::Bfloat16,
+            "DeepseekV32ForCausalLM",
+            2048,
+        );
+        let w = 0.5;
+        op.full_frac = w;
+        let (b, s) = (1u32, 4096u32);
+        let ops_json = serde_json::to_string(&vec![Op::DsaContext(op.clone())]).unwrap();
+        let sol = engine
+            .evaluate_ops_sol_json(&ops_json, true, b, s, 0, 1.0, None)
+            .unwrap();
+        assert_eq!(sol.len(), 1);
+
+        let dims = dsa_dims(&op.architecture);
+        let flops =
+            dsa_context_sol_flops(spec, op.gemm_quant_mode, op.fmha_quant_mode).unwrap();
+        let leaf = |skip: bool| {
+            dsa_context_sol(
+                spec,
+                dims,
+                op.index_topk as i64,
+                op.kv_cache_dtype,
+                op.fmha_quant_mode,
+                op.gemm_quant_mode,
+                b as i64,
+                s as i64,
+                0,
+                op.num_heads as i64,
+                skip,
+                flops,
+            )
+        };
+        let (full, skip) = (leaf(false), leaf(true));
+        let expected_math = w * full.math_ms + (1.0 - w) * skip.math_ms;
+        let expected_mem = w * full.mem_ms + (1.0 - w) * skip.mem_ms;
+        let expected_time = w * full.time_ms() + (1.0 - w) * skip.time_ms();
+        let (_, sol_time, sol_math, sol_mem) = &sol[0];
+        assert!((sol_time - expected_time).abs() < 1e-12, "{sol_time} vs {expected_time}");
+        assert!((sol_math - expected_math).abs() < 1e-12, "{sol_math} vs {expected_math}");
+        assert!((sol_mem - expected_mem).abs() < 1e-12, "{sol_mem} vs {expected_mem}");
+        // The skip leaf must actually differ from the full leaf, or this
+        // test would pass vacuously on a broken blend.
+        assert!(skip.time_ms() < full.time_ms());
+    }
+
+    /// Op families whose SOL branch does not export its decomposition yet
+    /// must error loudly (never silently chart a wrong breakdown).
+    #[test]
+    fn evaluate_ops_sol_json_rejects_unexported_families() {
+        let engine = build_engine(None);
+        let ops = vec![Op::Mamba2(crate::operators::Mamba2Op {
+            name: "mamba2".into(),
+            scale_factor: 1.0,
+            kernel_source: "causal_conv1d_fn".into(),
+            phase: "context".into(),
+            d_model: 4096,
+            d_state: 128,
+            d_conv: 4,
+            nheads: 128,
+            head_dim: 64,
+            n_groups: 8,
+            chunk_size: 256,
+        })];
+        let ops_json = serde_json::to_string(&ops).unwrap();
+        let err = engine
+            .evaluate_ops_sol_json(&ops_json, true, 1, 128, 0, 1.0, None)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no SOL decomposition"),
+            "unexpected error: {err}"
         );
     }
 }

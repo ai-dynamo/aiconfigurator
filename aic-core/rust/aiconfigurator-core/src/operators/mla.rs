@@ -20,8 +20,9 @@ use crate::operators::util_empirical::{self, UtilGrid};
 use crate::perf_database::attention::generation_attn_flops;
 use crate::perf_database::gemm::quant_tc_flops;
 use crate::perf_database::mla::{
-    context_mla_sol_ms, context_mla_sol_prefix_ms, generation_mla_module_sol_ms,
-    generation_mla_sol_ms, mla_bmm_sol_ms,
+    context_mla_sol_ms, context_mla_sol_prefix, context_mla_sol_prefix_ms,
+    generation_mla_module_sol, generation_mla_module_sol_ms, generation_mla_sol,
+    generation_mla_sol_ms, mla_bmm_sol, mla_bmm_sol_ms,
 };
 use crate::perf_database::PerfDatabase;
 use serde::{Deserialize, Serialize};
@@ -283,18 +284,15 @@ fn query_context_mla_table(
         // SOL formula, so no prefix correction applies here.
         DatabaseMode::Sol | DatabaseMode::SolFull => {
             let attn_flops = quant_tc_flops(&db.system_spec, fmha_quant.mapping())?;
-            Ok(PerformanceResult::new(
-                context_mla_sol_prefix_ms(
-                    &db.system_spec,
-                    kv_quant,
-                    num_heads as f64,
-                    s as f64,
-                    prefix as f64,
-                    b as f64,
-                    attn_flops,
-                ),
-                Source::Sol,
-            ))
+            Ok(PerformanceResult::sol(context_mla_sol_prefix(
+                &db.system_spec,
+                kv_quant,
+                num_heads as f64,
+                s as f64,
+                prefix as f64,
+                b as f64,
+                attn_flops,
+            )))
         }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             context_mla_empirical(db, b, s, prefix, num_heads, kv_quant, fmha_quant)?,
@@ -373,17 +371,14 @@ fn query_generation_mla_table(
         // kvcache_quant_mode)[0]` — flops implied by the kv-cache dtype.
         DatabaseMode::Sol | DatabaseMode::SolFull => {
             let attn_flops = generation_attn_flops(&db.system_spec, kv_quant)?;
-            Ok(PerformanceResult::new(
-                generation_mla_sol_ms(
-                    &db.system_spec,
-                    kv_quant,
-                    num_heads as f64,
-                    b as f64,
-                    s as f64,
-                    attn_flops,
-                ),
-                Source::Sol,
-            ))
+            Ok(PerformanceResult::sol(generation_mla_sol(
+                &db.system_spec,
+                kv_quant,
+                num_heads as f64,
+                b as f64,
+                s as f64,
+                attn_flops,
+            )))
         }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             generation_mla_empirical(db, b, s, num_heads, kv_quant)?,
@@ -478,10 +473,13 @@ fn query_mla_bmm_table(
     if matches!(db.database_mode, DatabaseMode::Sol | DatabaseMode::SolFull) {
         let spec = &db.system_spec;
         let bmm_flops = quant_tc_flops(spec, quant.mapping())?;
-        return Ok(PerformanceResult::new(
-            mla_bmm_sol_ms(spec, quant, num_heads as f64, num_tokens as f64, bmm_flops),
-            Source::Sol,
-        ));
+        return Ok(PerformanceResult::sol(mla_bmm_sol(
+            spec,
+            quant,
+            num_heads as f64,
+            num_tokens as f64,
+            bmm_flops,
+        )));
     }
     // Exact-head-first routing with a data-presence fallback: query the
     // exact head slice at scale 1.0 when it has rows, otherwise the
@@ -612,18 +610,15 @@ fn query_context_mla_module_table(
         // only select the empirical slice; they never enter the SOL).
         DatabaseMode::Sol | DatabaseMode::SolFull => {
             let attn_flops = quant_tc_flops(&db.system_spec, fmha_quant.mapping())?;
-            Ok(PerformanceResult::new(
-                context_mla_sol_prefix_ms(
-                    &db.system_spec,
-                    kv_quant,
-                    num_heads as f64,
-                    s as f64,
-                    prefix as f64,
-                    b as f64,
-                    attn_flops,
-                ),
-                Source::Sol,
-            ))
+            Ok(PerformanceResult::sol(context_mla_sol_prefix(
+                &db.system_spec,
+                kv_quant,
+                num_heads as f64,
+                s as f64,
+                prefix as f64,
+                b as f64,
+                attn_flops,
+            )))
         }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             context_mla_module_empirical(
@@ -738,19 +733,16 @@ fn query_generation_mla_module_table(
             let spec = &db.system_spec;
             let attn_flops = generation_attn_flops(spec, kv_quant)?;
             let bmm_flops = quant_tc_flops(spec, gemm_quant.mapping())?;
-            Ok(PerformanceResult::new(
-                generation_mla_module_sol_ms(
-                    spec,
-                    kv_quant,
-                    gemm_quant,
-                    num_heads as f64,
-                    b as f64,
-                    s as f64,
-                    attn_flops,
-                    bmm_flops,
-                ),
-                Source::Sol,
-            ))
+            Ok(PerformanceResult::sol(generation_mla_module_sol(
+                spec,
+                kv_quant,
+                gemm_quant,
+                num_heads as f64,
+                b as f64,
+                s as f64,
+                attn_flops,
+                bmm_flops,
+            )))
         }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             generation_mla_module_empirical(

@@ -39,6 +39,7 @@ use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
+use crate::operators::base::SolComponents;
 use crate::config::{PerfDbSources, PerfSource};
 use crate::perf_database::parquet_loader::PerfReader;
 
@@ -687,6 +688,24 @@ pub(crate) fn context_mla_sol_ms(
 /// - `sol_math = ops / attn_flops * 1000`
 /// - `sol_mem  = mem / mem_bw * 1000`
 /// - `sol      = max(sol_math, sol_mem)`
+pub(crate) fn context_mla_sol_prefix(
+    spec: &SystemSpec,
+    kv_quant: KvCacheQuantMode,
+    n: f64,
+    s: f64,
+    prefix: f64,
+    b: f64,
+    attn_flops: f64,
+) -> SolComponents {
+    let full_s = s + prefix;
+    let ops = b * n * 2.0 / 2.0 * (192.0 + 128.0) * (full_s * full_s - prefix * prefix);
+    let mem_bytes =
+        b * n * (kv_quant.mapping().memory * full_s * (192.0 + 128.0) + 2.0 * s * (192.0 + 128.0));
+    let sol_math = ops / attn_flops * 1000.0;
+    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+    SolComponents::new(sol_math, sol_mem)
+}
+
 pub(crate) fn context_mla_sol_prefix_ms(
     spec: &SystemSpec,
     kv_quant: KvCacheQuantMode,
@@ -696,13 +715,7 @@ pub(crate) fn context_mla_sol_prefix_ms(
     b: f64,
     attn_flops: f64,
 ) -> f64 {
-    let full_s = s + prefix;
-    let ops = b * n * 2.0 / 2.0 * (192.0 + 128.0) * (full_s * full_s - prefix * prefix);
-    let mem_bytes =
-        b * n * (kv_quant.mapping().memory * full_s * (192.0 + 128.0) + 2.0 * s * (192.0 + 128.0));
-    let sol_math = ops / attn_flops * 1000.0;
-    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    context_mla_sol_prefix(spec, kv_quant, n, s, prefix, b, attn_flops).time_ms()
 }
 
 /// Generation MLA SOL in ms. Mirrors
@@ -714,6 +727,21 @@ pub(crate) fn context_mla_sol_prefix_ms(
 /// - `sol_math = ops / attn_flops * 1000`
 /// - `sol_mem  = mem / mem_bw * 1000`
 /// - `sol      = max(sol_math, sol_mem)`
+pub(crate) fn generation_mla_sol(
+    spec: &SystemSpec,
+    kv_quant: KvCacheQuantMode,
+    n: f64,
+    b: f64,
+    s: f64,
+    attn_flops: f64,
+) -> SolComponents {
+    let ops = 2.0 * b * n * 1088.0 * s;
+    let mem_bytes = b * (n * 1088.0 * 2.0 + (s - 1.0) * 576.0 * kv_quant.mapping().memory);
+    let sol_math = ops / attn_flops * 1000.0;
+    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+    SolComponents::new(sol_math, sol_mem)
+}
+
 pub(crate) fn generation_mla_sol_ms(
     spec: &SystemSpec,
     kv_quant: KvCacheQuantMode,
@@ -722,11 +750,7 @@ pub(crate) fn generation_mla_sol_ms(
     s: f64,
     attn_flops: f64,
 ) -> f64 {
-    let ops = 2.0 * b * n * 1088.0 * s;
-    let mem_bytes = b * (n * 1088.0 * 2.0 + (s - 1.0) * 576.0 * kv_quant.mapping().memory);
-    let sol_math = ops / attn_flops * 1000.0;
-    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    generation_mla_sol(spec, kv_quant, n, b, s, attn_flops).time_ms()
 }
 
 /// MLA BMM SOL in ms. Mirrors `MLABmm._query_mla_bmm_table::get_sol` (uses
@@ -738,6 +762,20 @@ pub(crate) fn generation_mla_sol_ms(
 /// - `sol_math = ops / bmm_flops * 1000`
 /// - `sol_mem  = mem / mem_bw * 1000`
 /// - `sol      = max(sol_math, sol_mem)`
+pub(crate) fn mla_bmm_sol(
+    spec: &SystemSpec,
+    quant: GemmQuantMode,
+    n: f64,
+    t: f64,
+    bmm_flops: f64,
+) -> SolComponents {
+    let ops = 2.0 * t * n * 128.0 * 512.0;
+    let mem_bytes = n * (t * 640.0 + 128.0 * 512.0) * quant.mapping().memory;
+    let sol_math = ops / bmm_flops * 1000.0;
+    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+    SolComponents::new(sol_math, sol_mem)
+}
+
 pub(crate) fn mla_bmm_sol_ms(
     spec: &SystemSpec,
     quant: GemmQuantMode,
@@ -745,11 +783,7 @@ pub(crate) fn mla_bmm_sol_ms(
     t: f64,
     bmm_flops: f64,
 ) -> f64 {
-    let ops = 2.0 * t * n * 128.0 * 512.0;
-    let mem_bytes = n * (t * 640.0 + 128.0 * 512.0) * quant.mapping().memory;
-    let sol_math = ops / bmm_flops * 1000.0;
-    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    mla_bmm_sol(spec, quant, n, t, bmm_flops).time_ms()
 }
 
 /// Generation MLA module SOL in ms. Mirrors
@@ -765,7 +799,7 @@ pub(crate) fn mla_bmm_sol_ms(
 /// - `sol_mem  = (attn_mem + bmm_mem) / mem_bw`
 /// - `sol      = max(sol_math, sol_mem)`
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn generation_mla_module_sol_ms(
+pub(crate) fn generation_mla_module_sol(
     spec: &SystemSpec,
     kv_quant: KvCacheQuantMode,
     gemm_quant: GemmQuantMode,
@@ -774,7 +808,7 @@ pub(crate) fn generation_mla_module_sol_ms(
     s: f64,
     attn_flops: f64,
     bmm_flops: f64,
-) -> f64 {
+) -> SolComponents {
     // MLA attention ops
     let attn_ops = 2.0 * b * n * 1088.0 * s;
     let mem_bytes = b * (n * 1088.0 * 2.0 + (s - 1.0) * 576.0 * kv_quant.mapping().memory);
@@ -787,7 +821,21 @@ pub(crate) fn generation_mla_module_sol_ms(
     let bmm_mem_time = bmm_mem / spec.gpu.mem_bw * 1000.0;
     sol_math += bmm_math;
     sol_mem += bmm_mem_time;
-    sol_math.max(sol_mem)
+    SolComponents::new(sol_math, sol_mem)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generation_mla_module_sol_ms(
+    spec: &SystemSpec,
+    kv_quant: KvCacheQuantMode,
+    gemm_quant: GemmQuantMode,
+    n: f64,
+    b: f64,
+    s: f64,
+    attn_flops: f64,
+    bmm_flops: f64,
+) -> f64 {
+    generation_mla_module_sol(spec, kv_quant, gemm_quant, n, b, s, attn_flops, bmm_flops).time_ms()
 }
 
 fn grid3_to_node(grid: &Grid3<LeafValue>) -> Node {

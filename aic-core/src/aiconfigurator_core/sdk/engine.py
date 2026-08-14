@@ -1093,6 +1093,45 @@ def build_engine_spec_json(
     return json.dumps(spec)
 
 
+def build_database_probe_spec_json(database: Any, *, systems_path: str | None = None) -> str:
+    """``EngineSpec`` JSON with EMPTY op lists: an engine bound to
+    ``database``'s perf tables only (same shared-layer sources, query mode
+    and transfer policy as the live Python view). Compiled by tools that
+    evaluate ad-hoc op lists (``evaluate_ops_json`` /
+    ``evaluate_ops_sol_json``) without a model — the sanity-check notebook
+    sources its per-op reference values through this."""
+    engine: dict[str, Any] = {
+        "schema_version": ENGINE_CONFIG_SCHEMA_VERSION,
+        "model_name": "__database_probe__",
+        "system_name": database.system,
+        "systems_path": systems_path,
+        "backend": database.backend,
+        "backend_version": database.version,
+        "kv_block_size": None,
+        "tp_size": 1,
+        "pp_size": 1,
+        "attention_dp_size": None,
+        "moe_tp_size": None,
+        "moe_ep_size": None,
+        "cp_size": None,
+        "weight_dtype": None,
+        "moe_dtype": None,
+        "activation_dtype": None,
+        "kv_cache_dtype": None,
+        "perf_db_sources": _compute_perf_db_sources(database),
+        "database_mode": _database_mode_name(database),
+        "transfer_policy": _transfer_policy_tokens(database),
+        "extra": {},
+    }
+    spec = {
+        "schema_version": ENGINE_SPEC_SCHEMA_VERSION,
+        "engine": engine,
+        "context_ops": [],
+        "generation_ops": [],
+    }
+    return json.dumps(spec)
+
+
 def _maybe_load_database(system: str, backend: str, backend_version: str | None, systems_path: str | None) -> Any:
     try:
         from aiconfigurator_core.sdk import perf_database
@@ -1120,6 +1159,16 @@ class EngineHandle:
         """Compile + wrap in one call. ``systems_path`` is forwarded to both."""
         systems_path = kwargs.get("systems_path")
         spec_bytes = compile_engine(model_path, system, backend, **kwargs)
+        return cls(spec_bytes, systems_path=systems_path)
+
+    @classmethod
+    def for_database(cls, database: Any, *, systems_path: str | None = None) -> EngineHandle:
+        """Model-less handle bound to ``database``'s perf tables (empty op
+        lists — see :func:`build_database_probe_spec_json`). Serves ad-hoc
+        op-list evaluation only (``evaluate_ops_json`` /
+        ``evaluate_ops_sol_json``); the whole-run methods return zeros."""
+        spec_json = build_database_probe_spec_json(database, systems_path=systems_path)
+        spec_bytes = aiconfigurator_core.engine_spec_bincode_from_json(spec_json)
         return cls(spec_bytes, systems_path=systems_path)
 
     @property
@@ -1342,6 +1391,33 @@ class EngineHandle:
         this engine's database — serves op lists deliberately NOT in the
         compiled spec (the VL encoder phase); the caller keeps the shape math."""
         return self._engine.evaluate_ops_json(
+            ops_json,
+            bool(is_context),
+            int(batch_size),
+            int(s),
+            int(prefix),
+            float(imbalance_correction_scale),
+            int(x) if x is not None else None,
+        )
+
+    def evaluate_ops_sol_json(
+        self,
+        ops_json: str,
+        *,
+        is_context: bool,
+        batch_size: int,
+        s: int,
+        prefix: int = 0,
+        imbalance_correction_scale: float = 1.0,
+        x: int | None = None,
+    ) -> list[tuple[str, float, float, float]]:
+        """:meth:`evaluate_ops_json` under the SOL_FULL view: every op is
+        forced onto its analytic SOL branch and the roofline decomposition is
+        kept. Returns ``(name, sol_time_ms, sol_math_ms, sol_mem_ms)`` tuples
+        (name-folded, ``+=`` on all three) — the compiled-engine replacement
+        for per-call ``query_*(..., database_mode=SOL_FULL)`` triples. Raises
+        for op families whose SOL path does not export its decomposition."""
+        return self._engine.evaluate_ops_sol_json(
             ops_json,
             bool(is_context),
             int(batch_size),
