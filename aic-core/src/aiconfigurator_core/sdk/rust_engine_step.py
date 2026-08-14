@@ -334,8 +334,11 @@ def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = N
         if requested == "python":
             requested = None
     if requested is not None and requested != "rust":
+        # `requested`, not `backend`: after the deprecated-"python" re-resolve
+        # above, the value being rejected may come from the environment while
+        # `backend` still holds the config's retired "python".
         raise ValueError(
-            f"unknown engine_step_backend {backend!r}: the compiled Rust engine is the only "
+            f"unknown engine_step_backend {requested!r}: the compiled Rust engine is the only "
             "engine-step executor ('rust' is the only live value; 'python' is a deprecated no-op)."
         )
     if requested is None:

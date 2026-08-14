@@ -26,9 +26,11 @@ Gate 3), the current rule is wrong in three ways —
 
 One thing the rule must KEEP: the per-call Python query stack
 (`operations/*.py` `_query_*_table` bodies, `perf_database.query_*`,
-`perf_interp/`) is still live — the AFD comm ops and the sanity notebook
-consume it — so per-op query math remains DUAL-implemented until the #1357
-Phase-3 sequel deletes it family-by-family. The dual rule therefore
+`perf_interp/`) is still live — the AFD comm ops, the sanity notebook, and
+the op-internal SOL/empirical couplings (ops whose silicon query falls back
+into their own SOL math) consume it — so per-op query math remains
+DUAL-implemented until the #1357 Phase-3 sequel deletes it
+family-by-family. The dual rule therefore
 survives for the per-op surface, while the step-level rule becomes
 golden-diff.
 
@@ -83,11 +85,13 @@ interpolation, selection rules, engine composition) MUST in the same PR:
 
 ## Rule 2 — the per-call Python query stack is still dual (for now)
 
-`src/aiconfigurator/sdk/operations/**` `_query_*_table` bodies,
-`perf_database.query_*`, and `perf_interp/**` remain live consumers'
-substrate: the AFD comm ops (empirical nccl/p2p/mem_op queries plus the
-`_sum_latency` fallback loop) and
-`tools/sanity_check/validate_database.ipynb`. Until the #1357 Phase-3
+`aic-core/src/aiconfigurator_core/sdk/operations/**` `_query_*_table`
+bodies, `perf_database.query_*`, and `perf_interp/**` remain live
+consumers' substrate: the AFD comm ops (empirical nccl/p2p/mem_op queries
+plus the `_sum_latency` fallback loop),
+`tools/sanity_check/validate_database.ipynb`, and the op-internal
+SOL/empirical couplings (ops whose silicon queries fall back into their own
+SOL math). Until the #1357 Phase-3
 retirement lands, a latency-affecting change to that per-call math MUST
 still be mirrored in the corresponding Rust operator (and vice versa), with
 an anchor per Rule 1 — otherwise AFD/tooling silently diverge from the

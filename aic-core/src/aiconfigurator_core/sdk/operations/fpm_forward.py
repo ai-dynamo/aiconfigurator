@@ -91,17 +91,32 @@ class FPMForwardOp(Operation):
         phase: str,
         model_config,
         model_path: str,
+        sol_fn=None,
         weight_bytes: float = 0.0,
-        *,
-        sol_ops: list,
+        sol_ops: list | None = None,
     ) -> None:
         """``sol_ops`` — the model's ORIGINAL op-level list for this phase —
         rides the compiled spec so the Rust FPM SOL roofline derives from the
         op-level model itself: per-op analytic max(compute, mem) with the
         real physics (MoE activation, DSA index_topk saturation, per-op
-        quant)."""
+        quant).
+
+        ``sol_fn`` is retired: an injected Python roofline callback cannot
+        cross the compiled boundary, so passing one raises a targeted
+        migration error. The parameter keeps its legacy positional slot so
+        existing ``weight_bytes``/``sol_ops`` positional callers keep their
+        meaning through the deprecation window."""
         if phase not in _PHASES:
             raise ValueError(f"unknown FPM phase: {phase!r}")
+        if sol_fn is not None:
+            raise TypeError(
+                "sol_fn was retired with the Python FPM walk: the compiled engine "
+                "derives the whole-model SOL roofline itself (operators/fpm_sol.rs) "
+                "and cannot call back into Python. Pass sol_ops (the phase's "
+                "op-level list) instead."
+            )
+        if sol_ops is None:
+            raise ValueError("provide sol_ops (sol_fn was retired with the Python FPM walk)")
         super().__init__(f"fpm_forward_{phase}", 1.0)
         self._phase = phase
         self._model_path = str(model_path)

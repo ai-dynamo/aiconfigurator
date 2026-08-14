@@ -166,10 +166,27 @@ class TestForwardModelRewrite:
         assert model.context_ops[0].get_weights() == pytest.approx(expected_weights)
 
     def test_fpm_rejects_construction_without_sol_ops(self):
-        # Required keyword-only parameter: omitting it is a signature error,
-        # not a runtime branch (the sol_fn-injection alternative is gone).
-        with pytest.raises(TypeError, match="sol_ops"):
+        # Legacy "exactly one of sol_fn/sol_ops" contract, minus the retired
+        # half: omitting sol_ops keeps raising (main's ValueError), with the
+        # message pointing at the surviving parameter.
+        with pytest.raises(ValueError, match="provide sol_ops"):
             FPMForwardOp("prefill", _model_config(), MODEL_PATH, weight_bytes=1.0)
+
+    def test_fpm_sol_fn_raises_targeted_migration_error(self):
+        # The legacy sol_fn slot stays in the signature (so positional
+        # weight_bytes/sol_ops callers keep their meaning) but a callback
+        # cannot cross the compiled boundary: passing one must fail with
+        # migration guidance, not silently rebind or get ignored.
+        with pytest.raises(TypeError, match="sol_ops"):
+            FPMForwardOp("prefill", _model_config(), MODEL_PATH, lambda **kwargs: 1.0)
+
+    def test_fpm_legacy_positional_layout_preserved(self):
+        # main exposed (phase, model_config, model_path, sol_fn=None,
+        # weight_bytes=0.0, sol_ops=None): the 5th positional is
+        # weight_bytes and the 6th is sol_ops.
+        op = FPMForwardOp("prefill", _model_config(), MODEL_PATH, None, 123.0, [])
+        assert op.get_weights() == 123.0
+        assert op._sol_ops == []
 
     def test_fpm_rejects_unknown_phase(self):
         with pytest.raises(ValueError, match="unknown FPM phase"):

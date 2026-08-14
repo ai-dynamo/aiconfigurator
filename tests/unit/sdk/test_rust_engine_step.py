@@ -63,6 +63,16 @@ def test_python_backend_value_warns_once_and_noops(monkeypatch, caplog) -> None:
     )
 
 
+def test_invalid_env_behind_deprecated_python_config_is_named_in_the_error(monkeypatch) -> None:
+    """Config ``"python"`` re-resolves to the env; when THAT value is invalid,
+    the error must name the re-resolved value actually being rejected, not
+    the config's retired ``"python"``."""
+    monkeypatch.setenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", "auto")
+    rust_engine_step._python_step_fallback_reset()
+    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'auto'"):
+        rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), _real_database())
+
+
 def _real_database():
     """A real ``PerfDatabase`` instance (loader bypassed): default routing
     requires the real type — synthetic database doubles delegate to the

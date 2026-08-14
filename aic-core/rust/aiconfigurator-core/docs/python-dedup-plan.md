@@ -70,16 +70,25 @@ delete the Python FPM walk too.
 roofline queried every op-level op in SOL — but #1461 moved that to
 `fpm_sol.rs`, which is what unlocked deleting the walk.)
 
-**Sequel (PR-4 candidates — tracked in #1357 Phase 3):**
+**Sequel ladder (tracked in #1357 Phase 3):**
 
-1. Re-oracle `validate_database.ipynb` onto the per-op evaluation FFI
-   (needs a small FFI addition if the sol_math/sol_mem decomposition plots
-   are to survive; rust computes both components internally).
-2. Then delete the per-call stack family-by-family (#1357's
-   thin-delegation shape), retiring `query_*`, the empirical/silicon table
-   bodies, and `util_empirical`'s math (keep the provenance constants) —
-   with the AFD comm-table queries re-pointed at the op-list FFI or kept
-   as the last per-call island.
+1. **PR-4 — notebook re-oracle** (independent of PR-3; can run in
+   parallel): re-oracle `validate_database.ipynb` onto the per-op
+   evaluation FFI (needs a small FFI addition if the sol_math/sol_mem
+   decomposition plots are to survive; rust computes both components
+   internally). This is the prerequisite that unblocks the per-call
+   deletion — the notebook is the `query_*` facade's biggest live
+   consumer.
+2. **PR-5 — per-call query-stack retirement** (needs PR-3 + PR-4): delete
+   the per-call stack family-by-family (#1357's thin-delegation shape),
+   retiring `query_*`, the empirical/silicon table bodies, and
+   `util_empirical`'s math (keep the provenance constants) — with the AFD
+   comm-table queries re-pointed at the op-list FFI or kept as the last
+   per-call island. The deprecated `Mamba2` composite's disposition lands
+   here too.
+3. **PR-6 — deprecation removal** (time-locked): drop the `"python"`
+   `engine_step_backend` value, the routing gate, and the CLI choice after
+   the one-release bake PR-3 starts.
 
 The keep/delete inventory and Gate-3 text below are retained as the
 original plan of record; where they conflict with this disposition, the
