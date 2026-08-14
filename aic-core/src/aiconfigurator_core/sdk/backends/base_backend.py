@@ -235,6 +235,22 @@ class BaseBackend:
         return post_merge * runtime_config.num_images_per_request
 
     @staticmethod
+    def effective_prefill_isl(model_path: str, runtime_config: RuntimeConfig) -> int:
+        """Text ISL + vision context tokens for one request.
+
+        Single source for the effective prefill ISL: every token/batch budget
+        derived from it must divide by this same value, never a recomputed one.
+        """
+        from aiconfigurator_core.sdk.utils import get_model_config_from_model_path
+
+        try:
+            enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
+        except Exception:
+            logger.debug("Could not resolve model config for the effective ISL; using text ISL", exc_info=True)
+            enc_cfg = None
+        return runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, runtime_config)
+
+    @staticmethod
     def _visual_context_tokens(model: BaseModel, runtime_config: RuntimeConfig) -> int:
         return BaseBackend._visual_context_tokens_from_encoder_config(
             getattr(model, "encoder_config", None), runtime_config
@@ -249,7 +265,7 @@ class BaseBackend:
         RuntimeConfig + VisionEncoderConfig.
 
         Resolution order:
-            1. image_height + image_width (computed from patch/merge sizes)
+            1. image_height + image_width (smart-resized, then patch/merge sizes)
             2. num_image_tokens (explicit per-image override)
 
         Returns ``(tokens_post_merge_per_image, pre_merge_per_image)``.
@@ -257,11 +273,16 @@ class BaseBackend:
         """
         has_image_dims = runtime_config.image_height > 0 and runtime_config.image_width > 0
         if has_image_dims:
+            # Upstream VL processors (Qwen smart_resize) round each raw
+            # dimension to the *nearest* multiple of patch_size * merge_size
+            # before patchify; plain floor under-counts tokens for
+            # non-aligned inputs.  The processor's min/max_pixels rescaling
+            # is a preprocessor knob AIC does not model.
             img_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
-            tokens_per_image = (runtime_config.image_height // img_stride) * (runtime_config.image_width // img_stride)
-            pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (
-                runtime_config.image_width // enc_cfg.patch_size
-            )
+            h_bar = max(img_stride, round(runtime_config.image_height / img_stride) * img_stride)
+            w_bar = max(img_stride, round(runtime_config.image_width / img_stride) * img_stride)
+            tokens_per_image = (h_bar // img_stride) * (w_bar // img_stride)
+            pre_merge_per_image = (h_bar // enc_cfg.patch_size) * (w_bar // enc_cfg.patch_size)
         elif runtime_config.num_image_tokens > 0:
             tokens_per_image = runtime_config.num_image_tokens
             pre_merge_per_image = tokens_per_image * (enc_cfg.spatial_merge_size**2)
@@ -405,6 +426,37 @@ class BaseBackend:
             note_python_step_fallback("unsupported_op_graph:encoder", str(exc))
             return None
         return latency_dict, energy_dict, source_dict
+
+    def run_encoder_static(
+        self,
+        model: BaseModel,
+        database: PerfDatabase,
+        runtime_config: RuntimeConfig,
+        batch_size: int,
+        latency_correction_scale: float = 1.0,
+    ) -> tuple[float, float, dict[str, float], float]:
+        """Encoder-only static evaluation for a disaggregated encode (EPD) worker.
+
+        Runs just the vision-encoder phase for one batch of ``batch_size``
+        requests and returns ``(latency_ms, power_w, memory_dict,
+        power_coverage)``.  ``model`` may be any object carrying
+        ``encoder_ops``, ``encoder_config`` and ``config`` (e.g.
+        ``EncoderOnlyModel``); ``power_w`` is the phase-average power,
+        invariant to the correction.  ``power_coverage`` is the
+        latency-weighted fraction of ops with recorded energy, mirroring
+        ``InferenceSummary.get_power_data_coverage``.
+        """
+        encoder_latency_dict, encoder_energy_wms_dict, _, _ = self._run_encoder_phase(
+            model, database, runtime_config, batch_size
+        )
+        raw_latency = sum(encoder_latency_dict.values())
+        power_w = sum(encoder_energy_wms_dict.values()) / raw_latency if raw_latency > 0 else 0.0
+        covered_latency = sum(
+            latency for op, latency in encoder_latency_dict.items() if encoder_energy_wms_dict.get(op, 0.0) > 0
+        )
+        power_coverage = covered_latency / raw_latency if raw_latency > 0 else 0.0
+        memory = self._get_encoder_component_memory_for_runtime(model, runtime_config, batch_size)
+        return raw_latency * latency_correction_scale, power_w, memory, power_coverage
 
     def _run_context_phase(
         self,
@@ -670,7 +722,9 @@ class BaseBackend:
         This shares the same latency breakdown path as ``run_static`` but skips
         building an ``InferenceSummary``.
         """
-        if mode == "static_gen":
+        # Workers without encoder ops (text-only models, or EPD language-only
+        # prefill workers) still count vision tokens in the LLM context.
+        if mode == "static_gen" or not model.encoder_ops:
             encoder_latency = 0.0
             img_ctx_tokens = self._visual_context_tokens(model, runtime_config)
         else:
@@ -748,7 +802,9 @@ class BaseBackend:
             runtime_config.prefix,
         )
 
-        if mode == "static_gen":
+        # Workers without encoder ops (text-only models, or EPD language-only
+        # prefill workers) still count vision tokens in the LLM context.
+        if mode == "static_gen" or not model.encoder_ops:
             encoder_latency_dict, encoder_energy_wms_dict = defaultdict(float), defaultdict(float)
             encoder_source_dict = {}
             img_ctx_tokens = self._visual_context_tokens(model, runtime_config)

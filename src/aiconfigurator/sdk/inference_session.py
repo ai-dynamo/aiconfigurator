@@ -21,7 +21,7 @@ from aiconfigurator.sdk.picking import (
 )
 from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
 from aiconfigurator.sdk.step_estimate import MixedStepInput, StepEstimate
-from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, get_model_config_from_model_path
+from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
 
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -826,14 +826,7 @@ class DisaggInferenceSession:
         else:
             decode_batch_size_range = [i for i in decode_batch_size_list_default if i <= decode_max_num_tokens]
 
-        try:
-            enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
-        except Exception:
-            logger.debug("Could not resolve model config for VL effective ISL; using text ISL", exc_info=True)
-            enc_cfg = None
-        prefill_effective_isl = runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(
-            enc_cfg, runtime_config
-        )
+        prefill_effective_isl = BaseBackend.effective_prefill_isl(model_path, runtime_config)
         if prefill_max_num_tokens < prefill_effective_isl:
             logger.warning("prefill_max_num_tokens is less than effective prefill ISL, set to effective prefill ISL")
             prefill_max_num_tokens = prefill_effective_isl

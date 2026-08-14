@@ -213,6 +213,14 @@ result = cli_estimate(
 )
 ```
 
+#### EPD single point (`--enable-epd`)
+
+For vision-language models with image inputs, `--enable-epd` overlays a fixed encode-worker pool on an `agg` or `disagg` estimate (other estimate modes reject it):
+
+- `--encoder-tp`: Encode-worker TP (required with `--enable-epd`).
+- `--encoder-batch-size`: Encode batch size. Default: `1` (maximum: 8).
+- `--encoder-num-workers`: Encode workers in the pool. Default: `1`.
+
 #### Static estimate modes (`static`, `static_ctx`, `static_gen`)
 
 `agg` and `disagg` model continuous (in-flight) batching. The three `static` modes instead run a **single forward pass** through the model — no IFB scheduling — and report the per-phase latency and memory layout for that one pass. They are the quickest way to see where time and memory go for a given shape and parallelism.
@@ -433,6 +441,15 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--image-height`, `--image-width`: Image dimensions in pixels. Default: `0` (disabled — the request is modeled as text-only).
 - `--num-images`: Number of images per request. Default: `1`.
 - `--disable-encoder-dp`: Model the vision encoder as TP-sharded instead of the default data-parallel. Also available in `estimate` mode (alongside the image flags above).
+
+**Encoder disaggregation (EPD)** — serve the vision encoder from a dedicated encode-worker pool rate-matched against the LM workers (agg becomes E+agg, disagg becomes E+P+D). Requires image inputs; the LM workers are modeled language-only. Result rows carry `(e)workers`/`(e)tp`/`(e)bs` columns.
+
+- `--enable-epd`: Sweep dedicated encode workers alongside the LM sweep.
+- `--encoder-tp`: Encode-worker TP sizes to sweep. Default: `1 2 4 8`.
+- `--encoder-system`: System (GPU type) for the encode pool. Defaults to the LM-side system; backend and version always follow the P/agg side.
+- `--encoder-latency-correction`: Latency correction scale for encode workers. Default: `1.0`.
+
+Encode batch sizes are swept over `1 2 4 8`, capped at 8 (SGLang's `SGLANG_ENCODER_MAX_BATCH_SIZE` default); explicit candidates above the cap are rejected. Further knobs (`encoder_batch_candidates`, `max_encoder_workers`, `rate_match_encoder_degradation`) are Task fields for `exp`-mode YAML — see [Advanced Tuning](advanced_tuning.md). EPD rows are excluded from generator artifacts (see [Generator Overview](generator_overview.md)).
 
 The SLA, precision, and speculative-decoding flags (`--strict-sla`, `--request-latency`, `--inclusive-tpot`, `--nextn`, `--nextn-accepted`, `--database-mode`) have dedicated subsections below. Shared flags such as `--save-dir`, `--top-n`, and `--systems-paths` are described in [Common Arguments](#common-arguments-all-modes).
 

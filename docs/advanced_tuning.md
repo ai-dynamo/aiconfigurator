@@ -172,6 +172,23 @@ And for prefill, for typical ISL larger than 1000, it's almost saturating the co
 ## agg config
 It's same for agg. You can treat agg as a prefill or decode worker.
 
+## EPD (encoder disaggregation) config
+For vision-language workloads (image inputs set), `enable_epd: true` serves the vision encoder from a dedicated
+encode-worker pool instead of colocated with the LM workers — agg becomes E+agg, disagg becomes E+P+D. The encode
+pool is rate-matched against the LM pools; result rows carry `(e)workers`/`(e)tp`/`(e)bs` columns. Optional knobs
+(all require `enable_epd`; keys are Task field names, not CLI flags):
+
+- `encoder_tp_candidates`: encode-worker TP sizes to sweep (default `[1, 2, 4, 8]`)
+- `encoder_batch_candidates`: encode batch sizes to sweep (default `[1, 2, 4, 8]`; capped at 8, SGLang's
+  `SGLANG_ENCODER_MAX_BATCH_SIZE` default)
+- `max_encoder_workers`: encode-worker cap per rate-matched cell (default 32)
+- `encoder_latency_correction`: encode-latency correction scale (default 1.0)
+- `encoder_system_name`: system (GPU type) for a heterogeneous encode pool; backend and version follow the P/agg side
+- `rate_match_encoder_degradation`: encode-pool rate-matching degradation (default 0.9, alongside the
+  prefill/decode factors)
+
+See the `vl_epd_agg` experiment in `src/aiconfigurator/cli/example.yaml` for a complete template.
+
 ## Practical suggestion
 In order to save search time, you need to reduce the search space by choosing fewer parallel options. Say for `*_num_gpu_candidates` here, it's DeepSeek V3 with 671B model 
 parameters. With fp8_block, the rough estimation of the model weights is 671GB. You can not hold it on 4/2/1 gpus, you can modify it to `[8]` only. 
