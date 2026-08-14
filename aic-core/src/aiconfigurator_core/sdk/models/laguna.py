@@ -60,8 +60,20 @@ class LagunaModel(BaseModel):
         if self.config.moe_quant_mode != common.MoEQuantMode.fp8_block:
             return
         raw_config = _load_model_config_from_model_path(self.model_path)
-        default_size = [128, 128]
-        weight_block_size = raw_config.get("quantization_config", {}).get("weight_block_size", default_size)[0]
+        quant_config = raw_config.get("quantization_config") or {}
+        block = quant_config.get("weight_block_size")
+        if block is None:
+            block = (
+                ((quant_config.get("config_groups") or {}).get("group_0") or {})
+                .get("weights", {})
+                .get("block_structure")
+            )
+        if not isinstance(block, (list, tuple)) or not block or not isinstance(block[0], int) or block[0] <= 0:
+            raise ValueError(
+                f"Cannot resolve a positive fp8_block weight block size from the quantization config for "
+                f"{self.model_path}"
+            )
+        weight_block_size = block[0]
         moe_size_per_gpu = self._moe_inter_size // self.config.moe_tp_size
         if (moe_size_per_gpu % weight_block_size) != 0:
             raise ValueError(
@@ -163,6 +175,8 @@ class LagunaModel(BaseModel):
         *,
         is_context: bool,
     ) -> list:
+        # Match the shared HybridMoEModel/MoEModel approximation: router GEMMs
+        # below 128 experts are intentionally neglected as a small-cost term.
         router_ops = (
             [ops.GEMM(f"{prefix}_router_gemm", count, self._num_experts, h, common.GEMMQuantMode.bfloat16)]
             if self._num_experts >= 128
@@ -270,7 +284,16 @@ class LagunaModel(BaseModel):
         gate_ops = []
         if cfg.gating:
             gate_ops = [
-                ops.GEMM(f"{prefix}_attention_gate_gemm", count, dims["n_q_per_gpu"], self._hidden_size, gemm_q),
+                # The per-head gate is a skinny hidden->heads matvec. Model it
+                # as a memory-bound hidden-state read instead of querying the
+                # GEMM database below its collected output-width floor.
+                ops.ElementWise(
+                    f"{prefix}_attention_gate_proj",
+                    count,
+                    self._hidden_size,
+                    dims["n_q_per_gpu"],
+                    0.8,
+                ),
                 ops.ElementWise(f"{prefix}_attention_gate_act", count, dims["n_q_per_gpu"], dims["n_q_per_gpu"], 0.8),
             ]
         return [
@@ -312,8 +335,16 @@ class LagunaModel(BaseModel):
         wl_dist = self._workload_distribution()
         dense_inter_per_tp = self._inter_size // tp
         shared_inter_per_tp = cfg.shared_expert_inter_size // tp
-        global_dims = self._resolve_bucket_dims(self._heads_for_layer_type("full_attention"), 0)
-        swa_dims = self._resolve_bucket_dims(self._heads_for_layer_type("sliding_attention"), cfg.sliding_window_size)
+        global_dims = (
+            self._resolve_bucket_dims(self._heads_for_layer_type("full_attention"), 0)
+            if counts["global_dense"] + counts["global_moe"]
+            else {}
+        )
+        swa_dims = (
+            self._resolve_bucket_dims(self._heads_for_layer_type("sliding_attention"), cfg.sliding_window_size)
+            if counts["swa_dense"] + counts["swa_moe"]
+            else {}
+        )
 
         self.context_ops = [ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3)]
 
@@ -425,8 +456,16 @@ class LagunaModel(BaseModel):
         wl_dist = self._workload_distribution()
         dense_inter_per_tp = self._inter_size // tp
         shared_inter_per_tp = cfg.shared_expert_inter_size // tp
-        global_dims = self._resolve_bucket_dims(self._heads_for_layer_type("full_attention"), 0)
-        swa_dims = self._resolve_bucket_dims(self._heads_for_layer_type("sliding_attention"), cfg.sliding_window_size)
+        global_dims = (
+            self._resolve_bucket_dims(self._heads_for_layer_type("full_attention"), 0)
+            if counts["global_dense"] + counts["global_moe"]
+            else {}
+        )
+        swa_dims = (
+            self._resolve_bucket_dims(self._heads_for_layer_type("sliding_attention"), cfg.sliding_window_size)
+            if counts["swa_dense"] + counts["swa_moe"]
+            else {}
+        )
 
         self.generation_ops = [ops.Embedding("generation_embedding", 1 * sf, self._vocab_size, h, 0.3)]
 

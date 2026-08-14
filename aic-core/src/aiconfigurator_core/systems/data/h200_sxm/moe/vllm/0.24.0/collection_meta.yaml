@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 schema_version: 1
 provenance: collected
 runtime:
@@ -11,15 +14,22 @@ model:
   config_sha256: 6337348c4988936be54276c637e7a2c1c6b25ec44114a199240944a3e0f7212e
 collection:
   scope: append_missing_laguna_keys
-  run_root: artifacts/laguna_s2_repro/collection_vllm_0_24_minimal_moe_complete_20260811
   collected_at: '2026-08-10'
+  verified_at: '2026-08-14'
 tables:
   moe_perf:
-    collector_hash: sha256:f10c439456c62b3199c00d1357f949ecb3c37f9fe2e6a856bc55e7a27309ef3e
+    # 2026-08-02: appended 972 Kimi-K3 w4a16_mxfp4 rows collected on H200
+    # in the stock v0.24.0 image via the owner-approved situ-as-silu Marlin
+    # approximation and EP-local shim (wave-3 pipeline 60730461, job
+    # 382178203, AIC revision 04036a56c). The full EP1..128 wave had three
+    # classified moe_tp=32 Marlin tile-limit failures ("Invalid thread
+    # config"), matching the other systems.
+    collector_hash: sha256:198e3cebe5789b1c690e7cd1be3d69a1d417c9d601b3806d5ad4471f851f00f6
     case_plan_hash: sha256:850d9505b455eb5ef19a6aa0f92a5bb6273499782006e4d0d0df0ddd499dc7a2
     rows: 48681
     fresh_rows: 972
     preserved_rows: 47709
     replaced_rows: 0
+    verified_rows: 972
     sha256: d6fecbc3fcec3b6858ddd72149e5a75d4fab50e43cf04cbd993355f3f0acb05a
     status: complete

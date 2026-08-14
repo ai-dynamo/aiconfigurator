@@ -58,7 +58,17 @@ def test_laguna_attention_profiles_expand_only_native_tp_shapes(phase, shape_swe
         (48, 8, 128, 0),
         (24, 4, 128, 0),
         (12, 2, 128, 0),
+        (6, 1, 128, 0),
         (72, 8, 128, 512),
         (36, 4, 128, 512),
         (18, 2, 128, 512),
+        (9, 1, 128, 512),
     }
+
+
+def test_laguna_attention_profiles_do_not_expand_sglang():
+    shape_sweep = case_generator.get_attention_context_shape_sweeps("sglang")[0]
+
+    assert (
+        case_generator.get_attention_head_configs(shape_sweep, phase="context", backend="sglang", sm_version=90) == []
+    )

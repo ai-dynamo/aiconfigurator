@@ -740,7 +740,8 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
 
     moe_cases = get_common_moe_test_cases()
     laguna_moe_cases = [case for case in moe_cases if case.model_name == "poolside/Laguna-S-2.1-FP8"]
-    assert laguna_moe_cases
+    assert len(laguna_moe_cases) == 90
+    assert len({repr(case) for case in laguna_moe_cases}) == len(laguna_moe_cases)
     assert all(case.tp < 16 for case in laguna_moe_cases)
     assert {(case.hidden_size, case.inter_size, case.topk, case.num_experts) for case in laguna_moe_cases} == {
         (3072, 1024, 10, 256)

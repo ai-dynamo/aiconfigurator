@@ -3,11 +3,13 @@
 
 import json
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.afd_partition import build_afd_ops_partition
+from aiconfigurator.sdk.backends.vllm_backend import VLLMBackend
 from aiconfigurator.sdk.models import LagunaModel, check_is_moe, get_model, get_model_family
 from aiconfigurator.sdk.utils import get_model_config_from_model_path
 
@@ -116,9 +118,9 @@ def test_laguna_context_and_generation_ops_include_expected_recipes(laguna_model
         assert f"{phase}_global_dense_qkv_gemm" in names
         assert f"{phase}_global_qkv_gemm" in names
         assert f"{phase}_swa_qkv_gemm" in names
-        assert f"{phase}_global_dense_attention_gate_gemm" in names
-        assert f"{phase}_global_attention_gate_gemm" in names
-        assert f"{phase}_swa_attention_gate_gemm" in names
+        assert f"{phase}_global_dense_attention_gate_proj" in names
+        assert f"{phase}_global_attention_gate_proj" in names
+        assert f"{phase}_swa_attention_gate_proj" in names
         assert f"{phase}_global_router_gemm" in names
         assert f"{phase}_swa_router_gemm" in names
         assert f"{phase}_global_moe" in names
@@ -147,6 +149,16 @@ def test_laguna_qkv_width_uses_per_layer_attention_heads(laguna_model_path):
     # swa:    (72 / 8) * 128 + (8 / 8) * 128 * 2  →  9 * 128 + 1 * 256
     assert global_qkv._n == 6 * 128 + 1 * 128 * 2
     assert swa_qkv._n == 9 * 128 + 1 * 128 * 2
+
+
+def test_laguna_attention_gate_uses_memory_bound_projection(laguna_model_path):
+    model = _laguna_model(laguna_model_path, tp_size=8, moe_ep_size=8)
+    global_gate = next(op for op in model.context_ops if op._name == "context_global_attention_gate_proj")
+    swa_gate = next(op for op in model.context_ops if op._name == "context_swa_attention_gate_proj")
+
+    assert (global_gate._dim_in, global_gate._dim_out) == (model._hidden_size, 6)
+    assert (swa_gate._dim_in, swa_gate._dim_out) == (model._hidden_size, 9)
+    assert not any("attention_gate_gemm" in op._name for op in [*model.context_ops, *model.generation_ops])
 
 
 def test_laguna_kvcache_bytes_window_caps_swa_layers(laguna_model_path):
@@ -196,6 +208,86 @@ def test_laguna_invalid_gqa_head_ratio_raises(laguna_model_path):
         _laguna_model(laguna_model_path, tp_size=2, moe_ep_size=2)
 
 
+@pytest.mark.parametrize("gating", [True, 0, "none", "elementwise"])
+def test_laguna_rejects_unknown_gating_modes(laguna_model_path, gating):
+    config_path = f"{laguna_model_path}/config.json"
+    with open(config_path) as f:
+        config_json = json.load(f)
+    config_json["gating"] = gating
+    with open(config_path, "w") as f:
+        json.dump(config_json, f)
+
+    with pytest.raises(ValueError, match="gating must be false or 'per-head'"):
+        _laguna_model(laguna_model_path)
+
+
+def test_laguna_rejects_scalar_mlp_only_layers(laguna_model_path):
+    config_path = f"{laguna_model_path}/config.json"
+    with open(config_path) as f:
+        config_json = json.load(f)
+    config_json["mlp_only_layers"] = 0
+    with open(config_path, "w") as f:
+        json.dump(config_json, f)
+
+    with pytest.raises(ValueError, match="mlp_only_layers must be a list or tuple"):
+        _laguna_model(laguna_model_path)
+
+
+def test_laguna_fp8_block_requires_checkpoint_block_shape(laguna_model_path):
+    config_path = f"{laguna_model_path}/config.json"
+    with open(config_path) as f:
+        config_json = json.load(f)
+    config_json["quantization_config"].pop("weight_block_size", None)
+    config_json["quantization_config"]["config_groups"]["group_0"]["weights"].pop("block_structure")
+    with open(config_path, "w") as f:
+        json.dump(config_json, f)
+
+    model_config = _model_config(tp_size=8, moe_ep_size=8)
+    model_config.moe_quant_mode = common.MoEQuantMode.fp8_block
+    with pytest.raises(ValueError, match="Cannot resolve a positive fp8_block weight block size"):
+        get_model(laguna_model_path, model_config, backend_name="vllm")
+
+
+@pytest.mark.parametrize("attention_type,heads", [("full_attention", 48), ("sliding_attention", 72)])
+def test_laguna_single_attention_type_variants_do_not_resolve_empty_buckets(laguna_model_path, attention_type, heads):
+    config_path = f"{laguna_model_path}/config.json"
+    with open(config_path) as f:
+        config_json = json.load(f)
+    config_json["layer_types"] = [attention_type] * config_json["num_hidden_layers"]
+    config_json["num_attention_heads_per_layer"] = [heads] * config_json["num_hidden_layers"]
+    with open(config_path, "w") as f:
+        json.dump(config_json, f)
+
+    model = _laguna_model(laguna_model_path)
+
+    assert model.context_ops
+    assert model.generation_ops
+
+
+def test_laguna_block_fp8_workspace_uses_hidden_width(laguna_model_path):
+    model_config = _model_config(tp_size=8, moe_ep_size=1)
+    model_config.moe_tp_size = 8
+    model_config.moe_quant_mode = common.MoEQuantMode.fp8_block
+    model = get_model(laguna_model_path, model_config, backend_name="vllm")
+    database = SimpleNamespace(system_spec={"misc": {"nccl_mem": {8: 0}, "other_mem": 0}})
+    num_tokens = 8192
+
+    memory = VLLMBackend()._get_memory_usage(
+        model,
+        database,
+        batch_size=1,
+        beam_width=1,
+        isl=1,
+        osl=1,
+        num_tokens=num_tokens,
+    )
+
+    attention_width = model._num_heads * model._head_size
+    base_activations = 2 * num_tokens * attention_width * 5
+    moe_workspace = num_tokens * model._hidden_size * model._num_experts * model._topk / 128 * 4
+    assert memory["activations"] == pytest.approx((base_activations + moe_workspace) / (1 << 30))
+
+
 def test_laguna_afd_partition_classifies_all_ops(laguna_model_path):
     model = _laguna_model(laguna_model_path)
 
@@ -204,11 +296,11 @@ def test_laguna_afd_partition_classifies_all_ops(laguna_model_path):
     context_partition = build_afd_ops_partition(model, phase="context", allow_unknown_ops=False)
     generation_partition = build_afd_ops_partition(model, phase="generation", allow_unknown_ops=False)
 
-    # SWA attention-gate GEMMs must land in the attention bucket, not FFN.
-    assert any(op._name == "context_swa_attention_gate_gemm" for op in context_partition.attn_ops)
-    assert not any(op._name == "context_swa_attention_gate_gemm" for op in context_partition.ffn_ops)
-    assert any(op._name == "generation_swa_attention_gate_gemm" for op in generation_partition.attn_ops)
-    assert not any(op._name == "generation_swa_attention_gate_gemm" for op in generation_partition.ffn_ops)
+    # SWA attention-gate projections must land in the attention bucket, not FFN.
+    assert any(op._name == "context_swa_attention_gate_proj" for op in context_partition.attn_ops)
+    assert not any(op._name == "context_swa_attention_gate_proj" for op in context_partition.ffn_ops)
+    assert any(op._name == "generation_swa_attention_gate_proj" for op in generation_partition.attn_ops)
+    assert not any(op._name == "generation_swa_attention_gate_proj" for op in generation_partition.ffn_ops)
     # SWA shared-expert GEMMs must land in the FFN bucket, not attention.
     assert any(op._name == "context_swa_shared_gate_up_gemm" for op in context_partition.ffn_ops)
     assert not any(op._name == "context_swa_shared_gate_up_gemm" for op in context_partition.attn_ops)

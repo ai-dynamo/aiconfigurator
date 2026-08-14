@@ -883,6 +883,7 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"swa_num_heads={extra_params.swa_num_heads or 'default'}, "
             f"head_wise_attn_gate={extra_params.use_head_wise_attn_gate}, "
             f"share_expert_dim={config.get('share_expert_dim', 0)}"
+        )
     elif architecture == "LagunaForCausalLM":
         layer_types = tuple(config.get("layer_types", ()))
         mlp_layer_types = tuple(config.get("mlp_layer_types", ()))
@@ -913,21 +914,35 @@ def _parse_hf_config_json(config: dict) -> dict:
             for layer_type, heads in zip(layer_types, heads_per_layer, strict=True)
             if layer_type == "sliding_attention"
         }
-        if full_heads != {n}:
+        if full_heads and full_heads != {n}:
             raise ValueError(f"Laguna full_attention layers must use num_attention_heads={n}, got {sorted(full_heads)}")
         if len(sliding_heads) > 1:
             raise ValueError(f"Laguna sliding_attention layers must use one head count, got {sorted(sliding_heads)}")
 
         dense_layers = {index for index, layer_type in enumerate(mlp_layer_types) if layer_type == "dense"}
         mlp_only_layers = config.get("mlp_only_layers")
-        if mlp_only_layers is not None and dense_layers != set(mlp_only_layers):
-            raise ValueError(
-                f"Laguna mlp_only_layers {sorted(mlp_only_layers)} do not match dense mlp layers {sorted(dense_layers)}"
-            )
+        if mlp_only_layers is not None:
+            if not isinstance(mlp_only_layers, (list, tuple)) or any(
+                not isinstance(layer, int) for layer in mlp_only_layers
+            ):
+                raise ValueError("Laguna mlp_only_layers must be a list or tuple of integer layer indices")
+            if dense_layers != set(mlp_only_layers):
+                raise ValueError(
+                    f"Laguna mlp_only_layers {sorted(mlp_only_layers)} do not match dense mlp layers "
+                    f"{sorted(dense_layers)}"
+                )
 
         sliding_window = int(config.get("sliding_window", 0))
         if "sliding_attention" in layer_types and sliding_window <= 0:
             raise ValueError("Laguna sliding_attention layers require a positive sliding_window")
+
+        gating = config.get("gating", False)
+        if gating == "per-head":
+            per_head_gating = True
+        elif gating is False or gating is None:
+            per_head_gating = False
+        else:
+            raise ValueError(f"Laguna gating must be false or 'per-head', got {gating!r}")
 
         extra_params = LagunaConfig(
             layer_types=layer_types,
@@ -935,7 +950,7 @@ def _parse_hf_config_json(config: dict) -> dict:
             num_attention_heads_per_layer=heads_per_layer,
             sliding_window_size=sliding_window,
             shared_expert_inter_size=int(config.get("shared_expert_intermediate_size", 0)),
-            gating=bool(config.get("gating", False)),
+            gating=per_head_gating,
             use_qk_norm=True,
         )
         logger.info(

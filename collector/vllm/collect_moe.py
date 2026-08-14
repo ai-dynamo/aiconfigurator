@@ -112,6 +112,9 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
     declared_routing_bias = model_config.get("use_routing_bias")
     if declared_routing_bias is None:
         declared_routing_bias = model_config.get("use_moe_router_bias")
+    # Laguna serving constructs FusedMoE with sigmoid scoring, normalized
+    # top-k, FP32 correction bias, routed output scaling, and then upcasts
+    # router logits before invocation (models/laguna.py:191-237 @0.24.0).
     use_routing_bias = (
         model_config.get("topk_method") == "noaux_tc"
         or bool(declared_routing_bias)
@@ -419,7 +422,9 @@ def run_moe_torch(
         model_quantization = _load_model_moe_config(model_name).get("quantization_config")
         if isinstance(model_quantization, dict) and model_quantization.get("quant_method") == "compressed-tensors":
             # Construct the same artifact-owned quantization method serving
-            # selects instead of approximating it with generic Fp8Config.
+            # selects instead of approximating it with generic Fp8Config:
+            # weight_utils.get_quant_config returns quant_cls.from_config on
+            # the checkpoint descriptor (weight_utils.py:240-291 @0.24.0).
             quant_config = CompressedTensorsConfig.from_config(model_quantization)
         else:
             # Native block-FP8 checkpoints use per-128-block weights with

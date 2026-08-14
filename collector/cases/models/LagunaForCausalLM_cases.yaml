@@ -25,24 +25,33 @@ model_case_values:
       # by the checkpoint's 128-element quantization block.
       max_tp_exclusive: 16
       framework_quantization:
+        # Laguna routing is implemented only by the vLLM collector. Keep
+        # cross-model sweeps from persisting this geometry with another
+        # backend's default routing identity.
+        sglang:
+          allowed_modes: []
+        trtllm:
+          allowed_modes: []
         vllm:
           allowed_modes:
             - fp8_block
   attention:
     - id: laguna_s2_full_attention
       model_path: poolside/Laguna-S-2.1-FP8
+      frameworks: [vllm]
       num_attention_heads: 48
       num_key_value_heads: 8
       head_dim: 128
       window_size: 0
-      tensor_parallel_sizes: [1, 2, 4]
+      tensor_parallel_sizes: [1, 2, 4, 8]
     - id: laguna_s2_sliding_attention
       model_path: poolside/Laguna-S-2.1-FP8
+      frameworks: [vllm]
       num_attention_heads: 72
       num_key_value_heads: 8
       head_dim: 128
       window_size: 512
-      tensor_parallel_sizes: [1, 2, 4]
+      tensor_parallel_sizes: [1, 2, 4, 8]
 
 framework_specific_op_cases:
   vllm:
