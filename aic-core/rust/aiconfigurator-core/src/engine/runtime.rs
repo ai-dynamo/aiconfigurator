@@ -2044,6 +2044,45 @@ mod tests {
         assert!(skip.time_ms() < full.time_ms());
     }
 
+    /// CP DSA currently composes latency-only sparse MQA/top-k deltas, so the
+    /// SOL_FULL API must reject that configuration at the DSA boundary. It
+    /// must not run the composition and fail later with PerOpSolFold's generic
+    /// `no SOL decomposition` error. The adjacent non-CP blend test pins the
+    /// supported `cp_size=1` contract.
+    #[test]
+    fn evaluate_ops_sol_json_rejects_cp_dsa_explicitly() {
+        use crate::operators::DsaModuleOp;
+
+        let engine = build_engine(None);
+        let mut op = DsaModuleOp::new(
+            "dsa_context",
+            64,
+            KvCacheQuantMode::Bfloat16,
+            FmhaQuantMode::Bfloat16,
+            GemmQuantMode::Bfloat16,
+            "GlmMoeDsaForCausalLM",
+            2048,
+        );
+        op.cp_size = 2;
+        op.full_frac = 0.5;
+        let ops_json = serde_json::to_string(&vec![Op::DsaContext(op)]).unwrap();
+        let err = engine
+            .evaluate_ops_sol_json(&ops_json, true, 1, 4096, 0, 1.0, None)
+            .unwrap_err();
+
+        match err {
+            AicError::InvalidEngineConfig(message) => {
+                assert!(
+                    message.contains("DSA context SOL_FULL decomposition is not supported")
+                        && message.contains("cp_size=2")
+                        && message.contains("sparse MQA/top-k deltas are latency-only"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected explicit CP DSA configuration error, got {other}"),
+        }
+    }
+
     /// Op families whose SOL branch does not export its decomposition yet
     /// must error loudly (never silently chart a wrong breakdown).
     #[test]

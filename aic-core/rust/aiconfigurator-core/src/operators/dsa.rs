@@ -96,6 +96,18 @@ impl DsaModuleOp {
         isl: u32,
         prefix: u32,
     ) -> Result<PerformanceResult, AicError> {
+        // CP composes latency-only sparse MQA/top-k deltas with the base DSA
+        // and all-gather results. Those collected deltas do not provide a
+        // defensible math-vs-memory split, so reject decomposition requests
+        // at the operator boundary instead of reaching PerOpSolFold with a
+        // non-zero result whose `sol` field is absent. Plain SOL remains
+        // supported because it requests only the composed roofline latency.
+        if self.cp_size > 1 && db.database_mode == DatabaseMode::SolFull {
+            return Err(AicError::InvalidEngineConfig(format!(
+                "DSA context SOL_FULL decomposition is not supported for cp_size={} because the CP sparse MQA/top-k deltas are latency-only",
+                self.cp_size
+            )));
+        }
         let w = self.full_frac;
         // CP (round-robin sequence split) prefill takes the sparse-delta
         // composition path (Python `ContextDSAModule.query` -> `_query_cp`
