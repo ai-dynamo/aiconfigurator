@@ -555,6 +555,24 @@ impl PerfDatabase {
             provenance: Arc::clone(&self.provenance),
         }
     }
+
+    /// The SOL_FULL view over the same loaded tables (cheap: `Arc` clones).
+    ///
+    /// Mirrors passing `database_mode=DatabaseMode.SOL_FULL` per call on the
+    /// Python `query_*` facade: every operator query takes its analytic SOL
+    /// branch (and attaches `PerformanceResult::sol` components) regardless
+    /// of the engine's configured mode. Used by the per-op SOL-decomposition
+    /// FFI (`evaluate_ops_sol_json`).
+    pub fn sol_full_view(&self) -> PerfDatabase {
+        PerfDatabase {
+            tables: Arc::clone(&self.tables),
+            database_mode: DatabaseMode::SolFull,
+            transfer_policy: self.transfer_policy,
+            util_grids: Arc::clone(&self.util_grids),
+            delta_lookups: Arc::clone(&self.delta_lookups),
+            provenance: Arc::clone(&self.provenance),
+        }
+    }
 }
 
 /// Shared fixtures for the per-family ENERGY oracle tests.

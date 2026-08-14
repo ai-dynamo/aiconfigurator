@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::enums::{BackendKind, CommQuantMode, DatabaseMode, MoeQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
-use crate::operators::base::{PerformanceResult, Source};
+use crate::operators::base::{PerformanceResult, SolComponents, Source};
 use crate::operators::communication::{CustomAllReduceOp, NcclOp};
 use crate::operators::util_empirical::{self, UtilGrid};
 use crate::perf_database::PerfDatabase;
@@ -566,12 +566,10 @@ fn query_alltoall_table(
     if kernel_source == "NotEnabled" {
         // Python: `source = "sol" if database_mode == SOL else "empirical"`
         // (SOL_FULL's raw tuple collapses to the same 0.0 "sol" result).
-        let source = if matches!(db.database_mode, DatabaseMode::Sol | DatabaseMode::SolFull) {
-            Source::Sol
-        } else {
-            Source::Empirical
-        };
-        return Ok(PerformanceResult::new(0.0, source));
+        if matches!(db.database_mode, DatabaseMode::Sol | DatabaseMode::SolFull) {
+            return Ok(PerformanceResult::sol(SolComponents::new(0.0, 0.0)));
+        }
+        return Ok(PerformanceResult::new(0.0, Source::Empirical));
     }
 
     // The DB-level query redoes kernel selection / normalization / the
@@ -609,8 +607,11 @@ fn query_alltoall_table(
         // Python `_query_alltoall_table`: `get_sol(num_tokens, hidden_size,
         // topk, num_experts, moe_ep_size, quant_mode, node_num)[0]` — the RAW
         // quant (not the table-normalized one) and the defaulted node_num.
-        DatabaseMode::Sol | DatabaseMode::SolFull => Ok(PerformanceResult::new(
-            alltoall_sol_ms(
+        DatabaseMode::Sol | DatabaseMode::SolFull => {
+            // The SOL_FULL triple is `(sol_time, sol_comm, 0.0)` with
+            // `sol_time = sol_comm` — the comm bound rides in the math slot
+            // (Python `_query_alltoall_table::get_sol`).
+            let sol_comm = alltoall_sol_ms(
                 &db.system_spec,
                 op_name,
                 quant,
@@ -620,9 +621,9 @@ fn query_alltoall_table(
                 topk,
                 num_experts,
                 moe_ep_size,
-            ),
-            Source::Sol,
-        )),
+            );
+            Ok(PerformanceResult::sol(SolComponents::new(sol_comm, 0.0)))
+        }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(empirical()?, Source::Empirical)),
         DatabaseMode::Hybrid => match silicon() {
             Ok(latency) => Ok(PerformanceResult::new(latency, Source::Silicon)),

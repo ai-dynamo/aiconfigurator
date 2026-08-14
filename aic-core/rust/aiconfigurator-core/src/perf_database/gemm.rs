@@ -28,6 +28,7 @@ use super::perf_interp::{
 use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::enums::GemmQuantMode;
 use crate::common::error::AicError;
+use crate::operators::base::SolComponents;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
 use crate::perf_database::parquet_loader::PerfReader;
@@ -478,12 +479,29 @@ impl GemmTable {
     }
 }
 
-/// Speed-of-light GEMM latency in ms, from a pre-resolved `tc_flops`.
+/// Speed-of-light GEMM roofline components, from a pre-resolved `tc_flops`.
 ///
 /// Mirrors Python's `GEMM._query_gemm_table::get_sol`:
 /// - `sol_math = 2 * m * n * k / tc_flops * 1000`
 /// - `sol_mem  = quant.memory * (m*n + m*k + n*k) / mem_bw * 1000`
 /// - `sol      = max(sol_math, sol_mem)`
+pub(crate) fn gemm_sol_with_flops(
+    spec: &SystemSpec,
+    quant: GemmQuantMode,
+    tc_flops: f64,
+    m: f64,
+    n: f64,
+    k: f64,
+) -> SolComponents {
+    let mapping = quant.mapping();
+    let sol_math = 2.0 * m * n * k / tc_flops * 1000.0;
+    let sol_mem = mapping.memory * (m * n + m * k + n * k) / spec.gpu.mem_bw * 1000.0;
+    SolComponents::new(sol_math, sol_mem)
+}
+
+/// `max(sol_math, sol_mem)` of [`gemm_sol_with_flops`] — the scalar SOL
+/// latency for callers that don't need the decomposition (grid clamps,
+/// empirical sol_fn closures, the fp8_static floor).
 pub(crate) fn gemm_sol_latency_ms_with_flops(
     spec: &SystemSpec,
     quant: GemmQuantMode,
@@ -492,10 +510,7 @@ pub(crate) fn gemm_sol_latency_ms_with_flops(
     n: f64,
     k: f64,
 ) -> f64 {
-    let mapping = quant.mapping();
-    let sol_math = 2.0 * m * n * k / tc_flops * 1000.0;
-    let sol_mem = mapping.memory * (m * n + m * k + n * k) / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    gemm_sol_with_flops(spec, quant, tc_flops, m, n, k).time_ms()
 }
 
 // Strict resolver lives in common/system_spec.rs (it depends only on
