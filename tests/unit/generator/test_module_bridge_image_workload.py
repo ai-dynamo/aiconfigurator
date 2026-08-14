@@ -17,6 +17,8 @@ import pytest
 
 from aiconfigurator.generator.module_bridge import task_config_to_generator_config
 
+pytestmark = pytest.mark.unit
+
 
 def _task(
     *,

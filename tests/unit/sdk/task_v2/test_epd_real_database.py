@@ -15,6 +15,8 @@ import pytest
 from aiconfigurator.sdk import config
 from aiconfigurator.sdk.task_v2 import Task
 
+pytestmark = pytest.mark.unit
+
 _MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 _SYSTEM = "h200_sxm"
 _BACKEND = "sglang"
