@@ -402,7 +402,7 @@ points.par_iter().for_each(|p| {
 
 <h3 id="poc-build">3.3 Build / run</h3>
 
-<pre><code># one-time
+<pre><code># one-time (Python 3.13 validation environment)
 brew install rust
 python3.13 -m venv .venv &amp;&amp; source .venv/bin/activate
 pip install maturin pyarrow pytest
@@ -562,7 +562,7 @@ layout. Extending: one new struct per op, ~50–200 lines each.</p>
   </li>
   <li>
     <strong>Production wheels</strong>: maturin CI for
-    macOS / Linux / Windows × Python 3.13. <code>uv add aic_step</code>-friendly.
+    macOS / Linux / Windows × Python 3.11–3.13. <code>uv add aic_step</code>-friendly.
   </li>
 </ol>
 

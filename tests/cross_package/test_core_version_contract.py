@@ -15,7 +15,7 @@ from aiconfigurator_core.sdk import engine
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CORE_ROOT = REPO_ROOT / "aic-core"
 RUST_CONFIG = CORE_ROOT / "rust" / "aiconfigurator-core" / "src" / "config.rs"
-SUPPORTED_PYTHON = ">=3.13,<3.14"
+SUPPORTED_PYTHON = ">=3.11,<3.14"
 SUPPORTED_NUMPY = "numpy>=2.1,<3"
 
 

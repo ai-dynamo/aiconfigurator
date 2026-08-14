@@ -10,7 +10,7 @@ authors = [
 description = "Standalone core modeling, data, and Rust estimators for AIConfigurator"
 readme = { text = "Standalone core modeling, data, and Rust estimators for AIConfigurator.", content-type = "text/markdown" }
 license = "Apache-2.0"
-requires-python = ">=3.13,<3.14"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "packaging>=20.0",
     "numpy>=2.1,<3",
