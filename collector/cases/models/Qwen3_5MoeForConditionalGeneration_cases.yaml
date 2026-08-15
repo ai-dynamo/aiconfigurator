@@ -110,6 +110,14 @@ model_case_values:
     # flashinfer_trtllm (InferenceX runs 28131757535 / 28719981652,
     # sglang v0.5.14-cu130 image); re-verify against sglang 0.5.14 moe
     # runner dispatch on version bumps.
+    # SM100/103 resolve to flashinfer_trtllm even without the explicit
+    # --moe-runner-backend flag: ModelOptNvFp4FusedMoEMethod.create_moe_runner
+    # (modelopt_quant.py:2311-2323) leaves MARLIN only for capability in
+    # [8.0, 10.0) and defaults everything else -- SM100 (10,0) and SM103
+    # (10,3) both fail that upper-bound check -- to FLASHINFER_TRTLLM
+    # (modelopt_quant.py:2317-2323, "TRTLLM is currently the most performant
+    # and tested FP4 MoE backend"), same base_ops/moe.yaml:97-105 citation
+    # style/source as the other nvfp4-gated MoE models.
     - model_path: nvidia/Qwen3.5-397B-A17B-NVFP4
       frameworks: [sglang]
       hidden_size: 4096

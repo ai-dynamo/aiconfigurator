@@ -16,6 +16,7 @@ import functools
 import importlib.resources as pkg_resources
 import logging
 import os
+import re
 from typing import Optional
 
 import yaml
@@ -24,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 # Canonical set of named measurement lanes (excludes "default" which is always appended last).
 _KNOWN_LANES: frozenset[str] = frozenset({"fa3", "triton", "trtllm_mha", "flashinfer", "fla"})
+
+# Leading digits of a version segment, e.g. the "0" in "0rc23" or "14" in "14a1".
+_LEADING_DIGITS = re.compile(r"^(\d+)")
 
 
 @functools.cache
@@ -103,13 +107,30 @@ def _parse_version(v: str) -> tuple[int, ...]:
     everything after it is ignored so that PEP 440 suffixes such as
     ``"0.5.14.post1"`` or ``"0.5.14.dev3"`` produce ``(0, 5, 14)`` rather
     than falling back to ``(0,)``.
+
+    A segment may also GLUE its suffix directly onto the last numeric
+    component instead of dot-separating it — ``"1.3.0rc23"``,
+    ``"1.3.0a1"``, ``"1.3.0.post1"``'s sibling forms. Without stripping the
+    glued suffix first, ``int("0rc23")`` raises immediately and the whole
+    segment (including its leading ``"0"``) is dropped, so ``"1.3.0rc23"``
+    would parse as ``(1, 3)`` — shorter than, and therefore sorting BELOW,
+    the plain ``"1.3.0"`` release it is a candidate for. That silently
+    disqualifies a floor-matched framework-default lane keyed on the glued
+    form whenever the requested version is itself glued-suffixed. Take the
+    segment's leading digits (if any) before giving up on it, so
+    ``"1.3.0rc23"`` parses as ``(1, 3, 0)``.
     """
     parts: list[int] = []
     for segment in v.split("."):
         try:
             parts.append(int(segment))
+            continue
         except ValueError:
-            break  # trailing non-numeric segment — stop here
+            pass
+        leading_digits = _LEADING_DIGITS.match(segment)
+        if leading_digits:
+            parts.append(int(leading_digits.group(1)))
+        break  # first non-cleanly-numeric segment — stop after its leading digits, if any
     return tuple(parts) if parts else (0,)
 
 
