@@ -132,6 +132,7 @@ def test_gdn_decode_recurrence_names_alias_to_canonical_key():
         "head_v_dim",
         "model_name",
         "latency",
+        "power",
     ]
 
     def row(kernel_source, batch, latency):
@@ -153,6 +154,7 @@ def test_gdn_decode_recurrence_names_alias_to_canonical_key():
             "head_v_dim": 128,
             "model_name": "Qwen/Qwen3.5-27B",
             "latency": latency,
+            "power": "",
         }
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -170,6 +172,7 @@ def test_gdn_decode_recurrence_names_alias_to_canonical_key():
     assert set(data.keys()) == {"fused_sigmoid_gating_delta_rule_update"}
     leaves = data["fused_sigmoid_gating_delta_rule_update"]["generation"][(2048, 16, 128, 32, 128, 4)]
     assert {b: leaves[b]["latency"] for b in sorted(leaves)} == {1: 0.5, 2: 0.7, 4: 0.9}
+    assert {b: leaves[b]["power"] for b in sorted(leaves)} == {1: 0.0, 2: 0.0, 4: 0.0}
 
 
 # --- D1: topk calib pairs v1/v2 phase variants separately --------------------
@@ -205,3 +208,56 @@ def test_topk_calib_builder_splits_v1_and_v2_variants():
     calib = _build_topk_calib_from_rows(only_v1)
     assert calib[64]["v1"] is not None
     assert calib[64]["v2"] is None
+
+
+# Structural zero-work rows must remain valid calibration inputs without
+# affecting neighbouring shapes that perform real work.
+
+
+def test_zero_work_both_modes_gives_zero_delta():
+    """flat=0 / top_last=0 produces delta=0."""
+    from aiconfigurator.sdk.operations.dsv4 import _build_topk_calib_from_rows
+
+    by_native = {64: {0: {4096: {8: {"v1_flat": {"latency": 0.0}, "v1_top_last": {"latency": 0.0}}}}}}
+    calib = _build_topk_calib_from_rows(by_native)
+    assert calib[64]["v1"]["exact"][(0, 4096, 8)] == pytest.approx(0.0)
+    assert calib[64]["v2"] is None
+
+
+def test_zero_work_flat_with_positive_top_last_gives_zero_delta():
+    """flat=0 / top_last=positive is clamped to zero."""
+    from aiconfigurator.sdk.operations.dsv4 import _build_topk_calib_from_rows
+
+    by_native = {64: {0: {4096: {8: {"v1_flat": {"latency": 0.0}, "v1_top_last": {"latency": 1.5}}}}}}
+    calib = _build_topk_calib_from_rows(by_native)
+    assert calib[64]["v1"]["exact"][(0, 4096, 8)] == pytest.approx(0.0)
+
+
+def test_zero_work_rows_do_not_contaminate_positive_work_delta():
+    """A zero-work pair for one batch size does not affect another."""
+    from aiconfigurator.sdk.operations.dsv4 import _build_topk_calib_from_rows
+
+    by_native = {
+        64: {
+            0: {
+                4096: {
+                    8: {"v1_flat": {"latency": 0.0}, "v1_top_last": {"latency": 0.0}},
+                    16: {"v1_flat": {"latency": 2.0}, "v1_top_last": {"latency": 1.6}},
+                }
+            }
+        }
+    }
+    calib = _build_topk_calib_from_rows(by_native)
+    assert calib[64]["v1"]["exact"][(0, 4096, 8)] == pytest.approx(0.0)
+    assert calib[64]["v1"]["exact"][(0, 4096, 16)] == pytest.approx(0.4)
+
+
+def test_zero_work_row_contributes_zero_energy():
+    """A zero-latency, zero-energy result reports zero power."""
+    from aiconfigurator_core.sdk.performance_result import PerformanceResult
+
+    result = PerformanceResult(0.0, energy=0.0)
+    assert result.power == pytest.approx(0.0)
+    # Confirm the guard threshold: latency just above zero still yields correct power.
+    tiny = PerformanceResult(1e-8, energy=1e-8)
+    assert tiny.power == pytest.approx(1.0)

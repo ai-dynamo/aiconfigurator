@@ -861,7 +861,7 @@ def load_kda_data(kda_file: str):
         num_v_heads = int(row["num_v_heads"])
         head_v_dim = int(row["head_v_dim"])
         latency = float(row["latency"])
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
         energy = power * latency
 
         model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
@@ -1101,7 +1101,7 @@ def load_mamba2_data(mamba2_file: str):
         n_groups = int(row["n_groups"])
         chunk_size = int(row["chunk_size"])
         latency = float(row["latency"])
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
         energy = power * latency
 
         model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
@@ -1185,7 +1185,7 @@ def load_gdn_data(gdn_file: str):
         num_v_heads = int(row["num_v_heads"])
         head_v_dim = int(row["head_v_dim"])
         latency = float(row["latency"])
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
         energy = power * latency
 
         model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)

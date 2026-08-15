@@ -4,10 +4,12 @@
 import csv
 import os
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from collector import helper
+from collector.helper import PowerMonitor
 
 pytestmark = pytest.mark.unit
 
@@ -43,8 +45,7 @@ def test_log_perf_returns_true_after_durable_write(tmp_path):
     ]
 
 
-@pytest.mark.parametrize("first_has_power", [False, True])
-def test_log_perf_rejects_optional_column_schema_changes_before_append(tmp_path, first_has_power):
+def test_log_perf_rejects_non_power_schema_changes_before_append(tmp_path):
     perf_path = tmp_path / "mla_perf.txt"
     kwargs = {
         "item_list": [{"batch_size": 1, "latency": "1.25"}],
@@ -55,13 +56,12 @@ def test_log_perf_rejects_optional_column_schema_changes_before_append(tmp_path,
         "kernel_source": "mla_fa3",
         "perf_filename": str(perf_path),
     }
-    power_stats = {"power": 400.0, "power_limit": 700.0}
-
-    assert helper.log_perf(**kwargs, power_stats=power_stats if first_has_power else None)
+    assert helper.log_perf(**kwargs)
     original = perf_path.read_bytes()
 
-    with pytest.raises(helper.PerfLogError, match="Schema mismatch"):
-        helper.log_perf(**kwargs, power_stats=None if first_has_power else power_stats)
+    kwargs["item_list"] = [{"hidden_size": 4096, "latency": "1.25"}]
+    with pytest.raises(helper.PerfLogError, match="Existing CSV schema does not match this row"):
+        helper.log_perf(**kwargs)
     assert perf_path.read_bytes() == original
     assert not perf_path.with_suffix(".txt.lock").exists()
 
@@ -139,3 +139,185 @@ def test_log_perf_losing_breaker_never_unlinks_the_fresh_lock(tmp_path, monkeypa
         _log_perf(str(perf_path))
     assert lock_path.exists()
     assert not perf_path.exists()
+
+
+def _log_perf_with_power(perf_filename: str, power_stats) -> bool:
+    return helper.log_perf(
+        item_list=[{"batch_size": 1, "latency": "1.25"}],
+        framework="SGLang",
+        version="0.5.14",
+        device_name="Fake GPU",
+        op_name="moe",
+        kernel_source="sglang_fused_moe_triton",
+        perf_filename=perf_filename,
+        power_stats=power_stats,
+    )
+
+
+_POWER_STATS = {"power": 450.0, "power_limit": 1000.0}
+
+
+def test_log_perf_power_row_then_missing_power_row_consistent_columns(tmp_path, monkeypatch):
+    """
+    Regression: power-stats row written first, then a row with power_stats=None.
+    Both rows must have power/power_limit columns so pyarrow can parse the file.
+    Reproduces the sglang_fused_moe_triton bfloat16 smoke crash (2026-08-03).
+    """
+    monkeypatch.setenv("COLLECTOR_MEASURE_POWER", "true")
+    perf_path = str(tmp_path / "moe_perf.txt")
+
+    assert _log_perf_with_power(perf_path, _POWER_STATS) is True
+    assert _log_perf_with_power(perf_path, None) is True
+
+    with open(perf_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    assert len(rows) == 2
+    assert rows[0]["power"] == "450.0"
+    assert rows[0]["power_limit"] == "1000.0"
+    # Second row must have power column present (empty, not absent)
+    assert "power" in rows[1]
+    assert rows[1]["power"] == ""
+    assert rows[1]["power_limit"] == ""
+
+
+def test_power_monitor_rejects_none_device_id():
+    """
+    Regression: torch.device("cuda").index returns None; PowerMonitor(None) previously
+    called nvml.nvmlDeviceGetHandleByIndex(None), silently failed _init_handle(), and
+    returned power_stats=None — producing a zero-power row that bypassed the smoke gate.
+    Fix: PowerMonitor.__init__ raises TypeError on None so the bug is immediately visible
+    (benchmark_config must use torch.cuda.current_device(), not torch.device("cuda").index).
+    """
+    with pytest.raises(TypeError, match="explicit integer device index"):
+        PowerMonitor(None)
+
+
+def test_power_monitor_rejects_noninteger_device_id():
+    with pytest.raises(TypeError, match="explicit integer device index"):
+        PowerMonitor("cuda:0")
+
+
+def test_power_monitor_rejects_negative_device_id():
+    with pytest.raises(ValueError, match="non-negative CUDA device index"):
+        PowerMonitor(-1)
+
+
+def test_power_monitoring_only_stops_sampler_when_body_raises(monkeypatch):
+    events = []
+
+    class FakePowerMonitor:
+        def __init__(self, device_id):
+            assert device_id == 2
+
+        def start_sampling(self):
+            events.append("start")
+            return True
+
+        def stop_sampling(self):
+            events.append("stop")
+            return None
+
+    monkeypatch.setattr(helper, "PowerMonitor", FakePowerMonitor)
+
+    with (
+        pytest.raises(RuntimeError, match="kernel failed"),
+        helper.power_monitoring_only(SimpleNamespace(index=2), measure_power=True),
+    ):
+        raise RuntimeError("kernel failed")
+
+    assert events == ["start", "stop"]
+
+
+def test_log_perf_missing_power_row_then_power_row_consistent_columns(tmp_path, monkeypatch):
+    """
+    Regression: row with power_stats=None written first, then a power-stats row.
+    The header must include power columns from the start so the second row matches.
+    """
+    monkeypatch.setenv("COLLECTOR_MEASURE_POWER", "true")
+    perf_path = str(tmp_path / "moe_perf.txt")
+
+    assert _log_perf_with_power(perf_path, None) is True
+    assert _log_perf_with_power(perf_path, _POWER_STATS) is True
+
+    with open(perf_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    assert len(rows) == 2
+    # First row has empty power (zero-sample event recorded, not silently dropped)
+    assert rows[0]["power"] == ""
+    assert rows[0]["power_limit"] == ""
+    # Second row has actual values
+    assert rows[1]["power"] == "450.0"
+    assert rows[1]["power_limit"] == "1000.0"
+
+
+def test_log_perf_upgrades_existing_power_off_csv_before_power_append(tmp_path, monkeypatch):
+    """A resumed power run must not append wider rows under a legacy header."""
+    monkeypatch.delenv("COLLECTOR_MEASURE_POWER", raising=False)
+    perf_path = str(tmp_path / "moe_perf.txt")
+
+    assert _log_perf_with_power(perf_path, None) is True
+    with open(perf_path, newline="") as f:
+        assert "power" not in next(csv.reader(f))
+
+    monkeypatch.setenv("COLLECTOR_MEASURE_POWER", "true")
+    assert _log_perf_with_power(perf_path, _POWER_STATS) is True
+
+    with open(perf_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    assert len(rows) == 2
+    assert rows[0]["power"] == ""
+    assert rows[0]["power_limit"] == ""
+    assert rows[1]["power"] == "450.0"
+    assert rows[1]["power_limit"] == "1000.0"
+    assert helper.convert_perf_csv_to_parquet(perf_path, delete_source=False).exists()
+
+
+def test_aggregate_latency_weighted_power_is_energy_equivalent():
+    result = helper.aggregate_latency_weighted_power(
+        [
+            (1.0, {"power": 100.0, "power_limit": 1000.0}),
+            (3.0, {"power": 300.0, "power_limit": 1000.0}),
+        ]
+    )
+
+    assert result == {"power": 250.0, "power_limit": 1000.0}
+
+
+def test_aggregate_latency_weighted_power_drops_partial_power_but_keeps_latency(caplog):
+    with caplog.at_level("WARNING"):
+        result = helper.aggregate_latency_weighted_power([(1.0, _POWER_STATS), (2.0, None)])
+
+    assert result is None
+    assert "1 of 2 serial chunks have no power sample" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("power_stats", "message"),
+    [
+        ({"power": None, "power_limit": 1000.0}, "chunk power must be present"),
+        ({"power": 450.0, "power_limit": None}, "power limit must be present"),
+    ],
+)
+def test_aggregate_latency_weighted_power_rejects_missing_values(power_stats, message):
+    with pytest.raises(ValueError, match=message):
+        helper.aggregate_latency_weighted_power([(1.0, power_stats)])
+
+
+def test_zero_work_power_stats_uses_measured_limit(monkeypatch):
+    class FakePowerMonitor:
+        def __init__(self, device_id):
+            assert device_id == 3
+
+        def get_power_limit(self):
+            return 1000.0
+
+    monkeypatch.setattr(helper, "PowerMonitor", FakePowerMonitor)
+    monkeypatch.setenv("COLLECTOR_MEASURE_POWER", "true")
+
+    assert helper.zero_work_power_stats(SimpleNamespace(index=3)) == {
+        "power": 0.0,
+        "power_limit": 1000.0,
+    }

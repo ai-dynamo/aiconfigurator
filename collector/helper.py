@@ -113,8 +113,16 @@ class PowerMonitor:
     def __init__(self, device_id: int):
         """
         Args:
-            device_id: CUDA device index to monitor
+            device_id: Non-negative CUDA device index to monitor (must not be None;
+                use torch.cuda.current_device() rather than torch.device("cuda").index)
         """
+        if isinstance(device_id, bool) or not isinstance(device_id, int):
+            raise TypeError(
+                f"PowerMonitor requires an explicit integer device index, got {device_id!r}. "
+                "Use torch.cuda.current_device() or torch.device('cuda:N').index."
+            )
+        if device_id < 0:
+            raise ValueError(f"PowerMonitor requires a non-negative CUDA device index, got {device_id}")
         self.device_id = device_id
         self.interval_s = self.SAMPLE_INTERVAL_MS / 1000.0
         self._thread = None
@@ -179,6 +187,12 @@ class PowerMonitor:
             "power": float(np.mean(power_values_w)),
             "power_limit": float(self._power_limit_mw / 1000.0) if self._power_limit_mw else None,
         }
+
+    def get_power_limit(self) -> float | None:
+        """Return the device power-management limit without starting sampling."""
+        if not self._init_handle() or self._power_limit_mw is None:
+            return None
+        return float(self._power_limit_mw / 1000.0)
 
     def _monitoring_loop(self):
         """Background thread function that samples power every 100ms."""
@@ -437,8 +451,81 @@ def power_monitoring_only(device, measure_power: bool | None = None):
     try:
         yield power_monitor
     finally:
-        # Cleanup happens after yield returns
-        pass
+        # Callers stop the monitor themselves when they need the sampled
+        # statistics. This unconditional cleanup covers exceptions before
+        # that success-path call; stop_sampling() is intentionally idempotent.
+        if power_monitor is not None:
+            power_monitor.stop_sampling()
+
+
+def zero_work_power_stats(device, measure_power: bool | None = None) -> dict | None:
+    """Represent an intentional no-kernel row in a power-enabled collection.
+
+    The zero is exact work-attributable power, not a sampled idle-board value.
+    The accompanying limit is read from NVML so the row still carries real
+    device provenance. Perf-only runs preserve the historical ``None`` value.
+    """
+    if measure_power is None:
+        measure_power = _parse_bool_env("COLLECTOR_MEASURE_POWER", default=False)
+    if not measure_power:
+        return None
+
+    power_limit = PowerMonitor(device.index).get_power_limit()
+    if power_limit is None or not math.isfinite(power_limit) or power_limit <= 0:
+        raise RuntimeError("failed to read a finite positive power limit for a structural zero-work row")
+    return {"power": 0.0, "power_limit": power_limit}
+
+
+def aggregate_latency_weighted_power(measurements: Iterable[tuple[float, dict | None]]) -> dict | None:
+    """Combine serial measurements using energy-equivalent average power.
+
+    Each item is ``(latency_ms, power_stats)``. All-power-disabled input
+    returns ``None``. Mixed present/missing stats also return ``None`` (with a
+    warning): the latency remains valid, while persisting a partial average
+    would bias the row's power.
+    """
+    measurements = list(measurements)
+    if not measurements:
+        raise ValueError("at least one power measurement is required")
+
+    stats_present = [stats is not None for _, stats in measurements]
+    if not any(stats_present):
+        return None
+    if not all(stats_present):
+        logging.getLogger(__name__).warning(
+            "Dropping aggregate power because %d of %d serial chunks have no power sample; latency remains valid",
+            stats_present.count(False),
+            len(stats_present),
+        )
+        return None
+
+    total_latency_ms = 0.0
+    energy_w_ms = 0.0
+    power_limits = []
+    for latency_ms, stats in measurements:
+        latency_ms = float(latency_ms)
+        raw_power = stats.get("power")
+        raw_power_limit = stats.get("power_limit")
+        if raw_power is None:
+            raise ValueError("measured chunk power must be present, got None")
+        if raw_power_limit is None:
+            raise ValueError("measured chunk power limit must be present, got None")
+        power = float(raw_power)
+        power_limit = float(raw_power_limit)
+        if not math.isfinite(latency_ms) or latency_ms <= 0:
+            raise ValueError(f"power-bearing chunk latency must be finite and positive, got {latency_ms}")
+        if not math.isfinite(power) or power <= 0:
+            raise ValueError(f"measured chunk power must be finite and positive, got {power}")
+        if not math.isfinite(power_limit) or power_limit <= 0:
+            raise ValueError(f"measured power limit must be finite and positive, got {power_limit}")
+        total_latency_ms += latency_ms
+        energy_w_ms += latency_ms * power
+        power_limits.append(power_limit)
+
+    reference_limit = power_limits[0]
+    if any(not math.isclose(limit, reference_limit, rel_tol=1e-6, abs_tol=1e-6) for limit in power_limits[1:]):
+        raise RuntimeError(f"power limit changed across serial chunks: {power_limits}")
+    return {"power": energy_w_ms / total_latency_ms, "power_limit": reference_limit}
 
 
 def setup_signal_handlers(worker_id):
@@ -697,6 +784,7 @@ def log_perf(
     kernel_source: str,
     perf_filename: str,
     power_stats: dict | None = None,
+    include_power_columns: bool | None = None,
 ) -> bool:
     lock_file = perf_filename + ".lock"
 
@@ -741,47 +829,84 @@ def log_perf(
         raise PerfLogError(message)
 
     try:
-        with open(perf_filename, "a+", newline="") as f:
+        base_data = {
+            "framework": framework,
+            "version": version,
+            "device": device_name,
+            "op_name": op_name,
+            "kernel_source": kernel_source,
+        }
+
+        expected_fieldnames = list(base_data.keys())
+        if item_list:
+            expected_fieldnames += list(item_list[0].keys())
+
+        power_columns = ["power", "power_limit"]
+        if include_power_columns is False and power_stats:
+            raise ValueError("Cannot omit power columns when power_stats contains measurements")
+        requested_power_cols = (
+            bool(power_stats) or _parse_bool_env("COLLECTOR_MEASURE_POWER", default=False)
+            if include_power_columns is None
+            else include_power_columns
+        )
+        is_empty = not os.path.exists(perf_filename) or os.path.getsize(perf_filename) == 0
+        fieldnames = list(expected_fieldnames)
+        include_power_cols = requested_power_cols
+
+        if not is_empty:
+            with open(perf_filename, newline="") as existing_file:
+                existing_fieldnames = next(csv.reader(existing_file), [])
+
+            existing_non_power = [name for name in existing_fieldnames if name not in power_columns]
+            existing_power = [name for name in power_columns if name in existing_fieldnames]
+            if existing_non_power != expected_fieldnames or len(existing_power) not in (0, len(power_columns)):
+                raise ValueError(
+                    f"Existing CSV schema does not match this row: {existing_fieldnames} != {expected_fieldnames}"
+                )
+            if include_power_columns is False and existing_power:
+                raise ValueError(
+                    f"Existing CSV contains power columns that this table explicitly omits: {perf_filename}"
+                )
+
+            # A retained power-disabled CSV may be resumed with power enabled.
+            # Upgrade its header and pad existing rows before appending so the
+            # staging file remains rectangular and finalizes cleanly.
+            if requested_power_cols and not existing_power:
+                upgrade_file = f"{perf_filename}.power-schema-{os.getpid()}.tmp"
+                try:
+                    with (
+                        open(perf_filename, newline="") as source,
+                        open(upgrade_file, "w", newline="") as destination,
+                    ):
+                        reader = csv.reader(source)
+                        writer = csv.writer(destination)
+                        header = next(reader)
+                        writer.writerow(header + power_columns)
+                        for row in reader:
+                            if len(row) != len(header):
+                                raise ValueError(
+                                    f"Existing CSV row has {len(row)} columns but header has {len(header)}"
+                                )
+                            writer.writerow(row + ["", ""])
+                        destination.flush()
+                        os.fsync(destination.fileno())
+                    os.replace(upgrade_file, perf_filename)
+                finally:
+                    if os.path.exists(upgrade_file):
+                        os.unlink(upgrade_file)
+                existing_fieldnames += power_columns
+                existing_power = power_columns
+
+            fieldnames = existing_fieldnames
+            include_power_cols = bool(existing_power)
+        elif include_power_cols:
+            fieldnames += power_columns
+
+        with open(perf_filename, "a", newline="") as f:
             # Add header only if file is empty
             is_empty = os.fstat(f.fileno()).st_size == 0
-
-            base_data = {
-                "framework": framework,
-                "version": version,
-                "device": device_name,
-                "op_name": op_name,
-                "kernel_source": kernel_source,
-            }
-
-            # Get headers from first item if exists
-            fieldnames = list(base_data.keys())
-            if item_list:
-                fieldnames += list(item_list[0].keys())
-            # Add power_stats keys if present
-            if power_stats:
-                for key in ["power", "power_limit"]:
-                    if key not in fieldnames:
-                        fieldnames.append(key)
-
-            # The first row freezes the staging schema. A resumed or batched
-            # run must never append with a different optional-column setting
-            # (most notably --measure_power), because DictWriter would emit
-            # values in the NEW order under the OLD header. Validate under the
-            # same writer lock before appending so the file remains unchanged
-            # on mismatch and the caller can classify the failed persistence.
-            if not is_empty:
-                f.seek(0)
-                existing_header = next(csv.reader(f), [])
-                if existing_header != fieldnames:
-                    message = (
-                        f"Schema mismatch for {perf_filename}: "
-                        f"existing header {existing_header}, requested header {fieldnames}. "
-                        "Use the same measurement settings when resuming or start a fresh staging file."
-                    )
-                    print(f"Error writing log: {message}")
-                    raise PerfLogError(message)
-                f.seek(0, os.SEEK_END)
-
+            # Empty power cells preserve rows whose measurement had no sample;
+            # the failure ledger retains the zero-sample root cause.
             writer = csv.DictWriter(f, fieldnames=fieldnames)
 
             if is_empty:
@@ -789,10 +914,9 @@ def log_perf(
 
             for item in item_list:
                 row = base_data | item
-                # Add power_stats values if present
-                if power_stats:
-                    for key in ["power", "power_limit"]:
-                        row[key] = power_stats.get(key, "")
+                if include_power_cols:
+                    for key in power_columns:
+                        row[key] = power_stats.get(key, "") if power_stats else ""
                 writer.writerow(row)
 
             # Force disk write (for NFS)

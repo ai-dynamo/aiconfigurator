@@ -161,6 +161,12 @@ def test_measurement_only_columns_use_full_row_delta(parquet_diff_module, tmp_pa
     assert row_diff.note == "unavailable keys; exact full-row add/remove diff used"
 
 
+def test_power_limit_is_measurement_not_row_identity(parquet_diff_module):
+    columns = ["framework", "m", "latency", "power", "power_limit"]
+
+    assert parquet_diff_module._select_key_columns(columns, columns) == ["framework", "m"]
+
+
 def test_full_row_delta_preserves_original_nested_values(parquet_diff_module):
     row = {"latency": float("nan"), "power": {"rails": ["gpu", "soc"]}}
 

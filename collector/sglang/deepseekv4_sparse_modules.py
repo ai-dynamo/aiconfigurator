@@ -47,10 +47,10 @@ from types import SimpleNamespace
 import torch
 
 try:
-    from collector.sglang.helper import benchmark_with_power, log_perf
+    from collector.sglang.helper import benchmark_with_power, log_perf, zero_work_power_stats
 except ModuleNotFoundError:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from helper import benchmark_with_power, log_perf
+    from helper import benchmark_with_power, log_perf, zero_work_power_stats
 
 # Re-export test case generators from the centralized case generator
 # module so collect.py's registry can resolve them via getattr on this module.
@@ -744,7 +744,7 @@ def _guarded_bench(bench_fn: Callable[[], object], label: str):
 
 def _bench_sparse_kernel_shape(kernel, prefix, isl, bs, sc, device, *, topk_variant=None):
     """Bench one module ``(prefix, isl, bs)`` shape; return a list of
-    ``(score_mode, latency_ms)`` rows. TP-independent (paged_mqa maps tokens to
+    ``(score_mode, latency_ms, power_stats)`` rows. TP-independent (paged_mqa maps tokens to
     b=M while preserving request-local causal lengths; FMLA pads to full native
     heads), so this is computed once per shape.
 
@@ -758,7 +758,7 @@ def _bench_sparse_kernel_shape(kernel, prefix, isl, bs, sc, device, *, topk_vari
         # K_per_query on the PER-REQUEST sequence length (isl+prefix), not the
         # flattened total (bs*isl+prefix).
         full_s = isl + prefix
-        lat = _bench_flash_mla_sparse(
+        result = _bench_flash_mla_sparse(
             M,
             prefix,
             K_per_query=_FMLA_K_PER_QUERY[kernel](full_s, sc),
@@ -766,23 +766,23 @@ def _bench_sparse_kernel_shape(kernel, prefix, isl, bs, sc, device, *, topk_vari
             sliding_window=sc.sliding_window,
             batch_size=bs,
             device=device,
-        )["latency_ms"]
-        return [(None, lat)]
+        )
+        return [(None, result["latency_ms"], result.get("power_stats"))]
     if kernel == "topk":
         if topk_variant not in ("v1", "v2"):
             raise ValueError(f"topk requires variant v1 or v2, got {topk_variant!r}")
         return _bench_topk_shape(prefix, isl, bs, sc, device, variant=topk_variant)
     # paged_mqa_logits: tokens map to b=M, next_n=1, while causal lengths repeat
     # per request.
-    lat = _bench_paged_mqa_logits(
+    result = _bench_paged_mqa_logits(
         M,
         prefix,
         index_n_heads=sc.index_n_heads,
         index_head_dim=sc.index_head_dim,
         batch_size=bs,
         device=device,
-    )["latency_ms"]
-    return [(None, lat)]
+    )
+    return [(None, result["latency_ms"], result.get("power_stats"))]
 
 
 def _derive_context_shapes(bs_list, seq_list, prefix_list, is_valid, env_filter=None):
@@ -1047,12 +1047,12 @@ def run_dsv4_sparse_kernel_worker(
             failures.append(f"{label}: {type(error).__name__}: {error}")
             continue
         expected_modes = {f"{topk_variant}_flat", f"{topk_variant}_top_last"} if kernel == "topk" else {None}
-        if len(results) != len(expected_modes) or {score_mode for score_mode, _ in results} != expected_modes:
+        if len(results) != len(expected_modes) or {score_mode for score_mode, _, _ in results} != expected_modes:
             message = f"expected score modes {expected_modes}, got {results}"
             print(f"  incomplete result at {label}: {message}")
             failures.append(f"{label}: RuntimeError: {message}")
             continue
-        for score_mode, latency_ms in results:
+        for score_mode, latency_ms, power_stats in results:
             _write_row(
                 perf_path,
                 kernel=kernel,
@@ -1065,6 +1065,7 @@ def run_dsv4_sparse_kernel_worker(
                 device_name=device_name,
                 model_path=model_path,
                 score_mode=score_mode,
+                power_stats=power_stats,
             )
         n_ok += 1
     error_count = len(failures)
@@ -1124,7 +1125,7 @@ def _bench_topk_512(
     device: str,
     topk_k: int,
     variant: str,
-) -> float:
+) -> dict:
     """Time one v1/v2 topk_transform shape via the shared bench path.
 
     SGLang 0.5.14 context uses v1 with ``out_raw_indices`` while normal decode
@@ -1172,7 +1173,7 @@ def _bench_topk_512(
                 meta,
             )
 
-    return _bench_cuda_graph(kernel_func, allow_graph_fail=False, device=device)["latency_ms"]
+    return _bench_cuda_graph(kernel_func, allow_graph_fail=False, device=device)
 
 
 def get_dsv4_topk_calib_test_cases():
@@ -1205,11 +1206,10 @@ def _bench_topk_shape(prefix: int, isl: int, bs: int, sc, device: str, *, varian
     seq_lens = (causal_seq // ratio).clamp(min=1).repeat(bs)
     c4_len = int(seq_lens.max().item())
     if c4_len <= topk_k:
-        return [(f"{variant}_flat", 0.0), (f"{variant}_top_last", 0.0)]
-    return [
-        (
-            f"{variant}_{mode}",
-            round(_bench_topk_512(seq_lens, mode, device, topk_k=topk_k, variant=variant), 6),
-        )
-        for mode in ("flat", "top_last")
-    ]
+        stats = zero_work_power_stats(torch.device(device))
+        return [(f"{variant}_flat", 0.0, stats), (f"{variant}_top_last", 0.0, stats)]
+    results = []
+    for mode in ("flat", "top_last"):
+        measured = _bench_topk_512(seq_lens, mode, device, topk_k=topk_k, variant=variant)
+        results.append((f"{variant}_{mode}", round(measured["latency_ms"], 6), measured.get("power_stats")))
+    return results

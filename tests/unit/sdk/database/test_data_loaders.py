@@ -439,6 +439,22 @@ def test_load_gemm_data_parquet(tmp_path):
     assert data[GEMMQuantMode.bfloat16][128][256][512]["latency"] == pytest.approx(0.789)
 
 
+def test_load_gemm_data_parquet_nullable_power_preserves_perf_row(tmp_path):
+    csv_file = tmp_path / "gemm_nullable_power.csv"
+    parquet_file = tmp_path / "gemm_nullable_power.parquet"
+    csv_file.write_text(
+        "framework,version,device,op_name,gemm_dtype,m,n,k,latency,power,power_limit\n"
+        "trt,1.0,hwX,opX,bfloat16,128,256,512,0.789,450.0,1000.0\n"
+        "trt,1.0,hwX,opX,bfloat16,256,256,512,1.234,,\n"
+    )
+    pq.write_table(pc.read_csv(csv_file), parquet_file, compression="zstd")
+
+    data = load_gemm_data(str(parquet_file))
+
+    missing_power_row = data[GEMMQuantMode.bfloat16][256][256][512]
+    assert missing_power_row == {"latency": pytest.approx(1.234), "power": 0.0, "energy": 0.0}
+
+
 def test_resolve_perf_data_path_falls_back_to_legacy_txt(tmp_path):
     legacy_file = tmp_path / "gemm_perf.txt"
     legacy_file.write_text("framework,version,device,op_name,gemm_dtype,m,n,k,latency\n")

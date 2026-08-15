@@ -19,6 +19,7 @@ def _mock_helper_imports(monkeypatch):
     fake_helper.get_sm_version = lambda: 90  # default Hopper
     fake_helper.log_perf = lambda **kw: None
     fake_helper.benchmark_with_power = lambda **kw: None
+    fake_helper.power_monitoring_only = lambda *_a, **_kw: None
     monkeypatch.setitem(__import__("sys").modules, "helper", fake_helper)
 
     fake_torch = types.ModuleType("torch")

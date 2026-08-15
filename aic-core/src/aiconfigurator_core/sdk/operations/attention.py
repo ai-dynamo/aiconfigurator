@@ -1241,7 +1241,7 @@ def load_context_attention_data(context_attention_file):
         latency = float(latency)
 
         # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
 
         # NEW: Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds
@@ -1319,7 +1319,7 @@ def load_generation_attention_data(generation_attention_file):
         latency = float(latency)
 
         # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
 
         # NEW: Calculate energy from power and latency
         energy = power * latency  # watt-milliseconds
@@ -1389,7 +1389,7 @@ def load_encoder_attention_data(encoder_attention_file):
         head_size = int(head_size)
         latency = float(latency)
 
-        power = float(row.get("power", 0.0))
+        power = float(row.get("power") or 0.0)
         energy = power * latency
 
         quant_mode = common.FMHAQuantMode[quant_mode]
