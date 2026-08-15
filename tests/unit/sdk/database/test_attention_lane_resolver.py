@@ -59,6 +59,59 @@ def _resolve(backend, version, sm_version, override, systems_root):
 _KNOWN_LANES_SORTED = ("fa3", "fla", "flashinfer", "triton", "trtllm_mha")
 
 
+# ---------------------------------------------------------------------------
+# _parse_version: dotted AND glued PEP-440-style suffixes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "version,expected",
+    [
+        # Plain dotted versions: unaffected baseline.
+        ("0.5.14", (0, 5, 14)),
+        ("1.3.0", (1, 3, 0)),
+        # Dot-separated suffixes: the whole trailing segment is dropped, the
+        # numeric prefix before it is kept (pre-existing, still covered).
+        ("0.5.14.post1", (0, 5, 14)),
+        ("0.5.14.dev3", (0, 5, 14)),
+        # Glued suffixes: the suffix rides directly on the last numeric
+        # segment with no separating dot. The segment's LEADING digits must
+        # still be captured -- this is the R1 regression: naive int()-or-stop
+        # parsing dropped the entire segment (including its leading digits)
+        # on the first ValueError, so "1.3.0rc23" used to parse as (1, 3)
+        # instead of (1, 3, 0), sorting BELOW the "1.3.0" it is a release
+        # candidate for.
+        ("1.3.0rc23", (1, 3, 0)),
+        ("1.3.0a1", (1, 3, 0)),
+        ("1.3.0b2", (1, 3, 0)),
+        ("0.5.14rc23", (0, 5, 14)),
+        # Glued suffix on a non-final segment: still stops after capturing
+        # that segment's leading digits (matches the pre-existing "stop at
+        # first non-numeric segment" contract -- only the DROP-THE-DIGITS
+        # part of that contract was the bug).
+        ("1.0rc5.2", (1, 0)),
+        # A segment with no leading digits at all: nothing to capture, same
+        # as the pre-existing dot-separated-suffix behavior.
+        ("1.3.dev", (1, 3)),
+        # Degenerate: no numeric segments anywhere falls back to (0,).
+        ("dev", (0,)),
+    ],
+)
+def test_parse_version_dotted_and_glued_forms(version, expected):
+    from aiconfigurator_core.sdk.attention_lanes import _parse_version
+
+    assert _parse_version(version) == expected, f"_parse_version({version!r})"
+
+
+def test_parse_version_glued_suffix_sorts_at_or_above_its_base_release():
+    """The concrete failure mode: a glued release-candidate string must sort
+    >= the release it is a candidate for, so it still floor-matches a map
+    entry keyed on the plain release version."""
+    from aiconfigurator_core.sdk.attention_lanes import _parse_version
+
+    assert _parse_version("1.3.0rc23") >= _parse_version("1.3.0")
+
+
 def test_override_is_first(systems_root):
     """When override is given, it must appear first in the result."""
     result = _resolve("sglang", "0.5.14", 103, "trtllm_mha", systems_root)
@@ -140,6 +193,22 @@ def test_pep440_suffix_floor_matches_numeric_prefix(systems_root):
     """'0.5.14.post1' must floor-match the '0.5.14' entry and yield triton for sm103."""
     result = _resolve("sglang", "0.5.14.post1", 103, None, systems_root)
     assert result[0] == "triton", f"'0.5.14.post1' should floor-match '0.5.14' and yield triton head; got {result}"
+
+
+def test_glued_pep440_suffix_floor_matches_numeric_prefix(systems_root):
+    """'0.5.14rc23' (suffix GLUED to the last segment, no dot) must floor-match
+    the '0.5.14' entry and yield triton for sm103 -- same contract as the
+    dot-separated '0.5.14.post1' form above.
+
+    Regression: naive parsing (int() on each dot-split segment, stop at the
+    first failure) drops the WHOLE glued segment on failure, so
+    '0.5.14rc23' used to parse as (0, 5) -- shorter than, and sorting BELOW,
+    the clean '0.5.14' -> (0, 5, 14) it is a release candidate for. That took
+    '0.5.14rc23' below the '0.5.14' floor-match entirely, silently dropping
+    the framework-default lane.
+    """
+    result = _resolve("sglang", "0.5.14rc23", 103, None, systems_root)
+    assert result[0] == "triton", f"'0.5.14rc23' should floor-match '0.5.14' and yield triton head; got {result}"
 
 
 def test_pinned_head_is_carried_not_reconstructed(systems_root):

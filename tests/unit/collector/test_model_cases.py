@@ -1790,8 +1790,21 @@ def test_qwen35_397b_nvfp4_moe_cases_are_declared_with_correct_shape_and_runner(
     cases = get_common_moe_test_cases()
     nvfp4_cases = [case for case in cases if case.model_name == "nvidia/Qwen3.5-397B-A17B-NVFP4"]
 
-    # Row exists and carries the 397B shape tuple
+    # Row exists and carries the 397B shape tuple. The count itself is
+    # re-derived, not hardcoded from the model YAML's own "+117" comment: the
+    # NVFP4 row declares the IDENTICAL shape tuple (4096/1024, topk10, 512
+    # experts) as the bf16/fp8_block Qwen/Qwen3.5-397B-A17B row, so the
+    # shared moe.yaml sweep grid (tp/ep combos x token-count x workload
+    # distribution, filtered by that one shape) must expand to the exact
+    # same case count for both -- 117, per
+    # test_cross_model_common_cases_expand_from_base_op_yaml_sweeps's own
+    # "+117 for nvidia/Qwen3.5-397B-A17B-NVFP4" delta comment.
+    base_397b_cases = [case for case in cases if case.model_name == "Qwen/Qwen3.5-397B-A17B"]
     assert nvfp4_cases, "nvidia/Qwen3.5-397B-A17B-NVFP4 moe cases not found"
+    assert len(nvfp4_cases) == len(base_397b_cases) == 117, (
+        f"nvfp4 case count must match the bf16/fp8_block 397B row's identical-shape expansion; "
+        f"got {len(nvfp4_cases)} nvfp4 vs {len(base_397b_cases)} base"
+    )
     assert all(case.hidden_size == 4096 for case in nvfp4_cases)
     assert all(case.inter_size == 1024 for case in nvfp4_cases)
     assert all(case.topk == 10 for case in nvfp4_cases)
