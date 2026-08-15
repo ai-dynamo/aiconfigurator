@@ -588,7 +588,15 @@ class TrtLLMWideEPMoE(Operation):
         ``wideep_moe_perf.parquet`` rows verbatim (native kernel_source,
         ``num_slots`` pass-through, rows fanned to both phases), so the
         unified twin reproduces this op's values exactly. Supports the legacy
-        per-call ``quant_mode`` override."""
+        per-call ``quant_mode`` override. The twin carries no tp axis and the
+        retired math divided its SOL by ``moe_tp_size``, so non-default tp is
+        rejected loudly rather than silently answered as tp=1."""
+        if self._moe_tp_size != 1:
+            raise NotImplementedError(
+                f"{type(self).__name__}.query shim supports moe_tp_size=1 only (the unified "
+                "expert-compute twin carries no tp axis); evaluate a real op list via "
+                "EngineHandle.evaluate_ops_json."
+            )
         _, eval_kwargs = super()._engine_query_plan(kwargs)
         from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
 

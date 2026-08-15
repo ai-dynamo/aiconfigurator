@@ -103,9 +103,9 @@ class ContextAttention(Operation):
     """
     Context (prefill) attention operation.
 
-    Owns ``_data_cache: {key: LoadedOpData}`` for the context attention CSV.
-    No SOL clamp on the loaded table (legacy ``_correct_data`` did not
-    correct context attention) — only grid extrapolation runs in ``load_data``.
+    Owns ``_data_cache: {key: LoadedOpData}`` for the context attention CSV —
+    raw as-collected rows (no load-time clamp or grid pre-expansion; the
+    engine owns interpolation and the SOL floor).
     """
 
     _data_cache: ClassVar[dict] = {}
@@ -151,12 +151,9 @@ class ContextAttention(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads context_attention CSV into the class cache,
-        applies grid extrapolation, binds ``database._context_attention_data``.
-
-        Mirrors ``GEMM.load_data``: correction/extrapolation operate on the
-        canonical class-cache value (passed explicitly), then the instance
-        attr is bound, respecting any pre-set test override."""
+        """Idempotent. Loads context_attention CSV into the class cache
+        (raw rows) and binds ``database._context_attention_data``,
+        respecting any pre-set test override."""
         import os
 
         from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
@@ -203,9 +200,9 @@ class GenerationAttention(Operation):
     """
     Generation (decode) attention operation.
 
-    Owns an extrapolated SILICON working cache plus a raw measured cache for
-    empirical utilization calibration. ``load_data`` applies SOL clamping,
-    snapshots the measured rows, then expands the working grid.
+    Owns the SILICON row cache (raw as-collected; the load-time SOL clamp
+    and grid expansion retired with #1357 PR-5 — the engine owns both) plus
+    the raw-cache alias kept for its historical consumers.
     """
 
     _data_cache: ClassVar[dict] = {}
@@ -242,11 +239,10 @@ class GenerationAttention(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads generation_attention CSV, clamps to SOL,
-        preserves measured rows, extrapolates the working grid, and binds both
-        database views.
+        """Idempotent. Loads generation_attention CSV (raw rows; no clamp,
+        no grid expansion) and binds both database views.
 
-        Mirrors ``GEMM.load_data``: correction/extrapolation operate on the
+        Mirrors ``GEMM.load_data``: loading operates on the
         canonical class-cache value (passed explicitly), then the instance
         attr is bound, respecting any pre-set test override."""
         import os
@@ -350,8 +346,8 @@ class EncoderAttention(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads encoder_attention CSV into the class cache,
-        applies grid extrapolation, binds ``database._encoder_attention_data``.
+        """Idempotent. Loads encoder_attention CSV into the class cache
+        (raw rows), binds ``database._encoder_attention_data``.
         """
         import os
 

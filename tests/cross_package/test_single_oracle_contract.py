@@ -141,6 +141,7 @@ def _operation_defs(tree):
 
 
 def test_no_query_table_math_in_operations():
+    assert OPERATIONS_DIR.is_dir(), f"source layout expected at {OPERATIONS_DIR} (scan must not pass vacuously)"
     offenders = []
     for path in sorted(OPERATIONS_DIR.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -193,6 +194,9 @@ def test_perf_database_query_surface_is_frozen():
 
 
 def test_no_perf_interp_references_in_operations():
+    assert OPERATIONS_DIR.is_dir() and PERF_DATABASE_PATH.is_file(), (
+        f"source layout expected at {OPERATIONS_DIR} (scan must not pass vacuously)"
+    )
     offenders = []
     for path in sorted(OPERATIONS_DIR.glob("*.py")) + [PERF_DATABASE_PATH]:
         text = path.read_text(encoding="utf-8")

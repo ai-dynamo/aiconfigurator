@@ -1245,13 +1245,17 @@ def _evaluate_single_op(
         imbalance_correction_scale=float(imbalance_correction_scale),
         x=None if x is None else int(x),
     )
-    if database_mode == DatabaseMode.SOL_FULL:
-        handle = _probe_handle_for(database, None)
-        (_, sol_time, sol_math, sol_mem) = handle.evaluate_ops_sol_json(ops_json, **eval_kwargs)[0]
-        return sol_time, sol_math, sol_mem
+    # Normalize enum-or-string modes to the wire token BEFORE branching, so a
+    # plain "SOL_FULL" string takes the decomposition branch exactly like the
+    # enum member (the str() tolerance below otherwise routes it into the
+    # probe as a database mode and returns the wrong type).
     mode_token = None
     if database_mode is not None:
         mode_token = getattr(database_mode, "name", str(database_mode))
+    if mode_token == DatabaseMode.SOL_FULL.name:
+        handle = _probe_handle_for(database, None)
+        (_, sol_time, sol_math, sol_mem) = handle.evaluate_ops_sol_json(ops_json, **eval_kwargs)[0]
+        return sol_time, sol_math, sol_mem
     handle = _probe_handle_for(database, mode_token)
     (_, latency, energy, source) = handle.evaluate_ops_json(ops_json, **eval_kwargs)[0]
     return PerformanceResult(latency, energy=energy, source=source)

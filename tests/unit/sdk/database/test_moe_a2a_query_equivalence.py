@@ -97,7 +97,9 @@ def test_l1_deepep_query_equivalence():
             context = f"deepep_ht {node=} {hidden=} {topk=} {experts=} {sms=} {tok=}"
             assert float(unified) == pytest.approx(tokens[tok]["latency"] / 1000.0, rel=REL_TOL), context
             normal_comparisons += 1
-    assert normal_comparisons == 3 * sum(1 for _ in _iter_slices(legacy_normal, 5))
+    # _exact_token_probes dedupes min/median/max, so short token axes yield
+    # fewer than three probes — count what actually ran, not 3x slices.
+    assert normal_comparisons == sum(len(_exact_token_probes(t)) for _, t in _iter_slices(legacy_normal, 5))
     assert normal_comparisons > 50
 
     # Legacy LL table: [node][hidden][topk][experts] -> {tokens: leaf (us)}; no
@@ -114,7 +116,7 @@ def test_l1_deepep_query_equivalence():
             context = f"deepep_ll {node=} {hidden=} {topk=} {experts=} {tok=}"
             assert float(unified) == pytest.approx(tokens[tok]["latency"] / 1000.0, rel=REL_TOL), context
             ll_comparisons += 1
-    assert ll_comparisons == 3 * sum(1 for _ in _iter_slices(legacy_ll, 4))
+    assert ll_comparisons == sum(len(_exact_token_probes(t)) for _, t in _iter_slices(legacy_ll, 4))
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +164,7 @@ def test_l1_trtllm_alltoall_query_equivalence():
             context = f"{kernel_source} {op_name} {quant.name} {node=} {hidden=} {topk=} {experts=} {ep=} {tok=}"
             assert float(unified) == pytest.approx(tokens[tok]["latency"], rel=REL_TOL), context
             comparisons += 1
-    assert comparisons == 3 * sum(1 for _ in _iter_slices(legacy_table, 8))
+    assert comparisons == sum(len(_exact_token_probes(t)) for _, t in _iter_slices(legacy_table, 8))
     assert comparisons > 100
 
 

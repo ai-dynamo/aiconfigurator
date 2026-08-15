@@ -47,6 +47,7 @@ def test_msa_sol_scales_with_workload():
     from aiconfigurator.sdk.perf_database import get_database_view
 
     db = get_database_view("b200_sxm", "sglang", "0.5.14", database_mode="SOL")
+    assert db is not None, "b200_sxm/sglang/0.5.14 data missing"
     op = _ctx_msa()
     small = float(op.query(db, batch_size=8, s=512, prefix=0))
     large = float(op.query(db, batch_size=8, s=2048, prefix=0))

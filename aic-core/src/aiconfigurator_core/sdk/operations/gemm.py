@@ -4,7 +4,7 @@
 """GEMM operation and its associated CSV-backed data (compute_scale, scale_matrix).
 
 Stage 2 of ISSUE-05/AIC-542: GEMM now owns its three CSV tables, SOL
-correction, and grid extrapolation. ``PerfDatabase.query_gemm /
+and raw-row ownership. ``PerfDatabase.query_gemm /
 query_compute_scale / query_scale_matrix`` are tombstoned shims (#1357 PR-5).
 
 Lazy-load Pattern A: ``query()`` (and the delegating ``_query_*_table``
@@ -139,8 +139,8 @@ class GEMM(Operation):
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
         """Idempotent. On cache miss: parses the three CSVs into the class-
-        level caches, applies SOL correction + grid extrapolation directly
-        on those canonical wrappers, and records the load. Always: binds
+        level caches (raw as-collected rows; no load-time clamp or grid
+        pre-expansion — the engine owns both) and records the load. Always: binds
         ``database._gemm_data``/``_compute_scale_data``/``_scale_matrix_data``
         to the cached wrappers.
 
@@ -173,18 +173,13 @@ class GEMM(Operation):
             compute_scale_loaded = _load(PerfDataFilename.compute_scale, load_compute_scale_data)
             scale_matrix_loaded = _load(PerfDataFilename.scale_matrix, load_scale_matrix_data)
 
-            # Clamp the CANONICAL class-cache values to the SOL floor directly
-            # (not via ``database._gemm_data``) so a pre-set test override
-            # can't leave the cached wrapper uncorrected — a later DB sharing
-            # the same cache key would otherwise bind unclamped data.
-            #
-            # No load-time grid pre-expansion: queries resolve on the RAW table
-            # via the engine's interpolation (site curves + util-hold + nearest-site transfer),
-            # so rectangularizing the scattered (n, k) shapes is both redundant
-            # and harmful (it mangles asymmetric dense-m sweeps).
+            # No load-time SOL clamp or grid pre-expansion (#1357 PR-5): the
+            # loaded wrappers are the RAW collected rows (the data plane for
+            # enumeration/charts); the engine clamps and interpolates its own
+            # load, so query values stay SOL-floored via the single oracle.
 
-            # All three loads + correction + extrapolation succeeded — commit
-            # atomically so partially-populated cache state can never be observed.
+            # All three loads succeeded — commit atomically so partially-
+            # populated cache state can never be observed.
             cls._data_cache[key] = gemm_loaded
             cls._compute_scale_cache[key] = compute_scale_loaded
             cls._scale_matrix_cache[key] = scale_matrix_loaded
@@ -235,81 +230,6 @@ class GEMM(Operation):
     # plane (enumeration/charts); the compiled engine applies the same clamp
     # to its own load (see perf_database/gemm.rs), so QUERY values stay
     # SOL-floored via the single oracle.
-
-    # ------------------------------------------------------------------
-    # Grid extrapolation (formerly in PerfDatabase.__init__)
-    # ------------------------------------------------------------------
-
-    # GEMM extrapolation target grid (lifted verbatim from perf_database.py
-    # so behavior stays bit-identical).
-    _EXTRAPOLATION_TARGET_X: ClassVar[list] = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        48,
-        64,
-        80,
-        96,
-        128,
-        160,
-        192,
-        224,
-        256,
-        320,
-        384,
-        448,
-        512,
-        640,
-        768,
-        896,
-        1024,
-        2048,
-        4096,
-        8192,
-        16384,
-        32768,
-        131072,
-        524288,
-        1048576,
-        2097152 * 8,
-    ]  # num_tokens
-
-    _EXTRAPOLATION_TARGET_Y: ClassVar[list] = [
-        32,
-        64,
-        128,
-        256,
-        512,
-        768,
-        1024,
-        1536,
-        2048,
-        2560,
-        3072,
-        3584,
-        4096,
-        5120,
-        6144,
-        7168,
-        8192,
-        10240,
-        12288,
-        14336,
-        16384,
-        20480,
-        24576,
-        28672,
-        32768,
-        40960,
-        49152,
-        57344,
-        65536,
-        131072,
-        262144,
-    ]  # to fit vocab gemm
 
     # ------------------------------------------------------------------
     # Table query classmethods (formerly PerfDatabase.query_*)

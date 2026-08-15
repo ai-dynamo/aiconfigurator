@@ -178,7 +178,20 @@ def test_l1_trtllm_wideep_moe_compute_query_equivalence():
         # collected, the unified query answers with the FIRST available
         # distribution in table insertion order.
         first_dist = next(iter(legacy_table[kernel][quant]))
-        first_tokens = legacy_table[kernel][quant][first_dist][topk][experts][hidden][inter][slots][tp][ep]
+        # .get() chain: the table is a nested defaultdict and _iter_slices holds
+        # live iterators over these levels — direct indexing on a missing key
+        # would vivify entries mid-iteration.
+        first_tokens = (
+            legacy_table[kernel][quant]
+            .get(first_dist, {})
+            .get(topk, {})
+            .get(experts, {})
+            .get(hidden, {})
+            .get(inter, {})
+            .get(slots, {})
+            .get(tp, {})
+            .get(ep, {})
+        )
         tok = min(tokens)
         if tok in first_tokens:
             fallback = db.query_moe_expert_compute(

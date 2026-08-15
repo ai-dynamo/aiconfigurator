@@ -26,3 +26,46 @@ def test_system_spec_was_loaded_correctly(stub_perf_db):
     assert isinstance(spec, dict)
     assert spec["gpu"]["bfloat16_tc_flops"] == 1_000.0
     assert spec["node"]["inter_node_bw"] == 100.0
+
+
+# ---------------------------------------------------------------------------
+# Shim phase inference (base Operation._engine_query_is_context)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected"),
+    [("context", True), ("prefill", True), ("generation", False), ("decode", False)],
+)
+def test_module_shape_phase_marker_inference(phase, expected):
+    """The "module" shim shape must map BOTH phase vocabularies: the mamba/gdn
+    kernels store context/generation, FPMForwardOp stores prefill/decode
+    (``fpm_forward._PHASES``)."""
+    from aiconfigurator_core.sdk.operations.base import Operation
+
+    op = Operation("probe", 1.0)
+    op._phase = phase
+    assert op._engine_query_is_context({}) is expected
+
+
+def test_module_shape_phase_inference_hint_and_error():
+    from aiconfigurator_core.sdk.operations.base import Operation
+
+    op = Operation("probe", 1.0)
+    # explicit hint wins even with no marker
+    assert op._engine_query_is_context({"is_context": False}) is False
+    # no marker, no hint -> loud error naming the escape hatch
+    with pytest.raises(ValueError, match="is_context"):
+        op._engine_query_is_context({})
+
+
+def test_fpm_forward_phase_tokens_stay_mapped():
+    """Deliberate-edit tripwire: if ``fpm_forward._PHASES`` ever grows a token
+    the base inference does not recognize, fail here instead of at query time."""
+    from aiconfigurator_core.sdk.operations import fpm_forward
+    from aiconfigurator_core.sdk.operations.base import Operation
+
+    for phase in fpm_forward._PHASES:
+        op = Operation("probe", 1.0)
+        op._phase = phase
+        assert op._engine_query_is_context({}) in (True, False)

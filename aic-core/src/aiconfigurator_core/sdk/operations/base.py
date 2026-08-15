@@ -336,9 +336,13 @@ class Operation:
         is_context = getattr(self, "_is_context", None)
         if is_context is not None:
             return bool(is_context)
+        # Instance phase markers: the mamba/gdn kernels use context/generation,
+        # FPMForwardOp uses prefill/decode (fpm_forward._PHASES).
         phase = getattr(self, "_phase", None)
-        if phase in ("context", "generation"):
-            return phase == "context"
+        if phase in ("context", "prefill"):
+            return True
+        if phase in ("generation", "decode"):
+            return False
         raise ValueError(f"{type(self).__name__}.query cannot infer the evaluation phase; pass is_context=True/False.")
 
     def get_weights(self, **kwargs):

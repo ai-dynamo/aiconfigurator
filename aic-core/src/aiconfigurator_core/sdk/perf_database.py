@@ -3112,9 +3112,17 @@ class PerfDatabase:
         expert-compute twin: the engine's moe_expert_compute table absorbed
         the legacy ``wideep_moe_perf.parquet`` rows verbatim (native
         kernel_source, ``num_slots`` pass-through, rows fanned to both
-        phases)."""
+        phases). The twin carries no tp axis, and the retired math divided
+        its SOL by ``moe_tp_size`` — reject non-default tp loudly rather
+        than silently answering as tp=1."""
         from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
 
+        if moe_tp_size != 1:
+            raise NotImplementedError(
+                "query_wideep_moe_compute shim supports moe_tp_size=1 only (the unified "
+                "expert-compute twin carries no tp axis); evaluate a real op list via "
+                "EngineHandle.evaluate_ops_json."
+            )
         op = MoEExpertCompute(
             "wideep_moe_query",
             1.0,
@@ -3485,7 +3493,6 @@ class PerfDatabase:
         )
         return self._engine_query_shim(op, x=int(num_tokens), database_mode=database_mode)
 
-    # to simplify, we no longer support allreduce_strategy
     def moe_a2a_coverage(self, hidden_size: int, topk: int, num_experts: int) -> dict[str, set[tuple[int, int]]]:
         """Probe moe_a2a coverage for one model shape (PR 2's enumerator contract).
 

@@ -150,7 +150,7 @@ class TestTrtLLMWideEPMoE:
         the twin's job inside the engine)."""
         from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
 
-        moe = self._make()
+        moe = self._make(moe_tp_size=1)
         result = moe.query(object(), x=16)
 
         twin = seam["op"]
@@ -169,6 +169,15 @@ class TestTrtLLMWideEPMoE:
         assert isinstance(result, PerformanceResult)
         assert float(result) == 10.5
         assert result.energy == 2.5
+
+    def test_query_rejects_nondefault_moe_tp(self, seam):
+        """The unified twin carries no tp axis and the retired math divided
+        its SOL by moe_tp_size — tp != 1 must be a loud error, never a silent
+        tp=1 value (CodeRabbit review on #1552)."""
+        moe = self._make(moe_tp_size=2)
+        with pytest.raises(NotImplementedError, match="moe_tp_size=1 only"):
+            moe.query(object(), x=16)
+        assert "op" not in seam  # rejected before reaching the engine seam
 
     def test_query_propagates_attention_dp_to_twin(self, seam):
         """attention_dp_size rides the twin (the engine globalizes tokens);

@@ -41,9 +41,12 @@ def _infer_phase(op) -> bool | None:
     is_context = getattr(op, "_is_context", None)
     if is_context is not None:
         return bool(is_context)
+    # context/generation: mamba/gdn kernels; prefill/decode: FPMForwardOp.
     phase = getattr(op, "_phase", None)
-    if phase in ("context", "generation"):
-        return phase == "context"
+    if phase in ("context", "prefill"):
+        return True
+    if phase in ("generation", "decode"):
+        return False
     shape = getattr(type(op), "_ENGINE_QUERY_SHAPE", None)
     if shape in ("context", "generation"):
         return shape == "context"
