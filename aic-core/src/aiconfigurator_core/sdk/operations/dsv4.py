@@ -125,21 +125,14 @@ class DeepSeekV4MHCModule(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads mhc_module CSV, binds ``database._mhc_module_data``."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        """Idempotent. Fetches the engine's mhc_module table view, binds
+        ``database._mhc_module_data``."""
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.mhc_module.value
-            )
-            sources = database._build_op_sources(PerfDataFilename.mhc_module, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(
-                load_mhc_module_data(sources), PerfDataFilename.mhc_module, primary_path
-            )
+            cls._data_cache[key] = load_view(database, "_mhc_module_data", PerfDataFilename.mhc_module)
             cls._record_load()
 
         if "_mhc_module_data" not in database.__dict__:
@@ -280,9 +273,8 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads the csa+hca context split files, merges them,
-        deep-copies the merged dict for topk-piecewise lookup, and loads the
-        two DSV4 sparse-kernel CSVs.
+        """Idempotent. Fetches the engine's merged csa+hca context table view
+        and the three DSV4 sparse-kernel views.
 
         Binds:
         - ``database._context_deepseek_v4_attention_module_data``
@@ -291,40 +283,41 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         """
         import os
 
+        from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
         from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
 
-            def _load(filename_enum):
-                primary_path = resolve_op_data_path(
+            def _primary(filename_enum):
+                return resolve_op_data_path(
                     system_data_root, database.backend, database.version, filename_enum.value
                 )
-                sources = database._build_op_sources(filename_enum, primary_path, system_data_root)
-                return LoadedOpData(load_context_dsv4_kind_module_data(sources), filename_enum, primary_path)
 
-            ctx_split = [
-                _load(PerfDataFilename.dsv4_csa_context_module),
-                _load(PerfDataFilename.dsv4_hca_context_module),
-            ]
-            cls._data_cache[key] = _load_dsv4_split(ctx_split)
-            ctx_merged = cls._data_cache[key]
-            # the engine's interpolation resolves on the raw merged table directly; the raw
-            # wrapper is kept as a plain alias for backward compatibility.
-            cls._raw_data_cache[key] = ctx_merged
-
-            def _load_sparse(filename_enum):
-                primary_path = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, filename_enum.value
+            # The csa+hca merge happens engine-side; an absent-or-empty merge
+            # binds None, matching the retired _load_dsv4_split semantics
+            # (whose filepath came from the csa side, loaded first).
+            merged_view = fetch_table_view(database, "_context_deepseek_v4_attention_module_data")
+            if merged_view:
+                cls._data_cache[key] = LoadedOpData(
+                    merged_view,
+                    PerfDataFilename.dsv4_csa_context_module,
+                    _primary(PerfDataFilename.dsv4_csa_context_module),
                 )
-                sources = database._build_op_sources(filename_enum, primary_path, system_data_root)
-                return LoadedOpData(load_dsv4_sparse_kernel_data(sources), filename_enum, primary_path)
+            else:
+                cls._data_cache[key] = None
+            # The raw wrapper stays a plain alias for backward compatibility.
+            cls._raw_data_cache[key] = cls._data_cache[key]
+
+            def _load_sparse(sub_key, filename_enum):
+                view = fetch_table_view(database, f"_dsv4_sparse_kernel_data.{sub_key}")
+                return LoadedOpData(view, filename_enum, _primary(filename_enum))
 
             cls._sparse_kernel_cache[key] = {
-                "paged_mqa_logits": _load_sparse(PerfDataFilename.dsv4_paged_mqa_logits_module),
-                "hca_attn": _load_sparse(PerfDataFilename.dsv4_hca_attn_module),
-                "csa_attn": _load_sparse(PerfDataFilename.dsv4_csa_attn_module),
+                "paged_mqa_logits": _load_sparse("paged_mqa_logits", PerfDataFilename.dsv4_paged_mqa_logits_module),
+                "hca_attn": _load_sparse("hca_attn", PerfDataFilename.dsv4_hca_attn_module),
+                "csa_attn": _load_sparse("csa_attn", PerfDataFilename.dsv4_csa_attn_module),
             }
 
             cls._record_load()
@@ -386,29 +379,33 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads the csa+hca generation split files, merges
-        them, binds ``database._generation_deepseek_v4_attention_module_data``.
+        """Idempotent. Fetches the engine's merged csa+hca generation table
+        view, binds ``database._generation_deepseek_v4_attention_module_data``.
         """
         import os
 
+        from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
         from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-
-            def _load(filename_enum):
-                primary_path = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, filename_enum.value
+            # The csa+hca merge happens engine-side; an absent-or-empty merge
+            # binds None, matching the retired _load_dsv4_split semantics
+            # (whose filepath came from the csa side, loaded first).
+            merged_view = fetch_table_view(database, "_generation_deepseek_v4_attention_module_data")
+            if merged_view:
+                system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+                primary = resolve_op_data_path(
+                    system_data_root,
+                    database.backend,
+                    database.version,
+                    PerfDataFilename.dsv4_csa_generation_module.value,
                 )
-                sources = database._build_op_sources(filename_enum, primary_path, system_data_root)
-                return LoadedOpData(load_generation_dsv4_kind_module_data(sources), filename_enum, primary_path)
-
-            gen_split = [
-                _load(PerfDataFilename.dsv4_csa_generation_module),
-                _load(PerfDataFilename.dsv4_hca_generation_module),
-            ]
-            cls._data_cache[key] = _load_dsv4_split(gen_split)
+                cls._data_cache[key] = LoadedOpData(
+                    merged_view, PerfDataFilename.dsv4_csa_generation_module, primary
+                )
+            else:
+                cls._data_cache[key] = None
 
             cls._record_load()
 
@@ -500,17 +497,14 @@ class DeepSeekV4MegaMoEModule(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.dsv4_megamoe_module.value
-            )
-            cls._data_cache[key] = LoadedOpData(
-                load_dsv4_megamoe_module_data(primary_path), PerfDataFilename.dsv4_megamoe_module, primary_path
-            )
+            # Single-primary semantics live in the engine view (it reads only
+            # the head of the resolved source list, like the retired loader).
+            cls._data_cache[key] = load_view(database, "_dsv4_megamoe_module_data", PerfDataFilename.dsv4_megamoe_module)
             cls._record_load()
 
         if "_dsv4_megamoe_module_data" not in database.__dict__:

@@ -539,39 +539,17 @@ class MoEAllToAll(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads the unified moe_a2a table (new schema + legacy
-        adapters) on the three inference backends; binds ``None`` otherwise.
+        """Idempotent. Fetches the engine's unified moe_a2a table view (new
+        schema + legacy adapters, merged engine-side) on the three inference
+        backends; binds ``None`` otherwise.
         """
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             if database.backend in cls._SUPPORTED_BACKENDS:
-                system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-
-                primary = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, PerfDataFilename.moe_a2a.value
-                )
-                sources = database._build_op_sources(PerfDataFilename.moe_a2a, primary, system_data_root)
-
-                legacy_sources = {}
-                for kwarg, filename_enum in (
-                    ("legacy_normal_sources", PerfDataFilename.wideep_deepep_normal),
-                    ("legacy_ll_sources", PerfDataFilename.wideep_deepep_ll),
-                    ("legacy_trtllm_alltoall_sources", PerfDataFilename.trtllm_alltoall),
-                ):
-                    legacy_primary = resolve_op_data_path(
-                        system_data_root, database.backend, database.version, filename_enum.value
-                    )
-                    legacy_sources[kwarg] = database._build_op_sources(filename_enum, legacy_primary, system_data_root)
-
-                cls._data_cache[key] = LoadedOpData(
-                    load_moe_a2a_data(sources, **legacy_sources),
-                    PerfDataFilename.moe_a2a,
-                    primary,
-                )
+                cls._data_cache[key] = load_view(database, "_moe_a2a_data", PerfDataFilename.moe_a2a)
             else:
                 cls._data_cache[key] = None
 
@@ -950,39 +928,17 @@ class MoEExpertCompute(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads the unified moe_ep table (new schema + legacy
-        adapters) on the three inference backends; binds ``None`` otherwise.
+        """Idempotent. Fetches the engine's unified moe_ep table view (new
+        schema + legacy adapters, merged engine-side) on the three inference
+        backends; binds ``None`` otherwise.
         """
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             if database.backend in cls._SUPPORTED_BACKENDS:
-                system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-
-                primary = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, PerfDataFilename.moe_expert_compute.value
-                )
-                sources = database._build_op_sources(PerfDataFilename.moe_expert_compute, primary, system_data_root)
-
-                legacy_sources = {}
-                for kwarg, filename_enum in (
-                    ("legacy_context_sources", PerfDataFilename.wideep_context_moe),
-                    ("legacy_generation_sources", PerfDataFilename.wideep_generation_moe),
-                    ("legacy_trtllm_wideep_sources", PerfDataFilename.wideep_moe_compute),
-                ):
-                    legacy_primary = resolve_op_data_path(
-                        system_data_root, database.backend, database.version, filename_enum.value
-                    )
-                    legacy_sources[kwarg] = database._build_op_sources(filename_enum, legacy_primary, system_data_root)
-
-                cls._data_cache[key] = LoadedOpData(
-                    load_moe_expert_compute_data(sources, **legacy_sources),
-                    PerfDataFilename.moe_expert_compute,
-                    primary,
-                )
+                cls._data_cache[key] = load_view(database, "_moe_ep_data", PerfDataFilename.moe_expert_compute)
             else:
                 cls._data_cache[key] = None
 

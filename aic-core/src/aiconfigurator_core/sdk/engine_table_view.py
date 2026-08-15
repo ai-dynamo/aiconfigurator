@@ -122,18 +122,58 @@ def _rehydrate(node: dict, layers: tuple[KeyConverter, ...], depth: int) -> dict
     return out
 
 
+def _database_has_data_dir(database) -> bool:
+    """Whether the database's backend/version has ANY on-disk data, in either
+    the legacy ``<data>/<backend>/<version>`` or the family-first
+    ``<data>/<family>/<backend>/<version>`` layout — the same existence gate
+    the Rust engine applies at load. Estimate-only runs (SOL mode over a
+    version with no collected data) construct a PerfDatabase whose loaders
+    always answered ``None``; the probe engine would refuse to load at all,
+    so the view layer answers ``None`` without touching it."""
+    import os
+
+    root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+    if os.path.isdir(os.path.join(root, database.backend, database.version)):
+        return True
+    try:
+        family_dirs = os.listdir(root)
+    except OSError:
+        return False
+    return any(
+        os.path.isdir(os.path.join(root, family, database.backend, database.version)) for family in family_dirs
+    )
+
+
 def fetch_table_view(database, attribute: str):
     """Fetch one loader-shaped table from the engine, keys rehydrated.
 
     Returns ``None`` exactly when the retired Python loader returned ``None``
-    (every source file missing). The engine handle is the cached probe handle
-    for ``database`` — the same spec (and thus the same shared-layer source
-    map) the query path uses.
+    (every source file missing — including the estimate-only case where the
+    whole backend/version has no data directory). The engine handle is the
+    cached probe handle for ``database`` — the same spec (and thus the same
+    shared-layer source map) the query path uses.
     """
     from aiconfigurator_core.sdk import engine as _engine
 
+    if not _database_has_data_dir(database):
+        return None
     handle = _engine._probe_handle_for(database, None)
     raw = handle._engine.table_view_json(attribute)
     if raw is None:
         return None
     return _rehydrate(json.loads(raw), VIEW_KEY_LAYERS[attribute], 0)
+
+
+def load_view(database, attribute: str, filename_enum):
+    """``LoadedOpData`` over the engine table view — the op classes' binding
+    helper. Keeps the retired loaders' wrapper contract intact: ``.loaded``
+    reflects whether any source existed, and ``.filepath`` stays the resolved
+    PRIMARY path so data-miss errors keep naming the exact expected file."""
+    import os
+
+    from aiconfigurator_core.sdk.operations.base import resolve_op_data_path
+    from aiconfigurator_core.sdk.perf_database import LoadedOpData
+
+    system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+    primary = resolve_op_data_path(system_data_root, database.backend, database.version, filename_enum.value)
+    return LoadedOpData(fetch_table_view(database, attribute), filename_enum, primary)

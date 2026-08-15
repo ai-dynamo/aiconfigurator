@@ -22,6 +22,8 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
+import aiconfigurator_core
+
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.operations import util_empirical
 from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
@@ -50,17 +52,12 @@ logger = logging.getLogger(__name__)
 # follow the structure (efficiency drops with weight precision, mildly
 # recovers as activation precision drops); levels are relative and tunable —
 # only ratios are consumed.
+# PROJECTION of the engine's table (PR-6): the Rust
+# `operators/gemm.rs::GEMM_QUANT_UTIL_LEVEL` is the single source (with the
+# same per-row [data]/[inferred] provenance notes); rebuilding the dict from
+# the FFI ends the two-sided sync discipline every new quant used to need.
 _GEMM_QUANT_UTIL_LEVEL: dict[tuple[float, float], float] = {
-    (2, 1): 0.70,  # w16a16 / bfloat16               [data 0.55-0.79]
-    (1, 1): 0.55,  # w8a16 / int8_wo                 [inferred]
-    (0.5625, 1): 0.45,  # w4a16+scales / nvfp4_wo (Marlin FP4, BF16 compute) [copies inferred (0.5,1)]
-    (0.5, 1): 0.45,  # w4a16 / int4_wo (fused-dequant weight-only runs below
-    #                  the bf16 compute roofline it shares; Marlin-class) [inferred]
-    (1, 2): 0.45,  # w8a8 / fp8(_block/_ootb), sq    [data 0.28-0.55]
-    (0.5, 2): 0.35,  # w4a8                          [inferred]
-    (1, 4): 0.30,  # w8a4                            [inferred]
-    (0.5, 4): 0.30,  # w4a4                          [inferred ≈ nvfp4]
-    (0.5625, 4): 0.30,  # w4a4 / nvfp4               [data 0.21-0.36]
+    (memory, compute): level for memory, compute, level in aiconfigurator_core.gemm_quant_util_levels()
 }
 _GEMM_QUANT_UTIL_DEFAULT = 0.45  # unlisted profile: mid-range relative level
 
@@ -138,9 +135,10 @@ class GEMM(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. On cache miss: parses the three CSVs into the class-
-        level caches (raw as-collected rows; no load-time clamp or grid
-        pre-expansion — the engine owns both) and records the load. Always: binds
+        """Idempotent. On cache miss: fetches the three engine table views
+        (raw as-collected rows in the retired parsers' exact shape — the
+        engine owns parsing, clamping and interpolation) and records the
+        load. Always: binds
         ``database._gemm_data``/``_compute_scale_data``/``_scale_matrix_data``
         to the cached wrappers.
 
@@ -148,35 +146,18 @@ class GEMM(Operation):
         ``db._gemm_data = LoadedOpData(...)``) are respected — the binds
         below are gated on ``"_gemm_data" not in database.__dict__`` so
         intentional overrides survive."""
-        import os
-
-        # Lazy import to avoid the circular dependency between gemm.py and
-        # perf_database.py (perf_database delegates to GEMM at query time).
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache or key not in cls._compute_scale_cache or key not in cls._scale_matrix_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-
-            def _load(filename_enum, loader):
-                primary_path = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, filename_enum.value
-                )
-                sources = database._build_op_sources(filename_enum, primary_path, system_data_root)
-                return LoadedOpData(loader(sources), filename_enum, primary_path)
-
-            # Load all three into locals first so a loader failure on the second
-            # or third file doesn't leave the cache half-populated (which would
+            # Fetch all three into locals first so a failure on the second or
+            # third view doesn't leave the cache half-populated (which would
             # let a subsequent ``key in cls._data_cache`` early-out skip past
             # the missing siblings and crash downstream).
-            gemm_loaded = _load(PerfDataFilename.gemm, load_gemm_data)
-            compute_scale_loaded = _load(PerfDataFilename.compute_scale, load_compute_scale_data)
-            scale_matrix_loaded = _load(PerfDataFilename.scale_matrix, load_scale_matrix_data)
-
-            # No load-time SOL clamp or grid pre-expansion (#1357 PR-5): the
-            # loaded wrappers are the RAW collected rows (the data plane for
-            # enumeration/charts); the engine clamps and interpolates its own
-            # load, so query values stay SOL-floored via the single oracle.
+            gemm_loaded = load_view(database, "_gemm_data", PerfDataFilename.gemm)
+            compute_scale_loaded = load_view(database, "_compute_scale_data", PerfDataFilename.compute_scale)
+            scale_matrix_loaded = load_view(database, "_scale_matrix_data", PerfDataFilename.scale_matrix)
 
             # All three loads succeeded — commit atomically so partially-
             # populated cache state can never be observed.

@@ -102,21 +102,15 @@ class Mamba2Kernel(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads the packaged mamba2_perf Parquet perf table and binds
+        """Idempotent. Fetches the engine's mamba2_perf table view and binds
         ``database._mamba2_data``. No extrapolation (data is keyed by
         structural config tuples, not a dense grid)."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.mamba2.value
-            )
-            sources = database._build_op_sources(PerfDataFilename.mamba2, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(load_mamba2_data(sources), PerfDataFilename.mamba2, primary_path)
+            cls._data_cache[key] = load_view(database, "_mamba2_data", PerfDataFilename.mamba2)
             cls._record_load()
 
         if "_mamba2_data" not in database.__dict__:
@@ -195,20 +189,14 @@ class GDNKernel(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads the packaged gdn_perf Parquet perf table and binds
+        """Idempotent. Fetches the engine's gdn_perf table view and binds
         ``database._gdn_data``."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.gdn.value
-            )
-            sources = database._build_op_sources(PerfDataFilename.gdn, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(load_gdn_data(sources), PerfDataFilename.gdn, primary_path)
+            cls._data_cache[key] = load_view(database, "_gdn_data", PerfDataFilename.gdn)
             cls._record_load()
 
         if "_gdn_data" not in database.__dict__:
@@ -290,20 +278,14 @@ class KDAKernel(GDNKernel):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads the packaged kda_perf Parquet perf table and binds
+        """Idempotent. Fetches the engine's kda_perf table view and binds
         ``database._kda_data``."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.kda.value
-            )
-            sources = database._build_op_sources(PerfDataFilename.kda, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(load_kda_data(sources), PerfDataFilename.kda, primary_path)
+            cls._data_cache[key] = load_view(database, "_kda_data", PerfDataFilename.kda)
             cls._record_load()
 
         if "_kda_data" not in database.__dict__:

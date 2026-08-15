@@ -139,23 +139,14 @@ class ContextMLA(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads context_mla CSV, applies extrapolation, binds
+        """Idempotent. Fetches the engine's context_mla table view, binds
         ``database._context_mla_data``."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.context_mla.value
-            )
-            sources = database._build_op_sources(PerfDataFilename.context_mla, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(
-                load_context_mla_data(sources), PerfDataFilename.context_mla, primary_path
-            )
-            # No load-time grid pre-expansion: queries resolve on the RAW grid via the engine's interpolation.
+            cls._data_cache[key] = load_view(database, "_context_mla_data", PerfDataFilename.context_mla)
             cls._record_load()
 
         if "_context_mla_data" not in database.__dict__:
@@ -208,23 +199,14 @@ class GenerationMLA(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads generation_mla CSV, applies extrapolation, binds
+        """Idempotent. Fetches the engine's generation_mla table view, binds
         ``database._generation_mla_data``."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.generation_mla.value
-            )
-            sources = database._build_op_sources(PerfDataFilename.generation_mla, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(
-                load_generation_mla_data(sources), PerfDataFilename.generation_mla, primary_path
-            )
-            # No load-time grid pre-expansion: queries resolve on the RAW grid via the engine's interpolation.
+            cls._data_cache[key] = load_view(database, "_generation_mla_data", PerfDataFilename.generation_mla)
             cls._record_load()
 
         if "_generation_mla_data" not in database.__dict__:
@@ -281,20 +263,14 @@ class MLABmm(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads mla_bmm CSV, binds ``database._mla_bmm_data``.
-        No extrapolation (1D table)."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        """Idempotent. Fetches the engine's mla_bmm table view, binds
+        ``database._mla_bmm_data``."""
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.mla_bmm.value
-            )
-            sources = database._build_op_sources(PerfDataFilename.mla_bmm, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(load_mla_bmm_data(sources), PerfDataFilename.mla_bmm, primary_path)
+            cls._data_cache[key] = load_view(database, "_mla_bmm_data", PerfDataFilename.mla_bmm)
             cls._record_load()
 
         if "_mla_bmm_data" not in database.__dict__:
@@ -376,37 +352,20 @@ class MLAModule(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads BOTH context and generation module CSVs,
-        applies extrapolation to each, binds
-        ``database._context_mla_module_data`` and
+        """Idempotent. Fetches BOTH the engine's context and generation
+        module table views, binds ``database._context_mla_module_data`` and
         ``database._generation_mla_module_data``."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._context_data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-
-            context_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.mla_context_module.value
+            cls._context_data_cache[key] = load_view(
+                database, "_context_mla_module_data", PerfDataFilename.mla_context_module
             )
-            context_sources = database._build_op_sources(
-                PerfDataFilename.mla_context_module, context_path, system_data_root
+            cls._generation_data_cache[key] = load_view(
+                database, "_generation_mla_module_data", PerfDataFilename.mla_generation_module
             )
-            cls._context_data_cache[key] = LoadedOpData(
-                load_context_mla_module_data(context_sources), PerfDataFilename.mla_context_module, context_path
-            )
-
-            gen_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.mla_generation_module.value
-            )
-            gen_sources = database._build_op_sources(PerfDataFilename.mla_generation_module, gen_path, system_data_root)
-            cls._generation_data_cache[key] = LoadedOpData(
-                load_generation_mla_module_data(gen_sources), PerfDataFilename.mla_generation_module, gen_path
-            )
-
-            # No load-time grid pre-expansion: queries resolve on the RAW grid via the engine's interpolation.
             cls._record_load()
 
         if "_context_mla_module_data" not in database.__dict__:
@@ -468,33 +427,22 @@ class WideEPGenerationMLA(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads wideep_generation_mla CSV (SGLang only),
-        applies extrapolation, binds ``database._wideep_generation_mla_data``.
+        """Idempotent. Fetches the engine's wideep_generation_mla table view
+        (SGLang only), binds ``database._wideep_generation_mla_data``.
 
         Non-SGLang backends get ``None`` (matching the legacy
         ``if backend == "sglang"`` guard in ``__init__``)."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             if database.backend != "sglang":
                 cls._data_cache[key] = None
             else:
-                system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-                primary_path = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, PerfDataFilename.wideep_generation_mla.value
+                cls._data_cache[key] = load_view(
+                    database, "_wideep_generation_mla_data", PerfDataFilename.wideep_generation_mla
                 )
-                sources = database._build_op_sources(
-                    PerfDataFilename.wideep_generation_mla, primary_path, system_data_root
-                )
-                cls._data_cache[key] = LoadedOpData(
-                    load_wideep_generation_mla_data(sources),
-                    PerfDataFilename.wideep_generation_mla,
-                    primary_path,
-                )
-                # No load-time grid pre-expansion: queries resolve on the RAW grid via the engine's interpolation.
             cls._record_load()
 
         if "_wideep_generation_mla_data" not in database.__dict__:
@@ -555,30 +503,19 @@ class WideEPContextMLA(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads wideep_context_mla CSV (SGLang only),
-        applies extrapolation, binds ``database._wideep_context_mla_data``."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        """Idempotent. Fetches the engine's wideep_context_mla table view
+        (SGLang only), binds ``database._wideep_context_mla_data``."""
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             if database.backend != "sglang":
                 cls._data_cache[key] = None
             else:
-                system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-                primary_path = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, PerfDataFilename.wideep_context_mla.value
+                cls._data_cache[key] = load_view(
+                    database, "_wideep_context_mla_data", PerfDataFilename.wideep_context_mla
                 )
-                sources = database._build_op_sources(
-                    PerfDataFilename.wideep_context_mla, primary_path, system_data_root
-                )
-                cls._data_cache[key] = LoadedOpData(
-                    load_wideep_context_mla_data(sources),
-                    PerfDataFilename.wideep_context_mla,
-                    primary_path,
-                )
-                # No load-time grid pre-expansion: queries resolve on the RAW grid via the engine's interpolation.
             cls._record_load()
 
         if "_wideep_context_mla_data" not in database.__dict__:

@@ -611,8 +611,30 @@ def test_dsv4_megamoe_module_support_matrix_empty_without_data(tmp_path):
     systems_root = tmp_path / "systems"
     data_dir = systems_root / "data" / "sglang" / "0.5.10"
     data_dir.mkdir(parents=True)
+    # The engine table view resolves through the probe handle, whose Rust
+    # SystemSpec load needs the full gpu/node shape (the loader-stub era got
+    # away with a 1-key gpu dict).
     (systems_root / "gb200.yaml").write_text(
-        yaml.safe_dump({"data_dir": "data", "gpu": {"sm_version": 100}, "misc": {"nccl_version": "test"}})
+        yaml.safe_dump(
+            {
+                "data_dir": "data",
+                "gpu": {
+                    "sm_version": 100,
+                    "mem_bw": 8_000_000_000_000.0,
+                    "mem_bw_empirical_scaling_factor": 0.8,
+                    "mem_empirical_constant_latency": 0.000003,
+                    "bfloat16_tc_flops": 2_500_000_000_000_000.0,
+                    "fp8_tc_flops": 5_000_000_000_000_000.0,
+                },
+                "node": {
+                    "num_gpus_per_node": 4,
+                    "inter_node_bw": 100_000_000_000.0,
+                    "intra_node_bw": 900_000_000_000.0,
+                    "p2p_latency": 0.000001,
+                },
+                "misc": {"nccl_version": "test"},
+            }
+        )
     )
 
     db = PerfDatabase("gb200", "sglang", "0.5.10", str(systems_root))

@@ -348,7 +348,16 @@ class Operation:
         raise ValueError(f"{type(self).__name__}.query cannot infer the evaluation phase; pass is_context=True/False.")
 
     def get_weights(self, **kwargs):
-        raise NotImplementedError
+        """Constant weight bytes for this op, computed by the engine (PR-6).
+
+        The Python-side ``self._weights`` math retired; the compiled engine
+        owns the weight physics (``Op::weight_bytes``, including the
+        ``scale_factor`` treatment per family). Subclasses without an opspec
+        variant (the AFD orchestration ops, the deprecated ``Mamba2``
+        composite) keep explicit overrides."""
+        from aiconfigurator_core.sdk import engine
+
+        return engine.weight_of_op(self)
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:

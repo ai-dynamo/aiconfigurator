@@ -2120,6 +2120,9 @@ class PerfDatabase:
         # attribution — two different tables in the same source file share one
         # entry even if only one of them actually contributed rows.
         self.data_provenance: dict[str, list[dict[str, object]]] = {}
+        # (op_file_basename, sibling_path) pairs already warned about as
+        # low-fidelity cross-backend fallbacks — see _build_op_sources.
+        self._fallback_warned: set[tuple[str, str]] = set()
 
         # lazy per-op data ownership: every op class owns its CSV data and loads it on first query
         # via ``OpClass.load_data(database)``. No eager warm-up here — each op
@@ -2490,7 +2493,12 @@ class PerfDatabase:
                         "ks_filter": ks_filter,
                     }
                 )
-                if fallback_only & ks_filter:
+                if fallback_only & ks_filter and (op_file_basename, sibling_path) not in self._fallback_warned:
+                    # Once per (op file, sibling source) per database: source
+                    # resolution now reruns on every engine table-view fetch
+                    # (probe-spec keys are rebuilt each time), so an unguarded
+                    # warning would repeat per fetch.
+                    self._fallback_warned.add((op_file_basename, sibling_path))
                     logger.warning(
                         "Loading low-fidelity fallback rows for %s from %s. Queries "
                         "returning these rows are framework-implicit and may differ "

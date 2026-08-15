@@ -46,6 +46,8 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
+import aiconfigurator_core
+
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.operations import util_empirical
 from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
@@ -82,16 +84,12 @@ def _cache_key(database: PerfDatabase) -> tuple:
 # trustworthy enough to calibrate per-component (validated — splitting blows up because
 # the SOL attribution doesn't match the kernel's real bottleneck). Levels are relative
 # and tunable; only ratios are consumed.
+# PROJECTION of the engine's table (PR-6): the Rust
+# `operators/moe.rs::MOE_QUANT_UTIL_LEVEL` is the single source (with the
+# same per-row [data]/[inferred] provenance notes); rebuilding the dict from
+# the FFI ends the two-sided sync discipline every new quant used to need.
 _MOE_QUANT_UTIL_LEVEL: dict[tuple[float, float], float] = {
-    (2, 1): 0.53,  # w16a16 / bfloat16              [data]
-    (1, 1): 0.45,  # w8a16                          [inferred]
-    (0.5625, 1): 0.07,  # w4a16+scales / nvfp4_wo (Marlin FP4, weight-only BF16) [copies measured (0.5,1)]
-    (0.5, 1): 0.07,  # w4a16 (int4_wo, mxfp4)       [data]
-    (1, 2): 0.40,  # w8a8 / fp8(_block)             [data]
-    (0.5, 2): 0.15,  # w4a8 (w4afp8, mxfp4_mxfp8)   [data]
-    (1, 4): 0.30,  # w8a4                           [inferred]
-    (0.5, 4): 0.23,  # w4a4                         [data ≈ nvfp4]
-    (0.5625, 4): 0.23,  # w4a4 / nvfp4              [data]
+    (memory, compute): level for memory, compute, level in aiconfigurator_core.moe_quant_util_levels()
 }
 _MOE_QUANT_UTIL_DEFAULT = 0.30  # unlisted profile: mid-range relative level
 
@@ -188,56 +186,24 @@ class MoE(Operation):
         - ``_wideep_context_moe_data`` (None on non-SGLang)
         - ``_wideep_generation_moe_data`` (None on non-SGLang)
         """
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-
-            # Regular MoE table — ``load_moe_data`` returns ``(default, low_latency)``
-            # because rows tagged ``kernel_source="moe_torch_flow_min_latency"``
-            # are routed into a separate accumulator.
-            moe_primary = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.moe.value
-            )
-            moe_sources = database._build_op_sources(PerfDataFilename.moe, moe_primary, system_data_root)
-            moe_result = load_moe_data(moe_sources)
-            if isinstance(moe_result, tuple):
-                moe_default, moe_low_latency = moe_result
-            else:
-                moe_default, moe_low_latency = moe_result, None
-            cls._data_cache[key] = LoadedOpData(moe_default, PerfDataFilename.moe, moe_primary)
-            cls._low_latency_data_cache[key] = LoadedOpData(moe_low_latency, PerfDataFilename.moe, moe_primary)
+            # Regular MoE table — the engine folds one moe_perf read into the
+            # default and low-latency views (rows tagged
+            # ``kernel_source="moe_torch_flow_min_latency"`` route to the twin).
+            cls._data_cache[key] = load_view(database, "_moe_data", PerfDataFilename.moe)
+            cls._low_latency_data_cache[key] = load_view(database, "_moe_low_latency_data", PerfDataFilename.moe)
 
             # WideEP MoE tables — SGLang-only.
             if database.backend == "sglang":
-                ctx_primary = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, PerfDataFilename.wideep_context_moe.value
+                cls._wideep_context_data_cache[key] = load_view(
+                    database, "_wideep_context_moe_data", PerfDataFilename.wideep_context_moe
                 )
-                ctx_sources = database._build_op_sources(
-                    PerfDataFilename.wideep_context_moe, ctx_primary, system_data_root
-                )
-                cls._wideep_context_data_cache[key] = LoadedOpData(
-                    load_wideep_context_moe_data(ctx_sources),
-                    PerfDataFilename.wideep_context_moe,
-                    ctx_primary,
-                )
-
-                gen_primary = resolve_op_data_path(
-                    system_data_root,
-                    database.backend,
-                    database.version,
-                    PerfDataFilename.wideep_generation_moe.value,
-                )
-                gen_sources = database._build_op_sources(
-                    PerfDataFilename.wideep_generation_moe, gen_primary, system_data_root
-                )
-                cls._wideep_generation_data_cache[key] = LoadedOpData(
-                    load_wideep_generation_moe_data(gen_sources),
-                    PerfDataFilename.wideep_generation_moe,
-                    gen_primary,
+                cls._wideep_generation_data_cache[key] = load_view(
+                    database, "_wideep_generation_moe_data", PerfDataFilename.wideep_generation_moe
                 )
             else:
                 cls._wideep_context_data_cache[key] = None
@@ -347,41 +313,21 @@ class MoEDispatch(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads SGLang DeepEP normal + low-latency tables on
-        ``backend == "sglang"`` only; binds ``None`` on other backends.
+        """Idempotent. Fetches the engine's SGLang DeepEP normal +
+        low-latency table views on ``backend == "sglang"`` only; binds
+        ``None`` on other backends.
         """
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._normal_data_cache:
             if database.backend == "sglang":
-                system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-
-                normal_primary = resolve_op_data_path(
-                    system_data_root,
-                    database.backend,
-                    database.version,
-                    PerfDataFilename.wideep_deepep_normal.value,
+                cls._normal_data_cache[key] = load_view(
+                    database, "_wideep_deepep_normal_data", PerfDataFilename.wideep_deepep_normal
                 )
-                normal_sources = database._build_op_sources(
-                    PerfDataFilename.wideep_deepep_normal, normal_primary, system_data_root
-                )
-                cls._normal_data_cache[key] = LoadedOpData(
-                    load_wideep_deepep_normal_data(normal_sources),
-                    PerfDataFilename.wideep_deepep_normal,
-                    normal_primary,
-                )
-
-                ll_primary = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, PerfDataFilename.wideep_deepep_ll.value
-                )
-                ll_sources = database._build_op_sources(PerfDataFilename.wideep_deepep_ll, ll_primary, system_data_root)
-                cls._ll_data_cache[key] = LoadedOpData(
-                    load_wideep_deepep_ll_data(ll_sources),
-                    PerfDataFilename.wideep_deepep_ll,
-                    ll_primary,
+                cls._ll_data_cache[key] = load_view(
+                    database, "_wideep_deepep_ll_data", PerfDataFilename.wideep_deepep_ll
                 )
             else:
                 cls._normal_data_cache[key] = None
@@ -494,25 +440,18 @@ class TrtLLMWideEPMoE(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads ``_wideep_moe_compute_data`` only when
-        ``database.backend == "trtllm"``; binds ``None`` otherwise.
+        """Idempotent. Fetches the engine's ``_wideep_moe_compute_data``
+        table view only when ``database.backend == "trtllm"``; binds ``None``
+        otherwise.
         """
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             if database.backend == "trtllm":
-                system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-                primary = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, PerfDataFilename.wideep_moe_compute.value
-                )
-                sources = database._build_op_sources(PerfDataFilename.wideep_moe_compute, primary, system_data_root)
-                cls._data_cache[key] = LoadedOpData(
-                    load_wideep_moe_compute_data(sources),
-                    PerfDataFilename.wideep_moe_compute,
-                    primary,
+                cls._data_cache[key] = load_view(
+                    database, "_wideep_moe_compute_data", PerfDataFilename.wideep_moe_compute
                 )
             else:
                 cls._data_cache[key] = None
@@ -679,26 +618,17 @@ class TrtLLMWideEPMoEDispatch(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads ``_trtllm_alltoall_data`` only when
-        ``database.backend == "trtllm"``; binds ``None`` otherwise.
+        """Idempotent. Fetches the engine's ``_trtllm_alltoall_data`` table
+        view only when ``database.backend == "trtllm"``; binds ``None``
+        otherwise.
         """
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             if database.backend == "trtllm":
-                system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-                primary = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, PerfDataFilename.trtllm_alltoall.value
-                )
-                sources = database._build_op_sources(PerfDataFilename.trtllm_alltoall, primary, system_data_root)
-                cls._data_cache[key] = LoadedOpData(
-                    load_trtllm_alltoall_data(sources),
-                    PerfDataFilename.trtllm_alltoall,
-                    primary,
-                )
+                cls._data_cache[key] = load_view(database, "_trtllm_alltoall_data", PerfDataFilename.trtllm_alltoall)
             else:
                 cls._data_cache[key] = None
 

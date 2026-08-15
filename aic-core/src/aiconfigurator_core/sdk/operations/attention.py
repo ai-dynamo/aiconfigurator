@@ -106,27 +106,15 @@ class ContextAttention(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads context_attention CSV into the class cache
+        """Idempotent. Fetches the engine's context_attention table view
         (raw rows) and binds ``database._context_attention_data``,
         respecting any pre-set test override."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.context_attention.value
-            )
-            sources = database._build_op_sources(PerfDataFilename.context_attention, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(
-                load_context_attention_data(sources), PerfDataFilename.context_attention, primary_path
-            )
-
-            # No load-time grid pre-expansion: queries resolve on the RAW grid via
-            # the engine's interpolation (sqrt-space blend; the truncated large-seq x large-batch
-            # corner is ordinary out-of-range util-hold).
+            cls._data_cache[key] = load_view(database, "_context_attention_data", PerfDataFilename.context_attention)
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).
@@ -194,30 +182,22 @@ class GenerationAttention(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads generation_attention CSV (raw rows; no clamp,
-        no grid expansion) and binds both database views.
+        """Idempotent. Fetches the engine's generation_attention table view
+        (raw rows) and binds both database views.
 
         Mirrors ``GEMM.load_data``: loading operates on the
         canonical class-cache value (passed explicitly), then the instance
         attr is bound, respecting any pre-set test override."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.generation_attention.value
+            cls._data_cache[key] = load_view(
+                database, "_generation_attention_data", PerfDataFilename.generation_attention
             )
-            sources = database._build_op_sources(PerfDataFilename.generation_attention, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(
-                load_generation_attention_data(sources), PerfDataFilename.generation_attention, primary_path
-            )
-
-            # No load-time grid pre-expansion: queries resolve on the RAW table
-            # via the engine's interpolation, so the table IS the raw data (the former deepcopy
-            # for _raw_generation_attention_data is now just an alias).
+            # The raw wrapper stays a plain alias of the table (no load-time
+            # grid expansion since PR-5).
             cls._raw_data_cache[key] = cls._data_cache[key]
             cls._record_load()
 
@@ -301,25 +281,15 @@ class EncoderAttention(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads encoder_attention CSV into the class cache
+        """Idempotent. Fetches the engine's encoder_attention table view
         (raw rows), binds ``database._encoder_attention_data``.
         """
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.encoder_attention.value
-            )
-            sources = database._build_op_sources(PerfDataFilename.encoder_attention, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(
-                load_encoder_attention_data(sources), PerfDataFilename.encoder_attention, primary_path
-            )
-
-            # No load-time grid pre-expansion: queries resolve on the RAW grid via the engine's interpolation.
+            cls._data_cache[key] = load_view(database, "_encoder_attention_data", PerfDataFilename.encoder_attention)
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).

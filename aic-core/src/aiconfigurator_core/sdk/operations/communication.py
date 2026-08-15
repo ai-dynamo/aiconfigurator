@@ -82,22 +82,14 @@ class CustomAllReduce(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads the packaged custom_allreduce Parquet perf table and binds
+        """Idempotent. Fetches the engine's custom_allreduce table view and binds
         ``database._custom_allreduce_data``."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.custom_allreduce.value
-            )
-            sources = database._build_op_sources(PerfDataFilename.custom_allreduce, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(
-                load_custom_allreduce_data(sources), PerfDataFilename.custom_allreduce, primary_path
-            )
+            cls._data_cache[key] = load_view(database, "_custom_allreduce_data", PerfDataFilename.custom_allreduce)
             cls._record_load()
 
         if "_custom_allreduce_data" not in database.__dict__:
@@ -163,10 +155,11 @@ class NCCL(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads the packaged NCCL Parquet perf table plus the optional oneCCL fallback,
+        """Idempotent. Fetches the engine's NCCL table view plus the optional oneCCL fallback,
         binds ``database._nccl_data`` and ``database._oneccl_data``."""
         import os
 
+        from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
         from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
@@ -175,13 +168,15 @@ class NCCL(Operation):
 
             # NCCL data lives under ``systems_data_root/nccl/<nccl_version>/``
             # (legacy) or ``systems_data_root/<family>/nccl/<nccl_version>/``
-            # (family-first), NOT under ``backend/version/``. Per
-            # ``_build_op_sources`` early-exit, NCCL ops never inherit
-            # shared-layer sibling rows.
+            # (family-first), NOT under ``backend/version/`` — so the wrapper's
+            # ``filepath`` keeps the nccl_version-resolved primary. NCCL ops
+            # never inherit shared-layer sibling rows (the engine view loads
+            # the single system-wide file).
             nccl_version = database.system_spec["misc"]["nccl_version"]
             nccl_primary = resolve_op_data_path(system_data_root, "nccl", nccl_version, PerfDataFilename.nccl.value)
-            nccl_sources = database._build_op_sources(PerfDataFilename.nccl, nccl_primary, system_data_root)
-            cls._data_cache[key] = LoadedOpData(load_nccl_data(nccl_sources), PerfDataFilename.nccl, nccl_primary)
+            cls._data_cache[key] = LoadedOpData(
+                fetch_table_view(database, "_nccl_data"), PerfDataFilename.nccl, nccl_primary
+            )
 
             # oneCCL fallback (XPU systems). Only loaded when system_spec
             # declares an ``oneccl_version`` under ``misc``.
@@ -190,9 +185,8 @@ class NCCL(Operation):
                 oneccl_primary = resolve_op_data_path(
                     system_data_root, "oneccl", oneccl_version, PerfDataFilename.oneccl.value
                 )
-                oneccl_sources = database._build_op_sources(PerfDataFilename.oneccl, oneccl_primary, system_data_root)
                 cls._oneccl_data_cache[key] = LoadedOpData(
-                    load_nccl_data(oneccl_sources), PerfDataFilename.oneccl, oneccl_primary
+                    fetch_table_view(database, "_oneccl_data"), PerfDataFilename.oneccl, oneccl_primary
                 )
             else:
                 cls._oneccl_data_cache[key] = None
