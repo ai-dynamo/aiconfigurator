@@ -182,7 +182,7 @@ pub struct ContextAttentionOp {
     /// lanes, density-ranked donor tiers, `"default"`, and the table's own
     /// leftover lanes — and it is REPLAYED VERBATIM here: no re-deriving, no
     /// extending, no sorting. Appended at the struct TAIL because bincode
-    /// payloads are positional (ENGINE_SPEC_SCHEMA_VERSION 9).
+    /// payloads are positional (ENGINE_SPEC_SCHEMA_VERSION 12).
     #[serde(default = "default_lane_order")]
     pub lane_order: Vec<String>,
 }
@@ -314,7 +314,7 @@ pub struct GenerationAttentionOp {
     pub kv_cache_dtype: KvCacheQuantMode,
     /// Kernel-source lane precedence; see
     /// [`ContextAttentionOp::lane_order`] (appended at the struct TAIL —
-    /// bincode payloads are positional, ENGINE_SPEC_SCHEMA_VERSION 9).
+    /// bincode payloads are positional, ENGINE_SPEC_SCHEMA_VERSION 12).
     #[serde(default = "default_lane_order")]
     pub lane_order: Vec<String>,
 }
