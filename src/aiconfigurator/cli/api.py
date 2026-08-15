@@ -195,6 +195,7 @@ def cli_default(
     generator_set: list[str] | None = None,
     generator_config: str | None = None,
     generator_dynamo_version: str | None = None,
+    attention_backend: str | None = None,
     engine_step_backend: str | None = None,
     forward_model: str | None = None,
 ) -> CLIResult:
@@ -255,6 +256,9 @@ def cli_default(
             Equivalent to repeating ``--generator-set`` on the CLI.
         generator_config: Path to a unified generator YAML config file.
         generator_dynamo_version: Override Dynamo version used by the generator.
+        attention_backend: Attention kernel-lane override ('fa3', 'triton',
+            'trtllm_mha', 'flashinfer', 'fla', or 'default'). None uses the
+            framework default for the target system/backend version.
         engine_step_backend: Engine-step backend; "rust" (the compiled engine,
             default and only executor) is the only accepted value.
         forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None keeps the default.
@@ -328,6 +332,7 @@ def cli_default(
         nextn_accepted=nextn_accepted,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
         max_seq_len=max_seq_len,
+        attention_backend=attention_backend,
         engine_step_backend=engine_step_backend,
         forward_model=forward_model,
     )
@@ -645,6 +650,7 @@ def cli_exp(
     *,
     yaml_path: str | None = None,
     config: dict[str, dict] | None = None,
+    attention_backend: str | None = None,
     top_n: int = 5,
     save_dir: str | None = None,
 ) -> CLIResult:
@@ -660,6 +666,10 @@ def cli_exp(
         yaml_path: Path to a YAML file containing experiment definitions.
         config: Dict containing experiment definitions (alternative to yaml_path).
             Keys are experiment names, values are experiment configs.
+        attention_backend: Optional global attention kernel-lane override
+            ('fa3', 'triton', 'trtllm_mha', 'flashinfer', 'fla', or 'default'),
+            applied to every experiment. Per-experiment ``attention_backend``
+            entries in the YAML/config take precedence.
         top_n: Number of top configurations to return for each experiment. Default is 5.
         save_dir: Directory to save results. If None, results are not saved to disk.
 
@@ -721,6 +731,7 @@ def cli_exp(
     tasks = build_experiment_tasks(
         yaml_path=yaml_path,
         config=config,
+        attention_backend=attention_backend,
     )
 
     if not tasks:
@@ -1514,6 +1525,7 @@ def cli_estimate(
             load_database=_load_database,
             get_backend=get_backend,
             get_model=get_model,
+            attention_backend=attention_backend,
         )
         if static_result.summary is not None and static_result.summary.check_oom():
             phase_label = "decode" if static_mode == "static_gen" else "prefill"
