@@ -163,7 +163,7 @@
       "power"
      ],
      "n_leaves": 1628,
-     "ordered_sha256": "b08e1474229325d338dee88fcd9acac79ef937b2a72e10c97d49d6279aa90e61",
+     "ordered_sha256": "1b8905c1fa0aa277f530bdaf60483a284ca2015b392d9de6e72f5e34add500dc",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:fp8/i:32768/i:16384",
@@ -245,7 +245,7 @@
       "power"
      ],
      "n_leaves": 197071,
-     "ordered_sha256": "0bf1ce9fc8612c38d888e353285ade40ab82c560d802563ba220021b17e8cb1a",
+     "ordered_sha256": "fb35c44592e540007cda6b361e6221bbdf177d6002a9a1110f10c245f868beeb",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/i:8/i:256/i:1024/i:16/i:16384/i:8",
@@ -326,7 +326,7 @@
       "power"
      ],
      "n_leaves": 91302,
-     "ordered_sha256": "b03d7c8fcb21196ec90679cb0c5eb6f1bc1793df5a9ad3180f053e35cc778d93",
+     "ordered_sha256": "005260372d0c0f79238c256413bf50cec753a484a043bb7aabdf2d6c25f7b19a",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/i:64/i:64/i:4/i:0/i:256/i:64",
@@ -407,7 +407,7 @@
       "power"
      ],
      "n_leaves": 96485,
-     "ordered_sha256": "8f53aa5941dc99353aad129dcc77b086d0e6521a4631eae2d5da80de90d75b6f",
+     "ordered_sha256": "7eb453ed425261e9830fe0726891411a22f67da116ec64ecef180a2687a95c96",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:fp8_block/s:DeepseekV32ForCausalLM/s:trtllm/i:128/i:0/i:4/i:128",
@@ -488,7 +488,7 @@
       "power"
      ],
      "n_leaves": 33488,
-     "ordered_sha256": "d995bb5d9830b60386deb4c2f445d747f509168e9719d2b3764030cd57d8c159",
+     "ordered_sha256": "71245d6f0eb11667bdd1f5cf6d8efdf7943f989ebd8e4c680fb590058f9233a5",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:64/i:0/i:4/i:1",
@@ -569,7 +569,7 @@
       "power"
      ],
      "n_leaves": 1760,
-     "ordered_sha256": "2a88b74c5dba411736fa27c63d91fcae224b9a19d82f27c20492a714d8bdb654",
+     "ordered_sha256": "f6c782ee24630871c40b8c7bbd53ece6dd6d53daeb9d4c4b98eb037c9e267aad",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/i:128/i:1/i:1",
@@ -653,7 +653,7 @@
       "power"
      ],
      "n_leaves": 69,
-     "ordered_sha256": "a53a7d604cb770ead7c6b0cabc4b0e4fccc177fb850a639a01283175731b08b6",
+     "ordered_sha256": "76f5651b9494bf70120335e550b65c949696614a81c7f0d1a817cb0568871308",
      "sample_leaves": [
       [
        "e:CommQuantMode:half/i:2/s:AUTO/i:128",
@@ -742,7 +742,7 @@
         "latency"
        ],
        "n_leaves": 1686,
-       "ordered_sha256": "c2e387f44b3d52cbd2c494a251251ab4d2b9893a957b3333d9750ba3e9ea3245",
+       "ordered_sha256": "6cd1e23b0bfe44b30ed9f15a2f4faaba90e50d062734bdef868baf2280f706df",
        "sample_leaves": [
         [
          "i:64/i:1/i:256/i:1/i:1",
@@ -806,7 +806,7 @@
         "latency"
        ],
        "n_leaves": 2187,
-       "ordered_sha256": "a166431f1d94598c003ec55c89d5c0a4a4e0395a2a86ed0d4fa78b93abb93083",
+       "ordered_sha256": "6128d4e383a6ded4ac7d0c7165ecc338a13ad520a761fca0546cb86f215135a0",
        "sample_leaves": [
         [
          "i:64/i:1/i:0/i:1/i:1",
@@ -873,7 +873,7 @@
       "power"
      ],
      "n_leaves": 7679,
-     "ordered_sha256": "f8c772ec43b36d9b47db9852195ba0558efe330bf715bfa4c37b9934b5096ab9",
+     "ordered_sha256": "2eaf6aa9f554c8c900ae837d87c77883ad828ebdb895e55dcfae6e87a6741012",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/i:64/i:2/i:1/i:4",
@@ -957,7 +957,7 @@
       "power"
      ],
      "n_leaves": 8990,
-     "ordered_sha256": "05225da673507ca130e99e8c96ec6b215a1678fcaf81dc622761860fcf30a842",
+     "ordered_sha256": "666a5f4397a2ea4762fe5717dc4fc052a2d395d751be84176bbef71b2f2ad5a0",
      "sample_leaves": [
       [
        "s:causal_conv1d_fn/s:context/t:i:1024|i:16|i:128|i:16|i:128|i:4/i:1/i:1",
@@ -1041,7 +1041,7 @@
       "power"
      ],
      "n_leaves": 130536,
-     "ordered_sha256": "56e22481c8ce3653a37149fbe459ec396be85f378dcd09730af589e4a206074c",
+     "ordered_sha256": "1c45262698d0dc46b62fc84424785aace23ba349a0692c339e72d46b41d75971",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:fp8/i:1793/i:2560/i:1024",
@@ -1123,7 +1123,7 @@
       "power"
      ],
      "n_leaves": 43364,
-     "ordered_sha256": "b8abe5a1a85bb3238408ad25efe01d1798185a4cea91e7cb22c7ce5343f56fa6",
+     "ordered_sha256": "5adb9fe5f8f308d2958436e404815978056ffd3d02ebe576c4c73f003869565e",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/i:8/i:256/i:1024/i:16/i:32/i:2",
@@ -1204,7 +1204,7 @@
       "power"
      ],
      "n_leaves": 6416,
-     "ordered_sha256": "bd7fb318842a4b4680ee0722da109365e3594b56be12fc478f7054bdcb8f56a6",
+     "ordered_sha256": "6c2f38e28ebe933376a32da3c4280946ce1235ccc17d84a44b7482adf8f73428",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/i:64/i:64/i:4/i:1/i:1048576",
@@ -1286,7 +1286,7 @@
       "power"
      ],
      "n_leaves": 8590,
-     "ordered_sha256": "a8c32ce67833be11a6ff0bd494b26212597ee468ae573e0fed03856d890cfb24",
+     "ordered_sha256": "af1b30bc029be9b9db43f651d3b955f1bb40f5a68aafeaea7a70a38a80b9fd35",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:fp8/e:GEMMQuantMode:fp8_block/s:DeepseekV32ForCausalLM/s:trtllm/i:32/i:1/i:2",
@@ -1368,7 +1368,7 @@
       "power"
      ],
      "n_leaves": 1836,
-     "ordered_sha256": "92ed352e34996d611e441c0427c32a3ace09bce1f48a70f73db9c5c76b2c1015",
+     "ordered_sha256": "0f448b4b302f85e159ee65af5804bba72649013d7ef68326d4c4b2ec6c5db284",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:64/i:1/i:2",
@@ -1450,7 +1450,7 @@
       "power"
      ],
      "n_leaves": 2896,
-     "ordered_sha256": "16f27bc7fb9078aa94464dae04a7c0b0ff0c8230e2de37f4455aa3aec053cde5",
+     "ordered_sha256": "dde999fc863a9f64401a227dd3bed6f469d25888d26f6eff4e14e1f120508876",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:fp8/i:128/i:1/i:2",
@@ -1534,7 +1534,7 @@
       "power"
      ],
      "n_leaves": 428,
-     "ordered_sha256": "ec94b4af50775e07860323a877fcdcfc584fea53b3a96d63491b7ca247f3d5b0",
+     "ordered_sha256": "1e7a7378658225136627e8a4b77261eb024a0c490cda0070f3a4faf532599f8b",
      "sample_leaves": [
       [
        "s:causal_conv1d_fn_qkv3/s:context/t:i:7168|i:96|i:128|i:96|i:128|i:4/i:1/i:1",
@@ -1619,7 +1619,7 @@
       "power"
      ],
      "n_leaves": 140,
-     "ordered_sha256": "3473f5b7e3e6a9f600ed5dedf7a2e9e88939f8d04c45be9445dfb26749a2891c",
+     "ordered_sha256": "4316a53b53482e970f8a012b02b804ea7ce2f9af5ae1bb1f0cc290c3b82c1b34",
      "sample_leaves": [
       [
        "s:pre/i:4/i:4096/i:1",
@@ -1701,7 +1701,7 @@
       "power"
      ],
      "n_leaves": 1272,
-     "ordered_sha256": "3d29216bc6468ed9ab8dfea209a139b13085182316b294d939a42092199b1bb9",
+     "ordered_sha256": "5689b06112f6dc64eb0171287f80acbe6a8d2265effea49a8ec63c77e8f669cd",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:bfloat16/s:mla_gen_pre/i:128/i:1",
@@ -1783,7 +1783,7 @@
       "power"
      ],
      "n_leaves": 5320,
-     "ordered_sha256": "f3424b156097fadb9a7c516bd53e8f066c0f703326265c26ca489c174fab5795",
+     "ordered_sha256": "cef1d94a9462ff9276a4589646254889404ba9f588db3be211c0934d09eeac3e",
      "sample_leaves": [
       [
        "s:deepep_ht/s:dispatch/s:default/i:8/i:1/i:2048/i:8/i:128/i:4/i:1",
@@ -1870,7 +1870,7 @@
       "power"
      ],
      "n_leaves": 186146,
-     "ordered_sha256": "8ff424c63a3eeab6d06c529705f4c4b49f7fcfa9540c7702fb8a5d750550e2b8",
+     "ordered_sha256": "5fef66831c2a2a0fd4278843ca8591d3dce465c57e61a77fccb2c2c4fc3d101d",
      "sample_leaves": [
       [
        "e:MoEQuantMode:fp8_block/s:balanced/i:8/i:256/i:7168/i:2048/i:1/i:1/i:8",
@@ -1951,7 +1951,7 @@
       "power"
      ],
      "n_leaves": 762,
-     "ordered_sha256": "a518a371b6f4179eed27f3434df63157864fd6a63845f0a10efb7391b96232a7",
+     "ordered_sha256": "18f9e9e3509b4be0e53fc84e8919a598ef19c4454e57ac5fab7298b9277a88bf",
      "sample_leaves": [
       [
        "s:deepep_moe/e:MoEQuantMode:fp8_block/s:uniform/s:context/i:8/i:256/i:256/i:7168/i:2048/i:1/i:2/i:32",
@@ -2026,7 +2026,7 @@
      "l1_keys": [],
      "leaf_fields": [],
      "n_leaves": 0,
-     "ordered_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "ordered_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
      "sample_leaves": [],
      "sorted_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
      "state": "loaded"
@@ -2043,7 +2043,7 @@
       "power"
      ],
      "n_leaves": 504,
-     "ordered_sha256": "1dc505d2a522790f34e658334b9c05da329c168ce8be15188dad97b517215574",
+     "ordered_sha256": "a9d52e2cdaceddfa4fa039850c40c512e6f44affb9fed734d6edf6ef8b67a953",
      "sample_leaves": [
       [
        "e:CommQuantMode:half/s:all_gather/i:2/i:256",
@@ -2127,7 +2127,7 @@
       "power"
      ],
      "n_leaves": 1628,
-     "ordered_sha256": "3bc994061102d0fdc106b0090330469fddbba07846a486a236a079f0e4f45b5f",
+     "ordered_sha256": "8b3b249b57b6443f91fa5fb1dd9d1dba784edb4c9325d4a328b79e56cc6a41c5",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:fp8/i:32768/i:16384",
@@ -2211,7 +2211,7 @@
       "power"
      ],
      "n_leaves": 500,
-     "ordered_sha256": "fac7ad52978339c5d880258b0455460fc87c39bc4d4a7e640a15f4ca0f1cbaec",
+     "ordered_sha256": "73f1b90454e557f2343bc9e0f850085290a23b45c1fdf11622cab064bfcaa813",
      "sample_leaves": [
       [
        "s:trtllm_mla/e:FMHAQuantMode:fp8_block/e:KVCacheQuantMode:fp8/i:128/i:1/i:1",
@@ -2292,7 +2292,7 @@
       "power"
      ],
      "n_leaves": 426,
-     "ordered_sha256": "2edc4c377e19a4f5756010cc653463b4f1df19a229a0b8d007d07d805528e422",
+     "ordered_sha256": "3bf9222f5f8560bedd80020da793354249883fe01ec30c1aeb1272a61bbcc5f4",
      "sample_leaves": [
       [
        "e:MoEQuantMode:fp8_block/s:uniform/i:8/i:256/i:7168/i:2048/i:1/i:2/i:32",
@@ -2373,7 +2373,7 @@
       "power"
      ],
      "n_leaves": 176,
-     "ordered_sha256": "1aac78d9003c41efde0945034ea62076435c5b415eb5961d201522142a90bb77",
+     "ordered_sha256": "74045faed136f25a95ff7f102c4900508cb3288c02e29995ae298383bd7fe4d0",
      "sample_leaves": [
       [
        "i:1/i:2048/i:8/i:128/i:1",
@@ -2454,7 +2454,7 @@
       "power"
      ],
      "n_leaves": 2484,
-     "ordered_sha256": "326d1abda5f4e546543804377d6aa95e089251ff95f3b060cf323b5e5cf74f5b",
+     "ordered_sha256": "9fba9bf2760e7cf5551d0c219470dbe0fe4cf2c3e89c90e510cf2d2ae6f354b0",
      "sample_leaves": [
       [
        "i:1/i:2048/i:8/i:128/i:4/i:1",
@@ -2535,7 +2535,7 @@
       "power"
      ],
      "n_leaves": 528,
-     "ordered_sha256": "f457a6c5c5ca9c270dcfb72ecfd9e783ef2129cc40e93fcff865c5e4fefbac5e",
+     "ordered_sha256": "989e55f54a2f59817e3ae8c265b641b793fee6d419ef1478597a00459683c244",
      "sample_leaves": [
       [
        "s:trtllm_mla/e:KVCacheQuantMode:fp8/i:128/i:1/i:1",
@@ -2616,7 +2616,7 @@
       "power"
      ],
      "n_leaves": 336,
-     "ordered_sha256": "fef3039e1ac5b53d52ce5e666a89b45c5ca7100f43ffc3662d3192b838c07ee9",
+     "ordered_sha256": "ca4269229e6eb25c1b7a3d162598ed97fa466d3d87d59257464a40750ac3d1d9",
      "sample_leaves": [
       [
        "e:MoEQuantMode:fp8_block/s:uniform/i:8/i:256/i:7168/i:2048/i:1/i:2/i:2",
@@ -2858,7 +2858,7 @@
       "power"
      ],
      "n_leaves": 1628,
-     "ordered_sha256": "b08e1474229325d338dee88fcd9acac79ef937b2a72e10c97d49d6279aa90e61",
+     "ordered_sha256": "1b8905c1fa0aa277f530bdaf60483a284ca2015b392d9de6e72f5e34add500dc",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:fp8/i:32768/i:16384",
@@ -2940,7 +2940,7 @@
       "power"
      ],
      "n_leaves": 197071,
-     "ordered_sha256": "0bf1ce9fc8612c38d888e353285ade40ab82c560d802563ba220021b17e8cb1a",
+     "ordered_sha256": "fb35c44592e540007cda6b361e6221bbdf177d6002a9a1110f10c245f868beeb",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/i:8/i:256/i:1024/i:16/i:16384/i:8",
@@ -3021,7 +3021,7 @@
       "power"
      ],
      "n_leaves": 91302,
-     "ordered_sha256": "b03d7c8fcb21196ec90679cb0c5eb6f1bc1793df5a9ad3180f053e35cc778d93",
+     "ordered_sha256": "005260372d0c0f79238c256413bf50cec753a484a043bb7aabdf2d6c25f7b19a",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/i:64/i:64/i:4/i:0/i:256/i:64",
@@ -3102,7 +3102,7 @@
       "power"
      ],
      "n_leaves": 96485,
-     "ordered_sha256": "8f53aa5941dc99353aad129dcc77b086d0e6521a4631eae2d5da80de90d75b6f",
+     "ordered_sha256": "7eb453ed425261e9830fe0726891411a22f67da116ec64ecef180a2687a95c96",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:fp8_block/s:DeepseekV32ForCausalLM/s:trtllm/i:128/i:0/i:4/i:128",
@@ -3183,7 +3183,7 @@
       "power"
      ],
      "n_leaves": 33488,
-     "ordered_sha256": "d995bb5d9830b60386deb4c2f445d747f509168e9719d2b3764030cd57d8c159",
+     "ordered_sha256": "71245d6f0eb11667bdd1f5cf6d8efdf7943f989ebd8e4c680fb590058f9233a5",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:64/i:0/i:4/i:1",
@@ -3264,7 +3264,7 @@
       "power"
      ],
      "n_leaves": 1760,
-     "ordered_sha256": "2a88b74c5dba411736fa27c63d91fcae224b9a19d82f27c20492a714d8bdb654",
+     "ordered_sha256": "f6c782ee24630871c40b8c7bbd53ece6dd6d53daeb9d4c4b98eb037c9e267aad",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/i:128/i:1/i:1",
@@ -3348,7 +3348,7 @@
       "power"
      ],
      "n_leaves": 69,
-     "ordered_sha256": "a53a7d604cb770ead7c6b0cabc4b0e4fccc177fb850a639a01283175731b08b6",
+     "ordered_sha256": "76f5651b9494bf70120335e550b65c949696614a81c7f0d1a817cb0568871308",
      "sample_leaves": [
       [
        "e:CommQuantMode:half/i:2/s:AUTO/i:128",
@@ -3441,7 +3441,7 @@
       "used_cuda_graph"
      ],
      "n_leaves": 64,
-     "ordered_sha256": "83516dfc87f0ddee5b50a0bd51b8f7472f48d42a13cdd52ef0279d71f8df91d9",
+     "ordered_sha256": "0205fced9e1289c11dc552a781add518c7ae63d69ceb0a9d44402f2ff140b87f",
      "sample_leaves": [
       [
        "s:context/s:deepgemm_megamoe/s:fp8_fp4/e:MoEQuantMode:w4a8_mxfp4_mxfp8/s:sglang_jit/s:random/s:balanced/i:16/i:896/i:0/i:3584/i:3072/i:1/i:8/i:1024",
@@ -3615,7 +3615,7 @@
         "latency"
        ],
        "n_leaves": 1686,
-       "ordered_sha256": "c2e387f44b3d52cbd2c494a251251ab4d2b9893a957b3333d9750ba3e9ea3245",
+       "ordered_sha256": "6cd1e23b0bfe44b30ed9f15a2f4faaba90e50d062734bdef868baf2280f706df",
        "sample_leaves": [
         [
          "i:64/i:1/i:256/i:1/i:1",
@@ -3679,7 +3679,7 @@
         "latency"
        ],
        "n_leaves": 2187,
-       "ordered_sha256": "a166431f1d94598c003ec55c89d5c0a4a4e0395a2a86ed0d4fa78b93abb93083",
+       "ordered_sha256": "6128d4e383a6ded4ac7d0c7165ecc338a13ad520a761fca0546cb86f215135a0",
        "sample_leaves": [
         [
          "i:64/i:1/i:0/i:1/i:1",
@@ -3746,7 +3746,7 @@
       "power"
      ],
      "n_leaves": 7679,
-     "ordered_sha256": "f8c772ec43b36d9b47db9852195ba0558efe330bf715bfa4c37b9934b5096ab9",
+     "ordered_sha256": "2eaf6aa9f554c8c900ae837d87c77883ad828ebdb895e55dcfae6e87a6741012",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/i:64/i:2/i:1/i:4",
@@ -3830,7 +3830,7 @@
       "power"
      ],
      "n_leaves": 8990,
-     "ordered_sha256": "05225da673507ca130e99e8c96ec6b215a1678fcaf81dc622761860fcf30a842",
+     "ordered_sha256": "666a5f4397a2ea4762fe5717dc4fc052a2d395d751be84176bbef71b2f2ad5a0",
      "sample_leaves": [
       [
        "s:causal_conv1d_fn/s:context/t:i:1024|i:16|i:128|i:16|i:128|i:4/i:1/i:1",
@@ -3914,7 +3914,7 @@
       "power"
      ],
      "n_leaves": 130536,
-     "ordered_sha256": "56e22481c8ce3653a37149fbe459ec396be85f378dcd09730af589e4a206074c",
+     "ordered_sha256": "1c45262698d0dc46b62fc84424785aace23ba349a0692c339e72d46b41d75971",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:fp8/i:1793/i:2560/i:1024",
@@ -3996,7 +3996,7 @@
       "power"
      ],
      "n_leaves": 43364,
-     "ordered_sha256": "b8abe5a1a85bb3238408ad25efe01d1798185a4cea91e7cb22c7ce5343f56fa6",
+     "ordered_sha256": "5adb9fe5f8f308d2958436e404815978056ffd3d02ebe576c4c73f003869565e",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/i:8/i:256/i:1024/i:16/i:32/i:2",
@@ -4077,7 +4077,7 @@
       "power"
      ],
      "n_leaves": 6416,
-     "ordered_sha256": "bd7fb318842a4b4680ee0722da109365e3594b56be12fc478f7054bdcb8f56a6",
+     "ordered_sha256": "6c2f38e28ebe933376a32da3c4280946ce1235ccc17d84a44b7482adf8f73428",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/i:64/i:64/i:4/i:1/i:1048576",
@@ -4159,7 +4159,7 @@
       "power"
      ],
      "n_leaves": 8590,
-     "ordered_sha256": "a8c32ce67833be11a6ff0bd494b26212597ee468ae573e0fed03856d890cfb24",
+     "ordered_sha256": "af1b30bc029be9b9db43f651d3b955f1bb40f5a68aafeaea7a70a38a80b9fd35",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:fp8/e:GEMMQuantMode:fp8_block/s:DeepseekV32ForCausalLM/s:trtllm/i:32/i:1/i:2",
@@ -4241,7 +4241,7 @@
       "power"
      ],
      "n_leaves": 1836,
-     "ordered_sha256": "92ed352e34996d611e441c0427c32a3ace09bce1f48a70f73db9c5c76b2c1015",
+     "ordered_sha256": "0f448b4b302f85e159ee65af5804bba72649013d7ef68326d4c4b2ec6c5db284",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:64/i:1/i:2",
@@ -4323,7 +4323,7 @@
       "power"
      ],
      "n_leaves": 2896,
-     "ordered_sha256": "16f27bc7fb9078aa94464dae04a7c0b0ff0c8230e2de37f4455aa3aec053cde5",
+     "ordered_sha256": "dde999fc863a9f64401a227dd3bed6f469d25888d26f6eff4e14e1f120508876",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:fp8/i:128/i:1/i:2",
@@ -4412,7 +4412,7 @@
       "power"
      ],
      "n_leaves": 1008,
-     "ordered_sha256": "ee84e35f1c68d22d5d4b260d2558a7ae2d9573e83c72cd6297cceb52edad3440",
+     "ordered_sha256": "cfe341eb4a963ee43f66ad5ca870ebda2a948cd957b811c9078169daf83f0f6e",
      "sample_leaves": [
       [
        "s:causal_conv1d_fn_qkv3/s:context/t:i:7168|i:96|i:128|i:96|i:128|i:4/i:1/i:1",
@@ -4497,7 +4497,7 @@
       "power"
      ],
      "n_leaves": 140,
-     "ordered_sha256": "3473f5b7e3e6a9f600ed5dedf7a2e9e88939f8d04c45be9445dfb26749a2891c",
+     "ordered_sha256": "4316a53b53482e970f8a012b02b804ea7ce2f9af5ae1bb1f0cc290c3b82c1b34",
      "sample_leaves": [
       [
        "s:pre/i:4/i:4096/i:1",
@@ -4579,7 +4579,7 @@
       "power"
      ],
      "n_leaves": 1272,
-     "ordered_sha256": "3d29216bc6468ed9ab8dfea209a139b13085182316b294d939a42092199b1bb9",
+     "ordered_sha256": "5689b06112f6dc64eb0171287f80acbe6a8d2265effea49a8ec63c77e8f669cd",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:bfloat16/s:mla_gen_pre/i:128/i:1",
@@ -4661,7 +4661,7 @@
       "power"
      ],
      "n_leaves": 5320,
-     "ordered_sha256": "f3424b156097fadb9a7c516bd53e8f066c0f703326265c26ca489c174fab5795",
+     "ordered_sha256": "cef1d94a9462ff9276a4589646254889404ba9f588db3be211c0934d09eeac3e",
      "sample_leaves": [
       [
        "s:deepep_ht/s:dispatch/s:default/i:8/i:1/i:2048/i:8/i:128/i:4/i:1",
@@ -4748,7 +4748,7 @@
       "power"
      ],
      "n_leaves": 186146,
-     "ordered_sha256": "8ff424c63a3eeab6d06c529705f4c4b49f7fcfa9540c7702fb8a5d750550e2b8",
+     "ordered_sha256": "5fef66831c2a2a0fd4278843ca8591d3dce465c57e61a77fccb2c2c4fc3d101d",
      "sample_leaves": [
       [
        "e:MoEQuantMode:fp8_block/s:balanced/i:8/i:256/i:7168/i:2048/i:1/i:1/i:8",
@@ -4829,7 +4829,7 @@
       "power"
      ],
      "n_leaves": 762,
-     "ordered_sha256": "a518a371b6f4179eed27f3434df63157864fd6a63845f0a10efb7391b96232a7",
+     "ordered_sha256": "18f9e9e3509b4be0e53fc84e8919a598ef19c4454e57ac5fab7298b9277a88bf",
      "sample_leaves": [
       [
        "s:deepep_moe/e:MoEQuantMode:fp8_block/s:uniform/s:context/i:8/i:256/i:256/i:7168/i:2048/i:1/i:2/i:32",
@@ -4904,7 +4904,7 @@
      "l1_keys": [],
      "leaf_fields": [],
      "n_leaves": 0,
-     "ordered_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "ordered_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
      "sample_leaves": [],
      "sorted_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
      "state": "loaded"
@@ -4921,7 +4921,7 @@
       "power"
      ],
      "n_leaves": 504,
-     "ordered_sha256": "1dc505d2a522790f34e658334b9c05da329c168ce8be15188dad97b517215574",
+     "ordered_sha256": "a9d52e2cdaceddfa4fa039850c40c512e6f44affb9fed734d6edf6ef8b67a953",
      "sample_leaves": [
       [
        "e:CommQuantMode:half/s:all_gather/i:2/i:256",
@@ -5005,7 +5005,7 @@
       "power"
      ],
      "n_leaves": 1628,
-     "ordered_sha256": "3bc994061102d0fdc106b0090330469fddbba07846a486a236a079f0e4f45b5f",
+     "ordered_sha256": "8b3b249b57b6443f91fa5fb1dd9d1dba784edb4c9325d4a328b79e56cc6a41c5",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:fp8/i:32768/i:16384",
@@ -5089,7 +5089,7 @@
       "power"
      ],
      "n_leaves": 500,
-     "ordered_sha256": "fac7ad52978339c5d880258b0455460fc87c39bc4d4a7e640a15f4ca0f1cbaec",
+     "ordered_sha256": "73f1b90454e557f2343bc9e0f850085290a23b45c1fdf11622cab064bfcaa813",
      "sample_leaves": [
       [
        "s:trtllm_mla/e:FMHAQuantMode:fp8_block/e:KVCacheQuantMode:fp8/i:128/i:1/i:1",
@@ -5170,7 +5170,7 @@
       "power"
      ],
      "n_leaves": 426,
-     "ordered_sha256": "2edc4c377e19a4f5756010cc653463b4f1df19a229a0b8d007d07d805528e422",
+     "ordered_sha256": "3bf9222f5f8560bedd80020da793354249883fe01ec30c1aeb1272a61bbcc5f4",
      "sample_leaves": [
       [
        "e:MoEQuantMode:fp8_block/s:uniform/i:8/i:256/i:7168/i:2048/i:1/i:2/i:32",
@@ -5251,7 +5251,7 @@
       "power"
      ],
      "n_leaves": 176,
-     "ordered_sha256": "1aac78d9003c41efde0945034ea62076435c5b415eb5961d201522142a90bb77",
+     "ordered_sha256": "74045faed136f25a95ff7f102c4900508cb3288c02e29995ae298383bd7fe4d0",
      "sample_leaves": [
       [
        "i:1/i:2048/i:8/i:128/i:1",
@@ -5332,7 +5332,7 @@
       "power"
      ],
      "n_leaves": 2484,
-     "ordered_sha256": "326d1abda5f4e546543804377d6aa95e089251ff95f3b060cf323b5e5cf74f5b",
+     "ordered_sha256": "9fba9bf2760e7cf5551d0c219470dbe0fe4cf2c3e89c90e510cf2d2ae6f354b0",
      "sample_leaves": [
       [
        "i:1/i:2048/i:8/i:128/i:4/i:1",
@@ -5413,7 +5413,7 @@
       "power"
      ],
      "n_leaves": 528,
-     "ordered_sha256": "f457a6c5c5ca9c270dcfb72ecfd9e783ef2129cc40e93fcff865c5e4fefbac5e",
+     "ordered_sha256": "989e55f54a2f59817e3ae8c265b641b793fee6d419ef1478597a00459683c244",
      "sample_leaves": [
       [
        "s:trtllm_mla/e:KVCacheQuantMode:fp8/i:128/i:1/i:1",
@@ -5494,7 +5494,7 @@
       "power"
      ],
      "n_leaves": 336,
-     "ordered_sha256": "fef3039e1ac5b53d52ce5e666a89b45c5ca7100f43ffc3662d3192b838c07ee9",
+     "ordered_sha256": "ca4269229e6eb25c1b7a3d162598ed97fa466d3d87d59257464a40750ac3d1d9",
      "sample_leaves": [
       [
        "e:MoEQuantMode:fp8_block/s:uniform/i:8/i:256/i:7168/i:2048/i:1/i:2/i:2",
@@ -5702,7 +5702,7 @@
       "power"
      ],
      "n_leaves": 1628,
-     "ordered_sha256": "972f13d91dea4722307bf235ae75f9e26c2ce991e0f881dffaa5719b8da04995",
+     "ordered_sha256": "878f89f97eec283b242a7bc40998b58a85ea9c321ac8ea155af4c36e19f4910f",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:fp8/i:32768/i:51200",
@@ -5783,7 +5783,7 @@
       "power"
      ],
      "n_leaves": 57530,
-     "ordered_sha256": "d260f52a091bb94fb3b7d9cefe33c9d5e5c874e69d48d6e0b99117481f055e84",
+     "ordered_sha256": "d32e4ad3dfef82c653f5a0550ec07d1b51cffe19739e92b6130d558f81786d10",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/i:0/i:64/i:0/i:64/i:16384/i:4",
@@ -5864,7 +5864,7 @@
       "power"
      ],
      "n_leaves": 11680,
-     "ordered_sha256": "3d9e41da2c66cf48d3f6c85fd1dec8f933061fe672de5b4b1e259ee41e63fe67",
+     "ordered_sha256": "388950c9f1bbad44b6f176e8b3c2bff2737dbab71b0655cb21c1edbcdef1ba9b",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/e:GEMMQuantMode:fp8_block/i:64/i:64/i:4/i:2048/i:1/i:1",
@@ -5946,7 +5946,7 @@
       "power"
      ],
      "n_leaves": 41488,
-     "ordered_sha256": "722bc4dafbf1c15d31d1e5e5e206f44df07d67b05a2b651bcdb92fdc8671da38",
+     "ordered_sha256": "dcdcd6cbdaea90f65f251e6dd9681e00d12f11d82101002515bef4cb283725cc",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:DeepseekV32ForCausalLM/s:trtllm/i:128/i:0/i:1/i:1",
@@ -6034,7 +6034,7 @@
       "power"
      ],
      "n_leaves": 8784,
-     "ordered_sha256": "6fc1273a9047fbf9f7f477496b16d224c1c2b42cb3011daad1cba93480220a2f",
+     "ordered_sha256": "86ddef47f2f075d83f0d73e2b96f2801febea747bc824298261cf28743ac7d67",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/i:128/i:128/i:1/i:1",
@@ -6115,7 +6115,7 @@
       "power"
      ],
      "n_leaves": 69,
-     "ordered_sha256": "0bf36709328b19e97dc264f6de8629a777ac5d6c48f05008030a1c83f3276946",
+     "ordered_sha256": "729994082157e614728fe7dc838655b3099ee918ad893abbaded842fc7f412a8",
      "sample_leaves": [
       [
        "e:CommQuantMode:half/i:2/s:AUTO/i:128",
@@ -6203,7 +6203,7 @@
         "latency"
        ],
        "n_leaves": 1959,
-       "ordered_sha256": "d77f63cd0bf70b3e2e610e6b2c711f8e3318a598bb57dfa588211650074ee685",
+       "ordered_sha256": "f248f1b334fe13b41fa68a25a684e6308f23d75cb8fd6ac9a43635f0d3bc6090",
        "sample_leaves": [
         [
          "i:64/i:1/i:0/i:1/i:1",
@@ -6266,7 +6266,7 @@
         "latency"
        ],
        "n_leaves": 1959,
-       "ordered_sha256": "66a1cc7339ab7307680a24a85c9bf479c64205d0e91913db1266cec8e5fa6cb4",
+       "ordered_sha256": "58c840a51ed51d67a00435f9d29db952f58d9b208f492380164938056feec933",
        "sample_leaves": [
         [
          "i:64/i:1/i:0/i:1/i:1",
@@ -6333,7 +6333,7 @@
       "power"
      ],
      "n_leaves": 7679,
-     "ordered_sha256": "57f0a269e12234564051ba533510f159b14677e350c786e18be1801ede05cdb2",
+     "ordered_sha256": "960ccc000321cf979b4a50de410e6720cdd41983c8547678ba3a4e6210ce4f2c",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/i:64/i:2/i:1/i:32",
@@ -6418,7 +6418,7 @@
       "power"
      ],
      "n_leaves": 13134,
-     "ordered_sha256": "1178369753272c8e126c4ab74d134fc81d292c5af0ddd19219c6d5f64255a461",
+     "ordered_sha256": "815ed6510ad896754918202beefe4eae6ed703ffb3f344520c2923f28eb1fea8",
      "sample_leaves": [
       [
        "s:causal_conv1d_fn/s:context/t:i:1024|i:16|i:128|i:16|i:128|i:4/i:1/i:1",
@@ -6502,7 +6502,7 @@
       "power"
      ],
      "n_leaves": 142968,
-     "ordered_sha256": "62facd8ced2fce54d2a504a1822b63bbbe6c61f13e20bc44804dd2a89b6067b6",
+     "ordered_sha256": "bcc2dd65711941a031215450777187467a9d55bb5f291d149d6e472606de0925",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:nvfp4/i:32768/i:65536/i:16384",
@@ -6584,7 +6584,7 @@
       "power"
      ],
      "n_leaves": 67589,
-     "ordered_sha256": "1f853138bf14a311f4792e3a16f46f25f2f4bdf5cf8baae40dbe4fb41b5fcd72",
+     "ordered_sha256": "d9ce4da93b5880a020265204d5da7a5eceb426ab1b422b2d36b0ace66816b639",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/i:1/i:64/i:0/i:64/i:32/i:2",
@@ -6665,7 +6665,7 @@
       "power"
      ],
      "n_leaves": 3088,
-     "ordered_sha256": "b7e0693ce81642021fd3ee79033f380da93d66dce903511788538dd7f9643f96",
+     "ordered_sha256": "2ff08c1715f11c75ceb64c92e312d16ae735d95eac82501e5a46be9a8ba3b724",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:fp8/e:GEMMQuantMode:fp8_block/i:64/i:64/i:4/i:1/i:2",
@@ -6747,7 +6747,7 @@
       "power"
      ],
      "n_leaves": 26524,
-     "ordered_sha256": "cb59ee619d588ae55cd8b45436fe62d8c847dc3da3cd47c67f1a0669b0b3ba98",
+     "ordered_sha256": "f652ab79ea6fb86c77ef2715dc609704a35ae11ee7131767c79bf8a11ae789d0",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:DeepseekV32ForCausalLM/s:trtllm/i:128/i:1/i:17",
@@ -6835,7 +6835,7 @@
       "power"
      ],
      "n_leaves": 8832,
-     "ordered_sha256": "d3fe8b3cdcccc3d5595a9acce2a9517dc6d0560ba9c7fcbc69ec609c8efb1a57",
+     "ordered_sha256": "8a4ee74f03ed0a816c75288829651b2bb2ee42bf2e911ffbaacb2f9719db2717",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/i:128/i:128/i:1/i:3",
@@ -6921,7 +6921,7 @@
       "power"
      ],
      "n_leaves": 1203,
-     "ordered_sha256": "1114a52a4f2f0fcd18750e632331cd83af0603ebb2978ac653202f10224a9ef7",
+     "ordered_sha256": "935ca5968804955a2b10c953378f2685aac70bd2dbd930571232c4b3c6be6337",
      "sample_leaves": [
       [
        "s:causal_conv1d_fn_qkv3/s:context/t:i:7168|i:96|i:128|i:96|i:128|i:4/i:1/i:1",
@@ -7006,7 +7006,7 @@
       "power"
      ],
      "n_leaves": 134,
-     "ordered_sha256": "be6f140eb5a8e4c20af091ec91ff47de59dd7a1b2a33ad4c3dd8318763de0d8c",
+     "ordered_sha256": "f2d750674dcb8ed54f128654d4d1c94ac432935eca5d9729a759815e195e6265",
      "sample_leaves": [
       [
        "s:pre/i:4/i:4096/i:256",
@@ -7087,7 +7087,7 @@
       "power"
      ],
      "n_leaves": 636,
-     "ordered_sha256": "98b76e936e7ce6cfbd0ec46dea702b5b859866f186350bc038f08966ba2fce7d",
+     "ordered_sha256": "c857f8272f2e39df80ae9abee9318f6a5b6f443a8d67cc5f9d017e60371e1b6b",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:bfloat16/s:mla_gen_pre/i:96/i:1",
@@ -7177,7 +7177,7 @@
       "power"
      ],
      "n_leaves": 86653,
-     "ordered_sha256": "2fe6cb974cd95a7a998e9e63450fadb70f2c48236088d7ddb4dac5d28b0d075d",
+     "ordered_sha256": "f901ebc25325f2d11c32bae27239299ad11e90cb304ccc46d69ac4594d3f4c48",
      "sample_leaves": [
       [
        "e:MoEQuantMode:fp8_block/s:power_law_1.01/i:8/i:256/i:7168/i:2048/i:1/i:1/i:1",
@@ -7255,7 +7255,7 @@
      "l1_keys": [],
      "leaf_fields": [],
      "n_leaves": 0,
-     "ordered_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "ordered_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
      "sample_leaves": [],
      "sorted_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
      "state": "loaded"
@@ -7272,7 +7272,7 @@
       "power"
      ],
      "n_leaves": 504,
-     "ordered_sha256": "1dc505d2a522790f34e658334b9c05da329c168ce8be15188dad97b517215574",
+     "ordered_sha256": "a9d52e2cdaceddfa4fa039850c40c512e6f44affb9fed734d6edf6ef8b67a953",
      "sample_leaves": [
       [
        "e:CommQuantMode:half/s:all_gather/i:2/i:256",
@@ -7356,7 +7356,7 @@
       "power"
      ],
      "n_leaves": 1628,
-     "ordered_sha256": "10b67728488835597f8944c4170ab55d6a5ba3482f376b6238ff5093375c5836",
+     "ordered_sha256": "8a4f6db4dc8b0b5a3d77a5816d017f587c511b32001d57bc53179b2ae285045c",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:fp8/i:32768/i:51200",
@@ -7538,7 +7538,7 @@
       "power"
      ],
      "n_leaves": 17692,
-     "ordered_sha256": "bb531bd32e1301db09ee15a3c22f3e087002aaaeda08190a072f325108520bbd",
+     "ordered_sha256": "b5bdc9962e38f2af1f873feec30b217cb3d1217d3a31c1e08893ab7eb110f8f0",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/i:4/i:64/i:0/i:64/i:16384/i:8",
@@ -7634,7 +7634,7 @@
       "power"
      ],
      "n_leaves": 69,
-     "ordered_sha256": "3e83b02149222776d6e79ab29d29d32dac948e73fd2540a1a286bf2423fa15b7",
+     "ordered_sha256": "95f3b6c0159dcf9ecb9d44d33fda269f31f9dd13b78170b793b1623fe794f371",
      "sample_leaves": [
       [
        "e:CommQuantMode:half/i:2/s:AUTO/i:128",
@@ -7739,7 +7739,7 @@
       "power"
      ],
      "n_leaves": 22176,
-     "ordered_sha256": "4dccdd62b659623d31b4f77e1de241675d6955b53dd4c865cd73bc0902ebc573",
+     "ordered_sha256": "7bc8463d903d12e022f75991c59a1ce5a6c1243b4480f808f39fe716e9b1e790",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:fp8/i:8192/i:12288/i:10240",
@@ -7821,7 +7821,7 @@
       "power"
      ],
      "n_leaves": 28418,
-     "ordered_sha256": "ed6ed4056e47bc68161450c2ad18a0b079bd161e5da28f58554d294b99eaf516",
+     "ordered_sha256": "655d5ce88c06dd191585d507f9cbdbc3d24dbb3b98826026cf30fc7848ec8bf5",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/i:4/i:128/i:0/i:64/i:32/i:2",
@@ -7934,7 +7934,7 @@
       "power"
      ],
      "n_leaves": 2592,
-     "ordered_sha256": "d04887d06dd3b65dbcf5295b43bce7fe3cdf8452def40342630a64d89f5d09c4",
+     "ordered_sha256": "f9d35e2fbb52a48822f074992b41d31b2595e95b592cf74cf84d092e9f850861",
      "sample_leaves": [
       [
        "e:MoEQuantMode:bfloat16/s:power_law_1.01/i:4/i:60/i:2048/i:1408/i:1/i:1/i:1",
@@ -8012,7 +8012,7 @@
      "l1_keys": [],
      "leaf_fields": [],
      "n_leaves": 0,
-     "ordered_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "ordered_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
      "sample_leaves": [],
      "sorted_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
      "state": "loaded"
@@ -8032,7 +8032,7 @@
       "power"
      ],
      "n_leaves": 252,
-     "ordered_sha256": "aebbe91f423999324caa0d1b5201914497bc918f63c2ecb6f7bae379c2adf234",
+     "ordered_sha256": "accf2a27d81a41955f0ea80c49c4c21c778890797be0ff8819dbaee6c8288efd",
      "sample_leaves": [
       [
        "e:CommQuantMode:half/s:all_gather/i:2/i:256",
@@ -8260,7 +8260,7 @@
       "power"
      ],
      "n_leaves": 1628,
-     "ordered_sha256": "16870bf0dd6c8e83860fbeaa9292ed59cad51e7d7a29f328649b51f1d68d1f1b",
+     "ordered_sha256": "a6089e23c28c262578d648f271e53978a992b5705977fdf71e97c61e2c339405",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:fp8/i:32768/i:12288",
@@ -8342,7 +8342,7 @@
       "power"
      ],
      "n_leaves": 63120,
-     "ordered_sha256": "fa029094e30265356e508dc8b9eb047b42787e7e6e971ea206fe8d5467cce43b",
+     "ordered_sha256": "843804596c9c63695f9532715792dfd9e7dcd2c14592e6854aafec4dde53b793",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/i:1/i:64/i:128/i:96/i:16384/i:8",
@@ -8427,7 +8427,7 @@
       "power"
      ],
      "n_leaves": 40357,
-     "ordered_sha256": "530db7a20727f493fe487cdfb925856bf45c957c98070a9f978cdaa42d1f3d4a",
+     "ordered_sha256": "320821fad23288646d884e30a83e84a995bcb4a40124768bf8dbad0a97fccceb",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:DeepseekV32ForCausalLM/s:trtllm/i:128/i:0/i:16/i:1",
@@ -8511,7 +8511,7 @@
       "power"
      ],
      "n_leaves": 1760,
-     "ordered_sha256": "ad46966ce2114a388ecd0bcc8abbf3c5972abf33949abc32deff03412cf35225",
+     "ordered_sha256": "611dfda3f052e92a1634d47d5f9332f448a7b7c320432f07bbcff94661c35a1e",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/i:128/i:1/i:1",
@@ -8593,7 +8593,7 @@
       "power"
      ],
      "n_leaves": 8784,
-     "ordered_sha256": "4e00536f705532a6cba8c2ae8dc606bc36fbc783bee81d9fd51ddf8255f373b3",
+     "ordered_sha256": "8442b0b061f237c732eb1159f1a52dc542d44e433344fbafbeacbe1f4229f955",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/i:128/i:128/i:64/i:1",
@@ -8674,7 +8674,7 @@
       "power"
      ],
      "n_leaves": 46,
-     "ordered_sha256": "f1ccd70addfc71f16a6ad35dd5ff504b8792cb2370e896dfe9f84b339aba11ed",
+     "ordered_sha256": "2375c978db487bf76e5cda8a5d925a643eb46f4ff2c78d52189fa372833517d7",
      "sample_leaves": [
       [
        "e:CommQuantMode:half/i:2/s:AUTO/i:128",
@@ -8772,7 +8772,7 @@
       "power"
      ],
      "n_leaves": 6314,
-     "ordered_sha256": "594baa58ea44624d4ecb0ae86b56c0437605a56fdc7a15624a25099953dc27f9",
+     "ordered_sha256": "1552623843d63624b271f9d5cfdaf2e810e029646807d49f689ecf4c67fb38d6",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/i:64/i:2/i:1/i:1",
@@ -8856,7 +8856,7 @@
       "power"
      ],
      "n_leaves": 8671,
-     "ordered_sha256": "c7e13d356f0a675c98adc872f3b725a1bbb55d20e540227bc706158a8c87309a",
+     "ordered_sha256": "c528cbb65cc9728d986c4619ef4fb4b891dedc4acd0eee74ae057d87581fb172",
      "sample_leaves": [
       [
        "s:causal_conv1d_fn/s:context/t:i:1024|i:16|i:128|i:16|i:128|i:4/i:1/i:1",
@@ -8941,7 +8941,7 @@
       "power"
      ],
      "n_leaves": 165856,
-     "ordered_sha256": "25d2b5009d1819435f05e89dd2e1db32dbb517099ba49351e13a10bcca441530",
+     "ordered_sha256": "98aba589219ef41c14568ec8626274c8f0dfe5650bb624dd8865e5cd995423a2",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:bfloat16/i:16384/i:65536/i:51200",
@@ -9023,7 +9023,7 @@
       "power"
      ],
      "n_leaves": 40240,
-     "ordered_sha256": "f7f88216125fb5044884744111e5e22e5075d75c966da136a16c16d87dbeb675",
+     "ordered_sha256": "fd930bfb98f419afa10f17315013c823fb79ed9625aa52b97e6ed422982f9c26",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/i:0/i:64/i:0/i:64/i:32/i:2",
@@ -9108,7 +9108,7 @@
       "power"
      ],
      "n_leaves": 26496,
-     "ordered_sha256": "c6deea07cc43e57a76a3cd677356bc4f78afc09d7687865fed9037b97add3a69",
+     "ordered_sha256": "19b8517f1ed94e7c2db66837fe73501f0324c45b99d73336e22d6d03c969ff66",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:DeepseekV32ForCausalLM/s:trtllm/i:128/i:1/i:3",
@@ -9193,7 +9193,7 @@
       "power"
      ],
      "n_leaves": 2896,
-     "ordered_sha256": "d0b664deb57fb5dcc9d018e79cfc3b577a6295367b66fcd0b303f08a193347d4",
+     "ordered_sha256": "09821eac91a153df62ff60b13ba25721dba4fb554a0d90170e5d765b4de70496",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/i:128/i:1/i:2",
@@ -9275,7 +9275,7 @@
       "power"
      ],
      "n_leaves": 8832,
-     "ordered_sha256": "b0fd182bc9a09a43070a505125af1f06925a8d9c41cdae5401e0306b29ee0571",
+     "ordered_sha256": "827d5d40fccb620aaaa1c036777d3b20e5b1fec50eff12e5d25f5839cf1c94a1",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/i:128/i:128/i:1/i:3",
@@ -9360,7 +9360,7 @@
       "power"
      ],
      "n_leaves": 425,
-     "ordered_sha256": "7239d88e0ab3b291c79ccb0521a28d879fcd2320a24738f85a88972ce952c91a",
+     "ordered_sha256": "0912e544ef3a8621008330f04858fcd567ac4968a9253ce5a20ace47f0b78379",
      "sample_leaves": [
       [
        "s:causal_conv1d_fn/s:context/t:i:2688|i:128|i:4|i:64|i:64|i:8|i:128/i:1/i:1",
@@ -9445,7 +9445,7 @@
       "power"
      ],
      "n_leaves": 848,
-     "ordered_sha256": "011341d2ed902bd7106a02709e75035b8098db6f8af89b8315d3456089107937",
+     "ordered_sha256": "31f3cf2d410af0aca1272b85c0fb691676dd565e33040984749645890ff9badf",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:bfloat16/s:mla_gen_pre/i:128/i:1",
@@ -9527,7 +9527,7 @@
       "power"
      ],
      "n_leaves": 2096,
-     "ordered_sha256": "09cfc7d138dad0b441006efc7818b284b68aa5e8aa397e4412f67f165a455571",
+     "ordered_sha256": "4bec98eeb0f954e6927771500f274035c3e16e0e251d934f838e44ef86e3b1af",
      "sample_leaves": [
       [
        "s:nvlink_two_sided/s:prepare/s:bfloat16/i:4/i:1/i:7168/i:8/i:256/i:0/i:1",
@@ -9612,7 +9612,7 @@
       "power"
      ],
      "n_leaves": 89991,
-     "ordered_sha256": "fcd47a38a47679399d06db999d8210f6d4e6fde84e3434c6122a90c63dc33cc0",
+     "ordered_sha256": "7bc0230e1cb432cf5e031cb71ab153a681c94608b2365afe7d8b1fa1b3964ddd",
      "sample_leaves": [
       [
        "e:MoEQuantMode:w4a16_mxfp4/s:power_law_1.2/i:4/i:32/i:2880/i:2880/i:1/i:32/i:1",
@@ -9693,7 +9693,7 @@
       "power"
      ],
      "n_leaves": 8316,
-     "ordered_sha256": "c61a977f289f8ace3ae35db1f63043eb0062337d533f8ab26c8df1ad6e412845",
+     "ordered_sha256": "8c7753e712b52ade3224e0a559e5d79a745062bb80569956f3d7dc1a075fe7c6",
      "sample_leaves": [
       [
        "s:wideep_compute_cutlass/e:MoEQuantMode:nvfp4/s:power_law_1.01_eplb/s:context/i:8/i:256/i:256/i:7168/i:2048/i:1/i:2/i:1",
@@ -9774,7 +9774,7 @@
       "power"
      ],
      "n_leaves": 15552,
-     "ordered_sha256": "3667fc96140d208d3d610a35ab07d12544c6ecb7d44dfe0b54fd78f6b6fa68f7",
+     "ordered_sha256": "ec67c41a2f1d422f020c56c1e1437cf14a08fe39950878d8b6ef20ce43a1f3ec",
      "sample_leaves": [
       [
        "e:MoEQuantMode:nvfp4/s:power_law_1.01/i:8/i:128/i:4096/i:1536/i:8/i:1/i:1",
@@ -9856,7 +9856,7 @@
       "power"
      ],
      "n_leaves": 336,
-     "ordered_sha256": "db726875ffe736c397f97bc3af468c10f44a5e7b0c2470b24858673e894c721a",
+     "ordered_sha256": "3c83ca1a0b607043ae340daa8e93df83ac64646909f82f3e3aff3dc223c6a44f",
      "sample_leaves": [
       [
        "e:CommQuantMode:half/s:all_gather/i:2/i:256",
@@ -9940,7 +9940,7 @@
       "power"
      ],
      "n_leaves": 1628,
-     "ordered_sha256": "d483d018059ddd691676aa3a07f8cc1fe90e70ee3e4790b67a288dedbd6bbf7d",
+     "ordered_sha256": "d7c9a11c445270c39f0866b114a16aa4ea17cc8efc07d9aa1c6bfdb88b60750a",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:fp8/i:32768/i:12288",
@@ -10022,7 +10022,7 @@
       "power"
      ],
      "n_leaves": 2096,
-     "ordered_sha256": "b6b4230beb7c69faf523d4724a6def9a73c6ca8870dbd8da32fa6ccb3cf69fae",
+     "ordered_sha256": "7a1d1c892187b70400c2c97c720b546561addc28bdf1625d7487d770ff387ae2",
      "sample_leaves": [
       [
        "s:NVLinkTwoSided/s:alltoall_prepare/e:MoEQuantMode:bfloat16/i:1/i:7168/i:8/i:256/i:4/i:1",
@@ -10121,7 +10121,7 @@
       "power"
      ],
      "n_leaves": 4158,
-     "ordered_sha256": "f7afe2d57bdf2b8d4854aa37656f85bada6e29d57c52aa3677cb8d323f1f54ad",
+     "ordered_sha256": "68e9b2e36b7f15c2fbdeecd2cb6b0618781df44dbbc6e062cd7304ad6497c1e1",
      "sample_leaves": [
       [
        "s:wideep_compute_cutlass/e:MoEQuantMode:nvfp4/s:power_law_1.01_eplb/i:8/i:256/i:7168/i:2048/i:256/i:1/i:2/i:1",
@@ -10320,7 +10320,7 @@
       "power"
      ],
      "n_leaves": 441,
-     "ordered_sha256": "d9817e8b340b0842d50182cdec9d622f773c46e0fefc157d4952cae9064252be",
+     "ordered_sha256": "dde20d8feaea1178ec2dc6b89d941ef9d74fa3917f099a87cd516970c8984554",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:fp8/i:8192/i:16384",
@@ -10402,7 +10402,7 @@
       "power"
      ],
      "n_leaves": 46709,
-     "ordered_sha256": "c607e35c08b72d6964d798c90888770b34cf3848664e5d54627907c1fac53067",
+     "ordered_sha256": "4b07d806d0bae9d2285a0d00eedebf8fee35c9e347dac1e7f498d62ae3633fff",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/i:1/i:64/i:128/i:96/i:16384/i:8",
@@ -10486,7 +10486,7 @@
       "power"
      ],
      "n_leaves": 22624,
-     "ordered_sha256": "9a566d08f54056bc59d2902a2a7fce7f890eb4fef24a4946d39df29530b677e8",
+     "ordered_sha256": "77ed9e1a82264867f0bf36701cfccfeb1acdbd9dda004c01db82bad877450de4",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:DeepseekV32ForCausalLM/s:trtllm/i:128/i:0/i:64/i:1",
@@ -10570,7 +10570,7 @@
       "power"
      ],
      "n_leaves": 1392,
-     "ordered_sha256": "92f577652628503a2d065c3b27f8ae0b691b726016327c4968d65a2703a8c0c0",
+     "ordered_sha256": "b583e1d869be2e9f8bbccc9e1f4b0a6f2d503bd1363357d4739fe992c156b364",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/i:128/i:16/i:1",
@@ -10651,7 +10651,7 @@
       "power"
      ],
      "n_leaves": 3886,
-     "ordered_sha256": "3a99ce08cf4736c61159c72feb3737da700a6df14a9e35bb41cdefcb29ee8501",
+     "ordered_sha256": "6daa1e609e16f06a61359a1864160c48a91bfab9481512c268da2e4eee222eed",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/i:128/i:128/i:1/i:1",
@@ -10732,7 +10732,7 @@
       "power"
      ],
      "n_leaves": 69,
-     "ordered_sha256": "76f69ad5e3f2ddd59b1205e1cc646caa10d5c202117e8e765ad8e0dea21e9def",
+     "ordered_sha256": "73a0ba337e73a78de177fbaf8c09604d1bf6548b6e864a967830f64f9c423285",
      "sample_leaves": [
       [
        "e:CommQuantMode:half/i:2/s:AUTO/i:128",
@@ -10836,7 +10836,7 @@
       "power"
      ],
      "n_leaves": 8653,
-     "ordered_sha256": "887d2e09759ebcd6b3bc934506f44b1ab43f5bb13c9043b5c7690fad7395535f",
+     "ordered_sha256": "88108b74ffaf568442f7b77fa6f8b1ab1dca0d467a0fe570c80cfafa7afa10df",
      "sample_leaves": [
       [
        "s:causal_conv1d_fn/s:context/t:i:1024|i:16|i:128|i:16|i:128|i:4/i:1/i:1",
@@ -10922,7 +10922,7 @@
       "power"
      ],
      "n_leaves": 53760,
-     "ordered_sha256": "3588f4e5bbe0f5ff1f64bd65056d7fd334f8ff5b05794af634d8d2bf880e7ab1",
+     "ordered_sha256": "d113f67bbcf8b11e910c64dcad4ccba0aa9b1a0e555c65250b716c967b7ac280",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:int4_wo/i:8192/i:65536/i:10240",
@@ -11004,7 +11004,7 @@
       "power"
      ],
      "n_leaves": 29730,
-     "ordered_sha256": "5e6f82350e2eb8c342051f9bdd290004a2af90dbb0809239dba78595e8b5392d",
+     "ordered_sha256": "fbbf5ed0124ec027fe08f41d36b46dfbd6c30126ddfe75451cd2ec36ac380347",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/i:0/i:64/i:0/i:64/i:32/i:2",
@@ -11089,7 +11089,7 @@
       "power"
      ],
      "n_leaves": 17664,
-     "ordered_sha256": "987ceeef54749a70508d59e83e4721bbf3f0453fad4d85acb788c495d4e92eb2",
+     "ordered_sha256": "8b616f41199bfef3eccdcc725d7e633560f1a469da6e8aa4420dfc9a15bfefb4",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:DeepseekV32ForCausalLM/s:trtllm/i:128/i:1/i:3",
@@ -11174,7 +11174,7 @@
       "power"
      ],
      "n_leaves": 2896,
-     "ordered_sha256": "83b4b3e912bb50422c8523eab3ed664e7e7c1e04eefc2b8fe737593c07c15f74",
+     "ordered_sha256": "7860fbe810b853a0e8d0cfeade600408e0ab971982a7cebb6b6e2aaea870c239",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/i:64/i:1/i:2",
@@ -11256,7 +11256,7 @@
       "power"
      ],
      "n_leaves": 5888,
-     "ordered_sha256": "a138b7a5962141afda9b5608e203eec4edb8944ba5d2dcedb0640dc21eae8a04",
+     "ordered_sha256": "3f22515c2ef64c1d4ba75f9dd1589bb60d6fbc6b58d1b62f182c85d434059ccc",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/i:128/i:128/i:1/i:3",
@@ -11347,7 +11347,7 @@
       "power"
      ],
      "n_leaves": 848,
-     "ordered_sha256": "fee7f292621320f853236129853863fabf5b19f4eed5c386d1856e2cf77dd069",
+     "ordered_sha256": "77fe0a65a91d5119a70eb66ccd942b34f9cc026c8e616448a24a9f562d3fba48",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:bfloat16/s:mla_gen_pre/i:128/i:1",
@@ -11434,7 +11434,7 @@
       "power"
      ],
      "n_leaves": 63630,
-     "ordered_sha256": "68fecfa6375367a0e3ade5c86714f15f27980199aac5161577715ed55a506f70",
+     "ordered_sha256": "7bb4cf6a8cd7927cca38161abccaec8ad958c9f47e722175ba45195069e1d18b",
      "sample_leaves": [
       [
        "e:MoEQuantMode:bfloat16/s:balanced/i:2/i:8/i:4096/i:14336/i:1/i:1/i:1",
@@ -11512,7 +11512,7 @@
      "l1_keys": [],
      "leaf_fields": [],
      "n_leaves": 0,
-     "ordered_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "ordered_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
      "sample_leaves": [],
      "sorted_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
      "state": "loaded"
@@ -11529,7 +11529,7 @@
       "power"
      ],
      "n_leaves": 504,
-     "ordered_sha256": "2362bb280d15ff3eefb2e5e66c414a6214fe054186f288d624de25c752a9f097",
+     "ordered_sha256": "f68d0878337019e6d7835a8a55e2fcf44a21a175700d0fbc04d55b28aaaab68a",
      "sample_leaves": [
       [
        "e:CommQuantMode:half/s:all_gather/i:2/i:256",
@@ -11613,7 +11613,7 @@
       "power"
      ],
      "n_leaves": 441,
-     "ordered_sha256": "8d891ce653ab24c4c80d9f9caeb3c3f2f9eef15838302609b12ab7ac56597df5",
+     "ordered_sha256": "89074bfaf9ddf67b26c8c64836e057f11b7f58fcb13460e9ec3cc331c182ca2c",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:fp8/i:8192/i:16384",
@@ -11824,7 +11824,7 @@
       "power"
      ],
      "n_leaves": 1649,
-     "ordered_sha256": "0b47b2f8add19f99ceccde7257d0f168235246d555dcc4f80d5d96f0c686f2cf",
+     "ordered_sha256": "4c0c8ddac923456704e94ddfeacb5feb88fdb531adf7471c036a4b93002d8359",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:fp8/i:32768/i:16384",
@@ -11906,7 +11906,7 @@
       "power"
      ],
      "n_leaves": 196576,
-     "ordered_sha256": "6ab43f0d51c52dae794ffae34683faa002c9fe6a5940ebcb8869741100fc43f9",
+     "ordered_sha256": "d20c189150cf1d21b33aea35537d2915b0a2f92696a6a31d749014f090eb00db",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:fp8/e:KVCacheQuantMode:fp8/i:0/i:256/i:0/i:96/i:1024/i:32",
@@ -11996,7 +11996,7 @@
       "power"
      ],
      "n_leaves": 1392,
-     "ordered_sha256": "ede34dc5993eb18d9701b11c8b0506dafe01b17711c0a00231269eeb71814027",
+     "ordered_sha256": "0e3be3f945c5cd2f6fae3d3648503814e33e1295e09e24b4e22959026dc0376a",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/i:64/i:16/i:1",
@@ -12071,7 +12071,7 @@
      "l1_keys": [],
      "leaf_fields": [],
      "n_leaves": 0,
-     "ordered_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "ordered_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
      "sample_leaves": [],
      "sorted_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
      "state": "loaded"
@@ -12087,7 +12087,7 @@
       "power"
      ],
      "n_leaves": 69,
-     "ordered_sha256": "55f1a99d02ccaf15dcad0e107dfffde4a88af5f3bea00b01ba6084ebb201d794",
+     "ordered_sha256": "3efc233802a99645e1fef4e0f9462348050f5ac4684a5190afcb4e0a741cd670",
      "sample_leaves": [
       [
        "e:CommQuantMode:half/i:2/s:AUTO/i:128",
@@ -12185,7 +12185,7 @@
       "power"
      ],
      "n_leaves": 7679,
-     "ordered_sha256": "138f4ae7589f236cf1343560a5f696257ac8402d9f154b88c45ac72b340c9fe5",
+     "ordered_sha256": "a78a61a052982b5765b1577e9ae92ee97a8f1ef6d2e546f29115f4eafed66f2f",
      "sample_leaves": [
       [
        "e:FMHAQuantMode:bfloat16/i:64/i:2/i:1/i:1",
@@ -12269,7 +12269,7 @@
       "power"
      ],
      "n_leaves": 8597,
-     "ordered_sha256": "07fc9f333dd2a738b2def5d9d156fa4b08a24204f9c687b621b46d9485c572a1",
+     "ordered_sha256": "fd3dd1c44abf9907deb2991ef55bb2e0e57910982c0f9ccac0a596028b00fea2",
      "sample_leaves": [
       [
        "s:causal_conv1d_fn/s:context/t:i:1024|i:16|i:128|i:16|i:128|i:4/i:1/i:1",
@@ -12356,7 +12356,7 @@
       "power"
      ],
      "n_leaves": 155728,
-     "ordered_sha256": "590fcf7a376dbaf9628024578c3ace0ba34a152a0b4dbcb0e51e3a1da01012fa",
+     "ordered_sha256": "b2667757517da926e75ab2a593bcf2b9dfab70bfa191cea8ea20490a0c98aa00",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:bfloat16/i:3840/i:65536/i:51200",
@@ -12438,7 +12438,7 @@
       "power"
      ],
      "n_leaves": 211004,
-     "ordered_sha256": "6f69209f3ffbb797e71e5bed31feb90c8c621e7b3544787fbab94852d300cdfd",
+     "ordered_sha256": "04d0e8ba7b78de212a36865e9778950acc43e02f1968493a8189be7ea39255ce",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/i:0/i:64/i:0/i:64/i:32/i:2",
@@ -12529,7 +12529,7 @@
       "power"
      ],
      "n_leaves": 2896,
-     "ordered_sha256": "368d0ceecc570241f0381f7c5fd5df6cdc8c8afbfe88d847716af26c3f750821",
+     "ordered_sha256": "bd3425f03a1231b255451d8c0fbea636b470a21f0de1e6aebb404f0a2ef8dd32",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:fp8/i:64/i:1/i:2",
@@ -12604,7 +12604,7 @@
      "l1_keys": [],
      "leaf_fields": [],
      "n_leaves": 0,
-     "ordered_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "ordered_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
      "sample_leaves": [],
      "sorted_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
      "state": "loaded"
@@ -12624,7 +12624,7 @@
       "power"
      ],
      "n_leaves": 559,
-     "ordered_sha256": "07db64f01eedc1eaadff8707bc546d1e13ffed64ecd6ce7217f412bf09e25d1a",
+     "ordered_sha256": "682e3f0874bb0903c6186cb5d94e196b78b98f181e8e69865f99d62bdb0be568",
      "sample_leaves": [
       [
        "s:causal_conv1d_fn/s:context/t:i:8192|i:128|i:4|i:64|i:64|i:8|i:256/i:1/i:1",
@@ -12709,7 +12709,7 @@
       "power"
      ],
      "n_leaves": 848,
-     "ordered_sha256": "a06b409cf1553e47cbf5e921ef2ff2db82c0aa30e29886f0549a11a8f36e2d67",
+     "ordered_sha256": "6cc6cbf0f2b6432955b9bc905272b34b15203ec3f47efb9be0336fce2be0d248",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:bfloat16/s:mla_gen_pre/i:128/i:1",
@@ -12795,7 +12795,7 @@
       "power"
      ],
      "n_leaves": 85508,
-     "ordered_sha256": "3c38efb0f66fc6bd192ccc701f6dce9788a963c67983e98717a65ae837f6b5b9",
+     "ordered_sha256": "561e871eb000834085c051df943610fd3dcf81ab311ae3fc4e1ea2d7da86d3bd",
      "sample_leaves": [
       [
        "e:MoEQuantMode:fp8/s:power_law_1.01/i:22/i:512/i:8192/i:5120/i:1/i:1/i:1536",
@@ -12873,7 +12873,7 @@
      "l1_keys": [],
      "leaf_fields": [],
      "n_leaves": 0,
-     "ordered_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "ordered_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
      "sample_leaves": [],
      "sorted_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
      "state": "loaded"
@@ -12890,7 +12890,7 @@
       "power"
      ],
      "n_leaves": 504,
-     "ordered_sha256": "9b52c426d18e6923c9b1ad13e16e00626fca48ae06501961dc751fda030b488e",
+     "ordered_sha256": "ed593e4e0159a2da64342345482b9a2b92fff63ff32b8997765c39b4369e6ec9",
      "sample_leaves": [
       [
        "e:CommQuantMode:half/s:all_gather/i:2/i:256",
@@ -12974,7 +12974,7 @@
       "power"
      ],
      "n_leaves": 1649,
-     "ordered_sha256": "014a822d0d9f239726a29b6f1695e1aa49787fcbfab150e1dcff0414d37b0019",
+     "ordered_sha256": "851d5c3fcd8cd81a91909696f36a19a7503b3bc0d9249181c080304edc008710",
      "sample_leaves": [
       [
        "e:GEMMQuantMode:fp8/i:32768/i:16384",

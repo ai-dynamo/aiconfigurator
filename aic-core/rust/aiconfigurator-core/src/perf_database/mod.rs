@@ -196,6 +196,7 @@ mod moe_index;
 pub mod parquet_loader;
 pub mod perf_interp;
 pub mod state_space;
+pub mod table_view;
 pub mod trtllm_alltoall;
 pub mod wideep_mla;
 
@@ -240,6 +241,9 @@ pub struct PerfTables {
     pub wideep_mla: WideEpMlaTable,
     pub state_space: StateSpaceTable,
     pub fpm_forward: FpmForwardTable,
+    /// The Python-provided shared-layer source map, retained so the table
+    /// views (`table_view.rs`) can resolve any basename on demand.
+    pub perf_db_sources: PerfDbSources,
 }
 
 /// Modular performance database for a specific
@@ -457,6 +461,10 @@ impl PerfDatabase {
             // valid only for its exact backend/version (fpm_forward.rs).
             fpm_forward: FpmForwardTable::new(data_root.clone(), system, backend, version),
             system_spec: spec,
+            // Kept for the table-view folds (`table_view.rs`), which resolve
+            // every basename themselves — including the wideep/deepep files
+            // no query table loads.
+            perf_db_sources: perf_db_sources.clone(),
             data_root,
         };
         Ok(Self::from_tables(Arc::new(tables)))

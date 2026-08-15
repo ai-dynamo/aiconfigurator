@@ -134,23 +134,35 @@ def walk_table(node: Any, visit: Callable[[tuple[str, ...], dict], None], path: 
 def table_digest(table: Any) -> dict[str, Any]:
     """Order-sensitive digest of one table: structure + key order + values.
 
-    ``ordered_sha256`` hashes the insertion-ordered walk (the strongest
-    contract: notebook legends assign colors positionally from key order).
-    ``sorted_sha256`` hashes the same leaves sorted by path — kept as a
+    ``ordered_sha256`` hashes the FULL insertion-ordered structure — branch
+    open/close markers included, so an empty subtree (e.g. the mamba2
+    generation rows, which the Python loader vivifies but never fills) is
+    part of the contract, and key order is too (notebook legends assign
+    colors positionally from key order).
+    ``sorted_sha256`` hashes just the leaves sorted by path — kept as a
     deliberate fallback so an order-only mismatch is distinguishable from a
     value mismatch without recapturing.
     """
     ordered = hashlib.sha256()
     leaves: list[tuple[tuple[str, ...], dict]] = []
 
-    def visit(path: tuple[str, ...], leaf: dict) -> None:
-        ordered.update("/".join(path).encode())
-        ordered.update(b"=")
-        ordered.update(json.dumps(encode_leaf(leaf), sort_keys=True).encode())
-        ordered.update(b";")
-        leaves.append((path, leaf))
+    def hash_node(node: Any, path: tuple[str, ...]) -> None:
+        ordered.update(b"{")
+        for key, value in _iter_mapping(node):
+            encoded = encode_key(key)
+            ordered.update(encoded.encode())
+            ordered.update(b"=")
+            if _is_leaf(value):
+                ordered.update(json.dumps(encode_leaf(value), sort_keys=True).encode())
+                leaves.append((path + (encoded,), value))
+            elif isinstance(value, (dict, UserDict)):
+                hash_node(value, path + (encoded,))
+            else:
+                raise TypeError(f"unhandled table node at {'/'.join(path)}/{encoded}: {type(value).__name__}")
+            ordered.update(b";")
+        ordered.update(b"}")
 
-    walk_table(table, visit)
+    hash_node(table, ())
 
     sorted_hash = hashlib.sha256()
     for path, leaf in sorted(leaves, key=lambda item: item[0]):

@@ -650,6 +650,25 @@ impl AicEngine {
         })
         .map_err(aic_to_py)
     }
+
+    /// Engine-side table view (PR-6): the raw collected data plane for one
+    /// retired Python loader, in that loader's exact nested-dict shape.
+    ///
+    /// ``attribute`` is the PerfDatabase attribute the loader used to fill
+    /// (``"_gemm_data"``, ...; the DSV4 sparse sub-tables address as
+    /// ``"_dsv4_sparse_kernel_data.<sub>"``). Returns ``None`` exactly when
+    /// the Python loader returned ``None`` (every source file missing);
+    /// otherwise an insertion-ordered JSON object whose string keys the
+    /// Python side rehydrates into enum/int/tuple keys per family. Views are
+    /// folded fresh from the parquet sources on every call — they are the
+    /// diagnostic/enumeration surface, not the query path, and deliberately
+    /// bypass the query grids' load-time normalizations (SOL clamping etc.).
+    fn table_view_json(&self, py: Python<'_>, attribute: &str) -> PyResult<Option<String>> {
+        py.allow_threads(|| {
+            crate::perf_database::table_view::table_view_json(self.inner.database(), attribute)
+        })
+        .map_err(aic_to_py)
+    }
 }
 
 /// Convert a JSON-encoded [`EngineSpec`] into bincode bytes (Python → Rust
