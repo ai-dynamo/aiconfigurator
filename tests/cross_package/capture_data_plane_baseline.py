@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Capture the pre-deletion data-plane baseline for PR-6.
 
 Run on a tree where the Python ``load_*_data`` parsers are still alive.  The

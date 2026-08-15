@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared codec for the PR-6 data-plane baseline (capture AND replay).
 
 The pre-deletion capture (``capture_data_plane_baseline.py``) walks every
