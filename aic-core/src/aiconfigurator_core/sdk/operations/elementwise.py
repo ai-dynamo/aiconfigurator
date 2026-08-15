@@ -37,7 +37,6 @@ class ElementWise(Operation):
         **kwargs,
     ) -> None:
         super().__init__(name, scale_factor, seq_split=kwargs.get("seq_split", 1))
-        self._weights = 0.0
         self._empirical_bw_scaling_factor = empirical_bw_scaling_factor
         self._constant_latency = 5e-6  # 5us
         self._dim_in = dim_in
@@ -46,6 +45,3 @@ class ElementWise(Operation):
 
     # sol only
     _ENGINE_QUERY_SHAPE = "tokens"
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor

@@ -18,7 +18,8 @@ in the Rust fold, never here (single-oracle rule).
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from aiconfigurator_core.sdk import common
 
@@ -139,9 +140,7 @@ def _database_has_data_dir(database) -> bool:
         family_dirs = os.listdir(root)
     except OSError:
         return False
-    return any(
-        os.path.isdir(os.path.join(root, family, database.backend, database.version)) for family in family_dirs
-    )
+    return any(os.path.isdir(os.path.join(root, family, database.backend, database.version)) for family in family_dirs)
 
 
 def fetch_table_view(database, attribute: str):

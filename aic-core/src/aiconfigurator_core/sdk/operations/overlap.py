@@ -148,14 +148,6 @@ class FallbackOp(Operation):
         # token-shaped path first); kept as a safe default.
         return True if inferred is None else inferred
 
-    def get_weights(self, **kwargs):
-        # Use primary weights if available, otherwise sum fallback weights.
-        # In practice both should be equivalent since they model the same block.
-        primary_w = self._primary.get_weights(**kwargs)
-        if primary_w > 0:
-            return primary_w
-        return sum(op.get_weights(**kwargs) for op in self._fallback)
-
 
 class OverlapOp(Operation):
     """
@@ -215,9 +207,3 @@ class OverlapOp(Operation):
         # Unreachable when inferred is None (the plan override takes the
         # token-shaped path first); kept as a safe default.
         return True if inferred is None else inferred
-
-    def get_weights(self, **kwargs):
-        weights = 0.0
-        for op in self._group_a + self._group_b:
-            weights += op.get_weights(**kwargs)
-        return weights

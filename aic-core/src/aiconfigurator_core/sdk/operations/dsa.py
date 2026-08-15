@@ -101,37 +101,6 @@ DSA_MODEL_DIMS: dict[str, dict] = {
 DEFAULT_DSA_ARCHITECTURE = "DeepseekV32ForCausalLM"
 
 
-def dsa_block_weights_bytes(
-    architecture: str,
-    local_heads: int,
-    projection_quant_modes: dict,
-) -> float:
-    """Per-layer DSA attention block weight bytes for one rank.
-
-    ``projection_quant_modes`` maps the projection groups ``q``/``kv``/``o``/
-    ``indexer`` to their GEMMQuantMode — per-checkpoint fact (e.g.
-    DeepSeek-V3.2-NVFP4 keeps q/kv/indexer in BF16 but quantizes o_proj).
-    q_a / kv_a(+mqa, incl. the indexer K projection) and the indexer
-    projections are replicated across TP (single latent / single index);
-    q_b, the absorbed kv_b (W_UK/W_UV) and o_proj shard by heads
-    (``local_heads`` is already per-rank).
-    """
-    dims = DSA_MODEL_DIMS.get(architecture) or DSA_MODEL_DIMS[DEFAULT_DSA_ARCHITECTURE]
-    h = dims["hidden_size"]
-    q_lora = dims["q_lora_rank"]
-    kv_lora = dims["kv_lora_rank"]
-    qk = dims["qk_nope_head_dim"] + dims["qk_rope_head_dim"]
-    v = dims["v_head_dim"]
-    idx = dims["index_head_dim"] * dims["index_n_heads"]
-
-    def _b(group: str) -> float:
-        return projection_quant_modes[group].value.memory
-
-    q_params = h * q_lora + q_lora * local_heads * qk
-    kv_params = h * (kv_lora + dims["qk_rope_head_dim"]) + kv_lora * local_heads * (dims["qk_nope_head_dim"] + v)
-    o_params = local_heads * v * h
-    indexer_params = q_lora * idx + h * dims["index_n_heads"]
-    return q_params * _b("q") + kv_params * _b("kv") + o_params * _b("o") + indexer_params * _b("indexer")
 
 
 # Extrapolation grids — lifted verbatim from the legacy blocks in
@@ -238,7 +207,6 @@ class ContextDSAModule(Operation):
         self._attn_projection_quant_modes = attn_projection_quant_modes or dict.fromkeys(
             ("q", "kv", "o", "indexer"), gemm_quant_mode
         )
-        self._weights = dsa_block_weights_bytes(architecture, num_heads, self._attn_projection_quant_modes)
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -316,9 +284,6 @@ class ContextDSAModule(Operation):
     # AG_hidden + RS belong to the MoE comm (modeled by MoEDispatch), not here.
     # ------------------------------------------------------------------
 
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
-
 
 class GenerationDSAModule(Operation):
     """
@@ -367,7 +332,6 @@ class GenerationDSAModule(Operation):
         self._attn_projection_quant_modes = attn_projection_quant_modes or dict.fromkeys(
             ("q", "kv", "o", "indexer"), gemm_quant_mode
         )
-        self._weights = dsa_block_weights_bytes(architecture, num_heads, self._attn_projection_quant_modes)
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -430,9 +394,6 @@ class GenerationDSAModule(Operation):
     # ------------------------------------------------------------------
 
     _ENGINE_QUERY_SHAPE = "generation"
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
 
 
 # ─────────────────────────────────────────────────────────

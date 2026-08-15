@@ -40,12 +40,8 @@ class Embedding(Operation):
         super().__init__(name, scale_factor, seq_split=seq_split)
         self._row_size = row_size
         self._column_size = column_size
-        self._weights = row_size * column_size * 2
         self._empirical_bw_scaling_factor = empirical_bw_scaling_factor
         self._constant_latency = 5e-6  # 5us
 
     # sol only
     _ENGINE_QUERY_SHAPE = "tokens"
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor

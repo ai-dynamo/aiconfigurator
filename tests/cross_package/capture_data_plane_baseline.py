@@ -31,7 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _data_plane_codec import (  # noqa: E402
+from _data_plane_codec import (
     TABLE_ATTRIBUTES,
     snapshot_database_tables,
     snapshot_support_matrix,
@@ -184,9 +184,7 @@ def _snapshot_model_weights(pin: dict) -> dict:
     result = {"context_ops": [], "generation_ops": []}
     for phase in ("context_ops", "generation_ops"):
         for op in getattr(model, phase):
-            result[phase].append(
-                [type(op).__name__, getattr(op, "_name", ""), repr(float(op.get_weights()))]
-            )
+            result[phase].append([type(op).__name__, getattr(op, "_name", ""), repr(float(op.get_weights()))])
     return result
 
 
@@ -246,7 +244,7 @@ def probe() -> None:
     uncovered = []
     for attr, row in states.items():
         cells = [row.get(p, "?") for p in pins]
-        print(attr.ljust(width) + " | ".join(c.ljust(len(p)) for c, p in zip(cells, pins)))
+        print(attr.ljust(width) + " | ".join(c.ljust(len(p)) for c, p in zip(cells, pins, strict=True)))
         if not any(c.startswith("loaded") for c in cells):
             uncovered.append(attr)
     if uncovered:

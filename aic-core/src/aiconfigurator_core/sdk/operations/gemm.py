@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GEMM operation and its associated CSV-backed data (compute_scale, scale_matrix).
+"""GEMM operation over the engine table views (gemm, compute_scale, scale_matrix).
 
 GEMM owns its three CSV-backed raw tables (data plane only — per-op
 values come from the compiled engine, #1357 PR-5).
@@ -19,14 +19,12 @@ between tests and must get distinct cache entries.
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 import aiconfigurator_core
-
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.operations import util_empirical
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
+from aiconfigurator_core.sdk.operations.base import Operation
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -106,7 +104,6 @@ class GEMM(Operation):
         self._n = n
         self._k = k
         self._quant_mode = quant_mode
-        self._weights = self._n * self._k * quant_mode.value.memory
         self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
         self._low_precision_input = kwargs.get("low_precision_input", False)
         self._below_grid_sol = kwargs.get("below_grid_sol", False)
@@ -234,174 +231,3 @@ class GEMM(Operation):
             op = copy.copy(self)
             op._quant_mode = quant_mode
         return op, eval_kwargs
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
-
-
-# ─────────────────────────────────────────────────────────
-# CSV loaders (moved here from perf_database.py so each op family owns its data + parser)
-# ─────────────────────────────────────────────────────────
-
-
-def load_gemm_data(gemm_file):
-    """
-    Load the gemm data with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with
-              'latency', 'power', and 'energy' keys.
-              For old database formats without power, defaults to power=0.0 and energy=0.0.
-    """
-    rows = _read_filtered_rows(gemm_file)
-    if rows is None:
-        logger.debug(f"GEMM data file {gemm_file} not found.")
-        return None
-    gemm_data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (gemm) - power will default to 0.0")
-
-    for row in rows:
-        quant_mode, m, n, k, latency = (
-            row["gemm_dtype"],
-            row["m"],
-            row["n"],
-            row["k"],
-            row["latency"],
-        )
-        m = int(m)
-        n = int(n)
-        k = int(k)
-        latency = float(latency)
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-        # Note: power_limit is available in row.get("power_limit") if needed for validation
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds (W·ms)
-
-        quant_mode = common.GEMMQuantMode[quant_mode]
-
-        try:
-            # Check for conflict
-            gemm_data[quant_mode][m][n][k]
-            logger.debug(f"value conflict in gemm data: {quant_mode} {m} {n} {k}")
-        except KeyError:
-            # Store all three values
-            gemm_data[quant_mode][m][n][k] = {
-                "latency": latency,
-                "power": power,  # Keep for reference
-                "energy": energy,  # NEW: precomputed energy
-            }
-
-    return gemm_data
-
-
-def load_compute_scale_data(compute_scale_file):
-    """
-    Load the compute scale data with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure {quant_mode: {m: {k: {latency, power, energy}}}}
-              For old database formats without power, defaults to power=0.0 and energy=0.0.
-    """
-    rows = _read_filtered_rows(compute_scale_file)
-    if rows is None:
-        logger.debug(f"Compute scale data file {compute_scale_file} not found.")
-        return None
-    compute_scale_data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (compute_scale) - power will default to 0.0")
-
-    for row in rows:
-        quant_mode, m, k, latency = (
-            row["quant_dtype"],
-            row["m"],
-            row["k"],
-            row["latency"],
-        )
-        m = int(m)
-        k = int(k)
-        latency = float(latency)
-
-        # Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds (W·ms)
-
-        quant_mode = common.GEMMQuantMode[quant_mode]
-
-        try:
-            # Check for conflict
-            compute_scale_data[quant_mode][m][k]
-            logger.debug(f"value conflict in compute_scale data: {quant_mode} {m} {k}")
-        except KeyError:
-            # Store all three values
-            compute_scale_data[quant_mode][m][k] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,
-            }
-
-    return compute_scale_data
-
-
-def load_scale_matrix_data(scale_matrix_file):
-    """
-    Load the scale matrix data with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure {quant_mode: {m: {k: {latency, power, energy}}}}
-              For old database formats without power, defaults to power=0.0 and energy=0.0.
-    """
-    rows = _read_filtered_rows(scale_matrix_file)
-    if rows is None:
-        logger.debug(f"Scale matrix data file {scale_matrix_file} not found.")
-        return None
-    scale_matrix_data = defaultdict(lambda: defaultdict(lambda: defaultdict()))
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (scale_matrix) - power will default to 0.0")
-
-    for row in rows:
-        quant_mode, m, k, latency = (
-            row["quant_dtype"],
-            row["m"],
-            row["k"],
-            row["latency"],
-        )
-        m = int(m)
-        k = int(k)
-        latency = float(latency)
-
-        # Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds (W·ms)
-
-        quant_mode = common.GEMMQuantMode[quant_mode]
-
-        try:
-            # Check for conflict
-            scale_matrix_data[quant_mode][m][k]
-            logger.debug(f"value conflict in scale_matrix data: {quant_mode} {m} {k}")
-        except KeyError:
-            # Store all three values
-            scale_matrix_data[quant_mode][m][k] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,
-            }
-
-    return scale_matrix_data

@@ -101,8 +101,7 @@ class TestTrtLLMWideEPMoE:
 
         # For gated: 3 GEMMs * hidden_size * inter_size * num_experts * memory_bytes / tp / ep
         expected_weights = (1024 * 4096 * 8 * 2 * 3) // 2 // 2
-        assert moe._weights == expected_weights
-        assert moe.get_weights() == expected_weights  # scale_factor = 1.0
+        assert moe.get_weights() == expected_weights  # scale_factor = 1.0 (engine-computed, PR-6)
 
     def test_weight_calculation_non_gated(self):
         """Test weight calculation for non-gated MoE."""
@@ -123,8 +122,7 @@ class TestTrtLLMWideEPMoE:
 
         # For non-gated: 2 GEMMs * hidden_size * inter_size * num_experts * memory_bytes / tp / ep
         expected_weights = (1024 * 4096 * 8 * 2 * 2) // 2 // 2
-        assert moe._weights == expected_weights
-        assert moe.get_weights() == expected_weights * 2.0  # scale_factor = 2.0
+        assert moe.get_weights() == expected_weights * 2.0  # scale_factor = 2.0 (engine-computed, PR-6)
 
     def _make(self, **overrides):
         base = dict(

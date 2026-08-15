@@ -1054,11 +1054,12 @@ def weight_of_op(op: Any) -> float:
     """Single-op weight bytes via the engine — the body behind the base
     ``Operation.get_weights``. Weight physics never depends on the backend
     (the only backend-sensitive serializer branch is MoEDispatch's comm
-    flavor, whose weight is 0 either way) or on a database, so a bare
-    spec conversion suffices. Ops the spec cannot express (the AFD
+    flavor — a wire enum that rejects placeholders, so a valid token is
+    passed — and its weight is 0 under every flavor) or on a database, so a
+    bare spec conversion suffices. Ops the spec cannot express (the AFD
     orchestration quartet, the deprecated ``Mamba2`` composite) keep their
     own ``get_weights`` overrides and never reach this."""
-    spec = _to_opspec(op, backend="", architecture="", database=None)
+    spec = _to_opspec(op, backend="trtllm", architecture="", database=None)
     return float(aiconfigurator_core.weights_ops_json(json.dumps([spec]))[0])
 
 

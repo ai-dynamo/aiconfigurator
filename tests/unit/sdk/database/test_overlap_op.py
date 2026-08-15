@@ -44,10 +44,16 @@ class TestOverlapOp:
         assert overlap._group_b == [op_b]
 
     def test_get_weights_sums_all_ops(self):
-        """get_weights should return sum of weights from both groups."""
-        op_a1 = _make_mock_op(1.0, 1.0, weights=100.0)
-        op_a2 = _make_mock_op(1.0, 1.0, weights=200.0)
-        op_b1 = _make_mock_op(1.0, 1.0, weights=50.0)
+        """get_weights should return sum of weights from both groups.
+
+        Weights route through the engine (PR-6), so the children must be
+        real spec-expressible ops: bf16 GEMM weighs n*k*2 bytes."""
+        from aiconfigurator.sdk import common
+        from aiconfigurator.sdk.operations import GEMM
+
+        op_a1 = GEMM("a1", 1.0, 10, 5, common.GEMMQuantMode.bfloat16)  # 100 B
+        op_a2 = GEMM("a2", 1.0, 20, 5, common.GEMMQuantMode.bfloat16)  # 200 B
+        op_b1 = GEMM("b1", 1.0, 5, 5, common.GEMMQuantMode.bfloat16)  # 50 B
 
         overlap = OverlapOp("test", group_a=[op_a1, op_a2], group_b=[op_b1])
 

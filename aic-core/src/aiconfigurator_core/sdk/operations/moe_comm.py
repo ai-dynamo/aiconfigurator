@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator_core.sdk import common
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
+from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -568,10 +568,6 @@ class MoEAllToAll(Operation):
 
     _ENGINE_QUERY_SHAPE = "tokens"
 
-    def get_weights(self, **kwargs) -> float:
-        """All-to-all communication has no weight memory."""
-        return 0.0
-
 
 # ---------------------------------------------------------------------------
 # EP MoE compute (moe_expert_compute_perf.parquet) — same family, compute side
@@ -904,19 +900,9 @@ class MoEExpertCompute(Operation):
         self._kernel_source = kernel_source
         self._is_gated = is_gated
         self._enable_eplb = enable_eplb
-        # 3 GEMMs for gated (gate, up, down), 2 GEMMs for non-gated (up, down).
-        # EP-only family: no moe_tp division (moe_tp == 1 by construction).
-        # Parity-pinned: sized by num_experts, NOT num_slots, matching the
-        # retired TrtLLMWideEPMoE._weights (operations/moe.py:1435 @ dc4caca)
-        # so get_weights() byte-matches the legacy classes on the shipped
-        # gb200 EPLB artifacts. Physically EPLB replicates experts across
-        # slots, so num_slots-based sizing is the correct model — tracked as
-        # AIC-1674 (intentional delta: moves the memory column on EPLB
-        # configs). The SOL roofline's num_slots weight term mirrors its own
-        # legacy twin (the retired wideep_moe.rs sol_latency_ms) — the
-        # asymmetry is inherited, not invented.
-        num_gemms = 3 if is_gated else 2
-        self._weights = hidden_size * inter_size * num_experts * quant_mode.value.memory * num_gemms // moe_ep_size
+        # Weight bytes retired to the engine (Op::weight_bytes): EP-only
+        # sizing by num_experts NOT num_slots stays parity-pinned there
+        # (AIC-1674 tracks the intentional num_slots delta).
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -1007,6 +993,3 @@ class MoEExpertCompute(Operation):
             op = copy.copy(self)
             op._quant_mode = quant_mode
         return op, eval_kwargs
-
-    def get_weights(self, **kwargs) -> float:
-        return self._weights * self._scale_factor

@@ -47,10 +47,9 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 import aiconfigurator_core
-
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.operations import util_empirical
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
+from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -154,17 +153,6 @@ class MoE(Operation):
         self._is_gated = is_gated
         self._moe_backend = kwargs.get("moe_backend")
         self._enable_eplb = kwargs.get("enable_eplb", False)
-        # 3 GEMMs for gated (gate, up, down), 2 GEMMs for non-gated (up, down)
-        num_gemms = 3 if is_gated else 2
-        self._weights = (
-            self._hidden_size
-            * self._inter_size
-            * self._num_experts
-            * quant_mode.value.memory
-            * num_gemms
-            // self._moe_ep_size
-            // self._moe_tp_size
-        )
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -245,9 +233,6 @@ class MoE(Operation):
             op._quant_mode = quant_mode
         return op, eval_kwargs
 
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
-
 
 # ───────────────────────────────────────────────────────────────────────
 # MoEDispatch
@@ -289,7 +274,6 @@ class MoEDispatch(Operation):
         self._moe_tp_size = moe_tp_size
         self._moe_ep_size = moe_ep_size
         self._attention_dp_size = attention_dp_size
-        self._weights = 0.0
         self._enable_fp4_all2all = enable_fp4_all2all
         self._pre_dispatch = pre_dispatch
         self.num_gpus = self._moe_ep_size * self._moe_tp_size
@@ -359,9 +343,6 @@ class MoEDispatch(Operation):
 
     _ENGINE_QUERY_SHAPE = "tokens"
 
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
-
 
 # ───────────────────────────────────────────────────────────────────────
 # TrtLLMWideEPMoE
@@ -418,17 +399,22 @@ class TrtLLMWideEPMoE(Operation):
         self._workload_distribution = workload_distribution
         self._is_gated = is_gated
 
-        # Calculate weights: 3 GEMMs for gated (gate, up, down), 2 GEMMs for non-gated (up, down)
-        num_gemms = 3 if is_gated else 2
-        self._weights = (
+    def get_weights(self, **kwargs):
+        """Local math: this deprecated class has no OpSpec variant (its
+        table is engine-absorbed; PR-7 removes the class), so the base
+        engine-routed get_weights cannot serve it. Mirrors Op::weight_bytes
+        for the MoE family."""
+        num_gemms = 3 if self._is_gated else 2
+        weights = (
             self._hidden_size
             * self._inter_size
             * self._num_experts
-            * quant_mode.value.memory
+            * self._quant_mode.value.memory
             * num_gemms
             // self._moe_ep_size
             // self._moe_tp_size
         )
+        return weights * self._scale_factor
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -553,10 +539,6 @@ class TrtLLMWideEPMoE(Operation):
         )
         return twin, eval_kwargs
 
-    def get_weights(self, **kwargs):
-        """Get the weight memory size for this MoE layer."""
-        return self._weights * self._scale_factor
-
 
 # ───────────────────────────────────────────────────────────────────────
 # TrtLLMWideEPMoEDispatch
@@ -605,12 +587,17 @@ class TrtLLMWideEPMoEDispatch(Operation):
         self._quant_mode = quant_mode
         self._use_low_precision_combine = use_low_precision_combine
         self._node_num = node_num
-        self._weights = 0.0  # MoEDispatch has no weight memory
         self.num_gpus = self._moe_ep_size * self._moe_tp_size
 
     # ------------------------------------------------------------------
     # Data ownership
     # ------------------------------------------------------------------
+
+    def get_weights(self, **kwargs):
+        """Zero, locally: this deprecated tombstone class has no OpSpec
+        variant (PR-7 removes it), so the base engine-routed get_weights
+        cannot serve it. Dispatch has no weight memory."""
+        return 0.0
 
     @classmethod
     def _cache_key(cls, database: PerfDatabase) -> tuple:
@@ -747,10 +734,6 @@ class TrtLLMWideEPMoEDispatch(Operation):
             "(database._trtllm_alltoall_data); live models express dispatch through the "
             "compiled MoEDispatch op (EngineHandle.evaluate_ops_json)."
         )
-
-    def get_weights(self, **kwargs):
-        """MoE dispatch has no weight memory."""
-        return 0.0
 
 
 # ─────────────────────────────────────────────────────────

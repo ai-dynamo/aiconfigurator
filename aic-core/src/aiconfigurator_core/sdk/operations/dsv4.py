@@ -110,10 +110,6 @@ class DeepSeekV4MHCModule(Operation):
         self._hc_mult = hc_mult
         self._sinkhorn_iters = sinkhorn_iters
         self._quant_mode = quant_mode
-        mix_hc = (2 + hc_mult) * hc_mult
-        hc_dim = hc_mult * hidden_size
-        # Two parameter sets per decoder block: attention mHC and FFN mHC.
-        self._weights = 2 * (mix_hc * hc_dim + mix_hc + 3) * quant_mode.value.memory
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -151,9 +147,6 @@ class DeepSeekV4MHCModule(Operation):
     # ------------------------------------------------------------------
 
     _ENGINE_QUERY_SHAPE = "tokens"
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -212,34 +205,6 @@ class _BaseDeepSeekV4AttentionModule(Operation):
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
         self._gemm_quant_mode = gemm_quant_mode
-        self._weights = self._estimate_weights()
-
-    def _estimate_weights(self) -> float:
-        gemm_weight_elems = (
-            self._hidden_size * self._q_lora_rank
-            + self._q_lora_rank * self._num_heads * self._head_dim
-            + self._hidden_size * self._head_dim
-            + self._o_groups * self._o_lora_rank * self._hidden_size
-        )
-        bfloat16_weight_elems = self._num_heads * self._head_dim * self._o_lora_rank
-        float32_weight_elems = self._num_heads
-        if self._compress_ratio:
-            compressor_mult = 2 if self._compress_ratio == 4 else 1
-            gemm_weight_elems += 2 * self._hidden_size * compressor_mult * self._head_dim
-            float32_weight_elems += self._compress_ratio * compressor_mult * self._head_dim
-        if self._compress_ratio == 4:
-            gemm_weight_elems += self._q_lora_rank * self._index_n_heads * self._index_head_dim
-            gemm_weight_elems += 2 * self._hidden_size * 2 * self._index_head_dim
-            bfloat16_weight_elems += self._hidden_size * self._index_n_heads
-            float32_weight_elems += self._compress_ratio * 2 * self._index_head_dim
-        return (
-            gemm_weight_elems * self._gemm_quant_mode.value.memory
-            + bfloat16_weight_elems * common.GEMMQuantMode.bfloat16.value.memory
-            + float32_weight_elems * 4
-        )
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -291,9 +256,7 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
 
             def _primary(filename_enum):
-                return resolve_op_data_path(
-                    system_data_root, database.backend, database.version, filename_enum.value
-                )
+                return resolve_op_data_path(system_data_root, database.backend, database.version, filename_enum.value)
 
             # The csa+hca merge happens engine-side; an absent-or-empty merge
             # binds None, matching the retired _load_dsv4_split semantics
@@ -401,9 +364,7 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
                     database.version,
                     PerfDataFilename.dsv4_csa_generation_module.value,
                 )
-                cls._data_cache[key] = LoadedOpData(
-                    merged_view, PerfDataFilename.dsv4_csa_generation_module, primary
-                )
+                cls._data_cache[key] = LoadedOpData(merged_view, PerfDataFilename.dsv4_csa_generation_module, primary)
             else:
                 cls._data_cache[key] = None
 
@@ -474,16 +435,6 @@ class DeepSeekV4MegaMoEModule(Operation):
         self._num_fused_shared_experts = num_fused_shared_experts
         self._kernel_source = kernel_source
         self._kernel_dtype = kernel_dtype
-        self._weights = (
-            self._hidden_size
-            * self._inter_size
-            * self._num_experts
-            * quant_mode.value.memory
-            # DSv4 MegaMoE is always gated SwiGLU: 3 GEMMs (gate, up, down).
-            * 3
-            // self._moe_ep_size
-            // self._moe_tp_size
-        )
 
     @staticmethod
     def _normalize_distribution(workload_distribution: str) -> str:
@@ -504,7 +455,9 @@ class DeepSeekV4MegaMoEModule(Operation):
         if key not in cls._data_cache:
             # Single-primary semantics live in the engine view (it reads only
             # the head of the resolved source list, like the retired loader).
-            cls._data_cache[key] = load_view(database, "_dsv4_megamoe_module_data", PerfDataFilename.dsv4_megamoe_module)
+            cls._data_cache[key] = load_view(
+                database, "_dsv4_megamoe_module_data", PerfDataFilename.dsv4_megamoe_module
+            )
             cls._record_load()
 
         if "_dsv4_megamoe_module_data" not in database.__dict__:
@@ -528,10 +481,6 @@ class DeepSeekV4MegaMoEModule(Operation):
             op = copy.copy(self)
             op._quant_mode = quant_mode
         return op, eval_kwargs
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
-
 
 # ───────────────────────────────────────────────────────────────────────
 # Init-time split-file merge helper (formerly in PerfDatabase.__init__)

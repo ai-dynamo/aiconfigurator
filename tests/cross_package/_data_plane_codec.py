@@ -18,7 +18,8 @@ import enum
 import hashlib
 import json
 from collections import UserDict
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 # The frozen inventory of loader-backed table attributes on PerfDatabase.
 # This is the deletion surface of PR-6: every attribute listed here is filled

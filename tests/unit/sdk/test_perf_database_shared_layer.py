@@ -565,23 +565,7 @@ def _mla_module_row(version: str, batch_size: int, latency: float) -> str:
     )
 
 
-def test_mla_module_loader_first_source_wins(tmp_path: Path) -> None:
-    """Regression for the sibling-shadowing bug: module loaders used direct
-    assignment (last-wins), so a stale earlier-version source loaded after the
-    primary silently overrode the primary's rows at shared keys — refreshed
-    0.24.0 MLA data was diluted by 0.19.0 rows. The loader must keep the
-    first (highest-priority) source's value and only fill gaps from siblings.
-    """
-    from aiconfigurator_core.sdk.operations.mla import load_generation_mla_module_data
-
-    primary = tmp_path / "primary_mla_generation_module_perf.txt"
-    sibling = tmp_path / "sibling_mla_generation_module_perf.txt"
-    primary.write_text(_MLA_MODULE_HEADER + _mla_module_row("0.24.0", 16, 0.0977))
-    sibling.write_text(_MLA_MODULE_HEADER + _mla_module_row("0.19.0", 16, 0.1443) + _mla_module_row("0.19.0", 32, 0.2))
-
-    data = load_generation_mla_module_data([(str(primary), None), (str(sibling), None)])
-    kv = common.KVCacheQuantMode.fp8
-    gemm = common.GEMMQuantMode.bfloat16
-    # s key = isl + step = 1 + 8192; native 128 from the DeepSeek-V3 pin (#1458)
-    assert data[kv][gemm][128][64][16][8193]["latency"] == 0.0977  # primary wins at the shared key
-    assert data[kv][gemm][128][64][32][8193]["latency"] == 0.2  # sibling still fills the gap
+# test_mla_module_loader_first_source_wins retired with the Python MLA module
+# loader (PR-6): the cross-source first-wins contract now lives in the engine's
+# view fold (table_view.rs::view_generation_mla_module, insert_first_wins) and
+# is pinned by the data-plane baseline digests over the shared-layer pins.
