@@ -34,7 +34,7 @@ from concurrent.futures import (
 )
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -196,7 +196,7 @@ class ParetoRecord:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _drift_pct(python_value: float | None, rust_value: float | None) -> float | None:
