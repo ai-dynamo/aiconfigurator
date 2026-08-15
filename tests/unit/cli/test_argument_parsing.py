@@ -748,9 +748,7 @@ class TestCLIArgumentParsing:
 
     def test_attention_backend_estimate_default_none(self, cli_parser):
         """Test that --attention-backend defaults to None in estimate mode."""
-        args = cli_parser.parse_args(
-            ["estimate", "--model-path", "Qwen/Qwen3-32B", "--system", "h200_sxm"]
-        )
+        args = cli_parser.parse_args(["estimate", "--model-path", "Qwen/Qwen3-32B", "--system", "h200_sxm"])
         assert args.attention_backend is None
 
     def test_attention_backend_in_exp_mode(self, cli_parser, mock_exp_yaml_path):
