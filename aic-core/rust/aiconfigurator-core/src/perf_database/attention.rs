@@ -1616,6 +1616,10 @@ mod tests {
 
         // Donor gap-fill past TWO lanes: hs=64 is collected only in
         // `trtllm_mha` (Python oracle, same call with head_size=64, n_kv=64).
+        // Oracle regenerated post-rebase onto post-#1479 main (d221111
+        // replaced the grid-hold nearest-path snap with a tapered joint-log
+        // util transfer); the old snap-based constant (3.8185985565185545)
+        // is stale — re-verified live-Python == live-Rust on this exact call.
         let got = table
             .query_context(
                 &sglang_default_lanes(),
@@ -1630,7 +1634,7 @@ mod tests {
             )
             .expect("donor gap-fill must succeed")
             .latency;
-        let expected = 3.8185985565185545;
+        let expected = 3.749649873014346;
         assert!(
             ((got - expected) / expected).abs() < 1e-9,
             "donor gap-fill: rust {got} vs python {expected}"
