@@ -95,11 +95,27 @@ roofline queried every op-level op in SOL — but #1461 moved that to
    per-phase `query_trtllm_alltoall`); AFD's three query points and the
    `Mamba2` composite's five legs evaluate standard twin ops through the
    single-op plumbing.
-3. **Deprecation-cleanup PR** (time-locked): drop the `"python"`
-   `engine_step_backend` value, the routing gate, and the CLI choice after
-   the one-release bake PR-3 starts — plus the PR-5 shims
-   (`PerfDatabase.query_*`, `Operation.query`, `_evaluate_single_op`'s
-   deprecation plumbing) and the `Mamba2` composite export.
+3. **PR-6 — data-plane FFI + weight physics** (independent of the
+   deprecation window; runs while the PR-5 shims bake): add the engine
+   table-view FFI (per-family table view in the Python loaders' nested-dict
+   shape, `supported_quants`, quant-admission queries) and per-op
+   `weight_bytes`; migrate the notebook grids, support matrix, task
+   validation gate, and memory reports onto it; then delete the Python
+   parquet parsers (`load_*_data`), `LoadedOpData` dual loading, the
+   Python-side shared-layer source resolution, the util-level table
+   mirrors, and the `get_weights` math. Rust becomes the only owner of the
+   data plane and op physics; Python keeps composition/orchestration.
+4. **Deprecation-cleanup PR — removal + pyo3 op unification**
+   (time-locked): drop the `"python"` `engine_step_backend` value, the
+   routing gate, and the CLI choice after the one-release bake PR-3 starts
+   — plus the PR-5 shims (`PerfDatabase.query_*`, `Operation.query`,
+   `_evaluate_single_op`'s deprecation plumbing) and the `Mamba2`
+   composite export. In the same PR, export the Rust op structs as Python
+   classes via pyo3 so `models/*.py` construct them directly — deleting
+   the Python `Operation` classes, the `_to_opspec` serializer branches,
+   and the two-sided `ENGINE_SPEC_SCHEMA_VERSION` sync discipline
+   (prerequisite: a pickle/transfer story for pyo3 objects across
+   `ProcessPoolExecutor`).
 
 **Post-PR-5 invariant (the single-oracle rule):** per-op performance VALUES
 (latency, energy, SOL decomposition) are computed ONLY by the compiled
