@@ -337,17 +337,28 @@ def run_gdn_context_benchmark(
 
 def _resolve_flashinfer_gdn_decode():
     """
-    Resolve the FlashInfer bf16-state GDN decode kernel for the SM100+
-    lane, or return None (after logging why) when this process can't
-    produce it.
+    Resolve the FlashInfer bf16-state GDN decode kernel for the SM100+ lane.
 
-    SM100+ sglang serving makes this the mandatory decode kernel:
-    server_args.py's _handle_linear_attn_backend (server_args.py:4884-4915
-    @0.5.14) defaults linear_attn_decode_backend=flashinfer on SM100+ once
-    mamba_ssm_dtype == "bfloat16" (the model default) and hard-errors a
-    non-bf16 state on that backend. The lazy import mirrors sglang's own
-    guard for this kernel (gdn_flashinfer.py:34-56 @0.5.14,
-    _get_flashinfer_gdn_kernels -> gated_delta_rule_decode_pretranspose).
+    Returns a ``(kernel_fn, classified_error)`` pair, exactly one of which is
+    not None:
+    - SM<100: ``(None, None)``. The lane genuinely does not apply (SM90 keeps
+      the fla/triton fp32-state lane; no auto-flip there per
+      server_args.py:4884-4915) -- a legitimate skip, logged and done.
+    - SM100+, flashinfer importable: ``(kernel_fn, None)``.
+    - SM100+, flashinfer NOT importable: ``(None, message)``. SM100+ sglang
+      serving makes this the mandatory decode kernel: server_args.py's
+      _handle_linear_attn_backend (server_args.py:4884-4915 @0.5.14)
+      defaults linear_attn_decode_backend=flashinfer on SM100+ once
+      mamba_ssm_dtype == "bfloat16" (the model default) and hard-errors a
+      non-bf16 state on that backend. A missing import here is therefore a
+      collection-environment gap, not a legitimate skip: the caller raises
+      this message as a classified failure (layer_permissions.md: "execute
+      it, or raise") once it has attempted the other decode lanes for the
+      point, so the row is recorded as failed instead of silently omitted.
+
+    The lazy import mirrors sglang's own guard for this kernel
+    (gdn_flashinfer.py:34-56 @0.5.14, _get_flashinfer_gdn_kernels ->
+    gated_delta_rule_decode_pretranspose).
     """
     sm_version = get_sm_version()
     if sm_version < 100:
@@ -357,17 +368,20 @@ def _resolve_flashinfer_gdn_decode():
             "auto-flip there per server_args.py:4884-4915); skipping "
             "flashinfer_gated_delta_rule_decode rows for this case."
         )
-        return None
+        return None, None
     try:
         from flashinfer.gdn_decode import gated_delta_rule_decode_pretranspose
     except (ImportError, RuntimeError) as e:
-        print(
-            f"  SM{sm_version}: FlashInfer bf16 GDN decode lane unavailable "
-            f"(flashinfer.gdn_decode import failed: {e}); skipping "
-            "flashinfer_gated_delta_rule_decode rows for this case."
+        message = (
+            f"SM{sm_version}: FlashInfer bf16 GDN decode lane required but unavailable "
+            f"(flashinfer.gdn_decode import failed: {type(e).__name__}: {e}); SM100+ "
+            "sglang serving mandates this kernel for GDN decode once mamba_ssm_dtype "
+            "defaults to bfloat16 (server_args.py:4884-4915 @0.5.14) -- this is a "
+            "collection environment gap, not a skip."
         )
-        return None
-    return gated_delta_rule_decode_pretranspose
+        print(f"  {message}")
+        return None, message
+    return gated_delta_rule_decode_pretranspose, None
 
 
 def run_gdn_generation_benchmark(
@@ -412,9 +426,12 @@ def run_gdn_generation_benchmark(
     conv_weight = torch.randn(conv_channels, d_conv, dtype=dtype, device=device)
     # SIBLING lane, resolved once per test case (same shape/batch grid as the
     # fla lane below): SM100+ + flashinfer-importable also benchmarks the
-    # FlashInfer bf16-state decode kernel serving mandates there. See
-    # _resolve_flashinfer_gdn_decode for the serving citation.
-    flashinfer_gdn_decode_fn = _resolve_flashinfer_gdn_decode()
+    # FlashInfer bf16-state decode kernel serving mandates there. On SM100+
+    # with flashinfer unavailable, flashinfer_gdn_decode_error carries the
+    # classified-failure message raised below (once the other two decode
+    # lanes have already logged for the point); it stays None on SM<100,
+    # where the lane genuinely does not apply. See _resolve_flashinfer_gdn_decode.
+    flashinfer_gdn_decode_fn, flashinfer_gdn_decode_error = _resolve_flashinfer_gdn_decode()
     successful_points = 0
     failed_points = 0
 
@@ -599,6 +616,13 @@ def run_gdn_generation_benchmark(
                         power_stats=results["power_stats"],
                     ):
                         raise RuntimeError(f"failed to persist SGLang GDN generation row to {perf_filename}")
+            elif flashinfer_gdn_decode_error is not None:
+                # SM100+ mandates this lane (see _resolve_flashinfer_gdn_decode)
+                # and it isn't available in this collection environment: raise
+                # a classified error instead of silently omitting the row. The
+                # two lanes above already logged for this point, so only the
+                # flashinfer row is recorded as failed.
+                raise RuntimeError(flashinfer_gdn_decode_error)
 
             successful_points += 1
 
