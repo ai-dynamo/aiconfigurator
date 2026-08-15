@@ -1489,13 +1489,11 @@ from aiconfigurator_core.sdk.operations.dsa import (  # noqa: F401
 )
 from aiconfigurator_core.sdk.operations.dsv4 import (  # noqa: F401
     load_context_dsv4_kind_module_data,
-    load_dsv4_megamoe_module_data,
     load_dsv4_sparse_kernel_data,
     load_generation_dsv4_kind_module_data,
     load_mhc_module_data,
 )
 from aiconfigurator_core.sdk.operations.moe import (  # noqa: F401
-    load_moe_data,
     load_trtllm_alltoall_data,
     load_wideep_context_moe_data,
     load_wideep_deepep_ll_data,

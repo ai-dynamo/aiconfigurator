@@ -8,8 +8,8 @@ Op classes migrated from ``_legacy.py``:
 - ``MoE`` (ISSUE-12) — Mixture-of-Experts compute op. Owns:
     * ``_moe_data`` — regular MoE table
     * ``_moe_low_latency_data`` — TRT-LLM low-latency NVFP4 kernel table
-      (loaded from the same perf table as the regular MoE data; ``load_moe_data``
-      is the only loader that returns a tuple of two tables)
+      (folded from the same perf table as the regular MoE data by the engine
+      view — `table_view.rs::view_moe` returns the twin pair)
     * ``_wideep_context_moe_data`` — SGLang WideEP context MoE table
     * ``_wideep_generation_moe_data`` — SGLang WideEP generation MoE table
   Table selection (backend + ``moe_backend`` + ``num_tokens`` +
@@ -290,6 +290,14 @@ class MoEDispatch(Operation):
     # ------------------------------------------------------------------
     # Data ownership
     # ------------------------------------------------------------------
+
+    def get_weights(self, **kwargs):
+        """Comm op — no resident weights. Kept as a LOCAL constant (not the
+        engine route): the ``moe_backend='deepep_moe'`` variant (still built
+        by qwen35) has no opspec variant — its serializer raises the AIC-1601
+        tombstone — so the base FFI route would crash memory estimation for
+        an op whose weight was always 0.0."""
+        return 0.0
 
     @classmethod
     def _cache_key(cls, database: PerfDatabase) -> tuple:
@@ -739,133 +747,6 @@ class TrtLLMWideEPMoEDispatch(Operation):
 # ─────────────────────────────────────────────────────────
 # Perf-table loaders (moved here from perf_database.py so each op family owns its data + parser)
 # ─────────────────────────────────────────────────────────
-
-
-def load_moe_data(moe_file):
-    """
-    Load the moe data with power support (backward compatible).
-
-    Returns:
-        tuple: (moe_default_data, moe_low_latency_data) where leaf values are dicts
-               with 'latency', 'power', and 'energy' keys. For old formats,
-               power/energy default to 0.0. Both elements are `None` when the file
-               is missing.
-    """
-    rows = _read_filtered_rows(moe_file)
-    if rows is None:
-        logger.debug(f"MOE data file {moe_file} not found.")
-        return None, None
-
-    moe_default_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(
-                lambda: defaultdict(
-                    lambda: defaultdict(
-                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-                    )
-                )
-            )
-        )
-    )
-    moe_low_latency_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(
-                lambda: defaultdict(
-                    lambda: defaultdict(
-                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-                    )
-                )
-            )
-        )
-    )
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (moe) - power will default to 0.0")
-
-    for row in rows:
-        (
-            quant_mode,
-            num_tokens,
-            hidden_size,
-            inter_size,
-            topk,
-            num_experts,
-            moe_tp_size,
-            moe_ep_size,
-            workload_distribution,
-            latency,
-        ) = (
-            row["moe_dtype"],
-            row["num_tokens"],
-            row["hidden_size"],
-            row["inter_size"],
-            row["topk"],
-            row["num_experts"],
-            row["moe_tp_size"],
-            row["moe_ep_size"],
-            row["distribution"],
-            row["latency"],
-        )
-        kernel_source = row["kernel_source"]  # moe_torch_flow, moe_torch_flow_min_latency, moe_torch_flow
-        num_tokens = int(num_tokens)
-        hidden_size = int(hidden_size)
-        inter_size = int(inter_size)
-        topk = int(topk)
-        num_experts = int(num_experts)
-        moe_tp_size = int(moe_tp_size)
-        moe_ep_size = int(moe_ep_size)
-        latency = float(latency)
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds
-
-        quant_mode = common.MoEQuantMode[quant_mode]
-
-        # DeepSeek-V4-Pro's Blackwell MoE runs the trtllm-gen MXFP4xMXFP8 kernel
-        # (moe_runner_backend=flashinfer_mxfp4 -> Mxfp4FlashinferTrtllmMoEMethod ->
-        # trtllm_fp4_block_scale_routed_moe -> bmm_MxE4m3_MxE2m1MxE4m3 ... sm100f),
-        # which is a distinct precision from the flashinfer cutedsl kernel that the
-        # collector also logs under moe_dtype=w4a8_mxfp4_mxfp8. Route those rows to
-        # the dedicated quant mode so DeepSeek-V4 modeling can select it on Blackwell.
-        if quant_mode is common.MoEQuantMode.w4a8_mxfp4_mxfp8 and kernel_source == "sglang_mxfp4_flashinfer_trtllm_moe":
-            quant_mode = common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
-
-        # Same idea on Hopper: DeepSeek-V4-Pro runs the flashinfer cutlass SM90
-        # mixed-GEMM (cutlass_fused_moe(use_w4_group_scaling=True), MXFP4 weight x
-        # BF16 act), a distinct backend from GPT-OSS's triton_kernels mxfp4 that the
-        # collector also logs under moe_dtype=w4a16_mxfp4. Route those rows to the
-        # dedicated quant mode so DeepSeek-V4 modeling can select it on Hopper.
-        if quant_mode is common.MoEQuantMode.w4a16_mxfp4 and kernel_source == "sglang_flashinfer_cutlass_moe":
-            quant_mode = common.MoEQuantMode.w4a16_mxfp4_cutlass
-
-        moe_data = moe_low_latency_data if kernel_source == "moe_torch_flow_min_latency" else moe_default_data
-
-        try:
-            # Check for conflict
-            moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
-                moe_ep_size
-            ][num_tokens]
-            logger.debug(
-                f"value conflict in moe data: {workload_distribution} {quant_mode} {topk} "
-                f"{num_experts} {hidden_size} {inter_size} {moe_tp_size} {moe_ep_size} "
-                f"{num_tokens}"
-            )
-        except KeyError:
-            # Store all three values
-            moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
-                moe_ep_size
-            ][num_tokens] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,  # NEW: precomputed energy
-            }
-
-    return moe_default_data, moe_low_latency_data
 
 
 def load_wideep_context_moe_data(wideep_context_moe_file):

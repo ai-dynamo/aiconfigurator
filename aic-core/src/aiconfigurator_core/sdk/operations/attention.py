@@ -299,32 +299,3 @@ class EncoderAttention(Operation):
     # ------------------------------------------------------------------
 
     _ENGINE_QUERY_SHAPE = "context"
-
-
-# ─────────────────────────────────────────────────────────
-# CSV loaders (moved here from perf_database.py so each op family owns its data + parser)
-# ─────────────────────────────────────────────────────────
-
-
-def _log_attention_row_conflict(attention_kind, key, kept_provenance, dropped_row):
-    """Warn only when two named kernel sources at the same version collapse to one key.
-
-    First-wins overlap from earlier-version or legacy reuse sources is expected and
-    remains at debug level.
-    """
-    kept_kernel_source, kept_version = kept_provenance
-    dropped_kernel_source = dropped_row.get("kernel_source")
-    dropped_version = dropped_row.get("version")
-    is_backend_collision = (
-        kept_kernel_source
-        and dropped_kernel_source
-        and kept_kernel_source != dropped_kernel_source
-        and kept_version
-        and kept_version == dropped_version
-    )
-    log = logger.warning if is_backend_collision else logger.debug
-    log(
-        f"value conflict in {attention_kind} attention data: {key} — keeping first row "
-        f"(kernel_source={kept_kernel_source}, version={kept_version}), dropping later row "
-        f"(kernel_source={dropped_kernel_source}, version={dropped_version})"
-    )

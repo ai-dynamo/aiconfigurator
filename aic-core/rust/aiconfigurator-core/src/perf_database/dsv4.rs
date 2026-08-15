@@ -1328,7 +1328,7 @@ pub(crate) fn dsv4_attention_sol_ms(
 ///
 /// Mirrors Python `_dsv4_normalize_dtype` / `_DSV4_DTYPE_ALIASES`: the only
 /// alias is `fp8_e4m3` -> `fp8`. Everything else passes through unchanged.
-fn normalize_dsv4_dtype(name: &str) -> String {
+pub(crate) fn normalize_dsv4_dtype(name: &str) -> String {
     match name {
         "fp8_e4m3" => "fp8".to_string(),
         other => other.to_string(),
@@ -1366,7 +1366,7 @@ fn normalize_dsv4_dtype(name: &str) -> String {
 /// concatenates sibling-version files into one row stream — a migrated
 /// (local) primary pooled with a stale (native) sibling of the same model
 /// would otherwise blur both patterns and mask the stale rows.
-fn validate_dsv4_local_head_semantics(
+pub(crate) fn validate_dsv4_local_head_semantics(
     observed: &BTreeMap<(String, String), BTreeSet<(u32, u32)>>,
 ) -> Result<(), AicError> {
     for ((model, version), pairs) in observed {

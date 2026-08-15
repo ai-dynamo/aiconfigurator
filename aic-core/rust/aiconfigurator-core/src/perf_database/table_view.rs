@@ -70,10 +70,10 @@ impl ViewNode {
         }
     }
 
-    /// Descend to (creating) the branch at `path`, then insert `leaf` under
-    /// `last` ONLY if absent — the Python loaders' first-wins conflict rule.
-    /// Returns false on conflict (caller may log/count).
-    pub fn insert_first_wins(&mut self, path: &[String], last: &str, leaf: ViewNode) -> bool {
+    /// Walk to the branch at `path`, vivifying missing levels in insertion
+    /// order — the shared descent under every insert flavor (and Python's
+    /// defaultdict vivification contract).
+    fn descend(&mut self, path: &[String]) -> &mut ViewNode {
         let mut node = self;
         for key in path {
             let idx = match node.child_index(key) {
@@ -86,6 +86,14 @@ impl ViewNode {
             };
             node = &mut node.entries_mut()[idx].1;
         }
+        node
+    }
+
+    /// Descend to (creating) the branch at `path`, then insert `leaf` under
+    /// `last` ONLY if absent — the Python loaders' first-wins conflict rule.
+    /// Returns false on conflict (caller may log/count).
+    pub fn insert_first_wins(&mut self, path: &[String], last: &str, leaf: ViewNode) -> bool {
+        let node = self.descend(path);
         if node.child_index(last).is_some() {
             return false;
         }
@@ -98,18 +106,7 @@ impl ViewNode {
     /// legacy-adapted leaf" path. Replacement re-uses the existing slot, so
     /// the key keeps its original insertion position (Python dict semantics).
     pub fn insert_overwrite(&mut self, path: &[String], last: &str, leaf: ViewNode) {
-        let mut node = self;
-        for key in path {
-            let idx = match node.child_index(key) {
-                Some(i) => i,
-                None => {
-                    let entries = node.entries_mut();
-                    entries.push((key.clone(), ViewNode::branch()));
-                    entries.len() - 1
-                }
-            };
-            node = &mut node.entries_mut()[idx].1;
-        }
+        let node = self.descend(path);
         match node.child_index(last) {
             Some(i) => node.entries_mut()[i].1 = leaf,
             None => node.entries_mut().push((last.to_string(), leaf)),
@@ -186,9 +183,16 @@ fn write_json_f64(out: &mut String, value: f64) {
         // values print as "1.0" which json.loads parses back to Python float
         // — matching the Python loaders' float() casts.
         let _ = write!(out, "{value:?}");
+    } else if value.is_nan() {
+        // The retired Python loaders stored NaN cells verbatim (bare
+        // float()), and the consumer decodes with Python's json.loads, whose
+        // dialect accepts these tokens — so a NaN survives the round trip
+        // instead of panicking across the FFI.
+        out.push_str("NaN");
+    } else if value > 0.0 {
+        out.push_str("Infinity");
     } else {
-        // Perf tables never carry non-finite values; fail loudly if one does.
-        unreachable!("non-finite value in a table view: {value}");
+        out.push_str("-Infinity");
     }
 }
 
@@ -213,9 +217,26 @@ struct RowCtx<'a> {
 }
 
 impl RowCtx<'_> {
-    /// Python's `float(row.get("power", 0.0))` — absent column defaults 0.0.
+    /// Python's `float(row.get("power", 0.0))` — an absent COLUMN defaults
+    /// to 0.0, but a present-but-null cell fails loudly (parquet nulls read
+    /// back as `""` through `_read_perf_rows`, and `float("")` raised): the
+    /// classic loaders' documented fail-loud contract — only the moe_comm
+    /// family was deliberately lenient (`row_power_lenient`).
     fn power(&self) -> Result<f64, AicError> {
-        Ok(self.row.f64_optional(self.power_col)?.unwrap_or(0.0))
+        match self.power_col {
+            Some(col) => self.row.f64(col),
+            None => Ok(0.0),
+        }
+    }
+}
+
+/// Optional string column with a default when the COLUMN is absent; a null
+/// CELL still reads as "" — Python's `row.get(name, default)` distinction
+/// (the default applies only when the key is missing entirely).
+fn str_col_or(ctx: &RowCtx<'_>, name: &str, default: &str) -> Result<String, AicError> {
+    match ctx.reader.col_optional(name) {
+        Some(col) => Ok(ctx.row.str_optional(Some(col))?.unwrap_or("").to_string()),
+        None => Ok(default.to_string()),
     }
 }
 
@@ -488,10 +509,7 @@ pub fn view_wideep_context_mla(sources: &[PerfSource]) -> Result<Option<ViewNode
     let mut root = ViewNode::branch();
     let found = fold_sources(sources, |ctx| {
         let r = ctx.reader;
-        let kernel_source = match r.col_optional("kernel_source") {
-            Some(col) => ctx.row.str_optional(Some(col))?.unwrap_or("").to_string(),
-            None => "flashinfer".to_string(),
-        };
+        let kernel_source = str_col_or(ctx, "kernel_source", "flashinfer")?;
         let quant = ctx.row.str_owned(r.col("mla_dtype")?)?;
         let kv_dtype = ctx.row.str_owned(r.col("kv_cache_dtype")?)?;
         let b = ctx.row.u32(r.col("batch_size")?)?;
@@ -511,10 +529,7 @@ pub fn view_wideep_generation_mla(sources: &[PerfSource]) -> Result<Option<ViewN
     let mut root = ViewNode::branch();
     let found = fold_sources(sources, |ctx| {
         let r = ctx.reader;
-        let kernel_source = match r.col_optional("kernel_source") {
-            Some(col) => ctx.row.str_optional(Some(col))?.unwrap_or("").to_string(),
-            None => "flashinfer".to_string(),
-        };
+        let kernel_source = str_col_or(ctx, "kernel_source", "flashinfer")?;
         let kv_dtype = ctx.row.str_owned(r.col("kv_cache_dtype")?)?;
         let b = ctx.row.u32(r.col("batch_size")?)?;
         let s = ctx.row.u32(r.col("isl")?)?;
@@ -529,17 +544,12 @@ pub fn view_wideep_generation_mla(sources: &[PerfSource]) -> Result<Option<ViewN
     Ok(found.map(|_| root))
 }
 
-/// Python `operations/mla.py::_MLA_MODULE_NATIVE_HEADS` — the model pin that
-/// keys module rows' native-head identity (#1458).
-const MLA_MODULE_NATIVE_HEADS: &[(&str, u32)] = &[
-    ("deepseek-ai/DeepSeek-V3", 128),
-    ("deepseek-ai/DeepSeek-R1", 128),
-    ("nvidia/DeepSeek-V3.1-NVFP4", 128),
-];
-
-/// Python `operations/mla.py::_mla_module_native_heads`: model pin lookup +
-/// the per-row rank-local consistency check (#1429/#1458), fail-loud.
-fn mla_module_native_heads(ctx: &RowCtx<'_>, num_heads: u32) -> Result<u32, AicError> {
+/// Per-row native-head resolution for the MLA module views: the model pin
+/// itself is `perf_database/mla.rs::mla_module_native_heads` (ONE table for
+/// the query loader and the view — landing new module data extends it once);
+/// this wrapper adds the view-side fail-loud messages and the per-row
+/// rank-local consistency check (#1429/#1458).
+fn view_mla_module_native_heads(ctx: &RowCtx<'_>, num_heads: u32) -> Result<u32, AicError> {
     let r = ctx.reader;
     let model = ctx
         .row
@@ -553,20 +563,19 @@ fn mla_module_native_heads(ctx: &RowCtx<'_>, num_heads: u32) -> Result<u32, AicE
             ctx.path.display()
         )));
     }
-    let native = MLA_MODULE_NATIVE_HEADS
-        .iter()
-        .find(|(m, _)| *m == model)
-        .map(|(_, n)| *n)
-        .ok_or_else(|| {
-            AicError::PerfDatabase(format!(
-                "MLA module row in {} names unpinned model {model:?}; add its native head \
-                 count to MLA_MODULE_NATIVE_HEADS when landing the data (#1458).",
-                ctx.path.display()
-            ))
-        })?;
-    let tp_size = ctx
-        .row
-        .u32_optional(r.col_optional("tp_size"))?
+    let native = crate::perf_database::mla::mla_module_native_heads(&model).ok_or_else(|| {
+        AicError::PerfDatabase(format!(
+            "MLA module row in {} names unpinned model {model:?}; add its native head \
+             count to the module native-head pin (perf_database/mla.rs) when landing \
+             the data (#1458).",
+            ctx.path.display()
+        ))
+    })?;
+    // num_optional: DOUBLE-typed tp_size cells count like Python's
+    // int(float(x)) — an INT64-only read would silently bypass the #1429
+    // rank-local guard for exactly the files it exists to reject.
+    let tp_size = num_optional(ctx.row, r.col_optional("tp_size"))?
+        .map(|v| v as u32)
         .filter(|v| *v != 0)
         .unwrap_or(1);
     if tp_size > 1 && num_heads * tp_size != native {
@@ -608,7 +617,7 @@ pub fn view_context_mla_module(sources: &[PerfSource]) -> Result<Option<ViewNode
     let found = fold_sources(sources, |ctx| {
         let r = ctx.reader;
         let num_heads = ctx.row.u32(r.col("num_heads")?)?;
-        let native = mla_module_native_heads(ctx, num_heads)?;
+        let native = view_mla_module_native_heads(ctx, num_heads)?;
         let b = ctx.row.u32(r.col("batch_size")?)?;
         let s = ctx.row.u32(r.col("isl")?)?;
         let latency = ctx.row.f64(r.col("latency")?)?;
@@ -639,7 +648,7 @@ pub fn view_generation_mla_module(sources: &[PerfSource]) -> Result<Option<ViewN
     let found = fold_sources(sources, |ctx| {
         let r = ctx.reader;
         let num_heads = ctx.row.u32(r.col("num_heads")?)?;
-        let native = mla_module_native_heads(ctx, num_heads)?;
+        let native = view_mla_module_native_heads(ctx, num_heads)?;
         let b = ctx.row.u32(r.col("batch_size")?)?;
         let s = ctx.row.u32(r.col("isl")?)? + ctx.row.u32(r.col("step")?)?;
         let latency = ctx.row.f64(r.col("latency")?)?;
@@ -657,18 +666,7 @@ pub fn view_generation_mla_module(sources: &[PerfSource]) -> Result<Option<ViewN
 /// defaultdict "vivification" that some loaders rely on (deliberately or,
 /// in mamba2's generation case, as a preserved bug).
 fn vivify_branch(root: &mut ViewNode, path: &[String]) {
-    let mut node = root;
-    for key in path {
-        let idx = match node.child_index(key) {
-            Some(i) => i,
-            None => {
-                let entries = node.entries_mut();
-                entries.push((key.clone(), ViewNode::branch()));
-                entries.len() - 1
-            }
-        };
-        node = &mut node.entries_mut()[idx].1;
-    }
+    root.descend(path);
 }
 
 /// Tuple keys (mamba-family model keys) are encoded `a|b|c`; the Python
@@ -718,17 +716,6 @@ pub fn view_mamba2(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicError>
     Ok(found.map(|_| root))
 }
 
-/// Python `operations/mamba.py::_GDN_DECODE_RECURRENCE_ALIASES` — the decode
-/// recurrence kernel-name drift across sglang releases, normalized on load.
-fn gdn_kernel_alias(kernel_source: &str) -> &str {
-    match kernel_source {
-        "fused_recurrent_gated_delta_rule" | "fused_recurrent_gated_delta_rule_packed_decode" => {
-            "fused_sigmoid_gating_delta_rule_update"
-        }
-        other => other,
-    }
-}
-
 /// Shared shape of `load_gdn_data` / `load_kda_data`:
 /// `[kernel_source][phase][model_key]` with `[b][s]` for 2-D phases and
 /// `[b] -> leaf` otherwise, explicit first-wins on both shapes.
@@ -742,8 +729,10 @@ fn view_gdn_like(
     let found = fold_sources(sources, |ctx| {
         let r = ctx.reader;
         let raw_ks = ctx.row.str_owned(r.col("kernel_source")?)?;
+        // The alias map is the query loader's (state_space.rs) — one home
+        // for the sglang decode-kernel rename drift.
         let kernel_source = if alias {
-            gdn_kernel_alias(&raw_ks).to_string()
+            crate::perf_database::state_space::normalize_gdn_kernel_source(raw_ks)
         } else {
             raw_ks
         };
@@ -792,20 +781,6 @@ pub fn view_kda(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicError> {
     )
 }
 
-/// The `load_moe_data` kernel-routed quant rewrites: DeepSeek-V4-Pro's
-/// Blackwell trtllm-gen MXFP4xMXFP8 kernel and Hopper flashinfer-cutlass
-/// mixed-GEMM rows get dedicated quant modes distinct from the modes the
-/// collector logged them under.
-fn moe_quant_rewrite(quant: &str, kernel_source: &str) -> String {
-    if quant == "w4a8_mxfp4_mxfp8" && kernel_source == "sglang_mxfp4_flashinfer_trtllm_moe" {
-        return "w4a8_mxfp4_mxfp8_trtllm".to_string();
-    }
-    if quant == "w4a16_mxfp4" && kernel_source == "sglang_flashinfer_cutlass_moe" {
-        return "w4a16_mxfp4_cutlass".to_string();
-    }
-    quant.to_string()
-}
-
 /// `operations/moe.py::load_moe_data` — 9-level
 /// `[moe_dtype][distribution][topk][num_experts][hidden][inter][moe_tp][moe_ep][num_tokens]`,
 /// with `kernel_source == "moe_torch_flow_min_latency"` rows routed to the
@@ -815,7 +790,6 @@ pub fn view_moe(sources: &[PerfSource]) -> Result<Option<(ViewNode, ViewNode)>, 
     let mut low_latency = ViewNode::branch();
     let found = fold_sources(sources, |ctx| {
         let r = ctx.reader;
-        let raw_quant = ctx.row.str_owned(r.col("moe_dtype")?)?;
         let num_tokens = ctx.row.u32(r.col("num_tokens")?)?;
         let hidden = ctx.row.u32(r.col("hidden_size")?)?;
         let inter = ctx.row.u32(r.col("inter_size")?)?;
@@ -826,7 +800,11 @@ pub fn view_moe(sources: &[PerfSource]) -> Result<Option<(ViewNode, ViewNode)>, 
         let distribution = ctx.row.str_owned(r.col("distribution")?)?;
         let latency = ctx.row.f64(r.col("latency")?)?;
         let kernel_source = ctx.row.str_owned(r.col("kernel_source")?)?;
-        let quant = moe_quant_rewrite(&raw_quant, &kernel_source);
+        // Kernel-routed quant remap: the query loader's rule (moe.rs).
+        let quant = crate::perf_database::moe::moe_kernel_quant_rewrite(
+            ctx.row.str_owned(r.col("moe_dtype")?)?,
+            &kernel_source,
+        );
         let target = if kernel_source == "moe_torch_flow_min_latency" {
             &mut low_latency
         } else {
@@ -955,10 +933,7 @@ pub fn view_wideep_moe_compute(sources: &[PerfSource]) -> Result<Option<ViewNode
         let moe_ep = ctx.row.u32(r.col("moe_ep_size")?)?;
         let distribution = ctx.row.str_owned(r.col("distribution")?)?;
         let latency = ctx.row.f64(r.col("latency")?)?;
-        let kernel_source = match r.col_optional("kernel_source") {
-            Some(col) => ctx.row.str_optional(Some(col))?.unwrap_or("").to_string(),
-            None => "moe_torch_flow".to_string(),
-        };
+        let kernel_source = str_col_or(ctx, "kernel_source", "moe_torch_flow")?;
         let path = [
             kernel_source,
             quant,
@@ -997,10 +972,7 @@ pub fn view_trtllm_alltoall(sources: &[PerfSource]) -> Result<Option<ViewNode>, 
         let num_experts = ctx.row.u32(r.col("num_experts")?)?;
         let moe_ep = ctx.row.u32(r.col("moe_ep_size")?)?;
         let latency = ctx.row.f64(r.col("latency")?)?;
-        let kernel_source = match r.col_optional("kernel_source") {
-            Some(col) => ctx.row.str_optional(Some(col))?.unwrap_or("").to_string(),
-            None => "NVLinkTwoSided".to_string(),
-        };
+        let kernel_source = str_col_or(ctx, "kernel_source", "NVLinkTwoSided")?;
         let num_nodes = if has_num_nodes {
             ctx.row.u32(r.col("num_nodes")?)?
         } else {
@@ -1030,15 +1002,6 @@ fn num_optional(row: &PerfRow, col: Option<usize>) -> Result<Option<f64>, AicErr
         return Ok(Some(v));
     }
     Ok(row.u32_optional(col)?.map(|v| v as f64))
-}
-
-/// `moe_comm.py::_normalize_sms` — null/NaN/absent sms -> 0.
-fn normalize_sms(ctx: &RowCtx<'_>, col: Option<usize>) -> Result<u32, AicError> {
-    match num_optional(ctx.row, col)? {
-        None => Ok(0),
-        Some(v) if v.is_nan() => Ok(0),
-        Some(v) => Ok(v as u32),
-    }
 }
 
 /// `moe_comm.py::_row_power` — null/NaN/absent power -> 0.0; a measured but
@@ -1134,11 +1097,7 @@ pub fn view_moe_a2a(
                     ctx.row.u32(r.col("num_experts")?)?.to_string(),
                     sms.to_string(),
                 ];
-                let leaf = ViewNode::Leaf(vec![
-                    ("latency", ViewValue::F64(latency)),
-                    ("power", ViewValue::F64(power)),
-                    ("energy", ViewValue::F64(power * latency)),
-                ]);
+                let leaf = classic_leaf(latency, power);
                 root.insert_first_wins(&path, &ctx.row.u32(r.col("num_token")?)?.to_string(), leaf);
             }
             Ok(())
@@ -1150,10 +1109,7 @@ pub fn view_moe_a2a(
     // fallback max(1, ep//4); unmapped kernel/op rows are skipped.
     let found = fold_sources(legacy_trtllm_alltoall, |ctx| {
         let r = ctx.reader;
-        let kernel_source = match r.col_optional("kernel_source") {
-            Some(col) => ctx.row.str_optional(Some(col))?.unwrap_or("").to_string(),
-            None => "NVLinkTwoSided".to_string(),
-        };
+        let kernel_source = str_col_or(ctx, "kernel_source", "NVLinkTwoSided")?;
         let comm_backend = match kernel_source.as_str() {
             "NVLinkTwoSided" => "nvlink_two_sided",
             "NVLinkOneSided" => "nvlink_one_sided",
@@ -1189,11 +1145,7 @@ pub fn view_moe_a2a(
             ctx.row.u32(r.col("num_experts")?)?.to_string(),
             "0".to_string(),
         ];
-        let leaf = ViewNode::Leaf(vec![
-            ("latency", ViewValue::F64(latency)),
-            ("power", ViewValue::F64(power)),
-            ("energy", ViewValue::F64(power * latency)),
-        ]);
+        let leaf = classic_leaf(latency, power);
         root.insert_first_wins(&path, &ctx.row.u32(r.col("num_tokens")?)?.to_string(), leaf);
         Ok(())
     })?;
@@ -1203,7 +1155,9 @@ pub fn view_moe_a2a(
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let new_found = fold_sources(sources, |ctx| {
         let r = ctx.reader;
-        let sms = normalize_sms(ctx, r.col_optional("sms"))?;
+        // The sms normalization is the query loader's (moe_a2a.rs) —
+        // int-first with the is_finite guard.
+        let sms = crate::perf_database::moe_a2a::normalize_sms(ctx.row, r.col_optional("sms"))?;
         let path = [
             ctx.row.str_owned(r.col("comm_backend")?)?,
             ctx.row.str_owned(r.col("phase")?)?,
@@ -1218,11 +1172,7 @@ pub fn view_moe_a2a(
         let num_tokens = ctx.row.u32(r.col("num_tokens")?)?.to_string();
         let latency = require_latency(ctx, "moe_a2a_perf")? / 1000.0;
         let power = row_power_lenient(ctx)?;
-        let leaf = ViewNode::Leaf(vec![
-            ("latency", ViewValue::F64(latency)),
-            ("power", ViewValue::F64(power)),
-            ("energy", ViewValue::F64(power * latency)),
-        ]);
+        let leaf = classic_leaf(latency, power);
         let full_key = format!("{}\x1f{}", path.join("\x1f"), num_tokens);
         if seen.insert(full_key) {
             root.insert_overwrite(&path, &num_tokens, leaf);
@@ -1269,11 +1219,7 @@ pub fn view_moe_expert_compute(
                 ctx.row.u32(r.col("moe_tp_size")?)?.to_string(),
                 ctx.row.u32(r.col("moe_ep_size")?)?.to_string(),
             ];
-            let leaf = ViewNode::Leaf(vec![
-                ("latency", ViewValue::F64(latency)),
-                ("power", ViewValue::F64(power)),
-                ("energy", ViewValue::F64(power * latency)),
-            ]);
+            let leaf = classic_leaf(latency, power);
             root.insert_first_wins(&path, &ctx.row.u32(r.col("num_tokens")?)?.to_string(), leaf);
             Ok(())
         })?;
@@ -1284,10 +1230,7 @@ pub fn view_moe_expert_compute(
         let r = ctx.reader;
         let latency = ctx.row.f64(r.col("latency")?)?;
         let power = row_power_lenient(ctx)?;
-        let kernel_source = match r.col_optional("kernel_source") {
-            Some(col) => ctx.row.str_optional(Some(col))?.unwrap_or("").to_string(),
-            None => "moe_torch_flow".to_string(),
-        };
+        let kernel_source = str_col_or(ctx, "kernel_source", "moe_torch_flow")?;
         for inference_phase in ["context", "generation"] {
             let path = [
                 kernel_source.clone(),
@@ -1302,11 +1245,7 @@ pub fn view_moe_expert_compute(
                 ctx.row.u32(r.col("moe_tp_size")?)?.to_string(),
                 ctx.row.u32(r.col("moe_ep_size")?)?.to_string(),
             ];
-            let leaf = ViewNode::Leaf(vec![
-                ("latency", ViewValue::F64(latency)),
-                ("power", ViewValue::F64(power)),
-                ("energy", ViewValue::F64(power * latency)),
-            ]);
+            let leaf = classic_leaf(latency, power);
             root.insert_first_wins(&path, &ctx.row.u32(r.col("num_tokens")?)?.to_string(), leaf);
         }
         Ok(())
@@ -1332,11 +1271,7 @@ pub fn view_moe_expert_compute(
         let num_tokens = ctx.row.u32(r.col("num_tokens")?)?.to_string();
         let latency = require_latency(ctx, "moe_expert_compute_perf")?;
         let power = row_power_lenient(ctx)?;
-        let leaf = ViewNode::Leaf(vec![
-            ("latency", ViewValue::F64(latency)),
-            ("power", ViewValue::F64(power)),
-            ("energy", ViewValue::F64(power * latency)),
-        ]);
+        let leaf = classic_leaf(latency, power);
         let full_key = format!("{}\x1f{}", path.join("\x1f"), num_tokens);
         if seen.insert(full_key) {
             root.insert_overwrite(&path, &num_tokens, leaf);
@@ -1347,22 +1282,6 @@ pub fn view_moe_expert_compute(
     })?;
 
     Ok(if new_found.is_some() || legacy_loaded { Some(root) } else { None })
-}
-
-/// `operations/dsa.py::_dsa_kernel_source_buckets` — configured-backend
-/// bucket fan-out. BF16 KV rows back BOTH buckets; FP8 rows bucket by the
-/// executed kernel name with the legacy substring fallback.
-fn dsa_kernel_source_buckets(kernel_source: &str, kv_dtype: &str) -> &'static [&'static str] {
-    if kv_dtype == "bfloat16" {
-        return &["trtllm", "flashmla_kv"];
-    }
-    match kernel_source {
-        "sglang_dsa_indexer_trtllm" | "sglang_dsa_skip_indexer_trtllm" => &["trtllm"],
-        "sglang_dsa_indexer_flashmla_sparse" | "sglang_dsa_skip_indexer_flashmla_sparse" => &["flashmla_kv"],
-        "sglang_dsa_dense_mha_trtllm_ragged" => &["trtllm", "flashmla_kv"],
-        ks if ks.contains("trtllm") => &["trtllm"],
-        _ => &["flashmla_kv"],
-    }
 }
 
 /// Per-source accumulator reproducing the DSA loaders' two-rule merge:
@@ -1430,7 +1349,13 @@ fn view_dsa_module(
             let b = row.u32(reader.col("batch_size")?)?;
             let latency = row.f64(reader.col("latency")?)?;
             let power = if has_power {
-                row.f64_optional(power_col)?.unwrap_or(0.0)
+                // Fail-loud on a present-but-null cell, like the classic
+                // loaders; a LATER source file without the column still
+                // defaults per-row (Python's row.get).
+                match power_col {
+                    Some(col) => row.f64(col)?,
+                    None => 0.0,
+                }
             } else {
                 0.0
             };
@@ -1441,11 +1366,7 @@ fn view_dsa_module(
             let gemm = row.str_owned(reader.col("gemm_type")?)?;
             let kv_dtype = row.str_owned(reader.col("kv_cache_dtype")?)?;
             let ks = row.str_optional(ks_col)?.unwrap_or("").to_string();
-            let leaf = ViewNode::Leaf(vec![
-                ("latency", ViewValue::F64(latency)),
-                ("power", ViewValue::F64(power)),
-                ("energy", ViewValue::F64(power * latency)),
-            ]);
+            let leaf = classic_leaf(latency, power);
             if context {
                 let s = row.u32(reader.col("isl")?)?;
                 let fmha = row.str_owned(reader.col("mla_dtype")?)?;
@@ -1458,8 +1379,16 @@ fn view_dsa_module(
                             .to_string(),
                     ));
                 }
+                // A stored NaN step must not silently file the row at
+                // prefix=0 (Python's int(nan) raised and failed the load).
+                if step.is_some_and(|v| !v.is_finite()) {
+                    return Err(AicError::PerfDatabase(format!(
+                        "non-finite step cell in a DSA context row at {}",
+                        path.display()
+                    )));
+                }
                 let prefix = step.map(|v| v as u32).unwrap_or(0);
-                for backend in dsa_kernel_source_buckets(&ks, &kv_dtype) {
+                for backend in crate::perf_database::dsa::dsa_kernel_source_buckets(&ks, &kv_dtype) {
                     source_values.put(
                         vec![
                             fmha.clone(),
@@ -1477,7 +1406,7 @@ fn view_dsa_module(
                 }
             } else {
                 let s = row.u32(reader.col("isl")?)? + row.u32(reader.col("step")?)?;
-                for backend in dsa_kernel_source_buckets(&ks, &kv_dtype) {
+                for backend in crate::perf_database::dsa::dsa_kernel_source_buckets(&ks, &kv_dtype) {
                     source_values.put(
                         vec![
                             kv_dtype.clone(),
@@ -1533,25 +1462,16 @@ pub fn view_mhc_module(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicEr
         let latency = ctx.row.f64(r.col("latency")?)?;
         let power = first_power.power(ctx)?;
         let path = [op, hc_mult.to_string(), hidden.to_string()];
-        root.insert_first_wins(&path, &num_tokens.to_string(), classic_leaf_with(latency, power));
+        root.insert_first_wins(&path, &num_tokens.to_string(), classic_leaf(latency, power));
         Ok(())
     })?;
     Ok(found.map(|_| root))
 }
 
-/// `operations/dsv4.py::_dsv4_normalize_dtype` — sglang column naming to
-/// canonical enum names.
-fn dsv4_normalize_dtype(name: &str) -> &str {
-    match name {
-        "fp8_e4m3" => "fp8",
-        other => other,
-    }
-}
-
 /// `operations/dsv4.py::_validate_dsv4_local_head_semantics` — reject stale
 /// pre-#1131 NATIVE-heads files by the per-(model, version) fingerprint, and
 /// require a parseable tp_size everywhere once the file carries the column.
-fn validate_dsv4_local_head_semantics(
+fn validate_view_dsv4_head_semantics(
     rows: &[(u32, Option<u32>, String, String)],
     saw_tp_size: bool,
     missing_tp_rows: usize,
@@ -1570,6 +1490,10 @@ fn validate_dsv4_local_head_semantics(
              convention requires tp_size in every row (native = num_heads * tp_size)."
         )));
     }
+    // The stale-fingerprint rule itself is the query loader's
+    // (dsv4.rs::validate_dsv4_local_head_semantics) — one home for the #1429
+    // pattern; only the tp-presence preconditions above are view-specific
+    // (they carry the path label Python's loader printed).
     let mut observed: std::collections::BTreeMap<(String, String), std::collections::BTreeSet<(u32, u32)>> =
         std::collections::BTreeMap::new();
     for (heads, tp, model, version) in rows {
@@ -1579,21 +1503,7 @@ fn validate_dsv4_local_head_semantics(
             .or_default()
             .insert((*heads, tp));
     }
-    for ((model, version), pairs) in observed {
-        let tps: std::collections::BTreeSet<u32> = pairs.iter().map(|(_, tp)| *tp).collect();
-        let heads: std::collections::BTreeSet<u32> = pairs.iter().map(|(h, _)| *h).collect();
-        let products: std::collections::BTreeSet<u64> =
-            pairs.iter().map(|(h, tp)| *h as u64 * *tp as u64).collect();
-        if tps.len() > 1 && heads.len() == 1 && products.len() != 1 {
-            return Err(AicError::PerfDatabase(format!(
-                "DSV4 module rows for model={model:?} version={version:?} in {path_label} keep \
-                 num_heads constant across tp_size values {tps:?}: that is the retired \
-                 pre-#1131 NATIVE semantics (#1429). Migrate the file to rank-local heads \
-                 (num_heads //= tp_size) before loading."
-            )));
-        }
-    }
-    Ok(())
+    crate::perf_database::dsv4::validate_dsv4_local_head_semantics(&observed)
 }
 
 /// Shared body of the two DSV4 attention-kind loaders. Malformed rows are
@@ -1632,7 +1542,9 @@ fn view_dsv4_kind_module(sources: &[PerfSource], context: bool) -> Result<Option
         // tp parseable -> saw_tp_size, else missing_tp_rows += 1.
         let heads_opt = ctx.row.u32_optional(r.col_optional("num_heads"))?;
         if let Some(heads) = heads_opt {
-            let tp_opt = ctx.row.u32_optional(r.col_optional("tp_size"))?;
+            // num_optional: DOUBLE-typed tp_size counts as parseable like
+            // Python's int(float(x)) — INT64-only would fail the whole file.
+            let tp_opt = num_optional(ctx.row, r.col_optional("tp_size"))?.map(|v| v as u32);
             if tp_opt.is_some() {
                 saw_tp_size = true;
             } else {
@@ -1663,27 +1575,26 @@ fn view_dsv4_kind_module(sources: &[PerfSource], context: bool) -> Result<Option
             let Some(step) = step else { return Ok(()) };
             (s_raw + step as u32, 0)
         };
-        let tp = ctx
-            .row
-            .u32_optional(r.col_optional("tp_size"))?
-            .map(|v| v.max(1))
+        let tp = num_optional(ctx.row, r.col_optional("tp_size"))?
+            .map(|v| (v as u32).max(1))
             .unwrap_or(1);
         let power = if has_power {
-            ctx.row.f64_optional(ctx.power_col)?.unwrap_or(0.0)
+            // Fail-loud on a present-but-null cell (see RowCtx::power); a
+            // later source file without the column still defaults per-row.
+            match ctx.power_col {
+                Some(col) => ctx.row.f64(col)?,
+                None => 0.0,
+            }
         } else {
             0.0
         };
-        let (Some(gemm), Some(kv)) = (
-            ctx.row.str_optional(r.col_optional("gemm_type"))?,
-            ctx.row.str_optional(r.col_optional("kv_cache_dtype"))?,
-        ) else {
-            return Ok(());
-        };
+        // The dtype columns sat OUTSIDE the Python loader's
+        // try/except-continue: a missing column or null cell crashed the
+        // load loudly (KeyError / enum KeyError) rather than skipping rows.
+        let gemm = ctx.row.str_owned(r.col("gemm_type")?)?;
+        let kv = ctx.row.str_owned(r.col("kv_cache_dtype")?)?;
         let fmha = if context {
-            let Some(fmha) = ctx.row.str_optional(r.col_optional("mla_dtype"))? else {
-                return Ok(());
-            };
-            dsv4_normalize_dtype(fmha).to_string()
+            crate::perf_database::dsv4::normalize_dsv4_dtype(ctx.row.str(r.col("mla_dtype")?)?)
         } else {
             String::new()
         };
@@ -1696,21 +1607,21 @@ fn view_dsv4_kind_module(sources: &[PerfSource], context: bool) -> Result<Option
             heads,
             tp,
             power,
-            gemm: gemm.to_string(),
+            gemm,
             fmha,
-            kv: dsv4_normalize_dtype(kv).to_string(),
+            kv: crate::perf_database::dsv4::normalize_dsv4_dtype(&kv),
         });
         Ok(())
     })?;
     if found.is_none() {
         return Ok(None);
     }
-    validate_dsv4_local_head_semantics(&fingerprint, saw_tp_size, missing_tp_rows, &path_label)?;
+    validate_view_dsv4_head_semantics(&fingerprint, saw_tp_size, missing_tp_rows, &path_label)?;
 
     let mut root = ViewNode::branch();
     for row in decoded {
         let native = row.heads * row.tp;
-        let leaf = classic_leaf_with(row.latency, row.power);
+        let leaf = classic_leaf(row.latency, row.power);
         if context {
             let path = [
                 row.fmha,
@@ -1753,12 +1664,16 @@ pub fn view_generation_dsv4_kind_module(sources: &[PerfSource]) -> Result<Option
 /// `operations/dsv4.py::load_dsv4_megamoe_module_data` — the 15-level
 /// wide-leaf MegaMoE table; single-source only, boolean invariants enforced,
 /// DUPLICATE rows are a load error (not first-wins).
-pub fn view_dsv4_megamoe_module(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicError> {
-    // Python receives the primary path only (never the shared-layer list).
-    let Some(primary) = sources.first() else {
-        return Ok(None);
-    };
-    let single = [PerfSource(primary.0.clone(), None)];
+pub fn view_dsv4_megamoe_module(data_root: &std::path::Path) -> Result<Option<ViewNode>, AicError> {
+    // Python passed the PRIMARY path only — resolve_op_data_path's
+    // family-first-then-legacy walk, never the shared-layer source list. A
+    // legacy INCOMPLETE veto (or an admitted donor) must not substitute a
+    // sibling file here, and an empty source list must not re-resolve a
+    // vetoed primary; resolving directly reproduces the retired loader.
+    let basename = "dsv4_megamoe_module_perf.parquet";
+    let primary = crate::perf_database::find_in_family_dirs(data_root, basename)
+        .unwrap_or_else(|| data_root.join(basename));
+    let single = [PerfSource(primary, None)];
     let mut root = ViewNode::branch();
     let found = fold_sources(&single, |ctx| {
         let r = ctx.reader;
@@ -1772,7 +1687,9 @@ pub fn view_dsv4_megamoe_module(sources: &[PerfSource]) -> Result<Option<ViewNod
             match r.col_optional(name) {
                 // `PerfRow::bool` mirrors Python's `_to_bool(str(value))`:
                 // BOOLEAN, INT64 and string storages all coerce.
-                Some(col) => ctx.row.bool(col),
+                // A present-but-null cell coerces to false, mirroring the
+                // retired loader's _to_bool("") — PerfRow::bool would error.
+                Some(col) => Ok(ctx.row.bool(col).unwrap_or(false)),
                 None => Ok(to_bool(default)),
             }
         };
@@ -1794,10 +1711,7 @@ pub fn view_dsv4_megamoe_module(sources: &[PerfSource]) -> Result<Option<ViewNod
                 ctx.path.display()
             )));
         }
-        let kernel_source = match r.col_optional("kernel_source") {
-            Some(col) => ctx.row.str_optional(Some(col))?.unwrap_or("").to_string(),
-            None => "deepgemm_megamoe".to_string(),
-        };
+        let kernel_source = str_col_or(ctx, "kernel_source", "deepgemm_megamoe")?;
         let kernel_dtype = ctx.row.str_owned(r.col("kernel_dtype")?)?;
         let quant = ctx.row.str_owned(r.col("moe_dtype")?)?;
         let pre_dispatch = ctx.row.str_owned(r.col("pre_dispatch")?)?;
@@ -1937,15 +1851,6 @@ pub fn view_dsv4_sparse_kernel(sources: &[PerfSource]) -> Result<Option<ViewNode
     })
 }
 
-/// Standard leaf from a pre-resolved power value.
-fn classic_leaf_with(latency: f64, power: f64) -> ViewNode {
-    ViewNode::Leaf(vec![
-        ("latency", ViewValue::F64(latency)),
-        ("power", ViewValue::F64(power)),
-        ("energy", ViewValue::F64(power * latency)),
-    ])
-}
-
 /// `operations/dsv4.py::_deep_merge_dsv4_dicts` — in-place merge preserving
 /// dest insertion order; at any level where both sides are branches, recurse,
 /// otherwise src overwrites (leaf fields merge by name like Python dicts).
@@ -2015,6 +1920,10 @@ pub fn table_view_json(tables: &PerfTables, attribute: &str) -> Result<Option<St
         "_generation_mla_module_data" => view_generation_mla_module(&src("mla_generation_module_perf.parquet"))?,
         "_wideep_context_mla_data" => view_wideep_context_mla(&src("wideep_context_mla_perf.parquet"))?,
         "_wideep_generation_mla_data" => view_wideep_generation_mla(&src("wideep_generation_mla_perf.parquet"))?,
+        // Each arm folds moe_perf.parquet (the largest shipped table) and
+        // discards the twin — accepted: the fold runs once per (database,
+        // attribute) behind MoE.load_data's class cache, not per query. If
+        // this ever matters, cache the (default, low_latency) pair here.
         "_moe_data" => view_moe(&src("moe_perf.parquet"))?.map(|(default, _)| default),
         "_moe_low_latency_data" => view_moe(&src("moe_perf.parquet"))?.map(|(_, low_latency)| low_latency),
         "_wideep_context_moe_data" => view_wideep_moe(&src("wideep_context_moe_perf.parquet"))?,
@@ -2060,7 +1969,7 @@ pub fn table_view_json(tables: &PerfTables, attribute: &str) -> Result<Option<St
         }
         "_dsv4_sparse_kernel_data.hca_attn" => view_dsv4_sparse_kernel(&src("dsv4_hca_attn_module_perf.parquet"))?,
         "_dsv4_sparse_kernel_data.csa_attn" => view_dsv4_sparse_kernel(&src("dsv4_csa_attn_module_perf.parquet"))?,
-        "_dsv4_megamoe_module_data" => view_dsv4_megamoe_module(&src("dsv4_megamoe_module_perf.parquet"))?,
+        "_dsv4_megamoe_module_data" => view_dsv4_megamoe_module(&tables.data_root)?,
         "_mamba2_data" => view_mamba2(&src("mamba2_perf.parquet"))?,
         "_gdn_data" => view_gdn(&src("gdn_perf.parquet"))?,
         "_kda_data" => view_kda(&src("kda_perf.parquet"))?,

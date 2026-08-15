@@ -130,7 +130,16 @@ def _database_has_data_dir(database) -> bool:
     the Rust engine applies at load. Estimate-only runs (SOL mode over a
     version with no collected data) construct a PerfDatabase whose loaders
     always answered ``None``; the probe engine would refuse to load at all,
-    so the view layer answers ``None`` without touching it."""
+    so the view layer answers ``None`` without touching it.
+
+    KNOWN LIMIT: NCCL/OneCCL data is nccl_version-scoped (``<data>/[comm/]
+    nccl/<ver>``, outside this gate's dirs), so an estimate-only database
+    also loses its ``_nccl_data`` view even when that file exists — the old
+    Python parser could load it standalone. Lifting this needs the engine to
+    tolerate a missing backend/version data dir (the Rust loader hard-fails
+    at construction — the same pre-existing limit that killed the
+    estimate-only demo path in PR-3; a maintainer-level design decision
+    proposed alongside #1552, not extended here)."""
     import os
 
     root = os.path.join(database.systems_root, database.system_spec["data_dir"])
@@ -156,7 +165,15 @@ def fetch_table_view(database, attribute: str):
 
     if not _database_has_data_dir(database):
         return None
-    handle = _engine._probe_handle_for(database, None)
+    # One probe handle per database instance: _probe_handle_for's cache key
+    # is the probe-spec JSON itself, and BUILDING that key re-runs the
+    # shared-layer source resolution for every op file — a full warm does
+    # ~40 fetches, so memoize the handle on the database (its sources are
+    # construction-time state; mode/policy views are separate objects).
+    handle = database.__dict__.get("_table_view_probe_handle")
+    if handle is None:
+        handle = _engine._probe_handle_for(database, None)
+        database.__dict__["_table_view_probe_handle"] = handle
     raw = handle._engine.table_view_json(attribute)
     if raw is None:
         return None

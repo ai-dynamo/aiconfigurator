@@ -69,3 +69,14 @@ def test_fpm_forward_phase_tokens_stay_mapped():
         op = Operation("probe", 1.0)
         op._phase = phase
         assert op._engine_query_is_context({}) in (True, False)
+
+
+def test_get_weights_survives_ops_without_an_opspec_variant():
+    """The ``moe_backend='deepep_moe'`` MoEDispatch (still built by qwen35)
+    has no opspec variant — its serializer raises the AIC-1601 tombstone.
+    ``get_weights`` must stay the op's local 0.0 instead of crashing memory
+    estimation through the engine route (base ``Operation.get_weights``)."""
+    from aiconfigurator_core.sdk.operations.moe import MoEDispatch
+
+    op = MoEDispatch("d", 1.0, 7168, 8, 256, 1, 16, 1, False, moe_backend="deepep_moe")
+    assert op.get_weights() == 0.0

@@ -636,7 +636,7 @@ fn adapt_legacy_trtllm_alltoall(
 /// `_normalize_sms`: an absent column, a NULL cell, or NaN all key at 0.
 /// The column is INT64 in the collector schema; the f64 arm covers a
 /// float-typed collection (Python's `int(float(raw))`).
-fn normalize_sms(row: &PerfRow, col: Option<usize>) -> Result<u32, AicError> {
+pub(crate) fn normalize_sms(row: &PerfRow, col: Option<usize>) -> Result<u32, AicError> {
     if let Some(value) = row.u32_optional(col)? {
         return Ok(value);
     }
