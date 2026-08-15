@@ -256,6 +256,11 @@ _DSA_MODEL_NATIVE_HEADS = {
     "zai-org/GLM-5-FP8": 64,
     "nvidia/GLM-5-NVFP4": 64,
     "nvidia/GLM-5.2-NVFP4": 64,
+    # SM90 skip-indexer probe collection (pipelines 62700025/62872230,
+    # 2026-08-14..15) ships rows for the zai GLM-5.2 artifacts; same
+    # 64-head geometry as the NVFP4 sibling above.
+    "zai-org/GLM-5.2": 64,
+    "zai-org/GLM-5.2-FP8": 64,
 }
 
 
