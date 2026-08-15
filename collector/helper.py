@@ -113,7 +113,7 @@ class PowerMonitor:
     def __init__(self, device_id: int):
         """
         Args:
-            device_id: CUDA device index to monitor (must not be None;
+            device_id: Non-negative CUDA device index to monitor (must not be None;
                 use torch.cuda.current_device() rather than torch.device("cuda").index)
         """
         if isinstance(device_id, bool) or not isinstance(device_id, int):
@@ -121,6 +121,8 @@ class PowerMonitor:
                 f"PowerMonitor requires an explicit integer device index, got {device_id!r}. "
                 "Use torch.cuda.current_device() or torch.device('cuda:N').index."
             )
+        if device_id < 0:
+            raise ValueError(f"PowerMonitor requires a non-negative CUDA device index, got {device_id}")
         self.device_id = device_id
         self.interval_s = self.SAMPLE_INTERVAL_MS / 1000.0
         self._thread = None

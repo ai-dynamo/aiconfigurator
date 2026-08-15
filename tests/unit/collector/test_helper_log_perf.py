@@ -198,6 +198,11 @@ def test_power_monitor_rejects_noninteger_device_id():
         PowerMonitor("cuda:0")
 
 
+def test_power_monitor_rejects_negative_device_id():
+    with pytest.raises(ValueError, match="non-negative CUDA device index"):
+        PowerMonitor(-1)
+
+
 def test_power_monitoring_only_stops_sampler_when_body_raises(monkeypatch):
     events = []
 
