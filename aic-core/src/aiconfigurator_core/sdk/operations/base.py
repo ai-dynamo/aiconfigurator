@@ -244,9 +244,102 @@ class Operation:
         # major ops divide ``x`` by this in query(); default 1 means no shard.
         self._seq_split: int = seq_split
 
+    # How the deprecated ``query()`` shim maps this op's legacy kwargs onto
+    # the engine's op-list evaluation shape. Subclasses declare one of:
+    #   "tokens"     — token-major: query(x=<num tokens>)  (GEMM, MoE, comm, ...)
+    #   "context"    — batch-major prefill: query(batch_size=, s=, prefix=)
+    #   "generation" — batch-major decode:  query(batch_size=, s=)
+    #   "module"     — phase carried by the instance (``_is_context`` /
+    #                  ``_phase``) or the ``is_context=`` query kwarg
+    # ``None`` (default) = no shim: query() raises NotImplementedError.
+    _ENGINE_QUERY_SHAPE: ClassVar[str | None] = None
+
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        """Return latency (scaled by ``scale_factor``) plus energy/source data."""
-        raise NotImplementedError
+        """DEPRECATED (#1357): per-call query shim, removed next release.
+
+        Returns the compiled engine's op-level estimate for this op (scaled by
+        ``scale_factor``) as a ``PerformanceResult`` — the same value the
+        engine charges in a model run. Routed through the op-list FFI; the
+        Python per-call math is gone. Long-term callers use
+        ``EngineHandle.evaluate_ops_json`` (op-list) or the phase/run surface.
+        """
+        import warnings
+
+        from aiconfigurator_core.sdk.engine import QUERY_SHIM_DEPRECATION
+
+        warnings.warn(f"{type(self).__name__}.query: {QUERY_SHIM_DEPRECATION}", DeprecationWarning, stacklevel=2)
+        return self._engine_query(database, **kwargs)
+
+    def _engine_query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        """The shim body without the deprecation warning — internal callers
+        (the ``_sum_latency`` fallback loop, the AFD comm ops' orchestration)
+        route here so warnings fire only on the public deprecated surface."""
+        from aiconfigurator_core.sdk.engine import _evaluate_single_op
+
+        op, eval_kwargs = self._engine_query_plan(kwargs)
+        return _evaluate_single_op(database, op, **eval_kwargs)
+
+    def _engine_query_plan(self, kwargs: dict):
+        """Map legacy ``query(**kwargs)`` onto ``(op_to_evaluate, eval_kwargs)``
+        per the class's ``_ENGINE_QUERY_SHAPE``. Subclasses with per-call
+        overrides (MoE's ``quant_mode``) override this and rebuild the op.
+        Unrecognized kwargs are ignored, matching the legacy ``kwargs.get``
+        behavior (e.g. ``model_name``)."""
+        shape = self._ENGINE_QUERY_SHAPE
+        if shape is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} has no engine-backed query shim; evaluate it via "
+                "EngineHandle.evaluate_ops_json (op-list FFI)."
+            )
+        if shape == "tokens":
+            x = kwargs.get("x")
+            if x is None:
+                raise ValueError(f"{type(self).__name__}.query requires 'x' (num tokens).")
+            return self, {"is_context": True, "batch_size": 1, "s": 1, "x": int(x)}
+        if shape == "context":
+            is_context = True
+        elif shape == "generation":
+            is_context = False
+        else:
+            is_context = self._engine_query_is_context(kwargs)
+        beam_width = kwargs.get("beam_width", 1)
+        if not is_context and beam_width != 1:
+            raise ValueError(f"{type(self).__name__} only supports beam_width=1, got {beam_width}")
+        batch_size = kwargs.get("batch_size")
+        s = kwargs.get("s")
+        if batch_size is None or s is None:
+            raise ValueError(f"{type(self).__name__}.query requires 'batch_size' and 's'.")
+        if is_context:
+            scale = kwargs.get("seq_imbalance_correction_scale", 1.0)
+        else:
+            scale = kwargs.get(
+                "gen_seq_imbalance_correction_scale",
+                kwargs.get("seq_imbalance_correction_scale", 1.0),
+            )
+        x = kwargs.get("x")
+        return self, {
+            "is_context": is_context,
+            "batch_size": int(batch_size),
+            "s": int(s),
+            "prefix": int(kwargs.get("prefix") or 0),
+            "x": None if x is None else int(x),
+            "imbalance_correction_scale": float(scale or 1.0),
+        }
+
+    def _engine_query_is_context(self, kwargs: dict) -> bool:
+        """Phase for ``_ENGINE_QUERY_SHAPE = "module"`` ops: explicit
+        ``is_context=`` kwarg wins, then the instance's own phase marker.
+        Composites (Overlap/Fallback) override to infer from children."""
+        hint = kwargs.get("is_context")
+        if hint is not None:
+            return bool(hint)
+        is_context = getattr(self, "_is_context", None)
+        if is_context is not None:
+            return bool(is_context)
+        phase = getattr(self, "_phase", None)
+        if phase in ("context", "generation"):
+            return phase == "context"
+        raise ValueError(f"{type(self).__name__}.query cannot infer the evaluation phase; pass is_context=True/False.")
 
     def get_weights(self, **kwargs):
         raise NotImplementedError
@@ -340,9 +433,10 @@ def clear_all_op_caches() -> None:
     Operation._load_data_call_count.clear()
     # Lazy for the same cycle reason (rust_engine_step is imported by engine.py,
     # which imports operation modules).
-    from aiconfigurator_core.sdk import rust_engine_step
+    from aiconfigurator_core.sdk import engine, rust_engine_step
 
     rust_engine_step._engine_handle_cache_clear()
+    engine._clear_probe_handle_cache()
 
 
 def warm_all_op_data(database: PerfDatabase) -> None:

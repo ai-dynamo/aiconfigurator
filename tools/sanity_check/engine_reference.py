@@ -27,10 +27,10 @@ Only the two modes the charts use are supported: ``DatabaseMode.SILICON``
 raises the same typed SDK errors (``PerfDataNotAvailableError`` etc.), so
 the notebook's probe-and-skip handling works unchanged.
 
-``query_trtllm_alltoall`` is deliberately NOT re-oracled: its chart walks the
+The trtllm-alltoall chart is deliberately NOT re-oracled here: it walks the
 raw per-phase table (prepare/dispatch/combine/combine_lp), which no op-level
-evaluation expresses — it stays on the Python facade as a documented PR-5
-residual (like the AFD comm op).
+evaluation expresses — since PR-5 the notebook charts those rows directly
+with a local closed-form SOL (the per-call facade is a tombstone).
 """
 
 from __future__ import annotations

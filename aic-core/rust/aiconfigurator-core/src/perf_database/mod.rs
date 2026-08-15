@@ -406,8 +406,19 @@ impl PerfDatabase {
             dsv4: Dsv4Table::with_sources(data_root.clone(), perf_db_sources),
             // Single-primary by design: the Python MegaMoE loader reads one
             // unified path and never the shared-layer source list (see
-            // `dsv4_megamoe.rs`).
-            dsv4_megamoe: Dsv4MegaMoeTable::new(data_root.clone()),
+            // `dsv4_megamoe.rs`) — but that one path IS family-first
+            // resolved, so take the head of the standard source resolution.
+            dsv4_megamoe: Dsv4MegaMoeTable::with_primary(
+                resolve_op_sources(
+                    perf_db_sources,
+                    "dsv4_megamoe_module_perf.parquet",
+                    &data_root,
+                )
+                .into_iter()
+                .next()
+                .map(|PerfSource(path, _)| path)
+                .unwrap_or_else(|| data_root.join("dsv4_megamoe_module_perf.parquet")),
+            ),
             mhc: MhcTable::with_sources(data_root.clone(), perf_db_sources),
             trtllm_alltoall: TrtllmAlltoallTable::with_sources(data_root.clone(), perf_db_sources),
             wideep_mla: WideEpMlaTable::with_sources(

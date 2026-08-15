@@ -1,0 +1,1185 @@
+{
+ "_comment": "Pre-retirement per-call query baseline (#1357 PR-5). Captured from the Python per-call math (expected_from=engine cases: from the compiled engine) immediately before that math was deleted; see test_query_shim_baseline.py.",
+ "cases": {
+  "afd-combine": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.0116016,
+    "source": "empirical"
+   }
+  },
+  "afd-f-allgather": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.032965,
+    "source": "silicon"
+   }
+  },
+  "afd-f-reducescatter": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.0273425,
+    "source": "silicon"
+   }
+  },
+  "afd-transfer-a2f": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.15680064000000002,
+    "source": "empirical"
+   }
+  },
+  "ctx-attn-SOL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": null,
+    "latency": 0.034747531259858445,
+    "source": "sol"
+   }
+  },
+  "ctx-attn-SOL_FULL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "triple": [
+     0.034747531259858445,
+     0.03474189925985845,
+     0.008743765333333334
+    ]
+   }
+  },
+  "ctx-attn-live": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": null,
+    "latency": 0.13585770305796305,
+    "source": "engine"
+   }
+  },
+  "ctx-attn-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.124833511828572,
+    "source": "mixed"
+   }
+  },
+  "ctx-attn-prefix": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": null,
+    "latency": 0.124833511828572,
+    "source": "engine"
+   }
+  },
+  "ctx-dsa-silicon": {
+   "db": [
+    "b200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 3.8622,
+    "source": "silicon"
+   }
+  },
+  "ctx-mla-SOL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.1580959915874621,
+    "source": "sol"
+   }
+  },
+  "ctx-mla-SOL_FULL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "triple": [
+     0.1580959915874621,
+     0.1580959915874621,
+     0.05942613333333333
+    ]
+   }
+  },
+  "ctx-mla-live": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.34673279238575105,
+    "source": "silicon"
+   }
+  },
+  "ctx-mla-module-facade": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc10"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 2.224497497853291,
+    "source": "silicon"
+   }
+  },
+  "custom-ar-SOL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.1304894577777778,
+    "source": "sol"
+   }
+  },
+  "custom-ar-SOL_FULL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "triple": [
+     0.1304894577777778,
+     0.0,
+     0.0
+    ]
+   }
+  },
+  "custom-ar-live": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.1944256019592285,
+    "source": "silicon"
+   }
+  },
+  "custom-ar-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.01777951955795288,
+    "source": "silicon"
+   }
+  },
+  "custom-ar-u32": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 32.02447265625,
+    "source": "silicon"
+   }
+  },
+  "dsv4-ctx-facade": {
+   "db": [
+    "b200_sxm",
+    "sglang",
+    "0.5.14"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.2137,
+    "source": "silicon"
+   }
+  },
+  "dsv4-ctx-op": {
+   "db": [
+    "b200_sxm",
+    "sglang",
+    "0.5.14"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.2137,
+    "source": "silicon"
+   }
+  },
+  "dsv4-gen-facade": {
+   "db": [
+    "b200_sxm",
+    "sglang",
+    "0.5.14"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.08919931640625,
+    "source": "silicon"
+   }
+  },
+  "dsv4-gen-op": {
+   "db": [
+    "b200_sxm",
+    "sglang",
+    "0.5.14"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.08919931640625,
+    "source": "silicon"
+   }
+  },
+  "dsv4-megamoe-facade": {
+   "db": [
+    "b200_sxm",
+    "sglang",
+    "0.5.16"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.978677,
+    "source": "silicon"
+   }
+  },
+  "dsv4-megamoe-op": {
+   "db": [
+    "b200_sxm",
+    "sglang",
+    "0.5.16"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.978677,
+    "source": "silicon"
+   }
+  },
+  "elementwise-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.004092266666666666,
+    "source": "empirical"
+   }
+  },
+  "embedding-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.0039557333333333335,
+    "source": "empirical"
+   }
+  },
+  "encoder-attn-facade": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc10"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.017722666263580322,
+    "source": "silicon"
+   }
+  },
+  "encoder-attn-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc10"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.017722666263580322,
+    "source": "silicon"
+   }
+  },
+  "gdn-facade": {
+   "db": [
+    "b200_sxm",
+    "sglang",
+    "0.5.14"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 1.46670654296875,
+    "source": "silicon"
+   }
+  },
+  "gdn-kernel-op": {
+   "db": [
+    "b200_sxm",
+    "sglang",
+    "0.5.14"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 1.46670654296875,
+    "source": "silicon"
+   }
+  },
+  "gemm-bf16-SOL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.008685474814964612,
+    "source": "sol"
+   }
+  },
+  "gemm-bf16-SOL_FULL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "triple": [
+     0.008685474814964612,
+     0.008685474814964612,
+     0.00786432
+    ]
+   }
+  },
+  "gemm-bf16-below-grid": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.007674666742483775,
+    "source": "silicon"
+   }
+  },
+  "gemm-bf16-empirical": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.021790188985065347,
+    "source": "empirical"
+   }
+  },
+  "gemm-bf16-explicit-silicon": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.01685599982738495,
+    "source": "silicon"
+   }
+  },
+  "gemm-bf16-live": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.01685599982738495,
+    "source": "silicon"
+   }
+  },
+  "gemm-fp8-silicon": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.016966667026281357,
+    "source": "silicon"
+   }
+  },
+  "gemm-fp8static-silicon": {
+   "db": [
+    "b200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": null,
+    "latency": 0.011450666189193725,
+    "source": "engine"
+   }
+  },
+  "gemm-fp8static-solfull": {
+   "db": [
+    "b200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "triple": [
+     0.0024512166233766233,
+     0.001908874353777778,
+     0.0024512166233766233
+    ]
+   }
+  },
+  "gemm-op-scaled": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.0337119996547699,
+    "source": "silicon"
+   }
+  },
+  "gen-attn-SOL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.11203925333333332,
+    "source": "sol"
+   }
+  },
+  "gen-attn-SOL_FULL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "triple": [
+     0.11203925333333332,
+     0.004341677168857432,
+     0.11203925333333332
+    ]
+   }
+  },
+  "gen-attn-hybrid-offgrid": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.17152164387516677,
+    "source": "silicon"
+   }
+  },
+  "gen-attn-live": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.14591426805903512,
+    "source": "silicon"
+   }
+  },
+  "gen-attn-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.14591426805903512,
+    "source": "silicon"
+   }
+  },
+  "gen-dsa-silicon": {
+   "db": [
+    "b200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.16569968261718748,
+    "source": "silicon"
+   }
+  },
+  "gen-mla-SOL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.06336341333333334,
+    "source": "sol"
+   }
+  },
+  "gen-mla-SOL_FULL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "triple": [
+     0.06336341333333334,
+     0.009228316990899899,
+     0.06336341333333334
+    ]
+   }
+  },
+  "gen-mla-live": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.09087999661763509,
+    "source": "silicon"
+   }
+  },
+  "gen-mla-module-facade": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc10"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.1146884765625,
+    "source": "silicon"
+   }
+  },
+  "kda-kernel-op": {
+   "db": [
+    "h200_sxm",
+    "sglang",
+    "0.5.16"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.5231808185577392,
+    "source": "silicon"
+   }
+  },
+  "mamba2-composite-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc10"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.1853208804535361,
+    "source": "mixed"
+   }
+  },
+  "mamba2-facade": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc10"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.07004479765892029,
+    "source": "silicon"
+   }
+  },
+  "mamba2-kernel-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc10"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.07004479765892029,
+    "source": "silicon"
+   }
+  },
+  "mem-op-SOL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.0008738133333333332,
+    "source": "sol"
+   }
+  },
+  "mem-op-SOL_FULL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "triple": [
+     0.0008738133333333332,
+     0.0,
+     0.0008738133333333332
+    ]
+   }
+  },
+  "mem-op-live": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.004092266666666666,
+    "source": "empirical"
+   }
+  },
+  "mem-op-odd": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.003321501822916667,
+    "source": "empirical"
+   }
+  },
+  "mhc-facade": {
+   "db": [
+    "b200_sxm",
+    "sglang",
+    "0.5.14"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.0342,
+    "source": "silicon"
+   }
+  },
+  "mhc-op": {
+   "db": [
+    "b200_sxm",
+    "sglang",
+    "0.5.14"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.0342,
+    "source": "silicon"
+   }
+  },
+  "mla-bmm-facade": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc10"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.00639680027961731,
+    "source": "silicon"
+   }
+  },
+  "mla-bmm-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc10"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.00639680027961731,
+    "source": "silicon"
+   }
+  },
+  "mla-module-ctx-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc10"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 2.224497497853291,
+    "source": "silicon"
+   }
+  },
+  "mla-module-gen-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc10"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.1146884765625,
+    "source": "silicon"
+   }
+  },
+  "moe-a2a-facade": {
+   "db": [
+    "h200_sxm",
+    "sglang",
+    "0.5.6.post2"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.03728,
+    "source": "silicon"
+   }
+  },
+  "moe-a2a-op": {
+   "db": [
+    "h200_sxm",
+    "sglang",
+    "0.5.6.post2"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.03728,
+    "source": "silicon"
+   }
+  },
+  "moe-dispatch-op": {
+   "db": [
+    "h200_sxm",
+    "sglang",
+    "0.5.6.post2"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.38480000000000003,
+    "source": "silicon"
+   }
+  },
+  "moe-expert-compute-facade": {
+   "db": [
+    "h200_sxm",
+    "sglang",
+    "0.5.6.post2"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.3651657147066934,
+    "source": "silicon"
+   }
+  },
+  "moe-expert-compute-op": {
+   "db": [
+    "h200_sxm",
+    "sglang",
+    "0.5.6.post2"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.3651657147066934,
+    "source": "silicon"
+   }
+  },
+  "moe-fp8block-SOL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.2957858133333333,
+    "source": "sol"
+   }
+  },
+  "moe-fp8block-SOL_FULL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "triple": [
+     0.2957858133333333,
+     0.022799371389282102,
+     0.2957858133333333
+    ]
+   }
+  },
+  "moe-fp8block-live": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.5187583923339844,
+    "source": "silicon"
+   }
+  },
+  "moe-op-quant-override": {
+   "db": [
+    "b200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.3364736080169678,
+    "source": "silicon"
+   }
+  },
+  "moe-op-quant-override-missing": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "error": "PerfDataNotAvailableError"
+   }
+  },
+  "msa-ctx-op": {
+   "db": [
+    "b200_sxm",
+    "sglang",
+    "0.5.14"
+   ],
+   "value": {
+    "error": "PerfDataNotAvailableError"
+   }
+  },
+  "msa-gen-op": {
+   "db": [
+    "b200_sxm",
+    "sglang",
+    "0.5.14"
+   ],
+   "value": {
+    "error": "PerfDataNotAvailableError"
+   }
+  },
+  "nccl-ag-SOL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.0393216,
+    "source": "sol"
+   }
+  },
+  "nccl-ag-SOL_FULL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "triple": [
+     0.0393216,
+     0.0,
+     0.0393216
+    ]
+   }
+  },
+  "nccl-ag-live": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.23586428571428572,
+    "source": "silicon"
+   }
+  },
+  "nccl-alltoall-odd": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.02032557734489441,
+    "source": "silicon"
+   }
+  },
+  "nccl-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.01924,
+    "source": "silicon"
+   }
+  },
+  "p2p-SOL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.16777216,
+    "source": "sol"
+   }
+  },
+  "p2p-SOL_FULL": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "triple": [
+     0.16777216,
+     0.0,
+     0.16777216
+    ]
+   }
+  },
+  "p2p-live": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.17777215999999998,
+    "source": "empirical"
+   }
+  },
+  "p2p-odd": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.03469134,
+    "source": "empirical"
+   }
+  },
+  "p2p-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.02048576,
+    "source": "empirical"
+   }
+  },
+  "trtllm-alltoall-facade": {
+   "db": [
+    "gb200",
+    "trtllm",
+    "1.3.0rc10"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.011823999881744384,
+    "source": "silicon"
+   }
+  },
+  "wideep-ctx-mla-facade": {
+   "db": [
+    "h200_sxm",
+    "sglang",
+    "0.5.6.post2"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.7677880078554153,
+    "source": "silicon"
+   }
+  },
+  "wideep-ctx-mla-op": {
+   "db": [
+    "h200_sxm",
+    "sglang",
+    "0.5.6.post2"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.7677880078554153,
+    "source": "silicon"
+   }
+  },
+  "wideep-deepep-ll-facade": {
+   "db": [
+    "h200_sxm",
+    "sglang",
+    "0.5.6.post2"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.07377000000000002,
+    "source": "silicon"
+   }
+  },
+  "wideep-deepep-normal-facade": {
+   "db": [
+    "h200_sxm",
+    "sglang",
+    "0.5.6.post2"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.38480000000000003,
+    "source": "silicon"
+   }
+  },
+  "wideep-dispatch-op": {
+   "db": [
+    "gb200",
+    "trtllm",
+    "1.3.0rc10"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.023206400126218794,
+    "source": "silicon"
+   }
+  },
+  "wideep-gen-mla-facade": {
+   "db": [
+    "h200_sxm",
+    "sglang",
+    "0.5.6.post2"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.10881279706954956,
+    "source": "silicon"
+   }
+  },
+  "wideep-gen-mla-op": {
+   "db": [
+    "h200_sxm",
+    "sglang",
+    "0.5.6.post2"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.10881279706954956,
+    "source": "silicon"
+   }
+  },
+  "wideep-moe-compute-facade": {
+   "db": [
+    "gb200",
+    "trtllm",
+    "1.3.0rc10"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.06119040250778198,
+    "source": "silicon"
+   }
+  },
+  "wideep-moe-op": {
+   "db": [
+    "gb200",
+    "trtllm",
+    "1.3.0rc10"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.06119040250778198,
+    "source": "silicon"
+   }
+  }
+ }
+}

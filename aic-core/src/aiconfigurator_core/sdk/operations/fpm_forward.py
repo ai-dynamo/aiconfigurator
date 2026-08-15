@@ -86,6 +86,8 @@ def _norm_identity(value) -> str:
 class FPMForwardOp(Operation):
     """One whole-model forward pass for a single phase (prefill or decode)."""
 
+    _ENGINE_QUERY_SHAPE = "module"
+
     def __init__(
         self,
         phase: str,

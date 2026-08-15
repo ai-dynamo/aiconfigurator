@@ -85,10 +85,35 @@ roofline queried every op-level op in SOL — but #1461 moved that to
    `util_empirical`'s math (keep the provenance constants) — with the AFD
    comm-table queries re-pointed at the op-list FFI or kept as the last
    per-call island. The deprecated `Mamba2` composite's disposition lands
-   here too.
+   here too. **DONE — this PR.** Landed in one PR rather than
+   family-by-family: the pinned pre-retirement baseline
+   (`tests/cross_package/test_query_shim_baseline.py`, 97 cases captured
+   from the Python math before deletion) made the whole-surface swap
+   verifiable at once. `query_*`/`Operation.query` survive one release as
+   engine-routed deprecation shims (5 tombstones raise: the two GEMM
+   overhead sub-table queries, the two legacy deepep walks, and the
+   per-phase `query_trtllm_alltoall`); AFD's three query points and the
+   `Mamba2` composite's five legs evaluate standard twin ops through the
+   single-op plumbing.
 3. **PR-6 — deprecation removal** (time-locked): drop the `"python"`
    `engine_step_backend` value, the routing gate, and the CLI choice after
-   the one-release bake PR-3 starts.
+   the one-release bake PR-3 starts — plus the PR-5 shims
+   (`PerfDatabase.query_*`, `Operation.query`, `_evaluate_single_op`'s
+   deprecation plumbing) and the `Mamba2` composite export.
+
+**Post-PR-5 invariant (the single-oracle rule):** per-op performance VALUES
+(latency, energy, SOL decomposition) are computed ONLY by the compiled
+engine (`aic-core/rust/aiconfigurator-core`). Python owns model/topology
+composition, data loading, and orchestration — never estimation math. New
+per-op access goes through the op-list FFI (`EngineHandle.evaluate_ops_json`
+/ `evaluate_ops_sol_json`), the per-phase surface (`run_static_per_op`), or
+whole runs; there is no supported per-call Python query surface after the
+shims' window closes. Enforced by
+`tests/cross_package/test_single_oracle_contract.py` (frozen shim surface,
+no `_query_*_table`/`get_sol`/`get_empirical` defs, whitelisted `query`
+overrides, `perf_interp` stays deleted) and mirrored in `.coderabbit.yaml`
+path instructions; a companion `.claude/rules` update is proposed in
+`docs/single-oracle-rule-proposal.md`.
 
 The keep/delete inventory and Gate-3 text below are retained as the
 original plan of record; where they conflict with this disposition, the

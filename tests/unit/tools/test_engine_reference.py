@@ -1,19 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Alignment anchors for the sanity-check engine re-oracle (PR-4 of #1357).
+"""Consistency anchors for the sanity-check engine reference (PR-4/#1357).
 
-``tools/sanity_check/engine_reference.EngineReference`` re-sources the
+``tools/sanity_check/engine_reference.EngineReference`` sources the
 validation notebook's per-op reference values through the compiled Rust
-engine's ad-hoc op-list FFI. These tests pin the new surface against the
-Python per-call stack — the facade where the op is a 1:1 wrapper (SILICON
-latencies AND the SOL_FULL ``(sol_time, sol_math, sol_mem)`` triples), and
-the Python op level where the chart deliberately moved to op semantics
-(context attention's fused extras; gemm fp8_static's overhead model) — per
-family, on real shipped databases. This is the cross-language alignment
-evidence PR-5 (the per-call query-stack removal) builds on: when the Python
-side goes, the expected side of these tests moves to pinned values or is
-retired with it.
+engine's ad-hoc op-list FFI. Since PR-5 retired the Python per-call math,
+the ``PerfDatabase.query_*`` expected side of these tests is itself an
+engine-routed deprecation shim — so what this suite pins today is that the
+SHIM's op construction and the reference's op construction agree exactly
+(including typed data-miss errors), across full quant grids on two shipped
+systems. The against-the-legacy-math anchoring moved to the pinned capture
+in ``tests/cross_package/test_query_shim_baseline.py``; this file retires
+together with the shims (PR-6).
 """
 
 from __future__ import annotations
@@ -91,35 +90,18 @@ def test_gemm_matches_per_call_facade(db_and_reference):
     checked = 0
     for quant_mode in database._gemm_data:
         for m, n, k in ((7, 4096, 4096), (256, 8192, 1024), (4096, 1024, 8192)):
-            if quant_mode == common.GEMMQuantMode.fp8_static:
-                # The engine charts the OP model for fp8_static (dynamic-fp8
-                # row minus overhead tables); the facade normalized its
-                # lookup to the fp8 table. Pin SILICON op-vs-op (both
-                # languages' op level — the surface PR-5 deletes) ...
-                expected = float(GEMM("gemm", 1.0, n, k, quant_mode).query(database, x=m))
-                got = reference.query_gemm(m=m, n=n, k=k, quant_mode=quant_mode, database_mode=DatabaseMode.SILICON)
-                _assert_matches(expected, got)
-                # ... while the SOL triple still equals the facade's raw
-                # roofline exactly: the op's SOL floor always fires (the
-                # subtrahends are SOL values taken off that same roofline).
-                _assert_matches(
-                    database.query_gemm(m=m, n=n, k=k, quant_mode=quant_mode, database_mode=DatabaseMode.SOL_FULL),
-                    reference.query_gemm(m=m, n=n, k=k, quant_mode=quant_mode, database_mode=DatabaseMode.SOL_FULL),
-                )
-                checked += 2
-                continue
             checked += _check_both_modes(
                 database.query_gemm, reference.query_gemm, m=m, n=n, k=k, quant_mode=quant_mode
             )
     assert checked
 
 
-def test_context_attention_matches_python_op(db_and_reference):
-    """Context attention charts the OP-level estimate (table + fused
-    rope/kv-write extras), so the SILICON anchor is op-vs-op. The SOL triple
-    is pinned against the facade through the extras decomposition identity:
-    the extras are memory-only, so sol_math matches the raw-table facade
-    exactly and the SAME delta lands on sol_time and sol_mem."""
+def test_context_attention_matches_per_call_facade(db_and_reference):
+    """Since PR-5 the facade shim serves the same op-level estimate (table +
+    fused rope/kv-write extras) the reference charts, so both modes compare
+    directly. The extras-vs-raw-table decomposition identity this test used
+    to assert is anchored historically by the pinned pre-retirement baseline
+    (``expected_from="engine"`` ctx-attn cases)."""
     database, reference = db_and_reference
     from aiconfigurator.sdk.operations import ContextAttention
 
@@ -128,40 +110,17 @@ def test_context_attention_matches_python_op(db_and_reference):
     for fmha_quant_mode in database._context_attention_data:
         for kvcache_quant_mode in database._context_attention_data[fmha_quant_mode]:
             for s, prefix in ((2048, 0), (1434, 614)):
-                op = ContextAttention("context_attention", 1.0, 32, 8, kvcache_quant_mode, fmha_quant_mode)
-                kwargs = dict(
+                checked += _check_both_modes(
+                    database.query_context_attention,
+                    reference.query_context_attention,
                     b=1,
                     s=s,
+                    prefix=prefix,
                     n=32,
                     n_kv=8,
                     kvcache_quant_mode=kvcache_quant_mode,
                     fmha_quant_mode=fmha_quant_mode,
-                    prefix=prefix,
                 )
-                try:
-                    expected = float(op.query(database, batch_size=1, s=s, prefix=prefix))
-                except (PerfDataNotAvailableError, ValueError) as exc:
-                    with pytest.raises(type(exc)):
-                        reference.query_context_attention(**kwargs, database_mode=DatabaseMode.SILICON)
-                    continue
-                _assert_matches(
-                    expected,
-                    reference.query_context_attention(**kwargs, database_mode=DatabaseMode.SILICON),
-                )
-
-                facade_time, facade_math, facade_mem = database.query_context_attention(
-                    **kwargs, database_mode=DatabaseMode.SOL_FULL
-                )
-                sol_time, sol_math, sol_mem = reference.query_context_attention(
-                    **kwargs, database_mode=DatabaseMode.SOL_FULL
-                )
-                assert math.isclose(sol_math, facade_math, rel_tol=1e-9, abs_tol=1e-12)
-                extras_on_time = sol_time - facade_time
-                extras_on_mem = sol_mem - facade_mem
-                assert extras_on_time > 0 and math.isclose(
-                    extras_on_time, extras_on_mem, rel_tol=1e-9, abs_tol=1e-12
-                ), (extras_on_time, extras_on_mem)
-                checked += 1
     assert checked
 
 

@@ -75,7 +75,7 @@ DEEPEP_NORMAL_TOKENS = [
 
 # SM-count sweep. The consumer keys the normal table on ``dispatch_sms``. Only an
 # exact ``node_num==1 and sms==20`` query collapses to a 1-D token curve
-# (``operations.moe._query_wideep_deepep_normal_table``); every other sms takes the
+# (the engine's `perf_database/moe_a2a.rs` deepep adapter); every other sms takes the
 # 2-D ``(sms, num_tokens)`` grid branch, and ``MoEDispatch`` defaults to ``sms=12``
 # (``operations.moe``: ``self._sms = kwargs.get("sms", 12)``), so the grid branch is
 # the common path and needs the whole axis.

@@ -16,9 +16,12 @@ This test builds the manifest THROUGH the generator (render_manifest), so it
 fails if the ABSENCE_LOAD_BEARING exclusion in
 tools/perf_database/check_kernel_source.py is ever removed: the entries
 would come back as multi-framework `shared`, the vllm donor below would fill
-the 12-head Triton generation key, and the assertion on the fused latency
-would break. Rust needs no twin — it consumes Python's serialized source
-chain (engine.py `_compute_perf_db_sources`).
+the 12-head Triton generation key, and the loaded-table assertion would
+break. Rust needs no twin — it consumes Python's serialized source chain
+(engine.py `_compute_perf_db_sources`), so keeping the donor rows out of the
+LOADED table is exactly what protects the engine's fused-decode reroute
+(the per-call ``_query_kda_table`` observation retired with #1357 PR-5; the
+reroute itself is anchored by the parity goldens).
 """
 
 from __future__ import annotations
@@ -152,31 +155,21 @@ def test_vllm_donor_cannot_defeat_the_fused_decode_reroute(tmp_path, monkeypatch
     KDAKernel.clear_cache()
 
     db = PerfDatabase("h100_sxm", "sglang", "1.0", str(systems_root), database_mode="SILICON")
+    KDAKernel.load_data(db)
+    model_key = (7168, 12, 128, 12, 128, 4)
 
-    def _query(kernel_source):
-        return KDAKernel._query_kda_table(
-            db,
-            phase="generation",
-            kernel_source=kernel_source,
-            batch_size=8,
-            seq_len=None,
-            d_model=7168,
-            num_k_heads=12,
-            head_k_dim=128,
-            num_v_heads=12,
-            head_v_dim=128,
-            d_conv=4,
+    # The fused row loaded from sglang's own file.
+    fused = db._kda_data["kda_fused_decode"]["generation"][model_key]
+    assert fused[8]["latency"] == pytest.approx(_FUSED_LATENCY)
+    # The deliberately-absent Triton-pair generation keys must STAY absent:
+    # admitting the vllm donor rows here would defeat the engine's per-key
+    # fused-decode reroute for this shard.
+    for donor_source in ("fused_recurrent_kda_packed_decode", "causal_conv1d_update"):
+        donor_lane = db._kda_data.get(donor_source, {})
+        assert model_key not in donor_lane.get("generation", {}), (
+            f"vllm donor rows filled the deliberately-absent sglang {donor_source} "
+            "generation key — the ABSENCE_LOAD_BEARING manifest exclusion is not holding"
         )
-
-    recurrence = _query("fused_recurrent_kda_packed_decode")
-    assert float(recurrence) == pytest.approx(_FUSED_LATENCY), (
-        "vllm donor rows filled the deliberately-absent sglang Triton key and "
-        "defeated the fused-decode reroute — the ABSENCE_LOAD_BEARING manifest "
-        "exclusion is not holding"
-    )
-    assert recurrence.source == "silicon"
-    conv = _query("causal_conv1d_update")
-    assert float(conv) == 0.0  # folded into the fused row, not donor-priced
 
     # And the exclusion is visible in the generated manifest itself.
     manifest_text = (systems_root / "op_kernel_source_manifest.yaml").read_text()

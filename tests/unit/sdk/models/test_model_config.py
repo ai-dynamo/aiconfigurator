@@ -594,15 +594,26 @@ class TestHFModelSupport:
         assert "context_moe_pre_dispatch" in context_names
         assert "context_moe_post_dispatch" in context_names
 
-    def test_deepseek_v4_megamoe_module_query_uses_local_rank_tokens(self):
-        class FakeDatabase:
-            system_spec: ClassVar[dict[str, dict[str, int]]] = {"gpu": {"sm_version": 100}}
+    def test_deepseek_v4_megamoe_module_query_routes_local_rank_tokens_through_engine(self, monkeypatch):
+        """The megamoe op's query shim hands the engine LOCAL-rank tokens
+        (x is NOT globalized by dp) and a twin whose ctor already normalized
+        the workload distribution (uniform -> balanced) and pinned the random
+        source policy — the rebinding the retired Python query body used to
+        do per call. Restubbed at the #1357 PR-5 seam
+        (``engine._evaluate_single_op``)."""
+        from aiconfigurator_core.sdk import engine as engine_module
 
-            def query_dsv4_megamoe_module(self, **kwargs):
-                self.kwargs = kwargs
-                return PerformanceResult(2.0, energy=3.0)
+        recorded = {}
 
-        database = FakeDatabase()
+        def fake_evaluate_single_op(database, op, **eval_kwargs):
+            recorded["database"] = database
+            recorded["op"] = op
+            recorded["eval_kwargs"] = eval_kwargs
+            return PerformanceResult(2.0, energy=3.0, source="silicon")
+
+        monkeypatch.setattr(engine_module, "_evaluate_single_op", fake_evaluate_single_op)
+
+        database = object()  # the stubbed seam never touches it
         op = ops.DeepSeekV4MegaMoEModule(
             "test_megamoe",
             2,
@@ -618,15 +629,23 @@ class TestHFModelSupport:
 
         result = op.query(database, x=16)
 
-        assert float(result) == 4.0
-        assert result.energy == 6.0
-        assert database.kwargs["num_tokens"] == 16
-        assert database.kwargs["workload_distribution"] == "balanced"
-        assert database.kwargs["source_policy"] == "random"
+        # The engine owns scale-factor application now; the shim returns the
+        # engine's value untouched.
+        assert float(result) == 2.0
+        assert result.energy == 3.0
+        assert recorded["database"] is database
+        assert recorded["eval_kwargs"]["x"] == 16  # local-rank tokens, no dp scaling
+        twin = recorded["op"]
+        assert twin is op
+        assert twin._scale_factor == 2
+        assert twin._workload_distribution == "balanced"
+        assert twin._source_policy == "random"
 
     def test_deepseek_v4_megamoe_module_rejects_non_blackwell_database(self):
-        class FakeDatabase:
-            system_spec: ClassVar[dict[str, dict[str, int]]] = {"gpu": {"sm_version": 90}}
+        """The Blackwell-only guard moved to the compiled engine
+        (operators/dsv4.rs); it must still surface as a ValueError through the
+        query shim on a real pre-Blackwell (sm90) database."""
+        from aiconfigurator.sdk.perf_database import get_database
 
         op = ops.DeepSeekV4MegaMoEModule(
             "test_megamoe",
@@ -642,7 +661,7 @@ class TestHFModelSupport:
         )
 
         with pytest.raises(ValueError, match="Blackwell"):
-            op.query(FakeDatabase(), x=16)
+            op.query(get_database("h200_sxm", "sglang", "0.5.6.post2"), x=16)
 
     def test_deepseek_v32_kvcache_bytes_include_indexer_cache(self):
         model_config = config.ModelConfig(
