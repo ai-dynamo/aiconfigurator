@@ -233,8 +233,12 @@ class ContextDSAModule(Operation):
         self._full_frac = (
             float(dsa_full_layer_fraction) if dsa_full_layer_fraction is not None else 1.0 / self._index_topk_freq
         )
-        modes = attn_projection_quant_modes or dict.fromkeys(("q", "kv", "o", "indexer"), gemm_quant_mode)
-        self._weights = dsa_block_weights_bytes(architecture, num_heads, modes)
+        # Persisted (not just consumed) so the opspec can carry the
+        # per-projection checkpoint fact to the engine's weight_bytes.
+        self._attn_projection_quant_modes = attn_projection_quant_modes or dict.fromkeys(
+            ("q", "kv", "o", "indexer"), gemm_quant_mode
+        )
+        self._weights = dsa_block_weights_bytes(architecture, num_heads, self._attn_projection_quant_modes)
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -364,8 +368,12 @@ class GenerationDSAModule(Operation):
         self._full_frac = (
             float(dsa_full_layer_fraction) if dsa_full_layer_fraction is not None else 1.0 / self._index_topk_freq
         )
-        modes = attn_projection_quant_modes or dict.fromkeys(("q", "kv", "o", "indexer"), gemm_quant_mode)
-        self._weights = dsa_block_weights_bytes(architecture, num_heads, modes)
+        # Persisted (not just consumed) so the opspec can carry the
+        # per-projection checkpoint fact to the engine's weight_bytes.
+        self._attn_projection_quant_modes = attn_projection_quant_modes or dict.fromkeys(
+            ("q", "kv", "o", "indexer"), gemm_quant_mode
+        )
+        self._weights = dsa_block_weights_bytes(architecture, num_heads, self._attn_projection_quant_modes)
 
     # ------------------------------------------------------------------
     # Data ownership

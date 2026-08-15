@@ -686,6 +686,34 @@ fn engine_spec_bincode_from_json(spec_json: &str) -> PyResult<Vec<u8>> {
     spec.to_bincode().map_err(aic_to_py)
 }
 
+/// Constant per-op weight bytes for a JSON op list (PR-6): the batch FFI
+/// behind Python's `Operation.get_weights`. Weights are structural (computed
+/// from op fields alone, never from perf tables), so this is a module-level
+/// function — no engine handle, no database. Input is the same
+/// externally-tagged `Vec<Op>` JSON `evaluate_ops_json` takes (built by
+/// `engine.build_ops_json`); output is one f64 per op, in order.
+#[pyfunction]
+fn weights_ops_json(ops_json: &str) -> PyResult<Vec<f64>> {
+    let ops: Vec<crate::operators::Op> = serde_json::from_str(ops_json)
+        .map_err(|e| PyValueError::new_err(format!("ops JSON decode: {e}")))?;
+    Ok(ops.iter().map(crate::operators::Op::weight_bytes).collect())
+}
+
+/// The GEMM per-quant achieved-util LEVEL table, `(memory, compute, level)`
+/// rows (PR-6): the single source behind Python's former
+/// `_GEMM_QUANT_UTIL_LEVEL` mirror — Python rebuilds its dict from this, so
+/// the two sides can never drift again (#1524-class sync pain).
+#[pyfunction]
+fn gemm_quant_util_levels() -> Vec<(f64, f64, f64)> {
+    crate::operators::gemm::GEMM_QUANT_UTIL_LEVEL.to_vec()
+}
+
+/// The MoE per-quant achieved-util LEVEL table — see `gemm_quant_util_levels`.
+#[pyfunction]
+fn moe_quant_util_levels() -> Vec<(f64, f64, f64)> {
+    crate::operators::moe::MOE_QUANT_UTIL_LEVEL.to_vec()
+}
+
 /// Internal request shared by every Rust -> Python -> Rust construction path.
 ///
 /// The builder and the flat compatibility function both normalize into this
@@ -1266,6 +1294,9 @@ impl PyForwardPassPerfModel {
 fn _aiconfigurator_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_build_smoke, m)?)?;
     m.add_function(wrap_pyfunction!(engine_spec_bincode_from_json, m)?)?;
+    m.add_function(wrap_pyfunction!(weights_ops_json, m)?)?;
+    m.add_function(wrap_pyfunction!(gemm_quant_util_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(moe_quant_util_levels, m)?)?;
     m.add_class::<AicEngine>()?;
     m.add_class::<PyForwardPassPerfModel>()?;
     Ok(())

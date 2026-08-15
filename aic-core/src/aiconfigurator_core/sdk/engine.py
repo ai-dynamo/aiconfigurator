@@ -456,6 +456,11 @@ def _dsa_module(op: ContextDSAModule | GenerationDSAModule, *, architecture: str
         # `full_frac*full + (1-full_frac)*skip` (see `ContextDSAModule.query`).
         # 1.0 (DeepSeek-V3.2 / GLM-5) keeps the pure-full path.
         "full_frac": float(getattr(op, "_full_frac", 1.0)),
+        # Per-projection weight quant modes (checkpoint fact; weight_bytes
+        # only). serde-default on the Rust side: absent -> gemm_quant_mode.
+        "attn_projection_quant_modes": {
+            group: _quant_name(mode) for group, mode in op._attn_projection_quant_modes.items()
+        },
     }
 
 
@@ -1034,6 +1039,15 @@ def build_ops_json(
     """
     architecture = getattr(model, "architecture", "") or ""
     return json.dumps([_to_opspec(op, backend=backend, architecture=architecture, database=database) for op in ops])
+
+
+def weights_of_ops(ops: Any, *, model: Any, backend: str) -> list[float]:
+    """Constant per-op weight bytes via the engine (PR-6) — the batch
+    replacement for Python-side ``get_weights`` summing loops. Weights are
+    structural (op fields only, never perf-table data), so no handle or
+    database is involved; any op list the spec can express is accepted,
+    including the VL encoder phase and AFD partition sub-lists."""
+    return list(aiconfigurator_core.weights_ops_json(build_ops_json(ops, model=model, backend=backend)))
 
 
 def build_engine_spec_json(

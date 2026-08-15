@@ -214,6 +214,66 @@ impl FallbackOp {
 }
 
 impl Op {
+    /// Constant per-op weight bytes (PR-6): the engine-side replacement for
+    /// Python's `Operation.get_weights` math. Structural, not data-driven —
+    /// computed from op fields alone, never from perf tables. Ops with no
+    /// resident weights (attention/MLA kernels — their weights live on the
+    /// adjacent GEMMs — comm ops, dispatch, elementwise, MSA, the mamba
+    /// KERNEL ops) are 0.0, exactly like their Python `_weights = 0.0`.
+    /// `FpmForward` carries its snapshot verbatim (Python returns
+    /// `_weight_bytes` WITHOUT the scale_factor multiply); every non-zero
+    /// family multiplies its own scale_factor inside its `weight_bytes`.
+    pub fn weight_bytes(&self) -> f64 {
+        match self {
+            Op::Gemm(o) => o.weights_bytes(),
+            Op::Embedding(o) => o.weights_bytes(),
+            Op::Moe(o) => o.weight_bytes(),
+            Op::MoeExpertCompute(o) => o.weight_bytes(),
+            Op::Dsv4MegaMoe(o) => o.weight_bytes(),
+            Op::Mhc(o) => o.weight_bytes(),
+            Op::DsaContext(o) | Op::DsaGeneration(o) => o.weight_bytes(),
+            Op::Dsv4Context(o) | Op::Dsv4Generation(o) => o.weight_bytes(),
+            Op::FpmForward(o) => o.weight_bytes,
+            // Python FallbackOp.get_weights: primary wins when positive,
+            // else the granular fallback chain sums.
+            Op::Fallback(o) => {
+                let primary = o.primary.weight_bytes();
+                if primary > 0.0 {
+                    primary
+                } else {
+                    o.fallback.iter().map(Op::weight_bytes).sum()
+                }
+            }
+            // Python OverlapOp.get_weights: both groups sum (unlike latency's max).
+            Op::Overlap(o) => {
+                o.group_a.iter().map(Op::weight_bytes).sum::<f64>()
+                    + o.group_b.iter().map(Op::weight_bytes).sum::<f64>()
+            }
+            Op::Elementwise(_)
+            | Op::ContextAttention(_)
+            | Op::GenerationAttention(_)
+            | Op::EncoderAttention(_)
+            | Op::ContextMla(_)
+            | Op::GenerationMla(_)
+            | Op::MlaModuleContext(_)
+            | Op::MlaModuleGeneration(_)
+            | Op::MlaBmm(_)
+            | Op::MoeDispatch(_)
+            | Op::CustomAllReduce(_)
+            | Op::Nccl(_)
+            | Op::P2P(_)
+            | Op::Vision(_)
+            | Op::MsaContext(_)
+            | Op::MsaGeneration(_)
+            | Op::Mamba2(_)
+            | Op::Gdn(_)
+            | Op::Kda(_)
+            | Op::WideEpContextMla(_)
+            | Op::WideEpGenerationMla(_)
+            | Op::MoeAllToAll(_) => 0.0,
+        }
+    }
+
     /// Stable op name (Python `op._name`). Used by session code to filter
     /// (e.g. context-attention exclusion in mix-step composition) and for
     /// debugging.
