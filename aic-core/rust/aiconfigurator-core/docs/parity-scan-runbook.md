@@ -52,7 +52,7 @@ No GPU needed — this is a pure CPU perf-model scan.
 
 ```bash
 # 3.1 Toolchains
-#   - Python 3.10+ (3.12 recommended), uv, and a Rust toolchain.
+#   - Python 3.11-3.13 (3.13 recommended), uv, and a Rust toolchain.
 curl -LsSf https://astral.sh/uv/install.sh | sh          # uv (if absent)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y  # cargo/rustc
 source "$HOME/.cargo/env"
