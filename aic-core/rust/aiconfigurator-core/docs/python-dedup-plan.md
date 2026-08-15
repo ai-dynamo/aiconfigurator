@@ -72,13 +72,17 @@ roofline queried every op-level op in SOL — but #1461 moved that to
 
 **Sequel ladder (tracked in #1357 Phase 3):**
 
-1. **PR-4 — notebook re-oracle** (independent of PR-3; can run in
-   parallel): re-oracle `validate_database.ipynb` onto the per-op
-   evaluation FFI (needs a small FFI addition if the sol_math/sol_mem
-   decomposition plots are to survive; rust computes both components
-   internally). This is the prerequisite that unblocks the per-call
-   deletion — the notebook is the `query_*` facade's biggest live
-   consumer.
+1. **PR-4 — notebook re-oracle** — **DELIVERED by #1547**: the
+   sol_math/sol_mem decomposition crosses the FFI
+   (`AicEngine.evaluate_ops_sol_json`, `SolComponents` riding on
+   `PerformanceResult`), and `validate_database.ipynb` /
+   `create_charts.py` source per-op values from the compiled engine
+   (`tools/sanity_check/engine_reference.py` over a model-less
+   `EngineHandle.for_database` probe). The charts show OP-LEVEL
+   estimates (context attention includes the fused extras; gemm
+   fp8_static charts the op model). One deliberate residual for PR-5:
+   the `query_trtllm_alltoall` per-phase chart stays on the facade
+   (no op-level evaluation expresses the raw phase table).
 2. **PR-5 — per-call query-stack retirement** (needs PR-3 + PR-4): delete
    the per-call stack family-by-family (#1357's thin-delegation shape),
    retiring `query_*`, the empirical/silicon table bodies, and
