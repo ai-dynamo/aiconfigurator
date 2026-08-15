@@ -1059,6 +1059,7 @@ mod tests {
             index_topk: 2048,
             cp_size,
             full_frac: 1.0,
+            attn_projection_quant_modes: None,
         }
     }
 
