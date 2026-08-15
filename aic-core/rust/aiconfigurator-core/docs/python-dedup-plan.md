@@ -96,15 +96,28 @@ roofline queried every op-level op in SOL — but #1461 moved that to
    `Mamba2` composite's five legs evaluate standard twin ops through the
    single-op plumbing.
 3. **PR-6 — data-plane FFI + weight physics** (independent of the
-   deprecation window; runs while the PR-5 shims bake): add the engine
-   table-view FFI (per-family table view in the Python loaders' nested-dict
-   shape, `supported_quants`, quant-admission queries) and per-op
-   `weight_bytes`; migrate the notebook grids, support matrix, task
-   validation gate, and memory reports onto it; then delete the Python
-   parquet parsers (`load_*_data`), `LoadedOpData` dual loading, the
-   Python-side shared-layer source resolution, the util-level table
-   mirrors, and the `get_weights` math. Rust becomes the only owner of the
-   data plane and op physics; Python keeps composition/orchestration.
+   deprecation window; runs while the PR-5 shims bake). **DONE — this
+   PR.** The engine table view (`perf_database/table_view.rs`,
+   `AicEngine.table_view_json`) re-folds the raw parquet sources into
+   every retired Python loader's exact nested-dict shape — values, key
+   TYPES (rehydrated to enums/ints/tuples in
+   `sdk/engine_table_view.py`), insertion order, and empty subtrees —
+   and every `PerfDatabase._<family>_data` attribute now binds it, so
+   the notebook grids, support matrix, task validation gate, and every
+   other consumer kept their code unchanged. Per-op weight physics moved
+   to `Op::weight_bytes` (batch FFI `weights_ops_json`); the base
+   `Operation.get_weights` routes there and the per-class `_weights`
+   math is deleted. The `_GEMM/_MOE_QUANT_UTIL_LEVEL` dicts are
+   projections of the Rust tables. Verified by a pinned pre-deletion
+   baseline (7 databases × every table attribute + support matrices +
+   per-op weights, `tests/cross_package/test_data_plane_baseline.py`).
+   Deferred to the cleanup PR from the original cut: the Python-side shared-layer
+   source resolution (`_build_op_sources` still feeds the engine's
+   source map — moving it is orthogonal to the view work), kv-cache
+   bytes (model-level polymorphism, needs a model-geometry spec), and
+   the moe/moe_comm/dsa/dsv4 parsers, which survive as TEST-ONLY
+   schema-contract fixtures for the collector suite's format handshake
+   (no production path parses perf files in Python anymore).
 4. **Deprecation-cleanup PR — removal + pyo3 op unification**
    (time-locked): drop the `"python"` `engine_step_backend` value, the
    routing gate, and the CLI choice after the one-release bake PR-3 starts
@@ -115,7 +128,9 @@ roofline queried every op-level op in SOL — but #1461 moved that to
    the Python `Operation` classes, the `_to_opspec` serializer branches,
    and the two-sided `ENGINE_SPEC_SCHEMA_VERSION` sync discipline
    (prerequisite: a pickle/transfer story for pyo3 objects across
-   `ProcessPoolExecutor`).
+   `ProcessPoolExecutor`). Also collects PR-6's deferrals: the remaining
+   test-only parsers (with the collector-suite contract rewrite), the
+   Python shared-layer source resolution, and kv-bytes.
 
 **Post-PR-5 invariant (the single-oracle rule):** per-op performance VALUES
 (latency, energy, SOL decomposition) are computed ONLY by the compiled
