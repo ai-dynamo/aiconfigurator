@@ -77,7 +77,7 @@ def test_agg_with_model_resolves_identity_and_backend():
     assert t.nextn is not None
     assert t.backend_version is not None  # resolved to latest
     # Search space defaults populated
-    assert t.agg_tp_candidates == [1, 2, 4, 8]
+    assert t.agg_tp_candidates == [1, 2, 4, 8, 16]
     assert t.agg_pp_candidates == [1]
 
 
@@ -1047,8 +1047,8 @@ def test_sglang_agg_default_moe_ep_search():
     the union with the multi-node ladder instead (test_coverage_candidates)."""
     qwen = "Qwen/Qwen3-235B-A22B"
     t = Task(serving_mode="agg", model_path=qwen, system_name="h200_sxm", backend_name="sglang")
-    assert t.agg_moe_tp_candidates == [1, 2, 4, 8]
-    assert t.agg_moe_ep_candidates == [1, 2, 4, 8]
+    assert t.agg_moe_tp_candidates == [1, 2, 4, 8, 16]
+    assert t.agg_moe_ep_candidates == [1, 2, 4, 8, 16]
     t2 = Task(
         serving_mode="agg",
         model_path=qwen,
@@ -1057,7 +1057,7 @@ def test_sglang_agg_default_moe_ep_search():
         moe_backend="deepep_moe",
     )
     assert t2.agg_moe_tp_candidates == [1]
-    assert t2.agg_moe_ep_candidates == [1, 2, 4, 8]
+    assert t2.agg_moe_ep_candidates == [1, 2, 4, 8, 16]
 
 
 def test_run_validates_by_default():
@@ -1870,6 +1870,42 @@ def test_validate_gemm_quant_transfer_reachable_in_hybrid():
             make(mode, policy, quant=common.GEMMQuantMode.nvfp4).validate()
 
 
+def test_validate_nvfp4_wo_ladder_admitted_in_hybrid():
+    """nvfp4_wo has no collected MoE data on any system, but its util-level
+    entry is present so it is XPROFILE-reachable in HYBRID. SILICON rejects
+    (no data, no transfer). GEMM nvfp4_wo also goes through the XPROFILE
+    ladder to bfloat16.
+
+    This pins the ladder approach: validate admits without any alias, purely
+    through profile reachability — consistent with GEMM's treatment.
+    """
+
+    def make(mode, policy=None):
+        # vLLM 0.24.0 on H100: nvfp4 → nvfp4_wo (non-Blackwell remap)
+        return Task(
+            serving_mode="agg",
+            model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+            system_name="h100_sxm",
+            backend_name="vllm",
+            backend_version="0.24.0",
+            database_mode=mode,
+            transfer_policy=policy,
+        )
+
+    # HYBRID: util-level entry present → XPROFILE-reachable for both GEMM and MoE
+    make("HYBRID").validate()
+    make("HYBRID", "xprofile").validate()
+
+    # SILICON: no data, no transfer → both quant modes are rejected
+    with pytest.raises(ValueError, match="nvfp4_wo"):
+        make("SILICON").validate()
+
+    # With XPROFILE disabled: ladder cannot reach nvfp4_wo → rejected
+    for disabled in ("off", "conservative", "xquant"):
+        with pytest.raises(ValueError, match="nvfp4_wo"):
+            make("HYBRID", disabled).validate()
+
+
 def test_validate_fp8_static_not_transfer_admitted_in_hybrid():
     """fp8_static is a composite mode (fp8 base minus compute_scale/scale_matrix);
     the overhead tables have no transfer ladder, so HYBRID must NOT admit it via
@@ -1981,7 +2017,7 @@ def test_to_dict_emits_resolved_state_with_enum_names():
     # Backend version resolved automatically
     assert d["backend_version"] is not None
     # Search candidates populated
-    assert d["agg_tp_candidates"] == [1, 2, 4, 8]
+    assert d["agg_tp_candidates"] == [1, 2, 4, 8, 16]
 
 
 def test_to_dict_excludes_internal_fields():
@@ -2058,3 +2094,27 @@ def test_trtllm_dp1_tep_tuples_stay_fused():
     for tup in t.iter_parallel("agg"):
         if t._resolve_moe_comm_backend("agg", tup) is not None:
             assert tup[2] > 1, f"dp=1 large-EP tuple leaked: {tup}"
+
+
+def test_nvfp4_remapped_to_nvfp4_wo_on_hopper():
+    """nvfp4 models on non-Blackwell get remapped to nvfp4_wo unconditionally."""
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+        system_name="h100_sxm",
+        backend_name="trtllm",
+    )
+    assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4_wo
+    assert t.moe_quant_mode == common.MoEQuantMode.nvfp4_wo
+
+
+def test_nvfp4_preserved_on_blackwell():
+    """Blackwell keeps native nvfp4 quant modes."""
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+        system_name="b200_sxm",
+        backend_name="trtllm",
+    )
+    assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4
+    assert t.moe_quant_mode == common.MoEQuantMode.nvfp4

@@ -113,8 +113,8 @@ def test_qwen3_no_coverage_control_stays_fully_fused():
 
     assert t._large_ep_coverage("agg") == {}
     # Fused defaults, not the unioned multi-node ladders.
-    assert t.agg_moe_ep_candidates == [1, 2, 4, 8]
-    assert t.agg_num_gpu_candidates == [1, 2, 4, 8]
+    assert t.agg_moe_ep_candidates == [1, 2, 4, 8, 16]
+    assert t.agg_num_gpu_candidates == [1, 2, 4, 8, 16]
 
     tuples = list(t.iter_parallel("agg"))
     assert tuples

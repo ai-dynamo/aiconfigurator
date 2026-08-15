@@ -236,6 +236,7 @@ fn query_gemm_table(
 const GEMM_QUANT_UTIL_LEVEL: &[(f64, f64, f64)] = &[
     (2.0, 1.0, 0.70),    // w16a16 / bfloat16              [data 0.55-0.79]
     (1.0, 1.0, 0.55),    // w8a16 / int8_wo                [inferred]
+    (0.5625, 1.0, 0.45), // w4a16+scales / nvfp4_wo (Marlin FP4) [copies inferred (0.5,1)]
     (0.5, 1.0, 0.45),    // w4a16 / int4_wo                [inferred]
     (1.0, 2.0, 0.45),    // w8a8 / fp8(_block/_ootb), sq   [data 0.28-0.55]
     (0.5, 2.0, 0.35),    // w4a8                           [inferred]
