@@ -53,6 +53,29 @@ def _fake_fetch_table_view(overrides: dict[str, object]):
     return _fetch
 
 
+# ---------------------------------------------------------------------------
+# Module-level view router for the comprehensive singleton's fake system.
+# Installed ONCE at conftest import — i.e. before any test's monkeypatch can
+# run — so scoped fetch patches always layer ON TOP of it and their teardown
+# restores back TO it. The synthetic tables arrive later via
+# _COMPREHENSIVE_OVERRIDES (set when the singleton is built); until then the
+# router is a transparent pass-through.
+# ---------------------------------------------------------------------------
+from aiconfigurator_core.sdk import engine_table_view as _etv
+
+_COMPREHENSIVE_OVERRIDES: dict[str, object] | None = None
+_REAL_FETCH_TABLE_VIEW = _etv.fetch_table_view
+
+
+def _routed_fetch(database, attribute):
+    if _COMPREHENSIVE_OVERRIDES is not None and getattr(database, "system", None) == "test_system":
+        return _COMPREHENSIVE_OVERRIDES.get(attribute)
+    return _REAL_FETCH_TABLE_VIEW(database, attribute)
+
+
+_etv.fetch_table_view = _routed_fetch
+
+
 def _patch_all_loaders_and_yaml(monkeypatch) -> None:
     """
     Patch yaml + every data-loading function (so no real files are required).
@@ -377,21 +400,17 @@ def _get_comprehensive_db_singleton() -> PerfDatabase:
         "_mla_bmm_data": cached["mla_bmm_data"],
     }
 
-    # PERMANENT view routing for the singleton's fake system: unlike a scoped
-    # patch, this survives any later ``clear_all_op_caches()`` — a re-load of
-    # the singleton (or a deepcopy of it) must keep resolving to the synthetic
-    # tables instead of reaching the real engine with a fake system yaml.
-    # Real databases pass through untouched.
-    from aiconfigurator_core.sdk import engine_table_view as _etv
-
-    real_fetch = _etv.fetch_table_view
-
-    def _routed_fetch(database, attribute):
-        if getattr(database, "system", None) == "test_system":
-            return overrides.get(attribute)
-        return real_fetch(database, attribute)
-
-    _etv.fetch_table_view = _routed_fetch
+    # Publish the synthetic tables to the MODULE-LEVEL router (installed at
+    # conftest import, before any monkeypatch can run — see _routed_fetch
+    # below the stub helpers). Publishing state instead of swapping the
+    # function here keeps two properties: the routing survives any later
+    # ``clear_all_op_caches()`` (a re-load of the singleton or a deepcopy
+    # must keep resolving to the synthetic tables), AND a scoped
+    # ``stub_perf_db`` monkeypatch that happens to be active while this
+    # singleton is first built cannot be captured as the "real" fetch and
+    # then torn down out from under the router.
+    global _COMPREHENSIVE_OVERRIDES
+    _COMPREHENSIVE_OVERRIDES = overrides
 
     yaml_patch = patch("yaml.load", side_effect=lambda stream, Loader=None: system_spec)  # noqa: N803
     yaml_patch.start()

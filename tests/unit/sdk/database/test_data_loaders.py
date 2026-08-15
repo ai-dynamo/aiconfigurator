@@ -357,3 +357,25 @@ def test_dsv4_megamoe_module_support_matrix_empty_without_data(tmp_path):
     db = PerfDatabase("gb200", "sglang", "0.5.10", str(systems_root))
 
     assert db.supported_quant_mode["dsv4_megamoe_module"] == []
+
+
+def test_comprehensive_router_survives_scoped_stub_patch(stub_perf_db, mutable_comprehensive_perf_db, monkeypatch):
+    """Fixture-order regression: a scoped ``stub_perf_db`` fetch patch active
+    while the comprehensive singleton is (re)used must not be captured as the
+    router's pass-through — after cache clears, ``test_system`` reloads must
+    still resolve to the synthetic tables (the router is module-level and
+    scoped patches layer on top of it)."""
+    from aiconfigurator.sdk.operations import warm_all_op_data
+    from aiconfigurator.sdk.operations.base import clear_all_op_caches
+    from aiconfigurator.sdk.operations.gemm import GEMM
+
+    db = mutable_comprehensive_perf_db
+    clear_all_op_caches()
+    try:
+        db.__dict__.pop("_gemm_data", None)
+        warm_all_op_data(db)
+        assert db._gemm_data.loaded, "synthetic gemm table lost after a cache clear under a scoped stub patch"
+        assert len(db._gemm_data) > 0
+    finally:
+        clear_all_op_caches()
+        GEMM.load_data(db)

@@ -208,7 +208,7 @@ class GenerationAttention(Operation):
     # NOTE(#1357 PR-5): the load-time SOL clamp (`_correct_sol`) retired with
     # the Python query math. The loaded table is now the RAW collected data
     # plane (enumeration/charts); the compiled engine applies the same clamp
-    # to its own load (see perf_database/gemm.rs), so QUERY values stay
+    # to its own load (see perf_database/attention.rs), so QUERY values stay
     # SOL-floored via the single oracle.
 
     # ------------------------------------------------------------------

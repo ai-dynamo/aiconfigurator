@@ -204,9 +204,14 @@ class ContextDSAModule(Operation):
         )
         # Persisted (not just consumed) so the opspec can carry the
         # per-projection checkpoint fact to the engine's weight_bytes.
-        self._attn_projection_quant_modes = attn_projection_quant_modes or dict.fromkeys(
-            ("q", "kv", "o", "indexer"), gemm_quant_mode
-        )
+        # Normalized to ALL FOUR groups: a partial mapping fills the missing
+        # projections from gemm_quant_mode, so the opspec emission (and the
+        # Rust DsaProjectionQuants deserialization, which requires every
+        # field) never sees an incomplete map.
+        self._attn_projection_quant_modes = {
+            **dict.fromkeys(("q", "kv", "o", "indexer"), gemm_quant_mode),
+            **(attn_projection_quant_modes or {}),
+        }
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -329,9 +334,14 @@ class GenerationDSAModule(Operation):
         )
         # Persisted (not just consumed) so the opspec can carry the
         # per-projection checkpoint fact to the engine's weight_bytes.
-        self._attn_projection_quant_modes = attn_projection_quant_modes or dict.fromkeys(
-            ("q", "kv", "o", "indexer"), gemm_quant_mode
-        )
+        # Normalized to ALL FOUR groups: a partial mapping fills the missing
+        # projections from gemm_quant_mode, so the opspec emission (and the
+        # Rust DsaProjectionQuants deserialization, which requires every
+        # field) never sees an incomplete map.
+        self._attn_projection_quant_modes = {
+            **dict.fromkeys(("q", "kv", "o", "indexer"), gemm_quant_mode),
+            **(attn_projection_quant_modes or {}),
+        }
 
     # ------------------------------------------------------------------
     # Data ownership

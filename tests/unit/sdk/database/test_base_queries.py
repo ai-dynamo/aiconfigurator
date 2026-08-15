@@ -80,3 +80,26 @@ def test_get_weights_survives_ops_without_an_opspec_variant():
 
     op = MoEDispatch("d", 1.0, 7168, 8, 256, 1, 16, 1, False, moe_backend="deepep_moe")
     assert op.get_weights() == 0.0
+
+
+def test_dsa_partial_projection_map_normalizes_and_survives_the_weight_route():
+    """A PARTIAL attn_projection_quant_modes mapping (checkpoint fact for one
+    group only) must normalize to all four groups at construction — the opspec
+    emission and the Rust DsaProjectionQuants deserialization require every
+    field."""
+    from aiconfigurator_core.sdk import common
+    from aiconfigurator_core.sdk.operations.dsa import ContextDSAModule
+
+    op = ContextDSAModule(
+        "ctx_dsa",
+        1.0,
+        64,
+        common.KVCacheQuantMode.fp8,
+        common.FMHAQuantMode.bfloat16,
+        common.GEMMQuantMode.nvfp4,
+        attn_projection_quant_modes={"o": common.GEMMQuantMode.bfloat16},
+    )
+    assert set(op._attn_projection_quant_modes) == {"q", "kv", "o", "indexer"}
+    assert op._attn_projection_quant_modes["o"] is common.GEMMQuantMode.bfloat16
+    assert op._attn_projection_quant_modes["q"] is common.GEMMQuantMode.nvfp4
+    assert op.get_weights() > 0.0
