@@ -65,14 +65,15 @@ def test_active_cuda_vllm_collectors_are_exactly_pinned_to_manifest_version():
         declarations = [line.strip() for line in source.splitlines() if line.startswith("__compat__")]
         assert declarations == [expected], module
 
-    def test_active_vllm_xpu_collectors_are_exactly_pinned_to_manifest_version():
-        expected = f'__compat__ = "vllm=={get_collector_runtime("vllm_xpu").version}"'
-        assert all(not entry.versions for entry in VLLM_XPU_REGISTRY)
 
-        for module in sorted({entry.module for entry in VLLM_XPU_REGISTRY}):
-            source = (REPO_ROOT / f"{module.replace('.', '/')}.py").read_text(encoding="utf-8")
-            declarations = [line.strip() for line in source.splitlines() if line.startswith("__compat__")]
-            assert declarations == [expected], module
+def test_active_vllm_xpu_collectors_are_exactly_pinned_to_manifest_version():
+    expected = f'__compat__ = "vllm=={get_collector_runtime("vllm_xpu").version}"'
+    assert all(not entry.versions for entry in VLLM_XPU_REGISTRY)
+
+    for module in sorted({entry.module for entry in VLLM_XPU_REGISTRY}):
+        source = (REPO_ROOT / f"{module.replace('.', '/')}.py").read_text(encoding="utf-8")
+        declarations = [line.strip() for line in source.splitlines() if line.startswith("__compat__")]
+        assert declarations == [expected], module
 
 
 def test_wideep_runtime_stays_independent_from_default_framework_runtime():
