@@ -340,9 +340,10 @@ def task_config_to_generator_config(
     # system_name here would blank NodeConfig and drop all hardware facts.
     #
     # NodeConfig.system_name (and the hardware facts derived from it) is global,
-    # while disagg prefill/decode can request different systems. Heterogeneous
-    # placement is out of scope here, so fail fast rather than silently applying
-    # the prefill system's node selectors/env to both workers.
+    # while disagg prefill/decode -- and AFD's prefill / A / F pools -- can each
+    # request different systems. Heterogeneous placement is out of scope here,
+    # so fail fast rather than silently applying one pool's node selectors/env
+    # to every worker.
     system_name = task_config.primary_system_name
     if task_config.serving_mode == "disagg":
         prefill_system = getattr(task_config, "prefill_system_name", system_name)
@@ -351,6 +352,19 @@ def task_config_to_generator_config(
             raise ValueError(
                 "Generator artifacts currently require matching prefill/decode systems; "
                 f"got prefill={prefill_system!r}, decode={decode_system!r}"
+            )
+    elif task_config.serving_mode == "afd":
+        # AFD pools are modeling-only today: the sweep can compare hetero A/F
+        # (or a hetero static prefill pool), but there is no per-pool NodeConfig
+        # to emit them with.
+        overrides_by_pool = getattr(task_config, "afd_pool_overrides", None)
+        pool_overrides = overrides_by_pool() if callable(overrides_by_pool) else {}
+        if pool_overrides:
+            detail = ", ".join(f"{pool}={triple[0]!r}/{triple[1]!r}" for pool, triple in sorted(pool_overrides.items()))
+            raise ValueError(
+                "Generator artifacts currently require every AFD pool to share the "
+                f"top-level system and backend ({system_name!r}/{task_config.primary_backend_name!r}); "
+                f"got {detail}. Heterogeneous AFD pools are supported for modeling only."
             )
     params.setdefault("NodeConfig", {})["system_name"] = system_name
     rule_name = overrides.get("rule")

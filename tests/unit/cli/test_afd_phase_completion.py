@@ -370,11 +370,11 @@ def test_afd_prefill_uses_uncached_prefix_suffix_for_token_math(monkeypatch):
             a_combine=FakeCommOp("afd_a_side_combine"),
         )
 
-    def fake_sum_latency(self, _ops, *, batch_size, seq_len, model, runtime_config, is_context):
+    def fake_sum_latency(self, _ops, *, batch_size, seq_len, model, runtime_config, is_context, **_kwargs):
         captured["sum_latency_seq_lens"].append(seq_len)
         return 2.0, {}
 
-    def fake_memory_summary(self, _memory, runtime_config, _free_gpu_memory_fraction):
+    def fake_memory_summary(self, _memory, runtime_config, _free_gpu_memory_fraction, **_kwargs):
         summary = InferenceSummary(runtime_config)
         summary.set_oom(False)
         summary.set_kv_cache_oom(False)
@@ -456,7 +456,7 @@ def test_afd_decode_mtp_widens_compute_and_communication_queries(monkeypatch, ca
         captured["batch_sizes"].append(batch_size)
         return 2.0, {}
 
-    def fake_memory_summary(self, _memory, runtime_config, _free_gpu_memory_fraction):
+    def fake_memory_summary(self, _memory, runtime_config, _free_gpu_memory_fraction, **_kwargs):
         summary = InferenceSummary(runtime_config)
         summary.set_oom(False)
         summary.set_kv_cache_oom(False)

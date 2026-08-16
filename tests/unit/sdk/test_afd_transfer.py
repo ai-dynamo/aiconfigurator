@@ -466,3 +466,130 @@ class TestNumericalEquivalence:
         assert r["rs"] == 0.0
         assert r["combine"] == 0.0
         assert r["t_a2f"] > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Hetero A/F pools: F-side node width and bottleneck-priced cross-pool link
+# ---------------------------------------------------------------------------
+
+
+class _PerDatabaseEngineStub:
+    """Stands in for ``_engine_comm_query`` when the *database* must matter.
+
+    The shared ``_EngineStub`` ignores which database it is handed -- fine for
+    the single-pool legs, but bottleneck pricing is defined by two endpoints
+    disagreeing. Latency is the probe volume times a per-database factor, and
+    each database's probe volumes are recorded separately so a test can assert
+    both endpoints saw the same payload.
+    """
+
+    def __init__(self, factors: dict) -> None:
+        self._factors = factors
+        self.calls: dict = {id(db): [] for db in factors}
+
+    def __call__(self, database, op) -> PerformanceResult:
+        volume = int(op._h) * 2
+        self.calls.setdefault(id(database), []).append(volume)
+        factor = self._factors.get(database, 1.0)
+        return PerformanceResult(latency=float(volume) * factor / 1.0e9, energy=0.0)
+
+    def volumes(self, database) -> list:
+        return self.calls.get(id(database), [])
+
+
+class TestHeteroFGpusPerNode:
+    """``f_gpus_per_node`` is the F pool's hardware fact, not the A pool's."""
+
+    def _shared(self, **overrides):
+        kwargs = dict(
+            hidden_size=1024,
+            n_a_workers=4,
+            n_f_workers=16,
+            gpus_per_node=8,
+            num_experts=0,
+            topk=0,
+        )
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_transfer_num_f_nodes_uses_f_side(self):
+        # 16 F GPUs on 4-GPU nodes = 4 F nodes, not the 2 implied by gpus_per_node=8.
+        op = AFDTransfer(name="a2f", scale_factor=1.0, direction="a2f", **self._shared(f_gpus_per_node=4))
+        assert op.num_f_nodes == 4
+        baseline = AFDTransfer(name="a2f", scale_factor=1.0, direction="a2f", **self._shared())
+        assert baseline.num_f_nodes == 2
+
+    def test_transfer_defaults_f_side_to_gpus_per_node(self):
+        op = AFDTransfer(name="a2f", scale_factor=1.0, direction="a2f", **self._shared())
+        explicit = AFDTransfer(name="a2f", scale_factor=1.0, direction="a2f", **self._shared(f_gpus_per_node=8))
+        assert op.num_f_nodes == explicit.num_f_nodes
+
+    @pytest.mark.parametrize("op_cls", [AFDFAllGather, AFDFReduceScatter])
+    def test_f_collectives_use_f_side(self, op_cls):
+        op = op_cls(name="f_op", scale_factor=1.0, **self._shared(f_gpus_per_node=4))
+        assert op.num_f_nodes == 4
+        assert op.f_gpus_in_node == 4
+
+
+class TestPeerDatabaseBottleneck:
+    """Cross-pool A2F/F2A is charged at the slower endpoint (bandwidth = min)."""
+
+    # Two opaque database handles: the engine stub keys off identity, and the
+    # op itself never inspects a database -- it only forwards it.
+    FAST = object()
+    SLOW = object()
+
+    @pytest.fixture()
+    def engine2(self, monkeypatch) -> _PerDatabaseEngineStub:
+        stub = _PerDatabaseEngineStub({self.FAST: 1.0, self.SLOW: 4.0})
+        monkeypatch.setattr(afd_transfer_module, "_engine_comm_query", stub)
+        return stub
+
+    def _op(self, direction: str = "a2f", **overrides) -> AFDTransfer:
+        kwargs = dict(
+            hidden_size=1024,
+            n_a_workers=4,
+            n_f_workers=8,
+            gpus_per_node=8,
+            num_experts=0,
+            topk=0,
+        )
+        kwargs.update(overrides)
+        return AFDTransfer(name=f"afd_{direction}_transfer", scale_factor=1.0, direction=direction, **kwargs)
+
+    def test_without_peer_matches_pre_hetero_behavior(self, engine2):
+        op = self._op()
+        assert float(op.query(self.FAST, x=64)) == pytest.approx(float(op.query(self.FAST, x=64)))
+        vols = engine2.volumes(self.FAST)
+        assert vols[0] == vols[-1]
+
+    @pytest.mark.parametrize("direction", ["a2f", "f2a"])
+    def test_slower_peer_sets_the_price(self, engine2, direction):
+        op = self._op(direction)
+        assert float(op.query(self.FAST, x=64, peer_database=self.SLOW)) == pytest.approx(
+            float(op.query(self.SLOW, x=64))
+        )
+
+    @pytest.mark.parametrize("direction", ["a2f", "f2a"])
+    def test_faster_peer_does_not_speed_up(self, engine2, direction):
+        op = self._op(direction)
+        assert float(op.query(self.SLOW, x=64, peer_database=self.FAST)) == pytest.approx(
+            float(op.query(self.SLOW, x=64))
+        )
+
+    def test_symmetric_in_the_two_endpoints(self, engine2):
+        op = self._op()
+        assert float(op.query(self.FAST, x=64, peer_database=self.SLOW)) == pytest.approx(
+            float(op.query(self.SLOW, x=64, peer_database=self.FAST))
+        )
+
+    def test_same_object_peer_is_a_noop(self, engine2):
+        op = self._op()
+        assert float(op.query(self.SLOW, x=64, peer_database=self.SLOW)) == pytest.approx(
+            float(op.query(self.SLOW, x=64))
+        )
+
+    def test_both_endpoints_are_queried_with_the_same_payload(self, engine2):
+        op = self._op()
+        op.query(self.FAST, x=64, peer_database=self.SLOW)
+        assert engine2.volumes(self.FAST) == engine2.volumes(self.SLOW)

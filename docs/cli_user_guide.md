@@ -430,6 +430,7 @@ If you want to specify your problem with more details, we allow to define `ttft`
 Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode accepts:
 
 - `--decode-system`: System (GPU type) for disagg decode workers. Defaults to `--system`. Use it for heterogeneous prefill/decode (e.g. B200 prefill + H200 decode).
+- `--afd-prefill-system` / `--afd-a-system` / `--afd-f-system` (plus `--afd-*-backend` and `--afd-*-backend-version`): per-pool hardware and framework for AFD mode. See [Heterogeneous AFD pools](#heterogeneous-afd-pools).
 - `--backend-version`: Backend database version. Default: latest.
 - `--free-gpu-memory-fraction`: Fraction of free GPU memory TRT-LLM allocates for KV cache (default: `1.0`). Filters batch sizes that would exceed KV cache capacity.
 - `--max-seq-len`: TRT-LLM `--max_seq_len` (default: `isl + osl`). Controls how many KV blocks are pre-allocated per sequence; set to match your deployment for accurate KV-capacity filtering.
@@ -1188,6 +1189,85 @@ exp_b200_h200:
 We defined two experiments. `exp_h200_h200` uses H200 for both prefill and decode. `exp_b200_h200` uses B200 for prefill and H200 for decode — hetero-disagg is expressed purely by giving the two roles different `*_system_name` values (the model must be the same).
 
 **Note**: You can also compare different backends by setting different `backend_name` values (trtllm, vllm, sglang) in your experiments.
+
+<a id="heterogeneous-afd-pools"></a>
+### Heterogeneous AFD pools
+
+AFD (`serving_mode: afd`) deploys up to three pools, and each can sit on its own
+hardware and framework:
+
+| Pool | What it runs | Bottleneck | Keys |
+|---|---|---|---|
+| static prefill | context phase (only when `afd_combined_with_pd: true`) | compute | `afd_prefill_system_name` / `afd_prefill_backend_name` / `afd_prefill_backend_version` |
+| A (attention) | attention ops, owns the KV cache | memory bandwidth + HBM capacity | `afd_a_system_name` / `afd_a_backend_name` / `afd_a_backend_version` |
+| F (FFN/MoE) | FFN and MoE ops | compute | `afd_f_system_name` / `afd_f_backend_name` / `afd_f_backend_version` |
+
+The CLI equivalents in `default` mode are `--afd-{prefill,a,f}-system`,
+`--afd-{prefill,a,f}-backend` and `--afd-{prefill,a,f}-backend-version`.
+
+Every key is optional and **inherits the top-level `system_name` /
+`backend_name` / `backend_version` when unset**, so an AFD run that names no
+pool is homogeneous and behaves exactly as before. As with hetero-disagg, pools
+differ in *hardware and framework only* — the model is shared.
+
+This split is what AFD hetero exists for: the A pool is bound by KV-cache
+bandwidth and capacity, the F pool by FLOPS, so pairing a high-HBM device for A
+with a high-FLOPS device for F can beat either device alone.
+
+Semantics worth knowing:
+
+- **Cross-pool transfers are priced at the bottleneck.** The A→F and F→A links
+  span two device types, so they are charged at the slower endpoint —
+  equivalently, bandwidth is the `min` of both sides. Each side's `p2p_latency`
+  constant is included.
+- **Node width is per pool.** `n_a_workers` is derived from the A pool's
+  `num_gpus_per_node` and `tp_f` from the F pool's, so mixing e.g. H200 (8 GPUs
+  per node) with GB200 (4 per node) shapes each side correctly. `tp_a` must
+  divide the A pool's node width.
+- **HBM checks are per pool.** Each pool's memory footprint is checked against
+  that pool's device capacity and framework reserve policy.
+- **A pool is the primary side.** It owns the KV cache, so the `system`,
+  `backend` and `version` columns of the result table report the A pool.
+- **Modeling only.** Deployment artifact generation (`generate`) requires every
+  AFD pool to share the top-level system and backend, and fails fast otherwise —
+  there is a single global `NodeConfig`, so hetero pools cannot be emitted.
+
+The example [yaml](../src/aiconfigurator/cli/exps/afd_hetero.yaml) compares a
+homogeneous baseline against an A/F split and a hetero static prefill pool:
+
+```yaml
+exps:
+  - exp_homogeneous
+  - exp_hetero_a_f
+  - exp_hetero_prefill
+
+exp_homogeneous:
+  serving_mode: afd
+  model_path: Qwen/Qwen3-32B
+  system_name: h200_sxm        # every pool inherits this
+  backend_name: sglang
+  total_gpus: 32
+  afd_combined_with_pd: false
+
+exp_hetero_a_f:
+  serving_mode: afd
+  model_path: Qwen/Qwen3-32B
+  system_name: h200_sxm
+  backend_name: sglang
+  total_gpus: 32
+  afd_combined_with_pd: false
+  afd_a_system_name: h200_sxm  # attention stays on high-HBM H200
+  afd_f_system_name: b200_sxm  # FFN/MoE moves to high-FLOPS B200
+
+exp_hetero_prefill:
+  serving_mode: afd
+  model_path: Qwen/Qwen3-32B
+  system_name: h200_sxm
+  backend_name: sglang
+  total_gpus: 32
+  afd_combined_with_pd: true
+  afd_prefill_system_name: b200_sxm   # B200 prefill in front of H200 AFD decode
+```
 
 2. use a specific quantization  
 The example [yaml](../src/aiconfigurator/cli/exps/qwen3_32b_pertensor.yaml)

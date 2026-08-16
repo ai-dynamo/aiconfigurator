@@ -1053,6 +1053,10 @@ def cli_estimate(
     afd_phase: str = "decode",
     afd_combined_with_pd: bool = True,
     afd_boundary_on_attn: bool = True,
+    afd_a_system_name: str | None = None,
+    afd_a_backend_name: str | None = None,
+    afd_f_system_name: str | None = None,
+    afd_f_backend_name: str | None = None,
 ) -> EstimateResult:
     """
     Estimate TTFT, TPOT, and power for a single model/system/config combination.
@@ -1174,6 +1178,13 @@ def cli_estimate(
             ``logits_gemm``) to the A-Worker when True (default); set False to
             place them on the F-Worker. Inverse of the CLI ``--boundary-on-ffn``
             flag.
+        afd_a_system_name / afd_a_backend_name: (afd-only) Hardware and framework
+            for the A (attention) pool. Default to ``system_name`` /
+            ``backend_name``.
+        afd_f_system_name / afd_f_backend_name: (afd-only) Same for the F
+            (FFN/MoE) pool; default to the A pool. Naming a different device here
+            models heterogeneous AFD -- cross-pool A2F/F2A traffic is then priced
+            at the slower of the two endpoints.
 
     Returns:
         EstimateResult with ttft, tpot, power_w, mode, and the full raw result dict.
@@ -1217,28 +1228,35 @@ def cli_estimate(
         finally:
             set_systems_paths(previous_systems_paths)
 
-    def _resolve_version_for(sys_name: str) -> str:
-        resolved_version = backend_version
+    def _resolve_version_for(sys_name: str, backend: str | None = None) -> str:
+        """Latest DB version for one system.
+
+        ``backend`` overrides the top-level backend so an AFD pool pinned to a
+        different framework resolves a version that actually exists for it.
+        """
+        effective_backend = backend or backend_name
+        resolved_version = backend_version if effective_backend == backend_name else None
         if resolved_version is None:
             if active_systems_paths is None:
-                resolved_version = get_latest_database_version(system=sys_name, backend=backend_name)
+                resolved_version = get_latest_database_version(system=sys_name, backend=effective_backend)
             else:
                 resolved_version = get_latest_database_version(
                     system=sys_name,
-                    backend=backend_name,
+                    backend=effective_backend,
                     systems_paths=active_systems_paths,
                 )
         if resolved_version is None:
             if database_mode == "SILICON":
                 raise ValueError(
-                    f"No database found for system={sys_name}, backend={backend_name}. "
+                    f"No database found for system={sys_name}, backend={effective_backend}. "
                     "Check --systems-paths or available databases."
                 )
             resolved_version = "estimate"
         return resolved_version
 
-    def _load_database(sys_name: str):
-        resolved_version = _resolve_version_for(sys_name)
+    def _load_database(sys_name: str, backend: str | None = None):
+        effective_backend = backend or backend_name
+        resolved_version = _resolve_version_for(sys_name, effective_backend)
         # database_mode is needed at construction, not just at query time: SILICON and
         # HYBRID load declared shared-layer silicon rows, while formula-only modes do not.
         database_kwargs = {
@@ -1250,14 +1268,14 @@ def cli_estimate(
             database_kwargs["systems_paths"] = active_systems_paths
         db = get_database_view(
             sys_name,
-            backend_name,
+            effective_backend,
             resolved_version,
             **database_kwargs,
         )
         if db is None:
             raise ValueError(
                 f"Failed to load perf database for system={sys_name}, "
-                f"backend={backend_name}, version={resolved_version}."
+                f"backend={effective_backend}, version={resolved_version}."
             )
         return db
 
@@ -1465,6 +1483,10 @@ def cli_estimate(
             prefix=prefix,
             nextn=nextn,
             nextn_accepted=nextn_accepted,
+            afd_a_system_name=afd_a_system_name,
+            afd_a_backend_name=afd_a_backend_name,
+            afd_f_system_name=afd_f_system_name,
+            afd_f_backend_name=afd_f_backend_name,
         )
         # ``phase == "both"`` covers prefill+decode inside AFD; no static
         # complement is needed. When ``combined_with_pd`` is False the
@@ -2172,6 +2194,10 @@ def _run_afd_estimate(
     prefix: int = 0,
     nextn: int = 0,
     nextn_accepted: float | None = None,
+    afd_a_system_name: str | None = None,
+    afd_a_backend_name: str | None = None,
+    afd_f_system_name: str | None = None,
+    afd_f_backend_name: str | None = None,
 ) -> EstimateResult:
     """Run AFD (Attention-FFN Disaggregated) estimation.
 
@@ -2184,6 +2210,11 @@ def _run_afd_estimate(
     ``gpus_per_node`` is pulled from ``database.system_spec`` and is
     therefore not a parameter; ``f_tp_size`` is derived (Phase 1:
     F-DP=1) inside ``AFDConfig.__post_init__``.
+
+    ``afd_a_*`` / ``afd_f_*`` pin the A and F pools to their own hardware and
+    framework; each falls back to ``system_name`` / ``backend_name``, so an
+    estimate that names no pool is homogeneous and unchanged. Cross-pool
+    A2F/F2A traffic is then priced at the slower endpoint.
     """
     from aiconfigurator.sdk.config import AFDConfig, RuntimeConfig
     from aiconfigurator.sdk.inference_session import AFDInferenceSession
@@ -2197,7 +2228,29 @@ def _run_afd_estimate(
     backend = get_backend(backend_name)
     gpus_per_node = int(database.system_spec["node"]["num_gpus_per_node"])
 
-    f_tp_size = n_f_nodes * gpus_per_node
+    # Per-pool hardware / framework. Reuse the shared objects when a pool
+    # inherits, so the homogeneous path is byte-for-byte identical (hetero
+    # detection downstream is an identity check).
+    a_system = afd_a_system_name or system_name
+    a_backend_name_eff = afd_a_backend_name or backend_name
+    f_system = afd_f_system_name or a_system
+    f_backend_name_eff = afd_f_backend_name or a_backend_name_eff
+
+    if (a_system, a_backend_name_eff) == (system_name, backend_name):
+        a_database, a_backend = database, backend
+    else:
+        a_database = load_database(a_system, a_backend_name_eff)
+        a_backend = get_backend(a_backend_name_eff)
+    if (f_system, f_backend_name_eff) == (a_system, a_backend_name_eff):
+        f_database, f_backend = a_database, a_backend
+    else:
+        f_database = load_database(f_system, f_backend_name_eff)
+        f_backend = get_backend(f_backend_name_eff)
+
+    a_gpus_per_node = int(a_database.system_spec["node"]["num_gpus_per_node"])
+    f_gpus_per_node = int(f_database.system_spec["node"]["num_gpus_per_node"])
+
+    f_tp_size = n_f_nodes * f_gpus_per_node
 
     # Build model configs for A-Worker and F-Worker.
     # A-Worker: attention-only pool; MoE dims are irrelevant but must satisfy
@@ -2207,8 +2260,8 @@ def _run_afd_estimate(
     if f_moe_ep_size <= 0 or f_tp_size % f_moe_ep_size != 0:
         raise ValueError(
             f"f_moe_ep_size ({f_moe_ep_size}) must be a positive divisor of "
-            f"f_tp_size ({f_tp_size}) (= n_f_nodes * gpus_per_node, "
-            f"n_f_nodes={n_f_nodes}, gpus_per_node={gpus_per_node}) so that "
+            f"f_tp_size ({f_tp_size}) (= n_f_nodes * f_gpus_per_node, "
+            f"n_f_nodes={n_f_nodes}, f_gpus_per_node={f_gpus_per_node}) so that "
             "f_moe_tp = f_tp / f_moe_ep is an integer."
         )
     f_moe_tp_size = f_tp_size // f_moe_ep_size
@@ -2258,6 +2311,8 @@ def _run_afd_estimate(
         n_a_nodes=n_a_nodes,
         n_f_nodes=n_f_nodes,
         gpus_per_node=gpus_per_node,
+        a_gpus_per_node=a_gpus_per_node,
+        f_gpus_per_node=f_gpus_per_node,
         tp_a=a_tp_size,
         # tp_f is derived inside AFDConfig (Phase 1: F-DP=1).
         f_moe_ep_size=f_moe_ep_size,
@@ -2280,9 +2335,13 @@ def _run_afd_estimate(
         model_path=model_path,
         a_model_config=a_model_config,
         f_model_config=f_model_config,
-        database=database,
-        backend=backend,
+        database=a_database,
+        backend=a_backend,
         afd_config=afd_config,
+        f_database=f_database,
+        f_backend=f_backend,
+        a_system_name=a_system,
+        f_system_name=f_system,
     )
     summary = session.run_afd(
         runtime_config,

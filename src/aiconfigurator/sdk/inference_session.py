@@ -997,6 +997,10 @@ class AFDInferenceSession:
         database: perf_database.PerfDatabase,
         backend: BaseBackend,
         afd_config: config.AFDConfig,
+        f_database: perf_database.PerfDatabase | None = None,
+        f_backend: BaseBackend | None = None,
+        a_system_name: str | None = None,
+        f_system_name: str | None = None,
     ) -> None:
         self._model_path = model_path
         self._a_model_config = a_model_config
@@ -1006,9 +1010,38 @@ class AFDInferenceSession:
         if a_nextn != f_nextn:
             raise ValueError(f"AFD A/F model configs must use the same nextn; got A={a_nextn}, F={f_nextn}.")
         self._nextn = a_nextn
+        # ``database`` / ``backend`` describe the A pool, which is the
+        # "primary" side (it owns the KV cache). ``f_database`` /
+        # ``f_backend`` let the F pool run on different hardware and/or a
+        # different framework; both default to the A pool, which keeps the
+        # homogeneous path byte-for-byte identical. ``self._database`` /
+        # ``self._backend`` remain as A-side aliases.
         self._database = database
         self._backend = backend
+        self._a_database = database
+        self._a_backend = backend
+        self._f_database = f_database if f_database is not None else database
+        self._f_backend = f_backend if f_backend is not None else backend
+        # Resolved pool system names, used only to label the summary row. They
+        # fall back to each database's own ``system`` so callers that do not
+        # care keep the previous labels.
+        self._a_system_name = a_system_name or str(getattr(self._a_database, "system", ""))
+        self._f_system_name = f_system_name or str(getattr(self._f_database, "system", ""))
         self._afd_config = afd_config
+
+    @property
+    def is_hetero(self) -> bool:
+        """True when the F pool uses a different database or backend than A."""
+        return self._f_database is not self._a_database or self._f_backend is not self._a_backend
+
+    def _pool_label(self, a_value: str, f_value: str) -> str:
+        """One column value for two pools: ``"a"`` or ``"a+f"`` when they differ.
+
+        ``ColumnsAFD`` carries a single ``system`` / ``backend`` column, so a
+        hetero run would otherwise be indistinguishable from a homogeneous one
+        in ``pareto.csv``. Homogeneous runs keep the bare A-side value.
+        """
+        return a_value if a_value == f_value else f"{a_value}+{f_value}"
 
     # ------------------------------------------------------------------ #
     # Private helpers
@@ -1017,8 +1050,8 @@ class AFDInferenceSession:
         """Construct A-Worker and F-Worker model instances."""
         from aiconfigurator.sdk.models import get_model
 
-        a_model = get_model(self._model_path, self._a_model_config, self._backend.name.value)
-        f_model = get_model(self._model_path, self._f_model_config, self._backend.name.value)
+        a_model = get_model(self._model_path, self._a_model_config, self._a_backend.name.value)
+        f_model = get_model(self._model_path, self._f_model_config, self._f_backend.name.value)
         return a_model, f_model
 
     def _sum_latency(
@@ -1030,6 +1063,7 @@ class AFDInferenceSession:
         model,
         runtime_config: config.RuntimeConfig,
         is_context: bool,
+        database: perf_database.PerfDatabase | None = None,
     ):
         """Sum the query() latencies for a list of ops, returning (total, per-op dict).
 
@@ -1044,9 +1078,13 @@ class AFDInferenceSession:
         permanently. The Python ``op.query()`` loop remains the fallback for
         the explicit escape hatch and for op lists the compiled spec cannot
         express.
+
+        ``database`` selects the pool whose perf data backs the ops; it
+        defaults to the A pool so homogeneous callers are unaffected.
         """
         ops = list(ops_iter)
         x = batch_size * seq_len if is_context else batch_size
+        db = database if database is not None else self._a_database
 
         rust = self._sum_latency_with_rust(
             ops,
@@ -1056,6 +1094,7 @@ class AFDInferenceSession:
             model=model,
             runtime_config=runtime_config,
             is_context=is_context,
+            database=db,
         )
         if rust is not None:
             return rust
@@ -1076,8 +1115,10 @@ class AFDInferenceSession:
         per_op = defaultdict(float)
         for op in ops:
             # Internal shim entry (no DeprecationWarning): same engine-backed
-            # value as the deprecated public op.query().
-            result = op._engine_query(self._database, **kwargs_common)
+            # value as the deprecated public op.query(). ``db`` rather than
+            # ``self._database`` -- under hetero A/F each pool resolves against
+            # its own perf data.
+            result = op._engine_query(db, **kwargs_common)
             per_op[op._name] += float(result)
         return sum(per_op.values()), per_op
 
@@ -1091,6 +1132,7 @@ class AFDInferenceSession:
         model,
         runtime_config: config.RuntimeConfig,
         is_context: bool,
+        database: perf_database.PerfDatabase | None = None,
     ):
         """Compiled-engine path of :meth:`_sum_latency`, or ``None`` to fall
         back to the Python ``op.query()`` loop.
@@ -1111,7 +1153,9 @@ class AFDInferenceSession:
             should_use_rust_engine_step,
         )
 
-        if not ops or not should_use_rust_engine_step(runtime_config, self._database):
+        db = database if database is not None else self._a_database
+
+        if not ops or not should_use_rust_engine_step(runtime_config, db):
             return None
 
         phase_ops = model.context_ops if is_context else model.generation_ops
@@ -1141,7 +1185,7 @@ class AFDInferenceSession:
             if is_context:
                 entries = evaluate_context_ops_with_rust(
                     model,
-                    self._database,
+                    db,
                     indices=indices,
                     batch_size=batch_size,
                     s=seq_len,
@@ -1152,7 +1196,7 @@ class AFDInferenceSession:
             else:
                 entries = evaluate_generation_ops_with_rust(
                     model,
-                    self._database,
+                    db,
                     indices=indices,
                     batch_size=batch_size,
                     s=seq_len,
@@ -1240,6 +1284,9 @@ class AFDInferenceSession:
             n_a_workers=cfg.n_a_workers,
             n_f_workers=cfg.n_f_workers,
             gpus_per_node=cfg.gpus_per_node,
+            # All four F-side groupings (num_f_nodes / f_gpus_in_node) are
+            # F-pool hardware facts, which differ from A under hetero A/F.
+            f_gpus_per_node=cfg.effective_f_gpus_per_node,
             num_experts=num_experts,
             topk=topk,
             comm_quant_mode=comm_quant,
@@ -1385,9 +1432,9 @@ class AFDInferenceSession:
             num_tokens = batch_size
             kvcache_multiplier = max(int(cfg.num_microbatches or 1), 1)
 
-        return self._backend.get_partition_memory_usage(
+        return self._a_backend.get_partition_memory_usage(
             a_model,
-            self._database,
+            self._a_database,
             partition_ops=a_partition.attn_ops,
             batch_size=batch_size,
             beam_width=1,
@@ -1420,9 +1467,9 @@ class AFDInferenceSession:
             effective_max_seq_len = max_seq_len if max_seq_len is not None else isl + osl
             num_tokens = batch_size
 
-        return self._backend.get_partition_memory_usage(
+        return self._f_backend.get_partition_memory_usage(
             f_model,
-            self._database,
+            self._f_database,
             partition_ops=f_partition.ffn_ops,
             batch_size=batch_size,
             beam_width=1,
@@ -1439,16 +1486,28 @@ class AFDInferenceSession:
         memory: dict[str, float],
         runtime_config: config.RuntimeConfig,
         free_gpu_memory_fraction: float | None,
+        pool: str = "a",
     ) -> InferenceSummary:
+        """Check one pool's memory dict against that pool's HBM capacity.
+
+        ``pool`` picks the backend and the device memory capacity: under
+        hetero A/F the two pools have different HBM sizes and different
+        framework reserve policies, so checking F against the A device
+        would silently accept (or reject) the wrong topologies.
+        """
+        if pool not in ("a", "f"):
+            raise ValueError(f"_check_memory_dict: pool must be 'a' or 'f', got {pool!r}")
+        backend = self._a_backend if pool == "a" else self._f_backend
+        database = self._a_database if pool == "a" else self._f_database
         summary = InferenceSummary(runtime_config)
-        reserved_fraction, tolerance = self._backend.get_kv_cache_memory_check_params()
+        reserved_fraction, tolerance = backend.get_kv_cache_memory_check_params()
         summary.set_memory_and_check_oom(
             memory,
-            self._database.system_spec["gpu"]["mem_capacity"],
+            database.system_spec["gpu"]["mem_capacity"],
             free_gpu_memory_fraction=free_gpu_memory_fraction,
             kv_cache_reserved_fraction=reserved_fraction,
             kv_cache_tolerance=tolerance,
-            fraction_of_free=self._backend.memory_fraction_of_free(),
+            fraction_of_free=backend.memory_fraction_of_free(),
         )
         return summary
 
@@ -1526,6 +1585,7 @@ class AFDInferenceSession:
                 model=a_model,
                 runtime_config=runtime_config,
                 is_context=False,
+                database=self._a_database,
             )
             t_f_step_i, f_per_op_i = self._sum_latency(
                 f_partition.ffn_ops,
@@ -1534,6 +1594,7 @@ class AFDInferenceSession:
                 model=f_model,
                 runtime_config=runtime_config,
                 is_context=False,
+                database=self._f_database,
             )
 
             t_a_layer_i = t_a_step_i / num_layers + brk_t_a_per_layer
@@ -1664,11 +1725,20 @@ class AFDInferenceSession:
         # distinct label so the --detail report can attribute comm cost
         # back to the specific collective rather than a single bucket.
         comm_ops = self._build_afd_comm_ops(a_model, f_model)
-        r_a2f = comm_ops.a2f.query(self._database, x=afd_a_batch_tokens)
-        r_f2a = comm_ops.f2a.query(self._database, x=afd_a_batch_tokens)
-        r_ag = comm_ops.f_ag.query(self._database, x=afd_a_batch_tokens)
-        r_rs = comm_ops.f_rs.query(self._database, x=afd_a_batch_tokens)
-        r_cmb = comm_ops.a_combine.query(self._database, x=afd_a_batch_tokens)
+        # Cross-pool P2P spans both device types: price it at the slower
+        # endpoint. ``peer_database`` is passed ONLY under hetero A/F so the
+        # homogeneous call shape (and any op stub that does not accept the
+        # kwarg) is untouched.
+        p2p_kwargs = {"x": afd_a_batch_tokens}
+        if self._f_database is not self._a_database:
+            p2p_kwargs["peer_database"] = self._f_database
+        r_a2f = comm_ops.a2f.query(self._a_database, **p2p_kwargs)
+        r_f2a = comm_ops.f2a.query(self._a_database, **p2p_kwargs)
+        # F-node intra-node collectives run entirely on F hardware.
+        r_ag = comm_ops.f_ag.query(self._f_database, x=afd_a_batch_tokens)
+        r_rs = comm_ops.f_rs.query(self._f_database, x=afd_a_batch_tokens)
+        # A-side local HBM reduce-add stays on A hardware.
+        r_cmb = comm_ops.a_combine.query(self._a_database, x=afd_a_batch_tokens)
 
         # Re-pack into the legacy per-bucket breakdown so the downstream
         # per-op fold-in and per-step pipeline stay unchanged. Keys are
@@ -1739,6 +1809,7 @@ class AFDInferenceSession:
                 model=a_model,
                 runtime_config=runtime_config,
                 is_context=True,
+                database=self._a_database,
             )
             t_f_total, f_per_op = self._sum_latency(
                 f_partition.ffn_ops,
@@ -1747,6 +1818,7 @@ class AFDInferenceSession:
                 model=f_model,
                 runtime_config=runtime_config,
                 is_context=True,
+                database=self._f_database,
             )
             t_a_layer = t_a_total / num_layers + brk_t_a_per_layer
             t_f_layer = t_f_total / num_layers + brk_t_f_per_layer
@@ -1784,8 +1856,8 @@ class AFDInferenceSession:
             prefix=runtime_config.prefix,
             max_seq_len=max_seq_len,
         )
-        a_memory_summary = self._check_memory_dict(a_memory, runtime_config, free_gpu_memory_fraction)
-        f_memory_summary = self._check_memory_dict(f_memory, runtime_config, None)
+        a_memory_summary = self._check_memory_dict(a_memory, runtime_config, free_gpu_memory_fraction, pool="a")
+        f_memory_summary = self._check_memory_dict(f_memory, runtime_config, None, pool="f")
 
         return {
             "t_a_layer": t_a_layer,
@@ -1849,7 +1921,9 @@ class AFDInferenceSession:
         if phase not in ("prefill", "decode", "both"):
             raise ValueError(f"AFDInferenceSession.run_afd: invalid phase {phase!r}")
         if free_gpu_memory_fraction is None:
-            free_gpu_memory_fraction = self._backend.get_default_free_gpu_memory_fraction(self._database.version)
+            # KV cache lives on the A pool, so its default reserve fraction
+            # is an A-side framework/version fact.
+            free_gpu_memory_fraction = self._a_backend.get_default_free_gpu_memory_fraction(self._a_database.version)
 
         a_model, f_model = self._build_models()
 
@@ -2137,9 +2211,12 @@ class AFDInferenceSession:
             "boundary_on_attn": bool(cfg.boundary_on_attn),
             "num_total_gpus": total_gpus,
             "memory": round(max(a_memory_gb, f_memory_gb), 2),
-            "backend": self._backend.name.value,
-            "version": str(self._database.version),
-            "system": str(self._database.system),
+            # ``ColumnsAFD`` has one backend/version/system column, so a hetero
+            # run reports ``"<a>+<f>"``; homogeneous runs keep the bare A-side
+            # value (A is the primary pool, it owns the KV cache).
+            "backend": self._pool_label(self._a_backend.name.value, self._f_backend.name.value),
+            "version": self._pool_label(str(self._a_database.version), str(self._f_database.version)),
+            "system": self._pool_label(self._a_system_name, self._f_system_name),
             # AFD power is not modeled yet. NaN prevents these rows from
             # being mistaken for zero-power deployments or ranked against
             # configurations with measured power.
@@ -2148,10 +2225,14 @@ class AFDInferenceSession:
 
         summary_df = pd.DataFrame([result_dict], columns=common.ColumnsAFD)
         summary = InferenceSummary(runtime_config)
-        summary_memory = dict(a_memory if a_memory_gb >= f_memory_gb else f_memory)
+        a_is_peak = a_memory_gb >= f_memory_gb
+        summary_memory = dict(a_memory if a_is_peak else f_memory)
+        # Check the peak pool's footprint against *that* pool's HBM; the two
+        # capacities differ once A and F sit on different devices.
+        peak_database = self._a_database if a_is_peak else self._f_database
         summary.set_memory_and_check_oom(
             summary_memory,
-            self._database.system_spec["gpu"]["mem_capacity"],
+            peak_database.system_spec["gpu"]["mem_capacity"],
         )
         summary.set_oom(bool(is_oom))
         summary.set_kv_cache_oom(bool(a_is_kv_cache_oom or f_is_kv_cache_oom))

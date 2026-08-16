@@ -390,6 +390,7 @@ def _enumerate_afd_prefill_options(
     prefill_batch_size_list: list[int] | tuple[int, ...] | None = None,
     prefill_system_name: str | None = None,
     prefill_backend_version: str | None = None,
+    prefill_gpus_per_node: int | None = None,
     total_gpus: int | None = None,
     max_prefill_gpus: int | None = None,
     max_candidates: int = _AFD_PREFILL_MAX_CANDIDATES,
@@ -407,12 +408,17 @@ def _enumerate_afd_prefill_options(
     AFD is configured with a separate prefill worker config. ``quant_modes``
     is kept for compatibility with older direct callers.
 
+    The ``prefill_*`` arguments let this pool run on its own hardware and
+    framework; each falls back to the shared value, so an AFD run that does
+    not ask for a distinct prefill pool behaves exactly as before.
+
     Returns a list of dicts with prefill parallelism, per-worker GPU
     count, batch size, TTFT, ``seq_s`` (per-worker), memory and power.
     """
     is_moe = check_is_moe(model_path)
     effective_database = prefill_database or database
     effective_backend_name = prefill_backend_name or backend_name
+    effective_gpus_per_node = int(prefill_gpus_per_node or gpus_per_node)
     backend = get_backend(effective_backend_name)
     quant_modes = dict(quant_modes or {})
     base_model_config = (
@@ -432,7 +438,7 @@ def _enumerate_afd_prefill_options(
         batch_size_list = list(_AFD_PREFILL_BATCH_SIZE_LIST)
 
     if prefill_parallel_config_list is None:
-        tp_candidates = sorted({tp for tp in (1, 2, 4, 8) if tp <= max(gpus_per_node, 1)})
+        tp_candidates = sorted({tp for tp in (1, 2, 4, 8) if tp <= max(effective_gpus_per_node, 1)})
         prefill_parallel_config_list = [(tp, 1, 1, 1 if is_moe else tp, tp if is_moe else 1) for tp in tp_candidates]
 
     if max_candidates < 1:
@@ -853,8 +859,16 @@ def _quick_balance_ratio(
     runtime_config,
     a_model,
     f_model,
+    f_database: PerfDatabase | None = None,
 ) -> float:
-    """Single-point latency probe to estimate A/F balance ratio cheaply."""
+    """Single-point latency probe to estimate A/F balance ratio cheaply.
+
+    ``database`` backs the A ops; ``f_database`` backs the F ops and
+    defaults to ``database``. Under hetero A/F the two pools have different
+    perf data, so probing both sides against one device would report a
+    meaningless ratio.
+    """
+    f_db = f_database if f_database is not None else database
     kwargs_base = {
         "batch_size": batch_size,
         "beam_width": 1,
@@ -867,7 +881,7 @@ def _quick_balance_ratio(
         for op in a_ops
     )
     t_f = sum(
-        float(op._engine_query(database, x=batch_size, model_name=getattr(f_model, "model_name", ""), **kwargs_base))
+        float(op._engine_query(f_db, x=batch_size, model_name=getattr(f_model, "model_name", ""), **kwargs_base))
         for op in f_ops
     )
     return min(t_a, t_f) / max(t_a, t_f, 1e-9)
@@ -995,6 +1009,17 @@ def afd_pareto(
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
     quant_modes: dict | None = None,
+    # Hetero A/F pools: each defaults to the shared ``database`` /
+    # ``backend_name`` / ``gpus_per_node``, so omitting them all reproduces
+    # the homogeneous behavior exactly.
+    a_database: PerfDatabase | None = None,
+    a_backend_name: str | None = None,
+    a_system_name: str | None = None,
+    a_gpus_per_node: int | None = None,
+    f_database: PerfDatabase | None = None,
+    f_backend_name: str | None = None,
+    f_system_name: str | None = None,
+    f_gpus_per_node: int | None = None,
     prefill_database: PerfDatabase | None = None,
     prefill_backend_name: str | None = None,
     prefill_model_config: config.ModelConfig | None = None,
@@ -1002,6 +1027,7 @@ def afd_pareto(
     prefill_batch_size_list: list[int] | None = None,
     prefill_system_name: str | None = None,
     prefill_backend_version: str | None = None,
+    prefill_gpus_per_node: int | None = None,
     prefill_max_candidates: int = _AFD_PREFILL_MAX_CANDIDATES,
     prefill_candidate_overflow: str = _AFD_PREFILL_CANDIDATE_OVERFLOW,
     max_prefill_gpus: int | None = None,
@@ -1032,6 +1058,12 @@ def afd_pareto(
     deep-copy it and only override candidate parallelism fields.
     ``quant_modes`` is kept for compatibility with older direct callers.
 
+    Hetero pools: ``a_*`` / ``f_*`` override the shared ``database`` /
+    ``backend_name`` / ``gpus_per_node`` per pool, and ``prefill_*`` does
+    the same for the static prefill pool. Each unset argument inherits the
+    shared value. Cross-pool A2F/F2A traffic is priced at the slower of the
+    two endpoints (see :class:`AFDTransfer`).
+
     OOM candidates and per-candidate failures are skipped. Returns a
     DataFrame with :data:`common.ColumnsAFD` columns sorted by
     ``tokens/s/gpu``.
@@ -1051,6 +1083,25 @@ def afd_pareto(
         raise ValueError(f"max_a_batch_size must be an integer >= 32, got {max_a_batch_size!r}.")
 
     backend = get_backend(backend_name)
+    # Per-pool resolution. ``a_*`` is the primary side: the A pool owns the
+    # KV cache, so ``_derive_a_batch_size`` and the KV capacity checks run
+    # against it. Identity (``is``) comparisons downstream detect hetero, so
+    # reuse the very same objects when a pool inherits the shared value.
+    effective_a_database = a_database if a_database is not None else database
+    if not a_backend_name or a_backend_name == backend_name:
+        effective_a_backend = backend
+    else:
+        effective_a_backend = get_backend(a_backend_name)
+    effective_f_database = f_database if f_database is not None else effective_a_database
+    if not f_backend_name or f_backend_name == (a_backend_name or backend_name):
+        effective_f_backend = effective_a_backend
+    else:
+        effective_f_backend = get_backend(f_backend_name)
+    effective_a_gpus_per_node = int(a_gpus_per_node or gpus_per_node)
+    effective_f_gpus_per_node = int(f_gpus_per_node or gpus_per_node)
+    # Row labels only (the ``system`` column); fall back to each DB's own name.
+    effective_a_system_name = a_system_name or str(getattr(effective_a_database, "system", ""))
+    effective_f_system_name = f_system_name or str(getattr(effective_f_database, "system", ""))
     quant_modes = dict(quant_modes or {})
     base_model_config = copy.deepcopy(model_config) if model_config is not None else config.ModelConfig()
     for key, value in quant_modes.items():
@@ -1074,6 +1125,7 @@ def afd_pareto(
             prefill_batch_size_list=prefill_batch_size_list,
             prefill_system_name=prefill_system_name,
             prefill_backend_version=prefill_backend_version,
+            prefill_gpus_per_node=prefill_gpus_per_node,
             total_gpus=total_gpus,
             max_prefill_gpus=max_prefill_gpus,
             max_candidates=prefill_max_candidates,
@@ -1124,11 +1176,14 @@ def afd_pareto(
             candidate_attempts += 1
             try:
                 # --- Topology-level checks (independent of a_batch_size) ---
-                tp_f = int(n_f_nodes) * int(gpus_per_node)
+                tp_f = int(n_f_nodes) * effective_f_gpus_per_node
                 if int(f_moe_ep_size) <= 0 or tp_f % int(f_moe_ep_size) != 0:
                     continue
                 f_moe_tp = tp_f // int(f_moe_ep_size)
-                n_a_workers = (int(n_a_nodes) * int(gpus_per_node)) // int(tp_a)
+                n_a_workers = (int(n_a_nodes) * effective_a_gpus_per_node) // int(tp_a)
+                # A-pool TP cannot span more GPUs than one A node holds.
+                if int(tp_a) > effective_a_gpus_per_node or n_a_workers <= 0:
+                    continue
 
                 a_model_config = copy.deepcopy(base_model_config)
                 a_model_config.tp_size = int(tp_a)
@@ -1149,8 +1204,8 @@ def afd_pareto(
                     derived_bs, a_model, a_partition = _derive_a_batch_size(
                         model_path,
                         a_model_config,
-                        backend,
-                        database,
+                        effective_a_backend,
+                        effective_a_database,
                         num_microbatches=num_microbatches,
                         boundary_on_attn=boundary_on_attn,
                         isl=eval_runtime_config.isl,
@@ -1191,16 +1246,16 @@ def afd_pareto(
                             fixed_a_batch_size,
                         )
                         continue
-                    a_model = get_model(model_path, a_model_config, backend.name.value)
+                    a_model = get_model(model_path, a_model_config, effective_a_backend.name.value)
                     a_partition = build_afd_ops_partition(
                         a_model,
                         phase="generation",
                         boundary_on_attn=boundary_on_attn,
                     )
                     max_bs_a_micro = _analytical_max_batch_size(
-                        backend,
+                        effective_a_backend,
                         a_model,
-                        database,
+                        effective_a_database,
                         a_partition.attn_ops,
                         isl=eval_runtime_config.isl,
                         osl=eval_runtime_config.osl,
@@ -1217,7 +1272,7 @@ def afd_pareto(
                     )
 
                 # --- F-Worker: analytical max batch_size ---
-                f_model = get_model(model_path, f_model_config, backend.name.value)
+                f_model = get_model(model_path, f_model_config, effective_f_backend.name.value)
                 f_partition = build_afd_ops_partition(
                     f_model,
                     phase="generation",
@@ -1225,9 +1280,9 @@ def afd_pareto(
                 )
 
                 max_bs_f_micro = _analytical_max_batch_size(
-                    backend,
+                    effective_f_backend,
                     f_model,
-                    database,
+                    effective_f_database,
                     f_partition.ffn_ops,
                     isl=eval_runtime_config.isl,
                     osl=eval_runtime_config.osl,
@@ -1271,6 +1326,8 @@ def afd_pareto(
                         n_a_nodes=int(n_a_nodes),
                         n_f_nodes=int(n_f_nodes),
                         gpus_per_node=int(gpus_per_node),
+                        a_gpus_per_node=effective_a_gpus_per_node,
+                        f_gpus_per_node=effective_f_gpus_per_node,
                         tp_a=int(tp_a),
                         f_moe_ep_size=int(f_moe_ep_size),
                         a_batch_size=a_batch_size,
@@ -1288,9 +1345,13 @@ def afd_pareto(
                         model_path=model_path,
                         a_model_config=a_model_config,
                         f_model_config=f_model_config,
-                        database=database,
-                        backend=backend,
+                        database=effective_a_database,
+                        backend=effective_a_backend,
                         afd_config=afd_config,
+                        f_database=effective_f_database,
+                        f_backend=effective_f_backend,
+                        a_system_name=effective_a_system_name,
+                        f_system_name=effective_f_system_name,
                     )
                     summary = session.run_afd(
                         candidate_runtime_config,
@@ -1361,12 +1422,13 @@ def afd_pareto(
                         quick_ratio = _quick_balance_ratio(
                             a_partition.attn_ops,
                             f_partition.ffn_ops,
-                            database,
+                            effective_a_database,
                             batch_size=probe_bs,
                             seq_len=probe_s,
                             runtime_config=eval_runtime_config,
                             a_model=a_model,
                             f_model=f_model,
+                            f_database=effective_f_database,
                         )
                     except Exception:
                         logger.debug(
@@ -1400,6 +1462,8 @@ def afd_pareto(
                             n_a_nodes=int(n_a_nodes),
                             n_f_nodes=int(n_f_nodes),
                             gpus_per_node=int(gpus_per_node),
+                            a_gpus_per_node=effective_a_gpus_per_node,
+                            f_gpus_per_node=effective_f_gpus_per_node,
                             tp_a=int(tp_a),
                             f_moe_ep_size=int(f_moe_ep_size),
                             a_batch_size=a_batch_size,
@@ -1418,9 +1482,13 @@ def afd_pareto(
                             model_path=model_path,
                             a_model_config=a_model_config,
                             f_model_config=f_model_config,
-                            database=database,
-                            backend=backend,
+                            database=effective_a_database,
+                            backend=effective_a_backend,
                             afd_config=afd_config,
+                            f_database=effective_f_database,
+                            f_backend=effective_f_backend,
+                            a_system_name=effective_a_system_name,
+                            f_system_name=effective_f_system_name,
                         )
                         summary = session.run_afd(
                             candidate_runtime_config,

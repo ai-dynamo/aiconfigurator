@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# AFD heterogeneous pools.
+#
+# AFD deploys up to three pools, and each can sit on its own hardware and
+# framework:
+#
+#   * the static prefill pool -- present when afd_combined_with_pd is true
+#   * the A pool (attention)  -- memory-bandwidth bound, owns the KV cache
+#   * the F pool (FFN/MoE)    -- compute bound
+#
+# Per-pool keys: afd_{prefill,a,f}_{system_name,backend_name,backend_version}.
+# Any key left unset inherits the top-level system_name / backend_name /
+# backend_version, so exp_homogeneous below behaves exactly like a plain AFD
+# run. Cross-pool A2F/F2A transfers are priced at the slower of the two
+# endpoints (bandwidth = min of both sides).
+#
+# Pools differ in *hardware and framework only* -- the model is shared, exactly
+# like hetero-disagg (see hetero_disagg.yaml).
+
+exps:
+- exp_homogeneous
+- exp_hetero_a_f
+- exp_hetero_prefill
+
+# Baseline: everything on H200. Reference point for the two hetero runs.
+exp_homogeneous:
+  serving_mode: afd
+  model_path: Qwen/Qwen3-32B
+  system_name: h200_sxm
+  backend_name: sglang
+  total_gpus: 32
+  isl: 4000
+  osl: 1000
+  ttft: 4000.0
+  tpot: 50.0
+  # AFD covers the decode phase only; no static prefill pool in this example.
+  afd_combined_with_pd: false
+
+# Keep attention on H200 (large HBM per GPU for the KV cache) and move the
+# FFN/MoE pool to B200 (higher FLOPS). This is the pairing AFD hetero exists
+# for: the two pools have opposite bottlenecks.
+exp_hetero_a_f:
+  serving_mode: afd
+  model_path: Qwen/Qwen3-32B
+  system_name: h200_sxm
+  backend_name: sglang
+  total_gpus: 32
+  isl: 4000
+  osl: 1000
+  ttft: 4000.0
+  tpot: 50.0
+  afd_combined_with_pd: false
+  afd_a_system_name: h200_sxm
+  afd_f_system_name: b200_sxm
+
+# Only the static prefill pool moves: B200 prefill (high FLOPS for the
+# compute-bound context phase) in front of an H200 AFD decode pool. This is the
+# AFD analogue of hetero-disagg's B200-prefill + H200-decode split.
+exp_hetero_prefill:
+  serving_mode: afd
+  model_path: Qwen/Qwen3-32B
+  system_name: h200_sxm
+  backend_name: sglang
+  total_gpus: 32
+  isl: 4000
+  osl: 1000
+  ttft: 4000.0
+  tpot: 50.0
+  afd_combined_with_pd: true
+  afd_prefill_system_name: b200_sxm
