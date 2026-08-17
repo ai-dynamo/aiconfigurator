@@ -124,7 +124,10 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   `MoeExpertCompute` variants appended after `FpmForward`, and
 #   `MoeExpertComputeOp` carries the
 #   `enable_eplb` legacy-fidelity field.
-ENGINE_SPEC_SCHEMA_VERSION = 11
+# - 12 (PR-6): `DsaModuleOp` gained `attn_projection_quant_modes` — a
+#   bincode op-layout change (same class as v5/v7/v8/v10; serde(default)
+#   only covers the JSON wire, bincode is positional).
+ENGINE_SPEC_SCHEMA_VERSION = 12
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)

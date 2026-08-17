@@ -712,3 +712,66 @@ def test_data_provenance_populated_per_op_file(systems_root: Path) -> None:
     _sources_for(db, systems_root, common.PerfDataFilename.moe)
 
     assert set(db.data_provenance.keys()) == {"gemm_perf.parquet", "moe_perf.parquet"}
+
+
+def test_vetoed_primary_with_no_donor_loads_nothing_through_the_engine_view(systems_root: Path) -> None:
+    """An explicitly EMPTY source list must stay empty end to end (review
+    #1555 P1): a legacy INCOMPLETE.txt vetoes the primary, no donor is
+    admissible, ``_build_op_sources`` returns ``[]`` — and the engine view
+    must NOT fall back to re-resolving the vetoed primary file."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
+
+    (systems_root / "h100_sxm.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "data_dir": "data/h100_sxm",
+                "gpu": {
+                    "sm_version": 90,
+                    "mem_bw": 4_800_000_000_000.0,
+                    "mem_bw_empirical_scaling_factor": 0.8,
+                    "mem_empirical_constant_latency": 0.000003,
+                    "bfloat16_tc_flops": 989_000_000_000_000.0,
+                    "fp8_tc_flops": 1_978_000_000_000_000.0,
+                },
+                "node": {
+                    "num_gpus_per_node": 8,
+                    "inter_node_bw": 50_000_000_000.0,
+                    "intra_node_bw": 450_000_000_000.0,
+                    "p2p_latency": 0.00001,
+                },
+                "misc": {"nccl_version": "2.26.2"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Legacy layout: the primary carries rows AND a legacy INCOMPLETE.txt
+    # (whole-dir veto, no collection_meta.yaml); no sibling/donor exists.
+    version_dir = systems_root / "data" / "h100_sxm" / "trtllm" / "1.0.0"
+    version_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "framework": ["trtllm"],
+                "version": ["1.0.0"],
+                "device": ["h100"],
+                "op_name": ["gemm"],
+                "gemm_dtype": ["bfloat16"],
+                "m": [128],
+                "n": [256],
+                "k": [512],
+                "latency": [7.25],
+            }
+        ),
+        version_dir / "gemm_perf.parquet",
+    )
+    (version_dir / "INCOMPLETE.txt").write_text("partial collection\n")
+
+    db = _build_db(systems_root, backend="trtllm", version="1.0.0")
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+    assert sources == [], "the veto must yield an explicitly empty source list"
+
+    view = fetch_table_view(db, "_gemm_data")
+    assert view is None or not view, f"the vetoed primary leaked into the engine view: {view!r}"

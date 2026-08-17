@@ -47,7 +47,14 @@ pub(crate) fn resolve_op_sources(
 ) -> Vec<PerfSource> {
     match perf_db_sources.get(basename) {
         Some(sources) if !sources.is_empty() => sources.clone(),
-        _ => {
+        // A PRESENT but EMPTY list is a deliberate statement from
+        // `_build_op_sources`: the primary was vetoed (legacy INCOMPLETE.txt)
+        // and no donor was admissible — load NO sources. Falling back to the
+        // primary here would silently undo the veto.
+        Some(_) => Vec::new(),
+        // An ABSENT basename means the caller passed no source map at all
+        // (legacy single-data_root loads): default-primary behavior.
+        None => {
             let legacy = data_root.join(basename);
             let path = if legacy.is_file() {
                 legacy

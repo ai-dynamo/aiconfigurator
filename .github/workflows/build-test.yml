@@ -61,6 +61,7 @@ jobs:
             tests/cross_package/test_core_public_api.py \
             tests/cross_package/test_core_version_contract.py \
             tests/cross_package/test_import_contract.py \
+            tests/cross_package/test_single_oracle_contract.py \
             tests/cross_package/test_data_plane_baseline.py
       - name: Test crate with Python embedding
         env:
@@ -102,6 +103,7 @@ jobs:
             tests/cross_package/test_core_public_api.py \
             tests/cross_package/test_core_version_contract.py \
             tests/cross_package/test_import_contract.py \
+            tests/cross_package/test_single_oracle_contract.py \
             tests/cross_package/test_data_plane_baseline.py
 
   build-and-test:

@@ -50,7 +50,10 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 //   `MoeAllToAll` / `MoeExpertCompute` variants appended after
 //   `FpmForward`, and `MoeExpertComputeOp` carries the `enable_eplb`
 //   legacy-fidelity field.
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 11;
+// - 12 (PR-6): `DsaModuleOp` gained `attn_projection_quant_modes` — a
+//   bincode op-layout change (same class as v5/v7/v8/v10; the
+//   `#[serde(default)]` only covers the JSON wire, bincode is positional).
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 12;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].
