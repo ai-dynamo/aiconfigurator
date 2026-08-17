@@ -3,9 +3,11 @@
 #
 # Collector V3 manifest (schema v2): one `default` runtime per framework plus
 # explicit per-family overrides (design: docs/perf_database/
-# collector-v3-op-centric-design.md §4). Public images are digest-pinned;
-# bare internal image names are exempt. WideEP runtimes are peer framework
-# entries (wideep_<base>) so per-op resolution is uniform.
+# collector-v3-op-centric-design.md §4), plus optional per-model overrides
+# (`models:`, AIC-1762 task 4b) that pin one model's entire run regardless of
+# family. Public images are digest-pinned; bare internal image names are
+# exempt. WideEP runtimes are peer framework entries (wideep_<base>) so
+# per-op resolution is uniform.
 
 schema_version: 2
 
@@ -33,6 +35,40 @@ frameworks:
         version: "0.5.16"
         images:
           default: "lmsysorg/sglang:v0.5.16@sha256:7b6a35df9839fd593a94a1eaee82d7777f472225d9f3ad1f8a2e0cb2bd1785d0"
+    # Model-scoped runtime pin (owner-approved 2026-08-17, AIC-1762 task 4b):
+    # when the run's model identity (--model-path / COLLECTOR_MODEL_PATH)
+    # exactly equals one of these keys, the pin overrides BOTH the family
+    # pins above and the framework default for every op in the run — the
+    # whole run moves to this runtime, not just the ops that would otherwise
+    # resolve here. A run with no model identity, or one that does not match
+    # a key, resolves exactly as before (family/default), so this section is
+    # purely additive. Precedence: a model pin beats a family pin even for an
+    # op that has one (e.g. a hypothetical model-pinned run requesting a kda
+    # op still gets the model's runtime, not 0.5.16) — unlike the family pins
+    # above, which move a whole op family for every model, a model pin moves
+    # one model's entire run and leaves every other model's resolution (and
+    # every other op's family/default resolution) unchanged.
+    #
+    # Qwen3.8-Max ships day-0 on sglang v0.5.17 (registers
+    # Qwen3_5MoeForCausalLM / Qwen3_5ForCausalLM); it cannot collect at the
+    # 0.5.14 default above. Both tags below resolve to the same multi-arch
+    # index digest (verified on Docker Hub 2026-08-17).
+    models:
+      "Qwen/Qwen3.8-2.4T-A95B":
+        version: "0.5.17"
+        images:
+          default: "lmsysorg/sglang:v0.5.17@sha256:16aba8925507e631e1dc1e23d95d026533602591775f6a8db68b74ee99746155"
+          cu130: "lmsysorg/sglang:v0.5.17-cu130@sha256:16aba8925507e631e1dc1e23d95d026533602591775f6a8db68b74ee99746155"
+      "Qwen/Qwen3.8-2.4T-A95B-FP8":
+        version: "0.5.17"
+        images:
+          default: "lmsysorg/sglang:v0.5.17@sha256:16aba8925507e631e1dc1e23d95d026533602591775f6a8db68b74ee99746155"
+          cu130: "lmsysorg/sglang:v0.5.17-cu130@sha256:16aba8925507e631e1dc1e23d95d026533602591775f6a8db68b74ee99746155"
+      "RadixArk/Qwen3.8-2.4T-A95B-NVFP4":
+        version: "0.5.17"
+        images:
+          default: "lmsysorg/sglang:v0.5.17@sha256:16aba8925507e631e1dc1e23d95d026533602591775f6a8db68b74ee99746155"
+          cu130: "lmsysorg/sglang:v0.5.17-cu130@sha256:16aba8925507e631e1dc1e23d95d026533602591775f6a8db68b74ee99746155"
   trtllm:
     source_repo: "https://github.com/NVIDIA/TensorRT-LLM.git"
     default:

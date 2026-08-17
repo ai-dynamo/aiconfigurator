@@ -135,6 +135,32 @@ def _resolve_from(
     return _runtime_from_spec(framework_key, spec, runtime_spec, manifest, family=family)
 
 
+def _model_pinned_runtime(
+    manifest: dict[str, Any],
+    framework_key: str,
+    model_path: str | None,
+) -> CollectorRuntime | None:
+    """Model-scoped runtime pin (``frameworks.<key>.models``, Task 4b): when the
+    run's model identity exactly matches a key, the pin overrides family and
+    default resolution for every op resolved under this framework key.
+
+    Returns None — ordinary family/default resolution applies — when there is
+    no model identity, the framework declares no `models:` section, or the
+    identity does not match any key. `family` is left unset on the returned
+    runtime: a model pin is not a family classification, and reusing the
+    field would misleadingly suggest a family override produced it.
+    """
+    if not model_path:
+        return None
+    spec = manifest["frameworks"].get(framework_key)
+    if spec is None:
+        return None
+    runtime_spec = (spec.get("models") or {}).get(model_path)
+    if runtime_spec is None:
+        return None
+    return _runtime_from_spec(framework_key, spec, runtime_spec, manifest, family=None)
+
+
 def resolve_op_runtime(
     framework: str,
     op: str,
@@ -171,6 +197,7 @@ def require_collector_runtime(
     *,
     requested_ops: set[str],
     wideep_ops: set[str] | None = None,
+    model_path: str | None = None,
     path: str | Path = MANIFEST_PATH,
     catalog_path: str | Path = CATALOG_PATH,
 ) -> CollectorRuntime:
@@ -179,6 +206,11 @@ def require_collector_runtime(
     Collector V3 semantics: every op resolves independently (family override or
     framework default); one executor container serves exactly one runtime, so
     any spread across versions is an error telling the caller to split the run.
+
+    When `model_path` exactly matches a `frameworks.<key>.models` entry (Task
+    4b), that model-scoped pin overrides family and default resolution for
+    every op in the run. No `model_path`, or one that matches no key, resolves
+    exactly as before — this parameter is purely additive.
     """
     wideep_ops = wideep_ops or set()
     manifest = load_manifest(path)
@@ -199,10 +231,11 @@ def require_collector_runtime(
             missing = ops - {e.op for e in entries}
             if missing:
                 raise KeyError(f"{key} registry has no op(s): {sorted(missing)}")
+        model_runtime = _model_pinned_runtime(manifest, key, model_path)
         by_identity: dict[tuple[str, tuple[tuple[str, str], ...]], CollectorRuntime] = {}
         op_runtimes: dict[str, CollectorRuntime] = {}
         for entry in entries:
-            runtime = _resolve_from(manifest, family_map, key, entry)
+            runtime = model_runtime or _resolve_from(manifest, family_map, key, entry)
             by_identity.setdefault(_runtime_identity(runtime), runtime)
             op_runtimes[entry.op] = runtime
         if len(by_identity) > 1:
@@ -315,6 +348,11 @@ def _validate_framework_spec(name: str, spec: object, frameworks: dict[str, Any]
         raise TypeError(f"frameworks.{name}.families must be a mapping")
     for family, override in families.items():
         _validate_runtime_spec(f"frameworks.{name}.families.{family}", override)
+    models = spec.get("models") or {}
+    if not isinstance(models, dict):
+        raise TypeError(f"frameworks.{name}.models must be a mapping")
+    for model_id, override in models.items():
+        _validate_runtime_spec(f"frameworks.{name}.models.{model_id}", override)
 
 
 def _validate_runtime_spec(name: str, spec: object) -> None:

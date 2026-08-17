@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from collector.framework_manifest import get_collector_runtime, require_collector_runtime, resolve_op_runtime
+from collector.framework_manifest import (
+    get_collector_runtime,
+    require_collector_runtime,
+    resolve_op_runtime,
+    validate_resolution,
+)
 from collector.sglang.registry import REGISTRY as SGLANG_REGISTRY
 from collector.trtllm.registry import REGISTRY as TRTLLM_REGISTRY
 from collector.vllm.registry import REGISTRY as VLLM_REGISTRY
@@ -216,6 +221,89 @@ def test_runtime_selection_accepts_only_the_matching_pin(installed_version, requ
 def test_runtime_selection_rejects_mismatched_or_mixed_pins(installed_version, requested_ops, match):
     with pytest.raises(RuntimeError, match=match):
         require_collector_runtime("sglang", installed_version, requested_ops=requested_ops, wideep_ops=WIDEEP_OPS)
+
+
+# --- Task 4b: model-scoped runtime pins (frameworks.<key>.models) ---------
+
+
+@pytest.mark.parametrize(
+    ("installed_version", "requested_ops", "workload", "version"),
+    [
+        ("0.5.14+cu130", {"gemm"}, "default", "0.5.14"),
+        ("0.5.16", {"kda"}, "default", "0.5.16"),
+        ("0.5.10", {"moe_ep"}, "wideep", "0.5.10"),
+    ],
+)
+def test_no_model_identity_resolves_exactly_like_today(installed_version, requested_ops, workload, version):
+    # model_path is purely additive: omitting it, or passing None explicitly,
+    # must reproduce pre-4b resolution byte-for-byte across default, family,
+    # and wideep pins (CollectorRuntime is a frozen dataclass, so == is a
+    # full field comparison).
+    baseline = require_collector_runtime(
+        "sglang", installed_version, requested_ops=requested_ops, wideep_ops=WIDEEP_OPS
+    )
+    explicit_none = require_collector_runtime(
+        "sglang", installed_version, requested_ops=requested_ops, wideep_ops=WIDEEP_OPS, model_path=None
+    )
+    assert explicit_none == baseline
+    assert (explicit_none.workload, explicit_none.version) == (workload, version)
+
+
+def test_unknown_model_id_falls_back_to_default_resolution():
+    baseline = require_collector_runtime("sglang", "0.5.14", requested_ops={"gemm"}, wideep_ops=WIDEEP_OPS)
+    unmatched = require_collector_runtime(
+        "sglang",
+        "0.5.14",
+        requested_ops={"gemm"},
+        wideep_ops=WIDEEP_OPS,
+        model_path="some-org/not-a-pinned-model",
+    )
+    assert unmatched == baseline
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "Qwen/Qwen3.8-2.4T-A95B",
+        "Qwen/Qwen3.8-2.4T-A95B-FP8",
+        "RadixArk/Qwen3.8-2.4T-A95B-NVFP4",
+    ],
+)
+def test_model_pin_match_resolves_qwen38_max_to_sglang_0_5_17(model_path):
+    # Real manifest (no path= override): the checked-in frameworks.sglang.models
+    # entries added for Qwen3.8-Max day-0 support.
+    runtime = require_collector_runtime(
+        "sglang", "0.5.17", requested_ops={"gemm"}, wideep_ops=WIDEEP_OPS, model_path=model_path
+    )
+    assert runtime.version == "0.5.17"
+    assert runtime.image().startswith("lmsysorg/sglang:v0.5.17@sha256:")
+    assert runtime.image("cu130").startswith("lmsysorg/sglang:v0.5.17-cu130@sha256:")
+    # Not a family classification — see _model_pinned_runtime docstring.
+    assert runtime.family is None
+
+
+def test_model_pin_mismatch_error_names_the_model_scoped_image():
+    with pytest.raises(RuntimeError) as excinfo:
+        require_collector_runtime(
+            "sglang",
+            "0.5.14",
+            requested_ops={"gemm"},
+            wideep_ops=WIDEEP_OPS,
+            model_path="Qwen/Qwen3.8-2.4T-A95B",
+        )
+    message = str(excinfo.value)
+    # Same template as the pre-4b guard ("~:249"), but naming the
+    # model-scoped runtime/image instead of the framework default.
+    assert "sglang stock collector requires exactly 0.5.17, found 0.5.14" in message
+    assert "use lmsysorg/sglang:v0.5.17@sha256:" in message
+
+
+def test_real_manifest_models_section_does_not_break_validate_resolution():
+    # Task 4b spec: model pins are additive to validate_resolution()'s
+    # contract ("every registry op resolves to a pinned runtime"); adding
+    # frameworks.sglang.models must not introduce a resolution error anywhere
+    # in the real manifest.
+    assert validate_resolution() == []
 
 
 def test_unknown_requested_op_fails_with_key_error():
@@ -430,3 +518,97 @@ frameworks:
     assert f"lmsysorg/sglang:v0.5.14{digest_a}" in message
     assert f"lmsysorg/sglang:v0.5.14-wideep{digest_b}" in message
     assert "separate containers" in message
+
+
+def test_model_pin_overrides_a_synthetic_family_pin_for_the_same_op(tmp_path):
+    # Task 4b precedence: a model pin wins over a family pin for every op in
+    # the run, even one the family pin would otherwise claim — mirrors "a
+    # hypothetical kda under a model pin" from the framework_manifest.yaml
+    # comment. Synthetic fixture; the real kda entry is untouched.
+    digest = "@sha256:" + "0" * 64
+    model_digest = "@sha256:" + "1" * 64
+    (tmp_path / "framework_manifest.yaml").write_text(
+        f"""
+schema_version: 2
+frameworks:
+  sglang:
+    source_repo: "https://github.com/sgl-project/sglang.git"
+    default:
+      version: "0.5.14"
+      images:
+        default: "lmsysorg/sglang:v0.5.14{digest}"
+    families:
+      gemm:
+        version: "0.5.15"
+        images:
+          default: "lmsysorg/sglang:v0.5.15{digest}"
+    models:
+      "some-org/pinned-model":
+        version: "0.5.17"
+        images:
+          default: "lmsysorg/sglang:v0.5.17{model_digest}"
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "op_backend_catalog.yaml").write_text(
+        """
+schema_version: 1
+families:
+  - family: gemm
+    op_files: [gemm_perf]
+  - family: attention
+    op_files: [context_attention_perf, generation_attention_perf]
+""",
+        encoding="utf-8",
+    )
+    # Without a model pin: gemm (family override, 0.5.15) and
+    # attention_context (default, 0.5.14) split across two runtimes and fail
+    # closed, exactly as today.
+    with pytest.raises(RuntimeError, match="multiple runtime versions"):
+        require_collector_runtime(
+            "sglang",
+            "0.5.14",
+            requested_ops={"gemm", "attention_context"},
+            wideep_ops=set(),
+            path=tmp_path / "framework_manifest.yaml",
+            catalog_path=tmp_path / "op_backend_catalog.yaml",
+        )
+    # With the model pin active for this run: the gemm family override no
+    # longer applies — both ops resolve uniformly to the model-pinned runtime.
+    runtime = require_collector_runtime(
+        "sglang",
+        "0.5.17",
+        requested_ops={"gemm", "attention_context"},
+        wideep_ops=set(),
+        model_path="some-org/pinned-model",
+        path=tmp_path / "framework_manifest.yaml",
+        catalog_path=tmp_path / "op_backend_catalog.yaml",
+    )
+    assert runtime.version == "0.5.17"
+    assert runtime.image() == f"lmsysorg/sglang:v0.5.17{model_digest}"
+    assert runtime.family is None
+
+
+def test_model_pin_images_must_be_digest_pinned(tmp_path):
+    digest = "@sha256:" + "0" * 64
+    manifest = tmp_path / "framework_manifest.yaml"
+    manifest.write_text(
+        f"""
+schema_version: 2
+frameworks:
+  sglang:
+    source_repo: "https://github.com/sgl-project/sglang.git"
+    default:
+      version: "0.5.14"
+      images:
+        default: "lmsysorg/sglang:v0.5.14{digest}"
+    models:
+      "some-org/pinned-model":
+        version: "0.5.17"
+        images:
+          default: "lmsysorg/sglang:v0.5.17"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="digest-pinned"):
+        get_collector_runtime("sglang", path=manifest)
