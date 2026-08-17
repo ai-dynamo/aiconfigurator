@@ -70,6 +70,8 @@ def to_cli_estimate_kwargs(request: EstimateRequestV1) -> dict[str, Any]:
         request.runtime.decode_free_gpu_memory_fraction,
     )
     _set_if_not_none(kwargs, "max_seq_len", request.runtime.max_seq_len)
+    _set_if_not_none(kwargs, "prefill_max_seq_len", request.runtime.prefill_max_seq_len)
+    _set_if_not_none(kwargs, "decode_max_seq_len", request.runtime.decode_max_seq_len)
     _set_if_not_none(kwargs, "engine_step_backend", request.runtime.engine_step_backend)
 
     if request.topology.kind == "agg":

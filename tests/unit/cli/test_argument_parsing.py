@@ -79,11 +79,17 @@ class TestCLIArgumentParsing:
                 "0.85",
                 "--decode-free-gpu-memory-fraction",
                 "0.7",
+                "--prefill-max-seq-len",
+                "9000",
+                "--decode-max-seq-len",
+                "11000",
             ]
         )
 
         assert args.prefill_free_gpu_memory_fraction == 0.85
         assert args.decode_free_gpu_memory_fraction == 0.7
+        assert args.prefill_max_seq_len == 9000
+        assert args.decode_max_seq_len == 11000
 
     def test_generate_mode_required_args(self, cli_parser):
         """Test that generate mode requires the correct arguments."""

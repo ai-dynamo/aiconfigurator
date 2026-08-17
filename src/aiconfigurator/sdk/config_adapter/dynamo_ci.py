@@ -255,7 +255,7 @@ def _quantization(
 
 def _shared_runtime(
     roles: Mapping[str, Mapping[str, Any]], overrides: AdapterOverrides
-) -> tuple[float | None, float | None, float | None, int | None]:
+) -> tuple[float | None, float | None, float | None, int | None, int | None, int | None]:
     if overrides.free_gpu_memory_fraction is not None:
         fraction = overrides.free_gpu_memory_fraction
         prefill_fraction = None
@@ -277,16 +277,30 @@ def _shared_runtime(
 
     if overrides.max_seq_len is not None:
         max_seq_len = overrides.max_seq_len
+        prefill_max_seq_len = overrides.prefill_max_seq_len
+        decode_max_seq_len = overrides.decode_max_seq_len
     else:
-        lengths = {
-            _positive_int(value, "context length")
-            for config in roles.values()
-            if (value := _flag(config, "context-length", "max-model-len", "max-seq-len")) is not None
-        }
-        if len(lengths) > 1:
-            raise ValueError(f"prefill and decode use different context lengths: {sorted(lengths)}")
-        max_seq_len = next(iter(lengths), None)
-    return fraction, prefill_fraction, decode_fraction, max_seq_len
+        max_seq_len = None
+        prefill_value = _flag(roles["prefill"], "context-length", "max-model-len", "max-seq-len")
+        decode_value = _flag(roles["decode"], "context-length", "max-model-len", "max-seq-len")
+        prefill_max_seq_len = (
+            overrides.prefill_max_seq_len
+            if overrides.prefill_max_seq_len is not None
+            else (_positive_int(prefill_value, "prefill context length") if prefill_value is not None else None)
+        )
+        decode_max_seq_len = (
+            overrides.decode_max_seq_len
+            if overrides.decode_max_seq_len is not None
+            else (_positive_int(decode_value, "decode context length") if decode_value is not None else None)
+        )
+    return (
+        fraction,
+        prefill_fraction,
+        decode_fraction,
+        max_seq_len,
+        prefill_max_seq_len,
+        decode_max_seq_len,
+    )
 
 
 def _speculation(roles: Mapping[str, Mapping[str, Any]], overrides: AdapterOverrides) -> int | str:
@@ -359,7 +373,14 @@ def _request(
         backend_version = container
 
     gemm, moe, kvcache = _quantization(document, roles)
-    fraction, prefill_fraction, decode_fraction, max_seq_len = _shared_runtime(roles, overrides)
+    (
+        fraction,
+        prefill_fraction,
+        decode_fraction,
+        max_seq_len,
+        prefill_max_seq_len,
+        decode_max_seq_len,
+    ) = _shared_runtime(roles, overrides)
     nextn = _speculation(roles, overrides)
     topology = DisaggregatedTopologyV1(
         prefill=_worker(
@@ -406,6 +427,8 @@ def _request(
             prefill_free_gpu_memory_fraction=prefill_fraction,
             decode_free_gpu_memory_fraction=decode_fraction,
             max_seq_len=max_seq_len,
+            prefill_max_seq_len=prefill_max_seq_len,
+            decode_max_seq_len=decode_max_seq_len,
             engine_step_backend=overrides.engine_step_backend,
         ),
         provenance=SourceProvenanceV1(

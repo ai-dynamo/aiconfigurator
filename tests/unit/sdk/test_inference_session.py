@@ -114,6 +114,7 @@ def _build_mock_backend():
     backend = MagicMock()
     backend.name = SimpleNamespace(value="sglang")
     backend.static_memory_fractions = []
+    backend.static_max_seq_lens = []
 
     def _run_static(
         model,
@@ -123,8 +124,10 @@ def _build_mock_backend():
         stride=32,
         latency_correction_scale=1.0,
         free_gpu_memory_fraction=None,
+        max_seq_len=None,
     ):
         backend.static_memory_fractions.append(free_gpu_memory_fraction)
+        backend.static_max_seq_lens.append(max_seq_len)
         tp = model._tp
         pp = model._pp
         dp = model._dp
@@ -272,10 +275,15 @@ class TestRequireSameTPFiltering:
             free_gpu_memory_fraction=0.9,
             prefill_free_gpu_memory_fraction=0.85,
             decode_free_gpu_memory_fraction=0.7,
+            max_seq_len=8192,
+            prefill_max_seq_len=9000,
+            decode_max_seq_len=11000,
         )
 
         assert disagg_session._prefill_backend.static_memory_fractions == [0.85]
         assert disagg_session._decode_backend.static_memory_fractions == [0.7]
+        assert disagg_session._prefill_backend.static_max_seq_lens == [9000]
+        assert disagg_session._decode_backend.static_max_seq_lens == [11000]
 
     def test_false_allows_mismatched_tp(self, disagg_session, runtime_config, model_config):
         """require_same_tp=False → results are non-empty (mismatched TP is fine)."""

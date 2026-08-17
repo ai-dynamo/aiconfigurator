@@ -62,6 +62,7 @@ class InferenceSession:
         stride: int = 32,
         latency_correction_scale: float = 1.0,
         free_gpu_memory_fraction: float | None = None,
+        max_seq_len: int | None = None,
     ) -> InferenceSummary:
         """
         Run static inference
@@ -74,13 +75,18 @@ class InferenceSession:
             free_gpu_memory_fraction: Explicit KV-cache memory fraction for the
                 budget check (backend-defined semantics). When omitted the
                 backend applies its version-derived default.
+            max_seq_len: Optional per-slot KV cache allocation length.
 
         Returns:
             InferenceSummary: the summary of the inference result
         """
-        # Forward the fraction only when set so stubbed/injected backends
-        # predating the kwarg keep working (same compat rule as predict.py).
-        extra = {} if free_gpu_memory_fraction is None else {"free_gpu_memory_fraction": free_gpu_memory_fraction}
+        # Forward optional memory settings only when set so stubbed/injected
+        # backends predating the kwargs keep working.
+        extra = {}
+        if free_gpu_memory_fraction is not None:
+            extra["free_gpu_memory_fraction"] = free_gpu_memory_fraction
+        if max_seq_len is not None:
+            extra["max_seq_len"] = max_seq_len
         return self._backend.run_static(
             self._model,
             self._database,
@@ -297,6 +303,9 @@ class DisaggInferenceSession:
         free_gpu_memory_fraction: float | None = None,
         prefill_free_gpu_memory_fraction: float | None = None,
         decode_free_gpu_memory_fraction: float | None = None,
+        max_seq_len: int | None = None,
+        prefill_max_seq_len: int | None = None,
+        decode_max_seq_len: int | None = None,
     ) -> InferenceSummary:
         """
         Run disagg with given prefill/decode worker info
@@ -318,6 +327,10 @@ class DisaggInferenceSession:
                 fraction. Overrides the shared value for the prefill worker.
             decode_free_gpu_memory_fraction: Decode-specific KV-cache memory
                 fraction. Overrides the shared value for the decode worker.
+            max_seq_len: Shared maximum sequence length used by both workers
+                unless a role-specific value is provided.
+            prefill_max_seq_len: Prefill-specific maximum sequence length.
+            decode_max_seq_len: Decode-specific maximum sequence length.
 
         Returns:
             InferenceSummary: the summary of the inference result
@@ -340,6 +353,7 @@ class DisaggInferenceSession:
                 if prefill_free_gpu_memory_fraction is not None
                 else free_gpu_memory_fraction
             ),
+            max_seq_len=prefill_max_seq_len if prefill_max_seq_len is not None else max_seq_len,
         )
         decode_runtime_config = copy.deepcopy(runtime_config)
         decode_runtime_config.batch_size = decode_batch_size
@@ -353,6 +367,7 @@ class DisaggInferenceSession:
                 if decode_free_gpu_memory_fraction is not None
                 else free_gpu_memory_fraction
             ),
+            max_seq_len=decode_max_seq_len if decode_max_seq_len is not None else max_seq_len,
         )
         if speculative_profile is not None:
             decode_summary = speculative_profile.project_summary(decode_summary, role="decode")

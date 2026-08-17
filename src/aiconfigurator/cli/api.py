@@ -1003,6 +1003,8 @@ def cli_estimate(
     prefill_free_gpu_memory_fraction: float | None = None,
     decode_free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
+    prefill_max_seq_len: int | None = None,
+    decode_max_seq_len: int | None = None,
     engine_step_backend: str | None = None,
     forward_model: str | None = None,
     # Static-mode (and shared) extras
@@ -1098,6 +1100,10 @@ def cli_estimate(
         max_seq_len: The TRT-LLM ``--max_seq_len`` setting used at serving time.
             Controls how many KV blocks TRT-LLM pre-allocates per sequence. Defaults
             to ``isl + osl`` when ``None``.
+        prefill_max_seq_len: Prefill-specific maximum sequence length for
+            disagg. Overrides ``max_seq_len`` for the prefill worker.
+        decode_max_seq_len: Decode-specific maximum sequence length for
+            disagg. Overrides ``max_seq_len`` for the decode worker.
         engine_step_backend: Engine-step backend; "rust" (the compiled engine,
             default and only executor) or the deprecated no-op "python".
         prefix: (common) Prefix cache length (subset of ``isl`` already cached).
@@ -1320,6 +1326,9 @@ def cli_estimate(
             free_gpu_memory_fraction=free_gpu_memory_fraction,
             prefill_free_gpu_memory_fraction=prefill_free_gpu_memory_fraction,
             decode_free_gpu_memory_fraction=decode_free_gpu_memory_fraction,
+            max_seq_len=max_seq_len,
+            prefill_max_seq_len=prefill_max_seq_len,
+            decode_max_seq_len=decode_max_seq_len,
             backend_name=backend_name,
             resolved_version=resolved_version,
             isl=isl,
@@ -1805,6 +1814,9 @@ def _run_disagg_estimate(
     free_gpu_memory_fraction: float | None = None,
     prefill_free_gpu_memory_fraction: float | None = None,
     decode_free_gpu_memory_fraction: float | None = None,
+    max_seq_len: int | None = None,
+    prefill_max_seq_len: int | None = None,
+    decode_max_seq_len: int | None = None,
 ) -> EstimateResult:
     """Run disaggregated estimation."""
     from aiconfigurator.sdk.config import RuntimeConfig
@@ -1912,6 +1924,9 @@ def _run_disagg_estimate(
         free_gpu_memory_fraction=free_gpu_memory_fraction,
         prefill_free_gpu_memory_fraction=prefill_free_gpu_memory_fraction,
         decode_free_gpu_memory_fraction=decode_free_gpu_memory_fraction,
+        max_seq_len=max_seq_len,
+        prefill_max_seq_len=prefill_max_seq_len,
+        decode_max_seq_len=decode_max_seq_len,
     )
 
     if summary.check_oom():

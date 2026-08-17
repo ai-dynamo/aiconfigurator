@@ -133,6 +133,8 @@ class RuntimeSettingsV1(_StrictModel):
     prefill_free_gpu_memory_fraction: float | None = Field(default=None, gt=0, le=1)
     decode_free_gpu_memory_fraction: float | None = Field(default=None, gt=0, le=1)
     max_seq_len: int | None = Field(default=None, gt=0)
+    prefill_max_seq_len: int | None = Field(default=None, gt=0)
+    decode_max_seq_len: int | None = Field(default=None, gt=0)
     engine_step_backend: Literal["python", "rust"] | None = None
 
 
@@ -199,6 +201,8 @@ class AdapterOverrides(_StrictModel):
     prefill_free_gpu_memory_fraction: float | None = Field(default=None, gt=0, le=1)
     decode_free_gpu_memory_fraction: float | None = Field(default=None, gt=0, le=1)
     max_seq_len: int | None = Field(default=None, gt=0)
+    prefill_max_seq_len: int | None = Field(default=None, gt=0)
+    decode_max_seq_len: int | None = Field(default=None, gt=0)
     engine_step_backend: Literal["python", "rust"] | None = None
 
 

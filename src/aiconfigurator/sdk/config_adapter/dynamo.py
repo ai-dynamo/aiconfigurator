@@ -1021,13 +1021,31 @@ def _request_for_point(
             raw_fraction = _runtime_value(services, fraction_flags, fraction_config_path)
             free_fraction = _as_float(raw_fraction, "free GPU memory fraction") if raw_fraction is not None else None
     max_seq_len = overrides.max_seq_len
+    prefill_max_seq_len = overrides.prefill_max_seq_len
+    decode_max_seq_len = overrides.decode_max_seq_len
     if max_seq_len is None:
-        raw_max_seq = _runtime_value(
-            services,
-            ("max-model-len", "max-seq-len", "context-length"),
-            ("max_seq_len",),
-        )
-        max_seq_len = _as_int(raw_max_seq, "max sequence length") if raw_max_seq is not None else None
+        max_seq_flags = ("max-model-len", "max-seq-len", "context-length")
+        max_seq_config_path = ("max_seq_len",)
+        if topology.kind == "disagg":
+            prefill_service = next(service for service in services if service.role == "prefill")
+            decode_service = next(service for service in services if service.role == "decode")
+            if prefill_max_seq_len is None:
+                raw_prefill_max_seq = _runtime_value([prefill_service], max_seq_flags, max_seq_config_path)
+                prefill_max_seq_len = (
+                    _as_int(raw_prefill_max_seq, "prefill max sequence length")
+                    if raw_prefill_max_seq is not None
+                    else None
+                )
+            if decode_max_seq_len is None:
+                raw_decode_max_seq = _runtime_value([decode_service], max_seq_flags, max_seq_config_path)
+                decode_max_seq_len = (
+                    _as_int(raw_decode_max_seq, "decode max sequence length")
+                    if raw_decode_max_seq is not None
+                    else None
+                )
+        else:
+            raw_max_seq = _runtime_value(services, max_seq_flags, max_seq_config_path)
+            max_seq_len = _as_int(raw_max_seq, "max sequence length") if raw_max_seq is not None else None
 
     metadata = dgd.get("metadata", {})
     deployment_name = metadata.get("name") if isinstance(metadata, Mapping) else None
@@ -1054,6 +1072,8 @@ def _request_for_point(
             prefill_free_gpu_memory_fraction=prefill_free_fraction,
             decode_free_gpu_memory_fraction=decode_free_fraction,
             max_seq_len=max_seq_len,
+            prefill_max_seq_len=prefill_max_seq_len,
+            decode_max_seq_len=decode_max_seq_len,
             engine_step_backend=overrides.engine_step_backend,
         ),
         provenance=SourceProvenanceV1(

@@ -820,6 +820,18 @@ def _add_estimate_mode_arguments(parser):
         help="Decode worker KV-cache memory fraction (disagg). Overrides --free-gpu-memory-fraction for decode.",
     )
     parser.add_argument(
+        "--prefill-max-seq-len",
+        type=int,
+        default=None,
+        help="Prefill worker maximum sequence length (disagg). Overrides --max-seq-len for prefill.",
+    )
+    parser.add_argument(
+        "--decode-max-seq-len",
+        type=int,
+        default=None,
+        help="Decode worker maximum sequence length (disagg). Overrides --max-seq-len for decode.",
+    )
+    parser.add_argument(
         "--backend",
         choices=[backend.value for backend in common.BackendName],
         type=str,
@@ -2653,6 +2665,8 @@ def _run_estimate_mode(args):
             decode_num_workers=args.decode_num_workers,
             prefill_free_gpu_memory_fraction=args.prefill_free_gpu_memory_fraction,
             decode_free_gpu_memory_fraction=args.decode_free_gpu_memory_fraction,
+            prefill_max_seq_len=args.prefill_max_seq_len,
+            decode_max_seq_len=args.decode_max_seq_len,
         )
     elif estimate_mode == "afd":
         # gpus_per_node and f_tp_size are intentionally derived from the

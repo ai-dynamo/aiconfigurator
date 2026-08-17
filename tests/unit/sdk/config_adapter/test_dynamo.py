@@ -1175,11 +1175,11 @@ data:
   prefill.yaml: |
     tensor_parallel_size: 1
     max_batch_size: 1
-    max_seq_len: 4096
+    max_seq_len: 9000
   decode.yaml: |
     tensor_parallel_size: 2
     max_batch_size: 32
-    max_seq_len: 4096
+    max_seq_len: 11000
 ---
 kind: DynamoGraphDeployment
 metadata: {name: main-components}
@@ -1225,3 +1225,9 @@ spec:
     assert outcome.request.topology.kind == "disagg"
     assert outcome.request.topology.prefill.gpus_per_replica == 1
     assert outcome.request.topology.decode.gpus_per_replica == 2
+    assert outcome.request.runtime.max_seq_len is None
+    assert outcome.request.runtime.prefill_max_seq_len == 9000
+    assert outcome.request.runtime.decode_max_seq_len == 11000
+    kwargs = to_cli_estimate_kwargs(outcome.request)
+    assert kwargs["prefill_max_seq_len"] == 9000
+    assert kwargs["decode_max_seq_len"] == 11000

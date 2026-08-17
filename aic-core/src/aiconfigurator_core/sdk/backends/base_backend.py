@@ -564,6 +564,7 @@ class BaseBackend:
         stride: int = 32,
         latency_correction_scale: float = 1.0,
         free_gpu_memory_fraction: float | None = None,
+        max_seq_len: int | None = None,
     ) -> InferenceSummary:
         """
         Run the static inference.
@@ -578,6 +579,7 @@ class BaseBackend:
             latency_correction_scale (float): the correction scale to adjust the latency,
                 default is 1.0.
                 corrected latency = latency * latency_correction_scale
+            max_seq_len: Optional per-slot KV cache allocation length.
         """
 
         def _run_encoder(batch_size: int) -> tuple[dict[str, float], dict[str, float], dict[str, str], int]:
@@ -614,6 +616,9 @@ class BaseBackend:
             else self._get_encoder_component_memory_for_runtime(model, runtime_config, batch_size)
         )
         encoder_memory_total = encoder_memory.get("total", 0.0)
+        memory_extra = {}
+        if max_seq_len is not None and "max_seq_len" in inspect.signature(self._get_memory_usage).parameters:
+            memory_extra["max_seq_len"] = max_seq_len
 
         (
             context_latency_dict,
@@ -645,6 +650,7 @@ class BaseBackend:
                 prefix=prefix,
                 encoder_memory=encoder_memory,
                 mtp_scaled_tokens=0,
+                **memory_extra,
             )
         elif mode == "static_gen":
             memory = self._get_memory_usage(
@@ -656,6 +662,7 @@ class BaseBackend:
                 osl,
                 num_tokens=batch_size * beam_width,
                 prefix=prefix,
+                **memory_extra,
             )
         else:
             memory = self._get_memory_usage(
@@ -667,6 +674,7 @@ class BaseBackend:
                 osl,
                 prefix=prefix,
                 encoder_memory=encoder_memory,
+                **memory_extra,
             )
 
         # Calculate total latencies and energies (simple sums - decoupled!)
