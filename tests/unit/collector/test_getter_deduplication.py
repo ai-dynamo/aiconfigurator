@@ -388,10 +388,12 @@ def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkey
     # 1887 pre-Kimi-K3, +39 K3 w4a16_mxfp4 cases (grouped-topk mapping for
     # model_type kimi_linear), +99 Step-3.7-Flash executions after identical
     # physical invocations are deduplicated by their consumer key, +42
-    # Nemotron Super FP8 cases, and +39 for MiniMax-M3's MoE row
-    # (6144/3072, 128x4, bf16).
-    assert len(cases) == 2106
-    assert sum(len(case[1]) for case in cases) == 56862
+    # Nemotron Super FP8 cases, +39 for MiniMax-M3's MoE row (6144/3072,
+    # 128x4, bf16), and +126 Qwen3.8-Max (bf16/fp8_block/fp8 vLLM modes on
+    # its 8192/2048/topk10/512-expert row; the NVFP4 sibling row is
+    # sglang-only via frameworks: [sglang], so it is absent here).
+    assert len(cases) == 2232
+    assert sum(len(case[1]) for case in cases) == 60264
     # MiniMax-M3's declared MoE geometry must be present as its own rows —
     # a generator defect could drop it while unrelated cases preserve the
     # aggregate counts above. (case[:8] = moe_type, num_tokens, hidden,

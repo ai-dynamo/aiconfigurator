@@ -1,0 +1,141 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: Qwen3_5MoeForCausalLM
+model_path: Qwen/Qwen3.8-2.4T-A95B
+model_paths:
+  - Qwen/Qwen3.8-2.4T-A95B
+  - Qwen/Qwen3.8-2.4T-A95B-FP8
+  - RadixArk/Qwen3.8-2.4T-A95B-NVFP4
+include_base: true
+base_ops:
+  - attention_context
+  - attention_generation
+  - gemm
+description: >
+  Qwen3.8-Max MoE/GDN model-centric collection plan.
+
+model_case_values:
+  attention:
+    - id: qwen38_max_attention
+      model_path: Qwen/Qwen3.8-2.4T-A95B
+      model_aliases:
+        - Qwen/Qwen3.8-2.4T-A95B-FP8
+      num_attention_heads: 64
+      num_key_value_heads: 4
+      head_dim: 256
+      window_size: 0
+      # Verified against the pinned sglang v0.5.14 clone (tag v0.5.14,
+      # 49e384ce), NOT copied from the 397B row: server_args.py's
+      # Qwen3.5-hybrid-GDN SM100/103 attention-backend override
+      # (:4182-4211, forcing "triton" unless the mamba-radix-cache
+      # reconciliation allows trtllm_mha) is gated on an explicit
+      # architectures[0] allowlist at :4152-4159 -- "Qwen3MoeForCausalLM",
+      # "Qwen3VLMoeForConditionalGeneration", "Qwen3NextForCausalLM",
+      # "Qwen3_5MoeForConditionalGeneration" (397B/35B/122B's own
+      # architecture), "InternS2PreviewForConditionalGeneration",
+      # "Qwen3_5ForConditionalGeneration" -- which does NOT include
+      # "Qwen3_5MoeForCausalLM" (this architecture; config.json:3 on this
+      # branch). Confirmed by grep of the whole pinned clone: the class
+      # Qwen3_5MoeForCausalLM exists (models/qwen3_5.py:1372) only as the
+      # VL wrapper's internal language_model_cls (qwen3_5.py:1747); the
+      # model registry's EntryClass for that module
+      # (qwen3_5.py:2120) lists only Qwen3_5MoeForConditionalGeneration and
+      # Qwen3_5ForConditionalGeneration, so "Qwen3_5MoeForCausalLM" is not a
+      # servable architecture string at this pinned version -- unaffected by
+      # head count. An unmatched architecture falls through every model-arch
+      # elif in server_args.py untouched and gets the generic MHA default
+      # (_get_default_attn_backend, server_args.py:4407-4455; this model has
+      # no attention sinks): SM90 Hopper+CUDA>=12.3 -> fa3 (:4433-4437);
+      # SM100/103 -> trtllm_mha (:4438-4446, is_sm100_supported() matches
+      # capability major 10); else -> flashinfer (:4451-4454). This is the
+      # same table as the collector's own built-in fallback
+      # (case_generator.py get_attention_head_configs), declared explicitly
+      # here (rather than omitted) for audit visibility: unlike the 397B
+      # row, this model does NOT get the triton override, and that gap is a
+      # framework-support question for the version-bump audit, not a
+      # head-count question.
+      sglang_backends: {90: fa3, 100: trtllm_mha, 103: trtllm_mha, 120: flashinfer}
+      tensor_parallel_sizes: [1, 2, 4, 8, 16, 32]
+  moe:
+    - model_path: Qwen/Qwen3.8-2.4T-A95B
+      model_aliases:
+        - Qwen/Qwen3.8-2.4T-A95B-FP8
+      hidden_size: 8192
+      inter_size: 2048
+      topk: 10
+      num_experts: 512
+      # RoutingMethodType.RenormalizeNaive is hardcoded (not config- or
+      # architecture-conditional) at the get_moe_impl_class(...) call inside
+      # Qwen2MoeSparseMoeBlock.__init__ (models/qwen2_moe.py:290 @0.5.14).
+      # qwen3_5.py:807-808 (elif config.model_type == "qwen3_5_moe_text":
+      # self.mlp = Qwen2MoeSparseMoeBlock(...)) selects that exact block for
+      # any config whose model_type == "qwen3_5_moe_text" -- the bundled
+      # Qwen--Qwen3.8-2.4T-A95B_config.json's own model_type (config.json:117)
+      # -- so unlike the attention-backend gap above, this dispatch IS
+      # confirmed to apply verbatim: it is keyed on model_type, not on the
+      # architectures[0] string that is missing from the special-case lists.
+      sglang_moe_routing_method_type: RenormalizeNaive
+      sglang_moe_backends:
+        bfloat16: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
+        fp8_block: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
+    # NVFP4 artifact (ModelOpt experts-only recipe: routed-expert linears
+    # only, other components at source precision; collector-only id, no
+    # separate model_path row needed for the bf16/fp8_block artifacts above
+    # since the routed-expert-only quantization changes the invoked kernel
+    # and requires its own framework_quantization gate -- not a shape-only
+    # alias). Same modelopt_quant.py SM100/103 -> FLASHINFER_TRTLLM dispatch
+    # citation and style as the 397B NVFP4 row (integration base,
+    # base_ops/moe.yaml:97-105 citation style):
+    # ModelOptNvFp4FusedMoEMethod.create_moe_runner (modelopt_quant.py:2311-2323
+    # @0.5.14) leaves MARLIN only for capability in [8.0, 10.0) and defaults
+    # everything else -- SM100 (10,0) and SM103 (10,3) both fail that
+    # upper-bound check -- to FLASHINFER_TRTLLM (modelopt_quant.py:2317-2323,
+    # "TRTLLM is currently the most performant and tested FP4 MoE backend").
+    # This dispatch is gated on the checkpoint's quantization method, not the
+    # architectures string, so it is unaffected by the attention-backend gap
+    # noted above.
+    - model_path: RadixArk/Qwen3.8-2.4T-A95B-NVFP4
+      frameworks: [sglang]
+      hidden_size: 8192
+      inter_size: 2048
+      topk: 10
+      num_experts: 512
+      sglang_moe_routing_method_type: RenormalizeNaive
+      sglang_moe_backends:
+        nvfp4: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
+      framework_quantization:
+        sglang:
+          allowed_modes: [nvfp4]
+  gemm:
+    # Exact widths below the base feature grid (min 32): scalar shared-expert
+    # gate (hidden -> 1) and GDN in_proj_ba (2 * num_v_heads / tp). At
+    # num_v_heads=128, only tp16 drops below 32 (2*128/16=16); tp1/2/4/8
+    # (256/128/64/32) are already covered by the base sweep.
+    - model_path: Qwen/Qwen3.8-2.4T-A95B
+      model_aliases:
+        - Qwen/Qwen3.8-2.4T-A95B-FP8
+      output_feature_sizes: [1, 16]
+      input_feature_sizes: [8192]
+  gdn:
+    # TP32 is not declared: attention shards 32 ways (64 heads), but GDN's
+    # num_k_heads=16 cannot -- Qwen35Model raises ("both global head counts
+    # to be divisible by tensor parallel size", qwen35.py:55-60) -- matching
+    # the 397B/122B precedent (same num_k_heads=16).
+    - model_path: Qwen/Qwen3.8-2.4T-A95B
+      model_aliases:
+        - Qwen/Qwen3.8-2.4T-A95B-FP8
+      d_model: 8192
+      d_conv: 4
+      num_k_heads: 16
+      head_k_dim: 128
+      num_v_heads: 128
+      head_v_dim: 128
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
+
+all_frameworks_op_cases:
+  moe:
+    cases: all
+  gdn:
+    cases: all
