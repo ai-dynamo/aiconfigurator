@@ -5,8 +5,9 @@
 SystemSpec — hardware system spec loaded from a per-system YAML file.
 
 Subclasses ``dict`` so existing code that does ``spec["gpu"]["mem_bw"]`` or
-``isinstance(spec, dict)`` keeps working. ``get_p2p_bandwidth`` is the only
-added method, replacing ``PerfDatabase._get_p2p_bandwidth``.
+``isinstance(spec, dict)`` keeps working. ``get_p2p_bandwidth`` and
+``get_p2p_latency`` are the only added methods; the former replaces
+``PerfDatabase._get_p2p_bandwidth``.
 """
 
 from __future__ import annotations
@@ -41,3 +42,27 @@ class SystemSpec(dict):
         if num_gpus <= num_gpus_per_rack:
             return node_spec["inter_node_bw"]
         return node_spec.get("inter_rack_bw", node_spec["inter_node_bw"])
+
+    def get_p2p_latency(self, num_gpus: int) -> float:
+        """Return point-to-point latency (seconds) based on topology.
+
+        The latency counterpart of :meth:`get_p2p_bandwidth`. Two tiers are
+        enough here: ``p2p_latency`` is measured within a scale-up domain
+        (node or rack), while crossing racks adds the scale-out fabric's
+        round trip.
+
+        - ``num_gpus <= num_gpus_per_rack``: ``p2p_latency``
+        - ``num_gpus > num_gpus_per_rack``: ``inter_rack_latency``, falling
+          back to ``p2p_latency`` when unset
+
+        Systems without a declared rack tier (``num_gpus_per_rack`` absent)
+        therefore always return ``p2p_latency``, matching the pre-rack
+        behavior.
+        """
+        node_spec = self["node"]
+        num_gpus_per_rack = node_spec.get("num_gpus_per_rack", float("inf"))
+        p2p_latency = node_spec["p2p_latency"]
+
+        if num_gpus <= num_gpus_per_rack:
+            return p2p_latency
+        return node_spec.get("inter_rack_latency", p2p_latency)

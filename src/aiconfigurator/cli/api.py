@@ -1053,6 +1053,8 @@ def cli_estimate(
     afd_phase: str = "decode",
     afd_combined_with_pd: bool = True,
     afd_boundary_on_attn: bool = True,
+    afd_router_on_attn: bool = False,
+    afd_f_latency_scale: float = 1.0,
     afd_a_system_name: str | None = None,
     afd_a_backend_name: str | None = None,
     afd_f_system_name: str | None = None,
@@ -1178,6 +1180,15 @@ def cli_estimate(
             ``logits_gemm``) to the A-Worker when True (default); set False to
             place them on the F-Worker. Inverse of the CLI ``--boundary-on-ffn``
             flag.
+        afd_router_on_attn: (afd-only) Assign the MoE router to the A-Worker,
+            matching the FastAFD boundary. Default False keeps routing on the
+            F-Worker. Transfer volume is identical either way; only the router
+            GEMM's pool attribution changes.
+        afd_f_latency_scale: (afd-only) Multiply every F-side contribution
+            (MoE compute, router, intra-node AG/RS) to calibrate the predicted
+            T_e against a specific FFN runtime -- ~0.3-0.5 emulates a fused
+            MegaMoE-style kernel. Default 1.0 (no calibration). This is a
+            calibration knob, not a physical model.
         afd_a_system_name / afd_a_backend_name: (afd-only) Hardware and framework
             for the A (attention) pool. Default to ``system_name`` /
             ``backend_name``.
@@ -1470,6 +1481,8 @@ def cli_estimate(
             afd_phase=afd_phase,
             afd_combined_with_pd=afd_combined_with_pd,
             afd_boundary_on_attn=afd_boundary_on_attn,
+            afd_router_on_attn=afd_router_on_attn,
+            afd_f_latency_scale=afd_f_latency_scale,
             gemm_quant_mode=gemm_quant_mode,
             kvcache_quant_mode=kvcache_quant_mode,
             fmha_quant_mode=fmha_quant_mode,
@@ -2181,6 +2194,10 @@ def _run_afd_estimate(
     afd_phase,
     afd_combined_with_pd,
     afd_boundary_on_attn,
+    # Defaulted so existing callers keep working; both are no-ops at these
+    # values (router stays on F, F side unscaled).
+    afd_router_on_attn: bool = False,
+    afd_f_latency_scale: float = 1.0,
     gemm_quant_mode,
     kvcache_quant_mode,
     fmha_quant_mode,
@@ -2323,6 +2340,8 @@ def _run_afd_estimate(
         phase=afd_phase,
         combined_with_pd=bool(afd_combined_with_pd),
         boundary_on_attn=bool(afd_boundary_on_attn),
+        router_on_attn=bool(afd_router_on_attn),
+        f_latency_scale=float(afd_f_latency_scale),
     )
     runtime_config = RuntimeConfig(
         isl=isl,

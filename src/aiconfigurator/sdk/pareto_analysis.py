@@ -795,6 +795,7 @@ def _derive_a_batch_size(
     *,
     num_microbatches: int,
     boundary_on_attn: bool,
+    router_on_attn: bool = False,
     isl: int,
     osl: int,
     prefix: int,
@@ -822,7 +823,12 @@ def _derive_a_batch_size(
     from aiconfigurator.sdk.afd_partition import build_afd_ops_partition
 
     a_model = get_model(model_path, a_model_config, backend.name.value)
-    a_partition = build_afd_ops_partition(a_model, phase="generation", boundary_on_attn=boundary_on_attn)
+    a_partition = build_afd_ops_partition(
+        a_model,
+        phase="generation",
+        boundary_on_attn=boundary_on_attn,
+        router_on_attn=router_on_attn,
+    )
 
     kvcache_multiplier = max(int(num_microbatches or 1), 1)
 
@@ -1005,6 +1011,14 @@ def afd_pareto(
     combined_with_pd: bool = True,
     comm_overhead_factor: float = 1.0,
     boundary_on_attn: bool = True,
+    # FastAFD-aligned knobs. ``router_on_attn`` moves the MoE router to the
+    # A pool; ``f_latency_scale`` calibrates the whole F side against a
+    # specific FFN runtime (0.3-0.5 emulates a fused MegaMoE-style kernel);
+    # ``comm_hiding_tolerance`` lets mb=2 keep the overlapped K=3 pipeline
+    # when the round trip is negligible against compute.
+    router_on_attn: bool = False,
+    f_latency_scale: float = 1.0,
+    comm_hiding_tolerance: float = 0.1,
     target_ttft: float | None = None,
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
@@ -1208,6 +1222,7 @@ def afd_pareto(
                         effective_a_database,
                         num_microbatches=num_microbatches,
                         boundary_on_attn=boundary_on_attn,
+                        router_on_attn=router_on_attn,
                         isl=eval_runtime_config.isl,
                         osl=eval_runtime_config.osl,
                         prefix=eval_runtime_config.prefix or 0,
@@ -1251,6 +1266,7 @@ def afd_pareto(
                         a_model,
                         phase="generation",
                         boundary_on_attn=boundary_on_attn,
+                        router_on_attn=router_on_attn,
                     )
                     max_bs_a_micro = _analytical_max_batch_size(
                         effective_a_backend,
@@ -1277,6 +1293,7 @@ def afd_pareto(
                     f_model,
                     phase="generation",
                     boundary_on_attn=boundary_on_attn,
+                    router_on_attn=router_on_attn,
                 )
 
                 max_bs_f_micro = _analytical_max_batch_size(
@@ -1337,6 +1354,9 @@ def afd_pareto(
                         phase="decode",
                         combined_with_pd=bool(combined_with_pd),
                         boundary_on_attn=bool(boundary_on_attn),
+                        router_on_attn=bool(router_on_attn),
+                        f_latency_scale=float(f_latency_scale),
+                        comm_hiding_tolerance=float(comm_hiding_tolerance),
                     )
                     candidate_runtime_config = copy.deepcopy(eval_runtime_config)
                     candidate_runtime_config.batch_size = afd_config.n_a_workers * afd_config.a_batch_size
@@ -1473,6 +1493,9 @@ def afd_pareto(
                             phase="decode",
                             combined_with_pd=bool(combined_with_pd),
                             boundary_on_attn=bool(boundary_on_attn),
+                            router_on_attn=bool(router_on_attn),
+                            f_latency_scale=float(f_latency_scale),
+                            comm_hiding_tolerance=float(comm_hiding_tolerance),
                         )
 
                         candidate_runtime_config = copy.deepcopy(eval_runtime_config)

@@ -71,7 +71,9 @@ class TestServingModeArgument:
         )
         overflow_action = next(action for action in default_parser._actions if action.dest == "afd_candidate_overflow")
 
-        assert max_candidates_action.default == 10_000
+        # Raised from 10k when the A:F cap was dropped: skewed splits and
+        # mb=2 + optimistic are now enumerated, so the search space is larger.
+        assert max_candidates_action.default == 20_000
         assert overflow_action.default == "error"
 
         args = cli_parser.parse_args(
@@ -1000,3 +1002,96 @@ class TestAfdPoolFlags:
                 pools=cli_main._AFD_ESTIMATE_POOL_FLAGS,
                 suffixes=cli_main._AFD_ESTIMATE_POOL_SUFFIXES,
             )
+
+    def test_fastafd_knob_defaults_on_default_parser(self, cli_parser):
+        """All four FastAFD knobs default to preserving current behavior."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "64",
+                "--system",
+                "h200_sxm",
+                "--serving-mode",
+                "afd",
+            ]
+        )
+        assert args.afd_max_af_ratio is None  # no cap
+        assert args.afd_router_on_attn is False
+        assert args.afd_f_latency_scale == 1.0
+        assert args.afd_comm_hiding_tolerance == 0.1
+
+    def test_fastafd_knobs_are_parsed_on_default_parser(self, cli_parser):
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-235B-A22B",
+                "--total-gpus",
+                "72",
+                "--system",
+                "gb200",
+                "--serving-mode",
+                "afd",
+                "--afd-max-af-ratio",
+                "17",
+                "--afd-router-on-attn",
+                "--afd-f-latency-scale",
+                "0.45",
+                "--afd-comm-hiding-tolerance",
+                "0",
+            ]
+        )
+        assert args.afd_max_af_ratio == 17.0
+        assert args.afd_router_on_attn is True
+        assert args.afd_f_latency_scale == 0.45
+        assert args.afd_comm_hiding_tolerance == 0.0
+
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [
+            ("--afd-max-af-ratio", "0"),
+            ("--afd-max-af-ratio", "-1"),
+            ("--afd-f-latency-scale", "0"),
+            ("--afd-f-latency-scale", "-0.5"),
+            ("--afd-comm-hiding-tolerance", "-0.1"),
+        ],
+    )
+    def test_fastafd_knobs_reject_out_of_range_values(self, cli_parser, flag, value):
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(
+                [
+                    "default",
+                    "--model-path",
+                    "Qwen/Qwen3-32B",
+                    "--total-gpus",
+                    "64",
+                    "--system",
+                    "h200_sxm",
+                    "--serving-mode",
+                    "afd",
+                    flag,
+                    value,
+                ]
+            )
+
+    def test_estimate_parser_exposes_the_f_side_knobs(self, cli_parser):
+        """Estimate uses unprefixed names, matching its other AFD flags."""
+        args = cli_parser.parse_args(
+            [
+                "estimate",
+                "--model-path",
+                "Qwen/Qwen3-235B-A22B",
+                "--system",
+                "gb200",
+                "--estimate-mode",
+                "afd",
+                "--router-on-attn",
+                "--f-latency-scale",
+                "0.45",
+            ]
+        )
+        assert args.router_on_attn is True
+        assert args.f_latency_scale == 0.45

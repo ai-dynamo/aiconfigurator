@@ -99,6 +99,17 @@ class AFDTransfer(PythonOperation):
     -- for a fixed payload that is the larger of the two latencies, which
     is exactly ``min`` of the two bandwidths (each side's ``p2p_latency``
     constant is already folded into ``query_p2p``).
+
+    Super-node topology: ``span_gpus`` is how many GPUs the A and F pools
+    occupy together. It selects the fabric tier -- a pool pair that fits
+    inside one scale-up domain is priced on NVLink/NVSwitch, one that
+    exceeds ``num_gpus_per_rack`` on the scale-out fabric. Leaving it
+    ``None`` keeps the flat ``inter_node_bw`` pricing.
+
+    The two knobs are orthogonal and compose: each side resolves its own
+    tier against its own system spec (rack width is a hardware fact, so
+    hetero pools can disagree on it), then bottleneck pricing picks the
+    slower of the two tier-resolved latencies.
     """
 
     _VALID_DIRECTIONS = ("a2f", "f2a")
@@ -114,6 +125,7 @@ class AFDTransfer(PythonOperation):
         n_f_workers: int,
         gpus_per_node: int = 8,
         f_gpus_per_node: int | None = None,
+        span_gpus: int | None = None,
         num_experts: int = 0,
         topk: int = 0,
         comm_quant_mode: Optional[common.CommQuantMode] = None,
@@ -130,6 +142,9 @@ class AFDTransfer(PythonOperation):
         # F-node grouping is an F-pool hardware fact; under hetero A/F it
         # differs from the A pool. Falls back to gpus_per_node.
         self._f_gpus_per_node = max(int(f_gpus_per_node or gpus_per_node), 1)
+        # GPUs spanned by the A+F pools together, used to pick the fabric
+        # tier. None keeps the flat inter_node_bw pricing.
+        self._span_gpus = max(int(span_gpus), 1) if span_gpus else None
         self._num_experts = max(int(num_experts), 0)
         self._topk = max(int(topk), 0)
         self._comm_quant_mode = comm_quant_mode or common.CommQuantMode.half
@@ -145,6 +160,11 @@ class AFDTransfer(PythonOperation):
         """Physical F-node count: ``ceil(n_f_workers / f_gpus_per_node)``."""
         return max((self._n_f_workers + self._f_gpus_per_node - 1) // self._f_gpus_per_node, 1)
 
+    @property
+    def span_gpus(self) -> int | None:
+        """GPUs spanned by the A+F pools, or ``None`` for flat pricing."""
+        return self._span_gpus
+
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         x = int(kwargs.get("x", 0))
         if x <= 0:
@@ -158,14 +178,18 @@ class AFDTransfer(PythonOperation):
         if per_link_bytes <= 0:
             return PerformanceResult(0.0, 0.0, source="empirical")
         # pp_size=2 passes the twin's "pp_size=1 is a no-op" gate; a single
-        # P2P link is charged regardless of the actual pp depth.
-        probe = P2P("afd_p2p", 1.0, -(-per_link_bytes // 2), 2)
+        # P2P link is charged regardless of the actual pp depth. ``span_gpus``
+        # selects the fabric tier inside the engine -- None keeps the flat
+        # inter-node pricing, which is what a caller that does not care about
+        # tiers wants.
+        probe = P2P("afd_p2p", 1.0, -(-per_link_bytes // 2), 2, span_gpus=self._span_gpus)
         result = _engine_comm_query(database, probe)
         peer_database = kwargs.get("peer_database")
         if peer_database is not None and peer_database is not database:
             # Bottleneck pricing: same payload, so the slower side wins. The
-            # probe is reused verbatim -- only the database differs, so the two
-            # evaluations are comparable by construction.
+            # probe is reused verbatim -- only the database differs, so each
+            # side resolves its own fabric tier from its own system spec and
+            # the two evaluations stay comparable.
             peer_result = _engine_comm_query(peer_database, probe)
             if float(peer_result) > float(result):
                 result = peer_result

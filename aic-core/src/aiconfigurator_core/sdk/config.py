@@ -254,6 +254,30 @@ class AFDConfig:
     num_microbatches: int = 3
     pipeline_model: str = "optimistic"  # "optimistic" (K=3), "conservative" (K=2), or "serial"
     comm_overhead_factor: float = 1.0
+    # Comm-hiding tolerance for the optimistic (K=3) pipeline. The strict
+    # occupancy bound requires ``num_microbatches >= 2 + t_c / max(t_a,
+    # t_f)``, which is >= 3 whenever t_c > 0 and so always demotes mb=2 to
+    # the blocking K=2 model. When the cross-pool round trip is a negligible
+    # fraction of compute (``t_c <= comm_hiding_tolerance * max(t_a, t_f)``)
+    # the session keeps the overlapped K=3 cycle instead -- the measured
+    # behavior on NVLink-class fabrics, where FastAFD reports mb=2 already
+    # hides both directions. Set 0 to restore the strict bound.
+    comm_hiding_tolerance: float = 0.1
+    # Router placement. False (default) keeps aic's partition: un-routed
+    # hidden states cross the pool boundary and the F-worker runs
+    # router + grouping + experts. True matches the FastAFD boundary:
+    # routing happens on the A-worker and routed tokens cross. The transfer
+    # *volume* model is identical either way; only the router GEMM's pool
+    # attribution changes.
+    router_on_attn: bool = False
+    # F-pool latency calibration factor. Multiplies every F-side
+    # contribution (MoE compute, router, intra-node AG/RS) so the predicted
+    # T_e can be calibrated against a specific FFN runtime -- e.g. 0.3-0.5
+    # emulates FastAFD's fused MegaMoE kernel (measured 42-44% lower decode
+    # step latency) versus stock per-op kernel data. 1.0 = no calibration.
+    # This is a calibration knob, not a physical model: the number has to
+    # come from outside measurement.
+    f_latency_scale: float = 1.0
     # Which phase(s) AFD should be applied to.
     # "decode" (default) mirrors existing behavior; "prefill" applies to
     # the context phase; "both" produces an aggregated estimate combining
@@ -314,6 +338,10 @@ class AFDConfig:
             raise ValueError(f"num_microbatches ({self.num_microbatches}) must be >= 1.")
         if self.comm_overhead_factor <= 0:
             raise ValueError(f"comm_overhead_factor ({self.comm_overhead_factor}) must be > 0.")
+        if self.comm_hiding_tolerance < 0:
+            raise ValueError(f"comm_hiding_tolerance ({self.comm_hiding_tolerance}) must be >= 0.")
+        if self.f_latency_scale <= 0:
+            raise ValueError(f"f_latency_scale ({self.f_latency_scale}) must be > 0.")
         if self.f_moe_ep_size < 1:
             raise ValueError(f"f_moe_ep_size ({self.f_moe_ep_size}) must be >= 1.")
         if self.gpus_per_node < 1:
@@ -331,8 +359,7 @@ class AFDConfig:
                 raise ValueError(f"{name} ({value}) must be >= 1 when set.")
         if self.tp_a < 1 or self.a_gpus_per_node % self.tp_a != 0:
             raise ValueError(
-                f"tp_a ({self.tp_a}) must be a positive divisor of the A-pool "
-                f"gpus_per_node ({self.a_gpus_per_node})."
+                f"tp_a ({self.tp_a}) must be a positive divisor of the A-pool gpus_per_node ({self.a_gpus_per_node})."
             )
         if self.phase == "both" and self.combined_with_pd:
             raise ValueError(

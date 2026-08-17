@@ -386,6 +386,12 @@ def build_afd_parallel_lists(
     * ``tp_a`` divides ``gpus_per_node``
     * ``f_moe_ep_size`` divides ``tp_f = n_f_nodes * gpus_per_node``
     * ``num_experts % f_moe_ep_size == 0`` when known
+
+    ``max_af_ratio`` is ``None`` by default (no A:F cap beyond the node
+    budget). The old 4.0 cap excluded the measured AFD optima: FastAFD
+    reports 7:1 and 11:1 for Qwen3-235B and 17:1 for MiniMax-M2.5 on
+    GB200 NVL72, all outside a 4:1 bound. Set it explicitly to restore a
+    cap.
     """
     if gpus_per_node < 1 or total_gpus < 1:
         return []
@@ -404,8 +410,12 @@ def build_afd_parallel_lists(
     microbatch_candidates = list(search.get("microbatch_list") or [2, 3, 4])
     pipeline_candidates = list(search.get("pipeline_model_list") or ["optimistic", "conservative"])
     f_moe_ep_size_list = search.get("f_moe_ep_size_list")
-    max_af_ratio = float(search.get("max_af_ratio", 4.0))
-    max_candidates = int(search.get("max_candidates", 10_000))
+    max_af_ratio = search.get("max_af_ratio")
+    if max_af_ratio is not None:
+        max_af_ratio = float(max_af_ratio)
+        if max_af_ratio <= 0:
+            raise ValueError(f"afd_config.search.max_af_ratio must be > 0 when set, got {max_af_ratio}.")
+    max_candidates = int(search.get("max_candidates", 20_000))
     candidate_overflow = str(search.get("candidate_overflow", "error"))
     if max_candidates < 1:
         raise ValueError(f"afd_config.search.max_candidates must be >= 1, got {max_candidates}.")
@@ -415,7 +425,7 @@ def build_afd_parallel_lists(
     candidates: list[tuple[int, int, int, int, int, str]] = []
     for n_a_nodes in range(1, total_nodes):
         for n_f_nodes in range(1, total_nodes - n_a_nodes + 1):
-            if n_a_nodes / n_f_nodes > max_af_ratio:
+            if max_af_ratio is not None and n_a_nodes / n_f_nodes > max_af_ratio:
                 continue
             tp_f = n_f_nodes * gpus_per_node
             if is_moe:
@@ -437,15 +447,6 @@ def build_afd_parallel_lists(
                 for f_moe_ep_size in ep_candidates:
                     for num_microbatches in microbatch_candidates:
                         for pipeline_model in pipeline_candidates:
-                            # Skip optimistic + mb < 3: the K=3 pipeline
-                            # requires num_microbatches >= 2 + t_c/max(t_a,
-                            # t_f), which is >= 3 whenever t_c > 0 (the
-                            # normal case).  mb=2 + optimistic always degrades
-                            # to conservative, producing a duplicate of the
-                            # mb=2 + conservative candidate and a flood of
-                            # per-stride warnings.
-                            if pipeline_model == "optimistic" and num_microbatches < 3:
-                                continue
                             candidates.append(
                                 (n_a_nodes, n_f_nodes, tp_a, f_moe_ep_size, num_microbatches, pipeline_model)
                             )
@@ -678,6 +679,15 @@ class Task:
     afd_combined_with_pd: bool = True
     afd_comm_overhead_factor: float = 1.0
     afd_boundary_on_attn: bool = True
+    # FastAFD-aligned knobs. ``afd_router_on_attn`` moves the MoE router to
+    # the A pool (FastAFD's boundary); ``afd_f_latency_scale`` calibrates the
+    # whole F side against a specific FFN runtime (0.3-0.5 emulates a fused
+    # MegaMoE-style kernel, measured at 42-44% lower step latency);
+    # ``afd_comm_hiding_tolerance`` lets mb=2 keep the overlapped K=3
+    # pipeline when the round trip is negligible against compute.
+    afd_router_on_attn: bool = False
+    afd_f_latency_scale: float = 1.0
+    afd_comm_hiding_tolerance: float = 0.1
     afd_total_batch_size: int | None = None
     # Per-A-worker ceiling for the automatic A-batch search.
     afd_max_a_batch_size: int = 1024
@@ -691,8 +701,11 @@ class Task:
     afd_microbatch_candidates: list[int] | None = None
     afd_pipeline_model_candidates: list[str] | None = None
     afd_f_moe_ep_size_candidates: list[int | str] | None = None
-    afd_max_af_ratio: float = 4.0
-    afd_max_candidates: int = 10_000
+    # None = no A:F node-ratio cap beyond the GPU budget. FastAFD's measured
+    # optima on GB200 NVL72 sit at 7:1-17:1, so the former 4.0 default hid
+    # every one of them; set a float to reinstate a cap.
+    afd_max_af_ratio: float | None = None
+    afd_max_candidates: int = 20_000
     afd_candidate_overflow: str = "error"
     # AFD hetero pools. AFD deploys up to three pools -- a static prefill
     # pool (when afd_combined_with_pd), the A (attention) pool and the F
@@ -2345,6 +2358,14 @@ class Task:
             or self.afd_max_candidates < 1
         ):
             raise ValueError(f"afd_max_candidates must be a positive integer, got {self.afd_max_candidates!r}.")
+        if self.afd_max_af_ratio is not None and (
+            isinstance(self.afd_max_af_ratio, bool)
+            or not isinstance(self.afd_max_af_ratio, (int, float))
+            or self.afd_max_af_ratio <= 0
+        ):
+            raise ValueError(
+                f"afd_max_af_ratio must be a positive number or None (no cap), got {self.afd_max_af_ratio!r}."
+            )
         if self.afd_candidate_overflow not in {"error", "truncate"}:
             raise ValueError(
                 f"afd_candidate_overflow must be either 'error' or 'truncate', got {self.afd_candidate_overflow!r}."
@@ -2870,6 +2891,9 @@ class Task:
             "combined_with_pd": self.afd_combined_with_pd,
             "comm_overhead_factor": self.afd_comm_overhead_factor,
             "boundary_on_attn": self.afd_boundary_on_attn,
+            "router_on_attn": self.afd_router_on_attn,
+            "f_latency_scale": self.afd_f_latency_scale,
+            "comm_hiding_tolerance": self.afd_comm_hiding_tolerance,
             "total_batch_size": self.afd_total_batch_size,
             "max_a_batch_size": self.afd_max_a_batch_size,
             "target_ttft": self.ttft,
@@ -3446,6 +3470,9 @@ class Task:
             f_moe_ep_size=f_moe_ep_size,
             comm_overhead_factor=self.afd_comm_overhead_factor,
             boundary_on_attn=self.afd_boundary_on_attn,
+            router_on_attn=self.afd_router_on_attn,
+            f_latency_scale=self.afd_f_latency_scale,
+            comm_hiding_tolerance=self.afd_comm_hiding_tolerance,
         )
 
         a_model_config = copy.deepcopy(base_model_config)
