@@ -62,6 +62,26 @@ def test_estimate_encoder_flags_require_enable_epd():
         _run_estimate_mode(args)
 
 
+def test_estimate_epd_rejects_role_specific_memory_fractions(cli_parser):
+    args = cli_parser.parse_args(
+        [
+            "estimate",
+            "--model-path",
+            "Qwen/Qwen3-32B",
+            "--system",
+            "h200_sxm",
+            "--estimate-mode",
+            "disagg",
+            "--enable-epd",
+            "--prefill-free-gpu-memory-fraction",
+            "0.85",
+        ]
+    )
+
+    with pytest.raises(SystemExit, match="not supported with --enable-epd"):
+        _run_estimate_mode(args)
+
+
 def test_default_afd_serving_mode_rejects_enable_epd():
     with pytest.raises(ValueError, match="'afd' does not support EPD"):
         build_default_tasks(

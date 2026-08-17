@@ -256,24 +256,16 @@ def _quantization(
 def _shared_runtime(
     roles: Mapping[str, Mapping[str, Any]], overrides: AdapterOverrides
 ) -> tuple[float | None, float | None, float | None, int | None, int | None, int | None]:
-    if overrides.free_gpu_memory_fraction is not None:
-        fraction = overrides.free_gpu_memory_fraction
-        prefill_fraction = None
-        decode_fraction = None
-    else:
-        fraction = None
+    fraction = overrides.free_gpu_memory_fraction
+    prefill_fraction = overrides.prefill_free_gpu_memory_fraction
+    decode_fraction = overrides.decode_free_gpu_memory_fraction
+    if fraction is None:
         prefill_value = _flag(roles["prefill"], "mem-fraction-static", "gpu-memory-utilization")
         decode_value = _flag(roles["decode"], "mem-fraction-static", "gpu-memory-utilization")
-        prefill_fraction = (
-            overrides.prefill_free_gpu_memory_fraction
-            if overrides.prefill_free_gpu_memory_fraction is not None
-            else (float(prefill_value) if prefill_value is not None else None)
-        )
-        decode_fraction = (
-            overrides.decode_free_gpu_memory_fraction
-            if overrides.decode_free_gpu_memory_fraction is not None
-            else (float(decode_value) if decode_value is not None else None)
-        )
+        if prefill_fraction is None:
+            prefill_fraction = float(prefill_value) if prefill_value is not None else None
+        if decode_fraction is None:
+            decode_fraction = float(decode_value) if decode_value is not None else None
 
     if overrides.max_seq_len is not None:
         max_seq_len = overrides.max_seq_len

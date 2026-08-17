@@ -941,6 +941,14 @@ def test_dynamo_ci_preserves_role_specific_memory_fractions():
 
     adapted = adapt_config(DynamoRecipeSource(recipe)).outcomes[0]
     overridden = adapt_config(DynamoRecipeSource(recipe), AdapterOverrides(free_gpu_memory_fraction=0.85)).outcomes[0]
+    role_overridden = adapt_config(
+        DynamoRecipeSource(recipe),
+        AdapterOverrides(
+            free_gpu_memory_fraction=0.85,
+            prefill_free_gpu_memory_fraction=0.75,
+            decode_free_gpu_memory_fraction=0.7,
+        ),
+    ).outcomes[0]
 
     assert adapted.request is not None
     assert adapted.request.runtime.free_gpu_memory_fraction is None
@@ -950,6 +958,10 @@ def test_dynamo_ci_preserves_role_specific_memory_fractions():
     assert overridden.request.runtime.free_gpu_memory_fraction == 0.85
     assert overridden.request.runtime.prefill_free_gpu_memory_fraction is None
     assert overridden.request.runtime.decode_free_gpu_memory_fraction is None
+    assert role_overridden.request is not None
+    assert role_overridden.request.runtime.free_gpu_memory_fraction == 0.85
+    assert role_overridden.request.runtime.prefill_free_gpu_memory_fraction == 0.75
+    assert role_overridden.request.runtime.decode_free_gpu_memory_fraction == 0.7
 
 
 def test_dynamo_ci_declared_unsupported_quantization_is_rejected_even_for_fp8_model():

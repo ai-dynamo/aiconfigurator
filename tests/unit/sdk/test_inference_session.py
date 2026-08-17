@@ -285,6 +285,23 @@ class TestRequireSameTPFiltering:
         assert disagg_session._prefill_backend.static_max_seq_lens == [9000]
         assert disagg_session._decode_backend.static_max_seq_lens == [11000]
 
+        disagg_session._prefill_backend.static_memory_fractions.clear()
+        disagg_session._decode_backend.static_memory_fractions.clear()
+        disagg_session.run_disagg(
+            model_path="test-model",
+            runtime_config=runtime_config,
+            prefill_model_config=model_config,
+            prefill_batch_size=1,
+            prefill_num_worker=1,
+            decode_model_config=model_config,
+            decode_batch_size=1,
+            decode_num_worker=1,
+            free_gpu_memory_fraction=0.9,
+        )
+
+        assert disagg_session._prefill_backend.static_memory_fractions == [0.9]
+        assert disagg_session._decode_backend.static_memory_fractions == [0.9]
+
     def test_false_allows_mismatched_tp(self, disagg_session, runtime_config, model_config):
         """require_same_tp=False → results are non-empty (mismatched TP is fine)."""
         result = _run(

@@ -222,6 +222,16 @@ def _positive_float(value: str) -> float:
     return f
 
 
+def _memory_fraction(value: str) -> float:
+    """Argparse type for finite GPU memory fractions in ``(0, 1]``."""
+    import math
+
+    fraction = float(value)
+    if not (math.isfinite(fraction) and 0 < fraction <= 1):
+        raise argparse.ArgumentTypeError(f"must be a finite number in (0, 1], got {value!r}")
+    return fraction
+
+
 def _validate_model_path(model_path: str) -> str:
     """
     Validate model_path which can be:
@@ -809,13 +819,13 @@ def _add_estimate_mode_arguments(parser):
     )
     parser.add_argument(
         "--prefill-free-gpu-memory-fraction",
-        type=float,
+        type=_memory_fraction,
         default=None,
         help="Prefill worker KV-cache memory fraction (disagg). Overrides --free-gpu-memory-fraction for prefill.",
     )
     parser.add_argument(
         "--decode-free-gpu-memory-fraction",
-        type=float,
+        type=_memory_fraction,
         default=None,
         help="Decode worker KV-cache memory fraction (disagg). Overrides --free-gpu-memory-fraction for decode.",
     )
@@ -2460,6 +2470,17 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
 
     if estimate_mode not in ("agg", "disagg"):
         raise SystemExit("--enable-epd supports --estimate-mode agg or disagg only.")
+    if any(
+        fraction is not None
+        for fraction in (
+            args.prefill_free_gpu_memory_fraction,
+            args.decode_free_gpu_memory_fraction,
+        )
+    ):
+        raise SystemExit(
+            "--prefill-free-gpu-memory-fraction and --decode-free-gpu-memory-fraction "
+            "are not supported with --enable-epd; use --free-gpu-memory-fraction."
+        )
     workload = dict(
         enable_epd=True,
         backend_version=args.backend_version,
