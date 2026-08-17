@@ -61,6 +61,24 @@ def _infer_phase(op) -> bool | None:
     return None
 
 
+def _has_leaves(op) -> bool:
+    """True if the composite subtree reaches at least one LEAF op (a node
+    that is not itself an Overlap/Fallback composite)."""
+    composite = False
+    for group in ("_group_a", "_group_b", "_fallback"):
+        children = getattr(op, group, None)
+        if children is not None:
+            composite = True
+            if any(_has_leaves(child) for child in children):
+                return True
+    primary = getattr(op, "_primary", None)
+    if primary is not None:
+        composite = True
+        if _has_leaves(primary):
+            return True
+    return not composite
+
+
 class FallbackOp(Operation):
     """
     Try a primary operation first; if it raises PerfDataNotAvailableError,
@@ -109,12 +127,15 @@ class FallbackOp(Operation):
         (batch-major leaves always carry a marker via class shape or instance
         fields), so the plan is TOKEN-shaped — preserving the legacy
         ``query(db, x=...)``-only call shape, which never required
-        ``batch_size``/``s`` for token children. (Also covers empty groups:
-        an empty composite evaluates to zero either way.)"""
+        ``batch_size``/``s`` for token children. A truly EMPTY composite (no
+        leaf anywhere) keeps the legacy bare ``query(db)`` shape: zero work
+        needs no token count, so ``x`` defaults."""
         if kwargs.get("is_context") is None and _infer_phase(self) is None:
             x = kwargs.get("x")
             if x is None:
-                raise ValueError(f"{type(self).__name__}.query requires 'x' (num tokens) for token-only groups.")
+                if _has_leaves(self):
+                    raise ValueError(f"{type(self).__name__}.query requires 'x' (num tokens) for token-only groups.")
+                x = 1
             return self, {"is_context": True, "batch_size": 1, "s": 1, "x": int(x)}
         return super()._engine_query_plan(kwargs)
 
@@ -174,12 +195,15 @@ class OverlapOp(Operation):
         (batch-major leaves always carry a marker via class shape or instance
         fields), so the plan is TOKEN-shaped — preserving the legacy
         ``query(db, x=...)``-only call shape, which never required
-        ``batch_size``/``s`` for token children. (Also covers empty groups:
-        an empty composite evaluates to zero either way.)"""
+        ``batch_size``/``s`` for token children. A truly EMPTY composite (no
+        leaf anywhere) keeps the legacy bare ``query(db)`` shape: zero work
+        needs no token count, so ``x`` defaults."""
         if kwargs.get("is_context") is None and _infer_phase(self) is None:
             x = kwargs.get("x")
             if x is None:
-                raise ValueError(f"{type(self).__name__}.query requires 'x' (num tokens) for token-only groups.")
+                if _has_leaves(self):
+                    raise ValueError(f"{type(self).__name__}.query requires 'x' (num tokens) for token-only groups.")
+                x = 1
             return self, {"is_context": True, "batch_size": 1, "s": 1, "x": int(x)}
         return super()._engine_query_plan(kwargs)
 

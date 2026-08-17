@@ -21,9 +21,10 @@ class DeepSeekV4Model(BaseModel):
     @classmethod
     def supports_cp(cls, backend_name: str) -> bool:
         # DeepSeek-V4 CSA/HCA prefill CP: SGLang AllGather only. CP is modeled
-        # INSIDE ContextDeepSeekV4AttentionModule._query_cp (GLM-5-style mqa
-        # full/cp + topk full/cp deltas; HCA adds a windowed-KV all-gather),
-        # NOT via the dense _cp_attn_comm_ops / seq_split-only skeleton.
+        # INSIDE the engine's ContextDeepSeekV4AttentionModule operator
+        # (operators/dsv4.rs: GLM-5-style mqa full/cp + topk full/cp deltas;
+        # HCA adds a windowed-KV all-gather), NOT via the dense
+        # _cp_attn_comm_ops / seq_split-only skeleton.
         return backend_name == "sglang"
 
     @classmethod
@@ -87,8 +88,8 @@ class DeepSeekV4Model(BaseModel):
         attention_dp_size = self.config.attention_dp_size
         pp_size = self.config.pp_size
         # Context parallelism (sglang AllGather, prefill-only):
-        #  - attention modules: cp_size -> _query_cp (GLM-5-style mqa/topk full/cp
-        #    deltas + CSA/HCA all-gathers);
+        #  - attention modules: cp_size on the module spec -> the engine's CP
+        #    path (GLM-5-style mqa/topk full/cp deltas + CSA/HCA all-gathers);
         #  - token-major context ops (Embedding/MHC/norm/GEMM): seq_split=cp;
         #  - context MoEDispatch: attn_cp_size=cp (AG_hidden+RS comm), MoE compute
         #    cp-invariant. Generation/decode is NOT CP'd.

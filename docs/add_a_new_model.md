@@ -8,44 +8,28 @@ In aiconfigurator, the end-to-end latency estimation depends on operation-level 
 
 ### 1. Break Down the Model into Operations
 
-The model is broken down into operations, as shown in the source file [`models.py`](../src/aiconfigurator/sdk/models.py). A model is composed of operations such as GEMM and MoE defined in [`operations.py`](../src/aiconfigurator/sdk/operations.py).
+The model is broken down into operations, as shown in the source file [`models.py`](../src/aiconfigurator/sdk/models.py). A model is composed of operations such as GEMM and MoE defined in the [`operations` package](../aic-core/src/aiconfigurator_core/sdk/operations/) (see its README for the single-oracle contract).
 
 ### 2. Get Operation Latency Estimation
 
-This relies on the **query** method:
-```python
-class Operation(object):
-    """
-    Base operation class.
-    """
-    def __init__(self, name: str, scale_factor: float) -> None:
-        self._name = name
-        self._scale_factor = scale_factor
-    def query(self, database:PerfDatabase, **kwargs):
-        raise NotImplementedError
-    def get_weights(self, **kwargs):
-        raise NotImplementedError
-```
-The query method will then call the [`PerfDatabase`](../src/aiconfigurator/sdk/perf_database.py) corresponding method. Taking the MoE operation as an example:
+Since #1357 PR-5 (single-oracle), per-op latency/energy/SOL values are
+computed only by the compiled Rust engine
+(`aic-core/rust/aiconfigurator-core`). The Python `Operation` classes are
+typed parameter bags: constructor + fields (the wire parameters),
+`get_weights()` (the memory model), and — for table-backed ops — the parquet
+loader that feeds enumeration and charts. They contain no interpolation or
+lookup math.
 
-```python
-def query(self, database: PerfDatabase, **kwargs):
-    # attention dp size will scale up the total input tokens. 
-    x = kwargs.get('x') * self._attention_dp_size
-    overwrite_quant_mode = kwargs.get('quant_mode', None)
-    quant_mode = self._quant_mode if overwrite_quant_mode is None else overwrite_quant_mode
-    return database.query_moe(num_tokens=x, 
-                            hidden_size=self._hidden_size, 
-                            inter_size=self._inter_size, 
-                            topk=self._topk, 
-                            num_experts=self._num_experts,
-                            moe_tp_size=self._moe_tp_size,
-                            moe_ep_size=self._moe_ep_size, 
-                            quant_mode=quant_mode, 
-                            workload_distribution=self._workload_distribution) * self._scale_factor
-```
-
-The database contains the function **query_moe** which defines how we estimate the operation latency based on interpolation by querying the data we collected ahead of time.
+Evaluation flows through the engine surfaces in
+[`engine.py`](../aic-core/src/aiconfigurator_core/sdk/engine.py): each op
+converts to a wire `OpSpec` (`_to_opspec`), and per-op values come back from
+`EngineHandle.evaluate_ops_json` / `evaluate_ops_sol_json` (op-list FFI) or
+the compiled per-phase/whole-run entry points (`run_static`,
+`InferenceSession`). The legacy per-call surface
+(`Operation.query()` / `PerfDatabase.query_*`) still exists for one release
+as a DEPRECATION SHIM routed through the same engine
+(`sdk/engine.py::_evaluate_single_op`) — do not build new code on it, and do
+not extend it to new ops.
 
 ### 3. Collect Data for the Operation
 
@@ -136,7 +120,8 @@ single-oracle flow):
    `aic-core/src/aiconfigurator_core/systems/data/<system>/<family>/<backend>/<version>/`
    (the engine reads parquet only).
 6. **Pin the behavior**: once a shipped model reaches the op, add a parity
-   case via `parity_tests/pin_goldens.py` (append-only); later modeling
+   case via `aic-core/rust/aiconfigurator-core/parity_tests/pin_goldens.py`
+   (append-only); later modeling
    changes carry their golden diff.
 7. **Add new model definition** in `models.py` to build your model with new operation. A new model class is mapping to a new model family.  
 update your model in ModelFamily dict defined in [`common.py`](../src/aiconfigurator/sdk/common.py)
@@ -174,7 +159,7 @@ flowchart TD
     D --> E[Does the model need new operations?]
     E --> |YES| F([for instance, new model might have covolution, which isn't defined in sdk/operations.py])
     F --> G[Define your operations in <b><i>sdk/operations.py</b></i>]
-    G --> H[Define the model as a new model class in <i><b>sdk/models.py</b></i> using OPs defined in <i><b>sdk/operations.py</b></i>]
+    G --> H[Define the model as a new model class in <i><b>sdk/models.py</b></i> using the op classes from <i><b>sdk/operations/</b></i>]
     E --> |NO|H
     H --> i[Add architecture mapping to <i><b>ARCHITECTURE_TO_MODEL_FAMILY</b></i>]
     i --> j[Do you need to collect performance data for the new model?]

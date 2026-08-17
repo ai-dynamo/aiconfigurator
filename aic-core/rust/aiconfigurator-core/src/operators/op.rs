@@ -369,7 +369,9 @@ impl Op {
                 let source = match (source_a, source_b) {
                     (Some(a), Some(b)) => a.combine(b),
                     (Some(s), None) | (None, Some(s)) => s,
-                    (None, None) => Source::Silicon,
+                    // Empty composite: zero work measured against nothing — report the
+                    // baseline provenance, matching the legacy Python default.
+                    (None, None) => Source::Empirical,
                 };
                 Ok(PerformanceResult::with_energy(
                     total_a.max(total_b),

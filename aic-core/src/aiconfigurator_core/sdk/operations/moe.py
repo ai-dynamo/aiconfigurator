@@ -12,8 +12,9 @@ Op classes migrated from ``_legacy.py``:
       is the only loader that returns a tuple of two tables)
     * ``_wideep_context_moe_data`` — SGLang WideEP context MoE table
     * ``_wideep_generation_moe_data`` — SGLang WideEP generation MoE table
-  Dispatches to the right table inside ``query_moe`` based on backend +
-  ``moe_backend`` + ``num_tokens`` + ``quant_mode`` + ``is_gated``.
+  Table selection (backend + ``moe_backend`` + ``num_tokens`` +
+  ``quant_mode`` + ``is_gated``) happens in the engine; Python keeps all
+  four tables loaded on the data plane.
 
 - ``MoEDispatch`` (ISSUE-12) — MoE comm-cost op. Owns:
     * ``_wideep_deepep_normal_data`` — SGLang DeepEP normal-mode dispatch
@@ -259,10 +260,6 @@ class MoE(Operation):
         cls._low_latency_data_cache.clear()
         cls._wideep_context_data_cache.clear()
         cls._wideep_generation_data_cache.clear()
-
-    # ------------------------------------------------------------------
-    # Query table (formerly PerfDatabase.query_moe)
-    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # Op contract

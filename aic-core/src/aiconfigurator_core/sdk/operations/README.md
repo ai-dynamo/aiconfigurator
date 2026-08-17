@@ -61,7 +61,8 @@ deprecation-cleanup PR.
    `aic-core/rust/aiconfigurator-core/src/engine/spec.rs` round-trip fixture.
    `tests/unit/sdk/test_opspec_coverage.py` fails until the op converts or
    carries a justified `EXEMPT` entry.
-4. **Pin the behavior**: a parity case via `parity_tests/pin_goldens.py`
+4. **Pin the behavior**: a parity case via
+   `aic-core/rust/aiconfigurator-core/parity_tests/pin_goldens.py`
    (append-only) once a config class reaches the op; golden diffs carry the
    review for any later modeling change.
 5. **Deprecation-window shims are NOT extended**: do not add a

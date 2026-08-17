@@ -32,26 +32,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Attention utilisation vs head_size, relative to head_size=128. Used to transfer
-# util across head_size when the exact head_size has no collected data: borrow the
-# nearest collected head_size's util curve and rescale by ratio[target]/ratio[ref].
-#
-# Measured on Blackwell (b200) GQA where 64/128/256 are collected; the cross-GPU
-# spread within a backend is small, so a per-backend table is enough. PREFILL util
-# rises with head_size (compute-bound: larger heads pack the tensor cores better);
-# 192 is log2-interpolated and 512 EXTRAPOLATED under the observed diminishing-
-# returns trend (util saturates) -- both are estimates, not measured. 512 is held
-# conservatively close to 256 (only a small bump) since there is no data and util
-# is near-saturated there; under-crediting its efficiency errs toward over- rather
-# than under-estimating latency. DECODE util is ~head_size-independent (memory-bound
-# KV read), so its ratio is 1.0 (no table).
-_ATTN_PREFILL_HS_RATIO: dict[str, dict[int, float]] = {
-    "trtllm": {64: 0.58, 128: 1.00, 192: 1.10, 256: 1.17, 512: 1.20},
-    "sglang": {64: 0.60, 128: 1.00, 192: 1.18, 256: 1.32, 512: 1.38},
-    "vllm": {64: 0.60, 128: 1.00, 192: 1.27, 256: 1.51, 512: 1.60},
-}
-
-
 # Extrapolation target grids — lifted verbatim from the legacy blocks in
 # ``PerfDatabase.__init__`` so behavior stays bit-identical.
 
@@ -72,31 +52,6 @@ def _cache_key(database: PerfDatabase) -> tuple:
         database.version,
         database.enable_shared_layer,
     )
-
-
-def generation_attn_mode(system_spec: dict, kvcache_quant_mode: common.KVCacheQuantMode) -> common.FMHAQuantMode:
-    """Decode-attention FMHA mode implied by the kv-cache dtype.
-
-    fp8 KV implies an fp8-MMA decode kernel only where fp8 tensor cores exist
-    (SM >= 89, Ada and newer); on pre-89 hardware — and on specs without
-    ``sm_version``, e.g. XPU — the kernel dequantizes KV and issues the MMA on
-    the bf16 pipeline. That is how a100's shipped fp8-kv generation data was
-    collected in the first place, so gating here keeps that silicon usable
-    under the strict per-dtype resolution. The single home for the derivation
-    rule (mirrors Rust ``perf_database::attention::generation_attn_mode``).
-    """
-    has_fp8_mma = (system_spec["gpu"].get("sm_version") or -1) >= 89
-    if kvcache_quant_mode == common.KVCacheQuantMode.fp8 and has_fp8_mma:
-        return common.FMHAQuantMode.fp8
-    return common.FMHAQuantMode.bfloat16
-
-
-def generation_attn_flops(system_spec: dict, kvcache_quant_mode: common.KVCacheQuantMode) -> float:
-    """Strictly resolved TC FLOPS for :func:`generation_attn_mode`; used by
-    the generation get_sol closures, the eager query-entry checks, and
-    ``Attention._correct_sol``.
-    """
-    return common.get_quant_tc_flops(system_spec, generation_attn_mode(system_spec, kvcache_quant_mode))
 
 
 class ContextAttention(Operation):

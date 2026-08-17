@@ -30,8 +30,10 @@ ops) express arbitrary byte counts as ``ceil(bytes/2)`` bfloat16 elements —
 at most 1 byte of rounding on multi-MB messages — so those cases carry a
 1e-6 relative tolerance instead of the default 1e-9.
 
-``source`` tags are recorded for information but not asserted (provenance
-parity has its own coverage); latency and energy are asserted.
+``source`` tags captured from the legacy surface are asserted alongside
+latency and energy (review #1552 round 3). Exempt: ``expected_from="engine"``
+cases (their pinned source is a synthetic engine label, not legacy
+provenance), tombstones (error-only), and triple results (no source).
 
 Regenerate (ONLY meaningful on a checkout that still has the Python math):
 
@@ -1209,6 +1211,14 @@ CASES = [
         version="1.3.0rc20",
     ),
     op_case(
+        "overlap-empty-no-kwargs",
+        "h200",
+        "overlap.OverlapOp",
+        ["ov_empty", [], []],
+        {},
+        version="1.3.0rc20",
+    ),
+    op_case(
         "ctx-attn-zero-scale-op",
         "h200",
         "attention.ContextAttention",
@@ -1363,6 +1373,8 @@ def test_query_shim_matches_pre_retirement_baseline(case):
     _assert_close(expected["latency"], got["latency"], rel_tol)
     if expected.get("energy") is not None:
         _assert_close(expected["energy"], got["energy"], rel_tol)
+    if case.get("expected_from", "legacy") == "legacy" and expected.get("source") is not None:
+        assert got.get("source") == expected["source"], (expected, got)
 
 
 def test_baseline_covers_every_case():
@@ -1545,6 +1557,7 @@ SEMANTIC_DIMENSION_CASES = {
         "overlap-token-only-x-only",
         "fallback-token-only-x-only",
         "overlap-empty-groups",
+        "overlap-empty-no-kwargs",
     },
     "mixed-phase composite": {"overlap-mixed-op"},
     "tombstones assert their error": {

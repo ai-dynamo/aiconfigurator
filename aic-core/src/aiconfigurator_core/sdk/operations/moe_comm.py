@@ -16,7 +16,7 @@ registry shared by all three inference backends. On TRT-LLM this covers the
 [num_experts][sms][num_tokens]``.
 ``MoEAllToAll`` is the op class over that table: it owns the class-level
 cache + ``load_data`` (the retired per-call lookup lived behind
-``PerfDatabase.query_moe_a2a``.
+``PerfDatabase.query_moe_a2a``).
 
 The module also owns the large-EP compute side of the same family:
 ``load_moe_expert_compute_data`` loads the unified ``moe_expert_compute_perf.parquet`` EP MoE compute
@@ -25,7 +25,7 @@ by ``[kernel_source][quant][distribution][inference_phase][topk][num_experts]
 [num_slots][hidden_size][inter_size][moe_tp_size][moe_ep_size][num_tokens]``.
 ``MoEExpertCompute`` is the op class over that table: it owns the class-level cache +
 ``load_data`` (the retired per-call lookup lived behind
-``PerfDatabase.query_moe_expert_compute``.
+``PerfDatabase.query_moe_expert_compute``).
 """
 
 from __future__ import annotations
@@ -585,10 +585,6 @@ class MoEAllToAll(Operation):
         cls._data_cache.clear()
 
     # ------------------------------------------------------------------
-    # Query table (behind PerfDatabase.query_moe_a2a)
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
     # Op contract
     # ------------------------------------------------------------------
 
@@ -1037,10 +1033,6 @@ class MoEExpertCompute(Operation):
                 return fallback
 
         return preferred
-
-    # ------------------------------------------------------------------
-    # Query table (behind PerfDatabase.query_moe_expert_compute)
-    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # Op contract

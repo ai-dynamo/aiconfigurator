@@ -378,14 +378,10 @@ class Mamba2(Operation):
     (``docs/python-dedup-plan.md`` sequel).
 
     Composite op — no perf table of its own. Builds the full Mamba2Mixer
-    layer cost from:
-    - in_proj GEMM (``database.query_gemm``)
-    - conv1d mem_op (``database.query_mem_op`` — deliberately kept on
-      ``PerfDatabase``; ``query_mem_op`` is an explicit non-goal of this
-      refactor, see handoff Decision #7)
-    - SSM mem_op (``database.query_mem_op``)
-    - norm mem_op (``database.query_mem_op``)
-    - out_proj GEMM (``database.query_gemm``)
+    layer cost from five legs (in_proj GEMM, conv1d mem_op, SSM mem_op,
+    norm mem_op, out_proj GEMM), each evaluated by the compiled engine
+    through a standard twin op (GEMM / MemoryOp); this class keeps only
+    the leg composition (deprecated with the per-call window, #1357 PR-5).
 
     The internal state dimension is calculated as:
     expanded_size = 2 * (nheads * head_dim + 2 * n_groups * d_state)

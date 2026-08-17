@@ -341,7 +341,6 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         cls._data_cache.clear()
         cls._raw_data_cache.clear()
         cls._sparse_kernel_cache.clear()
-        cls._csa_topk_abs_cache.clear()
 
     # ------------------------------------------------------------------
     # Sparse-kernel lookup helper (formerly PerfDatabase._lookup_dsv4_sparse_kernel)
@@ -358,27 +357,9 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
     _ENGINE_QUERY_SHAPE = "context"
 
     # ------------------------------------------------------------------
-    # Context-Parallel (CP) prefill model — DeepSeek-V4 CSA / HCA.
-    # Self-contained branch (does NOT reuse the non-CP topk-DELTA correction).
-    # Mirrors GLM-5 ContextDSAModule._query_cp: per-card monolithic base +
-    # full/cp swap of the super-linear sub-kernels + CP all-gathers.
-    #   CSA (compress_ratio==4): base(per_card) + mqa full/cp + topk full/cp
-    #       + AG(indexer key) + AG(compressed KV).
-    #   HCA (compress_ratio==128 / SWA): base(per_card) + AG(windowed dense KV)
-    #       + AG(compressed KV)  — windowed dense, no indexer/topk selection.
-    # AG sizes follow DeepSeekV4Model.get_kvcache_bytes_per_sequence (head_dim
-    # entries; indexer index_head_dim; compressed isl//ratio; window-capped).
-    # ------------------------------------------------------------------
-    _csa_topk_abs_cache: ClassVar[dict] = {}
-
-    # Production chunked-prefill executes mqa as a chunk sequence; the pair
-    # count is additive over chunks, so full-isl mqa decomposes EXACTLY into
-    # in-grid lookups (isl <= sweep max 8192, past_kv collected to ~1M):
-    #   mqa(isl, past) = sum_k mqa(chunk_k, past + offset_k)
-    # This replaces the previous 16x util-hold extrapolation of a single
-    # full-isl lookup (review: PR #1303 pt.1) and matches what the runtime
-    # actually launches.
-    _MQA_CHUNK_TOKENS = 8192
+    # NOTE(#1357 PR-5): the Python CP prefill model and chunked-mqa
+    # decomposition that lived here retired with the per-call query stack;
+    # their oracle is the compiled engine (operators/dsv4.rs).
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -648,33 +629,13 @@ def _dsv4_normalize_dtype(name: str) -> str:
     return _DSV4_DTYPE_ALIASES.get(name, name)
 
 
-# ───────────────────────────────────────────────────────────────────────
-# DSV4 CSA topk DELTA calibration (SCHEME A correction).
-#
-# The CSA context-module collector runs the topK kernel on DEGENERATE scores
-# (dummy weights + zero/uninitialized prefix KV -> near-constant logits -> the
-# Small topK path falls into its O(n^2) tie-break). That inflates the measured
-# module latency vs real silicon, where logits are spread. We measured the topK
-# time standalone under a degenerate "flat" construction and a representative
-# "top_last" construction for every (prefix, isl, batch_size) shape, phase-
-# qualified (context runs the v1 selector, generation v2), stored as four rows
-# (score_mode=v{1,2}_{flat,top_last}) per shape in dsv4_csa_topk_calib_perf;
-# DELTA = flat.latency - top_last.latency per variant. At query time we
-# SUBTRACT the matching variant's DELTA from the CSA (compress_ratio==4)
-# module latency only. The DELTA is selector-geometry-specific (Flash
-# index_topk 512 vs Pro 1024), so the calib keys by the row's native
-# num_heads and applies ONLY to queries with the matching native identity
-# (#1460 review) — an uncovered native (Pro today: calib collected for
-# Flash only) is a logged no-op, never a borrowed correction.
-# Gate: AIC_DSV4_TOPK_CORRECTION (default on; set "0" to disable).
-# ───────────────────────────────────────────────────────────────────────
-_TOPK_CORRECTION_ENABLED = os.environ.get("AIC_DSV4_TOPK_CORRECTION", "1") != "0"
-
-
-_TOPK_CALIB_MISS_WARNED: set = set()
-
-
-_MISSING = object()
+# DSV4 CSA topk DELTA calibration table — DATA PROVENANCE. The collector
+# measures the topK kernel standalone under a degenerate "flat" and a
+# representative "top_last" score construction per shape (four score_mode
+# rows in dsv4_csa_topk_calib_perf); the loader below keeps those raw rows
+# on the data plane. The query-time DELTA-subtraction correction that
+# consumed them retired with #1357 PR-5 — its oracle is the compiled
+# engine (operators/dsv4.rs).
 
 
 def _validate_dsv4_local_head_semantics(rows, file_path):

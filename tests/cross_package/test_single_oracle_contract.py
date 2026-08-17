@@ -159,8 +159,6 @@ OPERATIONS_DEF_INVENTORY = {
             "GenerationAttention.load_data",
             "_cache_key",
             "_log_attention_row_conflict",
-            "generation_attn_flops",
-            "generation_attn_mode",
             "load_context_attention_data",
             "load_encoder_attention_data",
             "load_generation_attention_data",
@@ -479,6 +477,7 @@ OPERATIONS_DEF_INVENTORY = {
             "OverlapOp._engine_query_is_context",
             "OverlapOp._engine_query_plan",
             "OverlapOp.get_weights",
+            "_has_leaves",
             "_infer_phase",
         }
     ),
