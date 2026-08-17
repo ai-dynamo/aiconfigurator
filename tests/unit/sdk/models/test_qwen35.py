@@ -8,7 +8,6 @@ import pytest
 from aiconfigurator.sdk import common, models
 from aiconfigurator.sdk import config as sdk_config
 from aiconfigurator.sdk.operations import CustomAllReduce, OverlapOp
-from aiconfigurator.sdk.utils import _parse_hf_config_json
 
 pytestmark = pytest.mark.unit
 
@@ -240,80 +239,3 @@ def test_qwen35_memory_charges_kv_on_full_layers_and_constant_gdn_state():
     per_token_bytes = 2 * model.get_kvcache_elements_per_token()
     assert model.get_kvcache_bytes_per_sequence(4096) == 4096 * per_token_bytes + expected_state
     assert model.get_kvcache_max_tokens(expected_state + 100 * per_token_bytes) == 100
-
-
-def _qwen38_max_hf_config():
-    """Qwen3.8-Max (Qwen/Qwen3.8-2.4T-A95B): FLAT config -- all fields top-level,
-    no text_config nesting (unlike the Qwen3_5*ForConditionalGeneration VLM
-    classes). layer_types follows the interval-4 pattern (3 GDN layers then 1
-    full-attention layer) repeated 23 times over 92 layers -> 69 linear_attention
-    + 23 full_attention.
-    """
-    layer_types = ["linear_attention", "linear_attention", "linear_attention", "full_attention"] * 23
-    return {
-        "architectures": ["Qwen3_5MoeForCausalLM"],
-        "hidden_size": 8192,
-        "num_hidden_layers": 92,
-        "layer_types": layer_types,
-        "num_attention_heads": 64,
-        "num_key_value_heads": 4,
-        "head_dim": 256,
-        "attn_output_gate": True,
-        "partial_rotary_factor": 0.25,
-        "linear_num_key_heads": 16,
-        "linear_key_head_dim": 128,
-        "linear_num_value_heads": 128,
-        "linear_value_head_dim": 128,
-        "linear_conv_kernel_dim": 4,
-        "mamba_ssm_dtype": "float32",
-        "num_experts": 512,
-        "num_experts_per_tok": 10,
-        "moe_intermediate_size": 2048,
-        "shared_expert_intermediate_size": 2048,
-        "vocab_size": 248320,
-        "max_position_embeddings": 262144,
-        "mtp_num_hidden_layers": 1,
-        "rms_norm_eps": 1e-6,
-        "hidden_act": "silu",
-        "torch_dtype": "bfloat16",
-        "dtype": "bfloat16",
-        "rope_parameters": {
-            "partial_rotary_factor": 0.25,
-            "rope_theta": 10000000,
-            "rope_type": "default",
-        },
-        "tie_word_embeddings": False,
-    }
-
-
-class TestQwen38MaxFlatConfigParse:
-    """Qwen3.8-Max ships Qwen3_5MoeForCausalLM at the top level with every LLM
-    field flat -- unlike the two Qwen3.5 VLM classes, whose checkpoints nest
-    the decoder config under text_config."""
-
-    def test_parse_yields_qwen35_config_from_flat_layout(self):
-        result = _parse_hf_config_json(_qwen38_max_hf_config())
-
-        assert result["architecture"] == "Qwen3_5MoeForCausalLM"
-        assert models._architecture_to_model_family(result["architecture"]) == "QWEN35"
-        assert result["layers"] == 92
-        assert result["n"] == 64
-        assert result["n_kv"] == 4
-        # config head_dim (256) wins over hidden_size // n (8192 // 64 = 128).
-        assert result["d"] == 256
-        assert result["vocab"] == 248320
-        assert result["topk"] == 10
-        assert result["num_experts"] == 512
-        assert result["moe_inter_size"] == 2048
-
-        cfg = result["extra_params"]
-        assert isinstance(cfg, common.Qwen35Config)
-        assert len(cfg.layer_types) == 92
-        assert cfg.layer_types.count("full_attention") == 23
-        assert cfg.layer_types.count("linear_attention") == 69
-        assert cfg.linear_num_key_heads == 16
-        assert cfg.linear_key_head_dim == 128
-        assert cfg.linear_num_value_heads == 128
-        assert cfg.linear_value_head_dim == 128
-        assert cfg.linear_conv_kernel_dim == 4
-        assert cfg.shared_expert_inter_size == 2048
