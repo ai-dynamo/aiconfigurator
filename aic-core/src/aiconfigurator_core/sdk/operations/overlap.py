@@ -45,7 +45,7 @@ def _infer_phase(op) -> bool | None:
     phase = getattr(op, "_phase", None)
     if phase in ("context", "prefill"):
         return True
-    if phase in ("generation", "decode"):
+    if phase in ("generation", "decode", "verify"):
         return False
     shape = getattr(type(op), "_ENGINE_QUERY_SHAPE", None)
     if shape in ("context", "generation"):
@@ -112,10 +112,13 @@ class FallbackOp(Operation):
             return bool(hint)
         inferred = _infer_phase(self)
         if inferred is None:
-            raise ValueError(
-                f"{type(self).__name__}.query cannot infer the evaluation phase from its children; "
-                "pass is_context=True/False."
-            )
+            # No phase marker anywhere in the subtree <=> every leaf is
+            # token-shaped (batch-major leaves always carry a marker via
+            # class shape or instance fields). Token-major evaluation is
+            # phase-neutral — x flows verbatim either way — so default to
+            # the context list rather than demanding a new required kwarg
+            # the legacy surface never had. (Also covers empty groups.)
+            return True
         return inferred
 
     def get_weights(self, **kwargs):
@@ -168,10 +171,13 @@ class OverlapOp(Operation):
             return bool(hint)
         inferred = _infer_phase(self)
         if inferred is None:
-            raise ValueError(
-                f"{type(self).__name__}.query cannot infer the evaluation phase from its children; "
-                "pass is_context=True/False."
-            )
+            # No phase marker anywhere in the subtree <=> every leaf is
+            # token-shaped (batch-major leaves always carry a marker via
+            # class shape or instance fields). Token-major evaluation is
+            # phase-neutral — x flows verbatim either way — so default to
+            # the context list rather than demanding a new required kwarg
+            # the legacy surface never had. (Also covers empty groups.)
+            return True
         return inferred
 
     def get_weights(self, **kwargs):

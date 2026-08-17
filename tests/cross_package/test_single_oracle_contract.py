@@ -140,19 +140,59 @@ def _operation_defs(tree):
             yield node
 
 
+# Banned def-name shapes for Python-side per-op estimation math. Name-based
+# guards cannot catch a determined rename (the behavioral guard is the
+# CodeRabbit path instruction + human review); they DO catch the shapes this
+# codebase has actually grown: `_query_*` lookup/dispatch bodies (including
+# non-`_table` variants like the retired `_query_cp`), `_lookup_*`
+# interpolators, and `get_sol`/`get_empirical` closures.
+_BANNED_DEF_EXACT = frozenset({"get_sol", "get_empirical"})
+_BANNED_DEF_PREFIXES = ("_query_", "_lookup_")
+
+
+def _offending_defs(source_text: str, filename: str = "<memory>") -> list[str]:
+    offenders = []
+    for node in _operation_defs(ast.parse(source_text)):
+        name = node.name
+        if name in _BANNED_DEF_EXACT or name.startswith(_BANNED_DEF_PREFIXES):
+            offenders.append(f"{filename}:{node.lineno} def {name}")
+    return offenders
+
+
 def test_no_query_table_math_in_operations():
     assert OPERATIONS_DIR.is_dir(), f"source layout expected at {OPERATIONS_DIR} (scan must not pass vacuously)"
     offenders = []
     for path in sorted(OPERATIONS_DIR.glob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in _operation_defs(tree):
-            name = node.name
-            if (name.startswith("_query_") and name.endswith("_table")) or name in ("get_sol", "get_empirical"):
-                offenders.append(f"{path.name}:{node.lineno} def {name}")
+        offenders.extend(_offending_defs(path.read_text(encoding="utf-8"), path.name))
     assert not offenders, (
         "Python-side per-op query/roofline math reappeared (single-oracle violation, #1357 PR-5): "
         + "; ".join(offenders)
     )
+
+
+def test_math_def_scanner_catches_offenders():
+    """Negative fixture: the scanner itself must flag every banned shape —
+    including the non-`_table` `_query_*` variant that hid the retired
+    `_query_cp` cluster from the first version of this guard."""
+    fixture = (
+        "class Op:\n"
+        "    def _query_cp(self):\n"
+        "        pass\n"
+        "    def _query_gemm_table(self):\n"
+        "        pass\n"
+        "    @staticmethod\n"
+        "    def _lookup_2d(table):\n"
+        "        pass\n"
+        "def outer():\n"
+        "    def get_sol():\n"
+        "        pass\n"
+        "    def get_empirical():\n"
+        "        pass\n"
+        "def _engine_query_plan(self):\n"
+        "    pass\n"
+    )
+    flagged = {entry.split(" def ")[1] for entry in _offending_defs(fixture)}
+    assert flagged == {"_query_cp", "_query_gemm_table", "_lookup_2d", "get_sol", "get_empirical"}
 
 
 def test_operation_query_overrides_are_whitelisted():

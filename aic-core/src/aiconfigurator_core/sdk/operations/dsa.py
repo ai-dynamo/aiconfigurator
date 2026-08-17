@@ -32,9 +32,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator_core.sdk import common
-from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
-from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -134,20 +132,6 @@ def dsa_block_weights_bytes(
     o_params = local_heads * v * h
     indexer_params = q_lora * idx + h * dims["index_n_heads"]
     return q_params * _b("q") + kv_params * _b("kv") + o_params * _b("o") + indexer_params * _b("indexer")
-
-
-# DSA sparse sub-kernel (mqa / topk / dsa_attn) data-file prefix per architecture.
-# GLM-5 and DeepSeek-V3.2 share the same DSA kernels (only shapes/heads differ),
-# so the CP delta strategy in ContextDSAModule._query_cp is identical -- only the
-# collected data files differ: glm5_* vs dsv32_*. Defaults to glm5 for back-compat.
-_DSA_SPARSE_FILE_PREFIX = {
-    "GlmMoeDsaForCausalLM": "glm5",
-    "DeepseekV32ForCausalLM": "dsv32",
-}
-
-
-def _dsa_sparse_file_prefix(architecture: str) -> str:
-    return _DSA_SPARSE_FILE_PREFIX.get(architecture, "glm5")
 
 
 # Extrapolation grids — lifted verbatim from the legacy blocks in
@@ -311,7 +295,6 @@ class ContextDSAModule(Operation):
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
         cls._raw_data_cache.clear()
-        cls._glm5_sparse_cache.clear()
         cls._skip_data_cache.clear()
         cls._raw_skip_data_cache.clear()
 
@@ -334,215 +317,6 @@ class ContextDSAModule(Operation):
     #   + AG_KV + AG_LSE                              (the two small attention all-gathers)
     # AG_hidden + RS belong to the MoE comm (modeled by MoEDispatch), not here.
     # ------------------------------------------------------------------
-    _glm5_sparse_cache: ClassVar[dict] = {}
-
-    def _query_cp(
-        self, database: PerfDatabase, b: int, isl: int, prefix: int, skip_indexer: bool = False
-    ) -> PerformanceResult:
-        """CP (round-robin split) per-layer DSA, new strategy (2026-06-11):
-
-            result = dsa(isl/cp, prefix)
-                   + [mqa(isl, prefix)/cp      - mqa(isl/cp, prefix)]
-                   + [topk_last(isl, prefix)/cp - topk_flat(isl/cp, prefix)]
-                   + AG_KV + AG_LSE
-
-        The per-card monolithic dsa_module(isl/cp, prefix) is the base; its
-        internal mqa(isl/cp,prefix) and topk_flat(isl/cp,prefix) are swapped out
-        by the two deltas, leaving proj + dsa_attn (both prefix-independent: proj
-        by construction, dsa_attn topk-capped to index_topk) plus the CP-correct
-        full-chunk mqa/topk_last divided across cp ranks. All sub-kernels are
-        looked up at the REAL (q_len, prefix) shape — the parquet ``step`` column
-        IS the prefix (past_kv) length.
-        """
-        cp = self._cp_size
-        per_card = max(1, -(-isl // cp))  # ceil: critical path = busiest CP rank
-        sp = self._load_glm5_sparse(database, self._architecture, self._num_heads)
-        g = sp.get("_2d", {})
-        file_prefix = _dsa_sparse_file_prefix(self._architecture)
-        # Fail fast: CP DSA modeling REQUIRES the sparse mqa/topk tables for
-        # the mqa/topk_last deltas. _lookup_2d clamps isl + interp/extrapolates
-        # step, so a None below means the table is absent entirely (parquet not
-        # collected) -- degrading silently to dsa_base would hide that.
-        # skip_indexer layers carry NO indexer -> no mqa/topk deltas needed, so
-        # don't require the sparse tables for them.
-        missing = [] if skip_indexer else [k for k in ("mqa", "topk_last", "topk_flat") if not g.get(k)]
-        if missing:
-            raise PerfDataNotAvailableError(
-                f"DSA CP modeling needs sparse tables {missing} for "
-                f"{self._architecture} (num_heads={self._num_heads}); "
-                f"collect {file_prefix}_mqa_logits/{file_prefix}_topk first."
-            )
-        # Base: per-card monolithic dsa_module at (per_card, prefix), follows the
-        # run's kv_cache_dtype like the non-CP path.
-        dsa_base = float(
-            database.query_context_dsa_module(
-                b=b,
-                s=per_card,
-                prefix=prefix,
-                num_heads=self._num_heads,
-                kvcache_quant_mode=self._kvcache_quant_mode,
-                fmha_quant_mode=self._fmha_quant_mode,
-                gemm_quant_mode=self._gemm_quant_mode,
-                architecture=self._architecture,
-                dsa_backend="flashmla_kv",
-                skip_indexer=skip_indexer,
-            )
-        )
-        # Look the sparse sub-kernels up at the REAL batch b (the bs slice carries
-        # the measured bs=b latency), so the delta matches dsa_base (queried at b)
-        # WITHOUT an external x b linearity assumption.
-        mqa_tab = self._bs_slice(g.get("mqa", {}), b)
-        tl_tab = self._bs_slice(g.get("topk_last", {}), b)
-        tf_tab = self._bs_slice(g.get("topk_flat", {}), b)
-        mqa_full = self._lookup_2d(mqa_tab, isl, prefix)
-        mqa_perc = self._lookup_2d(mqa_tab, per_card, prefix)
-        tl_full = self._lookup_2d(tl_tab, isl, prefix)
-        tf_perc = self._lookup_2d(tf_tab, per_card, prefix)
-        latency = dsa_base
-        # skip layers reuse a sibling's topk index: no per-layer mqa/topk, so no
-        # full/cp deltas — just the per-card skip base + the attention all-gathers.
-        if not skip_indexer and None not in (mqa_full, mqa_perc, tl_full, tf_perc):
-            delta_mqa = mqa_full / cp - mqa_perc
-            delta_topk = tl_full / cp - tf_perc
-            latency += delta_mqa + delta_topk
-        # CP communication: AG of compressed KV (kv_lora+rope) + AG of LSE (kv_lora).
-        dims = DSA_MODEL_DIMS.get(self._architecture, {})
-        kv_lora = dims.get("kv_lora_rank", 512)
-        rope = dims.get("qk_rope_head_dim", 64)
-        index_head_dim = dims.get("index_head_dim", 128)
-        # CP attention all-gather, verified by instrumenting sglang cp_utils
-        # (cp_all_gather_rerange_output): per current-chunk tokens (isl, not
-        # isl+prefix; prefix KV is already replicated), bf16. Two gathers:
-        #   - compressed KV latent: kv_lora_rank + qk_rope_head_dim (= 576)
-        #   - DSA indexer key: index_head_dim (= 128)
-        # (The hidden_states 6144 AG/RS is the MoE token dispatch, modeled in
-        # context_moe_pre/post_dispatch, not here.)
-        # ag_kv = MQA-stage gather: DSA indexer key (index_head_dim), bf16.
-        # ag_lse = FMHA-stage gather: compressed KV latent (kv_lora_rank +
-        # qk_rope_head_dim), bf16. Both over the current chunk (isl), verified by
-        # instrumenting sglang (dsa_indexer index_key 128; deepseek_v2
-        # rebuild_cp_kv_cache latent 576).
-        # x b: the all-gather moves b sequences' worth of current-chunk KV.
-        # A skip-indexer (reuse) layer never runs the per-layer indexer, so it
-        # does not all-gather the DSA indexer key -- only the MLA compressed-KV/LSE
-        # gather remains. Don't charge the indexer-key AG to skip layers.
-        ag_kv = (
-            0.0
-            if skip_indexer
-            else float(database.query_nccl(common.CommQuantMode.half, cp, "all_gather", b * isl * index_head_dim))
-        )
-        ag_lse = float(database.query_nccl(common.CommQuantMode.half, cp, "all_gather", b * isl * (kv_lora + rope)))
-        latency += ag_kv + ag_lse
-        return PerformanceResult(latency * self._scale_factor, energy=0.0, source="estimated")
-
-    @classmethod
-    def _load_glm5_sparse(cls, database: PerfDatabase, architecture: str, num_heads: int) -> dict:
-        """Load DSA sparse sub-kernel tables (mqa / topk / dsa_attn) for the CP
-        composition path. Architecture-keyed: GLM-5 reads ``glm5_*`` filtered to
-        its native num_heads (64); DeepSeek-V3.2 reads ``dsv32_*`` filtered to
-        128. Same kernels, different shapes -- the delta strategy in _query_cp is
-        identical (full/cp mqa + flat->top_last topk). dsa_attn is optional (not
-        used by the delta; DSV3.2 only collects mqa + topk)."""
-        key = (cls._cache_key(database), architecture, num_heads)
-        if key in cls._glm5_sparse_cache:
-            return cls._glm5_sparse_cache[key]
-        import os
-
-        import pandas as pd
-
-        fp = _dsa_sparse_file_prefix(architecture)
-        system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-        # Resolve the version DIR once (family dir first, else legacy) via a
-        # representative filename, then apply the existing prefix-read logic
-        # within that dir -- the other glm5_*/dsv32_* siblings live alongside it.
-        # The three sparse tables are collected as independent ops, so anchor on
-        # whichever sibling exists first: a dir may hold topk/dsa_attn without
-        # mqa, and anchoring on mqa alone would fall back to the legacy dir and
-        # silently drop the present siblings.
-        candidates = [
-            resolve_op_data_path(
-                system_data_root,
-                database.backend,
-                database.version,
-                f"{fp}_{table}_module_perf.parquet",
-            )
-            for table in ("mqa_logits", "topk", "dsa_attn")
-        ]
-        anchor = next((path for path in candidates if os.path.exists(path)), candidates[0])
-        data_dir = os.path.dirname(anchor)
-        # Grids keyed by batch_size -> {(isl, step): latency}. Keeping every
-        # collected bs lets _query_cp look up the sparse deltas at the REAL
-        # batch (real measured bs=b latency), instead of scaling a bs=1 value
-        # by b (which would over-count: launch overhead amortises with batch).
-        out = {}
-        out2d = {"mqa": {}, "topk_last": {}, "topk_flat": {}, "dsa_attn": {}}
-
-        def _read(fn):
-            p = os.path.join(data_dir, fn)
-            return pd.read_parquet(p) if os.path.exists(p) else None
-
-        def _heads(df):
-            return df[df["num_heads"] == num_heads] if "num_heads" in df else df
-
-        def _put(tab, r):
-            tab.setdefault(int(r["batch_size"]), {})[(int(r["isl"]), int(r["step"]))] = float(r["latency"])
-
-        mdf = _read(f"{fp}_mqa_logits_module_perf.parquet")
-        if mdf is not None:
-            for _, r in _heads(mdf).iterrows():
-                _put(out2d["mqa"], r)
-        tdf = _read(f"{fp}_topk_module_perf.parquet")
-        if tdf is not None:
-            for _, r in _heads(tdf).iterrows():
-                mode = "topk_flat" if str(r.get("score_mode", "")) == "flat" else "topk_last"
-                _put(out2d[mode], r)
-        adf = _read(f"{fp}_dsa_attn_module_perf.parquet")
-        if adf is not None:
-            for _, r in _heads(adf).iterrows():
-                _put(out2d["dsa_attn"], r)
-        out["_2d"] = out2d
-        cls._glm5_sparse_cache[key] = out
-        return out
-
-    @staticmethod
-    def _bs_slice(by_bs: dict, b: int) -> dict:
-        """Pick the collected-batch slice nearest to ``b`` from a {bs: {(isl,step):lat}}
-        table. Exact match when ``b`` was collected (the common case); otherwise the
-        nearest collected batch."""
-        if not by_bs:
-            return {}
-        if b in by_bs:
-            return by_bs[b]
-        return by_bs[min(by_bs, key=lambda x: abs(x - b))]
-
-    @staticmethod
-    def _lookup_2d(table, isl, step):
-        """Lookup {(isl,step): latency} at a fixed isl (exact grid value), linear
-        interp/extrap on step. Used by the CP sub-kernel composition."""
-        if not table:
-            return None
-        isls = sorted({i for (i, _s) in table})
-        if isl > isls[-1]:
-            raise PerfDataNotAvailableError(
-                f"DSA CP: isl={isl} exceeds the collected sparse-kernel grid "
-                f"(max isl={isls[-1]}); mqa/topk scale super-linearly with isl, so "
-                f"clamping the isl axis would silently under-estimate. Re-collect with "
-                f"AIC_CHUNKED_PREFILL_SIZE >= {isl} "
-                f"(docs/CONTEXT_PARALLEL_DSA_MODELING.md §9.1)."
-            )
-        use_isl = isl if isl in isls else min(isls, key=lambda x: abs(x - isl))
-        steps = sorted(st for (i, st) in table if i == use_isl)
-        if not steps:
-            return None
-        if (use_isl, step) in table:
-            return table[(use_isl, step)]
-        lo = max([st for st in steps if st <= step], default=steps[0])
-        hi = min([st for st in steps if st >= step], default=steps[-1])
-        if lo == hi:
-            return table[(use_isl, lo)]
-        a = table[(use_isl, lo)]
-        bb = table[(use_isl, hi)]
-        return a + (bb - a) * (step - lo) / (hi - lo)
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor

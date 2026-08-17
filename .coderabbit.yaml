@@ -92,12 +92,11 @@ reviews:
         - Flag upper-layer dependencies or silent schema drift introduced into the minimal core distribution.
     - path: "aic-core/src/aiconfigurator_core/sdk/operations/**"
       instructions: |
-        - Single-oracle invariant (#1357 PR-5): per-op performance VALUES (latency/energy/SOL) come only from the compiled Rust engine (aic-core/rust/aiconfigurator-core). Python op classes own construction, weights, data loading and orchestration — not query math.
-        - Flag any new interpolation, roofline/SOL formula, empirical-utilization estimate, or per-call table lookup added on the Python side (a `_query_*_table` classmethod, a `get_sol`/`get_empirical` closure, or a `query()` override outside the whitelist in tests/cross_package/test_single_oracle_contract.py). The correct home is the Rust operator plus, if needed, a new engine FFI.
-        - Deprecated `Operation.query` shims must stay thin: build the op, route through `sdk/engine.py::_evaluate_single_op`, no math.
+        - Enforce the single-oracle invariant of #1357 PR-5 as specified by tests/cross_package/test_single_oracle_contract.py (the executable contract) and docs/single-oracle-rule-proposal.md in aic-core/rust/aiconfigurator-core (the pending .claude/rules update): per-op performance VALUES come only from the compiled Rust engine.
+        - Flag any Python-side estimation math these sources prohibit (interpolation, roofline/SOL formulas, empirical-utilization estimates, per-call table lookups, `query()` overrides outside the contract's whitelist); the correct home is the Rust operator plus, if needed, a new engine FFI.
     - path: "aic-core/src/aiconfigurator_core/sdk/perf_database.py"
       instructions: |
-        - Single-oracle invariant (#1357 PR-5): `PerfDatabase.query_*` is a FROZEN set of deprecated engine-routed shims scheduled for removal (PR-6). Flag any new `query_*` method, any math added inside an existing shim, and any new in-repo consumer of these shims — new per-op access goes through `EngineHandle.evaluate_ops_json` / `evaluate_ops_sol_json` or the phase/run surface.
+        - `PerfDatabase.query_*` is the FROZEN deprecated shim set defined in tests/cross_package/test_single_oracle_contract.py (removed with the deprecation-cleanup PR). Flag new `query_*` methods, math added inside a shim, and new in-repo shim consumers — new per-op access goes through `EngineHandle.evaluate_ops_json` / `evaluate_ops_sol_json` or the phase/run surface.
         - Data LOADING (table parsing, shared-layer source resolution, `_<family>_data` attributes) is in scope for this file and fine to extend; query math is not.
     - path: "src/aiconfigurator/generator/module_bridge.py"
       instructions: |

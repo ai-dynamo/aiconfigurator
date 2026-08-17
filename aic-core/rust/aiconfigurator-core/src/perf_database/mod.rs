@@ -337,6 +337,24 @@ impl PerfDatabase {
         version: &str,
         perf_db_sources: &PerfDbSources,
     ) -> Result<Self, AicError> {
+        Self::load_with_sources_opts(systems_root, system, backend, version, perf_db_sources, false)
+    }
+
+    /// [`PerfDatabase::load_with_sources`] with an estimate-only escape hatch:
+    /// `tolerate_missing_data` skips the perf-data-directory existence gate so
+    /// a system that ships only a spec yaml (Python's `allow_missing_data`
+    /// "estimate" databases) can still back a SOL view — every SOL answer is
+    /// analytic from the system spec, and any table-backed lookup raises its
+    /// own per-family miss lazily. Non-SOL callers must keep the loud gate:
+    /// a typo'd version string should fail at load, not as per-op misses.
+    pub fn load_with_sources_opts(
+        systems_root: &Path,
+        system: &str,
+        backend: &str,
+        version: &str,
+        perf_db_sources: &PerfDbSources,
+        tolerate_missing_data: bool,
+    ) -> Result<Self, AicError> {
         let system_yaml = systems_root.join(format!("{system}.yaml"));
         let spec = SystemSpec::load(&system_yaml)?;
         let system_data_root = systems_root.join(&spec.data_dir);
@@ -347,7 +365,10 @@ impl PerfDatabase {
         // the known legacy backend names). `data_root` stays the legacy path
         // either way — each table's `resolve_op_sources` call resolves the
         // actual per-file location (legacy or family) independently.
-        if !data_root.is_dir() && !has_family_backend_version(&system_data_root, backend, version) {
+        if !tolerate_missing_data
+            && !data_root.is_dir()
+            && !has_family_backend_version(&system_data_root, backend, version)
+        {
             return Err(AicError::PerfDatabase(format!(
                 "perf data directory not found in either the legacy layout ({}) or a family-first layout \
                  (<family>/{backend}/{version} under {}) (system={system}, backend={backend}, version={version})",
@@ -466,8 +487,16 @@ impl PerfDatabase {
         backend: &str,
         version: &str,
         perf_db_sources: &PerfDbSources,
+        tolerate_missing_data: bool,
     ) -> Result<Self, AicError> {
         static SHARED_TABLES: OnceLock<Mutex<HashMap<String, Weak<PerfTables>>>> = OnceLock::new();
+        if tolerate_missing_data {
+            // Estimate-only loads bypass the memo entirely: caching a set of
+            // empty tables under the plain identity key would let a later
+            // STRICT load of the same identity silently succeed with empty
+            // tables instead of raising the loud missing-directory error.
+            return Self::load_with_sources_opts(systems_root, system, backend, version, perf_db_sources, true);
+        }
         let key = shared_tables_key(systems_root, system, backend, version, perf_db_sources);
         let memo = SHARED_TABLES.get_or_init(Default::default);
         if let Some(tables) = memo.lock().unwrap().get(&key).and_then(Weak::upgrade) {
@@ -776,6 +805,7 @@ mod tests {
             "vllm",
             "0.19.0",
             &sources,
+            false,
         )
         .expect("shared load must succeed");
         let db2 = PerfDatabase::load_with_sources_shared(
@@ -784,6 +814,7 @@ mod tests {
             "vllm",
             "0.19.0",
             &sources,
+            false,
         )
         .expect("shared load must succeed");
         assert!(
@@ -800,6 +831,43 @@ mod tests {
     }
 
     #[test]
+    fn missing_data_dir_is_tolerated_only_when_requested() {
+        // Estimate-only escape hatch (#1552 review finding 8): a system with a
+        // spec yaml but NO perf-data directory must load under the tolerant
+        // flag (SOL answers are analytic from the spec) and must keep failing
+        // loudly under the strict default.
+        let strict = PerfDatabase::load_with_sources_opts(
+            &systems_root(),
+            "h100_pcie",
+            "trtllm",
+            "estimate",
+            &PerfDbSources::default(),
+            false,
+        );
+        assert!(
+            strict
+                .err()
+                .map(|e| e.to_string().contains("perf data directory not found"))
+                .unwrap_or(false),
+            "strict load of a data-less tuple must raise the missing-directory error"
+        );
+        let tolerant = PerfDatabase::load_with_sources_opts(
+            &systems_root(),
+            "h100_pcie",
+            "trtllm",
+            "estimate",
+            &PerfDbSources::default(),
+            true,
+        )
+        .expect("tolerant load must succeed from the spec yaml alone");
+        // Table-backed lookups still miss lazily per family.
+        assert!(tolerant
+            .gemm
+            .query(crate::common::enums::GemmQuantMode::Bfloat16, 64, 4096, 4096)
+            .is_err());
+    }
+
+    #[test]
     fn shared_load_distinct_source_maps_load_fresh_tables() {
         let db_default = PerfDatabase::load_with_sources_shared(
             &systems_root(),
@@ -807,6 +875,7 @@ mod tests {
             "vllm",
             "0.19.0",
             &PerfDbSources::default(),
+            false,
         )
         .expect("shared load must succeed");
         let mut sources = PerfDbSources::default();
@@ -820,6 +889,7 @@ mod tests {
             "vllm",
             "0.19.0",
             &sources,
+            false,
         )
         .expect("shared load must succeed (tables are lazy; the bad path only matters on query)");
         assert!(
@@ -841,6 +911,7 @@ mod tests {
             "vllm",
             "1.0",
             &PerfDbSources::default(),
+            false,
         )
         .expect("fixture load must succeed");
         let weak = Arc::downgrade(&db.tables);

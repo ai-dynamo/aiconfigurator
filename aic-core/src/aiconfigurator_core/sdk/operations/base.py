@@ -310,11 +310,11 @@ class Operation:
         if batch_size is None or s is None:
             raise ValueError(f"{type(self).__name__}.query requires 'batch_size' and 's'.")
         if is_context:
-            scale = kwargs.get("seq_imbalance_correction_scale", 1.0)
+            scale = kwargs.get("seq_imbalance_correction_scale")
         else:
             scale = kwargs.get(
                 "gen_seq_imbalance_correction_scale",
-                kwargs.get("seq_imbalance_correction_scale", 1.0),
+                kwargs.get("seq_imbalance_correction_scale"),
             )
         x = kwargs.get("x")
         return self, {
@@ -323,7 +323,7 @@ class Operation:
             "s": int(s),
             "prefix": int(kwargs.get("prefix") or 0),
             "x": None if x is None else int(x),
-            "imbalance_correction_scale": float(scale or 1.0),
+            "imbalance_correction_scale": 1.0 if scale is None else float(scale),
         }
 
     def _engine_query_is_context(self, kwargs: dict) -> bool:
@@ -336,12 +336,14 @@ class Operation:
         is_context = getattr(self, "_is_context", None)
         if is_context is not None:
             return bool(is_context)
-        # Instance phase markers: the mamba/gdn kernels use context/generation,
-        # FPMForwardOp uses prefill/decode (fpm_forward._PHASES).
+        # Instance phase markers: the mamba/gdn kernels use context/generation
+        # (KDA adds "verify" — speculative multi-token decode, generation-like
+        # for evaluation-context routing; the serialized spec keeps the verify
+        # phase + draft_tokens), FPMForwardOp uses prefill/decode.
         phase = getattr(self, "_phase", None)
         if phase in ("context", "prefill"):
             return True
-        if phase in ("generation", "decode"):
+        if phase in ("generation", "decode", "verify"):
             return False
         raise ValueError(f"{type(self).__name__}.query cannot infer the evaluation phase; pass is_context=True/False.")
 

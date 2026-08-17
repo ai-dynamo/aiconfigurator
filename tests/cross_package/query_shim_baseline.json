@@ -49,6 +49,18 @@
     "source": "empirical"
    }
   },
+  "compute-scale-tombstone": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.008402133484681447,
+    "source": "silicon"
+   }
+  },
   "ctx-attn-SOL": {
    "db": [
     "h200_sxm",
@@ -111,6 +123,18 @@
     "source": "engine"
    }
   },
+  "ctx-dsa-op": {
+   "db": [
+    "b200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 3.8622,
+    "source": "silicon"
+   }
+  },
   "ctx-dsa-silicon": {
    "db": [
     "b200_sxm",
@@ -170,6 +194,18 @@
    "value": {
     "energy": 0.0,
     "latency": 2.224497497853291,
+    "source": "silicon"
+   }
+  },
+  "ctx-mla-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.34673279238575105,
     "source": "silicon"
    }
   },
@@ -355,6 +391,18 @@
     "source": "silicon"
    }
   },
+  "fallback-token-only-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.012698666503032049,
+    "source": "silicon"
+   }
+  },
   "gdn-facade": {
    "db": [
     "b200_sxm",
@@ -491,6 +539,18 @@
     ]
    }
   },
+  "gemm-op-quant-override": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.01751733322938283,
+    "source": "silicon"
+   }
+  },
   "gemm-op-scaled": {
    "db": [
     "h200_sxm",
@@ -565,6 +625,30 @@
     "source": "silicon"
    }
   },
+  "gen-attn-zero-scale-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.0,
+    "source": "silicon"
+   }
+  },
+  "gen-dsa-op": {
+   "db": [
+    "b200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.16569968261718748,
+    "source": "silicon"
+   }
+  },
   "gen-dsa-silicon": {
    "db": [
     "b200_sxm",
@@ -627,6 +711,18 @@
     "source": "silicon"
    }
   },
+  "gen-mla-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.09087999661763509,
+    "source": "silicon"
+   }
+  },
   "kda-kernel-op": {
    "db": [
     "h200_sxm",
@@ -637,6 +733,18 @@
     "energy": 0.0,
     "latency": 0.5231808185577392,
     "source": "silicon"
+   }
+  },
+  "kda-verify-op": {
+   "db": [
+    "h200_sxm",
+    "sglang",
+    "0.5.16"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.00067456,
+    "source": "sol"
    }
   },
   "mamba2-composite-op": {
@@ -673,6 +781,16 @@
     "energy": 0.0,
     "latency": 0.07004479765892029,
     "source": "silicon"
+   }
+  },
+  "megamoe-op-quant-override-miss": {
+   "db": [
+    "b200_sxm",
+    "sglang",
+    "0.5.16"
+   ],
+   "value": {
+    "error": "PerfDataNotAvailableError"
    }
   },
   "mem-op-SOL": {
@@ -999,6 +1117,30 @@
     "source": "silicon"
    }
   },
+  "overlap-mixed-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.14591426805903512,
+    "source": "silicon"
+   }
+  },
+  "overlap-token-only-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.012698666503032049,
+    "source": "silicon"
+   }
+  },
   "p2p-SOL": {
    "db": [
     "h200_sxm",
@@ -1059,6 +1201,18 @@
     "energy": 0.0,
     "latency": 0.02048576,
     "source": "empirical"
+   }
+  },
+  "scale-matrix-tombstone": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.0020224000016848247,
+    "source": "silicon"
    }
   },
   "trtllm-alltoall-facade": {

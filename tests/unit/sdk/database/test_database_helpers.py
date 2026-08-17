@@ -240,14 +240,14 @@ def test_set_systems_paths_invalid_entry_raises(temp_systems_dir: Path, perf_dat
 
 
 def test_estimate_only_database_can_load_without_perf_files(perf_database):
-    """SOL/EMPIRICAL modes can instantiate from system specs without silicon files.
-
-    Loading is the Python-owned contract pinned here. The per-call
-    ``query_mem_op`` probe that used to follow retired with #1357 PR-5: the
-    engine-routed query shims load perf tables from DISK, so a data-less
-    estimate-only database cannot back the deprecated per-call surface
-    (estimate flows ride the run/FPM entry points instead).
+    """SOL/EMPIRICAL modes can instantiate from system specs without silicon files,
+    AND a SOL-mode per-call query still answers analytically from the spec: the
+    compiled engine tolerates a missing perf-data directory under the SOL view
+    (#1552 review finding 8 — perf_database/mod.rs load_with_sources_opts), so
+    the estimate-only capability survives the query-stack retirement.
     """
+    import warnings
+
     from aiconfigurator.sdk import common
 
     db = perf_database.get_database("h100_pcie", "trtllm", "estimate", allow_missing_data=True)
@@ -255,6 +255,12 @@ def test_estimate_only_database_can_load_without_perf_files(perf_database):
     assert db is not None
     db.set_default_database_mode(common.DatabaseMode.SOL)
     assert db.get_default_database_mode() == common.DatabaseMode.SOL
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        sol_ms = float(db.query_mem_op(1 << 20, database_mode=common.DatabaseMode.SOL))
+    # bytes / mem_bw * 1000 — pure system-spec arithmetic, no table involved.
+    expected = (1 << 20) / db.system_spec["gpu"]["mem_bw"] * 1000
+    assert sol_ms == pytest.approx(expected, rel=1e-9)
 
 
 # ----------------------------- get_latest_database_version -----------------------------

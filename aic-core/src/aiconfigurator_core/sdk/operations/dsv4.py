@@ -541,6 +541,19 @@ class DeepSeekV4MegaMoEModule(Operation):
 
     _ENGINE_QUERY_SHAPE = "tokens"
 
+    def _engine_query_plan(self, kwargs: dict):
+        """Legacy per-call ``quant_mode`` override: rebuild the twin with the
+        requested quant before engine evaluation (an uncovered override quant
+        must MISS loudly, exactly like the retired lookup did)."""
+        op, eval_kwargs = super()._engine_query_plan(kwargs)
+        quant_mode = kwargs.get("quant_mode")
+        if quant_mode is not None and quant_mode != self._quant_mode:
+            import copy
+
+            op = copy.copy(self)
+            op._quant_mode = quant_mode
+        return op, eval_kwargs
+
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor
 

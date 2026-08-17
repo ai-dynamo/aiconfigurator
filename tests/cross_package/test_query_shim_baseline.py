@@ -6,11 +6,15 @@
 PR-5 of #1357 deletes the Python per-call query math and re-routes the public
 surface (``PerfDatabase.query_*`` and ``Operation.query``) through the
 compiled engine as one-release deprecation shims. The values in
-``query_shim_baseline.json`` were captured FROM THE PYTHON MATH on the commit
-that deleted it (``--regen`` below, run before the deletion landed); this test
-replays every case through the live surface and requires bit-equal results,
-so a shim whose op construction or kwargs mapping drifts from the legacy
-semantics fails loudly.
+``query_shim_baseline.json`` were captured FROM THE PYTHON MATH on this PR's
+exact base commit (``--regen`` below, run on a checkout of the merge base);
+this test replays every case through the live surface and requires bit-equal
+results, so a shim whose op construction or kwargs mapping drifts from the
+legacy semantics fails loudly. Coverage is enforced against the FROZEN
+legacy-surface manifest at the bottom of this file (every retired facade,
+every op class with retired query semantics, and the named semantic
+dimensions — per-call overrides, verify phase, explicit zero scale,
+composites, tombstones, typed misses), not against the case list itself.
 
 Two deliberate exceptions, pinned against the ENGINE (not the legacy math)
 because PR-4 moved their public semantics to the op level with review:
@@ -1037,6 +1041,136 @@ CASES = [
         workload_distribution="power_law_1.01",
         is_context=True,
         num_fused_shared_experts=0,
+    ),  # ---- review round 2 (#1552 Arsene12358): coverage-gap dispositions ---------
+    op_case(
+        "overlap-token-only-op",
+        "h200",
+        "overlap.OverlapOp",
+        [
+            "ov",
+            [{"__op__": "gemm.GEMM", "ctor_args": ["g1", 1.0, 4096, 4096, "GEMMQuantMode.bfloat16"]}],
+            [{"__op__": "gemm.GEMM", "ctor_args": ["g2", 1.0, 4096, 4096, "GEMMQuantMode.bfloat16"]}],
+        ],
+        {"x": 64, "batch_size": 64, "s": 4096, "beam_width": 1},
+        version="1.3.0rc20",
+    ),
+    op_case(
+        "fallback-token-only-op",
+        "h200",
+        "overlap.FallbackOp",
+        [
+            "fb",
+            {"__op__": "gemm.GEMM", "ctor_args": ["g1", 1.0, 4096, 4096, "GEMMQuantMode.bfloat16"]},
+            [{"__op__": "gemm.GEMM", "ctor_args": ["g2", 1.0, 4096, 4096, "GEMMQuantMode.bfloat16"]}],
+        ],
+        {"x": 64, "batch_size": 64, "s": 4096, "beam_width": 1},
+        version="1.3.0rc20",
+    ),
+    op_case(
+        "overlap-mixed-op",
+        "h200",
+        "overlap.OverlapOp",
+        [
+            "ov_mixed",
+            [{"__op__": "gemm.GEMM", "ctor_args": ["g1", 1.0, 4096, 4096, "GEMMQuantMode.bfloat16"]}],
+            [
+                {
+                    "__op__": "attention.GenerationAttention",
+                    "ctor_args": ["ga", 1.0, 32, 4, "KVCacheQuantMode.bfloat16"],
+                }
+            ],
+        ],
+        {"x": 64, "batch_size": 64, "s": 4096, "beam_width": 1},
+        version="1.3.0rc20",
+    ),
+    op_case(
+        "gemm-op-quant-override",
+        "h200",
+        "gemm.GEMM",
+        ["g", 1.0, 4096, 4096, "GEMMQuantMode.bfloat16"],
+        {"x": 64, "quant_mode": "GEMMQuantMode.fp8"},
+        version="1.3.0rc20",
+    ),
+    op_case(
+        "megamoe-op-quant-override-miss",
+        "b200-sglang",
+        "dsv4.DeepSeekV4MegaMoEModule",
+        ["m", 1.0, 3584, 3072, 16, 896, 1, 8, "MoEQuantMode.w4a8_mxfp4_mxfp8", "power_law_1.01"],
+        {"x": 1024, "quant_mode": "MoEQuantMode.w4a16_mxfp4"},
+        ctor_kwargs={"is_context": True, "num_fused_shared_experts": 0},
+        version="0.5.16",
+    ),
+    op_case(
+        "ctx-mla-op",
+        "h200",
+        "mla.ContextMLA",
+        ["context_mla", 1.0, 16, "KVCacheQuantMode.bfloat16", "FMHAQuantMode.bfloat16"],
+        {"batch_size": 8, "s": 1434, "prefix": 614},
+        version="1.3.0rc20",
+    ),
+    op_case(
+        "gen-mla-op",
+        "h200",
+        "mla.GenerationMLA",
+        ["generation_mla", 1.0, 16, "KVCacheQuantMode.bfloat16"],
+        {"batch_size": 64, "s": 4096, "beam_width": 1},
+        version="1.3.0rc20",
+    ),
+    op_case(
+        "ctx-dsa-op",
+        "b200",
+        "dsa.ContextDSAModule",
+        [
+            "context_dsa",
+            1.0,
+            128,
+            "KVCacheQuantMode.bfloat16",
+            "FMHAQuantMode.bfloat16",
+            "GEMMQuantMode.bfloat16",
+        ],
+        {"batch_size": 1, "s": 4096, "prefix": 0},
+    ),
+    op_case(
+        "gen-dsa-op",
+        "b200",
+        "dsa.GenerationDSAModule",
+        ["generation_dsa", 1.0, 128, "KVCacheQuantMode.bfloat16", "GEMMQuantMode.bfloat16"],
+        {"batch_size": 1, "s": 8192, "beam_width": 1},
+    ),
+    op_case(
+        "kda-verify-op",
+        "h200-sglang",
+        "mamba.KDAKernel",
+        ["context_kda_verify", 1.0, "chunk_kda", "verify", 7168, 24, 128, 24, 128, 4],
+        {"batch_size": 1, "s": 4096},
+        ctor_kwargs={"draft_tokens": 3},
+        version="0.5.16",
+    ),
+    op_case(
+        "gen-attn-zero-scale-op",
+        "h200",
+        "attention.GenerationAttention",
+        ["generation_attention", 1.0, 32, 4, "KVCacheQuantMode.bfloat16"],
+        {"batch_size": 64, "s": 4096, "beam_width": 1, "gen_seq_imbalance_correction_scale": 0.0},
+        version="1.3.0rc20",
+    ),
+    facade_case(
+        "compute-scale-tombstone",
+        "h200",
+        "query_compute_scale",
+        expect_error="NotImplementedError",
+        m=256,
+        k=4096,
+        quant_mode="GEMMQuantMode.fp8_static",
+    ),
+    facade_case(
+        "scale-matrix-tombstone",
+        "h200",
+        "query_scale_matrix",
+        expect_error="NotImplementedError",
+        m=256,
+        k=4096,
+        quant_mode="GEMMQuantMode.fp8_static",
     ),
 ]
 
@@ -1062,14 +1196,32 @@ def _resolve_kwargs(kwargs):
     return {key: _resolve_value(value) for key, value in kwargs.items()}
 
 
-def _build_op(case):
+def _op_class(dotted):
     import importlib
 
-    module_name, _, class_name = case["op"].rpartition(".")
+    module_name, _, class_name = dotted.rpartition(".")
     module = importlib.import_module(f"aiconfigurator_core.sdk.operations.{module_name}")
-    cls = getattr(module, class_name)
-    args = [_resolve_value(a) for a in case["ctor_args"]]
-    kwargs = _resolve_kwargs(case["ctor_kwargs"])
+    return getattr(module, class_name)
+
+
+def _resolve_ctor_value(value):
+    """Ctor args may nest child op specs (composites): {"__op__": "gemm.GEMM",
+    "ctor_args": [...]} or lists thereof; everything else goes through the
+    enum decoder."""
+    if isinstance(value, dict) and "__op__" in value:
+        cls = _op_class(value["__op__"])
+        args = [_resolve_ctor_value(a) for a in value.get("ctor_args", [])]
+        kwargs = {k: _resolve_ctor_value(v) for k, v in value.get("ctor_kwargs", {}).items()}
+        return cls(*args, **kwargs)
+    if isinstance(value, list):
+        return [_resolve_ctor_value(v) for v in value]
+    return _resolve_value(value)
+
+
+def _build_op(case):
+    cls = _op_class(case["op"])
+    args = [_resolve_ctor_value(a) for a in case["ctor_args"]]
+    kwargs = {k: _resolve_ctor_value(v) for k, v in case["ctor_kwargs"].items()}
     return cls(*args, **kwargs)
 
 
@@ -1222,3 +1374,142 @@ if __name__ == "__main__":
         _regen()
     else:
         print(__doc__)
+
+
+# ----------------------------------------------------------------------------- #
+# Frozen legacy-surface manifest (review #1552: coverage must be derived from
+# an independent inventory, not from the hand-written CASES themselves).
+# ----------------------------------------------------------------------------- #
+
+# Every PerfDatabase.query_* method the retired stack exposed (== the shim set
+# frozen by test_single_oracle_contract.PERF_DATABASE_QUERY_SHIMS).
+LEGACY_FACADE_SURFACE = frozenset(
+    {
+        "query_gemm",
+        "query_compute_scale",
+        "query_scale_matrix",
+        "query_context_attention",
+        "query_encoder_attention",
+        "query_generation_attention",
+        "query_context_mla",
+        "query_generation_mla",
+        "query_context_mla_module",
+        "query_generation_mla_module",
+        "query_wideep_generation_mla",
+        "query_wideep_context_mla",
+        "query_custom_allreduce",
+        "query_nccl",
+        "query_moe",
+        "query_mla_bmm",
+        "query_mem_op",
+        "query_mamba2",
+        "query_gdn",
+        "query_p2p",
+        "query_wideep_deepep_ll",
+        "query_wideep_deepep_normal",
+        "query_wideep_moe_compute",
+        "query_trtllm_alltoall",
+        "query_moe_a2a",
+        "query_moe_expert_compute",
+        "query_context_dsa_module",
+        "query_generation_dsa_module",
+        "query_mhc_module",
+        "query_context_deepseek_v4_attention_module",
+        "query_generation_deepseek_v4_attention_module",
+        "query_dsv4_megamoe_module",
+    }
+)
+
+# Every Operation subclass whose retired query() had semantics of its own.
+# FPMForwardOp is deliberately absent: it never defined query() pre-retirement
+# (base raised NotImplementedError), so there is no legacy behavior to pin —
+# its phase mapping is covered by the base-plan tests in test_base_queries.py.
+LEGACY_OP_QUERY_SURFACE = frozenset(
+    {
+        "gemm.GEMM",
+        "embedding.Embedding",
+        "elementwise.ElementWise",
+        "attention.ContextAttention",
+        "attention.GenerationAttention",
+        "attention.EncoderAttention",
+        "mla.ContextMLA",
+        "mla.GenerationMLA",
+        "mla.MLAModule",
+        "mla.MLABmm",
+        "mla.WideEPContextMLA",
+        "mla.WideEPGenerationMLA",
+        "dsa.ContextDSAModule",
+        "dsa.GenerationDSAModule",
+        "msa.ContextMSAModule",
+        "msa.GenerationMSAModule",
+        "dsv4.DeepSeekV4MHCModule",
+        "dsv4.ContextDeepSeekV4AttentionModule",
+        "dsv4.GenerationDeepSeekV4AttentionModule",
+        "dsv4.DeepSeekV4MegaMoEModule",
+        "mamba.Mamba2Kernel",
+        "mamba.GDNKernel",
+        "mamba.KDAKernel",
+        "mamba.Mamba2",
+        "moe.MoE",
+        "moe.MoEDispatch",
+        "moe.TrtLLMWideEPMoE",
+        "moe.TrtLLMWideEPMoEDispatch",
+        "moe_comm.MoEAllToAll",
+        "moe_comm.MoEExpertCompute",
+        "communication.CustomAllReduce",
+        "communication.NCCL",
+        "communication.P2P",
+        "overlap.OverlapOp",
+        "overlap.FallbackOp",
+        "afd_transfer.AFDTransfer",
+        "afd_transfer.AFDFAllGather",
+        "afd_transfer.AFDFReduceScatter",
+        "afd_transfer.AFDCombine",
+    }
+)
+
+# Semantic dimensions the sweep must exercise, each naming its case ids.
+SEMANTIC_DIMENSION_CASES = {
+    "per-call quant override honored": {"gemm-op-quant-override", "moe-op-quant-override"},
+    "per-call quant override missing-data miss": {"moe-op-quant-override-missing", "megamoe-op-quant-override-miss"},
+    "verify phase (speculative KDA)": {"kda-verify-op"},
+    "explicit zero imbalance scale": {"gen-attn-zero-scale-op"},
+    "token-only composites": {"overlap-token-only-op", "fallback-token-only-op"},
+    "mixed-phase composite": {"overlap-mixed-op"},
+    "tombstones assert their error": {
+        "compute-scale-tombstone",
+        "scale-matrix-tombstone",
+        "wideep-deepep-ll-facade",
+        "wideep-deepep-normal-facade",
+        "trtllm-alltoall-facade",
+        "wideep-dispatch-op",
+    },
+    "typed data-miss errors": {"msa-ctx-op", "msa-gen-op"},
+    "per-call mode overrides": {"gemm-bf16-explicit-silicon", "gemm-bf16-empirical", "gen-attn-hybrid-offgrid"},
+}
+
+
+def test_cases_cover_frozen_legacy_surface():
+    """Coverage is judged against the FROZEN inventories above — not against
+    the hand-written CASES — so dropping a facade/op disposition from the
+    sweep fails here instead of silently shrinking coverage."""
+    facade_methods = {case["method"] for case in CASES if case["surface"] == "facade"}
+    missing_facades = LEGACY_FACADE_SURFACE - facade_methods
+    assert not missing_facades, f"facades without a pinned disposition: {sorted(missing_facades)}"
+
+    op_classes = {case["op"] for case in CASES if case["surface"] == "op"}
+    missing_ops = LEGACY_OP_QUERY_SURFACE - op_classes
+    assert not missing_ops, f"op classes without a pinned disposition: {sorted(missing_ops)}"
+
+    case_ids = {case["id"] for case in CASES}
+    for dimension, ids in SEMANTIC_DIMENSION_CASES.items():
+        gone = ids - case_ids
+        assert not gone, f"semantic dimension {dimension!r} lost its cases: {sorted(gone)}"
+
+
+def test_manifest_matches_contract_shim_set():
+    """The facade manifest and the single-oracle contract's frozen shim set
+    must be the SAME surface — a drift means one of them forgot an entry."""
+    from test_single_oracle_contract import PERF_DATABASE_QUERY_SHIMS
+
+    assert frozenset(PERF_DATABASE_QUERY_SHIMS) == LEGACY_FACADE_SURFACE
