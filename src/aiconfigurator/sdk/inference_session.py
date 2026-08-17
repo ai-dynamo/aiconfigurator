@@ -989,6 +989,12 @@ class AFDInferenceSession:
     :class:`aiconfigurator.sdk.inference_summary.InferenceSummary`.
     """
 
+    # Class-level default so the dedupe check also works on instances built
+    # without ``__init__`` (test doubles). ``__init__`` shadows it per session
+    # and the warning path assigns an instance attribute, so the suppression
+    # never leaks across sessions.
+    _warned_optimistic_fallback = False
+
     def __init__(
         self,
         model_path: str,
@@ -1028,6 +1034,10 @@ class AFDInferenceSession:
         self._a_system_name = a_system_name or str(getattr(self._a_database, "system", ""))
         self._f_system_name = f_system_name or str(getattr(self._f_database, "system", ""))
         self._afd_config = afd_config
+        # The optimistic->conservative fallback is evaluated once per decode
+        # stride per candidate, so a sweep would emit the same warning tens of
+        # thousands of times. Report it once per session.
+        self._warned_optimistic_fallback = False
 
     @property
     def is_hetero(self) -> bool:
@@ -1291,11 +1301,19 @@ class AFDInferenceSession:
             topk=topk,
             comm_quant_mode=comm_quant,
         )
+        # GPUs the A and F pools occupy together. Only the cross-pool P2P
+        # legs get it: on a super-node fabric (NVL72-class) a pool pair that
+        # fits one scale-up domain is priced on NVLink, one that exceeds
+        # num_gpus_per_rack on the scale-out fabric. The F-side AG/RS are
+        # intra-node and a_combine is a local HBM reduce, so neither can
+        # cross a rack and neither takes a span.
+        span_gpus = cfg.n_a_nodes * cfg.effective_a_gpus_per_node + cfg.n_f_nodes * cfg.effective_f_gpus_per_node
         return _AFDCommOps(
             a2f=AFDTransfer(
                 name="afd_a2f_transfer",
                 scale_factor=1.0,
                 direction="a2f",
+                span_gpus=span_gpus,
                 comm_overhead_factor=cfg.comm_overhead_factor,
                 **shared,
             ),
@@ -1303,6 +1321,7 @@ class AFDInferenceSession:
                 name="afd_f2a_transfer",
                 scale_factor=1.0,
                 direction="f2a",
+                span_gpus=span_gpus,
                 comm_overhead_factor=cfg.comm_overhead_factor,
                 **shared,
             ),
@@ -1352,7 +1371,10 @@ class AFDInferenceSession:
               TPOT_layer = t_a + t_a2f + t_f + t_f2a
 
         The optimistic model falls back to conservative when there are
-        not enough in-flight micro-batches to fill the K=3 pipeline.
+        not enough in-flight micro-batches to fill the K=3 pipeline. Since
+        ``min_m`` exceeds 2 whenever the round trip is non-zero, mb=2 always
+        takes that path -- which is why the sweep does not enumerate
+        ``optimistic`` below mb=3.
 
         Returns:
             (t_cycle, comm_hidden).  ``comm_hidden`` is True only in the
@@ -1371,12 +1393,15 @@ class AFDInferenceSession:
             # symmetric Phase-1 assumption (t_a2f == t_f2a).
             min_m = 2.0 + t_c / max(t_a, t_f, 1e-9)
             if num_microbatches < min_m:
-                logger.warning(
-                    "AFD optimistic pipeline: num_microbatches (%d) < min required (%.1f) "
-                    "to hide communication. Falling back to conservative model.",
-                    num_microbatches,
-                    min_m,
-                )
+                if not self._warned_optimistic_fallback:
+                    self._warned_optimistic_fallback = True
+                    logger.warning(
+                        "AFD optimistic pipeline: num_microbatches (%d) < min required (%.1f) "
+                        "to hide communication. Falling back to conservative model. "
+                        "Further occurrences in this session are suppressed.",
+                        num_microbatches,
+                        min_m,
+                    )
                 return max(t_a + t_a2f, t_f + t_f2a), False
             t_cycle = max(t_a, t_f, t_c)
             comm_hidden = t_c <= max(t_a, t_f)
@@ -1533,6 +1558,7 @@ class AFDInferenceSession:
         brk_t_f_per_layer: float,
         t_a2f_layer: float,
         t_f2a_layer: float,
+        f_scale: float = 1.0,
     ) -> tuple[float, float, float, float, dict, dict, bool]:
         """Integrate compute latency along the decode KV-cache length.
 
@@ -1555,6 +1581,10 @@ class AFDInferenceSession:
         max is
         evaluated on the full per-layer time, not on the compute-only
         time.
+
+        ``f_scale`` is ``AFDConfig.f_latency_scale``: it multiplies the
+        F-side compute so a fused FFN runtime can be emulated. The caller
+        has already scaled ``brk_t_f_per_layer``.
         """
         stride = self._AFD_DECODE_STRIDE
         verify_width = self._nextn + 1
@@ -1596,6 +1626,9 @@ class AFDInferenceSession:
                 is_context=False,
                 database=self._f_database,
             )
+            if f_scale != 1.0:
+                t_f_step_i *= f_scale
+                f_per_op_i = {k: v * f_scale for k, v in f_per_op_i.items()}
 
             t_a_layer_i = t_a_step_i / num_layers + brk_t_a_per_layer
             t_f_layer_i = t_f_step_i / num_layers + brk_t_f_per_layer
@@ -1685,9 +1718,20 @@ class AFDInferenceSession:
             )
         # Boundary ops (``add_norm_2`` / ``logits_gemm``) default to the
         # A-Worker, but ``cfg.boundary_on_attn`` lets the user reassign
-        # them to the F-Worker for sensitivity studies.
-        a_partition = build_afd_ops_partition(a_model, phase=ops_phase, boundary_on_attn=cfg.boundary_on_attn)
-        f_partition = build_afd_ops_partition(f_model, phase=ops_phase, boundary_on_attn=cfg.boundary_on_attn)
+        # them to the F-Worker for sensitivity studies. ``cfg.router_on_attn``
+        # does the same for the MoE router (FastAFD routes on the A side).
+        a_partition = build_afd_ops_partition(
+            a_model,
+            phase=ops_phase,
+            boundary_on_attn=cfg.boundary_on_attn,
+            router_on_attn=cfg.router_on_attn,
+        )
+        f_partition = build_afd_ops_partition(
+            f_model,
+            phase=ops_phase,
+            boundary_on_attn=cfg.boundary_on_attn,
+            router_on_attn=cfg.router_on_attn,
+        )
 
         isl = runtime_config.isl
         osl = runtime_config.osl or 1
@@ -1756,7 +1800,15 @@ class AFDInferenceSession:
         t_f2a_layer = float(r_f2a)
         t_c_layer = t_a2f_layer + t_f2a_layer
         brk_t_a_per_layer = float(r_cmb)
-        brk_t_f_per_layer = float(r_ag) + float(r_rs)
+        # ``f_latency_scale`` calibrates the whole F side against a specific
+        # FFN runtime (e.g. a fused MegaMoE-style kernel versus stock per-op
+        # data). It covers F compute plus the F-node intra-node AG/RS, which
+        # the fused kernel also absorbs. The cross-pool transfers and the
+        # A-side combine are fabric/A-side costs and stay unscaled.
+        f_scale = float(cfg.f_latency_scale or 1.0)
+        brk_t_f_per_layer = (float(r_ag) + float(r_rs)) * f_scale
+        if f_scale != 1.0:
+            brk["t_f"] = {label: ms * f_scale for label, ms in brk["t_f"].items()}
 
         # Ops in :mod:`aiconfigurator.sdk.models` are constructed with
         # ``scale_factor=num_layers`` (per-layer ops such as qkv_gemm) or
@@ -1793,6 +1845,7 @@ class AFDInferenceSession:
                 brk_t_f_per_layer=brk_t_f_per_layer,
                 t_a2f_layer=t_a2f_layer,
                 t_f2a_layer=t_f2a_layer,
+                f_scale=f_scale,
             )
             # ``comm_hidden`` was captured during the decode integration
             # loop above — reuse it instead of re-evaluating
@@ -1820,6 +1873,9 @@ class AFDInferenceSession:
                 is_context=True,
                 database=self._f_database,
             )
+            if f_scale != 1.0:
+                t_f_total *= f_scale
+                f_per_op = {k: v * f_scale for k, v in f_per_op.items()}
             t_a_layer = t_a_total / num_layers + brk_t_a_per_layer
             t_f_layer = t_f_total / num_layers + brk_t_f_per_layer
             t_cycle, comm_hidden = self._pipeline_tcycle(t_a_layer, t_f_layer, t_a2f_layer, t_f2a_layer)
@@ -1869,6 +1925,8 @@ class AFDInferenceSession:
             "t_step": t_step,
             "comm_hidden": comm_hidden,
             "balance_ratio": balance_ratio,
+            # Surfaced so a calibrated row is distinguishable from raw data.
+            "f_latency_scale": f_scale,
             "a_per_op": dict(a_per_op),
             "f_per_op": dict(f_per_op),
             "a_memory": a_memory,
@@ -2173,6 +2231,10 @@ class AFDInferenceSession:
             "t_step": t_step,
             "balance_ratio": balance_ratio,
             "comm_hidden": comm_hidden,
+            # Config-level, not per-phase: surfaced so a calibrated row is
+            # distinguishable from one built on raw kernel data.
+            "f_latency_scale": float(self._afd_config.f_latency_scale or 1.0),
+            "router_on_attn": bool(self._afd_config.router_on_attn),
             "prefill_t_a_layer": prefill_scalars["t_a_layer"],
             "prefill_t_f_layer": prefill_scalars["t_f_layer"],
             "prefill_t_a2f_layer": prefill_scalars["t_a2f_layer"],

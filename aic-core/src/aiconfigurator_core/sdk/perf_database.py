@@ -2257,6 +2257,10 @@ class PerfDatabase:
         """Thin wrapper — delegates to ``SystemSpec.get_p2p_bandwidth``."""
         return self.system_spec.get_p2p_bandwidth(num_gpus)
 
+    def _get_p2p_latency(self, num_gpus: int) -> float:
+        """Thin wrapper — delegates to ``SystemSpec.get_p2p_latency``."""
+        return self.system_spec.get_p2p_latency(num_gpus)
+
     def set_default_database_mode(self, mode: common.DatabaseMode) -> None:
         """
         Set the default database mode

@@ -115,6 +115,11 @@ pub struct NodeSpec {
     /// Inter-rack bandwidth, bytes/s. Optional.
     #[serde(default)]
     pub inter_rack_bw: Option<f64>,
+    /// Inter-rack point-to-point latency (seconds). Optional; falls back to
+    /// `p2p_latency` when unset, so systems without a rack tier keep the
+    /// pre-rack behavior.
+    #[serde(default)]
+    pub inter_rack_latency: Option<f64>,
 }
 
 /// Miscellaneous, mostly empirical, configuration.
@@ -173,6 +178,36 @@ impl SystemSpec {
             return node.inter_node_bw;
         }
         node.inter_rack_bw.unwrap_or(node.inter_node_bw)
+    }
+
+    /// Mirrors Python's `SystemSpec.get_p2p_latency` two-tier selection.
+    ///
+    /// The latency counterpart of [`Self::get_p2p_bandwidth`]. Two tiers are
+    /// enough: `p2p_latency` covers a scale-up domain (node or rack), while
+    /// crossing racks pays the scale-out fabric's round trip instead. A system
+    /// with no declared rack tier always returns `p2p_latency`.
+    ///
+    /// Leaving a rack cannot be faster than staying inside it, so the cross-rack
+    /// value is clamped at `p2p_latency`. The guard is load-bearing, not
+    /// defensive: some shipped specs raise `p2p_latency` by hand as a
+    /// calibration knob (gb200/gb300 label theirs a "nonofficial correction")
+    /// while `inter_rack_latency` keeps the textbook InfiniBand figure, leaving
+    /// the pair inverted. Nothing read `inter_rack_latency` before this method
+    /// existed, so the inconsistency had never mattered.
+    ///
+    /// Clamping silently here on purpose: this crate has no logging dependency,
+    /// and the Python `SystemSpec.get_p2p_latency` loads the same yaml and warns.
+    /// Both sides must agree on the number, which is what this mirrors.
+    pub fn get_p2p_latency(&self, num_gpus: u32) -> f64 {
+        let node = &self.node;
+        let per_rack = node.num_gpus_per_rack.unwrap_or(u32::MAX);
+        if num_gpus <= per_rack {
+            return node.p2p_latency;
+        }
+        match node.inter_rack_latency {
+            Some(inter_rack) if inter_rack >= node.p2p_latency => inter_rack,
+            _ => node.p2p_latency,
+        }
     }
 }
 

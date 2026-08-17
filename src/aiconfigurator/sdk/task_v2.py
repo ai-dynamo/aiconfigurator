@@ -374,6 +374,8 @@ def build_afd_parallel_lists(
     is_moe: bool,
     num_experts: int = 0,
     *,
+    a_gpus_per_node: int | None = None,
+    f_gpus_per_node: int | None = None,
     search_config: Mapping[str, Any] | None = None,
 ) -> list[tuple[int, int, int, int, int, str]]:
     """Enumerate AFD candidate topologies for the default-mode sweep.
@@ -382,30 +384,56 @@ def build_afd_parallel_lists(
     num_microbatches, pipeline_model)`` tuples.
 
     Candidates satisfy the hard constraints:
-    * GPU budget -- ``(n_a_nodes + n_f_nodes) * gpus_per_node <= total_gpus``
-    * ``tp_a`` divides ``gpus_per_node``
-    * ``f_moe_ep_size`` divides ``tp_f = n_f_nodes * gpus_per_node``
+    * GPU budget -- ``n_a_nodes * a_width + n_f_nodes * f_width <= total_gpus``
+    * ``tp_a`` divides ``a_width``
+    * ``f_moe_ep_size`` divides ``tp_f = n_f_nodes * f_width``
     * ``num_experts % f_moe_ep_size == 0`` when known
+
+    ``a_gpus_per_node`` / ``f_gpus_per_node`` are the per-pool node widths, each
+    defaulting to ``gpus_per_node``. Node width is a hardware fact, so under
+    hetero A/F the two differ and a single value silently conflates three
+    separate jobs: the budget, ``tp_a`` divisibility, and ``tp_f``. Costing
+    already resolved the widths per pool, so an enumerator using the top-level
+    width admitted candidates whose real footprint exceeded the budget -- with no
+    downstream check to catch it, since the rejection categories cover oom,
+    fixed_batch, tpot and low_batch_oom only.
+
+    Passing equal widths (or neither) reproduces the previous enumeration
+    element for element.
+
+    ``max_af_ratio`` is ``None`` by default (no A:F cap beyond the node
+    budget). The old 4.0 cap excluded the measured AFD optima: FastAFD
+    reports 7:1 and 11:1 for Qwen3-235B and 17:1 for MiniMax-M2.5 on
+    GB200 NVL72, all outside a 4:1 bound. Set it explicitly to restore a
+    cap.
     """
     if gpus_per_node < 1 or total_gpus < 1:
         return []
 
-    total_nodes = total_gpus // gpus_per_node
-    if total_nodes < 2:
+    a_width = max(int(a_gpus_per_node or gpus_per_node), 1)
+    f_width = max(int(f_gpus_per_node or gpus_per_node), 1)
+
+    # Each pool needs at least one node, so the cheapest possible deployment is
+    # one node of each. Anything under that cannot host AFD at all.
+    if a_width + f_width > total_gpus:
         return []
 
     search = dict(search_config or {})
     tp_a_candidates = search.get("tp_a_list")
     if tp_a_candidates is None:
-        tp_a_candidates = sorted({d for d in (1, 2, 4, gpus_per_node) if d >= 1 and gpus_per_node % d == 0})
+        tp_a_candidates = sorted({d for d in (1, 2, 4, a_width) if d >= 1 and a_width % d == 0})
     else:
-        tp_a_candidates = sorted({int(tp) for tp in tp_a_candidates if gpus_per_node % int(tp) == 0})
+        tp_a_candidates = sorted({int(tp) for tp in tp_a_candidates if a_width % int(tp) == 0})
 
     microbatch_candidates = list(search.get("microbatch_list") or [2, 3, 4])
     pipeline_candidates = list(search.get("pipeline_model_list") or ["optimistic", "conservative"])
     f_moe_ep_size_list = search.get("f_moe_ep_size_list")
-    max_af_ratio = float(search.get("max_af_ratio", 4.0))
-    max_candidates = int(search.get("max_candidates", 10_000))
+    max_af_ratio = search.get("max_af_ratio")
+    if max_af_ratio is not None:
+        max_af_ratio = float(max_af_ratio)
+        if max_af_ratio <= 0:
+            raise ValueError(f"afd_config.search.max_af_ratio must be > 0 when set, got {max_af_ratio}.")
+    max_candidates = int(search.get("max_candidates", 20_000))
     candidate_overflow = str(search.get("candidate_overflow", "error"))
     if max_candidates < 1:
         raise ValueError(f"afd_config.search.max_candidates must be >= 1, got {max_candidates}.")
@@ -413,11 +441,22 @@ def build_afd_parallel_lists(
         raise ValueError("afd_config.search.candidate_overflow must be 'error' or 'truncate'.")
 
     candidates: list[tuple[int, int, int, int, int, str]] = []
-    for n_a_nodes in range(1, total_nodes):
-        for n_f_nodes in range(1, total_nodes - n_a_nodes + 1):
-            if n_a_nodes / n_f_nodes > max_af_ratio:
+    # Bounds come from each pool's own width; the budget below is what actually
+    # admits a pair, so these only need to be wide enough not to cut off a
+    # feasible candidate. Leaving one node for the other pool mirrors the
+    # previous ``range(1, total_nodes)`` shape.
+    max_a_nodes = max((total_gpus - f_width) // a_width, 0)
+    max_f_nodes = max((total_gpus - a_width) // f_width, 0)
+    for n_a_nodes in range(1, max_a_nodes + 1):
+        for n_f_nodes in range(1, max_f_nodes + 1):
+            # Real footprint, not a node count times one width: this is the check
+            # that was missing, and the reason a gb200 A pool paired with a
+            # b200_sxm F pool could sail 44% over budget unnoticed.
+            if n_a_nodes * a_width + n_f_nodes * f_width > total_gpus:
                 continue
-            tp_f = n_f_nodes * gpus_per_node
+            if max_af_ratio is not None and n_a_nodes / n_f_nodes > max_af_ratio:
+                continue
+            tp_f = n_f_nodes * f_width
             if is_moe:
                 raw_ep_candidates = f_moe_ep_size_list or [1, 2, "n_f_nodes", "tp_f"]
                 resolved_ep_candidates: set[int] = set()
@@ -437,13 +476,14 @@ def build_afd_parallel_lists(
                 for f_moe_ep_size in ep_candidates:
                     for num_microbatches in microbatch_candidates:
                         for pipeline_model in pipeline_candidates:
-                            # Skip optimistic + mb < 3: the K=3 pipeline
-                            # requires num_microbatches >= 2 + t_c/max(t_a,
-                            # t_f), which is >= 3 whenever t_c > 0 (the
-                            # normal case).  mb=2 + optimistic always degrades
-                            # to conservative, producing a duplicate of the
-                            # mb=2 + conservative candidate and a flood of
-                            # per-stride warnings.
+                            # Skip optimistic + mb < 3. The K=3 pipeline needs
+                            # ``mb >= 2 + t_c / max(t_a, t_f)``, which exceeds 2
+                            # whenever the round trip is non-zero, so the session
+                            # demotes mb=2 to the blocking cadence and returns
+                            # exactly what the mb=2 + conservative candidate
+                            # already carries. Enumerating both spends a sweep
+                            # slot on a guaranteed duplicate and floods the log
+                            # with per-stride demotion warnings.
                             if pipeline_model == "optimistic" and num_microbatches < 3:
                                 continue
                             candidates.append(
@@ -678,6 +718,12 @@ class Task:
     afd_combined_with_pd: bool = True
     afd_comm_overhead_factor: float = 1.0
     afd_boundary_on_attn: bool = True
+    # FastAFD-aligned knobs. ``afd_router_on_attn`` moves the MoE router to
+    # the A pool (FastAFD's boundary); ``afd_f_latency_scale`` calibrates the
+    # whole F side against a specific FFN runtime (0.3-0.5 emulates a fused
+    # MegaMoE-style kernel, measured at 42-44% lower step latency).
+    afd_router_on_attn: bool = False
+    afd_f_latency_scale: float = 1.0
     afd_total_batch_size: int | None = None
     # Per-A-worker ceiling for the automatic A-batch search.
     afd_max_a_batch_size: int = 1024
@@ -691,8 +737,11 @@ class Task:
     afd_microbatch_candidates: list[int] | None = None
     afd_pipeline_model_candidates: list[str] | None = None
     afd_f_moe_ep_size_candidates: list[int | str] | None = None
-    afd_max_af_ratio: float = 4.0
-    afd_max_candidates: int = 10_000
+    # None = no A:F node-ratio cap beyond the GPU budget. FastAFD's measured
+    # optima on GB200 NVL72 sit at 7:1-17:1, so the former 4.0 default hid
+    # every one of them; set a float to reinstate a cap.
+    afd_max_af_ratio: float | None = None
+    afd_max_candidates: int = 20_000
     afd_candidate_overflow: str = "error"
     # AFD hetero pools. AFD deploys up to three pools -- a static prefill
     # pool (when afd_combined_with_pd), the A (attention) pool and the F
@@ -1973,10 +2022,16 @@ class Task:
             self._afd_parallel_config_list = []
             return
 
-        if effective_total_gpus < 2 * gpus_per_node:
+        # The floor is one node from each pool at its OWN width, not two of the
+        # top-level width: under hetero A/F those differ, so a fixed
+        # ``2 * gpus_per_node`` both rejects feasible budgets and accepts
+        # infeasible ones.
+        min_afd_gpus = self._afd_a_gpus_per_node + self._afd_f_gpus_per_node
+        if effective_total_gpus < min_afd_gpus:
             raise ValueError(
                 "The current node-granular AFD topology requires one full A node and one full F node "
-                f"(at least 2 nodes, {2 * gpus_per_node} GPUs at {gpus_per_node} GPUs/node); "
+                f"(at least {min_afd_gpus} GPUs: {self._afd_a_gpus_per_node} for the A pool + "
+                f"{self._afd_f_gpus_per_node} for the F pool); "
                 f"got total_gpus={effective_total_gpus}."
             )
 
@@ -2000,6 +2055,11 @@ class Task:
         self._afd_parallel_config_list = build_afd_parallel_lists(
             total_gpus=effective_total_gpus,
             gpus_per_node=gpus_per_node,
+            # Costing already sizes each pool by its own node width; hand the
+            # enumerator the same two so the budget it applies is the footprint the
+            # candidate will actually occupy.
+            a_gpus_per_node=self._afd_a_gpus_per_node,
+            f_gpus_per_node=self._afd_f_gpus_per_node,
             is_moe=self._is_moe,
             num_experts=num_experts,
             search_config=search_config,
@@ -2345,6 +2405,14 @@ class Task:
             or self.afd_max_candidates < 1
         ):
             raise ValueError(f"afd_max_candidates must be a positive integer, got {self.afd_max_candidates!r}.")
+        if self.afd_max_af_ratio is not None and (
+            isinstance(self.afd_max_af_ratio, bool)
+            or not isinstance(self.afd_max_af_ratio, (int, float))
+            or self.afd_max_af_ratio <= 0
+        ):
+            raise ValueError(
+                f"afd_max_af_ratio must be a positive number or None (no cap), got {self.afd_max_af_ratio!r}."
+            )
         if self.afd_candidate_overflow not in {"error", "truncate"}:
             raise ValueError(
                 f"afd_candidate_overflow must be either 'error' or 'truncate', got {self.afd_candidate_overflow!r}."
@@ -2870,6 +2938,8 @@ class Task:
             "combined_with_pd": self.afd_combined_with_pd,
             "comm_overhead_factor": self.afd_comm_overhead_factor,
             "boundary_on_attn": self.afd_boundary_on_attn,
+            "router_on_attn": self.afd_router_on_attn,
+            "f_latency_scale": self.afd_f_latency_scale,
             "total_batch_size": self.afd_total_batch_size,
             "max_a_batch_size": self.afd_max_a_batch_size,
             "target_ttft": self.ttft,
@@ -3446,6 +3516,8 @@ class Task:
             f_moe_ep_size=f_moe_ep_size,
             comm_overhead_factor=self.afd_comm_overhead_factor,
             boundary_on_attn=self.afd_boundary_on_attn,
+            router_on_attn=self.afd_router_on_attn,
+            f_latency_scale=self.afd_f_latency_scale,
         )
 
         a_model_config = copy.deepcopy(base_model_config)

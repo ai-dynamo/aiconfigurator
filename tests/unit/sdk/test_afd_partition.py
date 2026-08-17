@@ -352,3 +352,118 @@ def test_build_afd_ops_partition_inner_overlap_uses_unified_order():
 
     assert partition.attn_ops == []
     assert partition.ffn_ops == [overlap]
+
+
+def _moe_layer_ops():
+    return [
+        _named_op("generation_qkv_gemm"),
+        _named_op("generation_attention"),
+        _named_op("generation_moe_router_gemm"),
+        _named_op("generation_moe_gemm"),
+    ]
+
+
+def test_router_stays_on_ffn_by_default():
+    partition = build_afd_ops_partition(_Model(generation_ops=_moe_layer_ops()), phase="generation")
+
+    assert "generation_moe_router_gemm" in _names(partition.ffn_ops)
+    assert "generation_moe_router_gemm" not in _names(partition.attn_ops)
+
+
+def test_router_on_attn_moves_only_the_router():
+    """``router_on_attn=True`` matches the FastAFD boundary.
+
+    Routing happens on the attention worker and routed tokens cross the pool
+    boundary. Only the router GEMM changes pool; the expert GEMMs stay on F.
+    """
+    partition = build_afd_ops_partition(
+        _Model(generation_ops=_moe_layer_ops()),
+        phase="generation",
+        router_on_attn=True,
+    )
+
+    assert "generation_moe_router_gemm" in _names(partition.attn_ops)
+    assert "generation_moe_router_gemm" not in _names(partition.ffn_ops)
+    # Everything else is unmoved.
+    assert "generation_moe_gemm" in _names(partition.ffn_ops)
+    assert "generation_attention" in _names(partition.attn_ops)
+
+
+@pytest.mark.parametrize("router_on_attn", [False, True])
+def test_router_placement_does_not_change_the_op_set(router_on_attn):
+    """The knob repartitions; it never adds or drops work.
+
+    The cross-pool transfer volume is driven by ``p_send`` combinatorics and
+    is identical under both placements, so the union of both pools must be
+    invariant.
+    """
+    partition = build_afd_ops_partition(
+        _Model(generation_ops=_moe_layer_ops()),
+        phase="generation",
+        router_on_attn=router_on_attn,
+    )
+
+    assert set(_names(partition.attn_ops)) | set(_names(partition.ffn_ops)) == {
+        "generation_qkv_gemm",
+        "generation_attention",
+        "generation_moe_router_gemm",
+        "generation_moe_gemm",
+    }
+
+
+def test_router_placement_applies_inside_overlap_ops():
+    """An all-router OverlapOp must follow the knob, not the FFN markers."""
+    overlap = operations.OverlapOp(
+        "generation_router_overlap",
+        group_a=[_named_op("generation_moe_router_gemm")],
+        group_b=[_named_op("generation_moe_router_aux")],
+    )
+    model = _Model(generation_ops=[overlap])
+
+    on_ffn = build_afd_ops_partition(model, phase="generation")
+    on_attn = build_afd_ops_partition(model, phase="generation", router_on_attn=True)
+
+    assert on_ffn.ffn_ops == [overlap] and on_ffn.attn_ops == []
+    assert on_attn.attn_ops == [overlap] and on_attn.ffn_ops == []
+
+
+def test_router_placement_leaves_the_transfer_volume_model_alone():
+    """``router_on_attn`` repartitions compute; it never changes traffic.
+
+    Both placements move the same bytes across the boundary -- FastAFD sends
+    routed tokens, aic sends un-routed hidden states, and either way the model
+    is the ``p_send`` combinatorics over ``num_experts`` / ``topk`` /
+    ``num_f_nodes``. The structural guarantee is that the knob never reaches
+    the transfer op, so it *cannot* perturb the volume: assert that directly
+    rather than comparing two runs that were never going to differ.
+    """
+    import inspect
+
+    from aiconfigurator.sdk.operations import AFDTransfer
+    from aiconfigurator.sdk.operations.afd_transfer import _afd_send_prob
+
+    transfer_params = set(inspect.signature(AFDTransfer.__init__).parameters)
+    assert "router_on_attn" not in transfer_params, (
+        "router placement must not be an AFDTransfer input; if it becomes one, "
+        "the volume model is no longer placement-independent"
+    )
+
+    send_prob_params = set(inspect.signature(_afd_send_prob).parameters)
+    assert send_prob_params == {"num_experts", "topk", "num_f_nodes"}, (
+        f"p_send must depend only on the MoE shape and F-node count, got {sorted(send_prob_params)}"
+    )
+
+
+def test_router_placement_moves_exactly_one_op_between_pools():
+    """Quantify the repartition: F loses the router, A gains it, nothing else."""
+    ops = _moe_layer_ops()
+    on_ffn = build_afd_ops_partition(_Model(generation_ops=ops), phase="generation")
+    on_attn = build_afd_ops_partition(_Model(generation_ops=_moe_layer_ops()), phase="generation", router_on_attn=True)
+
+    moved_to_attn = set(_names(on_attn.attn_ops)) - set(_names(on_ffn.attn_ops))
+    left_ffn = set(_names(on_ffn.ffn_ops)) - set(_names(on_attn.ffn_ops))
+
+    assert moved_to_attn == {"generation_moe_router_gemm"}
+    assert left_ffn == {"generation_moe_router_gemm"}
+    assert len(on_attn.attn_ops) == len(on_ffn.attn_ops) + 1
+    assert len(on_attn.ffn_ops) == len(on_ffn.ffn_ops) - 1

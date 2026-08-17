@@ -71,7 +71,9 @@ class TestServingModeArgument:
         )
         overflow_action = next(action for action in default_parser._actions if action.dest == "afd_candidate_overflow")
 
-        assert max_candidates_action.default == 10_000
+        # Raised from 10k when the A:F cap was dropped: skewed splits and
+        # mb=2 + optimistic are now enumerated, so the search space is larger.
+        assert max_candidates_action.default == 20_000
         assert overflow_action.default == "error"
 
         args = cli_parser.parse_args(
@@ -95,6 +97,48 @@ class TestServingModeArgument:
     def test_afd_candidate_limit_rejects_non_positive_values(self, cli_parser):
         with pytest.raises(SystemExit):
             cli_parser.parse_args(["default", "--afd-max-candidates", "0"])
+
+
+class TestAfdFeasibilityFloorIsPerPool:
+    """The floor is one node from each pool at its own width.
+
+    Every other test around this gate is homogeneous, where ``2 * gpus_per_node``
+    and ``a_width + f_width`` coincide -- so a regression to the former is
+    invisible there. These cases make the two disagree.
+    """
+
+    @staticmethod
+    def _task(total_gpus, a_system, f_system):
+        from aiconfigurator.sdk.task_v2 import Task
+
+        return Task(
+            serving_mode="afd",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            total_gpus=total_gpus,
+            afd_a_system_name=a_system,
+            afd_f_system_name=f_system,
+        )
+
+    def test_budget_between_the_two_floors_is_accepted(self):
+        """gb200 A (4/node) + h200_sxm F (8/node): the real floor is 12 GPUs.
+
+        ``2 * 8 = 16`` would reject 12, even though one node of each fits.
+        """
+        task = self._task(12, "gb200", "h200_sxm")
+        assert task.total_gpus == 12
+
+    def test_below_the_real_floor_is_rejected(self):
+        with pytest.raises(ValueError, match="one full A node and one full F node"):
+            self._task(11, "gb200", "h200_sxm")
+
+    def test_the_message_names_both_pool_widths(self):
+        with pytest.raises(ValueError) as excinfo:
+            self._task(11, "gb200", "h200_sxm")
+        message = str(excinfo.value)
+        assert "4 for the A pool" in message
+        assert "8 for the F pool" in message
 
 
 class TestV2AfdTask:
@@ -200,7 +244,7 @@ class TestV2AfdTask:
         assert task.effective_total_gpus == 16
 
     def test_insufficient_nodes_raises(self):
-        with pytest.raises(ValueError, match="at least 2 nodes"):
+        with pytest.raises(ValueError, match="one full A node and one full F node"):
             Task(
                 serving_mode="afd",
                 model_path="Qwen/Qwen3-32B",
@@ -1000,3 +1044,91 @@ class TestAfdPoolFlags:
                 pools=cli_main._AFD_ESTIMATE_POOL_FLAGS,
                 suffixes=cli_main._AFD_ESTIMATE_POOL_SUFFIXES,
             )
+
+    def test_fastafd_knob_defaults_on_default_parser(self, cli_parser):
+        """All four FastAFD knobs default to preserving current behavior."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "64",
+                "--system",
+                "h200_sxm",
+                "--serving-mode",
+                "afd",
+            ]
+        )
+        assert args.afd_max_af_ratio is None  # no cap
+        assert args.afd_router_on_attn is False
+        assert args.afd_f_latency_scale == 1.0
+
+    def test_fastafd_knobs_are_parsed_on_default_parser(self, cli_parser):
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-235B-A22B",
+                "--total-gpus",
+                "72",
+                "--system",
+                "gb200",
+                "--serving-mode",
+                "afd",
+                "--afd-max-af-ratio",
+                "17",
+                "--afd-router-on-attn",
+                "--afd-f-latency-scale",
+                "0.45",
+            ]
+        )
+        assert args.afd_max_af_ratio == 17.0
+        assert args.afd_router_on_attn is True
+        assert args.afd_f_latency_scale == 0.45
+
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [
+            ("--afd-max-af-ratio", "0"),
+            ("--afd-max-af-ratio", "-1"),
+            ("--afd-f-latency-scale", "0"),
+            ("--afd-f-latency-scale", "-0.5"),
+        ],
+    )
+    def test_fastafd_knobs_reject_out_of_range_values(self, cli_parser, flag, value):
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(
+                [
+                    "default",
+                    "--model-path",
+                    "Qwen/Qwen3-32B",
+                    "--total-gpus",
+                    "64",
+                    "--system",
+                    "h200_sxm",
+                    "--serving-mode",
+                    "afd",
+                    flag,
+                    value,
+                ]
+            )
+
+    def test_estimate_parser_exposes_the_f_side_knobs(self, cli_parser):
+        """Estimate uses unprefixed names, matching its other AFD flags."""
+        args = cli_parser.parse_args(
+            [
+                "estimate",
+                "--model-path",
+                "Qwen/Qwen3-235B-A22B",
+                "--system",
+                "gb200",
+                "--estimate-mode",
+                "afd",
+                "--router-on-attn",
+                "--f-latency-scale",
+                "0.45",
+            ]
+        )
+        assert args.router_on_attn is True
+        assert args.f_latency_scale == 0.45

@@ -413,6 +413,15 @@ pub struct P2POp {
     /// per-rank payload is `ceil(x / seq_split)`. Defaults to 1.
     #[serde(default = "crate::operators::gemm::default_seq_split")]
     pub seq_split: u32,
+    /// Number of GPUs the link spans, used to pick the fabric tier
+    /// (intra-node / intra-rack / inter-rack). `None` keeps the flat
+    /// `inter_node_bw` + `p2p_latency` pricing, which is what every
+    /// pipeline-parallel caller wants: adjacent PP ranks are one hop apart
+    /// and their span is not the deployment size. Cross-pool callers (AFD)
+    /// set it so a topology leaving the scale-up domain is priced on the
+    /// scale-out fabric instead. `serde(default)` keeps older specs loadable.
+    #[serde(default)]
+    pub span_gpus: Option<u32>,
 }
 
 impl P2POp {
@@ -423,6 +432,7 @@ impl P2POp {
             pp_size,
             hidden_size,
             seq_split: 1,
+            span_gpus: None,
         }
     }
 
@@ -437,17 +447,34 @@ impl P2POp {
         // term (`message_bytes / inter_node_bw * 1000`, source "sol"); every
         // other mode — including SILICON/HYBRID, which have no P2P table —
         // uses the empirical formula tagged "empirical".
-        let inter_bw = spec.node.inter_node_bw.max(1.0);
+        //
+        // `span_gpus` selects the fabric tier. Unset means "caller did not
+        // say": keep the flat inter-node pricing so every pre-existing PP
+        // call site reproduces its previous value exactly.
+        //
+        // KNOWN CONSERVATISM: the tier comes from the pool pair's total span but
+        // is applied to every cross-pool link. On a 76-GPU gb200 deployment
+        // (72 in one rack + 4 in the next) only about 4/76 of the pairs really
+        // cross a rack, yet all of them are priced on the scale-out fabric --
+        // a 9x bandwidth step. Multi-rack AFD therefore always looks worse than
+        // it is, which caps the feature at one rack precisely where going wider
+        // should pay off. Pricing this properly means weighting the tiers by the
+        // crossing fraction, which needs a new input (how the pools are laid out
+        // across racks) and is a modeling extension rather than a fix; tracked
+        // separately. Until then the bias is one-directional: tiering can only
+        // penalise width, never flatter it.
+        let (inter_bw, latency) = match self.span_gpus {
+            None => (spec.node.inter_node_bw, spec.node.p2p_latency),
+            Some(span) => (spec.get_p2p_bandwidth(span), spec.get_p2p_latency(span)),
+        };
+        let inter_bw = inter_bw.max(1.0);
         // The P2P SOL_FULL triple is `(sol_time, 0, sol_time)` — the
         // inter-node bandwidth bound rides in the mem slot.
         let result = match db.database_mode {
             DatabaseMode::Sol | DatabaseMode::SolFull => {
                 PerformanceResult::sol(SolComponents::new(0.0, bytes / inter_bw * 1000.0))
             }
-            _ => PerformanceResult::new(
-                (bytes / inter_bw + spec.node.p2p_latency) * 1000.0,
-                Source::Empirical,
-            ),
+            _ => PerformanceResult::new((bytes / inter_bw + latency) * 1000.0, Source::Empirical),
         };
         Ok(result.clamp_non_negative().scaled(self.scale_factor))
     }
