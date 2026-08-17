@@ -114,6 +114,12 @@ class TestCheckCompat:
             ("vllm==0.24.0", "0.24.0", True),
             ("vllm==0.24.0", "0.24.0+cu129", True),
             ("vllm==0.24.0", "0.23.0", False),
+            # != operator (exercised by collector/sglang/collect_gemm.py's
+            # exact-two-version acceptance pattern, see TestExactVersionSet
+            # below)
+            ("sglang!=0.5.15", "0.5.14", True),
+            ("sglang!=0.5.15", "0.5.15", False),
+            ("sglang!=0.5.15", "0.5.16", True),
         ],
     )
     def test_compat_constraints(self, compat, runtime, expected):
@@ -130,6 +136,42 @@ class TestCheckCompat:
     def test_invalid_compat_raises(self, compat):
         with pytest.raises(ValueError, match="Invalid __compat__"):
             _check_compat(compat, "1.1.0")
+
+
+# ---------------------------------------------------------------------------
+# Exact-version-set acceptance (bounded range + != exclusions)
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestExactVersionSet:
+    """``_check_compat``'s grammar is AND-of-comparators only (see
+    ``_parse_compat_specifier``): no OR, so a __compat__ string can never
+    directly express a discrete set like "0.5.14 or 0.5.17". When a module's
+    verified-compatible versions are non-contiguous -- e.g.
+    collector/sglang/collect_gemm.py's ``sglang==0.5.14`` bumped for
+    AIC-1762 Task 4c to also accept 0.5.17 without silently admitting the
+    never-verified 0.5.15/0.5.16 in between -- the only expressible
+    equivalent is a bounded range with every excluded version carved out via
+    ``!=`` clauses (all ANDed, so every clause must hold). This locks in that
+    exactly {0.5.14, 0.5.17} pattern end-to-end through ``_check_compat``,
+    not just per-operator.
+    """
+
+    COMPAT = "sglang>=0.5.14,<=0.5.17,!=0.5.15,!=0.5.16"
+
+    @pytest.mark.parametrize(
+        "runtime,expected",
+        [
+            ("0.5.14", True),  # floor: accepted
+            ("0.5.17", True),  # ceiling: accepted
+            ("0.5.15", False),  # untested, explicitly excluded
+            ("0.5.16", False),  # untested, explicitly excluded
+            ("0.5.13", False),  # below floor
+            ("0.5.18", False),  # above ceiling
+            ("0.5.14.post1", True),  # post-release of the floor still satisfies >=/<=
+        ],
+    )
+    def test_accepts_exactly_the_verified_pair(self, runtime, expected):
+        assert _check_compat(self.COMPAT, runtime) == expected
 
 
 # ---------------------------------------------------------------------------

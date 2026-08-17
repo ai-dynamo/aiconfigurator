@@ -9,7 +9,33 @@ available. The module owns SGLang-specific kernel selection, quantization
 helpers, SM filters, and perf logging.
 """
 
-__compat__ = "sglang==0.5.14"
+# Verified 2026-08-17 against sglang v0.5.14 and v0.5.17 tags (source clones,
+# no runtime GPU available in this environment) for Task 4c/AIC-1762. Checked:
+# sgl_kernel.fp8_scaled_mm/sgl_per_token_quant_fp8 (byte-identical call shape,
+# moved wheel-internal path only); flashinfer fp4_quantize/mm_fp4 (sglang's
+# own call sites into flashinfer unchanged across its flashinfer_python pin
+# bump 0.6.12->0.6.15.post1; flashinfer's own source not directly verifiable,
+# not installed in this venv -- residual gap, pre-existing at 0.5.14 too);
+# deep_gemm_wrapper.{DEEPGEMM_SCALE_UE8M0,gemm_nt_f8f8bf16} and
+# SGLANG_JIT_DEEPGEMM_PRECOMPILE (byte-identical); fp8_utils.requant_weight_ue8m0
+# (unchanged path/signature; see _prepare_fp8_block_weights docstring for the
+# refreshed serving citation); DeepGEMM SM90-<110 fp8_block window / SM120
+# exclusion (configurer.py._compute_enable_deep_gemm byte-identical, still no
+# SM120 recipe -- not under-collecting); NVFP4 initialize_fp4_gemm_config
+# SM100/103->cute-dsl, SM80-89->marlin, else->cutlass dispatch (byte-identical,
+# see run_gemm() comment for the refreshed citation). ONE incompatible surface
+# found and fixed below: sglang.srt.layers.quantization.fp8_kernel (holding
+# sglang_per_token_group_quant_fp8) was relocated wholesale to
+# sglang.kernels.ops.quantization.fp8_kernel at 0.5.17 as part of a kernel-reorg
+# (no compat shim at the old path); the function signature is otherwise
+# unchanged (drops only an `enable_v2` kwarg this collector never passes), so
+# this is a cosmetic relocation handled via the version-conditional import
+# below, mirroring this file's existing try/except-import pattern (the
+# flashinfer capability probe just above). 0.5.15/0.5.16 stay excluded: never
+# verified, and version_resolver's __compat__ grammar (AND-of-comparators
+# only, no OR) can express this exact two-version acceptance set only as a
+# bounded range with the two untested patches explicitly carved out.
+__compat__ = "sglang>=0.5.14,<=0.5.17,!=0.5.15,!=0.5.16"
 
 import os
 import random
@@ -40,7 +66,19 @@ from sglang.srt.layers.deep_gemm_wrapper import (
     DEEPGEMM_SCALE_UE8M0,
     gemm_nt_f8f8bf16,
 )
-from sglang.srt.layers.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
+
+# sglang 0.5.17 relocated this module from srt/layers/quantization/ to the new
+# top-level sglang.kernels.ops package; sglang_per_token_group_quant_fp8's own
+# signature is otherwise unchanged (verified 2026-08-17, both v0.5.14 and
+# v0.5.17 tags: x, group_size, eps=1e-10, column_major_scales=False,
+# scale_tma_aligned=False, scale_ue8m0=False, fuse_silu_and_mul=False,
+# masked_m=None -- 0.5.17 additionally drops an unused enable_v2 kwarg this
+# collector never passes). Try the new (>=0.5.17) location first since sglang
+# fp8.py itself now imports from there.
+try:
+    from sglang.kernels.ops.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
+except ImportError:
+    from sglang.srt.layers.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
 from sglang.srt.layers.quantization.fp8_utils import requant_weight_ue8m0
 
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
@@ -135,7 +173,12 @@ def _prepare_fp8_block_weights(N, K, device, ue8m0):  # noqa: N803
     ``requant_weight_ue8m0`` -- the same one-time, load-time repacking
     SGLang serving performs in
     ``Fp8LinearMethod.process_weights_after_loading_block_quant``
-    (sglang/srt/layers/quantization/fp8.py:538-563, pinned v0.5.14 clone)
+    (sglang/srt/layers/quantization/fp8.py:538-563, pinned v0.5.14 clone;
+    re-verified 2026-08-17 at v0.5.17: same method now at fp8.py:648, which
+    calls the extracted helper ``requant_block_scale_ue8m0_for_deepgemm``
+    (fp8_utils.py:1538-1568) -- it still delegates to
+    ``requant_weight_ue8m0_inplace`` unchanged, so the semantics this
+    docstring describes hold at both pinned versions)
     -- instead of leaving raw fp32 scales for ``deep_gemm::fp8_gemm_nt`` to
     re-pack on every timed call. When ``ue8m0`` is falsy (Hopper), the
     weight/scale are returned unpacked, matching serving's fp32-scale path.
@@ -196,7 +239,10 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
         # source 49e384ce): "auto" resolves to flashinfer_cutedsl (mm_fp4
         # backend "cute-dsl") when is_sm100_supported() (major 10 -> SM100 and
         # SM103), marlin on SM80-89, and flashinfer_cutlass (mm_fp4 backend
-        # "cutlass") otherwise, which is the SM120 path.
+        # "cutlass") otherwise, which is the SM120 path. Re-verified 2026-08-17
+        # against the v0.5.14 and v0.5.17 tags directly: byte-identical body,
+        # now at fp4_utils.py:149-163 (v0.5.14 tag) / fp4_utils.py:145-159
+        # (v0.5.17) -- this dispatch mapping is unchanged.
         if sm_version in {100, 103}:
             fp4_backend = "cute-dsl"
         elif sm_version == 120:
