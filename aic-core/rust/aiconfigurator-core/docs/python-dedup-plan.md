@@ -95,7 +95,7 @@ roofline queried every op-level op in SOL — but #1461 moved that to
    per-phase `query_trtllm_alltoall`); AFD's three query points and the
    `Mamba2` composite's five legs evaluate standard twin ops through the
    single-op plumbing.
-3. **PR-6 — deprecation removal** (time-locked): drop the `"python"`
+3. **Deprecation-cleanup PR** (time-locked): drop the `"python"`
    `engine_step_backend` value, the routing gate, and the CLI choice after
    the one-release bake PR-3 starts — plus the PR-5 shims
    (`PerfDatabase.query_*`, `Operation.query`, `_evaluate_single_op`'s
@@ -112,8 +112,8 @@ shims' window closes. Enforced by
 `tests/cross_package/test_single_oracle_contract.py` (frozen shim surface,
 no `_query_*_table`/`get_sol`/`get_empirical` defs, whitelisted `query`
 overrides, `perf_interp` stays deleted) and mirrored in `.coderabbit.yaml`
-path instructions; a companion `.claude/rules` update is proposed in
-`docs/single-oracle-rule-proposal.md`.
+path instructions; the `.claude/rules/rust-core/parity.md` Rule 2 update landed with this
+migration at maintainer direction.
 
 The keep/delete inventory and Gate-3 text below are retained as the
 original plan of record; where they conflict with this disposition, the

@@ -41,8 +41,8 @@ PERF_DATABASE_PATH = OPERATIONS_DIR.parent / "perf_database.py"
 # whose per-message values still come from the engine (they compose standard
 # comm/gemm twins via the single-op evaluation plumbing):
 #   - the AFD comm ops: A/F topology math (send probability, link volumes)
-#   - Mamba2: deprecated composite kept for the public-SDK window (PR-6
-#     removes it); its five sub-ops are engine-evaluated twins
+#   - Mamba2: deprecated composite kept for the public-SDK window (the
+#     deprecation-cleanup PR removes it); its five sub-ops are engine-evaluated twins
 QUERY_OVERRIDE_WHITELIST = {
     "AFDTransfer",
     "AFDFAllGather",
@@ -53,7 +53,7 @@ QUERY_OVERRIDE_WHITELIST = {
 
 # The frozen public per-call surface on PerfDatabase: every entry is a
 # deprecated engine-routed shim (or an explicit tombstone that raises), all
-# removed together in PR-6. Adding a NEW query_* method to PerfDatabase is a
+# removed together in the deprecation-cleanup PR. Adding a NEW query_* method to PerfDatabase is a
 # single-oracle violation — route callers through the op-list FFI instead.
 PERF_DATABASE_QUERY_SHIMS = {
     "query_gemm",
@@ -224,12 +224,12 @@ def test_perf_database_query_surface_is_frozen():
     removed = PERF_DATABASE_QUERY_SHIMS - live
     assert not added, (
         f"PerfDatabase grew new query_* methods: {sorted(added)}. The per-call surface is a frozen "
-        "set of deprecated shims (removed in PR-6); new per-op access goes through "
+        "set of deprecated shims (removed in the deprecation-cleanup PR); new per-op access goes through "
         "EngineHandle.evaluate_ops_json."
     )
     assert not removed, (
         f"query_* shims disappeared before their deprecation window closed: {sorted(removed)} "
-        "(update this contract deliberately if PR-6 is executing the removal)."
+        "(update this contract deliberately if the deprecation-cleanup PR is executing the removal)."
     )
 
 

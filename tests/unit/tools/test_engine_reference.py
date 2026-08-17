@@ -12,7 +12,7 @@ SHIM's op construction and the reference's op construction agree exactly
 (including typed data-miss errors), across full quant grids on two shipped
 systems. The against-the-legacy-math anchoring moved to the pinned capture
 in ``tests/cross_package/test_query_shim_baseline.py``; this file retires
-together with the shims (PR-6).
+together with the shims (the deprecation-cleanup PR).
 """
 
 from __future__ import annotations
