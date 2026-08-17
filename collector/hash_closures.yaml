@@ -185,6 +185,11 @@ collector.vllm.collect_mhc_module:
 collector.vllm.collect_mla_module:
   - collector/cases/base_ops/mla_module.yaml
   - __model_cases__
+collector.vllm.collect_mla_module_027:
+  # 0.27.0-route shim whose get/run functions are re-exported from
+  # collector/vllm/collect_mla_module.py — identical case reads.
+  - collector/cases/base_ops/mla_module.yaml
+  - __model_cases__
 collector.vllm.collect_moe:
   - collector/cases/base_ops/moe.yaml
   - __model_cases__
