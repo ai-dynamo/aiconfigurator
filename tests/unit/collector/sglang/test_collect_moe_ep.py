@@ -200,9 +200,9 @@ def test_full_population_covers_every_declared_wideep_model(monkeypatch, moe_ep_
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     counts = _stage_counts()
     cases = moe_ep_symbols["get_moe_ep_test_cases"]()
-    assert counts["unique_invocations"] == len(cases) == 62
-    # Dedup is not a no-op: the raw stage carries 186 recipes for 62 invocations.
-    assert counts["quant_allowed"] == 186
+    assert counts["unique_invocations"] == len(cases) == 70
+    # Dedup is not a no-op: the raw stage carries 210 recipes for 70 invocations.
+    assert counts["quant_allowed"] == 210
     # Every case is a valid EP shard of its declared expert count, tied to the
     # model whose checkpoint the subprocess loads.
     for local_experts, ep_size, _hidden, _inter, _topk, num_experts, num_slots, quant, model in cases:
