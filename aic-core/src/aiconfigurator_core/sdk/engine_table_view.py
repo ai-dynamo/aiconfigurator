@@ -127,19 +127,10 @@ def _database_has_data_dir(database) -> bool:
     """Whether the database's backend/version has ANY on-disk data, in either
     the legacy ``<data>/<backend>/<version>`` or the family-first
     ``<data>/<family>/<backend>/<version>`` layout — the same existence gate
-    the Rust engine applies at load. Estimate-only runs (SOL mode over a
-    version with no collected data) construct a PerfDatabase whose loaders
-    always answered ``None``; the probe engine would refuse to load at all,
-    so the view layer answers ``None`` without touching it.
-
-    KNOWN LIMIT: NCCL/OneCCL data is nccl_version-scoped (``<data>/[comm/]
-    nccl/<ver>``, outside this gate's dirs), so an estimate-only database
-    also loses its ``_nccl_data`` view even when that file exists — the old
-    Python parser could load it standalone. Lifting this needs the engine to
-    tolerate a missing backend/version data dir (the Rust loader hard-fails
-    at construction — the same pre-existing limit that killed the
-    estimate-only demo path in PR-3; a maintainer-level design decision
-    proposed alongside #1552, not extended here)."""
+    the Rust engine applies at (strict-mode) load. When it is absent the
+    probe must be built under the SOL view, the one mode the engine loads
+    with missing-data tolerance (``load_with_sources_opts``, landed with
+    #1552's review rounds)."""
     import os
 
     root = os.path.join(database.systems_root, database.system_spec["data_dir"])
@@ -156,15 +147,17 @@ def fetch_table_view(database, attribute: str):
     """Fetch one loader-shaped table from the engine, keys rehydrated.
 
     Returns ``None`` exactly when the retired Python loader returned ``None``
-    (every source file missing — including the estimate-only case where the
-    whole backend/version has no data directory). The engine handle is the
-    cached probe handle for ``database`` — the same spec (and thus the same
-    shared-layer source map) the query path uses.
+    (every source file missing). Estimate-only databases (no backend/version
+    data directory at all) fetch through a SOL-moded probe — the one view the
+    engine loads with missing-data tolerance — so the nccl_version-scoped
+    NCCL/OneCCL tables still resolve (their files live outside the missing
+    dir, and the old parsers loaded them standalone) while every
+    backend/version-scoped view naturally answers ``None``. The engine handle
+    is the cached probe handle for ``database`` — the same spec (and thus the
+    same shared-layer source map) the query path uses.
     """
     from aiconfigurator_core.sdk import engine as _engine
 
-    if not _database_has_data_dir(database):
-        return None
     # One probe handle per database instance: _probe_handle_for's cache key
     # is the probe-spec JSON itself, and BUILDING that key re-runs the
     # shared-layer source resolution for every op file — a full warm does
@@ -172,7 +165,8 @@ def fetch_table_view(database, attribute: str):
     # construction-time state; mode/policy views are separate objects).
     handle = database.__dict__.get("_table_view_probe_handle")
     if handle is None:
-        handle = _engine._probe_handle_for(database, None)
+        mode_token = None if _database_has_data_dir(database) else "SOL"
+        handle = _engine._probe_handle_for(database, mode_token)
         database.__dict__["_table_view_probe_handle"] = handle
     raw = handle._engine.table_view_json(attribute)
     if raw is None:
