@@ -376,26 +376,31 @@ def _service_records(
             for index, component in enumerate(components)
             if isinstance(component, Mapping)
         )
+    spec_env = _env(spec.get("env", []), config_map_data) if isinstance(spec, Mapping) else {}
     records: list[_Service] = []
     for name, raw in service_items:
         if not isinstance(name, str) or not isinstance(raw, Mapping):
             continue
         component = str(raw.get("componentType", raw.get("type", ""))).lower()
-        if component == "main":
-            raise ValueError("componentType: main is not supported by adapter v1")
-        if component not in {"worker", "prefill", "decode"}:
+        if component not in {"worker", "prefill", "decode", "main"}:
             continue
         main = _container(raw)
         env = {
+            **spec_env,
             **_env(raw.get("envs", []), config_map_data),
             **_env(main.get("env", []), config_map_data),
         }
         command = _expand_literal(_engine_command(_command(main)), env)
+        if component == "main" and _BACKEND_MODULE_PATTERN.search(command) is None:
+            raise ValueError("componentType: main requires an explicit Dynamo backend worker command")
         flags = _flags(command)
+        role = _role(name, raw, flags)
+        if component == "main" and role == "worker":
+            raise ValueError("componentType: main requires an explicit prefill or decode role")
         records.append(
             _Service(
                 name=name,
-                role=_role(name, raw, flags),
+                role=role,
                 config=raw,
                 env=env,
                 flags=flags,
@@ -523,7 +528,7 @@ def _system(config: Mapping[str, Any]) -> str | None:
 
 def _model(service: _Service) -> str | None:
     config_model = _config_value(service, "model") or _config_value(service, "model_path")
-    return _coalesce(
+    model = _coalesce(
         "model identity",
         (
             ("--model", _flag(service, "model", "model-path")),
@@ -531,6 +536,16 @@ def _model(service: _Service) -> str | None:
             ("engine ConfigMap", config_model),
         ),
     )
+    served_model = _coalesce(
+        "served model identity",
+        (
+            ("--served-model-name", _flag(service, "served-model-name")),
+            ("SERVED_MODEL_NAME", service.env.get("SERVED_MODEL_NAME")),
+        ),
+    )
+    if isinstance(model, str) and model.startswith("/") and isinstance(served_model, str):
+        return served_model
+    return model or served_model
 
 
 def _config_value(service: _Service, name: str) -> Any:
@@ -629,6 +644,7 @@ def _worker_settings(
             ("engine ConfigMap", _config_value(service, "max_batch_size")),
         ),
     )
+    max_batch_value = _as_int(max_batch, f"{service.name} max batch size") if max_batch is not None else None
     if service.role == "prefill":
         raw_batch = batch_override if batch_override is not None else max_batch
         if raw_batch is None:
@@ -646,8 +662,14 @@ def _worker_settings(
                 f"{service.name} replicas * attention DP ({denominator})"
             )
         batch = concurrency // denominator
-        if max_batch is not None and batch > _as_int(max_batch, f"{service.name} max batch size"):
-            raise ValueError(f"active batch size {batch} exceeds {service.name} max batch size {max_batch}")
+    if max_batch_value is not None and batch > max_batch_value:
+        if batch_override is not None:
+            raise ValueError(f"active batch size {batch} exceeds {service.name} max batch size {max_batch_value}")
+        assumptions.append(
+            f"{service.name} active batch size is capped at its declared max batch size "
+            f"{max_batch_value}; workload concurrency {concurrency} remains unchanged."
+        )
+        batch = max_batch_value
     return WorkerSettingsV1(
         replicas=replicas,
         gpus_per_replica=gpus,
@@ -818,11 +840,22 @@ def _discover_points(documents: Sequence[Mapping[str, Any]], overrides: AdapterO
 def _runtime_value(services: Sequence[_Service], flag_names: tuple[str, ...], config_path: tuple[str, ...]) -> Any:
     values: list[tuple[str, Any]] = []
     for service in services:
-        value = _flag(service, *flag_names)
+        command_value = _flag(service, *flag_names)
         config_value: Any = service.engine_config
         for part in config_path:
             config_value = config_value.get(part) if isinstance(config_value, Mapping) else None
-        values.extend(((f"{service.name} command", value), (f"{service.name} ConfigMap", config_value)))
+        if service.flags.get("extra-engine-args") not in (None, True) and config_value is not None:
+            # Dynamo TRT-LLM constructs engine arguments from CLI values, then
+            # applies --extra-engine-args on top. Match that effective-value
+            # precedence instead of treating the two declarations as a conflict.
+            values.append((f"{service.name} ConfigMap", config_value))
+        else:
+            values.extend(
+                (
+                    (f"{service.name} command", command_value),
+                    (f"{service.name} ConfigMap", config_value),
+                )
+            )
     return _coalesce(flag_names[0], values)
 
 
@@ -962,13 +995,31 @@ def _request_for_point(
     nextn = overrides.nextn if overrides.nextn is not None else (source_nextn if source_nextn is not None else 0)
 
     free_fraction = overrides.free_gpu_memory_fraction
+    prefill_free_fraction = overrides.prefill_free_gpu_memory_fraction
+    decode_free_fraction = overrides.decode_free_gpu_memory_fraction
+    fraction_flags = ("free-gpu-memory-fraction", "gpu-memory-utilization", "mem-fraction-static")
+    fraction_config_path = ("kv_cache_config", "free_gpu_memory_fraction")
     if free_fraction is None:
-        raw_fraction = _runtime_value(
-            services,
-            ("free-gpu-memory-fraction", "gpu-memory-utilization", "mem-fraction-static"),
-            ("kv_cache_config", "free_gpu_memory_fraction"),
-        )
-        free_fraction = _as_float(raw_fraction, "free GPU memory fraction") if raw_fraction is not None else None
+        if topology.kind == "disagg":
+            prefill_service = next(service for service in services if service.role == "prefill")
+            decode_service = next(service for service in services if service.role == "decode")
+            if prefill_free_fraction is None:
+                raw_prefill_fraction = _runtime_value([prefill_service], fraction_flags, fraction_config_path)
+                prefill_free_fraction = (
+                    _as_float(raw_prefill_fraction, "prefill free GPU memory fraction")
+                    if raw_prefill_fraction is not None
+                    else None
+                )
+            if decode_free_fraction is None:
+                raw_decode_fraction = _runtime_value([decode_service], fraction_flags, fraction_config_path)
+                decode_free_fraction = (
+                    _as_float(raw_decode_fraction, "decode free GPU memory fraction")
+                    if raw_decode_fraction is not None
+                    else None
+                )
+        else:
+            raw_fraction = _runtime_value(services, fraction_flags, fraction_config_path)
+            free_fraction = _as_float(raw_fraction, "free GPU memory fraction") if raw_fraction is not None else None
     max_seq_len = overrides.max_seq_len
     if max_seq_len is None:
         raw_max_seq = _runtime_value(
@@ -1000,6 +1051,8 @@ def _request_for_point(
         runtime=RuntimeSettingsV1(
             systems_paths=overrides.systems_paths,
             free_gpu_memory_fraction=free_fraction,
+            prefill_free_gpu_memory_fraction=prefill_free_fraction,
+            decode_free_gpu_memory_fraction=decode_free_fraction,
             max_seq_len=max_seq_len,
             engine_step_backend=overrides.engine_step_backend,
         ),

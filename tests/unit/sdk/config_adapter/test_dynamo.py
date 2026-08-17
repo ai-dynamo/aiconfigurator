@@ -152,7 +152,7 @@ def test_resolved_dsv4_shell_comments_do_not_change_engine_arguments():
     assert outcome.request.topology.kind == "disagg"
 
 
-def test_resolved_dsv4_sweep_preserves_all_points_and_fail_closed_diagnostics():
+def test_resolved_dsv4_sweep_preserves_points_and_role_memory_fractions():
     fixture = _NIGHTLY_FIXTURES / "dsv4"
 
     report = adapt_config(
@@ -169,11 +169,13 @@ def test_resolved_dsv4_sweep_preserves_all_points_and_fail_closed_diagnostics():
         "concurrency-512",
         "concurrency-1024",
     ]
-    assert all(outcome.status == "rejected" for outcome in report.outcomes)
+    assert report.outcomes[0].status == "rejected"
     assert "must be divisible" in report.outcomes[0].diagnostics[-1].message
-    assert all(
-        "conflicting free-gpu-memory-fraction" in outcome.diagnostics[-1].message for outcome in report.outcomes[1:]
-    )
+    assert all(outcome.request is not None for outcome in report.outcomes[1:])
+    for outcome in report.outcomes[1:]:
+        assert outcome.request is not None
+        assert outcome.request.runtime.prefill_free_gpu_memory_fraction == 0.8
+        assert outcome.request.runtime.decode_free_gpu_memory_fraction == 0.9
 
 
 def test_resolved_kimi_engine_config_requires_speculative_acceptance():
@@ -267,7 +269,10 @@ spec:
         nodeSelector: {nvidia.com/gpu.product: NVIDIA-H200}
         mainContainer:
           env: [{name: MODEL_PATH, value: QWEN/QWEN3-32B}]
-          args: ["python -m dynamo.vllm --model ${MODEL_PATH} --tensor-parallel-size 2 --disaggregation-mode prefill"]
+          args:
+            - >-
+              python -m dynamo.vllm --model ${MODEL_PATH} --tensor-parallel-size 2
+              --gpu-memory-utilization 0.85 --disaggregation-mode prefill
     decode:
       componentType: worker
       subComponentType: decode
@@ -277,7 +282,10 @@ spec:
         nodeSelector: {nvidia.com/gpu.product: NVIDIA-H200}
         mainContainer:
           env: [{name: MODEL_PATH, value: QWEN/QWEN3-32B}]
-          args: ["python -m dynamo.vllm --model ${MODEL_PATH} --tensor-parallel-size 4 --disaggregation-mode decode"]
+          args:
+            - >-
+              python -m dynamo.vllm --model ${MODEL_PATH} --tensor-parallel-size 4
+              --gpu-memory-utilization 0.7 --disaggregation-mode decode
 """
     report = adapt_config(
         DynamoRecipeSource(deployment),
@@ -289,6 +297,71 @@ spec:
     assert kwargs["prefill_batch_size"] == 1
     assert kwargs["decode_num_workers"] == 1
     assert kwargs["decode_batch_size"] == 16
+    assert kwargs["prefill_free_gpu_memory_fraction"] == 0.85
+    assert kwargs["decode_free_gpu_memory_fraction"] == 0.7
+
+
+def test_global_env_uses_served_model_name_for_local_model_path():
+    deployment = """
+kind: DynamoGraphDeployment
+metadata: {name: nemotron-ultra}
+spec:
+  backendFramework: vllm
+  env:
+    - {name: MODEL_PATH, value: /opt/models/patched/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4}
+    - {name: SERVED_MODEL_NAME, value: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4}
+  services:
+    worker:
+      componentType: worker
+      replicas: 1
+      resources: {limits: {gpu: "2"}}
+      extraPodSpec:
+        nodeSelector: {nvidia.com/gpu.product: NVIDIA-B200}
+        mainContainer:
+          args:
+            - python -m dynamo.vllm --model ${MODEL_PATH} --served-model-name ${SERVED_MODEL_NAME}
+              --tensor-parallel-size 2
+"""
+
+    outcome = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=16),
+    ).outcomes[0]
+
+    assert outcome.request is not None
+    assert outcome.request.model.path == "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
+
+
+def test_workload_concurrency_is_preserved_when_active_batch_is_capped():
+    deployment = _agg_yaml(args_as_string=True).replace(
+        "--gpu-memory-utilization 0.9",
+        "--max-num-seqs 32 --gpu-memory-utilization 0.9",
+    )
+
+    outcome = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=1080),
+    ).outcomes[0]
+
+    assert outcome.request is not None
+    assert outcome.request.workload.concurrency == 1080
+    assert outcome.request.topology.worker.batch_size == 32
+    assert "workload concurrency 1080 remains unchanged" in outcome.request.provenance.assumptions[-2]
+
+
+def test_explicit_batch_override_above_engine_max_is_rejected():
+    deployment = _agg_yaml(args_as_string=True).replace(
+        "--gpu-memory-utilization 0.9",
+        "--max-num-seqs 32 --gpu-memory-utilization 0.9",
+    )
+
+    outcome = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=1080, batch_size=33),
+    ).outcomes[0]
+
+    assert outcome.status == "rejected"
+    assert outcome.diagnostics[-1].message == "active batch size 33 exceeds worker max batch size 32"
 
 
 def test_multidocument_configmap_and_multinode_sizing():
@@ -862,20 +935,21 @@ def test_dynamo_ci_concrete_recipe_expands_points_and_maps_topology():
     assert "must be divisible" in report.rejections[0].diagnostics[-1].message
 
 
-def test_dynamo_ci_role_specific_memory_requires_override():
+def test_dynamo_ci_preserves_role_specific_memory_fractions():
     recipe = _dynamo_ci_recipe()
     recipe["backend"]["sglang_config"]["decode"]["mem-fraction-static"] = 0.8
 
-    rejected = adapt_config(DynamoRecipeSource(recipe)).outcomes[0]
-    adapted = adapt_config(
-        DynamoRecipeSource(recipe),
-        AdapterOverrides(free_gpu_memory_fraction=0.85),
-    ).outcomes[0]
+    adapted = adapt_config(DynamoRecipeSource(recipe)).outcomes[0]
+    overridden = adapt_config(DynamoRecipeSource(recipe), AdapterOverrides(free_gpu_memory_fraction=0.85)).outcomes[0]
 
-    assert rejected.status == "rejected"
-    assert "different memory fractions" in rejected.diagnostics[-1].message
     assert adapted.request is not None
-    assert adapted.request.runtime.free_gpu_memory_fraction == 0.85
+    assert adapted.request.runtime.free_gpu_memory_fraction is None
+    assert adapted.request.runtime.prefill_free_gpu_memory_fraction == 0.9
+    assert adapted.request.runtime.decode_free_gpu_memory_fraction == 0.8
+    assert overridden.request is not None
+    assert overridden.request.runtime.free_gpu_memory_fraction == 0.85
+    assert overridden.request.runtime.prefill_free_gpu_memory_fraction is None
+    assert overridden.request.runtime.decode_free_gpu_memory_fraction is None
 
 
 def test_dynamo_ci_declared_unsupported_quantization_is_rejected_even_for_fp8_model():
@@ -1049,3 +1123,105 @@ def test_explicit_batch_override_preserves_nondivisible_source_concurrency():
     assert adapted.request.workload.concurrency == 32
     assert adapted.request.topology.worker.batch_size == 11
     assert "active batch size is explicitly overridden" in adapted.request.provenance.assumptions[-2]
+
+
+def test_trtllm_extra_engine_args_override_command_runtime_values():
+    deployment = """
+kind: ConfigMap
+metadata: {name: engine}
+data:
+  config.yaml: |
+    tensor_parallel_size: 1
+    max_batch_size: 32
+    max_seq_len: 4096
+    kv_cache_config: {free_gpu_memory_fraction: 0.7}
+---
+kind: DynamoGraphDeployment
+metadata: {name: trtllm-precedence}
+spec:
+  backendFramework: trtllm
+  services:
+    worker:
+      componentType: worker
+      replicas: 1
+      resources: {limits: {gpu: 1}}
+      extraPodSpec:
+        nodeSelector: {nvidia.com/gpu.product: NVIDIA-H200}
+        volumes: [{name: engine, configMap: {name: engine}}]
+        mainContainer:
+          volumeMounts: [{name: engine, mountPath: /config}]
+          env: [{name: MODEL_PATH, value: Qwen/Qwen3-32B}]
+          args:
+            - >-
+              python -m dynamo.trtllm --model-path ${MODEL_PATH}
+              --extra-engine-args /config/config.yaml
+              --free-gpu-memory-fraction 0.9
+"""
+
+    outcome = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=16),
+    ).outcomes[0]
+
+    assert outcome.request is not None
+    assert outcome.request.runtime.free_gpu_memory_fraction == 0.7
+
+
+def test_explicit_backend_main_components_map_as_disagg_workers():
+    deployment = """
+kind: ConfigMap
+metadata: {name: engine}
+data:
+  prefill.yaml: |
+    tensor_parallel_size: 1
+    max_batch_size: 1
+    max_seq_len: 4096
+  decode.yaml: |
+    tensor_parallel_size: 2
+    max_batch_size: 32
+    max_seq_len: 4096
+---
+kind: DynamoGraphDeployment
+metadata: {name: main-components}
+spec:
+  backendFramework: trtllm
+  services:
+    prefill:
+      componentType: main
+      replicas: 1
+      resources: {limits: {gpu: 1}}
+      extraPodSpec:
+        nodeSelector: {nvidia.com/gpu.product: NVIDIA-H200}
+        volumes: [{name: engine, configMap: {name: engine}}]
+        mainContainer:
+          volumeMounts: [{name: engine, mountPath: /config}]
+          env: [{name: MODEL_PATH, value: openai/gpt-oss-120b}]
+          args:
+            - >-
+              python -m dynamo.trtllm --model-path ${MODEL_PATH}
+              --extra-engine-args /config/prefill.yaml --disaggregation-mode prefill
+    decode:
+      componentType: main
+      replicas: 1
+      resources: {limits: {gpu: 2}}
+      extraPodSpec:
+        nodeSelector: {nvidia.com/gpu.product: NVIDIA-H200}
+        volumes: [{name: engine, configMap: {name: engine}}]
+        mainContainer:
+          volumeMounts: [{name: engine, mountPath: /config}]
+          env: [{name: MODEL_PATH, value: openai/gpt-oss-120b}]
+          args:
+            - >-
+              python -m dynamo.trtllm --model-path ${MODEL_PATH}
+              --extra-engine-args /config/decode.yaml --disaggregation-mode decode
+"""
+
+    outcome = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=16),
+    ).outcomes[0]
+
+    assert outcome.request is not None
+    assert outcome.request.topology.kind == "disagg"
+    assert outcome.request.topology.prefill.gpus_per_replica == 1
+    assert outcome.request.topology.decode.gpus_per_replica == 2

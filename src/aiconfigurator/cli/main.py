@@ -808,6 +808,18 @@ def _add_estimate_mode_arguments(parser):
         help="System name for disagg decode workers. Defaults to --system if omitted.",
     )
     parser.add_argument(
+        "--prefill-free-gpu-memory-fraction",
+        type=float,
+        default=None,
+        help="Prefill worker KV-cache memory fraction (disagg). Overrides --free-gpu-memory-fraction for prefill.",
+    )
+    parser.add_argument(
+        "--decode-free-gpu-memory-fraction",
+        type=float,
+        default=None,
+        help="Decode worker KV-cache memory fraction (disagg). Overrides --free-gpu-memory-fraction for decode.",
+    )
+    parser.add_argument(
         "--backend",
         choices=[backend.value for backend in common.BackendName],
         type=str,
@@ -2639,6 +2651,8 @@ def _run_estimate_mode(args):
             decode_moe_ep_size=args.decode_moe_ep_size,
             decode_batch_size=args.decode_batch_size,
             decode_num_workers=args.decode_num_workers,
+            prefill_free_gpu_memory_fraction=args.prefill_free_gpu_memory_fraction,
+            decode_free_gpu_memory_fraction=args.decode_free_gpu_memory_fraction,
         )
     elif estimate_mode == "afd":
         # gpus_per_node and f_tp_size are intentionally derived from the

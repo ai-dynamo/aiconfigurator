@@ -67,6 +67,24 @@ class TestCLIArgumentParsing:
         action = next(a for a in mode_parser._actions if a.dest == "free_gpu_memory_fraction")
         assert action.default is None
 
+    def test_estimate_accepts_role_specific_memory_fractions(self, cli_parser):
+        args = cli_parser.parse_args(
+            [
+                "estimate",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--system",
+                "h200_sxm",
+                "--prefill-free-gpu-memory-fraction",
+                "0.85",
+                "--decode-free-gpu-memory-fraction",
+                "0.7",
+            ]
+        )
+
+        assert args.prefill_free_gpu_memory_fraction == 0.85
+        assert args.decode_free_gpu_memory_fraction == 0.7
+
     def test_generate_mode_required_args(self, cli_parser):
         """Test that generate mode requires the correct arguments."""
         subparsers = [action for action in cli_parser._actions if action.dest == "mode"]

@@ -1000,6 +1000,8 @@ def cli_estimate(
     decode_num_workers: int | None = None,
     systems_paths: str | None = None,
     free_gpu_memory_fraction: float | None = None,
+    prefill_free_gpu_memory_fraction: float | None = None,
+    decode_free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
     engine_step_backend: str | None = None,
     forward_model: str | None = None,
@@ -1087,6 +1089,12 @@ def cli_estimate(
         free_gpu_memory_fraction: Fraction of free GPU memory TRT-LLM allocates for
             KV cache (default 0.9 for TRTLLM, 1.0 for other backends). Used to check whether the requested batch_size
             exceeds KV cache capacity.
+        prefill_free_gpu_memory_fraction: Prefill-specific KV-cache memory
+            fraction for disagg. Overrides ``free_gpu_memory_fraction`` for
+            the prefill worker.
+        decode_free_gpu_memory_fraction: Decode-specific KV-cache memory
+            fraction for disagg. Overrides ``free_gpu_memory_fraction`` for
+            the decode worker.
         max_seq_len: The TRT-LLM ``--max_seq_len`` setting used at serving time.
             Controls how many KV blocks TRT-LLM pre-allocates per sequence. Defaults
             to ``isl + osl`` when ``None``.
@@ -1310,6 +1318,8 @@ def cli_estimate(
             system_name=system_name,
             decode_system_name=decode_system,
             free_gpu_memory_fraction=free_gpu_memory_fraction,
+            prefill_free_gpu_memory_fraction=prefill_free_gpu_memory_fraction,
+            decode_free_gpu_memory_fraction=decode_free_gpu_memory_fraction,
             backend_name=backend_name,
             resolved_version=resolved_version,
             isl=isl,
@@ -1793,6 +1803,8 @@ def _run_disagg_estimate(
     nextn: int = 0,
     nextn_accepted: float | None = None,
     free_gpu_memory_fraction: float | None = None,
+    prefill_free_gpu_memory_fraction: float | None = None,
+    decode_free_gpu_memory_fraction: float | None = None,
 ) -> EstimateResult:
     """Run disaggregated estimation."""
     from aiconfigurator.sdk.config import RuntimeConfig
@@ -1898,6 +1910,8 @@ def _run_disagg_estimate(
         decode_num_worker=decode_num_workers,
         speculative_profile=SpeculativeDecodingProfile.from_inputs(nextn, nextn_accepted),
         free_gpu_memory_fraction=free_gpu_memory_fraction,
+        prefill_free_gpu_memory_fraction=prefill_free_gpu_memory_fraction,
+        decode_free_gpu_memory_fraction=decode_free_gpu_memory_fraction,
     )
 
     if summary.check_oom():

@@ -295,6 +295,8 @@ class DisaggInferenceSession:
         decode_num_worker: int,
         speculative_profile: SpeculativeDecodingProfile | None = None,
         free_gpu_memory_fraction: float | None = None,
+        prefill_free_gpu_memory_fraction: float | None = None,
+        decode_free_gpu_memory_fraction: float | None = None,
     ) -> InferenceSummary:
         """
         Run disagg with given prefill/decode worker info
@@ -310,10 +312,12 @@ class DisaggInferenceSession:
             decode_num_worker (int): the number of decode workers
             speculative_profile: Optional accepted-token progress assumption.
                 Projects decode metrics before prefill/decode rate matching.
-            free_gpu_memory_fraction: Explicit KV-cache memory fraction applied
-                to BOTH worker evaluations (semantics are backend-defined, see
-                run_static). When omitted, each run_static falls back to the
-                backend's version-derived default.
+            free_gpu_memory_fraction: Shared KV-cache memory fraction used by
+                both workers unless a role-specific value is provided.
+            prefill_free_gpu_memory_fraction: Prefill-specific KV-cache memory
+                fraction. Overrides the shared value for the prefill worker.
+            decode_free_gpu_memory_fraction: Decode-specific KV-cache memory
+                fraction. Overrides the shared value for the decode worker.
 
         Returns:
             InferenceSummary: the summary of the inference result
@@ -331,7 +335,11 @@ class DisaggInferenceSession:
             mode="static_ctx",
             runtime_config=prefill_runtime_config,
             latency_correction_scale=self._prefill_latency_correction_scale,
-            free_gpu_memory_fraction=free_gpu_memory_fraction,
+            free_gpu_memory_fraction=(
+                prefill_free_gpu_memory_fraction
+                if prefill_free_gpu_memory_fraction is not None
+                else free_gpu_memory_fraction
+            ),
         )
         decode_runtime_config = copy.deepcopy(runtime_config)
         decode_runtime_config.batch_size = decode_batch_size
@@ -340,7 +348,11 @@ class DisaggInferenceSession:
             mode="static_gen",
             runtime_config=decode_runtime_config,
             latency_correction_scale=self._decode_latency_correction_scale,
-            free_gpu_memory_fraction=free_gpu_memory_fraction,
+            free_gpu_memory_fraction=(
+                decode_free_gpu_memory_fraction
+                if decode_free_gpu_memory_fraction is not None
+                else free_gpu_memory_fraction
+            ),
         )
         if speculative_profile is not None:
             decode_summary = speculative_profile.project_summary(decode_summary, role="decode")

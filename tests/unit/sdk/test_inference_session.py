@@ -113,8 +113,18 @@ def _build_mock_backend():
     """
     backend = MagicMock()
     backend.name = SimpleNamespace(value="sglang")
+    backend.static_memory_fractions = []
 
-    def _run_static(model, database, runtime_config, mode, stride=32, latency_correction_scale=1.0):
+    def _run_static(
+        model,
+        database,
+        runtime_config,
+        mode,
+        stride=32,
+        latency_correction_scale=1.0,
+        free_gpu_memory_fraction=None,
+    ):
+        backend.static_memory_fractions.append(free_gpu_memory_fraction)
         tp = model._tp
         pp = model._pp
         dp = model._dp
@@ -248,6 +258,24 @@ class TestRequireSameTPFiltering:
         }
         assert result.get_encoder_source_dict() == {"encoder_attention": "mixed"}
         assert result.get_power_data_coverage() == 1.0
+
+    def test_run_disagg_uses_role_specific_memory_fractions(self, disagg_session, runtime_config, model_config):
+        disagg_session.run_disagg(
+            model_path="test-model",
+            runtime_config=runtime_config,
+            prefill_model_config=model_config,
+            prefill_batch_size=1,
+            prefill_num_worker=1,
+            decode_model_config=model_config,
+            decode_batch_size=1,
+            decode_num_worker=1,
+            free_gpu_memory_fraction=0.9,
+            prefill_free_gpu_memory_fraction=0.85,
+            decode_free_gpu_memory_fraction=0.7,
+        )
+
+        assert disagg_session._prefill_backend.static_memory_fractions == [0.85]
+        assert disagg_session._decode_backend.static_memory_fractions == [0.7]
 
     def test_false_allows_mismatched_tp(self, disagg_session, runtime_config, model_config):
         """require_same_tp=False → results are non-empty (mismatched TP is fine)."""

@@ -59,6 +59,16 @@ def to_cli_estimate_kwargs(request: EstimateRequestV1) -> dict[str, Any]:
     _set_if_not_none(kwargs, "comm_quant_mode", request.quantization.communication)
     _set_if_not_none(kwargs, "systems_paths", request.runtime.systems_paths)
     _set_if_not_none(kwargs, "free_gpu_memory_fraction", request.runtime.free_gpu_memory_fraction)
+    _set_if_not_none(
+        kwargs,
+        "prefill_free_gpu_memory_fraction",
+        request.runtime.prefill_free_gpu_memory_fraction,
+    )
+    _set_if_not_none(
+        kwargs,
+        "decode_free_gpu_memory_fraction",
+        request.runtime.decode_free_gpu_memory_fraction,
+    )
     _set_if_not_none(kwargs, "max_seq_len", request.runtime.max_seq_len)
     _set_if_not_none(kwargs, "engine_step_backend", request.runtime.engine_step_backend)
 

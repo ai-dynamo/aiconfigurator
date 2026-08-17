@@ -800,3 +800,5 @@ def test_disagg_estimate_honors_explicit_free_gpu_memory_fraction():
     assert result is not None
     with pytest.raises(RuntimeError, match="OOM"):
         cli_estimate(**common_kw, free_gpu_memory_fraction=0.001)
+    with pytest.raises(RuntimeError, match="OOM"):
+        cli_estimate(**common_kw, decode_free_gpu_memory_fraction=0.001)
