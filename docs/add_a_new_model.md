@@ -115,17 +115,19 @@ single-oracle flow):
 
 1. **Model `Conv` in the Rust engine**: an operator in
    `aic-core/rust/aiconfigurator-core/src/operators/` (query + SOL roofline +
-   energy) and a parquet loader in `src/perf_database/`, anchored by a Rust
+   energy) and a parquet loader in
+   `aic-core/rust/aiconfigurator-core/src/perf_database/`, anchored by a Rust
    `#[cfg(test)]` oracle test.
 2. **Define the Python `Conv` op class** in
    `aic-core/src/aiconfigurator_core/sdk/operations/` — constructor, fields,
    `get_weights`, and the parquet loader / `load_data` (the raw data plane for
    charts and the support matrix). No Python `query()` body or interpolation:
    the single-oracle contract test rejects those.
-3. **Wire the spec conversion**: a `_to_opspec` branch in `sdk/engine.py` and
-   an `Op` variant appended at the tail of `operators/op.rs` (mid-enum
+3. **Wire the spec conversion**: a `_to_opspec` branch in
+   `aic-core/src/aiconfigurator_core/sdk/engine.py` and an `Op` variant appended
+   at the tail of `aic-core/rust/aiconfigurator-core/src/operators/op.rs` (mid-enum
    insertion requires an `ENGINE_SPEC_SCHEMA_VERSION` bump on both sides),
-   plus the `engine/spec.rs` round-trip fixture.
+   plus the `aic-core/rust/aiconfigurator-core/src/engine/spec.rs` round-trip fixture.
    `tests/unit/sdk/test_opspec_coverage.py` enforces this.
 4. **Define the data collection process** in collector by referring to existing operations' collection code, such as `collect_gemm.py`
 5. **Collect data for conv**, register its family in

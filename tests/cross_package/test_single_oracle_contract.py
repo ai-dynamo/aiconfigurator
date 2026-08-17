@@ -106,184 +106,276 @@ UTIL_EMPIRICAL_PUBLIC_SURFACE = {
 }
 
 
-# Complete def-name inventory of operations/*.py (module, class, and nested
-# functions alike). ANY added or removed def requires editing this frozen
-# inventory — the import-contract-style deliberate friction that catches an
-# innocently NAMED Python oracle (e.g. `estimate_latency`) that the banned
-# prefixes above cannot: new estimation math cannot appear without a
-# reviewable one-line diff here declaring the new function.
+# Complete QUALIFIED def inventory of operations/*.py: every function at its
+# lexical path (module function, `Class.method`, nested closures as
+# `outer.inner`). Qualification defeats the shadow-class bypass a plain
+# name set allows (a new class defining only pre-existing NAMES like
+# `__init__`/`get_weights` still adds new qualified paths). ANY added or
+# removed def requires editing this frozen inventory — the reviewable
+# declaration point for anything that could be estimation math under an
+# innocent name.
 OPERATIONS_DEF_INVENTORY = {
     "__init__.py": frozenset(),
     "afd_transfer.py": frozenset(
         {
-            "__init__",
+            "AFDCombine.__init__",
+            "AFDCombine.get_weights",
+            "AFDCombine.query",
+            "AFDFAllGather.__init__",
+            "AFDFAllGather.f_gpus_in_node",
+            "AFDFAllGather.get_weights",
+            "AFDFAllGather.num_f_nodes",
+            "AFDFAllGather.query",
+            "AFDFReduceScatter.__init__",
+            "AFDFReduceScatter.f_gpus_in_node",
+            "AFDFReduceScatter.get_weights",
+            "AFDFReduceScatter.num_f_nodes",
+            "AFDFReduceScatter.query",
+            "AFDTransfer.__init__",
+            "AFDTransfer.direction",
+            "AFDTransfer.get_weights",
+            "AFDTransfer.num_f_nodes",
+            "AFDTransfer.query",
             "_afd_send_prob",
             "_engine_comm_query",
-            "direction",
-            "f_gpus_in_node",
-            "get_weights",
-            "num_f_nodes",
-            "query",
         }
     ),
     "attention.py": frozenset(
         {
-            "__init__",
+            "ContextAttention.__init__",
+            "ContextAttention._cache_key",
+            "ContextAttention.clear_cache",
+            "ContextAttention.get_weights",
+            "ContextAttention.load_data",
+            "EncoderAttention.__init__",
+            "EncoderAttention._cache_key",
+            "EncoderAttention.clear_cache",
+            "EncoderAttention.get_weights",
+            "EncoderAttention.load_data",
+            "GenerationAttention.__init__",
+            "GenerationAttention._cache_key",
+            "GenerationAttention.clear_cache",
+            "GenerationAttention.get_weights",
+            "GenerationAttention.load_data",
             "_cache_key",
             "_log_attention_row_conflict",
-            "clear_cache",
             "generation_attn_flops",
             "generation_attn_mode",
-            "get_weights",
             "load_context_attention_data",
-            "load_data",
             "load_encoder_attention_data",
             "load_generation_attention_data",
         }
     ),
     "base.py": frozenset(
         {
-            "__init__",
+            "Operation.__init__",
+            "Operation._engine_query",
+            "Operation._engine_query_is_context",
+            "Operation._engine_query_plan",
+            "Operation._record_load",
+            "Operation.clear_cache",
+            "Operation.get_weights",
+            "Operation.load_data",
+            "Operation.query",
+            "Operation.supported_quant_modes",
             "_all_operation_subclasses",
-            "_engine_query",
-            "_engine_query_is_context",
-            "_engine_query_plan",
             "_read_filtered_rows",
             "_read_perf_rows",
-            "_record_load",
             "_resolve_perf_data_path",
             "_version_dir_is_partial",
             "_version_dir_is_unusable",
             "clear_all_op_caches",
-            "clear_cache",
-            "get_weights",
-            "load_data",
-            "query",
             "resolve_op_data_path",
-            "supported_quant_modes",
             "warm_all_op_data",
         }
     ),
     "communication.py": frozenset(
         {
-            "__init__",
+            "CustomAllReduce.__init__",
+            "CustomAllReduce._cache_key",
+            "CustomAllReduce.clear_cache",
+            "CustomAllReduce.get_weights",
+            "CustomAllReduce.load_data",
+            "NCCL.__init__",
+            "NCCL._cache_key",
+            "NCCL.clear_cache",
+            "NCCL.get_weights",
+            "NCCL.load_data",
+            "P2P.__init__",
+            "P2P.get_weights",
             "_cache_key",
-            "clear_cache",
-            "get_weights",
             "load_custom_allreduce_data",
-            "load_data",
             "load_nccl_data",
         }
     ),
     "dsa.py": frozenset(
         {
-            "__init__",
-            "_b",
+            "ContextDSAModule.__init__",
+            "ContextDSAModule._cache_key",
+            "ContextDSAModule.clear_cache",
+            "ContextDSAModule.get_weights",
+            "ContextDSAModule.load_data",
+            "GenerationDSAModule.__init__",
+            "GenerationDSAModule._cache_key",
+            "GenerationDSAModule.clear_cache",
+            "GenerationDSAModule.get_weights",
+            "GenerationDSAModule.load_data",
             "_cache_key",
             "_dsa_kernel_source_buckets",
             "_format_dsa_unavailable_message",
-            "_nest",
             "_read_dsa_row_sources",
-            "clear_cache",
             "dsa_block_weights_bytes",
-            "get_weights",
+            "dsa_block_weights_bytes._b",
             "load_context_dsa_module_data",
-            "load_data",
+            "load_context_dsa_module_data._nest",
             "load_generation_dsa_module_data",
+            "load_generation_dsa_module_data._nest",
         }
     ),
     "dsv4.py": frozenset(
         {
-            "__init__",
+            "ContextDeepSeekV4AttentionModule._cache_key",
+            "ContextDeepSeekV4AttentionModule.clear_cache",
+            "ContextDeepSeekV4AttentionModule.load_data",
+            "ContextDeepSeekV4AttentionModule.load_data._load",
+            "ContextDeepSeekV4AttentionModule.load_data._load_sparse",
+            "DeepSeekV4MHCModule.__init__",
+            "DeepSeekV4MHCModule._cache_key",
+            "DeepSeekV4MHCModule.clear_cache",
+            "DeepSeekV4MHCModule.get_weights",
+            "DeepSeekV4MHCModule.load_data",
+            "DeepSeekV4MegaMoEModule.__init__",
+            "DeepSeekV4MegaMoEModule._cache_key",
+            "DeepSeekV4MegaMoEModule._engine_query_plan",
+            "DeepSeekV4MegaMoEModule._normalize_distribution",
+            "DeepSeekV4MegaMoEModule.clear_cache",
+            "DeepSeekV4MegaMoEModule.get_weights",
+            "DeepSeekV4MegaMoEModule.load_data",
+            "GenerationDeepSeekV4AttentionModule._cache_key",
+            "GenerationDeepSeekV4AttentionModule.clear_cache",
+            "GenerationDeepSeekV4AttentionModule.load_data",
+            "GenerationDeepSeekV4AttentionModule.load_data._load",
+            "_BaseDeepSeekV4AttentionModule.__init__",
+            "_BaseDeepSeekV4AttentionModule._estimate_weights",
+            "_BaseDeepSeekV4AttentionModule.get_weights",
             "_cache_key",
-            "_coerce",
             "_deep_merge_dsv4_dicts",
             "_dsv4_normalize_dtype",
-            "_engine_query_plan",
-            "_estimate_weights",
-            "_is_bad_key",
-            "_load",
             "_load_dsv4_split",
-            "_load_sparse",
-            "_make_nested",
-            "_normalize_distribution",
-            "_put_nested",
-            "_row_phase",
-            "_to_bool",
             "_validate_dsv4_local_head_semantics",
-            "clear_cache",
-            "get_weights",
             "load_context_dsv4_kind_module_data",
-            "load_data",
+            "load_context_dsv4_kind_module_data._make_nested",
             "load_dsv4_megamoe_module_data",
+            "load_dsv4_megamoe_module_data._put_nested",
+            "load_dsv4_megamoe_module_data._row_phase",
+            "load_dsv4_megamoe_module_data._to_bool",
             "load_dsv4_sparse_kernel_data",
             "load_dsv4_sparse_op_data",
+            "load_dsv4_sparse_op_data._coerce",
+            "load_dsv4_sparse_op_data._is_bad_key",
             "load_generation_dsv4_kind_module_data",
+            "load_generation_dsv4_kind_module_data._make_nested",
             "load_mhc_module_data",
         }
     ),
     "elementwise.py": frozenset(
         {
-            "__init__",
-            "get_weights",
+            "ElementWise.__init__",
+            "ElementWise.get_weights",
         }
     ),
     "embedding.py": frozenset(
         {
-            "__init__",
-            "get_weights",
+            "Embedding.__init__",
+            "Embedding.get_weights",
         }
     ),
     "fpm_forward.py": frozenset(
         {
-            "__init__",
+            "FPMForwardOp.__init__",
+            "FPMForwardOp.get_weights",
             "_norm_backend_request",
             "_norm_identity",
-            "get_weights",
         }
     ),
     "gemm.py": frozenset(
         {
-            "__init__",
-            "_cache_key",
-            "_engine_query_plan",
-            "_load",
-            "clear_cache",
-            "get_weights",
+            "GEMM.__init__",
+            "GEMM._cache_key",
+            "GEMM._engine_query_plan",
+            "GEMM.clear_cache",
+            "GEMM.get_weights",
+            "GEMM.load_data",
+            "GEMM.load_data._load",
+            "GEMM.supported_quant_modes",
             "load_compute_scale_data",
-            "load_data",
             "load_gemm_data",
             "load_scale_matrix_data",
-            "supported_quant_modes",
             "xprofile_util_level_known",
         }
     ),
     "mamba.py": frozenset(
         {
-            "__init__",
+            "GDNKernel.__init__",
+            "GDNKernel._cache_key",
+            "GDNKernel.clear_cache",
+            "GDNKernel.get_weights",
+            "GDNKernel.load_data",
+            "KDAKernel.__init__",
+            "KDAKernel.load_data",
+            "Mamba2.__init__",
+            "Mamba2.get_weights",
+            "Mamba2.query",
+            "Mamba2.query._gemm_value",
+            "Mamba2.query._mem_value",
+            "Mamba2Kernel.__init__",
+            "Mamba2Kernel._cache_key",
+            "Mamba2Kernel.clear_cache",
+            "Mamba2Kernel.get_weights",
+            "Mamba2Kernel.load_data",
             "_cache_key",
-            "_gemm_value",
-            "_mem_value",
-            "clear_cache",
-            "get_weights",
-            "load_data",
             "load_gdn_data",
             "load_kda_data",
             "load_mamba2_data",
-            "query",
         }
     ),
     "mla.py": frozenset(
         {
-            "__init__",
+            "ContextMLA.__init__",
+            "ContextMLA._cache_key",
+            "ContextMLA.clear_cache",
+            "ContextMLA.get_weights",
+            "ContextMLA.load_data",
+            "GenerationMLA.__init__",
+            "GenerationMLA._cache_key",
+            "GenerationMLA.clear_cache",
+            "GenerationMLA.get_weights",
+            "GenerationMLA.load_data",
+            "MLABmm.__init__",
+            "MLABmm._cache_key",
+            "MLABmm._engine_query_plan",
+            "MLABmm.clear_cache",
+            "MLABmm.get_weights",
+            "MLABmm.load_data",
+            "MLAModule.__init__",
+            "MLAModule._cache_key",
+            "MLAModule.clear_cache",
+            "MLAModule.get_weights",
+            "MLAModule.load_data",
+            "WideEPContextMLA.__init__",
+            "WideEPContextMLA._cache_key",
+            "WideEPContextMLA.clear_cache",
+            "WideEPContextMLA.get_weights",
+            "WideEPContextMLA.load_data",
+            "WideEPGenerationMLA.__init__",
+            "WideEPGenerationMLA._cache_key",
+            "WideEPGenerationMLA.clear_cache",
+            "WideEPGenerationMLA.get_weights",
+            "WideEPGenerationMLA.load_data",
             "_cache_key",
-            "_engine_query_plan",
             "_mla_module_native_heads",
-            "clear_cache",
-            "get_weights",
             "load_context_mla_data",
             "load_context_mla_module_data",
-            "load_data",
             "load_generation_mla_data",
             "load_generation_mla_module_data",
             "load_mla_bmm_data",
@@ -293,15 +385,33 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "moe.py": frozenset(
         {
-            "__init__",
+            "MoE.__init__",
+            "MoE._cache_key",
+            "MoE._engine_query_plan",
+            "MoE.clear_cache",
+            "MoE.get_weights",
+            "MoE.load_data",
+            "MoEDispatch.__init__",
+            "MoEDispatch._cache_key",
+            "MoEDispatch.clear_cache",
+            "MoEDispatch.get_weights",
+            "MoEDispatch.load_data",
+            "TrtLLMWideEPMoE.__init__",
+            "TrtLLMWideEPMoE._cache_key",
+            "TrtLLMWideEPMoE._engine_query_plan",
+            "TrtLLMWideEPMoE._select_kernel",
+            "TrtLLMWideEPMoE.clear_cache",
+            "TrtLLMWideEPMoE.get_weights",
+            "TrtLLMWideEPMoE.load_data",
+            "TrtLLMWideEPMoEDispatch.__init__",
+            "TrtLLMWideEPMoEDispatch._cache_key",
+            "TrtLLMWideEPMoEDispatch._engine_query_plan",
+            "TrtLLMWideEPMoEDispatch._normalize_quant_mode_for_table",
+            "TrtLLMWideEPMoEDispatch._select_alltoall_kernel",
+            "TrtLLMWideEPMoEDispatch.clear_cache",
+            "TrtLLMWideEPMoEDispatch.get_weights",
+            "TrtLLMWideEPMoEDispatch.load_data",
             "_cache_key",
-            "_engine_query_plan",
-            "_normalize_quant_mode_for_table",
-            "_select_alltoall_kernel",
-            "_select_kernel",
-            "clear_cache",
-            "get_weights",
-            "load_data",
             "load_moe_data",
             "load_trtllm_alltoall_data",
             "load_wideep_context_moe_data",
@@ -314,7 +424,19 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "moe_comm.py": frozenset(
         {
-            "__init__",
+            "MoEAllToAll.__init__",
+            "MoEAllToAll._cache_key",
+            "MoEAllToAll.clear_cache",
+            "MoEAllToAll.get_weights",
+            "MoEAllToAll.load_data",
+            "MoECommBackendSpec.feasible",
+            "MoEExpertCompute.__init__",
+            "MoEExpertCompute._cache_key",
+            "MoEExpertCompute._engine_query_plan",
+            "MoEExpertCompute._resolve_kernel_source",
+            "MoEExpertCompute.clear_cache",
+            "MoEExpertCompute.get_weights",
+            "MoEExpertCompute.load_data",
             "_adapt_legacy_deepep",
             "_adapt_legacy_deepep_ll",
             "_adapt_legacy_deepep_normal",
@@ -324,23 +446,17 @@ OPERATIONS_DEF_INVENTORY = {
             "_adapt_legacy_trtllm_alltoall",
             "_adapt_legacy_trtllm_wideep_moe",
             "_cache_key",
-            "_engine_query_plan",
             "_load_legacy_a2a",
             "_load_legacy_ep",
             "_moe_a2a_store",
             "_moe_ep_store",
             "_normalize_sms",
             "_require_latency",
-            "_resolve_kernel_source",
             "_row_power",
             "_store_a2a_leaf",
             "_store_ep_leaf",
             "_validate_a2a_request",
             "_validate_ep_phase",
-            "clear_cache",
-            "feasible",
-            "get_weights",
-            "load_data",
             "load_moe_a2a_data",
             "load_moe_expert_compute_data",
             "nodes_for",
@@ -348,18 +464,22 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "msa.py": frozenset(
         {
-            "__init__",
-            "get_weights",
-            "load_data",
+            "_BaseMSAModule.__init__",
+            "_BaseMSAModule.get_weights",
+            "_BaseMSAModule.load_data",
         }
     ),
     "overlap.py": frozenset(
         {
-            "__init__",
-            "_engine_query_is_context",
-            "_engine_query_plan",
+            "FallbackOp.__init__",
+            "FallbackOp._engine_query_is_context",
+            "FallbackOp._engine_query_plan",
+            "FallbackOp.get_weights",
+            "OverlapOp.__init__",
+            "OverlapOp._engine_query_is_context",
+            "OverlapOp._engine_query_plan",
+            "OverlapOp.get_weights",
             "_infer_phase",
-            "get_weights",
         }
     ),
     "util_empirical.py": frozenset(
@@ -513,12 +633,24 @@ def test_no_perf_interp_references_in_operations():
     assert not offenders, f"perf_interp references reappeared in: {offenders}"
 
 
-def _file_def_names(source_text: str) -> frozenset[str]:
-    return frozenset(
-        node.name
-        for node in ast.walk(ast.parse(source_text))
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    )
+def _file_def_names(source_text: str) -> list[str]:
+    """Every def at its qualified lexical path, in occurrence order (a list,
+    not a set, so duplicate qualified redefinitions surface as duplicates)."""
+    out: list[str] = []
+
+    def walk(node, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                qualified = f"{prefix}{child.name}"
+                out.append(qualified)
+                walk(child, qualified + ".")
+            elif isinstance(child, ast.ClassDef):
+                walk(child, f"{prefix}{child.name}.")
+            else:
+                walk(child, prefix)
+
+    walk(ast.parse(source_text), "")
+    return out
 
 
 def test_operations_def_inventory_is_frozen():
@@ -527,7 +659,11 @@ def test_operations_def_inventory_is_frozen():
     edited — the reviewable declaration point for anything that could be
     estimation math under an innocent name."""
     assert OPERATIONS_DIR.is_dir(), f"source layout expected at {OPERATIONS_DIR} (scan must not pass vacuously)"
-    live = {path.name: _file_def_names(path.read_text(encoding="utf-8")) for path in OPERATIONS_DIR.glob("*.py")}
+    live_lists = {path.name: _file_def_names(path.read_text(encoding="utf-8")) for path in OPERATIONS_DIR.glob("*.py")}
+    for fname, qualified in sorted(live_lists.items()):
+        duplicated = sorted({q for q in qualified if qualified.count(q) > 1})
+        assert not duplicated, f"{fname}: duplicate qualified defs (ambiguous redefinition): {duplicated}"
+    live = {fname: frozenset(qualified) for fname, qualified in live_lists.items()}
     assert set(live) == set(OPERATIONS_DEF_INVENTORY), (
         f"operations module set drifted: files added {sorted(set(live) - set(OPERATIONS_DEF_INVENTORY))}, "
         f"removed {sorted(set(OPERATIONS_DEF_INVENTORY) - set(live))} — update the inventory AND "
@@ -561,10 +697,40 @@ def test_def_inventory_catches_innocently_named_oracle():
         "def _interpolate_2d(grid, x, y):\n"
         "    return grid[x][y]\n"
     )
-    new_names = _file_def_names(fixture)
+    new_names = frozenset(_file_def_names(fixture))
     assert _offending_defs(fixture) == []  # the prefix guard alone is blind here...
     for fname, frozen in OPERATIONS_DEF_INVENTORY.items():
         assert not (new_names & frozen), f"fixture names collide with {fname}"
     # ...but none of these names exists in any frozen per-file inventory, so
     # introducing them into ANY operations module trips
     # test_operations_def_inventory_is_frozen.
+
+
+def test_def_inventory_catches_shadow_class_with_existing_names():
+    """Negative fixture for the shadow-class bypass: a NEW class that defines
+    only names already present in a module (``__init__``/``get_weights``/
+    ``load_data``) adds no new PLAIN names — but its qualified paths are new,
+    so the frozen inventory still flags it."""
+    fixture = (
+        "class ShadowOp:\n"
+        "    def __init__(self):\n"
+        "        pass\n"
+        "    def get_weights(self):\n"
+        "        return 0\n"
+        "    def load_data(self):\n"
+        "        pass\n"
+    )
+    qualified = frozenset(_file_def_names(fixture))
+    assert qualified == {"ShadowOp.__init__", "ShadowOp.get_weights", "ShadowOp.load_data"}
+    plain = {q.rpartition(".")[2] for q in qualified}
+    for fname, frozen in OPERATIONS_DEF_INVENTORY.items():
+        frozen_plain = {q.rpartition(".")[2] for q in frozen}
+        if plain <= frozen_plain:
+            # the plain names all pre-exist in this file (the bypass a flat
+            # name set would allow)...
+            assert not (qualified & frozen), f"fixture qualified names collide with {fname}"
+            break
+    else:  # pragma: no cover — operations/ always has such a file
+        raise AssertionError("no inventory file contains all fixture plain names")
+    # ...but none of the QUALIFIED paths exists anywhere, so introducing the
+    # shadow class trips test_operations_def_inventory_is_frozen.

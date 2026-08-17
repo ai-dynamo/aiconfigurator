@@ -41,7 +41,8 @@ deprecation-cleanup PR.
 
 1. **Model the op in Rust**: an operator in
    `aic-core/rust/aiconfigurator-core/src/operators/` (query, SOL, energy)
-   and, if table-backed, a loader in `src/perf_database/`. Anchor it with a
+   and, if table-backed, a loader in
+   `aic-core/rust/aiconfigurator-core/src/perf_database/`. Anchor it with a
    Rust `#[cfg(test)]` oracle test (hand-derived — there is no Python
    reference to generate against).
 2. **Add the Python op class here**: constructor + fields (the wire
@@ -52,11 +53,12 @@ deprecation-cleanup PR.
    add must be declared in its frozen per-file inventory
    (`OPERATIONS_DEF_INVENTORY`) — that edit is the deliberate, reviewable
    declaration of the new function.
-3. **Wire the spec conversion**: a `_to_opspec` branch in `sdk/engine.py`
-   and an `Op` variant in `operators/op.rs` — **append at the enum tail**
+3. **Wire the spec conversion**: a `_to_opspec` branch in
+   `aic-core/src/aiconfigurator_core/sdk/engine.py` and an `Op` variant in
+   `aic-core/rust/aiconfigurator-core/src/operators/op.rs` — **append at the enum tail**
    (bincode variant indices are positional; a mid-enum insertion requires
    an `ENGINE_SPEC_SCHEMA_VERSION` bump on BOTH sides) — plus the
-   `engine/spec.rs` round-trip fixture.
+   `aic-core/rust/aiconfigurator-core/src/engine/spec.rs` round-trip fixture.
    `tests/unit/sdk/test_opspec_coverage.py` fails until the op converts or
    carries a justified `EXEMPT` entry.
 4. **Pin the behavior**: a parity case via `parity_tests/pin_goldens.py`
