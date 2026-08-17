@@ -246,7 +246,6 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         - ``database._raw_context_deepseek_v4_attention_module_data``
         - ``database._dsv4_sparse_kernel_data``
         """
-        import os
 
         from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
         from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
@@ -345,7 +344,6 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         """Idempotent. Fetches the engine's merged csa+hca generation table
         view, binds ``database._generation_deepseek_v4_attention_module_data``.
         """
-        import os
 
         from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
         from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
@@ -481,6 +479,7 @@ class DeepSeekV4MegaMoEModule(Operation):
             op = copy.copy(self)
             op._quant_mode = quant_mode
         return op, eval_kwargs
+
 
 # ───────────────────────────────────────────────────────────────────────
 # Init-time split-file merge helper (formerly in PerfDatabase.__init__)

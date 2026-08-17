@@ -32,7 +32,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator_core.sdk import common
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
+from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -99,8 +99,6 @@ DSA_MODEL_DIMS: dict[str, dict] = {
 }
 
 DEFAULT_DSA_ARCHITECTURE = "DeepseekV32ForCausalLM"
-
-
 
 
 # Extrapolation grids — lifted verbatim from the legacy blocks in
