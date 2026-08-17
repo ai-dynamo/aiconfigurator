@@ -130,7 +130,12 @@ roofline queried every op-level op in SOL — but #1461 moved that to
    (prerequisite: a pickle/transfer story for pyo3 objects across
    `ProcessPoolExecutor`). Also collects PR-6's deferrals: the remaining
    test-only parsers (with the collector-suite contract rewrite), the
-   Python shared-layer source resolution, and kv-bytes.
+   Python shared-layer source resolution, and kv-bytes. The two pinned
+   migration baselines retire here with the surfaces they froze —
+   `query_shim_baseline.json` with the shims, `data_plane_baseline.json`
+   with the migration-equivalence claim (its long-term successor is the
+   synthetic-parquet behavior tests over the view path, which don't
+   depend on shipped data staying byte-stable).
 
 **Post-PR-5 invariant (the single-oracle rule):** per-op performance VALUES
 (latency, energy, SOL decomposition) are computed ONLY by the compiled
