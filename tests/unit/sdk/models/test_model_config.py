@@ -56,6 +56,8 @@ class TestSupportedModels:
             "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
             "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
             "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+            "Qwen/Qwen3.8-2.4T-A95B",
+            "Qwen/Qwen3.8-2.4T-A95B-FP8",
         ],
     )
     def test_specific_models_are_in_default_list(self, hf_id):
@@ -1868,6 +1870,54 @@ class TestBundledModelConfigsOffline:
         assert model_config.kvcache_quant_mode == common.KVCacheQuantMode.bfloat16
         assert model_config.fmha_quant_mode == common.FMHAQuantMode.bfloat16
 
+    def test_qwen38max_loads_from_bundle_with_gdn_and_moe_fields(self, monkeypatch):
+        import aiconfigurator.sdk.utils as sdk_utils
+
+        def _no_network(*a, **k):
+            raise AssertionError("network path reached")
+
+        monkeypatch.setattr(sdk_utils, "_download_hf_config", _no_network, raising=False)
+        sdk_utils.get_model_config_from_model_path.cache_clear()
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+        cfg = sdk_utils.get_model_config_from_model_path("Qwen/Qwen3.8-2.4T-A95B")
+        assert cfg["architecture"] == "Qwen3_5MoeForCausalLM"
+        assert cfg["n"] == 64
+        assert cfg["n_kv"] == 4
+        assert cfg["d"] == 256
+        assert cfg["vocab"] == 248320
+        extra = cfg["extra_params"]
+        assert (
+            extra.linear_num_key_heads,
+            extra.linear_key_head_dim,
+            extra.linear_num_value_heads,
+            extra.linear_value_head_dim,
+            extra.linear_conv_kernel_dim,
+        ) == (16, 128, 128, 128, 4)
+        assert (extra.num_experts, extra.topk, extra.moe_inter_size, extra.shared_expert_inter_size) == (
+            512,
+            10,
+            2048,
+            2048,
+        )
+        assert extra.layer_types.count("full_attention") == 23
+        assert extra.layer_types.count("linear_attention") == 69
+        sdk_utils.get_model_config_from_model_path.cache_clear()
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+
+    def test_qwen38max_fp8_loads_from_bundle(self, monkeypatch):
+        import aiconfigurator.sdk.utils as sdk_utils
+
+        def _no_network(*a, **k):
+            raise AssertionError("network path reached")
+
+        monkeypatch.setattr(sdk_utils, "_download_hf_config", _no_network, raising=False)
+        sdk_utils.get_model_config_from_model_path.cache_clear()
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+        cfg = sdk_utils.get_model_config_from_model_path("Qwen/Qwen3.8-2.4T-A95B-FP8")
+        quant_cfg = cfg["raw_config"]["quantization_config"]
+        assert quant_cfg["quant_method"] == "fp8"
+        assert quant_cfg["weight_block_size"] == [128, 128]
+        sdk_utils.get_model_config_from_model_path.cache_clear()
         sdk_utils._load_model_config_from_model_path.cache_clear()
 
 

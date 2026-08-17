@@ -602,6 +602,9 @@ DefaultHFModels = {
     # Qwen 3.6 Models
     "nvidia/Qwen3.6-27B-NVFP4",
     "nvidia/Qwen3.6-35B-A3B-NVFP4",
+    # Qwen3.8-Max Models
+    "Qwen/Qwen3.8-2.4T-A95B",
+    "Qwen/Qwen3.8-2.4T-A95B-FP8",
     # MiMo Models
     "XiaomiMiMo/MiMo-V2-Flash",
     "XiaomiMiMo/MiMo-7B-Base",
