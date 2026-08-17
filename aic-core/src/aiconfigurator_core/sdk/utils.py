@@ -883,7 +883,15 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"head_wise_attn_gate={extra_params.use_head_wise_attn_gate}, "
             f"share_expert_dim={config.get('share_expert_dim', 0)}"
         )
-    elif architecture in {"Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration"}:
+    elif architecture in {
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+        # Qwen3.8-Max: same hybrid GDN + full-attention shape, but the released
+        # checkpoint ships a FLAT config (no text_config nesting) under this
+        # CausalLM architecture string instead of the VLM ConditionalGeneration
+        # classes above.
+        "Qwen3_5MoeForCausalLM",
+    }:
         # Qwen3.5 hybrid GDN + full-attention model.
         layer_types_raw = config.get("layer_types", [])
         if len(layer_types_raw) != layers:

@@ -724,6 +724,9 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "Llama4ForConditionalGeneration": "HYBRIDMOE",
     "Qwen3_5ForConditionalGeneration": "QWEN35",
     "Qwen3_5MoeForConditionalGeneration": "QWEN35",
+    # Qwen3.8-Max: FLAT config (no text_config nesting) -- do NOT add to
+    # MULTIMODAL_TEXT_CONFIG_KEY below, unlike the two VLM classes above.
+    "Qwen3_5MoeForCausalLM": "QWEN35",
     "Gemma4ForConditionalGeneration": "GEMMA4MIX",
 }
 

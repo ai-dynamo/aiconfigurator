@@ -1979,3 +1979,27 @@ class TestDSV4NVFP4QuantResolution:
             sdk_utils.get_model_config_from_model_path.cache_clear()
             sdk_utils._load_model_config_from_model_path.cache_clear()
             _get_model_info.cache_clear()
+
+
+# ── Qwen3.8-Max (Qwen3_5MoeForCausalLM) constants ───────────────────────────────
+
+_QWEN38_MAX_ARCH = "Qwen3_5MoeForCausalLM"
+
+
+class TestQwen38MaxRegistration:
+    """Qwen3.8-Max ships the flat (non-VLM) Qwen3_5MoeForCausalLM architecture.
+
+    Distinct from the two Qwen3.5 VLM classes (Qwen3_5ForConditionalGeneration,
+    Qwen3_5MoeForConditionalGeneration), whose checkpoints nest LM fields under
+    text_config -- Qwen3_5MoeForCausalLM must NOT be added to
+    MULTIMODAL_TEXT_CONFIG_KEY.
+    """
+
+    def test_architecture_in_model_family_map(self):
+        assert _QWEN38_MAX_ARCH in common.ARCHITECTURE_TO_MODEL_FAMILY
+
+    def test_architecture_maps_to_qwen35_family(self):
+        assert common.ARCHITECTURE_TO_MODEL_FAMILY[_QWEN38_MAX_ARCH] == "QWEN35"
+
+    def test_architecture_is_not_multimodal(self):
+        assert _QWEN38_MAX_ARCH not in common.MULTIMODAL_TEXT_CONFIG_KEY
