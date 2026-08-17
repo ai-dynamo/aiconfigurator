@@ -1218,6 +1218,64 @@ CASES = [
         {},
         version="1.3.0rc20",
     ),
+    # Zero-valued composite provenance (review round 4): a zero-valued member
+    # is a source-NEUTRAL additive identity — it must not poison the tag.
+    op_case(
+        "overlap-nested-empty-same-group",
+        "h200",
+        "overlap.OverlapOp",
+        [
+            "ov_same",
+            [
+                {"__op__": "gemm.GEMM", "ctor_args": ["g1", 1.0, 4096, 4096, "GEMMQuantMode.bfloat16"]},
+                {"__op__": "overlap.OverlapOp", "ctor_args": ["nested_empty", [], []]},
+            ],
+            [],
+        ],
+        {"x": 64},
+        version="1.3.0rc20",
+    ),
+    op_case(
+        "overlap-nested-empty-opposite-group",
+        "h200",
+        "overlap.OverlapOp",
+        [
+            "ov_opp",
+            [{"__op__": "gemm.GEMM", "ctor_args": ["g1", 1.0, 4096, 4096, "GEMMQuantMode.bfloat16"]}],
+            [{"__op__": "overlap.OverlapOp", "ctor_args": ["nested_empty", [], []]}],
+        ],
+        {"x": 64},
+        version="1.3.0rc20",
+    ),
+    op_case(
+        "fallback-primary-miss-empty-chain",
+        "b200-sglang",
+        "overlap.FallbackOp",
+        [
+            "fb_empty",
+            {
+                "__op__": "msa.ContextMSAModule",
+                "ctor_args": ["msa", 1.0],
+                "ctor_kwargs": {
+                    "num_heads": 8,
+                    "num_kv_heads": 1,
+                    "hidden_size": 4096,
+                    "head_dim": 128,
+                    "v_head_dim": 128,
+                    "index_n_heads": 4,
+                    "index_head_dim": 128,
+                    "index_topk": 2048,
+                    "block_size": 128,
+                    "kvcache_quant_mode": "KVCacheQuantMode.fp8",
+                    "fmha_quant_mode": "FMHAQuantMode.fp8",
+                    "gemm_quant_mode": "GEMMQuantMode.fp8_block",
+                },
+            },
+            [],
+        ],
+        {"batch_size": 8, "s": 512, "prefix": 0},
+        version="0.5.14",
+    ),
     op_case(
         "ctx-attn-zero-scale-op",
         "h200",
@@ -1558,6 +1616,11 @@ SEMANTIC_DIMENSION_CASES = {
         "fallback-token-only-x-only",
         "overlap-empty-groups",
         "overlap-empty-no-kwargs",
+    },
+    "zero-valued composite members are source-neutral": {
+        "overlap-nested-empty-same-group",
+        "overlap-nested-empty-opposite-group",
+        "fallback-primary-miss-empty-chain",
     },
     "mixed-phase composite": {"overlap-mixed-op"},
     "tombstones assert their error": {
