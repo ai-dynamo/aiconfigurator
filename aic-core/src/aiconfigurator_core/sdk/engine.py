@@ -325,10 +325,14 @@ def _dispatch_flavor(backend: str, op: MoEDispatch) -> str:
     instead: the established contract for graphs the native engine cannot
     represent, which delegates the step back to Python.
     """
-    if backend == "deepep_moe":
+    if getattr(op, "_moe_backend", None) == "deepep_moe":
+        # The guard must read the OP's moe_backend (the framework backend
+        # param never takes this value, so testing it silently serialized
+        # DeepEP dispatch ops as CustomAllReduce — the exact algorithm swap
+        # this raise exists to prevent).
         raise OpConversionError(
             "MoEDispatch(moe_backend='deepep_moe') has no native variant (retired with "
-            "AIC-1601; large-EP comm is modeled by MoEAllToAll) — delegating to the Python step"
+            "AIC-1601; large-EP comm is modeled by MoEAllToAll)"
         )
     if backend == "trtllm":
         return "TrtllmAlltoall"
@@ -533,13 +537,13 @@ def _mhc_module(op: DeepSeekV4MHCModule, *, architecture: str) -> dict:
         "name": op._name,
         "scale_factor": op._scale_factor,
         # op (pre/post/both) is part of the mHC table key — pre and post have
-        # distinct latencies. See `perf_database::mhc` / `_query_mhc_table`.
+        # distinct latencies. See `perf_database::mhc`.
         "op": op._op,
         "hc_mult": op._hc_mult,
         "hidden_size": op._hidden_size,
         "architecture": architecture,
         # SOL inputs for the Rust-side mHC roofline (beyond-range util-hold
-        # anchor; mirrors `_query_mhc_table.get_sol`).
+        # anchor; mirrors the retired python get_sol).
         "sinkhorn_iters": op._sinkhorn_iters,
         "quant_mode": _quant_name(op._quant_mode),
         # CP: token-major module, per-rank tokens = ceil(x / seq_split)
@@ -1088,13 +1092,20 @@ def build_engine_spec_json(
     return json.dumps(spec)
 
 
-def build_database_probe_spec_json(database: Any, *, systems_path: str | None = None) -> str:
+def build_database_probe_spec_json(
+    database: Any, *, systems_path: str | None = None, database_mode: str | None = None
+) -> str:
     """``EngineSpec`` JSON with EMPTY op lists: an engine bound to
     ``database``'s perf tables only (same shared-layer sources, query mode
     and transfer policy as the live Python view). Compiled by tools that
     evaluate ad-hoc op lists (``evaluate_ops_json`` /
     ``evaluate_ops_sol_json``) without a model — the sanity-check notebook
-    sources its per-op reference values through this."""
+    sources its per-op reference values through this.
+
+    ``database_mode`` overrides the view's own query mode (wire token, e.g.
+    ``"SILICON"``): the deprecated per-call ``query_*(...,
+    database_mode=...)`` shims reproduce a per-call mode by probing the same
+    sources under the requested mode."""
     engine: dict[str, Any] = {
         "schema_version": ENGINE_CONFIG_SCHEMA_VERSION,
         "model_name": "__database_probe__",
@@ -1114,7 +1125,7 @@ def build_database_probe_spec_json(database: Any, *, systems_path: str | None = 
         "activation_dtype": None,
         "kv_cache_dtype": None,
         "perf_db_sources": _compute_perf_db_sources(database),
-        "database_mode": _database_mode_name(database),
+        "database_mode": database_mode or _database_mode_name(database),
         "transfer_policy": _transfer_policy_tokens(database),
         "extra": {},
     }
@@ -1125,6 +1136,145 @@ def build_database_probe_spec_json(database: Any, *, systems_path: str | None = 
         "generation_ops": [],
     }
     return json.dumps(spec)
+
+
+# --------------------------------------------------------------------------- #
+# Deprecated per-call query shim plumbing (#1357 PR-5).
+#
+# The retired Python per-call query stack (``PerfDatabase.query_*`` and
+# ``Operation.query``) survives one release as thin shims that route every
+# value through the compiled engine. This block is their plumbing: a small
+# LRU of model-less probe engines keyed by (database identity, effective
+# query mode) plus a single-op evaluation helper. It is NOT a second public
+# query surface — long-term callers use ``EngineHandle.evaluate_ops_json`` /
+# ``evaluate_ops_sol_json`` (op-list FFI) or the phase/run entry points; this
+# plumbing is removed together with the shims.
+# --------------------------------------------------------------------------- #
+
+_PROBE_HANDLE_CACHE: dict[str, EngineHandle] = {}
+_PROBE_HANDLE_CACHE_MAX = 8
+
+QUERY_SHIM_DEPRECATION = (
+    "The Python per-call query stack is deprecated (#1357) and will be removed in the "
+    "next release; values now come from the compiled engine. Migrate to the op-list FFI "
+    "(EngineHandle.evaluate_ops_json / evaluate_ops_sol_json), the per-phase surface "
+    "(run_static_per_op), or whole-run entry points (run_static / InferenceSession)."
+)
+
+
+def _require_real_database(database: Any) -> None:
+    """The probe engine loads perf tables from DISK by (system, backend,
+    version, sources): only a real ``PerfDatabase`` can be served. Synthetic
+    or duck-typed stand-ins must fail loudly here — silently answering from
+    disk while the caller believes its in-memory tables are being read would
+    be an incorrect-value bug. (A real instance whose loaded tables were
+    monkeypatched afterwards is undetectable; the engine answers from the
+    on-disk rows.)"""
+    from aiconfigurator_core.sdk.perf_database import PerfDatabase
+
+    if not isinstance(database, PerfDatabase):
+        raise TypeError(
+            "the deprecated per-call query shims route through the compiled engine, which "
+            f"loads perf tables from disk — got {type(database)!r} instead of PerfDatabase. "
+            "Evaluate ad-hoc data via EngineHandle.evaluate_ops_json on a real database, or "
+            "walk the raw loaded tables (database._<family>_data) directly."
+        )
+
+
+def _probe_handle_for(database: Any, mode_token: str | None) -> EngineHandle:
+    """Cached model-less probe engine over ``database``'s live view, optionally
+    re-moded per call (``mode_token`` is the wire token, e.g. ``"SILICON"``).
+    The cache key is the probe spec JSON itself: it captures system, backend,
+    version, resolved per-op sources, query mode and transfer policy, so any
+    view change produces a distinct entry."""
+    _require_real_database(database)
+    systems_path = getattr(database, "systems_root", None) or os.environ.get("AICONFIGURATOR_SYSTEMS_PATH")
+    key = build_database_probe_spec_json(database, systems_path=systems_path, database_mode=mode_token)
+    handle = _PROBE_HANDLE_CACHE.get(key)
+    if handle is None:
+        handle = EngineHandle(aiconfigurator_core.engine_spec_bincode_from_json(key), systems_path=systems_path)
+        while len(_PROBE_HANDLE_CACHE) >= _PROBE_HANDLE_CACHE_MAX:
+            _PROBE_HANDLE_CACHE.pop(next(iter(_PROBE_HANDLE_CACHE)))
+        _PROBE_HANDLE_CACHE[key] = handle
+    return handle
+
+
+def _clear_probe_handle_cache() -> None:
+    """Same eviction contract as the engine-step handle LRU (each handle pins
+    a Rust-side perf-DB load); called from ``clear_all_op_caches``."""
+    _PROBE_HANDLE_CACHE.clear()
+
+
+def _evaluate_single_op(
+    database: Any,
+    op: Any,
+    *,
+    is_context: bool,
+    batch_size: int,
+    s: int,
+    prefix: int = 0,
+    x: int | None = None,
+    imbalance_correction_scale: float = 1.0,
+    database_mode: Any = None,
+):
+    """Evaluate ONE Python ``Operation`` through the compiled engine — the
+    value source behind the deprecated per-call shims.
+
+    ``database_mode`` follows the retired facades' per-call semantics:
+    ``None`` uses the database's live mode; ``SILICON`` / ``HYBRID`` /
+    ``EMPIRICAL`` / ``SOL`` re-mode the probe for this call (scalar
+    ``PerformanceResult`` — SOL rides the re-moded probe, NOT the
+    decomposition FFI, so it works for every op family); ``SOL_FULL``
+    returns the raw ``(sol_time, sol_math, sol_mem)`` triple via the
+    SOL-decomposition FFI (raises for op families whose SOL path does not
+    export its decomposition)."""
+    from aiconfigurator_core.sdk.common import DatabaseMode
+    from aiconfigurator_core.sdk.performance_result import PerformanceResult
+
+    ops_json = build_ops_json(
+        [op],
+        model=_PROBE_MODEL_STUB,
+        backend=database.backend,
+        database=database,
+    )
+    eval_kwargs = dict(
+        is_context=bool(is_context),
+        batch_size=int(batch_size),
+        s=int(s),
+        prefix=int(prefix),
+        imbalance_correction_scale=float(imbalance_correction_scale),
+        x=None if x is None else int(x),
+    )
+    # Normalize enum-or-string modes to the wire token BEFORE branching, so a
+    # plain "SOL_FULL" string takes the decomposition branch exactly like the
+    # enum member (the str() tolerance below otherwise routes it into the
+    # probe as a database mode and returns the wrong type).
+    mode_token = None
+    if database_mode is not None:
+        mode_token = getattr(database_mode, "name", str(database_mode))
+    if mode_token == DatabaseMode.SOL_FULL.name:
+        # Acquire the decomposition handle through a SOL-mode probe: the sol
+        # FFI forces the SOL_FULL view internally regardless of the handle's
+        # base mode, and the SOL-mode load path tolerates a missing perf-data
+        # directory — so estimate-only (spec-yaml-only) databases keep their
+        # legacy SOL_FULL triples instead of failing at engine load.
+        handle = _probe_handle_for(database, DatabaseMode.SOL.name)
+        (_, sol_time, sol_math, sol_mem) = handle.evaluate_ops_sol_json(ops_json, **eval_kwargs)[0]
+        return sol_time, sol_math, sol_mem
+    handle = _probe_handle_for(database, mode_token)
+    (_, latency, energy, source) = handle.evaluate_ops_json(ops_json, **eval_kwargs)[0]
+    return PerformanceResult(latency, energy=energy, source=source)
+
+
+class _ProbeModelStub:
+    """``build_ops_json`` only reads ``architecture`` off the model; ops that
+    need a real architecture (DSA/DSv4 index-dim derivation) carry it on the
+    op instance and their conversion ignores this stub."""
+
+    architecture = ""
+
+
+_PROBE_MODEL_STUB = _ProbeModelStub()
 
 
 def _maybe_load_database(system: str, backend: str, backend_version: str | None, systems_path: str | None) -> Any:

@@ -12,7 +12,6 @@ extend this file as more ops migrate.
 
 from __future__ import annotations
 
-from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.base import Operation
 from aiconfigurator.sdk.operations.gemm import GEMM
 
@@ -55,22 +54,11 @@ def test_perf_database_init_opens_no_csvs(tmp_path, monkeypatch):
     )
 
 
-def test_gemm_loads_exactly_once_across_many_queries(stub_perf_db):
-    """A single GEMM.load_data call covers an arbitrary number of queries."""
-    # The autouse ``_reset_op_load_counts`` fixture cleared the counter
-    # before this test ran. ``stub_perf_db`` triggered one load during
-    # its explicit ``_warm_lazy_op_caches`` step — the fixture warms
-    # while loader patches are still active rather than relying on
-    # ``PerfDatabase.__init__`` to do it eagerly.
-    initial_count = Operation._load_data_call_count.get(GEMM, 0)
-    assert initial_count <= 1, "GEMM should load at most once during fixture warm-up"
-
-    quant_mode = common.GEMMQuantMode.bfloat16
-    for m, n, k in [(64, 128, 256), (64, 128, 512), (64, 256, 256), (128, 128, 256), (128, 256, 512)]:
-        stub_perf_db.query_gemm(m, n, k, quant_mode)
-
-    # Many queries → still loaded exactly once.
-    assert Operation._load_data_call_count.get(GEMM, 0) == initial_count
+# ``test_gemm_loads_exactly_once_across_many_queries`` retired with #1357
+# PR-5: the per-call query shims route through the compiled engine (which
+# loads its own tables from disk) and never touch ``OpClass.load_data``, so
+# "many queries -> one Python load" is no longer a live relationship. The
+# load-once idempotence contract itself is pinned directly below.
 
 
 def test_gemm_load_count_unaffected_by_repeated_load_data_calls(stub_perf_db):
@@ -89,11 +77,10 @@ def test_clear_all_op_caches_resets_counter_and_class_cache():
 
     The save/restore around the call keeps the comprehensive_perf_db
     singleton's cache entries alive for sibling tests — clearing them
-    would force fresh disk loads with no loader patches active. Every
-    op-class ``_query_*_table`` method invokes ``cls.load_data(database)``
-    at the top, so EVERY op class's class cache must be preserved here
-    (not just GEMM's)."""
-    from aiconfigurator.sdk.operations import util_empirical
+    would force fresh disk loads with no loader patches active. (The
+    util-grid cache this test also seeded retired with the estimation math
+    in #1357 PR-5; ``clear_grid_cache`` survives as a compat no-op inside
+    ``clear_all_op_caches``.)"""
     from aiconfigurator.sdk.operations.base import Operation as _OpBase
     from aiconfigurator.sdk.operations.base import _all_operation_subclasses, clear_all_op_caches
 
@@ -105,7 +92,6 @@ def test_clear_all_op_caches_resets_counter_and_class_cache():
         for attr_name in list(cls.__dict__):
             if attr_name.endswith("_cache") and isinstance(cls.__dict__[attr_name], dict):
                 saved.append((cls, attr_name, dict(cls.__dict__[attr_name])))
-    saved_util_grids = dict(util_empirical._GRID_CACHE)
 
     try:
         sentinel_key = ("/dev/null", "test", "test", "test", False)
@@ -116,16 +102,13 @@ def test_clear_all_op_caches_resets_counter_and_class_cache():
         # clears all three per-class caches, not just ``_data_cache``.
         GEMM._compute_scale_cache[sentinel_key] = "compute-scale-sentinel"
         GEMM._scale_matrix_cache[sentinel_key] = "scale-matrix-sentinel"
-        util_empirical.get_grid("sentinel-util-grid", lambda: util_empirical.UtilGrid([]))
 
         clear_all_op_caches()
 
         assert sentinel_key not in GEMM._data_cache
         assert sentinel_key not in GEMM._compute_scale_cache
         assert sentinel_key not in GEMM._scale_matrix_cache
-        assert "sentinel-util-grid" not in util_empirical._GRID_CACHE
         assert Operation._load_data_call_count.get(GEMM, 0) == 0
     finally:
         for cls, attr_name, contents in saved:
             getattr(cls, attr_name).update(contents)
-        util_empirical._GRID_CACHE.update(saved_util_grids)

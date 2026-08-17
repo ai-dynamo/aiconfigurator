@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.errors import MissingSystemFlopsError, PerfDataNotAvailableError
+from aiconfigurator.sdk.errors import MissingSystemFlopsError
 from aiconfigurator.sdk.operations.gemm import GEMM
 
 
@@ -39,32 +39,9 @@ class TestGEMMCacheStructure:
         assert key[3] == stub_perf_db.version
         assert key[4] == stub_perf_db.enable_shared_layer
 
-    def test_clear_cache_clears_compute_scale_delta_lookup(self, monkeypatch):
-        # Patch every class cache to keep this test isolated from the warmed
-        # singleton caches used by the rest of the database suite.
-        monkeypatch.setattr(GEMM, "_data_cache", {"sentinel": object()})
-        monkeypatch.setattr(GEMM, "_compute_scale_cache", {"sentinel": object()})
-        monkeypatch.setattr(GEMM, "_scale_matrix_cache", {"sentinel": object()})
-        monkeypatch.setattr(GEMM, "_compute_scale_delta_lookup_cache", {1: object()})
-
-        GEMM.clear_cache()
-
-        assert GEMM._data_cache == {}
-        assert GEMM._compute_scale_cache == {}
-        assert GEMM._scale_matrix_cache == {}
-        assert GEMM._compute_scale_delta_lookup_cache == {}
-
 
 class TestStaticHelpers:
-    """``common.get_quant_tc_flops`` + ``_normalize_gemm_quant_mode_for_table``."""
-
-    def test_normalize_fp8_static_maps_to_fp8(self):
-        result = GEMM._normalize_gemm_quant_mode_for_table(common.GEMMQuantMode.fp8_static)
-        assert result == common.GEMMQuantMode.fp8
-
-    def test_normalize_passes_through_other_modes(self):
-        for qm in [common.GEMMQuantMode.bfloat16, common.GEMMQuantMode.fp8, common.GEMMQuantMode.nvfp4]:
-            assert GEMM._normalize_gemm_quant_mode_for_table(qm) == qm
+    """``common.get_quant_tc_flops`` per-dtype resolution."""
 
     def test_get_quant_tc_flops_uses_specific_key_when_present(self):
         system_spec = {"gpu": {"bfloat16_tc_flops": 1000.0, "fp8_tc_flops": 2000.0, "fp4_tc_flops": 4000.0}}
@@ -154,98 +131,14 @@ class TestLoadData:
         assert db._gemm_data is sentinel, "load_data must not override test-set _gemm_data"
 
 
-class TestQueryDelegation:
-    """``PerfDatabase.query_gemm`` etc. delegate to GEMM classmethods."""
-
-    def test_query_gemm_via_database_matches_direct_classmethod(self, comprehensive_perf_db):
-        db = comprehensive_perf_db
-        m, n, k = 4, 256, 256
-        quant_mode = common.GEMMQuantMode.bfloat16
-
-        via_db = db.query_gemm(m, n, k, quant_mode)
-        direct = GEMM._query_gemm_table(db, m, n, k, quant_mode)
-
-        assert float(via_db) == float(direct)
-        assert via_db.energy == direct.energy
-
-    def test_query_gemm_sol_mode_does_not_require_data(self, stub_perf_db):
-        """SOL mode is pure formula — must work even with no real data."""
-        result = stub_perf_db.query_gemm(
-            128, 256, 256, common.GEMMQuantMode.bfloat16, database_mode=common.DatabaseMode.SOL
-        )
-        assert float(result) > 0
-
-    def test_query_compute_scale_sol_mode(self, stub_perf_db):
-        result = stub_perf_db.query_compute_scale(
-            128, 256, common.GEMMQuantMode.fp8, database_mode=common.DatabaseMode.SOL
-        )
-        assert float(result) > 0
-
-    def test_query_scale_matrix_sol_mode(self, stub_perf_db):
-        result = stub_perf_db.query_scale_matrix(
-            128, 256, common.GEMMQuantMode.fp8, database_mode=common.DatabaseMode.SOL
-        )
-        assert float(result) > 0
-
-
-class TestSolCorrection:
-    """``GEMM._correct_sol`` clamps mutated GEMM data back to >= SOL."""
-
-    def test_correct_sol_clamps_low_gemm_latency(self, mutable_comprehensive_perf_db):
-        db = mutable_comprehensive_perf_db
-        quant_mode = common.GEMMQuantMode.bfloat16
-        m, n, k = 64, 128, 256
-
-        sol_value = float(db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL))
-
-        # Set an artificially low value (lower than SOL)
-        db._gemm_data[quant_mode][m][n][k] = {"latency": sol_value * 0.5, "power": 0.0, "energy": 0.0}
-
-        GEMM._correct_sol(db)
-
-        clamped = db._gemm_data[quant_mode][m][n][k]
-        clamped_latency = clamped["latency"] if isinstance(clamped, dict) else clamped
-        assert clamped_latency >= sol_value
-
-
-@pytest.mark.parametrize("quant_mode", [common.GEMMQuantMode.bfloat16, common.GEMMQuantMode.fp8])
-def test_query_returns_silicon_source_for_loaded_table(comprehensive_perf_db, quant_mode):
-    """Per-op silicon/empirical attribution (PR #956) must survive the
-    GEMM migration."""
-    result = comprehensive_perf_db.query_gemm(4, 256, 256, quant_mode)
-    assert getattr(result, "source", None) == "silicon"
-
-
-def test_below_grid_shape_degrades_to_sol_only_with_flag(comprehensive_perf_db):
-    """`below_grid_sol` opt-in: a SILICON shape miss degrades to SOL; without
-    the flag it raises, and a quant-mode miss stays strict either way."""
-    db = comprehensive_perf_db
-    quant = common.GEMMQuantMode.bfloat16
-
-    # n=1 is octaves below the fixture grid (n >= 128).
-    with pytest.raises(PerfDataNotAvailableError):
-        db.query_gemm(4, 1, 256, quant)
-
-    result = db.query_gemm(4, 1, 256, quant, below_grid_sol=True)
-    assert result.source == "sol"
-    assert float(result) == float(db.query_gemm(4, 1, 256, quant, database_mode=common.DatabaseMode.SOL))
-
-    # int8_wo has system flops but no collected table: strict despite the flag.
-    with pytest.raises(PerfDataNotAvailableError):
-        db.query_gemm(4, 1, 256, common.GEMMQuantMode.int8_wo, below_grid_sol=True)
-
-
-def test_below_grid_flag_threads_from_op_and_leaves_hybrid_unchanged(comprehensive_perf_db):
-    db = comprehensive_perf_db
-    quant = common.GEMMQuantMode.bfloat16
-
-    # Op-level: the constructor kwarg must reach the table query.
-    assert GEMM("gate", 1, 1, 256, quant, below_grid_sol=True).query(db, x=4).source == "sol"
-    with pytest.raises(PerfDataNotAvailableError):
-        GEMM("gate", 1, 1, 256, quant).query(db, x=4)
-
-    # HYBRID keeps its empirical fallback regardless of the flag.
-    with_flag = db.query_gemm(4, 1, 256, quant, database_mode=common.DatabaseMode.HYBRID, below_grid_sol=True)
-    without = db.query_gemm(4, 1, 256, quant, database_mode=common.DatabaseMode.HYBRID)
-    assert with_flag.source == without.source == "empirical"
-    assert float(with_flag) == float(without)
+# ---------------------------------------------------------------------------
+# Retired with #1357 PR-5 (single oracle = the compiled engine):
+# - the ``PerfDatabase.query_gemm`` -> ``GEMM._query_gemm_table`` delegation
+#   and the SOL-mode formula smokes (the classmethods are gone; the public
+#   facades are engine-routed deprecation shims);
+# - ``GEMM._correct_sol`` load-time clamping (the engine clamps its own load);
+# - per-op silicon-source attribution and the ``below_grid_sol`` degradation
+#   flag threading (below-grid handling is engine-internal now).
+# Anchored by tests/cross_package/test_query_shim_baseline.py and the frozen
+# parity goldens.
+# ---------------------------------------------------------------------------

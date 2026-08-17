@@ -25,15 +25,58 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.operations.base import Operation
-from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
-    from aiconfigurator_core.sdk.perf_database import PerfDatabase
+    pass
 
 
 logger = logging.getLogger(__name__)
+
+
+def _infer_phase(op) -> bool | None:
+    """First phase marker found in a composite subtree: ``_is_context`` /
+    ``_phase`` instance fields, a phase-declaring ``_ENGINE_QUERY_SHAPE``, or
+    recursion into Overlap/Fallback child groups."""
+    is_context = getattr(op, "_is_context", None)
+    if is_context is not None:
+        return bool(is_context)
+    # context/generation: mamba/gdn kernels; prefill/decode: FPMForwardOp.
+    phase = getattr(op, "_phase", None)
+    if phase in ("context", "prefill"):
+        return True
+    if phase in ("generation", "decode", "verify"):
+        return False
+    shape = getattr(type(op), "_ENGINE_QUERY_SHAPE", None)
+    if shape in ("context", "generation"):
+        return shape == "context"
+    for group in ("_group_a", "_group_b", "_fallback"):
+        for child in getattr(op, group, ()) or ():
+            found = _infer_phase(child)
+            if found is not None:
+                return found
+    primary = getattr(op, "_primary", None)
+    if primary is not None:
+        return _infer_phase(primary)
+    return None
+
+
+def _has_leaves(op) -> bool:
+    """True if the composite subtree reaches at least one LEAF op (a node
+    that is not itself an Overlap/Fallback composite)."""
+    composite = False
+    for group in ("_group_a", "_group_b", "_fallback"):
+        children = getattr(op, group, None)
+        if children is not None:
+            composite = True
+            if any(_has_leaves(child) for child in children):
+                return True
+    primary = getattr(op, "_primary", None)
+    if primary is not None:
+        composite = True
+        if _has_leaves(primary):
+            return True
+    return not composite
 
 
 class FallbackOp(Operation):
@@ -75,34 +118,35 @@ class FallbackOp(Operation):
         self._primary = primary
         self._fallback = fallback
 
-    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        from aiconfigurator_core.sdk.perf_database import PerfDataNotAvailableError, _get_configured_database_view
+    _ENGINE_QUERY_SHAPE = "module"
 
-        primary_database = (
-            _get_configured_database_view(
-                database,
-                common.DatabaseMode.SILICON,
-                getattr(database, "transfer_policy", None),
-            )
-            if database._default_database_mode == common.DatabaseMode.HYBRID
-            else database
-        )
+    def _engine_query_plan(self, kwargs: dict):
+        """Composites carry no phase of their own. A phase-marked descendant
+        (or an explicit ``is_context=`` kwarg) selects the batch-major plan;
+        a subtree with NO marker anywhere <=> every leaf is token-shaped
+        (batch-major leaves always carry a marker via class shape or instance
+        fields), so the plan is TOKEN-shaped — preserving the legacy
+        ``query(db, x=...)``-only call shape, which never required
+        ``batch_size``/``s`` for token children. A truly EMPTY composite (no
+        leaf anywhere) keeps the legacy bare ``query(db)`` shape: zero work
+        needs no token count, so ``x`` defaults."""
+        if kwargs.get("is_context") is None and _infer_phase(self) is None:
+            x = kwargs.get("x")
+            if x is None:
+                if _has_leaves(self):
+                    raise ValueError(f"{type(self).__name__}.query requires 'x' (num tokens) for token-only groups.")
+                x = 1
+            return self, {"is_context": True, "batch_size": 1, "s": 1, "x": int(x)}
+        return super()._engine_query_plan(kwargs)
 
-        try:
-            return self._primary.query(primary_database, **kwargs)
-        except PerfDataNotAvailableError as e:
-            logger.debug(
-                "FallbackOp '%s': primary op '%s' failed (%s: %s), using fallback ops",
-                self._name,
-                self._primary._name,
-                type(e).__name__,
-                e,
-            )
-
-        total = PerformanceResult(0.0, energy=0.0, source="empirical")
-        for op in self._fallback:
-            total += op.query(database, **kwargs)
-        return total
+    def _engine_query_is_context(self, kwargs: dict) -> bool:
+        hint = kwargs.get("is_context")
+        if hint is not None:
+            return bool(hint)
+        inferred = _infer_phase(self)
+        # Unreachable when inferred is None (the plan override takes the
+        # token-shaped path first); kept as a safe default.
+        return True if inferred is None else inferred
 
     def get_weights(self, **kwargs):
         # Use primary weights if available, otherwise sum fallback weights.
@@ -142,28 +186,35 @@ class OverlapOp(Operation):
         self._group_a = group_a
         self._group_b = group_b
 
-    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        """
-        Query overlap operation latency.
+    _ENGINE_QUERY_SHAPE = "module"
 
-        Returns:
-            PerformanceResult with latency = max(group_a, group_b)
-            and energy = sum of all ops.
-        """
-        total_a = PerformanceResult(0.0, energy=0.0, source="empirical")
-        for op in self._group_a:
-            total_a += op.query(database, **kwargs)
+    def _engine_query_plan(self, kwargs: dict):
+        """Composites carry no phase of their own. A phase-marked descendant
+        (or an explicit ``is_context=`` kwarg) selects the batch-major plan;
+        a subtree with NO marker anywhere <=> every leaf is token-shaped
+        (batch-major leaves always carry a marker via class shape or instance
+        fields), so the plan is TOKEN-shaped — preserving the legacy
+        ``query(db, x=...)``-only call shape, which never required
+        ``batch_size``/``s`` for token children. A truly EMPTY composite (no
+        leaf anywhere) keeps the legacy bare ``query(db)`` shape: zero work
+        needs no token count, so ``x`` defaults."""
+        if kwargs.get("is_context") is None and _infer_phase(self) is None:
+            x = kwargs.get("x")
+            if x is None:
+                if _has_leaves(self):
+                    raise ValueError(f"{type(self).__name__}.query requires 'x' (num tokens) for token-only groups.")
+                x = 1
+            return self, {"is_context": True, "batch_size": 1, "s": 1, "x": int(x)}
+        return super()._engine_query_plan(kwargs)
 
-        total_b = PerformanceResult(0.0, energy=0.0, source="empirical")
-        for op in self._group_b:
-            total_b += op.query(database, **kwargs)
-
-        merged = total_a + total_b
-        return PerformanceResult(
-            latency=max(float(total_a), float(total_b)),
-            energy=total_a.energy + total_b.energy,
-            source=merged.source,
-        )
+    def _engine_query_is_context(self, kwargs: dict) -> bool:
+        hint = kwargs.get("is_context")
+        if hint is not None:
+            return bool(hint)
+        inferred = _infer_phase(self)
+        # Unreachable when inferred is None (the plan override takes the
+        # token-shaped path first); kept as a safe default.
+        return True if inferred is None else inferred
 
     def get_weights(self, **kwargs):
         weights = 0.0

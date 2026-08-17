@@ -15,10 +15,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from aiconfigurator_core.sdk.operations.base import Operation
-from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
-    from aiconfigurator_core.sdk.perf_database import PerfDatabase
+    pass
 
 
 class Embedding(Operation):
@@ -46,20 +45,7 @@ class Embedding(Operation):
         self._constant_latency = 5e-6  # 5us
 
     # sol only
-    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        """Query embedding latency with power data."""
-        x = kwargs.get("x")
-        if x is None:
-            raise ValueError("Embedding.query requires 'x' (num tokens).")
-        x = -(-x // self._seq_split)  # CP: per-rank token count (ceil = busiest rank)
-        d2d_bytes = x * self._column_size * 2
-
-        result = database.query_mem_op(d2d_bytes)
-        return PerformanceResult(
-            float(result) * self._scale_factor,
-            energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
-        )
+    _ENGINE_QUERY_SHAPE = "tokens"
 
     def get_weights(self, **kwargs):
         return self._weights * self._scale_factor

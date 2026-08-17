@@ -15,8 +15,8 @@ registry shared by all three inference backends. On TRT-LLM this covers the
 ``[comm_backend][phase][comm_dtype][ep_size][node_num][hidden_size][topk]
 [num_experts][sms][num_tokens]``.
 ``MoEAllToAll`` is the op class over that table: it owns the class-level
-cache + ``load_data`` and the ``_query_a2a_table`` lookup behind
-``PerfDatabase.query_moe_a2a``.
+cache + ``load_data`` (the retired per-call lookup lived behind
+``PerfDatabase.query_moe_a2a``).
 
 The module also owns the large-EP compute side of the same family:
 ``load_moe_expert_compute_data`` loads the unified ``moe_expert_compute_perf.parquet`` EP MoE compute
@@ -24,8 +24,8 @@ table (with legacy sglang/trtllm wideep adapters) into one nested dict keyed
 by ``[kernel_source][quant][distribution][inference_phase][topk][num_experts]
 [num_slots][hidden_size][inter_size][moe_tp_size][moe_ep_size][num_tokens]``.
 ``MoEExpertCompute`` is the op class over that table: it owns the class-level cache +
-``load_data`` and the ``_query_ep_table`` lookup behind
-``PerfDatabase.query_moe_expert_compute``.
+``load_data`` (the retired per-call lookup lived behind
+``PerfDatabase.query_moe_expert_compute``).
 """
 
 from __future__ import annotations
@@ -36,11 +36,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator_core.sdk import common, perf_interp
-from aiconfigurator_core.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
-from aiconfigurator_core.sdk.operations import util_empirical
+from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
-from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -167,28 +164,6 @@ def _store_a2a_leaf(data: defaultdict, key: tuple, leaf: dict, *, overwrite: boo
         logger.debug("value conflict in moe_a2a data: %s", " ".join(str(part) for part in key))
         return
     bucket[num_tokens] = leaf
-
-
-def _sum_phase_grids(first: dict, second: dict) -> dict:
-    """Build the aligned ``[sms][tokens]`` grid for two communication phases."""
-    combined = {}
-    for sms, first_tokens in first.items():
-        second_tokens = second.get(sms, {})
-        token_sums = {}
-        for num_tokens, first_leaf in first_tokens.items():
-            second_leaf = second_tokens.get(num_tokens)
-            if second_leaf is None:
-                continue
-            latency = float(first_leaf["latency"]) + float(second_leaf["latency"])
-            energy = float(first_leaf.get("energy", 0.0)) + float(second_leaf.get("energy", 0.0))
-            token_sums[num_tokens] = {
-                "latency": latency,
-                "power": energy / latency if latency > 0 else 0.0,
-                "energy": energy,
-            }
-        if token_sums:
-            combined[sms] = token_sums
-    return combined
 
 
 def _normalize_sms(raw: object) -> int:
@@ -333,7 +308,7 @@ def _adapt_legacy_trtllm_alltoall(data: defaultdict, rows) -> None:
     """Adapt legacy trtllm ``trtllm_alltoall_perf`` rows into ``data``.
 
     UNITS: the legacy ``latency`` column is already in **milliseconds** —
-    ``load_trtllm_alltoall_data`` stores it raw and ``query_trtllm_alltoall``
+    ``load_trtllm_alltoall_data`` stores it raw and the retired per-phase query
     returns table values without the /1000 the DeepEP query path applies (its
     SOL tier computes ms directly; shipped gb200 values span ~0.01-17 ms).
     Stored raw here, no us->ms conversion.
@@ -505,46 +480,6 @@ def _validate_a2a_request(comm_backend: str, phase: str) -> None:
         )
 
 
-def _resolve_comm_dtype_slice(phase_slice, comm_dtype: str, query_context: str):
-    """Three-step dtype resolution: exact key -> fp8_block alias -> sole dtype.
-
-    1. Exact ``comm_dtype`` key.
-    2. ``fp8_block`` tries ``fp8`` (debug log): fp8_block is a behavioral mode
-       that reuses the fp8 comm tables — the same normalization the legacy
-       ``query_trtllm_alltoall`` applies via ``_normalize_quant_mode_for_table``.
-       Exact-first ordering keeps real fp8_block rows winning if a future
-       collection ships them.
-    3. The ``"default"`` slice when it is the sole collected key (debug log):
-       the legacy DeepEP tables have no dtype axis (their adapted rows live
-       under ``"default"``), so a caller asking for a payload dtype must
-       still reach them — untyped data is a stand-in for any request. A sole
-       TYPED key is NOT: shipped GB200 ``nvlink_one_sided`` carries only
-       nvfp4, and matched two-sided rows show bf16/nvfp4 dispatch ratios of
-       0.56x-3.48x, so substituting across payload dtypes is a material
-       silent error where the legacy query raised. Typed slices miss.
-    """
-    if comm_dtype in phase_slice:
-        return phase_slice[comm_dtype]
-    if comm_dtype == "fp8_block" and "fp8" in phase_slice:
-        logger.debug(
-            "moe_a2a: comm_dtype 'fp8_block' not collected; normalizing to 'fp8' "
-            "(behavioral mode reusing the fp8 comm tables; %s)",
-            query_context,
-        )
-        return phase_slice["fp8"]
-    if len(phase_slice) == 1 and "default" in phase_slice:
-        logger.debug(
-            "moe_a2a: comm_dtype %r not collected; falling back to the untyped 'default' slice (%s)",
-            comm_dtype,
-            query_context,
-        )
-        return phase_slice["default"]
-    raise PerfDataNotAvailableError(
-        f"Missing silicon data for the requested lookup; comm_dtype '{comm_dtype}' is not available for "
-        f"{query_context}; collected dtypes: {sorted(phase_slice)}."
-    )
-
-
 class MoEAllToAll(Operation):
     """Unified large-EP MoE all-to-all comm op (one phase per instance).
 
@@ -650,151 +585,10 @@ class MoEAllToAll(Operation):
         cls._data_cache.clear()
 
     # ------------------------------------------------------------------
-    # Query table (behind PerfDatabase.query_moe_a2a)
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def _query_a2a_table(
-        cls,
-        database: PerfDatabase,
-        comm_backend: str,
-        phase: str,
-        comm_dtype: str,
-        ep_size: int,
-        node_num: int,
-        hidden_size: int,
-        topk: int,
-        num_experts: int,
-        num_tokens: int,
-        sms: int = 0,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
-        """Silicon lookup against the unified moe_a2a table.
-
-        SILICON walks the slice (backend -> phase -> dtype-with-fallback ->
-        ep -> node -> hidden -> topk -> experts), then resolves ``sms``: an
-        exact sms key gets a 1-D token interpolation, otherwise a 2-D
-        (sms, tokens) grid — the same split the legacy DeepEP-normal query
-        uses. SOL/SOL_FULL/EMPIRICAL have no estimation tier yet and raise
-        ``EmpiricalNotImplementedError``; HYBRID falls back to that same
-        raise when silicon data misses.
-        """
-        cls.load_data(database)
-        _validate_a2a_request(comm_backend, phase)
-
-        if database_mode is None:
-            database_mode = database._default_database_mode
-
-        query_context = (
-            f"moe_a2a {comm_backend}/{phase}: {comm_dtype=}, {ep_size=}, {node_num=}, "
-            f"{hidden_size=}, {topk=}, {num_experts=}, {sms=}, {num_tokens=}"
-        )
-
-        if database_mode in (common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL):
-            raise EmpiricalNotImplementedError(
-                f"{database_mode.name} mode is not available for {query_context}: "
-                "silicon data required (estimation tier is a planned follow-up)."
-            )
-
-        def get_silicon() -> PerformanceResult:
-            phase_slice = util_empirical.require_data_slice(database._moe_a2a_data, comm_backend, phase)
-            dtype_slice = _resolve_comm_dtype_slice(phase_slice, comm_dtype, query_context)
-            by_sms = util_empirical.require_data_slice(dtype_slice, ep_size, node_num, hidden_size, topk, num_experts)
-            # 1-D/2-D token curves with a linear token proxy SOL for the
-            # boundary util-hold: per-slice payload bytes scale ~linearly with
-            # tokens (hidden/topk/dtype fixed), so the proxy is
-            # ratio-equivalent to any bandwidth roofline (see the DeepEP notes
-            # in operations/moe.py).
-            # Preserve the legacy DeepEP-HT lookup contract: only the node-1,
-            # sms=20 slice is a 1-D token curve. Other HT requests, including
-            # exact sms keys on larger node counts, use the 2-D (sms, tokens)
-            # grid. This distinction matters beyond the token frontier now
-            # that Grid extrapolation blends nearby leaves instead of snapping
-            # to one outer-axis path. LL and TRT-LLM keep exact-sms 1-D curves.
-            use_token_curve = sms in by_sms and (comm_backend != "deepep_ht" or (node_num == 1 and sms == 20))
-            if use_token_curve:
-                config = perf_interp.OpInterpConfig(
-                    axes=("num_tokens",), resolver=perf_interp.Grid(), sol_fn=lambda t: float(t)
-                )
-                result = perf_interp.query(config, by_sms[sms], num_tokens)
-            else:
-                config = perf_interp.OpInterpConfig(
-                    axes=("sms", "num_tokens"), resolver=perf_interp.Grid(), sol_fn=lambda _sm, t: float(t)
-                )
-                result = perf_interp.query(config, by_sms, sms, num_tokens)
-            lat = perf_interp.get_value(result, "latency")
-            energy = perf_interp.get_value(result, "energy")
-
-            if comm_backend == "deepep_ht" and phase in ("dispatch", "combine") and not use_token_curve:
-                # The current Grid frontier hold blends utilisation and is
-                # therefore nonlinear in latency. Preserve the legacy DeepEP
-                # contract by resolving the summed dispatch+combine curve,
-                # then apportioning its result using the independently
-                # resolved phase shares. Querying each phase independently
-                # and adding afterward would drift at the token frontier.
-                other_phase = "combine" if phase == "dispatch" else "dispatch"
-                other_phase_slice = util_empirical.require_data_slice(database._moe_a2a_data, comm_backend, other_phase)
-                other_dtype_slice = _resolve_comm_dtype_slice(other_phase_slice, comm_dtype, query_context)
-                other_by_sms = util_empirical.require_data_slice(
-                    other_dtype_slice, ep_size, node_num, hidden_size, topk, num_experts
-                )
-                combined = _sum_phase_grids(by_sms, other_by_sms)
-                if combined:
-                    other_result = perf_interp.query(config, other_by_sms, sms, num_tokens)
-                    combined_result = perf_interp.query(config, combined, sms, num_tokens)
-                    other_lat = perf_interp.get_value(other_result, "latency")
-                    combined_lat = perf_interp.get_value(combined_result, "latency")
-                    phase_lat_sum = lat + other_lat
-                    if phase_lat_sum > 0:
-                        lat *= combined_lat / phase_lat_sum
-
-                    other_energy = perf_interp.get_value(other_result, "energy")
-                    combined_energy = perf_interp.get_value(combined_result, "energy")
-                    phase_energy_sum = energy + other_energy
-                    if phase_energy_sum > 0:
-                        energy *= combined_energy / phase_energy_sum
-            return database._interp_pr(lat, energy=energy)
-
-        def get_empirical() -> float:
-            raise EmpiricalNotImplementedError(
-                f"HYBRID empirical fallback is not available for {query_context}: "
-                "silicon data required (estimation tier is a planned follow-up)."
-            )
-
-        return database._query_silicon_or_hybrid(
-            get_silicon=get_silicon,
-            get_empirical=get_empirical,
-            database_mode=database_mode,
-            error_msg=f"Failed to query moe_a2a data for {query_context}",
-        )
-
-    # ------------------------------------------------------------------
     # Op contract
     # ------------------------------------------------------------------
 
-    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        num_tokens = kwargs.get("x")  # per-rank tokens — comm ops never ADP-scale
-        # Legacy fidelity: attention TP shards the token stream ahead of the
-        # A2A, mirroring MoEDispatch's ``num_tokens // self._scale_num_tokens``
-        # exactly — plain floor division, no max(1, ...) guard (0 is possible).
-        num_tokens = num_tokens // self._attention_tp_size
-        result = database.query_moe_a2a(
-            self._comm_backend,
-            self._phase,
-            self._comm_dtype,
-            self._moe_ep_size,
-            self._node_num,
-            self._hidden_size,
-            self._topk,
-            self._num_experts,
-            num_tokens,
-            sms=self._sms,
-        )
-        return PerformanceResult(
-            float(result) * self._scale_factor,
-            energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
-        )
+    _ENGINE_QUERY_SHAPE = "tokens"
 
     def get_weights(self, **kwargs) -> float:
         """All-to-all communication has no weight memory."""
@@ -953,7 +747,7 @@ def _load_legacy_ep(
 
     UNITS: the legacy ``latency`` column is already in **milliseconds** — the
     oracle loaders store it raw and their query paths feed it through the same
-    ``perf_interp`` machinery as the regular (ms) moe table with no /1000
+    the engine's interpolation machinery as the regular (ms) moe table with no /1000
     anywhere; shipped values span ~0.03-62 ms, physically sensible for MoE
     compute. Stored raw here, no unit conversion — bit-exact equality with the
     oracles is pinned by the shipped-data equivalence sweeps.
@@ -1071,49 +865,6 @@ def _validate_ep_phase(inference_phase: str) -> None:
     """Shared ctor/query validation: an unknown inference phase is a ValueError."""
     if inference_phase not in _EP_PHASES:
         raise ValueError(f"Invalid inference_phase '{inference_phase}'. Must be one of {list(_EP_PHASES)}")
-
-
-def _resolve_ep_distribution(quant_slice, workload_distribution: str, inference_phase: str, query_context: str) -> str:
-    """Distribution fallback chain: requested -> "uniform" -> first-available.
-
-    Candidates are the distributions that actually carry ``inference_phase``
-    data, in table insertion order — the legacy sglang tables are separate
-    files per phase, so their fallback is inherently phase-scoped; the
-    unified table nests phase below distribution and must filter to match.
-    The chain reproduces both legacy oracles on their shipped tables: the
-    sglang tables include "uniform", so step 2 fires there (the sglang
-    oracle's own fallback); the trtllm gb200 table has no "uniform", so
-    step 3 fires there with the same first-collected distribution the trtllm
-    oracle picks (``available_distributions[0]`` — e.g. the production
-    default request "power_law" resolves to "power_law_1.01_eplb"). The
-    residual corner — a table lacking "uniform" where the sglang oracle
-    would raise but the unified chain answers first-available — is strictly
-    more permissive and unreachable on shipped sglang data, the same stance
-    the comm-dtype fallback takes. A typed miss remains only when no
-    collected distribution carries the requested phase.
-    """
-    candidates = [dist for dist, phases in quant_slice.items() if inference_phase in phases]
-    if workload_distribution in candidates:
-        return workload_distribution
-    if "uniform" in candidates:
-        logger.debug(
-            "moe_ep: workload_distribution %r not collected; falling back to 'uniform' (%s)",
-            workload_distribution,
-            query_context,
-        )
-        return "uniform"
-    if candidates:
-        logger.debug(
-            "moe_ep: workload_distribution %r not collected; falling back to first available %r (%s)",
-            workload_distribution,
-            candidates[0],
-            query_context,
-        )
-        return candidates[0]
-    raise PerfDataNotAvailableError(
-        f"Missing silicon data for the requested lookup; workload_distribution '{workload_distribution}' is not "
-        f"available for {query_context}; no collected distribution carries {inference_phase} data."
-    )
 
 
 class MoEExpertCompute(Operation):
@@ -1284,179 +1035,22 @@ class MoEExpertCompute(Operation):
         return preferred
 
     # ------------------------------------------------------------------
-    # Query table (behind PerfDatabase.query_moe_expert_compute)
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def _query_ep_table(
-        cls,
-        database: PerfDatabase,
-        kernel_source: str,
-        quant_mode: common.MoEQuantMode,
-        workload_distribution: str,
-        inference_phase: str,
-        topk: int,
-        num_experts: int,
-        num_slots: int,
-        hidden_size: int,
-        inter_size: int,
-        moe_tp_size: int,
-        moe_ep_size: int,
-        num_tokens: int,
-        is_gated: bool = True,
-        enable_eplb: bool = False,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
-        """Silicon lookup against the unified moe_ep table.
-
-        SILICON walks the slice (kernel -> quant -> distribution-with-fallback
-        -> phase -> topk -> experts -> slots -> hidden -> inter -> tp -> ep),
-        then resolves tokens on a 1-D ``perf_interp`` Grid curve: RAW lerp in
-        range; beyond the collected range the engine holds the boundary util
-        and the wideep-MoE roofline SOL carries the growth — exactly the
-        legacy retrieval (``MoE._query_moe_table`` deepep branch /
-        ``TrtLLMWideEPMoE._query_compute_table``). The sglang oracle's
-        singleton-underflow guard is adopted family-wide: a single measured
-        token point cannot define the low-token launch floor, so querying
-        below it is a typed miss (the trtllm oracle would boundary-hold there;
-        the guard is the deliberate, safer behavior). SOL/SOL_FULL/EMPIRICAL
-        have no estimation tier yet and raise
-        ``EmpiricalNotImplementedError``; HYBRID falls back to that same
-        raise when silicon data misses.
-        """
-        cls.load_data(database)
-        _validate_ep_phase(inference_phase)
-        if enable_eplb and inference_phase == "context" and kernel_source in _SGLANG_ADAPTED_KERNEL_SOURCES:
-            # Legacy sglang EPLB prefill correction (moe.py:649): EPLB
-            # rebalancing flattens hot-expert load, modeled as int(tokens*0.8)
-            # before the table walk. Context + deepep tables only — the trtllm
-            # EPLB effect rides the `_eplb` distribution suffix instead.
-            num_tokens = int(num_tokens * 0.8)
-
-        if database_mode is None:
-            database_mode = database._default_database_mode
-
-        query_context = (
-            f"moe_ep {kernel_source}/{inference_phase}: {quant_mode=}, {workload_distribution=}, "
-            f"{topk=}, {num_experts=}, {num_slots=}, {hidden_size=}, {inter_size=}, "
-            f"{moe_tp_size=}, {moe_ep_size=}, {num_tokens=}"
-        )
-
-        if database_mode in (common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL):
-            raise EmpiricalNotImplementedError(
-                f"{database_mode.name} mode is not available for {query_context}: "
-                "silicon data required (estimation tier is a planned follow-up)."
-            )
-
-        # Verbatim wideep-MoE roofline (TrtLLMWideEPMoE._query_compute_table's
-        # get_sol): num_slots (not num_experts) sizes the weight-read term —
-        # EPLB redundant mode replicates experts across slots. sglang-adapted
-        # slices pin num_slots == num_experts, where this reduces exactly to
-        # the sglang oracle's SOL (MoE._query_moe_table's get_sol). num_gemms
-        # is pinned to 3 (gated): the forward has no is_gated axis and both
-        # Gated (SwiGLU): 3 GEMMs; non-gated (Relu2): 2 — the legacy sglang
-        # oracle derives this in _query_moe_table (moe.py:309) from the op's
-        # is_gated. The SOL only shapes the beyond-range boundary util-hold;
-        # in-range lookups are raw lerp on measured points.
-        num_gemms = 3 if is_gated else 2
-
-        def get_sol_latency(tokens: int) -> float:
-            total_tokens = tokens * topk
-            ops = total_tokens * hidden_size * inter_size * num_gemms * 2 // moe_ep_size // moe_tp_size
-            mem_bytes = quant_mode.value.memory * (
-                total_tokens // moe_ep_size * hidden_size * 2  # input+output
-                + total_tokens // moe_ep_size * inter_size * num_gemms // moe_tp_size  # intermediate activations
-                + hidden_size
-                * inter_size
-                * num_gemms
-                // moe_tp_size
-                * min(num_slots // moe_ep_size, total_tokens // moe_ep_size)  # weights (use num_slots)
-            )
-            sol_math = ops / (database.system_spec["gpu"]["bfloat16_tc_flops"] * quant_mode.value.compute) * 1000
-            sol_mem = mem_bytes / database.system_spec["gpu"]["mem_bw"] * 1000
-            return max(sol_math, sol_mem)
-
-        def get_silicon() -> PerformanceResult:
-            quant_slice = util_empirical.require_data_slice(database._moe_ep_data, kernel_source, quant_mode)
-            used_distribution = _resolve_ep_distribution(
-                quant_slice, workload_distribution, inference_phase, query_context
-            )
-            moe_dict = util_empirical.require_data_slice(
-                quant_slice,
-                used_distribution,
-                inference_phase,
-                topk,
-                num_experts,
-                num_slots,
-                hidden_size,
-                inter_size,
-                moe_tp_size,
-                moe_ep_size,
-            )
-            token_points = sorted(moe_dict)
-            if len(token_points) == 1 and num_tokens < token_points[0]:
-                raise PerfDataNotAvailableError(
-                    "MoE EP silicon token underflow has only one measured point; cannot infer "
-                    f"low-token latency from a singleton. measured_token={token_points[0]}, {query_context}."
-                )
-            config = perf_interp.OpInterpConfig(
-                axes=("num_tokens",), resolver=perf_interp.Grid(), sol_fn=get_sol_latency
-            )
-            result = perf_interp.query(config, moe_dict, num_tokens)
-            lat = perf_interp.get_value(result, "latency")
-            energy = perf_interp.get_value(result, "energy")
-            return database._interp_pr(lat, energy=energy)
-
-        def get_empirical() -> float:
-            raise EmpiricalNotImplementedError(
-                f"HYBRID empirical fallback is not available for {query_context}: "
-                "silicon data required (estimation tier is a planned follow-up)."
-            )
-
-        return database._query_silicon_or_hybrid(
-            get_silicon=get_silicon,
-            get_empirical=get_empirical,
-            database_mode=database_mode,
-            error_msg=f"Failed to query moe_ep data for {query_context}",
-        )
-
-    # ------------------------------------------------------------------
     # Op contract
     # ------------------------------------------------------------------
 
-    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        # Attention DP globalizes tokens: the A2A dispatch delivers every DP
-        # rank's tokens to the experts (same scaling as legacy MoE /
-        # TrtLLMWideEPMoE query()).
-        num_tokens = kwargs.get("x") * self._attention_dp_size
-        # Per-call quant override — the legacy expert-compute ops both honor
-        # kwargs.get("quant_mode"); it drives kernel resolution too (a
-        # Blackwell fp8_block override selects deepgemm, not moe_torch_flow).
-        quant_mode = kwargs.get("quant_mode") or self._quant_mode
-        kernel_source = self._kernel_source
-        if kernel_source is None:
-            kernel_source = self._resolve_kernel_source(database, quant_mode)
-        result = database.query_moe_expert_compute(
-            kernel_source,
-            quant_mode,
-            self._workload_distribution,
-            self._inference_phase,
-            self._topk,
-            self._num_experts,
-            self._num_slots,
-            self._hidden_size,
-            self._inter_size,
-            1,  # moe_tp_size — the large-EP family is EP-only
-            self._moe_ep_size,
-            num_tokens,
-            is_gated=self._is_gated,
-            enable_eplb=self._enable_eplb,
-        )
-        return PerformanceResult(
-            float(result) * self._scale_factor,
-            energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
-        )
+    _ENGINE_QUERY_SHAPE = "tokens"
+
+    def _engine_query_plan(self, kwargs: dict):
+        """Legacy per-call ``quant_mode`` override: rebuild the twin with the
+        requested quant before engine evaluation."""
+        op, eval_kwargs = super()._engine_query_plan(kwargs)
+        quant_mode = kwargs.get("quant_mode")
+        if quant_mode is not None and quant_mode != self._quant_mode:
+            import copy
+
+            op = copy.copy(self)
+            op._quant_mode = quant_mode
+        return op, eval_kwargs
 
     def get_weights(self, **kwargs) -> float:
         return self._weights * self._scale_factor

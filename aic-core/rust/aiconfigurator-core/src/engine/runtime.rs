@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use crate::common::enums::TransferPolicy;
+use crate::common::enums::{DatabaseMode, TransferPolicy};
 use crate::common::error::AicError;
 use crate::engine::spec::EngineSpec;
 use crate::operators::base::PerformanceResult;
@@ -336,6 +336,12 @@ impl Engine {
             spec.engine.backend.as_str(),
             version,
             &spec.engine.perf_db_sources,
+            // Estimate-only systems (a spec yaml with no collected data) may
+            // back a SOL view: every SOL answer is analytic from the system
+            // spec, so tolerate a missing perf-data directory under SOL and
+            // let table-backed lookups miss lazily. All other modes keep the
+            // loud load-time gate.
+            spec.engine.database_mode == DatabaseMode::Sol,
         )?
         .with_mode(spec.engine.database_mode, transfer_policy);
         Engine::build(spec, Arc::new(db))

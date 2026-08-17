@@ -12,11 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations.mla import (
     _MLA_MODULE_NATIVE_HEADS,
-    _require_native_bucket,
-    _resolve_mla_module_native_key,
     load_context_mla_data,
     load_context_mla_module_data,
     load_generation_mla_data,
@@ -145,23 +142,8 @@ def test_load_mla_module_tp_rows_must_be_rank_local(tmp_path):
     assert set(data[fmha][kv][gemm].keys()) == {128}
 
 
-# ───────────────────────────────────────────────────────────────────────
-# Native resolution ladder (query side)
-# ───────────────────────────────────────────────────────────────────────
-
-
-def test_resolve_native_key_ladder():
-    two = {64: "a", 128: "b"}
-    assert _resolve_mla_module_native_key(two, 128) == 128  # exact
-    assert _resolve_mla_module_native_key(two, 96) == 64  # nearest <=
-    assert _resolve_mla_module_native_key(two, 32) == 64  # below all -> smallest
-    assert _resolve_mla_module_native_key({128: "b"}, 64) == 128  # sole bucket
-    assert _resolve_mla_module_native_key({128: "b"}, None) == 128  # legacy caller, one bucket
-    assert _resolve_mla_module_native_key(two, None) is None  # legacy caller, ambiguous
-    assert _resolve_mla_module_native_key({}, 128) is None
-    # Query-side wrapper turns the ambiguous-legacy miss into a typed error.
-    with pytest.raises(PerfDataNotAvailableError, match="native"):
-        _require_native_bucket({64: {}, 128: {}}, None, "context")
+# Native resolution ladder (query side): retired to the compiled engine with
+# #1357 PR-5 (see aic-core/rust operators; anchored by the parity goldens).
 
 
 # ───────────────────────────────────────────────────────────────────────

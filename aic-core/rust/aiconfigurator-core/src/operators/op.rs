@@ -337,44 +337,29 @@ impl Op {
             // context (num_tokens is ignored, mirroring Python's kwargs use).
             Op::FpmForward(op) => op.query(db, ctx),
             Op::Overlap(op) => {
-                // Mirrors Python `OverlapOp.query`: each group is summed
-                // independently, then latency = max(group_a_total,
-                // group_b_total) while ENERGY = group_a + group_b (both
-                // groups consume power even though they overlap in time).
-                // Source tag follows the additive combine rule.
-                let mut total_a = 0.0_f64;
-                let mut energy_a = 0.0_f64;
-                let mut source_a: Option<Source> = None;
+                // Mirrors Python `OverlapOp.query`: each group accumulates
+                // through `PerformanceResult` addition from a zero/empirical
+                // seed (`total_a = PerformanceResult(0.0, energy=0.0,
+                // source="empirical"); total_a += ...`), then latency =
+                // max(group_a_total, group_b_total) while ENERGY = group_a +
+                // group_b (both groups consume power even though they overlap
+                // in time). The source is `(total_a + total_b).source` — the
+                // seeds and `plus`'s zero-identity rule make zero-valued
+                // members (empty groups, nested empty composites, zero-cost
+                // legs) source-NEUTRAL instead of poisoning the tag to Mixed.
+                let mut total_a = PerformanceResult::new(0.0, Source::Empirical);
                 for inner in &op.group_a {
-                    let r = inner.query(db, ctx)?;
-                    total_a += r.latency_ms;
-                    energy_a += r.energy_wms;
-                    source_a = Some(match source_a {
-                        None => r.source,
-                        Some(prev) => prev.combine(r.source),
-                    });
+                    total_a = total_a.plus(inner.query(db, ctx)?);
                 }
-                let mut total_b = 0.0_f64;
-                let mut energy_b = 0.0_f64;
-                let mut source_b: Option<Source> = None;
+                let mut total_b = PerformanceResult::new(0.0, Source::Empirical);
                 for inner in &op.group_b {
-                    let r = inner.query(db, ctx)?;
-                    total_b += r.latency_ms;
-                    energy_b += r.energy_wms;
-                    source_b = Some(match source_b {
-                        None => r.source,
-                        Some(prev) => prev.combine(r.source),
-                    });
+                    total_b = total_b.plus(inner.query(db, ctx)?);
                 }
-                let source = match (source_a, source_b) {
-                    (Some(a), Some(b)) => a.combine(b),
-                    (Some(s), None) | (None, Some(s)) => s,
-                    (None, None) => Source::Silicon,
-                };
+                let merged = total_a.plus(total_b);
                 Ok(PerformanceResult::with_energy(
-                    total_a.max(total_b),
-                    energy_a + energy_b,
-                    source,
+                    total_a.latency_ms.max(total_b.latency_ms),
+                    total_a.energy_wms + total_b.energy_wms,
+                    merged.source,
                 )
                 .clamp_non_negative())
             }
@@ -406,24 +391,23 @@ impl Op {
                     Ok(r) => Ok(r),
                     Err(AicError::PerfDatabase(_)) | Err(AicError::Io { .. }) => {
                         // Fallback chain: Python sums PerformanceResults
-                        // (`total += op.query(...)`), so latency AND energy
-                        // both accumulate.
-                        let mut total = 0.0_f64;
-                        let mut energy = 0.0_f64;
-                        let mut source: Option<Source> = None;
+                        // from a zero/empirical seed (`total =
+                        // PerformanceResult(0.0, energy=0.0,
+                        // source="empirical"); total += op.query(...)`), so
+                        // latency AND energy both accumulate and an empty (or
+                        // all-zero) chain keeps the empirical seed tag via
+                        // `plus`'s zero-identity rule.
+                        let mut total = PerformanceResult::new(0.0, Source::Empirical);
                         for inner in &op.fallback {
-                            let r = inner.query(db, ctx)?;
-                            total += r.latency_ms;
-                            energy += r.energy_wms;
-                            source = Some(match source {
-                                None => r.source,
-                                Some(prev) => prev.combine(r.source),
-                            });
+                            total = total.plus(inner.query(db, ctx)?);
                         }
+                        // `with_energy` (sol: None) keeps the pre-existing
+                        // composed-result behavior: only the SOURCE semantics
+                        // change in this fix, not the SOL decomposition.
                         Ok(PerformanceResult::with_energy(
-                            total,
-                            energy,
-                            source.unwrap_or(Source::Silicon),
+                            total.latency_ms,
+                            total.energy_wms,
+                            total.source,
                         )
                         .clamp_non_negative())
                     }
@@ -447,3 +431,123 @@ impl Op {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::enums::GemmQuantMode;
+    use crate::operators::gemm::GemmOp;
+    use crate::perf_database::energy_test_fixtures::{write_parquet, Col};
+    use crate::perf_database::PerfDatabase;
+
+    /// Minimal systems root with ONE bf16 GEMM row: an exact-hit silicon
+    /// leaf at `num_tokens=128`, and a guaranteed typed data miss for any
+    /// fp8 query (no fp8 table exists).
+    fn one_row_gemm_db() -> (tempfile::TempDir, PerfDatabase) {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let data = crate::perf_database::energy_test_fixtures::write_energy_systems_root(tmp.path());
+        write_parquet(
+            &data.join("gemm_perf.parquet"),
+            &[
+                Col::Str("gemm_dtype", vec!["bfloat16"]),
+                Col::I64("m", vec![128]),
+                Col::I64("n", vec![1024]),
+                Col::I64("k", vec![1024]),
+                Col::F64("latency", vec![1.0]),
+                Col::F64("power", vec![100.0]),
+            ],
+        );
+        let db = PerfDatabase::load(tmp.path(), "testsys", "vllm", "1.0").expect("db must load");
+        (tmp, db)
+    }
+
+    fn silicon_leaf() -> Op {
+        Op::Gemm(GemmOp::new("hit", 1024, 1024, GemmQuantMode::Bfloat16))
+    }
+
+    fn missing_leaf() -> Op {
+        Op::Gemm(GemmOp::new("miss", 1024, 1024, GemmQuantMode::Fp8))
+    }
+
+    fn ctx() -> RuntimeContext {
+        RuntimeContext {
+            num_tokens: 128,
+            ..RuntimeContext::default()
+        }
+    }
+
+    fn empty_overlap(name: &str) -> Op {
+        Op::Overlap(OverlapOp::new(name, vec![], vec![]))
+    }
+
+    // Zero-valued composite provenance oracle (review #1552 round 4): the
+    // legacy Python accumulators start from `PerformanceResult(0.0,
+    // energy=0.0, source="empirical")` and `__add__` treats a (0.0, 0.0)
+    // operand as a source-neutral identity, so zero-valued members must
+    // never poison a composite's tag to Mixed and empty composition must
+    // report `empirical`.
+
+    #[test]
+    fn empty_overlap_source_is_empirical() {
+        let (_tmp, db) = one_row_gemm_db();
+        let r = empty_overlap("e").query(&db, &ctx()).expect("query");
+        assert_eq!(r.latency_ms, 0.0);
+        assert_eq!(r.energy_wms, 0.0);
+        assert_eq!(r.source, Source::Empirical);
+    }
+
+    #[test]
+    fn half_empty_overlap_keeps_leaf_source() {
+        let (_tmp, db) = one_row_gemm_db();
+        let op = Op::Overlap(OverlapOp::new("half", vec![silicon_leaf()], vec![]));
+        let r = op.query(&db, &ctx()).expect("query");
+        assert!((r.latency_ms - 1.0).abs() < 1e-12);
+        assert_eq!(r.source, Source::Silicon);
+    }
+
+    #[test]
+    fn nested_zero_overlap_is_source_neutral_same_group() {
+        let (_tmp, db) = one_row_gemm_db();
+        let op = Op::Overlap(OverlapOp::new(
+            "same",
+            vec![silicon_leaf(), empty_overlap("nested")],
+            vec![],
+        ));
+        let r = op.query(&db, &ctx()).expect("query");
+        assert!((r.latency_ms - 1.0).abs() < 1e-12);
+        assert_eq!(r.source, Source::Silicon, "zero-valued nested composite must be source-neutral");
+    }
+
+    #[test]
+    fn nested_zero_overlap_is_source_neutral_opposite_group() {
+        let (_tmp, db) = one_row_gemm_db();
+        let op = Op::Overlap(OverlapOp::new(
+            "opp",
+            vec![silicon_leaf()],
+            vec![empty_overlap("nested")],
+        ));
+        let r = op.query(&db, &ctx()).expect("query");
+        assert!((r.latency_ms - 1.0).abs() < 1e-12);
+        assert_eq!(r.source, Source::Silicon, "zero-valued opposite group must be source-neutral");
+    }
+
+    #[test]
+    fn failed_primary_empty_fallback_is_empirical() {
+        let (_tmp, db) = one_row_gemm_db();
+        let op = Op::Fallback(FallbackOp::new("fb", missing_leaf(), vec![]));
+        let r = op.query(&db, &ctx()).expect("query");
+        assert_eq!(r.latency_ms, 0.0);
+        assert_eq!(r.energy_wms, 0.0);
+        assert_eq!(r.source, Source::Empirical);
+    }
+
+    #[test]
+    fn failed_primary_fallback_chain_keeps_leaf_source() {
+        let (_tmp, db) = one_row_gemm_db();
+        let op = Op::Fallback(FallbackOp::new("fb", missing_leaf(), vec![silicon_leaf()]));
+        let r = op.query(&db, &ctx()).expect("query");
+        assert!((r.latency_ms - 1.0).abs() < 1e-12);
+        assert_eq!(r.source, Source::Silicon);
+    }
+}
+
