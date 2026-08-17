@@ -207,6 +207,7 @@ OPERATIONS_DEF_INVENTORY = {
             "_cache_key",
             "_dsa_kernel_source_buckets",
             "_format_dsa_unavailable_message",
+            "_normalize_projection_quant_modes",
             "_read_dsa_row_sources",
             "load_context_dsa_module_data",
             "load_context_dsa_module_data._nest",

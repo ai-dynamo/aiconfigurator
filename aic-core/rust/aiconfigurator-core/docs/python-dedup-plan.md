@@ -140,7 +140,10 @@ roofline queried every op-level op in SOL — but #1461 moved that to
 **Post-PR-5 invariant (the single-oracle rule):** per-op performance VALUES
 (latency, energy, SOL decomposition) are computed ONLY by the compiled
 engine (`aic-core/rust/aiconfigurator-core`). Python owns model/topology
-composition, data loading, and orchestration — never estimation math. New
+composition, model-config loading and shared-layer SOURCE SELECTION, and
+orchestration — never estimation math, and (since PR-6) never
+perf-data parsing: the engine loads and serves the performance tables,
+Python consumes them through the table-view FFI. New
 per-op access goes through the op-list FFI (`EngineHandle.evaluate_ops_json`
 / `evaluate_ops_sol_json`), the per-phase surface (`run_static_per_op`), or
 whole runs; there is no supported per-call Python query surface after the

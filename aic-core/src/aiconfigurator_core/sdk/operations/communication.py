@@ -169,11 +169,17 @@ class NCCL(Operation):
             # ``filepath`` keeps the nccl_version-resolved primary. NCCL ops
             # never inherit shared-layer sibling rows (the engine view loads
             # the single system-wide file).
-            nccl_version = database.system_spec["misc"]["nccl_version"]
-            nccl_primary = resolve_op_data_path(system_data_root, "nccl", nccl_version, PerfDataFilename.nccl.value)
-            cls._data_cache[key] = LoadedOpData(
-                fetch_table_view(database, "_nccl_data"), PerfDataFilename.nccl, nccl_primary
-            )
+            # Optional like oneccl below (the Rust comm_root resolution is
+            # Option-tolerant): a spec without misc.nccl_version binds an
+            # unloaded wrapper instead of KeyError-ing the whole load.
+            nccl_version = (database.system_spec.get("misc") or {}).get("nccl_version")
+            if nccl_version:
+                nccl_primary = resolve_op_data_path(system_data_root, "nccl", nccl_version, PerfDataFilename.nccl.value)
+                cls._data_cache[key] = LoadedOpData(
+                    fetch_table_view(database, "_nccl_data"), PerfDataFilename.nccl, nccl_primary
+                )
+            else:
+                cls._data_cache[key] = LoadedOpData(None, PerfDataFilename.nccl, PerfDataFilename.nccl.value)
 
             # oneCCL fallback (XPU systems). Only loaded when system_spec
             # declares an ``oneccl_version`` under ``misc``.

@@ -100,6 +100,22 @@ DSA_MODEL_DIMS: dict[str, dict] = {
 
 DEFAULT_DSA_ARCHITECTURE = "DeepseekV32ForCausalLM"
 
+_DSA_PROJECTION_GROUPS = ("q", "kv", "o", "indexer")
+
+
+def _normalize_projection_quant_modes(overrides, gemm_quant_mode) -> dict:
+    """All four projection groups, missing ones filled from gemm_quant_mode.
+
+    The opspec emission (and the Rust ``DsaProjectionQuants``
+    deserialization, which requires every field) never sees an incomplete
+    map, and an unknown group name fails loudly instead of being silently
+    dropped by the engine."""
+    overrides = overrides or {}
+    unknown = sorted(set(overrides) - set(_DSA_PROJECTION_GROUPS))
+    if unknown:
+        raise ValueError(f"unknown DSA projection group(s) {unknown}; expected a subset of {_DSA_PROJECTION_GROUPS}")
+    return {**dict.fromkeys(_DSA_PROJECTION_GROUPS, gemm_quant_mode), **overrides}
+
 
 # Extrapolation grids — lifted verbatim from the legacy blocks in
 # ``PerfDatabase.__init__``.
@@ -202,14 +218,9 @@ class ContextDSAModule(Operation):
         )
         # Persisted (not just consumed) so the opspec can carry the
         # per-projection checkpoint fact to the engine's weight_bytes.
-        # Normalized to ALL FOUR groups: a partial mapping fills the missing
-        # projections from gemm_quant_mode, so the opspec emission (and the
-        # Rust DsaProjectionQuants deserialization, which requires every
-        # field) never sees an incomplete map.
-        self._attn_projection_quant_modes = {
-            **dict.fromkeys(("q", "kv", "o", "indexer"), gemm_quant_mode),
-            **(attn_projection_quant_modes or {}),
-        }
+        self._attn_projection_quant_modes = _normalize_projection_quant_modes(
+            attn_projection_quant_modes, gemm_quant_mode
+        )
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -332,14 +343,9 @@ class GenerationDSAModule(Operation):
         )
         # Persisted (not just consumed) so the opspec can carry the
         # per-projection checkpoint fact to the engine's weight_bytes.
-        # Normalized to ALL FOUR groups: a partial mapping fills the missing
-        # projections from gemm_quant_mode, so the opspec emission (and the
-        # Rust DsaProjectionQuants deserialization, which requires every
-        # field) never sees an incomplete map.
-        self._attn_projection_quant_modes = {
-            **dict.fromkeys(("q", "kv", "o", "indexer"), gemm_quant_mode),
-            **(attn_projection_quant_modes or {}),
-        }
+        self._attn_projection_quant_modes = _normalize_projection_quant_modes(
+            attn_projection_quant_modes, gemm_quant_mode
+        )
 
     # ------------------------------------------------------------------
     # Data ownership

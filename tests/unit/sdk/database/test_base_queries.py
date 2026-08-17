@@ -101,5 +101,18 @@ def test_dsa_partial_projection_map_normalizes_and_survives_the_weight_route():
     )
     assert set(op._attn_projection_quant_modes) == {"q", "kv", "o", "indexer"}
     assert op._attn_projection_quant_modes["o"] is common.GEMMQuantMode.bfloat16
-    assert op._attn_projection_quant_modes["q"] is common.GEMMQuantMode.nvfp4
+    for defaulted in ("q", "kv", "indexer"):
+        assert op._attn_projection_quant_modes[defaulted] is common.GEMMQuantMode.nvfp4
     assert op.get_weights() > 0.0
+
+    # An unknown group name must fail loudly, not be silently dropped.
+    with pytest.raises(ValueError, match="unknown DSA projection group"):
+        ContextDSAModule(
+            "ctx_dsa",
+            1.0,
+            64,
+            common.KVCacheQuantMode.fp8,
+            common.FMHAQuantMode.bfloat16,
+            common.GEMMQuantMode.nvfp4,
+            attn_projection_quant_modes={"o_proj": common.GEMMQuantMode.bfloat16},
+        )
