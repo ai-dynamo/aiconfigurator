@@ -92,6 +92,18 @@ frameworks:
         version: "0.1.dev19262"
         images:
           default: "vllm/vllm-openai@sha256:e90e2603b2781936651ba019804137714367c69e10a7b25a2e57b46995225616"
+      # mla: pin 0.27.0 so gb300/vllm MLA module rows are collected on the
+      # same runtime as the K3 serving lane (KDA-family sibling) instead of
+      # silently consuming the trtllm 1.3.0 low-fidelity fallback. Collector
+      # API drift 0.24.0 -> 0.27.0 is audited before the pin lands in data.
+      mla:
+        version: "0.27.0"
+        images:
+          default: "vllm/vllm-openai:v0.27.0@sha256:07ea4e292adf3a26b05ac97114b28849cf4551a26beb1fbe7decd3842d752ed7"
+      mla_bmm:
+        version: "0.27.0"
+        images:
+          default: "vllm/vllm-openai:v0.27.0@sha256:07ea4e292adf3a26b05ac97114b28849cf4551a26beb1fbe7decd3842d752ed7"
       # moe: NO family pin (owner decision 2026-08-02, reverting the
       # 2026-08-01 family-wide preview pin — a temporary preview build must
       # not own a family default; a family pin here hijacks image selection
