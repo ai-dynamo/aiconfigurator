@@ -67,8 +67,9 @@ def _selected_glm5_models():
     are checkpoint-quantization-independent and use only model geometry. On
     SM90, select the registered BF16 GLM-5 identity to match the supported
     full-module plan without advertising an NVFP4 artifact. On SM100/103,
-    prefer GLM-5.2-NVFP4 because its longer range covers GLM-5. Return no cases
-    when a targeted model filter selects an unsupported or non-GLM checkpoint."""
+    prefer GLM-5.3-NVFP4 (or GLM-5.2-NVFP4) because its longer range covers
+    GLM-5. Return no cases when a targeted model filter selects an unsupported
+    or non-GLM checkpoint."""
     try:
         from collector.sglang.collect_mla_module import get_mla_module_model_specs
     except ModuleNotFoundError:
@@ -79,6 +80,8 @@ def _selected_glm5_models():
     paths = {s.model_path for s in get_mla_module_model_specs(attention_type="dsa")}
     if get_sm_version() not in {100, 103, 120}:
         return ["zai-org/GLM-5"] if "zai-org/GLM-5" in paths else []
+    if "nvidia/GLM-5.3-NVFP4" in paths:
+        return ["nvidia/GLM-5.3-NVFP4"]
     if "nvidia/GLM-5.2-NVFP4" in paths:
         return ["nvidia/GLM-5.2-NVFP4"]
     if "nvidia/GLM-5-NVFP4" in paths:

@@ -554,6 +554,9 @@ DefaultHFModels = {
     "zai-org/GLM-5.2",
     "zai-org/GLM-5.2-FP8",
     "nvidia/GLM-5.2-NVFP4",
+    "zai-org/GLM-5.3",
+    "zai-org/GLM-5.3-FP8",
+    "nvidia/GLM-5.3-NVFP4",
     # DeepSeek V4
     *DEEPSEEK_V4_HF_MODELS,
     # Qwen 3 Models

@@ -253,6 +253,7 @@ class TestDsaSkipIndexer:
         assert "register_forward_hook" not in decode
 
 
+@pytest.mark.unit
 class TestBuildModuleTestCases:
     def test_glm52_local_config_uses_transformers_v5_layer_type(self):
         mod = _import_module()
@@ -302,11 +303,11 @@ class TestBuildModuleTestCases:
         model_paths = {case[6] for case in cases}
         # #1378 canonicalization: one DSA collection per (architecture,
         # DSA-gemm-type) group on the longest-context checkpoint, reused for the
-        # consumer-equivalent rest. GLM-5/5.1/5.2 share identical DSA geometry
-        # (index_n_heads=32, index_head_dim=128, index_topk=2048, heads/dims/lora
-        # all equal) so GLM-5.2 (bf16) and GLM-5.2-FP8 (fp8_block) are canonical;
-        # GLM-5/5.1 and every NVFP4 checkpoint (which shares the bf16 DSA key)
-        # are reused, not collected.
+        # consumer-equivalent rest. GLM-5/5.1/5.2/5.3 share identical DSA geometry
+        # (index_n_heads=32, index_head_dim=128, index_topk=2048, heads/dims/lora,
+        # max_position_embeddings all equal for 5.2/5.3) so GLM-5.2 (bf16) and
+        # GLM-5.2-FP8 (fp8_block) are canonical by YAML iteration order; GLM-5/5.1
+        # and every NVFP4 checkpoint (which shares the bf16 DSA key) are reused.
         assert model_paths == {
             "deepseek-ai/DeepSeek-V3.2",
             "zai-org/GLM-5.2",
@@ -337,7 +338,7 @@ class TestBuildModuleTestCases:
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_module_test_cases("dsa", "context")
         model_paths = {case[6] for case in cases}
-        # bf16 canonical is the longest-context GLM (GLM-5.2); GLM-5/5.1 reuse it.
+        # bf16 canonical is GLM-5.2 (first in YAML among 5.2/5.3); GLM-5/5.1 reuse it.
         assert "zai-org/GLM-5.2" in model_paths
         assert "zai-org/GLM-5" not in model_paths
         assert not any("NVFP4" in model_path for model_path in model_paths)
@@ -378,9 +379,10 @@ class TestBuildModuleTestCases:
         with patch.object(mod, "get_sm_version", return_value=100):
             cases = mod.get_dsa_context_module_skip_indexer_test_cases()
         assert cases
-        # Only GLM-5.2 has index_topk_freq>1 (=4), so the skip-indexer op is
-        # collected on the GLM-5.2 canonicals (bf16 + fp8_block); GLM-5/5.1
-        # (freq=1) have no skip layers and NVFP4 reuses the bf16 key.
+        # GLM-5.2 and GLM-5.3 both have index_topk_freq=4; GLM-5/5.1 have freq=1
+        # (no skip layers). The skip-indexer op is collected on the GLM-5.2
+        # canonicals (bf16 + fp8_block) since 5.2 precedes 5.3 in YAML order;
+        # NVFP4 reuses the bf16 key.
         assert {case[6] for case in cases} == {"zai-org/GLM-5.2", "zai-org/GLM-5.2-FP8"}
 
     def test_glm_sparse_selector_preserves_targeted_artifact(self, monkeypatch):
@@ -402,7 +404,7 @@ class TestBuildModuleTestCases:
 
         namespace["get_sm_version"] = lambda: 100
         monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
-        assert selector() == ["nvidia/GLM-5.2-NVFP4"]
+        assert selector() == ["nvidia/GLM-5.3-NVFP4"]
         monkeypatch.setenv("COLLECTOR_MODEL_PATH", "nvidia/GLM-5-NVFP4")
         assert selector() == ["nvidia/GLM-5-NVFP4"]
 
