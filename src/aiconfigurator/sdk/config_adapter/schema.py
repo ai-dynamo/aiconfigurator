@@ -189,7 +189,9 @@ class AdapterOverrides(_StrictModel):
     fmha_quant_mode: str | None = None
     moe_quant_mode: str | None = None
     comm_quant_mode: str | None = None
+    batch_size: int | None = Field(default=None, gt=0)
     prefill_batch_size: int | None = Field(default=None, gt=0)
+    decode_batch_size: int | None = Field(default=None, gt=0)
     systems_paths: str | None = None
     free_gpu_memory_fraction: float | None = Field(default=None, gt=0, le=1)
     max_seq_len: int | None = Field(default=None, gt=0)

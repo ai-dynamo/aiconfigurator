@@ -692,7 +692,7 @@ def test_missing_system_and_arbitrary_shell_values_are_rejected():
     ).outcomes[0]
 
     assert system_outcome.status == "rejected"
-    assert "system is missing" in system_outcome.diagnostics[-1].message
+    assert "GPU model is not declared" in system_outcome.diagnostics[-1].message
     assert shell_outcome.status == "rejected"
     assert "shell-derived" in shell_outcome.diagnostics[-1].message
 
@@ -917,3 +917,135 @@ def test_dynamo_ci_speculation_requires_acceptance():
     assert adapted.request is not None
     assert adapted.request.model.nextn == 2
     assert adapted.request.model.nextn_accepted == 1.5
+
+
+def test_components_schema_resolves_configmap_placeholders():
+    deployment = """
+kind: ConfigMap
+metadata: {name: engine-config}
+data:
+  speculative-config: '{"method":"mtp","num_speculative_tokens":3}'
+---
+kind: DynamoGraphDeployment
+metadata: {name: components-agg}
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      podTemplate: {spec: {containers: [{name: main, args: [frontend]}]}}
+    - name: agg
+      type: worker
+      replicas: 2
+      podTemplate:
+        spec:
+          nodeSelector: {nvidia.com/gpu.product: NVIDIA-B200}
+          containers:
+            - name: main
+              command: [python3, -m, dynamo.vllm]
+              args:
+                - --model=Qwen/Qwen3-32B
+                - --tensor-parallel-size=1
+                - --speculative-config=$(SPEC_CONFIG)
+              env:
+                - name: SPEC_CONFIG
+                  valueFrom: {configMapKeyRef: {name: engine-config, key: speculative-config}}
+              resources: {limits: {nvidia.com/gpu: "1"}}
+"""
+
+    outcome = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=8, nextn=3, nextn_accepted=1.5),
+    ).outcomes[0]
+
+    assert outcome.request is not None
+    assert outcome.request.systems.prefill == "b200_sxm"
+    assert outcome.request.topology.worker.replicas == 2
+    assert outcome.request.topology.worker.batch_size == 4
+
+
+def test_components_schema_extracts_literal_engine_command_from_shell_wrapper():
+    deployment = """
+kind: ConfigMap
+metadata: {name: sglang-config}
+data:
+  prefill.yaml: |-
+    model-path: Qwen/Qwen3-32B
+    tensor-parallel-size: 2
+  decode.yaml: |-
+    model-path: Qwen/Qwen3-32B
+    tensor-parallel-size: 2
+    max-running-requests: 16
+---
+kind: DynamoGraphDeployment
+metadata: {name: components-disagg}
+spec:
+  backendFramework: sglang
+  components:
+    - name: prefill
+      type: prefill
+      replicas: 1
+      podTemplate:
+        spec:
+          nodeSelector: {nvidia.com/gpu.product: NVIDIA-H200}
+          containers:
+            - name: main
+              command: [/bin/bash, -lc]
+              args:
+                - |
+                  DEVICE="$(discover-device --dynamic)"
+                  exec python3 -m dynamo.sglang --config /etc/sglang/prefill.yaml
+              volumeMounts:
+                - {name: config, mountPath: /etc/sglang}
+              resources: {limits: {nvidia.com/gpu: "2"}}
+          volumes:
+            - {name: config, configMap: {name: sglang-config}}
+    - name: decode
+      type: decode
+      replicas: 2
+      podTemplate:
+        spec:
+          nodeSelector: {nvidia.com/gpu.product: NVIDIA-H200}
+          containers:
+            - name: main
+              command: [/bin/bash, -lc]
+              args:
+                - |
+                  DEVICE="$(discover-device --dynamic)"
+                  exec python3 -m dynamo.sglang --config /etc/sglang/decode.yaml
+              volumeMounts:
+                - {name: config, mountPath: /etc/sglang}
+              resources: {limits: {nvidia.com/gpu: "2"}}
+          volumes:
+            - {name: config, configMap: {name: sglang-config}}
+"""
+
+    outcome = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=16),
+    ).outcomes[0]
+
+    assert outcome.request is not None
+    assert outcome.request.topology.kind == "disagg"
+    assert outcome.request.topology.prefill.tp_size == 2
+    assert outcome.request.topology.decode.replicas == 2
+    assert outcome.request.topology.decode.batch_size == 8
+
+
+def test_explicit_batch_override_preserves_nondivisible_source_concurrency():
+    deployment = _agg_yaml().replace("replicas: 1", "replicas: 3")
+
+    rejected = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=32),
+    ).outcomes[0]
+    adapted = adapt_config(
+        DynamoRecipeSource(deployment),
+        AdapterOverrides(isl=1024, osl=128, concurrency=32, batch_size=11),
+    ).outcomes[0]
+
+    assert rejected.status == "rejected"
+    assert adapted.request is not None
+    assert adapted.request.workload.concurrency == 32
+    assert adapted.request.topology.worker.batch_size == 11
+    assert "active batch size is explicitly overridden" in adapted.request.provenance.assumptions[-2]
