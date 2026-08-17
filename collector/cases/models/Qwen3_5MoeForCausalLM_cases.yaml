@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Pinned serving+collection framework version for every sglang citation in
+# this file: v0.5.17 (tag v0.5.17, tag object 29481685462732237d80d86076d6563e1f658102,
+# dereferenced commit b6a09f38fcc5e96574324b4acc19d421c539cfc6).
+# Qwen3_5MoeForCausalLM is registered day-0 at
+# python/sglang/srt/models/qwen3_5_text.py:208
+# (EntryClass = [Qwen3_5MoeForCausalLM, Qwen3_5ForCausalLM]); v0.5.14 (an
+# earlier draft of this file's citations) predates the model's existence
+# entirely, so every pin below targets v0.5.17 instead.
 schema_version: 1
 architecture: Qwen3_5MoeForCausalLM
 model_path: Qwen/Qwen3.8-2.4T-A95B
@@ -26,36 +34,41 @@ model_case_values:
       num_key_value_heads: 4
       head_dim: 256
       window_size: 0
-      # Verified against the pinned sglang v0.5.14 clone (tag v0.5.14,
-      # 49e384ce), NOT copied from the 397B row: server_args.py's
-      # Qwen3.5-hybrid-GDN SM100/103 attention-backend override
-      # (:4182-4211, forcing "triton" unless the mamba-radix-cache
-      # reconciliation allows trtllm_mha) is gated on an explicit
-      # architectures[0] allowlist at :4152-4159 -- "Qwen3MoeForCausalLM",
-      # "Qwen3VLMoeForConditionalGeneration", "Qwen3NextForCausalLM",
-      # "Qwen3_5MoeForConditionalGeneration" (397B/35B/122B's own
-      # architecture), "InternS2PreviewForConditionalGeneration",
-      # "Qwen3_5ForConditionalGeneration" -- which does NOT include
-      # "Qwen3_5MoeForCausalLM" (this architecture; config.json:3 on this
-      # branch). Confirmed by grep of the whole pinned clone: the class
-      # Qwen3_5MoeForCausalLM exists (models/qwen3_5.py:1372) only as the
-      # VL wrapper's internal language_model_cls (qwen3_5.py:1747); the
-      # model registry's EntryClass for that module
-      # (qwen3_5.py:2120) lists only Qwen3_5MoeForConditionalGeneration and
-      # Qwen3_5ForConditionalGeneration, so "Qwen3_5MoeForCausalLM" is not a
-      # servable architecture string at this pinned version -- unaffected by
-      # head count. An unmatched architecture falls through every model-arch
-      # elif in server_args.py untouched and gets the generic MHA default
-      # (_get_default_attn_backend, server_args.py:4407-4455; this model has
-      # no attention sinks): SM90 Hopper+CUDA>=12.3 -> fa3 (:4433-4437);
-      # SM100/103 -> trtllm_mha (:4438-4446, is_sm100_supported() matches
-      # capability major 10); else -> flashinfer (:4451-4454). This is the
-      # same table as the collector's own built-in fallback
-      # (case_generator.py get_attention_head_configs), declared explicitly
-      # here (rather than omitted) for audit visibility: unlike the 397B
-      # row, this model does NOT get the triton override, and that gap is a
-      # framework-support question for the version-bump audit, not a
-      # head-count question.
+      # Verified against the pinned sglang v0.5.17 clone (tag v0.5.17,
+      # commit b6a09f38), NOT copied from the 397B row. Unlike at v0.5.14,
+      # Qwen3_5MoeForCausalLM IS now a registered, servable architecture
+      # (models/qwen3_5_text.py:208 EntryClass) -- but it is still absent
+      # from the SM100 triton-forcing allowlist `_qwen3_5_hybrid_overrides`
+      # (arg_groups/overrides.py:1234-1239, decorating the function at
+      # :1240): that allowlist covers Qwen3NextForCausalLM,
+      # Qwen3_5MoeForConditionalGeneration (397B/35B/122B's own
+      # architecture), InternS2PreviewForConditionalGeneration, and
+      # Qwen3_5ForConditionalGeneration -- NOT Qwen3_5MoeForCausalLM. This is
+      # a deliberate difference from the 397B row's triton override: 397B's
+      # architecture is in that allowlist, the Max's is not.
+      #
+      # With no override firing, attention_backend stays unset and resolves
+      # through the generic default (_get_default_attn_backend,
+      # server_args.py:5655-5727; this model has no attention sinks):
+      # SM90 Hopper+CUDA>=12.3 -> fa3 (:5682-5688); SM100/103 -> trtllm_mha
+      # (:5689-5701, is_sm100_supported() matches capability major 10 --
+      # NOT the v0.5.17 fa4 branch there, since fa4 only fires when
+      # model_config.has_asymmetric_kv is True (configs/model_config.py:738-746),
+      # and this model declares only head_dim=256 with no separate
+      # v_head_dim/swa_head_dim, so ModelConfig._derive_model_shapes
+      # defaults v_head_dim and swa_v_head_dim to head_dim
+      # (:811-824), making has_asymmetric_kv False); SM120 -> flashinfer
+      # (:5706-5710).
+      #
+      # The hybrid-GDN backend-compatibility guard
+      # (layers/attention/attention_registry.py:396-414) still admits both
+      # choices: it fires because hybrid_gdn_config() keys on the CONFIG
+      # CLASS Qwen3_5MoeConfig (configs/hybrid_arch.py:48-60, an isinstance
+      # check, not an architecture-string match), so this model is
+      # recognized as hybrid-GDN despite the new architecture string. The
+      # allowed backend set on non-SM120 Blackwell is
+      # {triton, trtllm_mha, fa4} (trtllm_mha passes) and on SM120
+      # {triton, trtllm_mha, flashinfer} (flashinfer passes).
       sglang_backends: {90: fa3, 100: trtllm_mha, 103: trtllm_mha, 120: flashinfer}
       tensor_parallel_sizes: [1, 2, 4, 8, 16, 32]
   moe:
@@ -68,18 +81,42 @@ model_case_values:
       num_experts: 512
       # RoutingMethodType.RenormalizeNaive is hardcoded (not config- or
       # architecture-conditional) at the get_moe_impl_class(...) call inside
-      # Qwen2MoeSparseMoeBlock.__init__ (models/qwen2_moe.py:290 @0.5.14).
-      # qwen3_5.py:807-808 (elif config.model_type == "qwen3_5_moe_text":
+      # Qwen2MoeSparseMoeBlock.__init__ (models/qwen2_moe.py:299 @v0.5.17).
+      # qwen3_5.py:930-931 (elif config.model_type == "qwen3_5_moe_text":
       # self.mlp = Qwen2MoeSparseMoeBlock(...)) selects that exact block for
       # any config whose model_type == "qwen3_5_moe_text" -- the bundled
-      # Qwen--Qwen3.8-2.4T-A95B_config.json's own model_type (config.json:117)
-      # -- so unlike the attention-backend gap above, this dispatch IS
-      # confirmed to apply verbatim: it is keyed on model_type, not on the
-      # architectures[0] string that is missing from the special-case lists.
+      # Qwen--Qwen3.8-2.4T-A95B_config.json's own model_type (config.json:117).
+      # This logic still lives in the pre-v0.5.17 qwen3_5.py: the new
+      # qwen3_5_text.py EntryClass wrapper's Qwen3_5ForCausalLM (:41) and
+      # Qwen3_5MoeForCausalLM (:174) classes each delegate to it via their
+      # own `body_cls = qwen3_5.Qwen3_5*ForCausalLM`. This dispatch is keyed on
+      # model_type, not on the architectures[0] string that gates the
+      # attention override above, so it applies verbatim regardless of that
+      # gap.
+      #
+      # No sglang_moe_backends override is declared: the SM100
+      # flashinfer_trtllm moe-runner-backend forcer
+      # (`_qwen3_moe_family_overrides`, arg_groups/overrides.py:1283-1290,
+      # decorating :1291) is gated by the SAME kind of architecture-string
+      # allowlist as the attention override above (it lists
+      # Qwen3MoeForCausalLM -- the *dense* Qwen3 family, a different string
+      # -- plus Qwen3VLMoeForConditionalGeneration, Qwen3NextForCausalLM,
+      # Qwen3_5MoeForConditionalGeneration, InternS2PreviewForConditionalGeneration,
+      # Qwen3_5ForConditionalGeneration, NOT Qwen3_5MoeForCausalLM). With
+      # moe_runner_backend left "auto" (server_args.py:2296-2304) and no
+      # DeepEP/mooncake/nixl a2a backend configured (moe_a2a_backend
+      # defaults to "none", server_args.py:2277-2295), both quant paths
+      # resolve to TRITON: UnquantizedFusedMoEMethod.create_moe_runner
+      # (layers/quantization/unquant.py:544-568, falling through to the
+      # `else: backend = MoeRunnerBackend.TRITON` at :567-568) for bfloat16,
+      # and Fp8MoEMethod.create_moe_runner (layers/quantization/fp8.py:2265-2294,
+      # `is_deepgemm_moe_runner_backend_enabled()` requires a non-none a2a
+      # backend so falls to `else: moe_runner_backend = MoeRunnerBackend.TRITON`
+      # at :2281) for fp8_block. That is exactly the
+      # base_ops/moe.yaml:79-81 default ({default: triton} for both
+      # bfloat16 and fp8_block already), so redeclaring it here would just
+      # duplicate the base value -- omitted instead.
       sglang_moe_routing_method_type: RenormalizeNaive
-      sglang_moe_backends:
-        bfloat16: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
-        fp8_block: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
     # NVFP4 artifact (ModelOpt experts-only recipe: routed-expert linears
     # only, other components at source precision; collector-only id, no
     # separate model_path row needed for the bf16/fp8_block artifacts above
@@ -88,10 +125,10 @@ model_case_values:
     # alias). Same modelopt_quant.py SM100/103 -> FLASHINFER_TRTLLM dispatch
     # citation and style as the 397B NVFP4 row (integration base,
     # base_ops/moe.yaml:97-105 citation style):
-    # ModelOptNvFp4FusedMoEMethod.create_moe_runner (modelopt_quant.py:2311-2323
-    # @0.5.14) leaves MARLIN only for capability in [8.0, 10.0) and defaults
+    # ModelOptNvFp4FusedMoEMethod.create_moe_runner (modelopt_quant.py:2520-2532
+    # @v0.5.17) leaves MARLIN only for capability in [8.0, 10.0) and defaults
     # everything else -- SM100 (10,0) and SM103 (10,3) both fail that
-    # upper-bound check -- to FLASHINFER_TRTLLM (modelopt_quant.py:2317-2323,
+    # upper-bound check -- to FLASHINFER_TRTLLM (modelopt_quant.py:2529-2532,
     # "TRTLLM is currently the most performant and tested FP4 MoE backend").
     # This dispatch is gated on the checkpoint's quantization method, not the
     # architectures string, so it is unaffected by the attention-backend gap

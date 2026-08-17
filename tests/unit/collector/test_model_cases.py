@@ -1895,6 +1895,17 @@ def test_qwen38_max_nvfp4_moe_cases_are_declared_with_correct_shape_and_runner()
     assert get_sglang_moe_backend(sample, "nvfp4", 100) == "flashinfer_trtllm"
     assert get_sglang_moe_backend(sample, "nvfp4", 103) == "flashinfer_trtllm"
 
+    # The base (bf16/fp8_block) row declares no sglang_moe_backends override,
+    # so it falls through to base_ops/moe.yaml's default -- triton -- for
+    # both dtypes: Qwen3_5MoeForCausalLM is absent from the v0.5.17
+    # `_qwen3_moe_family_overrides` SM100 flashinfer_trtllm-forcing
+    # allowlist (arg_groups/overrides.py:1283-1290), so moe_runner_backend
+    # stays "auto" and both UnquantizedFusedMoEMethod and Fp8MoEMethod
+    # resolve TRITON on this architecture.
+    base_sample = base_cases[0]
+    assert get_sglang_moe_backend(base_sample, "bfloat16", 100) == "triton"
+    assert get_sglang_moe_backend(base_sample, "fp8_block", 100) == "triton"
+
     # Quant policy: nvfp4 allowed only for the NVFP4 id; bf16/fp8_block only
     # for the base id (and its aliased -FP8 sibling).
     assert moe_model_allows_quantization("sglang", "RadixArk/Qwen3.8-2.4T-A95B-NVFP4", "nvfp4")
