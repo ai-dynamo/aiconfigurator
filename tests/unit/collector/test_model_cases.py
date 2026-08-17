@@ -746,6 +746,13 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     assert {(case.hidden_size, case.inter_size, case.topk, case.num_experts) for case in laguna_moe_cases} == {
         (3072, 1024, 10, 256)
     }
+    laguna_xs_moe_cases = [case for case in moe_cases if case.model_name == "poolside/Laguna-XS.2-FP8"]
+    assert laguna_xs_moe_cases
+    assert len({repr(case) for case in laguna_xs_moe_cases}) == len(laguna_xs_moe_cases)
+    assert all(case.tp < 8 for case in laguna_xs_moe_cases)
+    assert {(case.hidden_size, case.inter_size, case.topk, case.num_experts) for case in laguna_xs_moe_cases} == {
+        (2048, 512, 8, 256)
+    }
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024

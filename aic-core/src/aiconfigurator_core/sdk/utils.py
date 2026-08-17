@@ -937,12 +937,12 @@ def _parse_hf_config_json(config: dict) -> dict:
             raise ValueError("Laguna sliding_attention layers require a positive sliding_window")
 
         gating = config.get("gating", False)
-        if gating == "per-head":
+        if gating is True or gating == "per-head":
             per_head_gating = True
         elif gating is False or gating is None:
             per_head_gating = False
         else:
-            raise ValueError(f"Laguna gating must be false or 'per-head', got {gating!r}")
+            raise ValueError(f"Laguna gating must be true, false, or 'per-head', got {gating!r}")
 
         extra_params = LagunaConfig(
             layer_types=layer_types,

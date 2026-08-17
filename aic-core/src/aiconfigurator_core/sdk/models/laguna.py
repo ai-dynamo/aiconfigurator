@@ -7,7 +7,26 @@ import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
 from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor
-from aiconfigurator_core.sdk.utils import _load_model_config_from_model_path
+from aiconfigurator_core.sdk.utils import (
+    _load_model_config_from_model_path,
+    parse_compressed_tensors_quant,
+)
+
+
+def _laguna_ffn_quant_modes(
+    raw_config: dict, fallback: common.GEMMQuantMode
+) -> tuple[common.GEMMQuantMode, common.GEMMQuantMode]:
+    base_algo, ignored = parse_compressed_tensors_quant(raw_config.get("quantization_config"))
+    if base_algo is None:
+        return fallback, fallback
+    try:
+        checkpoint_mode = common.GEMMQuantMode[base_algo]
+    except KeyError as error:
+        raise ValueError(f"Unsupported Laguna compressed-tensors GEMM quantization {base_algo!r}") from error
+    return (
+        fallback if "dense_mlp" in ignored else checkpoint_mode,
+        fallback if "shared_experts" in ignored else checkpoint_mode,
+    )
 
 
 @register_model("LAGUNA")
@@ -16,10 +35,15 @@ class LagunaModel(BaseModel):
 
     @classmethod
     def create(cls, model_info: dict, model_config, backend_name: str) -> BaseModel:
+        dense_mlp_quant_mode, shared_expert_quant_mode = _laguna_ffn_quant_modes(
+            model_info.get("raw_config", {}), model_config.gemm_quant_mode
+        )
         model = cls(
             model_info["topk"],
             model_info["num_experts"],
             model_info["moe_inter_size"],
+            dense_mlp_quant_mode,
+            shared_expert_quant_mode,
             model_info["model_path"],
             model_info["model_family"],
             model_info["architecture"],
@@ -37,7 +61,15 @@ class LagunaModel(BaseModel):
         model.set_laguna_config(model_info["extra_params"])
         return model
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    def __init__(
+        self,
+        topk: int,
+        num_experts: int,
+        moe_inter_size: int,
+        dense_mlp_quant_mode: common.GEMMQuantMode,
+        shared_expert_quant_mode: common.GEMMQuantMode,
+        *args,
+    ) -> None:
         super().__init__(*args)
         assert (
             self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
@@ -50,6 +82,8 @@ class LagunaModel(BaseModel):
         self._topk = topk
         self._num_experts = num_experts
         self._moe_inter_size = moe_inter_size
+        self._dense_mlp_quant_mode = dense_mlp_quant_mode
+        self._shared_expert_quant_mode = shared_expert_quant_mode
         self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
         self._laguna_config: common.LagunaConfig | None = None
         # Match existing hybrid MoE families until Laguna-specific routing imbalance is calibrated.
@@ -121,8 +155,43 @@ class LagunaModel(BaseModel):
                 )
 
         self._laguna_config = cfg
+        self._validate_fp8_block_quantized_ffn_config()
         self._build_context_ops()
         self._build_generation_ops()
+
+    def _validate_fp8_block_quantized_ffn_config(self) -> None:
+        cfg = self._laguna_config
+        quantized_inter_sizes = []
+        if self._dense_mlp_quant_mode == common.GEMMQuantMode.fp8_block:
+            quantized_inter_sizes.append(("dense MLP", self._inter_size))
+        if cfg.shared_expert_inter_size > 0 and self._shared_expert_quant_mode == common.GEMMQuantMode.fp8_block:
+            quantized_inter_sizes.append(("shared expert", cfg.shared_expert_inter_size))
+        if not quantized_inter_sizes:
+            return
+
+        raw_config = _load_model_config_from_model_path(self.model_path)
+        quant_config = raw_config.get("quantization_config") or {}
+        block = (
+            ((quant_config.get("config_groups") or {}).get("group_0") or {}).get("weights", {}).get("block_structure")
+        )
+        if (
+            not isinstance(block, (list, tuple))
+            or len(block) != 2
+            or any(not isinstance(size, int) or size <= 0 for size in block)
+        ):
+            raise ValueError(
+                "Cannot resolve a positive two-dimensional fp8_block weight "
+                f"block shape from the quantization config for {self.model_path}"
+            )
+
+        for label, inter_size in quantized_inter_sizes:
+            inter_per_gpu = inter_size // self.config.tp_size
+            if inter_size % self.config.tp_size != 0 or any(inter_per_gpu % size != 0 for size in block):
+                raise ValueError(
+                    f"Invalid quantized Laguna {label} configuration: "
+                    f"intermediate_size={inter_size} / tp_size={self.config.tp_size} "
+                    f"must be divisible by fp8_block shape {list(block)}"
+                )
 
     def _count_layer_types(self) -> dict[str, int]:
         cfg = self._laguna_config
@@ -432,10 +501,26 @@ class LagunaModel(BaseModel):
             self.context_ops.extend(
                 self._moe_ops(prefix, count, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist, is_context=True)
             )
-            self.context_ops.extend(self._shared_expert_ops(prefix, count, h, shared_inter_per_tp, gemm_q))
+            self.context_ops.extend(
+                self._shared_expert_ops(
+                    prefix,
+                    count,
+                    h,
+                    shared_inter_per_tp,
+                    self._shared_expert_quant_mode,
+                )
+            )
         else:
             self.context_ops.append(ops.ElementWise(f"{prefix}_dense_ffn_norm", count, 2 * h, 2 * h, 0.8))
-            self.context_ops.extend(self._dense_ffn_ops(prefix, count, h, dense_inter_per_tp, gemm_q))
+            self.context_ops.extend(
+                self._dense_ffn_ops(
+                    prefix,
+                    count,
+                    h,
+                    dense_inter_per_tp,
+                    self._dense_mlp_quant_mode,
+                )
+            )
 
     def _build_generation_ops(self) -> None:
         if not self._laguna_config:
@@ -548,10 +633,26 @@ class LagunaModel(BaseModel):
             self.generation_ops.extend(
                 self._moe_ops(prefix, count, h, moe_tp, moe_ep, attn_dp, moe_q, wl_dist, is_context=False)
             )
-            self.generation_ops.extend(self._shared_expert_ops(prefix, count, h, shared_inter_per_tp, gemm_q))
+            self.generation_ops.extend(
+                self._shared_expert_ops(
+                    prefix,
+                    count,
+                    h,
+                    shared_inter_per_tp,
+                    self._shared_expert_quant_mode,
+                )
+            )
         else:
             self.generation_ops.append(ops.ElementWise(f"{prefix}_dense_ffn_norm", count, 2 * h, 2 * h, 0.8))
-            self.generation_ops.extend(self._dense_ffn_ops(prefix, count, h, dense_inter_per_tp, gemm_q))
+            self.generation_ops.extend(
+                self._dense_ffn_ops(
+                    prefix,
+                    count,
+                    h,
+                    dense_inter_per_tp,
+                    self._dense_mlp_quant_mode,
+                )
+            )
 
     def get_kvcache_elements_per_token(self) -> int:
         if not self._laguna_config:

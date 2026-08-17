@@ -2,34 +2,37 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: 1
-provenance: collected
+provenance: legacy
 runtime:
   framework: vllm
   version: 0.24.0
-  image: vllm/vllm-openai:v0.24.0
-  image_digest: sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f
-model:
-  path: poolside/Laguna-S-2.1-FP8
-  revision: fc72eb9025540b2225a681bb81950cc1225ff286
-  config_sha256: 6337348c4988936be54276c637e7a2c1c6b25ec44114a199240944a3e0f7212e
-collection:
-  scope: append_missing_laguna_keys
-  collected_at: '2026-08-10'
-  verified_at: '2026-08-14'
 tables:
   moe_perf:
-    # 2026-08-02: appended 972 Kimi-K3 w4a16_mxfp4 rows collected on H200
-    # in the stock v0.24.0 image via the owner-approved situ-as-silu Marlin
-    # approximation and EP-local shim (wave-3 pipeline 60730461, job
-    # 382178203, AIC revision 04036a56c). The full EP1..128 wave had three
-    # classified moe_tp=32 Marlin tile-limit failures ("Invalid thread
-    # config"), matching the other systems.
-    collector_hash: sha256:198e3cebe5789b1c690e7cd1be3d69a1d417c9d601b3806d5ad4471f851f00f6
-    case_plan_hash: sha256:850d9505b455eb5ef19a6aa0f92a5bb6273499782006e4d0d0df0ddd499dc7a2
-    rows: 48681
-    fresh_rows: 972
-    preserved_rows: 47709
-    replaced_rows: 0
-    verified_rows: 972
-    sha256: d6fecbc3fcec3b6858ddd72149e5a75d4fab50e43cf04cbd993355f3f0acb05a
+    # 2026-08-02: appended 972 Kimi-K3 w4a16_mxfp4 rows (kernel_source
+    # vllm_compressedtensorsw4a4mxfp4moe_marlin_marlinexperts_situ_as_silu)
+    # collected on H200 in the STOCK v0.24.0 image via the
+    # owner-approved situ-as-silu Marlin approximation + EP-local shim
+    # (wave-3 pipeline 60730461, job 382178203, AIC revision 04036a56c); keys
+    # disjoint from the base table. FULL EP 1..128 coverage — vllm's
+    # marlin_moe_wna16 does NOT have the Hopper EP>1 crash that blocks
+    # the sglang 0.5.14 marlin lane. Same 3 classified moe_tp=32 marlin
+    # tile-limit failures ("Invalid thread config") as every other system.
+    #
+    # 2026-08-17: appended 972 Laguna S fp8_block rows (36 grouped cases x 27
+    # token counts, hidden 3072 / inter 1024 / topk 10 / 256 experts)
+    # collected on H200 SXM in the stock vllm/vllm-openai:v0.24.0 image
+    # (sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f)
+    # from poolside/Laguna-S-2.1-FP8 @ fc72eb90, with zero collector errors.
+    # collector_hash
+    # sha256:14a5d1f21cc31819e5f508002c352cbfffbcfb664b36aeee6abf3168d3bfdd8b,
+    # case_plan_hash
+    # sha256:850d9505b455eb5ef19a6aa0f92a5bb6273499782006e4d0d0df0ddd499dc7a2.
+    # Keys disjoint from the base table, so nothing is replaced.
+    #
+    # poolside/Laguna-XS.2-FP8 @ 607820a6 contributes no rows: its MoE
+    # geometry (hidden 2048 / inter 512 / topk 8 / 256 experts, fp8_block)
+    # maps onto consumer keys this table already carries from Qwen3.5, and
+    # MoeKey does not include kernel_source, so it reuses those rows by
+    # design. Collection for it is fail-closed in
+    # collector/cases/models/LagunaForCausalLM_cases.yaml.
     status: complete

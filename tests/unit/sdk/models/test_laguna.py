@@ -16,12 +16,22 @@ from aiconfigurator.sdk.utils import get_model_config_from_model_path
 pytestmark = pytest.mark.unit
 
 LAGUNA_MODEL_PATH = "poolside/Laguna-S-2.1-FP8"
+LAGUNA_XS_MODEL_PATH = "poolside/Laguna-XS.2-FP8"
 
 
 @pytest.fixture
 def laguna_model_path(tmp_path):
     config_json = deepcopy(get_model_config_from_model_path(LAGUNA_MODEL_PATH)["raw_config"])
     model_dir = tmp_path / "Laguna-S-v2.1"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps(config_json))
+    return str(model_dir)
+
+
+@pytest.fixture
+def laguna_xs_model_path(tmp_path):
+    config_json = deepcopy(get_model_config_from_model_path(LAGUNA_XS_MODEL_PATH)["raw_config"])
+    model_dir = tmp_path / "Laguna-XS.2"
     model_dir.mkdir()
     (model_dir / "config.json").write_text(json.dumps(config_json))
     return str(model_dir)
@@ -94,6 +104,41 @@ def test_laguna_s2_fp8_resolves_vllm_quant_defaults():
     ]
     assert shared_expert_ops
     assert all(op._quant_mode == common.GEMMQuantMode.bfloat16 for op in shared_expert_ops)
+
+
+def test_laguna_xs2_fp8_resolves_checkpoint_specific_ffn_quantization():
+    model_config = _model_config_with_quant_defaults(tp_size=4, moe_ep_size=4)
+
+    model = get_model(LAGUNA_XS_MODEL_PATH, model_config, backend_name="vllm")
+
+    assert isinstance(model, LagunaModel)
+    assert model._count_layer_types() == {
+        "global_dense": 1,
+        "global_moe": 9,
+        "swa_moe": 30,
+        "swa_dense": 0,
+    }
+    assert model._nextn == 0
+    assert model_config.gemm_quant_mode == common.GEMMQuantMode.bfloat16
+    assert model_config.moe_quant_mode == common.MoEQuantMode.fp8_block
+    assert model_config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+    assert model_config.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+
+    ffn_ops = [
+        op
+        for op in [*model.context_ops, *model.generation_ops]
+        if ("_shared_" in op._name or "_dense_gate_up_gemm" in op._name or "_dense_down_gemm" in op._name)
+        and hasattr(op, "_quant_mode")
+    ]
+    attention_ops = [
+        op
+        for op in [*model.context_ops, *model.generation_ops]
+        if ("_qkv_gemm" in op._name or "_proj_gemm" in op._name) and hasattr(op, "_quant_mode")
+    ]
+    assert ffn_ops
+    assert attention_ops
+    assert all(op._quant_mode == common.GEMMQuantMode.fp8_block for op in ffn_ops)
+    assert all(op._quant_mode == common.GEMMQuantMode.bfloat16 for op in attention_ops)
 
 
 def test_laguna_counts_expected_layer_buckets(laguna_model_path):
@@ -208,7 +253,7 @@ def test_laguna_invalid_gqa_head_ratio_raises(laguna_model_path):
         _laguna_model(laguna_model_path, tp_size=2, moe_ep_size=2)
 
 
-@pytest.mark.parametrize("gating", [True, 0, "none", "elementwise"])
+@pytest.mark.parametrize("gating", [1, 0, "none", "elementwise"])
 def test_laguna_rejects_unknown_gating_modes(laguna_model_path, gating):
     config_path = f"{laguna_model_path}/config.json"
     with open(config_path) as f:
@@ -217,7 +262,7 @@ def test_laguna_rejects_unknown_gating_modes(laguna_model_path, gating):
     with open(config_path, "w") as f:
         json.dump(config_json, f)
 
-    with pytest.raises(ValueError, match="gating must be false or 'per-head'"):
+    with pytest.raises(ValueError, match="gating must be true, false, or 'per-head'"):
         _laguna_model(laguna_model_path)
 
 
@@ -262,6 +307,18 @@ def test_laguna_single_attention_type_variants_do_not_resolve_empty_buckets(lagu
 
     assert model.context_ops
     assert model.generation_ops
+    empty_bucket = "_swa_" if attention_type == "full_attention" else "_global"
+    assert not any(empty_bucket in op._name for op in model.context_ops)
+    assert not any(empty_bucket in op._name for op in model.generation_ops)
+
+
+def test_laguna_xs2_rejects_tp8_for_quantized_shared_expert(laguna_xs_model_path):
+    with pytest.raises(ValueError, match=r"shared expert.*512 / tp_size=8"):
+        get_model(
+            laguna_xs_model_path,
+            _model_config_with_quant_defaults(tp_size=8, moe_ep_size=8),
+            backend_name="vllm",
+        )
 
 
 def test_laguna_block_fp8_workspace_uses_hidden_width(laguna_model_path):

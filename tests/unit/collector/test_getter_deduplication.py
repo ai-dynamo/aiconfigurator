@@ -388,6 +388,8 @@ def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkey
     laguna_cases = [case for case in cases if case[8] == "poolside/Laguna-S-2.1-FP8"]
     assert len(laguna_cases) == 36
     assert sum(len(case[1]) for case in laguna_cases) == 972
+    laguna_xs_cases = [case for case in cases if case[8] == "poolside/Laguna-XS.2-FP8"]
+    assert laguna_xs_cases == []
     # Native artifacts stay excluded on SM90 (vLLM 0.24.0 serves them there
     # as Marlin W4A16, so the SM100-gated w4a8_mxfp4_mxfp8 label must not
     # expand); the converted FP8 artifacts are collected as fp8_block only —
@@ -633,21 +635,25 @@ def test_canonical_routed_scaling_factor_of_zero_is_preserved(monkeypatch):
     assert module._resolve_moe_runtime_config("test/neither", {})["routed_scaling_factor"] == 1.0
 
 
-def test_vllm_laguna_runtime_config_matches_serving(monkeypatch):
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "poolside/Laguna-S-2.1-FP8",
+        "poolside/Laguna-XS.2-FP8",
+    ],
+)
+def test_vllm_laguna_runtime_config_matches_serving(monkeypatch, model_name):
     _install_vllm_stubs(monkeypatch)
     module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
-    monkeypatch.setattr(
-        module,
-        "_load_model_moe_config",
-        lambda _model_name: {
-            "model_type": "laguna",
-            "hidden_act": "silu",
-            "norm_topk_prob": True,
-            "moe_routed_scaling_factor": 2.5,
-        },
+    config_path = (
+        Path(__file__).resolve().parents[3]
+        / "aic-core/src/aiconfigurator_core/model_configs"
+        / f"{model_name.replace('/', '--')}_config.json"
     )
+    model_config = json.loads(config_path.read_text())
+    monkeypatch.setattr(module, "_load_model_moe_config", lambda _model_name: model_config)
 
-    runtime_config = module._resolve_moe_runtime_config("poolside/Laguna-S-2.1-FP8", {})
+    runtime_config = module._resolve_moe_runtime_config(model_name, {})
 
     assert runtime_config["scoring_func"] == "sigmoid"
     assert runtime_config["renormalize"] is True

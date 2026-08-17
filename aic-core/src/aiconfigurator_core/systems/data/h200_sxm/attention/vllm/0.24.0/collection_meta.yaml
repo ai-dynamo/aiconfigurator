@@ -2,36 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: 1
-provenance: collected
+provenance: legacy
 runtime:
   framework: vllm
   version: 0.24.0
-  image: vllm/vllm-openai:v0.24.0
-  image_digest: sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f
-model:
-  path: poolside/Laguna-S-2.1-FP8
-  revision: fc72eb9025540b2225a681bb81950cc1225ff286
-  config_sha256: 6337348c4988936be54276c637e7a2c1c6b25ec44114a199240944a3e0f7212e
-collection:
-  scope: append_missing_laguna_keys
-  collected_at: '2026-08-11'
-  verified_at: '2026-08-14'
 tables:
   context_attention_perf:
-    collector_hash: sha256:affda83c29b737f4efa59b9139aeeb3b2ddfde862d74d44eb2d8b8efea855d63
-    case_plan_hash: sha256:c2ff986528682d08125d84d7f4e27a8eaf7916246e7af1a39bbec8941792bde5
-    rows: 51782
-    fresh_rows: 238
-    preserved_rows: 51544
-    replaced_rows: 0
-    sha256: fb188f217310401d7e657f4b1edb94ec2291cfd4b0446e9205af538b915d8b95
+    # 2026-08-17: appended 1666 Laguna dense-attention rows (hybrid full +
+    # sliding-window geometries) collected on H200 SXM in the stock
+    # vllm/vllm-openai:v0.24.0 image
+    # (sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f)
+    # from poolside/Laguna-S-2.1-FP8 @ fc72eb90 and
+    # poolside/Laguna-XS.2-FP8 @ 607820a6. collector_hash
+    # sha256:e0e6c099fe64786c893c603bbd0352bed949be8042da816f443d1117d355180f,
+    # case_plan_hash sha256:c2ff9865... (S) and sha256:342b3840... (XS).
+    # The two runs measured 3332 cases (1904 + 1428) with zero collector
+    # errors. Of those, 1666 keys were absent here and were appended; the
+    # other 1666 already existed and kept their published values, which the
+    # fresh measurements agree with to a median of 0.87%. Nothing is replaced.
     status: complete
   generation_attention_perf:
-    collector_hash: sha256:affda83c29b737f4efa59b9139aeeb3b2ddfde862d74d44eb2d8b8efea855d63
-    case_plan_hash: sha256:938c36f3e7c0055790e2d40f56b7817089ec3b89d8e6265ff3080ad3ff6df773
-    rows: 63334
-    fresh_rows: 328
-    preserved_rows: 63006
-    replaced_rows: 0
-    sha256: d086293151d66f06c1c4191890c9e7d8a9af6e89bcf3ab9b0e4e54e92f2b0ef8
+    # 2026-08-17: appended 2080 Laguna dense-attention rows from the same two
+    # runs as context_attention_perf above. case_plan_hash
+    # sha256:938c36f3... (S) and sha256:64b5ef7e... (XS). The runs measured
+    # 4248 cases (2424 + 1824) with zero collector errors; the 2168 keys that
+    # already existed kept their published values, which the fresh
+    # measurements agree with to a median of 0.83%.
     status: complete

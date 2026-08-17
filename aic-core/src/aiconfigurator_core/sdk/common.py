@@ -599,6 +599,7 @@ DefaultHFModels = {
     "Qwen/Qwen3-VL-235B-A22B-Instruct",
     # Poolside Laguna
     "poolside/Laguna-S-2.1-FP8",
+    "poolside/Laguna-XS.2-FP8",
     # MiniMax Models
     "MiniMaxAI/MiniMax-M2.5",
     "nvidia/MiniMax-M2.5-NVFP4",
