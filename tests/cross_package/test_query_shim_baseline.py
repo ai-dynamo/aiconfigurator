@@ -68,6 +68,9 @@ _DBS = {
     "gb200": ("gb200", "trtllm"),
     "h200-sglang": ("h200_sxm", "sglang"),
     "b200-sglang": ("b200_sxm", "sglang"),
+    # spec-yaml-only system (no perf data dir): loaded with allow_missing_data,
+    # answers SOL/SOL_FULL analytically from the spec.
+    "h100-estimate": ("h100_pcie", "trtllm"),
 }
 
 _MODES = (None, "SOL", "SOL_FULL")
@@ -1172,7 +1175,69 @@ CASES = [
         k=4096,
         quant_mode="GEMMQuantMode.fp8_static",
     ),
+    # ---- review round 2 follow-ups ---------------------------------------------
+    op_case(
+        "overlap-token-only-x-only",
+        "h200",
+        "overlap.OverlapOp",
+        [
+            "ov",
+            [{"__op__": "gemm.GEMM", "ctor_args": ["g1", 1.0, 4096, 4096, "GEMMQuantMode.bfloat16"]}],
+            [{"__op__": "gemm.GEMM", "ctor_args": ["g2", 1.0, 4096, 4096, "GEMMQuantMode.bfloat16"]}],
+        ],
+        {"x": 64},
+        version="1.3.0rc20",
+    ),
+    op_case(
+        "fallback-token-only-x-only",
+        "h200",
+        "overlap.FallbackOp",
+        [
+            "fb",
+            {"__op__": "gemm.GEMM", "ctor_args": ["g1", 1.0, 4096, 4096, "GEMMQuantMode.bfloat16"]},
+            [{"__op__": "gemm.GEMM", "ctor_args": ["g2", 1.0, 4096, 4096, "GEMMQuantMode.bfloat16"]}],
+        ],
+        {"x": 64},
+        version="1.3.0rc20",
+    ),
+    op_case(
+        "overlap-empty-groups",
+        "h200",
+        "overlap.OverlapOp",
+        ["ov_empty", [], []],
+        {"x": 64},
+        version="1.3.0rc20",
+    ),
+    op_case(
+        "ctx-attn-zero-scale-op",
+        "h200",
+        "attention.ContextAttention",
+        ["context_attention", 1.0, 32, 8, "KVCacheQuantMode.bfloat16", "FMHAQuantMode.bfloat16"],
+        {"batch_size": 1, "s": 2048, "prefix": 0, "seq_imbalance_correction_scale": 0.0},
+        version="1.3.0rc20",
+    ),
+    facade_case(
+        "estimate-mem-op-sol",
+        "h100-estimate",
+        "query_mem_op",
+        version="estimate",
+        mem_bytes=1048576,
+        database_mode="SOL",
+    ),
+    facade_case(
+        "estimate-mem-op-sol-full",
+        "h100-estimate",
+        "query_mem_op",
+        version="estimate",
+        mem_bytes=1048576,
+        database_mode="SOL_FULL",
+    ),
 ]
+
+for _case in CASES:
+    if _case["db"] == "h100-estimate":
+        # spec-yaml-only database: load with allow_missing_data.
+        _case["allow_missing"] = True
 
 
 # ----------------------------------------------------------------------------- #
@@ -1250,11 +1315,11 @@ def _run_case(case, database):
     return _encode_result(result)
 
 
-def _load_database(system, backend, version):
+def _load_database(system, backend, version, allow_missing=False):
     from aiconfigurator_core.sdk.perf_database import get_database
 
     try:
-        return get_database(system=system, backend=backend, version=version)
+        return get_database(system=system, backend=backend, version=version, allow_missing_data=allow_missing)
     except Exception:
         return None
 
@@ -1275,7 +1340,7 @@ def test_query_shim_matches_pre_retirement_baseline(case):
     pinned = baseline["cases"].get(case["id"])
     assert pinned is not None, f"case {case['id']} missing from baseline JSON — regenerate before deleting math"
     system, backend, version = pinned["db"]
-    database = _load_database(system, backend, version)
+    database = _load_database(system, backend, version, allow_missing=bool(case.get("allow_missing")))
     if database is None:
         pytest.skip(f"pinned database {system}/{backend}/{version} unavailable")
     got = _run_case(case, database)
@@ -1346,7 +1411,7 @@ def _regen():
     for case in CASES:
         system, backend = _DBS[case["db"]]
         version = case.get("version") or get_latest_database_version(system, backend)
-        database = _load_database(system, backend, version)
+        database = _load_database(system, backend, version, allow_missing=bool(case.get("allow_missing")))
         if database is None:
             raise RuntimeError(f"regen requires database {system}/{backend} (case {case['id']})")
         if case.get("expected_from") == "engine":
@@ -1473,8 +1538,14 @@ SEMANTIC_DIMENSION_CASES = {
     "per-call quant override honored": {"gemm-op-quant-override", "moe-op-quant-override"},
     "per-call quant override missing-data miss": {"moe-op-quant-override-missing", "megamoe-op-quant-override-miss"},
     "verify phase (speculative KDA)": {"kda-verify-op"},
-    "explicit zero imbalance scale": {"gen-attn-zero-scale-op"},
-    "token-only composites": {"overlap-token-only-op", "fallback-token-only-op"},
+    "explicit zero imbalance scale (both branches)": {"gen-attn-zero-scale-op", "ctx-attn-zero-scale-op"},
+    "token-only composites (full kwargs AND legacy x-only shape)": {
+        "overlap-token-only-op",
+        "fallback-token-only-op",
+        "overlap-token-only-x-only",
+        "fallback-token-only-x-only",
+        "overlap-empty-groups",
+    },
     "mixed-phase composite": {"overlap-mixed-op"},
     "tombstones assert their error": {
         "compute-scale-tombstone",
@@ -1486,6 +1557,7 @@ SEMANTIC_DIMENSION_CASES = {
     },
     "typed data-miss errors": {"msa-ctx-op", "msa-gen-op"},
     "per-call mode overrides": {"gemm-bf16-explicit-silicon", "gemm-bf16-empirical", "gen-attn-hybrid-offgrid"},
+    "estimate-only (spec-yaml-only) SOL answers": {"estimate-mem-op-sol", "estimate-mem-op-sol-full"},
 }
 
 

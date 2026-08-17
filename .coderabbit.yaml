@@ -92,12 +92,10 @@ reviews:
         - Flag upper-layer dependencies or silent schema drift introduced into the minimal core distribution.
     - path: "aic-core/src/aiconfigurator_core/sdk/operations/**"
       instructions: |
-        - Enforce `.claude/rules/rust-core/parity.md` Rule 2 (the single-oracle invariant, #1357 Phase 3) and its executable contract tests/cross_package/test_single_oracle_contract.py: per-op performance VALUES come only from the compiled Rust engine.
-        - Flag any Python-side estimation math these sources prohibit (interpolation, roofline/SOL formulas, empirical-utilization estimates, per-call table lookups, `query()` overrides outside the contract's whitelist); the correct home is the Rust operator plus, if needed, a new engine FFI.
+        - Enforce `.claude/rules/rust-core/parity.md` Rule 2 and its executable contract, tests/cross_package/test_single_oracle_contract.py; flag any change those sources prohibit.
     - path: "aic-core/src/aiconfigurator_core/sdk/perf_database.py"
       instructions: |
-        - `PerfDatabase.query_*` is the FROZEN deprecated shim set defined in tests/cross_package/test_single_oracle_contract.py (removed with the deprecation-cleanup PR). Flag new `query_*` methods, math added inside a shim, and new in-repo shim consumers — new per-op access goes through `EngineHandle.evaluate_ops_json` / `evaluate_ops_sol_json` or the phase/run surface.
-        - Data LOADING (table parsing, shared-layer source resolution, `_<family>_data` attributes) is in scope for this file and fine to extend; query math is not.
+        - Enforce `.claude/rules/rust-core/parity.md` Rule 2 and tests/cross_package/test_single_oracle_contract.py for the `query_*` surface. Data loading remains in scope for this file and fine to extend.
     - path: "src/aiconfigurator/generator/module_bridge.py"
       instructions: |
         - Treat this as a compatibility bridge between profiler/SDK outputs and generator inputs.

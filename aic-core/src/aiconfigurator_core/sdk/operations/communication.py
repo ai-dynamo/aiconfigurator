@@ -15,7 +15,7 @@
 
 - ``P2P`` has no silicon table — latency is computed analytically from
   ``inter_node_bw`` + ``p2p_latency``. The base ``Operation.load_data``
-  no-op default applies; ``_query_p2p_table`` is factored out for
+  no-op default applies (the retired per-call lookup was factored out for
   parity with the other ops.
 
 Cache key matches every other migrated op: ``(systems_root, system,
@@ -228,7 +228,7 @@ class P2P(Operation):
     P2P (point-to-point) communication operation with power tracking.
 
     Purely analytical — no silicon table. The base ``Operation.load_data``
-    no-op default handles the missing perf table; ``_query_p2p_table`` is factored
+    no-op default handles the missing perf table (the retired per-call lookup was factored
     out only for parity with the other migrated ops.
     """
 

@@ -35,12 +35,12 @@ def test_system_spec_was_loaded_correctly(stub_perf_db):
 
 @pytest.mark.parametrize(
     ("phase", "expected"),
-    [("context", True), ("prefill", True), ("generation", False), ("decode", False)],
+    [("context", True), ("prefill", True), ("generation", False), ("decode", False), ("verify", False)],
 )
 def test_module_shape_phase_marker_inference(phase, expected):
     """The "module" shim shape must map BOTH phase vocabularies: the mamba/gdn
-    kernels store context/generation, FPMForwardOp stores prefill/decode
-    (``fpm_forward._PHASES``)."""
+    kernels store context/generation (KDA adds verify — speculative decode,
+    generation-like), FPMForwardOp stores prefill/decode (``fpm_forward._PHASES``)."""
     from aiconfigurator_core.sdk.operations.base import Operation
 
     op = Operation("probe", 1.0)

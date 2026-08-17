@@ -108,17 +108,34 @@ Models with different MLA operations also follow a similar process. For example,
 
 Today, we don't support the Mamba model yet. By looking at the Mamba model, it relies on the support of convolution operations. Convolution is not yet supported, so you need to add a new operation `Conv`.
 
-Steps required:
+Steps required (per-op performance math lives ONLY in the compiled Rust
+engine — see `.claude/rules/rust-core/parity.md` Rule 2 and
+`aic-core/src/aiconfigurator_core/sdk/operations/README.md` for the full
+single-oracle flow):
 
-1. **Define a new Operation `Conv`** in `operations.py`
-2. **Define a new method `query_conv`** in `perf_database.py`
-3. **Declare the op's interpolation config** in [`sdk/perf_interp/config.py`](../src/aiconfigurator/sdk/perf_interp/config.py). Raw perf tables are resolved through the shared `perf_interp.query` engine, and each op family declares its table shape once as an `OpInterpConfig` record: name the axes in the table's nesting order, pick the resolver (`ScatteredSites` for scattered-shapes-plus-swept-axis tables like GEMM, `Grid` for near-regular grids like attention), and provide the op's analytic `sol_fn` (its speed-of-light roofline — required; it anchors out-of-range extrapolation). Add a factory next to `gemm_config` / `context_grid_config`, register it in `OP_CONFIG_FACTORIES`, and call `perf_interp.query(config, table, *coords)` from `query_conv`.
+1. **Model `Conv` in the Rust engine**: an operator in
+   `aic-core/rust/aiconfigurator-core/src/operators/` (query + SOL roofline +
+   energy) and a parquet loader in `src/perf_database/`, anchored by a Rust
+   `#[cfg(test)]` oracle test.
+2. **Define the Python `Conv` op class** in
+   `aic-core/src/aiconfigurator_core/sdk/operations/` — constructor, fields,
+   `get_weights`, and the parquet loader / `load_data` (the raw data plane for
+   charts and the support matrix). No Python `query()` body or interpolation:
+   the single-oracle contract test rejects those.
+3. **Wire the spec conversion**: a `_to_opspec` branch in `sdk/engine.py` and
+   an `Op` variant appended at the tail of `operators/op.rs` (mid-enum
+   insertion requires an `ENGINE_SPEC_SCHEMA_VERSION` bump on both sides),
+   plus the `engine/spec.rs` round-trip fixture.
+   `tests/unit/sdk/test_opspec_coverage.py` enforces this.
 4. **Define the data collection process** in collector by referring to existing operations' collection code, such as `collect_gemm.py`
 5. **Collect data for conv**, register its family in
    `collector/op_backend_catalog.yaml`, and add the finalized parquet file
    under
    `aic-core/src/aiconfigurator_core/systems/data/<system>/<family>/<backend>/<version>/`
-6. **Add data loading code** in `perf_database.py` to load your data, which is leveraged by the method `query_conv`
+   (the engine reads parquet only).
+6. **Pin the behavior**: once a shipped model reaches the op, add a parity
+   case via `parity_tests/pin_goldens.py` (append-only); later modeling
+   changes carry their golden diff.
 7. **Add new model definition** in `models.py` to build your model with new operation. A new model class is mapping to a new model family.  
 update your model in ModelFamily dict defined in [`common.py`](../src/aiconfigurator/sdk/common.py)
 

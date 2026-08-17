@@ -123,6 +123,18 @@
     "source": "engine"
    }
   },
+  "ctx-attn-zero-scale-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.0,
+    "source": "mixed"
+   }
+  },
   "ctx-dsa-op": {
    "db": [
     "b200_sxm",
@@ -391,7 +403,45 @@
     "source": "silicon"
    }
   },
+  "estimate-mem-op-sol": {
+   "db": [
+    "h100_pcie",
+    "trtllm",
+    "estimate"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.000524288,
+    "source": "sol"
+   }
+  },
+  "estimate-mem-op-sol-full": {
+   "db": [
+    "h100_pcie",
+    "trtllm",
+    "estimate"
+   ],
+   "value": {
+    "triple": [
+     0.000524288,
+     0.0,
+     0.000524288
+    ]
+   }
+  },
   "fallback-token-only-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.012698666503032049,
+    "source": "silicon"
+   }
+  },
+  "fallback-token-only-x-only": {
    "db": [
     "h200_sxm",
     "trtllm",
@@ -1117,6 +1167,18 @@
     "source": "silicon"
    }
   },
+  "overlap-empty-groups": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.0,
+    "source": "empirical"
+   }
+  },
   "overlap-mixed-op": {
    "db": [
     "h200_sxm",
@@ -1130,6 +1192,18 @@
    }
   },
   "overlap-token-only-op": {
+   "db": [
+    "h200_sxm",
+    "trtllm",
+    "1.3.0rc20"
+   ],
+   "value": {
+    "energy": 0.0,
+    "latency": 0.012698666503032049,
+    "source": "silicon"
+   }
+  },
+  "overlap-token-only-x-only": {
    "db": [
     "h200_sxm",
     "trtllm",

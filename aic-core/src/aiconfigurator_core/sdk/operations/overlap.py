@@ -102,24 +102,30 @@ class FallbackOp(Operation):
 
     _ENGINE_QUERY_SHAPE = "module"
 
+    def _engine_query_plan(self, kwargs: dict):
+        """Composites carry no phase of their own. A phase-marked descendant
+        (or an explicit ``is_context=`` kwarg) selects the batch-major plan;
+        a subtree with NO marker anywhere <=> every leaf is token-shaped
+        (batch-major leaves always carry a marker via class shape or instance
+        fields), so the plan is TOKEN-shaped — preserving the legacy
+        ``query(db, x=...)``-only call shape, which never required
+        ``batch_size``/``s`` for token children. (Also covers empty groups:
+        an empty composite evaluates to zero either way.)"""
+        if kwargs.get("is_context") is None and _infer_phase(self) is None:
+            x = kwargs.get("x")
+            if x is None:
+                raise ValueError(f"{type(self).__name__}.query requires 'x' (num tokens) for token-only groups.")
+            return self, {"is_context": True, "batch_size": 1, "s": 1, "x": int(x)}
+        return super()._engine_query_plan(kwargs)
+
     def _engine_query_is_context(self, kwargs: dict) -> bool:
-        """Composites carry no phase of their own: use the explicit
-        ``is_context=`` kwarg when given, else infer it from the first
-        phase-marked descendant (mixed-phase groups do not occur — the model
-        builders assemble composites per phase list)."""
         hint = kwargs.get("is_context")
         if hint is not None:
             return bool(hint)
         inferred = _infer_phase(self)
-        if inferred is None:
-            # No phase marker anywhere in the subtree <=> every leaf is
-            # token-shaped (batch-major leaves always carry a marker via
-            # class shape or instance fields). Token-major evaluation is
-            # phase-neutral — x flows verbatim either way — so default to
-            # the context list rather than demanding a new required kwarg
-            # the legacy surface never had. (Also covers empty groups.)
-            return True
-        return inferred
+        # Unreachable when inferred is None (the plan override takes the
+        # token-shaped path first); kept as a safe default.
+        return True if inferred is None else inferred
 
     def get_weights(self, **kwargs):
         # Use primary weights if available, otherwise sum fallback weights.
@@ -161,24 +167,30 @@ class OverlapOp(Operation):
 
     _ENGINE_QUERY_SHAPE = "module"
 
+    def _engine_query_plan(self, kwargs: dict):
+        """Composites carry no phase of their own. A phase-marked descendant
+        (or an explicit ``is_context=`` kwarg) selects the batch-major plan;
+        a subtree with NO marker anywhere <=> every leaf is token-shaped
+        (batch-major leaves always carry a marker via class shape or instance
+        fields), so the plan is TOKEN-shaped — preserving the legacy
+        ``query(db, x=...)``-only call shape, which never required
+        ``batch_size``/``s`` for token children. (Also covers empty groups:
+        an empty composite evaluates to zero either way.)"""
+        if kwargs.get("is_context") is None and _infer_phase(self) is None:
+            x = kwargs.get("x")
+            if x is None:
+                raise ValueError(f"{type(self).__name__}.query requires 'x' (num tokens) for token-only groups.")
+            return self, {"is_context": True, "batch_size": 1, "s": 1, "x": int(x)}
+        return super()._engine_query_plan(kwargs)
+
     def _engine_query_is_context(self, kwargs: dict) -> bool:
-        """Composites carry no phase of their own: use the explicit
-        ``is_context=`` kwarg when given, else infer it from the first
-        phase-marked descendant (mixed-phase groups do not occur — the model
-        builders assemble composites per phase list)."""
         hint = kwargs.get("is_context")
         if hint is not None:
             return bool(hint)
         inferred = _infer_phase(self)
-        if inferred is None:
-            # No phase marker anywhere in the subtree <=> every leaf is
-            # token-shaped (batch-major leaves always carry a marker via
-            # class shape or instance fields). Token-major evaluation is
-            # phase-neutral — x flows verbatim either way — so default to
-            # the context list rather than demanding a new required kwarg
-            # the legacy surface never had. (Also covers empty groups.)
-            return True
-        return inferred
+        # Unreachable when inferred is None (the plan override takes the
+        # token-shaped path first); kept as a safe default.
+        return True if inferred is None else inferred
 
     def get_weights(self, **kwargs):
         weights = 0.0

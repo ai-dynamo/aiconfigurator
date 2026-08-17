@@ -106,6 +106,274 @@ UTIL_EMPIRICAL_PUBLIC_SURFACE = {
 }
 
 
+# Complete def-name inventory of operations/*.py (module, class, and nested
+# functions alike). ANY added or removed def requires editing this frozen
+# inventory — the import-contract-style deliberate friction that catches an
+# innocently NAMED Python oracle (e.g. `estimate_latency`) that the banned
+# prefixes above cannot: new estimation math cannot appear without a
+# reviewable one-line diff here declaring the new function.
+OPERATIONS_DEF_INVENTORY = {
+    "__init__.py": frozenset(),
+    "afd_transfer.py": frozenset(
+        {
+            "__init__",
+            "_afd_send_prob",
+            "_engine_comm_query",
+            "direction",
+            "f_gpus_in_node",
+            "get_weights",
+            "num_f_nodes",
+            "query",
+        }
+    ),
+    "attention.py": frozenset(
+        {
+            "__init__",
+            "_cache_key",
+            "_log_attention_row_conflict",
+            "clear_cache",
+            "generation_attn_flops",
+            "generation_attn_mode",
+            "get_weights",
+            "load_context_attention_data",
+            "load_data",
+            "load_encoder_attention_data",
+            "load_generation_attention_data",
+        }
+    ),
+    "base.py": frozenset(
+        {
+            "__init__",
+            "_all_operation_subclasses",
+            "_engine_query",
+            "_engine_query_is_context",
+            "_engine_query_plan",
+            "_read_filtered_rows",
+            "_read_perf_rows",
+            "_record_load",
+            "_resolve_perf_data_path",
+            "_version_dir_is_partial",
+            "_version_dir_is_unusable",
+            "clear_all_op_caches",
+            "clear_cache",
+            "get_weights",
+            "load_data",
+            "query",
+            "resolve_op_data_path",
+            "supported_quant_modes",
+            "warm_all_op_data",
+        }
+    ),
+    "communication.py": frozenset(
+        {
+            "__init__",
+            "_cache_key",
+            "clear_cache",
+            "get_weights",
+            "load_custom_allreduce_data",
+            "load_data",
+            "load_nccl_data",
+        }
+    ),
+    "dsa.py": frozenset(
+        {
+            "__init__",
+            "_b",
+            "_cache_key",
+            "_dsa_kernel_source_buckets",
+            "_format_dsa_unavailable_message",
+            "_nest",
+            "_read_dsa_row_sources",
+            "clear_cache",
+            "dsa_block_weights_bytes",
+            "get_weights",
+            "load_context_dsa_module_data",
+            "load_data",
+            "load_generation_dsa_module_data",
+        }
+    ),
+    "dsv4.py": frozenset(
+        {
+            "__init__",
+            "_cache_key",
+            "_coerce",
+            "_deep_merge_dsv4_dicts",
+            "_dsv4_normalize_dtype",
+            "_engine_query_plan",
+            "_estimate_weights",
+            "_is_bad_key",
+            "_load",
+            "_load_dsv4_split",
+            "_load_sparse",
+            "_make_nested",
+            "_normalize_distribution",
+            "_put_nested",
+            "_row_phase",
+            "_to_bool",
+            "_validate_dsv4_local_head_semantics",
+            "clear_cache",
+            "get_weights",
+            "load_context_dsv4_kind_module_data",
+            "load_data",
+            "load_dsv4_megamoe_module_data",
+            "load_dsv4_sparse_kernel_data",
+            "load_dsv4_sparse_op_data",
+            "load_generation_dsv4_kind_module_data",
+            "load_mhc_module_data",
+        }
+    ),
+    "elementwise.py": frozenset(
+        {
+            "__init__",
+            "get_weights",
+        }
+    ),
+    "embedding.py": frozenset(
+        {
+            "__init__",
+            "get_weights",
+        }
+    ),
+    "fpm_forward.py": frozenset(
+        {
+            "__init__",
+            "_norm_backend_request",
+            "_norm_identity",
+            "get_weights",
+        }
+    ),
+    "gemm.py": frozenset(
+        {
+            "__init__",
+            "_cache_key",
+            "_engine_query_plan",
+            "_load",
+            "clear_cache",
+            "get_weights",
+            "load_compute_scale_data",
+            "load_data",
+            "load_gemm_data",
+            "load_scale_matrix_data",
+            "supported_quant_modes",
+            "xprofile_util_level_known",
+        }
+    ),
+    "mamba.py": frozenset(
+        {
+            "__init__",
+            "_cache_key",
+            "_gemm_value",
+            "_mem_value",
+            "clear_cache",
+            "get_weights",
+            "load_data",
+            "load_gdn_data",
+            "load_kda_data",
+            "load_mamba2_data",
+            "query",
+        }
+    ),
+    "mla.py": frozenset(
+        {
+            "__init__",
+            "_cache_key",
+            "_engine_query_plan",
+            "_mla_module_native_heads",
+            "clear_cache",
+            "get_weights",
+            "load_context_mla_data",
+            "load_context_mla_module_data",
+            "load_data",
+            "load_generation_mla_data",
+            "load_generation_mla_module_data",
+            "load_mla_bmm_data",
+            "load_wideep_context_mla_data",
+            "load_wideep_generation_mla_data",
+        }
+    ),
+    "moe.py": frozenset(
+        {
+            "__init__",
+            "_cache_key",
+            "_engine_query_plan",
+            "_normalize_quant_mode_for_table",
+            "_select_alltoall_kernel",
+            "_select_kernel",
+            "clear_cache",
+            "get_weights",
+            "load_data",
+            "load_moe_data",
+            "load_trtllm_alltoall_data",
+            "load_wideep_context_moe_data",
+            "load_wideep_deepep_ll_data",
+            "load_wideep_deepep_normal_data",
+            "load_wideep_generation_moe_data",
+            "load_wideep_moe_compute_data",
+            "xprofile_util_level_known",
+        }
+    ),
+    "moe_comm.py": frozenset(
+        {
+            "__init__",
+            "_adapt_legacy_deepep",
+            "_adapt_legacy_deepep_ll",
+            "_adapt_legacy_deepep_normal",
+            "_adapt_legacy_sglang_context_moe",
+            "_adapt_legacy_sglang_generation_moe",
+            "_adapt_legacy_sglang_wideep_moe",
+            "_adapt_legacy_trtllm_alltoall",
+            "_adapt_legacy_trtllm_wideep_moe",
+            "_cache_key",
+            "_engine_query_plan",
+            "_load_legacy_a2a",
+            "_load_legacy_ep",
+            "_moe_a2a_store",
+            "_moe_ep_store",
+            "_normalize_sms",
+            "_require_latency",
+            "_resolve_kernel_source",
+            "_row_power",
+            "_store_a2a_leaf",
+            "_store_ep_leaf",
+            "_validate_a2a_request",
+            "_validate_ep_phase",
+            "clear_cache",
+            "feasible",
+            "get_weights",
+            "load_data",
+            "load_moe_a2a_data",
+            "load_moe_expert_compute_data",
+            "nodes_for",
+        }
+    ),
+    "msa.py": frozenset(
+        {
+            "__init__",
+            "get_weights",
+            "load_data",
+        }
+    ),
+    "overlap.py": frozenset(
+        {
+            "__init__",
+            "_engine_query_is_context",
+            "_engine_query_plan",
+            "_infer_phase",
+            "get_weights",
+        }
+    ),
+    "util_empirical.py": frozenset(
+        {
+            "capture_provenance",
+            "clear_grid_cache",
+            "note_provenance",
+            "quant_profile",
+            "worst_provenance",
+        }
+    ),
+}
+
+
 def test_perf_interp_is_gone():
     assert importlib.util.find_spec("aiconfigurator_core.sdk.perf_interp") is None, (
         "sdk.perf_interp was retired in PR-5 of #1357: per-op interpolation lives in the "
@@ -243,3 +511,60 @@ def test_no_perf_interp_references_in_operations():
         if "perf_interp" in text:
             offenders.append(path.name)
     assert not offenders, f"perf_interp references reappeared in: {offenders}"
+
+
+def _file_def_names(source_text: str) -> frozenset[str]:
+    return frozenset(
+        node.name
+        for node in ast.walk(ast.parse(source_text))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    )
+
+
+def test_operations_def_inventory_is_frozen():
+    """Every function definition in operations/ is enumerated above. Adding a
+    def (whatever its name) fails here until the inventory is deliberately
+    edited — the reviewable declaration point for anything that could be
+    estimation math under an innocent name."""
+    assert OPERATIONS_DIR.is_dir(), f"source layout expected at {OPERATIONS_DIR} (scan must not pass vacuously)"
+    live = {path.name: _file_def_names(path.read_text(encoding="utf-8")) for path in OPERATIONS_DIR.glob("*.py")}
+    assert set(live) == set(OPERATIONS_DEF_INVENTORY), (
+        f"operations module set drifted: files added {sorted(set(live) - set(OPERATIONS_DEF_INVENTORY))}, "
+        f"removed {sorted(set(OPERATIONS_DEF_INVENTORY) - set(live))} — update the inventory AND "
+        "test_import_contract.py deliberately."
+    )
+    problems = []
+    for fname in sorted(live):
+        added = live[fname] - OPERATIONS_DEF_INVENTORY[fname]
+        removed = OPERATIONS_DEF_INVENTORY[fname] - live[fname]
+        if added:
+            problems.append(f"{fname}: added defs {sorted(added)}")
+        if removed:
+            problems.append(f"{fname}: removed defs {sorted(removed)}")
+    assert not problems, (
+        "operations/ def inventory drifted — declare the change deliberately in "
+        "OPERATIONS_DEF_INVENTORY (and justify any new function that computes performance values): "
+        + "; ".join(problems)
+    )
+
+
+def test_def_inventory_catches_innocently_named_oracle():
+    """Negative fixture for the rename gap the banned prefixes cannot cover:
+    an estimator named `estimate_latency` / `table_lookup` / `_interpolate_2d`
+    matches no banned prefix, but it is a NEW def, so the frozen inventory
+    flags it."""
+    fixture = (
+        "def estimate_latency(shape, table):\n"
+        "    return table[shape] * 1.05\n"
+        "def table_lookup(table, key):\n"
+        "    return table[key]\n"
+        "def _interpolate_2d(grid, x, y):\n"
+        "    return grid[x][y]\n"
+    )
+    new_names = _file_def_names(fixture)
+    assert _offending_defs(fixture) == []  # the prefix guard alone is blind here...
+    for fname, frozen in OPERATIONS_DEF_INVENTORY.items():
+        assert not (new_names & frozen), f"fixture names collide with {fname}"
+    # ...but none of these names exists in any frozen per-file inventory, so
+    # introducing them into ANY operations module trips
+    # test_operations_def_inventory_is_frozen.

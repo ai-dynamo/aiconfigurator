@@ -7,7 +7,7 @@ Stage 2 of ISSUE-05/AIC-542: GEMM now owns its three CSV tables, SOL
 and raw-row ownership. ``PerfDatabase.query_gemm /
 query_compute_scale / query_scale_matrix`` are tombstoned shims (#1357 PR-5).
 
-Lazy-load Pattern A: ``query()`` (and the delegating ``_query_*_table``
+Lazy-load Pattern A: consumers (and the retired per-call lookups
 classmethods) trigger ``load_data`` on cache miss. ``_data_cache`` /
 ``_compute_scale_cache`` / ``_scale_matrix_cache`` are keyed by
 ``(systems_root, system, backend, version, enable_shared_layer)`` so the

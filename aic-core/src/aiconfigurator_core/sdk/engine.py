@@ -1253,7 +1253,12 @@ def _evaluate_single_op(
     if database_mode is not None:
         mode_token = getattr(database_mode, "name", str(database_mode))
     if mode_token == DatabaseMode.SOL_FULL.name:
-        handle = _probe_handle_for(database, None)
+        # Acquire the decomposition handle through a SOL-mode probe: the sol
+        # FFI forces the SOL_FULL view internally regardless of the handle's
+        # base mode, and the SOL-mode load path tolerates a missing perf-data
+        # directory — so estimate-only (spec-yaml-only) databases keep their
+        # legacy SOL_FULL triples instead of failing at engine load.
+        handle = _probe_handle_for(database, DatabaseMode.SOL.name)
         (_, sol_time, sol_math, sol_mem) = handle.evaluate_ops_sol_json(ops_json, **eval_kwargs)[0]
         return sol_time, sol_math, sol_mem
     handle = _probe_handle_for(database, mode_token)

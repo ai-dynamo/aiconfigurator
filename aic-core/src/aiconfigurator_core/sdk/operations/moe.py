@@ -431,7 +431,7 @@ class TrtLLMWideEPMoE(Operation):
 
     Owns ``_wideep_moe_compute_data``, loaded only on
     ``database.backend == "trtllm"``. On other backends the cache slot
-    binds to ``None`` and ``_query_compute_table`` raises
+    binds to ``None`` and the engine's table lookup raises
     ``PerfDataNotAvailableError`` via the standard silicon/hybrid flow.
 
     Supports three EPLB modes:
