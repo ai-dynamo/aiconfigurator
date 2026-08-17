@@ -41,7 +41,10 @@ Output:
     kda_perf.txt — same column layout as the sglang kda collector.
 """
 
-__compat__ = "vllm==0.1.dev19262"
+# Serve-parity `metadata=` argument validated on the 0.27.0 release image
+# (Kimi-K3 landed upstream there; the kimi-k3 preview pin is retired in the
+# manifest kda family, so this module exactly pins 0.27.0).
+__compat__ = "vllm==0.27.0"
 
 import gc
 import os
@@ -173,6 +176,8 @@ def run_kda_context_benchmark(
     dispatched like KimiK3DeltaAttention._forward on this SM."""
     from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn
     from vllm.models.kimi_k3.nvidia.ops.third_party.kda import chunk_kda_with_fused_gate
+    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+    from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
 
     device = torch.device(device)
     torch.cuda.set_device(device)
@@ -191,27 +196,18 @@ def run_kda_context_benchmark(
         for seq_len in seq_len_list:
             nt = batch_size * seq_len
             try:
-                # FIXME(kernel-limit): UNVERIFIED for vLLM. The pinned
-                # preview's source is not publicly addressable (version
-                # 0.1.dev19262+gb6bbf29dd; commit b6bbf29dd exists in no
-                # public vllm repo), and the era file at v0.24.0 computes
-                # token offsets from int64 strides
-                # (vllm/model_executor/layers/mamba/ops/causal_conv1d.py:39,47
+                # Resolved at the 0.27.0 era bump: the former FIXME
+                # kernel-limit guard (nt * proj >= 2**31 rejected) is
+                # deleted. 0.27.0's causal_conv1d keeps token addressing in
+                # int64 end-to-end
+                # (vllm/model_executor/layers/mamba/ops/causal_conv1d.py:40,48
                 # `stride_x_token: tl.int64` plus explicit .to(tl.int64)
-                # casts) — mainline vLLM establishes NO int32 token-offset
-                # limit, per-block or otherwise. This `nt * proj` bound is
-                # therefore a conservative unverified guard, deliberately
-                # NOT sglang's silicon-proven `nt * 3*proj` int32 limit
-                # (its Triton kernel offsets int32 across the 3-block
-                # buffer, causal_conv1d_triton.py:373-379). Silicon:
-                # identical 20-context + 1-generation guard spectrum on all
-                # eight systems; in-band cells pass (ledger 2026-08-01).
-                # Next preview/version bump: verify against the real branch
-                # source and either cite the limit or delete the guard.
-                if nt * proj >= 2**31:
-                    raise ValueError(
-                        f"causal_conv1d int32 token-offset overflow guard: total_tokens={nt} * proj={proj} >= 2**31"
-                    )
+                # casts), establishing no int32 token-offset limit; GB300
+                # silicon at 0.27.0 confirms the two tightest formerly-vetoed
+                # cells pass with SOL-sane timings (nv12 bs64 s32768: conv
+                # 3-way 15.8ms for ~116GB traffic ≈ 7.3TB/s; nv96 bs8 s32768:
+                # 14.3ms for the same traffic — both within the 8TB/s byte
+                # model margin).
                 cu = torch.arange(0, nt + 1, seq_len, dtype=torch.int32, device=device)
                 idx = torch.arange(batch_size, dtype=torch.int32, device=device)
                 has_init = torch.zeros(batch_size, dtype=torch.bool, device=device)
@@ -234,6 +230,36 @@ def run_kda_context_benchmark(
                     "model_name": model_name,
                 }
 
+                # Serving precomputes the conv metadata once per step in the
+                # KDA attention-metadata builder (KimiK3KDAMetadata subclasses
+                # GDNAttentionMetadata;
+                # vllm/models/kimi_k3/nvidia/kda_metadata.py @0.27.0 image era)
+                # and passes it into every layer's prefill conv call
+                # (vllm/models/kimi_k3/nvidia/kda.py::_prefill_conv passes
+                # metadata=m). Omitting metadata takes the non-serving branch:
+                # causal_conv1d_fn recomputes nums/offset lists with
+                # np.repeat + nums.sum().item() (D2H) inside EVERY timed
+                # call, adding ~0.25ms host overhead per conv (a flat
+                # ~0.8ms/iter floor on GB300 that dominated the 0.1.dev19262
+                # re-collect, conv1d SOL ~15%). Build it per-shape and pass
+                # it through like collect_gdn.py does.
+                nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
+                    torch.arange(0, nt + 1, seq_len, dtype=torch.int32),
+                    device=device,
+                )
+                conv_metadata = GDNAttentionMetadata(
+                    num_prefills=batch_size,
+                    num_prefill_tokens=nt,
+                    num_decodes=0,
+                    num_decode_tokens=0,
+                    num_spec_decodes=0,
+                    num_spec_decode_tokens=0,
+                    num_actual_tokens=nt,
+                    nums_dict=nums_dict,
+                    batch_ptr=batch_ptr,
+                    token_chunk_offset_ptr=token_chunk_offset_ptr,
+                )
+
                 def run_conv_qkv3():
                     for x, w, cs in ((q_in, q_w, q_cs), (k_in, k_w, k_cs), (v_in, v_w, v_cs)):
                         causal_conv1d_fn(
@@ -245,6 +271,7 @@ def run_kda_context_benchmark(
                             cache_indices=idx,
                             has_initial_state=has_init,
                             activation="silu",
+                            metadata=conv_metadata,
                         )
 
                 with benchmark_with_power(
@@ -252,11 +279,12 @@ def run_kda_context_benchmark(
                     kernel_func=run_conv_qkv3,
                     num_warmups=NUM_WARMUPS,
                     num_runs=NUM_RUNS,
-                    repeat_n=1,
-                    # vLLM's prefill convolution performs a host-side metadata
-                    # transfer per call (same as the 0.24 GDN precedent in
-                    # collect_gdn.py), which CUDA graph capture rejects.
-                    use_cuda_graph=False,
+                    # With the metadata handed in, production launches this op
+                    # eagerly but back-to-back in a deep queue, so the row must
+                    # hold GPU service time (same as the GDN precedent in
+                    # collect_gdn.py — repeat graph replay, not a sync-bounded
+                    # eager loop).
+                    repeat_n=10,
                 ) as results:
                     _log(
                         common,
