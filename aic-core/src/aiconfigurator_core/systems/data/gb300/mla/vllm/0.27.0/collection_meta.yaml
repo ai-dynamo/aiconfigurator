@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+provenance: local
+runtime:
+  framework: vllm
+  version: 0.27.0
+  image: vllm/vllm-openai:v0.27.0
+  image_digest: sha256:07ea4e292adf3a26b05ac97114b28849cf4551a26beb1fbe7decd3842d752ed7
+tables:
+  # SM103 (GB300) vllm 0.27.0 MLA module rows. Collected 2026-08-17 on a
+  # 4xGB300 NVL72 pod at branch ziyang/k3-gb300-027-mla: the mla family was
+  # pinned to the K3 serving runtime (see collector/framework_manifest.yaml
+  # mla/mla_bmm family notes) and the MLA ops moved to the 0.27.0 shim module
+  # collector/vllm/collect_mla_module_027.py whose get/run functions
+  # re-dispatch into collect_mla_module.py (base stays at 0.24.0 for the DSA
+  # ops in the sparse_attention family). Preflight audit vs the 0.24.0
+  # citations in the base collector: DeepseekV2MLAAttention ctor surface,
+  # glm_moe_dsa config-registry gap patch, FP8 prefill predicate, and the
+  # prefill selector surface are unchanged in 0.27.0. Full plan ran to
+  # completion with zero errors; kernel ground truth on SM103: bf16/mla &
+  # bf16-kvctx run FLASHINFER_MLA + FLASH_ATTN, fp8/fp8 runs FLASHINFER_MLA +
+  # TRTLLM_RAGGED, generation runs FLASHINFER_MLA — identical to the 0.24.0
+  # fact templates.
+  mla_context_module_perf:
+    collector_ref: 9dc4e14
+    collector_hash: sha256:856fde0cbc5f1bbf1a0a1913a56b7dcf58abd9fb3c7846d166acbe26a52dac0a
+    case_plan_hash: sha256:31e7308fa596a933a6991ba16596a774d2ddde1d2ddfa53f1fd88de614891971
+    collected_at: '2026-08-17'
+    rows: 8684
+    status: complete
+  mla_generation_module_perf:
+    collector_ref: 9dc4e14
+    collector_hash: sha256:856fde0cbc5f1bbf1a0a1913a56b7dcf58abd9fb3c7846d166acbe26a52dac0a
+    case_plan_hash: sha256:677099287a920aec3b20a8d29d08a9c6f31eccbbbb0d7a03a354e1b109cd20f3
+    collected_at: '2026-08-17'
+    rows: 8732
+    status: complete
