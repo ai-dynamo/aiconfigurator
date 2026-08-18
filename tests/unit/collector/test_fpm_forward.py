@@ -1501,20 +1501,23 @@ def _cell_cli_args(workload_kind: str) -> list[str]:
     return merged["params"]["agg"]["extra_cli_args"]
 
 
-def test_decode_cells_disable_prefix_caching_and_keep_overlap():
-    """Decode measures a production-shaped steady step; both flags follow.
+def test_decode_cells_keep_prefix_caching_and_async_overlap():
+    """Decode measures a production-shaped steady step on engine defaults.
 
-    Prefix caching on makes ``Request.__init__`` hash the whole prompt through
-    the block hasher, and every decode point admits batch_size synthetic
-    requests carrying the point's full context, so the sha256 work runs inside
-    the measured step: 26.5 ms -> 121 ms at (batch 256, 2.1M KV) on M2.7
-    tp4+EP. Synchronous scheduling additionally serialises scheduler CPU work
-    that production overlaps: async 26.5 ms (1.03x of the 25.8 ms measured on
-    real traffic) versus sync 31.3 ms (1.21x).
+    Prefix caching stays enabled: the engine's KV warm-up reuses warmed
+    prefixes across points and refuses to warm without it
+    (skip_reason="prefix_caching_disabled"), which would collapse every
+    decode point into the fake-KV fallback regime convicted of
+    underestimating capture-mode decode. The old pin's block-hasher
+    contamination (26.5 ms -> 121 ms at (batch 256, 2.1M KV)) applied to the
+    fallback protocol only; under KV warm-up the hashing runs at seed time,
+    outside the measured step. Async scheduling also stays on: production
+    overlaps scheduler CPU work with the GPU (async 26.5 ms = 1.03x of the
+    25.8 ms measured on real traffic, sync 31.3 ms = 1.21x).
     """
     args = _cell_cli_args("decode")
 
-    assert "--no-enable-prefix-caching" in args
+    assert "--no-enable-prefix-caching" not in args
     assert "--no-async-scheduling" not in args
 
 

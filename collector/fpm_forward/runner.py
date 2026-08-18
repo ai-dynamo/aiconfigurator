@@ -50,7 +50,10 @@ from .planner import FPMCell, FPMCollectionPlan
 logger = logging.getLogger(__name__)
 
 CHECKPOINT_SCHEMA = "aic-fpm-collector-checkpoint-v3"
-DEFAULT_BENCHMARK_TIMEOUT_SECONDS = 3600
+# KV warm-up dominates a decode cell's wall clock (~80 min for a tep4 decode
+# sweep on MiniMax M2.7); one hour would kill the engine mid-warm-up. 10800
+# matches the r15 parity protocol's budget.
+DEFAULT_BENCHMARK_TIMEOUT_SECONDS = 10800
 RESULT_COPY_ATTEMPTS = 3
 RESULT_COPY_TIMEOUT_SECONDS = 300
 # Convergence budget for the background-delete escalation in cleanup(); the
@@ -78,17 +81,22 @@ _FPM_VLLM_RUNTIME_ARGS = (
 # insensitive to both flags (measured 100-108 ms across all four combinations
 # at 8192 new tokens, M2.7 tp4+EP).
 _FPM_VLLM_PREFILL_ARGS = ("--no-async-scheduling",)
-# Decode inverts both:
-#   * prefix caching off -- `Request.__init__` hashes the whole prompt through
-#     the block hasher, and every decode point admits batch_size synthetic
-#     requests carrying the point's full context, so that sha256 work runs
-#     inside the measured step. The cost tracks total context tokens rather
-#     than batch: 26.5 ms -> 121 ms at (batch 256, 2.1M KV) on M2.7 tp4+EP.
-#   * async scheduling on -- the steady-state second step models a production
-#     decode iteration, and production overlaps scheduler CPU work with the
-#     GPU. Against real traffic at (256, 2.1M KV): async 26.5 ms (1.03x of the
-#     25.8 ms measured), sync 31.3 ms (1.21x).
-_FPM_VLLM_DECODE_ARGS = ("--no-enable-prefix-caching",)
+# Decode keeps async scheduling on (vLLM's default) -- the steady-state
+# second step models a production decode iteration, and production overlaps
+# scheduler CPU work with the GPU. Against real traffic at (256, 2.1M KV):
+# async 26.5 ms (1.03x of the 25.8 ms measured), sync 31.3 ms (1.21x).
+#
+# Decode also keeps prefix caching on (vLLM's default). The engine's KV
+# warm-up reuses warmed prefixes across points and refuses to warm without
+# prefix caching (skip_reason="prefix_caching_disabled"), collapsing every
+# decode point back to the fake-KV fallback regime that underestimates
+# capture-mode decode. The old `--no-enable-prefix-caching` pin dated from
+# that fallback protocol, where each point admits batch_size synthetic
+# full-context requests and `Request.__init__` block hashing would run
+# inside the measured step (26.5 ms -> 121 ms at (batch 256, 2.1M KV) on
+# M2.7 tp4+EP); under KV warm-up the hashing happens at seed time, outside
+# the measured step, and the r15 parity baseline runs with the default.
+_FPM_VLLM_DECODE_ARGS = ()
 REMOTE_EXIT_MARKER = "__FPM_REMOTE_EXIT_CODE__="
 REMOTE_FILES_MARKER = "__FPM_REMOTE_FILES__="
 REMOTE_WORKDIR = "/tmp/fpm-bench"

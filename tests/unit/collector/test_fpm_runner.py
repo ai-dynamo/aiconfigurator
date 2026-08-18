@@ -1028,7 +1028,7 @@ def test_cell_render_adds_one_collector_owned_benchmark_timeout():
     args = _cell_generator_overrides(plan, cell, {})["params"]["agg"]["extra_cli_args"]
 
     assert args.count("--benchmark-timeout") == 1
-    assert args[args.index("--benchmark-timeout") + 1] == "3600"
+    assert args[args.index("--benchmark-timeout") + 1] == "10800"
     assert args[args.index("--benchmark-warmup-iterations") + 1] == "2"
 
 
@@ -1581,10 +1581,12 @@ def test_pure_tp_render_uses_shared_vllm_tp_without_expert_parallel(
 
 
 @pytest.mark.parametrize("workload_kind", ["prefill", "decode"])
-def test_decode_render_pins_prefix_caching_off_and_prefill_keeps_it(tmp_path, workload_kind):
-    """Decode engines must run with prefix caching disabled; prefill engines
-    must NOT get the flag — the runtime collapses the prefill kv-read axis
-    to [0] without prefix caching."""
+def test_render_never_disables_prefix_caching(tmp_path, workload_kind):
+    """No workload kind may disable prefix caching: prefill stages cached-kv
+    points through the prefix cache, and decode's KV warm-up refuses to warm
+    without it (skip_reason="prefix_caching_disabled"), collapsing every
+    point into the fake-KV fallback regime convicted of underestimating
+    capture-mode decode."""
 
     cell = FPMCell(
         cell_id=f"prefix-cache-{workload_kind}",
@@ -1606,10 +1608,7 @@ def test_decode_render_pins_prefix_caching_off_and_prefill_keeps_it(tmp_path, wo
     _render_cell(plan, cell, tmp_path, {})
 
     script = (tmp_path / "run.sh").read_text()
-    if workload_kind == "decode":
-        assert "--no-enable-prefix-caching" in script
-    else:
-        assert "--no-enable-prefix-caching" not in script
+    assert "--no-enable-prefix-caching" not in script
 
 
 def test_render_uses_frozen_model_config_without_resolving_model_path(tmp_path, monkeypatch):
