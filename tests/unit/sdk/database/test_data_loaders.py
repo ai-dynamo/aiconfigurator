@@ -3,6 +3,7 @@
 
 from collections import defaultdict
 from itertools import product
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -58,6 +59,61 @@ def test_perf_database_finalize_loaded_data_converts_defaultdicts():
     assert not isinstance(database._raw_nested_data["nested"], defaultdict)
     with pytest.raises(KeyError):
         database._gemm_data["missing"]
+
+
+def test_generation_dsa_load_data_binds_each_raw_attribute_independently(tmp_path):
+    from aiconfigurator.sdk.operations.dsa import GenerationDSAModule
+
+    database = SimpleNamespace(
+        systems_root=str(tmp_path),
+        system="test_system",
+        backend="sglang",
+        version="test_version",
+        enable_shared_layer=True,
+    )
+    key = GenerationDSAModule._cache_key(database)
+    cached_data, cached_raw = object(), object()
+    cached_skip, cached_raw_skip = object(), object()
+    data_override, skip_override = object(), object()
+    database._generation_dsa_module_data = data_override
+    database._generation_dsa_module_skip_data = skip_override
+
+    GenerationDSAModule.clear_cache()
+    try:
+        GenerationDSAModule._data_cache[key] = cached_data
+        GenerationDSAModule._raw_data_cache[key] = cached_raw
+        GenerationDSAModule._skip_data_cache[key] = cached_skip
+        GenerationDSAModule._raw_skip_data_cache[key] = cached_raw_skip
+
+        GenerationDSAModule.load_data(database)
+
+        assert database._generation_dsa_module_data is data_override
+        assert database._raw_generation_dsa_module_data is cached_raw
+        assert database._generation_dsa_module_skip_data is skip_override
+        assert database._raw_generation_dsa_module_skip_data is cached_raw_skip
+    finally:
+        GenerationDSAModule.clear_cache()
+
+
+def test_nccl_load_data_tolerates_null_misc(tmp_path):
+    from aiconfigurator.sdk.operations.communication import NCCL
+
+    database = SimpleNamespace(
+        systems_root=str(tmp_path),
+        system="test_system",
+        backend="sglang",
+        version="test_version",
+        enable_shared_layer=True,
+        system_spec={"data_dir": "data", "misc": None},
+    )
+
+    NCCL.clear_cache()
+    try:
+        NCCL.load_data(database)
+        assert database._nccl_data.loaded is False
+        assert database._oneccl_data is None
+    finally:
+        NCCL.clear_cache()
 
 
 def test_get_database_with_yaml_and_data_path(tmp_path, monkeypatch):

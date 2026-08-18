@@ -266,9 +266,11 @@ class GenerationDSAModule(_core.GenerationDSAModule, OpShellKit):
 
         if "_generation_dsa_module_data" not in database.__dict__:
             database._generation_dsa_module_data = cls._data_cache[key]
+        if "_raw_generation_dsa_module_data" not in database.__dict__:
             database._raw_generation_dsa_module_data = cls._raw_data_cache[key]
         if "_generation_dsa_module_skip_data" not in database.__dict__:
             database._generation_dsa_module_skip_data = cls._skip_data_cache[key]
+        if "_raw_generation_dsa_module_skip_data" not in database.__dict__:
             database._raw_generation_dsa_module_skip_data = cls._raw_skip_data_cache[key]
 
     @classmethod

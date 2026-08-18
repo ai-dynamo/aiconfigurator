@@ -159,7 +159,7 @@ class NCCL(_core.NCCL, OpShellKit):
 
             # oneCCL fallback (XPU systems). Only loaded when system_spec
             # declares an ``oneccl_version`` under ``misc``.
-            oneccl_version = database.system_spec.get("misc", {}).get("oneccl_version")
+            oneccl_version = (database.system_spec.get("misc") or {}).get("oneccl_version")
             if oneccl_version:
                 oneccl_primary = resolve_op_data_path(
                     system_data_root, "oneccl", oneccl_version, PerfDataFilename.oneccl.value

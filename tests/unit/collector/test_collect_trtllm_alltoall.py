@@ -206,10 +206,9 @@ def test_comparability_new_writer_leaf_equals_adapted_legacy_leaf(tmp_path):
     # 4-GPU nodes) written by the new writer and read through the new-schema
     # loader must land on the same key with the same ms leaf as the same
     # measurement in a legacy trtllm_alltoall row through the adapter.
-    # Both legs are read back through the ENGINE table view (the SDK-side
-    # Python parsers retired with the deprecation-cleanup PR): the legacy
-    # trtllm_alltoall file and the new writer's moe_a2a file feed ONE
-    # `_moe_a2a_data` view, so equal measurements must land on equal keys.
+    # Both legs are read back through separate ENGINE table views (the
+    # SDK-side Python parsers retired with the deprecation-cleanup PR), so
+    # each adapter must independently land equal measurements on equal keys.
     import pandas as pd
     import yaml
 
@@ -267,6 +266,30 @@ def test_comparability_new_writer_leaf_equals_adapted_legacy_leaf(tmp_path):
     ]
     pd.DataFrame(legacy_rows).to_parquet(data_dir / "trtllm_alltoall_perf.parquet", index=False)
 
+    # Each leg gets its own tree and engine handle so neither source can mask
+    # a broken adapter/writer by overwriting the other's identical keys.
+    table_meta = {
+        "collector_ref": "test-fixture",
+        "collector_hash": "sha256:" + "0" * 64,
+        "case_plan_hash": provenance.case_plan_hash(["comparability"]),
+        "collected_at": "2026-08-18",
+        "rows": 4,
+        "status": provenance.STATUS_COMPLETE,
+    }
+    provenance.write_collection_meta(
+        data_dir,
+        {"framework": "trtllm", "version": "1.3.0rc10", "image": "test-fixture"},
+        {"trtllm_alltoall_perf": dict(table_meta)},
+    )
+    legacy_db = PerfDatabase("h100_sxm", "trtllm", "1.3.0rc10", str(root), database_mode="HYBRID")
+    legacy_loaded = fetch_table_view(legacy_db, "_moe_a2a_data")
+
+    unified_root = tmp_path / "unified-systems"
+    unified_root.mkdir()
+    (unified_root / "h100_sxm.yaml").write_bytes((root / "h100_sxm.yaml").read_bytes())
+    unified_data_dir = unified_root / "data/h100_sxm/moe_comm/trtllm/1.3.0rc10"
+    unified_data_dir.mkdir(parents=True)
+
     perf_file = tmp_path / "moe_a2a_perf.txt"
     for row in ata.build_unified_rows(_case(), _two_sided_result(), kernel_source="NVLinkTwoSided", node_num=2):
         log_perf(
@@ -279,30 +302,21 @@ def test_comparability_new_writer_leaf_equals_adapted_legacy_leaf(tmp_path):
             perf_filename=str(perf_file),
         )
     [parquet_path] = finalize_perf_files([perf_file])
-    (data_dir / "moe_a2a_perf.parquet").write_bytes(Path(parquet_path).read_bytes())
+    (unified_data_dir / "moe_a2a_perf.parquet").write_bytes(Path(parquet_path).read_bytes())
 
-    # This family-layout directory is Collector V3 data, so CI's
-    # AIC_STRICT_PROVENANCE=1 gate requires every synthetic table to be
-    # covered by the colocated sidecar.
-    table_meta = {
-        "collector_ref": "test-fixture",
-        "collector_hash": "sha256:" + "0" * 64,
-        "case_plan_hash": provenance.case_plan_hash(["comparability"]),
-        "collected_at": "2026-08-18",
-        "rows": 4,
-        "status": provenance.STATUS_COMPLETE,
-    }
     provenance.write_collection_meta(
-        data_dir,
+        unified_data_dir,
         {"framework": "trtllm", "version": "1.3.0rc10", "image": "test-fixture"},
-        {
-            "moe_a2a_perf": dict(table_meta),
-            "trtllm_alltoall_perf": dict(table_meta),
-        },
+        {"moe_a2a_perf": dict(table_meta)},
     )
+    unified_db = PerfDatabase("h100_sxm", "trtllm", "1.3.0rc10", str(unified_root), database_mode="HYBRID")
+    unified_loaded = fetch_table_view(unified_db, "_moe_a2a_data")
 
-    db = PerfDatabase("h100_sxm", "trtllm", "1.3.0rc10", str(root), database_mode="HYBRID")
-    loaded = fetch_table_view(db, "_moe_a2a_data")
+    def _leaf(view, key):
+        value = view
+        for part in key:
+            value = value[part]
+        return value
 
     for phase, comm_dtype, latency_ms in [
         ("prepare", "nvfp4", 0.05),
@@ -310,11 +324,12 @@ def test_comparability_new_writer_leaf_equals_adapted_legacy_leaf(tmp_path):
         ("combine", "nvfp4", 1.2),
         ("combine", "fp4", 0.6),
     ]:
-        leaf = loaded["nvlink_two_sided"][phase][comm_dtype][8][2][7168][8][256][0][4096]
-        # The new writer's leg lands on the SAME key; new-schema rows
-        # overwrite adapted legacy ones, and both carry the same measurement,
-        # so one leaf serves both legs at the legacy value.
-        assert leaf["latency"] == pytest.approx(latency_ms), (phase, comm_dtype)
+        key = ("nvlink_two_sided", phase, comm_dtype, 8, 2, 7168, 8, 256, 0, 4096)
+        legacy_leaf = _leaf(legacy_loaded, key)
+        unified_leaf = _leaf(unified_loaded, key)
+        assert legacy_leaf["latency"] == pytest.approx(latency_ms), ("legacy", phase, comm_dtype)
+        assert unified_leaf["latency"] == pytest.approx(latency_ms), ("unified", phase, comm_dtype)
+        assert unified_leaf == legacy_leaf
 
 
 # ---------------------------------------------------------------------------
