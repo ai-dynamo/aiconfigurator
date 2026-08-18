@@ -714,6 +714,24 @@ fn moe_quant_util_levels() -> Vec<(f64, f64, f64)> {
     crate::operators::moe::MOE_QUANT_UTIL_LEVEL.to_vec()
 }
 
+/// The table-view attribute registry, `(attribute, [source basenames])` rows
+/// (PR-6): the single source behind the Python side's `VIEW_KEY_LAYERS` /
+/// baseline-codec attribute inventories — a completeness test set-compares
+/// them against this export so the four formerly hand-synced sites can never
+/// drift silently again (same pattern as `gemm_quant_util_levels`).
+#[pyfunction]
+fn table_view_attributes() -> Vec<(String, Vec<String>)> {
+    crate::perf_database::table_view::TABLE_VIEW_ATTRIBUTES
+        .iter()
+        .map(|(attribute, basenames)| {
+            (
+                attribute.to_string(),
+                basenames.iter().map(|b| b.to_string()).collect(),
+            )
+        })
+        .collect()
+}
+
 /// Internal request shared by every Rust -> Python -> Rust construction path.
 ///
 /// The builder and the flat compatibility function both normalize into this
@@ -1297,6 +1315,7 @@ fn _aiconfigurator_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(weights_ops_json, m)?)?;
     m.add_function(wrap_pyfunction!(gemm_quant_util_levels, m)?)?;
     m.add_function(wrap_pyfunction!(moe_quant_util_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(table_view_attributes, m)?)?;
     m.add_class::<AicEngine>()?;
     m.add_class::<PyForwardPassPerfModel>()?;
     Ok(())
