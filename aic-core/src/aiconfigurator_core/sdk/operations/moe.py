@@ -8,8 +8,8 @@ Op classes migrated from ``_legacy.py``:
 - ``MoE`` (ISSUE-12) — Mixture-of-Experts compute op. Owns:
     * ``_moe_data`` — regular MoE table
     * ``_moe_low_latency_data`` — TRT-LLM low-latency NVFP4 kernel table
-      (loaded from the same perf table as the regular MoE data; ``load_moe_data``
-      is the only loader that returns a tuple of two tables)
+      (folded from the same perf table as the regular MoE data by the engine
+      view — `table_view.rs::view_moe` returns the twin pair)
     * ``_wideep_context_moe_data`` — SGLang WideEP context MoE table
     * ``_wideep_generation_moe_data`` — SGLang WideEP generation MoE table
   Table selection (backend + ``moe_backend`` + ``num_tokens`` +
@@ -46,9 +46,10 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
+import aiconfigurator_core
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.operations import util_empirical
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
+from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -82,16 +83,12 @@ def _cache_key(database: PerfDatabase) -> tuple:
 # trustworthy enough to calibrate per-component (validated — splitting blows up because
 # the SOL attribution doesn't match the kernel's real bottleneck). Levels are relative
 # and tunable; only ratios are consumed.
+# PROJECTION of the engine's table (PR-6): the Rust
+# `operators/moe.rs::MOE_QUANT_UTIL_LEVEL` is the single source (with the
+# same per-row [data]/[inferred] provenance notes); rebuilding the dict from
+# the FFI ends the two-sided sync discipline every new quant used to need.
 _MOE_QUANT_UTIL_LEVEL: dict[tuple[float, float], float] = {
-    (2, 1): 0.53,  # w16a16 / bfloat16              [data]
-    (1, 1): 0.45,  # w8a16                          [inferred]
-    (0.5625, 1): 0.07,  # w4a16+scales / nvfp4_wo (Marlin FP4, weight-only BF16) [copies measured (0.5,1)]
-    (0.5, 1): 0.07,  # w4a16 (int4_wo, mxfp4)       [data]
-    (1, 2): 0.40,  # w8a8 / fp8(_block)             [data]
-    (0.5, 2): 0.15,  # w4a8 (w4afp8, mxfp4_mxfp8)   [data]
-    (1, 4): 0.30,  # w8a4                           [inferred]
-    (0.5, 4): 0.23,  # w4a4                         [data ≈ nvfp4]
-    (0.5625, 4): 0.23,  # w4a4 / nvfp4              [data]
+    (memory, compute): level for memory, compute, level in aiconfigurator_core.moe_quant_util_levels()
 }
 _MOE_QUANT_UTIL_DEFAULT = 0.30  # unlisted profile: mid-range relative level
 
@@ -156,17 +153,6 @@ class MoE(Operation):
         self._is_gated = is_gated
         self._moe_backend = kwargs.get("moe_backend")
         self._enable_eplb = kwargs.get("enable_eplb", False)
-        # 3 GEMMs for gated (gate, up, down), 2 GEMMs for non-gated (up, down)
-        num_gemms = 3 if is_gated else 2
-        self._weights = (
-            self._hidden_size
-            * self._inter_size
-            * self._num_experts
-            * quant_mode.value.memory
-            * num_gemms
-            // self._moe_ep_size
-            // self._moe_tp_size
-        )
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -188,61 +174,42 @@ class MoE(Operation):
         - ``_wideep_context_moe_data`` (None on non-SGLang)
         - ``_wideep_generation_moe_data`` (None on non-SGLang)
         """
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
-        if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-
-            # Regular MoE table — ``load_moe_data`` returns ``(default, low_latency)``
-            # because rows tagged ``kernel_source="moe_torch_flow_min_latency"``
-            # are routed into a separate accumulator.
-            moe_primary = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.moe.value
-            )
-            moe_sources = database._build_op_sources(PerfDataFilename.moe, moe_primary, system_data_root)
-            moe_result = load_moe_data(moe_sources)
-            if isinstance(moe_result, tuple):
-                moe_default, moe_low_latency = moe_result
-            else:
-                moe_default, moe_low_latency = moe_result, None
-            cls._data_cache[key] = LoadedOpData(moe_default, PerfDataFilename.moe, moe_primary)
-            cls._low_latency_data_cache[key] = LoadedOpData(moe_low_latency, PerfDataFilename.moe, moe_primary)
+        if (
+            key not in cls._data_cache
+            or key not in cls._low_latency_data_cache
+            or key not in cls._wideep_context_data_cache
+            or key not in cls._wideep_generation_data_cache
+        ):
+            # Fetch every view into locals first so a failure on a later
+            # fetch can't leave the caches half-populated — a retry would
+            # then KeyError at the bind lines below, masking the real error
+            # until clear_cache (same hardening as GEMM.load_data).
+            # Regular MoE table — the engine folds one moe_perf read into the
+            # default and low-latency views (rows tagged
+            # ``kernel_source="moe_torch_flow_min_latency"`` route to the twin).
+            moe_loaded = load_view(database, "_moe_data", PerfDataFilename.moe)
+            low_latency_loaded = load_view(database, "_moe_low_latency_data", PerfDataFilename.moe)
 
             # WideEP MoE tables — SGLang-only.
             if database.backend == "sglang":
-                ctx_primary = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, PerfDataFilename.wideep_context_moe.value
+                wideep_context_loaded = load_view(
+                    database, "_wideep_context_moe_data", PerfDataFilename.wideep_context_moe
                 )
-                ctx_sources = database._build_op_sources(
-                    PerfDataFilename.wideep_context_moe, ctx_primary, system_data_root
-                )
-                cls._wideep_context_data_cache[key] = LoadedOpData(
-                    load_wideep_context_moe_data(ctx_sources),
-                    PerfDataFilename.wideep_context_moe,
-                    ctx_primary,
-                )
-
-                gen_primary = resolve_op_data_path(
-                    system_data_root,
-                    database.backend,
-                    database.version,
-                    PerfDataFilename.wideep_generation_moe.value,
-                )
-                gen_sources = database._build_op_sources(
-                    PerfDataFilename.wideep_generation_moe, gen_primary, system_data_root
-                )
-                cls._wideep_generation_data_cache[key] = LoadedOpData(
-                    load_wideep_generation_moe_data(gen_sources),
-                    PerfDataFilename.wideep_generation_moe,
-                    gen_primary,
+                wideep_generation_loaded = load_view(
+                    database, "_wideep_generation_moe_data", PerfDataFilename.wideep_generation_moe
                 )
             else:
-                cls._wideep_context_data_cache[key] = None
-                cls._wideep_generation_data_cache[key] = None
+                wideep_context_loaded = None
+                wideep_generation_loaded = None
 
+            cls._data_cache[key] = moe_loaded
+            cls._low_latency_data_cache[key] = low_latency_loaded
+            cls._wideep_context_data_cache[key] = wideep_context_loaded
+            cls._wideep_generation_data_cache[key] = wideep_generation_loaded
             cls._record_load()
 
         if "_moe_data" not in database.__dict__:
@@ -278,9 +245,6 @@ class MoE(Operation):
             op = copy.copy(self)
             op._quant_mode = quant_mode
         return op, eval_kwargs
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -323,7 +287,6 @@ class MoEDispatch(Operation):
         self._moe_tp_size = moe_tp_size
         self._moe_ep_size = moe_ep_size
         self._attention_dp_size = attention_dp_size
-        self._weights = 0.0
         self._enable_fp4_all2all = enable_fp4_all2all
         self._pre_dispatch = pre_dispatch
         self.num_gpus = self._moe_ep_size * self._moe_tp_size
@@ -341,52 +304,40 @@ class MoEDispatch(Operation):
     # Data ownership
     # ------------------------------------------------------------------
 
+    def get_weights(self, **kwargs):
+        """Comm op — no resident weights. Kept as a LOCAL constant (not the
+        engine route): the ``moe_backend='deepep_moe'`` variant (still built
+        by qwen35) has no opspec variant — its serializer raises the AIC-1601
+        tombstone — so the base FFI route would crash memory estimation for
+        an op whose weight was always 0.0."""
+        return 0.0
+
     @classmethod
     def _cache_key(cls, database: PerfDatabase) -> tuple:
         return _cache_key(database)
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads SGLang DeepEP normal + low-latency tables on
-        ``backend == "sglang"`` only; binds ``None`` on other backends.
+        """Idempotent. Fetches the engine's SGLang DeepEP normal +
+        low-latency table views on ``backend == "sglang"`` only; binds
+        ``None`` on other backends.
         """
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
-        if key not in cls._normal_data_cache:
+        if key not in cls._normal_data_cache or key not in cls._ll_data_cache:
+            # Locals first, commit last — a failed second fetch must not
+            # leave the caches half-populated (see GEMM.load_data).
             if database.backend == "sglang":
-                system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-
-                normal_primary = resolve_op_data_path(
-                    system_data_root,
-                    database.backend,
-                    database.version,
-                    PerfDataFilename.wideep_deepep_normal.value,
-                )
-                normal_sources = database._build_op_sources(
-                    PerfDataFilename.wideep_deepep_normal, normal_primary, system_data_root
-                )
-                cls._normal_data_cache[key] = LoadedOpData(
-                    load_wideep_deepep_normal_data(normal_sources),
-                    PerfDataFilename.wideep_deepep_normal,
-                    normal_primary,
-                )
-
-                ll_primary = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, PerfDataFilename.wideep_deepep_ll.value
-                )
-                ll_sources = database._build_op_sources(PerfDataFilename.wideep_deepep_ll, ll_primary, system_data_root)
-                cls._ll_data_cache[key] = LoadedOpData(
-                    load_wideep_deepep_ll_data(ll_sources),
-                    PerfDataFilename.wideep_deepep_ll,
-                    ll_primary,
-                )
+                normal_loaded = load_view(database, "_wideep_deepep_normal_data", PerfDataFilename.wideep_deepep_normal)
+                ll_loaded = load_view(database, "_wideep_deepep_ll_data", PerfDataFilename.wideep_deepep_ll)
             else:
-                cls._normal_data_cache[key] = None
-                cls._ll_data_cache[key] = None
+                normal_loaded = None
+                ll_loaded = None
 
+            cls._normal_data_cache[key] = normal_loaded
+            cls._ll_data_cache[key] = ll_loaded
             cls._record_load()
 
         if "_wideep_deepep_normal_data" not in database.__dict__:
@@ -412,9 +363,6 @@ class MoEDispatch(Operation):
     # ------------------------------------------------------------------
 
     _ENGINE_QUERY_SHAPE = "tokens"
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -472,17 +420,22 @@ class TrtLLMWideEPMoE(Operation):
         self._workload_distribution = workload_distribution
         self._is_gated = is_gated
 
-        # Calculate weights: 3 GEMMs for gated (gate, up, down), 2 GEMMs for non-gated (up, down)
-        num_gemms = 3 if is_gated else 2
-        self._weights = (
+    def get_weights(self, **kwargs):
+        """Local math: this deprecated class has no OpSpec variant (its
+        table is engine-absorbed; PR-7 removes the class), so the base
+        engine-routed get_weights cannot serve it. Mirrors Op::weight_bytes
+        for the MoE family."""
+        num_gemms = 3 if self._is_gated else 2
+        weights = (
             self._hidden_size
             * self._inter_size
             * self._num_experts
-            * quant_mode.value.memory
+            * self._quant_mode.value.memory
             * num_gemms
             // self._moe_ep_size
             // self._moe_tp_size
         )
+        return weights * self._scale_factor
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -494,25 +447,18 @@ class TrtLLMWideEPMoE(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads ``_wideep_moe_compute_data`` only when
-        ``database.backend == "trtllm"``; binds ``None`` otherwise.
+        """Idempotent. Fetches the engine's ``_wideep_moe_compute_data``
+        table view only when ``database.backend == "trtllm"``; binds ``None``
+        otherwise.
         """
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             if database.backend == "trtllm":
-                system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-                primary = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, PerfDataFilename.wideep_moe_compute.value
-                )
-                sources = database._build_op_sources(PerfDataFilename.wideep_moe_compute, primary, system_data_root)
-                cls._data_cache[key] = LoadedOpData(
-                    load_wideep_moe_compute_data(sources),
-                    PerfDataFilename.wideep_moe_compute,
-                    primary,
+                cls._data_cache[key] = load_view(
+                    database, "_wideep_moe_compute_data", PerfDataFilename.wideep_moe_compute
                 )
             else:
                 cls._data_cache[key] = None
@@ -614,10 +560,6 @@ class TrtLLMWideEPMoE(Operation):
         )
         return twin, eval_kwargs
 
-    def get_weights(self, **kwargs):
-        """Get the weight memory size for this MoE layer."""
-        return self._weights * self._scale_factor
-
 
 # ───────────────────────────────────────────────────────────────────────
 # TrtLLMWideEPMoEDispatch
@@ -666,12 +608,17 @@ class TrtLLMWideEPMoEDispatch(Operation):
         self._quant_mode = quant_mode
         self._use_low_precision_combine = use_low_precision_combine
         self._node_num = node_num
-        self._weights = 0.0  # MoEDispatch has no weight memory
         self.num_gpus = self._moe_ep_size * self._moe_tp_size
 
     # ------------------------------------------------------------------
     # Data ownership
     # ------------------------------------------------------------------
+
+    def get_weights(self, **kwargs):
+        """Zero, locally: this deprecated tombstone class has no OpSpec
+        variant (PR-7 removes it), so the base engine-routed get_weights
+        cannot serve it. Dispatch has no weight memory."""
+        return 0.0
 
     @classmethod
     def _cache_key(cls, database: PerfDatabase) -> tuple:
@@ -679,26 +626,17 @@ class TrtLLMWideEPMoEDispatch(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads ``_trtllm_alltoall_data`` only when
-        ``database.backend == "trtllm"``; binds ``None`` otherwise.
+        """Idempotent. Fetches the engine's ``_trtllm_alltoall_data`` table
+        view only when ``database.backend == "trtllm"``; binds ``None``
+        otherwise.
         """
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             if database.backend == "trtllm":
-                system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-                primary = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, PerfDataFilename.trtllm_alltoall.value
-                )
-                sources = database._build_op_sources(PerfDataFilename.trtllm_alltoall, primary, system_data_root)
-                cls._data_cache[key] = LoadedOpData(
-                    load_trtllm_alltoall_data(sources),
-                    PerfDataFilename.trtllm_alltoall,
-                    primary,
-                )
+                cls._data_cache[key] = load_view(database, "_trtllm_alltoall_data", PerfDataFilename.trtllm_alltoall)
             else:
                 cls._data_cache[key] = None
 
@@ -818,141 +756,10 @@ class TrtLLMWideEPMoEDispatch(Operation):
             "compiled MoEDispatch op (EngineHandle.evaluate_ops_json)."
         )
 
-    def get_weights(self, **kwargs):
-        """MoE dispatch has no weight memory."""
-        return 0.0
-
 
 # ─────────────────────────────────────────────────────────
 # Perf-table loaders (moved here from perf_database.py so each op family owns its data + parser)
 # ─────────────────────────────────────────────────────────
-
-
-def load_moe_data(moe_file):
-    """
-    Load the moe data with power support (backward compatible).
-
-    Returns:
-        tuple: (moe_default_data, moe_low_latency_data) where leaf values are dicts
-               with 'latency', 'power', and 'energy' keys. For old formats,
-               power/energy default to 0.0. Both elements are `None` when the file
-               is missing.
-    """
-    rows = _read_filtered_rows(moe_file)
-    if rows is None:
-        logger.debug(f"MOE data file {moe_file} not found.")
-        return None, None
-
-    moe_default_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(
-                lambda: defaultdict(
-                    lambda: defaultdict(
-                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-                    )
-                )
-            )
-        )
-    )
-    moe_low_latency_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(
-                lambda: defaultdict(
-                    lambda: defaultdict(
-                        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-                    )
-                )
-            )
-        )
-    )
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (moe) - power will default to 0.0")
-
-    for row in rows:
-        (
-            quant_mode,
-            num_tokens,
-            hidden_size,
-            inter_size,
-            topk,
-            num_experts,
-            moe_tp_size,
-            moe_ep_size,
-            workload_distribution,
-            latency,
-        ) = (
-            row["moe_dtype"],
-            row["num_tokens"],
-            row["hidden_size"],
-            row["inter_size"],
-            row["topk"],
-            row["num_experts"],
-            row["moe_tp_size"],
-            row["moe_ep_size"],
-            row["distribution"],
-            row["latency"],
-        )
-        kernel_source = row["kernel_source"]  # moe_torch_flow, moe_torch_flow_min_latency, moe_torch_flow
-        num_tokens = int(num_tokens)
-        hidden_size = int(hidden_size)
-        inter_size = int(inter_size)
-        topk = int(topk)
-        num_experts = int(num_experts)
-        moe_tp_size = int(moe_tp_size)
-        moe_ep_size = int(moe_ep_size)
-        latency = float(latency)
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds
-
-        quant_mode = common.MoEQuantMode[quant_mode]
-
-        # DeepSeek-V4-Pro's Blackwell MoE runs the trtllm-gen MXFP4xMXFP8 kernel
-        # (moe_runner_backend=flashinfer_mxfp4 -> Mxfp4FlashinferTrtllmMoEMethod ->
-        # trtllm_fp4_block_scale_routed_moe -> bmm_MxE4m3_MxE2m1MxE4m3 ... sm100f),
-        # which is a distinct precision from the flashinfer cutedsl kernel that the
-        # collector also logs under moe_dtype=w4a8_mxfp4_mxfp8. Route those rows to
-        # the dedicated quant mode so DeepSeek-V4 modeling can select it on Blackwell.
-        if quant_mode is common.MoEQuantMode.w4a8_mxfp4_mxfp8 and kernel_source == "sglang_mxfp4_flashinfer_trtllm_moe":
-            quant_mode = common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
-
-        # Same idea on Hopper: DeepSeek-V4-Pro runs the flashinfer cutlass SM90
-        # mixed-GEMM (cutlass_fused_moe(use_w4_group_scaling=True), MXFP4 weight x
-        # BF16 act), a distinct backend from GPT-OSS's triton_kernels mxfp4 that the
-        # collector also logs under moe_dtype=w4a16_mxfp4. Route those rows to the
-        # dedicated quant mode so DeepSeek-V4 modeling can select it on Hopper.
-        if quant_mode is common.MoEQuantMode.w4a16_mxfp4 and kernel_source == "sglang_flashinfer_cutlass_moe":
-            quant_mode = common.MoEQuantMode.w4a16_mxfp4_cutlass
-
-        moe_data = moe_low_latency_data if kernel_source == "moe_torch_flow_min_latency" else moe_default_data
-
-        try:
-            # Check for conflict
-            moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
-                moe_ep_size
-            ][num_tokens]
-            logger.debug(
-                f"value conflict in moe data: {workload_distribution} {quant_mode} {topk} "
-                f"{num_experts} {hidden_size} {inter_size} {moe_tp_size} {moe_ep_size} "
-                f"{num_tokens}"
-            )
-        except KeyError:
-            # Store all three values
-            moe_data[quant_mode][workload_distribution][topk][num_experts][hidden_size][inter_size][moe_tp_size][
-                moe_ep_size
-            ][num_tokens] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,  # NEW: precomputed energy
-            }
-
-    return moe_default_data, moe_low_latency_data
 
 
 def load_wideep_context_moe_data(wideep_context_moe_file):

@@ -69,14 +69,10 @@ class _BaseMSAModule(Operation):
         self._gemm_quant_mode = gemm_quant_mode
         self._dsa_architecture = dsa_architecture
         self._dsa_scale_k = dsa_scale_k
-        self._weights = 0.0
 
     @classmethod
     def load_data(cls, database):  # no MSA silicon table
         pass
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
 
 
 class ContextMSAModule(_BaseMSAModule):

@@ -145,23 +145,16 @@ OPERATIONS_DEF_INVENTORY = {
             "ContextAttention.__init__",
             "ContextAttention._cache_key",
             "ContextAttention.clear_cache",
-            "ContextAttention.get_weights",
             "ContextAttention.load_data",
             "EncoderAttention.__init__",
             "EncoderAttention._cache_key",
             "EncoderAttention.clear_cache",
-            "EncoderAttention.get_weights",
             "EncoderAttention.load_data",
             "GenerationAttention.__init__",
             "GenerationAttention._cache_key",
             "GenerationAttention.clear_cache",
-            "GenerationAttention.get_weights",
             "GenerationAttention.load_data",
             "_cache_key",
-            "_log_attention_row_conflict",
-            "load_context_attention_data",
-            "load_encoder_attention_data",
-            "load_generation_attention_data",
         }
     ),
     "base.py": frozenset(
@@ -192,18 +185,13 @@ OPERATIONS_DEF_INVENTORY = {
             "CustomAllReduce.__init__",
             "CustomAllReduce._cache_key",
             "CustomAllReduce.clear_cache",
-            "CustomAllReduce.get_weights",
             "CustomAllReduce.load_data",
             "NCCL.__init__",
             "NCCL._cache_key",
             "NCCL.clear_cache",
-            "NCCL.get_weights",
             "NCCL.load_data",
             "P2P.__init__",
-            "P2P.get_weights",
             "_cache_key",
-            "load_custom_allreduce_data",
-            "load_nccl_data",
         }
     ),
     "dsa.py": frozenset(
@@ -211,19 +199,16 @@ OPERATIONS_DEF_INVENTORY = {
             "ContextDSAModule.__init__",
             "ContextDSAModule._cache_key",
             "ContextDSAModule.clear_cache",
-            "ContextDSAModule.get_weights",
             "ContextDSAModule.load_data",
             "GenerationDSAModule.__init__",
             "GenerationDSAModule._cache_key",
             "GenerationDSAModule.clear_cache",
-            "GenerationDSAModule.get_weights",
             "GenerationDSAModule.load_data",
             "_cache_key",
             "_dsa_kernel_source_buckets",
             "_format_dsa_unavailable_message",
+            "_normalize_projection_quant_modes",
             "_read_dsa_row_sources",
-            "dsa_block_weights_bytes",
-            "dsa_block_weights_bytes._b",
             "load_context_dsa_module_data",
             "load_context_dsa_module_data._nest",
             "load_generation_dsa_module_data",
@@ -235,38 +220,27 @@ OPERATIONS_DEF_INVENTORY = {
             "ContextDeepSeekV4AttentionModule._cache_key",
             "ContextDeepSeekV4AttentionModule.clear_cache",
             "ContextDeepSeekV4AttentionModule.load_data",
-            "ContextDeepSeekV4AttentionModule.load_data._load",
             "ContextDeepSeekV4AttentionModule.load_data._load_sparse",
+            "ContextDeepSeekV4AttentionModule.load_data._primary",
             "DeepSeekV4MHCModule.__init__",
             "DeepSeekV4MHCModule._cache_key",
             "DeepSeekV4MHCModule.clear_cache",
-            "DeepSeekV4MHCModule.get_weights",
             "DeepSeekV4MHCModule.load_data",
             "DeepSeekV4MegaMoEModule.__init__",
             "DeepSeekV4MegaMoEModule._cache_key",
             "DeepSeekV4MegaMoEModule._engine_query_plan",
             "DeepSeekV4MegaMoEModule._normalize_distribution",
             "DeepSeekV4MegaMoEModule.clear_cache",
-            "DeepSeekV4MegaMoEModule.get_weights",
             "DeepSeekV4MegaMoEModule.load_data",
             "GenerationDeepSeekV4AttentionModule._cache_key",
             "GenerationDeepSeekV4AttentionModule.clear_cache",
             "GenerationDeepSeekV4AttentionModule.load_data",
-            "GenerationDeepSeekV4AttentionModule.load_data._load",
             "_BaseDeepSeekV4AttentionModule.__init__",
-            "_BaseDeepSeekV4AttentionModule._estimate_weights",
-            "_BaseDeepSeekV4AttentionModule.get_weights",
             "_cache_key",
-            "_deep_merge_dsv4_dicts",
             "_dsv4_normalize_dtype",
-            "_load_dsv4_split",
             "_validate_dsv4_local_head_semantics",
             "load_context_dsv4_kind_module_data",
             "load_context_dsv4_kind_module_data._make_nested",
-            "load_dsv4_megamoe_module_data",
-            "load_dsv4_megamoe_module_data._put_nested",
-            "load_dsv4_megamoe_module_data._row_phase",
-            "load_dsv4_megamoe_module_data._to_bool",
             "load_dsv4_sparse_kernel_data",
             "load_dsv4_sparse_op_data",
             "load_dsv4_sparse_op_data._coerce",
@@ -279,13 +253,11 @@ OPERATIONS_DEF_INVENTORY = {
     "elementwise.py": frozenset(
         {
             "ElementWise.__init__",
-            "ElementWise.get_weights",
         }
     ),
     "embedding.py": frozenset(
         {
             "Embedding.__init__",
-            "Embedding.get_weights",
         }
     ),
     "fpm_forward.py": frozenset(
@@ -302,13 +274,8 @@ OPERATIONS_DEF_INVENTORY = {
             "GEMM._cache_key",
             "GEMM._engine_query_plan",
             "GEMM.clear_cache",
-            "GEMM.get_weights",
             "GEMM.load_data",
-            "GEMM.load_data._load",
             "GEMM.supported_quant_modes",
-            "load_compute_scale_data",
-            "load_gemm_data",
-            "load_scale_matrix_data",
             "xprofile_util_level_known",
         }
     ),
@@ -317,7 +284,6 @@ OPERATIONS_DEF_INVENTORY = {
             "GDNKernel.__init__",
             "GDNKernel._cache_key",
             "GDNKernel.clear_cache",
-            "GDNKernel.get_weights",
             "GDNKernel.load_data",
             "KDAKernel.__init__",
             "KDAKernel.load_data",
@@ -329,12 +295,8 @@ OPERATIONS_DEF_INVENTORY = {
             "Mamba2Kernel.__init__",
             "Mamba2Kernel._cache_key",
             "Mamba2Kernel.clear_cache",
-            "Mamba2Kernel.get_weights",
             "Mamba2Kernel.load_data",
             "_cache_key",
-            "load_gdn_data",
-            "load_kda_data",
-            "load_mamba2_data",
         }
     ),
     "mla.py": frozenset(
@@ -342,43 +304,29 @@ OPERATIONS_DEF_INVENTORY = {
             "ContextMLA.__init__",
             "ContextMLA._cache_key",
             "ContextMLA.clear_cache",
-            "ContextMLA.get_weights",
             "ContextMLA.load_data",
             "GenerationMLA.__init__",
             "GenerationMLA._cache_key",
             "GenerationMLA.clear_cache",
-            "GenerationMLA.get_weights",
             "GenerationMLA.load_data",
             "MLABmm.__init__",
             "MLABmm._cache_key",
             "MLABmm._engine_query_plan",
             "MLABmm.clear_cache",
-            "MLABmm.get_weights",
             "MLABmm.load_data",
             "MLAModule.__init__",
             "MLAModule._cache_key",
             "MLAModule.clear_cache",
-            "MLAModule.get_weights",
             "MLAModule.load_data",
             "WideEPContextMLA.__init__",
             "WideEPContextMLA._cache_key",
             "WideEPContextMLA.clear_cache",
-            "WideEPContextMLA.get_weights",
             "WideEPContextMLA.load_data",
             "WideEPGenerationMLA.__init__",
             "WideEPGenerationMLA._cache_key",
             "WideEPGenerationMLA.clear_cache",
-            "WideEPGenerationMLA.get_weights",
             "WideEPGenerationMLA.load_data",
             "_cache_key",
-            "_mla_module_native_heads",
-            "load_context_mla_data",
-            "load_context_mla_module_data",
-            "load_generation_mla_data",
-            "load_generation_mla_module_data",
-            "load_mla_bmm_data",
-            "load_wideep_context_mla_data",
-            "load_wideep_generation_mla_data",
         }
     ),
     "moe.py": frozenset(
@@ -387,7 +335,6 @@ OPERATIONS_DEF_INVENTORY = {
             "MoE._cache_key",
             "MoE._engine_query_plan",
             "MoE.clear_cache",
-            "MoE.get_weights",
             "MoE.load_data",
             "MoEDispatch.__init__",
             "MoEDispatch._cache_key",
@@ -410,7 +357,6 @@ OPERATIONS_DEF_INVENTORY = {
             "TrtLLMWideEPMoEDispatch.get_weights",
             "TrtLLMWideEPMoEDispatch.load_data",
             "_cache_key",
-            "load_moe_data",
             "load_trtllm_alltoall_data",
             "load_wideep_context_moe_data",
             "load_wideep_deepep_ll_data",
@@ -425,7 +371,6 @@ OPERATIONS_DEF_INVENTORY = {
             "MoEAllToAll.__init__",
             "MoEAllToAll._cache_key",
             "MoEAllToAll.clear_cache",
-            "MoEAllToAll.get_weights",
             "MoEAllToAll.load_data",
             "MoECommBackendSpec.feasible",
             "MoEExpertCompute.__init__",
@@ -433,7 +378,6 @@ OPERATIONS_DEF_INVENTORY = {
             "MoEExpertCompute._engine_query_plan",
             "MoEExpertCompute._resolve_kernel_source",
             "MoEExpertCompute.clear_cache",
-            "MoEExpertCompute.get_weights",
             "MoEExpertCompute.load_data",
             "_adapt_legacy_deepep",
             "_adapt_legacy_deepep_ll",
@@ -463,7 +407,6 @@ OPERATIONS_DEF_INVENTORY = {
     "msa.py": frozenset(
         {
             "_BaseMSAModule.__init__",
-            "_BaseMSAModule.get_weights",
             "_BaseMSAModule.load_data",
         }
     ),
@@ -472,6 +415,12 @@ OPERATIONS_DEF_INVENTORY = {
             "FallbackOp.__init__",
             "FallbackOp._engine_query_is_context",
             "FallbackOp._engine_query_plan",
+            # Composite weight recursion restored (review round 2): the base
+            # engine route would serialize the WHOLE composite and crash on a
+            # weight-shielded child with no opspec variant (tombstoned
+            # MoEDispatch deepep flavor). These recurse through each child's
+            # own get_weights — no performance math, values identical to
+            # Op::weight_bytes for convertible children.
             "FallbackOp.get_weights",
             "OverlapOp.__init__",
             "OverlapOp._engine_query_is_context",
@@ -733,3 +682,45 @@ def test_def_inventory_catches_shadow_class_with_existing_names():
         raise AssertionError("no inventory file contains all fixture plain names")
     # ...but none of the QUALIFIED paths exists anywhere, so introducing the
     # shadow class trips test_operations_def_inventory_is_frozen.
+
+
+def test_surviving_parsers_have_no_production_callers():
+    """The moe/moe_comm/dsa/dsv4 ``load_*_data`` parsers survive PR-6 only as
+    TEST-ONLY schema-contract fixtures (the collector suite's format
+    handshake); every production ``PerfDatabase._<family>_data`` attribute is
+    served by the engine table view. A production call site re-appearing for
+    any of them is the Python data plane growing back — fail here so the
+    revival is a deliberate, reviewed decision.
+    """
+    import re
+
+    sdk_root = OPERATIONS_DIR.parents[2]  # aic-core/src/aiconfigurator_core
+    surviving = sorted(
+        {
+            match
+            for path in OPERATIONS_DIR.glob("*.py")
+            for match in re.findall(r"^def (load_\w+_data)\b", path.read_text(encoding="utf-8"), re.MULTILINE)
+        }
+    )
+    # The inventory itself is load-bearing: if the cleanup PR deletes the
+    # parsers, this test retires with them (empty set would pass vacuously).
+    assert surviving, "no surviving parsers found — retire this test together with the parser deletion"
+
+    offenders = []
+    for path in sdk_root.rglob("*.py"):
+        rel = path.relative_to(sdk_root).as_posix()
+        if "/operations/" in f"/{rel}":
+            continue  # definitions and their module-internal use
+        text = path.read_text(encoding="utf-8")
+        for name in surviving:
+            for match in re.finditer(rf"\b{name}\b", text):
+                line = text[: match.start()].count("\n") + 1
+                snippet = text.splitlines()[line - 1].strip()
+                if snippet.startswith("#"):
+                    continue  # commentary, not a call site
+                # perf_database's legacy re-export block is the one allowed
+                # reference (kept for the collector suite's import path).
+                if rel.endswith("perf_database.py") and re.match(rf"^{name},?$", snippet):
+                    continue
+                offenders.append(f"{rel}:{line}: {snippet[:100]}")
+    assert not offenders, "surviving test-only parsers gained production references:\n" + "\n".join(offenders)

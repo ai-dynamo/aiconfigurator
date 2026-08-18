@@ -42,12 +42,30 @@ _GEMM_HEADER = "framework,version,device,op_name,kernel_source,gemm_dtype,m,n,k,
 
 
 def _write_gemm_csv(path: Path, rows: list[tuple[str, str, int, int, int, float]]) -> None:
-    """Write a GEMM perf CSV. Each row is (framework, kernel_source, m, n, k, latency)."""
+    """Write a GEMM perf table as real parquet. Each row is
+    (framework, kernel_source, m, n, k, latency). The engine table view that
+    now backs ``GEMM.load_data`` reads parquet only — the legacy ``.txt``
+    fallback retired with the Python parsers (PR-6). An empty ``rows`` list
+    writes a zero-row file (the exists-but-empty case)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as f:
-        f.write(_GEMM_HEADER)
-        for framework, kernel_source, m, n, k, latency in rows:
-            f.write(f"{framework},1.0,h100,gemm,{kernel_source},bfloat16,{m},{n},{k},{latency}\n")
+    table = pa.table(
+        {
+            "framework": pa.array([r[0] for r in rows], pa.string()),
+            "version": pa.array(["1.0"] * len(rows), pa.string()),
+            "device": pa.array(["h100"] * len(rows), pa.string()),
+            "op_name": pa.array(["gemm"] * len(rows), pa.string()),
+            "kernel_source": pa.array([r[1] for r in rows], pa.string()),
+            "gemm_dtype": pa.array(["bfloat16"] * len(rows), pa.string()),
+            "m": pa.array([r[2] for r in rows], pa.int64()),
+            "n": pa.array([r[3] for r in rows], pa.int64()),
+            "k": pa.array([r[4] for r in rows], pa.int64()),
+            "latency": pa.array([r[5] for r in rows], pa.float64()),
+        }
+    )
+    pq.write_table(table, path)
 
 
 def _make_system_yaml(systems_root: Path, system: str, data_dir_name: str = "data") -> None:
@@ -122,7 +140,7 @@ def env(tmp_path: Path) -> Path:
 
 
 def _backend_csv(env: Path, backend: str = "trtllm", version: str = "1.0") -> Path:
-    return env / "data" / "h100_sxm" / backend / version / "gemm_perf.txt"
+    return env / "data" / "h100_sxm" / backend / version / "gemm_perf.parquet"
 
 
 def _build_db(systems_root: Path, *, database_mode: str | None = "HYBRID") -> PerfDatabase:
@@ -173,11 +191,10 @@ def test_backend_only(env: Path) -> None:
 def test_shared_layer_on_when_mode_unspecified(env: Path) -> None:
     """An unspecified database_mode follows PerfDatabase's default SILICON behavior."""
     active_csv = _backend_csv(env)
-    active_csv.parent.mkdir(parents=True, exist_ok=True)
-    active_csv.write_text(_GEMM_HEADER)
+    _write_gemm_csv(active_csv, [])
 
     _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
-    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+    _make_manifest(env, [("gemm_perf.parquet", "torch_flow", "shared", ["trtllm"])])
 
     db = _build_db(env, database_mode=None)
     assert db.enable_shared_layer is True
@@ -188,11 +205,10 @@ def test_shared_layer_on_when_mode_unspecified(env: Path) -> None:
 def test_shared_layer_off_in_estimate_modes(env: Path, mode: str) -> None:
     """Formula-only modes do not reuse sibling silicon rows."""
     active_csv = _backend_csv(env)
-    active_csv.parent.mkdir(parents=True, exist_ok=True)
-    active_csv.write_text(_GEMM_HEADER)
+    _write_gemm_csv(active_csv, [])
 
     _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
-    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+    _make_manifest(env, [("gemm_perf.parquet", "torch_flow", "shared", ["trtllm"])])
 
     db = _build_db(env, database_mode=mode)
     assert db.enable_shared_layer is False
@@ -206,11 +222,10 @@ def test_shared_layer_on_in_silicon_mode(env: Path) -> None:
     behavior — both modes consult the silicon tables.
     """
     active_csv = _backend_csv(env)
-    active_csv.parent.mkdir(parents=True, exist_ok=True)
-    active_csv.write_text(_GEMM_HEADER)
+    _write_gemm_csv(active_csv, [])
 
     _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
-    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+    _make_manifest(env, [("gemm_perf.parquet", "torch_flow", "shared", ["trtllm"])])
 
     db = _build_db(env, database_mode="SILICON")
     assert db.enable_shared_layer is True
@@ -228,7 +243,7 @@ def test_get_database_shared_layer_uses_declared_marker_version(env: Path) -> No
     marker_dir.mkdir(parents=True, exist_ok=True)
     (marker_dir / SHARED_LAYER_REUSE_MARKER).write_text("declared shared-layer reuse\n", encoding="utf-8")
     _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
-    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+    _make_manifest(env, [("gemm_perf.parquet", "torch_flow", "shared", ["trtllm"])])
 
     databases_cache.clear()
     try:
@@ -250,7 +265,7 @@ def test_get_database_shared_layer_uses_declared_marker_version(env: Path) -> No
 def test_get_database_shared_layer_rejects_undeclared_active_version(env: Path) -> None:
     """A sibling version alone does not make arbitrary framework versions loadable."""
     _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
-    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+    _make_manifest(env, [("gemm_perf.parquet", "torch_flow", "shared", ["trtllm"])])
 
     databases_cache.clear()
     try:
@@ -273,16 +288,15 @@ def test_shared_layer_on_in_hybrid_mode_with_fallback(env: Path) -> None:
     without needing any extra flag — HYBRID already accepts coarser fallbacks.
     """
     active_csv = _backend_csv(env)
-    active_csv.parent.mkdir(parents=True, exist_ok=True)
-    active_csv.write_text(_GEMM_HEADER)
+    _write_gemm_csv(active_csv, [])
 
     _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
     _write_gemm_csv(_backend_csv(env, version="0.8"), [("trtllm", "default", 2048, 4096, 4096, 0.3)])
     _make_manifest(
         env,
         [
-            ("gemm_perf.txt", "torch_flow", "shared", ["trtllm"]),
-            ("gemm_perf.txt", "default", "shared_fallback", ["trtllm"]),
+            ("gemm_perf.parquet", "torch_flow", "shared", ["trtllm"]),
+            ("gemm_perf.parquet", "default", "shared_fallback", ["trtllm"]),
         ],
     )
 
@@ -295,11 +309,10 @@ def test_shared_layer_on_in_hybrid_mode_with_fallback(env: Path) -> None:
 def test_sibling_only_with_no_active_data(env: Path) -> None:
     """Active version's file is empty; sibling version provides the row."""
     active_csv = _backend_csv(env)
-    active_csv.parent.mkdir(parents=True, exist_ok=True)
-    active_csv.write_text(_GEMM_HEADER)  # header-only
+    _write_gemm_csv(active_csv, [])  # zero-row file (exists but empty)
 
     _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
-    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+    _make_manifest(env, [("gemm_perf.parquet", "torch_flow", "shared", ["trtllm"])])
 
     db = _build_db(env)
     assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
@@ -309,7 +322,7 @@ def test_merged_no_conflict(env: Path) -> None:
     """Active has shape A, sibling version has shape B → both present in merged dict."""
     _write_gemm_csv(_backend_csv(env), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.5)])
     _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 2048, 4096, 4096, 0.9)])
-    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+    _make_manifest(env, [("gemm_perf.parquet", "torch_flow", "shared", ["trtllm"])])
 
     db = _build_db(env)
     assert _gemm_lookup(db, 1024, 4096, 4096) == 0.5
@@ -320,7 +333,7 @@ def test_merged_conflict_active_wins(env: Path) -> None:
     """Active and sibling both have shape A with different latencies → active wins."""
     _write_gemm_csv(_backend_csv(env), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.5)])
     _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 99.0)])
-    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+    _make_manifest(env, [("gemm_perf.parquet", "torch_flow", "shared", ["trtllm"])])
 
     db = _build_db(env)
     assert _gemm_lookup(db, 1024, 4096, 4096) == 0.5  # active wins
@@ -341,7 +354,7 @@ def test_kernel_source_filter(env: Path) -> None:
     _write_gemm_csv(
         _backend_csv(env, backend="vllm", version="0.5"), [("vllm", "vllm_default", 1024, 4096, 4096, 99.0)]
     )
-    _make_manifest(env, [("gemm_perf.txt", "vllm_default", "shared", ["vllm"])])
+    _make_manifest(env, [("gemm_perf.parquet", "vllm_default", "shared", ["vllm"])])
 
     db = _build_db(env)
     assert _gemm_lookup(db, 1024, 4096, 4096) == 0.5
@@ -353,8 +366,7 @@ def test_cross_backend_inheritance(env: Path) -> None:
     """
     # Active trtllm has nothing for this shape.
     active_csv = _backend_csv(env)
-    active_csv.parent.mkdir(parents=True, exist_ok=True)
-    active_csv.write_text(_GEMM_HEADER)
+    _write_gemm_csv(active_csv, [])
 
     # Sibling sglang has the row, tagged with a kernel_source the manifest declares
     # shared between trtllm and sglang.
@@ -362,7 +374,7 @@ def test_cross_backend_inheritance(env: Path) -> None:
         _backend_csv(env, backend="sglang", version="0.5"),
         [("sglang", "causal_conv1d_fn", 1024, 4096, 4096, 0.7)],
     )
-    _make_manifest(env, [("gemm_perf.txt", "causal_conv1d_fn", "shared", ["trtllm", "sglang"])])
+    _make_manifest(env, [("gemm_perf.parquet", "causal_conv1d_fn", "shared", ["trtllm", "sglang"])])
 
     db = _build_db(env)
     assert _gemm_lookup(db, 1024, 4096, 4096) == 0.7
@@ -383,11 +395,10 @@ def test_fallback_emits_warning(env: Path, caplog: pytest.LogCaptureFixture) -> 
     the active one.
     """
     active_csv = _backend_csv(env)
-    active_csv.parent.mkdir(parents=True, exist_ok=True)
-    active_csv.write_text(_GEMM_HEADER)
+    _write_gemm_csv(active_csv, [])
 
     _write_gemm_csv(_backend_csv(env, backend="vllm", version="0.5"), [("vllm", "default", 1024, 4096, 4096, 0.7)])
-    _make_manifest(env, [("gemm_perf.txt", "default", "shared_fallback", ["trtllm", "vllm"])])
+    _make_manifest(env, [("gemm_perf.parquet", "default", "shared_fallback", ["trtllm", "vllm"])])
 
     with caplog.at_level(logging.WARNING, logger="aiconfigurator.sdk.perf_database"):
         db = _build_db(env)  # HYBRID mode
@@ -408,8 +419,7 @@ def test_same_framework_outranks_other_framework(env: Path) -> None:
     """
     # Active trtllm has no rows for the shape.
     active_csv = _backend_csv(env)
-    active_csv.parent.mkdir(parents=True, exist_ok=True)
-    active_csv.write_text(_GEMM_HEADER)
+    _write_gemm_csv(active_csv, [])
 
     # trtllm 0.9 has the shape with one latency.
     _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "causal_conv1d_fn", 1024, 4096, 4096, 0.5)])
@@ -418,7 +428,7 @@ def test_same_framework_outranks_other_framework(env: Path) -> None:
         _backend_csv(env, backend="sglang", version="0.5"),
         [("sglang", "causal_conv1d_fn", 1024, 4096, 4096, 99.0)],
     )
-    _make_manifest(env, [("gemm_perf.txt", "causal_conv1d_fn", "shared", ["trtllm", "sglang"])])
+    _make_manifest(env, [("gemm_perf.parquet", "causal_conv1d_fn", "shared", ["trtllm", "sglang"])])
 
     db = _build_db(env)
     # Pre-fix this would return 99.0 because sglang sorted before trtllm alphabetically.
@@ -433,13 +443,12 @@ def test_newest_same_framework_version_wins(env: Path) -> None:
     `0.9.0` would beat `0.10.0` on string compare; PEP 440 sort handles it correctly.
     """
     active_csv = _backend_csv(env)
-    active_csv.parent.mkdir(parents=True, exist_ok=True)
-    active_csv.write_text(_GEMM_HEADER)
+    _write_gemm_csv(active_csv, [])
 
     # 0.10.0 is newer than 0.9.0 even though "0.10.0" < "0.9.0" lexically.
     _write_gemm_csv(_backend_csv(env, version="0.9.0"), [("trtllm", "causal_conv1d_fn", 1024, 4096, 4096, 99.0)])
     _write_gemm_csv(_backend_csv(env, version="0.10.0"), [("trtllm", "causal_conv1d_fn", 1024, 4096, 4096, 0.5)])
-    _make_manifest(env, [("gemm_perf.txt", "causal_conv1d_fn", "shared", ["trtllm"])])
+    _make_manifest(env, [("gemm_perf.parquet", "causal_conv1d_fn", "shared", ["trtllm"])])
 
     db = _build_db(env)
     assert _gemm_lookup(db, 1024, 4096, 4096) == 0.5
@@ -457,7 +466,7 @@ def test_shared_layer_override_off_in_silicon_mode(env: Path) -> None:
     _write_gemm_csv(active_csv, [("trtllm", "torch_flow", 512, 512, 512, 0.3)])
 
     _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
-    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+    _make_manifest(env, [("gemm_perf.parquet", "torch_flow", "shared", ["trtllm"])])
 
     db = PerfDatabase(
         system="h100_sxm",
@@ -476,11 +485,10 @@ def test_shared_layer_override_off_in_silicon_mode(env: Path) -> None:
 def test_shared_layer_override_none_keeps_mode_derived_behavior(env: Path) -> None:
     """shared_layer=None is the default and preserves mode-derived semantics."""
     active_csv = _backend_csv(env)
-    active_csv.parent.mkdir(parents=True, exist_ok=True)
-    active_csv.write_text(_GEMM_HEADER)
+    _write_gemm_csv(active_csv, [])
 
     _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
-    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+    _make_manifest(env, [("gemm_perf.parquet", "torch_flow", "shared", ["trtllm"])])
 
     db = PerfDatabase(
         system="h100_sxm",
@@ -497,11 +505,10 @@ def test_shared_layer_override_none_keeps_mode_derived_behavior(env: Path) -> No
 def test_get_database_shared_layer_override_cached_separately(env: Path) -> None:
     """Overridden templates must not alias the mode-derived cache entry."""
     active_csv = _backend_csv(env)
-    active_csv.parent.mkdir(parents=True, exist_ok=True)
-    active_csv.write_text(_GEMM_HEADER)
+    _write_gemm_csv(active_csv, [])
 
     _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
-    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+    _make_manifest(env, [("gemm_perf.parquet", "torch_flow", "shared", ["trtllm"])])
 
     databases_cache.clear()
     try:
@@ -524,11 +531,10 @@ def test_get_database_view_shared_layer_override(env: Path) -> None:
     from aiconfigurator.sdk.perf_database import get_database_view
 
     active_csv = _backend_csv(env)
-    active_csv.parent.mkdir(parents=True, exist_ok=True)
-    active_csv.write_text(_GEMM_HEADER)
+    _write_gemm_csv(active_csv, [])
 
     _write_gemm_csv(_backend_csv(env, version="0.9"), [("trtllm", "torch_flow", 1024, 4096, 4096, 0.7)])
-    _make_manifest(env, [("gemm_perf.txt", "torch_flow", "shared", ["trtllm"])])
+    _make_manifest(env, [("gemm_perf.parquet", "torch_flow", "shared", ["trtllm"])])
 
     databases_cache.clear()
     try:
@@ -559,23 +565,7 @@ def _mla_module_row(version: str, batch_size: int, latency: float) -> str:
     )
 
 
-def test_mla_module_loader_first_source_wins(tmp_path: Path) -> None:
-    """Regression for the sibling-shadowing bug: module loaders used direct
-    assignment (last-wins), so a stale earlier-version source loaded after the
-    primary silently overrode the primary's rows at shared keys — refreshed
-    0.24.0 MLA data was diluted by 0.19.0 rows. The loader must keep the
-    first (highest-priority) source's value and only fill gaps from siblings.
-    """
-    from aiconfigurator_core.sdk.operations.mla import load_generation_mla_module_data
-
-    primary = tmp_path / "primary_mla_generation_module_perf.txt"
-    sibling = tmp_path / "sibling_mla_generation_module_perf.txt"
-    primary.write_text(_MLA_MODULE_HEADER + _mla_module_row("0.24.0", 16, 0.0977))
-    sibling.write_text(_MLA_MODULE_HEADER + _mla_module_row("0.19.0", 16, 0.1443) + _mla_module_row("0.19.0", 32, 0.2))
-
-    data = load_generation_mla_module_data([(str(primary), None), (str(sibling), None)])
-    kv = common.KVCacheQuantMode.fp8
-    gemm = common.GEMMQuantMode.bfloat16
-    # s key = isl + step = 1 + 8192; native 128 from the DeepSeek-V3 pin (#1458)
-    assert data[kv][gemm][128][64][16][8193]["latency"] == 0.0977  # primary wins at the shared key
-    assert data[kv][gemm][128][64][32][8193]["latency"] == 0.2  # sibling still fills the gap
+# test_mla_module_loader_first_source_wins retired with the Python MLA module
+# loader (PR-6): the cross-source first-wins contract now lives in the engine's
+# view fold (table_view.rs::view_generation_mla_module, insert_first_wins) and
+# is pinned by the data-plane baseline digests over the shared-layer pins.

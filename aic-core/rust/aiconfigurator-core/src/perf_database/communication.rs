@@ -111,6 +111,16 @@ impl CommunicationTable {
         }
     }
 
+    /// System-wide NCCL data dir (for the table view's primary-only load).
+    pub(crate) fn nccl_root(&self) -> Option<&Path> {
+        self.nccl_root.as_deref()
+    }
+
+    /// System-wide OneCCL data dir (vLLM/XPU systems only).
+    pub(crate) fn oneccl_root(&self) -> Option<&Path> {
+        self.oneccl_root.as_deref()
+    }
+
     /// Raw custom-allreduce value (latency ms + power/energy), 1-D
     /// interpolated along `message_size`.
     ///

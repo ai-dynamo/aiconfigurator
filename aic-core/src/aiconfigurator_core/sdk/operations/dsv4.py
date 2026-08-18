@@ -57,29 +57,6 @@ def _cache_key(database: PerfDatabase) -> tuple:
 
 
 # ───────────────────────────────────────────────────────────────────────
-# Module-level helpers (moved from perf_database.py).
-# Re-exported from perf_database for back-compat with tests that imported
-# them via ``from aiconfigurator_core.sdk.perf_database import ...``.
-# ───────────────────────────────────────────────────────────────────────
-
-
-def _deep_merge_dsv4_dicts(dest, src):
-    """In-place merge ``src`` nested dict into ``dest``.
-
-    Used to combine the per-(attn_kind) CSVs into one nested dict. At any
-    level where both sides have a dict, recurse; otherwise overwrite.
-    """
-    if src is None:
-        return dest
-    for k, v in src.items():
-        if k in dest and isinstance(dest[k], dict) and isinstance(v, dict):
-            _deep_merge_dsv4_dicts(dest[k], v)
-        else:
-            dest[k] = v
-    return dest
-
-
-# ───────────────────────────────────────────────────────────────────────
 # DeepSeekV4MHCModule
 # ───────────────────────────────────────────────────────────────────────
 
@@ -110,10 +87,6 @@ class DeepSeekV4MHCModule(Operation):
         self._hc_mult = hc_mult
         self._sinkhorn_iters = sinkhorn_iters
         self._quant_mode = quant_mode
-        mix_hc = (2 + hc_mult) * hc_mult
-        hc_dim = hc_mult * hidden_size
-        # Two parameter sets per decoder block: attention mHC and FFN mHC.
-        self._weights = 2 * (mix_hc * hc_dim + mix_hc + 3) * quant_mode.value.memory
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -125,21 +98,14 @@ class DeepSeekV4MHCModule(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads mhc_module CSV, binds ``database._mhc_module_data``."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        """Idempotent. Fetches the engine's mhc_module table view, binds
+        ``database._mhc_module_data``."""
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.mhc_module.value
-            )
-            sources = database._build_op_sources(PerfDataFilename.mhc_module, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(
-                load_mhc_module_data(sources), PerfDataFilename.mhc_module, primary_path
-            )
+            cls._data_cache[key] = load_view(database, "_mhc_module_data", PerfDataFilename.mhc_module)
             cls._record_load()
 
         if "_mhc_module_data" not in database.__dict__:
@@ -158,9 +124,6 @@ class DeepSeekV4MHCModule(Operation):
     # ------------------------------------------------------------------
 
     _ENGINE_QUERY_SHAPE = "tokens"
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -219,34 +182,6 @@ class _BaseDeepSeekV4AttentionModule(Operation):
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
         self._gemm_quant_mode = gemm_quant_mode
-        self._weights = self._estimate_weights()
-
-    def _estimate_weights(self) -> float:
-        gemm_weight_elems = (
-            self._hidden_size * self._q_lora_rank
-            + self._q_lora_rank * self._num_heads * self._head_dim
-            + self._hidden_size * self._head_dim
-            + self._o_groups * self._o_lora_rank * self._hidden_size
-        )
-        bfloat16_weight_elems = self._num_heads * self._head_dim * self._o_lora_rank
-        float32_weight_elems = self._num_heads
-        if self._compress_ratio:
-            compressor_mult = 2 if self._compress_ratio == 4 else 1
-            gemm_weight_elems += 2 * self._hidden_size * compressor_mult * self._head_dim
-            float32_weight_elems += self._compress_ratio * compressor_mult * self._head_dim
-        if self._compress_ratio == 4:
-            gemm_weight_elems += self._q_lora_rank * self._index_n_heads * self._index_head_dim
-            gemm_weight_elems += 2 * self._hidden_size * 2 * self._index_head_dim
-            bfloat16_weight_elems += self._hidden_size * self._index_n_heads
-            float32_weight_elems += self._compress_ratio * 2 * self._index_head_dim
-        return (
-            gemm_weight_elems * self._gemm_quant_mode.value.memory
-            + bfloat16_weight_elems * common.GEMMQuantMode.bfloat16.value.memory
-            + float32_weight_elems * 4
-        )
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -280,53 +215,54 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads the csa+hca context split files, merges them,
-        deep-copies the merged dict for topk-piecewise lookup, and loads the
-        two DSV4 sparse-kernel CSVs.
+        """Idempotent. Fetches the engine's merged csa+hca context table view
+        and the three DSV4 sparse-kernel views.
 
         Binds:
         - ``database._context_deepseek_v4_attention_module_data``
         - ``database._raw_context_deepseek_v4_attention_module_data``
         - ``database._dsv4_sparse_kernel_data``
         """
-        import os
 
+        from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
         from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
-        if key not in cls._data_cache:
+        if key not in cls._data_cache or key not in cls._raw_data_cache or key not in cls._sparse_kernel_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
 
-            def _load(filename_enum):
-                primary_path = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, filename_enum.value
+            def _primary(filename_enum):
+                return resolve_op_data_path(system_data_root, database.backend, database.version, filename_enum.value)
+
+            # Locals first, commit last — a failed sparse fetch must not
+            # leave only the merged view cached (see GEMM.load_data).
+            # The csa+hca merge happens engine-side; an absent-or-empty merge
+            # binds None, matching the retired split-merge semantics
+            # (whose filepath came from the csa side, loaded first).
+            merged_view = fetch_table_view(database, "_context_deepseek_v4_attention_module_data")
+            if merged_view:
+                merged_loaded = LoadedOpData(
+                    merged_view,
+                    PerfDataFilename.dsv4_csa_context_module,
+                    _primary(PerfDataFilename.dsv4_csa_context_module),
                 )
-                sources = database._build_op_sources(filename_enum, primary_path, system_data_root)
-                return LoadedOpData(load_context_dsv4_kind_module_data(sources), filename_enum, primary_path)
+            else:
+                merged_loaded = None
 
-            ctx_split = [
-                _load(PerfDataFilename.dsv4_csa_context_module),
-                _load(PerfDataFilename.dsv4_hca_context_module),
-            ]
-            cls._data_cache[key] = _load_dsv4_split(ctx_split)
-            ctx_merged = cls._data_cache[key]
-            # the engine's interpolation resolves on the raw merged table directly; the raw
-            # wrapper is kept as a plain alias for backward compatibility.
-            cls._raw_data_cache[key] = ctx_merged
+            def _load_sparse(sub_key, filename_enum):
+                view = fetch_table_view(database, f"_dsv4_sparse_kernel_data.{sub_key}")
+                return LoadedOpData(view, filename_enum, _primary(filename_enum))
 
-            def _load_sparse(filename_enum):
-                primary_path = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, filename_enum.value
-                )
-                sources = database._build_op_sources(filename_enum, primary_path, system_data_root)
-                return LoadedOpData(load_dsv4_sparse_kernel_data(sources), filename_enum, primary_path)
-
-            cls._sparse_kernel_cache[key] = {
-                "paged_mqa_logits": _load_sparse(PerfDataFilename.dsv4_paged_mqa_logits_module),
-                "hca_attn": _load_sparse(PerfDataFilename.dsv4_hca_attn_module),
-                "csa_attn": _load_sparse(PerfDataFilename.dsv4_csa_attn_module),
+            sparse_loaded = {
+                "paged_mqa_logits": _load_sparse("paged_mqa_logits", PerfDataFilename.dsv4_paged_mqa_logits_module),
+                "hca_attn": _load_sparse("hca_attn", PerfDataFilename.dsv4_hca_attn_module),
+                "csa_attn": _load_sparse("csa_attn", PerfDataFilename.dsv4_csa_attn_module),
             }
 
+            cls._data_cache[key] = merged_loaded
+            # The raw wrapper stays a plain alias for backward compatibility.
+            cls._raw_data_cache[key] = merged_loaded
+            cls._sparse_kernel_cache[key] = sparse_loaded
             cls._record_load()
 
         if "_context_deepseek_v4_attention_module_data" not in database.__dict__:
@@ -386,29 +322,30 @@ class GenerationDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads the csa+hca generation split files, merges
-        them, binds ``database._generation_deepseek_v4_attention_module_data``.
+        """Idempotent. Fetches the engine's merged csa+hca generation table
+        view, binds ``database._generation_deepseek_v4_attention_module_data``.
         """
-        import os
 
+        from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
         from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-
-            def _load(filename_enum):
-                primary_path = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, filename_enum.value
+            # The csa+hca merge happens engine-side; an absent-or-empty merge
+            # binds None, matching the retired _load_dsv4_split semantics
+            # (whose filepath came from the csa side, loaded first).
+            merged_view = fetch_table_view(database, "_generation_deepseek_v4_attention_module_data")
+            if merged_view:
+                system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
+                primary = resolve_op_data_path(
+                    system_data_root,
+                    database.backend,
+                    database.version,
+                    PerfDataFilename.dsv4_csa_generation_module.value,
                 )
-                sources = database._build_op_sources(filename_enum, primary_path, system_data_root)
-                return LoadedOpData(load_generation_dsv4_kind_module_data(sources), filename_enum, primary_path)
-
-            gen_split = [
-                _load(PerfDataFilename.dsv4_csa_generation_module),
-                _load(PerfDataFilename.dsv4_hca_generation_module),
-            ]
-            cls._data_cache[key] = _load_dsv4_split(gen_split)
+                cls._data_cache[key] = LoadedOpData(merged_view, PerfDataFilename.dsv4_csa_generation_module, primary)
+            else:
+                cls._data_cache[key] = None
 
             cls._record_load()
 
@@ -477,16 +414,6 @@ class DeepSeekV4MegaMoEModule(Operation):
         self._num_fused_shared_experts = num_fused_shared_experts
         self._kernel_source = kernel_source
         self._kernel_dtype = kernel_dtype
-        self._weights = (
-            self._hidden_size
-            * self._inter_size
-            * self._num_experts
-            * quant_mode.value.memory
-            # DSv4 MegaMoE is always gated SwiGLU: 3 GEMMs (gate, up, down).
-            * 3
-            // self._moe_ep_size
-            // self._moe_tp_size
-        )
 
     @staticmethod
     def _normalize_distribution(workload_distribution: str) -> str:
@@ -500,16 +427,15 @@ class DeepSeekV4MegaMoEModule(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.dsv4_megamoe_module.value
-            )
-            cls._data_cache[key] = LoadedOpData(
-                load_dsv4_megamoe_module_data(primary_path), PerfDataFilename.dsv4_megamoe_module, primary_path
+            # Single-primary semantics live in the engine view (it reads only
+            # the head of the resolved source list, like the retired loader).
+            cls._data_cache[key] = load_view(
+                database, "_dsv4_megamoe_module_data", PerfDataFilename.dsv4_megamoe_module
             )
             cls._record_load()
 
@@ -534,37 +460,6 @@ class DeepSeekV4MegaMoEModule(Operation):
             op = copy.copy(self)
             op._quant_mode = quant_mode
         return op, eval_kwargs
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
-
-
-# ───────────────────────────────────────────────────────────────────────
-# Init-time split-file merge helper (formerly in PerfDatabase.__init__)
-# ───────────────────────────────────────────────────────────────────────
-
-
-def _load_dsv4_split(loaded_list):
-    """Merge per-(attn_kind) loaded data into one combined ``LoadedOpData``.
-
-    Each DSV4 context/generation module CSV is collected per attention kind
-    (csa/hca). Each loader returns a nested dict scoped to one
-    compress_ratio. We merge into one aggregate dict so downstream queries
-    do not need to know which attention kind produced each row.
-    """
-    from aiconfigurator_core.sdk.perf_database import LoadedOpData
-
-    merged: dict = {}
-    first_loaded = next((x for x in loaded_list if x is not None), None)
-    if first_loaded is None:
-        return None
-    for loaded in loaded_list:
-        if loaded is None or not loaded.loaded:
-            continue
-        _deep_merge_dsv4_dicts(merged, loaded.data)
-    if not merged:
-        return None
-    return LoadedOpData(merged, first_loaded.op_name_enum, first_loaded.filepath)
 
 
 # ─────────────────────────────────────────────────────────
@@ -846,130 +741,6 @@ def load_generation_dsv4_kind_module_data(file_path: str):
                 "energy": power * latency,
             }
     return data
-
-
-def load_dsv4_megamoe_module_data(dsv4_megamoe_module_file):
-    """
-    Load DeepSeek-V4 MegaMoE full-module data.
-
-    The collected latency is the SGLang/DeepGEMM MegaMoE routed path:
-    prepared hidden states and top-k tensors -> pre-dispatch -> fused MegaMoE.
-    Gate/top-k generation is intentionally outside the measured region.
-
-    Returns:
-        dict: Nested dict whose leaves contain latency, power, energy and
-        routing metadata.
-    """
-    if dsv4_megamoe_module_file is None:
-        return None
-
-    if isinstance(dsv4_megamoe_module_file, list | tuple):
-        raise TypeError("DSv4 MegaMoE data loader expects a single unified perf file path")
-
-    source_label = os.fspath(dsv4_megamoe_module_file)
-    rows = _read_filtered_rows(source_label)
-    if rows is None:
-        logger.debug(f"DeepSeek-V4 MegaMoE data file {source_label} not found.")
-        return None
-
-    def _to_bool(value: object) -> bool:
-        return str(value).strip().lower() in {"1", "true", "yes", "y"}
-
-    row_bool_invariants = [
-        ("used_cuda_graph", True, None, "DSv4 MegaMoE perf row was not collected with CUDA Graph"),
-        (
-            "includes_gate_topk",
-            False,
-            "true",
-            "DSv4 MegaMoE perf row includes gate/top-k outside the supported boundary",
-        ),
-        ("includes_routed_scale", True, None, "DSv4 MegaMoE perf row does not include SGLang routed output scaling"),
-    ]
-
-    def _row_phase(row: dict[str, str]) -> str:
-        phase = row.get("phase", "").strip()
-        if not phase:
-            raise ValueError(f"DSv4 MegaMoE unified perf file requires a phase column: {source_label} {row}")
-        if phase not in {"context", "generation"}:
-            raise ValueError(f"DSv4 MegaMoE perf row has unsupported phase={phase!r}: {row}")
-        return phase
-
-    def _put_nested(root: dict, keys: list[object], value: dict) -> None:
-        current = root
-        for key in keys[:-1]:
-            current = current.setdefault(key, {})
-        leaf_key = keys[-1]
-        if leaf_key in current:
-            raise ValueError(f"duplicate DSv4 MegaMoE data row for {source_label} {keys}")
-        current[leaf_key] = value
-
-    dsv4_megamoe_data: dict = {}
-    logger.debug(f"Loading DeepSeek-V4 MegaMoE module data from: {source_label}")
-    for row in rows:
-        for field, expected_value, default, error in row_bool_invariants:
-            if _to_bool(row.get(field, default)) != expected_value:
-                raise ValueError(f"{error}: {source_label} {row}")
-
-        kernel_source = row.get("kernel_source", "deepgemm_megamoe")
-        kernel_dtype = row["kernel_dtype"]
-        quant_mode = common.MoEQuantMode[row["moe_dtype"]]
-        pre_dispatch = row["pre_dispatch"]
-        source_policy = row["source_policy"]
-        distribution = row["distribution"]
-        topk = int(row["topk"])
-        num_experts = int(row["num_experts"])
-        num_fused_shared_experts = int(row.get("num_fused_shared_experts", 0))
-        hidden_size = int(row["hidden_size"])
-        inter_size = int(row["inter_size"])
-        moe_tp_size = int(row.get("moe_tp_size", 1))
-        moe_ep_size = int(row["moe_ep_size"])
-        num_tokens = int(row["num_tokens"])
-        latency = float(row["latency"])
-        power = float(row.get("power") or 0.0)
-        energy = power * latency
-        num_max_tokens_per_rank = int(row.get("num_max_tokens_per_rank") or 0)
-        effective_num_max_tokens_per_rank = int(row.get("effective_num_max_tokens_per_rank") or num_max_tokens_per_rank)
-
-        entry = {
-            "latency": latency,
-            "power": power,
-            "energy": energy,
-            "global_num_tokens": int(row.get("global_num_tokens") or num_tokens * moe_ep_size),
-            "num_max_tokens_per_rank": num_max_tokens_per_rank,
-            "effective_num_max_tokens_per_rank": effective_num_max_tokens_per_rank,
-            "used_cuda_graph": True,
-            "kernel_dtype": kernel_dtype,
-            "routed_scaling_factor": float(row["routed_scaling_factor"]),
-            "includes_routed_scale": True,
-            "includes_gate_topk": False,
-            "buffer_policy": row.get("buffer_policy", ""),
-            "includes_buffer_init": _to_bool(row.get("includes_buffer_init", "false")),
-        }
-        phase = _row_phase(row)
-        entry["phase"] = phase
-        _put_nested(
-            dsv4_megamoe_data,
-            [
-                phase,
-                kernel_source,
-                kernel_dtype,
-                quant_mode,
-                pre_dispatch,
-                source_policy,
-                distribution,
-                topk,
-                num_experts,
-                num_fused_shared_experts,
-                hidden_size,
-                inter_size,
-                moe_tp_size,
-                moe_ep_size,
-                num_tokens,
-            ],
-            entry,
-        )
-
-    return dsv4_megamoe_data
 
 
 # ───────────────────────────────────────────────────────────────────────

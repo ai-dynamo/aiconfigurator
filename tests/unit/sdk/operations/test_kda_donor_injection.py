@@ -72,11 +72,26 @@ def _kda_rows(framework: str, kernel_source: str, latency: float) -> list[str]:
 
 
 def _write_kda_csv(path: Path, chunks: list[list[str]]) -> None:
+    """Write the CSV-shaped rows as a real parquet file: the engine table
+    view (which now backs ``KDAKernel.load_data``) reads parquet only —
+    the legacy ``.txt`` fallback retired with the Python parsers (PR-6)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as f:
-        f.write(_KDA_HEADER)
-        for chunk in chunks:
-            f.writelines(chunk)
+    header = _KDA_HEADER.strip().split(",")
+    rows = [line.strip().split(",") for chunk in chunks for line in chunk]
+    string_cols = {"framework", "version", "device", "op_name", "kernel_source", "phase", "model_name"}
+    columns = {}
+    for i, name in enumerate(header):
+        values = [row[i] for row in rows]
+        if name in string_cols:
+            columns[name] = values
+        elif name == "latency":
+            columns[name] = [float(v) for v in values]
+        else:
+            columns[name] = [int(v) for v in values]
+    pq.write_table(pa.table(columns), path)
 
 
 def _summary(op_file: str, kernel_source: str, tier: str, frameworks: list[str]) -> dict:
@@ -130,12 +145,12 @@ def test_vllm_donor_cannot_defeat_the_fused_decode_reroute(tmp_path, monkeypatch
     # sglang owns ONLY the fused generation row for the 12-head shard — the
     # Triton generation key is deliberately absent (fused dispatch truth).
     _write_kda_csv(
-        systems_root / "data" / "h100_sxm" / "sglang" / "1.0" / "kda_perf.txt",
+        systems_root / "data" / "h100_sxm" / "sglang" / "1.0" / "kda_perf.parquet",
         [_kda_rows("SGLang", "kda_fused_decode", _FUSED_LATENCY)],
     )
     # The vllm sibling carries genuine Triton-pair rows for the SAME shard.
     _write_kda_csv(
-        systems_root / "data" / "h100_sxm" / "vllm" / "1.0" / "kda_perf.txt",
+        systems_root / "data" / "h100_sxm" / "vllm" / "1.0" / "kda_perf.parquet",
         [
             _kda_rows("VLLM", "causal_conv1d_update", _DONOR_LATENCY),
             _kda_rows("VLLM", "fused_recurrent_kda_packed_decode", _DONOR_LATENCY),

@@ -124,7 +124,10 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 #   `MoeExpertCompute` variants appended after `FpmForward`, and
 #   `MoeExpertComputeOp` carries the
 #   `enable_eplb` legacy-fidelity field.
-ENGINE_SPEC_SCHEMA_VERSION = 11
+# - 12 (PR-6): `DsaModuleOp` gained `attn_projection_quant_modes` — a
+#   bincode op-layout change (same class as v5/v7/v8/v10; serde(default)
+#   only covers the JSON wire, bincode is positional).
+ENGINE_SPEC_SCHEMA_VERSION = 12
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)
@@ -456,6 +459,11 @@ def _dsa_module(op: ContextDSAModule | GenerationDSAModule, *, architecture: str
         # `full_frac*full + (1-full_frac)*skip` (see `ContextDSAModule.query`).
         # 1.0 (DeepSeek-V3.2 / GLM-5) keeps the pure-full path.
         "full_frac": float(getattr(op, "_full_frac", 1.0)),
+        # Per-projection weight quant modes (checkpoint fact; weight_bytes
+        # only). serde-default on the Rust side: absent -> gemm_quant_mode.
+        "attn_projection_quant_modes": {
+            group: _quant_name(mode) for group, mode in op._attn_projection_quant_modes.items()
+        },
     }
 
 
@@ -1036,6 +1044,22 @@ def build_ops_json(
     return json.dumps([_to_opspec(op, backend=backend, architecture=architecture, database=database) for op in ops])
 
 
+def weight_of_op(op: Any) -> float:
+    """Single-op weight bytes via the engine — the body behind the base
+    ``Operation.get_weights``. Weight physics never depends on the backend
+    (the only backend-sensitive serializer branch is MoEDispatch's comm
+    flavor — a wire enum that rejects placeholders, so a valid token is
+    passed — and its weight is 0 under every flavor) or on a database, so a
+    bare spec conversion suffices. Ops the spec cannot express (the AFD
+    orchestration quartet, the deprecated ``Mamba2`` composite) keep their
+    own ``get_weights`` overrides and never reach this."""
+    spec = _to_opspec(op, backend="trtllm", architecture="", database=None)
+    # allow_nan=False: serde_json rejects NaN/Infinity tokens, so fail here
+    # with a clear ValueError naming the op instead of a cryptic FFI parse
+    # error (no shipped op produces one — this is a guard, not a path).
+    return float(aiconfigurator_core.weights_ops_json(json.dumps([spec], allow_nan=False))[0])
+
+
 def build_engine_spec_json(
     model: Any,
     *,
@@ -1153,6 +1177,12 @@ def build_database_probe_spec_json(
 
 _PROBE_HANDLE_CACHE: dict[str, EngineHandle] = {}
 _PROBE_HANDLE_CACHE_MAX = 8
+# Bumped by _clear_probe_handle_cache. Consumers that memoize a probe-spec
+# KEY per database (engine_table_view.fetch_table_view) tag the memo with
+# this generation and re-resolve after any documented eviction lever fires,
+# so a cleared LRU can never be resurrected through a stale memoized key
+# (stale source map, stale SOL-mode decision).
+_PROBE_CACHE_GENERATION = 0
 
 QUERY_SHIM_DEPRECATION = (
     "The Python per-call query stack is deprecated (#1357) and will be removed in the "
@@ -1181,15 +1211,22 @@ def _require_real_database(database: Any) -> None:
         )
 
 
-def _probe_handle_for(database: Any, mode_token: str | None) -> EngineHandle:
-    """Cached model-less probe engine over ``database``'s live view, optionally
-    re-moded per call (``mode_token`` is the wire token, e.g. ``"SILICON"``).
-    The cache key is the probe spec JSON itself: it captures system, backend,
-    version, resolved per-op sources, query mode and transfer policy, so any
-    view change produces a distinct entry."""
+def _probe_spec_key(database: Any, mode_token: str | None) -> tuple[str, str | None]:
+    """The ``(probe-spec JSON, systems_path)`` pair for ``database`` — the LRU
+    key. Building it re-runs the shared-layer source resolution for every op
+    file: the expensive half of ``_probe_handle_for``, split out so callers
+    that fetch many views per database (``engine_table_view``) can memoize
+    the key without ever holding a handle outside the LRU."""
     _require_real_database(database)
     systems_path = getattr(database, "systems_root", None) or os.environ.get("AICONFIGURATOR_SYSTEMS_PATH")
     key = build_database_probe_spec_json(database, systems_path=systems_path, database_mode=mode_token)
+    return key, systems_path
+
+
+def _probe_handle_from_key(key: str, systems_path: str | None) -> EngineHandle:
+    """LRU half of ``_probe_handle_for``: every probe handle in the process
+    lives in ``_PROBE_HANDLE_CACHE`` (cap ``_PROBE_HANDLE_CACHE_MAX``), so the
+    eviction levers govern every pinned Rust perf-DB load."""
     handle = _PROBE_HANDLE_CACHE.get(key)
     if handle is None:
         handle = EngineHandle(aiconfigurator_core.engine_spec_bincode_from_json(key), systems_path=systems_path)
@@ -1199,9 +1236,23 @@ def _probe_handle_for(database: Any, mode_token: str | None) -> EngineHandle:
     return handle
 
 
+def _probe_handle_for(database: Any, mode_token: str | None) -> EngineHandle:
+    """Cached model-less probe engine over ``database``'s live view, optionally
+    re-moded per call (``mode_token`` is the wire token, e.g. ``"SILICON"``).
+    The cache key is the probe spec JSON itself: it captures system, backend,
+    version, resolved per-op sources, query mode and transfer policy, so any
+    view change produces a distinct entry."""
+    key, systems_path = _probe_spec_key(database, mode_token)
+    return _probe_handle_from_key(key, systems_path)
+
+
 def _clear_probe_handle_cache() -> None:
     """Same eviction contract as the engine-step handle LRU (each handle pins
-    a Rust-side perf-DB load); called from ``clear_all_op_caches``."""
+    a Rust-side perf-DB load); called from ``clear_all_op_caches``. Advancing
+    the generation invalidates per-database probe-spec memos too, so the next
+    fetch re-resolves sources (and the SOL-mode decision) from disk."""
+    global _PROBE_CACHE_GENERATION
+    _PROBE_CACHE_GENERATION += 1
     _PROBE_HANDLE_CACHE.clear()
 
 

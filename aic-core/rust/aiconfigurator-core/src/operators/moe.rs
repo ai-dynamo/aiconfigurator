@@ -52,7 +52,7 @@ use std::sync::Arc;
 /// `(memory, compute)` profile. Mirrors `_MOE_QUANT_UTIL_LEVEL`
 /// (`operations/moe.py:87-97`); consumed ONLY by the cross-profile tier,
 /// and only as the ratio `e(query)/e(ref)`.
-const MOE_QUANT_UTIL_LEVEL: &[(f64, f64, f64)] = &[
+pub(crate) const MOE_QUANT_UTIL_LEVEL: &[(f64, f64, f64)] = &[
     (2.0, 1.0, 0.53),    // w16a16 / bfloat16              [data]
     (1.0, 1.0, 0.45),    // w8a16                          [inferred]
     (0.5625, 1.0, 0.07), // w4a16+scales / nvfp4_wo (Marlin FP4) [copies measured (0.5,1)]
@@ -225,6 +225,20 @@ pub struct MoeOp {
 }
 
 impl MoeOp {
+    /// Python `MoE` weights × scale_factor: 3 GEMMs gated (gate/up/down),
+    /// 2 non-gated, with Python's float floor-division chain preserved
+    /// (`// moe_ep_size // moe_tp_size` — two SEQUENTIAL floors).
+    pub fn weight_bytes(&self) -> f64 {
+        let num_gemms = if self.is_gated { 3.0 } else { 2.0 };
+        let raw = f64::from(self.hidden_size)
+            * f64::from(self.inter_size)
+            * f64::from(self.num_experts)
+            * self.quant_mode.mapping().memory
+            * num_gemms;
+        let per_ep = (raw / f64::from(self.moe_ep_size)).floor();
+        (per_ep / f64::from(self.moe_tp_size)).floor() * self.scale_factor
+    }
+
     pub fn new(
         name: impl Into<String>,
         hidden_size: u32,

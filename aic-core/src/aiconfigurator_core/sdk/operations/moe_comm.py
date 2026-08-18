@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator_core.sdk import common
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
+from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -539,39 +539,17 @@ class MoEAllToAll(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads the unified moe_a2a table (new schema + legacy
-        adapters) on the three inference backends; binds ``None`` otherwise.
+        """Idempotent. Fetches the engine's unified moe_a2a table view (new
+        schema + legacy adapters, merged engine-side) on the three inference
+        backends; binds ``None`` otherwise.
         """
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             if database.backend in cls._SUPPORTED_BACKENDS:
-                system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-
-                primary = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, PerfDataFilename.moe_a2a.value
-                )
-                sources = database._build_op_sources(PerfDataFilename.moe_a2a, primary, system_data_root)
-
-                legacy_sources = {}
-                for kwarg, filename_enum in (
-                    ("legacy_normal_sources", PerfDataFilename.wideep_deepep_normal),
-                    ("legacy_ll_sources", PerfDataFilename.wideep_deepep_ll),
-                    ("legacy_trtllm_alltoall_sources", PerfDataFilename.trtllm_alltoall),
-                ):
-                    legacy_primary = resolve_op_data_path(
-                        system_data_root, database.backend, database.version, filename_enum.value
-                    )
-                    legacy_sources[kwarg] = database._build_op_sources(filename_enum, legacy_primary, system_data_root)
-
-                cls._data_cache[key] = LoadedOpData(
-                    load_moe_a2a_data(sources, **legacy_sources),
-                    PerfDataFilename.moe_a2a,
-                    primary,
-                )
+                cls._data_cache[key] = load_view(database, "_moe_a2a_data", PerfDataFilename.moe_a2a)
             else:
                 cls._data_cache[key] = None
 
@@ -589,10 +567,6 @@ class MoEAllToAll(Operation):
     # ------------------------------------------------------------------
 
     _ENGINE_QUERY_SHAPE = "tokens"
-
-    def get_weights(self, **kwargs) -> float:
-        """All-to-all communication has no weight memory."""
-        return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -926,19 +900,9 @@ class MoEExpertCompute(Operation):
         self._kernel_source = kernel_source
         self._is_gated = is_gated
         self._enable_eplb = enable_eplb
-        # 3 GEMMs for gated (gate, up, down), 2 GEMMs for non-gated (up, down).
-        # EP-only family: no moe_tp division (moe_tp == 1 by construction).
-        # Parity-pinned: sized by num_experts, NOT num_slots, matching the
-        # retired TrtLLMWideEPMoE._weights (operations/moe.py:1435 @ dc4caca)
-        # so get_weights() byte-matches the legacy classes on the shipped
-        # gb200 EPLB artifacts. Physically EPLB replicates experts across
-        # slots, so num_slots-based sizing is the correct model — tracked as
-        # AIC-1674 (intentional delta: moves the memory column on EPLB
-        # configs). The SOL roofline's num_slots weight term mirrors its own
-        # legacy twin (the retired wideep_moe.rs sol_latency_ms) — the
-        # asymmetry is inherited, not invented.
-        num_gemms = 3 if is_gated else 2
-        self._weights = hidden_size * inter_size * num_experts * quant_mode.value.memory * num_gemms // moe_ep_size
+        # Weight bytes retired to the engine (Op::weight_bytes): EP-only
+        # sizing by num_experts NOT num_slots stays parity-pinned there
+        # (AIC-1674 tracks the intentional num_slots delta).
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -950,39 +914,17 @@ class MoEExpertCompute(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads the unified moe_ep table (new schema + legacy
-        adapters) on the three inference backends; binds ``None`` otherwise.
+        """Idempotent. Fetches the engine's unified moe_ep table view (new
+        schema + legacy adapters, merged engine-side) on the three inference
+        backends; binds ``None`` otherwise.
         """
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
             if database.backend in cls._SUPPORTED_BACKENDS:
-                system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-
-                primary = resolve_op_data_path(
-                    system_data_root, database.backend, database.version, PerfDataFilename.moe_expert_compute.value
-                )
-                sources = database._build_op_sources(PerfDataFilename.moe_expert_compute, primary, system_data_root)
-
-                legacy_sources = {}
-                for kwarg, filename_enum in (
-                    ("legacy_context_sources", PerfDataFilename.wideep_context_moe),
-                    ("legacy_generation_sources", PerfDataFilename.wideep_generation_moe),
-                    ("legacy_trtllm_wideep_sources", PerfDataFilename.wideep_moe_compute),
-                ):
-                    legacy_primary = resolve_op_data_path(
-                        system_data_root, database.backend, database.version, filename_enum.value
-                    )
-                    legacy_sources[kwarg] = database._build_op_sources(filename_enum, legacy_primary, system_data_root)
-
-                cls._data_cache[key] = LoadedOpData(
-                    load_moe_expert_compute_data(sources, **legacy_sources),
-                    PerfDataFilename.moe_expert_compute,
-                    primary,
-                )
+                cls._data_cache[key] = load_view(database, "_moe_ep_data", PerfDataFilename.moe_expert_compute)
             else:
                 cls._data_cache[key] = None
 
@@ -1051,6 +993,3 @@ class MoEExpertCompute(Operation):
             op = copy.copy(self)
             op._quant_mode = quant_mode
         return op, eval_kwargs
-
-    def get_weights(self, **kwargs) -> float:
-        return self._weights * self._scale_factor

@@ -65,7 +65,7 @@ class TestTrtLLMWideEPMoEDispatch:
         assert not dispatch._use_low_precision_combine  # Default
         assert dispatch._node_num is None  # Default
         assert dispatch.num_gpus == 8  # 2 * 4
-        assert dispatch._weights == 0.0
+        assert dispatch.get_weights() == 0.0
 
     def test_initialization_post_dispatch_with_options(self):
         """Test initialization for post-dispatch phase with custom options."""

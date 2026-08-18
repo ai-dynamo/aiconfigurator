@@ -47,7 +47,14 @@ pub(crate) fn resolve_op_sources(
 ) -> Vec<PerfSource> {
     match perf_db_sources.get(basename) {
         Some(sources) if !sources.is_empty() => sources.clone(),
-        _ => {
+        // A PRESENT but EMPTY list is a deliberate statement from
+        // `_build_op_sources`: the primary was vetoed (legacy INCOMPLETE.txt)
+        // and no donor was admissible — load NO sources. Falling back to the
+        // primary here would silently undo the veto.
+        Some(_) => Vec::new(),
+        // An ABSENT basename means the caller passed no source map at all
+        // (legacy single-data_root loads): default-primary behavior.
+        None => {
             let legacy = data_root.join(basename);
             let path = if legacy.is_file() {
                 legacy
@@ -85,9 +92,25 @@ fn shared_tables_key(
     key
 }
 
+/// Whether a version dir is excluded from data loading wholesale: a legacy
+/// `INCOMPLETE.txt` marker with NO structured `collection_meta.yaml` sidecar.
+/// Mirrors the CANONICAL `operations/base.py::_version_dir_is_unusable`
+/// (a structured sidecar supersedes a stale legacy marker; `status: partial`
+/// validation is the Python admission layer's job, not this existence check).
+pub(crate) fn version_dir_is_unusable(version_dir: &Path) -> bool {
+    if version_dir.join("collection_meta.yaml").is_file() {
+        return false;
+    }
+    version_dir.join("INCOMPLETE.txt").is_file()
+}
+
 /// Scan family-first sibling dirs for `<family>/<backend>/<version>/<basename>`,
 /// where `<data_dir>` (the family dirs' parent) and `<backend>/<version>` are
-/// derived from `data_root` (`<data_dir>/<backend>/<version>`).
+/// derived from `data_root` (`<data_dir>/<backend>/<version>`). Mirrors
+/// `operations/base.py::resolve_op_data_path`'s family walk: dot-dirs are
+/// skipped and a version dir carrying the legacy INCOMPLETE veto is never
+/// admitted (the legacy `<backend>/<version>` fallback stays UNvetoed there,
+/// so callers falling back to `data_root` keep that behavior).
 pub(crate) fn find_in_family_dirs(data_root: &Path, basename: &str) -> Option<PathBuf> {
     let version = data_root.file_name()?.to_str()?;
     let backend = data_root.parent()?.file_name()?.to_str()?;
@@ -98,10 +121,14 @@ pub(crate) fn find_in_family_dirs(data_root: &Path, basename: &str) -> Option<Pa
             Some(name) => name,
             None => continue,
         };
-        if KNOWN_BACKEND_DIRS.contains(&name) {
+        if name.starts_with('.') || KNOWN_BACKEND_DIRS.contains(&name) {
             continue;
         }
-        let candidate = entry.path().join(backend).join(version).join(basename);
+        let version_dir = entry.path().join(backend).join(version);
+        if version_dir_is_unusable(&version_dir) {
+            continue;
+        }
+        let candidate = version_dir.join(basename);
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -152,7 +179,10 @@ fn comm_root(system_data_root: &Path, backend_dir: &str, version: &str) -> PathB
         .join("comm")
         .join(backend_dir)
         .join(version);
-    if family_root.is_dir() {
+    // A family dir under the legacy INCOMPLETE veto is never admitted —
+    // Python's resolve_op_data_path skipped it and fell through to the
+    // legacy layout (which _build_op_sources admission-checks separately).
+    if family_root.is_dir() && !version_dir_is_unusable(&family_root) {
         family_root
     } else {
         system_data_root.join(backend_dir).join(version)
@@ -196,6 +226,7 @@ mod moe_index;
 pub mod parquet_loader;
 pub mod perf_interp;
 pub mod state_space;
+pub mod table_view;
 pub mod trtllm_alltoall;
 pub mod wideep_mla;
 
@@ -240,6 +271,9 @@ pub struct PerfTables {
     pub wideep_mla: WideEpMlaTable,
     pub state_space: StateSpaceTable,
     pub fpm_forward: FpmForwardTable,
+    /// The Python-provided shared-layer source map, retained so the table
+    /// views (`table_view.rs`) can resolve any basename on demand.
+    pub perf_db_sources: PerfDbSources,
 }
 
 /// Modular performance database for a specific
@@ -457,6 +491,10 @@ impl PerfDatabase {
             // valid only for its exact backend/version (fpm_forward.rs).
             fpm_forward: FpmForwardTable::new(data_root.clone(), system, backend, version),
             system_spec: spec,
+            // Kept for the table-view folds (`table_view.rs`), which resolve
+            // every basename themselves — including the wideep/deepep files
+            // no query table loads.
+            perf_db_sources: perf_db_sources.clone(),
             data_root,
         };
         Ok(Self::from_tables(Arc::new(tables)))

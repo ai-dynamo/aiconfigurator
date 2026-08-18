@@ -443,13 +443,13 @@ impl MoeExpertComputeTable {
 /// `kernel_source` every legacy sglang wideep row is pinned to
 /// (`_adapt_legacy_sglang_wideep_moe`; spec §4.2 — the legacy column spells
 /// it `deepepmoe` and is never read).
-const SGLANG_ADAPTED_KERNEL_SOURCE: &str = "deepep_moe";
+pub(crate) const SGLANG_ADAPTED_KERNEL_SOURCE: &str = "deepep_moe";
 
 /// `kernel_source` Python assumes when the legacy trtllm wideep file has no
 /// such COLUMN (`row.get("kernel_source", "moe_torch_flow")`). A column that
 /// exists with a NULL cell is a different case — see
 /// [`adapt_legacy_trtllm_wideep_moe`].
-const LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE: &str = "moe_torch_flow";
+pub(crate) const LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE: &str = "moe_torch_flow";
 
 /// `num_gemms` in the roofline SOL follows `is_gated` (3 gated / 2
 /// non-gated), mirroring the Python SOL and the legacy oracle

@@ -560,7 +560,7 @@ fn load_mamba2_parquet(sources: &[PerfSource]) -> Result<Mamba2Grids, AicError> 
 /// canonical modeling identity; normalize the LOOKUP key here (mirrors
 /// Python `_GDN_DECODE_RECURRENCE_ALIASES`) — the parquet keeps the
 /// executed-kernel truth.
-fn normalize_gdn_kernel_source(kernel_source: String) -> String {
+pub(crate) fn normalize_gdn_kernel_source(kernel_source: String) -> String {
     match kernel_source.as_str() {
         "fused_recurrent_gated_delta_rule" | "fused_recurrent_gated_delta_rule_packed_decode" => {
             "fused_sigmoid_gating_delta_rule_update".to_string()

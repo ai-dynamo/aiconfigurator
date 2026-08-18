@@ -394,6 +394,21 @@ impl MoeTable {
 /// `load_moe_data` skip-on-key-conflict. Missing files are skipped (a sibling
 /// declared in the manifest need not exist for every system); an error is
 /// returned only when no source yields rows.
+/// Kernel-routed quant remaps (Python `load_moe_data`'s two rules) — the
+/// single home shared by the query loader and the table view, so the next
+/// per-GPU-generation mxfp4-style remap lands once:
+/// - Blackwell trtllm-gen MXFP4xMXFP8 rows get their dedicated quant mode;
+/// - Hopper flashinfer-cutlass SM90 mixed-GEMM rows likewise.
+pub(crate) fn moe_kernel_quant_rewrite(raw_quant: String, kernel_source: &str) -> String {
+    match (raw_quant.as_str(), kernel_source) {
+        ("w4a8_mxfp4_mxfp8", "sglang_mxfp4_flashinfer_trtllm_moe") => {
+            "w4a8_mxfp4_mxfp8_trtllm".to_string()
+        }
+        ("w4a16_mxfp4", "sglang_flashinfer_cutlass_moe") => "w4a16_mxfp4_cutlass".to_string(),
+        _ => raw_quant,
+    }
+}
+
 fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> {
     let mut default_index: MoeIndex<MoeShapeKey, BTreeMap<u32, LeafValue>> = MoeIndex::default();
     let mut low_latency_index: MoeIndex<MoeShapeKey, BTreeMap<u32, LeafValue>> =
@@ -442,16 +457,7 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> 
             //  - Hopper flashinfer cutlass SM90 mixed-GEMM:
             //    w4a16_mxfp4 + sglang_flashinfer_cutlass_moe
             //      -> w4a16_mxfp4_cutlass
-            let raw_quant = row.str_owned(moe_dtype_col)?;
-            let quant = match (raw_quant.as_str(), kernel_source.as_str()) {
-                ("w4a8_mxfp4_mxfp8", "sglang_mxfp4_flashinfer_trtllm_moe") => {
-                    "w4a8_mxfp4_mxfp8_trtllm".to_string()
-                }
-                ("w4a16_mxfp4", "sglang_flashinfer_cutlass_moe") => {
-                    "w4a16_mxfp4_cutlass".to_string()
-                }
-                _ => raw_quant,
-            };
+            let quant = moe_kernel_quant_rewrite(row.str_owned(moe_dtype_col)?, &kernel_source);
             let distribution = row.str_owned(distribution_col)?;
             let shape = MoeShapeKey {
                 topk: row.u32(topk_col)?,

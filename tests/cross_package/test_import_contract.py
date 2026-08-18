@@ -25,6 +25,7 @@ CORE_SDK_LEAF_MODULES = [
     "config",
     "config_builders",
     "engine",
+    "engine_table_view",
     "errors",
     "inference_summary",
     "memory",

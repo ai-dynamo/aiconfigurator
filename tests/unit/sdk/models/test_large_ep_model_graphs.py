@@ -588,7 +588,12 @@ class TestDeepSeekV32LargeEP:
         generation = _op(model.generation_ops, "generation_attention")
         # q/kv/indexer are BF16 while o_proj is NVFP4: 13.15 GiB over 61 layers.
         assert context.get_weights() / (1 << 30) == pytest.approx(13.15, abs=0.1)
-        assert generation._weights == context._weights
+        # Same per-layer weight physics on both phases; get_weights() folds in
+        # the phase scale (generation carries the 0.9 PDL factor), so compare
+        # scale-normalized values.
+        assert generation.get_weights() / generation._scale_factor == pytest.approx(
+            context.get_weights() / context._scale_factor
+        )
 
     def test_trtllm_validation_applies(self):
         with pytest.raises(ValueError, match="must equal"):
@@ -626,7 +631,8 @@ class TestGLMSharedExpertQuantMode:
         model = self._build("trtllm", TRTLLM_COMM)
         gate_up = _op(model.context_ops, "context_shared_gate_up_gemm")
         assert gate_up._quant_mode is common.GEMMQuantMode.bfloat16
-        assert gate_up._weights == self.LEGACY_BF16_GATE_UP_WEIGHTS
+        # Engine-computed weights (PR-6): normalize out the layer scale.
+        assert gate_up.get_weights() / gate_up._scale_factor == self.LEGACY_BF16_GATE_UP_WEIGHTS
         assert _op(model.context_ops, "context_shared_ffn2_gemm")._quant_mode is common.GEMMQuantMode.bfloat16
         # The routed experts stay on the model-wide MoE mode.
         assert _op(model.context_ops, "context_moe")._quant_mode is common.MoEQuantMode.nvfp4
@@ -635,7 +641,7 @@ class TestGLMSharedExpertQuantMode:
         model = self._build("sglang", SGLANG_COMM)
         gate_up = _op(model.context_ops, "context_gate_ffn1_gemm")
         assert gate_up._quant_mode is common.GEMMQuantMode.nvfp4
-        assert gate_up._weights == self.LEGACY_NVFP4_GATE_UP_WEIGHTS
+        assert gate_up.get_weights() / gate_up._scale_factor == self.LEGACY_NVFP4_GATE_UP_WEIGHTS
 
 
 # ---------------------------------------------------------------------------

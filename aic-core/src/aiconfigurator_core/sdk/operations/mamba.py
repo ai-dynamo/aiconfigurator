@@ -24,11 +24,10 @@ config tuples (``(d_model, d_state, ...)``) rather than dense
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator_core.sdk import common
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
+from aiconfigurator_core.sdk.operations.base import Operation
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
@@ -90,7 +89,6 @@ class Mamba2Kernel(Operation):
         self._d_conv = d_conv
         self._n_groups = n_groups
         self._chunk_size = chunk_size
-        self._weights = 0.0
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -102,21 +100,15 @@ class Mamba2Kernel(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads the packaged mamba2_perf Parquet perf table and binds
+        """Idempotent. Fetches the engine's mamba2_perf table view and binds
         ``database._mamba2_data``. No extrapolation (data is keyed by
         structural config tuples, not a dense grid)."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.mamba2.value
-            )
-            sources = database._build_op_sources(PerfDataFilename.mamba2, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(load_mamba2_data(sources), PerfDataFilename.mamba2, primary_path)
+            cls._data_cache[key] = load_view(database, "_mamba2_data", PerfDataFilename.mamba2)
             cls._record_load()
 
         if "_mamba2_data" not in database.__dict__:
@@ -135,9 +127,6 @@ class Mamba2Kernel(Operation):
     # ------------------------------------------------------------------
 
     _ENGINE_QUERY_SHAPE = "module"
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
 
 
 class GDNKernel(Operation):
@@ -183,7 +172,6 @@ class GDNKernel(Operation):
         self._num_v_heads = num_v_heads
         self._head_v_dim = head_v_dim
         self._d_conv = d_conv
-        self._weights = 0.0
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -195,20 +183,14 @@ class GDNKernel(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads the packaged gdn_perf Parquet perf table and binds
+        """Idempotent. Fetches the engine's gdn_perf table view and binds
         ``database._gdn_data``."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.gdn.value
-            )
-            sources = database._build_op_sources(PerfDataFilename.gdn, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(load_gdn_data(sources), PerfDataFilename.gdn, primary_path)
+            cls._data_cache[key] = load_view(database, "_gdn_data", PerfDataFilename.gdn)
             cls._record_load()
 
         if "_gdn_data" not in database.__dict__:
@@ -227,9 +209,6 @@ class GDNKernel(Operation):
     # ------------------------------------------------------------------
 
     _ENGINE_QUERY_SHAPE = "module"
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
 
 
 class KDAKernel(GDNKernel):
@@ -290,81 +269,20 @@ class KDAKernel(GDNKernel):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads the packaged kda_perf Parquet perf table and binds
+        """Idempotent. Fetches the engine's kda_perf table view and binds
         ``database._kda_data``."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.kda.value
-            )
-            sources = database._build_op_sources(PerfDataFilename.kda, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(load_kda_data(sources), PerfDataFilename.kda, primary_path)
+            cls._data_cache[key] = load_view(database, "_kda_data", PerfDataFilename.kda)
             cls._record_load()
 
         if "_kda_data" not in database.__dict__:
             database._kda_data = cls._data_cache[key]
 
     _ENGINE_QUERY_SHAPE = "module"
-
-
-def load_kda_data(kda_file: str):
-    """
-    Load KDA kernel performance data from kda_perf.parquet.
-
-    Same columns as gdn_perf. Returns data[kernel_source][phase][model_key];
-    "context" and "verify" phases nest [batch_size][seq_len] (seq_len carries
-    the per-request draft-token count for verify rows); "generation" nests
-    [batch_size] only. Returns None if the file does not exist.
-    """
-    rows = _read_filtered_rows(kda_file)
-    if rows is None:
-        logger.debug(f"KDA data file {kda_file} not found.")
-        return None
-
-    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
-
-    for row in rows:
-        kernel_source = row["kernel_source"]
-        phase = row["phase"]
-        batch_size = int(row["batch_size"])
-        seq_len = int(row["seq_len"])
-        d_model = int(row["d_model"])
-        d_conv = int(row["d_conv"])
-        num_k_heads = int(row["num_k_heads"])
-        head_k_dim = int(row["head_k_dim"])
-        num_v_heads = int(row["num_v_heads"])
-        head_v_dim = int(row["head_v_dim"])
-        latency = float(row["latency"])
-        power = float(row.get("power", 0.0))
-        energy = power * latency
-
-        model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
-        entry = {"latency": latency, "power": power, "energy": energy}
-
-        by_model = data[kernel_source][phase][model_key]
-        if phase in ("context", "verify"):
-            if batch_size in by_model and seq_len in by_model[batch_size]:
-                logger.debug(f"value conflict in kda data: {kernel_source} {phase} {model_key} {batch_size} {seq_len}")
-            else:
-                by_model.setdefault(batch_size, {})[seq_len] = entry
-        else:
-            if batch_size in by_model:
-                logger.debug(f"value conflict in kda data: {kernel_source} {phase} {model_key} {batch_size}")
-            else:
-                by_model[batch_size] = entry
-
-    result = {}
-    for ks, by_phase in data.items():
-        result[ks] = {}
-        for ph, by_key in by_phase.items():
-            result[ks][ph] = dict(by_key)
-
-    return result
 
 
 class Mamba2(Operation):
@@ -542,162 +460,3 @@ class Mamba2(Operation):
 
     def get_weights(self, **kwargs):  # Mamba2 weights
         return self._weights * self._scale_factor
-
-
-# ─────────────────────────────────────────────────────────
-# Perf-table loaders (moved here from perf_database.py so each op family owns its data + parser)
-# ─────────────────────────────────────────────────────────
-
-
-def load_mamba2_data(mamba2_file: str):
-    """
-    Load Mamba2 Conv1D + SSM kernel performance data from mamba2_perf.parquet.
-
-    Table columns: framework, version, device, op_name, kernel_source, phase,
-    batch_size, seq_len, num_tokens, d_model, d_state, d_conv, nheads, head_dim,
-    n_groups, chunk_size, model_name, latency (optional: power).
-    All rows must have the same columns (context and generation both include
-    seq_len and num_tokens so columns align).
-
-    Returns:
-        dict: data[kernel_source][phase][model_key] where model_key is
-              (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size).
-              For phase "context" the leaf is [batch_size][seq_len] -> {latency, power, energy}.
-              For phase "generation" the leaf is [batch_size] -> {latency, power, energy}.
-              Returns None if file does not exist.
-    """
-    rows = _read_filtered_rows(mamba2_file)
-    if rows is None:
-        logger.debug(f"Mamba2 data file {mamba2_file} not found.")
-        return None
-
-    # data[kernel_source][phase][model_key] -> nested batch_size [seq_len] -> {latency, power, energy}
-    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
-
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (mamba2) - power will default to 0.0")
-
-    for row in rows:
-        kernel_source = row["kernel_source"]
-        phase = row["phase"]
-        batch_size = int(row["batch_size"])
-        seq_len = int(row["seq_len"])
-        d_model = int(row["d_model"])
-        d_state = int(row["d_state"])
-        d_conv = int(row["d_conv"])
-        nheads = int(row["nheads"])
-        head_dim = int(row["head_dim"])
-        n_groups = int(row["n_groups"])
-        chunk_size = int(row["chunk_size"])
-        latency = float(row["latency"])
-        power = float(row.get("power", 0.0))
-        energy = power * latency
-
-        model_key = (d_model, d_state, d_conv, nheads, head_dim, n_groups, chunk_size)
-        entry = {"latency": latency, "power": power, "energy": energy}
-
-        try:
-            if phase == "context":
-                data[kernel_source][phase][model_key][batch_size][seq_len]
-                logger.debug(
-                    f"value conflict in mamba2 data: {kernel_source} {phase} {model_key} {batch_size} {seq_len}"
-                )
-            else:
-                data[kernel_source][phase][model_key][batch_size]
-                logger.debug(f"value conflict in mamba2 data: {kernel_source} {phase} {model_key} {batch_size}")
-        except KeyError:
-            if phase == "context":
-                data[kernel_source][phase][model_key][batch_size][seq_len] = entry
-            else:
-                data[kernel_source][phase][model_key][batch_size] = entry
-
-    # Convert default dicts to regular dicts for predictable behavior; keep generation as 1D
-    result = {}
-    for ks, by_phase in data.items():
-        result[ks] = {}
-        for ph, by_key in by_phase.items():
-            result[ks][ph] = dict(by_key)
-
-    return result
-
-
-# The GDN decode-recurrence kernel name drifted across sglang releases
-# (0.5.10 recorded fused_recurrent_gated_delta_rule; 0.5.14 records the
-# executed fused_recurrent_gated_delta_rule_packed_decode). Consumers (the
-# qwen35 GDNKernel op and the Rust port) query one canonical modeling
-# identity; normalize the LOOKUP key here so every version's measured decode
-# rows are reachable. The parquet keeps the executed-kernel truth.
-_GDN_DECODE_RECURRENCE_ALIASES = {
-    "fused_recurrent_gated_delta_rule": "fused_sigmoid_gating_delta_rule_update",
-    "fused_recurrent_gated_delta_rule_packed_decode": "fused_sigmoid_gating_delta_rule_update",
-}
-
-
-def load_gdn_data(gdn_file: str):
-    """
-    Load GDN (Gated DeltaNet) kernel performance data from gdn_perf.parquet.
-
-    Table columns: framework, version, device, op_name, kernel_source, phase,
-    batch_size, seq_len, num_tokens, d_model, d_conv, num_k_heads, head_k_dim,
-    num_v_heads, head_v_dim, model_name, latency (optional: power).
-    All rows must have the same columns (context and generation both include
-    seq_len and num_tokens so columns align).
-
-    Returns:
-        dict: data[kernel_source][phase][model_key] where model_key is
-              (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv).
-              For phase "context" the leaf is [batch_size][seq_len] -> {latency, power, energy}.
-              For phase "generation" the leaf is [batch_size] -> {latency, power, energy}.
-              Returns None if file does not exist.
-    """
-    rows = _read_filtered_rows(gdn_file)
-    if rows is None:
-        logger.debug(f"GDN data file {gdn_file} not found.")
-        return None
-
-    # data[kernel_source][phase][model_key] -> nested batch_size [seq_len] -> {latency, power, energy}
-    data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
-
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (gdn) - power will default to 0.0")
-
-    for row in rows:
-        kernel_source = _GDN_DECODE_RECURRENCE_ALIASES.get(row["kernel_source"], row["kernel_source"])
-        phase = row["phase"]
-        batch_size = int(row["batch_size"])
-        seq_len = int(row["seq_len"])
-        d_model = int(row["d_model"])
-        d_conv = int(row["d_conv"])
-        num_k_heads = int(row["num_k_heads"])
-        head_k_dim = int(row["head_k_dim"])
-        num_v_heads = int(row["num_v_heads"])
-        head_v_dim = int(row["head_v_dim"])
-        latency = float(row["latency"])
-        power = float(row.get("power", 0.0))
-        energy = power * latency
-
-        model_key = (d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv)
-        entry = {"latency": latency, "power": power, "energy": energy}
-
-        by_model = data[kernel_source][phase][model_key]
-        if phase == "context":
-            if batch_size in by_model and seq_len in by_model[batch_size]:
-                logger.debug(f"value conflict in gdn data: {kernel_source} {phase} {model_key} {batch_size} {seq_len}")
-            else:
-                by_model.setdefault(batch_size, {})[seq_len] = entry
-        else:
-            if batch_size in by_model:
-                logger.debug(f"value conflict in gdn data: {kernel_source} {phase} {model_key} {batch_size}")
-            else:
-                by_model[batch_size] = entry
-
-    # Convert defaultdicts to regular dicts for predictable behavior
-    result = {}
-    for ks, by_phase in data.items():
-        result[ks] = {}
-        for ph, by_key in by_phase.items():
-            result[ks][ph] = dict(by_key)
-
-    return result

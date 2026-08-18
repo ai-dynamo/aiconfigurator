@@ -1470,24 +1470,17 @@ def get_all_databases(
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# CSV loader re-exports.
-#
-# Every ``load_*_data`` function lives in the op module that owns the
-# data it parses (lazy per-op data ownership). The re-exports below keep the previous
-# import paths working for external callers and for legacy
-# ``aiconfigurator_core.sdk.perf_database.<loader>`` patch sites in test
-# fixtures (the conftest now patches the new locations directly; these
-# survive for code outside this repo).
+# Loader disposition after PR-6: the compiled engine owns the data plane —
+# every ``PerfDatabase._<family>_data`` attribute is served by the engine
+# table view (``sdk/engine_table_view.py``) in the retired parsers' exact
+# nested shape, and NO production path parses perf files in Python anymore.
+# The gemm/attention/comm/mla/mamba parsers are deleted outright. The
+# moe/moe_comm/dsa/dsv4 parsers below survive as TEST-ONLY schema-contract
+# fixtures: the collector suite (a separate module) hand-shakes its output
+# format against them, so their removal rides with PR-7's cross-module
+# cleanup rather than this PR. The DSA model-dims constants keep their
+# legacy import path.
 # ─────────────────────────────────────────────────────────────────────────
-from aiconfigurator_core.sdk.operations.attention import (  # noqa: F401
-    load_context_attention_data,
-    load_encoder_attention_data,
-    load_generation_attention_data,
-)
-from aiconfigurator_core.sdk.operations.communication import (  # noqa: F401
-    load_custom_allreduce_data,
-    load_nccl_data,
-)
 from aiconfigurator_core.sdk.operations.dsa import (  # noqa: F401
     DEFAULT_DSA_ARCHITECTURE,
     DSA_MODEL_DIMS,
@@ -1495,33 +1488,12 @@ from aiconfigurator_core.sdk.operations.dsa import (  # noqa: F401
     load_generation_dsa_module_data,
 )
 from aiconfigurator_core.sdk.operations.dsv4 import (  # noqa: F401
-    _dsv4_normalize_dtype,
     load_context_dsv4_kind_module_data,
-    load_dsv4_megamoe_module_data,
     load_dsv4_sparse_kernel_data,
     load_generation_dsv4_kind_module_data,
     load_mhc_module_data,
 )
-from aiconfigurator_core.sdk.operations.gemm import (  # noqa: F401
-    load_compute_scale_data,
-    load_gemm_data,
-    load_scale_matrix_data,
-)
-from aiconfigurator_core.sdk.operations.mamba import (  # noqa: F401
-    load_gdn_data,
-    load_mamba2_data,
-)
-from aiconfigurator_core.sdk.operations.mla import (  # noqa: F401
-    load_context_mla_data,
-    load_context_mla_module_data,
-    load_generation_mla_data,
-    load_generation_mla_module_data,
-    load_mla_bmm_data,
-    load_wideep_context_mla_data,
-    load_wideep_generation_mla_data,
-)
 from aiconfigurator_core.sdk.operations.moe import (  # noqa: F401
-    load_moe_data,
     load_trtllm_alltoall_data,
     load_wideep_context_moe_data,
     load_wideep_deepep_ll_data,
@@ -2120,6 +2092,9 @@ class PerfDatabase:
         # attribution — two different tables in the same source file share one
         # entry even if only one of them actually contributed rows.
         self.data_provenance: dict[str, list[dict[str, object]]] = {}
+        # (op_file_basename, sibling_path) pairs already warned about as
+        # low-fidelity cross-backend fallbacks — see _build_op_sources.
+        self._fallback_warned: set[tuple[str, str]] = set()
 
         # lazy per-op data ownership: every op class owns its CSV data and loads it on first query
         # via ``OpClass.load_data(database)``. No eager warm-up here — each op
@@ -2490,7 +2465,12 @@ class PerfDatabase:
                         "ks_filter": ks_filter,
                     }
                 )
-                if fallback_only & ks_filter:
+                if fallback_only & ks_filter and (op_file_basename, sibling_path) not in self._fallback_warned:
+                    # Once per (op file, sibling source) per database: source
+                    # resolution now reruns on every engine table-view fetch
+                    # (probe-spec keys are rebuilt each time), so an unguarded
+                    # warning would repeat per fetch.
+                    self._fallback_warned.add((op_file_basename, sibling_path))
                     logger.warning(
                         "Loading low-fidelity fallback rows for %s from %s. Queries "
                         "returning these rows are framework-implicit and may differ "

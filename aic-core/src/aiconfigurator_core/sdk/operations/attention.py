@@ -3,7 +3,7 @@
 
 """Context + Generation attention ops (ISSUE-06 / AIC-543).
 
-Both classes own their CSV-backed perf tables, SOL correction (generation
+Both classes bind the engine's table views, SOL correction (generation
 only — context attention has no SOL clamp in the legacy
 ``_correct_data``), and grid extrapolation.
 ``PerfDatabase.query_context_attention`` / ``query_generation_attention``
@@ -21,11 +21,10 @@ enable_shared_layer)``, same as GEMM (and every other migrated op).
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator_core.sdk import common
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
+from aiconfigurator_core.sdk.operations.base import Operation
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -81,7 +80,6 @@ class ContextAttention(Operation):
         """Initialize context attention query parameters."""
         super().__init__(name, scale_factor)
         self._n = n
-        self._weights = 0.0
         self._n_kv = n_kv
         self._kvcache_quant_mode = kvcache_quant_mode
         self._fmha_quant_mode = fmha_quant_mode
@@ -106,27 +104,15 @@ class ContextAttention(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads context_attention CSV into the class cache
+        """Idempotent. Fetches the engine's context_attention table view
         (raw rows) and binds ``database._context_attention_data``,
         respecting any pre-set test override."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.context_attention.value
-            )
-            sources = database._build_op_sources(PerfDataFilename.context_attention, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(
-                load_context_attention_data(sources), PerfDataFilename.context_attention, primary_path
-            )
-
-            # No load-time grid pre-expansion: queries resolve on the RAW grid via
-            # the engine's interpolation (sqrt-space blend; the truncated large-seq x large-batch
-            # corner is ordinary out-of-range util-hold).
+            cls._data_cache[key] = load_view(database, "_context_attention_data", PerfDataFilename.context_attention)
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).
@@ -146,9 +132,6 @@ class ContextAttention(Operation):
     # ------------------------------------------------------------------
 
     _ENGINE_QUERY_SHAPE = "context"
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
 
 
 class GenerationAttention(Operation):
@@ -177,7 +160,6 @@ class GenerationAttention(Operation):
         """Initialize generation attention query parameters."""
         super().__init__(name, scale_factor)
         self._n = n
-        self._weights = 0.0
         self._n_kv = n_kv
         self._kv_cache_dtype = kv_cache_dtype
         self._window_size = window_size
@@ -194,30 +176,22 @@ class GenerationAttention(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads generation_attention CSV (raw rows; no clamp,
-        no grid expansion) and binds both database views.
+        """Idempotent. Fetches the engine's generation_attention table view
+        (raw rows) and binds both database views.
 
         Mirrors ``GEMM.load_data``: loading operates on the
         canonical class-cache value (passed explicitly), then the instance
         attr is bound, respecting any pre-set test override."""
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.generation_attention.value
+            cls._data_cache[key] = load_view(
+                database, "_generation_attention_data", PerfDataFilename.generation_attention
             )
-            sources = database._build_op_sources(PerfDataFilename.generation_attention, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(
-                load_generation_attention_data(sources), PerfDataFilename.generation_attention, primary_path
-            )
-
-            # No load-time grid pre-expansion: queries resolve on the RAW table
-            # via the engine's interpolation, so the table IS the raw data (the former deepcopy
-            # for _raw_generation_attention_data is now just an alias).
+            # The raw wrapper stays a plain alias of the table (no load-time
+            # grid expansion since PR-5).
             cls._raw_data_cache[key] = cls._data_cache[key]
             cls._record_load()
 
@@ -234,7 +208,7 @@ class GenerationAttention(Operation):
     # NOTE(#1357 PR-5): the load-time SOL clamp (`_correct_sol`) retired with
     # the Python query math. The loaded table is now the RAW collected data
     # plane (enumeration/charts); the compiled engine applies the same clamp
-    # to its own load (see perf_database/gemm.rs), so QUERY values stay
+    # to its own load (see perf_database/attention.rs), so QUERY values stay
     # SOL-floored via the single oracle.
 
     # ------------------------------------------------------------------
@@ -246,9 +220,6 @@ class GenerationAttention(Operation):
     # ------------------------------------------------------------------
 
     _ENGINE_QUERY_SHAPE = "generation"
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
 
 
 class EncoderAttention(Operation):
@@ -289,7 +260,6 @@ class EncoderAttention(Operation):
         self._head_size = head_size
         self._fmha_quant_mode = fmha_quant_mode
         self._partial_rotary_factor = partial_rotary_factor
-        self._weights = 0.0
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -301,25 +271,15 @@ class EncoderAttention(Operation):
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Loads encoder_attention CSV into the class cache
+        """Idempotent. Fetches the engine's encoder_attention table view
         (raw rows), binds ``database._encoder_attention_data``.
         """
-        import os
-
-        from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
+        from aiconfigurator_core.sdk.engine_table_view import load_view
+        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
         if key not in cls._data_cache:
-            system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, PerfDataFilename.encoder_attention.value
-            )
-            sources = database._build_op_sources(PerfDataFilename.encoder_attention, primary_path, system_data_root)
-            cls._data_cache[key] = LoadedOpData(
-                load_encoder_attention_data(sources), PerfDataFilename.encoder_attention, primary_path
-            )
-
-            # No load-time grid pre-expansion: queries resolve on the RAW grid via the engine's interpolation.
+            cls._data_cache[key] = load_view(database, "_encoder_attention_data", PerfDataFilename.encoder_attention)
             cls._record_load()
 
         # Bind instance attr (respect intentional test pre-overrides).
@@ -339,252 +299,3 @@ class EncoderAttention(Operation):
     # ------------------------------------------------------------------
 
     _ENGINE_QUERY_SHAPE = "context"
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
-
-
-# ─────────────────────────────────────────────────────────
-# CSV loaders (moved here from perf_database.py so each op family owns its data + parser)
-# ─────────────────────────────────────────────────────────
-
-
-def _log_attention_row_conflict(attention_kind, key, kept_provenance, dropped_row):
-    """Warn only when two named kernel sources at the same version collapse to one key.
-
-    First-wins overlap from earlier-version or legacy reuse sources is expected and
-    remains at debug level.
-    """
-    kept_kernel_source, kept_version = kept_provenance
-    dropped_kernel_source = dropped_row.get("kernel_source")
-    dropped_version = dropped_row.get("version")
-    is_backend_collision = (
-        kept_kernel_source
-        and dropped_kernel_source
-        and kept_kernel_source != dropped_kernel_source
-        and kept_version
-        and kept_version == dropped_version
-    )
-    log = logger.warning if is_backend_collision else logger.debug
-    log(
-        f"value conflict in {attention_kind} attention data: {key} — keeping first row "
-        f"(kernel_source={kept_kernel_source}, version={kept_version}), dropping later row "
-        f"(kernel_source={dropped_kernel_source}, version={dropped_version})"
-    )
-
-
-def load_context_attention_data(context_attention_file):
-    """
-    Load the context attention data with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
-    """
-    rows = _read_filtered_rows(context_attention_file)
-    if rows is None:
-        logger.debug(f"Context attention data file {context_attention_file} not found.")
-        return None
-    context_attention_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(
-                lambda: defaultdict(
-                    lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-                )
-            )
-        )
-    )
-    context_attention_provenance = {}
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (context_attention) - power will default to 0.0")
-
-    for row in rows:
-        try:
-            window_size = row["window_size"]
-        except KeyError:  # catch potential error for backward comptability
-            window_size = 0
-        quant_mode, kv_cache_dtype, b, s, n, kv_n, head_size, latency = (
-            row["attn_dtype"],
-            row["kv_cache_dtype"],
-            row["batch_size"],
-            row["isl"],
-            row["num_heads"],
-            row["num_key_value_heads"],
-            row["head_dim"],
-            row["latency"],
-        )
-        b = int(b)
-        s = int(s)
-        n = int(n)
-        kv_n = int(kv_n)
-        head_size = int(head_size)
-        window_size = int(window_size)
-        latency = float(latency)
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds
-
-        # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads.
-        # Use kv_n = 0 to mean n_kv == n.
-        kv_n = 0 if n == kv_n else kv_n
-
-        quant_mode = common.FMHAQuantMode[quant_mode]
-        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
-        key = (quant_mode, kv_cache_dtype, kv_n, head_size, window_size, n, s, b)
-
-        try:
-            context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b]
-        except KeyError:
-            # Store all three values
-            context_attention_data[quant_mode][kv_cache_dtype][kv_n][head_size][window_size][n][s][b] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,  # NEW: precomputed energy
-            }
-            context_attention_provenance[key] = (row.get("kernel_source"), row.get("version"))
-        else:
-            _log_attention_row_conflict("context", " ".join(map(str, key)), context_attention_provenance[key], row)
-
-    return context_attention_data
-
-
-def load_generation_attention_data(generation_attention_file):
-    """
-    Load the generation attention data with power support (backward compatible).
-
-    Returns:
-        dict: Nested dict structure where leaf values are dicts with 'latency' and 'power' keys.
-    """
-    rows = _read_filtered_rows(generation_attention_file)
-    if rows is None:
-        logger.debug(f"Generation attention data file {generation_attention_file} not found.")
-        return None
-    generation_attention_data = defaultdict(
-        lambda: defaultdict(
-            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict()))))
-        )
-    )
-    generation_attention_provenance = {}
-
-    # Check if power columns exist (backward compatibility)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (generation_attention) - power will default to 0.0")
-
-    for row in rows:
-        try:
-            window_size = row["window_size"]
-        except KeyError:
-            window_size = 0
-        quant_mode, kv_cache_dtype, b, s, n, kv_n, head_size, step, latency = (  # noqa: F841
-            row["attn_dtype"],
-            row["kv_cache_dtype"],
-            row["batch_size"],
-            row["isl"],
-            row["num_heads"],
-            row["num_key_value_heads"],
-            row["head_dim"],
-            row["step"],
-            row["latency"],
-        )
-        b = int(b)
-        s = int(s)
-        n = int(n)
-        kv_n = int(kv_n)
-        head_size = int(head_size)
-        window_size = int(window_size)
-        step = int(step)
-        latency = float(latency)
-
-        # NEW: Read power with backward compatibility
-        power = float(row.get("power", 0.0))
-
-        # NEW: Calculate energy from power and latency
-        energy = power * latency  # watt-milliseconds
-
-        # we only have kv_n==n(MHA) and kv_n==1,2,4,8(XQA), interp/extrap all other num_kv_heads.
-        # Use kv_n = 0 to mean n_kv == n.
-        kv_n = 0 if n == kv_n else kv_n
-        s = s + step
-
-        kv_cache_dtype = common.KVCacheQuantMode[kv_cache_dtype]
-        key = (kv_cache_dtype, kv_n, head_size, window_size, n, b, s)
-
-        try:
-            generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s]
-        except KeyError:
-            # Store all three values
-            generation_attention_data[kv_cache_dtype][kv_n][head_size][window_size][n][b][s] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,  # NEW: precomputed energy
-            }
-            generation_attention_provenance[key] = (row.get("kernel_source"), row.get("version"))
-        else:
-            _log_attention_row_conflict(
-                "generation", " ".join(map(str, key)), generation_attention_provenance[key], row
-            )
-
-    return generation_attention_data
-
-
-def load_encoder_attention_data(encoder_attention_file):
-    """
-    Load the non-causal encoder attention data (ViT, audio encoder, etc.).
-
-    Schema is intentionally simplified vs. context attention:
-    - MHA only (n_kv == n), so no n_kv dimension
-    - No KV cache (encoder is single-pass), so no kv_cache_dtype dimension
-    - No sliding window, so no window_size dimension
-
-    Returns:
-        dict: Nested dict [fmha_quant_mode][head_size][n][s][b] -> {latency, power, energy}.
-    """
-    rows = _read_filtered_rows(encoder_attention_file)
-    if rows is None:
-        logger.debug(f"Encoder attention data file {encoder_attention_file} not found.")
-        return None
-    encoder_attention_data = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict())))
-    )
-
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if not has_power:
-        logger.debug("Legacy database format detected (encoder_attention) - power will default to 0.0")
-
-    for row in rows:
-        quant_mode, b, s, n, head_size, latency = (
-            row["attn_dtype"],
-            row["batch_size"],
-            row["isl"],
-            row["num_heads"],
-            row["head_dim"],
-            row["latency"],
-        )
-        b = int(b)
-        s = int(s)
-        n = int(n)
-        head_size = int(head_size)
-        latency = float(latency)
-
-        power = float(row.get("power", 0.0))
-        energy = power * latency
-
-        quant_mode = common.FMHAQuantMode[quant_mode]
-
-        try:
-            encoder_attention_data[quant_mode][head_size][n][s][b]
-            logger.debug(f"value conflict in encoder attention data: {quant_mode} {head_size} {n} {s} {b}")
-        except KeyError:
-            encoder_attention_data[quant_mode][head_size][n][s][b] = {
-                "latency": latency,
-                "power": power,
-                "energy": energy,
-            }
-
-    return encoder_attention_data

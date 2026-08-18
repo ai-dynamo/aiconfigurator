@@ -93,7 +93,7 @@ struct GenModuleGrids {
 /// Native-head pin for MLA module tables — byte-equal with Python's
 /// `_MLA_MODULE_NATIVE_HEADS` (operations/mla.py). Unknown models fail the
 /// load: extending the pin is part of landing new module data.
-fn mla_module_native_heads(model: &str) -> Option<u32> {
+pub(crate) fn mla_module_native_heads(model: &str) -> Option<u32> {
     match model {
         "deepseek-ai/DeepSeek-V3" => Some(128),
         // vllm 0.22.0 provenance aliases of the same 128-native geometry.

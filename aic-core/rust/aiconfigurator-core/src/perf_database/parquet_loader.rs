@@ -195,6 +195,24 @@ impl PerfRow {
         }
     }
 
+    /// Optional INT64 kept SIGNED. Returns None when the cell is missing/null
+    /// (or stored under a non-integer physical type). The table-view folds use
+    /// this to mirror Python's `int(row[...])`, which never narrowed: a
+    /// negative key cell loaded as a negative key instead of erroring.
+    pub fn i64_optional(&self, col: Option<usize>) -> Result<Option<i64>, AicError> {
+        let Some(idx) = col else {
+            return Ok(None);
+        };
+        match self.row.get_long(idx) {
+            Ok(v) => Ok(Some(v)),
+            Err(parquet::errors::ParquetError::General(_)) => Ok(None),
+            Err(source) => Err(AicError::Parquet {
+                path: self.path.clone(),
+                source,
+            }),
+        }
+    }
+
     /// INT64 → u64. Used by columns that legitimately need the full range
     /// (e.g. NCCL `message_size`).
     pub fn u64(&self, col: usize) -> Result<u64, AicError> {

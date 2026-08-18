@@ -95,16 +95,55 @@ roofline queried every op-level op in SOL — but #1461 moved that to
    per-phase `query_trtllm_alltoall`); AFD's three query points and the
    `Mamba2` composite's five legs evaluate standard twin ops through the
    single-op plumbing.
-3. **Deprecation-cleanup PR** (time-locked): drop the `"python"`
-   `engine_step_backend` value, the routing gate, and the CLI choice after
-   the one-release bake PR-3 starts — plus the PR-5 shims
-   (`PerfDatabase.query_*`, `Operation.query`, `_evaluate_single_op`'s
-   deprecation plumbing) and the `Mamba2` composite export.
+3. **PR-6 — data-plane FFI + weight physics** (independent of the
+   deprecation window; runs while the PR-5 shims bake). **DONE — this
+   PR.** The engine table view (`perf_database/table_view.rs`,
+   `AicEngine.table_view_json`) re-folds the raw parquet sources into
+   every retired Python loader's exact nested-dict shape — values, key
+   TYPES (rehydrated to enums/ints/tuples in
+   `sdk/engine_table_view.py`), insertion order, and empty subtrees —
+   and every `PerfDatabase._<family>_data` attribute now binds it, so
+   the notebook grids, support matrix, task validation gate, and every
+   other consumer kept their code unchanged. Per-op weight physics moved
+   to `Op::weight_bytes` (batch FFI `weights_ops_json`); the base
+   `Operation.get_weights` routes there and the per-class `_weights`
+   math is deleted. The `_GEMM/_MOE_QUANT_UTIL_LEVEL` dicts are
+   projections of the Rust tables. Verified by a pinned pre-deletion
+   baseline (7 databases × every table attribute + support matrices +
+   per-op weights, `tests/cross_package/test_data_plane_baseline.py`).
+   Deferred to the cleanup PR from the original cut: the Python-side shared-layer
+   source resolution (`_build_op_sources` still feeds the engine's
+   source map — moving it is orthogonal to the view work), kv-cache
+   bytes (model-level polymorphism, needs a model-geometry spec), and
+   the moe/moe_comm/dsa/dsv4 parsers, which survive as TEST-ONLY
+   schema-contract fixtures for the collector suite's format handshake
+   (no production path parses perf files in Python anymore).
+4. **Deprecation-cleanup PR — removal + pyo3 op unification**
+   (time-locked): drop the `"python"` `engine_step_backend` value, the
+   routing gate, and the CLI choice after the one-release bake PR-3 starts
+   — plus the PR-5 shims (`PerfDatabase.query_*`, `Operation.query`,
+   `_evaluate_single_op`'s deprecation plumbing) and the `Mamba2`
+   composite export. In the same PR, export the Rust op structs as Python
+   classes via pyo3 so `models/*.py` construct them directly — deleting
+   the Python `Operation` classes, the `_to_opspec` serializer branches,
+   and the two-sided `ENGINE_SPEC_SCHEMA_VERSION` sync discipline
+   (prerequisite: a pickle/transfer story for pyo3 objects across
+   `ProcessPoolExecutor`). Also collects PR-6's deferrals: the remaining
+   test-only parsers (with the collector-suite contract rewrite), the
+   Python shared-layer source resolution, and kv-bytes. The two pinned
+   migration baselines retire here with the surfaces they froze —
+   `query_shim_baseline.json` with the shims, `data_plane_baseline.json`
+   with the migration-equivalence claim (its long-term successor is the
+   synthetic-parquet behavior tests over the view path, which don't
+   depend on shipped data staying byte-stable).
 
 **Post-PR-5 invariant (the single-oracle rule):** per-op performance VALUES
 (latency, energy, SOL decomposition) are computed ONLY by the compiled
 engine (`aic-core/rust/aiconfigurator-core`). Python owns model/topology
-composition, data loading, and orchestration — never estimation math. New
+composition, model-config loading and shared-layer SOURCE SELECTION, and
+orchestration — never estimation math, and (since PR-6) never
+perf-data parsing: the engine loads and serves the performance tables,
+Python consumes them through the table-view FFI. New
 per-op access goes through the op-list FFI (`EngineHandle.evaluate_ops_json`
 / `evaluate_ops_sol_json`), the per-phase surface (`run_static_per_op`), or
 whole runs; there is no supported per-call Python query surface after the

@@ -149,8 +149,16 @@ class FallbackOp(Operation):
         return True if inferred is None else inferred
 
     def get_weights(self, **kwargs):
-        # Use primary weights if available, otherwise sum fallback weights.
-        # In practice both should be equivalent since they model the same block.
+        """Primary-wins recursion THROUGH each child's own ``get_weights``.
+
+        The base engine route would serialize the whole composite, and a
+        child whose class shields its weight behind an override (the
+        tombstoned ``MoEDispatch`` deepep flavor, ``TrtLLMWideEPMoE``'s
+        local math) has no opspec variant — the conversion would raise and
+        crash memory estimation despite the shield. Recursing in Python
+        applies every child's own route (override or engine + per-instance
+        cache); for engine-convertible children the values are identical to
+        ``Op::weight_bytes``'s Fallback arm (same primary-wins rule)."""
         primary_w = self._primary.get_weights(**kwargs)
         if primary_w > 0:
             return primary_w
@@ -217,6 +225,11 @@ class OverlapOp(Operation):
         return True if inferred is None else inferred
 
     def get_weights(self, **kwargs):
+        """Sum over both groups THROUGH each child's own ``get_weights`` —
+        see ``FallbackOp.get_weights`` for why composites must recurse in
+        Python (per-class weight shields have no opspec variant). Identical
+        values to ``Op::weight_bytes``'s Overlap arm for convertible
+        children (same group_a-then-group_b summation order)."""
         weights = 0.0
         for op in self._group_a + self._group_b:
             weights += op.get_weights(**kwargs)

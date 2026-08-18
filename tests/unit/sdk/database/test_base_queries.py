@@ -69,3 +69,50 @@ def test_fpm_forward_phase_tokens_stay_mapped():
         op = Operation("probe", 1.0)
         op._phase = phase
         assert op._engine_query_is_context({}) in (True, False)
+
+
+def test_get_weights_survives_ops_without_an_opspec_variant():
+    """The ``moe_backend='deepep_moe'`` MoEDispatch (still built by qwen35)
+    has no opspec variant — its serializer raises the AIC-1601 tombstone.
+    ``get_weights`` must stay the op's local 0.0 instead of crashing memory
+    estimation through the engine route (base ``Operation.get_weights``)."""
+    from aiconfigurator_core.sdk.operations.moe import MoEDispatch
+
+    op = MoEDispatch("d", 1.0, 7168, 8, 256, 1, 16, 1, False, moe_backend="deepep_moe")
+    assert op.get_weights() == 0.0
+
+
+def test_dsa_partial_projection_map_normalizes_and_survives_the_weight_route():
+    """A PARTIAL attn_projection_quant_modes mapping (checkpoint fact for one
+    group only) must normalize to all four groups at construction — the opspec
+    emission and the Rust DsaProjectionQuants deserialization require every
+    field."""
+    from aiconfigurator_core.sdk import common
+    from aiconfigurator_core.sdk.operations.dsa import ContextDSAModule
+
+    op = ContextDSAModule(
+        "ctx_dsa",
+        1.0,
+        64,
+        common.KVCacheQuantMode.fp8,
+        common.FMHAQuantMode.bfloat16,
+        common.GEMMQuantMode.nvfp4,
+        attn_projection_quant_modes={"o": common.GEMMQuantMode.bfloat16},
+    )
+    assert set(op._attn_projection_quant_modes) == {"q", "kv", "o", "indexer"}
+    assert op._attn_projection_quant_modes["o"] is common.GEMMQuantMode.bfloat16
+    for defaulted in ("q", "kv", "indexer"):
+        assert op._attn_projection_quant_modes[defaulted] is common.GEMMQuantMode.nvfp4
+    assert op.get_weights() > 0.0
+
+    # An unknown group name must fail loudly, not be silently dropped.
+    with pytest.raises(ValueError, match="unknown DSA projection group"):
+        ContextDSAModule(
+            "ctx_dsa",
+            1.0,
+            64,
+            common.KVCacheQuantMode.fp8,
+            common.FMHAQuantMode.bfloat16,
+            common.GEMMQuantMode.nvfp4,
+            attn_projection_quant_modes={"o_proj": common.GEMMQuantMode.bfloat16},
+        )

@@ -10,10 +10,6 @@ one adjudicated finding: B1 (DSA buckets), B2 (DSV4 arch remap), D1 (topk
 calib v1/v2 phase split), D2 (GDN decode-recurrence aliases).
 """
 
-import csv
-import os
-import tempfile
-
 import pytest
 
 from aiconfigurator.sdk import common
@@ -111,67 +107,7 @@ def test_dsv4_arch_remap_never_overrides_explicit_mode():
 # --- D2: GDN decode-recurrence kernel names alias to one modeling identity --
 
 
-def test_gdn_decode_recurrence_names_alias_to_canonical_key():
-    from aiconfigurator.sdk.operations.mamba import load_gdn_data
-
-    header = [
-        "framework",
-        "version",
-        "device",
-        "op_name",
-        "kernel_source",
-        "phase",
-        "batch_size",
-        "seq_len",
-        "num_tokens",
-        "d_model",
-        "d_conv",
-        "num_k_heads",
-        "head_k_dim",
-        "num_v_heads",
-        "head_v_dim",
-        "model_name",
-        "latency",
-    ]
-
-    def row(kernel_source, batch, latency):
-        return {
-            "framework": "SGLang",
-            "version": "0.5.14",
-            "device": "B200",
-            "op_name": "gdn",
-            "kernel_source": kernel_source,
-            "phase": "generation",
-            "batch_size": batch,
-            "seq_len": 1,
-            "num_tokens": batch,
-            "d_model": 2048,
-            "d_conv": 4,
-            "num_k_heads": 16,
-            "head_k_dim": 128,
-            "num_v_heads": 32,
-            "head_v_dim": 128,
-            "model_name": "Qwen/Qwen3.5-27B",
-            "latency": latency,
-        }
-
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "gdn_perf.txt")
-        with open(path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=header)
-            writer.writeheader()
-            # 0.5.10-era and 0.5.14 executed-kernel names for the same
-            # decode recurrence; both must land under the canonical key.
-            writer.writerow(row("fused_recurrent_gated_delta_rule", 1, 0.5))
-            writer.writerow(row("fused_recurrent_gated_delta_rule_packed_decode", 2, 0.7))
-            writer.writerow(row("fused_sigmoid_gating_delta_rule_update", 4, 0.9))
-        data = load_gdn_data(path)
-
-    assert set(data.keys()) == {"fused_sigmoid_gating_delta_rule_update"}
-    leaves = data["fused_sigmoid_gating_delta_rule_update"]["generation"][(2048, 16, 128, 32, 128, 4)]
-    assert {b: leaves[b]["latency"] for b in sorted(leaves)} == {1: 0.5, 2: 0.7, 4: 0.9}
-
-
-# --- D1 retired with #1357 PR-5: ``_build_topk_calib_from_rows`` (v1/v2 DELTA
-# pairing, native keying, no cross-variant borrowing) moved into the compiled
-# engine's loader (aic-core/rust); anchored by the frozen parity goldens.
+# test_gdn_decode_recurrence_names_alias_to_canonical_key retired with the
+# Python GDN loader (PR-6): the decode-recurrence kernel-name aliasing now
+# lives in the engine's view fold (table_view.rs::gdn_kernel_alias) and is
+# pinned by the data-plane baseline digests (gdn tables, all pins).

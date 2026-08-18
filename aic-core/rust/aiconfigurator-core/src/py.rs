@@ -650,6 +650,25 @@ impl AicEngine {
         })
         .map_err(aic_to_py)
     }
+
+    /// Engine-side table view (PR-6): the raw collected data plane for one
+    /// retired Python loader, in that loader's exact nested-dict shape.
+    ///
+    /// ``attribute`` is the PerfDatabase attribute the loader used to fill
+    /// (``"_gemm_data"``, ...; the DSV4 sparse sub-tables address as
+    /// ``"_dsv4_sparse_kernel_data.<sub>"``). Returns ``None`` exactly when
+    /// the Python loader returned ``None`` (every source file missing);
+    /// otherwise an insertion-ordered JSON object whose string keys the
+    /// Python side rehydrates into enum/int/tuple keys per family. Views are
+    /// folded fresh from the parquet sources on every call — they are the
+    /// diagnostic/enumeration surface, not the query path, and deliberately
+    /// bypass the query grids' load-time normalizations (SOL clamping etc.).
+    fn table_view_json(&self, py: Python<'_>, attribute: &str) -> PyResult<Option<String>> {
+        py.allow_threads(|| {
+            crate::perf_database::table_view::table_view_json(self.inner.database(), attribute)
+        })
+        .map_err(aic_to_py)
+    }
 }
 
 /// Convert a JSON-encoded [`EngineSpec`] into bincode bytes (Python → Rust
@@ -665,6 +684,52 @@ fn engine_spec_bincode_from_json(spec_json: &str) -> PyResult<Vec<u8>> {
     let spec: crate::engine::spec::EngineSpec = serde_json::from_str(spec_json)
         .map_err(|e| PyValueError::new_err(format!("engine spec JSON decode: {e}")))?;
     spec.to_bincode().map_err(aic_to_py)
+}
+
+/// Constant per-op weight bytes for a JSON op list (PR-6): the batch FFI
+/// behind Python's `Operation.get_weights`. Weights are structural (computed
+/// from op fields alone, never from perf tables), so this is a module-level
+/// function — no engine handle, no database. Input is the same
+/// externally-tagged `Vec<Op>` JSON `evaluate_ops_json` takes (built by
+/// `engine.build_ops_json`); output is one f64 per op, in order.
+#[pyfunction]
+fn weights_ops_json(ops_json: &str) -> PyResult<Vec<f64>> {
+    let ops: Vec<crate::operators::Op> = serde_json::from_str(ops_json)
+        .map_err(|e| PyValueError::new_err(format!("ops JSON decode: {e}")))?;
+    Ok(ops.iter().map(crate::operators::Op::weight_bytes).collect())
+}
+
+/// The GEMM per-quant achieved-util LEVEL table, `(memory, compute, level)`
+/// rows (PR-6): the single source behind Python's former
+/// `_GEMM_QUANT_UTIL_LEVEL` mirror — Python rebuilds its dict from this, so
+/// the two sides can never drift again (#1524-class sync pain).
+#[pyfunction]
+fn gemm_quant_util_levels() -> Vec<(f64, f64, f64)> {
+    crate::operators::gemm::GEMM_QUANT_UTIL_LEVEL.to_vec()
+}
+
+/// The MoE per-quant achieved-util LEVEL table — see `gemm_quant_util_levels`.
+#[pyfunction]
+fn moe_quant_util_levels() -> Vec<(f64, f64, f64)> {
+    crate::operators::moe::MOE_QUANT_UTIL_LEVEL.to_vec()
+}
+
+/// The table-view attribute registry, `(attribute, [source basenames])` rows
+/// (PR-6): the single source behind the Python side's `VIEW_KEY_LAYERS` /
+/// baseline-codec attribute inventories — a completeness test set-compares
+/// them against this export so the four formerly hand-synced sites can never
+/// drift silently again (same pattern as `gemm_quant_util_levels`).
+#[pyfunction]
+fn table_view_attributes() -> Vec<(String, Vec<String>)> {
+    crate::perf_database::table_view::TABLE_VIEW_ATTRIBUTES
+        .iter()
+        .map(|(attribute, basenames)| {
+            (
+                attribute.to_string(),
+                basenames.iter().map(|b| b.to_string()).collect(),
+            )
+        })
+        .collect()
 }
 
 /// Internal request shared by every Rust -> Python -> Rust construction path.
@@ -1247,6 +1312,10 @@ impl PyForwardPassPerfModel {
 fn _aiconfigurator_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_build_smoke, m)?)?;
     m.add_function(wrap_pyfunction!(engine_spec_bincode_from_json, m)?)?;
+    m.add_function(wrap_pyfunction!(weights_ops_json, m)?)?;
+    m.add_function(wrap_pyfunction!(gemm_quant_util_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(moe_quant_util_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(table_view_attributes, m)?)?;
     m.add_class::<AicEngine>()?;
     m.add_class::<PyForwardPassPerfModel>()?;
     Ok(())
