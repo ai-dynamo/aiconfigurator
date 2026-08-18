@@ -448,15 +448,16 @@ impl PyEmbedding {
     const _ENGINE_QUERY_SHAPE: &'static str = "tokens";
 
     #[new]
-    #[pyo3(signature = (name, scale_factor, row_size, column_size, _empirical_bw_scaling_factor=0.3, *, seq_split=1))]
+    #[pyo3(signature = (name, scale_factor, row_size, column_size, empirical_bw_scaling_factor=0.3, *, seq_split=1))]
     fn new(
         name: String,
         scale_factor: f64,
         row_size: u32,
         column_size: u32,
-        _empirical_bw_scaling_factor: f64,
+        empirical_bw_scaling_factor: f64,
         seq_split: u32,
     ) -> PyResult<(Self, PyOperation)> {
+        let _ = empirical_bw_scaling_factor;
         let inner = Op::Embedding(EmbeddingOp {
             name,
             scale_factor,
@@ -523,17 +524,18 @@ impl PyElementWise {
     const _ENGINE_QUERY_SHAPE: &'static str = "tokens";
 
     #[new]
-    #[pyo3(signature = (name, scale_factor, dim_in, dim_out, _empirical_bw_scaling_factor=0.8, *, seq_split=1, scale_num_tokens=1))]
+    #[pyo3(signature = (name, scale_factor, dim_in, dim_out, empirical_bw_scaling_factor=0.8, *, seq_split=1, scale_num_tokens=1))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
         scale_factor: f64,
         dim_in: u64,
         dim_out: u64,
-        _empirical_bw_scaling_factor: f64,
+        empirical_bw_scaling_factor: f64,
         seq_split: u32,
         scale_num_tokens: u32,
     ) -> PyResult<(Self, PyOperation)> {
+        let _ = empirical_bw_scaling_factor;
         let inner = Op::Elementwise(ElementwiseOp {
             name,
             scale_factor,
@@ -1763,7 +1765,7 @@ impl PyMoEDispatch {
     const _ENGINE_QUERY_SHAPE: &'static str = "tokens";
 
     #[new]
-    #[pyo3(signature = (name, scale_factor, hidden_size, topk, num_experts, moe_tp_size, moe_ep_size, attention_dp_size, pre_dispatch, _enable_fp4_all2all=true, *, backend, sms=12, moe_backend=None, is_context=true, scale_num_tokens=1, quant_mode=None, _reduce_results=true, attn_cp_size=1, attn_ar_modeled=false))]
+    #[pyo3(signature = (name, scale_factor, hidden_size, topk, num_experts, moe_tp_size, moe_ep_size, attention_dp_size, pre_dispatch, enable_fp4_all2all=true, *, backend, sms=12, moe_backend=None, is_context=true, scale_num_tokens=1, quant_mode=None, reduce_results=true, attn_cp_size=1, attn_ar_modeled=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
@@ -1775,19 +1777,21 @@ impl PyMoEDispatch {
         moe_ep_size: u32,
         attention_dp_size: u32,
         pre_dispatch: bool,
-        _enable_fp4_all2all: bool,
+        enable_fp4_all2all: bool,
         backend: String,
         sms: u32,
         moe_backend: Option<String>,
         is_context: bool,
         scale_num_tokens: u32,
         quant_mode: Option<&Bound<'_, PyAny>>,
-        _reduce_results: bool,
+        reduce_results: bool,
         attn_cp_size: u32,
         attn_ar_modeled: bool,
     ) -> PyResult<(Self, PyOperation)> {
         use crate::common::enums::BackendKind;
         use crate::operators::DispatchFlavor;
+
+        let _ = (enable_fp4_all2all, reduce_results);
 
         let backend_kind = match backend.as_str() {
             "trtllm" => BackendKind::Trtllm,
