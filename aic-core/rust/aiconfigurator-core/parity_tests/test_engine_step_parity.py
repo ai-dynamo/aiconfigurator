@@ -652,6 +652,62 @@ SMOKE_CASES = [
         ),
         id="qwen35-27b-b200-sglang-0514-lanes-trtllm-mha",
     ),
+    # AIC-1762: Qwen3.8-Max (Qwen3.5-family hybrid GDN + full-attention,
+    # 2.4T-A95B) on gb300/sglang/0.5.17 -- the first end-to-end exercise of
+    # the sparse 0.5.17 data design (moe/gdn/gemm collected; attention/comm/
+    # quantize answer through shared-layer sibling inheritance from 0.5.14,
+    # perf_database.get_database docstring). nextn: resolve_nextn_auto reads
+    # num_nextn_predict_layers from the checkpoint's flat config (no
+    # text_config nesting, common.py:716-718) and finds it absent -> 0; both
+    # cases pin nextn=0 explicitly (the case struct's own field) rather than
+    # relying silently on the dataclass default, so the "no MTP" resolution
+    # is a reviewable decision, not an omission.
+    #
+    # fp8 lane (checkpoint-native fp8_block, auto-inferred from the bundled
+    # -FP8 config's weight_block_size -- utils.py:1213-1215): tp=8 (every
+    # other smoke case's default) OOMs -- the fp8_block checkpoint is
+    # ~2.4TB of weights (1 byte/param) over 8 GPUs. tp=16 (still GDN-head-
+    # divisible: 16 % 16 == 0, 128 % 16 == 0) is the smallest power-of-two
+    # width that fits; moe_ep bumped to 16 to keep tp*dp*cp == moe_tp*moe_ep.
+    # "agg-flavored": bumps agg_batch_size well past the trivial default (2)
+    # so the IFB batch dimension is genuinely exercised at this model's scale.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3.8-2.4T-A95B-FP8",
+            system_name="gb300",
+            backend_name="sglang",
+            backend_version="0.5.17",
+            tp_size=16,
+            moe_tp_size=1,
+            moe_ep_size=16,
+            agg_batch_size=32,
+            nextn=0,
+        ),
+        id="qwen38-max-gb300-sglang-0517-fp8-agg",
+    ),
+    # nvfp4 lane: the bf16 base checkpoint (no quantization_config) forced
+    # onto nvfp4 MoE via the explicit override -- same pattern as the
+    # existing xquant/xprofile HYBRID_CASES below (moe_quant_mode is the
+    # only quant knob the case struct exposes; gemm/attention/kv stay at
+    # their checkpoint-inferred default, bfloat16 here). nvfp4's 0.5625
+    # bytes/param (vs fp8_block's 1) is small enough that the default tp=8
+    # fits without adjustment. "disagg-flavored": bumps the disagg worker/
+    # batch knobs past their trivial defaults (1 prefill worker, 4-request
+    # decode batch) for a genuine disagg-shaped profile.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3.8-2.4T-A95B",
+            system_name="gb300",
+            backend_name="sglang",
+            backend_version="0.5.17",
+            moe_quant_mode="nvfp4",
+            disagg_prefill_num_workers=2,
+            disagg_decode_batch_size=8,
+            disagg_decode_num_workers=2,
+            nextn=0,
+        ),
+        id="qwen38-max-gb300-sglang-0517-nvfp4-disagg",
+    ),
 ]
 
 PARITY_RTOL = 0.01
