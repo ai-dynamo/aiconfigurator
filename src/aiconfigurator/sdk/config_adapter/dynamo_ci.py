@@ -141,7 +141,7 @@ def _worker(
     config: Mapping[str, Any],
     resources: Mapping[str, Any],
     concurrency: int,
-    prefill_batch_override: int | None,
+    batch_override: int | None,
     assumptions: list[str],
 ) -> WorkerSettingsV1:
     nodes = _positive_int(resources.get(f"{role}_nodes"), f"resources.{role}_nodes")
@@ -196,9 +196,12 @@ def _worker(
     moe_tp = width_without_pp // moe_ep
 
     if role == "prefill":
-        batch_size = prefill_batch_override or 1
-        if prefill_batch_override is None:
+        batch_size = batch_override or 1
+        if batch_override is None:
             assumptions.append("dynamo-ci disaggregated prefill batch defaults to 1.")
+    elif batch_override is not None:
+        batch_size = batch_override
+        assumptions.append(f"dynamo-ci {role} batch size is explicitly overridden to {batch_size}.")
     else:
         denominator = replicas * attention_dp
         if concurrency % denominator:
@@ -380,7 +383,7 @@ def _request(
             config=roles["prefill"],
             resources=resources,
             concurrency=concurrency,
-            prefill_batch_override=overrides.prefill_batch_size,
+            batch_override=overrides.prefill_batch_size,
             assumptions=assumptions,
         ),
         decode=_worker(
@@ -388,7 +391,7 @@ def _request(
             config=roles["decode"],
             resources=resources,
             concurrency=concurrency,
-            prefill_batch_override=None,
+            batch_override=overrides.decode_batch_size,
             assumptions=assumptions,
         ),
     )

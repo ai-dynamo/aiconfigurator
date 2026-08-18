@@ -935,6 +935,24 @@ def test_dynamo_ci_concrete_recipe_expands_points_and_maps_topology():
     assert "must be divisible" in report.rejections[0].diagnostics[-1].message
 
 
+def test_dynamo_ci_decode_batch_override_preserves_nondivisible_concurrency():
+    recipe = _dynamo_ci_recipe()
+    recipe["benchmark"]["concurrencies"] = "10"
+
+    rejected = adapt_config(DynamoRecipeSource(recipe)).outcomes[0]
+    adapted = adapt_config(
+        DynamoRecipeSource(recipe),
+        AdapterOverrides(decode_batch_size=2),
+    ).outcomes[0]
+
+    assert rejected.status == "rejected"
+    assert "must be divisible" in rejected.diagnostics[-1].message
+    assert adapted.request is not None
+    assert adapted.request.workload.concurrency == 10
+    assert adapted.request.topology.decode.batch_size == 2
+    assert "decode batch size is explicitly overridden to 2" in adapted.request.provenance.assumptions[-1]
+
+
 def test_dynamo_ci_preserves_role_specific_memory_fractions():
     recipe = _dynamo_ci_recipe()
     recipe["backend"]["sglang_config"]["decode"]["mem-fraction-static"] = 0.8
