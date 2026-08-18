@@ -75,6 +75,7 @@ fn perf_err(msg: String) -> AicError {
 ///   duplicate_declared    args = [table, from_version, system_data_root]  (DEBUG)
 ///   unparseable_sibling   args = [system_data_root, backend, version]
 ///   low_fidelity          args = [op_file_basename, sibling_path]
+///   strict_provenance     args = [dedupe_kind, dedupe_key, message]
 #[derive(Clone, Debug, Serialize)]
 pub struct ResolverWarning {
     pub kind: &'static str,
@@ -164,6 +165,163 @@ fn load_yaml_mapping(path: &Path, label: &str) -> Result<serde_yaml::Mapping, Ai
             yaml_type_name(&other)
         ))),
     }
+}
+
+fn record_strict_provenance_warning(
+    warnings: &mut Vec<ResolverWarning>,
+    kind: &str,
+    key: &Path,
+    message: String,
+) {
+    warnings.push(warn(
+        "strict_provenance",
+        vec![kind.to_string(), key.display().to_string(), message],
+    ));
+}
+
+fn version_dir_data_stems(version_path: &Path) -> std::io::Result<BTreeSet<String>> {
+    let entries = match std::fs::read_dir(version_path) {
+        Ok(entries) => entries,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(BTreeSet::new())
+        }
+        Err(error) => return Err(error),
+    };
+    let mut stems = BTreeSet::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.')
+            || matches!(
+                name.as_ref(),
+                REUSE_YAML_MARKER
+                    | COLLECTION_META_MARKER
+                    | INCOMPLETE_MARKER
+                    | SHARED_LAYER_REUSE_MARKER
+            )
+            || !entry.path().is_file()
+        {
+            continue;
+        }
+        if let Some(stem) = entry.path().file_stem() {
+            stems.insert(stem.to_string_lossy().into_owned());
+        }
+    }
+    Ok(stems)
+}
+
+/// Enforce Collector V3 sidecar coverage at native admission time. Primary
+/// directories check every real data table; declared donors check the one
+/// table being admitted. Callers exclude legacy-layout directories.
+fn check_strict_provenance_coverage(
+    version_path: &Path,
+    strict: bool,
+    only_table: Option<&str>,
+    warnings: &mut Vec<ResolverWarning>,
+) -> Result<(), AicError> {
+    let stems = match only_table {
+        Some(table) => BTreeSet::from([table.to_string()]),
+        None => match version_dir_data_stems(version_path) {
+            Ok(stems) => stems,
+            Err(error) => {
+                let message = format!(
+                    "{}: cannot inspect perf-data files ({error}); strict provenance cannot verify \
+                     sidecar coverage (Collector V3 design §5/§7.4)",
+                    version_path.display()
+                );
+                if strict {
+                    return Err(perf_err(message));
+                }
+                record_strict_provenance_warning(
+                    warnings,
+                    "unreadable-version-dir",
+                    version_path,
+                    message,
+                );
+                return Ok(());
+            }
+        },
+    };
+    if stems.is_empty() {
+        return Ok(());
+    }
+
+    let meta_path = version_path.join(COLLECTION_META_MARKER);
+    if !meta_path.is_file() {
+        let tables: Vec<&String> = stems.iter().collect();
+        let message = format!(
+            "{}: holds table(s) {tables:?} with no collection_meta.yaml sidecar \
+             (Collector V3 design §5/§7.4)",
+            version_path.display()
+        );
+        if strict {
+            return Err(perf_err(message));
+        }
+        record_strict_provenance_warning(warnings, "missing-sidecar", version_path, message);
+        return Ok(());
+    }
+
+    let meta = match load_yaml_mapping(&meta_path, "collection_meta.yaml") {
+        Ok(meta) => meta,
+        Err(error) => {
+            if strict {
+                return Err(error);
+            }
+            record_strict_provenance_warning(
+                warnings,
+                "malformed-sidecar",
+                &meta_path,
+                error.to_string(),
+            );
+            return Ok(());
+        }
+    };
+    let covered: BTreeSet<String> = match meta.get(serde_yaml::Value::String("tables".to_string())) {
+        Some(serde_yaml::Value::Mapping(tables)) => tables
+            .keys()
+            .filter_map(|key| match key {
+                serde_yaml::Value::String(name) => Some(name.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => BTreeSet::new(),
+    };
+    let uncovered: BTreeSet<String> = stems.difference(&covered).cloned().collect();
+    if uncovered.is_empty() {
+        return Ok(());
+    }
+
+    let tables: Vec<&String> = uncovered.iter().collect();
+    let legacy = matches!(
+        meta.get(serde_yaml::Value::String("provenance".to_string())),
+        Some(serde_yaml::Value::String(value)) if value == "legacy"
+    );
+    if legacy {
+        let message = format!(
+            "{}: provenance: legacy sidecar does not list table(s) {tables:?}; \
+             graced for one release (Collector V3 design §5)",
+            meta_path.display()
+        );
+        record_strict_provenance_warning(warnings, "legacy-uncovered", &meta_path, message);
+        return Ok(());
+    }
+
+    let message = format!(
+        "{}: table(s) {tables:?} not covered by collection_meta.yaml 'tables' entries \
+         (Collector V3 design §5/§7.4)",
+        meta_path.display()
+    );
+    if strict {
+        return Err(perf_err(message));
+    }
+    record_strict_provenance_warning(warnings, "uncovered-table", &meta_path, message);
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -681,14 +839,21 @@ pub fn resolve_one(
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_default();
-    if primary_path.is_file()
+    let primary_is_file = primary_path.is_file();
+    let primary_unusable = primary_is_file
         && version_dir_unusable_for_request(
             &primary_version_dir,
             &ctx.system_data_root,
             ctx.strict,
             &mut warnings,
-        )?
+        )?;
+    if primary_is_file
+        && !primary_unusable
+        && op_file_family_from_path(&primary_path, &ctx.system_data_root).is_some()
     {
+        check_strict_provenance_coverage(&primary_version_dir, ctx.strict, None, &mut warnings)?;
+    }
+    if primary_unusable {
         // Only the unstructured legacy marker is a whole-directory veto.
         warnings.push(warn(
             "primary_veto",
@@ -761,6 +926,14 @@ pub fn resolve_one(
         let donor_dir = donor_path.parent().map(Path::to_path_buf).unwrap_or_default();
         if version_dir_unusable_for_request(&donor_dir, &ctx.system_data_root, ctx.strict, &mut warnings)? {
             continue;
+        }
+        if op_file_family_from_path(&donor_path, &ctx.system_data_root).is_some() {
+            check_strict_provenance_coverage(
+                &donor_dir,
+                ctx.strict,
+                Some(&reuse_entry.table),
+                &mut warnings,
+            )?;
         }
         records.push((
             reuse_entry.from_version.clone(),
@@ -1144,6 +1317,10 @@ mod tests {
         let data = root.join("data");
         write(&data.join("gemm/trtllm/1.0.0/gemm_perf.parquet"), "stub");
         write(
+            &data.join("gemm/trtllm/1.0.0/collection_meta.yaml"),
+            "schema_version: 1\ntables:\n  gemm_perf: {status: complete}\n",
+        );
+        write(
             &data.join("gemm/trtllm/1.0.0/reuse.yaml"),
             "reuse:\n  - table: gemm_perf\n",
         );
@@ -1162,6 +1339,80 @@ mod tests {
             .warnings
             .iter()
             .any(|w| w.kind == "malformed_sidecar" || w.kind == "malformed_reuse"));
+    }
+
+    #[test]
+    fn strict_primary_missing_sidecar_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(&root.join("data/gemm/trtllm/1.0.0/gemm_perf.parquet"), "stub");
+        let mut c = ctx(root, "trtllm", "1.0.0");
+        c.strict = true;
+
+        let err = resolve_one(&c, "gemm_perf.parquet", None).unwrap_err();
+        assert!(err.to_string().contains("no collection_meta.yaml"), "{err}");
+    }
+
+    #[test]
+    fn strict_primary_rejects_any_uncovered_table_in_version_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let version_dir = root.join("data/gemm/trtllm/1.0.0");
+        write(&version_dir.join("gemm_perf.parquet"), "stub");
+        write(&version_dir.join("uncovered_perf.parquet"), "stub");
+        write(
+            &version_dir.join("collection_meta.yaml"),
+            "schema_version: 1\ntables:\n  gemm_perf: {status: complete}\n",
+        );
+        let mut c = ctx(root, "trtllm", "1.0.0");
+        c.strict = true;
+
+        let err = resolve_one(&c, "gemm_perf.parquet", None).unwrap_err();
+        assert!(err.to_string().contains("uncovered_perf"), "{err}");
+    }
+
+    #[test]
+    fn strict_declared_donor_requires_coverage_for_admitted_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let requested = root.join("data/moe/trtllm/1.0.0");
+        let donor = root.join("data/moe/trtllm/0.9.0");
+        write(&requested.join("moe_perf.parquet"), "stub");
+        write(
+            &requested.join("collection_meta.yaml"),
+            "schema_version: 1\ntables:\n  moe_perf: {status: complete}\n",
+        );
+        write(
+            &requested.join("reuse.yaml"),
+            "schema_version: 1\nreuse:\n  - table: wideep_moe_perf\n    from_version: '0.9.0'\n    reason: r\n    approved_by: a\n",
+        );
+        write(&donor.join("wideep_moe_perf.parquet"), "stub");
+        write(&donor.join("collection_meta.yaml"), "schema_version: 1\ntables: {}\n");
+        let mut c = ctx(root, "trtllm", "1.0.0");
+        c.strict = true;
+
+        let err = resolve_one(&c, "wideep_moe_perf.parquet", None).unwrap_err();
+        assert!(err.to_string().contains("wideep_moe_perf"), "{err}");
+    }
+
+    #[test]
+    fn strict_legacy_provenance_graces_uncovered_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let version_dir = root.join("data/gemm/trtllm/1.0.0");
+        write(&version_dir.join("gemm_perf.parquet"), "stub");
+        write(
+            &version_dir.join("collection_meta.yaml"),
+            "schema_version: 1\nprovenance: legacy\ntables: {}\n",
+        );
+        let mut c = ctx(root, "trtllm", "1.0.0");
+        c.strict = true;
+
+        let report = resolve_one(&c, "gemm_perf.parquet", None).unwrap();
+        assert_eq!(channels(&report), ["primary"]);
+        assert!(report.warnings.iter().any(|warning| {
+            warning.kind == "strict_provenance" && warning.args[0] == "legacy-uncovered"
+        }));
     }
 
     #[test]

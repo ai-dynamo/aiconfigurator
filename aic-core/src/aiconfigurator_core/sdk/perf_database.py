@@ -2204,6 +2204,8 @@ class PerfDatabase:
                 _warn_strict_provenance_once("malformed-sidecar", args[0], args[1])
             elif kind == "malformed_reuse":
                 _warn_strict_provenance_once("malformed-reuse", args[0], args[1])
+            elif kind == "strict_provenance":
+                _warn_strict_provenance_once(args[0], args[1], args[2])
             elif kind == "duplicate_declared":
                 logger.debug(
                     "Duplicate declared-reuse entry for table %s from_version %s under %s; first occurrence wins.",
