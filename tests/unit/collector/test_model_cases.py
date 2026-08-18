@@ -1283,6 +1283,7 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("nvidia/Kimi-K2.5-NVFP4", "KimiK25ForConditionalGeneration", 64),
         ("nvidia/Kimi-K2.6-NVFP4", "KimiK25ForConditionalGeneration", 64),
         ("nvidia/Kimi-K2.7-Code-NVFP4", "KimiK25ForConditionalGeneration", 64),
+        ("moonshotai/Kimi-K3", "KimiK3ForConditionalGeneration", 96),
     }
     assert {spec.model_path for spec in wideep_specs} == {
         "deepseek-ai/DeepSeek-R1",
