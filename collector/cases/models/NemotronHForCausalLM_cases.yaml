@@ -7,6 +7,7 @@ model_path: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
 model_paths:
   - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
   - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+  - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
   - nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
   - nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16
   - nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8
@@ -110,6 +111,16 @@ model_case_values:
           allowed_modes: [nvfp4]
         vllm:
           allowed_modes: []
+    # vLLM routes Nemotron-H experts through moe_latent_size=1024.
+    - model_path: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
+      frameworks: [vllm]
+      hidden_size: 1024
+      inter_size: 2688
+      topk: 22
+      num_experts: 512
+      framework_quantization:
+        vllm:
+          allowed_modes: [fp8]
     # Ultra uses its outer hidden width in SGLang/TRT-LLM, while vLLM routes
     # experts through moe_latent_size=2048. Declare that geometry directly.
     - model_path: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16

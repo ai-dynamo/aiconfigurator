@@ -93,7 +93,9 @@ the past_kv length), not `prefix=0`.
 > *(Strategy 2026-06-11.)* An earlier strategy used the `×cp` identity
 > `mqa(isl/cp)·(cp−1)` (net `cp·mqa(isl/cp)`); under perfect `isl²` scaling
 > the two agree, but `full/cp` anchors directly on the measured full-chunk mqa
-> and is what `_query_cp` implements.
+> and is what the engine's `ContextDSAModule` CP path implements
+> (`aic-core/rust/aiconfigurator-core/src/operators/dsa.rs`; the retired
+> Python `_query_cp` was its reference).
 
 ### 3.2 topk — sub-quadratic ⇒ `full/cp`, then flat→top_last
 

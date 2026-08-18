@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -46,6 +47,8 @@ def test_release_verifier_rejects_stale_spica_archive_member(verifier, monkeypat
         "aiconfigurator/generator/api.py",
         "aiconfigurator/logging_utils.py",
         "aiconfigurator/sdk/_compat.py",
+        "aiconfigurator/sdk/config_adapter/__init__.py",
+        "aiconfigurator/sdk/config_adapter/schemas/estimate-request-v1.schema.json",
         "aiconfigurator/sdk/engine.py",
         "aiconfigurator/sdk/task_v2.py",
     }
@@ -66,3 +69,58 @@ def test_release_verifier_rejects_stale_spica_archive_member(verifier, monkeypat
 
     with pytest.raises(RuntimeError, match=r"removed Spica payload.*spica/data/model\.bin"):
         verifier.main()
+
+
+def test_infra_scan_rejects_gap_skill_tool_dataset_report_and_web_payloads(verifier):
+    names = {
+        ".agents/skills/adapt-server-config/SKILL.md",
+        "aiconfigurator/datasets/private.json",
+        "aiconfigurator/gap_analysis/pipeline.py",
+        "aiconfigurator/reports/gap.html",
+        "aiconfigurator/skills/helper.py",
+        "aiconfigurator/tools/import.py",
+        "datasets/source.csv",
+        "reports/generated.json",
+        "tools/private_helper.py",
+        "vendor/datasets/source.csv",
+        "vendor/reports/generated.json",
+        "vendor/web/dashboard.js",
+        "vendor/webapp/dashboard.js",
+        "webapp/dashboard.js",
+    }
+
+    assert verifier._infra_entries(names) == sorted(names)
+
+
+def test_config_adapter_readme_remains_repository_only(verifier):
+    upper, _ = verifier._source_payloads()
+
+    assert "aiconfigurator/sdk/config_adapter/README.md" not in upper
+    assert "aiconfigurator/sdk/config_adapter/schemas/estimate-request-v1.schema.json" in upper
+
+
+def test_rust_crate_package_rejects_upper_payload(verifier, monkeypatch):
+    result = subprocess.CompletedProcess(
+        args=["cargo"],
+        returncode=0,
+        stdout="Cargo.toml\nsrc/lib.rs\naiconfigurator/sdk/config_adapter/api.py\n",
+        stderr="",
+    )
+    monkeypatch.setattr(verifier.subprocess, "run", lambda *args, **kwargs: result)
+
+    with pytest.raises(RuntimeError, match="config_adapter"):
+        verifier._verify_rust_crate_package()
+
+
+@pytest.mark.parametrize("root", ["datasets", "reports"])
+def test_rust_crate_package_rejects_infra_roots(verifier, monkeypatch, root):
+    result = subprocess.CompletedProcess(
+        args=["cargo"],
+        returncode=0,
+        stdout=f"Cargo.toml\nsrc/lib.rs\n{root}/private.json\n",
+        stderr="",
+    )
+    monkeypatch.setattr(verifier.subprocess, "run", lambda *args, **kwargs: result)
+
+    with pytest.raises(RuntimeError, match=root):
+        verifier._verify_rust_crate_package()

@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Sanitized from the resolved Dynamo-CI RecipeDeployment nightly bundle.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: kimi-k25-agg-kv-eagle
+spec:
+  backendFramework: trtllm
+  services:
+    agg:
+      componentType: worker
+      replicas: 3
+      multinode: {nodeCount: 2}
+      resources: {limits: {gpu: "4"}}
+      extraPodSpec:
+        volumes:
+          - name: trtllm-config
+            configMap: {name: kimi-k25-agg-kv-eagle-config}
+        mainContainer:
+          volumeMounts:
+            - name: trtllm-config
+              mountPath: /config
+          command: [python3, -m, dynamo.trtllm]
+          args:
+            - --model-path
+            - nvidia/Kimi-K2.5-NVFP4
+            - --extra-engine-args
+            - /config/agg.yaml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kimi-k25-agg-kv-eagle-config
+data:
+  agg.yaml: |
+    tensor_parallel_size: 8
+    max_batch_size: 128
+    kv_cache_config:
+      dtype: fp8
+      free_gpu_memory_fraction: 0.75
+    speculative_config:
+      decoding_type: Eagle3
+      max_draft_len: 3
+      speculative_model_dir: nvidia/Kimi-K2.5-Thinking-Eagle3

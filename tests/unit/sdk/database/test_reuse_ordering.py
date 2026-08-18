@@ -29,7 +29,7 @@ import yaml
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.base import resolve_op_data_path
-from aiconfigurator.sdk.perf_database import PerfDatabase, _load_op_kernel_source_manifest_entries
+from aiconfigurator.sdk.perf_database import PerfDatabase
 
 pytestmark = pytest.mark.unit
 
@@ -77,17 +77,19 @@ def systems_root(tmp_path: Path) -> Path:
     root = tmp_path / "systems"
     root.mkdir()
     (root / "h100_sxm.yaml").write_text("data_dir: data/h100_sxm\n", encoding="utf-8")
-    _load_op_kernel_source_manifest_entries.cache_clear()
+    # (manifest parsing moved into the engine resolver — no Python cache to clear)
     return root
 
 
 def _build_db(systems_root: Path, *, backend: str, version: str, database_mode: str | None = "HYBRID") -> PerfDatabase:
+    # Synthetic source-ordering trees intentionally omit Collector V3 sidecars.
     return PerfDatabase(
         system="h100_sxm",
         backend=backend,
         version=version,
         systems_root=str(systems_root),
         database_mode=database_mode,
+        strict_provenance=False,
     )
 
 
@@ -148,6 +150,25 @@ def test_declared_reuse_channel_admits_newer_donor_in_isolation(systems_root: Pa
     assert _channels(db, "moe_perf.parquet") == ["primary", "declared_reuse"]
 
 
+def test_declared_reuse_rejects_legacy_incomplete_donor(systems_root: Path) -> None:
+    """A declared legacy-layout donor carrying INCOMPLETE.txt is unusable."""
+    backend, requested, donor = "sglang", "0.5.12", "0.5.14"
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{requested}/gemm_perf.parquet")
+    _write_yaml(
+        systems_root,
+        f"data/h100_sxm/gemm/{backend}/{requested}/reuse.yaml",
+        {"reuse": [_reuse_entry("gemm_perf", donor)]},
+    )
+    _write(systems_root, f"data/h100_sxm/{backend}/{donor}/gemm_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/{backend}/{donor}/INCOMPLETE.txt", b"partial collection\n")
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+
+    assert _channels(db, "gemm_perf.parquet") == ["primary"]
+    assert all(donor not in path for path, _ in sources)
+
+
 def test_declared_reuse_works_with_no_primary_data_at_all(systems_root: Path) -> None:
     """Mirrors the real l40s/quantize/vllm/0.22.0 case: the requested version
     dir holds ONLY a reuse.yaml, no parquet of its own."""
@@ -189,6 +210,20 @@ def test_fallback_nearest_earlier_descending_no_manifest_needed(systems_root: Pa
 
     assert _versions(db, "gemm_perf.parquet") == ["1.0.0", "0.9.0", "0.8.0"]
     assert _channels(db, "gemm_perf.parquet") == ["primary", "fallback", "fallback"]
+
+
+def test_fallback_rejects_legacy_incomplete_donor(systems_root: Path) -> None:
+    """Implicit same-backend fallback must honor the legacy whole-dir veto."""
+    backend, requested, donor = "trtllm", "1.0.0", "0.9.0"
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{requested}/gemm_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/{backend}/{donor}/gemm_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/{backend}/{donor}/INCOMPLETE.txt", b"partial collection\n")
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+
+    assert _channels(db, "gemm_perf.parquet") == ["primary"]
+    assert all(donor not in path for path, _ in sources)
 
 
 def test_fallback_excludes_newer_than_requested(systems_root: Path) -> None:
@@ -355,6 +390,107 @@ def test_full_channel_order_declared_then_fallback_nearest_then_cross_backend(sy
 # ---------------------------------------------------------------------------
 
 
+def test_cross_backend_rejects_legacy_incomplete_donor(systems_root: Path) -> None:
+    """Cross-backend fill must not admit an INCOMPLETE legacy directory."""
+    backend, requested = "trtllm", "1.0.0"
+    donor_backend, donor_version = "sglang", "0.5.14"
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{requested}/gemm_perf.parquet")
+    _write(systems_root, f"data/h100_sxm/{donor_backend}/{donor_version}/gemm_perf.parquet")
+    _write(
+        systems_root,
+        f"data/h100_sxm/{donor_backend}/{donor_version}/INCOMPLETE.txt",
+        b"partial collection\n",
+    )
+    _write_manifest(
+        systems_root,
+        [("gemm_perf.parquet", "shared_kernel", "shared", [backend, donor_backend])],
+    )
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+
+    assert _channels(db, "gemm_perf.parquet") == ["primary"]
+    assert all(donor_backend not in path for path, _ in sources)
+
+
+def test_loaded_rows_keep_primary_and_fill_only_missing_shapes(systems_root: Path) -> None:
+    """Exercise the LOADED table (the engine view): overlap is first-wins;
+    fallback fills only gaps."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
+
+    def _write_gemm_parquet(rel: str, rows: list[tuple[str, str, int, int, int, float]]) -> None:
+        path = systems_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "framework": [r[0] for r in rows],
+                    "version": [r[1] for r in rows],
+                    "device": ["h100"] * len(rows),
+                    "op_name": ["gemm"] * len(rows),
+                    "gemm_dtype": ["bfloat16"] * len(rows),
+                    "m": [r[2] for r in rows],
+                    "n": [r[3] for r in rows],
+                    "k": [r[4] for r in rows],
+                    "latency": [r[5] for r in rows],
+                }
+            ),
+            path,
+        )
+
+    # The engine view resolves through the probe handle; unlike the
+    # sources-only tests sharing this fixture, it needs the full gpu/node
+    # spec shape.
+    (systems_root / "h100_sxm.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "data_dir": "data/h100_sxm",
+                "gpu": {
+                    "sm_version": 90,
+                    "mem_bw": 4_800_000_000_000.0,
+                    "mem_bw_empirical_scaling_factor": 0.8,
+                    "mem_empirical_constant_latency": 0.000003,
+                    "bfloat16_tc_flops": 989_000_000_000_000.0,
+                    "fp8_tc_flops": 1_978_000_000_000_000.0,
+                },
+                "node": {
+                    "num_gpus_per_node": 8,
+                    "inter_node_bw": 50_000_000_000.0,
+                    "intra_node_bw": 450_000_000_000.0,
+                    "p2p_latency": 0.00001,
+                },
+                "misc": {"nccl_version": "2.26.2"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    backend, requested, donor = "trtllm", "1.0.0", "0.9.0"
+    _write_gemm_parquet(
+        f"data/h100_sxm/gemm/{backend}/{requested}/gemm_perf.parquet",
+        [("trtllm", "1.0.0", 128, 256, 512, 1.25)],
+    )
+    _write_yaml(
+        systems_root,
+        f"data/h100_sxm/gemm/{backend}/{requested}/collection_meta.yaml",
+        {"tables": {"gemm_perf": {"status": "partial"}}},
+    )
+    _write_gemm_parquet(
+        f"data/h100_sxm/gemm/{backend}/{donor}/gemm_perf.parquet",
+        [("trtllm", "0.9.0", 128, 256, 512, 9.50), ("trtllm", "0.9.0", 256, 256, 512, 2.50)],
+    )
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    loaded = fetch_table_view(db, "_gemm_data")
+
+    quant = common.GEMMQuantMode.bfloat16
+    assert loaded[quant][128][256][512]["latency"] == pytest.approx(1.25)
+    assert loaded[quant][256][256][512]["latency"] == pytest.approx(2.50)
+
+
 def test_self_overlap_declared_donor_admitted_after_primary(systems_root: Path) -> None:
     """Requested dir owns SOME shapes of gemm_perf AND declares a donor for
     the SAME table (matches data/l40s/gemm/sglang/0.5.12/reuse.yaml in the
@@ -445,37 +581,17 @@ def test_nccl_op_name_early_exit_still_applies(systems_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Partial version dirs are never admitted as the primary source.
-# resolve_op_data_path skips partial FAMILY dirs, but its final legacy-layout
-# fallback returns an existing file with no partial check — the admission
-# chokepoint (_build_op_sources) must refuse that primary itself.
+# Partial collection semantics
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("marker", ["incomplete_txt", "meta_yaml_partial"])
-def test_partial_legacy_primary_not_admitted_donors_still_fill(
-    systems_root: Path, caplog: pytest.LogCaptureFixture, marker: str
+def test_legacy_incomplete_primary_not_admitted_donors_still_fill(
+    systems_root: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A legacy-layout dir holding the requested version's table but marked
-    partial (INCOMPLETE.txt legacy marker, or collection_meta.yaml with any
-    ``status: partial`` table) must NOT be admitted as the primary source.
-    Channels 2-4 still fill, and data_provenance lists admitted sources
-    only — no primary record for the refused file."""
+    """The unstructured legacy INCOMPLETE marker remains a whole-dir veto."""
     backend, requested, earlier = "trtllm", "1.0.0", "0.9.0"
     _write(systems_root, f"data/h100_sxm/{backend}/{requested}/gemm_perf.parquet")
-    if marker == "incomplete_txt":
-        _write(systems_root, f"data/h100_sxm/{backend}/{requested}/INCOMPLETE.txt", b"partial collection\n")
-    else:
-        _write_yaml(
-            systems_root,
-            f"data/h100_sxm/{backend}/{requested}/collection_meta.yaml",
-            {
-                "schema_version": 1,
-                "runtime": {"framework": backend, "version": requested},
-                "tables": {"gemm_perf": {"status": "partial"}},
-            },
-        )
-    # A complete family-layout earlier sibling fills via channel 3 (fallback).
+    _write(systems_root, f"data/h100_sxm/{backend}/{requested}/INCOMPLETE.txt", b"partial collection\n")
     _write(systems_root, f"data/h100_sxm/gemm/{backend}/{earlier}/gemm_perf.parquet")
 
     db = _build_db(systems_root, backend=backend, version=requested)
@@ -487,17 +603,58 @@ def test_partial_legacy_primary_not_admitted_donors_still_fill(
     assert provenance[0]["version"] == earlier
     assert [path for path, _ in sources] == [e["path"] for e in provenance]
     assert not any(f"{backend}/{requested}/gemm_perf.parquet" in path for path, _ in sources)
-    assert any("partial" in r.getMessage() and requested in r.getMessage() for r in caplog.records)
+    assert any("INCOMPLETE.txt" in r.getMessage() and requested in r.getMessage() for r in caplog.records)
 
 
-def test_partial_family_dir_is_skipped_by_resolver_not_the_admission_guard(systems_root: Path) -> None:
-    """Scope guard: a family-layout primary can never be partial, because
-    resolve_op_data_path already skips partial family dirs — the admission
-    guard in _build_op_sources only ever fires for the legacy-layout
-    fallback path. Here the partial family dir is skipped upstream, so the
-    primary resolves to the (nonexistent) legacy-shaped path and keeps its
-    provenance record with exists=False, per the usual missing-primary
-    semantics."""
+def test_structured_partial_legacy_primary_is_admitted_before_fallback(systems_root: Path) -> None:
+    """Structured partial means missing coverage, not invalid successful rows."""
+    backend, requested, earlier = "trtllm", "1.0.0", "0.9.0"
+    _write(systems_root, f"data/h100_sxm/{backend}/{requested}/gemm_perf.parquet")
+    _write_yaml(
+        systems_root,
+        f"data/h100_sxm/{backend}/{requested}/collection_meta.yaml",
+        {
+            "schema_version": 1,
+            "runtime": {"framework": backend, "version": requested},
+            "tables": {"gemm_perf": {"status": "partial"}},
+        },
+    )
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{earlier}/gemm_perf.parquet")
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+
+    provenance = db.data_provenance["gemm_perf.parquet"]
+    assert [e["channel"] for e in provenance] == ["primary", "fallback"]
+    assert [e["version"] for e in provenance] == [requested, earlier]
+    assert provenance[0]["exists"] is True
+    assert [path for path, _ in sources] == [e["path"] for e in provenance]
+
+
+def test_structured_partial_family_primary_is_resolved_and_admitted(systems_root: Path) -> None:
+    """Family-layout partial data stays primary; older rows fill gaps only."""
+    backend, requested, earlier = "trtllm", "1.0.0", "0.9.0"
+    primary_rel = f"data/h100_sxm/gemm/{backend}/{requested}/gemm_perf.parquet"
+    _write(systems_root, primary_rel)
+    _write_yaml(
+        systems_root,
+        f"data/h100_sxm/gemm/{backend}/{requested}/collection_meta.yaml",
+        {"tables": {"gemm_perf": {"status": "partial"}}},
+    )
+    _write(systems_root, f"data/h100_sxm/gemm/{backend}/{earlier}/gemm_perf.parquet")
+
+    db = _build_db(systems_root, backend=backend, version=requested)
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+
+    provenance = db.data_provenance["gemm_perf.parquet"]
+    assert [e["channel"] for e in provenance] == ["primary", "fallback"]
+    assert provenance[0]["path"] == str(systems_root / primary_rel)
+    assert provenance[0]["exists"] is True
+    assert [path for path, _ in sources] == [e["path"] for e in provenance]
+
+
+def test_legacy_incomplete_family_dir_is_skipped_by_resolver(systems_root: Path) -> None:
+    """Legacy INCOMPLETE still skips the family path because it has no coverage detail."""
     backend, requested, earlier = "trtllm", "1.0.0", "0.9.0"
     _write(systems_root, f"data/h100_sxm/gemm/{backend}/{requested}/gemm_perf.parquet")
     _write(systems_root, f"data/h100_sxm/gemm/{backend}/{requested}/INCOMPLETE.txt", b"partial collection\n")
@@ -508,7 +665,7 @@ def test_partial_family_dir_is_skipped_by_resolver_not_the_admission_guard(syste
 
     provenance = db.data_provenance["gemm_perf.parquet"]
     assert [e["channel"] for e in provenance] == ["primary", "fallback"]
-    assert provenance[0]["exists"] is False  # legacy-shaped path, not the partial family file
+    assert provenance[0]["exists"] is False
     assert f"gemm/{backend}/{requested}" not in provenance[0]["path"]
     assert provenance[1]["version"] == earlier
     assert [path for path, _ in sources] == [e["path"] for e in provenance]
@@ -557,3 +714,66 @@ def test_data_provenance_populated_per_op_file(systems_root: Path) -> None:
     _sources_for(db, systems_root, common.PerfDataFilename.moe)
 
     assert set(db.data_provenance.keys()) == {"gemm_perf.parquet", "moe_perf.parquet"}
+
+
+def test_vetoed_primary_with_no_donor_loads_nothing_through_the_engine_view(systems_root: Path) -> None:
+    """An explicitly EMPTY source list must stay empty end to end (review
+    #1555 P1): a legacy INCOMPLETE.txt vetoes the primary, no donor is
+    admissible, ``_build_op_sources`` returns ``[]`` — and the engine view
+    must NOT fall back to re-resolving the vetoed primary file."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
+
+    (systems_root / "h100_sxm.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "data_dir": "data/h100_sxm",
+                "gpu": {
+                    "sm_version": 90,
+                    "mem_bw": 4_800_000_000_000.0,
+                    "mem_bw_empirical_scaling_factor": 0.8,
+                    "mem_empirical_constant_latency": 0.000003,
+                    "bfloat16_tc_flops": 989_000_000_000_000.0,
+                    "fp8_tc_flops": 1_978_000_000_000_000.0,
+                },
+                "node": {
+                    "num_gpus_per_node": 8,
+                    "inter_node_bw": 50_000_000_000.0,
+                    "intra_node_bw": 450_000_000_000.0,
+                    "p2p_latency": 0.00001,
+                },
+                "misc": {"nccl_version": "2.26.2"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Legacy layout: the primary carries rows AND a legacy INCOMPLETE.txt
+    # (whole-dir veto, no collection_meta.yaml); no sibling/donor exists.
+    version_dir = systems_root / "data" / "h100_sxm" / "trtllm" / "1.0.0"
+    version_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "framework": ["trtllm"],
+                "version": ["1.0.0"],
+                "device": ["h100"],
+                "op_name": ["gemm"],
+                "gemm_dtype": ["bfloat16"],
+                "m": [128],
+                "n": [256],
+                "k": [512],
+                "latency": [7.25],
+            }
+        ),
+        version_dir / "gemm_perf.parquet",
+    )
+    (version_dir / "INCOMPLETE.txt").write_text("partial collection\n")
+
+    db = _build_db(systems_root, backend="trtllm", version="1.0.0")
+    sources = _sources_for(db, systems_root, common.PerfDataFilename.gemm)
+    assert sources == [], "the veto must yield an explicitly empty source list"
+
+    view = fetch_table_view(db, "_gemm_data")
+    assert view is None or not view, f"the vetoed primary leaked into the engine view: {view!r}"

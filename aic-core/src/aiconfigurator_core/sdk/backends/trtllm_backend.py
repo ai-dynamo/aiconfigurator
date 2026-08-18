@@ -78,7 +78,9 @@ class TRTLLMBackend(BaseBackend):
     def get_kv_cache_memory_check_params(self) -> tuple[float, float]:
         return KV_CACHE_MEMORY_RESERVED_FRACTION, KV_CACHE_MEMORY_TOLERANCE
 
-    def _resolve_agg_kwargs(self, kwargs: dict, isl: int, osl: int) -> dict:
+    def _resolve_agg_kwargs(self, kwargs: dict, isl: int, osl: int, backend_version: str | None = None) -> dict:
+        # backend_version is unused: TRT-LLM's fraction default is not
+        # version-dependent.
         # Use ``if x is None`` (rather than kwargs.get default) so that an
         # explicit None from the Python API still falls back to the constant.
         max_seq_len = kwargs.get("max_seq_len")
@@ -108,7 +110,6 @@ class TRTLLMBackend(BaseBackend):
         osl: int,
         b: int,
         ctx_tokens: int,
-        engine_step_backend_key: str,
         agg_extra: dict,
     ) -> tuple:
         return (
@@ -116,15 +117,21 @@ class TRTLLMBackend(BaseBackend):
             osl,
             b,
             ctx_tokens,
-            engine_step_backend_key,
             agg_extra["max_seq_len"],
             agg_extra["max_num_tokens"],
             agg_extra["free_gpu_memory_fraction"],
         )
 
-    def _memory_usage_kwargs_for_agg(self, num_tokens: int, agg_extra: dict) -> dict:
+    def _memory_usage_kwargs_for_agg(
+        self, num_tokens: int, agg_extra: dict, mtp_scaled_tokens: int | None = None
+    ) -> dict:
         # Activation memory tracks BuildConfig.max_num_tokens, not the agg-derived
-        # num_tokens. KV cache tracks max_seq_len per slot.
+        # num_tokens. KV cache tracks max_seq_len per slot. mtp_scaled_tokens is
+        # intentionally dropped (None), which RETAINS the legacy full (nextn+1)
+        # multiplier on this path: max_num_tokens is a per-iteration budget, and
+        # whether the decode-share correction applies to a budget-based footprint
+        # needs its own analysis (compare the AIC-1110 suppression on the
+        # KV-capacity path, which treats the budget as already draft-inclusive).
         return {
             "num_tokens": agg_extra["max_num_tokens"],
             "max_seq_len": agg_extra["max_seq_len"],

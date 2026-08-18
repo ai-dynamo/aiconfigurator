@@ -520,6 +520,7 @@ class Qwen35Model(BaseModel):
                         is_context=True,
                         scale_num_tokens=tp,
                         attn_ar_modeled=True,
+                        backend=self._backend_name,
                     )
                 )
             ops_list.append(
@@ -560,6 +561,7 @@ class Qwen35Model(BaseModel):
                         moe_backend=self.config.moe_backend,
                         is_context=True,
                         attn_ar_modeled=True,
+                        backend=self._backend_name,
                     )
                 )
             if cfg.shared_expert_inter_size > 0:
@@ -792,6 +794,7 @@ class Qwen35Model(BaseModel):
                     moe_backend=self.config.moe_backend,
                     is_context=False,
                     attn_ar_modeled=True,
+                    backend=self._backend_name,
                 )
                 # sglang's pre-MLP gather completes before the dual-stream
                 # fork; vLLM's DP dispatch runs on the main stream inside it.
@@ -855,6 +858,7 @@ class Qwen35Model(BaseModel):
                         moe_backend=self.config.moe_backend,
                         is_context=False,
                         attn_ar_modeled=True,
+                        backend=self._backend_name,
                     )
                 )
         else:

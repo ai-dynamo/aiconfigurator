@@ -119,8 +119,10 @@ Loader obligations (mirroring the writer's semantics):
   generator output — the bridge (`generator/module_bridge.py`) reads named Task
   attributes and result columns only, none of which change, so generated deployment
   configs are byte-identical with the flag set or omitted.
-- While M2 (Rust) is not landed, `forward_model=fpm` forces the Python engine step:
-  `should_use_rust_engine_step` (`rust_engine_step.py:224`) returns False for FPM models.
+- (Historical) until M2 landed, `forward_model=fpm` forced the Python engine step via
+  `base_backend`'s FPM guards. M2 shipped as #1461 (`Op::FpmForward` + `fpm_sol.rs`), and
+  the Python FPM walk was retired with the Python engine-step path (Phase 2 PR-3) — the
+  compiled engine is the only FPM executor now.
 
 ### M1 — Python loader, `FPMForwardOp`, centralized rewrite
 
@@ -255,8 +257,9 @@ M0 config switch  ──►  M1 Python op + loader (synthetic fixtures)
                   M2 Rust op + schema bump + parity  ──►  M4 Rust/parity tests
 ```
 
-Python-first is deliberate: M0+M1+M3 are shippable with `fpm` forcing the Python engine
-step; M2 removes that restriction. Real-data validation (GLM-5.2 vLLM cells from Task 1)
+Python-first was deliberate: M0+M1+M3 shipped with `fpm` forcing the Python engine
+step; M2 (#1461) removed that restriction, and Phase 2 PR-3 then deleted the Python
+walk entirely. Real-data validation (GLM-5.2 vLLM cells from Task 1)
 follows once a dataset lands in the tree.
 
 ## 4.1 Implementation status (2026-07-19)
@@ -265,11 +268,17 @@ M0 + M1 + M3 + the Python half of M4 are implemented on `feature/fpm-modeling`:
 `operations/fpm_forward.py` (loader + op + interp configs + sol builder), the `get_model`
 rewrite, `ModelConfig.forward_model` threaded through TaskV2 / v1-compat / CLI
 (`--forward-model`), the explicit FPM mixed/genonly branches with the Rust engine-step
-forced off, and `tests/unit/sdk/test_fpm_forward.py` (33 tests). D1 shipped as
+forced off, and `tests/unit/sdk/test_fpm_forward.py` (33 tests). (The Python-side
+loader/query/sol pieces were later retired in Phase 2 PR-3 once #1461's Rust port
+owned them; `fpm_forward.py` keeps only the construction/identity/weights surface.) D1 shipped as
 exact-model-path-only (the interim unique-path fallback was removed in review); D2 shipped as ScatteredSites (per-phase configs,
 one-line swap to Grid for the LOO bake-off); D3 shipped as zero-energy; D4 deferred to M2.
 The mixed step ships the marginal-decode composition (§M3), replacing the original plan's
-plain prefill+decode sum. M2 (Rust op + schema bump + parity) and real-data LOO
+plain prefill+decode sum; its prefill component prices the iteration's REAL scheduled
+totals (chunk + decode tokens, per chunk) via ``query_totals``, so the CUDA-graph/eager
+regime encoded in the collected rows is addressed at the correct coordinate (the
+2026-08-11 e2e campaign measured -38%..-44% on capture-boundary rows under the earlier
+ISL-row/chunk-count averaging). M2 (Rust op + schema bump + parity) and real-data LOO
 qualification remain.
 
 ## 5. Open decisions (need owner sign-off before implementation)

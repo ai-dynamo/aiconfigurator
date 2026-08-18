@@ -177,6 +177,7 @@ You can use the generator in two ways: AIConfigurator CLI or standalone (code/CL
 - Benchmark helpers (non-FPM targets):
   - `bench_run.sh` and `k8s_bench.yaml` are generated alongside normal deployment artifacts for running `aiperf` benchmarks. The FPM target emits neither helper.
   - `concurrency_array` is built from a base list (`1 2 8 16 32 64 128`) plus `BenchConfig.estimated_concurrency` and its +/-5% neighbors when the estimate is available.
+- EPD rows are fail-closed: rows recommending a dedicated encode pool (`(e)workers > 0`, from `enable_epd`) skip all generator artifacts with a warning — the bridge does not map the encode pool into a deployment topology yet, and LM-only configs would contradict the recommendation. Performance tables and CSVs still contain these rows.
 
 ### FPM V1 Target
 

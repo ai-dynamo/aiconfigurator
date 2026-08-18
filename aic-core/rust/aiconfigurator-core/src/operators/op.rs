@@ -19,10 +19,10 @@ use serde::{Deserialize, Serialize};
 use crate::common::error::AicError;
 use crate::operators::{
     ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp, Dsv4ModuleOp,
-    ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp, GenerationAttentionOp,
-    GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp,
-    MsaModuleOp, NcclOp, P2POp, PerformanceResult, Source, TrtllmWideEpMoEDispatchOp,
-    VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp, WideEpMoeOp,
+    ElementwiseOp, EmbeddingOp, EncoderAttentionOp, FpmForwardOp, GdnOp, GemmOp,
+    GenerationAttentionOp, GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp, MlaModuleOp,
+    MoEDispatchOp, MoeAllToAllOp, MoeExpertComputeOp, MoeOp, MsaModuleOp, NcclOp, P2POp,
+    PerformanceResult, Source, VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp,
 };
 use crate::perf_database::PerfDatabase;
 
@@ -125,14 +125,6 @@ pub enum Op {
     /// SGLang WideEP generation MLA — replaces `GenerationMlaOp` in the
     /// `WideEPDeepSeekModel` variant.
     WideEpGenerationMla(WideEpGenerationMlaOp),
-    /// TensorRT-LLM WideEP MoE compute. Used by the
-    /// `TrtllmWideEPDeepSeekModel` variant; dispatch / combine cost is
-    /// modeled separately by `WideEpMoeDispatch`.
-    WideEpMoe(WideEpMoeOp),
-    /// TensorRT-LLM WideEP All2All dispatch (prepare+dispatch / combine).
-    /// Mirrors Python `TrtLLMWideEPMoEDispatch` — a direct `Operation`
-    /// subclass, NOT a `MoEDispatch` flavor.
-    WideEpMoeDispatch(TrtllmWideEpMoEDispatchOp),
     /// Two op groups that execute in parallel on different CUDA streams.
     /// Mirrors Python `aiconfigurator.sdk.operations.overlap.OverlapOp`:
     /// `latency = max(sum(group_a), sum(group_b))`.
@@ -158,8 +150,28 @@ pub enum Op {
     /// `kda_perf` table, an fp32-state SOL byte model, a "verify" phase and
     /// a `draft_tokens` field). APPENDED at the end (see the bincode note on
     /// `Dsv4MegaMoe`); the new serialized variant bumped
-    /// `ENGINE_SPEC_SCHEMA_VERSION` to 5.
+    /// `ENGINE_SPEC_SCHEMA_VERSION` to 5 (renumbered to 6 at its merge).
     Kda(KdaOp),
+    /// Whole-model forward pass (Python `forward_model="fpm"`): with the FPM
+    /// rewrite each phase op list is exactly one of these, answering from the
+    /// collected `fpm_forward_perf` cells instead of a granular composition.
+    /// NOT related to the `crate::fpm` (ForwardPassPerfModel) module.
+    /// APPENDED at the end (see the bincode note on `Dsv4MegaMoe`); claimed
+    /// `ENGINE_SPEC_SCHEMA_VERSION` 5 concurrently with #1460/#1435 and was
+    /// renumbered to 9 across the intervening wire-format landings.
+    FpmForward(FpmForwardOp),
+    /// Unified large-EP MoE all-to-all comm phase (Python
+    /// `operations.moe_comm.MoEAllToAll`) — one variant serves every backend
+    /// and every phase; the op's `phase` / `comm_backend` fields select the
+    /// slice. Measured-SILICON-only; see `operators/moe_a2a.rs`.
+    ///
+    /// APPENDED after `FpmForward` — same positional-index rule as above.
+    MoeAllToAll(MoeAllToAllOp),
+    /// Unified large-EP MoE expert compute (Python
+    /// `operations.moe_comm.MoEExpertCompute`) — one variant for both inference phases;
+    /// the op's `inference_phase` field selects the slice.
+    /// Measured-SILICON-only; see `operators/moe_expert_compute.rs`.
+    MoeExpertCompute(MoeExpertComputeOp),
 }
 
 /// Inline-defined here (rather than a sibling module under `operators/`)
@@ -202,6 +214,66 @@ impl FallbackOp {
 }
 
 impl Op {
+    /// Constant per-op weight bytes (PR-6): the engine-side replacement for
+    /// Python's `Operation.get_weights` math. Structural, not data-driven —
+    /// computed from op fields alone, never from perf tables. Ops with no
+    /// resident weights (attention/MLA kernels — their weights live on the
+    /// adjacent GEMMs — comm ops, dispatch, elementwise, MSA, the mamba
+    /// KERNEL ops) are 0.0, exactly like their Python `_weights = 0.0`.
+    /// `FpmForward` carries its snapshot verbatim (Python returns
+    /// `_weight_bytes` WITHOUT the scale_factor multiply); every non-zero
+    /// family multiplies its own scale_factor inside its `weight_bytes`.
+    pub fn weight_bytes(&self) -> f64 {
+        match self {
+            Op::Gemm(o) => o.weights_bytes(),
+            Op::Embedding(o) => o.weights_bytes(),
+            Op::Moe(o) => o.weight_bytes(),
+            Op::MoeExpertCompute(o) => o.weight_bytes(),
+            Op::Dsv4MegaMoe(o) => o.weight_bytes(),
+            Op::Mhc(o) => o.weight_bytes(),
+            Op::DsaContext(o) | Op::DsaGeneration(o) => o.weight_bytes(),
+            Op::Dsv4Context(o) | Op::Dsv4Generation(o) => o.weight_bytes(),
+            Op::FpmForward(o) => o.weight_bytes,
+            // Python FallbackOp.get_weights: primary wins when positive,
+            // else the granular fallback chain sums.
+            Op::Fallback(o) => {
+                let primary = o.primary.weight_bytes();
+                if primary > 0.0 {
+                    primary
+                } else {
+                    o.fallback.iter().map(Op::weight_bytes).sum()
+                }
+            }
+            // Python OverlapOp.get_weights: both groups sum (unlike latency's max).
+            Op::Overlap(o) => {
+                o.group_a.iter().map(Op::weight_bytes).sum::<f64>()
+                    + o.group_b.iter().map(Op::weight_bytes).sum::<f64>()
+            }
+            Op::Elementwise(_)
+            | Op::ContextAttention(_)
+            | Op::GenerationAttention(_)
+            | Op::EncoderAttention(_)
+            | Op::ContextMla(_)
+            | Op::GenerationMla(_)
+            | Op::MlaModuleContext(_)
+            | Op::MlaModuleGeneration(_)
+            | Op::MlaBmm(_)
+            | Op::MoeDispatch(_)
+            | Op::CustomAllReduce(_)
+            | Op::Nccl(_)
+            | Op::P2P(_)
+            | Op::Vision(_)
+            | Op::MsaContext(_)
+            | Op::MsaGeneration(_)
+            | Op::Mamba2(_)
+            | Op::Gdn(_)
+            | Op::Kda(_)
+            | Op::WideEpContextMla(_)
+            | Op::WideEpGenerationMla(_)
+            | Op::MoeAllToAll(_) => 0.0,
+        }
+    }
+
     /// Stable op name (Python `op._name`). Used by session code to filter
     /// (e.g. context-attention exclusion in mix-step composition) and for
     /// debugging.
@@ -235,12 +307,73 @@ impl Op {
             Op::Gdn(o) => &o.name,
             Op::WideEpContextMla(o) => &o.name,
             Op::WideEpGenerationMla(o) => &o.name,
-            Op::WideEpMoe(o) => &o.name,
-            Op::WideEpMoeDispatch(o) => &o.name,
+            Op::FpmForward(o) => &o.name,
             Op::Overlap(o) => &o.name,
             Op::Fallback(o) => &o.name,
             Op::Dsv4MegaMoe(o) => &o.name,
             Op::Kda(o) => &o.name,
+            Op::MoeAllToAll(o) => &o.name,
+            Op::MoeExpertCompute(o) => &o.name,
+        }
+    }
+
+    /// Rename the op (Python's post-construction `op._name = ...` rewiring:
+    /// hybrid layer-type prefixes rename block ops after the shared builder
+    /// returns them). Every variant carries `name`.
+    pub fn set_name(&mut self, name: String) {
+        match self {
+            Op::Gemm(o) => o.name = name,
+            Op::Embedding(o) => o.name = name,
+            Op::Elementwise(o) => o.name = name,
+            Op::ContextAttention(o) => o.name = name,
+            Op::GenerationAttention(o) => o.name = name,
+            Op::EncoderAttention(o) => o.name = name,
+            Op::ContextMla(o) => o.name = name,
+            Op::GenerationMla(o) => o.name = name,
+            Op::MlaModuleContext(o) => o.name = name,
+            Op::MlaModuleGeneration(o) => o.name = name,
+            Op::MlaBmm(o) => o.name = name,
+            Op::Moe(o) => o.name = name,
+            Op::MoeDispatch(o) => o.name = name,
+            Op::CustomAllReduce(o) => o.name = name,
+            Op::Nccl(o) => o.name = name,
+            Op::P2P(o) => o.name = name,
+            Op::Vision(o) => o.name = name,
+            Op::DsaContext(o) => o.name = name,
+            Op::DsaGeneration(o) => o.name = name,
+            Op::MsaContext(o) => o.name = name,
+            Op::MsaGeneration(o) => o.name = name,
+            Op::Dsv4Context(o) => o.name = name,
+            Op::Dsv4Generation(o) => o.name = name,
+            Op::Mhc(o) => o.name = name,
+            Op::Mamba2(o) => o.name = name,
+            Op::Gdn(o) => o.name = name,
+            Op::WideEpContextMla(o) => o.name = name,
+            Op::WideEpGenerationMla(o) => o.name = name,
+            Op::FpmForward(o) => o.name = name,
+            Op::Overlap(o) => o.name = name,
+            Op::Fallback(o) => o.name = name,
+            Op::Dsv4MegaMoe(o) => o.name = name,
+            Op::Kda(o) => o.name = name,
+            Op::MoeAllToAll(o) => o.name = name,
+            Op::MoeExpertCompute(o) => o.name = name,
+        }
+    }
+
+    /// CP sequence-shard factor for the token-major families that carry one;
+    /// 1 for every other variant (their constructors' CP audit gate refuses
+    /// `seq_split > 1`, so 1 is exact, not a guess). Backs the Python-side
+    /// `Operation._seq_split` default read.
+    pub fn seq_split(&self) -> u32 {
+        match self {
+            Op::Gemm(o) => o.seq_split,
+            Op::Embedding(o) => o.seq_split,
+            Op::Elementwise(o) => o.seq_split,
+            Op::CustomAllReduce(o) => o.seq_split,
+            Op::Nccl(o) => o.seq_split,
+            Op::P2P(o) => o.seq_split,
+            Op::Mhc(o) => o.seq_split,
+            _ => 1,
         }
     }
 
@@ -320,47 +453,33 @@ impl Op {
             Op::Gdn(op) => op.query(db, ctx.batch_size, ctx.s),
             Op::WideEpContextMla(op) => op.query(db, ctx.batch_size, ctx.s, ctx.prefix),
             Op::WideEpGenerationMla(op) => op.query(db, ctx.batch_size, ctx.s),
-            Op::WideEpMoe(op) => op.query(db, ctx.num_tokens),
-            Op::WideEpMoeDispatch(op) => op.query(db, ctx.num_tokens),
+            // Whole-model op: consumes batch_size/s/prefix/beam_width from the
+            // context (num_tokens is ignored, mirroring Python's kwargs use).
+            Op::FpmForward(op) => op.query(db, ctx),
             Op::Overlap(op) => {
-                // Mirrors Python `OverlapOp.query`: each group is summed
-                // independently, then latency = max(group_a_total,
-                // group_b_total) while ENERGY = group_a + group_b (both
-                // groups consume power even though they overlap in time).
-                // Source tag follows the additive combine rule.
-                let mut total_a = 0.0_f64;
-                let mut energy_a = 0.0_f64;
-                let mut source_a: Option<Source> = None;
+                // Mirrors Python `OverlapOp.query`: each group accumulates
+                // through `PerformanceResult` addition from a zero/empirical
+                // seed (`total_a = PerformanceResult(0.0, energy=0.0,
+                // source="empirical"); total_a += ...`), then latency =
+                // max(group_a_total, group_b_total) while ENERGY = group_a +
+                // group_b (both groups consume power even though they overlap
+                // in time). The source is `(total_a + total_b).source` — the
+                // seeds and `plus`'s zero-identity rule make zero-valued
+                // members (empty groups, nested empty composites, zero-cost
+                // legs) source-NEUTRAL instead of poisoning the tag to Mixed.
+                let mut total_a = PerformanceResult::new(0.0, Source::Empirical);
                 for inner in &op.group_a {
-                    let r = inner.query(db, ctx)?;
-                    total_a += r.latency_ms;
-                    energy_a += r.energy_wms;
-                    source_a = Some(match source_a {
-                        None => r.source,
-                        Some(prev) => prev.combine(r.source),
-                    });
+                    total_a = total_a.plus(inner.query(db, ctx)?);
                 }
-                let mut total_b = 0.0_f64;
-                let mut energy_b = 0.0_f64;
-                let mut source_b: Option<Source> = None;
+                let mut total_b = PerformanceResult::new(0.0, Source::Empirical);
                 for inner in &op.group_b {
-                    let r = inner.query(db, ctx)?;
-                    total_b += r.latency_ms;
-                    energy_b += r.energy_wms;
-                    source_b = Some(match source_b {
-                        None => r.source,
-                        Some(prev) => prev.combine(r.source),
-                    });
+                    total_b = total_b.plus(inner.query(db, ctx)?);
                 }
-                let source = match (source_a, source_b) {
-                    (Some(a), Some(b)) => a.combine(b),
-                    (Some(s), None) | (None, Some(s)) => s,
-                    (None, None) => Source::Silicon,
-                };
+                let merged = total_a.plus(total_b);
                 Ok(PerformanceResult::with_energy(
-                    total_a.max(total_b),
-                    energy_a + energy_b,
-                    source,
+                    total_a.latency_ms.max(total_b.latency_ms),
+                    total_a.energy_wms + total_b.energy_wms,
+                    merged.source,
                 )
                 .clamp_non_negative())
             }
@@ -392,24 +511,23 @@ impl Op {
                     Ok(r) => Ok(r),
                     Err(AicError::PerfDatabase(_)) | Err(AicError::Io { .. }) => {
                         // Fallback chain: Python sums PerformanceResults
-                        // (`total += op.query(...)`), so latency AND energy
-                        // both accumulate.
-                        let mut total = 0.0_f64;
-                        let mut energy = 0.0_f64;
-                        let mut source: Option<Source> = None;
+                        // from a zero/empirical seed (`total =
+                        // PerformanceResult(0.0, energy=0.0,
+                        // source="empirical"); total += op.query(...)`), so
+                        // latency AND energy both accumulate and an empty (or
+                        // all-zero) chain keeps the empirical seed tag via
+                        // `plus`'s zero-identity rule.
+                        let mut total = PerformanceResult::new(0.0, Source::Empirical);
                         for inner in &op.fallback {
-                            let r = inner.query(db, ctx)?;
-                            total += r.latency_ms;
-                            energy += r.energy_wms;
-                            source = Some(match source {
-                                None => r.source,
-                                Some(prev) => prev.combine(r.source),
-                            });
+                            total = total.plus(inner.query(db, ctx)?);
                         }
+                        // `with_energy` (sol: None) keeps the pre-existing
+                        // composed-result behavior: only the SOURCE semantics
+                        // change in this fix, not the SOL decomposition.
                         Ok(PerformanceResult::with_energy(
-                            total,
-                            energy,
-                            source.unwrap_or(Source::Silicon),
+                            total.latency_ms,
+                            total.energy_wms,
+                            total.source,
                         )
                         .clamp_non_negative())
                     }
@@ -423,6 +541,133 @@ impl Op {
             // Like Gdn: the op derives its phase coordinates internally
             // (verify divides the (nextn+1)-scaled batch by draft_tokens).
             Op::Kda(op) => op.query(db, ctx.batch_size, ctx.s),
+            // Both large-EP ops take Python's `x` (moe_comm.py:657, :1291) —
+            // the same per-rank token count every other compute/comm op gets.
+            // The per-op token rescaling (`// attention_tp_size` for the comm
+            // side, `* attention_dp_size` for the compute side) happens INSIDE
+            // each `query`, exactly where Python does it.
+            Op::MoeAllToAll(op) => op.query(db, ctx.num_tokens),
+            Op::MoeExpertCompute(op) => op.query(db, ctx.num_tokens),
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::enums::GemmQuantMode;
+    use crate::operators::gemm::GemmOp;
+    use crate::perf_database::energy_test_fixtures::{write_parquet, Col};
+    use crate::perf_database::PerfDatabase;
+
+    /// Minimal systems root with ONE bf16 GEMM row: an exact-hit silicon
+    /// leaf at `num_tokens=128`, and a guaranteed typed data miss for any
+    /// fp8 query (no fp8 table exists).
+    fn one_row_gemm_db() -> (tempfile::TempDir, PerfDatabase) {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let data = crate::perf_database::energy_test_fixtures::write_energy_systems_root(tmp.path());
+        write_parquet(
+            &data.join("gemm_perf.parquet"),
+            &[
+                Col::Str("gemm_dtype", vec!["bfloat16"]),
+                Col::I64("m", vec![128]),
+                Col::I64("n", vec![1024]),
+                Col::I64("k", vec![1024]),
+                Col::F64("latency", vec![1.0]),
+                Col::F64("power", vec![100.0]),
+            ],
+        );
+        let db = PerfDatabase::load(tmp.path(), "testsys", "vllm", "1.0").expect("db must load");
+        (tmp, db)
+    }
+
+    fn silicon_leaf() -> Op {
+        Op::Gemm(GemmOp::new("hit", 1024, 1024, GemmQuantMode::Bfloat16))
+    }
+
+    fn missing_leaf() -> Op {
+        Op::Gemm(GemmOp::new("miss", 1024, 1024, GemmQuantMode::Fp8))
+    }
+
+    fn ctx() -> RuntimeContext {
+        RuntimeContext {
+            num_tokens: 128,
+            ..RuntimeContext::default()
+        }
+    }
+
+    fn empty_overlap(name: &str) -> Op {
+        Op::Overlap(OverlapOp::new(name, vec![], vec![]))
+    }
+
+    // Zero-valued composite provenance oracle (review #1552 round 4): the
+    // legacy Python accumulators start from `PerformanceResult(0.0,
+    // energy=0.0, source="empirical")` and `__add__` treats a (0.0, 0.0)
+    // operand as a source-neutral identity, so zero-valued members must
+    // never poison a composite's tag to Mixed and empty composition must
+    // report `empirical`.
+
+    #[test]
+    fn empty_overlap_source_is_empirical() {
+        let (_tmp, db) = one_row_gemm_db();
+        let r = empty_overlap("e").query(&db, &ctx()).expect("query");
+        assert_eq!(r.latency_ms, 0.0);
+        assert_eq!(r.energy_wms, 0.0);
+        assert_eq!(r.source, Source::Empirical);
+    }
+
+    #[test]
+    fn half_empty_overlap_keeps_leaf_source() {
+        let (_tmp, db) = one_row_gemm_db();
+        let op = Op::Overlap(OverlapOp::new("half", vec![silicon_leaf()], vec![]));
+        let r = op.query(&db, &ctx()).expect("query");
+        assert!((r.latency_ms - 1.0).abs() < 1e-12);
+        assert_eq!(r.source, Source::Silicon);
+    }
+
+    #[test]
+    fn nested_zero_overlap_is_source_neutral_same_group() {
+        let (_tmp, db) = one_row_gemm_db();
+        let op = Op::Overlap(OverlapOp::new(
+            "same",
+            vec![silicon_leaf(), empty_overlap("nested")],
+            vec![],
+        ));
+        let r = op.query(&db, &ctx()).expect("query");
+        assert!((r.latency_ms - 1.0).abs() < 1e-12);
+        assert_eq!(r.source, Source::Silicon, "zero-valued nested composite must be source-neutral");
+    }
+
+    #[test]
+    fn nested_zero_overlap_is_source_neutral_opposite_group() {
+        let (_tmp, db) = one_row_gemm_db();
+        let op = Op::Overlap(OverlapOp::new(
+            "opp",
+            vec![silicon_leaf()],
+            vec![empty_overlap("nested")],
+        ));
+        let r = op.query(&db, &ctx()).expect("query");
+        assert!((r.latency_ms - 1.0).abs() < 1e-12);
+        assert_eq!(r.source, Source::Silicon, "zero-valued opposite group must be source-neutral");
+    }
+
+    #[test]
+    fn failed_primary_empty_fallback_is_empirical() {
+        let (_tmp, db) = one_row_gemm_db();
+        let op = Op::Fallback(FallbackOp::new("fb", missing_leaf(), vec![]));
+        let r = op.query(&db, &ctx()).expect("query");
+        assert_eq!(r.latency_ms, 0.0);
+        assert_eq!(r.energy_wms, 0.0);
+        assert_eq!(r.source, Source::Empirical);
+    }
+
+    #[test]
+    fn failed_primary_fallback_chain_keeps_leaf_source() {
+        let (_tmp, db) = one_row_gemm_db();
+        let op = Op::Fallback(FallbackOp::new("fb", missing_leaf(), vec![silicon_leaf()]));
+        let r = op.query(&db, &ctx()).expect("query");
+        assert!((r.latency_ms - 1.0).abs() < 1e-12);
+        assert_eq!(r.source, Source::Silicon);
+    }
+}
+

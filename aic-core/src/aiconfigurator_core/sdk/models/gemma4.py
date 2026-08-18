@@ -58,6 +58,7 @@ class Gemma4MixModel(BaseModel):
             model_info["vocab"],
             model_info["context"],
             model_config,
+            backend_name=backend_name,
             raw_config=model_info["raw_config"],
             allow_checkpoint_split=not model_info["gemm_quant_mode_is_explicit"],
         )
@@ -70,6 +71,7 @@ class Gemma4MixModel(BaseModel):
         num_experts: int,
         moe_inter_size: int,
         *args,
+        backend_name: str = "",
         raw_config: dict | None = None,
         allow_checkpoint_split: bool = True,
     ) -> None:
@@ -84,6 +86,9 @@ class Gemma4MixModel(BaseModel):
             if any(".mlp" in pattern for pattern in exclusions):
                 self._shared_mlp_gemm_quant_mode = common.GEMMQuantMode.bfloat16
                 self._routed_moe_quant_mode = common.MoEQuantMode.bfloat16
+        # Framework backend, threaded to MoEDispatch (its comm flavor is a
+        # constructor field since the pyo3 op unification).
+        self._backend_name = backend_name
         # Gemma 4 family includes both MoE variants (e.g. gemma-4-26B-A4B-it,
         # topk=8/num_experts=128) and dense variants (e.g. gemma-4-31B-it,
         # gemma-4-E2B-it, gemma-4-E4B-it: topk=0/num_experts=None). For dense
@@ -223,6 +228,7 @@ class Gemma4MixModel(BaseModel):
                 attn_dp,
                 True,
                 quant_mode=moe_q,
+                backend=self._backend_name,
             ),
             ops.MoE(
                 f"{prefix}_moe",
@@ -248,6 +254,7 @@ class Gemma4MixModel(BaseModel):
                 attn_dp,
                 False,
                 quant_mode=moe_q,
+                backend=self._backend_name,
             ),
         ]
 

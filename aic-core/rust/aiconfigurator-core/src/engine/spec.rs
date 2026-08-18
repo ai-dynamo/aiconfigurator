@@ -166,8 +166,8 @@ mod tests {
         ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
         Dsv4ModuleOp, ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp,
         GenerationAttentionOp, GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp, MlaBmmOp,
-        MlaModuleOp, MoEDispatchOp, MoeOp, NcclOp, P2POp, TrtllmWideEpMoEDispatchOp,
-        VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp, WideEpMoeOp,
+        MlaModuleOp, MoEDispatchOp, MoeAllToAllOp, MoeExpertComputeOp, MoeOp, NcclOp, P2POp,
+        VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp,
     };
     use crate::perf_database::dsv4::AttnKind;
     use crate::{
@@ -394,6 +394,7 @@ mod tests {
             index_topk: 2048,
             cp_size: 1,
             full_frac: 1.0,
+            attn_projection_quant_modes: None,
         }
     }
 
@@ -475,6 +476,7 @@ mod tests {
             architecture: "DeepseekV4ForCausalLM".into(),
             sinkhorn_iters: 20,
             quant_mode: GemmQuantMode::Bfloat16,
+            seq_split: 1,
         }
     }
 
@@ -548,37 +550,46 @@ mod tests {
         }
     }
 
-    fn wideep_moe() -> WideEpMoeOp {
-        WideEpMoeOp {
-            name: "wideep_moe".into(),
-            scale_factor: 1.0,
+    /// Large-EP comm phase with every optional field set to a NON-default
+    /// value, so the round-trip would notice a `#[serde(default)]` swallowing
+    /// a carried field.
+    fn moe_all_to_all() -> MoeAllToAllOp {
+        MoeAllToAllOp {
+            name: "moe_dispatch".into(),
+            scale_factor: 61.0,
+            phase: "dispatch".into(),
+            comm_backend: "deepep_ht".into(),
+            comm_dtype: "fp8_block".into(),
+            hidden_size: 7168,
+            topk: 8,
+            num_experts: 256,
+            moe_ep_size: 16,
+            node_num: 2,
+            sms: 24,
+            attention_tp_size: 2,
+        }
+    }
+
+    /// Large-EP expert compute. `num_slots` / `kernel_source` are `Some(...)`
+    /// here on purpose — the `None` (Python-default) case is what production
+    /// emits, and both encodings must survive the wire.
+    fn moe_expert_compute() -> MoeExpertComputeOp {
+        MoeExpertComputeOp {
+            name: "moe".into(),
+            scale_factor: 61.0,
             hidden_size: 7168,
             inter_size: 2048,
             topk: 8,
             num_experts: 256,
-            moe_tp_size: 1,
-            moe_ep_size: 8,
-            attention_dp_size: 8,
+            moe_ep_size: 16,
             quant_mode: MoeQuantMode::Fp8Block,
-            workload_distribution: "power_law_1.2_eplb".into(),
-            num_slots: 288,
-            kernel_source: "moe_torch_flow".into(),
-        }
-    }
-
-    fn wideep_moe_dispatch() -> TrtllmWideEpMoEDispatchOp {
-        TrtllmWideEpMoEDispatchOp {
-            name: "wideep_moe_dispatch".into(),
-            scale_factor: 61.0,
-            hidden_size: 7168,
-            topk: 8,
-            num_experts: 256,
-            moe_tp_size: 1,
-            moe_ep_size: 8,
+            workload_distribution: "power_law_1.2".into(),
             attention_dp_size: 8,
-            pre_dispatch: true,
-            quant_mode: MoeQuantMode::Nvfp4,
-            use_low_precision_combine: false,
+            inference_phase: "context".into(),
+            num_slots: Some(288),
+            kernel_source: Some("deepep_moe".into()),
+            is_gated: true,
+            enable_eplb: true,
         }
     }
 
@@ -588,6 +599,34 @@ mod tests {
             name: "overlap_attn_moe".into(),
             group_a: vec![OpSpec::ContextMla(context_mla()), OpSpec::Gemm(gemm())],
             group_b: vec![OpSpec::Moe(moe()), OpSpec::MoeDispatch(moe_dispatch())],
+        }
+    }
+
+    fn fpm_forward() -> crate::operators::FpmForwardOp {
+        // Recursive like Overlap/Fallback: sol_ops carries the model's
+        // original granular list, so the round-trip must preserve nesting.
+        crate::operators::FpmForwardOp {
+            name: "fpm_forward_prefill".into(),
+            phase: crate::operators::FpmPhase::Prefill,
+            model_path: "org/model-a".into(),
+            match_identity: vec![
+                "nvfp4".into(),
+                "nvfp4".into(),
+                "bfloat16".into(),
+                "half".into(),
+                "fp8".into(),
+                "4".into(),
+                "1".into(),
+                "1".into(),
+                "4".into(),
+                "1".into(),
+                "1".into(),
+            ],
+            weight_bytes: 1.5e10,
+            sol_ops: vec![
+                OpSpec::Gemm(gemm()),
+                OpSpec::ContextAttention(context_attention()),
+            ],
         }
     }
 
@@ -638,15 +677,17 @@ mod tests {
             OpSpec::Gdn(gdn()),
             OpSpec::WideEpContextMla(wideep_context_mla()),
             OpSpec::WideEpGenerationMla(wideep_generation_mla()),
-            OpSpec::WideEpMoe(wideep_moe()),
-            OpSpec::WideEpMoeDispatch(wideep_moe_dispatch()),
             OpSpec::Overlap(overlap()),
             OpSpec::Fallback(fallback()),
             // Appended AFTER Fallback (bincode enum indices are positional;
             // appending shifts nothing, so no ENGINE_SPEC_SCHEMA_VERSION bump).
             OpSpec::Dsv4MegaMoe(dsv4_megamoe()),
-            // Appended at the very end (schema_version 5: Kda variant).
+            // Appended in wire order: Kda, FpmForward, then this PR's
+            // large-EP pair.
             OpSpec::Kda(kda()),
+            OpSpec::FpmForward(fpm_forward()),
+            OpSpec::MoeAllToAll(moe_all_to_all()),
+            OpSpec::MoeExpertCompute(moe_expert_compute()),
         ];
 
         // Exhaustiveness guard: if a variant is added to `Op`, this match
@@ -681,12 +722,13 @@ mod tests {
                 | OpSpec::Gdn(_)
                 | OpSpec::WideEpContextMla(_)
                 | OpSpec::WideEpGenerationMla(_)
-                | OpSpec::WideEpMoe(_)
-                | OpSpec::WideEpMoeDispatch(_)
+                | OpSpec::FpmForward(_)
                 | OpSpec::Overlap(_)
                 | OpSpec::Fallback(_)
                 | OpSpec::Dsv4MegaMoe(_)
-                | OpSpec::Kda(_) => {}
+                | OpSpec::Kda(_)
+                | OpSpec::MoeAllToAll(_)
+                | OpSpec::MoeExpertCompute(_) => {}
             }
         }
         ops
@@ -700,6 +742,7 @@ mod tests {
             systems_path: None,
             backend: crate::BackendKind::Trtllm,
             backend_version: Some("1.0.0rc3".into()),
+            forward_model: None,
             kv_block_size: Some(64),
             parallel: ParallelMapping {
                 tp_size: 8,
@@ -716,11 +759,59 @@ mod tests {
                 kv_cache_dtype: Some(DataType::Fp8),
             },
             speculative: Some(SpeculativeConfig { nextn: Some(1) }),
-            perf_db_sources: Default::default(),
+            enable_shared_layer: None,
+            strict_provenance: false,
             database_mode: Default::default(),
             transfer_policy: None,
             extra: BTreeMap::new(),
         }
+    }
+
+    /// Pin the bincode POSITIONAL variant index of the first and the two last
+    /// `Op` variants. bincode encodes an enum as a leading 4-byte LE variant
+    /// index, so inserting or removing a variant mid-enum silently reinterprets
+    /// every later variant on the wire.
+    ///
+    /// These pin bincode positional indices; if this test fails you reordered/
+    /// inserted mid-enum — append instead, or bump ENGINE_SPEC_SCHEMA_VERSION
+    /// in lockstep (config.rs + engine.py).
+    #[test]
+    fn op_variant_indices_are_pinned() {
+        const GEMM_INDEX: u32 = 0;
+        // Re-derived after current main's Kda and FpmForward tail variants,
+        // and after retiring the two mid-enum wideEP MoE variants.
+        const MOE_ALL_TO_ALL_INDEX: u32 = 33;
+        const MOE_EXPERT_COMPUTE_INDEX: u32 = 34;
+
+        let index_of = |op: &OpSpec| -> u32 {
+            let bytes = bincode::serialize(op).expect("serialize op");
+            u32::from_le_bytes(bytes[..4].try_into().expect("4-byte variant index prefix"))
+        };
+
+        assert_eq!(
+            index_of(&OpSpec::Gemm(gemm())),
+            GEMM_INDEX,
+            "first variant moved"
+        );
+        assert_eq!(
+            index_of(&OpSpec::MoeAllToAll(moe_all_to_all())),
+            MOE_ALL_TO_ALL_INDEX,
+            "MoeAllToAll index moved"
+        );
+        assert_eq!(
+            index_of(&OpSpec::MoeExpertCompute(moe_expert_compute())),
+            MOE_EXPERT_COMPUTE_INDEX,
+            "MoeExpertCompute index moved"
+        );
+
+        // The two last variants must stay adjacent and terminal: appending is
+        // the only safe growth direction.
+        assert_eq!(MOE_EXPERT_COMPUTE_INDEX, MOE_ALL_TO_ALL_INDEX + 1);
+        assert_eq!(
+            MOE_EXPERT_COMPUTE_INDEX as usize + 1,
+            all_op_variants().len(),
+            "all_op_variants() must cover exactly the pinned variant count"
+        );
     }
 
     #[test]
@@ -892,6 +983,28 @@ mod tests {
                 assert_eq!(expected, ENGINE_SPEC_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
+        }
+    }
+
+    /// v11 -> v12 regression (PR-6): `DsaModuleOp` gained
+    /// `attn_projection_quant_modes`, a positional bincode layout change. A
+    /// pre-PR v11 producer's DSA payload must be rejected by the VERSION GATE
+    /// (before any op decoding) as `UnsupportedSchemaVersion` — never reach
+    /// the op-payload stage where the missing Option tag would surface as an
+    /// opaque "unexpected end of file".
+    #[test]
+    fn from_bincode_rejects_v11_dsa_producer_at_the_version_gate() {
+        let spec = EngineSpec::new(sample_engine_config(), vec![OpSpec::DsaContext(dsa_module())], vec![]);
+        let mut bytes = spec.to_bincode().expect("to_bincode");
+        bytes[..4].copy_from_slice(&11u32.to_le_bytes()); // a v11 producer's stamp
+
+        match EngineSpec::from_bincode(&bytes) {
+            Err(AicError::UnsupportedSchemaVersion { kind, got, expected }) => {
+                assert_eq!(kind, "EngineSpec");
+                assert_eq!(got, 11);
+                assert_eq!(expected, ENGINE_SPEC_SCHEMA_VERSION);
+            }
+            other => panic!("expected UnsupportedSchemaVersion for a v11 DSA payload, got {other:?}"),
         }
     }
 

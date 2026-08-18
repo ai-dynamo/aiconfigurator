@@ -15,6 +15,7 @@ import aiconfigurator_core.sdk as sdk
 from aiconfigurator_core.sdk.config import ModelConfig, RuntimeConfig
 from aiconfigurator_core.sdk.engine import EngineHandle, compile_engine
 from aiconfigurator_core.sdk.memory import estimate_kv_cache, estimate_num_gpu_blocks
+from aiconfigurator_core.sdk.operations import ElementWise, Embedding, MoEDispatch
 from aiconfigurator_core.sdk.rust_engine_step import RustForwardPassPerfModel
 
 EXPECTED_FACADE = {
@@ -70,10 +71,30 @@ def test_stable_function_signatures() -> None:
         "kvcache_quant_mode: 'str | None' = None, fmha_quant_mode: 'str | None' = None, "
         "comm_quant_mode: 'str | None' = None, nextn: 'int' = 0, "
         "kv_block_size: 'int | None' = None, "
-        "systems_path: 'str | None' = None) -> 'bytes'"
+        "systems_path: 'str | None' = None, "
+        "forward_model: 'str | None' = None) -> 'bytes'"
     )
     assert "scheduler_block_size" in inspect.signature(estimate_num_gpu_blocks).parameters
     assert "memory_fraction_kind" in inspect.signature(estimate_kv_cache).parameters
+
+
+def test_native_operation_constructors_preserve_legacy_keyword_names() -> None:
+    Embedding("embedding", 1.0, 1024, 128, empirical_bw_scaling_factor=0.4)
+    ElementWise("elementwise", 1.0, 128, 64, empirical_bw_scaling_factor=0.6)
+    MoEDispatch(
+        "dispatch",
+        1.0,
+        7168,
+        8,
+        256,
+        1,
+        16,
+        1,
+        False,
+        enable_fp4_all2all=False,
+        backend="sglang",
+        reduce_results=False,
+    )
 
 
 def test_distribution_carries_typing_contract() -> None:

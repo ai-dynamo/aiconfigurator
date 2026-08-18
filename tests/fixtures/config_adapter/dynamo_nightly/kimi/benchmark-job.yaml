@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aiperf-synthetic
+spec:
+  template:
+    spec:
+      containers:
+        - name: perf
+          env:
+            - {name: CONCURRENCIES, value: "1 2 4 8 16 32 64 128 256"}
+            - {name: ISL, value: "1000"}
+            - {name: OSL, value: "1500"}
