@@ -50,6 +50,9 @@ pub(crate) fn resolve_op_sources(
 /// function of the load identity + policy; a fixed map renders its full
 /// contents. `\x1f` (unit separator) keeps boundaries unambiguous; non-UTF-8
 /// paths degrade lossily instead of failing.
+/// Process-global (or test-private) memo behind [`PerfDatabase::load_resolved_shared`].
+type SharedTablesMemo = Mutex<HashMap<String, Weak<PerfTables>>>;
+
 fn shared_tables_key(
     systems_root: &Path,
     system: &str,
@@ -566,7 +569,36 @@ impl PerfDatabase {
         strict_provenance: bool,
         tolerate_missing_data: bool,
     ) -> Result<Self, AicError> {
-        static SHARED_TABLES: OnceLock<Mutex<HashMap<String, Weak<PerfTables>>>> = OnceLock::new();
+        static SHARED_TABLES: OnceLock<SharedTablesMemo> = OnceLock::new();
+        Self::load_resolved_shared_in(
+            SHARED_TABLES.get_or_init(Default::default),
+            systems_root,
+            system,
+            backend,
+            version,
+            enable_shared_layer,
+            strict_provenance,
+            tolerate_missing_data,
+        )
+    }
+
+    /// [`Self::load_resolved_shared`] against an explicit memo. The public
+    /// entry point passes the process-global memo; tests pass a private one
+    /// so the same-identity sharing assertion is DETERMINISTIC — against the
+    /// global memo it is only an amortization (parallel tests loading the
+    /// same identity may overwrite or expire each other's entries, the
+    /// documented concurrent-first-load behavior).
+    #[allow(clippy::too_many_arguments)]
+    fn load_resolved_shared_in(
+        memo: &SharedTablesMemo,
+        systems_root: &Path,
+        system: &str,
+        backend: &str,
+        version: &str,
+        enable_shared_layer: bool,
+        strict_provenance: bool,
+        tolerate_missing_data: bool,
+    ) -> Result<Self, AicError> {
         if tolerate_missing_data {
             // Estimate-only loads bypass the memo entirely: caching a set of
             // empty tables under the plain identity key would let a later
@@ -592,7 +624,6 @@ impl PerfDatabase {
         )?;
         let resolver = Arc::new(SourceResolver::live(ctx));
         let key = shared_tables_key(systems_root, system, backend, version, &resolver);
-        let memo = SHARED_TABLES.get_or_init(Default::default);
         if let Some(tables) = memo.lock().unwrap().get(&key).and_then(Weak::upgrade) {
             return Ok(Self::from_tables(tables));
         }
@@ -893,7 +924,14 @@ mod tests {
 
     #[test]
     fn shared_load_reuses_tables_and_isolates_view_state() {
-        let db1 = PerfDatabase::load_resolved_shared(
+        // A PRIVATE memo: against the process-global one this assertion is
+        // flaky under parallel `cargo test` — other tests loading the same
+        // identity overwrite/expire the entry (the documented
+        // concurrent-first-load amortization), which is exactly what the
+        // uniqueness assertion below must not race with.
+        let memo = SharedTablesMemo::default();
+        let db1 = PerfDatabase::load_resolved_shared_in(
+            &memo,
             &systems_root(),
             "b200_sxm",
             "vllm",
@@ -903,7 +941,8 @@ mod tests {
             false,
         )
         .expect("shared load must succeed");
-        let db2 = PerfDatabase::load_resolved_shared(
+        let db2 = PerfDatabase::load_resolved_shared_in(
+            &memo,
             &systems_root(),
             "b200_sxm",
             "vllm",
