@@ -410,7 +410,7 @@ def build_engine_spec_json(
     # early-return). Emitting the encoder ops here would make the compiled engine
     # query them unconditionally (with wrong shapes), diverging from the Python
     # reference for VL models. Vision modeling in the compiled path is deferred
-    # until runtime image config is threaded through compile_engine.
+    # until runtime image config is threaded through compile_engine (#1567).
     context_ops = json.loads(_ops_json(model.context_ops))
     generation_ops = json.loads(_ops_json(model.generation_ops))
 
