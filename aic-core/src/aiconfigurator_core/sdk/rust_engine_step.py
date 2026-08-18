@@ -984,13 +984,14 @@ def _engine_config_json(model: Any, database: Any) -> str:
                         "moe_comm_backend": getattr(model_config, "moe_comm_backend", None),
                         "num_gpus_per_node": getattr(model_config, "num_gpus_per_node", None),
                     },
-                    # Data-resolution policy. `build_engine_spec_json` bakes the
-                    # database's policy-dependent `perf_db_sources` into the
-                    # compiled handle, so two views of the same on-disk identity
-                    # that differ only in shared-layer or strict-provenance
-                    # policy must not share a cached handle — a warmed
-                    # primary-only handle would otherwise answer (or fail) for
-                    # the reuse-carrying view depending on call order.
+                    # Data-resolution policy. `build_engine_spec_json` bakes
+                    # these flags into the compiled handle and the engine
+                    # resolves per-op sources from them (schema v13), so two
+                    # views of the same on-disk identity that differ only in
+                    # shared-layer or strict-provenance policy must not share
+                    # a cached handle — a warmed primary-only handle would
+                    # otherwise answer (or fail) for the reuse-carrying view
+                    # depending on call order.
                     "database_policy": {
                         "enable_shared_layer": bool(getattr(database, "enable_shared_layer", False)),
                         "strict_provenance": bool(getattr(database, "strict_provenance", False)),

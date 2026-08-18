@@ -184,6 +184,13 @@ def fetch_table_view(database, attribute: str):
     if memo is None or memo[0] != _engine._PROBE_CACHE_GENERATION:
         mode_token = None if _database_has_data_dir(database) else "SOL"
         key, systems_path = _engine._probe_spec_key(database, mode_token)
+        # Fill data_provenance and emit resolver warnings at the same moment
+        # the retired eager wire sweep used to (the first engine-backed
+        # fetch): the engine resolves its own sources at load, so this sweep
+        # is the diagnostics/logging half only. Idempotent per database.
+        # After _probe_spec_key so the non-PerfDatabase TypeError gate
+        # (_require_real_database) keeps firing first.
+        database._materialize_source_reports()
         memo = (_engine._PROBE_CACHE_GENERATION, key, systems_path)
         database.__dict__["_table_view_probe_spec"] = memo
     handle = _engine._probe_handle_from_key(memo[1], memo[2])

@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use super::axis_curve::AxisCurve;
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
@@ -65,20 +65,21 @@ impl TrtllmAlltoallTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf) -> Self {
-        Self::with_sources(data_root, &PerfDbSources::default())
+        Self::with_sources(data_root, &SourceResolver::fixed(PerfDbSources::default()))
+            .expect("fixed-map resolution is infallible")
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources resolved from
     /// `perf_db_sources` (Python-supplied). The perf file falls back to its
     /// primary `data_root/<basename>` when absent from the map. No I/O.
-    pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
+    pub fn with_sources(data_root: PathBuf, resolver: &SourceResolver) -> Result<Self, AicError> {
         let alltoall_sources =
-            resolve_op_sources(perf_db_sources, "trtllm_alltoall_perf.parquet", &data_root);
-        Self {
+            resolver.sources_for("trtllm_alltoall_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             alltoall_sources,
             trtllm_alltoall: OnceLock::new(),
-        }
+        })
     }
 
     /// TRT-LLM alltoall latency for one phase op. Mirrors Python

@@ -35,7 +35,7 @@ use std::sync::OnceLock;
 use super::axis_curve::LeafAxisCurve;
 use super::moe_index::{MoeIndex, MoeShapeKey};
 use super::perf_interp::LeafValue;
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
@@ -126,19 +126,20 @@ impl MoeTable {
     /// perf file is sourced solely from `data_root/moe_perf.parquet` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf) -> Self {
-        Self::with_sources(data_root, &PerfDbSources::default())
+        Self::with_sources(data_root, &SourceResolver::fixed(PerfDbSources::default()))
+            .expect("fixed-map resolution is infallible")
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources resolved from
     /// `perf_db_sources` (Python-supplied). The MoE file falls back to its
     /// primary `data_root/moe_perf.parquet` when absent from the map. No I/O.
-    pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
-        let moe_sources = resolve_op_sources(perf_db_sources, "moe_perf.parquet", &data_root);
-        Self {
+    pub fn with_sources(data_root: PathBuf, resolver: &SourceResolver) -> Result<Self, AicError> {
+        let moe_sources = resolver.sources_for("moe_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             moe_sources,
             moe: OnceLock::new(),
-        }
+        })
     }
 
     /// Raw MoE value (latency ms + power/energy) via the perf_interp v2

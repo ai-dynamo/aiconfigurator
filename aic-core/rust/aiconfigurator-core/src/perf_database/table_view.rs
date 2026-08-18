@@ -29,7 +29,7 @@ use std::fmt::Write as _;
 
 use crate::common::error::AicError;
 use crate::perf_database::parquet_loader::{PerfReader, PerfRow};
-use crate::perf_database::{kernel_source_ok, resolve_op_sources, PerfSource, PerfTables};
+use crate::perf_database::{kernel_source_ok, PerfSource, PerfTables};
 
 /// Leaf field value. Integer-typed Python fields must serialize WITHOUT a
 /// decimal point so `json.loads` rehydrates the exact Python type
@@ -2144,7 +2144,7 @@ pub const TABLE_VIEW_ATTRIBUTES: &[(&str, &[&str])] = &[
 /// sparse sub-tables are addressed as
 /// `"_dsv4_sparse_kernel_data.<paged_mqa_logits|hca_attn|csa_attn>"`.
 pub fn table_view_json(tables: &PerfTables, attribute: &str) -> Result<Option<String>, AicError> {
-    let src = |basename: &str| resolve_op_sources(&tables.perf_db_sources, basename, &tables.data_root);
+    let src = |basename: &str| tables.source_resolver.sources_for(basename, &tables.data_root);
     let comm_src = |root: Option<&std::path::Path>, basename: &str| -> Vec<PerfSource> {
         match root {
             // _build_op_sources refused an EXISTING primary whose version dir
@@ -2158,72 +2158,72 @@ pub fn table_view_json(tables: &PerfTables, attribute: &str) -> Result<Option<St
         }
     };
     let node = match attribute {
-        "_gemm_data" => view_gemm(&src("gemm_perf.parquet"))?,
-        "_compute_scale_data" => view_gemm_scale(&src("computescale_perf.parquet"))?,
-        "_scale_matrix_data" => view_gemm_scale(&src("scale_matrix_perf.parquet"))?,
-        "_context_attention_data" => view_context_attention(&src("context_attention_perf.parquet"))?,
-        "_generation_attention_data" => view_generation_attention(&src("generation_attention_perf.parquet"))?,
-        "_encoder_attention_data" => view_encoder_attention(&src("encoder_attention_perf.parquet"))?,
-        "_context_mla_data" => view_context_mla(&src("context_mla_perf.parquet"))?,
-        "_generation_mla_data" => view_generation_mla(&src("generation_mla_perf.parquet"))?,
-        "_mla_bmm_data" => view_mla_bmm(&src("mla_bmm_perf.parquet"))?,
-        "_context_mla_module_data" => view_context_mla_module(&src("mla_context_module_perf.parquet"))?,
-        "_generation_mla_module_data" => view_generation_mla_module(&src("mla_generation_module_perf.parquet"))?,
-        "_wideep_context_mla_data" => view_wideep_context_mla(&src("wideep_context_mla_perf.parquet"))?,
-        "_wideep_generation_mla_data" => view_wideep_generation_mla(&src("wideep_generation_mla_perf.parquet"))?,
+        "_gemm_data" => view_gemm(&src("gemm_perf.parquet")?)?,
+        "_compute_scale_data" => view_gemm_scale(&src("computescale_perf.parquet")?)?,
+        "_scale_matrix_data" => view_gemm_scale(&src("scale_matrix_perf.parquet")?)?,
+        "_context_attention_data" => view_context_attention(&src("context_attention_perf.parquet")?)?,
+        "_generation_attention_data" => view_generation_attention(&src("generation_attention_perf.parquet")?)?,
+        "_encoder_attention_data" => view_encoder_attention(&src("encoder_attention_perf.parquet")?)?,
+        "_context_mla_data" => view_context_mla(&src("context_mla_perf.parquet")?)?,
+        "_generation_mla_data" => view_generation_mla(&src("generation_mla_perf.parquet")?)?,
+        "_mla_bmm_data" => view_mla_bmm(&src("mla_bmm_perf.parquet")?)?,
+        "_context_mla_module_data" => view_context_mla_module(&src("mla_context_module_perf.parquet")?)?,
+        "_generation_mla_module_data" => view_generation_mla_module(&src("mla_generation_module_perf.parquet")?)?,
+        "_wideep_context_mla_data" => view_wideep_context_mla(&src("wideep_context_mla_perf.parquet")?)?,
+        "_wideep_generation_mla_data" => view_wideep_generation_mla(&src("wideep_generation_mla_perf.parquet")?)?,
         // Each arm folds moe_perf.parquet (the largest shipped table) and
         // discards the twin — accepted: the fold runs once per (database,
         // attribute) behind MoE.load_data's class cache, not per query. If
         // this ever matters, cache the (default, low_latency) pair here.
-        "_moe_data" => view_moe(&src("moe_perf.parquet"))?.map(|(default, _)| default),
-        "_moe_low_latency_data" => view_moe(&src("moe_perf.parquet"))?.map(|(_, low_latency)| low_latency),
-        "_wideep_context_moe_data" => view_wideep_moe(&src("wideep_context_moe_perf.parquet"))?,
-        "_wideep_generation_moe_data" => view_wideep_moe(&src("wideep_generation_moe_perf.parquet"))?,
-        "_wideep_deepep_normal_data" => view_wideep_deepep_normal(&src("wideep_deepep_normal_perf.parquet"))?,
-        "_wideep_deepep_ll_data" => view_wideep_deepep_ll(&src("wideep_deepep_ll_perf.parquet"))?,
-        "_wideep_moe_compute_data" => view_wideep_moe_compute(&src("wideep_moe_perf.parquet"))?,
-        "_trtllm_alltoall_data" => view_trtllm_alltoall(&src("trtllm_alltoall_perf.parquet"))?,
+        "_moe_data" => view_moe(&src("moe_perf.parquet")?)?.map(|(default, _)| default),
+        "_moe_low_latency_data" => view_moe(&src("moe_perf.parquet")?)?.map(|(_, low_latency)| low_latency),
+        "_wideep_context_moe_data" => view_wideep_moe(&src("wideep_context_moe_perf.parquet")?)?,
+        "_wideep_generation_moe_data" => view_wideep_moe(&src("wideep_generation_moe_perf.parquet")?)?,
+        "_wideep_deepep_normal_data" => view_wideep_deepep_normal(&src("wideep_deepep_normal_perf.parquet")?)?,
+        "_wideep_deepep_ll_data" => view_wideep_deepep_ll(&src("wideep_deepep_ll_perf.parquet")?)?,
+        "_wideep_moe_compute_data" => view_wideep_moe_compute(&src("wideep_moe_perf.parquet")?)?,
+        "_trtllm_alltoall_data" => view_trtllm_alltoall(&src("trtllm_alltoall_perf.parquet")?)?,
         "_moe_a2a_data" => view_moe_a2a(
-            &src("moe_a2a_perf.parquet"),
-            &src("wideep_deepep_normal_perf.parquet"),
-            &src("wideep_deepep_ll_perf.parquet"),
-            &src("trtllm_alltoall_perf.parquet"),
+            &src("moe_a2a_perf.parquet")?,
+            &src("wideep_deepep_normal_perf.parquet")?,
+            &src("wideep_deepep_ll_perf.parquet")?,
+            &src("trtllm_alltoall_perf.parquet")?,
         )?,
         "_moe_ep_data" => view_moe_expert_compute(
-            &src("moe_expert_compute_perf.parquet"),
-            &src("wideep_context_moe_perf.parquet"),
-            &src("wideep_generation_moe_perf.parquet"),
-            &src("wideep_moe_perf.parquet"),
+            &src("moe_expert_compute_perf.parquet")?,
+            &src("wideep_context_moe_perf.parquet")?,
+            &src("wideep_generation_moe_perf.parquet")?,
+            &src("wideep_moe_perf.parquet")?,
         )?,
-        "_custom_allreduce_data" => view_custom_allreduce(&src("custom_allreduce_perf.parquet"))?,
+        "_custom_allreduce_data" => view_custom_allreduce(&src("custom_allreduce_perf.parquet")?)?,
         "_nccl_data" => view_nccl(&comm_src(tables.communication.nccl_root(), "nccl_perf.parquet"))?,
         "_oneccl_data" => view_nccl(&comm_src(tables.communication.oneccl_root(), "oneccl_perf.parquet"))?,
-        "_context_dsa_module_data" => view_context_dsa_module(&src("dsa_context_module_perf.parquet"), false)?,
-        "_context_dsa_module_skip_data" => view_context_dsa_module(&src("dsa_context_module_perf.parquet"), true)?,
+        "_context_dsa_module_data" => view_context_dsa_module(&src("dsa_context_module_perf.parquet")?, false)?,
+        "_context_dsa_module_skip_data" => view_context_dsa_module(&src("dsa_context_module_perf.parquet")?, true)?,
         "_generation_dsa_module_data" => {
-            view_generation_dsa_module(&src("dsa_generation_module_perf.parquet"), false)?
+            view_generation_dsa_module(&src("dsa_generation_module_perf.parquet")?, false)?
         }
         "_generation_dsa_module_skip_data" => {
-            view_generation_dsa_module(&src("dsa_generation_module_perf.parquet"), true)?
+            view_generation_dsa_module(&src("dsa_generation_module_perf.parquet")?, true)?
         }
-        "_mhc_module_data" => view_mhc_module(&src("mhc_module_perf.parquet"))?,
+        "_mhc_module_data" => view_mhc_module(&src("mhc_module_perf.parquet")?)?,
         "_context_deepseek_v4_attention_module_data" => merge_dsv4_split(vec![
-            view_context_dsv4_kind_module(&src("dsv4_csa_context_module_perf.parquet"))?,
-            view_context_dsv4_kind_module(&src("dsv4_hca_context_module_perf.parquet"))?,
+            view_context_dsv4_kind_module(&src("dsv4_csa_context_module_perf.parquet")?)?,
+            view_context_dsv4_kind_module(&src("dsv4_hca_context_module_perf.parquet")?)?,
         ]),
         "_generation_deepseek_v4_attention_module_data" => merge_dsv4_split(vec![
-            view_generation_dsv4_kind_module(&src("dsv4_csa_generation_module_perf.parquet"))?,
-            view_generation_dsv4_kind_module(&src("dsv4_hca_generation_module_perf.parquet"))?,
+            view_generation_dsv4_kind_module(&src("dsv4_csa_generation_module_perf.parquet")?)?,
+            view_generation_dsv4_kind_module(&src("dsv4_hca_generation_module_perf.parquet")?)?,
         ]),
         "_dsv4_sparse_kernel_data.paged_mqa_logits" => {
-            view_dsv4_sparse_kernel(&src("dsv4_paged_mqa_logits_module_perf.parquet"))?
+            view_dsv4_sparse_kernel(&src("dsv4_paged_mqa_logits_module_perf.parquet")?)?
         }
-        "_dsv4_sparse_kernel_data.hca_attn" => view_dsv4_sparse_kernel(&src("dsv4_hca_attn_module_perf.parquet"))?,
-        "_dsv4_sparse_kernel_data.csa_attn" => view_dsv4_sparse_kernel(&src("dsv4_csa_attn_module_perf.parquet"))?,
+        "_dsv4_sparse_kernel_data.hca_attn" => view_dsv4_sparse_kernel(&src("dsv4_hca_attn_module_perf.parquet")?)?,
+        "_dsv4_sparse_kernel_data.csa_attn" => view_dsv4_sparse_kernel(&src("dsv4_csa_attn_module_perf.parquet")?)?,
         "_dsv4_megamoe_module_data" => view_dsv4_megamoe_module(&tables.data_root)?,
-        "_mamba2_data" => view_mamba2(&src("mamba2_perf.parquet"))?,
-        "_gdn_data" => view_gdn(&src("gdn_perf.parquet"))?,
-        "_kda_data" => view_kda(&src("kda_perf.parquet"))?,
+        "_mamba2_data" => view_mamba2(&src("mamba2_perf.parquet")?)?,
+        "_gdn_data" => view_gdn(&src("gdn_perf.parquet")?)?,
+        "_kda_data" => view_kda(&src("kda_perf.parquet")?)?,
         other => {
             return Err(AicError::PerfDatabase(format!(
                 "unknown table-view attribute {other:?}"

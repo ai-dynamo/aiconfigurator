@@ -44,7 +44,7 @@ use super::attention::generation_attn_mode;
 use super::dsa::{bs_slice, lookup_2d, SparseGrid};
 use super::gemm::quant_tc_flops;
 use super::perf_interp::{self, LeafValue, Node, OpInterpConfig};
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
@@ -227,44 +227,21 @@ impl Dsv4Table {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf) -> Self {
-        Self::with_sources(data_root, &PerfDbSources::default())
+        Self::with_sources(data_root, &SourceResolver::fixed(PerfDbSources::default()))
+            .expect("fixed-map resolution is infallible")
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources resolved from
     /// `perf_db_sources` (Python-supplied). Each DSV4 file falls back to its
     /// primary `data_root/<basename>` when absent from the map. No I/O.
-    pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
-        let csa_context_sources = resolve_op_sources(
-            perf_db_sources,
-            "dsv4_csa_context_module_perf.parquet",
-            &data_root,
-        );
-        let hca_context_sources = resolve_op_sources(
-            perf_db_sources,
-            "dsv4_hca_context_module_perf.parquet",
-            &data_root,
-        );
-        let csa_generation_sources = resolve_op_sources(
-            perf_db_sources,
-            "dsv4_csa_generation_module_perf.parquet",
-            &data_root,
-        );
-        let hca_generation_sources = resolve_op_sources(
-            perf_db_sources,
-            "dsv4_hca_generation_module_perf.parquet",
-            &data_root,
-        );
-        let topk_calib_sources = resolve_op_sources(
-            perf_db_sources,
-            "dsv4_csa_topk_calib_perf.parquet",
-            &data_root,
-        );
-        let paged_mqa_sources = resolve_op_sources(
-            perf_db_sources,
-            "dsv4_paged_mqa_logits_module_perf.parquet",
-            &data_root,
-        );
-        Self {
+    pub fn with_sources(data_root: PathBuf, resolver: &SourceResolver) -> Result<Self, AicError> {
+        let csa_context_sources = resolver.sources_for("dsv4_csa_context_module_perf.parquet", &data_root)?;
+        let hca_context_sources = resolver.sources_for("dsv4_hca_context_module_perf.parquet", &data_root)?;
+        let csa_generation_sources = resolver.sources_for("dsv4_csa_generation_module_perf.parquet", &data_root)?;
+        let hca_generation_sources = resolver.sources_for("dsv4_hca_generation_module_perf.parquet", &data_root)?;
+        let topk_calib_sources = resolver.sources_for("dsv4_csa_topk_calib_perf.parquet", &data_root)?;
+        let paged_mqa_sources = resolver.sources_for("dsv4_paged_mqa_logits_module_perf.parquet", &data_root)?;
+        Ok(Self {
             csa_context_sources,
             hca_context_sources,
             csa_generation_sources,
@@ -277,7 +254,7 @@ impl Dsv4Table {
             hca_generation: OnceLock::new(),
             topk_calib: OnceLock::new(),
             paged_mqa: OnceLock::new(),
-        }
+        })
     }
 
     /// Context-DSV4 latency at `lookup_s = isl` (the new-token count).

@@ -31,6 +31,7 @@ from ._aiconfigurator_core import (
     engine_spec_bincode_from_json,
     gemm_quant_util_levels,
     moe_quant_util_levels,
+    resolve_op_sources_report_json,
     table_view_attributes,
     weights_ops_json,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "engine_spec_bincode_from_json",
     "gemm_quant_util_levels",
     "moe_quant_util_levels",
+    "resolve_op_sources_report_json",
     "table_view_attributes",
     "weights_ops_json",
 ]

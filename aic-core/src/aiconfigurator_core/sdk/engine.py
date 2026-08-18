@@ -127,7 +127,13 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 # - 12 (PR-6): `DsaModuleOp` gained `attn_projection_quant_modes` — a
 #   bincode op-layout change (same class as v5/v7/v8/v10; serde(default)
 #   only covers the JSON wire, bincode is positional).
-ENGINE_SPEC_SCHEMA_VERSION = 12
+# - 13 (deprecation-cleanup PR): the engine owns shared-layer source
+#   resolution. `EngineConfig` dropped the Python-resolved `perf_db_sources`
+#   map (a bincode config-layout change) and gained `enable_shared_layer` /
+#   `strict_provenance` policy flags; the engine re-derives every table's
+#   source list from the perf-data tree
+#   (`perf_database/source_resolution.rs`).
+ENGINE_SPEC_SCHEMA_VERSION = 13
 ENGINE_CONFIG_SCHEMA_VERSION = 1
 
 logger = logging.getLogger(__name__)
@@ -805,48 +811,23 @@ def _to_opspec(op: Any, *, backend: str, architecture: str, database: Any) -> di
 # --------------------------------------------------------------------------- #
 
 
-def _compute_perf_db_sources(database: Any) -> dict:
-    """Resolve the shared-layer (sibling/cross-version) source list per op file
-    from the Python ``database``, so the Rust core can load the SAME rows Python
-    does under SILICON/HYBRID.
-
-    Returns ``{op_file_basename: [[abs_path, [kernel_sources] | None], ...]}``.
-    ``_build_op_sources`` returns just ``[(primary, None)]`` when the shared
-    layer is off or an op has no inheritable siblings, so the Rust side falls
-    back to its primary ``data_root`` behaviour for those. Returns ``{}`` when a
-    database is unavailable or introspection fails (Rust then uses its
-    single-``data_root`` default). Discovery stays here (single source of truth)
-    rather than being reimplemented in Rust.
-    """
+def _shared_layer_flag(database: Any) -> bool | None:
+    """The database view's shared-layer flag for the wire, ``None`` when no
+    database is bound (the engine then derives it from ``database_mode``,
+    mirroring ``_shared_layer_enabled``). The engine resolves per-op sources
+    ITSELF (schema v13, ``perf_database/source_resolution.rs``); Python only
+    ships the policy bit — including explicit ``shared_layer=`` overrides
+    regression harnesses use to pin per-version behavior."""
     if database is None:
-        return {}
-    try:
-        from aiconfigurator_core.sdk.common import PerfDataFilename
-        from aiconfigurator_core.sdk.operations.base import resolve_op_data_path
+        return None
+    flag = getattr(database, "enable_shared_layer", None)
+    return None if flag is None else bool(flag)
 
-        system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
-        out: dict[str, list] = {}
-        for filename_enum in PerfDataFilename:
-            primary_path = resolve_op_data_path(
-                system_data_root, database.backend, database.version, filename_enum.value
-            )
-            sources = database._build_op_sources(filename_enum, primary_path, system_data_root)
-            out[filename_enum.value] = [
-                [os.path.abspath(path), (sorted(ks) if ks is not None else None)] for path, ks in sources
-            ]
-        return out
-    except Exception:
-        logger.warning(
-            "Failed to resolve shared-layer perf-DB sources for %s/%s/%s; the "
-            "compiled engine will load PRIMARY-ONLY rows while Python uses the "
-            "shared layer in the same run — cross-engine drift is possible. "
-            "Investigate rather than ignore.",
-            getattr(database, "system", "?"),
-            getattr(database, "backend", "?"),
-            getattr(database, "version", "?"),
-            exc_info=True,
-        )
-        return {}
+
+def _strict_provenance_flag(database: Any) -> bool:
+    """The database view's fail-closed provenance mode for the wire (absent
+    database -> False, matching a bare load)."""
+    return bool(getattr(database, "strict_provenance", False)) if database is not None else False
 
 
 def _engine_config_dict(
@@ -898,10 +879,11 @@ def _engine_config_dict(
         "moe_dtype": _rust_moe_quant_to_dtype(getattr(cfg, "moe_quant_mode", None)),
         "activation_dtype": _rust_quant_to_dtype(getattr(cfg, "fmha_quant_mode", None)),
         "kv_cache_dtype": _rust_quant_to_dtype(getattr(cfg, "kvcache_quant_mode", None)),
-        # Shared-layer (sibling/cross-version) per-op perf-data sources, resolved
-        # in Python so the Rust core inherits the same rows. Empty/absent = Rust
-        # uses its single-``data_root`` default (back-compat with old specs).
-        "perf_db_sources": _compute_perf_db_sources(database),
+        # Shared-layer policy bits only (schema v13): the engine resolves
+        # per-op sources itself (`perf_database/source_resolution.rs`), so the
+        # wire carries the flag, not the resolved map.
+        "enable_shared_layer": _shared_layer_flag(database),
+        "strict_provenance": _strict_provenance_flag(database),
         # Perf-database query mode + enabled empirical transfer kinds, read off
         # the live database view so the compiled engine answers HYBRID/EMPIRICAL
         # queries the same way the Python step does. Presets are resolved here
@@ -1148,7 +1130,8 @@ def build_database_probe_spec_json(
         "moe_dtype": None,
         "activation_dtype": None,
         "kv_cache_dtype": None,
-        "perf_db_sources": _compute_perf_db_sources(database),
+        "enable_shared_layer": _shared_layer_flag(database),
+        "strict_provenance": _strict_provenance_flag(database),
         "database_mode": database_mode or _database_mode_name(database),
         "transfer_policy": _transfer_policy_tokens(database),
         "extra": {},
@@ -1213,10 +1196,10 @@ def _require_real_database(database: Any) -> None:
 
 def _probe_spec_key(database: Any, mode_token: str | None) -> tuple[str, str | None]:
     """The ``(probe-spec JSON, systems_path)`` pair for ``database`` — the LRU
-    key. Building it re-runs the shared-layer source resolution for every op
-    file: the expensive half of ``_probe_handle_for``, split out so callers
-    that fetch many views per database (``engine_table_view``) can memoize
-    the key without ever holding a handle outside the LRU."""
+    key. The spec carries the load identity + data-resolution policy bits
+    (schema v13: the engine resolves per-op sources itself), so building the
+    key is cheap; callers that fetch many views per database
+    (``engine_table_view``) still memoize it to skip the JSON assembly."""
     _require_real_database(database)
     systems_path = getattr(database, "systems_root", None) or os.environ.get("AICONFIGURATOR_SYSTEMS_PATH")
     key = build_database_probe_spec_json(database, systems_path=systems_path, database_mode=mode_token)

@@ -29,7 +29,7 @@ import yaml
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.operations.base import resolve_op_data_path
-from aiconfigurator.sdk.perf_database import PerfDatabase, _load_op_kernel_source_manifest_entries
+from aiconfigurator.sdk.perf_database import PerfDatabase
 
 pytestmark = pytest.mark.unit
 
@@ -77,7 +77,7 @@ def systems_root(tmp_path: Path) -> Path:
     root = tmp_path / "systems"
     root.mkdir()
     (root / "h100_sxm.yaml").write_text("data_dir: data/h100_sxm\n", encoding="utf-8")
-    _load_op_kernel_source_manifest_entries.cache_clear()
+    # (manifest parsing moved into the engine resolver — no Python cache to clear)
     return root
 
 
