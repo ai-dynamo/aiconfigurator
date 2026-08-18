@@ -281,6 +281,26 @@ def test_comparability_new_writer_leaf_equals_adapted_legacy_leaf(tmp_path):
     [parquet_path] = finalize_perf_files([perf_file])
     (data_dir / "moe_a2a_perf.parquet").write_bytes(Path(parquet_path).read_bytes())
 
+    # This family-layout directory is Collector V3 data, so CI's
+    # AIC_STRICT_PROVENANCE=1 gate requires every synthetic table to be
+    # covered by the colocated sidecar.
+    table_meta = {
+        "collector_ref": "test-fixture",
+        "collector_hash": "sha256:" + "0" * 64,
+        "case_plan_hash": provenance.case_plan_hash(["comparability"]),
+        "collected_at": "2026-08-18",
+        "rows": 4,
+        "status": provenance.STATUS_COMPLETE,
+    }
+    provenance.write_collection_meta(
+        data_dir,
+        {"framework": "trtllm", "version": "1.3.0rc10", "image": "test-fixture"},
+        {
+            "moe_a2a_perf": dict(table_meta),
+            "trtllm_alltoall_perf": dict(table_meta),
+        },
+    )
+
     db = PerfDatabase("h100_sxm", "trtllm", "1.3.0rc10", str(root), database_mode="HYBRID")
     loaded = fetch_table_view(db, "_moe_a2a_data")
 
