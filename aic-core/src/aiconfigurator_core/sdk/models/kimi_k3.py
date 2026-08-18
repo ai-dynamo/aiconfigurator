@@ -217,36 +217,69 @@ class KimiK3Model(BaseModel):
         # --- MLA full-attention layers ---
         if counts["full"] > 0:
             c = counts["full"]
-            self.context_ops.extend(
-                [
-                    ops.ElementWise("context_mla_norm", c, 2 * h, 2 * h, 0.8),
-                    ops.GEMM("context_mla_downscale_gemm", c, mla["fused_qkv_a_out"], h, gemm_q),
-                    ops.GEMM("context_mla_q_b_gemm", c, mla["q_b_out"] // tp, cfg.q_lora_rank, gemm_q),
-                    ops.GEMM("context_mla_kv_b_gemm", c, mla["kv_b_out"] // tp, cfg.kv_lora_rank, gemm_q),
-                    # vLLM models MLA as standard attention with v_head_dim
-                    # (K2.5/DeepSeek vLLM convention); sglang uses the granular
-                    # MLA tables.
-                    ops.ContextAttention(
-                        "context_attention",
-                        c,
-                        self._num_heads // tp,
-                        self._num_kv_heads // tp,
-                        kvcache_q,
-                        fmha_q,
-                        head_size=cfg.v_head_dim,
+            # Context MLA block (vLLM): q_b + kv_b projections, attention core
+            # and o_proj. Since vLLM 0.27.0 upstream ships Kimi-K3's own
+            # ``MultiHeadLatentAttention`` (vllm/models/kimi_k3/nvidia/mla.py)
+            # whose attention core is a REAL MLA lane (``get_attn_backend(
+            # use_mla=True)`` + MLAAttentionImpl on latent-dim KV cache,
+            # num_kv_heads=1, selected by vllm's MLA back/prefill selectors),
+            # price it against the module-level MLA tables (#1458 [native][local]
+            # identity). The granular GQA stack below stays as FallbackOp
+            # fallback for systems whose module tables still have no rows
+            # (e.g. before per-head-count collection lands).
+            context_mla_granular = [
+                ops.GEMM("context_mla_q_b_gemm", c, mla["q_b_out"] // tp, cfg.q_lora_rank, gemm_q),
+                ops.GEMM("context_mla_kv_b_gemm", c, mla["kv_b_out"] // tp, cfg.kv_lora_rank, gemm_q),
+                ops.ContextAttention(
+                    "context_attention",
+                    c,
+                    self._num_heads // tp,
+                    self._num_kv_heads // tp,
+                    kvcache_q,
+                    fmha_q,
+                    head_size=cfg.v_head_dim,
+                ),
+                ops.GEMM("context_mla_o_gemm", c, h, mla["o_in"] // tp, gemm_q, low_precision_input=True),
+            ]
+            if self._backend_name == "vllm":
+                context_mla_block = [
+                    ops.FallbackOp(
+                        "context_mla_block",
+                        primary=ops.MLAModule(
+                            "context_mla_module",
+                            c,
+                            True,
+                            self._num_heads // tp,
+                            kvcache_q,
+                            fmha_q,
+                            gemm_q,
+                            native_num_heads=self._num_heads,
+                        ),
+                        fallback=context_mla_granular,
                     )
-                    if self._backend_name == "vllm"
-                    else ops.ContextMLA(
+                ]
+            else:
+                # sglang keeps the granular ContextMLA tables.
+                context_mla_block = [
+                    context_mla_granular[0],
+                    context_mla_granular[1],
+                    ops.ContextMLA(
                         "context_attention",
                         c,
                         self._num_heads // tp,
                         kvcache_q,
                         fmha_q,
                     ),
+                    context_mla_granular[3],
+                ]
+            self.context_ops.extend(
+                [
+                    ops.ElementWise("context_mla_norm", c, 2 * h, 2 * h, 0.8),
+                    ops.GEMM("context_mla_downscale_gemm", c, mla["fused_qkv_a_out"], h, gemm_q),
+                    *context_mla_block,
                     # output gate: extra hidden -> n*v_head_dim GEMM + sigmoid multiply
                     ops.GEMM("context_mla_gate_gemm", c, mla["o_in"] // tp, h, gemm_q),
                     ops.ElementWise("context_mla_gate_mul", c, 2 * mla["o_in"] // tp, mla["o_in"] // tp, 0.8),
-                    ops.GEMM("context_mla_o_gemm", c, h, mla["o_in"] // tp, gemm_q, low_precision_input=True),
                     ops.CustomAllReduce("context_mla_ar", c, h, tp),
                 ]
             )
@@ -276,6 +309,7 @@ class KimiK3Model(BaseModel):
         pp = self.config.pp_size
         gemm_q = self.config.gemm_quant_mode
         kvcache_q = self.config.kvcache_quant_mode
+        fmha_q = self.config.fmha_quant_mode
         counts = self._count_layer_types()
         mla = self._mla_dims(cfg)
 
@@ -404,55 +438,79 @@ class KimiK3Model(BaseModel):
         # --- MLA full-attention layers ---
         if counts["full"] > 0:
             c = counts["full"]
+            # Generation MLA block (vLLM): q_b up-projection, attention core
+            # and o_proj. Same 0.27.0 serving-truth change as the context
+            # side: upstream MultiHeadLatentAttention runs the real MLA lane,
+            # so price the block against the module-level MLA tables; the
+            # granular GQA stack is the FallbackOp fallback for systems whose
+            # module tables have no rows yet.
+            generation_mla_granular = [
+                ops.GEMM("generation_mla_q_b_gemm", c, mla["q_b_out"] // tp, cfg.q_lora_rank, gemm_q),
+                ops.GenerationAttention(
+                    "generation_attention",
+                    c,
+                    self._num_heads // tp,
+                    self._num_kv_heads // tp,
+                    kvcache_q,
+                    head_size=cfg.v_head_dim,
+                ),
+                ops.GEMM("generation_mla_o_gemm", c, h, mla["o_in"] // tp, gemm_q, low_precision_input=True),
+            ]
+            if self._backend_name == "vllm":
+                generation_mla_block = [
+                    ops.FallbackOp(
+                        "generation_mla_block",
+                        primary=ops.MLAModule(
+                            "generation_mla_module",
+                            c,
+                            False,
+                            self._num_heads // tp,
+                            kvcache_q,
+                            fmha_q,
+                            gemm_q,
+                            native_num_heads=self._num_heads,
+                        ),
+                        fallback=generation_mla_granular,
+                    )
+                ]
+            else:
+                # sglang: granular absorbed-BMM stack. The absorb BMMs are
+                # priced per exact local head count (96-family for K3). The
+                # mla_bmm query routes exact-first: systems without exact
+                # rows (only b200 sglang carries them today) fall back to the
+                # next-pow2 DeepSeek slice scaled by the head ratio — see
+                # engine's mla_bmm table (operators/mla.rs).
+                generation_mla_block = [
+                    generation_mla_granular[0],
+                    ops.MLABmm(
+                        "generation_bmm_pre",
+                        c,
+                        self._num_heads // tp,
+                        mla_bmm_q,
+                        if_pre=True,
+                    ),
+                    ops.GenerationMLA(
+                        "generation_attention",
+                        c,
+                        self._num_heads // tp,
+                        kvcache_q,
+                    ),
+                    ops.MLABmm(
+                        "generation_bmm_post",
+                        c,
+                        self._num_heads // tp,
+                        mla_bmm_q,
+                        if_pre=False,
+                    ),
+                    generation_mla_granular[2],
+                ]
             self.generation_ops.extend(
                 [
                     ops.ElementWise("generation_mla_norm", c, 2 * h, 2 * h, 0.8),
                     ops.GEMM("generation_mla_downscale_gemm", c, mla["fused_qkv_a_out"], h, gemm_q),
-                    ops.GEMM("generation_mla_q_b_gemm", c, mla["q_b_out"] // tp, cfg.q_lora_rank, gemm_q),
-                    # The absorb BMMs are priced per exact local head count
-                    # (96-family for K3). The mla_bmm query routes
-                    # exact-first: systems without exact rows (only b200
-                    # sglang carries them today) fall back to the next-pow2
-                    # DeepSeek slice scaled by the head ratio — see
-                    # engine's mla_bmm table (operators/mla.rs).
-                    *(
-                        [
-                            ops.GenerationAttention(
-                                "generation_attention",
-                                c,
-                                self._num_heads // tp,
-                                self._num_kv_heads // tp,
-                                kvcache_q,
-                                head_size=cfg.v_head_dim,
-                            )
-                        ]
-                        if self._backend_name == "vllm"
-                        else [
-                            ops.MLABmm(
-                                "generation_bmm_pre",
-                                c,
-                                self._num_heads // tp,
-                                mla_bmm_q,
-                                if_pre=True,
-                            ),
-                            ops.GenerationMLA(
-                                "generation_attention",
-                                c,
-                                self._num_heads // tp,
-                                kvcache_q,
-                            ),
-                            ops.MLABmm(
-                                "generation_bmm_post",
-                                c,
-                                self._num_heads // tp,
-                                mla_bmm_q,
-                                if_pre=False,
-                            ),
-                        ]
-                    ),
+                    *generation_mla_block,
                     ops.GEMM("generation_mla_gate_gemm", c, mla["o_in"] // tp, h, gemm_q),
                     ops.ElementWise("generation_mla_gate_mul", c, 2 * mla["o_in"] // tp, mla["o_in"] // tp, 0.8),
-                    ops.GEMM("generation_mla_o_gemm", c, h, mla["o_in"] // tp, gemm_q, low_precision_input=True),
                     ops.CustomAllReduce("generation_mla_ar", c, h, tp),
                 ]
             )
