@@ -1241,6 +1241,15 @@ def _add_estimate_mode_arguments(parser):
         "Controls how many KV blocks TRT-LLM pre-allocates per sequence. "
         "Set this to match your actual deployment to get an accurate KV cache capacity warning.",
     )
+    parser.add_argument(
+        "--inclusive-tpot",
+        action="store_true",
+        default=False,
+        help=(
+            "Report TPOT as (ttft + tpot * (osl - 1)) / osl, spreading TTFT cost across all output tokens. "
+            "Affects terminal output only; internal calculations always use inter-token latency."
+        ),
+    )
 
 
 def _add_support_mode_arguments(parser):
@@ -2731,12 +2740,17 @@ def _run_estimate_mode(args):
         if args.attention_dp_size and args.attention_dp_size != 1:
             print(f"  Attention DP:     {args.attention_dp_size}")
 
+    # Compute display TPOT: inclusive spreads TTFT across all output tokens.
+    display_tpot = result.tpot
+    if getattr(args, "inclusive_tpot", False) and result.ttft is not None and result.osl and result.osl > 0:
+        display_tpot = (result.ttft + result.tpot * (result.osl - 1)) / result.osl
+
     print("-" * 60)
     if result.mode == "static_gen":
         # ttft is zero by construction; surface generation_latency instead.
         gen_lat = float(result.raw.get("generation_latency", 0.0) or 0.0)
         print(f"  Generation lat.:  {gen_lat:.3f} ms")
-        print(f"  TPOT:             {result.tpot:.3f} ms")
+        print(f"  TPOT:             {display_tpot:.3f} ms")
     elif result.mode == "static_ctx":
         print(f"  TTFT:             {result.ttft:.3f} ms")
     elif result.mode == "afd":
@@ -2780,11 +2794,11 @@ def _run_estimate_mode(args):
         if p_impl or d_impl:
             print(f"  Composition:      (p)={p_impl or 'unmodeled'}  (d)={d_impl or 'unmodeled'}")
         print(f"  TTFT:             {result.ttft:.3f} ms")
-        print(f"  TPOT:             {result.tpot:.3f} ms")
+        print(f"  TPOT:             {display_tpot:.3f} ms")
         print(f"  Request Latency:  {result.request_latency:.3f} ms")
     else:
         print(f"  TTFT:             {result.ttft:.3f} ms")
-        print(f"  TPOT:             {result.tpot:.3f} ms")
+        print(f"  TPOT:             {display_tpot:.3f} ms")
         print(f"  Request Latency:  {result.request_latency:.3f} ms")
     encoder_latency = float(result.raw.get("encoder_latency", 0.0) or 0.0)
     if encoder_latency > 0.0:

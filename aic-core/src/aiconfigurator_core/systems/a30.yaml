@@ -30,3 +30,6 @@ misc:
     8: 411041792 # 392MB
   other_mem: 3758096384 # 3.5GB safety reserve
   nccl_version: '2.27.3'
+  vendor: 'nvidia'
+  architecture: 'ampere'
+  name: 'NVIDIA A30'

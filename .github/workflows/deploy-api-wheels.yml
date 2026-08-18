@@ -1,0 +1,125 @@
+name: Build and release API wheels
+
+on:
+  push:
+    branches:
+      - deploy/api
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-api-wheels-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build manylinux x86_64 wheels
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build wheels via Docker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          target: wheel-out
+          build-args: WHEEL_BUILD_BASE=quay.io/pypa/manylinux_2_28_x86_64
+          outputs: type=local,dest=./wheelhouse
+
+      - name: List built wheels
+        run: ls -lh wheelhouse/
+
+      - name: Smoke-test native extension
+        run: |
+          python3 -m pip install --quiet --no-deps \
+            wheelhouse/aiconfigurator_core-*.whl \
+            wheelhouse/aiconfigurator-*.whl
+          python3 -c \
+            'import aiconfigurator_core; assert aiconfigurator_core._build_smoke() == 1'
+
+      - name: Upload wheels as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-manylinux-x86_64
+          path: wheelhouse/*.whl
+          retention-days: 90
+
+  release:
+    name: Publish wheels to GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels-manylinux-x86_64
+          path: wheelhouse/
+
+      - name: Determine version
+        id: version
+        run: |
+          core_whl=$(ls wheelhouse/aiconfigurator_core-*.whl | head -1)
+          version=$(basename "$core_whl" | sed -E 's/aiconfigurator_core-([^-]+)-.*/\1/')
+          sha_short="${GITHUB_SHA:0:8}"
+          tag="deploy-api-v${version}+${sha_short}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Create versioned GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+
+          # Delete existing release with same tag if present
+          gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+          gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/${tag}" -X DELETE 2>/dev/null || true
+
+          gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "API wheels v${{ steps.version.outputs.version }} (${GITHUB_SHA:0:8})" \
+            --notes "Auto-built manylinux_2_28_x86_64 wheels from deploy/api branch.
+
+          Commit: ${GITHUB_SHA}
+          Branch: deploy/api
+
+          Install:
+          \`\`\`
+          pip install aiconfigurator-core aiconfigurator --find-links https://github.com/${GITHUB_REPOSITORY}/releases/expanded_assets/deploy-api-latest
+          \`\`\`" \
+            --prerelease \
+            wheelhouse/*.whl
+
+      - name: Update latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Delete the previous "latest" release and re-create with current wheels
+          gh release delete deploy-api-latest --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+          gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/deploy-api-latest" -X DELETE 2>/dev/null || true
+
+          gh release create deploy-api-latest \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "API wheels (latest)" \
+            --notes "Latest manylinux_2_28_x86_64 wheels from deploy/api branch.
+
+          Built from: ${{ steps.version.outputs.tag }}
+          Commit: ${GITHUB_SHA}" \
+            --prerelease \
+            wheelhouse/*.whl

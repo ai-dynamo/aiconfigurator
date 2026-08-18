@@ -1,0 +1,600 @@
+openapi: 3.1.0
+info:
+  title: AIConfigurator API
+  description: |
+    Minimal REST API for LLM inference GPU sizing and memory estimation.
+    Wraps the aiconfigurator SDK (`cli_recommend` and `estimate_kv_cache`).
+  version: 1.0.0
+  contact:
+    name: ConfigIQ team
+
+servers:
+  - url: http://localhost:7860
+    description: Local development
+  - url: https://aiconfigurator.dev
+    description: Production
+
+tags:
+  - name: sizing
+    description: GPU recommendation and memory estimation
+  - name: catalog
+    description: Supported models and GPU systems
+
+# ─── Paths ──────────────────────────────────────────────────────────────────
+
+paths:
+  /recommend:
+    post:
+      operationId: recommend
+      tags: [sizing]
+      summary: Find optimal GPU configuration for a workload
+      description: |
+        Given a model, GPU system, backend, workload shape, and performance
+        targets (SLA), searches across parallelism configurations (TP/PP/DP/EP)
+        and serving modes (aggregated and disaggregated) to find the deployment
+        with the fewest GPUs that meets the constraints.
+
+        Wraps `cli_recommend()` from the aiconfigurator SDK.
+
+        Exactly one of `target_request_rate` or `target_concurrency` must be
+        provided.
+
+        Use the `include` query parameter to enrich each config with optional
+        detail sections:
+        - `config` — serving configuration (vLLM/SGLang parameters)
+        - `memory` — per-component memory breakdown
+
+        Example: `POST /recommend?include=config,memory`
+      parameters:
+        - name: include
+          in: query
+          required: false
+          description: Comma-separated list of optional sections to include (config, memory).
+          schema:
+            type: string
+            example: "config,memory"
+        - name: mode
+          in: query
+          required: false
+          description: |
+            Search mode. Use 'quick' for a fast agg-only, single-node, top-1
+            result (~1s warm). Omit for a full search across aggregated and
+            disaggregated serving modes.
+          schema:
+            type: string
+            enum: [quick]
+            example: "quick"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecommendRequest'
+      responses:
+        '200':
+          description: Recommendation found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecommendResponse'
+        '422':
+          description: No feasible configuration found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /memory:
+    post:
+      operationId: estimateMemory
+      tags: [sizing]
+      summary: Estimate GPU memory breakdown for a model configuration
+      description: |
+        Given a model, GPU system, backend, and parallelism configuration,
+        estimates the per-rank memory breakdown: model weights, activations,
+        runtime overhead, communication buffers, and KV cache capacity.
+
+        Wraps `estimate_kv_cache()` from the aiconfigurator SDK.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryRequest'
+      responses:
+        '200':
+          description: Memory estimate
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryResponse'
+        '422':
+          description: Unsupported model/backend/system combination
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /models:
+    get:
+      operationId: listModels
+      tags: [catalog]
+      summary: List supported models
+      description: Returns the set of model identifiers the SDK has performance data for.
+      responses:
+        '200':
+          description: Model list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelListResponse'
+
+  /systems:
+    get:
+      operationId: listSystems
+      tags: [catalog]
+      summary: List supported GPU systems
+      description: |
+        Returns supported GPU systems. Each entry always includes id and name.
+        Use include=specs to add hardware details (memory, TDP, architecture).
+      parameters:
+        - name: include
+          in: query
+          required: false
+          description: Comma-separated extras to include (specs).
+          schema:
+            type: string
+            example: "specs"
+      responses:
+        '200':
+          description: System list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemListResponse'
+
+# ─── Schemas ────────────────────────────────────────────────────────────────
+
+components:
+  schemas:
+
+    # ── Recommend ──────────────────────────────────────────────────────────
+
+    RecommendRequest:
+      type: object
+      required: [model_path, system]
+      properties:
+        model_path:
+          type: string
+          description: HuggingFace model path or SDK model key.
+          example: Qwen/Qwen3-32B-FP8
+        system:
+          type: string
+          description: GPU system identifier.
+          example: h200_sxm
+        backend:
+          type: string
+          description: Inference backend.
+          enum: [vllm, sglang, trtllm]
+          default: vllm
+        backend_version:
+          type: string
+          nullable: true
+          description: Backend version. Null uses the latest available.
+          default: null
+        target_request_rate:
+          type: number
+          nullable: true
+          description: Target request rate in req/s. Set exactly one of this or target_concurrency.
+          default: null
+        target_concurrency:
+          type: number
+          nullable: true
+          description: Target concurrent users. Set exactly one of this or target_request_rate.
+          default: null
+        isl:
+          type: integer
+          description: Input sequence length (tokens).
+          default: 4000
+        osl:
+          type: integer
+          description: Output sequence length (tokens).
+          default: 1000
+        ttft:
+          type: number
+          description: Time to first token target (ms).
+          default: 2000.0
+        tpot:
+          type: number
+          description: Time per output token target (ms).
+          default: 30.0
+        request_latency:
+          type: number
+          nullable: true
+          description: End-to-end request latency target (ms). Optional.
+          default: null
+        prefix:
+          type: integer
+          description: Prefix cache length (tokens).
+          default: 0
+        database_mode:
+          type: string
+          description: Performance database mode.
+          enum: [HYBRID, SILICON, EMPIRICAL, SOL]
+          default: HYBRID
+        top_n:
+          type: integer
+          description: Number of top configurations to return.
+          default: 5
+          minimum: 1
+          maximum: 20
+
+    RecommendResponse:
+      type: object
+      required: [configs]
+      properties:
+        configs:
+          type: array
+          description: Top configurations ranked by fewest GPUs, then throughput.
+          items:
+            $ref: '#/components/schemas/RecommendConfig'
+        chosen_mode:
+          type: string
+          description: Serving mode chosen (agg or disagg).
+          example: agg
+
+    RecommendConfig:
+      type: object
+      properties:
+        # GPU sizing
+        total_gpus_needed:
+          type: integer
+          description: Total GPUs required (replicas x GPUs per worker).
+        replicas_needed:
+          type: integer
+          description: Number of worker replicas.
+        num_total_gpus:
+          type: integer
+          description: GPUs per worker (TP x PP x DP).
+
+        # Parallelism
+        tp:
+          type: integer
+          description: Tensor parallel size.
+        pp:
+          type: integer
+          description: Pipeline parallel size.
+        dp:
+          type: integer
+          description: Data parallel size.
+        moe_tp:
+          type: integer
+          nullable: true
+          description: MoE tensor parallel size (MoE models only).
+        moe_ep:
+          type: integer
+          nullable: true
+          description: MoE expert parallel size (MoE models only).
+        cp:
+          type: integer
+          nullable: true
+          description: Context parallel size.
+
+        # Performance
+        ttft:
+          type: number
+          description: Predicted TTFT (ms).
+        tpot:
+          type: number
+          description: Predicted TPOT (ms).
+        request_latency:
+          type: number
+          description: Predicted end-to-end request latency (ms).
+        concurrency:
+          type: integer
+          description: Concurrency level at which these metrics hold.
+        request_rate:
+          type: number
+          description: Achievable request rate (req/s).
+
+        # Throughput
+        tokens_per_second:
+          type: number
+          description: Total tokens/s.
+        tokens_per_second_per_gpu:
+          type: number
+          description: Tokens/s per GPU.
+        tokens_per_second_per_user:
+          type: number
+          description: Tokens/s per concurrent user.
+
+        # Memory and metadata
+        memory:
+          type: number
+          description: Memory usage (GB).
+        model:
+          type: string
+          description: Resolved model identifier.
+        system:
+          type: string
+          description: GPU system used.
+        backend:
+          type: string
+          description: Backend used.
+        backend_version:
+          type: string
+          description: Backend version used.
+
+        # Quantization
+        gemm:
+          type: string
+          description: GEMM quantization mode.
+        kvcache:
+          type: string
+          description: KV cache quantization mode.
+        fmha:
+          type: string
+          description: FMHA quantization mode.
+        moe:
+          type: string
+          nullable: true
+          description: MoE quantization mode.
+        comm:
+          type: string
+          nullable: true
+          description: Communication quantization mode.
+
+        # Power
+        power_w:
+          type: number
+          nullable: true
+          description: Estimated power draw (watts).
+
+        # Optional detail sections (present when requested via include= query param)
+        serving_config:
+          nullable: true
+          description: Serving configuration (present when include=config).
+          $ref: '#/components/schemas/ServingConfig'
+        memory_breakdown:
+          nullable: true
+          description: Per-component memory breakdown (present when include=memory).
+          $ref: '#/components/schemas/MemoryBreakdown'
+
+    ServingConfig:
+      type: object
+      description: Backend-specific serving parameters for the recommended configuration.
+      properties:
+        backend:
+          type: string
+          description: Inference backend.
+        tensor_parallel_size:
+          type: integer
+        max_model_len:
+          type: integer
+          description: Maximum sequence length (ISL + OSL).
+        max_num_seqs:
+          type: integer
+          description: Maximum concurrent sequences.
+        gpu_memory_utilization:
+          type: number
+          description: Fraction of GPU memory to use (0.0-1.0).
+        enable_chunked_prefill:
+          type: boolean
+        enable_prefix_caching:
+          type: boolean
+        quantization:
+          type: string
+          description: Quantization mode (fp8, int8, auto, etc).
+
+    # ── Memory ─────────────────────────────────────────────────────────────
+
+    MemoryRequest:
+      type: object
+      required: [model_path, system, backend]
+      properties:
+        model_path:
+          type: string
+          description: HuggingFace model path or SDK model key.
+          example: QWEN3_32B
+        system:
+          type: string
+          description: GPU system identifier.
+          example: h200_sxm
+        backend:
+          type: string
+          description: Inference backend.
+          enum: [vllm, sglang, trtllm]
+          default: vllm
+        backend_version:
+          type: string
+          nullable: true
+          default: null
+        max_num_tokens:
+          type: integer
+          description: Maximum KV cache token budget.
+          default: 8192
+        max_batch_size:
+          type: integer
+          description: Maximum batch size.
+          default: 128
+        memory_fraction_kind:
+          type: string
+          description: |
+            How memory_fraction_value is interpreted.
+            "of_total" for vLLM/SGLang, "of_free" for TRT-LLM.
+          enum: [of_total, of_free]
+          default: of_total
+        memory_fraction_value:
+          type: number
+          description: Fraction of memory to use for KV cache [0.0, 1.0].
+          default: 1.0
+          minimum: 0.0
+          maximum: 1.0
+        tp_size:
+          type: integer
+          default: 1
+        pp_size:
+          type: integer
+          default: 1
+        attention_dp_size:
+          type: integer
+          default: 1
+        moe_tp_size:
+          type: integer
+          nullable: true
+          default: null
+        moe_ep_size:
+          type: integer
+          nullable: true
+          default: null
+        gemm_quant_mode:
+          type: string
+          nullable: true
+          default: null
+        moe_quant_mode:
+          type: string
+          nullable: true
+          default: null
+        kvcache_quant_mode:
+          type: string
+          nullable: true
+          default: null
+        fmha_quant_mode:
+          type: string
+          nullable: true
+          default: null
+        comm_quant_mode:
+          type: string
+          nullable: true
+          default: null
+        tolerance_fraction:
+          type: number
+          nullable: true
+          description: Safety margin [0.0, 1.0). Reduces KV budget by this fraction.
+          default: null
+
+    MemoryResponse:
+      type: object
+      required: [total_gpu_capacity_bytes, total_kv_size_bytes, kv_size_per_token_bytes, total_kv_size_tokens, source, memory_breakdown]
+      properties:
+        total_gpu_capacity_bytes:
+          type: integer
+          description: Total GPU memory capacity (bytes).
+        total_kv_size_bytes:
+          type: integer
+          description: KV cache size (bytes).
+        kv_size_per_token_bytes:
+          type: integer
+          description: KV cache per token (bytes).
+        total_kv_size_tokens:
+          type: integer
+          description: Maximum tokens that fit in the KV cache.
+        source:
+          type: string
+          enum: [native, naive_fallback]
+          description: Estimation method used.
+        memory_breakdown:
+          $ref: '#/components/schemas/MemoryBreakdown'
+        tolerance_adjusted:
+          type: object
+          nullable: true
+          description: Adjusted values when tolerance_fraction is set.
+          properties:
+            total_kv_size_bytes:
+              type: integer
+            total_kv_size_tokens:
+              type: integer
+            tolerance_fraction:
+              type: number
+
+    MemoryBreakdown:
+      type: object
+      properties:
+        weights_bytes:
+          type: integer
+          description: Model weights memory (bytes).
+        activations_bytes:
+          type: integer
+          description: Activation memory (bytes).
+        runtime_overhead_bytes:
+          type: integer
+          description: Runtime overhead memory (bytes).
+        comm_overhead_bytes:
+          type: integer
+          description: Communication buffer memory (bytes).
+        kv_cache_bytes:
+          type: integer
+          description: KV cache memory (bytes). Mirrors total_kv_size_bytes.
+
+    # ── Catalog ────────────────────────────────────────────────────────────
+
+    ModelListResponse:
+      type: object
+      properties:
+        models:
+          type: array
+          items:
+            type: string
+          description: Sorted list of supported model identifiers.
+
+    SystemListResponse:
+      type: object
+      properties:
+        systems:
+          type: array
+          items:
+            $ref: '#/components/schemas/SystemEntry'
+          description: List of supported GPU systems.
+
+    SystemEntry:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          description: System identifier.
+          example: h200_sxm
+        name:
+          type: string
+          description: Human-readable GPU name.
+          example: NVIDIA H200 SXM
+        # Fields below are present when include=specs
+        vendor:
+          type: string
+          nullable: true
+          example: nvidia
+        architecture:
+          type: string
+          nullable: true
+          example: hopper
+        memory_bytes:
+          type: integer
+          description: GPU memory capacity in bytes.
+        tdp_watts:
+          type: number
+          description: Thermal design power (watts).
+        gpus_per_node:
+          type: integer
+          description: Number of GPUs per node.
+
+    # ── Error ──────────────────────────────────────────────────────────────
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.

@@ -1,0 +1,23 @@
+# Exclude large directories that aren't needed for the API deployment
+aic-core/
+src/
+docker/
+tests/
+collector/
+docs/
+.github/
+tools/simple_sdk_demo/
+tools/perf_database/
+tools/accuracy_regression_testing/
+tools/accuracy_tracking/
+tools/automation/
+tools/generator_validator/
+tools/prediction_regression_gate/
+tools/sanity_check/
+tools/support_matrix/
+tools/spica/
+.venv/
+aiconfigurator/
+uv.lock
+pyproject.toml
+*.ipynb

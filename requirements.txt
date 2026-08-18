@@ -1,0 +1,19 @@
+# AIConfigurator wheels — installed from GitHub Release built by CI.
+# Update the --find-links URL when a new release is tagged.
+#
+# To install locally for testing:
+#   pip install -r requirements.txt
+#
+# The CI workflow (deploy-api-wheels.yml) builds manylinux_2_28_x86_64
+# wheels and publishes them as GitHub Release assets. Vercel's Python
+# runtime runs pip install during build.
+
+--find-links https://github.com/openshift-psap/aiconfigurator/releases/expanded_assets/deploy-api-latest
+
+aiconfigurator-core
+aiconfigurator
+
+# FastAPI + ASGI server
+fastapi>=0.115
+uvicorn>=0.34
+orjson>=3.10
