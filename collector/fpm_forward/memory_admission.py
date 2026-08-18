@@ -15,7 +15,10 @@ from aiconfigurator.sdk.memory import KVCacheEstimator
 # modeling consumer re-runs identically). Only these justify rejecting a
 # topology without silicon evidence; every other ValueError (unknown model,
 # template bootstrap, estimator gaps) stays runnable. Extend the tuple as new
-# validators appear; the durable fix is typed exceptions in aic-core.
+# validators appear.
+# FIXME(structural-marker): message matching is a stopgap. The durable fix is
+# typed exceptions in aic-core (a structural-validation error hierarchy) so
+# this classification survives upstream wording changes; retire the tuple then.
 _STRUCTURAL_VALIDATION_MARKERS = ("Invalid quantized MoE configuration",)
 from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
 
@@ -198,7 +201,8 @@ def filter_memory_infeasible_topologies(
 
     decisions = []
     admitted = []
-    rejected = []
+    rejected_structural = []
+    rejected_capacity = []
     for topology in topologies:
         estimates = tuple(
             _estimate_dtype(
@@ -224,7 +228,7 @@ def filter_memory_infeasible_topologies(
                 "the modeling consumer would fail on the same math, so its data is unusable. "
                 "Rerun with --fpm-strict-admission false to force runtime verification"
             )
-            rejected.append((topology, estimates))
+            rejected_structural.append((topology, estimates))
         elif "unknown" in dispositions or "predicted_invalid" in dispositions:
             disposition = "unknown"
             reason = "AIC could not prove the topology is impossible; runtime verification is required"
@@ -234,7 +238,7 @@ def filter_memory_infeasible_topologies(
         else:
             disposition = "rejected"
             reason = "all requested KV dtypes exceed rank-local GPU capacity at configured max new tokens"
-            rejected.append((topology, estimates))
+            rejected_capacity.append((topology, estimates))
         decisions.append(
             TopologyMemoryDecision(
                 topology=topology,
@@ -245,9 +249,29 @@ def filter_memory_infeasible_topologies(
             )
         )
 
-    if rejected:
+    # Attribute the two drop causes separately: a structural rejection is AIC
+    # declaring the configuration impossible, not a memory-capacity fact, and
+    # folding it into the capacity warning misleads whoever reads the log.
+    if rejected_structural:
         details = []
-        for topology, estimates in rejected:
+        for topology, estimates in rejected_structural:
+            invalid = next(
+                (estimate for estimate in estimates if estimate.disposition == "predicted_invalid"),
+                estimates[0],
+            )
+            details.append(f"{topology.to_dict()}={invalid.reason}")
+        logger.warning(
+            "fpm_forward: dropped %d/%d topologies (AIC structural validation predicts the "
+            "configuration is invalid, system=%s; --fpm-strict-admission false forces runtime "
+            "verification): %s",
+            len(rejected_structural),
+            len(topologies),
+            system,
+            "; ".join(details),
+        )
+    if rejected_capacity:
+        details = []
+        for topology, estimates in rejected_capacity:
             best = min(
                 estimates,
                 key=lambda estimate: estimate.estimated_non_kv_bytes
@@ -265,7 +289,7 @@ def filter_memory_infeasible_topologies(
         logger.warning(
             "fpm_forward: dropped %d/%d topologies (AIC configured max-new-token non-KV memory "
             "exceeds GPU capacity, system=%s, max_new_tokens=%d): %s",
-            len(rejected),
+            len(rejected_capacity),
             len(topologies),
             system,
             max_new_tokens,

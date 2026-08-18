@@ -18,6 +18,8 @@ from typing import Any
 
 import yaml
 
+from aiconfigurator.fpm_contract import FPM_RESOLVED_CONFIG_GLOB
+
 from .native_artifact import validate_native_collection
 from .planner import FPMCell, FPMCollectionPlan, backend_identity_columns
 
@@ -72,7 +74,7 @@ def _validate_backend_markers(cell: FPMCell, cell_dir: Path) -> None:
     expected = cell.backend_policy.expected_markers
     if not expected:
         return
-    paths = sorted((cell_dir / "raw").glob("**/resolved-config*.json"))
+    paths = sorted((cell_dir / "raw").glob(f"**/{FPM_RESOLVED_CONFIG_GLOB}"))
     if not paths:
         raise ValueError(f"backend policy {cell.backend_policy.policy_id} requires resolved-config evidence")
     for path in paths:
@@ -83,7 +85,10 @@ def _validate_backend_markers(cell: FPMCell, cell_dir: Path) -> None:
                 actual = _dotted_get(payload, marker_path)
             except KeyError:
                 actual = "<missing>"
-            if actual != marker_value:
+            # Markers are declared as strings while the resolved config keeps
+            # native JSON types (enable_eplb: true vs expected "True");
+            # compare canonical string forms so a type gap is not a mismatch.
+            if str(actual) != str(marker_value):
                 mismatches[marker_path] = {"actual": actual, "expected": marker_value}
         if mismatches:
             raise ValueError(f"backend marker mismatch in {path}: {mismatches}")
@@ -399,7 +404,7 @@ def write_formal_database(
             missing = sorted(required - set(table.column_names))
             if missing:
                 raise ValueError(
-                    "existing FPM database does not satisfy the attempt-bound schema-v5 row-key "
+                    "existing FPM database does not satisfy the attempt-bound schema-v6 row-key "
                     f"contract (missing columns: {missing}); publish to a clean destination: {parquet_path}"
                 )
             merged.extend(table.to_pylist())

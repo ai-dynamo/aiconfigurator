@@ -1142,6 +1142,104 @@ def test_formal_database_first_publisher_wins_on_rerun_overlap(tmp_path):
     assert parquet2.read_bytes() == sealed
 
 
+def test_formal_database_mixed_overlap_skips_sealed_cell_and_lands_the_rest(tmp_path):
+    """A plan overlapping one sealed cell publishes its fresh cells while the
+    sealed cell's rows stay first-publisher-owned: partial skip, rest lands."""
+
+    import pyarrow.parquet as pq
+
+    plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
+    rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+    systems_root = tmp_path / "systems"
+    write_formal_database(plan, rows, systems_root=systems_root)
+
+    overlapping = {
+        **rows[0],
+        "latency_ms": 123.0,
+        "collector_attempt_id": "attempt-2",
+        "runtime_run_id": "run-2",
+    }
+    fresh = {
+        **rows[0],
+        "cell_id": "fpm-test-other",
+        "batch_size": rows[0]["batch_size"] + 4,
+        "collector_attempt_id": "attempt-2",
+        "runtime_run_id": "run-2",
+    }
+    parquet, _metadata, skipped = write_formal_database(plan, [overlapping, fresh], systems_root=systems_root)
+
+    assert skipped == (rows[0]["cell_id"],)
+    published = pq.read_table(parquet).to_pylist()
+    assert {row["cell_id"] for row in published} == {rows[0]["cell_id"], "fpm-test-other"}
+    sealed_rows = [row for row in published if row["cell_id"] == rows[0]["cell_id"]]
+    assert {row["collector_attempt_id"] for row in sealed_rows} == {"attempt"}
+    fresh_rows = [row for row in published if row["cell_id"] == "fpm-test-other"]
+    assert {row["collector_attempt_id"] for row in fresh_rows} == {"attempt-2"}
+
+
+def test_formal_database_refuses_parquet_without_commit_record(tmp_path):
+    """Published rows are sha-sealed evidence: a parquet without its metadata
+    commit record could be a partial write or a foreign file, so the merge
+    must refuse instead of building on unvouched bytes."""
+
+    plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
+    rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+    systems_root = tmp_path / "systems"
+    _parquet, metadata, _skipped = write_formal_database(plan, rows, systems_root=systems_root)
+
+    metadata.unlink()
+    with pytest.raises(ValueError, match="no commit record"):
+        write_formal_database(plan, rows, systems_root=systems_root)
+
+
+def test_formal_database_refuses_parquet_that_mismatches_commit_record(tmp_path):
+    """A parquet whose bytes disagree with the recorded sha256 (manual edit,
+    torn write) must abort the merge instead of silently absorbing it."""
+
+    plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
+    rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+    systems_root = tmp_path / "systems"
+    _parquet, metadata, _skipped = write_formal_database(plan, rows, systems_root=systems_root)
+
+    committed = json.loads(metadata.read_text())
+    committed["parquet_sha256"] = "0" * 64
+    metadata.write_text(json.dumps(committed))
+    with pytest.raises(ValueError, match="does not match its commit record"):
+        write_formal_database(plan, rows, systems_root=systems_root)
+
+
+def test_backend_marker_validation_tolerates_native_json_types(tmp_path):
+    """Markers are declared as strings ("True") while the resolved config
+    stores native JSON types (true); validation compares canonical string
+    forms, so the type gap is not a mismatch but a real value gap still is."""
+
+    from collector.fpm_forward.database import _validate_backend_markers
+
+    cell = FPMCell(
+        cell_id="fpm-test",
+        workload_kind="prefill",
+        topology=ParallelTopology(tp=1, pp=1, dp=2, moe_tp=1, moe_ep=2, cp=1),
+        weight_quantization="nvfp4",
+        kv_cache_dtype="fp8",
+        backend_policy=BackendPolicy("eplb_pinned", {}, {"config.engine_args.enable_eplb": "True"}),
+        parallel_strategy="dep",
+        gemm_quant_mode="nvfp4",
+        moe_quant_mode="nvfp4",
+        fmha_quant_mode="fp8",
+        comm_quant_mode="half",
+    )
+    cell_dir = tmp_path / "cell"
+    config_path = cell_dir / "raw" / "pod-0" / "resolved-config-node0.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps({"config": {"engine_args": {"enable_eplb": True}}}))
+
+    _validate_backend_markers(cell, cell_dir)
+
+    config_path.write_text(json.dumps({"config": {"engine_args": {"enable_eplb": False}}}))
+    with pytest.raises(ValueError, match="backend marker mismatch"):
+        _validate_backend_markers(cell, cell_dir)
+
+
 def test_formal_database_merge_gate_names_missing_row_key_columns(tmp_path):
     """An existing parquet that satisfies the run-identity columns but lacks a
     _ROW_KEY column must be rejected with the actionable schema ValueError,
@@ -1687,6 +1785,42 @@ def test_strict_admission_rejects_aic_structural_invalidity_by_default(monkeypat
             selected_ops={"dsa_context_module", "dsa_generation_module"},
             options=FPMCollectionOptions.from_args(_args()),
         )
+
+
+def test_strict_admission_selective_rejection_keeps_valid_topologies(monkeypatch, caplog):
+    """Structural invalidity is per-topology: only the invalid shapes drop,
+    the rest stay collectable, and the drop log attributes the structural
+    cause instead of blaming memory capacity."""
+
+    import logging
+    from types import SimpleNamespace
+
+    def selective(*_args, **kwargs):
+        if kwargs.get("moe_tp_size", 1) > 1:
+            raise ValueError("Invalid quantized MoE configuration: 1536 % 128 != 0")
+        return SimpleNamespace(breakdown={"non_kv_bytes": 10 * 2**30, "gpu_memory_capacity_bytes": 100 * 2**30})
+
+    monkeypatch.setattr(
+        "collector.fpm_forward.memory_admission.KVCacheEstimator.from_request",
+        selective,
+    )
+    with caplog.at_level(logging.WARNING, logger="collector.fpm_forward.memory_admission"):
+        plan = build_collection_plan(
+            backend="vllm",
+            model_path="nvidia/GLM-5.2-NVFP4",
+            model_architecture="GlmMoeDsaForCausalLM",
+            system="b200_sxm",
+            selected_ops={"dsa_context_module", "dsa_generation_module"},
+            options=FPMCollectionOptions.from_args(_args()),
+        )
+
+    assert plan.topologies
+    assert all(topology.moe_tp == 1 for topology in plan.topologies)
+    assert {decision.disposition for decision in plan.topology_memory_admission} == {"admitted", "rejected"}
+    rejected = [d for d in plan.topology_memory_admission if d.disposition == "rejected"]
+    assert all("structural validation" in d.reason for d in rejected)
+    assert "AIC structural validation predicts the configuration is invalid" in caplog.text
+    assert "exceeds GPU capacity" not in caplog.text
 
 
 def test_strict_admission_false_keeps_predicted_invalid_for_runtime_verification(monkeypatch):

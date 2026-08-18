@@ -167,11 +167,13 @@ class BackendPolicy:
         }
 
 
-def backend_identity_columns(policy: BackendPolicy) -> dict[str, str]:
+def backend_identity_columns(policy: BackendPolicy) -> dict[str, str | bool]:
     """The four explicit backend identity columns (schema v6).
 
-    Unspecified knobs record "auto" (the engine decided); specified knobs
-    record the pinned value, with booleans lowered to "true"/"false".
+    Unspecified string knobs record "auto" (the engine decided); specified
+    knobs record the pinned value. The boolean knobs stay real booleans
+    (default False): the parquet column stays boolean and the modeling-side
+    str() normalization yields "False"/"True".
     """
     fields = policy.aic_fields
 

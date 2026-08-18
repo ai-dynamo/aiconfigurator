@@ -2195,6 +2195,11 @@ def test_publish_partial_ships_passed_cells_and_records_the_missing(tmp_path, mo
     )
 
     assert not [e for e in errors if e["classification"] == "formal_database_failed"]
+    # Partial publication must not hide the failure: the run records the
+    # missing cells as an error so the exit code stays nonzero.
+    incomplete = [e for e in errors if e["classification"] == "campaign_incomplete"]
+    assert len(incomplete) == 1
+    assert failed_cell.cell_id in incomplete[0]["error_message"]
     checkpoint = json.loads((checkpoint_dir / "fpm_forward.json").read_text())
     database = checkpoint["database"]
     assert database["status"] == "passed"
@@ -2203,6 +2208,56 @@ def test_publish_partial_ships_passed_cells_and_records_the_missing(tmp_path, mo
     assert database["missing_cells"] == [failed_cell.cell_id]
     assert database["row_count"] == len(published["rows"]) > 0
     assert Path(database["parquet"]).exists()
+
+
+def test_publish_partial_never_publishes_smoke_rows(tmp_path, monkeypatch):
+    """--fpm-publish-partial is a formal-run escape hatch: combined with
+    --smoke it must not open a path for smoke rows into the formal database.
+
+    The failed cell is first so the smoke target set is not all-passed: that
+    is exactly the state where the partial-publication arm would otherwise
+    pick up the passed cell's smoke rows and publish them."""
+
+    passed_cell = _cell()
+    failed_cell = dataclasses.replace(passed_cell, cell_id="cell-prefill-failed")
+    plan = _plan(passed_cell)
+    plan.cells = (failed_cell, passed_cell)
+
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "fpm_forward_smoke.json").write_text(
+        json.dumps(
+            {
+                "schema": fpm_runner.CHECKPOINT_SCHEMA,
+                "plan_sha256": plan.sha256,
+                "cells": {
+                    passed_cell.cell_id: {"status": "passed", "attempt_id": "attempt-1"},
+                    failed_cell.cell_id: {"status": "failed", "attempt_id": "attempt-2"},
+                },
+            }
+        )
+    )
+
+    def forbidden_writer(*_args, **_kwargs):
+        raise AssertionError("smoke rows must never reach write_formal_database")
+
+    monkeypatch.setattr("collector.fpm_forward.database.write_formal_database", forbidden_writer)
+
+    errors = run_collection(
+        plan,
+        generator_overrides={},
+        checkpoint_dir=str(checkpoint_dir),
+        artifact_root=str(tmp_path / "artifacts"),
+        resume=True,
+        retry_failed=False,
+        smoke=True,
+        database_root=str(tmp_path / "db"),
+        publish_partial=True,
+    )
+
+    assert [e["classification"] for e in errors] == ["campaign_incomplete"]
+    checkpoint = json.loads((checkpoint_dir / "fpm_forward_smoke.json").read_text())
+    assert "database" not in checkpoint
 
 
 def test_partial_run_without_the_flag_still_refuses_to_publish(tmp_path):

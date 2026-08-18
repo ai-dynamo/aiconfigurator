@@ -1677,7 +1677,10 @@ def _run_collection_impl(
         }
         _atomic_json(checkpoint_path, checkpoint)
     elif (not errors and all_passed and covers_full_plan) or (
-        publish_partial
+        # Smoke rows must never reach the formal database, no matter which
+        # publication escape hatches are set.
+        not smoke
+        and publish_partial
         and any(
             isinstance(checkpoint["cells"].get(cell.cell_id), dict)
             and checkpoint["cells"][cell.cell_id].get("status") == "passed"
@@ -1730,6 +1733,21 @@ def _run_collection_impl(
                     len(publishable_cells),
                     len(plan.cells),
                     ", ".join(missing_cells),
+                )
+                # Publication succeeded, but the run must still exit nonzero:
+                # a resumed run skips previously-failed cells without re-adding
+                # their execution errors, and a clean exit would hide them.
+                errors.append(
+                    {
+                        "module": "fpm_forward",
+                        "error_type": "IncompleteCampaign",
+                        "error_message": (
+                            "partial publication: "
+                            f"{len(missing_cells)} of {len(plan.cells)} plan cells are not in the "
+                            f"formal database: {', '.join(missing_cells)}"
+                        ),
+                        "classification": "campaign_incomplete",
+                    }
                 )
         except Exception as error:
             checkpoint["database"] = {
