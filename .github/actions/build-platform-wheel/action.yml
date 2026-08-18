@@ -63,10 +63,11 @@ runs:
       shell: bash
       env:
         # Hermetic interpreter: always the python-build-standalone build uv
-        # manages (downloaded user-space, cached under ~/.local/share/uv on
-        # the persistent runner) — never whatever python the host happens to
-        # carry, and no sudo anywhere.
+        # manages (installed under ~/.local/share/uv/python by default; the
+        # per-run UV_CACHE_DIR below is separate) — never whatever python the
+        # host happens to carry, and no sudo anywhere.
         UV_PYTHON_PREFERENCE: only-managed
+        UV_PYTHON_DOWNLOADS: automatic
       run: |
         uv_cache_dir="${RUNNER_TEMP}/aiconfigurator-uv-cache-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
         export UV_CACHE_DIR="${uv_cache_dir}"
