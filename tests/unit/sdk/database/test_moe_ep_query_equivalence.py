@@ -34,12 +34,10 @@ from pathlib import Path
 
 import pytest
 
+from aiconfigurator_core.sdk import engine
+from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
 from aiconfigurator_core.sdk.operations.base import resolve_op_data_path
-from aiconfigurator_core.sdk.operations.moe import (
-    load_wideep_context_moe_data,
-    load_wideep_generation_moe_data,
-    load_wideep_moe_compute_data,
-)
+from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
 from aiconfigurator_core.sdk.perf_database import get_database
 
 pytestmark = pytest.mark.unit
@@ -62,6 +60,28 @@ REL_TOL = 1e-9
 # Uncollected in both shipped tables (asserted in each sweep): exercises the
 # distribution-fallback path on real data.
 UNCOLLECTED_DIST = "power_law"
+
+
+def _query_ep(db, kernel_source, quant, dist, phase, topk, experts, slots, hidden, inter, tp, ep, tok, **kwargs):
+    """The retired ``query_moe_expert_compute`` shim's exact twin: build the
+    unified op and evaluate it through the engine's single-op plumbing."""
+    assert tp == 1, "the unified op carries no tp axis"
+    op = MoEExpertCompute(
+        "moe_expert_compute_query",
+        1.0,
+        hidden_size=hidden,
+        inter_size=inter,
+        topk=topk,
+        num_experts=experts,
+        moe_ep_size=ep,
+        quant_mode=quant,
+        workload_distribution=dist,
+        attention_dp_size=1,
+        inference_phase=phase,
+        num_slots=slots,
+        **kwargs,
+    )
+    return engine._evaluate_single_op(db, op, is_context=True, batch_size=1, s=1, x=int(tok))
 
 
 def _iter_slices(nested, depth):
@@ -94,11 +114,11 @@ def test_l1_sglang_wideep_moe_query_equivalence():
     assert db is not None
 
     # Legacy tables: [quant][dist][topk][experts][hidden][inter][tp][ep] -> {tokens: leaf (ms)}.
-    for phase, path, loader in (
-        ("context", SGLANG_CONTEXT_PATH, load_wideep_context_moe_data),
-        ("generation", SGLANG_GENERATION_PATH, load_wideep_generation_moe_data),
+    for phase, attribute in (
+        ("context", "_wideep_context_moe_data"),
+        ("generation", "_wideep_generation_moe_data"),
     ):
-        legacy_table = loader(path)
+        legacy_table = fetch_table_view(db, attribute)
         assert legacy_table
         assert all(UNCOLLECTED_DIST not in legacy_table[quant] for quant in legacy_table)
         comparisons = 0
@@ -106,8 +126,8 @@ def test_l1_sglang_wideep_moe_query_equivalence():
             for tok in _exact_token_probes(tokens):
                 # num_slots = num_experts: the legacy sglang tables have no
                 # EPLB redundancy axis (spec §4.2 adapter pin).
-                unified = db.query_moe_expert_compute(
-                    "deepep_moe", quant, dist, phase, topk, experts, experts, hidden, inter, tp, ep, tok
+                unified = _query_ep(
+                    db, "deepep_moe", quant, dist, phase, topk, experts, experts, hidden, inter, tp, ep, tok
                 )
                 context = f"sglang wideep {phase} {quant.name} {dist} {topk=} {experts=} {ep=} {tok=}"
                 assert float(unified) == pytest.approx(tokens[tok]["latency"], rel=REL_TOL), context
@@ -121,8 +141,8 @@ def test_l1_sglang_wideep_moe_query_equivalence():
             uniform_tokens = uniform_slice.get(tp, {}).get(ep, {})
             tok = min(tokens)
             if tok in uniform_tokens:
-                fallback = db.query_moe_expert_compute(
-                    "deepep_moe", quant, UNCOLLECTED_DIST, phase, topk, experts, experts, hidden, inter, tp, ep, tok
+                fallback = _query_ep(
+                    db, "deepep_moe", quant, UNCOLLECTED_DIST, phase, topk, experts, experts, hidden, inter, tp, ep, tok
                 )
                 assert float(fallback) == pytest.approx(uniform_tokens[tok]["latency"], rel=REL_TOL)
                 comparisons += 1
@@ -143,7 +163,7 @@ def test_l1_trtllm_wideep_moe_compute_query_equivalence():
     assert db is not None
 
     # Legacy table: [kernel][quant][dist][topk][experts][hidden][inter][slots][tp][ep] -> {tokens: leaf (ms)}.
-    legacy_table = load_wideep_moe_compute_data(TRTLLM_WIDEEP_PATH)
+    legacy_table = fetch_table_view(db, "_wideep_moe_compute_data")
     assert legacy_table
 
     assert all(
@@ -161,15 +181,15 @@ def test_l1_trtllm_wideep_moe_compute_query_equivalence():
         probes = _exact_token_probes(tokens)
         for i, tok in enumerate(probes):
             context = f"trtllm wideep {kernel} {quant.name} {dist} {slots=} {experts=} {hidden=} {ep=} {tok=}"
-            unified_ctx = db.query_moe_expert_compute(
-                kernel, quant, dist, "context", topk, experts, slots, hidden, inter, tp, ep, tok
+            unified_ctx = _query_ep(
+                db, kernel, quant, dist, "context", topk, experts, slots, hidden, inter, tp, ep, tok
             )
             assert float(unified_ctx) == pytest.approx(tokens[tok]["latency"], rel=REL_TOL), context
             if i == 0:
                 # The legacy table has no context/generation split: both unified
                 # phases carry the same rows and must return identical values.
-                unified_gen = db.query_moe_expert_compute(
-                    kernel, quant, dist, "generation", topk, experts, slots, hidden, inter, tp, ep, tok
+                unified_gen = _query_ep(
+                    db, kernel, quant, dist, "generation", topk, experts, slots, hidden, inter, tp, ep, tok
                 )
                 assert float(unified_ctx) == float(unified_gen), context
                 assert unified_ctx.energy == unified_gen.energy, context
@@ -194,8 +214,8 @@ def test_l1_trtllm_wideep_moe_compute_query_equivalence():
         )
         tok = min(tokens)
         if tok in first_tokens:
-            fallback = db.query_moe_expert_compute(
-                kernel, quant, UNCOLLECTED_DIST, "context", topk, experts, slots, hidden, inter, tp, ep, tok
+            fallback = _query_ep(
+                db, kernel, quant, UNCOLLECTED_DIST, "context", topk, experts, slots, hidden, inter, tp, ep, tok
             )
             assert float(fallback) == pytest.approx(first_tokens[tok]["latency"], rel=REL_TOL)
             comparisons += 1
@@ -220,7 +240,7 @@ def test_l1_sglang_context_eplb_token_correction_equivalence():
     # raw-derivably: pick a collected token t0 (t0 % 4 == 0) and query
     # tok = t0 * 5 / 4, so the corrected walk lands EXACTLY on the raw t0 row.
     db = get_database("h200_sxm", "sglang", "0.5.6.post2")
-    legacy_table = load_wideep_context_moe_data(SGLANG_CONTEXT_PATH)
+    legacy_table = fetch_table_view(db, "_wideep_context_moe_data")
     comparisons = 0
     for (quant, dist, topk, experts, hidden, inter, tp, ep), tokens in itertools.islice(
         _iter_slices(legacy_table, 8), 6
@@ -228,7 +248,8 @@ def test_l1_sglang_context_eplb_token_correction_equivalence():
         anchors = [t for t in sorted(tokens) if t % 4 == 0][:2]
         for t0 in anchors:
             tok = t0 * 5 // 4  # int(tok * 0.8) == t0
-            unified = db.query_moe_expert_compute(
+            unified = _query_ep(
+                db,
                 "deepep_moe",
                 quant,
                 dist,
@@ -249,7 +270,8 @@ def test_l1_sglang_context_eplb_token_correction_equivalence():
     assert comparisons >= 8, f"eplb sweep too small: {comparisons}"
     # Generation is NOT corrected — one probe pinning the asymmetry.
     (quant, dist, topk, experts, hidden, inter, tp, ep), tokens = next(_iter_slices(legacy_table, 8))
-    with_eplb = db.query_moe_expert_compute(
+    with_eplb = _query_ep(
+        db,
         "deepep_moe",
         quant,
         dist,
@@ -264,8 +286,8 @@ def test_l1_sglang_context_eplb_token_correction_equivalence():
         min(tokens),
         enable_eplb=True,
     )
-    without = db.query_moe_expert_compute(
-        "deepep_moe", quant, dist, "generation", topk, experts, experts, hidden, inter, tp, ep, min(tokens)
+    without = _query_ep(
+        db, "deepep_moe", quant, dist, "generation", topk, experts, experts, hidden, inter, tp, ep, min(tokens)
     )
     assert float(with_eplb) == float(without)
 
@@ -280,38 +302,42 @@ def test_l1_sglang_context_eplb_token_correction_equivalence():
     not os.path.exists(SGLANG_CONTEXT_PATH),
     reason="shipped h200 sglang 0.5.6.post2 wideep parquets not present",
 )
-def test_moe_expert_compute_per_call_quant_mode_override_reaches_the_walk():
-    # Legacy expert-compute ops honor kwargs.get("quant_mode"); the op-level
-    # override must reach both kernel resolution and the table walk. Construct
-    # with an uncollected ctor mode and query with the collected one: only the
-    # override can make the walk succeed.
+def test_moe_expert_compute_quant_mode_is_a_constructor_fact():
+    # The per-call ``quant_mode`` override retired with the query shims
+    # (deprecation cleanup): quant is a CONSTRUCTOR fact that reaches both
+    # kernel resolution and the table walk. An uncollected ctor mode must
+    # MISS loudly; the collected mode (a fresh twin, the pattern production
+    # uses) must hit the same value as the direct table recompute.
     from aiconfigurator_core.sdk import common
     from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
     from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
 
     db = get_database("h200_sxm", "sglang", "0.5.6.post2")
-    legacy_table = load_wideep_context_moe_data(SGLANG_CONTEXT_PATH)
+    legacy_table = fetch_table_view(db, "_wideep_context_moe_data")
     (quant, dist, topk, experts, hidden, inter, tp, ep), tokens = next(_iter_slices(legacy_table, 8))
-    op = MoEExpertCompute(
-        "review_probe",
-        1.0,
-        hidden_size=hidden,
-        inter_size=inter,
-        topk=topk,
-        num_experts=experts,
-        moe_ep_size=ep,
-        quant_mode=common.MoEQuantMode.nvfp4,  # uncollected on this table
-        workload_distribution=dist,
-        attention_dp_size=1,
-        inference_phase="context",
-    )
+
+    def _probe(quant_mode):
+        return MoEExpertCompute(
+            "review_probe",
+            1.0,
+            hidden_size=hidden,
+            inter_size=inter,
+            topk=topk,
+            num_experts=experts,
+            moe_ep_size=ep,
+            quant_mode=quant_mode,
+            workload_distribution=dist,
+            attention_dp_size=1,
+            inference_phase="context",
+        )
+
     with pytest.raises(PerfDataNotAvailableError):
-        op.query(db, x=min(tokens))  # ctor mode alone must miss
-    overridden = op.query(db, x=min(tokens), quant_mode=quant)  # override hits
-    direct = db.query_moe_expert_compute(
-        "deepep_moe", quant, dist, "context", topk, experts, experts, hidden, inter, tp, ep, min(tokens)
+        _probe(common.MoEQuantMode.nvfp4)._engine_query(db, x=min(tokens))  # uncollected mode must miss
+    hit = _probe(quant)._engine_query(db, x=min(tokens))
+    direct = _query_ep(
+        db, "deepep_moe", quant, dist, "context", topk, experts, experts, hidden, inter, tp, ep, min(tokens)
     )
-    assert float(overridden) == pytest.approx(float(direct), rel=1e-12)
+    assert float(hit) == pytest.approx(float(direct), rel=1e-12)
 
 
 if __name__ == "__main__":

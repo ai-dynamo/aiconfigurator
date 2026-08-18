@@ -912,6 +912,14 @@ def _install_estimate_perf_db_stubs(monkeypatch):
     )
 
 
+def test_cli_estimate_afd_rejects_invalid_engine_step_backend():
+    """AFD-only estimates validate before their early return path."""
+    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'python'"):
+        api.cli_estimate(
+            **_afd_cli_estimate_kwargs(engine_step_backend="python", afd_combined_with_pd=False),
+        )
+
+
 def test_cli_estimate_afd_combined_with_pd_false_skips_static(monkeypatch):
     """``combined_with_pd=False`` must return the AFD-only result.
 

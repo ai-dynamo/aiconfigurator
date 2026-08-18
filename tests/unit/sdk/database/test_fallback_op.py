@@ -9,7 +9,7 @@ retired to the compiled engine with #1357 PR-5: ``FallbackOp.query`` is now a
 deprecation shim that converts the whole composite (children included) and
 evaluates it in Rust, so there is no Python seam where the per-child queries
 happen. That behaviour is anchored by the frozen parity goldens and
-tests/cross_package/test_query_shim_baseline.py. What stays Python-owned —
+the frozen parity goldens. What stays Python-owned —
 weight accounting and the query-shim planning (phase routing, beam-width
 validation) — is tested here.
 """
@@ -97,7 +97,7 @@ class TestMLAModule:
 
     def test_context_instance_evaluates_context_phase(self, seam):
         op = _mla_module(is_context=True)
-        result = op.query(object(), batch_size=4, s=4000, prefix=0)
+        result = op._engine_query(object(), batch_size=4, s=4000, prefix=0)
 
         assert seam["op"] is op
         assert seam["eval_kwargs"]["is_context"] is True
@@ -108,7 +108,7 @@ class TestMLAModule:
 
     def test_generation_instance_evaluates_generation_phase(self, seam):
         op = _mla_module(is_context=False)
-        result = op.query(object(), batch_size=4, s=4000, beam_width=1)
+        result = op._engine_query(object(), batch_size=4, s=4000, beam_width=1)
 
         assert seam["op"] is op
         assert seam["eval_kwargs"]["is_context"] is False
@@ -121,4 +121,4 @@ class TestMLAModule:
         mock_db = MagicMock()
         op = _mla_module(is_context=False)
         with pytest.raises(ValueError, match="beam_width=1"):
-            op.query(mock_db, batch_size=4, s=4000, beam_width=2)
+            op._engine_query(mock_db, batch_size=4, s=4000, beam_width=2)

@@ -27,7 +27,6 @@ from aiconfigurator.sdk import common
 from aiconfigurator.sdk.perf_database import (
     SHARED_LAYER_REUSE_MARKER,
     PerfDatabase,
-    _load_op_kernel_source_manifest_entries,
     databases_cache,
     get_database,
 )
@@ -135,7 +134,7 @@ def env(tmp_path: Path) -> Path:
         "framework,version,device,op_name,kernel_source,nccl_dtype,num_gpus,message_size,latency\n"
     )
     # Clear the manifest LRU cache so each test sees its own manifest.
-    _load_op_kernel_source_manifest_entries.cache_clear()
+    # (manifest parsing moved into the engine resolver — no Python cache to clear)
     return systems_root
 
 

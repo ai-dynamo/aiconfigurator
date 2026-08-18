@@ -3,7 +3,7 @@
 
 """Generate the Python oracle for the Rust ``moe_a2a`` perf table.
 
-Dumps stratified ``(key, num_tokens) -> PerfDatabase.query_moe_a2a(...)``
+Dumps stratified ``(key, num_tokens) -> MoEAllToAll twin evaluation``
 samples from the shipped h200_sxm/sglang and gb200/trtllm data to
 ``src/perf_database/testdata/moe_a2a_oracle.json``; the Rust
 ``#[cfg(test)] moe_a2a_matches_python_oracle`` test loads the same parquet
@@ -32,6 +32,7 @@ import sys
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
+from aiconfigurator_core.sdk.engine import _evaluate_single_op
 from aiconfigurator_core.sdk.operations.moe_comm import MoEAllToAll
 from aiconfigurator_core.sdk.perf_database import get_database
 
@@ -172,18 +173,20 @@ def build_samples(db, data_root):
                 sms = item[3]
             elif kind in ("dtype_alias", "dtype_sole"):
                 comm_dtype = item[3]
-            result = db.query_moe_a2a(
-                comm_backend,
-                phase,
-                comm_dtype,
-                ep,
-                node,
-                hidden,
-                topk,
-                experts,
-                num_tokens,
+            op = MoEAllToAll(
+                "moe_a2a_query",
+                1.0,
+                phase=phase,
+                comm_backend=comm_backend,
+                hidden_size=hidden,
+                topk=topk,
+                num_experts=experts,
+                moe_ep_size=ep,
+                node_num=node,
+                comm_dtype=comm_dtype,
                 sms=sms,
             )
+            result = _evaluate_single_op(db, op, is_context=True, batch_size=1, s=1, x=int(num_tokens))
             samples.append(
                 {
                     "data_root": data_root,
@@ -215,7 +218,7 @@ def main() -> None:
 
     header = {
         "_regenerate": (".venv/bin/python aic-core/rust/aiconfigurator-core/parity_tests/gen_moe_a2a_oracle.py"),
-        "_source": "PerfDatabase.query_moe_a2a (shared_layer=False), SILICON mode",
+        "_source": "MoEAllToAll via engine._evaluate_single_op (shared_layer=False), SILICON mode",
         "_tuples": [f"{s}/{b}/{v}" for s, b, v in TUPLES],
     }
     out_path = os.path.normpath(OUT_PATH)

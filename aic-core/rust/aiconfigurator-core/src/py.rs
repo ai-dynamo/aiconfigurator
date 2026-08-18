@@ -732,6 +732,79 @@ fn table_view_attributes() -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
+/// Shared-layer source resolution report for ONE op-file basename (the
+/// deprecation-cleanup PR: the engine owns resolution,
+/// `perf_database/source_resolution.rs`). Returns JSON
+/// `{"records": [{version, path, channel, exists, ks_filter}...],
+///   "warnings": [{kind, args}...]}` — the Python `PerfDatabase` rebuilds its
+/// `data_provenance` diagnostics from `records` and re-emits `warnings`
+/// through its established logging registries. Resolution is a pure function
+/// of the tree, so this report always matches what the engine's own load
+/// resolved. `primary_path` preserves the retired Python resolver's
+/// caller-supplied-primary contract; `None` resolves it internally. Strict
+/// failures (malformed sidecar metadata with `strict=true`) raise
+/// `ValueError` with the resolver's message, mirroring the retired Python
+/// `_parse_reuse_yaml` / `_version_dir_state` errors.
+#[pyfunction]
+#[pyo3(signature = (systems_root, system_data_root, backend, version, op_file_basename, primary_path=None, enable_shared_layer=true, strict=false))]
+#[allow(clippy::too_many_arguments)]
+fn resolve_op_sources_report_json(
+    py: Python<'_>,
+    systems_root: &str,
+    system_data_root: &str,
+    backend: &str,
+    version: &str,
+    op_file_basename: &str,
+    primary_path: Option<&str>,
+    enable_shared_layer: bool,
+    strict: bool,
+) -> PyResult<String> {
+    let ctx = crate::perf_database::ResolveCtx {
+        systems_root: PathBuf::from(systems_root),
+        system_data_root: PathBuf::from(system_data_root),
+        backend: backend.to_string(),
+        version: version.to_string(),
+        enable_shared_layer,
+        strict,
+    };
+    let report = py
+        .allow_threads(|| {
+            crate::perf_database::resolve_one(
+                &ctx,
+                op_file_basename,
+                primary_path.map(std::path::Path::new),
+            )
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    serde_json::to_string(&report).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// The engine's spec schema version (single owner since the pyo3 op
+/// unification; Python reads it for diagnostics instead of declaring a twin).
+#[pyfunction]
+fn engine_spec_schema_version() -> u32 {
+    crate::ENGINE_SPEC_SCHEMA_VERSION
+}
+
+/// Serialize a sequence of engine-backed op objects to the externally-tagged
+/// OpSpec JSON array `AicEngine.evaluate_ops_json` consumes. Refuses retired
+/// tombstone ops (recursively) — the single gate on the one surface where
+/// ops leave Python as a spec (the compile path assembles its spec JSON
+/// through this same array).
+#[pyfunction]
+fn ops_json_from_ops(ops: &Bound<'_, PyAny>) -> PyResult<String> {
+    let ops = crate::py_ops::ops_from_sequence(ops)?;
+    crate::py_ops::reject_retired_ops(&ops).map_err(PyValueError::new_err)?;
+    serde_json::to_string(&ops).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Deserialize one externally-tagged opspec JSON document into an
+/// engine-backed op object (the FPMForwardOp adapter's bridge).
+#[pyfunction]
+fn op_from_spec_json(py: Python<'_>, spec_json: &str) -> PyResult<Py<PyAny>> {
+    crate::py_ops::op_from_spec_json(py, spec_json)
+}
+
 /// Internal request shared by every Rust -> Python -> Rust construction path.
 ///
 /// The builder and the flat compatibility function both normalize into this
@@ -1316,8 +1389,13 @@ fn _aiconfigurator_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gemm_quant_util_levels, m)?)?;
     m.add_function(wrap_pyfunction!(moe_quant_util_levels, m)?)?;
     m.add_function(wrap_pyfunction!(table_view_attributes, m)?)?;
+    m.add_function(wrap_pyfunction!(resolve_op_sources_report_json, m)?)?;
+    m.add_function(wrap_pyfunction!(ops_json_from_ops, m)?)?;
+    m.add_function(wrap_pyfunction!(engine_spec_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(op_from_spec_json, m)?)?;
     m.add_class::<AicEngine>()?;
     m.add_class::<PyForwardPassPerfModel>()?;
+    crate::py_ops::register(m)?;
     Ok(())
 }
 
@@ -1435,7 +1513,8 @@ mod tests {
                 kv_cache_dtype: None,
             },
             speculative: None,
-            perf_db_sources: Default::default(),
+            enable_shared_layer: None,
+            strict_provenance: false,
             database_mode: Default::default(),
             transfer_policy: None,
             extra: BTreeMap::new(),

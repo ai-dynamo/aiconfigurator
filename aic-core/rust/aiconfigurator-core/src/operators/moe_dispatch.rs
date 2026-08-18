@@ -36,6 +36,15 @@ pub enum DispatchFlavor {
     CustomAllReduce,
     /// TRT-LLM all-to-all.
     TrtllmAlltoall,
+    /// Tombstone for `moe_backend="deepep_moe"` dispatch (retired with
+    /// AIC-1601; large-EP comm is modeled by `MoeAllToAll`). Constructing the
+    /// op is legal — Python model builders still emit the configuration and
+    /// its weight/memory contribution is zero — but a compiled spec refuses
+    /// it (`EngineSpec::from_bincode`-side validation) and evaluating it
+    /// raises the retired-op error, mirroring the retired `_to_opspec`
+    /// conversion error. Appended at the enum tail (serde/bincode variant
+    /// indices are positional).
+    RetiredDeepEp,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -128,6 +137,13 @@ impl MoEDispatchOp {
     pub fn query(&self, db: &PerfDatabase, num_tokens: u32) -> Result<PerformanceResult, AicError> {
         let spec: &SystemSpec = &db.system_spec;
         match self.flavor {
+            DispatchFlavor::RetiredDeepEp => {
+                return Err(AicError::InvalidEngineConfig(format!(
+                    "MoEDispatch '{}' (moe_backend='deepep_moe') has no native evaluation \
+                     (retired with AIC-1601; large-EP comm is modeled by MoeAllToAll)",
+                    self.name
+                )))
+            }
             DispatchFlavor::CustomAllReduce => {
                 // Backend-aware port of Python `MoEDispatch.query` for vLLM and
                 // SGLang non-DeepEP paths. Both backends pass through this
