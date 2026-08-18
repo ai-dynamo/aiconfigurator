@@ -82,6 +82,27 @@ def test_estimate_epd_rejects_role_specific_memory_fractions(cli_parser):
         _run_estimate_mode(args)
 
 
+@pytest.mark.parametrize("option", ["--prefill-max-seq-len", "--decode-max-seq-len"])
+def test_estimate_epd_rejects_role_specific_max_seq_len(cli_parser, option):
+    args = cli_parser.parse_args(
+        [
+            "estimate",
+            "--model-path",
+            "Qwen/Qwen3-32B",
+            "--system",
+            "h200_sxm",
+            "--estimate-mode",
+            "disagg",
+            "--enable-epd",
+            option,
+            "8192",
+        ]
+    )
+
+    with pytest.raises(SystemExit, match="not supported with --enable-epd"):
+        _run_estimate_mode(args)
+
+
 def test_default_afd_serving_mode_rejects_enable_epd():
     with pytest.raises(ValueError, match="'afd' does not support EPD"):
         build_default_tasks(

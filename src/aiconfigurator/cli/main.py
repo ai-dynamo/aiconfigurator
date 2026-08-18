@@ -2481,6 +2481,16 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
             "--prefill-free-gpu-memory-fraction and --decode-free-gpu-memory-fraction "
             "are not supported with --enable-epd; use --free-gpu-memory-fraction."
         )
+    if any(
+        max_seq_len is not None
+        for max_seq_len in (
+            args.prefill_max_seq_len,
+            args.decode_max_seq_len,
+        )
+    ):
+        raise SystemExit(
+            "--prefill-max-seq-len and --decode-max-seq-len are not supported with --enable-epd; use --max-seq-len."
+        )
     workload = dict(
         enable_epd=True,
         backend_version=args.backend_version,
