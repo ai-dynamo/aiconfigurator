@@ -80,35 +80,58 @@ class FakeMoeFlags:
                 setattr(self, name, value)
 
 
-def _inject_fake_runtime_context(monkeypatch) -> FakeMoeFlags:
-    """Install a fake sglang.srt.runtime_context exporting get_flags(), the
-    same sys.modules-injection technique test_collect_gdn_contract.py's
+def _install_fake_sglang_srt_runtime_context(monkeypatch, runtime_context_module):
+    """Shared sys.modules plumbing: inject fake sglang/sglang.srt parent
+    packages plus the given sglang.srt.runtime_context module, the same
+    sys.modules-injection technique test_collect_gdn_contract.py's
     TestResolveFlashinferGdnDecode uses for flashinfer.gdn_decode."""
-    fake_moe_flags = FakeMoeFlags()
-    fake_flags_singleton = types.SimpleNamespace(moe=fake_moe_flags)
-    fake_runtime_context = types.ModuleType("sglang.srt.runtime_context")
-    fake_runtime_context.get_flags = lambda: fake_flags_singleton
     fake_sglang_srt = types.ModuleType("sglang.srt")
-    fake_sglang_srt.runtime_context = fake_runtime_context
+    fake_sglang_srt.runtime_context = runtime_context_module
     fake_sglang = types.ModuleType("sglang")
     fake_sglang.srt = fake_sglang_srt
 
     monkeypatch.setitem(sys.modules, "sglang", fake_sglang)
     monkeypatch.setitem(sys.modules, "sglang.srt", fake_sglang_srt)
-    monkeypatch.setitem(sys.modules, "sglang.srt.runtime_context", fake_runtime_context)
+    monkeypatch.setitem(sys.modules, "sglang.srt.runtime_context", runtime_context_module)
+
+
+def _inject_fake_0514_runtime_context(monkeypatch) -> None:
+    """Install a fake sglang.srt.runtime_context with NO get_flags export --
+    the real shape of that module at 0.5.14 (a 226-line ParallelContext/
+    get_parallel()-only file; the Flags/MoeFlags tier _pin_moe_runner_backend
+    reads was added later). Hermetic (MINOR 1, code review 2026-08-18):
+    previously this branch relied on sglang genuinely being absent from this
+    venv, which is ambient environment state, not a controlled fact -- if a
+    real sglang install (of any version) ever became importable here, `from
+    sglang.srt.runtime_context import get_flags` would stop raising and this
+    branch's tests would spuriously fail. Explicitly modeling the real
+    0.5.14 module shape removes that dependency."""
+    fake_runtime_context = types.ModuleType("sglang.srt.runtime_context")
+    # Deliberately no get_flags attribute -- mirrors real 0.5.14.
+    _install_fake_sglang_srt_runtime_context(monkeypatch, fake_runtime_context)
+
+
+def _inject_fake_0517_runtime_context(monkeypatch) -> FakeMoeFlags:
+    """Install a fake sglang.srt.runtime_context exporting get_flags()."""
+    fake_moe_flags = FakeMoeFlags()
+    fake_flags_singleton = types.SimpleNamespace(moe=fake_moe_flags)
+    fake_runtime_context = types.ModuleType("sglang.srt.runtime_context")
+    fake_runtime_context.get_flags = lambda: fake_flags_singleton
+    _install_fake_sglang_srt_runtime_context(monkeypatch, fake_runtime_context)
     return fake_moe_flags
 
 
 @pytest.mark.parametrize("backend_value", ["triton", "flashinfer_trtllm"])
 class TestPin0514BareGlobal:
-    """sglang genuinely is not installed in this venv (verified:
-    ``import sglang`` raises ModuleNotFoundError), so `from sglang.srt.
-    runtime_context import get_flags` fails here exactly as it would on a
-    real 0.5.14 install (that module has no `get_flags` export before
-    0.5.17 -- see _pin_moe_runner_backend's docstring). No injection needed:
-    this is the collector's real behavior on 0.5.14 today, unchanged."""
+    """sglang 0.5.14: a fake sglang.srt.runtime_context with no get_flags
+    export is injected (see _inject_fake_0514_runtime_context) so `from
+    sglang.srt.runtime_context import get_flags` fails here exactly as it
+    would on a real 0.5.14 install, regardless of whether a real sglang is
+    ambiently importable in this venv (MINOR 1, code review 2026-08-18:
+    hermetic, not dependent on ambient absence)."""
 
-    def test_pins_and_restores_the_module_global(self, backend_value):
+    def test_pins_and_restores_the_module_global(self, monkeypatch, backend_value):
+        _inject_fake_0514_runtime_context(monkeypatch)
         fake_moe_utils = types.SimpleNamespace(MOE_RUNNER_BACKEND=None)
         pin = _load_pin_function({"_moe_utils": fake_moe_utils})
 
@@ -117,7 +140,8 @@ class TestPin0514BareGlobal:
             assert backend_value == fake_moe_utils.MOE_RUNNER_BACKEND
         assert fake_moe_utils.MOE_RUNNER_BACKEND is None
 
-    def test_restores_on_exception(self, backend_value):
+    def test_restores_on_exception(self, monkeypatch, backend_value):
+        _inject_fake_0514_runtime_context(monkeypatch)
         fake_moe_utils = types.SimpleNamespace(MOE_RUNNER_BACKEND="PRE_EXISTING")
         pin = _load_pin_function({"_moe_utils": fake_moe_utils})
 
@@ -133,7 +157,7 @@ class TestPin0517RuntimeContextFlags:
     Flags singleton, pinned through its own override() primitive."""
 
     def test_pins_through_get_flags_moe_override_and_restores(self, monkeypatch, backend_value):
-        fake_moe_flags = _inject_fake_runtime_context(monkeypatch)
+        fake_moe_flags = _inject_fake_0517_runtime_context(monkeypatch)
         fake_moe_utils = types.SimpleNamespace(MOE_RUNNER_BACKEND="MUST_NOT_BE_TOUCHED")
         pin = _load_pin_function({"_moe_utils": fake_moe_utils})
 
@@ -148,7 +172,7 @@ class TestPin0517RuntimeContextFlags:
         assert fake_moe_flags.runner_backend is None
 
     def test_restores_on_exception(self, monkeypatch, backend_value):
-        fake_moe_flags = _inject_fake_runtime_context(monkeypatch)
+        fake_moe_flags = _inject_fake_0517_runtime_context(monkeypatch)
         fake_moe_utils = types.SimpleNamespace(MOE_RUNNER_BACKEND=None)
         pin = _load_pin_function({"_moe_utils": fake_moe_utils})
 

@@ -37,7 +37,18 @@ def _load_functions(*names: str, namespace: dict | None = None) -> dict:
     selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
     from collector.helper import WORKER_RESTART
 
-    loaded = {"WORKER_RESTART": WORKER_RESTART, **(namespace or {})}
+    # _raise_if_unverified_moe_lane (AIC-1762 Task 4c/4d code review,
+    # 2026-08-18) is called unconditionally near the top of run_moe_torch;
+    # this file's tests exercise the SM-alignment/quant-construction logic
+    # further down, not that guard (see
+    # test_collect_moe_unverified_lane_guard.py for guard-specific
+    # coverage), so it's stubbed as a permissive no-op by default here,
+    # exactly like WORKER_RESTART above.
+    loaded = {
+        "WORKER_RESTART": WORKER_RESTART,
+        "_raise_if_unverified_moe_lane": lambda _moe_type: None,
+        **(namespace or {}),
+    }
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(SOURCE_PATH), "exec"), loaded)
     return loaded
 

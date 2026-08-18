@@ -23,18 +23,33 @@ helpers, SM filters, and perf logging.
 # exclusion (configurer.py._compute_enable_deep_gemm byte-identical, still no
 # SM120 recipe -- not under-collecting); NVFP4 initialize_fp4_gemm_config
 # SM100/103->cute-dsl, SM80-89->marlin, else->cutlass dispatch (byte-identical,
-# see run_gemm() comment for the refreshed citation). ONE incompatible surface
-# found and fixed below: sglang.srt.layers.quantization.fp8_kernel (holding
-# sglang_per_token_group_quant_fp8) was relocated wholesale to
-# sglang.kernels.ops.quantization.fp8_kernel at 0.5.17 as part of a kernel-reorg
-# (no compat shim at the old path); the function signature is otherwise
-# unchanged (drops only an `enable_v2` kwarg this collector never passes), so
-# this is a cosmetic relocation handled via the version-conditional import
-# below, mirroring this file's existing try/except-import pattern (the
-# flashinfer capability probe just above). 0.5.15/0.5.16 stay excluded: never
-# verified, and version_resolver's __compat__ grammar (AND-of-comparators
-# only, no OR) can express this exact two-version acceptance set only as a
-# bounded range with the two untested patches explicitly carved out.
+# see run_gemm() comment for the refreshed citation). ONE incompatible import
+# path found and fixed below: sglang.srt.layers.quantization.fp8_kernel
+# (holding sglang_per_token_group_quant_fp8) was relocated wholesale to
+# sglang.kernels.ops.quantization.fp8_kernel at 0.5.17 as part of a
+# kernel-reorg (no compat shim at the old path) -- fixed with the
+# version-conditional import below. CORRECTION (code review, 2026-08-18):
+# the SIGNATURE is unchanged (drops only an unused `enable_v2` kwarg), but
+# the INTERNALLY DISPATCHED KERNEL for this collector's exact call is NOT --
+# see the dated comment at the import site below for the precise, cited
+# difference. Measuring whatever 0.5.17 actually dispatches to under that
+# call shape IS framework truth for that version (the collector's mandate
+# per layer_permissions.md); the caveat is for data consumers: fp8_block
+# gemm rows collected at 0.5.14 and at 0.5.17 are NOT cross-version
+# comparable, because they time different kernels for the identical
+# (m, n, k) inputs. 0.5.15/0.5.16 stay excluded: never verified, and
+# version_resolver's __compat__ grammar (AND-of-comparators only, no OR) has
+# no way to express a true two-point set either -- this bounded range with
+# the two untested base releases carved out via != is the closest
+# expressible approximation, NOT an exact {0.5.14, 0.5.17} gate (CORRECTED
+# 2026-08-18, code review): `_check_compat`'s `!=` only excludes the literal
+# point version, so 0.5.15.post1/0.5.15rc1/0.5.16.post2-style variants of
+# the excluded releases still satisfy this specifier (see
+# tests/unit/collector/test_version_resolver.py's TestExactVersionSet for
+# the honest, probed semantics). This is an accepted, narrow gap: the
+# framework_manifest digest-pinned gate is the true version enforcement
+# upstream and only ever supplies exactly 0.5.14 or 0.5.17 in a sanctioned
+# run, so the leak is unreachable there.
 __compat__ = "sglang>=0.5.14,<=0.5.17,!=0.5.15,!=0.5.16"
 
 import os
@@ -69,12 +84,42 @@ from sglang.srt.layers.deep_gemm_wrapper import (
 
 # sglang 0.5.17 relocated this module from srt/layers/quantization/ to the new
 # top-level sglang.kernels.ops package; sglang_per_token_group_quant_fp8's own
-# signature is otherwise unchanged (verified 2026-08-17, both v0.5.14 and
+# SIGNATURE is otherwise unchanged (verified 2026-08-17, both v0.5.14 and
 # v0.5.17 tags: x, group_size, eps=1e-10, column_major_scales=False,
 # scale_tma_aligned=False, scale_ue8m0=False, fuse_silu_and_mul=False,
 # masked_m=None -- 0.5.17 additionally drops an unused enable_v2 kwarg this
 # collector never passes). Try the new (>=0.5.17) location first since sglang
 # fp8.py itself now imports from there.
+#
+# CORRECTED 2026-08-18 (code review): the signature match above does NOT mean
+# the invoked KERNEL is unchanged -- for this collector's exact call
+# (group_size=128, column_major_scales=True, scale_tma_aligned=True,
+# scale_ue8m0=DEEPGEMM_SCALE_UE8M0), the two pinned versions dispatch
+# differently:
+#   - v0.5.14: fp8_kernel.py:544-545 sets `enable_v2 = group_size in
+#     [16,32,64,128] or _is_musa` (True for group_size=128, independent of
+#     scale_ue8m0/dtype), so the `elif enable_v2:` branch always calls
+#     `sgl_per_token_group_quant_8bit_jit_v2` (fp8_kernel.py:567-568).
+#   - v0.5.17: the v1/v2 choice moved into
+#     `_run_per_token_group_quant_8bit_kernel`, guarded by
+#     `if scale_ue8m0 and x_s.dtype == torch.float32 and not _is_musa:`
+#     (fp8_kernel.py:546). On Blackwell (DEEPGEMM_SCALE_UE8M0=True,
+#     scale_ue8m0=True passed in), `create_per_token_group_quant_fp8_output_
+#     scale`'s column_major_scales+scale_tma_aligned+scale_ue8m0 branch
+#     returns an INT (not float32) scale tensor (fp8_kernel.py:472-476), so
+#     the guard's `x_s.dtype == torch.float32` is False -> falls through to
+#     `per_token_group_quant(...)` (fp8_kernel.py:589), never reaching the v2
+#     kernel. On Hopper (DEEPGEMM_SCALE_UE8M0=False, scale_ue8m0=False
+#     passed in), the guard's first conjunct alone is already False, same
+#     fallback. So at 0.5.17 this collector always times
+#     `per_token_group_quant`, never `sgl_per_token_group_quant_8bit_jit_v2`,
+#     for this exact call shape on either platform.
+# This is framework truth, not a bug: sglang 0.5.17 serving really does
+# dispatch this way for this call shape, and the collector's job is to
+# measure what serving actually invokes (layer_permissions.md). The
+# consequence is for DATA CONSUMERS: fp8_block gemm rows collected at 0.5.14
+# vs 0.5.17 are NOT cross-version comparable -- they time two different
+# kernels for the identical (m, n, k, dtype) inputs.
 try:
     from sglang.kernels.ops.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
 except ImportError:

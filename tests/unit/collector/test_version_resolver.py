@@ -139,7 +139,8 @@ class TestCheckCompat:
 
 
 # ---------------------------------------------------------------------------
-# Exact-version-set acceptance (bounded range + != exclusions)
+# Bounded-range-with-exclusions: the closest APPROXIMATION of a two-point
+# version set this grammar can express (NOT an exact set -- see below)
 # ---------------------------------------------------------------------------
 @pytest.mark.unit
 class TestExactVersionSet:
@@ -147,13 +148,54 @@ class TestExactVersionSet:
     ``_parse_compat_specifier``): no OR, so a __compat__ string can never
     directly express a discrete set like "0.5.14 or 0.5.17". When a module's
     verified-compatible versions are non-contiguous -- e.g.
-    collector/sglang/collect_gemm.py's ``sglang==0.5.14`` bumped for
-    AIC-1762 Task 4c to also accept 0.5.17 without silently admitting the
-    never-verified 0.5.15/0.5.16 in between -- the only expressible
-    equivalent is a bounded range with every excluded version carved out via
-    ``!=`` clauses (all ANDed, so every clause must hold). This locks in that
-    exactly {0.5.14, 0.5.17} pattern end-to-end through ``_check_compat``,
-    not just per-operator.
+    collector/sglang/{collect_gemm,collect_gdn,collect_moe}.py's
+    ``sglang==0.5.14`` bumped for AIC-1762 Task 4c/4d to also accept 0.5.17
+    without silently admitting the never-verified 0.5.15/0.5.16 in between --
+    the closest expressible approximation is a bounded range with the
+    excluded base releases carved out via ``!=`` clauses (all ANDed, so
+    every clause must hold).
+
+    CORRECTED (code review, 2026-08-18): this is NOT an exact {0.5.14,
+    0.5.17} gate, and the class name/tests below previously implied
+    otherwise. ``!=X`` excludes only the literal point version ``X`` --
+    ``packaging.version.Version`` pre/post-release variants of an excluded
+    base release (``0.5.15.post1``, ``0.5.15rc1``, ``0.5.16.post2``, ...)
+    are NOT equal to the excluded ``Version`` and so still satisfy every
+    clause. The range is also asymmetric around post-releases of its own
+    endpoints: ``0.5.14.post1`` satisfies ``>=0.5.14`` (post-releases sort
+    after their base), so it's accepted, while ``0.5.17.post1`` fails
+    ``<=0.5.17`` for the same reason, so it's rejected -- same grammar,
+    opposite outcome, because one endpoint is a floor and the other a
+    ceiling. A wildcard clause like ``!=0.5.15.*`` cannot fix the pre/post
+    leak either: ``_normalize_version`` (version_resolver.py:30-48) silently
+    turns any ``InvalidVersion`` (which ``Version("0.5.15.*")`` is) into
+    ``Version("0")``, making such a clause an unconditionally-satisfied
+    no-op, not a wildcard exclusion (``_check_compat`` reimplements
+    comparisons by hand from ``Specifier.version``/``.operator`` rather than
+    delegating to ``Specifier.contains()``, which is what would normally
+    support PEP 440 wildcard matching).
+
+    A tighter alternative exists in principle -- registry ``VersionRoute``
+    forks (two physically separate collector modules, each with its own
+    EXACT ``==`` pin, chosen by ``resolve_module``'s floor-based routing)
+    would close this leak completely, since ``==`` has no partial-exclusion
+    problem. Rejected as disproportionate for this gap: it would require
+    duplicating each of the three ~800-1000 line collector files into two
+    near-identical copies (one per pinned version) purely to close a leak
+    that only admits synthetic pre/post/rc variants of two already-excluded
+    intermediate patch releases nobody would realistically pip-install after
+    0.5.17 has shipped -- and the leak is unreachable in practice anyway
+    (see below).
+
+    Why this narrow gap is accepted rather than closed: the
+    ``framework_manifest`` digest-pinned gate (Task 4b) is the TRUE version
+    enforcement upstream of this one -- it selects the runtime container
+    image, and for sglang stock collection only ever supplies exactly
+    ``0.5.14`` or ``0.5.17`` (never a pre/post/rc variant) in any sanctioned
+    run. This ``__compat__`` string is defense-in-depth behind that gate,
+    not the sole enforcement, so the tests below PROVE (not just assert) the
+    real, current behavior -- including the leak -- as a documented,
+    understood fact instead of an untested invariant.
     """
 
     COMPAT = "sglang>=0.5.14,<=0.5.17,!=0.5.15,!=0.5.16"
@@ -163,15 +205,47 @@ class TestExactVersionSet:
         [
             ("0.5.14", True),  # floor: accepted
             ("0.5.17", True),  # ceiling: accepted
-            ("0.5.15", False),  # untested, explicitly excluded
-            ("0.5.16", False),  # untested, explicitly excluded
+            ("0.5.15", False),  # untested base release, explicitly excluded
+            ("0.5.16", False),  # untested base release, explicitly excluded
             ("0.5.13", False),  # below floor
             ("0.5.18", False),  # above ceiling
-            ("0.5.14.post1", True),  # post-release of the floor still satisfies >=/<=
         ],
     )
-    def test_accepts_exactly_the_verified_pair(self, runtime, expected):
+    def test_accepts_the_verified_pair_and_rejects_the_untested_base_releases(self, runtime, expected):
         assert _check_compat(self.COMPAT, runtime) == expected
+
+    @pytest.mark.parametrize(
+        "runtime,expected",
+        [
+            ("0.5.14.post1", True),  # floor: post-release still satisfies >=0.5.14
+            ("0.5.17.post1", False),  # ceiling: post-release now FAILS <=0.5.17 -- asymmetric
+        ],
+    )
+    def test_endpoint_post_release_asymmetry(self, runtime, expected):
+        """Same grammar, opposite outcome at each endpoint: >= is a floor
+        (post-releases of it still satisfy), <= is a ceiling (post-releases
+        of it no longer do). Not a bug to fix -- a documented consequence of
+        reusing plain comparators for a pinned-pair approximation."""
+        assert _check_compat(self.COMPAT, runtime) == expected
+
+    @pytest.mark.parametrize(
+        "runtime",
+        [
+            "0.5.15.post1",  # post-release of an excluded base release
+            "0.5.15rc1",  # pre-release of an excluded base release
+            "0.5.16.post2",  # post-release of the other excluded base release
+        ],
+    )
+    def test_excluded_version_variants_leak_through_the_specifier_alone(self, runtime):
+        """CODIFIES REALITY, does not assert a false invariant: `!=0.5.15`
+        excludes only the exact Version("0.5.15"), so any distinguishable
+        pre/post-release of it is NOT equal and satisfies every clause here.
+        This module's __compat__ therefore accepts these three strings on
+        its own. They are still blocked in any sanctioned run: the
+        framework_manifest digest-pinned gate upstream never supplies a
+        pre/post-release string for sglang stock collection, only the exact
+        ("0.5.14" | "0.5.17") pair -- see this class's docstring."""
+        assert _check_compat(self.COMPAT, runtime) is True
 
 
 # ---------------------------------------------------------------------------

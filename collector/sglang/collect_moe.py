@@ -43,9 +43,18 @@ rank-local workload construction, quantized weight setup, and perf logging.
 # fix: 0.5.14 keeps the exact original global read/write/restore, 0.5.17
 # goes through the new RuntimeContext/Flags singleton via its own sanctioned
 # override() primitive). 0.5.15/0.5.16 stay excluded: never verified, and
-# version_resolver's __compat__ grammar (AND-of-comparators only, no OR) can
-# express this exact two-version acceptance set only as a bounded range with
-# the two untested patches explicitly carved out.
+# version_resolver's __compat__ grammar (AND-of-comparators only, no OR) has
+# no way to express a true two-point set either -- this bounded range with
+# the two untested base releases carved out via != is the closest
+# expressible approximation, NOT an exact {0.5.14, 0.5.17} gate (CORRECTED
+# 2026-08-18, code review): `_check_compat`'s `!=` only excludes the literal
+# point version, so 0.5.15.post1/0.5.15rc1/0.5.16.post2-style variants of
+# the excluded releases still satisfy this specifier (see
+# tests/unit/collector/test_version_resolver.py's TestExactVersionSet for
+# the honest, probed semantics). This is an accepted, narrow gap: the
+# framework_manifest digest-pinned gate is the true version enforcement
+# upstream and only ever supplies exactly 0.5.14 or 0.5.17 in a sanctioned
+# run, so the leak is unreachable there.
 __compat__ = "sglang>=0.5.14,<=0.5.17,!=0.5.15,!=0.5.16"
 
 import gc
@@ -125,6 +134,8 @@ from sglang.srt.layers.quantization.fp8 import Fp8Config
 from sglang.srt.layers.quantization.modelopt_quant import ModelOptFp4Config, ModelOptFp8Config
 from sglang.srt.layers.quantization.mxfp4 import Mxfp4Config
 from sglang.srt.utils import is_hip
+
+from collector.version_resolver import _check_compat
 
 try:
     from case_generator import (
@@ -547,26 +558,29 @@ def _pin_moe_runner_backend(backend: MoeRunnerBackend):
 
     SGLang 0.5.17: that global is gone entirely. Backend selection was
     refactored into a process-level ``RuntimeContext``/``Flags`` singleton
-    (``sglang/srt/runtime_context.py``, module-level ``_CONTEXT =
-    RuntimeContext(parallel=_PARALLEL)``, :1061-1062 @0.5.17, constructed at
-    import time -- not a contextvar, not per-request).
-    ``get_moe_runner_backend()`` (utils.py:333-337 @0.5.17, same accessor
-    name as 0.5.14) now reads ``get_flags().moe.runner_backend`` instead.
-    Confirmed this is genuinely load-bearing on the runner-construction
-    chain, not vestigial: it gates ``use_triton_kernels``,
-    ``use_deep_gemm``, ``use_flashinfer_mxfp4_moe``, and the entire
-    triton/flashinfer_trtllm/flashinfer_cutlass/flashinfer_mxfp4/... branch
-    selection inside ``FusedMoE.__init__`` itself
-    (``fused_moe_triton/layer.py`` -- 15+ call sites: 274, 312, 315-318,
-    331, 384, 417-418, 430, 436-437, 442, 1086-1087, 1341-1342), plus
-    ``topk.py`` (504, 507, 519-520, 2166) and
+    (``sglang/srt/runtime_context.py``, module-level ``_PARALLEL =
+    ParallelContext()`` / ``_CONTEXT = RuntimeContext(parallel=_PARALLEL)``,
+    :1062-1063 @0.5.17, constructed at import time -- not a contextvar, not
+    per-request). ``get_moe_runner_backend()`` (utils.py:333-337 @0.5.17,
+    same accessor name as 0.5.14) now reads ``get_flags().moe.runner_backend``
+    instead. Confirmed this is genuinely load-bearing on the
+    runner-construction chain, not vestigial: it gates
+    ``use_triton_kernels``, ``use_deep_gemm``, ``use_flashinfer_mxfp4_moe``,
+    and the entire triton/flashinfer_trtllm/flashinfer_cutlass/
+    flashinfer_mxfp4/... branch selection inside ``FusedMoE.__init__``
+    itself (``fused_moe_triton/layer.py`` -- 15+ call sites: 274, 312,
+    315-318, 331, 384, 417-418, 430, 436-437, 442, 1086-1087, 1341-1342),
+    plus ``topk.py`` (504, 507, 519-520, 2166) and
     ``token_dispatcher/standard.py:102``. ``MoeFlags.runner_backend``
-    defaults to ``None`` (``runtime_context.py:369``) and both
-    ``Flags.moe``/``RuntimeContext.flags`` are eagerly constructed at import
-    time (``runtime_context.py:748-756``,
-    ``dataclasses.field(default_factory=...)``), so overriding it here is
-    safe without any server-side ``initialize_moe_config()`` call having
-    run first. ``_FlagGroupBase.override()`` (``runtime_context.py:323-341``)
+    defaults to ``None`` (``runtime_context.py:369``); its containing
+    ``moe: MoeFlags`` field on ``Flags`` is itself eagerly
+    ``dataclasses.field(default_factory=MoeFlags)`` (``runtime_context.py:
+    412``), and ``RuntimeContext.__init__`` eagerly sets ``self.flags =
+    Flags()`` (``runtime_context.py:748-756``) -- so ``get_flags().moe`` is
+    always a live, already-constructed object, and overriding
+    ``.runner_backend`` here is safe without any server-side
+    ``initialize_moe_config()`` call having run first.
+    ``_FlagGroupBase.override()`` (``runtime_context.py:323-341``)
     is SGLang's own sanctioned "test-only injection primitive" for exactly
     this temporarily-force-a-flag-value use case -- transactional (the kwarg
     name is validated before any write) and restores on exit even under an
@@ -766,6 +780,16 @@ def _benchmark_framework_quantized_moe(
                     )
                 kernel_source = source_by_backend[moe_backend]
             elif moe_type == "nvfp4":
+                # NOTE (code review, 2026-08-18): on SM100/103 this model's
+                # requested moe_backend is "flashinfer_trtllm", which is also
+                # what MoeRunnerBackend.AUTO resolves to here (Qwen3_5MoeFor
+                # CausalLM_cases.yaml:128-132). A silently-failed
+                # _pin_moe_runner_backend pin would leave the runner on AUTO,
+                # which would STILL satisfy the actual_backend != moe_backend
+                # check below -- this check cannot distinguish "pinned
+                # correctly" from "pin silently no-op'd, AUTO happened to
+                # match" for this lane. It CAN still catch a pin that landed
+                # the WRONG value, or a runner that resolved to neither.
                 runner = getattr(quant_method, "runner", None)
                 actual_backend = getattr(getattr(quant_method, "_moe_runner_backend", None), "value", None)
                 runner_backend = getattr(getattr(runner, "runner_backend", None), "value", None)
@@ -829,6 +853,15 @@ def _benchmark_framework_quantized_moe(
                         )
                     kernel_source = source_by_backend[moe_backend]
                 else:
+                    # NOTE (code review, 2026-08-18): bfloat16/fp8_block for
+                    # this model request moe_backend="triton", which is also
+                    # what MoeRunnerBackend.AUTO resolves to here (no
+                    # sglang_moe_backends override declared,
+                    # Qwen3_5MoeForCausalLM_cases.yaml:97-118). Same
+                    # AUTO-coincidence caveat as the nvfp4 branch above: this
+                    # check cannot distinguish a correctly-pinned backend
+                    # from a silently-failed pin that left the runner on
+                    # AUTO for this lane.
                     runner = getattr(quant_method, "runner", None)
                     actual_backend = getattr(getattr(runner, "runner_backend", None), "value", None)
                     if actual_backend != moe_backend:
@@ -1040,6 +1073,45 @@ def build_rank0_workloads(
     return workloads
 
 
+def _raise_if_unverified_moe_lane(moe_type: str) -> None:
+    """Fail closed on the three MoE lanes whose dispatch citations were
+    never re-verified against sglang 0.5.17 (code review, 2026-08-18,
+    AIC-1762 Task 4c/4d follow-up).
+
+    int4_wo, w4a16_mxfp4, and w4a8_mxfp4_mxfp8 are NOT among Qwen3.8-Max's
+    collected quant modes (bfloat16/fp8_block/nvfp4 -- the lanes the 0.5.17
+    __compat__ bump actually re-verified), and the review confirmed several
+    of their dispatch citations elsewhere in this function are now stale:
+    the int4_wo SM-split citation "server_args.py:3725-3737" (the
+    is_kimi_k2_k25_thinking_int4-driven flashinfer_trtllm auto-select) is
+    unrelated embedding/BCG code at 0.5.17 -- that logic relocated into
+    sglang/srt/arg_groups/overrides.py as part of a broader
+    server_args.py -> arg_groups/ reorg (is_kimi_k2_k25_thinking_int4 now at
+    overrides.py:1697-1703, the auto-select at :1734-1748); the w4a16_mxfp4
+    SM120 Marlin citation "server_args.py:3876-3887" moved the same way.
+    Mxfp4FlashinferTrtllmMoEMethod is still defined at 0.5.17
+    (mxfp4_flashinfer_trtllm_moe.py:48, was :125) but its
+    process_weights_after_loading body was not re-diffed. Rather than trust
+    stale citations or silently measure whatever sglang 0.5.17 happens to
+    dispatch to under an unchecked assumption, raise: re-verifying these
+    three lanes at 0.5.17 is explicitly out of scope for this bump (see the
+    FIXME(kernel-limit) a few lines below this function's call site, whose
+    own text already demanded a re-check on the next version bump).
+    """
+    if moe_type not in ("int4_wo", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"):
+        return
+    installed_version = pkg_resources.get_distribution("sglang").version
+    if not _check_compat("sglang==0.5.14", installed_version):
+        raise RuntimeError(
+            f"SGLang {moe_type} collection is verified only at sglang==0.5.14 "
+            f"(installed: {installed_version}). Its dispatch citations (int4_wo "
+            "SM-split, w4a16_mxfp4 SM120 Marlin auto-select, w4a8_mxfp4_mxfp8 "
+            "SM100/103 alignment guard) were never re-verified for the AIC-1762 "
+            "0.5.17 bump -- re-verify against sglang 0.5.17 source (see this "
+            "function's docstring for what already moved) before removing it."
+        )
+
+
 def run_moe_torch(
     moe_type,
     num_tokens,
@@ -1083,6 +1155,7 @@ def run_moe_torch(
         "int4_wo",
         "w4a16_mxfp4",
     ], "only support moe type = fp8_block, bfloat16, nvfp4, int4_wo, w4a16_mxfp4, or w4a8_mxfp4_mxfp8"
+    _raise_if_unverified_moe_lane(moe_type)
     if moe_backend not in {
         "triton",
         "triton_kernel",
@@ -1096,6 +1169,10 @@ def run_moe_torch(
     # for MXFP4 w4a16 where SGLang 0.5.14 serving itself selects Marlin on
     # SM120 (server_args.py:3876-3887; mxfp4.py:520-521 asserts SM90-or-SM120).
     # NVFP4/mxfp8-activation modes stay rejected (FP4/INT4 identity reversal).
+    # STALE at 0.5.17 (code review, 2026-08-18): the SM120 auto-select moved
+    # into sglang/srt/arg_groups/overrides.py, same reorg as the int4_wo
+    # citation above -- unreachable concern in practice since the version
+    # guard above already raises for w4a16_mxfp4 at any version but 0.5.14.
     if moe_backend == "marlin" and moe_type not in ("int4_wo", "w4a16_mxfp4"):
         raise ValueError(
             f"SGLang Marlin is only valid for the weight-only modes int4_wo/w4a16_mxfp4, got moe_type={moe_type!r}"
@@ -1147,6 +1224,11 @@ def run_moe_torch(
         # 2026-07-05: local_inter 128/384/768/1536/3072 pass, 64/96/192 fail.
         # SM103 shares the exact flashinfer_mxfp4 code path but remains
         # hardware-unvalidated.
+        # NOT re-diffed at 0.5.17 (code review, 2026-08-18): the class itself
+        # still exists (mxfp4_flashinfer_trtllm_moe.py:48, was :125) but its
+        # body wasn't checked -- unreachable concern in practice since the
+        # version guard above already raises for w4a8_mxfp4_mxfp8 at any
+        # version but 0.5.14.
         raise ValueError(
             "SGLang SM100/103 DeepSeek-V4 W4A8 FP4 experts require hidden_size and local_inter_size "
             f"to be divisible by 128, got hidden_size={hidden_size}, local_inter_size={local_inter_size}"
@@ -1154,8 +1236,12 @@ def run_moe_torch(
     use_int4_w4a16 = moe_type == "int4_wo"
     # int4_wo runner truth is SM-split in SGLang 0.5.14 serving: SM90 auto
     # resolves to Marlin (CompressedTensorsWNA16MoE), while SM100/103 force
-    # flashinfer_trtllm (server_args.py:3725-3737), whose scheme
-    # CompressedTensorsMxInt4MoE feeds BF16 activations straight into
+    # flashinfer_trtllm (server_args.py:3725-3737 @0.5.14 -- STALE at 0.5.17:
+    # that line range is unrelated code there; the is_kimi_k2_k25_thinking_
+    # int4-driven auto-select relocated into sglang/srt/arg_groups/
+    # overrides.py, ~:1697-1748, as part of a broader reorg -- the version
+    # guard above blocks this lane before this citation would matter), whose
+    # scheme CompressedTensorsMxInt4MoE feeds BF16 activations straight into
     # trtllm_mxint4_block_scale_moe — the same W4A16 identity on a different
     # kernel (the FP8-activation variant arrived later, flashinfer PR#2912,
     # and is not used by 0.5.14).
@@ -1165,6 +1251,12 @@ def run_moe_torch(
     # (moe_tp 16/32) fail — 707/3,078 cases, all with that one message.
     # blockK's exact value/origin in flashinfer is unverified; re-check on
     # the next flashinfer/sglang bump before considering a probe or guard.
+    # AIC-1762 Task 4c/4d (2026-08-18): that next bump arrived (0.5.17), but
+    # this lane's re-check is DELIBERATELY DEFERRED behind the version guard
+    # above (int4_wo/w4a16_mxfp4/w4a8_mxfp4_mxfp8 now raise at any installed
+    # version other than 0.5.14) -- out of scope for a bump whose collected
+    # lanes are bfloat16/fp8_block/nvfp4 only. Re-verify blockK against
+    # 0.5.17 source before lifting the guard for this lane.
     if use_int4_w4a16 and moe_backend not in ("marlin", "flashinfer_trtllm"):
         raise ValueError(
             f"SGLang int4_wo requires the Marlin (SM90) or flashinfer_trtllm (SM100/103) backend, got {moe_backend}"

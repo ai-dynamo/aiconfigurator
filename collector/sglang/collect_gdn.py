@@ -71,9 +71,17 @@ Output:
 # mirroring collect_gemm.py's established try/except-import pattern (this
 # file had none of its own before this bump). 0.5.15/0.5.16 stay excluded:
 # never verified, and version_resolver's __compat__ grammar (AND-of-
-# comparators only, no OR) can express this exact two-version acceptance set
-# only as a bounded range with the two untested patches explicitly carved
-# out.
+# comparators only, no OR) has no way to express a true two-point set either
+# -- this bounded range with the two untested base releases carved out via
+# != is the closest expressible approximation, NOT an exact {0.5.14, 0.5.17}
+# gate (CORRECTED 2026-08-18, code review): `_check_compat`'s `!=` only
+# excludes the literal point version, so 0.5.15.post1/0.5.15rc1/
+# 0.5.16.post2-style variants of the excluded releases still satisfy this
+# specifier (see tests/unit/collector/test_version_resolver.py's
+# TestExactVersionSet for the honest, probed semantics). This is an
+# accepted, narrow gap: the framework_manifest digest-pinned gate is the
+# true version enforcement upstream and only ever supplies exactly 0.5.14
+# or 0.5.17 in a sanctioned run, so the leak is unreachable there.
 __compat__ = "sglang>=0.5.14,<=0.5.17,!=0.5.15,!=0.5.16"
 
 import gc
@@ -81,12 +89,21 @@ import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from sglang.srt.layers.attention.fla.chunk import chunk_gated_delta_rule
-    from sglang.srt.layers.attention.fla.fused_recurrent import (
+    # These names are otherwise only bound dynamically (globals().update(...)
+    # in run_gdn_torch() below) after a version-conditional import, so a
+    # static type checker needs its own declaration to resolve the call
+    # sites elsewhere in this file. Pointed at the >=0.5.17 paths (MINOR 4,
+    # code review 2026-08-18): the old sglang.srt.layers.attention.fla.*/
+    # sglang.srt.layers.attention.mamba.causal_conv1d_triton paths this block
+    # used before this bump no longer exist at 0.5.17, which would leave
+    # type-checking broken on a 0.5.17-only environment. causal_conv1d_fn's
+    # path is unaffected by the reorg (same at both versions).
+    from sglang.kernels.ops.attention.fla.chunk import chunk_gated_delta_rule
+    from sglang.kernels.ops.attention.fla.fused_recurrent import (
         fused_recurrent_gated_delta_rule_packed_decode,
     )
+    from sglang.kernels.ops.mamba.causal_conv1d_triton import causal_conv1d_update
     from sglang.srt.layers.attention.mamba.causal_conv1d import causal_conv1d_fn
-    from sglang.srt.layers.attention.mamba.causal_conv1d_triton import causal_conv1d_update
 
 import torch
 
