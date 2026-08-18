@@ -124,8 +124,6 @@ OPERATIONS_DEF_INVENTORY = {
             "PythonOperation.__init__",
             "PythonOperation.get_weights",
             "_all_operation_subclasses",
-            "_read_filtered_rows",
-            "_read_perf_rows",
             "_resolve_perf_data_path",
             "_version_dir_is_partial",
             "_version_dir_is_unusable",
@@ -174,9 +172,6 @@ OPERATIONS_DEF_INVENTORY = {
             "GenerationDeepSeekV4AttentionModule.clear_cache",
             "GenerationDeepSeekV4AttentionModule.load_data",
             "_cache_key",
-            "load_dsv4_sparse_op_data",
-            "load_dsv4_sparse_op_data._coerce",
-            "load_dsv4_sparse_op_data._is_bad_key",
         }
     ),
     "elementwise.py": frozenset(),
@@ -541,45 +536,3 @@ def test_def_inventory_catches_shadow_class_with_existing_names():
         raise AssertionError("no inventory file contains all fixture plain names")
     # ...but none of the QUALIFIED paths exists anywhere, so introducing the
     # shadow class trips test_operations_def_inventory_is_frozen.
-
-
-def test_surviving_parsers_have_no_production_callers():
-    """The moe/moe_comm/dsa/dsv4 ``load_*_data`` parsers survive PR-6 only as
-    TEST-ONLY schema-contract fixtures (the collector suite's format
-    handshake); every production ``PerfDatabase._<family>_data`` attribute is
-    served by the engine table view. A production call site re-appearing for
-    any of them is the Python data plane growing back — fail here so the
-    revival is a deliberate, reviewed decision.
-    """
-    import re
-
-    sdk_root = OPERATIONS_DIR.parents[2]  # aic-core/src/aiconfigurator_core
-    surviving = sorted(
-        {
-            match
-            for path in OPERATIONS_DIR.glob("*.py")
-            for match in re.findall(r"^def (load_\w+_data)\b", path.read_text(encoding="utf-8"), re.MULTILINE)
-        }
-    )
-    # The inventory itself is load-bearing: if the cleanup PR deletes the
-    # parsers, this test retires with them (empty set would pass vacuously).
-    assert surviving, "no surviving parsers found — retire this test together with the parser deletion"
-
-    offenders = []
-    for path in sdk_root.rglob("*.py"):
-        rel = path.relative_to(sdk_root).as_posix()
-        if "/operations/" in f"/{rel}":
-            continue  # definitions and their module-internal use
-        text = path.read_text(encoding="utf-8")
-        for name in surviving:
-            for match in re.finditer(rf"\b{name}\b", text):
-                line = text[: match.start()].count("\n") + 1
-                snippet = text.splitlines()[line - 1].strip()
-                if snippet.startswith("#"):
-                    continue  # commentary, not a call site
-                # perf_database's legacy re-export block is the one allowed
-                # reference (kept for the collector suite's import path).
-                if rel.endswith("perf_database.py") and re.match(rf"^{name},?$", snippet):
-                    continue
-                offenders.append(f"{rel}:{line}: {snippet[:100]}")
-    assert not offenders, "surviving test-only parsers gained production references:\n" + "\n".join(offenders)

@@ -27,7 +27,6 @@ lever for long-running webapps.
 
 from __future__ import annotations
 
-import csv
 import logging
 import os
 from collections import defaultdict
@@ -41,24 +40,6 @@ if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
-
-
-def _read_perf_rows(perf_file: str) -> list[dict[str, object]]:
-    if perf_file.lower().endswith(".parquet"):
-        try:
-            import pyarrow.parquet as pq
-        except ImportError as exc:
-            raise RuntimeError(
-                "Loading parquet perf data requires the 'pyarrow' package. "
-                "Install aiconfigurator with its declared runtime dependencies."
-            ) from exc
-        return [
-            {key: "" if value is None else value for key, value in row.items()}
-            for row in pq.read_table(perf_file).to_pylist()
-        ]
-
-    with open(perf_file, encoding="utf-8", newline="") as f:
-        return [{key: "" if value is None else value for key, value in row.items()} for row in csv.DictReader(f)]
 
 
 def _resolve_perf_data_path(perf_file: str) -> str:
@@ -164,47 +145,6 @@ def resolve_op_data_path(system_data_root: str, backend: str, version: str, op_f
             return candidate
     legacy = _resolve_perf_data_path(os.path.join(system_data_root, backend, version, op_filename))
     return legacy
-
-
-def _read_filtered_rows(file_or_sources):
-    """Read perf rows from one or more sources. Used by the one surviving
-    test-only parser (``dsv4.load_dsv4_sparse_op_data``).
-
-    Accepts:
-      - A single path string: yields all rows. Returns ``None`` if the file is
-        missing, an empty list if it exists but has no rows. Preserves the
-        legacy distinction the per-op ``load_*`` functions rely on.
-      - An iterable of ``(path, kernel_source_filter)`` tuples: yields rows
-        from each source in order; missing files are skipped; rows are
-        filtered by ``kernel_source`` when a filter is provided. Returns
-        ``None`` only if **every** path is missing.
-
-    The order of the returned list mirrors the order of the input sources, so
-    when the per-row loaders skip on key conflict, the earliest source wins on
-    every coordinate — same first-wins semantic the shared-layer loader needs
-    without a separate merge step.
-
-    Lives here (not in ``perf_database``) so the per-op-module loaders can
-    import it without a circular dependency on ``perf_database`` at module
-    load time.
-    """
-    if isinstance(file_or_sources, str):
-        path = _resolve_perf_data_path(file_or_sources)
-        if not os.path.exists(path):
-            return None
-        return _read_perf_rows(path)
-
-    rows: list[dict] = []
-    any_exists = False
-    for path, ks_filter in file_or_sources:
-        path = _resolve_perf_data_path(path)
-        if not os.path.exists(path):
-            continue
-        any_exists = True
-        for row in _read_perf_rows(path):
-            if ks_filter is None or row.get("kernel_source") in ks_filter:
-                rows.append(row)
-    return rows if any_exists else None
 
 
 # The op base class IS the compiled engine's: every engine-backed op family

@@ -231,14 +231,13 @@ def context_fmha_supported_modes(database, ctx_op: str, kv_cache_mode) -> list[s
     return sorted(modes)
 
 
-# ``_read_filtered_rows`` lives in ``operations.base`` so the per-op-module
-# loaders can import it without a circular dependency on ``perf_database``
-# at module load time. Re-exported here for any external callers that may
-# still import it via ``aiconfigurator_core.sdk.perf_database._read_filtered_rows``.
+# Path-resolution helpers live in ``operations.base`` so the per-op-module
+# loaders can import them without a circular dependency on ``perf_database``
+# at module load time; re-exported here for external callers. (The row
+# readers ``_read_perf_rows`` / ``_read_filtered_rows`` retired with the
+# last Python parser — the engine table view serves every table.)
 from aiconfigurator_core.sdk.operations.base import (  # noqa: F401
     _KNOWN_BACKEND_DIRS,
-    _read_filtered_rows,
-    _read_perf_rows,
     _resolve_perf_data_path,
     resolve_op_data_path,
 )
@@ -1456,21 +1455,15 @@ def get_all_databases(
 # served by the engine table view (``sdk/engine_table_view.py``) in the
 # retired parsers' exact nested shape, and NO path parses perf files in
 # Python anymore, tests included (the collector-format handshake asserts
-# against the engine view / frozen schema literals instead). One survivor:
-# ``load_dsv4_sparse_op_data`` with ``_TOPK_CALIB_KEYS`` — the
-# ``dsv4_csa_topk_calib_perf`` table has no engine view attribute yet, and
-# ``test_dsv4_cp_top_last_reuse.py`` pins its shipped reuse-donor values
-# (issue #1498). It retires when that view attribute lands alongside the
-# migration-baseline retirement. The DSA model-dims constants keep their
-# legacy import path.
+# against the engine view / frozen schema literals instead),
+# tests included; the LAST survivor — the dsv4 csa-topk-calib parser —
+# retired when the ``_dsv4_csa_topk_calib_data`` view attribute landed
+# (``test_dsv4_cp_top_last_reuse.py`` now pins the engine view). The DSA
+# model-dims constants keep their legacy import path.
 # ─────────────────────────────────────────────────────────────────────────
 from aiconfigurator_core.sdk.operations.dsa import (  # noqa: F401
     DEFAULT_DSA_ARCHITECTURE,
     DSA_MODEL_DIMS,
-)
-from aiconfigurator_core.sdk.operations.dsv4 import (  # noqa: F401
-    _TOPK_CALIB_KEYS,
-    load_dsv4_sparse_op_data,
 )
 
 

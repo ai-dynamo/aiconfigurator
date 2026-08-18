@@ -2010,6 +2010,62 @@ pub fn view_dsv4_sparse_kernel(sources: &[PerfSource]) -> Result<Option<ViewNode
     })
 }
 
+/// The retired `operations/dsv4.py::load_dsv4_sparse_op_data` under
+/// `_TOPK_CALIB_KEYS` — the CSA topk DELTA calibration table nested under
+/// `(num_heads, step, isl, batch_size, score_mode)`, leaf `{"latency": ms}`.
+/// The first four keys are Python-`int`-coerced; `score_mode` keeps its
+/// string form (`v1_top_last` / `v1_flat` / ...). Blank / NaN-sentinel key
+/// cells skip the ROW (`_is_bad_key`), duplicate keys keep the FIRST source
+/// (shared-layer contract), and an existing file with zero usable rows
+/// yields `None` (`root or None`).
+pub fn view_dsv4_csa_topk_calib(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicError> {
+    const INT_KEY_COLS: [&str; 4] = ["num_heads", "step", "isl", "batch_size"];
+    let mut root = ViewNode::branch();
+    let mut any_leaf = false;
+    let found = fold_sources(sources, |ctx| {
+        let r = ctx.reader;
+        let mut keys: Vec<String> = Vec::with_capacity(5);
+        for col in INT_KEY_COLS {
+            // `_coerce` = int(float(cell)); a null / NaN / non-numeric cell
+            // is a bad key that skips the row (this subsumes the loader's
+            // duplicate-header guard on the batch_size cell).
+            let Some(idx) = r.col_optional(col) else { return Ok(()) };
+            let Some(value) = py_int_optional(ctx.row, idx)? else {
+                return Ok(());
+            };
+            keys.push(value.to_string());
+        }
+        // score_mode stays a string key; `_is_bad_key` skipped blank and
+        // NaN/inf SENTINEL strings.
+        let Some(mode_col) = r.col_optional("score_mode") else { return Ok(()) };
+        let Some(mode) = ctx.row.str_optional(Some(mode_col))? else {
+            return Ok(());
+        };
+        let trimmed = mode.trim();
+        if trimmed.is_empty()
+            || matches!(
+                trimmed.to_ascii_lowercase().as_str(),
+                "nan" | "inf" | "-inf" | "+inf" | "infinity" | "-infinity"
+            )
+        {
+            return Ok(());
+        }
+        let mode = mode.to_string();
+        // float(row["latency"]): absent column / null cell -> skip row.
+        let Some(latency) = num_optional(ctx.row, r.col_optional("latency"))? else {
+            return Ok(());
+        };
+        let leaf = ViewNode::Leaf(vec![("latency", ViewValue::F64(latency))]);
+        root.insert_first_wins(&keys, &mode, leaf);
+        any_leaf = true;
+        Ok(())
+    })?;
+    Ok(match found {
+        Some(()) if any_leaf => Some(root),
+        _ => None,
+    })
+}
+
 /// `operations/dsv4.py::_deep_merge_dsv4_dicts` — in-place merge preserving
 /// dest insertion order; at any level where both sides are branches, recurse,
 /// otherwise src overwrites (leaf fields merge by name like Python dicts).
@@ -2131,6 +2187,7 @@ pub const TABLE_VIEW_ATTRIBUTES: &[(&str, &[&str])] = &[
     ),
     ("_dsv4_sparse_kernel_data.hca_attn", &["dsv4_hca_attn_module_perf.parquet"]),
     ("_dsv4_sparse_kernel_data.csa_attn", &["dsv4_csa_attn_module_perf.parquet"]),
+    ("_dsv4_csa_topk_calib_data", &["dsv4_csa_topk_calib_perf.parquet"]),
     ("_dsv4_megamoe_module_data", &["dsv4_megamoe_module_perf.parquet"]),
     ("_mamba2_data", &["mamba2_perf.parquet"]),
     ("_gdn_data", &["gdn_perf.parquet"]),
@@ -2220,6 +2277,7 @@ pub fn table_view_json(tables: &PerfTables, attribute: &str) -> Result<Option<St
         }
         "_dsv4_sparse_kernel_data.hca_attn" => view_dsv4_sparse_kernel(&src("dsv4_hca_attn_module_perf.parquet")?)?,
         "_dsv4_sparse_kernel_data.csa_attn" => view_dsv4_sparse_kernel(&src("dsv4_csa_attn_module_perf.parquet")?)?,
+        "_dsv4_csa_topk_calib_data" => view_dsv4_csa_topk_calib(&src("dsv4_csa_topk_calib_perf.parquet")?)?,
         "_dsv4_megamoe_module_data" => view_dsv4_megamoe_module(&tables.data_root)?,
         "_mamba2_data" => view_mamba2(&src("mamba2_perf.parquet")?)?,
         "_gdn_data" => view_gdn(&src("gdn_perf.parquet")?)?,

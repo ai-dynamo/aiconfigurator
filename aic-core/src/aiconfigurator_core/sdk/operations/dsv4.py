@@ -36,7 +36,7 @@ import os
 from typing import TYPE_CHECKING, ClassVar
 
 import aiconfigurator_core._aiconfigurator_core as _core
-from aiconfigurator_core.sdk.operations.base import OpShellKit, _read_filtered_rows, resolve_op_data_path
+from aiconfigurator_core.sdk.operations.base import OpShellKit, resolve_op_data_path
 
 logger = logging.getLogger(__name__)
 
@@ -322,79 +322,3 @@ class DeepSeekV4MegaMoEModule(_core.DeepSeekV4MegaMoEModule, OpShellKit):
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-
-# ─────────────────────────────────────────────────────────
-# CSV loaders (moved here from perf_database.py so each op family owns its data + parser)
-# ─────────────────────────────────────────────────────────
-
-
-_TOPK_CALIB_KEYS = ("num_heads", "step", "isl", "batch_size", "score_mode")
-
-
-def load_dsv4_sparse_op_data(file_or_sources, key_columns):
-    """Generic loader for the DeepSeek-V4 sparse-op family.
-
-    Reads the shared perf schema (parquet or txt, single path or override
-    ``(path, kernel_source_filter)`` sources — see ``_read_filtered_rows``) and
-    nests every row under ``key_columns`` in order, leaf == ``{"latency": ms}``.
-
-    Numeric key cells coerce to ``int``; non-numeric stay ``str`` (e.g.
-    ``score_mode``). Rows with a blank or NaN/inf key cell are skipped.
-    Returns ``None`` when no source file exists.
-
-    Consumers:
-      - sparse kernels: ``_SPARSE_KERNEL_KEYS`` -> data[heads][tp][past_kv][isl][bs]
-      - topk calib:     ``_TOPK_CALIB_KEYS``    -> data[native][step][isl][bs][score_mode]
-    """
-    rows = _read_filtered_rows(file_or_sources)
-    if rows is None:
-        return None
-
-    def _coerce(value):
-        try:
-            return int(float(value))
-        except (TypeError, ValueError, OverflowError):
-            return value
-
-    def _is_bad_key(k):
-        # A key cell that is blank or a NaN/inf sentinel must not become a dict
-        # key: such rows are malformed and would misbucket (or KeyError) the
-        # downstream calibration lookup. Legitimate non-numeric keys (e.g.
-        # ``score_mode`` values like ``"default"``) are kept.
-        if k is None:
-            return True
-        if isinstance(k, float):  # uncoerced float NaN/inf
-            return k != k or k in (float("inf"), float("-inf"))
-        if isinstance(k, str):
-            return k.strip() == "" or k.strip().lower() in (
-                "nan",
-                "inf",
-                "-inf",
-                "+inf",
-                "infinity",
-                "-infinity",
-            )
-        return False
-
-    root: dict = {}
-    for row in rows:
-        # Skip duplicate header rows (files may be appended to across runs).
-        if row.get("batch_size") in (None, "", "batch_size"):
-            continue
-        try:
-            keys = [_coerce(row[col]) for col in key_columns]
-            latency = float(row["latency"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if any(_is_bad_key(k) for k in keys):  # blank / NaN / inf key cell
-            continue
-        node = root
-        for k in keys[:-1]:
-            node = node.setdefault(k, {})
-        if keys[-1] in node:
-            # Check for conflict: first source wins (shared-layer contract).
-            logger.debug(f"value conflict in dsv4 sparse-op data: {keys}")
-            continue
-        node[keys[-1]] = {"latency": latency}
-    return root or None

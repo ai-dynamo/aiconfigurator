@@ -3,10 +3,11 @@
 
 """Retired-loader fidelity of the engine table views on MALFORMED data.
 
-The shipped parquet files are covered bit-for-bit by the frozen data-plane
-baseline (``tests/cross_package/test_data_plane_baseline.py``); what that
-replay cannot see is how the folds treat data shapes the retired Python
-parsers tolerated but the collector never ships: null cells, DOUBLE-typed
+The migration-era data-plane baseline (retired once the loaders' bit-for-bit
+equivalence was proven and the synthetic view-shape suites landed) covered
+the shipped parquet files; what such a replay cannot see is how the folds
+treat data shapes the retired Python parsers tolerated but the collector
+never ships: null cells, DOUBLE-typed
 integer columns (a single null upcasts a pandas column), NaN sentinels,
 negative collector-bug keys, and legacy ``INCOMPLETE.txt`` vetoes. Each test
 here pins one such contract to the retired parser's exact behavior

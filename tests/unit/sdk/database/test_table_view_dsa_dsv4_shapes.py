@@ -19,6 +19,8 @@ Key orders (identical to the retired parsers):
   [native][local][cr][prefix][s][b]; generation [kv][gemm][native][local]
   [cr][b][s_total].
 - ``_dsv4_sparse_kernel_data.<sub>``: [native_heads][tp][past_kv][isl][b].
+- ``_dsv4_csa_topk_calib_data``: [native_heads][step][isl][b][score_mode]
+  (score_mode stays a STRING key; the other four coerce to int).
 """
 
 from pathlib import Path
@@ -490,3 +492,68 @@ def test_dsv4_sparse_kernel_view_key_order(systems_root: Path) -> None:
 
 def test_dsv4_sparse_kernel_view_missing_returns_none(systems_root: Path) -> None:
     assert _fetch(_build_db(systems_root), "_dsv4_sparse_kernel_data.csa_attn") is None
+
+
+# ---------------------------------------------------------------------------
+# DSV4 CSA topk-calib view (the last retired parser: load_dsv4_sparse_op_data
+# under _TOPK_CALIB_KEYS)
+# ---------------------------------------------------------------------------
+
+CALIB_REL = "data/h100_sxm/sparse_attention/sglang/1.0.0/dsv4_csa_topk_calib_perf.parquet"
+
+
+def _calib_row(**overrides) -> dict:
+    row = {
+        "num_heads": 64,
+        "step": 0,
+        "isl": 8192,
+        "batch_size": 1,
+        "score_mode": "v1_top_last",
+        "latency": 0.05,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_calib_view_nests_ints_then_string_score_mode(systems_root: Path) -> None:
+    _write_parquet(
+        systems_root,
+        CALIB_REL,
+        [
+            _calib_row(),
+            _calib_row(score_mode="v1_flat", latency=0.0),
+            _calib_row(isl=1024, latency=0.01),
+        ],
+    )
+    data = _fetch(_build_db(systems_root), "_dsv4_csa_topk_calib_data")
+    assert data[64][0][8192][1]["v1_top_last"]["latency"] == 0.05
+    assert data[64][0][8192][1]["v1_flat"]["latency"] == 0.0
+    assert data[64][0][1024][1]["v1_top_last"]["latency"] == 0.01
+
+
+def test_calib_view_skips_bad_key_rows_and_keeps_first_on_conflict(systems_root: Path) -> None:
+    """The retired parser skipped rows with null/NaN key cells or a blank /
+    NaN-sentinel score_mode (``_is_bad_key``) and kept the FIRST value on a
+    duplicate coordinate (shared-layer first-wins)."""
+    _write_parquet(
+        systems_root,
+        CALIB_REL,
+        [
+            _calib_row(latency=1.0),
+            _calib_row(latency=2.0),  # duplicate coordinate: first wins
+            _calib_row(step=None, latency=3.0),  # null int key -> row skipped
+            _calib_row(score_mode="", latency=4.0),  # blank string key -> skipped
+            _calib_row(score_mode="nan", latency=5.0),  # NaN sentinel -> skipped
+        ],
+        types={"step": pa.int64()},
+    )
+    data = _fetch(_build_db(systems_root), "_dsv4_csa_topk_calib_data")
+    assert data == {64: {0: {8192: {1: {"v1_top_last": {"latency": 1.0}}}}}}
+
+
+def test_calib_view_absent_file_and_empty_rows_return_none(systems_root: Path) -> None:
+    """`root or None`: a missing file AND an existing file with zero usable
+    rows both answer None (unlike the classic loaders, which distinguish)."""
+    assert _fetch(_build_db(systems_root), "_dsv4_csa_topk_calib_data") is None
+    _write_parquet(systems_root, CALIB_REL, [_calib_row(score_mode="")])
+    assert _fetch(_build_db(systems_root), "_dsv4_csa_topk_calib_data") is None

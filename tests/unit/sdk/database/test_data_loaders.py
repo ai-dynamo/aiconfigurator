@@ -11,7 +11,6 @@ from aiconfigurator.sdk.common import (
     BackendName,
     PerfDataFilename,
 )
-from aiconfigurator.sdk.operations.base import _read_perf_rows
 from aiconfigurator.sdk.perf_database import (
     LoadedOpData,
     PerfDatabase,
@@ -35,13 +34,6 @@ class DummyPerfDatabase:
         self.database_mode = database_mode
         self.enable_shared_layer = database_mode is None or database_mode.upper() in ("SILICON", "HYBRID")
         self.strict_provenance = False
-
-
-def test_read_perf_rows_normalizes_missing_csv_fields(tmp_path):
-    data_path = tmp_path / "ragged_perf.txt"
-    data_path.write_text("a,b,c\n1,2\n")
-
-    assert _read_perf_rows(str(data_path)) == [{"a": "1", "b": "2", "c": ""}]
 
 
 def test_perf_database_finalize_loaded_data_converts_defaultdicts():
