@@ -9,7 +9,44 @@ owns SGLang kernel compatibility, server-args mocking, routing-logit synthesis,
 rank-local workload construction, quantized weight setup, and perf logging.
 """
 
-__compat__ = "sglang==0.5.14"
+# Verified 2026-08-18 against sglang v0.5.14 and v0.5.17 tags (source clones,
+# no runtime GPU available in this environment) for AIC-1762 Task 4c/4d.
+# Compatible unchanged: is_hip; fused_moe() (triton path, byte-identical
+# signature); override_config; MoeRunnerBackend/RoutingMethodType enums
+# (RenormalizeNaive retained -- labeled "Qwen3" in-source); FusedMoE.__init__,
+# TopK/TopKConfig/StandardTopKOutput/TopKOutputFormat/select_experts,
+# Fp8Config/ModelOptFp8Config/ModelOptFp4Config/Mxfp4Config/
+# CompressedTensorsConfig, MoeRunnerConfig (every kwarg this collector passes
+# unchanged; new kwargs on the framework side are all additive/defaulted);
+# the four mocked _global_server_args fields; _patch_framework_moe_parallel's
+# patch targets (get_tp_group/is_allocation_symmetric/get_parallel are still
+# plain per-module `from X import Y` bindings at 0.5.17, and layer.py/
+# standard.py now read parallel sizes as get_parallel().moe_ep_size/
+# .moe_ep_rank/.moe_tp_size/.moe_tp_rank attributes -- exactly the shape of
+# the patched SimpleNamespace, so get_parallel patching alone still covers
+# it; the four separate get_moe_expert_parallel_*/get_moe_tensor_parallel_*
+# free functions it also patches no longer exist at 0.5.17, consolidated
+# into those get_parallel() attributes -- now a harmless dead-write, not a
+# crash, via the existing missing-attribute-tolerant replace()/finally).
+# TWO incompatible surfaces found and fixed (Task 4c found + reported both
+# BLOCKED; Task 4d implements the fixes on explicit owner authorization):
+# (1) fused_moe_triton_kernels relocated wholesale from
+# sglang.srt.layers.moe.moe_runner.triton_utils to the new top-level
+# sglang.kernels.ops.moe package as part of a 0.5.17 kernel reorg; the only
+# symbol this collector touches, _B_DESC_CACHE, is byte-identical (same
+# OrderedDict cache, same line numbers even) -- a cosmetic relocation, fixed
+# below with a version-conditional import mirroring collect_gemm.py's
+# established try/except-import pattern. (2) sglang.srt.layers.moe.utils.
+# MOE_RUNNER_BACKEND -- the bare module global this collector pinned fused-
+# MoE backend selection through -- no longer exists at 0.5.17 (see
+# _pin_moe_runner_backend below for the full trace and the version-branched
+# fix: 0.5.14 keeps the exact original global read/write/restore, 0.5.17
+# goes through the new RuntimeContext/Flags singleton via its own sanctioned
+# override() primitive). 0.5.15/0.5.16 stay excluded: never verified, and
+# version_resolver's __compat__ grammar (AND-of-comparators only, no OR) can
+# express this exact two-version acceptance set only as a bounded range with
+# the two untested patches explicitly carved out.
+__compat__ = "sglang>=0.5.14,<=0.5.17,!=0.5.15,!=0.5.16"
 
 import gc
 import importlib
@@ -40,7 +77,17 @@ if _server_args_module._global_server_args is None:
     _server_args_module._global_server_args = _mock_server_args
 
 import sglang.srt.layers.moe.fused_moe_triton.layer as _moe_layer_mod
-import sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe_triton_kernels as _fmoe_kernels_mod
+
+# sglang 0.5.17 relocated this module to the new top-level sglang.kernels.ops
+# package; the only symbol used here, _B_DESC_CACHE, is byte-identical at
+# both pinned versions (verified 2026-08-18: same OrderedDict[tuple,
+# TensorDescriptor] cache, same eviction logic, same line numbers). Try the
+# new (>=0.5.17) location first since sglang's own fused_moe.py now imports
+# from there.
+try:
+    import sglang.kernels.ops.moe.fused_moe_triton_kernels as _fmoe_kernels_mod
+except ImportError:
+    import sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe_triton_kernels as _fmoe_kernels_mod
 import sglang.srt.layers.moe.token_dispatcher.standard as _std_dispatch_mod
 import sglang.srt.layers.moe.topk as _topk_mod
 import sglang.srt.layers.moe.utils as _moe_utils
@@ -418,7 +465,18 @@ def benchmark_config(
 
 @contextmanager
 def _patch_framework_moe_parallel(*, moe_tp_size: int, moe_ep_size: int):
-    """Patch the SGLang 0.5.14 helpers cached by framework MoE backends."""
+    """Patch the SGLang helpers cached by framework MoE backends.
+
+    Re-verified 2026-08-18 at v0.5.17: every patched name is still a plain
+    per-module ``from X import Y`` binding, and ``layer.py``/``standard.py``
+    now read parallel sizes as ``get_parallel().moe_ep_size/.moe_ep_rank/
+    .moe_tp_size/.moe_tp_rank`` attributes -- exactly this function's
+    ``SimpleNamespace`` shape -- so the ``get_parallel`` patch alone still
+    covers it. The four separate ``get_moe_expert_parallel_*``/
+    ``get_moe_tensor_parallel_*`` free functions patched below no longer
+    exist at 0.5.17 (consolidated into the ``get_parallel()`` attributes
+    above); patching them there is now a harmless dead-write, not a crash.
+    """
     parallel = SimpleNamespace(
         tp_size=moe_tp_size,
         tp_rank=0,
@@ -474,6 +532,72 @@ def _patch_framework_moe_parallel(*, moe_tp_size: int, moe_ep_size: int):
                 setattr(module, name, original)
 
 
+@contextmanager
+def _pin_moe_runner_backend(backend: MoeRunnerBackend):
+    """Pin SGLang's fused-MoE runner-backend selection for the ``with``
+    block, across SGLang's two pinning mechanisms (traced 2026-08-18,
+    AIC-1762 Task 4d).
+
+    SGLang 0.5.14: a bare module global, ``sglang.srt.layers.moe.utils.
+    MOE_RUNNER_BACKEND`` (utils.py:249 @0.5.14), read by
+    ``get_moe_runner_backend()`` (utils.py:310-313 @0.5.14). Behavior on
+    this version is byte-identical to before this helper existed -- the
+    same read/write/restore, just factored out of
+    ``_benchmark_framework_quantized_moe``.
+
+    SGLang 0.5.17: that global is gone entirely. Backend selection was
+    refactored into a process-level ``RuntimeContext``/``Flags`` singleton
+    (``sglang/srt/runtime_context.py``, module-level ``_CONTEXT =
+    RuntimeContext(parallel=_PARALLEL)``, :1061-1062 @0.5.17, constructed at
+    import time -- not a contextvar, not per-request).
+    ``get_moe_runner_backend()`` (utils.py:333-337 @0.5.17, same accessor
+    name as 0.5.14) now reads ``get_flags().moe.runner_backend`` instead.
+    Confirmed this is genuinely load-bearing on the runner-construction
+    chain, not vestigial: it gates ``use_triton_kernels``,
+    ``use_deep_gemm``, ``use_flashinfer_mxfp4_moe``, and the entire
+    triton/flashinfer_trtllm/flashinfer_cutlass/flashinfer_mxfp4/... branch
+    selection inside ``FusedMoE.__init__`` itself
+    (``fused_moe_triton/layer.py`` -- 15+ call sites: 274, 312, 315-318,
+    331, 384, 417-418, 430, 436-437, 442, 1086-1087, 1341-1342), plus
+    ``topk.py`` (504, 507, 519-520, 2166) and
+    ``token_dispatcher/standard.py:102``. ``MoeFlags.runner_backend``
+    defaults to ``None`` (``runtime_context.py:369``) and both
+    ``Flags.moe``/``RuntimeContext.flags`` are eagerly constructed at import
+    time (``runtime_context.py:748-756``,
+    ``dataclasses.field(default_factory=...)``), so overriding it here is
+    safe without any server-side ``initialize_moe_config()`` call having
+    run first. ``_FlagGroupBase.override()`` (``runtime_context.py:323-341``)
+    is SGLang's own sanctioned "test-only injection primitive" for exactly
+    this temporarily-force-a-flag-value use case -- transactional (the kwarg
+    name is validated before any write) and restores on exit even under an
+    exception -- so it is used here directly instead of a manual
+    read/write/restore.
+
+    The two branches are told apart by whether ``sglang.srt.runtime_context``
+    exports ``get_flags`` at all: that module exists at 0.5.14 too (as a
+    226-line ``ParallelContext``/``get_parallel()``-only file, pre-dating the
+    ``Flags`` tier), so the probe below only wraps the import statement
+    itself -- never the benchmarked code inside the ``with`` block -- so an
+    unrelated ``ImportError`` raised deeper in FusedMoE construction can
+    never be mistaken for the version signal.
+    """
+    try:
+        from sglang.srt.runtime_context import get_flags
+    except ImportError:
+        get_flags = None
+
+    if get_flags is not None:
+        with get_flags().moe.override(runner_backend=backend):
+            yield
+    else:
+        previous = _moe_utils.MOE_RUNNER_BACKEND
+        _moe_utils.MOE_RUNNER_BACKEND = backend
+        try:
+            yield
+        finally:
+            _moe_utils.MOE_RUNNER_BACKEND = previous
+
+
 def _benchmark_framework_quantized_moe(
     *,
     moe_type: str,
@@ -506,7 +630,7 @@ def _benchmark_framework_quantized_moe(
     int4_group_size: int,
     device: str,
 ) -> tuple[float, dict, str]:
-    """Benchmark model-aware paths through SGLang 0.5.14 FusedMoE."""
+    """Benchmark model-aware paths through SGLang FusedMoE (0.5.14/0.5.17)."""
     if moe_backend.startswith("flashinfer"):
         _ensure_writable_flashinfer_cubin_dir()
 
@@ -559,16 +683,17 @@ def _benchmark_framework_quantized_moe(
     else:
         raise ValueError(f"Unsupported framework quantized MoE case: {moe_type=} {model_name=}")
 
-    previous_backend = _moe_utils.MOE_RUNNER_BACKEND
     server_args = _server_args_module._global_server_args
     previous_precision = server_args.flashinfer_mxfp4_moe_precision
-    _moe_utils.MOE_RUNNER_BACKEND = MoeRunnerBackend(moe_backend)
     if moe_backend == "flashinfer_mxfp4":
         server_args.flashinfer_mxfp4_moe_precision = _mxfp4_activation_precision(moe_type)
 
     moe_layer = None
     try:
-        with _patch_framework_moe_parallel(moe_tp_size=moe_tp_size, moe_ep_size=moe_ep_size):
+        with (
+            _pin_moe_runner_backend(MoeRunnerBackend(moe_backend)),
+            _patch_framework_moe_parallel(moe_tp_size=moe_tp_size, moe_ep_size=moe_ep_size),
+        ):
             moe_layer = FusedMoE(
                 num_experts=num_experts,
                 hidden_size=hidden_size,
@@ -774,7 +899,6 @@ def _benchmark_framework_quantized_moe(
             parameter = None
             moe_layer = None
         _fmoe_kernels_mod._B_DESC_CACHE.clear()
-        _moe_utils.MOE_RUNNER_BACKEND = previous_backend
         server_args.flashinfer_mxfp4_moe_precision = previous_precision
         gc.collect()
         torch.cuda.empty_cache()
