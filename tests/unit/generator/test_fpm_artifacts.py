@@ -1527,3 +1527,22 @@ def test_fpm_multinode_fusion_guard_merges_into_existing_compilation_config():
     assert script.count("--compilation-config") == 1
     assert "cudagraph_mode" in script
     assert '"fuse_allreduce_rms":false' in script
+
+
+@pytest.mark.unit
+def test_fpm_pod_renders_guaranteed_qos_by_default():
+    """A GPU-only pod runs BestEffort and FPM's launch-bound band then
+    disperses +-8-18% across boots (R15 F-arm verdict: requests==limits
+    brings it to 3.3%). The render must default to Guaranteed QoS with
+    per-GPU-scaled cpu/memory, requests mirroring limits."""
+
+    pod = _pod(_render())
+    resources = _main_container(pod)["resources"]
+    limits = resources["limits"]
+    requests = resources["requests"]
+
+    assert limits["nvidia.com/gpu"] == "4"
+    assert limits["cpu"] == "56"  # 14 cores x 4 GPUs
+    assert limits["memory"] == "256Gi"  # 64Gi x 4 GPUs
+    assert requests["cpu"] == limits["cpu"]
+    assert requests["memory"] == limits["memory"]

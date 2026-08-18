@@ -957,6 +957,23 @@ def _lower_resources(
     limits = lowered.get("limits") or {}
     if "nvidia.com/gpu" not in limits:
         raise ValueError("FPM resource Pod requires a GPU limit")
+
+    # Guaranteed QoS by default: a GPU-only pod runs BestEffort, and FPM's
+    # launch-bound band then disperses +-8-18% across boots (host launch speed
+    # is decided by neighbour contention; R15 F-arm verdict: requests==limits
+    # brings the in-band spread to 3.3%). CPU/memory scale per GPU and remain
+    # overridable via worker_extra_pod_spec.mainContainer.resources. 14
+    # cores/GPU (not 16) keeps a whole 8-GPU-node pod schedulable on real
+    # fleets (127.9 allocatable cores on the H200 pool) with daemonset
+    # headroom; 64Gi/GPU matches the validated F-arm pod.
+    limits = lowered.setdefault("limits", limits)
+    requests = lowered.setdefault("requests", {})
+    if "cpu" not in limits and "cpu" not in requests:
+        limits["cpu"] = str(gpu_limit * 14)
+        requests["cpu"] = str(gpu_limit * 14)
+    if "memory" not in limits and "memory" not in requests:
+        limits["memory"] = f"{gpu_limit * 64}Gi"
+        requests["memory"] = f"{gpu_limit * 64}Gi"
     return lowered
 
 
