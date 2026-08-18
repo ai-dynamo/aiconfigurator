@@ -12,6 +12,8 @@ Covers the three things this model adds on top of HybridMoEModel:
     global layers grow, giving ~0.29x the KV of an all-global model.
 """
 
+import json
+
 import pytest
 
 from aiconfigurator.sdk import common, config
@@ -129,6 +131,7 @@ class TestStep3p7KVCache:
             result["vocab"],
             result["context"],
             model_config,
+            backend_name="trtllm",
         )
         model._share_expert_dim = 1280
         model.set_hybrid_config(result["extra_params"])
@@ -271,6 +274,7 @@ def test_shared_expert_ops_are_cp_audited():
         result["vocab"],
         result["context"],
         model_config,
+        backend_name="trtllm",
     )
     model._share_expert_dim = 1280
     model.set_hybrid_config(result["extra_params"])
@@ -324,6 +328,7 @@ def test_sliding_attention_ops_use_the_swa_query_head_count():
         result["vocab"],
         result["context"],
         model_config,
+        backend_name="trtllm",
     )
     model._share_expert_dim = 1280
     model.set_hybrid_config(result["extra_params"])
@@ -383,6 +388,7 @@ def _build_step37(hf_config):
         result["vocab"],
         result["context"],
         model_config,
+        backend_name="trtllm",
     )
     model._share_expert_dim = 1280
     model.set_hybrid_config(result["extra_params"])
@@ -427,7 +433,11 @@ def test_head_wise_attn_gate_emits_g_proj_sized_per_layer_type():
         assert gemm._k == h
         # one gate scalar per head, so the gate weight is head_dim times smaller
         # than the out-projection it scales
-        assert by_name[f"{prefix}_attn_gate"]._dim_out == heads * 128
+        gate_spec = json.loads(by_name[f"{prefix}_attn_gate"]._spec_json())["Elementwise"]
+        # dim_in = heads*128 + heads (proj activations + one gate scalar per
+        # head), dim_out = heads*128; the wire folds them to
+        # bytes_per_token = (dim_in + dim_out) * 2 (bf16 activations).
+        assert gate_spec["bytes_per_token"] == (heads * 128 * 2 + heads) * 2
 
 
 def test_head_wise_attn_gate_is_off_by_default():

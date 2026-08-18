@@ -35,8 +35,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator_core.sdk import common
-from aiconfigurator_core.sdk.operations.base import Operation
+import aiconfigurator_core._aiconfigurator_core as _core
+from aiconfigurator_core.sdk.operations.base import OpShellKit
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -62,30 +62,12 @@ def _cache_key(database: PerfDatabase) -> tuple:
 # fmt: on
 
 
-class ContextMLA(Operation):
+class ContextMLA(_core.ContextMLA, OpShellKit):
     """
     Context MLA operation. Owns ``_context_mla_data``.
     """
 
     _data_cache: ClassVar[dict] = {}
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        num_heads: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode,
-        cp_size: int = 1,
-    ) -> None:
-        super().__init__(name, scale_factor)
-        self._num_heads = num_heads
-        self._kvcache_quant_mode = kvcache_quant_mode
-        self._fmha_quant_mode = fmha_quant_mode
-        # Context parallelism (sglang AllGather zigzag in-seq split). When cp>1,
-        # query() models CP rank 0's two zigzag chunks (prev: prefix..+c; next:
-        # prefix+isl-c..isl), same as ContextAttention. c = ceil(isl/(2*cp)).
-        self._cp_size = cp_size
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -122,26 +104,13 @@ class ContextMLA(Operation):
     # Op contract
     # ------------------------------------------------------------------
 
-    _ENGINE_QUERY_SHAPE = "context"
 
-
-class GenerationMLA(Operation):
+class GenerationMLA(_core.GenerationMLA, OpShellKit):
     """
     Generation MLA operation (MQA part). Owns ``_generation_mla_data``.
     """
 
     _data_cache: ClassVar[dict] = {}
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        num_heads: int,
-        kv_cache_dtype: common.KVCacheQuantMode,
-    ) -> None:
-        super().__init__(name, scale_factor)
-        self._num_heads = num_heads
-        self._kv_cache_dtype = kv_cache_dtype
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -178,10 +147,8 @@ class GenerationMLA(Operation):
     # Op contract
     # ------------------------------------------------------------------
 
-    _ENGINE_QUERY_SHAPE = "generation"
 
-
-class MLABmm(Operation):
+class MLABmm(_core.MLABmm, OpShellKit):
     """
     MLABmm operation — pre/post BMM for MLA decoding. Owns ``_mla_bmm_data``.
     No extrapolation in the legacy ``__init__`` path; data is 1D-keyed by
@@ -189,19 +156,6 @@ class MLABmm(Operation):
     """
 
     _data_cache: ClassVar[dict] = {}
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        num_heads: int,
-        quant_mode: common.GEMMQuantMode,
-        if_pre: bool = True,
-    ) -> None:
-        super().__init__(name, scale_factor)
-        self._num_heads = num_heads
-        self._quant_mode = quant_mode
-        self._if_pre = if_pre
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -234,8 +188,6 @@ class MLABmm(Operation):
     # Op contract
     # ------------------------------------------------------------------
 
-    _ENGINE_QUERY_SHAPE = "generation"
-
     def _engine_query_plan(self, kwargs: dict):
         """Legacy signature has no ``s``: the BMM shape is batch-only."""
         beam_width = kwargs.get("beam_width", 1)
@@ -251,7 +203,7 @@ class MLABmm(Operation):
         }
 
 
-class MLAModule(Operation):
+class MLAModule(_core.MLAModule, OpShellKit):
     """
     Module-level MLA op for both context and generation phases.
 
@@ -267,26 +219,6 @@ class MLAModule(Operation):
 
     _context_data_cache: ClassVar[dict] = {}
     _generation_data_cache: ClassVar[dict] = {}
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        is_context: bool,
-        num_heads: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode,
-        gemm_quant_mode: common.GEMMQuantMode,
-        native_num_heads: int | None = None,
-    ) -> None:
-        super().__init__(name, scale_factor)
-        self._is_context = is_context
-        self._num_heads = num_heads
-        # Model-native identity for the [native][local] module table (#1458).
-        self._native_num_heads = native_num_heads
-        self._kvcache_quant_mode = kvcache_quant_mode
-        self._fmha_quant_mode = fmha_quant_mode
-        self._gemm_quant_mode = gemm_quant_mode
 
     # ------------------------------------------------------------------
     # Data ownership — two tables, one per phase
@@ -335,31 +267,14 @@ class MLAModule(Operation):
     # Op contract
     # ------------------------------------------------------------------
 
-    _ENGINE_QUERY_SHAPE = "module"
 
-
-class WideEPGenerationMLA(Operation):
+class WideEPGenerationMLA(_core.WideEPGenerationMLA, OpShellKit):
     """
     WideEP Generation MLA operation (SGLang-only). Owns
     ``_wideep_generation_mla_data``. Loaded only when ``backend == "sglang"``.
     """
 
     _data_cache: ClassVar[dict] = {}
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        tp_size: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode,
-        attn_backend: str = "flashinfer",
-    ) -> None:
-        super().__init__(name, scale_factor)
-        self._tp_size = tp_size
-        self._kvcache_quant_mode = kvcache_quant_mode
-        self._fmha_quant_mode = fmha_quant_mode
-        self._attn_backend = attn_backend
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -404,34 +319,14 @@ class WideEPGenerationMLA(Operation):
     # Op contract
     # ------------------------------------------------------------------
 
-    _ENGINE_QUERY_SHAPE = "generation"
 
-
-class WideEPContextMLA(Operation):
+class WideEPContextMLA(_core.WideEPContextMLA, OpShellKit):
     """
     WideEP Context MLA operation (SGLang-only). Owns
     ``_wideep_context_mla_data``. Loaded only when ``backend == "sglang"``.
     """
 
     _data_cache: ClassVar[dict] = {}
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        tp_size: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode,
-        attn_backend: str = "flashinfer",
-        cp_size: int = 1,
-    ) -> None:
-        super().__init__(name, scale_factor)
-        self._tp_size = tp_size
-        self._kvcache_quant_mode = kvcache_quant_mode
-        self._fmha_quant_mode = fmha_quant_mode
-        self._attn_backend = attn_backend
-        # CP (sglang AllGather zigzag); see ContextMLA. cp>1 -> rank-0 two-chunk.
-        self._cp_size = cp_size
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -472,5 +367,3 @@ class WideEPContextMLA(Operation):
     # ------------------------------------------------------------------
     # Op contract
     # ------------------------------------------------------------------
-
-    _ENGINE_QUERY_SHAPE = "context"

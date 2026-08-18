@@ -1168,8 +1168,9 @@ class PerfDataFilename(Enum):
     dsv4_hca_context_module = "dsv4_hca_context_module_perf.parquet"
     dsv4_csa_generation_module = "dsv4_csa_generation_module_perf.parquet"
     dsv4_hca_generation_module = "dsv4_hca_generation_module_perf.parquet"
-    # DeepSeek-V4 sparse-op family — all share one column schema and load
-    # through ``operations.dsv4.load_dsv4_sparse_op_data``:
+    # DeepSeek-V4 sparse-op family — all share one column schema, served by
+    # the engine table view (``_dsv4_sparse_kernel_data.*`` /
+    # ``_dsv4_csa_topk_calib_data``):
     #   csa_attn / hca_attn / paged_mqa_logits : FMLA & indexer kernel latency,
     #     keyed ``num_heads -> tp -> past_kv -> isl -> bs`` (kernel-level Δ data,
     #     queried by ``_lookup_sparse_kernel``).

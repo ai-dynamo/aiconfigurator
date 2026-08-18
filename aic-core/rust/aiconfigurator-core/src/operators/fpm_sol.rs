@@ -377,6 +377,13 @@ fn moe_dispatch_sol(op: &MoEDispatchOp, spec: &SystemSpec, x: f64) -> Result<f64
     let half_bytes = 2.0; // CommQuantMode::Half.memory — MoEDispatch always passes half
 
     let comm = match op.flavor {
+        DispatchFlavor::RetiredDeepEp => {
+            return Err(AicError::InvalidEngineConfig(format!(
+                "MoEDispatch '{}' (moe_backend='deepep_moe') has no native SOL \
+                 (retired with AIC-1601; large-EP comm is modeled by MoeAllToAll)",
+                op.name
+            )))
+        }
         DispatchFlavor::CustomAllReduce => match op.backend {
             // vllm (moe.py:1222-1239): additive.
             BackendKind::Vllm => {

@@ -35,7 +35,7 @@ use super::attention::generation_attn_flops;
 use super::gemm::quant_tc_flops;
 use super::interpolation::Grid3;
 use super::perf_interp::{self, LeafValue, Node, OpInterpConfig};
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
@@ -173,34 +173,28 @@ impl MlaTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
-        Self::with_sources(data_root, system_spec, &PerfDbSources::default())
+        Self::with_sources(data_root, system_spec, &SourceResolver::fixed(PerfDbSources::default()))
+            .expect("fixed-map resolution is infallible")
     }
 
-    /// Construct with shared-layer (sibling/cross-version) sources resolved from
-    /// `perf_db_sources` (Python-supplied). Each MLA-family file falls back to
-    /// its primary `data_root/<basename>` when absent from the map. No I/O.
+    /// Construct with shared-layer (sibling/cross-version) sources supplied by the
+    /// engine's `SourceResolver` (live resolution owns the shared-layer walk;
+    /// a fixed source map is the test-only path). Each MLA-family file falls back to
+    /// its primary `data_root/<basename>` when the resolver names no override. No I/O.
     pub fn with_sources(
         data_root: PathBuf,
         system_spec: SystemSpec,
-        perf_db_sources: &PerfDbSources,
-    ) -> Self {
+        resolver: &SourceResolver,
+    ) -> Result<Self, AicError> {
         let context_mla_sources =
-            resolve_op_sources(perf_db_sources, "context_mla_perf.parquet", &data_root);
+            resolver.sources_for("context_mla_perf.parquet", &data_root)?;
         let generation_mla_sources =
-            resolve_op_sources(perf_db_sources, "generation_mla_perf.parquet", &data_root);
+            resolver.sources_for("generation_mla_perf.parquet", &data_root)?;
         let mla_bmm_sources =
-            resolve_op_sources(perf_db_sources, "mla_bmm_perf.parquet", &data_root);
-        let mla_context_module_sources = resolve_op_sources(
-            perf_db_sources,
-            "mla_context_module_perf.parquet",
-            &data_root,
-        );
-        let mla_generation_module_sources = resolve_op_sources(
-            perf_db_sources,
-            "mla_generation_module_perf.parquet",
-            &data_root,
-        );
-        Self {
+            resolver.sources_for("mla_bmm_perf.parquet", &data_root)?;
+        let mla_context_module_sources = resolver.sources_for("mla_context_module_perf.parquet", &data_root)?;
+        let mla_generation_module_sources = resolver.sources_for("mla_generation_module_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             system_spec,
             context_mla_sources,
@@ -213,7 +207,7 @@ impl MlaTable {
             bmm: OnceLock::new(),
             context_module: OnceLock::new(),
             generation_module: OnceLock::new(),
-        }
+        })
     }
 
     /// Op-level context MLA value (latency ms + power/energy; raw — no

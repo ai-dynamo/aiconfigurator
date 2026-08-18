@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use super::perf_interp::{self, LeafValue, Node, OpInterpConfig};
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
 use crate::perf_database::parquet_loader::PerfReader;
@@ -111,22 +111,24 @@ impl StateSpaceTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, backend: &str, version: &str) -> Self {
-        Self::with_sources(data_root, backend, version, &PerfDbSources::default())
+        Self::with_sources(data_root, backend, version, &SourceResolver::fixed(PerfDbSources::default()))
+            .expect("fixed-map resolution is infallible")
     }
 
-    /// Construct with shared-layer (sibling/cross-version) sources resolved from
-    /// `perf_db_sources` (Python-supplied). Each state-space file falls back to
-    /// its primary `data_root/<basename>` when absent from the map. No I/O.
+    /// Construct with shared-layer (sibling/cross-version) sources supplied by the
+    /// engine's `SourceResolver` (live resolution owns the shared-layer walk;
+    /// a fixed source map is the test-only path). Each state-space file falls back to
+    /// its primary `data_root/<basename>` when the resolver names no override. No I/O.
     pub fn with_sources(
         data_root: PathBuf,
         backend: &str,
         version: &str,
-        perf_db_sources: &PerfDbSources,
-    ) -> Self {
-        let mamba2_sources = resolve_op_sources(perf_db_sources, "mamba2_perf.parquet", &data_root);
-        let gdn_sources = resolve_op_sources(perf_db_sources, "gdn_perf.parquet", &data_root);
-        let kda_sources = resolve_op_sources(perf_db_sources, "kda_perf.parquet", &data_root);
-        Self {
+        resolver: &SourceResolver,
+    ) -> Result<Self, AicError> {
+        let mamba2_sources = resolver.sources_for("mamba2_perf.parquet", &data_root)?;
+        let gdn_sources = resolver.sources_for("gdn_perf.parquet", &data_root)?;
+        let kda_sources = resolver.sources_for("kda_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             mamba2_sources,
             gdn_sources,
@@ -135,7 +137,7 @@ impl StateSpaceTable {
             mamba2: OnceLock::new(),
             gdn: OnceLock::new(),
             kda: OnceLock::new(),
-        }
+        })
     }
 
     /// Mamba2 latency for a layer instance, resolved on the perf_interp

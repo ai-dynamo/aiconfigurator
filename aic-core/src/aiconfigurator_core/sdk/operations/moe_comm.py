@@ -10,34 +10,30 @@ registry shared by all three inference backends. On TRT-LLM this covers the
 
 ``MOE_A2A_BACKENDS`` maps backend name to its :class:`MoECommBackendSpec`
 (framework/phase applicability plus feasibility rules).
-``load_moe_a2a_data`` loads the unified ``moe_a2a_perf.parquet`` comm table
-(with legacy per-backend adapters) into one nested dict keyed by
+``MoEAllToAll`` is the op class over the unified ``moe_a2a_perf.parquet``
+comm table, served by the engine table view (``_moe_a2a_data``, with legacy
+per-backend adapters folded engine-side) as one nested dict keyed by
 ``[comm_backend][phase][comm_dtype][ep_size][node_num][hidden_size][topk]
-[num_experts][sms][num_tokens]``.
-``MoEAllToAll`` is the op class over that table: it owns the class-level
-cache + ``load_data`` (the retired per-call lookup lived behind
-``PerfDatabase.query_moe_a2a``).
+[num_experts][sms][num_tokens]``. The class owns the view binding
+(class-level cache + ``load_data``).
 
 The module also owns the large-EP compute side of the same family:
-``load_moe_expert_compute_data`` loads the unified ``moe_expert_compute_perf.parquet`` EP MoE compute
-table (with legacy sglang/trtllm wideep adapters) into one nested dict keyed
-by ``[kernel_source][quant][distribution][inference_phase][topk][num_experts]
-[num_slots][hidden_size][inter_size][moe_tp_size][moe_ep_size][num_tokens]``.
-``MoEExpertCompute`` is the op class over that table: it owns the class-level cache +
-``load_data`` (the retired per-call lookup lived behind
-``PerfDatabase.query_moe_expert_compute``).
+``MoEExpertCompute`` over the unified ``moe_expert_compute_perf.parquet``
+table (view attribute ``_moe_ep_data``, legacy sglang/trtllm wideep adapters
+folded engine-side), keyed by ``[kernel_source][quant][distribution]
+[inference_phase][topk][num_experts][num_slots][hidden_size][inter_size]
+[moe_tp_size][moe_ep_size][num_tokens]``. The Python parsers for both tables
+retired with the deprecation-cleanup PR.
 """
 
 from __future__ import annotations
 
 import logging
-import math
-from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator_core.sdk import common
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
+import aiconfigurator_core._aiconfigurator_core as _core
+from aiconfigurator_core.sdk.operations.base import OpShellKit
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -121,342 +117,6 @@ def nodes_for(ep_size: int, num_gpus_per_node: int) -> int:
     return -(-ep_size // num_gpus_per_node)
 
 
-def _moe_a2a_store() -> defaultdict:
-    """Empty moe_a2a store: 9 auto-vivifying levels over a token->leaf dict.
-
-    Key order: ``[comm_backend][phase][comm_dtype][ep_size][node_num]
-    [hidden_size][topk][num_experts][sms]`` -> ``{num_tokens: leaf}``.
-    """
-    return defaultdict(  # comm_backend
-        lambda: defaultdict(  # phase
-            lambda: defaultdict(  # comm_dtype
-                lambda: defaultdict(  # ep_size
-                    lambda: defaultdict(  # node_num
-                        lambda: defaultdict(  # hidden_size
-                            lambda: defaultdict(  # topk
-                                lambda: defaultdict(  # num_experts
-                                    lambda: defaultdict(dict)  # sms -> {num_tokens: leaf}
-                                )
-                            )
-                        )
-                    )
-                )
-            )
-        )
-    )
-
-
-def _store_a2a_leaf(data: defaultdict, key: tuple, leaf: dict, *, overwrite: bool) -> None:
-    """Store one ``{"latency", "power", "energy"}`` leaf under the 10-part key.
-
-    ``key`` is ``(comm_backend, phase, comm_dtype, ep_size, node_num,
-    hidden_size, topk, num_experts, sms, num_tokens)``. With
-    ``overwrite=False`` a collision keeps the first-stored leaf and logs at
-    debug level — the intra-source convention every sibling loader follows.
-    ``overwrite=True`` replaces whatever is there — the path new-schema rows
-    use to take precedence over legacy-adapted rows at the same key.
-    """
-    *outer_key, num_tokens = key
-    bucket = data
-    for part in outer_key:
-        bucket = bucket[part]
-    if num_tokens in bucket and not overwrite:
-        logger.debug("value conflict in moe_a2a data: %s", " ".join(str(part) for part in key))
-        return
-    bucket[num_tokens] = leaf
-
-
-def _normalize_sms(raw: object) -> int:
-    """Normalize the ``sms`` column to an int key; null/NaN/absent -> 0.
-
-    HT-mode rows carry an SM budget; LL-mode rows leave ``sms`` null (older
-    files may omit the column entirely). Parquet nulls read back as ``""``
-    through ``_read_perf_rows``; an absent column arrives as ``None``.
-    """
-    if raw is None or raw == "":
-        return 0
-    value = float(raw)
-    return 0 if math.isnan(value) else int(value)
-
-
-def _row_power(row: dict) -> float:
-    """Normalize optional ``power`` to watts; null/NaN/absent -> 0.0.
-
-    A present-but-null power cell means "not measured", exactly like an absent
-    column — but ``float(row.get("power", 0.0))`` raised ``ValueError`` on it:
-    parquet nulls read back as ``""`` through ``_read_perf_rows``, and a NaN
-    cell would silently poison ``energy``. ``log_perf`` freezes the CSV header
-    from the first row, so within one collection run power columns are
-    all-or-nothing per file and this cell is unreachable; null cells arrive
-    through merged/legacy files, which every ``power`` read in this module
-    must tolerate (same treatment as ``sms`` above).
-    """
-    raw = row.get("power")
-    if raw is None or raw == "":
-        return 0.0
-    value = float(raw)
-    if math.isnan(value):
-        return 0.0
-    if not math.isfinite(value):
-        raise ValueError("non-finite power cell in perf data: power must be finite when measured")
-    return value
-
-
-def _require_latency(row: dict, table: str) -> float:
-    """Read schema-required finite ``latency``; invalid values are corrupt.
-
-    Unlike ``power`` (optional — see ``_row_power``), a latency-less row has
-    no meaning: coercing null to 0.0 would silently poison every consumer, so
-    the load refuses with a named error instead of the bare ``float("")``
-    ValueError. New-schema loaders only — the legacy adapters keep their
-    oracle loaders' bare ``float(row["latency"])`` behavior (parity).
-    """
-    raw = row.get("latency")
-    if raw is None or raw == "":
-        raise ValueError(
-            f"null latency cell in a {table} row: latency is schema-required and must be finite; "
-            "refusing to load corrupt perf data"
-        )
-    value = float(raw)
-    if not math.isfinite(value):
-        raise ValueError(
-            f"non-finite latency cell in a {table} row: latency is schema-required and must be finite; "
-            "refusing to load corrupt perf data"
-        )
-    return value
-
-
-def _adapt_legacy_deepep(data: defaultdict, rows, *, comm_backend: str, phase_columns: dict) -> None:
-    """Adapt legacy sglang DeepEP rows (normal or ll table) into ``data``.
-
-    One legacy row becomes one dispatch row + one combine row; each phase
-    latency is the sum of its ``phase_columns`` entries in **microseconds**
-    (the legacy query path divides by 1000), stored as ms. ``comm_dtype`` is
-    ``"default"`` and ``ep_size = node_num * 8`` — the legacy tables were
-    collected on 8-GPU HGX fleets with no dtype axis. HT rows keep their
-    ``dispatch_sms`` budget for both phases (the legacy table keys the whole
-    row by it); LL rows have no SM budget -> 0.
-    """
-    for row in rows:
-        node_num = int(row["node_num"])
-        sms = int(row["dispatch_sms"]) if comm_backend == "deepep_ht" else 0
-        power = _row_power(row)
-        for phase, columns in phase_columns.items():
-            latency_us = 0.0
-            for column in columns:
-                latency_us += float(row[column])
-            latency = latency_us / 1000.0  # us -> ms
-            key = (
-                comm_backend,
-                phase,
-                "default",
-                node_num * 8,
-                node_num,
-                int(row["hidden_size"]),
-                int(row["num_topk"]),
-                int(row["num_experts"]),
-                sms,
-                int(row["num_token"]),
-            )
-            leaf = {"latency": latency, "power": power, "energy": power * latency}
-            _store_a2a_leaf(data, key, leaf, overwrite=False)
-
-
-def _adapt_legacy_deepep_normal(data: defaultdict, rows) -> None:
-    _adapt_legacy_deepep(
-        data,
-        rows,
-        comm_backend="deepep_ht",
-        phase_columns={
-            "dispatch": ("dispatch_transmit_us", "dispatch_notify_us"),
-            "combine": ("combine_transmit_us", "combine_notify_us"),
-        },
-    )
-
-
-def _adapt_legacy_deepep_ll(data: defaultdict, rows) -> None:
-    # The legacy LL table never had the four-way transmit/notify split — only
-    # per-phase averages (see load_wideep_deepep_ll_data).
-    _adapt_legacy_deepep(
-        data,
-        rows,
-        comm_backend="deepep_ll",
-        phase_columns={"dispatch": ("dispatch_avg_t_us",), "combine": ("combine_avg_t_us",)},
-    )
-
-
-_LEGACY_TRTLLM_KERNEL_TO_BACKEND = {
-    "NVLinkTwoSided": "nvlink_two_sided",
-    "NVLinkOneSided": "nvlink_one_sided",
-}
-
-# op_name -> (phase, comm_dtype); None means the row's ``moe_dtype`` passes
-# through. comm_dtype is the table's dtype axis: the run's moe_dtype for
-# prepare/dispatch/standard combine (dispatch payload == run dtype physically;
-# standard-combine payload is always bf16 but is keyed by run dtype so every
-# legacy leaf maps 1:1, losslessly), and "fp4" for the low-precision combine
-# kernel (distinct key — an nvfp4 run's standard combine keys as "nvfp4").
-_LEGACY_TRTLLM_OP_TO_PHASE_DTYPE = {
-    "alltoall_prepare": ("prepare", None),
-    "alltoall_dispatch": ("dispatch", None),
-    "alltoall_combine": ("combine", None),
-    "alltoall_combine_low_precision": ("combine", "fp4"),
-}
-
-
-def _adapt_legacy_trtllm_alltoall(data: defaultdict, rows) -> None:
-    """Adapt legacy trtllm ``trtllm_alltoall_perf`` rows into ``data``.
-
-    UNITS: the legacy ``latency`` column is already in **milliseconds** —
-    ``load_trtllm_alltoall_data`` stores it raw and the retired per-phase query
-    returns table values without the /1000 the DeepEP query path applies (its
-    SOL tier computes ms directly; shipped gb200 values span ~0.01-17 ms).
-    Stored raw here, no us->ms conversion.
-
-    ``node_num``: the legacy GB200 NVL4 files carry no ``num_nodes`` column,
-    so it is derived as ``max(1, moe_ep_size // 4)`` — here once, mirroring
-    ``load_trtllm_alltoall_data``, and never anywhere else; an explicit
-    ``num_nodes`` column wins when present, also mirroring the legacy loader.
-    """
-    for row in rows:
-        kernel_source = row.get("kernel_source", "NVLinkTwoSided")
-        comm_backend = _LEGACY_TRTLLM_KERNEL_TO_BACKEND.get(kernel_source)
-        phase_dtype = _LEGACY_TRTLLM_OP_TO_PHASE_DTYPE.get(row["op_name"])
-        if comm_backend is None or phase_dtype is None:
-            logger.debug(
-                "skipping legacy trtllm_alltoall row with no unified mapping: "
-                f"kernel_source={kernel_source} op_name={row['op_name']}"
-            )
-            continue
-        phase, comm_dtype = phase_dtype
-        if comm_dtype is None:
-            comm_dtype = row["moe_dtype"]
-        ep_size = int(row["moe_ep_size"])
-        node_num = int(row["num_nodes"]) if "num_nodes" in row else max(1, ep_size // 4)
-        latency = float(row["latency"])  # already ms — see docstring
-        power = _row_power(row)
-        key = (
-            comm_backend,
-            phase,
-            comm_dtype,
-            ep_size,
-            node_num,
-            int(row["hidden_size"]),
-            int(row["topk"]),
-            int(row["num_experts"]),
-            0,  # legacy alltoall rows carry no SM budget
-            int(row["num_tokens"]),
-        )
-        leaf = {"latency": latency, "power": power, "energy": power * latency}
-        _store_a2a_leaf(data, key, leaf, overwrite=False)
-
-
-def _load_legacy_a2a(
-    data: defaultdict,
-    legacy_normal_sources,
-    legacy_ll_sources,
-    legacy_trtllm_alltoall_sources,
-) -> bool:
-    """Adapt legacy per-backend comm tables into the unified ``data`` store.
-
-    Mapping (spec §4.1): sglang ``wideep_deepep_normal_perf`` -> ``deepep_ht``,
-    ``wideep_deepep_ll_perf`` -> ``deepep_ll``, trtllm ``trtllm_alltoall_perf``
-    -> ``nvlink_two_sided``/``nvlink_one_sided``. All adapters store with
-    ``overwrite=False`` (intra-source keep-first), so a later new-schema row
-    can still take precedence via its overwrite path. Returns True when at
-    least one legacy source exists — an existing-but-empty file counts, the
-    same exists-but-empty semantic the new-schema path has.
-    """
-    loaded = False
-    for sources, adapt in (
-        (legacy_normal_sources, _adapt_legacy_deepep_normal),
-        (legacy_ll_sources, _adapt_legacy_deepep_ll),
-        (legacy_trtllm_alltoall_sources, _adapt_legacy_trtllm_alltoall),
-    ):
-        if sources is None:
-            continue
-        rows = _read_filtered_rows(sources)
-        if rows is None:
-            continue
-        loaded = True
-        adapt(data, rows)
-    return loaded
-
-
-def load_moe_a2a_data(
-    sources,
-    legacy_normal_sources=None,
-    legacy_ll_sources=None,
-    legacy_trtllm_alltoall_sources=None,
-) -> dict | None:
-    """Load the unified MoE all-to-all comm table (``moe_a2a_perf.parquet``).
-
-    ``sources`` is the new-schema source list (``(path, kernel_source_filter)``
-    tuples, or a single path) read via ``_read_filtered_rows``; the three
-    ``legacy_*_sources`` feed the per-backend legacy adapters
-    (:func:`_load_legacy_a2a`). Legacy rows load first; a new-schema row
-    overwrites a legacy leaf at the same key, while collisions **within** the
-    new schema keep the first row (debug log) like every sibling loader.
-
-    Returns:
-        dict: ``[comm_backend][phase][comm_dtype][ep_size][node_num]
-        [hidden_size][topk][num_experts][sms][num_tokens]`` -> dict with
-        ``latency`` (ms — the parquet column is in microseconds), ``power``
-        (W) and ``energy`` (W·ms) keys. ``phase`` is stored as collected
-        (``prepare``/``dispatch``/``combine``); validation happens at query
-        time. ``None`` when no source loaded anything.
-    """
-    data = _moe_a2a_store()
-    legacy_loaded = _load_legacy_a2a(data, legacy_normal_sources, legacy_ll_sources, legacy_trtllm_alltoall_sources)
-
-    rows = _read_filtered_rows(sources)
-    if rows is None and not legacy_loaded:
-        logger.debug(f"MoE A2A data sources {sources} not found.")
-        return None
-    rows = rows or []
-
-    # Check if the power column exists (optional in the schema)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if len(rows) > 0 and not has_power:
-        logger.debug("moe_a2a data has no power column - power will default to 0.0")
-
-    seen: set[tuple] = set()
-    for row in rows:
-        key = (
-            row["comm_backend"],
-            row["phase"],  # stored as collected; validated at query time
-            row["comm_dtype"],
-            int(row["ep_size"]),
-            int(row["node_num"]),
-            int(row["hidden_size"]),
-            int(row["topk"]),
-            int(row["num_experts"]),
-            _normalize_sms(row.get("sms")),
-            int(row["num_tokens"]),
-        )
-        latency = _require_latency(row, "moe_a2a_perf") / 1000.0  # collector records us; leaves are ms
-        power = _row_power(row)
-        energy = power * latency  # watt-milliseconds
-
-        # The first new-schema occurrence of a key overwrites any
-        # legacy-adapted leaf; repeats fall into the helper's keep-first path.
-        first_occurrence = key not in seen
-        seen.add(key)
-        _store_a2a_leaf(
-            data,
-            key,
-            {"latency": latency, "power": power, "energy": energy},
-            overwrite=first_occurrence,
-        )
-
-    return data
-
-
-# ---------------------------------------------------------------------------
-# MoEAllToAll — the op class over the unified moe_a2a table
-# ---------------------------------------------------------------------------
-
-
 _A2A_PHASES = ("prepare", "dispatch", "combine")
 
 
@@ -480,11 +140,11 @@ def _validate_a2a_request(comm_backend: str, phase: str) -> None:
         )
 
 
-class MoEAllToAll(Operation):
+class MoEAllToAll(_core.MoEAllToAll, OpShellKit):
     """Unified large-EP MoE all-to-all comm op (one phase per instance).
 
     Owns ``_moe_a2a_data`` — the unified comm table loaded by
-    :func:`load_moe_a2a_data` (new-schema ``moe_a2a_perf.parquet`` plus the
+    the engine view (new-schema ``moe_a2a_perf.parquet`` plus the
     three legacy per-backend adapters). Loaded on every inference backend
     ({"sglang", "vllm", "trtllm"} all have legacy comm sources); ``None``
     otherwise. Comm ops see per-rank token counts: ``query(x=...)`` scales by
@@ -497,37 +157,21 @@ class MoEAllToAll(Operation):
     """
 
     _data_cache: ClassVar[dict] = {}
+    _trtllm_alltoall_data_cache: ClassVar[dict] = {}
 
     _SUPPORTED_BACKENDS: ClassVar[tuple[str, ...]] = ("sglang", "vllm", "trtllm")
 
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        *,
-        phase: str,
-        comm_backend: str,
-        hidden_size: int,
-        topk: int,
-        num_experts: int,
-        moe_ep_size: int,
-        node_num: int,
-        comm_dtype: str = "default",
-        sms: int = 0,
-        attention_tp_size: int = 1,
-    ) -> None:
-        super().__init__(name, scale_factor)
-        _validate_a2a_request(comm_backend, phase)
-        self._phase = phase
-        self._comm_backend = comm_backend
-        self._hidden_size = hidden_size
-        self._topk = topk
-        self._num_experts = num_experts
-        self._moe_ep_size = moe_ep_size
-        self._node_num = node_num
-        self._comm_dtype = comm_dtype
-        self._sms = sms
-        self._attention_tp_size = attention_tp_size
+    def __init__(self, *args, **kwargs) -> None:
+        """Ctor-time spec guard on top of the Rust ``__new__`` (which has
+        already consumed the args and built the op): the backend/phase matrix
+        (``MOE_A2A_BACKENDS``) is Python-owned policy, so the ValueError fires
+        here where the intent is expressed. The values are read back from the
+        CONSTRUCTED op (not the call kwargs), so the guard holds however the
+        constructor was invoked. Pickle rebuilds bypass this
+        (``__getnewargs_ex__`` -> ``__new__``), which is safe: those values
+        came from an already-validated instance."""
+        del args, kwargs
+        _validate_a2a_request(self._comm_backend, self._phase)
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -555,18 +199,30 @@ class MoEAllToAll(Operation):
 
             cls._record_load()
 
+        # Rehomed from the deleted ``TrtLLMWideEPMoEDispatch`` (AIC-1357): the
+        # legacy trtllm alltoall view stays loadable for charts / the support
+        # matrix even though no op family constructs against it anymore.
+        if key not in cls._trtllm_alltoall_data_cache:
+            if database.backend == "trtllm":
+                cls._trtllm_alltoall_data_cache[key] = load_view(
+                    database, "_trtllm_alltoall_data", PerfDataFilename.trtllm_alltoall
+                )
+            else:
+                cls._trtllm_alltoall_data_cache[key] = None
+
         if "_moe_a2a_data" not in database.__dict__:
             database._moe_a2a_data = cls._data_cache[key]
+        if "_trtllm_alltoall_data" not in database.__dict__:
+            database._trtllm_alltoall_data = cls._trtllm_alltoall_data_cache[key]
 
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
+        cls._trtllm_alltoall_data_cache.clear()
 
     # ------------------------------------------------------------------
     # Op contract
     # ------------------------------------------------------------------
-
-    _ENGINE_QUERY_SHAPE = "tokens"
 
 
 # ---------------------------------------------------------------------------
@@ -574,265 +230,7 @@ class MoEAllToAll(Operation):
 # ---------------------------------------------------------------------------
 
 
-def _moe_ep_store() -> defaultdict:
-    """Empty moe_ep store: 11 auto-vivifying levels over a token->leaf dict.
-
-    Key order: ``[kernel_source][quant][distribution][inference_phase][topk]
-    [num_experts][num_slots][hidden_size][inter_size][moe_tp_size]
-    [moe_ep_size]`` -> ``{num_tokens: leaf}``. ``quant`` is a
-    :class:`common.MoEQuantMode` member, matching the sibling MoE loaders.
-    """
-    return defaultdict(  # kernel_source
-        lambda: defaultdict(  # quant
-            lambda: defaultdict(  # distribution
-                lambda: defaultdict(  # inference_phase
-                    lambda: defaultdict(  # topk
-                        lambda: defaultdict(  # num_experts
-                            lambda: defaultdict(  # num_slots
-                                lambda: defaultdict(  # hidden_size
-                                    lambda: defaultdict(  # inter_size
-                                        lambda: defaultdict(  # moe_tp_size
-                                            lambda: defaultdict(dict)  # moe_ep_size -> {num_tokens: leaf}
-                                        )
-                                    )
-                                )
-                            )
-                        )
-                    )
-                )
-            )
-        )
-    )
-
-
-def _store_ep_leaf(data: defaultdict, key: tuple, leaf: dict, *, overwrite: bool) -> None:
-    """Store one ``{"latency", "power", "energy"}`` leaf under the 12-part key.
-
-    ``key`` is ``(kernel_source, quant, distribution, inference_phase, topk,
-    num_experts, num_slots, hidden_size, inter_size, moe_tp_size, moe_ep_size,
-    num_tokens)``. ``overwrite=False`` keeps the first-stored leaf on a
-    collision (debug log) — the keep-first convention shared by new-schema
-    rows AND the legacy adapters (their oracles adopted the
-    skip-on-key-conflict shared-layer contract in #1423). ``overwrite=True``
-    replaces whatever is there — used only by the first new-schema
-    occurrence of a key to take precedence over legacy-adapted rows.
-    """
-    *outer_key, num_tokens = key
-    bucket = data
-    for part in outer_key:
-        bucket = bucket[part]
-    if num_tokens in bucket and not overwrite:
-        logger.debug("value conflict in moe_ep data: %s", " ".join(str(part) for part in key))
-        return
-    bucket[num_tokens] = leaf
-
-
-def _adapt_legacy_sglang_wideep_moe(data: defaultdict, rows, *, inference_phase: str) -> None:
-    """Adapt legacy sglang ``wideep_{context,generation}_moe_perf`` rows.
-
-    Mirrors ``load_wideep_context_moe_data`` / ``load_wideep_generation_moe_data``
-    (the oracles): straight ``MoEQuantMode[moe_dtype]`` with no
-    kernel-source-based quant rerouting (unlike ``load_moe_data``), and the
-    first row wins on a key collision (``overwrite=False``) — the oracles
-    adopted the skip-on-key-conflict shared-layer contract in #1423, so a
-    cross-source conflict (primary vs shared/fallback file) resolves to the
-    first-loaded source on both paths. ``kernel_source`` is pinned to
-    ``"deepep_moe"`` (spec §4.2; the legacy column spells it ``deepepmoe``
-    and the oracles never read it), ``num_slots = num_experts`` (the legacy
-    sglang tables have no EPLB redundancy axis), and ``inference_phase``
-    comes from which kwarg carried the source file.
-    """
-    for row in rows:
-        latency = float(row["latency"])
-        power = _row_power(row)
-        num_experts = int(row["num_experts"])
-        key = (
-            "deepep_moe",
-            common.MoEQuantMode[row["moe_dtype"]],
-            row["distribution"],
-            inference_phase,
-            int(row["topk"]),
-            num_experts,
-            num_experts,  # num_slots = num_experts
-            int(row["hidden_size"]),
-            int(row["inter_size"]),
-            int(row["moe_tp_size"]),
-            int(row["moe_ep_size"]),
-            int(row["num_tokens"]),
-        )
-        _store_ep_leaf(data, key, {"latency": latency, "power": power, "energy": power * latency}, overwrite=False)
-
-
-def _adapt_legacy_sglang_context_moe(data: defaultdict, rows) -> None:
-    _adapt_legacy_sglang_wideep_moe(data, rows, inference_phase="context")
-
-
-def _adapt_legacy_sglang_generation_moe(data: defaultdict, rows) -> None:
-    _adapt_legacy_sglang_wideep_moe(data, rows, inference_phase="generation")
-
-
-def _adapt_legacy_trtllm_wideep_moe(data: defaultdict, rows) -> None:
-    """Adapt legacy trtllm ``wideep_moe_perf`` rows.
-
-    Mirrors ``load_wideep_moe_compute_data`` (the oracle): native
-    ``kernel_source`` (``"moe_torch_flow"`` when the column is absent),
-    ``num_slots`` and ``_eplb`` distributions pass through unchanged, no
-    quant rerouting, first row wins on a key collision (``overwrite=False``
-    — the oracle adopted the skip-on-key-conflict shared-layer contract in
-    #1423). The legacy table has no context/generation split — one kernel
-    measured across the token range — so each row is registered under BOTH
-    ``inference_phase`` values with identical (but independent) leaves.
-    """
-    for row in rows:
-        latency = float(row["latency"])
-        power = _row_power(row)
-        base_key = (
-            row.get("kernel_source", "moe_torch_flow"),
-            common.MoEQuantMode[row["moe_dtype"]],
-            row["distribution"],
-        )
-        shape_key = (
-            int(row["topk"]),
-            int(row["num_experts"]),
-            int(row["num_slots"]),
-            int(row["hidden_size"]),
-            int(row["inter_size"]),
-            int(row["moe_tp_size"]),
-            int(row["moe_ep_size"]),
-            int(row["num_tokens"]),
-        )
-        for inference_phase in ("context", "generation"):
-            leaf = {"latency": latency, "power": power, "energy": power * latency}
-            _store_ep_leaf(data, (*base_key, inference_phase, *shape_key), leaf, overwrite=False)
-
-
-def _load_legacy_ep(
-    data: defaultdict,
-    legacy_context_sources,
-    legacy_generation_sources,
-    legacy_trtllm_wideep_sources,
-) -> bool:
-    """Adapt legacy wideep compute tables into the unified ``data`` store.
-
-    Mapping (spec §4.2): sglang ``wideep_context_moe_perf`` /
-    ``wideep_generation_moe_perf`` -> ``kernel_source="deepep_moe"`` with the
-    inference phase set per source kwarg; trtllm ``wideep_moe_perf`` -> native
-    kernel sources, registered under both phases.
-
-    UNITS: the legacy ``latency`` column is already in **milliseconds** — the
-    oracle loaders store it raw and their query paths feed it through the same
-    the engine's interpolation machinery as the regular (ms) moe table with no /1000
-    anywhere; shipped values span ~0.03-62 ms, physically sensible for MoE
-    compute. Stored raw here, no unit conversion — bit-exact equality with the
-    oracles is pinned by the shipped-data equivalence sweeps.
-
-    Returns True when at least one legacy source exists — an
-    existing-but-empty file counts, the same exists-but-empty semantic the
-    new-schema path has.
-    """
-    loaded = False
-    for sources, adapt in (
-        (legacy_context_sources, _adapt_legacy_sglang_context_moe),
-        (legacy_generation_sources, _adapt_legacy_sglang_generation_moe),
-        (legacy_trtllm_wideep_sources, _adapt_legacy_trtllm_wideep_moe),
-    ):
-        if sources is None:
-            continue
-        rows = _read_filtered_rows(sources)
-        if rows is None:
-            continue
-        loaded = True
-        adapt(data, rows)
-    return loaded
-
-
-def load_moe_expert_compute_data(
-    sources,
-    legacy_context_sources=None,
-    legacy_generation_sources=None,
-    legacy_trtllm_wideep_sources=None,
-) -> dict | None:
-    """Load the unified EP MoE compute table (``moe_expert_compute_perf.parquet``).
-
-    ``sources`` is the new-schema source list (``(path, kernel_source_filter)``
-    tuples, or a single path) read via ``_read_filtered_rows``; the three
-    ``legacy_*_sources`` feed the legacy wideep adapters
-    (:func:`_load_legacy_ep`). Legacy rows load first; a new-schema row
-    overwrites a legacy leaf at the same key, while collisions **within** the
-    new schema keep the first row (debug log) like every sibling loader.
-
-    Returns:
-        dict: ``[kernel_source][quant][distribution][inference_phase][topk]
-        [num_experts][num_slots][hidden_size][inter_size][moe_tp_size]
-        [moe_ep_size][num_tokens]`` -> dict with ``latency`` (ms — the column
-        is already in milliseconds, unlike the us-collected a2a table),
-        ``power`` (W) and ``energy`` (W·ms) keys. ``quant`` is a
-        :class:`common.MoEQuantMode` member; ``inference_phase`` is stored as
-        collected (``context``/``generation``); validation happens at query
-        time. ``None`` when no source loaded anything.
-    """
-    data = _moe_ep_store()
-    legacy_loaded = _load_legacy_ep(
-        data, legacy_context_sources, legacy_generation_sources, legacy_trtllm_wideep_sources
-    )
-
-    rows = _read_filtered_rows(sources)
-    if rows is None and not legacy_loaded:
-        logger.debug(f"MoE EP data sources {sources} not found.")
-        return None
-    rows = rows or []
-
-    # Check if the power column exists (optional in the schema)
-    has_power = len(rows) > 0 and "power" in rows[0]
-    if len(rows) > 0 and not has_power:
-        logger.debug("moe_ep data has no power column - power will default to 0.0")
-
-    seen: set[tuple] = set()
-    for row in rows:
-        key = (
-            row["kernel_source"],
-            common.MoEQuantMode[row["moe_dtype"]],
-            row["distribution"],
-            row["inference_phase"],  # stored as collected; validated at query time
-            int(row["topk"]),
-            int(row["num_experts"]),
-            int(row["num_slots"]),
-            int(row["hidden_size"]),
-            int(row["inter_size"]),
-            int(row["moe_tp_size"]),
-            int(row["moe_ep_size"]),
-            int(row["num_tokens"]),
-        )
-        latency = _require_latency(row, "moe_expert_compute_perf")  # already ms (spec §4.2) — stored raw
-        power = _row_power(row)
-        energy = power * latency  # watt-milliseconds
-
-        # The first new-schema occurrence of a key overwrites any
-        # legacy-adapted leaf; repeats fall into the helper's keep-first path.
-        first_occurrence = key not in seen
-        seen.add(key)
-        _store_ep_leaf(
-            data,
-            key,
-            {"latency": latency, "power": power, "energy": energy},
-            overwrite=first_occurrence,
-        )
-
-    return data
-
-
-# ---------------------------------------------------------------------------
-# MoEExpertCompute — the op class over the unified moe_ep table
-# ---------------------------------------------------------------------------
-
-
 _EP_PHASES = ("context", "generation")
-
-#: Kernel legs adapted from the legacy sglang wideep tables — the loader pins
-#: ``"deepep_moe"`` (spec §4.2) and ``_resolve_kernel_source`` returns it for
-#: sglang/vllm. The EPLB context correction applies to these legs only; the
-#: trtllm legs (``deepgemm``/``moe_torch_flow``) never carried it.
-_SGLANG_ADAPTED_KERNEL_SOURCES = frozenset({"deepep_moe"})
 
 
 def _validate_ep_phase(inference_phase: str) -> None:
@@ -841,11 +239,11 @@ def _validate_ep_phase(inference_phase: str) -> None:
         raise ValueError(f"Invalid inference_phase '{inference_phase}'. Must be one of {list(_EP_PHASES)}")
 
 
-class MoEExpertCompute(Operation):
+class MoEExpertCompute(_core.MoEExpertCompute, OpShellKit):
     """Unified large-EP MoE expert-compute op (one inference phase per instance).
 
     Owns ``_moe_ep_data`` — the unified compute table loaded by
-    :func:`load_moe_expert_compute_data` (new-schema ``moe_expert_compute_perf.parquet`` plus the
+    the engine view (new-schema ``moe_expert_compute_perf.parquet`` plus the
     legacy sglang wideep context/generation and trtllm wideep adapters).
     Loaded on every inference backend ({"sglang", "vllm", "trtllm"} all have
     legacy compute sources); ``None`` otherwise. ``query(x=...)`` scales
@@ -854,7 +252,7 @@ class MoEExpertCompute(Operation):
     ``TrtLLMWideEPMoE`` query paths) and always queries ``moe_tp_size=1``:
     the large-EP family is EP-only. ``num_slots`` defaults to ``num_experts``
     (no EPLB redundancy); ``kernel_source=None`` auto-resolves per backend at
-    query time (see :meth:`_resolve_kernel_source`). ``enable_eplb=True`` is
+    query time inside the engine (`moe_expert_compute.rs`). ``enable_eplb=True`` is
     legacy fidelity with the sglang MoE query: tokens become
     ``int(tokens * 0.8)`` before the table lookup when the phase is context
     AND the resolved kernel leg is sglang-adapted
@@ -863,46 +261,16 @@ class MoEExpertCompute(Operation):
     """
 
     _data_cache: ClassVar[dict] = {}
+    _wideep_compute_data_cache: ClassVar[dict] = {}
 
     _SUPPORTED_BACKENDS: ClassVar[tuple[str, ...]] = ("sglang", "vllm", "trtllm")
 
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        *,
-        hidden_size: int,
-        inter_size: int,
-        topk: int,
-        num_experts: int,
-        moe_ep_size: int,
-        quant_mode: common.MoEQuantMode,
-        workload_distribution: str,
-        attention_dp_size: int,
-        inference_phase: str,
-        num_slots: int | None = None,
-        kernel_source: str | None = None,
-        is_gated: bool = True,
-        enable_eplb: bool = False,
-    ) -> None:
-        super().__init__(name, scale_factor)
-        _validate_ep_phase(inference_phase)
-        self._hidden_size = hidden_size
-        self._inter_size = inter_size
-        self._topk = topk
-        self._num_experts = num_experts
-        self._num_slots = num_slots if num_slots is not None else num_experts
-        self._moe_ep_size = moe_ep_size
-        self._quant_mode = quant_mode
-        self._workload_distribution = workload_distribution
-        self._attention_dp_size = attention_dp_size
-        self._inference_phase = inference_phase
-        self._kernel_source = kernel_source
-        self._is_gated = is_gated
-        self._enable_eplb = enable_eplb
-        # Weight bytes retired to the engine (Op::weight_bytes): EP-only
-        # sizing by num_experts NOT num_slots stays parity-pinned there
-        # (AIC-1674 tracks the intentional num_slots delta).
+    def __init__(self, *args, **kwargs) -> None:
+        """Ctor-time spec guard on top of the Rust ``__new__`` — see
+        ``MoEAllToAll.__init__`` for the read-back and pickle-bypass
+        rationale."""
+        del args, kwargs
+        _validate_ep_phase(self._inference_phase)
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -930,66 +298,27 @@ class MoEExpertCompute(Operation):
 
             cls._record_load()
 
+        # Rehomed from the deleted ``TrtLLMWideEPMoE`` (AIC-1357): the legacy
+        # trtllm wideep compute view stays loadable for charts / the support
+        # matrix even though no op family constructs against it anymore.
+        if key not in cls._wideep_compute_data_cache:
+            if database.backend == "trtllm":
+                cls._wideep_compute_data_cache[key] = load_view(
+                    database, "_wideep_moe_compute_data", PerfDataFilename.wideep_moe_compute
+                )
+            else:
+                cls._wideep_compute_data_cache[key] = None
+
         if "_moe_ep_data" not in database.__dict__:
             database._moe_ep_data = cls._data_cache[key]
+        if "_wideep_moe_compute_data" not in database.__dict__:
+            database._wideep_moe_compute_data = cls._wideep_compute_data_cache[key]
 
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    # ------------------------------------------------------------------
-    # kernel_source auto-resolution (kernel_source=None)
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def _resolve_kernel_source(cls, database: PerfDatabase, quant_mode: common.MoEQuantMode) -> str:
-        """Resolve the collected kernel key when the caller pins none.
-
-        sglang/vllm large-EP MoE has a single collected kernel
-        (``"deepep_moe"``, spec §4.2). trtllm replicates
-        ``TrtLLMWideEPMoE._select_kernel`` (TensorRT-LLM's
-        ``MoEOpSelector.select_op``) against the unified table's kernel keys:
-        Blackwell (SM >= 100) + fp8_block -> ``"deepgemm"``, otherwise
-        ``"moe_torch_flow"`` (Cutlass); an absent preferred kernel falls back
-        to the first collected kernel key. Copied, not imported — the legacy
-        classmethod consults its trtllm-only ``_wideep_moe_compute_data``
-        table, which this family retires.
-        """
-        if database.backend in ("sglang", "vllm"):
-            return "deepep_moe"
-
-        cls.load_data(database)
-        sm_version = database.system_spec["gpu"]["sm_version"]
-        is_blackwell = sm_version >= 100
-        quant_mode_str = quant_mode.name if hasattr(quant_mode, "name") else str(quant_mode)
-        preferred = "deepgemm" if is_blackwell and "fp8_block" in quant_mode_str else "moe_torch_flow"
-
-        ep_data = database._moe_ep_data
-        if ep_data:
-            available_kernels = list(ep_data.keys())
-            if preferred in available_kernels:
-                return preferred
-            if available_kernels:
-                fallback = available_kernels[0]
-                logger.debug(f"Preferred MoE kernel '{preferred}' not available, falling back to '{fallback}'")
-                return fallback
-
-        return preferred
+        cls._wideep_compute_data_cache.clear()
 
     # ------------------------------------------------------------------
     # Op contract
     # ------------------------------------------------------------------
-
-    _ENGINE_QUERY_SHAPE = "tokens"
-
-    def _engine_query_plan(self, kwargs: dict):
-        """Legacy per-call ``quant_mode`` override: rebuild the twin with the
-        requested quant before engine evaluation."""
-        op, eval_kwargs = super()._engine_query_plan(kwargs)
-        quant_mode = kwargs.get("quant_mode")
-        if quant_mode is not None and quant_mode != self._quant_mode:
-            import copy
-
-            op = copy.copy(self)
-            op._quant_mode = quant_mode
-        return op, eval_kwargs

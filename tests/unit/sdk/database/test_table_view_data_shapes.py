@@ -3,10 +3,11 @@
 
 """Retired-loader fidelity of the engine table views on MALFORMED data.
 
-The shipped parquet files are covered bit-for-bit by the frozen data-plane
-baseline (``tests/cross_package/test_data_plane_baseline.py``); what that
-replay cannot see is how the folds treat data shapes the retired Python
-parsers tolerated but the collector never ships: null cells, DOUBLE-typed
+The migration-era data-plane baseline (retired once the loaders' bit-for-bit
+equivalence was proven and the synthetic view-shape suites landed) covered
+the shipped parquet files; what such a replay cannot see is how the folds
+treat data shapes the retired Python parsers tolerated but the collector
+never ships: null cells, DOUBLE-typed
 integer columns (a single null upcasts a pandas column), NaN sentinels,
 negative collector-bug keys, and legacy ``INCOMPLETE.txt`` vetoes. Each test
 here pins one such contract to the retired parser's exact behavior
@@ -80,12 +81,14 @@ def systems_root(tmp_path: Path) -> Path:
 
 
 def _build_db(systems_root: Path, *, backend: str = "trtllm", version: str = "1.0.0") -> PerfDatabase:
+    # Synthetic table-shape fixtures intentionally omit Collector V3 sidecars.
     return PerfDatabase(
         system="h100_sxm",
         backend=backend,
         version=version,
         systems_root=str(systems_root),
         database_mode="HYBRID",
+        strict_provenance=False,
     )
 
 
@@ -476,9 +479,10 @@ def test_moe_load_data_retry_recovers_after_a_failed_later_fetch(systems_root: P
 
 
 def test_composite_weights_respect_child_weight_shields() -> None:
-    """A tombstoned MoEDispatch (deepep flavor, weight shielded to 0.0)
-    nested inside Overlap/Fallback must not crash memory estimation: the
-    composites recurse through each child's own get_weights."""
+    """A tombstoned MoEDispatch (RetiredDeepEp flavor — spec assembly and
+    query refuse it) nested inside Overlap/Fallback must not crash memory
+    estimation: the Rust ``Op::weight_bytes`` dispatch arm is 0.0 for every
+    flavor and the composite arms recurse natively."""
     from aiconfigurator.sdk.operations.moe import MoEDispatch
     from aiconfigurator.sdk.operations.overlap import FallbackOp, OverlapOp
 
@@ -492,6 +496,7 @@ def test_composite_weights_respect_child_weight_shields() -> None:
         moe_ep_size=16,
         attention_dp_size=1,
         pre_dispatch=False,
+        backend="sglang",
         moe_backend="deepep_moe",
     )
     assert dispatch.get_weights() == 0.0

@@ -28,12 +28,6 @@ import pytest
 
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.operations.base import resolve_op_data_path
-from aiconfigurator_core.sdk.operations.moe_comm import (
-    _moe_a2a_store,
-    _moe_ep_store,
-    _store_a2a_leaf,
-    _store_ep_leaf,
-)
 from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename, get_database
 
 pytestmark = pytest.mark.unit
@@ -56,6 +50,24 @@ SGLANG_CONTEXT_MOE_PATH = resolve_op_data_path(
 TRTLLM_WIDEEP_MOE_PATH = resolve_op_data_path(
     str(SYSTEMS_DATA_ROOT / "gb200"), "trtllm", "1.3.0rc10", "wideep_moe_perf.parquet"
 )
+
+
+def _vivifying_store():
+    """Local twin of the retired parsers' auto-vivifying nested defaultdict
+    store (the parsers are gone; the probe contract they exposed is not)."""
+    from collections import defaultdict
+
+    def factory():
+        return defaultdict(factory)
+
+    return defaultdict(factory)
+
+
+def _store_leaf(data, key, leaf):
+    node = data
+    for part in key[:-1]:
+        node = node[part]
+    node[key[-1]] = leaf
 
 
 def _leaf(latency, power=0.0):
@@ -186,9 +198,9 @@ def test_a2a_unloaded_wrapper_returns_empty_dict(stub_perf_db):
 def test_a2a_probe_does_not_vivify_defaultdict_store(stub_perf_db):
     # The raw loader store auto-vivifies on indexing; the probe must walk with
     # .get() so a miss at any level leaves the key structure untouched.
-    data = _moe_a2a_store()
-    _store_a2a_leaf(data, ("deepep_ht", "dispatch", "default", 16, 2, *_SHAPE, 20, 32), _leaf(0.1), overwrite=False)
-    _store_a2a_leaf(data, ("deepep_ht", "combine", "default", 16, 2, *_SHAPE, 20, 32), _leaf(0.2), overwrite=False)
+    data = _vivifying_store()
+    _store_leaf(data, ("deepep_ht", "dispatch", "default", 16, 2, *_SHAPE, 20, 32), _leaf(0.1))
+    _store_leaf(data, ("deepep_ht", "combine", "default", 16, 2, *_SHAPE, 20, 32), _leaf(0.2))
     stub_perf_db._moe_a2a_data = data
     before = _key_paths(data)
 
@@ -292,9 +304,9 @@ def test_ep_unloaded_wrapper_returns_empty_set(stub_perf_db):
 
 
 def test_ep_probe_does_not_vivify_defaultdict_store(stub_perf_db):
-    data = _moe_ep_store()
+    data = _vivifying_store()
     key = ("deepep_moe", common.MoEQuantMode.fp8_block, "uniform", "context", 8, 256, 256, 7168, 2048, 1, 16, 32)
-    _store_ep_leaf(data, key, _leaf(0.1), overwrite=False)
+    _store_leaf(data, key, _leaf(0.1))
     stub_perf_db._moe_ep_data = data
     before = _key_paths(data)
 

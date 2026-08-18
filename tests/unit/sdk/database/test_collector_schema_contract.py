@@ -1,12 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Two-sided schema contract: collector-written headers -> SDK loaders (D1).
+"""Two-sided schema contract: collector-written headers -> the engine table
+view (D1).
 
-The ``moe_a2a_perf`` and ``moe_expert_compute_perf`` tables are produced by collectors and
-consumed by ``aiconfigurator_core.sdk.operations.moe_comm``. Each side pins the
-CSV header independently; this module is the SDK-side half. The collector-side
-twins (which pin the same literals against the actual writers) are:
+The ``moe_a2a_perf`` and ``moe_expert_compute_perf`` tables are produced by
+collectors and consumed by the compiled engine (the Python parsers retired
+with the deprecation-cleanup PR; ``fetch_table_view`` serves the loader-shaped
+dicts). Each side pins the header independently; this module is the SDK-side
+half. The collector-side twins (which pin the same literals against the
+actual writers) are:
 
 - ``tests/unit/collector/test_collect_moe_a2a.py::MOE_A2A_HEADER``
 - ``tests/unit/collector/test_collect_trtllm_alltoall.py::MOE_A2A_HEADER``
@@ -19,12 +22,15 @@ SDK tests do not reach into the collector). The twin literals are verified by
 reading the twin test files as text; a drifting header breaks one side's pin
 before it can silently break the cross-module contract.
 
-Each test writes ONE synthetic row under the frozen header via pandas,
-round-trips it through the real loader, and asserts the nested key plus the
-unit convention. The two tables deliberately disagree on raw latency units —
-``moe_a2a`` records MICROSECONDS (the loader divides by 1000), ``moe_ep``
-records MILLISECONDS (stored raw) — and that sibling divergence is exactly
-what these tests keep visible (see "MoE table units and caveats" in
+Each test writes ONE synthetic row under the frozen header (column order
+preserved), round-trips it through the ENGINE table view, and asserts the
+nested key plus the unit convention. The view's column readers look up the
+frozen header's column names directly, so a renamed or dropped column fails
+at the fold — a stronger pin than the retired loaders' ``row.get`` defaults.
+The two tables deliberately disagree on raw latency units — ``moe_a2a``
+records MICROSECONDS (the view divides by 1000), ``moe_ep`` records
+MILLISECONDS (stored raw) — and that sibling divergence is exactly what
+these tests keep visible (see "MoE table units and caveats" in
 ``collector/README.md``).
 """
 
@@ -32,9 +38,11 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import yaml
 
 from aiconfigurator_core.sdk.common import MoEQuantMode
-from aiconfigurator_core.sdk.operations.moe_comm import load_moe_a2a_data, load_moe_expert_compute_data
+from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
+from aiconfigurator_core.sdk.perf_database import PerfDatabase
 
 pytestmark = pytest.mark.unit
 
@@ -77,13 +85,41 @@ _TWIN_PINS = {
 }
 
 
-def _write_row_under_header(tmp_path, header: str, row: dict, filename: str) -> str:
-    """Write one row to parquet with the header's exact columns and order."""
+def _view_db_over_row(tmp_path, header: str, row: dict, filename: str) -> PerfDatabase:
+    """Write one row to parquet with the header's exact columns and order,
+    inside a minimal systems tree the engine view can serve."""
     columns = header.split(",")
     assert set(row) == set(columns), "synthetic row must cover the frozen header exactly"
-    path = tmp_path / filename
+    root = tmp_path / "systems"
+    root.mkdir(exist_ok=True)
+    (root / "h100_sxm.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "data_dir": "data/h100_sxm",
+                "gpu": {
+                    "sm_version": 90,
+                    "mem_bw": 4_800_000_000_000.0,
+                    "mem_bw_empirical_scaling_factor": 0.8,
+                    "mem_empirical_constant_latency": 0.000003,
+                    "bfloat16_tc_flops": 989_000_000_000_000.0,
+                    "fp8_tc_flops": 1_978_000_000_000_000.0,
+                },
+                "node": {
+                    "num_gpus_per_node": 8,
+                    "inter_node_bw": 50_000_000_000.0,
+                    "intra_node_bw": 450_000_000_000.0,
+                    "p2p_latency": 0.00001,
+                },
+                "misc": {"nccl_version": "2.26.2"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    path = root / "data/h100_sxm/moe_comm/sglang/0.5.10" / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([row], columns=columns).to_parquet(path, index=False)
-    return str(path)
+    # These hand-written rows test schema decoding, not collector provenance.
+    return PerfDatabase("h100_sxm", "sglang", "0.5.10", str(root), database_mode="HYBRID", strict_provenance=False)
 
 
 def test_moe_a2a_header_row_loads_with_us_to_ms_conversion(tmp_path):
@@ -108,9 +144,9 @@ def test_moe_a2a_header_row_loads_with_us_to_ms_conversion(tmp_path):
         "notify_us": 50.0,
         "latency": 850.0,  # MICROSECONDS — the moe_a2a writer convention
     }
-    path = _write_row_under_header(tmp_path, MOE_A2A_HEADER, row, "moe_a2a_perf.parquet")
+    db = _view_db_over_row(tmp_path, MOE_A2A_HEADER, row, "moe_a2a_perf.parquet")
 
-    data = load_moe_a2a_data([(path, None)])
+    data = fetch_table_view(db, "_moe_a2a_data")
 
     # 10-part nested key: [comm_backend][phase][comm_dtype][ep_size][node_num]
     # [hidden_size][topk][num_experts][sms][num_tokens].
@@ -143,9 +179,9 @@ def test_moe_ep_header_row_loads_with_ms_stored_raw(tmp_path):
         "moe_ep_size": 16,
         "latency": 0.25,  # MILLISECONDS — the moe_ep writer convention
     }
-    path = _write_row_under_header(tmp_path, MOE_EXPERT_COMPUTE_HEADER, row, "moe_expert_compute_perf.parquet")
+    db = _view_db_over_row(tmp_path, MOE_EXPERT_COMPUTE_HEADER, row, "moe_expert_compute_perf.parquet")
 
-    data = load_moe_expert_compute_data([(path, None)])
+    data = fetch_table_view(db, "_moe_ep_data")
 
     # 12-part nested key: [kernel_source][quant][distribution][inference_phase]
     # [topk][num_experts][num_slots][hidden_size][inter_size][moe_tp_size]

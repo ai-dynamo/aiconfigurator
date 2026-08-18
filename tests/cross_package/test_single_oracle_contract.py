@@ -41,53 +41,11 @@ PERF_DATABASE_PATH = OPERATIONS_DIR.parent / "perf_database.py"
 # whose per-message values still come from the engine (they compose standard
 # comm/gemm twins via the single-op evaluation plumbing):
 #   - the AFD comm ops: A/F topology math (send probability, link volumes)
-#   - Mamba2: deprecated composite kept for the public-SDK window (the
-#     deprecation-cleanup PR removes it); its five sub-ops are engine-evaluated twins
 QUERY_OVERRIDE_WHITELIST = {
     "AFDTransfer",
     "AFDFAllGather",
     "AFDFReduceScatter",
     "AFDCombine",
-    "Mamba2",
-}
-
-# The frozen public per-call surface on PerfDatabase: every entry is a
-# deprecated engine-routed shim (or an explicit tombstone that raises), all
-# removed together in the deprecation-cleanup PR. Adding a NEW query_* method to PerfDatabase is a
-# single-oracle violation — route callers through the op-list FFI instead.
-PERF_DATABASE_QUERY_SHIMS = {
-    "query_gemm",
-    "query_compute_scale",
-    "query_scale_matrix",
-    "query_context_attention",
-    "query_encoder_attention",
-    "query_generation_attention",
-    "query_context_mla",
-    "query_generation_mla",
-    "query_context_mla_module",
-    "query_generation_mla_module",
-    "query_wideep_generation_mla",
-    "query_wideep_context_mla",
-    "query_custom_allreduce",
-    "query_nccl",
-    "query_moe",
-    "query_mla_bmm",
-    "query_mem_op",
-    "query_mamba2",
-    "query_gdn",
-    "query_p2p",
-    "query_wideep_deepep_ll",
-    "query_wideep_deepep_normal",
-    "query_wideep_moe_compute",
-    "query_trtllm_alltoall",
-    "query_moe_a2a",
-    "query_moe_expert_compute",
-    "query_context_dsa_module",
-    "query_generation_dsa_module",
-    "query_mhc_module",
-    "query_context_deepseek_v4_attention_module",
-    "query_generation_deepseek_v4_attention_module",
-    "query_dsv4_megamoe_module",
 }
 
 # util_empirical's surviving public surface: the provenance pipeline (the
@@ -142,15 +100,12 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "attention.py": frozenset(
         {
-            "ContextAttention.__init__",
             "ContextAttention._cache_key",
             "ContextAttention.clear_cache",
             "ContextAttention.load_data",
-            "EncoderAttention.__init__",
             "EncoderAttention._cache_key",
             "EncoderAttention.clear_cache",
             "EncoderAttention.load_data",
-            "GenerationAttention.__init__",
             "GenerationAttention._cache_key",
             "GenerationAttention.clear_cache",
             "GenerationAttention.load_data",
@@ -159,19 +114,16 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "base.py": frozenset(
         {
-            "Operation.__init__",
-            "Operation._engine_query",
-            "Operation._engine_query_is_context",
-            "Operation._engine_query_plan",
-            "Operation._record_load",
-            "Operation.clear_cache",
-            "Operation.get_weights",
-            "Operation.load_data",
-            "Operation.query",
-            "Operation.supported_quant_modes",
+            "OpShellKit._engine_query",
+            "OpShellKit._engine_query_is_context",
+            "OpShellKit._engine_query_plan",
+            "OpShellKit._record_load",
+            "OpShellKit.clear_cache",
+            "OpShellKit.load_data",
+            "OpShellKit.supported_quant_modes",
+            "PythonOperation.__init__",
+            "PythonOperation.get_weights",
             "_all_operation_subclasses",
-            "_read_filtered_rows",
-            "_read_perf_rows",
             "_resolve_perf_data_path",
             "_version_dir_is_partial",
             "_version_dir_is_unusable",
@@ -182,37 +134,25 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "communication.py": frozenset(
         {
-            "CustomAllReduce.__init__",
             "CustomAllReduce._cache_key",
             "CustomAllReduce.clear_cache",
             "CustomAllReduce.load_data",
-            "NCCL.__init__",
             "NCCL._cache_key",
             "NCCL.clear_cache",
             "NCCL.load_data",
-            "P2P.__init__",
             "_cache_key",
         }
     ),
     "dsa.py": frozenset(
         {
-            "ContextDSAModule.__init__",
             "ContextDSAModule._cache_key",
             "ContextDSAModule.clear_cache",
             "ContextDSAModule.load_data",
-            "GenerationDSAModule.__init__",
             "GenerationDSAModule._cache_key",
             "GenerationDSAModule.clear_cache",
             "GenerationDSAModule.load_data",
             "_cache_key",
-            "_dsa_kernel_source_buckets",
-            "_format_dsa_unavailable_message",
             "_normalize_projection_quant_modes",
-            "_read_dsa_row_sources",
-            "load_context_dsa_module_data",
-            "load_context_dsa_module_data._nest",
-            "load_generation_dsa_module_data",
-            "load_generation_dsa_module_data._nest",
         }
     ),
     "dsv4.py": frozenset(
@@ -222,44 +162,20 @@ OPERATIONS_DEF_INVENTORY = {
             "ContextDeepSeekV4AttentionModule.load_data",
             "ContextDeepSeekV4AttentionModule.load_data._load_sparse",
             "ContextDeepSeekV4AttentionModule.load_data._primary",
-            "DeepSeekV4MHCModule.__init__",
             "DeepSeekV4MHCModule._cache_key",
             "DeepSeekV4MHCModule.clear_cache",
             "DeepSeekV4MHCModule.load_data",
-            "DeepSeekV4MegaMoEModule.__init__",
             "DeepSeekV4MegaMoEModule._cache_key",
-            "DeepSeekV4MegaMoEModule._engine_query_plan",
-            "DeepSeekV4MegaMoEModule._normalize_distribution",
             "DeepSeekV4MegaMoEModule.clear_cache",
             "DeepSeekV4MegaMoEModule.load_data",
             "GenerationDeepSeekV4AttentionModule._cache_key",
             "GenerationDeepSeekV4AttentionModule.clear_cache",
             "GenerationDeepSeekV4AttentionModule.load_data",
-            "_BaseDeepSeekV4AttentionModule.__init__",
             "_cache_key",
-            "_dsv4_normalize_dtype",
-            "_validate_dsv4_local_head_semantics",
-            "load_context_dsv4_kind_module_data",
-            "load_context_dsv4_kind_module_data._make_nested",
-            "load_dsv4_sparse_kernel_data",
-            "load_dsv4_sparse_op_data",
-            "load_dsv4_sparse_op_data._coerce",
-            "load_dsv4_sparse_op_data._is_bad_key",
-            "load_generation_dsv4_kind_module_data",
-            "load_generation_dsv4_kind_module_data._make_nested",
-            "load_mhc_module_data",
         }
     ),
-    "elementwise.py": frozenset(
-        {
-            "ElementWise.__init__",
-        }
-    ),
-    "embedding.py": frozenset(
-        {
-            "Embedding.__init__",
-        }
-    ),
+    "elementwise.py": frozenset(),
+    "embedding.py": frozenset(),
     "fpm_forward.py": frozenset(
         {
             "FPMForwardOp.__init__",
@@ -270,9 +186,7 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "gemm.py": frozenset(
         {
-            "GEMM.__init__",
             "GEMM._cache_key",
-            "GEMM._engine_query_plan",
             "GEMM.clear_cache",
             "GEMM.load_data",
             "GEMM.supported_quant_modes",
@@ -281,18 +195,11 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "mamba.py": frozenset(
         {
-            "GDNKernel.__init__",
             "GDNKernel._cache_key",
             "GDNKernel.clear_cache",
             "GDNKernel.load_data",
-            "KDAKernel.__init__",
+            "KDAKernel._cache_key",
             "KDAKernel.load_data",
-            "Mamba2.__init__",
-            "Mamba2.get_weights",
-            "Mamba2.query",
-            "Mamba2.query._gemm_value",
-            "Mamba2.query._mem_value",
-            "Mamba2Kernel.__init__",
             "Mamba2Kernel._cache_key",
             "Mamba2Kernel.clear_cache",
             "Mamba2Kernel.load_data",
@@ -301,28 +208,22 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "mla.py": frozenset(
         {
-            "ContextMLA.__init__",
             "ContextMLA._cache_key",
             "ContextMLA.clear_cache",
             "ContextMLA.load_data",
-            "GenerationMLA.__init__",
             "GenerationMLA._cache_key",
             "GenerationMLA.clear_cache",
             "GenerationMLA.load_data",
-            "MLABmm.__init__",
             "MLABmm._cache_key",
             "MLABmm._engine_query_plan",
             "MLABmm.clear_cache",
             "MLABmm.load_data",
-            "MLAModule.__init__",
             "MLAModule._cache_key",
             "MLAModule.clear_cache",
             "MLAModule.load_data",
-            "WideEPContextMLA.__init__",
             "WideEPContextMLA._cache_key",
             "WideEPContextMLA.clear_cache",
             "WideEPContextMLA.load_data",
-            "WideEPGenerationMLA.__init__",
             "WideEPGenerationMLA._cache_key",
             "WideEPGenerationMLA.clear_cache",
             "WideEPGenerationMLA.load_data",
@@ -331,38 +232,17 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "moe.py": frozenset(
         {
-            "MoE.__init__",
             "MoE._cache_key",
-            "MoE._engine_query_plan",
+            "MoE._seq_split",
+            "MoE._seq_split.setter",
             "MoE.clear_cache",
             "MoE.load_data",
             "MoEDispatch.__init__",
             "MoEDispatch._cache_key",
+            "MoEDispatch._quant_mode",
             "MoEDispatch.clear_cache",
-            "MoEDispatch.get_weights",
             "MoEDispatch.load_data",
-            "TrtLLMWideEPMoE.__init__",
-            "TrtLLMWideEPMoE._cache_key",
-            "TrtLLMWideEPMoE._engine_query_plan",
-            "TrtLLMWideEPMoE._select_kernel",
-            "TrtLLMWideEPMoE.clear_cache",
-            "TrtLLMWideEPMoE.get_weights",
-            "TrtLLMWideEPMoE.load_data",
-            "TrtLLMWideEPMoEDispatch.__init__",
-            "TrtLLMWideEPMoEDispatch._cache_key",
-            "TrtLLMWideEPMoEDispatch._engine_query_plan",
-            "TrtLLMWideEPMoEDispatch._normalize_quant_mode_for_table",
-            "TrtLLMWideEPMoEDispatch._select_alltoall_kernel",
-            "TrtLLMWideEPMoEDispatch.clear_cache",
-            "TrtLLMWideEPMoEDispatch.get_weights",
-            "TrtLLMWideEPMoEDispatch.load_data",
             "_cache_key",
-            "load_trtllm_alltoall_data",
-            "load_wideep_context_moe_data",
-            "load_wideep_deepep_ll_data",
-            "load_wideep_deepep_normal_data",
-            "load_wideep_generation_moe_data",
-            "load_wideep_moe_compute_data",
             "xprofile_util_level_known",
         }
     ),
@@ -375,57 +255,25 @@ OPERATIONS_DEF_INVENTORY = {
             "MoECommBackendSpec.feasible",
             "MoEExpertCompute.__init__",
             "MoEExpertCompute._cache_key",
-            "MoEExpertCompute._engine_query_plan",
-            "MoEExpertCompute._resolve_kernel_source",
             "MoEExpertCompute.clear_cache",
             "MoEExpertCompute.load_data",
-            "_adapt_legacy_deepep",
-            "_adapt_legacy_deepep_ll",
-            "_adapt_legacy_deepep_normal",
-            "_adapt_legacy_sglang_context_moe",
-            "_adapt_legacy_sglang_generation_moe",
-            "_adapt_legacy_sglang_wideep_moe",
-            "_adapt_legacy_trtllm_alltoall",
-            "_adapt_legacy_trtllm_wideep_moe",
             "_cache_key",
-            "_load_legacy_a2a",
-            "_load_legacy_ep",
-            "_moe_a2a_store",
-            "_moe_ep_store",
-            "_normalize_sms",
-            "_require_latency",
-            "_row_power",
-            "_store_a2a_leaf",
-            "_store_ep_leaf",
             "_validate_a2a_request",
             "_validate_ep_phase",
-            "load_moe_a2a_data",
-            "load_moe_expert_compute_data",
             "nodes_for",
         }
     ),
-    "msa.py": frozenset(
-        {
-            "_BaseMSAModule.__init__",
-            "_BaseMSAModule.load_data",
-        }
-    ),
+    "msa.py": frozenset(),
     "overlap.py": frozenset(
         {
-            "FallbackOp.__init__",
             "FallbackOp._engine_query_is_context",
             "FallbackOp._engine_query_plan",
-            # Composite weight recursion restored (review round 2): the base
-            # engine route would serialize the WHOLE composite and crash on a
-            # weight-shielded child with no opspec variant (tombstoned
-            # MoEDispatch deepep flavor). These recurse through each child's
-            # own get_weights — no performance math, values identical to
-            # Op::weight_bytes for convertible children.
-            "FallbackOp.get_weights",
-            "OverlapOp.__init__",
+            "FallbackOp._seq_split",
+            "FallbackOp._seq_split.setter",
             "OverlapOp._engine_query_is_context",
             "OverlapOp._engine_query_plan",
-            "OverlapOp.get_weights",
+            "OverlapOp._seq_split",
+            "OverlapOp._seq_split.setter",
             "_has_leaves",
             "_infer_phase",
         }
@@ -552,20 +400,17 @@ def test_operation_query_overrides_are_whitelisted():
     )
 
 
-def test_perf_database_query_surface_is_frozen():
+def test_perf_database_has_no_per_call_query_surface():
+    """The deprecated ``query_*`` shim window closed with the
+    deprecation-cleanup PR: PerfDatabase exposes NO per-call query surface.
+    New per-op access goes through EngineHandle.evaluate_ops_json /
+    evaluate_ops_sol_json, the per-phase surface, or whole runs."""
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
 
     live = {name for name in dir(PerfDatabase) if name.startswith("query_")}
-    added = live - PERF_DATABASE_QUERY_SHIMS
-    removed = PERF_DATABASE_QUERY_SHIMS - live
-    assert not added, (
-        f"PerfDatabase grew new query_* methods: {sorted(added)}. The per-call surface is a frozen "
-        "set of deprecated shims (removed in the deprecation-cleanup PR); new per-op access goes through "
-        "EngineHandle.evaluate_ops_json."
-    )
-    assert not removed, (
-        f"query_* shims disappeared before their deprecation window closed: {sorted(removed)} "
-        "(update this contract deliberately if the deprecation-cleanup PR is executing the removal)."
+    assert not live, (
+        f"PerfDatabase grew query_* methods: {sorted(live)}. The per-call surface was removed "
+        "after its deprecation window; new per-op access goes through EngineHandle.evaluate_ops_json."
     )
 
 
@@ -583,13 +428,22 @@ def test_no_perf_interp_references_in_operations():
 
 def _file_def_names(source_text: str) -> list[str]:
     """Every def at its qualified lexical path, in occurrence order (a list,
-    not a set, so duplicate qualified redefinitions surface as duplicates)."""
+    not a set, so duplicate qualified redefinitions surface as duplicates).
+    Property setter/deleter re-defs share the property's name by construction;
+    they are qualified with the decorator role so a getter/setter pair is not
+    flagged as an ambiguous redefinition."""
     out: list[str] = []
+
+    def role_suffix(node) -> str:
+        for dec in getattr(node, "decorator_list", []):
+            if isinstance(dec, ast.Attribute) and dec.attr in ("setter", "deleter"):
+                return f".{dec.attr}"
+        return ""
 
     def walk(node, prefix: str) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                qualified = f"{prefix}{child.name}"
+                qualified = f"{prefix}{child.name}{role_suffix(child)}"
                 out.append(qualified)
                 walk(child, qualified + ".")
             elif isinstance(child, ast.ClassDef):
@@ -682,45 +536,3 @@ def test_def_inventory_catches_shadow_class_with_existing_names():
         raise AssertionError("no inventory file contains all fixture plain names")
     # ...but none of the QUALIFIED paths exists anywhere, so introducing the
     # shadow class trips test_operations_def_inventory_is_frozen.
-
-
-def test_surviving_parsers_have_no_production_callers():
-    """The moe/moe_comm/dsa/dsv4 ``load_*_data`` parsers survive PR-6 only as
-    TEST-ONLY schema-contract fixtures (the collector suite's format
-    handshake); every production ``PerfDatabase._<family>_data`` attribute is
-    served by the engine table view. A production call site re-appearing for
-    any of them is the Python data plane growing back — fail here so the
-    revival is a deliberate, reviewed decision.
-    """
-    import re
-
-    sdk_root = OPERATIONS_DIR.parents[2]  # aic-core/src/aiconfigurator_core
-    surviving = sorted(
-        {
-            match
-            for path in OPERATIONS_DIR.glob("*.py")
-            for match in re.findall(r"^def (load_\w+_data)\b", path.read_text(encoding="utf-8"), re.MULTILINE)
-        }
-    )
-    # The inventory itself is load-bearing: if the cleanup PR deletes the
-    # parsers, this test retires with them (empty set would pass vacuously).
-    assert surviving, "no surviving parsers found — retire this test together with the parser deletion"
-
-    offenders = []
-    for path in sdk_root.rglob("*.py"):
-        rel = path.relative_to(sdk_root).as_posix()
-        if "/operations/" in f"/{rel}":
-            continue  # definitions and their module-internal use
-        text = path.read_text(encoding="utf-8")
-        for name in surviving:
-            for match in re.finditer(rf"\b{name}\b", text):
-                line = text[: match.start()].count("\n") + 1
-                snippet = text.splitlines()[line - 1].strip()
-                if snippet.startswith("#"):
-                    continue  # commentary, not a call site
-                # perf_database's legacy re-export block is the one allowed
-                # reference (kept for the collector suite's import path).
-                if rel.endswith("perf_database.py") and re.match(rf"^{name},?$", snippet):
-                    continue
-                offenders.append(f"{rel}:{line}: {snippet[:100]}")
-    assert not offenders, "surviving test-only parsers gained production references:\n" + "\n".join(offenders)

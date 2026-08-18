@@ -32,8 +32,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator_core.sdk import common
-from aiconfigurator_core.sdk.operations.base import Operation, resolve_op_data_path
+import aiconfigurator_core._aiconfigurator_core as _core
+from aiconfigurator_core.sdk.operations.base import OpShellKit, resolve_op_data_path
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -58,7 +58,7 @@ def _cache_key(database: PerfDatabase) -> tuple:
     )
 
 
-class CustomAllReduce(Operation):
+class CustomAllReduce(_core.CustomAllReduce, OpShellKit):
     """
     Custom AllReduce operation with power tracking.
 
@@ -66,12 +66,6 @@ class CustomAllReduce(Operation):
     """
 
     _data_cache: ClassVar[dict] = {}
-    _CP_AWARE: ClassVar[bool] = True  # query divides x by self._seq_split (smaller per-rank AR payload)
-
-    def __init__(self, name: str, scale_factor: float, h: int, tp_size: int, *, seq_split: int = 1) -> None:
-        super().__init__(name, scale_factor, seq_split=seq_split)
-        self._h = h
-        self._tp_size = tp_size
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -108,10 +102,8 @@ class CustomAllReduce(Operation):
     # Op contract
     # ------------------------------------------------------------------
 
-    _ENGINE_QUERY_SHAPE = "tokens"
 
-
-class NCCL(Operation):
+class NCCL(_core.NCCL, OpShellKit):
     """
     NCCL collective communication operation with power tracking.
 
@@ -123,24 +115,6 @@ class NCCL(Operation):
 
     _data_cache: ClassVar[dict] = {}
     _oneccl_data_cache: ClassVar[dict] = {}
-    _CP_AWARE: ClassVar[bool] = True  # query divides x by self._seq_split (smaller per-rank payload)
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        nccl_op: str,
-        num_elements_per_token: int,
-        num_gpus: int,
-        comm_quant_mode: common.CommQuantMode,
-        *,
-        seq_split: int = 1,
-    ) -> None:
-        super().__init__(name, scale_factor, seq_split=seq_split)
-        self._nccl_op = nccl_op
-        self._num_elements_per_token = num_elements_per_token
-        self._num_gpus = num_gpus
-        self._comm_quant_mode = comm_quant_mode
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -185,7 +159,7 @@ class NCCL(Operation):
 
             # oneCCL fallback (XPU systems). Only loaded when system_spec
             # declares an ``oneccl_version`` under ``misc``.
-            oneccl_version = database.system_spec.get("misc", {}).get("oneccl_version")
+            oneccl_version = (database.system_spec.get("misc") or {}).get("oneccl_version")
             if oneccl_version:
                 oneccl_primary = resolve_op_data_path(
                     system_data_root, "oneccl", oneccl_version, PerfDataFilename.oneccl.value
@@ -218,10 +192,8 @@ class NCCL(Operation):
     # Op contract
     # ------------------------------------------------------------------
 
-    _ENGINE_QUERY_SHAPE = "tokens"
 
-
-class P2P(Operation):
+class P2P(_core.P2P, OpShellKit):
     """
     P2P (point-to-point) communication operation with power tracking.
 
@@ -230,14 +202,6 @@ class P2P(Operation):
     out only for parity with the other migrated ops.
     """
 
-    _CP_AWARE: ClassVar[bool] = True  # query divides x by self._seq_split (smaller per-rank payload)
-
-    def __init__(self, name: str, scale_factor: float, h: int, pp_size: int, *, seq_split: int = 1) -> None:
-        super().__init__(name, scale_factor, seq_split=seq_split)
-        self._h = h
-        self._pp_size = pp_size
-        self._bytes_per_element = 2
-
     # ------------------------------------------------------------------
     # Query table (formerly PerfDatabase.query_p2p)
     # ------------------------------------------------------------------
@@ -245,5 +209,3 @@ class P2P(Operation):
     # ------------------------------------------------------------------
     # Op contract
     # ------------------------------------------------------------------
-
-    _ENGINE_QUERY_SHAPE = "tokens"

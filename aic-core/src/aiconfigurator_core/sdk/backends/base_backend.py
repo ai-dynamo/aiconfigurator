@@ -394,9 +394,8 @@ class BaseBackend:
         latency_dict: dict[str, float] = defaultdict(float)
         energy_dict: dict[str, float] = defaultdict(float)
         source_dict: dict[str, str] = {}
-        backend_name = getattr(database.backend, "value", database.backend)
         for eff_s, ops in groups.items():
-            ops_json = build_ops_json(ops, model=model, backend=str(backend_name), database=database)
+            ops_json = build_ops_json(ops)
             entries = evaluate_ops_json_with_rust(
                 model,
                 database,
