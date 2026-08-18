@@ -75,15 +75,109 @@ import pkg_resources
 import sglang.srt.server_args as _server_args_module
 import torch
 
-if _server_args_module._global_server_args is None:
-    _mock_server_args = MagicMock()
-    _mock_server_args.enable_deterministic_inference = False
-    _mock_server_args.enable_fused_moe_sum_all_reduce = (
-        False  # SGLang 0.5.14; prevents fused all-reduce in single-GPU benchmarks
-    )
-    _mock_server_args.kt_weight_path = None
-    _mock_server_args.flashinfer_mxfp4_moe_precision = "default"
-    _server_args_module._global_server_args = _mock_server_args
+# Verified 2026-08-18 (first real-GPU 0.5.17 run crashed here: AttributeError:
+# module 'sglang.srt.server_args' has no attribute '_global_server_args').
+# 0.5.14: a bare module global (server_args.py:7180 @0.5.14). 0.5.17: gone
+# from server_args.py entirely, moved into the RuntimeContext singleton
+# (sglang/srt/runtime_context.py). The legacy accessor/setter shims
+# (get_global_server_args/set_global_server_args_for_scheduler,
+# server_args.py:9294-9316 @0.5.17) still exist by the same names but now
+# read/write get_context().server_args -- a property that RAISES ValueError
+# when unset rather than returning None, so the "already set?" guard below
+# reaches into RuntimeContext's own _server_args slot directly instead
+# (mirroring how sglang's own reset_context() touches the same slot,
+# runtime_context.py:1349).
+#
+# Deeper than a rename: mutation does not stick the same way for 3 of the 4
+# fields. At 0.5.14 every consumer reads these straight off the server_args
+# object. At 0.5.17, enable_deterministic_inference moved to
+# get_exec().deterministic.enable_deterministic_inference
+# (fused_moe_triton_config.py:72,190 @0.5.17; deep_gemm.py:1069);
+# enable_fused_moe_sum_all_reduce moved to
+# get_exec().moe.enable_fused_moe_sum_all_reduce
+# (triton_utils/fused_moe.py:534 @0.5.17); flashinfer_mxfp4_moe_precision
+# moved to get_exec().moe.flashinfer_mxfp4_moe_precision (mxfp4.py:344-345,
+# mxfp4_flashinfer_trtllm_moe.py:53-54 @0.5.17). That "config bag" tree is
+# projected by RuntimeContext.set_server_args() from the NS(...)-marked
+# dataclass fields of whatever object gets published
+# (runtime_context.py:788-821); a MagicMock has no such fields
+# (namespace_of() returns {} for any non-dataclass type,
+# arg_groups/arg_utils.py:108-109 -- an explicitly-supported "mock config
+# objects in tests" case per resolvable_fields()'s own docstring there), so
+# the bag comes back empty and every get_exec() read above raises
+# ValueError("config namespace ... not published"). No attribute stuffed
+# onto a MagicMock can satisfy this at 0.5.17. (kt_weight_path is the one
+# exception: both its reads, kt_ep_wrapper.py:73,90 @0.5.17, are inside
+# create_kt_config_from_server_args, which this module's own
+# _patch_framework_moe_parallel already replaces with a no-op lambda -- its
+# value is never actually consulted in this collector's benchmark path at
+# either version.)
+#
+# Fix: at 0.5.17, publish a REAL sglang.srt.server_args.ServerArgs instance
+# instead of a MagicMock, using the exact bootstrap sglang's own test suite
+# uses for this (test/manual/test_moe_quant_once.py:222 @0.5.17:
+# `set_global_server_args_for_scheduler(ServerArgs(model_path="dummy"))` --
+# model_path has no default and is otherwise unused here, so a dummy string
+# satisfies construction without a real checkpoint). The four fields below
+# are passed explicitly even though they already equal ServerArgs's own
+# declared defaults (enable_deterministic_inference=False,
+# enable_fused_moe_sum_all_reduce=False, flashinfer_mxfp4_moe_precision=
+# "default", kt_weight_path=None -- server_args.py:3247-3251, 1930-1932,
+# 2305-2309, 2927-2930 @0.5.17) -- defensive against a future default
+# change, matching this block's original intent of pinning these values
+# rather than inheriting whatever the framework currently defaults to.
+# NOTE: `sglang.srt.runtime_context.get_context` is NOT a safe version probe
+# here -- it exists at BOTH 0.5.14 and 0.5.17 (unlike get_flags/get_exec
+# below), but the RuntimeContext class it returns has a different shape per
+# version: 0.5.14's is `__slots__ = ("parallel",)` only (runtime_context.py:
+# 208-214 @0.5.14, no _server_args slot at all), so `get_context()._server_
+# args` would itself raise AttributeError on 0.5.14 -- a second bug this
+# fix must not introduce while fixing the first one. get_server_args (the
+# free function, not the property) IS a safe probe: absent at 0.5.14 (that
+# 227-line file has no such name; confirmed by reading it in full, not
+# just grepping), present at 0.5.17 (runtime_context.py:1074-1075).
+try:
+    from sglang.srt.runtime_context import get_server_args as _sglang_get_server_args
+except ImportError:
+    _sglang_get_server_args = None
+
+if _sglang_get_server_args is None:
+    _server_args_already_set = _server_args_module._global_server_args is not None
+else:
+    try:
+        _sglang_get_server_args()
+        _server_args_already_set = True
+    except ValueError:
+        # RuntimeContext.server_args (the property get_server_args wraps)
+        # raises exactly this -- "Global server args is not set yet!" --
+        # when unset (runtime_context.py:787-794 @0.5.17); its own docstring
+        # calls this the verbatim legacy message "tests and user scripts may
+        # match on it", i.e. the sanctioned way to probe "is it set".
+        _server_args_already_set = False
+
+if not _server_args_already_set:
+    if _sglang_get_server_args is None:
+        # SGLang 0.5.14 -- byte-identical to before this fix.
+        _mock_server_args = MagicMock()
+        _mock_server_args.enable_deterministic_inference = False
+        _mock_server_args.enable_fused_moe_sum_all_reduce = (
+            False  # SGLang 0.5.14; prevents fused all-reduce in single-GPU benchmarks
+        )
+        _mock_server_args.kt_weight_path = None
+        _mock_server_args.flashinfer_mxfp4_moe_precision = "default"
+        _server_args_module._global_server_args = _mock_server_args
+    else:
+        from sglang.srt.server_args import ServerArgs, set_global_server_args_for_scheduler
+
+        set_global_server_args_for_scheduler(
+            ServerArgs(
+                model_path="dummy",
+                enable_deterministic_inference=False,
+                enable_fused_moe_sum_all_reduce=False,
+                kt_weight_path=None,
+                flashinfer_mxfp4_moe_precision="default",
+            )
+        )
 
 import sglang.srt.layers.moe.fused_moe_triton.layer as _moe_layer_mod
 
@@ -612,6 +706,58 @@ def _pin_moe_runner_backend(backend: MoeRunnerBackend):
             _moe_utils.MOE_RUNNER_BACKEND = previous
 
 
+@contextmanager
+def _pin_flashinfer_mxfp4_moe_precision(value: str | None):
+    """Pin ``flashinfer_mxfp4_moe_precision`` for the ``with`` block, across
+    SGLang's two server_args mechanisms (found 2026-08-18, first real-GPU
+    0.5.17 run: this line crashed identically to the ``_global_server_args``
+    setup-time access, same root cause -- see the module-level comment above
+    ``_server_args_module`` for the full 0.5.14/0.5.17 trace).
+
+    ``value=None`` means "leave it alone" (the ``moe_backend != "flashinfer_
+    mxfp4"`` case in the caller) -- a true no-op, not a pin to ``None``.
+
+    SGLang 0.5.14: mutate the mocked/real ``ServerArgs`` object's attribute
+    directly, exactly as before this fix -- every 0.5.14 consumer reads this
+    field straight off that object.
+
+    SGLang 0.5.17: mutating the ``ServerArgs`` object's attribute after
+    publish does NOT propagate. ``get_exec().moe.flashinfer_mxfp4_moe_
+    precision`` is what ``Mxfp4MoEMethod``/``Mxfp4FlashinferTrtllmMoEMethod``
+    actually read (mxfp4.py:344-345, mxfp4_flashinfer_trtllm_moe.py:53-54
+    @0.5.17) -- a ``_ConfigBag`` leaf, and ``_ConfigBag`` (runtime_context.py:
+    577-596) explicitly documents itself as snapshotted-at-publish and
+    read-only by bare assignment thereafter (``__setattr__`` raises,
+    runtime_context.py:616-620): "the bag is the single source of truth for
+    its fields thereafter." Its own docstring names the sanctioned writers:
+    ``get_context().override(source, ...)`` (permanent) or the scoped
+    ``.override(**kw)`` context manager (runtime_context.py:637-653) -- the
+    same transactional/exception-safe/restore-on-exit shape as
+    ``MoeFlags.override()`` in ``_pin_moe_runner_backend`` above, used here
+    the same way.
+    """
+    if value is None:
+        yield
+        return
+
+    try:
+        from sglang.srt.runtime_context import get_exec
+    except ImportError:
+        get_exec = None
+
+    if get_exec is not None:
+        with get_exec().moe.override(flashinfer_mxfp4_moe_precision=value):
+            yield
+    else:
+        server_args = _server_args_module._global_server_args
+        previous = server_args.flashinfer_mxfp4_moe_precision
+        server_args.flashinfer_mxfp4_moe_precision = value
+        try:
+            yield
+        finally:
+            server_args.flashinfer_mxfp4_moe_precision = previous
+
+
 def _benchmark_framework_quantized_moe(
     *,
     moe_type: str,
@@ -697,15 +843,13 @@ def _benchmark_framework_quantized_moe(
     else:
         raise ValueError(f"Unsupported framework quantized MoE case: {moe_type=} {model_name=}")
 
-    server_args = _server_args_module._global_server_args
-    previous_precision = server_args.flashinfer_mxfp4_moe_precision
-    if moe_backend == "flashinfer_mxfp4":
-        server_args.flashinfer_mxfp4_moe_precision = _mxfp4_activation_precision(moe_type)
-
     moe_layer = None
     try:
         with (
             _pin_moe_runner_backend(MoeRunnerBackend(moe_backend)),
+            _pin_flashinfer_mxfp4_moe_precision(
+                _mxfp4_activation_precision(moe_type) if moe_backend == "flashinfer_mxfp4" else None
+            ),
             _patch_framework_moe_parallel(moe_tp_size=moe_tp_size, moe_ep_size=moe_ep_size),
         ):
             moe_layer = FusedMoE(
@@ -932,7 +1076,6 @@ def _benchmark_framework_quantized_moe(
             parameter = None
             moe_layer = None
         _fmoe_kernels_mod._B_DESC_CACHE.clear()
-        server_args.flashinfer_mxfp4_moe_precision = previous_precision
         gc.collect()
         torch.cuda.empty_cache()
 
