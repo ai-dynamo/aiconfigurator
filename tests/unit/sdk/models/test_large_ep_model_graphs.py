@@ -988,7 +988,7 @@ class TestVllmLargeEPKeepsVocabTPCollectives:
         assert "generation_p2p" in gen
         emb = next(op for op in model.context_ops if op._name == "context_embedding")
         # 151936-row vocab stays TP-sharded over tp=2, not replicated.
-        assert 151936 // 2 in emb.__dict__.values()
+        assert emb._row_size == 151936 // 2
 
     def test_sglang_contrast_stays_transcribed(self):
         model = _build(
@@ -1008,4 +1008,4 @@ class TestVllmLargeEPKeepsVocabTPCollectives:
         assert "context_embedding_ar" not in ctx
         assert "generation_embedding_ar" not in gen
         emb = next(op for op in model.context_ops if op._name == "context_embedding")
-        assert 151936 in emb.__dict__.values()  # replicated
+        assert emb._row_size == 151936  # replicated

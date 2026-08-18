@@ -55,7 +55,7 @@ use std::sync::OnceLock;
 
 use super::axis_curve::AxisCurve;
 use super::perf_interp::{self, Node, OpInterpConfig};
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
 use crate::perf_database::parquet_loader::{PerfReader, PerfRow};
@@ -106,32 +106,29 @@ impl MoeA2aTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf) -> Self {
-        Self::with_sources(data_root, &PerfDbSources::default())
+        Self::with_sources(data_root, &SourceResolver::fixed(PerfDbSources::default()))
+            .expect("fixed-map resolution is infallible")
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources resolved
     /// from `perf_db_sources` (Python-supplied). Each perf file falls back to
     /// its primary `data_root/<basename>` when absent from the map. No I/O.
-    pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
+    pub fn with_sources(data_root: PathBuf, resolver: &SourceResolver) -> Result<Self, AicError> {
         let moe_a2a_sources =
-            resolve_op_sources(perf_db_sources, "moe_a2a_perf.parquet", &data_root);
-        let legacy_normal_sources = resolve_op_sources(
-            perf_db_sources,
-            "wideep_deepep_normal_perf.parquet",
-            &data_root,
-        );
+            resolver.sources_for("moe_a2a_perf.parquet", &data_root)?;
+        let legacy_normal_sources = resolver.sources_for("wideep_deepep_normal_perf.parquet", &data_root)?;
         let legacy_ll_sources =
-            resolve_op_sources(perf_db_sources, "wideep_deepep_ll_perf.parquet", &data_root);
+            resolver.sources_for("wideep_deepep_ll_perf.parquet", &data_root)?;
         let legacy_trtllm_alltoall_sources =
-            resolve_op_sources(perf_db_sources, "trtllm_alltoall_perf.parquet", &data_root);
-        Self {
+            resolver.sources_for("trtllm_alltoall_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             moe_a2a_sources,
             legacy_normal_sources,
             legacy_ll_sources,
             legacy_trtllm_alltoall_sources,
             grids: OnceLock::new(),
-        }
+        })
     }
 
     /// Unified MoE all-to-all latency (ms) for one comm phase.
@@ -1688,7 +1685,11 @@ mod tests {
             "wideep_deepep_ll_perf.parquet",
             "trtllm_alltoall_perf.parquet",
         ] {
-            for source in resolve_op_sources(&PerfDbSources::default(), basename, data_root) {
+            for source in crate::perf_database::resolve_op_sources(
+                &PerfDbSources::default(),
+                basename,
+                data_root,
+            ) {
                 let path = source.path();
                 if !path.exists() {
                     continue;

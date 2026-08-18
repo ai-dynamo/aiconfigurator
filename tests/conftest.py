@@ -28,8 +28,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         choices=["rust"],
         default=None,
         help="Pin the engine-step backend env for the test run. 'rust' is the only "
-        "live value (the Python step path was removed; 'python' is a deprecated "
-        "runtime no-op and not offered here).",
+        "value (the compiled engine is the only step executor).",
     )
 
 

@@ -6,7 +6,7 @@
 The estimation MATH that used to be tested here (``UtilGrid`` interpolation,
 ``grid_for``/``grid_from_reference`` caching, ``estimate`` transfer ladder,
 ``require_data_slice``) retired to the compiled engine with #1357 PR-5; its
-behaviour is anchored by ``tests/cross_package/test_query_shim_baseline.py``
+behaviour is anchored by the frozen parity goldens
 and the frozen parity goldens. What remains observable from Python — and
 tested here — is the provenance pipeline the engine reports back through.
 """

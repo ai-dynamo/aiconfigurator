@@ -88,6 +88,7 @@ def test_model_width_assert_includes_cp():
             8192,
             _mkcfg(4, ep=8),
             {},
+            backend_name="trtllm",
         )
 
 
@@ -233,6 +234,7 @@ def test_gemma4_cp_per_type_allgather_and_zigzag():
         8192,
         _mkcfg(8, ep=8),
         {},
+        backend_name="trtllm",
     )
     m.set_gemma4_config(
         common.Gemma4MixConfig(
@@ -274,6 +276,7 @@ def test_hybrid_moe_cp_per_type_allgather():
         40960,
         _mkcfg(8, ep=8),
         {},
+        backend_name="trtllm",
     )
     m.set_hybrid_config(
         common.HybridMoEConfig(

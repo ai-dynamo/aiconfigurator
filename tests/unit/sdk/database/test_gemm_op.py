@@ -139,6 +139,6 @@ class TestLoadData:
 # - ``GEMM._correct_sol`` load-time clamping (the engine clamps its own load);
 # - per-op silicon-source attribution and the ``below_grid_sol`` degradation
 #   flag threading (below-grid handling is engine-internal now).
-# Anchored by tests/cross_package/test_query_shim_baseline.py and the frozen
+# Anchored by the frozen
 # parity goldens.
 # ---------------------------------------------------------------------------

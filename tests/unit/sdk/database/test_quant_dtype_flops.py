@@ -9,7 +9,7 @@ query entry in every mode, the sm<89 fp8-KV bf16-pipeline derivation)
 verified the retired Python query stack on monkeypatched in-memory system
 specs; that math and its eager ``?``-style flops resolution now live solely
 in the compiled engine (#1357 PR-5), anchored by the frozen parity goldens
-and tests/cross_package/test_query_shim_baseline.py. What remains here is
+and the frozen parity goldens. What remains here is
 the shipped-data/CI invariant, which reads disk directly.
 """
 

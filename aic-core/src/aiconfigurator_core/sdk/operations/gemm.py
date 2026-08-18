@@ -22,9 +22,9 @@ import logging
 from typing import TYPE_CHECKING, ClassVar
 
 import aiconfigurator_core
-from aiconfigurator_core.sdk import common
+import aiconfigurator_core._aiconfigurator_core as _core
 from aiconfigurator_core.sdk.operations import util_empirical
-from aiconfigurator_core.sdk.operations.base import Operation
+from aiconfigurator_core.sdk.operations.base import OpShellKit
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -71,9 +71,9 @@ def xprofile_util_level_known(quant_mode) -> bool:
     return util_empirical.quant_profile(quant_mode) in _GEMM_QUANT_UTIL_LEVEL
 
 
-class GEMM(Operation):
+class GEMM(_core.GEMM, OpShellKit):
     """
-    GEMM operation with power tracking.
+    GEMM operation with power tracking (Rust-backed; see py_ops.rs).
 
     Owns three CSV-backed tables:
     - ``_data_cache``: gemm latency/energy keyed by ``quant_mode -> m -> n -> k``
@@ -84,29 +84,9 @@ class GEMM(Operation):
     ``(systems_root, system, backend, version, enable_shared_layer)``.
     """
 
-    # Per-op subclass overrides of Operation._data_cache. Keyed by
-    # (systems_root, system, backend, version, enable_shared_layer).
     _data_cache: ClassVar[dict] = {}
     _compute_scale_cache: ClassVar[dict] = {}
     _scale_matrix_cache: ClassVar[dict] = {}
-    _CP_AWARE: ClassVar[bool] = True  # query divides x (token count) by self._seq_split
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        n: int,
-        k: int,
-        quant_mode: common.GEMMQuantMode,
-        **kwargs,
-    ) -> None:
-        super().__init__(name, scale_factor, seq_split=kwargs.get("seq_split", 1))
-        self._n = n
-        self._k = k
-        self._quant_mode = quant_mode
-        self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
-        self._low_precision_input = kwargs.get("low_precision_input", False)
-        self._below_grid_sol = kwargs.get("below_grid_sol", False)
 
     # ------------------------------------------------------------------
     # Data ownership: load + cache + clear
@@ -216,18 +196,3 @@ class GEMM(Operation):
     # ------------------------------------------------------------------
     # Op contract: query() + get_weights()
     # ------------------------------------------------------------------
-
-    _ENGINE_QUERY_SHAPE = "tokens"
-
-    def _engine_query_plan(self, kwargs: dict):
-        """Legacy per-call ``quant_mode`` override: rebuild the twin with the
-        requested quant before engine evaluation (an uncovered override quant
-        must MISS loudly, exactly like the retired lookup did)."""
-        op, eval_kwargs = super()._engine_query_plan(kwargs)
-        quant_mode = kwargs.get("quant_mode")
-        if quant_mode is not None and quant_mode != self._quant_mode:
-            import copy
-
-            op = copy.copy(self)
-            op._quant_mode = quant_mode
-        return op, eval_kwargs

@@ -34,7 +34,6 @@ import pytest
 
 from aiconfigurator.sdk.perf_database import (
     PerfDatabase,
-    _load_op_kernel_source_manifest_entries,
 )
 from aiconfigurator_core.sdk.operations.mamba import KDAKernel
 
@@ -166,7 +165,7 @@ def test_vllm_donor_cannot_defeat_the_fused_decode_reroute(tmp_path, monkeypatch
         _summary("kda_perf.parquet", "fused_recurrent_kda_packed_decode", "shared", ["sglang", "vllm"]),
     ]
     (systems_root / "op_kernel_source_manifest.yaml").write_text(gen.render_manifest(summaries))
-    _load_op_kernel_source_manifest_entries.cache_clear()
+    # (manifest parsing moved into the engine resolver — no Python cache to clear)
     KDAKernel.clear_cache()
 
     db = PerfDatabase("h100_sxm", "sglang", "1.0", str(systems_root), database_mode="SILICON")

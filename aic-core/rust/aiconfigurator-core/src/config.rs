@@ -53,7 +53,13 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 // - 12 (PR-6): `DsaModuleOp` gained `attn_projection_quant_modes` — a
 //   bincode op-layout change (same class as v5/v7/v8/v10; the
 //   `#[serde(default)]` only covers the JSON wire, bincode is positional).
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 12;
+// - 13 (deprecation-cleanup PR): the engine owns shared-layer source
+//   resolution. `EngineConfig` dropped the Python-resolved
+//   `perf_db_sources` map (a bincode config-layout change) and gained
+//   `enable_shared_layer` / `strict_provenance` policy flags; the engine
+//   re-derives every table's source list from the perf-data tree
+//   (`perf_database/source_resolution.rs`).
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 13;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].
@@ -99,17 +105,21 @@ pub struct EngineConfig {
     #[serde(flatten)]
     pub speculative: Option<SpeculativeConfig>,
 
-    /// Shared-layer (sibling/cross-version) perf-data sources per op-file
-    /// basename (e.g. `gemm_perf.parquet`), resolved in Python
-    /// (`sdk/engine.py::_compute_perf_db_sources`) so the Rust core inherits the
-    /// SAME rows Python does under SILICON/HYBRID. Each entry is
-    /// `(abs_path, Option<kernel_source_allowlist>)` in priority order — the
-    /// first source containing a shape wins (mirrors Python
-    /// `_read_filtered_rows` + skip-on-key-conflict). Absent/empty = fall back
-    /// to the single primary `data_root` (back-compat with pre-shared-layer
-    /// specs).
+    /// Shared-layer (sibling/cross-version) source inheritance on/off. The
+    /// engine resolves per-op sources ITSELF (`perf_database/source_resolution.rs`
+    /// — schema v13; the resolved `perf_db_sources` map left the wire with the
+    /// Python resolver). `None` derives the flag from `database_mode`
+    /// (SILICON/HYBRID = on), mirroring Python `_shared_layer_enabled`;
+    /// `Some` carries an explicit override (Python's `shared_layer=` kwarg,
+    /// used by regression harnesses to pin per-version behavior).
     #[serde(default)]
-    pub perf_db_sources: PerfDbSources,
+    pub enable_shared_layer: Option<bool>,
+
+    /// Fail-closed provenance mode (Python's `strict_provenance` /
+    /// `AIC_STRICT_PROVENANCE`): malformed sidecar metadata errors the load
+    /// instead of warn-and-continue. Absent on old specs -> false.
+    #[serde(default)]
+    pub strict_provenance: bool,
 
     /// Perf-database lookup mode (Python's `database._default_database_mode`).
     /// SILICON queries collected tables only; HYBRID falls back to the
