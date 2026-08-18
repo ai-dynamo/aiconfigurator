@@ -149,7 +149,7 @@ class TestTrtLLMWideEPMoE:
         from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
 
         moe = self._make(moe_tp_size=1)
-        result = moe.query(object(), x=16)
+        result = moe._engine_query(object(), x=16)
 
         twin = seam["op"]
         assert isinstance(twin, MoEExpertCompute)
@@ -174,28 +174,28 @@ class TestTrtLLMWideEPMoE:
         tp=1 value (CodeRabbit review on #1552)."""
         moe = self._make(moe_tp_size=2)
         with pytest.raises(NotImplementedError, match="moe_tp_size=1 only"):
-            moe.query(object(), x=16)
+            moe._engine_query(object(), x=16)
         assert "op" not in seam  # rejected before reaching the engine seam
 
     def test_query_propagates_attention_dp_to_twin(self, seam):
         """attention_dp_size rides the twin (the engine globalizes tokens);
         x itself stays rank-local at the seam."""
         moe = self._make(moe_tp_size=1, moe_ep_size=1, workload_distribution="uniform", attention_dp_size=4)
-        moe.query(object(), x=16)
+        moe._engine_query(object(), x=16)
 
         assert seam["eval_kwargs"]["x"] == 16
         assert seam["op"]._attention_dp_size == 4
 
     def test_query_propagates_scale_factor_to_twin(self, seam):
         moe = self._make(scale_factor=3.0, moe_tp_size=1, moe_ep_size=1, workload_distribution="uniform")
-        moe.query(object(), x=16)
+        moe._engine_query(object(), x=16)
 
         assert seam["op"]._scale_factor == 3.0
 
     def test_query_with_quant_mode_override(self, seam):
         """The legacy per-call quant_mode override rebuilds the twin."""
         moe = self._make(moe_tp_size=1, moe_ep_size=1, workload_distribution="uniform")
-        moe.query(object(), x=16, quant_mode=common.MoEQuantMode.nvfp4)
+        moe._engine_query(object(), x=16, quant_mode=common.MoEQuantMode.nvfp4)
 
         assert seam["op"]._quant_mode == common.MoEQuantMode.nvfp4
 
@@ -207,7 +207,7 @@ class TestTrtLLMWideEPMoE:
             moe_ep_size=1,
             workload_distribution="power_law_1.2_eplb",
         )
-        moe.query(object(), x=16)
+        moe._engine_query(object(), x=16)
 
         assert seam["op"]._num_slots == 12
 

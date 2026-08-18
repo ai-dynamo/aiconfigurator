@@ -464,7 +464,7 @@ class TestEncoderMemoryInSummary:
     def _stub_engine_step(monkeypatch):
         """Stub the compiled-engine bridge so run_static needs no perf data.
 
-        The step boundary moved from per-op ``op.query()`` (formerly stubbed
+        The step boundary moved from per-op ``op._engine_query()`` (formerly stubbed
         with MagicMocks) to the rust bridge functions after the Python step
         path was removed; these tests are about the encoder MEMORY plumbing,
         so the step values are fixed dummies.

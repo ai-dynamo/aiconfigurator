@@ -41,53 +41,11 @@ PERF_DATABASE_PATH = OPERATIONS_DIR.parent / "perf_database.py"
 # whose per-message values still come from the engine (they compose standard
 # comm/gemm twins via the single-op evaluation plumbing):
 #   - the AFD comm ops: A/F topology math (send probability, link volumes)
-#   - Mamba2: deprecated composite kept for the public-SDK window (the
-#     deprecation-cleanup PR removes it); its five sub-ops are engine-evaluated twins
 QUERY_OVERRIDE_WHITELIST = {
     "AFDTransfer",
     "AFDFAllGather",
     "AFDFReduceScatter",
     "AFDCombine",
-    "Mamba2",
-}
-
-# The frozen public per-call surface on PerfDatabase: every entry is a
-# deprecated engine-routed shim (or an explicit tombstone that raises), all
-# removed together in the deprecation-cleanup PR. Adding a NEW query_* method to PerfDatabase is a
-# single-oracle violation — route callers through the op-list FFI instead.
-PERF_DATABASE_QUERY_SHIMS = {
-    "query_gemm",
-    "query_compute_scale",
-    "query_scale_matrix",
-    "query_context_attention",
-    "query_encoder_attention",
-    "query_generation_attention",
-    "query_context_mla",
-    "query_generation_mla",
-    "query_context_mla_module",
-    "query_generation_mla_module",
-    "query_wideep_generation_mla",
-    "query_wideep_context_mla",
-    "query_custom_allreduce",
-    "query_nccl",
-    "query_moe",
-    "query_mla_bmm",
-    "query_mem_op",
-    "query_mamba2",
-    "query_gdn",
-    "query_p2p",
-    "query_wideep_deepep_ll",
-    "query_wideep_deepep_normal",
-    "query_wideep_moe_compute",
-    "query_trtllm_alltoall",
-    "query_moe_a2a",
-    "query_moe_expert_compute",
-    "query_context_dsa_module",
-    "query_generation_dsa_module",
-    "query_mhc_module",
-    "query_context_deepseek_v4_attention_module",
-    "query_generation_deepseek_v4_attention_module",
-    "query_dsv4_megamoe_module",
 }
 
 # util_empirical's surviving public surface: the provenance pipeline (the
@@ -167,7 +125,6 @@ OPERATIONS_DEF_INVENTORY = {
             "Operation.clear_cache",
             "Operation.get_weights",
             "Operation.load_data",
-            "Operation.query",
             "Operation.supported_quant_modes",
             "_all_operation_subclasses",
             "_read_filtered_rows",
@@ -272,11 +229,6 @@ OPERATIONS_DEF_INVENTORY = {
             "GDNKernel.load_data",
             "KDAKernel.__init__",
             "KDAKernel.load_data",
-            "Mamba2.__init__",
-            "Mamba2.get_weights",
-            "Mamba2.query",
-            "Mamba2.query._gemm_value",
-            "Mamba2.query._mem_value",
             "Mamba2Kernel.__init__",
             "Mamba2Kernel._cache_key",
             "Mamba2Kernel.clear_cache",
@@ -512,20 +464,17 @@ def test_operation_query_overrides_are_whitelisted():
     )
 
 
-def test_perf_database_query_surface_is_frozen():
+def test_perf_database_has_no_per_call_query_surface():
+    """The deprecated ``query_*`` shim window closed with the
+    deprecation-cleanup PR: PerfDatabase exposes NO per-call query surface.
+    New per-op access goes through EngineHandle.evaluate_ops_json /
+    evaluate_ops_sol_json, the per-phase surface, or whole runs."""
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
 
     live = {name for name in dir(PerfDatabase) if name.startswith("query_")}
-    added = live - PERF_DATABASE_QUERY_SHIMS
-    removed = PERF_DATABASE_QUERY_SHIMS - live
-    assert not added, (
-        f"PerfDatabase grew new query_* methods: {sorted(added)}. The per-call surface is a frozen "
-        "set of deprecated shims (removed in the deprecation-cleanup PR); new per-op access goes through "
-        "EngineHandle.evaluate_ops_json."
-    )
-    assert not removed, (
-        f"query_* shims disappeared before their deprecation window closed: {sorted(removed)} "
-        "(update this contract deliberately if the deprecation-cleanup PR is executing the removal)."
+    assert not live, (
+        f"PerfDatabase grew query_* methods: {sorted(live)}. The per-call surface was removed "
+        "after its deprecation window; new per-op access goes through EngineHandle.evaluate_ops_json."
     )
 
 

@@ -8,7 +8,7 @@ The attention/mHC SOL formulas and the silicon interpolation ladder that used
 to be tested here (``_deepseek_v4_attention_sol``, kNN past-frontier holds,
 prefix-resolved table reads, rank-local head-bucket resolution) retired to the
 compiled engine with #1357 PR-5; that behaviour is anchored by
-``tests/cross_package/test_query_shim_baseline.py`` and the frozen parity
+the frozen parity
 goldens.
 """
 
@@ -121,7 +121,7 @@ def test_mhc_weight_memory_uses_quant_mode():
 
 def test_deepseek_v4_per_op_sol_queries_run_end_to_end():
     """Every DSV4 op must answer a per-op SOL query through the per-call
-    ``op.query()`` surface (now a deprecation shim routed through the compiled
+    ``op._engine_query()`` surface (now a deprecation shim routed through the compiled
     engine's model-less probe). The probe engine loads perf tables from disk,
     so this runs on a real shipped database rather than the synthetic-stuffed
     fixture (whose in-memory tables the engine cannot see)."""
@@ -140,9 +140,11 @@ def test_deepseek_v4_per_op_sol_queries_run_end_to_end():
     model = get_model("sgl-project/DeepSeek-V4-Flash-FP8", model_config, backend_name="sglang")
 
     context_total = sum(
-        float(op.query(db, x=128, batch_size=1, beam_width=1, s=128, prefix=0)) for op in model.context_ops
+        float(op._engine_query(db, x=128, batch_size=1, beam_width=1, s=128, prefix=0)) for op in model.context_ops
     )
-    generation_total = sum(float(op.query(db, x=2, batch_size=2, beam_width=1, s=129)) for op in model.generation_ops)
+    generation_total = sum(
+        float(op._engine_query(db, x=2, batch_size=2, beam_width=1, s=129)) for op in model.generation_ops
+    )
     assert context_total > 0
     assert generation_total > 0
 

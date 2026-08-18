@@ -127,7 +127,7 @@ class TestTrtLLMWideEPMoEDispatch:
             quant_mode=common.MoEQuantMode.bfloat16,
         )
         with pytest.raises(NotImplementedError, match="retired with the Python per-call query stack"):
-            op.query(object(), x=16)
+            op._engine_query(object(), x=16)
 
 
 if __name__ == "__main__":

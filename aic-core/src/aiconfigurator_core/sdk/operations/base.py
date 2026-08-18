@@ -244,36 +244,25 @@ class Operation:
         # major ops divide ``x`` by this in query(); default 1 means no shard.
         self._seq_split: int = seq_split
 
-    # How the deprecated ``query()`` shim maps this op's legacy kwargs onto
-    # the engine's op-list evaluation shape. Subclasses declare one of:
-    #   "tokens"     — token-major: query(x=<num tokens>)  (GEMM, MoE, comm, ...)
-    #   "context"    — batch-major prefill: query(batch_size=, s=, prefix=)
-    #   "generation" — batch-major decode:  query(batch_size=, s=)
+    # How ``_engine_query`` maps this op's legacy kwargs onto the engine's
+    # op-list evaluation shape. Subclasses declare one of:
+    #   "tokens"     — token-major: x=<num tokens>  (GEMM, MoE, comm, ...)
+    #   "context"    — batch-major prefill: batch_size=, s=, prefix=
+    #   "generation" — batch-major decode:  batch_size=, s=
     #   "module"     — phase carried by the instance (``_is_context`` /
-    #                  ``_phase``) or the ``is_context=`` query kwarg
-    # ``None`` (default) = no shim: query() raises NotImplementedError.
+    #                  ``_phase``) or the ``is_context=`` kwarg
+    # ``None`` (default) = not reachable through the kwarg mapping.
     _ENGINE_QUERY_SHAPE: ClassVar[str | None] = None
 
-    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        """DEPRECATED (#1357): per-call query shim, removed next release.
-
-        Returns the compiled engine's op-level estimate for this op (scaled by
-        ``scale_factor``) as a ``PerformanceResult`` — the same value the
-        engine charges in a model run. Routed through the op-list FFI; the
-        Python per-call math is gone. Long-term callers use
-        ``EngineHandle.evaluate_ops_json`` (op-list) or the phase/run surface.
-        """
-        import warnings
-
-        from aiconfigurator_core.sdk.engine import QUERY_SHIM_DEPRECATION
-
-        warnings.warn(f"{type(self).__name__}.query: {QUERY_SHIM_DEPRECATION}", DeprecationWarning, stacklevel=2)
-        return self._engine_query(database, **kwargs)
-
     def _engine_query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        """The shim body without the deprecation warning — internal callers
-        (the ``_sum_latency`` fallback loop, the AFD comm ops' orchestration)
-        route here so warnings fire only on the public deprecated surface."""
+        """Evaluate this op through the compiled engine's single-op plumbing.
+
+        The permanent internal surface behind the Python-side ORCHESTRATION
+        callers (the ``_sum_latency`` fallback loop, the AFD comm ops, the
+        pareto A/F balance probe). The public deprecated ``query()`` wrapper
+        that used to front this was removed after its one-release window;
+        external callers use ``EngineHandle.evaluate_ops_json`` (op-list) or
+        the phase/run surface."""
         from aiconfigurator_core.sdk.engine import _evaluate_single_op
 
         op, eval_kwargs = self._engine_query_plan(kwargs)

@@ -9,7 +9,7 @@ borrowing, interpolation faithfulness, query_trtllm_alltoall normalization
 and its not-enabled zero, custom-allreduce/nccl/p2p mode math, the HYBRID
 fallback) retired to the compiled engine with #1357 PR-5 —
 query_trtllm_alltoall is a tombstone, the rest are engine-routed shims whose
-values are anchored by tests/cross_package/test_query_shim_baseline.py and
+values are anchored by
 the frozen parity goldens.
 """
 

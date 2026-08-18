@@ -127,7 +127,7 @@ def _assert_ops_identical(built, expected):
 
 
 def _lat(op, db, x):
-    return float(op.query(db, x=x))
+    return float(op._engine_query(db, x=x))
 
 
 def _assert_close(got, want, context):
@@ -401,18 +401,33 @@ def _legacy_trtllm_combine_op_name(phase):
 
 
 def _legacy_trtllm_moe_latency(db, phase, x, enable_eplb, num_slots):
-    """The legacy TrtLLMWideEPMoE query, recomputed via ``query_wideep_moe_compute``."""
-    result = db.query_wideep_moe_compute(
-        num_tokens=x * 16,  # attention_dp globalizes tokens
+    """The legacy TrtLLMWideEPMoE query, recomputed via the unified
+    expert-compute twin (the retired ``query_wideep_moe_compute`` shim's
+    exact construction) through the engine's single-op plumbing."""
+    from aiconfigurator_core.sdk import engine
+    from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
+
+    op = MoEExpertCompute(
+        "wideep_moe_query",
+        1.0,
         hidden_size=7168,
         inter_size=2048,
         topk=8,
         num_experts=256,
-        num_slots=num_slots or 256,
-        moe_tp_size=1,
         moe_ep_size=16,
         quant_mode=TRTLLM_MOE_QUANT,
         workload_distribution=_trtllm_distribution(enable_eplb),
+        attention_dp_size=1,
+        inference_phase="context",
+        num_slots=num_slots or 256,
+    )
+    result = engine._evaluate_single_op(
+        db,
+        op,
+        is_context=True,
+        batch_size=1,
+        s=1,
+        x=int(x * 16),  # attention_dp globalizes tokens
     )
     return float(result) * _trtllm_scale(phase)
 

@@ -14,7 +14,7 @@ pytestmark = pytest.mark.unit
 # on the synthetic fixture (non-causal SOL FLOPs, the 2x-causal relation,
 # silicon table lookups, op-vs-facade equality, scale-factor and partial-RoPE
 # latency composition) moved to the compiled engine and is anchored by
-# tests/cross_package/test_query_shim_baseline.py and the frozen parity
+# the frozen parity
 # goldens. Construction contracts stay below.
 
 

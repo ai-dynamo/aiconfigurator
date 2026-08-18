@@ -8,7 +8,7 @@ forwarding to inner ops) retired to the compiled engine with #1357 PR-5:
 ``OverlapOp.query`` is now a deprecation shim that converts the whole
 composite (children included) and evaluates it in Rust, so there is no
 Python seam where per-child queries happen. That behaviour is anchored by
-the frozen parity goldens and tests/cross_package/test_query_shim_baseline.py.
+the frozen parity goldens.
 What stays Python-owned — construction and the aggregation shape of weight
 accounting (per-child weights themselves come from the engine since PR-6) —
 is tested here.

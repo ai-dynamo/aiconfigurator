@@ -321,7 +321,7 @@ def test_candidate_graph_builds_and_large_ep_ops_query_finitely(synth_systems, s
     # 128 * dp8 = 1024 on the compute curve (in range).
     database = get_database(SYNTH_SYSTEM, backend, SYNTH_VERSION)
     for op in large_ops:
-        latency = float(op.query(database, x=128))
+        latency = float(op._engine_query(database, x=128))
         assert math.isfinite(latency) and latency > 0.0, op._name
 
 

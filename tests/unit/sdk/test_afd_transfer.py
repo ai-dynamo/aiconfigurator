@@ -13,7 +13,8 @@ per-rank volumes, zero gates). The per-message latency comes from the
 compiled engine via ``afd_transfer._engine_comm_query`` — stubbed here at
 that seam, recording the probe twin op each leg builds. Value fidelity
 against the engine is covered by ``tests/cross_package/
-test_query_shim_baseline.py`` (afd-* cases on a real database).
+the frozen parity goldens (afd-* cases were pinned on a real database
+through the migration window).
 """
 
 from __future__ import annotations

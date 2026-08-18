@@ -38,7 +38,7 @@ from aiconfigurator_core.sdk.operations.elementwise import ElementWise
 from aiconfigurator_core.sdk.operations.embedding import Embedding
 from aiconfigurator_core.sdk.operations.fpm_forward import FPMForwardOp
 from aiconfigurator_core.sdk.operations.gemm import GEMM
-from aiconfigurator_core.sdk.operations.mamba import GDNKernel, KDAKernel, Mamba2, Mamba2Kernel
+from aiconfigurator_core.sdk.operations.mamba import GDNKernel, KDAKernel, Mamba2Kernel
 from aiconfigurator_core.sdk.operations.mla import (
     ContextMLA,
     GenerationMLA,
@@ -87,7 +87,6 @@ __all__ = [
     "KDAKernel",
     "MLABmm",
     "MLAModule",
-    "Mamba2",
     "Mamba2Kernel",
     "MoE",
     "MoEAllToAll",

@@ -128,7 +128,7 @@ def _make_op(scale_factor=1.0, **overrides):
 # normalization, typed misses, attention_tp token division, off-grid sms 2D
 # interpolation, and the estimation-tier EmpiricalNotImplementedError — live
 # in aic-core/rust/.../operators/moe_a2a.rs, anchored by
-# tests/cross_package/test_query_shim_baseline.py and the frozen parity
+# the frozen parity
 # goldens (the shims answer from DISK, so injected in-memory stores are
 # invisible to them). Python-side boundary contracts stay below.
 # ---------------------------------------------------------------------------
@@ -144,21 +144,14 @@ def test_ctor_rejects_unknown_phase():
         _make_op(phase="gather")
 
 
-def test_ctor_and_query_reject_phase_outside_backend_comm_phases(a2a_db):
+def test_ctor_rejects_phase_outside_backend_comm_phases():
     # prepare is a known phase globally, but only the trtllm nvlink_two_sided
     # backend implements it — the registry's per-backend comm_phases must
-    # reject the combination at the boundary, not as a later data miss.
+    # reject the combination at the boundary, not as a later data miss. (The
+    # ctor is the single validation boundary since the per-call query shims
+    # retired.)
     with pytest.raises(ValueError, match="does not implement phase 'prepare'"):
-        _make_op(comm_backend="deepep_ht", phase="prepare")
-    with pytest.raises(ValueError, match="does not implement phase 'prepare'"):
-        a2a_db.query_moe_a2a("deepep_ll", "prepare", "default", 16, 2, 7168, 8, 256, 32)
-
-
-def test_query_rejects_unknown_backend_and_phase(a2a_db):
-    with pytest.raises(ValueError, match="comm_backend"):
-        a2a_db.query_moe_a2a("bogus_backend", "dispatch", "default", 16, 2, 7168, 8, 256, 32)
-    with pytest.raises(ValueError, match="phase"):
-        a2a_db.query_moe_a2a("deepep_ht", "gather", "default", 16, 2, 7168, 8, 256, 32)
+        _make_op(comm_backend="deepep_ll", phase="prepare")
 
 
 def test_get_weights_is_zero():

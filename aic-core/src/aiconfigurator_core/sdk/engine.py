@@ -1109,9 +1109,9 @@ def build_database_probe_spec_json(
     sources its per-op reference values through this.
 
     ``database_mode`` overrides the view's own query mode (wire token, e.g.
-    ``"SILICON"``): the deprecated per-call ``query_*(...,
-    database_mode=...)`` shims reproduce a per-call mode by probing the same
-    sources under the requested mode."""
+    ``"SOL"``): the table-view path probes estimate-only databases (a spec
+    yaml with no collected data) under the SOL mode token so their analytic
+    views stay servable."""
     engine: dict[str, Any] = {
         "schema_version": ENGINE_CONFIG_SCHEMA_VERSION,
         "model_name": "__database_probe__",
@@ -1146,16 +1146,17 @@ def build_database_probe_spec_json(
 
 
 # --------------------------------------------------------------------------- #
-# Deprecated per-call query shim plumbing (#1357 PR-5).
+# Model-less probe plumbing.
 #
-# The retired Python per-call query stack (``PerfDatabase.query_*`` and
-# ``Operation.query``) survives one release as thin shims that route every
-# value through the compiled engine. This block is their plumbing: a small
-# LRU of model-less probe engines keyed by (database identity, effective
-# query mode) plus a single-op evaluation helper. It is NOT a second public
-# query surface — long-term callers use ``EngineHandle.evaluate_ops_json`` /
-# ``evaluate_ops_sol_json`` (op-list FFI) or the phase/run entry points; this
-# plumbing is removed together with the shims.
+# A small LRU of probe engines keyed by database identity, serving the two
+# PERMANENT consumers that need engine values without a compiled model: the
+# table-view bindings (``engine_table_view.fetch_table_view``) and the
+# single-op evaluation helper behind the Python-side orchestration surfaces
+# (the AFD comm ops, the ``_sum_latency`` fallback loop). It is NOT a public
+# per-op query surface — the deprecated ``query_*``/``Operation.query`` shims
+# that once rode this plumbing were removed after their one-release window;
+# long-term callers use ``EngineHandle.evaluate_ops_json`` /
+# ``evaluate_ops_sol_json`` (op-list FFI) or the phase/run entry points.
 # --------------------------------------------------------------------------- #
 
 _PROBE_HANDLE_CACHE: dict[str, EngineHandle] = {}
@@ -1166,13 +1167,6 @@ _PROBE_HANDLE_CACHE_MAX = 8
 # so a cleared LRU can never be resurrected through a stale memoized key
 # (stale source map, stale SOL-mode decision).
 _PROBE_CACHE_GENERATION = 0
-
-QUERY_SHIM_DEPRECATION = (
-    "The Python per-call query stack is deprecated (#1357) and will be removed in the "
-    "next release; values now come from the compiled engine. Migrate to the op-list FFI "
-    "(EngineHandle.evaluate_ops_json / evaluate_ops_sol_json), the per-phase surface "
-    "(run_static_per_op), or whole-run entry points (run_static / InferenceSession)."
-)
 
 
 def _require_real_database(database: Any) -> None:
@@ -1187,10 +1181,10 @@ def _require_real_database(database: Any) -> None:
 
     if not isinstance(database, PerfDatabase):
         raise TypeError(
-            "the deprecated per-call query shims route through the compiled engine, which "
-            f"loads perf tables from disk — got {type(database)!r} instead of PerfDatabase. "
-            "Evaluate ad-hoc data via EngineHandle.evaluate_ops_json on a real database, or "
-            "walk the raw loaded tables (database._<family>_data) directly."
+            "the engine table view and the single-op plumbing route through the compiled "
+            f"engine, which loads perf tables from disk — got {type(database)!r} instead of "
+            "PerfDatabase. Evaluate ad-hoc data via EngineHandle.evaluate_ops_json on a real "
+            "database, or walk the raw loaded tables (database._<family>_data) directly."
         )
 
 
@@ -1249,20 +1243,17 @@ def _evaluate_single_op(
     prefix: int = 0,
     x: int | None = None,
     imbalance_correction_scale: float = 1.0,
-    database_mode: Any = None,
 ):
-    """Evaluate ONE Python ``Operation`` through the compiled engine — the
-    value source behind the deprecated per-call shims.
+    """Evaluate ONE Python ``Operation`` through the compiled engine, under
+    the database's live mode.
 
-    ``database_mode`` follows the retired facades' per-call semantics:
-    ``None`` uses the database's live mode; ``SILICON`` / ``HYBRID`` /
-    ``EMPIRICAL`` / ``SOL`` re-mode the probe for this call (scalar
-    ``PerformanceResult`` — SOL rides the re-moded probe, NOT the
-    decomposition FFI, so it works for every op family); ``SOL_FULL``
-    returns the raw ``(sol_time, sol_math, sol_mem)`` triple via the
-    SOL-decomposition FFI (raises for op families whose SOL path does not
-    export its decomposition)."""
-    from aiconfigurator_core.sdk.common import DatabaseMode
+    The permanent single-op plumbing behind the Python-side ORCHESTRATION
+    surfaces (the AFD comm ops' twin evaluation, the ``_sum_latency``
+    fallback loop). The retired per-call query shims used to ride this too,
+    with a per-call ``database_mode`` re-moding dimension (including the
+    ``SOL_FULL`` decomposition triple) — that dimension left with the shims;
+    per-call SOL decomposition is served by
+    ``EngineHandle.evaluate_ops_sol_json`` directly."""
     from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
     ops_json = build_ops_json(
@@ -1279,23 +1270,7 @@ def _evaluate_single_op(
         imbalance_correction_scale=float(imbalance_correction_scale),
         x=None if x is None else int(x),
     )
-    # Normalize enum-or-string modes to the wire token BEFORE branching, so a
-    # plain "SOL_FULL" string takes the decomposition branch exactly like the
-    # enum member (the str() tolerance below otherwise routes it into the
-    # probe as a database mode and returns the wrong type).
-    mode_token = None
-    if database_mode is not None:
-        mode_token = getattr(database_mode, "name", str(database_mode))
-    if mode_token == DatabaseMode.SOL_FULL.name:
-        # Acquire the decomposition handle through a SOL-mode probe: the sol
-        # FFI forces the SOL_FULL view internally regardless of the handle's
-        # base mode, and the SOL-mode load path tolerates a missing perf-data
-        # directory — so estimate-only (spec-yaml-only) databases keep their
-        # legacy SOL_FULL triples instead of failing at engine load.
-        handle = _probe_handle_for(database, DatabaseMode.SOL.name)
-        (_, sol_time, sol_math, sol_mem) = handle.evaluate_ops_sol_json(ops_json, **eval_kwargs)[0]
-        return sol_time, sol_math, sol_mem
-    handle = _probe_handle_for(database, mode_token)
+    handle = _probe_handle_for(database, None)
     (_, latency, energy, source) = handle.evaluate_ops_json(ops_json, **eval_kwargs)[0]
     return PerformanceResult(latency, energy=energy, source=source)
 

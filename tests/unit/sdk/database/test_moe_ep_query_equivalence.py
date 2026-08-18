@@ -328,8 +328,8 @@ def test_moe_expert_compute_per_call_quant_mode_override_reaches_the_walk():
         inference_phase="context",
     )
     with pytest.raises(PerfDataNotAvailableError):
-        op.query(db, x=min(tokens))  # ctor mode alone must miss
-    overridden = op.query(db, x=min(tokens), quant_mode=quant)  # override hits
+        op._engine_query(db, x=min(tokens))  # ctor mode alone must miss
+    overridden = op._engine_query(db, x=min(tokens), quant_mode=quant)  # override hits
     direct = _query_ep(
         db, "deepep_moe", quant, dist, "context", topk, experts, experts, hidden, inter, tp, ep, min(tokens)
     )

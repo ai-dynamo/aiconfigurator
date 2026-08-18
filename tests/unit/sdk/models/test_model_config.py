@@ -627,7 +627,7 @@ class TestHFModelSupport:
             workload_distribution="uniform",
         )
 
-        result = op.query(database, x=16)
+        result = op._engine_query(database, x=16)
 
         # The engine owns scale-factor application now; the shim returns the
         # engine's value untouched.
@@ -661,7 +661,7 @@ class TestHFModelSupport:
         )
 
         with pytest.raises(ValueError, match="Blackwell"):
-            op.query(get_database("h200_sxm", "sglang", "0.5.6.post2"), x=16)
+            op._engine_query(get_database("h200_sxm", "sglang", "0.5.6.post2"), x=16)
 
     def test_deepseek_v32_kvcache_bytes_include_indexer_cache(self):
         model_config = config.ModelConfig(

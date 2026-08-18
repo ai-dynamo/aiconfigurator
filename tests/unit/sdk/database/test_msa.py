@@ -7,7 +7,7 @@ The cross-op (XOP) DSA-to-MSA utilization transfer this file also used to pin
 (policy gating + xop provenance tagging via the ``_dsa_context_util`` seam)
 retired to the compiled engine with #1357 PR-5; transfer-ladder behaviour is
 anchored by the frozen parity goldens and
-tests/cross_package/test_query_shim_baseline.py."""
+the frozen parity goldens."""
 
 import pytest
 
@@ -49,8 +49,8 @@ def test_msa_sol_scales_with_workload():
     db = get_database_view("b200_sxm", "sglang", "0.5.14", database_mode="SOL")
     assert db is not None, "b200_sxm/sglang/0.5.14 data missing"
     op = _ctx_msa()
-    small = float(op.query(db, batch_size=8, s=512, prefix=0))
-    large = float(op.query(db, batch_size=8, s=2048, prefix=0))
-    with_prefix = float(op.query(db, batch_size=8, s=2048, prefix=2048))
+    small = float(op._engine_query(db, batch_size=8, s=512, prefix=0))
+    large = float(op._engine_query(db, batch_size=8, s=2048, prefix=0))
+    with_prefix = float(op._engine_query(db, batch_size=8, s=2048, prefix=2048))
     assert 0 < small < large  # scales with new-token count
     assert with_prefix > large  # cached prefix adds indexer work beyond index_topk

@@ -3,7 +3,7 @@
 
 """Generate the Python oracle for the Rust ``moe_expert_compute`` perf table.
 
-Dumps stratified ``(key, num_tokens) -> PerfDatabase.query_moe_expert_compute(...)``
+Dumps stratified ``(key, num_tokens) -> MoEExpertCompute twin evaluation``
 samples from the shipped h200_sxm/sglang and gb200/trtllm data to
 ``src/perf_database/testdata/moe_expert_compute_oracle.json``; the Rust
 ``#[cfg(test)] moe_ep_matches_python_oracle`` test loads the same parquet
@@ -35,6 +35,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", 
 sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
 from aiconfigurator_core.sdk.common import MoEQuantMode
+from aiconfigurator_core.sdk.engine import _evaluate_single_op
 from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
 from aiconfigurator_core.sdk.perf_database import get_database
 
@@ -207,20 +208,23 @@ def build_samples(db, system, data_root):
             ) = coord
             if kind in ("dist_uniform_fallback", "dist_first_available"):
                 distribution = item[3]
-            result = db.query_moe_expert_compute(
-                kernel_source,
-                MoEQuantMode[quant_name],
-                distribution,
-                inference_phase,
-                topk,
-                num_experts,
-                num_slots,
-                hidden_size,
-                inter_size,
-                moe_tp_size,
-                moe_ep_size,
-                num_tokens,
+            assert moe_tp_size == 1, "the unified expert-compute twin carries no tp axis"
+            op = MoEExpertCompute(
+                "moe_expert_compute_query",
+                1.0,
+                hidden_size=hidden_size,
+                inter_size=inter_size,
+                topk=topk,
+                num_experts=num_experts,
+                moe_ep_size=moe_ep_size,
+                quant_mode=MoEQuantMode[quant_name],
+                workload_distribution=distribution,
+                attention_dp_size=1,
+                inference_phase=inference_phase,
+                num_slots=num_slots,
+                kernel_source=kernel_source,
             )
+            result = _evaluate_single_op(db, op, is_context=True, batch_size=1, s=1, x=int(num_tokens))
             samples.append(
                 {
                     "data_root": data_root,
@@ -257,7 +261,7 @@ def main() -> None:
         "_regenerate": (
             ".venv/bin/python aic-core/rust/aiconfigurator-core/parity_tests/gen_moe_expert_compute_oracle.py"
         ),
-        "_source": "PerfDatabase.query_moe_expert_compute (shared_layer=False), SILICON mode",
+        "_source": "MoEExpertCompute twin via _evaluate_single_op (shared_layer=False), SILICON mode",
         "_tuples": [f"{s}/{b}/{v}" for s, b, v in TUPLES],
     }
     out_path = os.path.normpath(OUT_PATH)
