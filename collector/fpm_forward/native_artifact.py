@@ -276,7 +276,8 @@ def validate_native_collection(
         rank_timings.append((rank, elapsed, measured))
 
         points = []
-        for benchmark_id, row in enumerate(rows, start=1):
+        seen_ids = set()
+        for row in rows:
             if not isinstance(row, dict) or not isinstance(row.get("point"), dict):
                 raise TypeError(f"native result entry is malformed: {path}")
             point = row["point"]
@@ -289,8 +290,10 @@ def validate_native_collection(
             }
             if not required.issubset(point) or point["point_type"] != cell.workload_kind:
                 raise ValueError(f"native point contract mismatch: {point}")
-            if int(point["benchmark_id"]) != benchmark_id:
-                raise ValueError(f"native benchmark IDs are not contiguous: {path}")
+            benchmark_id = int(point["benchmark_id"])
+            if benchmark_id in seen_ids:
+                raise ValueError(f"native benchmark IDs are duplicated: {path}")
+            seen_ids.add(benchmark_id)
             _expected_scheduled(point)
             fpms = row.get("fpms")
             if not isinstance(fpms, list) or len(fpms) != 1:
@@ -298,6 +301,14 @@ def validate_native_collection(
             _validate_fpm(point, fpms[0], rank=rank)
             local_fpms[(benchmark_id, rank)] = fpms[0]
             points.append(point)
+        # The engine writes results in execution order, and KV warm-up's
+        # point reordering (batch/kv-depth descending for warm-chain reuse,
+        # fake points last) deliberately decouples that order from
+        # benchmark_id -- so validate the ID set, not file positions, then
+        # canonicalize by ID.
+        if seen_ids != set(range(1, expected + 1)):
+            raise ValueError(f"native benchmark IDs are not contiguous: {path}")
+        points.sort(key=lambda item: int(item["benchmark_id"]))
         if canonical_points is None:
             canonical_points = points
         elif points != canonical_points:
@@ -313,9 +324,16 @@ def validate_native_collection(
 
     measurements = []
     measured_iteration_seconds = 0.0
-    for benchmark_id, (point, group) in enumerate(zip(canonical_points, canonical_groups, strict=True), start=1):
+    # iteration_groups are written in execution order too; canonicalize by
+    # benchmark_id so the positional pairing with the ID-sorted points holds.
+    for group in canonical_groups:
         if not isinstance(group, dict):
-            raise TypeError(f"native iteration group {benchmark_id} is not a mapping")
+            raise TypeError("native iteration group is not a mapping")
+    try:
+        canonical_groups = sorted(canonical_groups, key=lambda group: int(group["benchmark_id"]))
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"native iteration group benchmark_id is invalid: {error}") from error
+    for benchmark_id, (point, group) in enumerate(zip(canonical_points, canonical_groups, strict=True), start=1):
         if (
             group.get("benchmark_id") != benchmark_id
             or group.get("point") != point

@@ -1081,6 +1081,92 @@ def test_native_collection_validation_accepts_balanced_total_points(tmp_path):
         _validate_runtime_collection(cell, tmp_path)
 
 
+def test_native_collection_validation_accepts_execution_order_decoupled_from_ids(tmp_path):
+    """KV warm-up reorders execution (batch/kv-depth descending, fake points
+    last) and the engine writes results in execution order, so file order is
+    NOT benchmark_id order (engine contract: the two are decoupled). The
+    validator must accept any permutation whose ID set is exactly 1..N and
+    canonicalize by ID."""
+
+    cell = _cell(phase="decode")
+    execution_order = [3, 1, 4, 2]
+    rows = []
+    groups = []
+    for benchmark_id in execution_order:
+        point = {
+            "point_type": "decode",
+            "benchmark_id": benchmark_id,
+            "total_prefill_tokens": 0,
+            "total_kv_read_tokens": 128,
+            "batch_size": 4,
+            "expected_cudagraph_mode": "FULL",
+            "expected_capture_size": 4,
+            "padding_tokens": 0,
+            "sample_reasons": ["capture"],
+        }
+        fpm = {
+            "counter_id": benchmark_id,
+            "dp_rank": 0,
+            "wall_time": 0.01 * benchmark_id,
+            "scheduled_requests": {
+                "num_prefill_requests": 0,
+                "sum_prefill_tokens": 0,
+                "sum_prefill_kv_tokens": 0,
+                "num_decode_requests": 4,
+                "sum_decode_kv_tokens": 128,
+            },
+        }
+        rows.append({"point": point, "fpms": [fpm]})
+        groups.append(
+            {
+                "benchmark_id": benchmark_id,
+                "point": point,
+                "expected_dp_ranks": [0],
+                "complete": True,
+                "wall_time": fpm["wall_time"],
+                "rank_results": [{"dp_rank": 0, "fpms": [fpm]}],
+            }
+        )
+    measured = sum(0.01 * benchmark_id for benchmark_id in execution_order)
+    payload = {
+        "schema_version": 2,
+        "artifact_type": "rank",
+        "status": "complete",
+        "valid": True,
+        "usable": True,
+        "timing_valid": True,
+        "stop_reason": None,
+        "error": None,
+        "run_id": "run",
+        "grid_digest": "grid",
+        "config": {"mode": "decode"},
+        "coverage": {"expected_points": 4, "completed_points": 4, "skipped_points": 0},
+        "dp": {"rank": 0, "size": 1},
+        "results": rows,
+        "iteration_groups": groups,
+        "skipped_points": [],
+        "missing_phases": [],
+        "timing": {"benchmark_elapsed_seconds": measured + 1.0, "measured_iteration_seconds": measured},
+    }
+    path = tmp_path / "pod-0" / "benchmark.json"
+    path.parent.mkdir()
+    _write_provenance(path.parent / "collector-provenance.json", cell_id=cell.cell_id)
+    path.write_text(json.dumps(payload))
+
+    assert _validate_runtime_collection(cell, tmp_path) == 4
+
+    # A permutation with a gap (1,2,4,5) must still fail as non-contiguous.
+    # counter_id tracks benchmark_id by contract, so mutate both (the row and
+    # its group share the fpm object, one update covers each).
+    for row, group, wrong_id in zip(rows, groups, [5, 1, 4, 2], strict=True):
+        row["point"]["benchmark_id"] = wrong_id
+        row["fpms"][0]["counter_id"] = wrong_id
+        group["benchmark_id"] = wrong_id
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="not contiguous"):
+        _validate_runtime_collection(cell, tmp_path)
+
+
 def test_native_collection_validation_rejects_group_local_divergence(tmp_path):
     cell = _cell(dp=2)
     for rank in range(2):
