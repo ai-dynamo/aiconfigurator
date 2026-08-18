@@ -13,6 +13,7 @@ import pytest
 
 from collector.case_generator import (
     get_attention_head_configs,
+    get_gemm_case_specs,
     get_moe_quantization_specs,
     moe_model_allows_quantization,
 )
@@ -40,6 +41,19 @@ def _load_mla_adapter(module_path: str, globals_dict: dict):
     return namespace["_build_mla_test_cases"]
 
 
+def _load_gdn_getter(module_path: str):
+    from collector.case_generator import get_common_gdn_test_cases
+
+    source_path = REPO_ROOT / module_path
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "get_gdn_test_cases"
+    )
+    namespace = {"get_common_gdn_test_cases": get_common_gdn_test_cases}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
+    return namespace["get_gdn_test_cases"]
+
+
 def test_model_case_plan_merges_required_base_and_framework_specific_ops():
     plan = build_collection_case_plan(backend="sglang", model_path="deepseek-ai/DeepSeek-V3")
 
@@ -51,8 +65,11 @@ def test_model_case_plan_merges_required_base_and_framework_specific_ops():
     assert "moe" in plan.selected_ops
     assert "mla_context" in plan.selected_ops
     assert "wideep_mla_context" not in plan.selected_ops
-    assert "wideep_moe" not in plan.selected_ops
-    assert "trtllm_moe_wideep" not in plan.selected_ops
+    # The sglang plan keeps moe_ep out (separate WideEP 0.5.10 runtime); the
+    # trtllm plan activates it (same image as stock trtllm) — see
+    # tests/unit/collector/trtllm/test_collect_moe_ep.py.
+    assert "moe_ep" not in plan.selected_ops
+    assert "trtllm_moe_wideep" not in plan.selected_ops  # retired op name
 
 
 def test_attention_head_configs_preserve_real_model_structures_without_cross_mixing():
@@ -196,6 +213,71 @@ def test_added_model_moe_profiles_resolve_targeted_aliases(monkeypatch):
         assert {
             (case.model_name, case.hidden_size, case.inter_size, case.topk, case.num_experts) for case in cases
         } == {expected}
+
+
+@pytest.mark.parametrize(
+    ("model_path", "d_model", "global_k_heads", "global_v_heads", "tp_sizes"),
+    [
+        ("Qwen/Qwen3.5-27B", 5120, 16, 48, (1, 2, 4, 8)),
+        ("Qwen/Qwen3.5-35B-A3B", 2048, 16, 32, (1, 2, 4, 8, 16)),
+    ],
+)
+def test_qwen35_gdn_getters_expand_tp_local_physical_keys(
+    monkeypatch, model_path, d_model, global_k_heads, global_v_heads, tp_sizes
+):
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+    expected = {
+        (phase, d_model, 4, global_k_heads // tp, 128, global_v_heads // tp, 128)
+        for phase in ("context", "generation")
+        for tp in tp_sizes
+    }
+
+    for module_path in ("collector/sglang/collect_gdn.py", "collector/vllm/collect_gdn.py"):
+        cases = _load_gdn_getter(module_path)()
+        assert {(case[0], case[1], case[2], case[3], case[4], case[5], case[6]) for case in cases} == expected
+
+
+def test_gdn_tp_declarations_fail_loud_and_dedupe_on_loader_key(monkeypatch):
+    from collector import case_generator
+
+    invalid = {
+        "model_path": "example/invalid",
+        "d_model": 2048,
+        "d_conv": 4,
+        "num_k_heads": 16,
+        "head_k_dim": 128,
+        "num_v_heads": 32,
+        "head_v_dim": 128,
+        "tensor_parallel_sizes": [3],
+    }
+    monkeypatch.setattr(case_generator, "_model_case_values", lambda op_name: [invalid])
+    with pytest.raises(ValueError, match="both global head counts to be divisible"):
+        case_generator.get_common_gdn_test_cases()
+
+    def profile(model_path, d_model, num_k_heads, num_v_heads, tp):
+        return {
+            "model_path": model_path,
+            "d_model": d_model,
+            "d_conv": 4,
+            "num_k_heads": num_k_heads,
+            "head_k_dim": 128,
+            "num_v_heads": num_v_heads,
+            "head_v_dim": 128,
+            "tensor_parallel_sizes": [tp],
+        }
+
+    profiles = [
+        profile("example/first", 2048, 16, 32, 4),
+        profile("example/duplicate", 2048, 4, 8, 1),
+        profile("example/distinct-d-model", 4096, 4, 8, 1),
+    ]
+    monkeypatch.setattr(case_generator, "_model_case_values", lambda op_name: profiles)
+    cases = case_generator.get_common_gdn_test_cases()
+
+    assert len(cases) == 4
+    assert {(case.phase, case.d_model, case.num_k_heads, case.num_v_heads, case.model_name) for case in cases} == {
+        (phase, 2048, 4, 8, "example/first") for phase in ("context", "generation")
+    } | {(phase, 4096, 4, 8, "example/distinct-d-model") for phase in ("context", "generation")}
 
 
 def test_mimo_attention_profile_matches_aic_full_attention_window(monkeypatch):
@@ -498,6 +580,7 @@ def test_deepseek_minimax_and_nemotron_moe_quantization_is_artifact_specific():
             "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": set() if backend == "sglang" else {"fp8"},
         }
         if backend == "vllm":
+            expected_by_artifact["nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8"] = {"fp8"}
             expected_by_artifact["nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"] = set()
             expected_by_artifact["nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"] = set()
         for model_path, expected in expected_by_artifact.items():
@@ -623,14 +706,18 @@ def test_gemm_common_cases_expand_from_base_op_yaml_shape_specs():
     cases = get_gemm_case_specs()
     xpu_cases = get_gemm_case_specs("vllm_xpu")
 
-    assert len(cases) == 35742
+    # Base sweep expansion first (order preserved for checkpoint stability),
+    # then model_case_values.gemm rows.
+    assert len(cases) == 37296
     assert cases[0] == GemmCommonTestCase(x=32768, n=65536, k=51200)
-    assert cases[-1] == GemmCommonTestCase(x=1, n=32, k=32)
+    assert cases[35741] == GemmCommonTestCase(x=1, n=32, k=32)
+    assert cases[-1] == GemmCommonTestCase(x=1, n=1, k=4096)
     assert not any(case.n == 65536 and case.k == 65536 for case in cases)
 
-    assert len(xpu_cases) == 9177
+    assert len(xpu_cases) == 9618
     assert xpu_cases[0] == GemmCommonTestCase(x=8192, n=65536, k=12288)
-    assert xpu_cases[-1] == GemmCommonTestCase(x=1, n=32, k=32)
+    assert xpu_cases[9176] == GemmCommonTestCase(x=1, n=32, k=32)
+    assert xpu_cases[-1] == GemmCommonTestCase(x=1, n=1, k=4096)
     assert get_gemm_type_specs("vllm_xpu") == ["bfloat16", "fp8"]
 
     compute_scale_cases = get_compute_scale_case_specs()
@@ -656,7 +743,9 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # (BF16/FP8) share GLM-5's MoE dims. nvidia/GLM-5.1-NVFP4 is also
     # registered in moe.yaml base_ops.
     # +114 for Kimi-K3's LatentMoE row (3584/3072, 896x16, w4a16_mxfp4).
-    assert len(moe_cases) == 5025
+    # +198 from Step-3.7-Flash: 99 cases for each physical BF16/FP8 artifact.
+    # +117 for the vLLM Nemotron Super FP8 latent-MoE row (1024/2688, 512x22).
+    assert len(moe_cases) == 5340
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -669,6 +758,31 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
         and case.inter_size == 5120
         for case in moe_cases
     )
+    # Step-3.7-Flash: assert both physical artifact identities, the shape, and
+    # the routing contract. MoE loads the model config by model_name, so the
+    # BF16 artifact must not alias to the FP8 representative.
+    step_cases = [case for case in moe_cases if "Step-3.7-Flash" in case.model_name]
+    assert {case.model_name for case in step_cases} == {
+        "stepfun-ai/Step-3.7-Flash",
+        "stepfun-ai/Step-3.7-Flash-FP8",
+    }
+    assert sum(case.model_name == "stepfun-ai/Step-3.7-Flash" for case in step_cases) == 99
+    assert sum(case.model_name == "stepfun-ai/Step-3.7-Flash-FP8" for case in step_cases) == 99
+    assert all(
+        case.hidden_size == 4096 and case.inter_size == 1280 and case.topk == 8 and case.num_experts == 288
+        for case in step_cases
+    )
+    # Sigmoid gate + correction bias before top-k, renormalized and scaled by
+    # 3.0. The defaults (softmax, no bias, no scaling) would benchmark a
+    # different MoE invocation from the one that is actually served.
+    assert all(
+        case.sglang_moe_scoring_func == "sigmoid"
+        and case.sglang_moe_has_correction_bias
+        and case.sglang_moe_renormalize
+        and case.sglang_moe_routed_scaling_factor == 3.0
+        for case in step_cases
+    )
+
     # Kimi-K3 declares the native 96-head MLA profile (DeepSeek geometry),
     # expanding the MLA spec grids.
     assert len(get_context_mla_case_specs()) == 330
@@ -676,7 +790,7 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     mamba_cases = get_common_mamba2_test_cases()
     assert len(mamba_cases) == 12
     assert {case.model_name for case in mamba_cases} >= {"MAMBA2_GENERIC_4K", "MAMBA2_GENERIC_1K"}
-    assert len(get_common_gdn_test_cases()) == 16
+    assert len(get_common_gdn_test_cases()) == 74
     mhc_cases = get_common_mhc_test_cases()
     assert len(mhc_cases) == 8
     assert {(case.model_name, case.phase, case.hidden_size, case.hc_mult) for case in mhc_cases} == {
@@ -1131,7 +1245,7 @@ def test_dsv4_plan_only_uses_backend_specific_case_plan():
 
     assert payload["ops"] == expected_ops
     assert "dsv4_csa_topk_calib" in payload["ops"]
-    assert "wideep_moe" not in payload["ops"]
+    assert "moe_ep" not in payload["ops"]
 
 
 def test_vllm_024_schedules_consumed_dsv4_modules_only():
@@ -1227,7 +1341,7 @@ def test_vllm_024_model_plans_only_schedule_representable_attention_paths():
         "mla_context",
         "mla_generation",
         "moe",
-        "trtllm_moe_wideep",
+        "moe_ep",
     ]
     assert build_collection_case_plan(backend="vllm_xpu", model_path=kimi_path).ops == ["gemm", "moe"]
 
@@ -1406,6 +1520,7 @@ def test_quant_sensitive_moe_artifacts_use_quant_equivalent_representatives(monk
         "nvidia/DeepSeek-V3.1-NVFP4": "nvidia/DeepSeek-V3.1-NVFP4",
         "nvidia/MiniMax-M2.5-NVFP4": "nvidia/MiniMax-M2.5-NVFP4",
         "nvidia/MiniMax-M2.7-NVFP4": "nvidia/MiniMax-M2.5-NVFP4",
+        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
@@ -1415,6 +1530,34 @@ def test_quant_sensitive_moe_artifacts_use_quant_equivalent_representatives(monk
         monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
         cases = get_common_moe_test_cases()
         assert cases and {case.model_name for case in cases} == {expected_representative}
+
+
+def test_nemotron_super_fp8_vllm_moe_case_covers_missing_consumer_key(monkeypatch):
+    from collector.case_generator import get_common_moe_test_cases
+
+    model_path = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8"
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+
+    cases = get_common_moe_test_cases(backend="vllm")
+
+    assert cases
+    assert {case.model_name for case in cases} == {model_path}
+    assert any(
+        case.hidden_size == 1024
+        and case.inter_size == 2688
+        and case.topk == 22
+        and case.num_experts == 512
+        and case.tp == 1
+        and case.ep == 4
+        and case.token_expert_distribution == "power_law"
+        and case.power_law_alpha == 1.01
+        for case in cases
+    )
+    assert moe_model_allows_quantization("vllm", model_path, "fp8")
+    assert not moe_model_allows_quantization("vllm", model_path, "bfloat16")
+
+    config_path = REPO_ROOT / "src/aiconfigurator/model_configs" / f"{model_path.replace('/', '--')}_config.json"
+    assert config_path.is_file()
 
 
 def test_nemotron_ultra_quant_artifact_keeps_moe_path_but_reuses_mamba_profile(monkeypatch):
@@ -1476,3 +1619,53 @@ def test_collector_case_yaml_numeric_lists_are_sorted():
                 violations.append(f"{path.relative_to(REPO_ROOT)}:{'.'.join(yaml_path)} = {values}")
 
     assert violations == []
+
+
+def test_step3p7_plans_correlated_attention_topologies(monkeypatch):
+    """Step-3.7 must plan (64 Q, window 0) and (96 Q, window 512), not their cross-product.
+
+    The pinned vLLM Step3p5 block substitutes 96 query heads on
+    sliding_attention layers while global layers keep 64. A single row
+    cross-producting num_attention_heads=64 with window_sizes [0, 512] plans
+    64-head SWA cases that never run and omits the 96-head SWA cases that do --
+    without changing the total case count, so an aggregate assertion misses it.
+    """
+    from collector.case_generator import get_attention_context_shape_sweeps
+
+    # Attention is shape-only, so both artifacts intentionally share the rows.
+    for model_path in ("stepfun-ai/Step-3.7-Flash-FP8", "stepfun-ai/Step-3.7-Flash"):
+        monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+        configs = {
+            (config.num_heads, config.num_kv_heads, config.head_dim, config.window_size)
+            for sweep in get_attention_context_shape_sweeps("vllm")
+            for config in get_attention_head_configs(sweep, phase="context")
+        }
+
+        assert configs == {
+            # global attention: 64 Q / 8 KV, sharded over TP 1/2/4/8
+            (64, 8, 128, 0),
+            (32, 4, 128, 0),
+            (16, 2, 128, 0),
+            (8, 1, 128, 0),
+            # sliding attention (window 512): 96 Q / 8 KV
+            (96, 8, 128, 512),
+            (48, 4, 128, 512),
+            (24, 2, 128, 512),
+            (12, 1, 128, 512),
+        }, model_path
+
+
+def test_qwen35_gemm_model_rows_add_exact_below_grid_widths():
+    """model_case_values.gemm supplies exact widths under the base feature grid
+    (scalar expert gate n=1, GDN b/a projections); token density comes from the
+    base sweeps and cases dedupe on the physical (x, n, k) tuple."""
+    specs = get_gemm_case_specs()
+    shapes = {(case.n, case.k) for case in specs}
+    assert {(1, 2048), (8, 2048), (16, 4096), (12, 5120)} <= shapes
+
+    base_tokens = set()
+    for sweep in load_yaml_file(BASE_OP_CASES_DIR / "gemm.yaml")["all_frameworks_op_cases"]["gemm"]["cases"]:
+        base_tokens.update(int(token) for token in sweep["token_counts"])
+    assert {case.x for case in specs if (case.n, case.k) == (1, 2048)} == base_tokens
+
+    assert len(specs) == len({(case.x, case.n, case.k) for case in specs})

@@ -36,6 +36,7 @@ from aiconfigurator_core.sdk.operations.dsv4 import (
 )
 from aiconfigurator_core.sdk.operations.elementwise import ElementWise
 from aiconfigurator_core.sdk.operations.embedding import Embedding
+from aiconfigurator_core.sdk.operations.fpm_forward import FPMForwardOp
 from aiconfigurator_core.sdk.operations.gemm import GEMM
 from aiconfigurator_core.sdk.operations.mamba import GDNKernel, KDAKernel, Mamba2, Mamba2Kernel
 from aiconfigurator_core.sdk.operations.mla import (
@@ -47,6 +48,7 @@ from aiconfigurator_core.sdk.operations.mla import (
     WideEPGenerationMLA,
 )
 from aiconfigurator_core.sdk.operations.moe import MoE, MoEDispatch, TrtLLMWideEPMoE, TrtLLMWideEPMoEDispatch
+from aiconfigurator_core.sdk.operations.moe_comm import MoEAllToAll, MoEExpertCompute
 from aiconfigurator_core.sdk.operations.msa import ContextMSAModule, GenerationMSAModule
 from aiconfigurator_core.sdk.operations.overlap import FallbackOp, OverlapOp
 
@@ -74,6 +76,7 @@ __all__ = [
     "ElementWise",
     "Embedding",
     "EncoderAttention",
+    "FPMForwardOp",
     "FallbackOp",
     "GDNKernel",
     "GenerationAttention",
@@ -87,7 +90,9 @@ __all__ = [
     "Mamba2",
     "Mamba2Kernel",
     "MoE",
+    "MoEAllToAll",
     "MoEDispatch",
+    "MoEExpertCompute",
     "Operation",
     "OverlapOp",
     "PerformanceResult",

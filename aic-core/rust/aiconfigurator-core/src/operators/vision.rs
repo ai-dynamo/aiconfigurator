@@ -3,14 +3,13 @@
 
 //! Vision encoder operators.
 //!
-//! Mirrors `aiconfigurator.sdk.models.vit_ops.build_encoder_ops`. The
+//! Mirrors `aiconfigurator.sdk.models.blocks.vit.build_encoder_ops`. The
 //! encoder runs once before the LLM context phase and is composed from
 //! standard transformer ops (QKV GEMM + encoder attention + out-proj GEMM
 //! + FFN GEMMs + ElementWise norms). This module exposes a single
 //! `VisionEncoderOp` that bundles those pieces — the model layer calls it
 //! once for the encoder phase.
 
-use serde::{Deserialize, Serialize};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode};
 use crate::common::error::AicError;
 use crate::operators::attention::EncoderAttentionOp;
@@ -18,6 +17,7 @@ use crate::operators::base::{PerformanceResult, Source};
 use crate::operators::elementwise::ElementwiseOp;
 use crate::operators::gemm::GemmOp;
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 /// ViT-style encoder: QKV → attention → out-proj → FFN → norms.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -54,7 +54,8 @@ impl VisionEncoderOp {
             quant_mode: self.gemm_quant,
             scale_num_tokens: 1,
             low_precision_input: false,
-                seq_split: 1,
+            seq_split: 1,
+            below_grid_sol: false,
         };
         let attn = EncoderAttentionOp::new(
             format!("{}.attn", self.name),
@@ -70,7 +71,8 @@ impl VisionEncoderOp {
             quant_mode: self.gemm_quant,
             scale_num_tokens: 1,
             low_precision_input: false,
-                seq_split: 1,
+            seq_split: 1,
+            below_grid_sol: false,
         };
         let ffn1 = GemmOp {
             name: format!("{}.ffn1", self.name),
@@ -80,7 +82,8 @@ impl VisionEncoderOp {
             quant_mode: self.gemm_quant,
             scale_num_tokens: 1,
             low_precision_input: false,
-                seq_split: 1,
+            seq_split: 1,
+            below_grid_sol: false,
         };
         let ffn2 = GemmOp {
             name: format!("{}.ffn2", self.name),
@@ -90,7 +93,8 @@ impl VisionEncoderOp {
             quant_mode: self.gemm_quant,
             scale_num_tokens: 1,
             low_precision_input: false,
-                seq_split: 1,
+            seq_split: 1,
+            below_grid_sol: false,
         };
         let norms = ElementwiseOp::new(
             format!("{}.norms", self.name),

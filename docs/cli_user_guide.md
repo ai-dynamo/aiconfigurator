@@ -16,7 +16,8 @@ These flags are shared across modes (a few are sweep-only, as noted):
 - `--top-n N`: Number of top configurations to output — per experiment in `exp` mode, or per serving mode (agg/disagg) in `default` mode. Default: `5`. (`default`, `exp`, `generate`, `estimate`)
 - `--systems-paths`: System search paths (comma-separated). Use `default` for the built-in systems path; the first match wins for an identical system/backend/version. (`default`, `exp`, `generate`, `estimate`)
 - `--deployment-target`: Generated-artifact platform — `dynamo-j2` (default), `dynamo-python`, `llm-d-helm`, `llm-d-kustomize`, or `fpm`. See [Deployment Target Selection](#deployment-target-selection). (`default`, `exp`, `generate`, `estimate`)
-- `--engine-step-backend`: Engine-step latency backend — unset defaults to the compiled Rust engine (databases with measured power data delegate to the Python step until energy crosses the FFI); `python` is the escape hatch, `rust` forces the compiled engine. Accepted by all modes but inert in `generate`, which performs no latency estimation. (`default`, `exp`, `generate`, `estimate`)
+- `--engine-step-backend`: Engine-step latency backend. The compiled Rust engine is the only step executor; `rust` is the only live value. `python` is DEPRECATED and now a no-op — it warns once and runs on the compiled engine anyway (accepted for one release cycle, then removed); any other value raises an error. Accepted by the five modes below (not `support`) but inert in `generate`, which performs no latency estimation. (`default`, `recommend`, `exp`, `generate`, `estimate`)
+- `--forward-model`: Forward-pass modeling mode — `op_level` (default; granular per-op modeling) or `fpm` (predicts from collected whole-model forward-pass data; requires `fpm_forward_perf` data for the exact model/system/backend/version and never extrapolates outside the collected domain). Evaluates on the compiled engine's native FPM operation. `fpm` predictions are only as accurate as the match between the deployed engine configuration and the collected data — in particular the CUDA-graph capture surface: regime cliffs are encoded in the data, not modeled, so a deployment whose capture config differs from the collection will mispredict. V1 accepts only vLLM identities the standard deployment path can reproduce: automatic MoE/attention backend selection with EPLB disabled. Pinned backend or EPLB identities are rejected until structured generator support lands. Not supported in the `afd` estimate mode. (`default`, `exp`, `generate`, `estimate`)
 
 The `support` mode accepts only `--log-level`, `--debug`, and `--no-color` from this list. Generator-artifact flags (`--generator-config`, `--generator-set`, `--generator-help`, `--generator-help-backend`, `--generated-config-version`, `--generator-dynamo-version`) are documented under [Default mode](#default-mode).
 
@@ -211,6 +212,14 @@ result = cli_estimate(
     decode_batch_size=64, decode_num_workers=2,
 )
 ```
+
+#### EPD single point (`--enable-epd`)
+
+For vision-language models with image inputs, `--enable-epd` overlays a fixed encode-worker pool on an `agg` or `disagg` estimate (other estimate modes reject it):
+
+- `--encoder-tp`: Encode-worker TP (required with `--enable-epd`).
+- `--encoder-batch-size`: Encode batch size. Default: `1` (maximum: 8).
+- `--encoder-num-workers`: Encode workers in the pool. Default: `1`.
 
 #### Static estimate modes (`static`, `static_ctx`, `static_gen`)
 
@@ -415,14 +424,32 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--free-gpu-memory-fraction`: Fraction of free GPU memory TRT-LLM allocates for KV cache (default: `1.0`). Filters batch sizes that would exceed KV cache capacity.
 - `--max-seq-len`: TRT-LLM `--max_seq_len` (default: `isl + osl`). Controls how many KV blocks are pre-allocated per sequence; set to match your deployment for accurate KV-capacity filtering.
 - `--enable-chunked-prefill`: Enable chunked prefill for a finer-grained context-token sweep. When off (default), the context-token stride is aligned to ISL for faster sweeping.
-- `--enable-wideep`: Enable Wide Expert Parallelism (WideEP) for MoE models — EP-only parallelism via the `deepep_moe` backend. Applies to DeepSeek and Qwen3-235B on SGLang.
-- `--moe-backend`: Explicit SGLang MoE backend — `deepep_moe` or `megamoe` (use `megamoe` to model DeepSeek-V4 MegaMoE on Blackwell).
+- `--enable-wideep`: **Deprecated and ignored for large-EP modeling** (accepted with a one-time warning). On SGLang, it still narrows the default `moe_tp` candidates to `[1]`; explicit `*_moe_tp_candidates` values take precedence. Large-EP (wideEP) is explored automatically — see the note below.
+- `--moe-backend`: Explicit SGLang MoE backend. `megamoe` is a real kernel selection (use it to model DeepSeek-V4 MegaMoE on Blackwell); `deepep_moe` is deprecated: it is ignored for modeling (large-EP is explored automatically from data coverage), but on SGLang it still narrows the default `moe_tp` candidates to `[1]` — explicit `*_moe_tp_candidates` always win.
+
+> **Large-EP (wideEP) is explored automatically.** For MoE models, multi-node EP-only
+> parallelism joins the search whenever the performance database covers the model's MoE
+> shape on the target system/backend — both the MoE all-to-all (dispatch/combine) data
+> and the EP compute data must be present. No flag is needed: fused and large-EP
+> configurations compete in the same search. To restrict or force EP sizes, set
+> `*_moe_ep_candidates` in an exp YAML ([Exp mode](#exp-mode)); when a model's shape has
+> no coverage, a one-time INFO log names the collectors to run
+> (see [Advanced Tuning](advanced_tuning.md#large-ep-wideep-exploration)).
 
 **Vision-language inputs** (multimodal models such as Qwen3-VL):
 
 - `--image-height`, `--image-width`: Image dimensions in pixels. Default: `0` (disabled — the request is modeled as text-only).
 - `--num-images`: Number of images per request. Default: `1`.
 - `--disable-encoder-dp`: Model the vision encoder as TP-sharded instead of the default data-parallel. Also available in `estimate` mode (alongside the image flags above).
+
+**Encoder disaggregation (EPD)** — serve the vision encoder from a dedicated encode-worker pool rate-matched against the LM workers (agg becomes E+agg, disagg becomes E+P+D). Requires image inputs; the LM workers are modeled language-only. Result rows carry `(e)workers`/`(e)tp`/`(e)bs` columns.
+
+- `--enable-epd`: Sweep dedicated encode workers alongside the LM sweep.
+- `--encoder-tp`: Encode-worker TP sizes to sweep. Default: `1 2 4 8`.
+- `--encoder-system`: System (GPU type) for the encode pool. Defaults to the LM-side system; backend and version always follow the P/agg side.
+- `--encoder-latency-correction`: Latency correction scale for encode workers. Default: `1.0`.
+
+Encode batch sizes are swept over `1 2 4 8`, capped at 8 (SGLang's `SGLANG_ENCODER_MAX_BATCH_SIZE` default); explicit candidates above the cap are rejected. Further knobs (`encoder_batch_candidates`, `max_encoder_workers`, `rate_match_encoder_degradation`) are Task fields for `exp`-mode YAML — see [Advanced Tuning](advanced_tuning.md). EPD rows are excluded from generator artifacts (see [Generator Overview](generator_overview.md)).
 
 The SLA, precision, and speculative-decoding flags (`--strict-sla`, `--request-latency`, `--inclusive-tpot`, `--nextn`, `--nextn-accepted`, `--database-mode`) have dedicated subsections below. Shared flags such as `--save-dir`, `--top-n`, and `--systems-paths` are described in [Common Arguments](#common-arguments-all-modes).
 
@@ -619,13 +646,13 @@ results/Qwen_Qwen3-32B-FP8_h200_sxm_trtllm_isl4000_osl1000_ttft1000_tpot20_90449
 By default, we output the top 5 configs we have found. You can get the configs and scripts to deploy under each experiment's folder. The generated files depend on your `--deployment-target`:
 - **Dynamo** (default): `k8s_deploy.yaml` for Kubernetes deployment, plus engine configs (`agg_config.yaml`, `prefill_config.yaml`, `decode_config.yaml`) and run scripts (`node_0_run.sh`)
 - **llm-d**: `llm-d-values.yaml` for Helm deployment with the llm-d-modelservice chart
-- **FPM V1**: exactly `k8s_deploy.yaml` (a reusable keepalive Pod or LeaderWorkerSet) and `run.sh` (the complete rank-aware vLLM launch)
+- **FPM V1**: exactly `k8s_deploy.yaml` (a reusable keepalive Pod, LeaderWorkerSet, or Grove PodCliqueSet), `fpm_env.sh` (rank discovery plus the per-cell collection facts), and `run.sh` (the launch-only vLLM command)
 
 For benchmarking, see the [Benchmark Artifacts](#benchmark-artifacts) section below. Refer to [deployment guide](dynamo_deployment_guide.md) for Dynamo deployments or the [README llm-d section](../README.md#deploying-to-llm-d-platform) for llm-d deployments.
 
 `--save-dir DIR` allows you to specify more information such as generating the config for a different version of the backend, say estimating the performance using trtllm 1.0.0rc3 but generate config for 1.0.0rc6. This is allowed and feasible. By passing `--generated-config-version 1.0.0rc6` can give you the right result.
 
-**Deployment Target Selection**
+#### Deployment Target Selection
 
 Use `--deployment-target` to choose which orchestration platform to deploy to:
 - `dynamo-j2` (default): Generates typed Dynamo Kubernetes manifests
@@ -649,15 +676,21 @@ Workers:
       - --scheduler-cls
       - InstrumentedScheduler
       - --benchmark-mode
-      - agg
+      - prefill
       - --dump-config-to
       - "/results/resolved-config-node{node_rank}.json"
 K8sConfig:
+  # Optional; the multinode default is lws.
+  fpm_orchestrator: grove
   fpm_shared_memory_size: 200Gi
   fpm_resource_labels:
     fpm.nvidia.com/run-id: glm52-example
     fpm.nvidia.com/stage: probe
+    # Optional; set only when the target cluster uses KAI Scheduler.
+    kai.scheduler/queue: dynamo
   worker_extra_pod_spec:
+    # Optional; Grove does not select a scheduler by default.
+    schedulerName: kai-scheduler
     mainContainer:
       resources:
         requests:
@@ -672,19 +705,20 @@ K8sConfig:
 
 `Workers.agg.extra_cli_args` must be a `list[str]`, and the final command must include `--benchmark-mode` with one of `agg`, `prefill`, or `decode`. This runtime option selects the FPM collection phase; it does not change the required single aggregated-worker deployment topology. `K8sConfig.extra_env` accepts concrete `{name, value}` entries only; `valueFrom`, `envFrom`, and Secret-derived values are not supported. The normal rule, mapping, and versioned-template pipeline still builds the base command before the extra arguments are appended. If both `--benchmark-output-path` and `DYN_FPM_BENCHMARK_OUTPUT_PATH` are supplied, they must be identical. If neither is supplied, the generator adds `/results/benchmark.json` to both the command and environment.
 
-`K8sConfig.fpm_shared_memory_size` controls the generated `/dev/shm` `emptyDir` limit, while `K8sConfig.fpm_resource_labels` adds labels to the workload and its Pods. Container memory, ephemeral-storage, and other requests or limits can be supplied under `K8sConfig.worker_extra_pod_spec.mainContainer.resources`; the Generator-resolved per-node GPU count cannot be changed there. Matching user-provided `results` or `dshm` volume-and-mount pairs are preserved instead of replaced.
+`K8sConfig.fpm_shared_memory_size` controls the generated `/dev/shm` `emptyDir` limit, while `K8sConfig.fpm_resource_labels` adds labels to the workload and its Pods. Container memory, ephemeral-storage, and other requests or limits can be supplied under `K8sConfig.worker_extra_pod_spec.mainContainer.resources`; the Generator-resolved per-node GPU count cannot be changed there. Grove does not inject a scheduler or queue: clusters that use KAI Scheduler can set `worker_extra_pod_spec.schedulerName` and the `kai.scheduler/queue` resource label explicitly, while other clusters can supply their own scheduler settings through the same generic fields. Matching user-provided `results` or `dshm` volume-and-mount pairs are preserved instead of replaced.
 
 The generated artifact directory contains only:
 
 ```text
 artifacts/
 ├── k8s_deploy.yaml
+├── fpm_env.sh
 └── run.sh
 ```
 
-For a single-node topology, `k8s_deploy.yaml` is a keepalive Pod. For a multinode topology, it is a keepalive `LeaderWorkerSet` whose size and per-node GPU limit come from the resolved topology. Both forms contain the requested image, per-node GPU limit, preserved custom resources, volumes, and mounts, but no engine arguments or engine/FPM environment variables. By default they mount Pod-local `emptyDir` storage at `/results`. `run.sh` contains the environment exports and the complete resolved `python3 -m dynamo.vllm ...` command.
+For a single-node topology, `k8s_deploy.yaml` is a keepalive Pod. For a multinode topology, it contains a keepalive `LeaderWorkerSet` by default or a `PodCliqueSet` when `K8sConfig.fpm_orchestrator` is `grove`. Its size and per-node GPU limit come from the resolved topology. GB200/MNNVL output also includes its `ComputeDomain` in the same YAML file. All forms contain the requested image, per-node GPU limit, preserved custom resources, volumes, and mounts, but no engine arguments or engine/FPM environment variables. By default they mount Pod-local `emptyDir` storage at `/results`. `fpm_env.sh` owns rank/leader discovery and exports the per-cell `FPM_*` collection facts; `run.sh` sources it, adds the engine environment exports, and execs the complete resolved `python3 -m dynamo.vllm ...` command.
 
-`Workers.agg.gpus_per_worker` is the total GPU count for the one worker replica. When that topology exceeds `NodeConfig.num_gpus_per_node`, the generator emits an LWS and divides the GPU limit across its Pods. The total must divide evenly across the resolved node count, and `TP * PP * DP` must match it. Multinode DP must divide evenly across nodes and uses the `mp` data-parallel backend. The target cluster must have the LeaderWorkerSet API and controller installed before applying a multinode artifact.
+`Workers.agg.gpus_per_worker` is the total GPU count for the one worker replica. When that topology exceeds `NodeConfig.num_gpus_per_node`, the generator emits the selected multinode workload and divides the GPU limit across its Pods. The total must divide evenly across the resolved node count, and `TP * PP * DP` must match it. Multinode DP must divide evenly across nodes and uses the `mp` data-parallel backend. Select `lws` for a cluster with LeaderWorkerSet, or `grove` for a cluster with Grove.
 
 For one node, apply the Pod, wait for it to become ready, and stream the script into it:
 
@@ -694,9 +728,9 @@ kubectl wait --for=condition=Ready pod/<pod> --timeout=10m
 kubectl exec -i <pod> -- bash -s < artifacts/run.sh
 ```
 
-For multiple nodes, the collector stages inputs first and then starts the same `run.sh` concurrently on every LWS Pod. The script requires the controller-injected `LWS_WORKER_INDEX` and `LWS_LEADER_ADDRESS` values to add the rank, master, headless, or local-DP arguments required by that node. Multinode values passed to `--dump-config-to` must contain `{node_rank}`; the default is `/results/resolved-config-node{node_rank}.json`. This placeholder applies only to `--dump-config-to`, not to environment values or arbitrary CLI arguments. Callers must not pass Generator-owned orchestration options such as `--nnodes`, `--node-rank`, `--headless`, or `--data-parallel-size-local` in `extra_cli_args`. On multinode runs, leave `DYN_FPM_WORKER_ID` unset so the script derives `<FPM_RUN_ID>-node<N>`, unless the collector supplies a distinct value to each process.
+For multiple nodes, the collector stages inputs first and then starts its collection runtime concurrently on every workload Pod; the runtime sources `fpm_env.sh` — which derives rank and leader address from the controller-injected LWS or Grove values — before invoking `run.sh`, which adds the rank, master, headless, or local-DP arguments required by that node. Multinode values passed to `--dump-config-to` must contain `{node_rank}`; the default is `/results/resolved-config-node{node_rank}.json`. This placeholder applies only to `--dump-config-to`, not to environment values or arbitrary CLI arguments. Callers must not pass Generator-owned orchestration options such as `--nnodes`, `--node-rank`, `--headless`, or `--data-parallel-size-local` in `extra_cli_args`. On multinode runs, leave `DYN_FPM_WORKER_ID` unset so the script derives `<FPM_RUN_ID>-node<N>`, unless the collector supplies a distinct value to each process.
 
-With DP greater than one, DP rank 0 uses the configured benchmark output path and later DP ranks use `_dp<N>` before the extension. Each node waits for all results in its local rank range. Under the current FPM schema-v1 contract, a result counts as complete only when it has `status: complete`, `valid: true`, complete zero-skipped coverage, the requested benchmark mode and point phase, and nested FPM samples for the expected DP rank. For `agg`, result points may be `prefill` or `decode`. The script also accepts the legacy schema-v2 `status: passed` plus `config.dp_rank` result used by earlier Phase 1 collectors. A terminal invalid result stops the script. The collector still owns staging the complete runtime bundle (scheduler code, cases, capacity, run-spec, runtime contracts, and validators) on every Pod, strict schema/metric validation, result download/aggregation/evidence, exit coordination, and cleanup.
+With DP greater than one, DP rank 0 uses the configured benchmark output path and later DP ranks use `_dp<N>` before the extension. Each node waits for all results in its local rank range. Under the current FPM schema-v2 contract, a result counts as complete only when it has `status: complete`, `valid: true`, complete zero-skipped coverage, the requested benchmark mode and point phase, and nested FPM samples for the expected DP rank. For `agg`, result points may be `prefill` or `decode`. A terminal invalid result stops the script. A collection driver still owns staging its collection runtime on every Pod, strict result validation, result download/aggregation/evidence, exit coordination, and cleanup.
 
 Every execution starts a new engine and reloads the model. `run.sh` refuses to overwrite any expected benchmark output, so each run must use new paths. With the default `/results` `emptyDir`, results remain only for the lifetime of the Pod. FPM V1 does not keep the engine or GPU-resident model alive between executions. Selecting any other deployment target preserves the existing generator output and behavior.
 
@@ -1029,11 +1063,15 @@ disagg_full:
   nextn: 1
   nextn_accepted: 0.85
 
+  # MoE kernel backend (shared; e.g. "megamoe" for DeepSeek-V4 on Blackwell SGLang).
+  # Large-EP (wideEP) is explored automatically when perf data covers the model
+  # shape; restrict with *_moe_ep_candidates.
+  moe_backend: null
+
   # --- Prefill role ---
   prefill_model_path: deepseek-ai/DeepSeek-V3   # required
   prefill_system_name: h200_sxm                 # required
   prefill_backend_name: trtllm                  # trtllm (default) | vllm | sglang
-  prefill_enable_wideep: false
   # Quant override (default: inferred from the HF model config)
   prefill_gemm_quant_mode: fp8_block            # fp8 | fp8_block | bfloat16
   prefill_moe_quant_mode: fp8_block             # fp8 | fp8_block | w4afp8 | bfloat16
@@ -1052,7 +1090,6 @@ disagg_full:
   decode_model_path: deepseek-ai/DeepSeek-V3    # required
   decode_system_name: h200_sxm                  # required
   decode_backend_name: trtllm
-  decode_enable_wideep: false
   decode_gemm_quant_mode: fp8_block
   decode_moe_quant_mode: fp8_block
   decode_kvcache_quant_mode: bfloat16
@@ -1082,28 +1119,25 @@ This is long; the basics:
     - For `agg`, the same fields are top-level (`model_path`, `system_name`, `gemm_quant_mode`, `agg_tp_candidates`, ...) — see `agg_full` in the template.  
     - `backend_name`: `trtllm` (default), `vllm`, or `sglang`.  
     - `backend_version`, `isl`, `osl`, `ttft`, `tpot`: same meaning as in `default` mode (shared, top-level).  
-    - `*_enable_wideep`: enables wide-EP for fine-grained MoE models.  
+    - Large-EP (wideEP) has no key: it is explored automatically whenever the performance database covers the model's MoE shape on the role's system/backend (MoE all-to-all dispatch/combine plus EP compute data). Restrict or force EP sizes with `*_moe_ep_candidates`. The deprecated keys (`enable_wideep`, `prefill_enable_wideep`, `decode_enable_wideep`, `moe_backend: deepep_moe`) are still accepted with a one-time warning and have no modeling effect. One search-default residue remains: on SGLang, a config that spells `enable_wideep` / `moe_backend: deepep_moe` still narrows the *default* `moe_tp` candidates to `[1]` (a resolved-config compatibility behavior) — an explicit `*_moe_tp_candidates` list always wins.
     - `nextn` / `nextn_accepted`: MTP speculative decoding (never auto-enabled; `nextn_accepted` is required when the resolved `nextn > 0`).
     - The replica/correction knobs (`num_gpu_per_replica`, `max_*_workers`, `*_latency_correction`, ...) are covered in [Advanced Tuning](advanced_tuning.md). Typically the only thing you need to touch is the quantization.
 
 Quantization override order: explicit `*_quant_mode` fields take precedence; any mode left unset is filled from the model's HF quantization metadata.
 
-You can drop everything optional and keep just the required fields plus the few knobs you care about. Here's a minimal disagg with wide-EP:
+You can drop everything optional and keep just the required fields plus the few knobs you care about. Here's a minimal disagg for a large-EP (wideEP) study — no flag needed, the multi-node EP ladder joins the search automatically because the gb200 database covers this model's MoE shape:
 ```yaml
 disagg_simplified:
   serving_mode: disagg
   total_gpus: 512
   nextn: 2
   nextn_accepted: 1.1
-  prefill_model_path: deepseek-ai/DeepSeek-V3
+  prefill_model_path: nvidia/DeepSeek-V3.1-NVFP4
   prefill_system_name: gb200
-  prefill_enable_wideep: true        # wide-EP for prefill
-  decode_model_path: deepseek-ai/DeepSeek-V3
+  decode_model_path: nvidia/DeepSeek-V3.1-NVFP4
   decode_system_name: gb200
-  decode_enable_wideep: true         # wide-EP for decode
-  max_gpu_per_replica: 512           # wide-EP needs a larger replica budget
 ```
-Everything omitted falls back to defaults / HF inference.
+Everything omitted falls back to defaults / HF inference. With large-EP candidates in play the replica budget widens automatically (`max_gpu_per_replica` defaults to 512). To pin a role to large EP sizes only, add e.g. `decode_moe_ep_candidates: [16, 32, 64]`.
 
 Let's go through some pre-defined experiments for reference.
 1. homegeneous vs. heterogenous  

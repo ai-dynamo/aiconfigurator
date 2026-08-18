@@ -6,10 +6,10 @@
 //!
 //! Each wraps `db.state_space.query_*` with `scale_factor` + `clamp`.
 
-use serde::{Deserialize, Serialize};
 use crate::common::error::AicError;
 use crate::operators::base::{PerformanceResult, Source};
 use crate::perf_database::PerfDatabase;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Mamba2Op {
@@ -54,9 +54,13 @@ impl Mamba2Op {
             self.chunk_size,
             &|b, s| self.sol_latency_ms(db, b, s),
         ) {
-            Ok(latency) => Ok(PerformanceResult::new(latency, Source::Silicon)
-                .clamp_non_negative()
-                .scaled(self.scale_factor)),
+            Ok(value) => {
+                Ok(
+                    PerformanceResult::with_energy(value.latency, value.energy, Source::Silicon)
+                        .clamp_non_negative()
+                        .scaled(self.scale_factor),
+                )
+            }
             Err(AicError::PerfDatabase(_)) => {
                 let latency = self.sol_latency_ms(db, batch_size as f64, seq_len as f64);
                 Ok(PerformanceResult::new(latency, Source::Sol)
@@ -138,9 +142,13 @@ impl GdnOp {
             self.head_v_dim,
             &|b, s| self.sol_latency_ms(db, b, s),
         ) {
-            Ok(latency) => Ok(PerformanceResult::new(latency, Source::Silicon)
-                .clamp_non_negative()
-                .scaled(self.scale_factor)),
+            Ok(value) => {
+                Ok(
+                    PerformanceResult::with_energy(value.latency, value.energy, Source::Silicon)
+                        .clamp_non_negative()
+                        .scaled(self.scale_factor),
+                )
+            }
             Err(AicError::PerfDatabase(_)) => {
                 let latency = self.sol_latency_ms(db, batch_size as f64, seq_len as f64);
                 Ok(PerformanceResult::new(latency, Source::Sol)
@@ -165,7 +173,8 @@ impl GdnOp {
         let hk = self.head_k_dim as f64;
         let nv = self.num_v_heads as f64;
         let hv = self.head_v_dim as f64;
-        let conv_channels = nk * hk + nv * hv;
+        // Packed q/k/v convolution width (2K + V), matching the collector's conv_dim.
+        let conv_channels = 2.0 * nk * hk + nv * hv;
         let d_conv = self.d_conv as f64;
         let d_model = self.d_model as f64;
         let state_size = nv * hk * hv;
@@ -184,13 +193,15 @@ impl GdnOp {
                 x * conv_channels * (d_conv + 1.0) * 2.0,
                 x * conv_channels * 2.0,
             ),
+            // q/k/v reads are 2K + V wide; the recurrent state is FP32 (Qwen3.5
+            // pins mamba_ssm_dtype=float32) while h_chunks stay input-dtype BF16.
             "chunk_gated_delta_rule" => (
-                x * (nk * hk + nv * hv) * 2.0 + state_size * 2.0 * bs + h_chunks_bytes,
-                x * nv * hv * 2.0 + state_size * 2.0 * bs + h_chunks_bytes,
+                x * (2.0 * nk * hk + nv * hv) * 2.0 + state_size * 4.0 * bs + h_chunks_bytes,
+                x * nv * hv * 2.0 + state_size * 4.0 * bs + h_chunks_bytes,
             ),
             "fused_sigmoid_gating_delta_rule_update" => (
-                x * (nk * hk + nv * hv) * 2.0 + state_size * 2.0 * bs,
-                x * nv * hv * 2.0 + state_size * 2.0 * bs,
+                x * (2.0 * nk * hk + nv * hv) * 2.0 + state_size * 4.0 * bs,
+                x * nv * hv * 2.0 + state_size * 4.0 * bs,
             ),
             _ => (x * d_model * 2.0, x * d_model * 2.0),
         };
@@ -248,7 +259,9 @@ impl KdaOp {
                 "fused_sigmoid_gating_delta_rule_update" | "causal_conv1d_update"
             )
             && !db.state_space.kda_has_verify_rows(kernel_source)
-            && db.state_space.kda_has_verify_rows("fused_kda_decode_mtp_dspark")
+            && db
+                .state_space
+                .kda_has_verify_rows("fused_kda_decode_mtp_dspark")
         {
             if kernel_source == "causal_conv1d_update" {
                 return Ok(PerformanceResult::new(0.0, Source::Silicon)
@@ -308,9 +321,13 @@ impl KdaOp {
             self.head_v_dim,
             &|b, s| self.sol_latency_ms_with(db, kernel_source, b, s),
         ) {
-            Ok(latency) => Ok(PerformanceResult::new(latency, Source::Silicon)
-                .clamp_non_negative()
-                .scaled(self.scale_factor)),
+            Ok(value) => {
+                Ok(
+                    PerformanceResult::with_energy(value.latency, value.energy, Source::Silicon)
+                        .clamp_non_negative()
+                        .scaled(self.scale_factor),
+                )
+            }
             Err(AicError::PerfDatabase(_)) => {
                 let latency =
                     self.sol_latency_ms_with(db, kernel_source, batch_size as f64, seq_len as f64);
@@ -538,8 +555,7 @@ mod tests {
         // read = 8*4*2048*2 + state*2; write = 8*2048*2 + state*8.
         let op = kda_op("fused_sigmoid_gating_delta_rule_update", "verify", 4);
         let x = 8.0;
-        let expected =
-            (x * 4.0 * proj * 2.0 + state * 2.0) + (x * proj * 2.0 + state * x);
+        let expected = (x * 4.0 * proj * 2.0 + state * 2.0) + (x * proj * 2.0 + state * x);
         assert_eq!(op.sol_total_bytes(2.0, 4.0), expected);
 
         // vLLM prefill core aliases onto the chunk_kda byte model
@@ -547,8 +563,8 @@ mod tests {
         let op = kda_op("flashkda_fwd", "context", 0);
         let x = 128.0;
         let h_chunks = 2.0 * state * 1.0;
-        let expected = (x * 4.0 * proj * 2.0 + state + h_chunks)
-            + (x * proj * 2.0 + state + h_chunks);
+        let expected =
+            (x * 4.0 * proj * 2.0 + state + h_chunks) + (x * proj * 2.0 + state + h_chunks);
         assert_eq!(op.sol_total_bytes(1.0, 128.0), expected);
 
         // Packed conv update (generation, x = b): 3P channels.

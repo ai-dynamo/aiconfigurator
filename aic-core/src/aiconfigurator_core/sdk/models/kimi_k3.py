@@ -414,7 +414,7 @@ class KimiK3Model(BaseModel):
                     # exact-first: systems without exact rows (only b200
                     # sglang carries them today) fall back to the next-pow2
                     # DeepSeek slice scaled by the head ratio — see
-                    # operations/mla.py::MLABmm._query_mla_bmm_table.
+                    # engine's mla_bmm table (operators/mla.rs).
                     *(
                         [
                             ops.GenerationAttention(

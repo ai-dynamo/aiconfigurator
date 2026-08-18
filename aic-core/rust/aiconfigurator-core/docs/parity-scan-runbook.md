@@ -5,6 +5,15 @@ SPDX-License-Identifier: Apache-2.0
 
 # Phase 2 Parity Scan — Cloud Execution Runbook
 
+> **RETIRED — historical documentation.** This runbook can no longer be
+> executed: the scanner (`tools/support_matrix/scan_rust_parity.py`) and the
+> live Python engine-step reference it compared against were both removed in
+> the Python-step removal PR, after the scan's mission completed (gate CLOSED
+> 2026-06-16 with 0 regressions — see `parity-scan-report.md`).
+> `engine_step_backend="python"` is now a deprecated no-op that routes to the
+> compiled Rust engine. The document below is retained unchanged as a record
+> of how the parity gate was run.
+
 **Audience:** an autonomous agent (or engineer) running the full Rust↔Python
 parity scan on a **large-RAM cloud host**. This document is self-contained —
 you do not need any prior conversation context.
@@ -43,7 +52,7 @@ No GPU needed — this is a pure CPU perf-model scan.
 
 ```bash
 # 3.1 Toolchains
-#   - Python 3.10+ (3.12 recommended), uv, and a Rust toolchain.
+#   - Python 3.11-3.13 (3.13 recommended), uv, and a Rust toolchain.
 curl -LsSf https://astral.sh/uv/install.sh | sh          # uv (if absent)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y  # cargo/rustc
 source "$HOME/.cargo/env"

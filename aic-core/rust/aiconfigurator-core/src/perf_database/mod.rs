@@ -8,11 +8,12 @@
 //! paths and parses the system YAML; each table's parquet data is read on first
 //! query via `OnceLock`. Submodules cover the full op-family set: gemm,
 //! attention, mla, dsa, dsv4, mhc, moe, communication, state-space, and
-//! the WideEP/DeepEP all-to-all variants.
+//! the TRT-LLM all-to-all table.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::common::enums::{DatabaseMode, TransferPolicy};
 use crate::common::error::AicError;
@@ -46,7 +47,14 @@ pub(crate) fn resolve_op_sources(
 ) -> Vec<PerfSource> {
     match perf_db_sources.get(basename) {
         Some(sources) if !sources.is_empty() => sources.clone(),
-        _ => {
+        // A PRESENT but EMPTY list is a deliberate statement from
+        // `_build_op_sources`: the primary was vetoed (legacy INCOMPLETE.txt)
+        // and no donor was admissible — load NO sources. Falling back to the
+        // primary here would silently undo the veto.
+        Some(_) => Vec::new(),
+        // An ABSENT basename means the caller passed no source map at all
+        // (legacy single-data_root loads): default-primary behavior.
+        None => {
             let legacy = data_root.join(basename);
             let path = if legacy.is_file() {
                 legacy
@@ -58,10 +66,52 @@ pub(crate) fn resolve_op_sources(
     }
 }
 
+/// Stable identity string for one `load_with_sources` input set, used as the
+/// shared-tables memo key. Deterministic: `PerfDbSources` is a `BTreeMap` and
+/// each source list is ordered, so equal inputs always render equal keys.
+/// Built by hand (not serde) so non-UTF-8 paths degrade lossily instead of
+/// failing; `\x1f` (unit separator) keeps path/name boundaries unambiguous.
+fn shared_tables_key(
+    systems_root: &Path,
+    system: &str,
+    backend: &str,
+    version: &str,
+    perf_db_sources: &PerfDbSources,
+) -> String {
+    use std::fmt::Write as _;
+    let mut key = format!(
+        "{}\x1f{system}\x1f{backend}\x1f{version}",
+        systems_root.display()
+    );
+    for (basename, sources) in perf_db_sources {
+        let _ = write!(key, "\x1f{basename}=");
+        for PerfSource(path, kernel_sources) in sources {
+            let _ = write!(key, "{}|{kernel_sources:?};", path.display());
+        }
+    }
+    key
+}
+
+/// Whether a version dir is excluded from data loading wholesale: a legacy
+/// `INCOMPLETE.txt` marker with NO structured `collection_meta.yaml` sidecar.
+/// Mirrors the CANONICAL `operations/base.py::_version_dir_is_unusable`
+/// (a structured sidecar supersedes a stale legacy marker; `status: partial`
+/// validation is the Python admission layer's job, not this existence check).
+pub(crate) fn version_dir_is_unusable(version_dir: &Path) -> bool {
+    if version_dir.join("collection_meta.yaml").is_file() {
+        return false;
+    }
+    version_dir.join("INCOMPLETE.txt").is_file()
+}
+
 /// Scan family-first sibling dirs for `<family>/<backend>/<version>/<basename>`,
 /// where `<data_dir>` (the family dirs' parent) and `<backend>/<version>` are
-/// derived from `data_root` (`<data_dir>/<backend>/<version>`).
-fn find_in_family_dirs(data_root: &Path, basename: &str) -> Option<PathBuf> {
+/// derived from `data_root` (`<data_dir>/<backend>/<version>`). Mirrors
+/// `operations/base.py::resolve_op_data_path`'s family walk: dot-dirs are
+/// skipped and a version dir carrying the legacy INCOMPLETE veto is never
+/// admitted (the legacy `<backend>/<version>` fallback stays UNvetoed there,
+/// so callers falling back to `data_root` keep that behavior).
+pub(crate) fn find_in_family_dirs(data_root: &Path, basename: &str) -> Option<PathBuf> {
     let version = data_root.file_name()?.to_str()?;
     let backend = data_root.parent()?.file_name()?.to_str()?;
     let data_dir = data_root.parent()?.parent()?;
@@ -71,10 +121,14 @@ fn find_in_family_dirs(data_root: &Path, basename: &str) -> Option<PathBuf> {
             Some(name) => name,
             None => continue,
         };
-        if KNOWN_BACKEND_DIRS.contains(&name) {
+        if name.starts_with('.') || KNOWN_BACKEND_DIRS.contains(&name) {
             continue;
         }
-        let candidate = entry.path().join(backend).join(version).join(basename);
+        let version_dir = entry.path().join(backend).join(version);
+        if version_dir_is_unusable(&version_dir) {
+            continue;
+        }
+        let candidate = version_dir.join(basename);
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -125,7 +179,10 @@ fn comm_root(system_data_root: &Path, backend_dir: &str, version: &str) -> PathB
         .join("comm")
         .join(backend_dir)
         .join(version);
-    if family_root.is_dir() {
+    // A family dir under the legacy INCOMPLETE veto is never admitted —
+    // Python's resolve_op_data_path skipped it and fell through to the
+    // legacy layout (which _build_op_sources admission-checks separately).
+    if family_root.is_dir() && !version_dir_is_unusable(&family_root) {
         family_root
     } else {
         system_data_root.join(backend_dir).join(version)
@@ -157,32 +214,37 @@ pub mod communication;
 pub mod dsa;
 pub mod dsv4;
 pub mod dsv4_megamoe;
+pub mod fpm_forward;
 pub mod gemm;
 mod interpolation;
 pub mod mhc;
 pub mod mla;
 pub mod moe;
+pub mod moe_a2a;
+pub mod moe_expert_compute;
 mod moe_index;
 pub mod parquet_loader;
 pub mod perf_interp;
 pub mod state_space;
-pub mod wideep;
+pub mod table_view;
+pub mod trtllm_alltoall;
 pub mod wideep_mla;
-pub mod wideep_moe;
 
 pub use attention::AttentionTable;
 pub use communication::CommunicationTable;
 pub use dsa::DsaTable;
 pub use dsv4::{AttnKind, Dsv4Table};
 pub use dsv4_megamoe::Dsv4MegaMoeTable;
+pub use fpm_forward::FpmForwardTable;
 pub use gemm::GemmTable;
 pub use mhc::MhcTable;
 pub use mla::MlaTable;
 pub use moe::MoeTable;
+pub use moe_a2a::MoeA2aTable;
+pub use moe_expert_compute::MoeExpertComputeTable;
 pub use state_space::StateSpaceTable;
-pub use wideep::WideEpTable;
+pub use trtllm_alltoall::TrtllmAlltoallTable;
 pub use wideep_mla::WideEpMlaTable;
-pub use wideep_moe::WideEpMoeTable;
 
 /// The loaded per-family perf tables for one caller-facing
 /// `<system>/<backend>/<version>` tuple — the mode-independent,
@@ -198,15 +260,20 @@ pub struct PerfTables {
     pub attention: AttentionTable,
     pub mla: MlaTable,
     pub moe: MoeTable,
+    pub moe_a2a: MoeA2aTable,
+    pub moe_expert_compute: MoeExpertComputeTable,
     pub communication: CommunicationTable,
     pub dsa: DsaTable,
     pub dsv4: Dsv4Table,
     pub dsv4_megamoe: Dsv4MegaMoeTable,
     pub mhc: MhcTable,
-    pub wideep: WideEpTable,
+    pub trtllm_alltoall: TrtllmAlltoallTable,
     pub wideep_mla: WideEpMlaTable,
-    pub wideep_moe: WideEpMoeTable,
     pub state_space: StateSpaceTable,
+    pub fpm_forward: FpmForwardTable,
+    /// The Python-provided shared-layer source map, retained so the table
+    /// views (`table_view.rs`) can resolve any basename on demand.
+    pub perf_db_sources: PerfDbSources,
 }
 
 /// Modular performance database for a specific
@@ -259,6 +326,16 @@ impl std::ops::Deref for PerfDatabase {
 }
 
 impl PerfDatabase {
+    /// Test-only: swap the fpm_forward table so fixtures can point it at a
+    /// temp collector pair while every other table stays on the checked-in
+    /// fixture DB. The fixture db must be uniquely owned (no clones yet).
+    #[cfg(test)]
+    pub(crate) fn set_fpm_forward_for_test(&mut self, table: FpmForwardTable) {
+        Arc::get_mut(&mut self.tables)
+            .expect("test fixture db must be uniquely owned")
+            .fpm_forward = table;
+    }
+
     /// Resolve and parse the system YAML, locate the per-version data
     /// directory, and construct lazy table owners.
     ///
@@ -294,6 +371,24 @@ impl PerfDatabase {
         version: &str,
         perf_db_sources: &PerfDbSources,
     ) -> Result<Self, AicError> {
+        Self::load_with_sources_opts(systems_root, system, backend, version, perf_db_sources, false)
+    }
+
+    /// [`PerfDatabase::load_with_sources`] with an estimate-only escape hatch:
+    /// `tolerate_missing_data` skips the perf-data-directory existence gate so
+    /// a system that ships only a spec yaml (Python's `allow_missing_data`
+    /// "estimate" databases) can still back a SOL view — every SOL answer is
+    /// analytic from the system spec, and any table-backed lookup raises its
+    /// own per-family miss lazily. Non-SOL callers must keep the loud gate:
+    /// a typo'd version string should fail at load, not as per-op misses.
+    pub fn load_with_sources_opts(
+        systems_root: &Path,
+        system: &str,
+        backend: &str,
+        version: &str,
+        perf_db_sources: &PerfDbSources,
+        tolerate_missing_data: bool,
+    ) -> Result<Self, AicError> {
         let system_yaml = systems_root.join(format!("{system}.yaml"));
         let spec = SystemSpec::load(&system_yaml)?;
         let system_data_root = systems_root.join(&spec.data_dir);
@@ -304,7 +399,10 @@ impl PerfDatabase {
         // the known legacy backend names). `data_root` stays the legacy path
         // either way — each table's `resolve_op_sources` call resolves the
         // actual per-file location (legacy or family) independently.
-        if !data_root.is_dir() && !has_family_backend_version(&system_data_root, backend, version) {
+        if !tolerate_missing_data
+            && !data_root.is_dir()
+            && !has_family_backend_version(&system_data_root, backend, version)
+        {
             return Err(AicError::PerfDatabase(format!(
                 "perf data directory not found in either the legacy layout ({}) or a family-first layout \
                  (<family>/{backend}/{version} under {}) (system={system}, backend={backend}, version={version})",
@@ -347,6 +445,12 @@ impl PerfDatabase {
             ),
             mla: MlaTable::with_sources(data_root.clone(), spec.clone(), perf_db_sources),
             moe: MoeTable::with_sources(data_root.clone(), perf_db_sources),
+            moe_a2a: MoeA2aTable::with_sources(data_root.clone(), perf_db_sources),
+            moe_expert_compute: MoeExpertComputeTable::with_sources(
+                data_root.clone(),
+                spec.clone(),
+                perf_db_sources,
+            ),
             communication: CommunicationTable::with_sources(
                 data_root.clone(),
                 nccl_root,
@@ -357,33 +461,112 @@ impl PerfDatabase {
             dsv4: Dsv4Table::with_sources(data_root.clone(), perf_db_sources),
             // Single-primary by design: the Python MegaMoE loader reads one
             // unified path and never the shared-layer source list (see
-            // `dsv4_megamoe.rs`).
-            dsv4_megamoe: Dsv4MegaMoeTable::new(data_root.clone()),
+            // `dsv4_megamoe.rs`) — but that one path IS family-first
+            // resolved, so take the head of the standard source resolution.
+            dsv4_megamoe: Dsv4MegaMoeTable::with_primary(
+                resolve_op_sources(
+                    perf_db_sources,
+                    "dsv4_megamoe_module_perf.parquet",
+                    &data_root,
+                )
+                .into_iter()
+                .next()
+                .map(|PerfSource(path, _)| path)
+                .unwrap_or_else(|| data_root.join("dsv4_megamoe_module_perf.parquet")),
+            ),
             mhc: MhcTable::with_sources(data_root.clone(), perf_db_sources),
-            wideep: WideEpTable::with_sources(data_root.clone(), perf_db_sources),
+            trtllm_alltoall: TrtllmAlltoallTable::with_sources(data_root.clone(), perf_db_sources),
             wideep_mla: WideEpMlaTable::with_sources(
                 data_root.clone(),
                 spec.clone(),
                 perf_db_sources,
             ),
-            wideep_moe: WideEpMoeTable::with_sources(data_root.clone(), perf_db_sources),
             state_space: StateSpaceTable::with_sources(
                 data_root.clone(),
                 backend,
                 version,
                 perf_db_sources,
             ),
+            // Deliberately NOT shared-layer aware: FPM whole-model data is
+            // valid only for its exact backend/version (fpm_forward.rs).
+            fpm_forward: FpmForwardTable::new(data_root.clone(), system, backend, version),
             system_spec: spec,
+            // Kept for the table-view folds (`table_view.rs`), which resolve
+            // every basename themselves — including the wideep/deepep files
+            // no query table loads.
+            perf_db_sources: perf_db_sources.clone(),
             data_root,
         };
-        Ok(Self {
-            tables: Arc::new(tables),
+        Ok(Self::from_tables(Arc::new(tables)))
+    }
+
+    /// Like [`PerfDatabase::load_with_sources`], but shares the loaded
+    /// [`PerfTables`] across databases with the same load identity
+    /// (systems root, system, backend, version, shared-layer source map).
+    ///
+    /// The tables are the expensive half of a database: each family parses
+    /// its parquet files behind a `OnceLock` on first query, so every
+    /// separately-loaded instance re-parses the same files. Sharing them
+    /// amortizes that parse across the many single-use engines a sweep
+    /// compiles (one per model x parallelism x quant identity — the
+    /// prediction-regression gate builds hundreds per combo). Only the
+    /// immutable-after-load half is shared: every returned view gets fresh
+    /// mode/policy fields, memo caches, and a fresh provenance accumulator,
+    /// so two engines over the same tables never couple their runtime state.
+    ///
+    /// The memo holds `Weak` references and is swept on insert, so tables
+    /// live exactly as long as some database still uses them. Concurrent
+    /// first loads of the same identity may both build (benign: last insert
+    /// wins and both instances work; the memo is an amortization, not a
+    /// uniqueness guarantee).
+    pub fn load_with_sources_shared(
+        systems_root: &Path,
+        system: &str,
+        backend: &str,
+        version: &str,
+        perf_db_sources: &PerfDbSources,
+        tolerate_missing_data: bool,
+    ) -> Result<Self, AicError> {
+        static SHARED_TABLES: OnceLock<Mutex<HashMap<String, Weak<PerfTables>>>> = OnceLock::new();
+        if tolerate_missing_data {
+            // Estimate-only loads bypass the memo entirely: caching a set of
+            // empty tables under the plain identity key would let a later
+            // STRICT load of the same identity silently succeed with empty
+            // tables instead of raising the loud missing-directory error.
+            return Self::load_with_sources_opts(systems_root, system, backend, version, perf_db_sources, true);
+        }
+        let key = shared_tables_key(systems_root, system, backend, version, perf_db_sources);
+        let memo = SHARED_TABLES.get_or_init(Default::default);
+        if let Some(tables) = memo.lock().unwrap().get(&key).and_then(Weak::upgrade) {
+            return Ok(Self::from_tables(tables));
+        }
+        let db = Self::load_with_sources(systems_root, system, backend, version, perf_db_sources)?;
+        let mut map = memo.lock().unwrap();
+        map.retain(|_, weak| weak.strong_count() > 0);
+        map.insert(key, Arc::downgrade(&db.tables));
+        Ok(db)
+    }
+
+    /// Fresh default-mode view over `tables`. Per-view state (query mode,
+    /// transfer policy, memo caches, provenance accumulator) always starts
+    /// fresh here — the invariant [`PerfDatabase::load_with_sources_shared`]
+    /// relies on to share tables without coupling views.
+    fn from_tables(tables: Arc<PerfTables>) -> Self {
+        Self {
+            tables,
             database_mode: DatabaseMode::default(),
             transfer_policy: TransferPolicy::ALL,
             util_grids: Arc::new(UtilGridCache::new()),
             delta_lookups: Arc::new(DeltaLookupCache::new()),
             provenance: Arc::new(AtomicU8::new(ProvenanceTier::Silicon as u8)),
-        })
+        }
+    }
+
+    /// The shared tables `Arc` (the load identity of the underlying data).
+    /// Exposed for the engine layer's table-sharing tests.
+    #[cfg(test)]
+    pub(crate) fn tables_arc(&self) -> &Arc<PerfTables> {
+        &self.tables
     }
 
     /// Record that an empirical path of tier `tier` produced a value.
@@ -450,6 +633,173 @@ impl PerfDatabase {
             provenance: Arc::clone(&self.provenance),
         }
     }
+
+    /// The SOL_FULL view over the same loaded tables (cheap: `Arc` clones).
+    ///
+    /// Mirrors passing `database_mode=DatabaseMode.SOL_FULL` per call on the
+    /// Python `query_*` facade: every operator query takes its analytic SOL
+    /// branch (and attaches `PerformanceResult::sol` components) regardless
+    /// of the engine's configured mode. Used by the per-op SOL-decomposition
+    /// FFI (`evaluate_ops_sol_json`).
+    pub fn sol_full_view(&self) -> PerfDatabase {
+        PerfDatabase {
+            tables: Arc::clone(&self.tables),
+            database_mode: DatabaseMode::SolFull,
+            transfer_policy: self.transfer_policy,
+            util_grids: Arc::clone(&self.util_grids),
+            delta_lookups: Arc::clone(&self.delta_lookups),
+            provenance: Arc::clone(&self.provenance),
+        }
+    }
+}
+
+/// Shared fixtures for the per-family ENERGY oracle tests.
+///
+/// The shipped perf databases carry no `power` column (their energies are
+/// all 0.0), so the energy oracles run on synthetic power-carrying parquet
+/// fixtures. Each test documents its fixture rows and query; the pinned
+/// values were minted by rebuilding the identical fixture with pandas and
+/// querying the frozen Python SDK, e.g.:
+///
+/// ```text
+/// cd <repo> && uv run python - <<'PY'
+/// import pandas as pd, yaml, tempfile, os
+/// from aiconfigurator_core.sdk.perf_database import PerfDatabase
+/// from aiconfigurator_core.sdk import common
+/// root = tempfile.mkdtemp(); data = os.path.join(root, "data", "vllm", "1.0")
+/// os.makedirs(data)
+/// yaml.safe_dump({...the testsys spec below...},
+///                open(os.path.join(root, "testsys.yaml"), "w"))
+/// pd.DataFrame([...the test's rows...]).to_parquet(
+///     os.path.join(data, "<family>_perf.parquet"))
+/// db = PerfDatabase("testsys", "vllm", "1.0", root)
+/// r = db.query_<family>(..., database_mode=common.DatabaseMode.SILICON)
+/// print(float(r), r.energy)
+/// PY
+/// ```
+///
+/// The system spec here mirrors that script's `testsys.yaml` byte for byte
+/// so SOL-dependent paths (the GEMM load clamp, the fp8_static latency
+/// floor) agree across both engines.
+#[cfg(test)]
+pub(crate) mod energy_test_fixtures {
+    use std::fs::File;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use parquet::data_type::{BoolType, ByteArray, ByteArrayType, DataType, DoubleType, Int64Type};
+    use parquet::file::properties::WriterProperties;
+    use parquet::file::writer::{SerializedFileWriter, SerializedRowGroupWriter};
+    use parquet::schema::parser::parse_message_type;
+
+    use crate::common::system_spec::{GpuSpec, MiscSpec, NodeSpec, SystemSpec};
+
+    /// One parquet column of the fixture: name + values (row-aligned).
+    pub(crate) enum Col {
+        Str(&'static str, Vec<&'static str>),
+        I64(&'static str, Vec<i64>),
+        F64(&'static str, Vec<f64>),
+        Bool(&'static str, Vec<bool>),
+    }
+
+    fn write_typed<T: DataType>(rg: &mut SerializedRowGroupWriter<'_, File>, values: &[T::T]) {
+        let mut col = rg.next_column().unwrap().expect("column");
+        col.typed::<T>().write_batch(values, None, None).unwrap();
+        col.close().unwrap();
+    }
+
+    /// Write one single-row-group parquet with the given columns.
+    pub(crate) fn write_parquet(path: &Path, cols: &[Col]) {
+        let fields: Vec<String> = cols
+            .iter()
+            .map(|c| match c {
+                Col::Str(name, _) => format!("REQUIRED BYTE_ARRAY {name} (UTF8);"),
+                Col::I64(name, _) => format!("REQUIRED INT64 {name};"),
+                Col::F64(name, _) => format!("REQUIRED DOUBLE {name};"),
+                Col::Bool(name, _) => format!("REQUIRED BOOLEAN {name};"),
+            })
+            .collect();
+        let schema = format!("message energy_fixture {{ {} }}", fields.join(" "));
+        let schema = Arc::new(parse_message_type(&schema).expect("schema must parse"));
+        let file = File::create(path).expect("create parquet");
+        let mut writer =
+            SerializedFileWriter::new(file, schema, Arc::new(WriterProperties::builder().build()))
+                .expect("writer");
+        let mut rg = writer.next_row_group().expect("row group");
+        for col in cols {
+            match col {
+                Col::Str(_, v) => {
+                    let bytes: Vec<ByteArray> = v.iter().map(|s| ByteArray::from(*s)).collect();
+                    write_typed::<ByteArrayType>(&mut rg, &bytes);
+                }
+                Col::I64(_, v) => write_typed::<Int64Type>(&mut rg, v),
+                Col::F64(_, v) => write_typed::<DoubleType>(&mut rg, v),
+                Col::Bool(_, v) => write_typed::<BoolType>(&mut rg, v),
+            }
+        }
+        rg.close().unwrap();
+        writer.close().unwrap();
+    }
+
+    /// The oracle script's `testsys.yaml` gpu/node numbers, as an in-code
+    /// spec for family tables constructed directly from a data dir.
+    pub(crate) fn energy_test_spec() -> SystemSpec {
+        SystemSpec {
+            data_dir: "data".into(),
+            gpu: GpuSpec {
+                mem_bw: 7.7e12,
+                mem_bw_empirical_scaling_factor: 0.92,
+                mem_empirical_constant_latency: 2e-6,
+                mem_capacity: None,
+                bfloat16_tc_flops: Some(2.25e15),
+                int8_tc_flops: Some(4.5e15),
+                fp8_tc_flops: Some(4.5e15),
+                fp4_tc_flops: Some(9e15),
+                power: None,
+                sm_version: Some(100),
+            },
+            node: NodeSpec {
+                num_gpus_per_node: 8,
+                intra_node_bw: 900e9,
+                inter_node_bw: 50e9,
+                pcie_bw: None,
+                p2p_latency: 2e-6,
+                num_gpus_per_rack: None,
+                inter_rack_bw: None,
+            },
+            misc: MiscSpec::default(),
+        }
+    }
+
+    /// Write `testsys.yaml` (the YAML twin of [`energy_test_spec`]) into a
+    /// synthetic systems root and return the fixture data dir
+    /// `<root>/data/vllm/1.0` — the layout `PerfDatabase::load(root,
+    /// "testsys", "vllm", "1.0")` resolves.
+    pub(crate) fn write_energy_systems_root(root: &Path) -> std::path::PathBuf {
+        let yaml = r#"
+data_dir: data
+gpu:
+  mem_bw: 7.7e12
+  mem_bw_empirical_scaling_factor: 0.92
+  mem_empirical_constant_latency: 2.0e-6
+  bfloat16_tc_flops: 2.25e15
+  int8_tc_flops: 4.5e15
+  fp8_tc_flops: 4.5e15
+  fp4_tc_flops: 9.0e15
+  sm_version: 100
+node:
+  num_gpus_per_node: 8
+  intra_node_bw: 900.0e9
+  inter_node_bw: 50.0e9
+  p2p_latency: 2.0e-6
+misc:
+  nccl_version: test
+"#;
+        std::fs::write(root.join("testsys.yaml"), yaml).expect("write yaml");
+        let data = root.join("data").join("vllm").join("1.0");
+        std::fs::create_dir_all(&data).expect("mkdir data");
+        data
+    }
 }
 
 #[cfg(test)]
@@ -481,6 +831,132 @@ mod tests {
             gemm_sources[0].0.is_file(),
             "resolved GEMM parquet must exist: {}",
             gemm_sources[0].0.display()
+        );
+    }
+
+    #[test]
+    fn shared_load_reuses_tables_and_isolates_view_state() {
+        let sources = PerfDbSources::default();
+        let db1 = PerfDatabase::load_with_sources_shared(
+            &systems_root(),
+            "b200_sxm",
+            "vllm",
+            "0.19.0",
+            &sources,
+            false,
+        )
+        .expect("shared load must succeed");
+        let db2 = PerfDatabase::load_with_sources_shared(
+            &systems_root(),
+            "b200_sxm",
+            "vllm",
+            "0.19.0",
+            &sources,
+            false,
+        )
+        .expect("shared load must succeed");
+        assert!(
+            Arc::ptr_eq(&db1.tables, &db2.tables),
+            "same load identity must share the parsed tables"
+        );
+        // Per-view state must stay isolated: a provenance note (and memo
+        // caches) on one view never leaks into another view over the same
+        // shared tables.
+        db1.note_provenance(ProvenanceTier::Empirical);
+        assert_eq!(db2.worst_provenance(), ProvenanceTier::Silicon);
+        assert!(!Arc::ptr_eq(&db1.util_grids, &db2.util_grids));
+        assert!(!Arc::ptr_eq(&db1.delta_lookups, &db2.delta_lookups));
+    }
+
+    #[test]
+    fn missing_data_dir_is_tolerated_only_when_requested() {
+        // Estimate-only escape hatch (#1552 review finding 8): a system with a
+        // spec yaml but NO perf-data directory must load under the tolerant
+        // flag (SOL answers are analytic from the spec) and must keep failing
+        // loudly under the strict default.
+        let strict = PerfDatabase::load_with_sources_opts(
+            &systems_root(),
+            "h100_pcie",
+            "trtllm",
+            "estimate",
+            &PerfDbSources::default(),
+            false,
+        );
+        assert!(
+            strict
+                .err()
+                .map(|e| e.to_string().contains("perf data directory not found"))
+                .unwrap_or(false),
+            "strict load of a data-less tuple must raise the missing-directory error"
+        );
+        let tolerant = PerfDatabase::load_with_sources_opts(
+            &systems_root(),
+            "h100_pcie",
+            "trtllm",
+            "estimate",
+            &PerfDbSources::default(),
+            true,
+        )
+        .expect("tolerant load must succeed from the spec yaml alone");
+        // Table-backed lookups still miss lazily per family.
+        assert!(tolerant
+            .gemm
+            .query(crate::common::enums::GemmQuantMode::Bfloat16, 64, 4096, 4096)
+            .is_err());
+    }
+
+    #[test]
+    fn shared_load_distinct_source_maps_load_fresh_tables() {
+        let db_default = PerfDatabase::load_with_sources_shared(
+            &systems_root(),
+            "b200_sxm",
+            "vllm",
+            "0.19.0",
+            &PerfDbSources::default(),
+            false,
+        )
+        .expect("shared load must succeed");
+        let mut sources = PerfDbSources::default();
+        sources.insert(
+            "gemm_perf.parquet".to_string(),
+            vec![PerfSource(PathBuf::from("/nonexistent/gemm.parquet"), None)],
+        );
+        let db_override = PerfDatabase::load_with_sources_shared(
+            &systems_root(),
+            "b200_sxm",
+            "vllm",
+            "0.19.0",
+            &sources,
+            false,
+        )
+        .expect("shared load must succeed (tables are lazy; the bad path only matters on query)");
+        assert!(
+            !Arc::ptr_eq(&db_default.tables, &db_override.tables),
+            "a different source map is a different load identity"
+        );
+    }
+
+    #[test]
+    fn shared_tables_are_dropped_with_their_last_view() {
+        // A unique tempdir root gives this test its own memo identity, so
+        // parallel tests holding the real-fixture tables can't keep this
+        // entry alive.
+        let tmp = tempfile::tempdir().unwrap();
+        energy_test_fixtures::write_energy_systems_root(tmp.path());
+        let db = PerfDatabase::load_with_sources_shared(
+            tmp.path(),
+            "testsys",
+            "vllm",
+            "1.0",
+            &PerfDbSources::default(),
+            false,
+        )
+        .expect("fixture load must succeed");
+        let weak = Arc::downgrade(&db.tables);
+        drop(db);
+        assert!(
+            weak.upgrade().is_none(),
+            "the memo must hold Weak refs only — tables die with their last view"
         );
     }
 

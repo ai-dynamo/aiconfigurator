@@ -2,10 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: 1
-provenance: legacy
 runtime:
   framework: sglang
   version: 0.5.14
+  image: lmsysorg/sglang:v0.5.14
+  image_digest: sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3
 tables:
   gdn_perf:
+    collector_ref: 5a1834df2865d291f84f5fc1fbf6f3c99b69afba
+    collector_hash: sha256:e18b5b3a83ff649f4955a271b0d3b3680be2c43a5e07e68882b4e91a6991d075
+    case_plan_hash: sha256:1e658e78c925cba9773688165ecec208c0c2c2f0b931268cc15a245fc878ac48
+    collected_at: '2026-08-10'
+    rows: 8820
+    # All 32 failed tasks are strict-completeness raises on the largest
+    # batch x seq inner points (memory-bound sweep tail); collected rows
+    # are unaffected.
     status: complete

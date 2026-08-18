@@ -144,6 +144,8 @@ def post_sla(
 
         # dense model
         is_moe = check_is_moe(model_path)
+        # (explicit enable_wideep=False dropped: the parameter is deprecated
+        # and ignored by enumerate_parallel_config.)
         agg_parallel_config_list = enumerate_parallel_config(
             num_gpu_list=[1, 2, 4, 8],
             tp_list=[1, 2, 4, 8],
@@ -153,7 +155,6 @@ def post_sla(
             dp_list=[1],
             is_moe=is_moe,
             backend=common.BackendName(backend),
-            enable_wideep=False,
         )
 
         concurrency_list_default = [

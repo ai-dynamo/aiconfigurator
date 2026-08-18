@@ -9,6 +9,14 @@ Four ops model the full AFD communication path:
 * ``AFDFAllGather`` — F-node intra-node AllGather along the token dimension
 * ``AFDFReduceScatter`` — F-node intra-node ReduceScatter after F compute
 * ``AFDCombine`` — A-side cross-EP local HBM reduce-add
+
+These are ORCHESTRATION ops (their ``query`` overrides are whitelisted by the
+single-oracle contract): the A/F topology math — send probability, per-link
+volumes, rank mapping — stays here in Python, while the per-message latency
+value comes from the compiled engine via a single-element op-list evaluation
+of the standard comm twin (``P2P`` / ``NCCL`` / ``ElementWise``). Byte-exact
+volumes are expressed as ``ceil(bytes/2)`` bf16 elements on the probe op —
+at most 1 byte of rounding on multi-MB messages.
 """
 
 from __future__ import annotations
@@ -18,10 +26,20 @@ from typing import TYPE_CHECKING, Optional
 
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.operations.base import Operation
+from aiconfigurator_core.sdk.operations.communication import NCCL, P2P
+from aiconfigurator_core.sdk.operations.elementwise import ElementWise
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
+
+
+def _engine_comm_query(database: PerfDatabase, op: Operation) -> PerformanceResult:
+    """Engine value for one comm probe op. ``x=1``: the probe carries the full
+    message in its per-token field, so no token factorization is needed."""
+    from aiconfigurator_core.sdk.engine import _evaluate_single_op
+
+    return _evaluate_single_op(database, op, is_context=True, batch_size=1, s=1, x=1)
 
 
 def _afd_send_prob(num_experts: int, topk: int, num_f_nodes: int) -> float:
@@ -113,7 +131,9 @@ class AFDTransfer(Operation):
         per_link_bytes = int(p_send * x * self._hidden_size * bpe)
         if per_link_bytes <= 0:
             return PerformanceResult(0.0, 0.0, source="empirical")
-        result = database.query_p2p(per_link_bytes)
+        # pp_size=2 passes the twin's "pp_size=1 is a no-op" gate; a single
+        # P2P link is charged regardless of the actual pp depth.
+        result = _engine_comm_query(database, P2P("afd_p2p", 1.0, -(-per_link_bytes // 2), 2))
         lat = float(result) * self._comm_overhead_factor
         return PerformanceResult(
             lat * self._scale_factor,
@@ -193,7 +213,9 @@ class AFDFAllGather(Operation):
         per_rank_elements = int(tokens_per_f_node * self._hidden_size / f_local)
         if per_rank_elements <= 0:
             return PerformanceResult(0.0, 0.0, source="empirical")
-        result = database.query_nccl(self._comm_quant_mode, f_local, "all_gather", per_rank_elements)
+        result = _engine_comm_query(
+            database, NCCL("afd_all_gather", 1.0, "all_gather", per_rank_elements, f_local, self._comm_quant_mode)
+        )
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
@@ -273,7 +295,10 @@ class AFDFReduceScatter(Operation):
         per_rank_elements = int(tokens_per_f_node * self._hidden_size / f_local)
         if per_rank_elements <= 0:
             return PerformanceResult(0.0, 0.0, source="empirical")
-        result = database.query_nccl(self._comm_quant_mode, f_local, "reduce_scatter", per_rank_elements)
+        result = _engine_comm_query(
+            database,
+            NCCL("afd_reduce_scatter", 1.0, "reduce_scatter", per_rank_elements, f_local, self._comm_quant_mode),
+        )
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,
@@ -322,7 +347,7 @@ class AFDCombine(Operation):
         total_bytes = int((self._f_moe_ep_size + 1) * tokens_per_a_rank * self._hidden_size * bpe)
         if total_bytes <= 0:
             return PerformanceResult(0.0, 0.0, source="empirical")
-        result = database.query_mem_op(total_bytes)
+        result = _engine_comm_query(database, ElementWise("afd_combine_mem", 1.0, -(-total_bytes // 2), 0))
         return PerformanceResult(
             float(result) * self._scale_factor,
             energy=result.energy * self._scale_factor,

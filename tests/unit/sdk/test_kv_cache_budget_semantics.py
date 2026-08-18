@@ -127,3 +127,67 @@ def test_explicit_fraction_overrides_backend_default():
     assert kwargs["free_gpu_memory_fraction"] == 0.8
     kwargs = backend._static_oom_check_kwargs(180 * (1 << 30), backend_version="0.19.0")
     assert kwargs["free_gpu_memory_fraction"] == pytest.approx(0.90)
+
+
+def test_vllm_agg_resolver_carries_version_aware_fraction():
+    """The agg resolver must not drop the fraction: run_agg budgets through
+    ``_oom_check_kwargs(agg_extra)``, and before this resolver existed the
+    base class returned {} — every aggregated vLLM run was budgeted at the
+    0.92 constant regardless of database version or explicit override."""
+    backend = VLLMBackend()
+    assert backend._resolve_agg_kwargs({}, isl=1024, osl=1024, backend_version="0.19.0") == {
+        "free_gpu_memory_fraction": pytest.approx(0.90)
+    }
+    assert backend._resolve_agg_kwargs({}, isl=1024, osl=1024, backend_version="0.22.0") == {
+        "free_gpu_memory_fraction": pytest.approx(0.92)
+    }
+    # explicit override wins over the version default
+    resolved = backend._resolve_agg_kwargs(
+        {"free_gpu_memory_fraction": 0.75}, isl=1024, osl=1024, backend_version="0.22.0"
+    )
+    assert resolved == {"free_gpu_memory_fraction": 0.75}
+    # idempotent: re-resolving forwarded kwargs returns the same values
+    assert backend._resolve_agg_kwargs(resolved, isl=1024, osl=1024, backend_version="0.22.0") == resolved
+    # and the resolved value is what the agg OOM check budgets with
+    oom_kwargs = backend._oom_check_kwargs(
+        backend._resolve_agg_kwargs({}, isl=1024, osl=1024, backend_version="0.19.0")
+    )
+    assert oom_kwargs["free_gpu_memory_fraction"] == pytest.approx(0.90)
+    assert oom_kwargs["fraction_of_free"] is False
+
+
+def test_sglang_agg_resolver_honors_explicit_fraction():
+    """SGLang agg keeps its 0.88 fallback when unset but must honor an
+    explicit user fraction (it was previously discarded the same way)."""
+    from aiconfigurator.sdk.backends.sglang_backend import (
+        SGLANG_FALLBACK_MEM_FRACTION_STATIC,
+        SGLANGBackend,
+    )
+
+    backend = SGLANGBackend()
+    resolved = backend._resolve_agg_kwargs({}, isl=1024, osl=1024)
+    assert backend._oom_check_kwargs(resolved)["free_gpu_memory_fraction"] == SGLANG_FALLBACK_MEM_FRACTION_STATIC
+    resolved = backend._resolve_agg_kwargs({"free_gpu_memory_fraction": 0.8}, isl=1024, osl=1024)
+    assert backend._oom_check_kwargs(resolved)["free_gpu_memory_fraction"] == 0.8
+
+
+def test_agg_cache_key_distinguishes_fraction():
+    """The cached run_agg summary embeds the KV-budget OOM verdict, so
+    summaries resolved under different fractions must not share an entry."""
+    backend = VLLMBackend()
+    key_090 = backend._make_agg_cache_key(
+        1024, 1024, 8, 512, backend._resolve_agg_kwargs({}, isl=1024, osl=1024, backend_version="0.19.0")
+    )
+    key_092 = backend._make_agg_cache_key(
+        1024, 1024, 8, 512, backend._resolve_agg_kwargs({}, isl=1024, osl=1024, backend_version="0.22.0")
+    )
+    assert key_090 != key_092
+
+
+def test_base_backend_agg_resolver_defaults_off():
+    """Backends without a default fraction resolve to {} (no budget check)."""
+
+    class _NoDefault(BaseBackend):
+        pass
+
+    assert _NoDefault()._resolve_agg_kwargs({}, isl=1024, osl=1024) == {}

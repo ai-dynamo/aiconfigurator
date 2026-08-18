@@ -3,7 +3,7 @@
 
 """Parity for the ``compile_engine`` + ``EngineHandle`` path.
 
-Two surfaces:
+Three surfaces:
 
 1. **Op-transfer round-trip fidelity.** ``compile_engine`` produces bincode
    bytes; ``EngineHandle`` consumes them and computes. We also inspect the
@@ -11,13 +11,22 @@ Two surfaces:
    match the model's actual ``context_ops`` / ``generation_ops``. This is where
    a misnamed field or a wrong phase-pair tag would surface loudly.
 
-2. **Integration parity.** For a smoke subset of the existing
-   ``EngineStepParityCase``s — spanning all three backends (vllm + sglang +
-   trtllm) so backend-specific op-transfer divergences (the ``MoEDispatch``
-   flavor split, trtllm comm quant, the SGLang/TRT-LLM Fallback-MLA chain) are
-   covered — compare the compiled-engine path against Python's ``BaseBackend``
-   reference for static_ctx, static_gen, mixed-step, and decode-step within
-   ``PARITY_RTOL``, exercising ``compile_engine`` / ``EngineHandle`` directly.
+2. **Integration parity vs golden fixtures.** For a smoke subset of the
+   existing ``EngineStepParityCase``s — spanning all three backends (vllm +
+   sglang + trtllm) so backend-specific op-transfer divergences (the
+   ``MoEDispatch`` flavor split, trtllm comm quant, the SGLang/TRT-LLM
+   Fallback-MLA chain) are covered — compare the compiled-engine path against
+   the FROZEN Python ``BaseBackend`` reference in
+   ``goldens/compile_engine.json`` (captured by the retired
+   ``regenerate_goldens.py`` while the Python step path was alive; new
+   records are pinned from the live rust engine by ``pin_goldens.py``) for
+   static_ctx, static_gen, mixed-step, and decode-step within
+   ``PARITY_RTOL``.
+
+3. **Per-op FFI anchor.** ``EngineHandle.run_static_per_op`` folded by name
+   must reproduce the frozen Python summary per-op dicts (latency + energy +
+   source) from ``goldens/per_op.json`` — the Gate-3 precondition that per-op
+   values cross the FFI with real op names.
 
 These tests require the maturin-built ``aiconfigurator_core`` extension.
 """
@@ -31,9 +40,16 @@ import json
 
 import pytest
 
-# Reuse the existing harness's case definitions and constants so this test
-# tracks the same smoke matrix.
-from test_engine_step_parity import PARITY_RTOL, SMOKE_CASES, EngineStepParityCase
+# Reuse the existing harness's case definitions, constants, and golden loader
+# so this test tracks the same smoke matrix and fixture workflow.
+from test_engine_step_parity import (
+    _REGENERATE_HINT,
+    PARITY_RTOL,
+    POWER_CASES,
+    SMOKE_CASES,
+    EngineStepParityCase,
+    load_parity_golden,
+)
 
 from aiconfigurator.sdk import config, engine, perf_database
 from aiconfigurator.sdk.backends.factory import get_backend
@@ -49,10 +65,15 @@ pytestmark = pytest.mark.integration
 # sglang/vllm emit `CustomAllReduce` — trtllm comm quant, and the
 # SGLang/TRT-LLM-only Fallback-MLA chain) uncovered here.
 #
-# Cases drawn straight from `SMOKE_CASES` so this tracks the same matrix. All
-# compute (no error-symmetry cases), so every surface yields a real number.
+# Cases drawn straight from `SMOKE_CASES` (plus one `POWER_CASES` member) so
+# this tracks the same matrix. All compute (no error-symmetry cases), so every
+# surface yields a real number.
 #
-#   vllm   : the original 5 b200_sxm/vllm/0.19.0 cases.
+#   vllm   : the original 5 b200_sxm/vllm/0.19.0 cases, plus the
+#            Qwen3-30B-A3B b200_sxm/vllm/0.22.0 POWER_CASES member — every
+#            0.19.0/0.5.x/1.3.0rc10 identity is latency-only (energy_wms == 0
+#            in every per-op golden), so this is the one subset case whose
+#            per-op energy comparison actually executes.
 #   sglang : Kimi-K2.5 (Fallback-MLA + MoE) and MiniMax-M2.5 (MoE), both
 #            b200_sxm/sglang/0.5.10. SGLang's MoEDispatch flavor is the same
 #            `CustomAllReduce` else-branch as vllm; its distinct value is the
@@ -69,6 +90,7 @@ _SUBSET_IDS_BY_BACKEND = {
         "minimax-m25-b200-vllm-019-sampled-prefix",
         "minimax-m27-b200-vllm-019-isl1024-osl2",
         "qwen3-30b-a3b-b200-vllm-019-isl1024-osl2",
+        "qwen3-30b-a3b-b200-vllm-022-power",
     ],
     "sglang": [
         "kimi-k25-b200-sglang-0510-isl1024-osl2",
@@ -80,14 +102,36 @@ _SUBSET_IDS_BY_BACKEND = {
     ],
 }
 
+# Subset members on power-carrying database identities: their per-op goldens
+# must carry nonzero energy_wms, so the energy comparison branch is proven to
+# execute (see the anti-vacuous guard in TestCompileEnginePerOpParity).
+_POWER_SUBSET_IDS = {"qwen3-30b-a3b-b200-vllm-022-power"}
+
 # Preserve the per-backend ordering (vllm, then sglang, then trtllm) so the
 # parametrize ids group readably and the determinism sweep covers vllm first.
-_SUBSET_BY_ID = {p.id: p for p in SMOKE_CASES}
+_SUBSET_BY_ID = {p.id: p for p in [*SMOKE_CASES, *POWER_CASES]}
 _declared_ids = [cid for ids in _SUBSET_IDS_BY_BACKEND.values() for cid in ids]
 _missing_ids = [cid for cid in _declared_ids if cid not in _SUBSET_BY_ID]
 if _missing_ids:
     raise AssertionError(f"subset declares case ids absent from SMOKE_CASES: {_missing_ids}")
 _SUBSET_CASES = [_SUBSET_BY_ID[cid] for cid in _declared_ids]
+
+# Golden records key on the pytest param id; recover it from the (frozen,
+# hashable) case value the tests are parametrized with.
+_SUBSET_CASE_IDS = {p.values[0]: p.id for p in _SUBSET_CASES}
+
+
+def _golden_reference(key: str) -> float:
+    """One frozen Python reference value from ``goldens/compile_engine.json``."""
+    references = load_parity_golden("compile_engine.json")["references"]
+    value = references.get(key)
+    if value is None:
+        pytest.fail(f"no compile-engine golden reference '{key}'; {_REGENERATE_HINT}", pytrace=False)
+    return float(value)
+
+
+def _case_reference(case: EngineStepParityCase, metric: str) -> float:
+    return _golden_reference(f"{_SUBSET_CASE_IDS[case]}::{metric}")
 
 
 # --------------------------------------------------------------------------- #
@@ -219,68 +263,14 @@ class TestOpTransferRoundTrip:
 
 
 # --------------------------------------------------------------------------- #
-# 2. Integration pre-validation against Python BaseBackend.
+# 2. Integration parity against the frozen Python BaseBackend reference.
+#
+# The Python side of every reference is a FROZEN golden value in
+# `goldens/compile_engine.json`, captured by the retired
+# `regenerate_goldens.py` while the Python step path was still alive. Only
+# the compiled-engine side runs live; `pin_goldens.py` appends records for
+# new cases (pinned from the live rust engine, provenance-marked).
 # --------------------------------------------------------------------------- #
-
-
-def _python_static(case: EngineStepParityCase, mode: str, stride: int) -> float:
-    model, backend, database = _build_python_model(case)
-    rc = config.RuntimeConfig(
-        batch_size=case.batch_size,
-        beam_width=1,
-        isl=case.isl,
-        osl=max(case.osl, 2),
-        prefix=case.prefix,
-    )
-    (
-        ctx_lat,
-        _ctx_e,
-        gen_lat,
-        _gen_e,
-        _ctx_s,
-        _gen_s,
-    ) = _quiet(backend._run_static_breakdown, model, database, rc, mode, stride)
-    if mode == "static_ctx":
-        return float(sum(ctx_lat.values()))
-    if mode == "static_gen":
-        return float(sum(gen_lat.values()))
-    return float(sum(ctx_lat.values()) + sum(gen_lat.values()))
-
-
-def _python_mixed(case: EngineStepParityCase) -> float:
-    model, backend, database = _build_python_model(case)
-    rc = config.RuntimeConfig(
-        batch_size=case.batch_size, beam_width=1, isl=case.isl, osl=max(case.osl, 2), prefix=case.prefix
-    )
-    latency_ms, _, _, _ = _quiet(
-        backend._get_mix_step_latency,
-        model,
-        database,
-        rc,
-        case.isl,  # ctx_tokens
-        case.batch_size,  # gen_tokens
-        case.isl,
-        max(case.osl, 2),
-        case.prefix,
-    )
-    return float(latency_ms)
-
-
-def _python_decode(case: EngineStepParityCase) -> float:
-    model, backend, database = _build_python_model(case)
-    rc = config.RuntimeConfig(
-        batch_size=case.batch_size, beam_width=1, isl=case.isl, osl=max(case.osl, 2), prefix=case.prefix
-    )
-    latency_ms, _, _, _ = _quiet(
-        backend._get_genonly_step_latency,
-        model,
-        database,
-        rc,
-        case.batch_size,  # gen_tokens
-        case.isl,
-        max(case.osl, 2),
-    )
-    return float(latency_ms)
 
 
 def _assert_within(name: str, python_value: float, new_value: float, *, backend: str) -> None:
@@ -300,6 +290,20 @@ def _assert_within(name: str, python_value: float, new_value: float, *, backend:
     )
 
 
+# Chunked-prefill shapes: shared by the parametrized test and the golden
+# pin path (pin_goldens.py) so the fixture keys track the test matrix.
+_CHUNKED_PREFILL_CASE_ID = "minimax-m25-b200-vllm-019-isl1024-osl2"
+_CHUNKED_PREFILL_SHAPES = [
+    (512, 4, 4096, 128, 0),  # chunked prefill: ctx_tokens < isl
+    (512, 4, 4096, 128, 256),  # chunked + cached prefix
+    (300, 7, 1000, 64, 100),  # ragged chunk + prefix + decode overlap
+]
+
+
+def _chunked_prefill_key(ctx_tokens: int, gen_tokens: int, isl: int, osl: int, prefix: int) -> str:
+    return f"chunked_prefill::ctx{ctx_tokens}_gen{gen_tokens}_isl{isl}_osl{osl}_prefix{prefix}::mixed_step"
+
+
 class TestCompileEngineStaticParity:
     @pytest.mark.parametrize("case", _SUBSET_CASES)
     def test_static_ctx_and_gen(self, case: EngineStepParityCase) -> None:
@@ -309,8 +313,8 @@ class TestCompileEngineStaticParity:
         new_ctx, new_gen, new_total = handle.run_static(
             batch_size=case.batch_size, isl=case.isl, osl=osl, prefix=case.prefix, stride=1
         )
-        py_ctx = _python_static(case, "static_ctx", 1)
-        py_gen = _python_static(case, "static_gen", 1)
+        py_ctx = _case_reference(case, "static_ctx")
+        py_gen = _case_reference(case, "static_gen")
         _assert_within("static_ctx", py_ctx, new_ctx, backend=case.backend_name)
         _assert_within("static_gen", py_gen, new_gen, backend=case.backend_name)
         _assert_within("static_total", py_ctx + py_gen, new_total, backend=case.backend_name)
@@ -321,31 +325,20 @@ class TestCompileEngineMixedStepParity:
     def test_mixed_step(self, case: EngineStepParityCase) -> None:
         handle = _compile_handle(case)
         new_val = handle.mixed_step_latency(case.isl, case.batch_size, case.isl, max(case.osl, 2), case.prefix)
-        py_val = _python_mixed(case)
+        py_val = _case_reference(case, "mixed_step")
         _assert_within("mixed_step", py_val, new_val, backend=case.backend_name)
 
-    @pytest.mark.parametrize(
-        "ctx_tokens,gen_tokens,isl,osl,prefix",
-        [
-            (512, 4, 4096, 128, 0),  # chunked prefill: ctx_tokens < isl
-            (512, 4, 4096, 128, 256),  # chunked + cached prefix
-            (300, 7, 1000, 64, 100),  # ragged chunk + prefix + decode overlap
-        ],
-    )
+    @pytest.mark.parametrize("ctx_tokens,gen_tokens,isl,osl,prefix", _CHUNKED_PREFILL_SHAPES)
     def test_mixed_step_chunked_prefill(self, ctx_tokens, gen_tokens, isl, osl, prefix) -> None:
         """Chunked prefill (ctx_tokens < isl) was the largest pre-rewrite
         composition gap: Python queries context attention at the FULL per-req
         isl then divides by ceil(isl/ctx), the old Rust queried the chunk
         directly. The rewritten three-pass mirror must match exactly."""
-        case = _SUBSET_BY_ID["minimax-m25-b200-vllm-019-isl1024-osl2"].values[0]
-        model, backend, database = _build_python_model(case)
-        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=isl, osl=osl, prefix=prefix)
-        py_val, _, _, _ = _quiet(
-            backend._get_mix_step_latency, model, database, rc, ctx_tokens, gen_tokens, isl, osl, prefix
-        )
+        case = _SUBSET_BY_ID[_CHUNKED_PREFILL_CASE_ID].values[0]
         handle = _compile_handle(case)
         new_val = handle.mixed_step_latency(ctx_tokens, gen_tokens, isl, osl, prefix)
-        _assert_within("mixed_step_chunked", float(py_val), new_val, backend=case.backend_name)
+        py_val = _golden_reference(_chunked_prefill_key(ctx_tokens, gen_tokens, isl, osl, prefix))
+        _assert_within("mixed_step_chunked", py_val, new_val, backend=case.backend_name)
 
 
 class TestCompileEngineDecodeStepParity:
@@ -353,8 +346,104 @@ class TestCompileEngineDecodeStepParity:
     def test_decode_step(self, case: EngineStepParityCase) -> None:
         handle = _compile_handle(case)
         new_val = handle.decode_step_latency(case.batch_size, case.isl, max(case.osl, 2))
-        py_val = _python_decode(case)
+        py_val = _case_reference(case, "decode_step")
         _assert_within("decode_step", py_val, new_val, backend=case.backend_name)
+
+
+# --------------------------------------------------------------------------- #
+# 2a. Per-op FFI anchor (Gate-3 precondition: per-op values cross the op-list
+# FFI with real op names, latencies, energies, and source tags — not the
+# synthetic `rust_engine_step_*` collapse).
+# --------------------------------------------------------------------------- #
+
+
+def _fold_per_op_entries(entries) -> dict[str, tuple[float, float, str]]:
+    """Fold the FFI's ``(name, latency_ms, energy_wms, source)`` tuples by
+    name (``+=``), mirroring ``rust_engine_step._fold_per_op``: duplicate
+    names accumulate, sources merge to ``"mixed"`` on mismatch."""
+    folded: dict[str, list] = {}
+    for name, latency_ms, energy_wms, source in entries:
+        record = folded.get(name)
+        if record is None:
+            folded[name] = [float(latency_ms), float(energy_wms), str(source)]
+        else:
+            record[0] += float(latency_ms)
+            record[1] += float(energy_wms)
+            if record[2] != source:
+                record[2] = "mixed"
+    return {name: (record[0], record[1], record[2]) for name, record in folded.items()}
+
+
+# Known per-op source-TAG divergences between the frozen Python summary dicts
+# and the compiled engine's per-op leaves. Latency and energy match bit-exact
+# on every one of these (verified across the full 10-case subset); only the
+# provenance label differs, and each pattern is pinned as an exact
+# (op_name, golden_tag, rust_tag) triple so any NEW divergence — or a change
+# to these — still fails:
+#  - `*_p2p` at pp=1: Python's `P2P.query()` answers the zero-transfer case
+#    through the comm formula path and tags "empirical"; the compiled engine
+#    emits the zero-latency leaf with its default "silicon" tag.
+#  - `context_attention` (non-MLA families): the Python module query merges
+#    multi-component provenance internally and returns source="mixed"; the
+#    compiled engine reports the fused attention leaf's own "silicon" tag.
+_ACCEPTED_SOURCE_TAG_DIVERGENCES = {
+    ("context_p2p", "empirical", "silicon"),
+    ("generation_p2p", "empirical", "silicon"),
+}
+
+
+class TestCompileEnginePerOpParity:
+    @pytest.mark.parametrize("case", _SUBSET_CASES)
+    def test_static_per_op_matches_golden(self, case: EngineStepParityCase) -> None:
+        case_id = _SUBSET_CASE_IDS[case]
+        golden = load_parity_golden("per_op.json")["cases"].get(case_id)
+        if golden is None:
+            pytest.fail(f"no per-op golden for case '{case_id}'; {_REGENERATE_HINT}", pytrace=False)
+
+        handle = _compile_handle(case)
+        ctx_entries, gen_entries = handle.run_static_per_op(
+            batch_size=case.batch_size, isl=case.isl, osl=max(case.osl, 2), prefix=case.prefix, stride=1
+        )
+        energy_compared = False
+        for phase, entries in (("context", ctx_entries), ("generation", gen_entries)):
+            folded = _fold_per_op_entries(entries)
+            expected = golden[phase]
+            # The keysets must match EXACTLY — a golden op the rust fold lacks
+            # (or vice versa) is a lost/renamed op, not a tolerable gap.
+            assert set(folded) == set(expected), (
+                f"[{case.backend_name}] {phase} per-op keyset drift: "
+                f"golden_only={sorted(set(expected) - set(folded))} "
+                f"rust_only={sorted(set(folded) - set(expected))}"
+            )
+            for name in sorted(expected):
+                exp = expected[name]
+                latency, energy, source = folded[name]
+                _assert_within(
+                    f"{phase}::{name}::latency", float(exp["latency_ms"]), latency, backend=case.backend_name
+                )
+                golden_energy = float(exp["energy_wms"])
+                if golden_energy > 0.0:
+                    _assert_within(f"{phase}::{name}::energy", golden_energy, energy, backend=case.backend_name)
+                    energy_compared = True
+                else:
+                    assert energy == 0.0, (
+                        f"[{case.backend_name}] {phase}::{name} golden energy is 0 but the rust fold produced {energy}"
+                    )
+                golden_source = str(exp["source"])
+                if source != golden_source and (name, golden_source, source) not in _ACCEPTED_SOURCE_TAG_DIVERGENCES:
+                    pytest.fail(
+                        f"[{case.backend_name}] {phase}::{name} source tag drift: "
+                        f"golden={golden_source!r} rust={source!r} "
+                        f"(not in _ACCEPTED_SOURCE_TAG_DIVERGENCES)"
+                    )
+        # Anti-vacuous guard: the power-identity subset member exists so the
+        # energy comparison above actually executes (every other subset case
+        # sits on a latency-only identity where all golden energy_wms are 0).
+        if case_id in _POWER_SUBSET_IDS:
+            assert energy_compared, (
+                f"{case_id} sits on a power-carrying identity but no golden op carried "
+                "energy_wms > 0 — the per-op energy comparison never executed"
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -362,47 +451,39 @@ class TestCompileEngineDecodeStepParity:
 # --------------------------------------------------------------------------- #
 
 
-class TestImbalanceScaleParity:
-    """Non-1.0 seq/gen imbalance-correction scales must produce identical
-    Python and Rust numbers. Regression for the session.rs hardcode: the wire
-    accepted the scales but every RuntimeContext pinned them to 1.0, so any
-    task setting them diverged silently on the rust path."""
+# Shared by the imbalance tests and the golden pin path.
+_IMBALANCE_CASE_ID = "minimax-m25-b200-vllm-019-isl1024-osl2"
+_IMBALANCE_CTX_SCALE = 1.3
+_IMBALANCE_GEN_SCALE = 0.85
 
-    _CASE_ID = "minimax-m25-b200-vllm-019-isl1024-osl2"
-    _CTX_SCALE = 1.3
-    _GEN_SCALE = 0.85
+
+class TestImbalanceScaleParity:
+    """Non-1.0 seq/gen imbalance-correction scales must reproduce the frozen
+    Python numbers. Regression for the session.rs hardcode: the wire accepted
+    the scales but every RuntimeContext pinned them to 1.0, so any task
+    setting them diverged silently on the rust path."""
 
     def _case(self) -> EngineStepParityCase:
-        return _SUBSET_BY_ID[self._CASE_ID].values[0]
+        return _SUBSET_BY_ID[_IMBALANCE_CASE_ID].values[0]
 
     def test_static_scales_thread_through(self) -> None:
         case = self._case()
-        model, backend, database = _build_python_model(case)
-        rc = config.RuntimeConfig(
-            batch_size=case.batch_size,
-            beam_width=1,
-            isl=case.isl,
-            osl=max(case.osl, 2),
-            prefix=case.prefix,
-            seq_imbalance_correction_scale=self._CTX_SCALE,
-            gen_seq_imbalance_correction_scale=self._GEN_SCALE,
-        )
-        ctx_lat, _, gen_lat, _, _, _ = _quiet(backend._run_static_breakdown, model, database, rc, "static", 1)
-        py_ctx = float(sum(ctx_lat.values()))
-        py_gen = float(sum(gen_lat.values()))
-
         handle = _compile_handle(case)
         new_ctx, new_gen, _ = handle.run_static(
             batch_size=case.batch_size,
             isl=case.isl,
             osl=max(case.osl, 2),
             prefix=case.prefix,
-            seq_imbalance_correction_scale=self._CTX_SCALE,
-            gen_seq_imbalance_correction_scale=self._GEN_SCALE,
+            seq_imbalance_correction_scale=_IMBALANCE_CTX_SCALE,
+            gen_seq_imbalance_correction_scale=_IMBALANCE_GEN_SCALE,
             stride=1,
         )
-        _assert_within("static_ctx@scale", py_ctx, new_ctx, backend=case.backend_name)
-        _assert_within("static_gen@scale", py_gen, new_gen, backend=case.backend_name)
+        _assert_within(
+            "static_ctx@scale", _golden_reference("imbalance_scale::static_ctx"), new_ctx, backend=case.backend_name
+        )
+        _assert_within(
+            "static_gen@scale", _golden_reference("imbalance_scale::static_gen"), new_gen, backend=case.backend_name
+        )
 
         # The scales must actually bite: a scaled run differs from unscaled.
         base_ctx, base_gen, _ = handle.run_static(
@@ -413,37 +494,6 @@ class TestImbalanceScaleParity:
 
     def test_mixed_and_decode_scales_thread_through(self) -> None:
         case = self._case()
-        model, backend, database = _build_python_model(case)
-        rc = config.RuntimeConfig(
-            batch_size=case.batch_size,
-            beam_width=1,
-            isl=case.isl,
-            osl=max(case.osl, 2),
-            prefix=case.prefix,
-            seq_imbalance_correction_scale=self._CTX_SCALE,
-            gen_seq_imbalance_correction_scale=self._GEN_SCALE,
-        )
-        py_mixed, _, _, _ = _quiet(
-            backend._get_mix_step_latency,
-            model,
-            database,
-            rc,
-            case.isl,
-            case.batch_size,
-            case.isl,
-            max(case.osl, 2),
-            case.prefix,
-        )
-        py_decode, _, _, _ = _quiet(
-            backend._get_genonly_step_latency,
-            model,
-            database,
-            rc,
-            case.batch_size,
-            case.isl,
-            max(case.osl, 2),
-        )
-
         handle = _compile_handle(case)
         new_mixed = handle.mixed_step_latency(
             case.isl,
@@ -451,26 +501,88 @@ class TestImbalanceScaleParity:
             case.isl,
             max(case.osl, 2),
             case.prefix,
-            seq_imbalance_correction_scale=self._CTX_SCALE,
-            gen_seq_imbalance_correction_scale=self._GEN_SCALE,
+            seq_imbalance_correction_scale=_IMBALANCE_CTX_SCALE,
+            gen_seq_imbalance_correction_scale=_IMBALANCE_GEN_SCALE,
         )
         new_decode = handle.decode_step_latency(
             case.batch_size,
             case.isl,
             max(case.osl, 2),
-            gen_seq_imbalance_correction_scale=self._GEN_SCALE,
+            gen_seq_imbalance_correction_scale=_IMBALANCE_GEN_SCALE,
         )
-        _assert_within("mixed_step@scale", float(py_mixed), new_mixed, backend=case.backend_name)
-        _assert_within("decode_step@scale", float(py_decode), new_decode, backend=case.backend_name)
+        _assert_within(
+            "mixed_step@scale", _golden_reference("imbalance_scale::mixed_step"), new_mixed, backend=case.backend_name
+        )
+        _assert_within(
+            "decode_step@scale",
+            _golden_reference("imbalance_scale::decode_step"),
+            new_decode,
+            backend=case.backend_name,
+        )
 
 
 # --------------------------------------------------------------------------- #
-# 2c. SGLang WideEP (deepep_moe) — MLA + MoE + DeepEP dispatch routing.
+# 2c. Large-EP (ex-WideEP) — MLA + EP MoE + all-to-all dispatch routing.
+#
+# The large-EP ops compile natively as of AIC-1601 (emission gated by
+# `test_large_ep_op_graph_compiles_natively` in test_rust_engine_step.py).
+# Both classes below exercise the post-deprecation internal contract
+# (`ModelConfig.moe_comm_backend` per phase + the system's `num_gpus_per_node`)
+# end-to-end through a native EngineHandle.
 # --------------------------------------------------------------------------- #
+
+
+_WIDEEP_SGLANG_MODEL = "deepseek-ai/DeepSeek-V3"
+_WIDEEP_SGLANG_SYSTEM = "h200_sxm"
+_WIDEEP_SGLANG_VERSION = "0.5.6.post2"
+
+
+def _build_wideep_sglang():
+    """(model, backend, database, spec_json) for the SGLang WideEP config;
+    shared by the parity tests (handle side) and the golden capture (python
+    references)."""
+    from aiconfigurator.sdk import common
+
+    database = _quiet(perf_database.get_database, _WIDEEP_SGLANG_SYSTEM, "sglang", _WIDEEP_SGLANG_VERSION)
+    if database is None:
+        pytest.skip(f"no perf database for {_WIDEEP_SGLANG_SYSTEM}/sglang/{_WIDEEP_SGLANG_VERSION}")
+    model_config = config.ModelConfig(
+        tp_size=8,
+        moe_tp_size=1,
+        moe_ep_size=8,
+        moe_comm_backend={"context": "deepep_ht", "generation": "deepep_ll"},
+        num_gpus_per_node=8,
+        attention_backend="flashinfer",
+        gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+        moe_quant_mode=common.MoEQuantMode.fp8_block,
+        kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+        fmha_quant_mode=common.FMHAQuantMode.fp8_block,
+    )
+    model = _quiet(get_model, _WIDEEP_SGLANG_MODEL, model_config, "sglang")
+    backend = get_backend("sglang")
+    spec_json = _quiet(
+        engine.build_engine_spec_json,
+        model,
+        model_path=_WIDEEP_SGLANG_MODEL,
+        system=_WIDEEP_SGLANG_SYSTEM,
+        backend="sglang",
+        backend_version=_WIDEEP_SGLANG_VERSION,
+        kv_block_size=None,
+        systems_path=None,
+        nextn=0,
+        database=database,
+    )
+    return model, backend, database, spec_json
+
+
+def _handle_from_spec_json(spec_json: str) -> engine.EngineHandle:
+    import aiconfigurator_core
+
+    return engine.EngineHandle(bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json)))
 
 
 class TestWideEpDeepEpParity:
-    """SGLang WideEP DeepSeek (moe_backend=deepep_moe) end-to-end parity.
+    """SGLang large-EP DeepSeek (deepep_ht/deepep_ll) end-to-end parity.
 
     Covers three previously-divergent surfaces at once: the WideEP MLA
     per-rank-heads table coordinate (tp=8 -> heads=16; the bridge used to emit
@@ -480,125 +592,82 @@ class TestWideEpDeepEpParity:
     CustomAllReduce). Data lives on h200_sxm/sglang/0.5.6.post2 (the only
     shipped version with the deepep dispatch parquets)."""
 
-    _MODEL = "deepseek-ai/DeepSeek-V3"
-    _SYSTEM = "h200_sxm"
-    _VERSION = "0.5.6.post2"
-
-    def _build(self):
-        from aiconfigurator.sdk import common
-
-        database = _quiet(perf_database.get_database, self._SYSTEM, "sglang", self._VERSION)
-        if database is None:
-            pytest.skip(f"no perf database for {self._SYSTEM}/sglang/{self._VERSION}")
-        model_config = config.ModelConfig(
-            tp_size=8,
-            moe_tp_size=1,
-            moe_ep_size=8,
-            moe_backend="deepep_moe",
-            attention_backend="flashinfer",
-            gemm_quant_mode=common.GEMMQuantMode.fp8_block,
-            moe_quant_mode=common.MoEQuantMode.fp8_block,
-            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
-            fmha_quant_mode=common.FMHAQuantMode.fp8_block,
-        )
-        model = _quiet(get_model, self._MODEL, model_config, "sglang")
-        backend = get_backend("sglang")
-        spec_json = _quiet(
-            engine.build_engine_spec_json,
-            model,
-            model_path=self._MODEL,
-            system=self._SYSTEM,
-            backend="sglang",
-            backend_version=self._VERSION,
-            kv_block_size=None,
-            systems_path=None,
-            nextn=0,
-            database=database,
-        )
-        import aiconfigurator_core
-
-        handle = engine.EngineHandle(bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json)))
-        return model, backend, database, handle
-
     def test_wideep_static_parity(self) -> None:
-        model, backend, database, handle = self._build()
-        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=4, prefix=0)
-        ctx_lat, _, gen_lat, _, _, _ = _quiet(backend._run_static_breakdown, model, database, rc, "static", 1)
-        py_ctx, py_gen = float(sum(ctx_lat.values())), float(sum(gen_lat.values()))
+        _model, _backend, _database, spec_json = _build_wideep_sglang()
+        handle = _handle_from_spec_json(spec_json)
         new_ctx, new_gen, _ = handle.run_static(batch_size=1, isl=1024, osl=4, prefix=0, stride=1)
-        _assert_within("wideep_static_ctx", py_ctx, new_ctx, backend="sglang")
-        _assert_within("wideep_static_gen", py_gen, new_gen, backend="sglang")
+        _assert_within("wideep_static_ctx", _golden_reference("wideep_sglang::static_ctx"), new_ctx, backend="sglang")
+        _assert_within("wideep_static_gen", _golden_reference("wideep_sglang::static_gen"), new_gen, backend="sglang")
 
     def test_wideep_mixed_and_decode_parity(self) -> None:
-        model, backend, database, handle = self._build()
-        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=4, prefix=0)
-        py_mixed, _, _, _ = _quiet(backend._get_mix_step_latency, model, database, rc, 1024, 2, 1024, 4, 0)
-        py_decode, _, _, _ = _quiet(backend._get_genonly_step_latency, model, database, rc, 2, 1024, 4)
+        _model, _backend, _database, spec_json = _build_wideep_sglang()
+        handle = _handle_from_spec_json(spec_json)
         new_mixed = handle.mixed_step_latency(1024, 2, 1024, 4, 0)
         new_decode = handle.decode_step_latency(2, 1024, 4)
-        _assert_within("wideep_mixed", float(py_mixed), new_mixed, backend="sglang")
-        _assert_within("wideep_decode", float(py_decode), new_decode, backend="sglang")
+        _assert_within("wideep_mixed", _golden_reference("wideep_sglang::mixed_step"), new_mixed, backend="sglang")
+        _assert_within("wideep_decode", _golden_reference("wideep_sglang::decode_step"), new_decode, backend="sglang")
 
 
 # --------------------------------------------------------------------------- #
-# 2d. TRT-LLM WideEP (NVLink Two-Sided alltoall) — gb200.
+# 2d. TRT-LLM large-EP (NVLink Two-Sided alltoall) — gb200.
 # --------------------------------------------------------------------------- #
+
+
+def _build_wideep_trtllm():
+    """(model, backend, database, spec_json) for the TRT-LLM WideEP config;
+    shared by the parity test (handle side) and the golden capture."""
+    from aiconfigurator.sdk import common
+
+    database = _quiet(perf_database.get_database, "gb200", "trtllm", "1.3.0rc10")
+    if database is None:
+        pytest.skip("no perf database for gb200/trtllm/1.3.0rc10")
+    model_config = config.ModelConfig(
+        tp_size=1,
+        attention_dp_size=8,
+        moe_tp_size=1,
+        moe_ep_size=8,
+        moe_comm_backend={"context": "nvlink_two_sided", "generation": "nvlink_two_sided"},
+        num_gpus_per_node=4,
+        gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+        moe_quant_mode=common.MoEQuantMode.nvfp4,
+        kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+        fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+    )
+    model = _quiet(get_model, "deepseek-ai/DeepSeek-V3", model_config, "trtllm")
+    backend = get_backend("trtllm")
+    spec_json = _quiet(
+        engine.build_engine_spec_json,
+        model,
+        model_path="deepseek-ai/DeepSeek-V3",
+        system="gb200",
+        backend="trtllm",
+        backend_version="1.3.0rc10",
+        kv_block_size=None,
+        systems_path=None,
+        nextn=0,
+        database=database,
+    )
+    return model, backend, database, spec_json
 
 
 class TestTrtllmWideEpParity:
-    """TRT-LLM WideEP DeepSeek (enable_wideep, attention_dp=8) on gb200.
+    """TRT-LLM large-EP DeepSeek (nvlink_two_sided, attention_dp=8) on gb200.
 
-    Covers the `TrtLLMWideEPMoEDispatch` port (prepare+dispatch pre /
-    combine post through the trtllm_alltoall table, kernel auto-selected as
-    NVLinkTwoSided via moe_backend="wideep") and the alltoall loader keying
-    (kernel_source/op_name/num_nodes — the pre-fix loader collapsed 1,556 of
-    2,096 gb200 rows). This path used to fail opspec conversion entirely
-    (`TrtLLMWideEPMoEDispatch` had no `_to_opspec` branch)."""
-
-    def _build(self):
-        from aiconfigurator.sdk import common
-
-        database = _quiet(perf_database.get_database, "gb200", "trtllm", "1.3.0rc10")
-        if database is None:
-            pytest.skip("no perf database for gb200/trtllm/1.3.0rc10")
-        model_config = config.ModelConfig(
-            tp_size=1,
-            attention_dp_size=8,
-            moe_tp_size=1,
-            moe_ep_size=8,
-            enable_wideep=True,
-            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
-            moe_quant_mode=common.MoEQuantMode.nvfp4,
-            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
-            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-        )
-        model = _quiet(get_model, "deepseek-ai/DeepSeek-V3", model_config, "trtllm")
-        backend = get_backend("trtllm")
-        spec_json = _quiet(
-            engine.build_engine_spec_json,
-            model,
-            model_path="deepseek-ai/DeepSeek-V3",
-            system="gb200",
-            backend="trtllm",
-            backend_version="1.3.0rc10",
-            kv_block_size=None,
-            systems_path=None,
-            nextn=0,
-            database=database,
-        )
-        import aiconfigurator_core
-
-        handle = engine.EngineHandle(bytes(aiconfigurator_core.engine_spec_bincode_from_json(spec_json)))
-        return model, backend, database, handle
+    Covers the trtllm all-to-all port (prepare+dispatch pre / combine post
+    through the trtllm_alltoall table, kernel NVLinkTwoSided) and the
+    alltoall loader keying (kernel_source/op_name/num_nodes — the pre-fix
+    loader collapsed 1,556 of 2,096 gb200 rows)."""
 
     def test_trtllm_wideep_static_parity(self) -> None:
-        model, backend, database, handle = self._build()
-        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=4, prefix=0)
-        ctx_lat, _, gen_lat, _, _, _ = _quiet(backend._run_static_breakdown, model, database, rc, "static", 1)
-        py_ctx, py_gen = float(sum(ctx_lat.values())), float(sum(gen_lat.values()))
+        _model, _backend, _database, spec_json = _build_wideep_trtllm()
+        handle = _handle_from_spec_json(spec_json)
         new_ctx, new_gen, _ = handle.run_static(batch_size=1, isl=1024, osl=4, prefix=0, stride=1)
-        _assert_within("trtllm_wideep_static_ctx", py_ctx, new_ctx, backend="trtllm")
-        _assert_within("trtllm_wideep_static_gen", py_gen, new_gen, backend="trtllm")
+        _assert_within(
+            "trtllm_wideep_static_ctx", _golden_reference("wideep_trtllm::static_ctx"), new_ctx, backend="trtllm"
+        )
+        _assert_within(
+            "trtllm_wideep_static_gen", _golden_reference("wideep_trtllm::static_gen"), new_gen, backend="trtllm"
+        )
 
 
 # --------------------------------------------------------------------------- #

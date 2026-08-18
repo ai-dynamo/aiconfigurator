@@ -15,10 +15,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from aiconfigurator_core.sdk.operations.base import Operation
-from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
-    from aiconfigurator_core.sdk.perf_database import PerfDatabase
+    pass
 
 
 class ElementWise(Operation):
@@ -38,7 +37,6 @@ class ElementWise(Operation):
         **kwargs,
     ) -> None:
         super().__init__(name, scale_factor, seq_split=kwargs.get("seq_split", 1))
-        self._weights = 0.0
         self._empirical_bw_scaling_factor = empirical_bw_scaling_factor
         self._constant_latency = 5e-6  # 5us
         self._dim_in = dim_in
@@ -46,24 +44,4 @@ class ElementWise(Operation):
         self._scale_num_tokens = kwargs.get("scale_num_tokens", 1)
 
     # sol only
-    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        """Query element-wise operation latency with power data."""
-        x = kwargs.get("x")  # num tokens
-        if x is None:
-            raise ValueError("ElementWise.query requires 'x' (num tokens).")
-        if self._scale_num_tokens <= 0:
-            raise ValueError(f"ElementWise.query: scale_num_tokens must be > 0, got {self._scale_num_tokens}.")
-        x //= self._scale_num_tokens
-        x = -(-x // self._seq_split)  # CP: per-rank token count (ceil = busiest rank)
-        read_bytes = x * self._dim_in * 2  # bfloat16 for act
-        write_bytes = x * self._dim_out * 2
-
-        result = database.query_mem_op(read_bytes + write_bytes)
-        return PerformanceResult(
-            float(result) * self._scale_factor,
-            energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
-        )
-
-    def get_weights(self, **kwargs):
-        return self._weights * self._scale_factor
+    _ENGINE_QUERY_SHAPE = "tokens"

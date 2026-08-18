@@ -12,4 +12,6 @@
 pub mod runtime;
 pub mod spec;
 
-pub use runtime::{Engine, RuntimeConfig, StaticMode, StaticResult, DEFAULT_STATIC_STRIDE};
+pub use runtime::{
+    Engine, PerOpValue, RuntimeConfig, StaticMode, StaticResult, DEFAULT_STATIC_STRIDE,
+};

@@ -240,15 +240,27 @@ def test_set_systems_paths_invalid_entry_raises(temp_systems_dir: Path, perf_dat
 
 
 def test_estimate_only_database_can_load_without_perf_files(perf_database):
-    """SOL/EMPIRICAL modes can instantiate from system specs without silicon files."""
+    """SOL/EMPIRICAL modes can instantiate from system specs without silicon files,
+    AND a SOL-mode per-call query still answers analytically from the spec: the
+    compiled engine tolerates a missing perf-data directory under the SOL view
+    (#1552 review finding 8 — perf_database/mod.rs load_with_sources_opts), so
+    the estimate-only capability survives the query-stack retirement.
+    """
+    import warnings
+
     from aiconfigurator.sdk import common
 
     db = perf_database.get_database("h100_pcie", "trtllm", "estimate", allow_missing_data=True)
 
     assert db is not None
     db.set_default_database_mode(common.DatabaseMode.SOL)
-    result = db.query_mem_op(1024)
-    assert float(result) > 0
+    assert db.get_default_database_mode() == common.DatabaseMode.SOL
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        sol_ms = float(db.query_mem_op(1 << 20, database_mode=common.DatabaseMode.SOL))
+    # bytes / mem_bw * 1000 — pure system-spec arithmetic, no table involved.
+    expected = (1 << 20) / db.system_spec["gpu"]["mem_bw"] * 1000
+    assert sol_ms == pytest.approx(expected, rel=1e-9)
 
 
 # ----------------------------- get_latest_database_version -----------------------------
@@ -408,9 +420,9 @@ def test_get_database_skips_incomplete_version_directory(tmp_path: Path, perf_da
         perf_database.databases_cache.update(cache_snapshot)
 
 
-def test_perf_database_clear_runtime_caches_clears_interpolation_and_lru_state(perf_database):
-    from aiconfigurator.sdk.perf_interp import engine as perf_interp_engine
-
+def test_perf_database_clear_runtime_caches_clears_lru_state(perf_database):
+    # The perf_interp site-index cache this test also covered retired with the
+    # Python query math (#1357 PR-5); the lru-eviction contract remains.
     db = object.__new__(perf_database.PerfDatabase)
     cache_clear_calls = []
 
@@ -419,11 +431,9 @@ def test_perf_database_clear_runtime_caches_clears_interpolation_and_lru_state(p
 
     fake_cached_method.cache_clear = lambda: cache_clear_calls.append("cleared")
     db.fake_cached_method = fake_cached_method
-    perf_interp_engine._SITE_INDEX_CACHE[id(db)] = (db, None)
 
     db.clear_runtime_caches()
 
-    assert not perf_interp_engine._SITE_INDEX_CACHE
     assert cache_clear_calls == ["cleared"]
 
 
@@ -557,26 +567,11 @@ def test_configured_view_rejects_incompatible_shared_layer_template(perf_databas
         perf_database._get_configured_database_view(silicon_template, common.DatabaseMode.EMPIRICAL)
 
 
-def test_transfer_policy_and_mode_change_clear_global_grid_cache(perf_database):
-    """In-place mode/policy mutation eagerly drops stale/unreachable grids,
-    while no-op setter calls preserve the cache."""
-    from aiconfigurator.sdk import common
-    from aiconfigurator.sdk.operations import util_empirical
-
-    db = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="HYBRID")
-
-    util_empirical._GRID_CACHE["__s1__"] = object()
-    db.set_transfer_policy("conservative")  # != default ALL -> clears
-    assert "__s1__" not in util_empirical._GRID_CACHE
-
-    util_empirical._GRID_CACHE["__s2__"] = object()
-    db.set_transfer_policy("conservative")  # no-op -> preserved
-    assert "__s2__" in util_empirical._GRID_CACHE
-
-    util_empirical._GRID_CACHE["__s3__"] = object()
-    db.set_default_database_mode(common.DatabaseMode.EMPIRICAL)  # != HYBRID -> clears
-    assert "__s3__" not in util_empirical._GRID_CACHE
-    util_empirical._GRID_CACHE.clear()
+# The global util-grid cache (and its eager eviction on in-place mode/policy
+# mutation) retired with the estimation math (#1357 PR-5):
+# ``util_empirical.clear_grid_cache`` is a compat no-op and the engine owns
+# grid state. The surviving lru-cache eviction on mode rotation is pinned in
+# tests/unit/sdk/database/test_attention.py::test_default_database_mode.
 
 
 def test_clear_database_runtime_caches_clears_matching_cached_database_once(perf_database):

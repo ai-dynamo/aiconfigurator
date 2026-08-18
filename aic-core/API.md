@@ -34,6 +34,103 @@ from aiconfigurator_core.sdk.rust_engine_step import RustForwardPassPerfModel
 from aiconfigurator_core.sdk.memory import estimate_kv_cache, estimate_num_gpu_blocks
 ```
 
+The large-EP MoE communication family is exposed as an explicit module path
+(it is not part of the facade):
+
+```python
+from aiconfigurator_core.sdk.operations.moe_comm import MOE_A2A_BACKENDS, MoEAllToAll, MoEExpertCompute
+```
+
+`MOE_A2A_BACKENDS` maps each supported MoE all-to-all comm backend to its
+`MoECommBackendSpec` (framework and phase applicability plus feasibility
+rules). `MoEAllToAll` and `MoEExpertCompute` are the operation classes over the
+unified `moe_a2a_perf` comm and `moe_expert_compute_perf` expert-compute tables. `PerfDatabase`
+(`aiconfigurator_core.sdk.perf_database`) forwards to them through
+`query_moe_a2a(...)` and `query_moe_expert_compute(...)` and adds the read-only
+coverage probes `moe_a2a_coverage(...)` and `moe_expert_compute_coverage(...)`. These
+queries serve measured silicon data only: SOL and empirical database modes
+raise `EmpiricalNotImplementedError`, with an estimation tier as a planned
+follow-up.
+
+The MoE-block builder that consumes those ops is likewise an explicit module
+path:
+
+```python
+from aiconfigurator_core.sdk.models.blocks import (
+    MoEBlockShape,
+    build_moe_block_ops,
+    register_moe_block,
+)
+from aiconfigurator_core.sdk.models.blocks.moe import LARGE_EP_READY_FAMILIES
+```
+
+`MoEBlockShape` is a frozen dataclass capturing the checkpoint-level geometry
+of a model's MoE block: `hidden_size`, `moe_inter_size`, `topk`,
+`num_experts`, `num_shared_experts` (0 when absent), `num_moe_layers`, and
+`is_gated` (default `True`). `MoEBlockShape.from_model_info(model_info)`
+derives it from a `_get_model_info` dict and raises `ValueError` for a
+non-MoE checkpoint.
+
+`build_moe_block_ops(prefix, shape, cfg, quant_mode, workload_distribution,
+*, scale_factor, backend_name, inference_phase, model_family="*",
+attn_cp_size=1, gpus_per_node=None, shared_gemm_quant_mode=None,
+dispatch_quant_mode=<forward>)` is the one
+place MoE blocks are wired. It returns the block's op list for one inference
+phase — router GEMM, shared-expert GEMMs, and either the fused
+dispatch/compute/combine pipeline or, when `cfg.moe_comm_backend` names a
+comm backend for `inference_phase`, the large-EP `MoEAllToAll`/`MoEExpertCompute`
+emission. An omitted `gpus_per_node` resolves from `cfg.num_gpus_per_node`
+for large-EP configs and raises when that field is unset. `scale_factor` is
+deliberately model-owned (legacy model classes
+scale their MoE ops by their own layer count, not `shape.num_moe_layers`),
+`shared_gemm_quant_mode` overrides `cfg.gemm_quant_mode` for the
+shared-expert GEMMs only, and `dispatch_quant_mode` overrides the fused
+path's `MoEDispatch` quant mode only.
+
+`register_moe_block(family="*", framework="*", system="*")` is the builder's
+specialization registry: family/framework/system-specific deviations register
+a variant for a `(family, framework, system)` key instead of adding model
+classes, `"*"` being a per-position wildcard. Lookup is most-specific-wins
+with family > framework > system priority; a duplicate key registration
+raises `ValueError`. The decorated function is called as `fn(default, **ctx)`
+where `default` is a zero-argument continuation returning a fresh copy of the
+generic pipeline's ops — variants compose with the default rather than
+reimplementing it. Two variants ship registered at import: the DeepSeek and
+DeepSeek-V3.2 families on sglang strip the router GEMM under deepep backends
+for legacy graph fidelity.
+
+`LARGE_EP_READY_FAMILIES` (a frozenset, currently `{"MOE", "DEEPSEEK",
+"DEEPSEEKV32", "KIMIK25"}`) names the model families whose classes construct
+a large-EP graph when the enumerator sets `ModelConfig.moe_comm_backend`. It
+is the enumerator's assignment gate: a comm backend must never be assigned
+outside this set — HYBRIDMOE and MINIMAXM3 raise on one by design, and
+QWEN3VL_MOE stays excluded until its `create()` forwards `backend_name`.
+
+### Large-EP enablement is coverage-driven
+
+`ModelConfig.moe_comm_backend` (`dict[str, str] | None`) and
+`ModelConfig.num_gpus_per_node` (`int | None`) are internal, enumerator-owned
+fields — never user flags. The enumerator sets them together, per parallel
+tuple: `moe_comm_backend` maps each inference phase (`"context"` /
+`"generation"`) to the comm backend resolved for that phase, and
+`num_gpus_per_node` carries the system's node width — a hardware fact the
+large-EP ops need at construction to derive the comm node span. The fields
+must stay consistent: model classes raise `ValueError` when
+`moe_comm_backend` is set without `num_gpus_per_node`, because a defaulted
+node width would silently mis-price the cross-node all-to-all.
+
+Enumeration follows the coverage probes. A parallel tuple with `moe_tp == 1`
+and `moe_ep > 1` participates in the large-EP regime when
+`moe_a2a_coverage(...)` and `moe_expert_compute_coverage(...)` cover its EP size
+— at this system's `nodes_for(ep, gpus_per_node)` topology and the run's MoE
+quant mode — for every phase the worker runs, plus the context phase for
+every role (a worker's weights are sized from its context ops). Coverage is
+necessary, not sufficient: each tuple is resolved individually, the per-phase
+backend being the first `MOE_A2A_BACKENDS` registry entry that covers the
+tuple's EP, and a tuple that resolves no backend for a required phase builds
+the fused graph instead. Collecting the two tables for a model shape on a
+system is what makes large EP explorable there — no flag, no code change.
+
 `aiconfigurator_core.sdk.__all__` is the supported high-level surface. The
 facade resolves lazily, so importing it does not load the model registry,
 performance database, or native engine until a name is used.
@@ -126,8 +223,11 @@ The supported root-level Rust surface is grouped as follows:
   `ENGINE_SPEC_SCHEMA_VERSION`, and `FPM_VERSION`.
 
 Advanced consumers may use `engine::{Engine, RuntimeConfig, StaticMode,
-StaticResult}` and `engine::spec::{EngineSpec, OpSpec}` to load and execute a
-previously compiled specification directly.
+StaticResult, PerOpValue}` and `engine::spec::{EngineSpec, OpSpec}` to load and
+execute a previously compiled specification directly. `PerOpValue` is the
+per-op result tuple `(name, latency_ms, energy_wms, source)` returned by the
+`*_per_op` / `evaluate_*` methods (the thin op-list evaluation FFI); per-op
+energy is 0.0 wherever the perf tables carry no power columns.
 
 ## Compatibility rules
 

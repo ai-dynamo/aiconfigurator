@@ -385,7 +385,13 @@ def enumerate_profiling_configs(
         isl: Input sequence length (used for prefill heuristic).
         osl: Output sequence length (used by rule plugins, e.g.
             ``cache_transceiver_max_tokens_in_buffer``).
-        enable_wideep: Enable wide expert-parallelism search space.
+        enable_wideep: DEPRECATED name, kept for API compatibility. Only
+            widens the multi-node enumeration breadth here (which parallel
+            lists get enumerated); it selects no modeling path — the SDK's
+            ``enable_wideep`` task flags are deprecated and ignored, with
+            large-EP participation decided per config from perf-data
+            coverage. For MoE models larger than half a node the internal
+            VRAM rule below auto-enables it regardless of this argument.
         backend_version: Optional backend database version.
         num_gpus_per_node: GPUs per physical node.  If ``None`` it is
             read from the system config YAML.

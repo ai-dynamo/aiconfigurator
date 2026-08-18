@@ -21,7 +21,7 @@ from aiconfigurator.sdk.picking import (
 )
 from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
 from aiconfigurator.sdk.step_estimate import MixedStepInput, StepEstimate
-from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, get_model_config_from_model_path
+from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
 
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -573,6 +573,8 @@ class DisaggInferenceSession:
             target_ttft=target_ttft,
             target_tpot=target_tpot,
             top_n=top_n,
+            prefill_degradation_factor=self._rate_matching_prefill_degradation_factor,
+            decode_degradation_factor=self._rate_matching_decode_degradation_factor,
         )
 
         disagg_summary_df = result["best_config_df"]
@@ -824,14 +826,7 @@ class DisaggInferenceSession:
         else:
             decode_batch_size_range = [i for i in decode_batch_size_list_default if i <= decode_max_num_tokens]
 
-        try:
-            enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
-        except Exception:
-            logger.debug("Could not resolve model config for VL effective ISL; using text ISL", exc_info=True)
-            enc_cfg = None
-        prefill_effective_isl = runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(
-            enc_cfg, runtime_config
-        )
+        prefill_effective_isl = BaseBackend.effective_prefill_isl(model_path, runtime_config)
         if prefill_max_num_tokens < prefill_effective_isl:
             logger.warning("prefill_max_num_tokens is less than effective prefill ISL, set to effective prefill ISL")
             prefill_max_num_tokens = prefill_effective_isl
@@ -867,7 +862,7 @@ class DisaggInferenceSession:
             logger.debug(f"No prefill or decode workers found for {model_path} with given configs.")
             return disagg_summary
 
-        # ----- autoscale mode: pick P and D independently, no rate matching -----
+        # ----- autoscale mode: pick P and D independently, no worker-count rate matching -----
         if autoscale:
             return self._pick_autoscale(
                 prefill_summary_df=prefill_summary_df,
@@ -1008,8 +1003,28 @@ class AFDInferenceSession:
         for decode we pass ``gen_seq_imbalance_correction_scale``.  Tokens
         processed per call = ``batch_size`` for decode, ``batch_size*seq_len``
         for prefill (one token per sequence vs. full sequence).
+
+        The per-op values come from the compiled engine when the routing gate
+        allows (the op-list evaluation FFI); the AFD orchestration — the A/F
+        partitioning, the stride integration, the comm ops — stays Python-side
+        permanently. The Python ``op.query()`` loop remains the fallback for
+        the explicit escape hatch and for op lists the compiled spec cannot
+        express.
         """
+        ops = list(ops_iter)
         x = batch_size * seq_len if is_context else batch_size
+
+        rust = self._sum_latency_with_rust(
+            ops,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            x=x,
+            model=model,
+            runtime_config=runtime_config,
+            is_context=is_context,
+        )
+        if rust is not None:
+            return rust
 
         kwargs_common = {
             "x": x,
@@ -1025,9 +1040,99 @@ class AFDInferenceSession:
             kwargs_common["gen_seq_imbalance_correction_scale"] = runtime_config.gen_seq_imbalance_correction_scale
 
         per_op = defaultdict(float)
-        for op in ops_iter:
-            result = op.query(self._database, **kwargs_common)
+        for op in ops:
+            # Internal shim entry (no DeprecationWarning): same engine-backed
+            # value as the deprecated public op.query().
+            result = op._engine_query(self._database, **kwargs_common)
             per_op[op._name] += float(result)
+        return sum(per_op.values()), per_op
+
+    def _sum_latency_with_rust(
+        self,
+        ops: list,
+        *,
+        batch_size: int,
+        seq_len: int,
+        x: int,
+        model,
+        runtime_config: config.RuntimeConfig,
+        is_context: bool,
+    ):
+        """Compiled-engine path of :meth:`_sum_latency`, or ``None`` to fall
+        back to the Python ``op.query()`` loop.
+
+        Maps the partitioned op objects to their positions in
+        ``model.context_ops`` / ``model.generation_ops`` (the compiled spec
+        preserves that order 1:1) and evaluates them through the thin op-list
+        FFI with ``_sum_latency``'s exact query shape: uniform ``x`` (no
+        logits-GEMM exception) and the runtime ``prefix`` threaded into BOTH
+        phases. Falls back (returns ``None``) for ops outside the model lists
+        and for op graphs the spec cannot express.
+        """
+        from aiconfigurator.sdk.rust_engine_step import (
+            RustEngineUnsupportedError,
+            evaluate_context_ops_with_rust,
+            evaluate_generation_ops_with_rust,
+            note_python_step_fallback,
+            should_use_rust_engine_step,
+        )
+
+        if not ops or not should_use_rust_engine_step(runtime_config, self._database):
+            return None
+
+        phase_ops = model.context_ops if is_context else model.generation_ops
+        memo_attr = "_afd_rust_context_index" if is_context else "_afd_rust_generation_index"
+        # Memo keyed by the LIST OBJECT's identity, not its length: a rebuilt
+        # equal-length op list could otherwise serve stale id()->index
+        # mappings silently (CPython id reuse).
+        memo = getattr(model, memo_attr, None)
+        if memo is not None and memo[0] is phase_ops:
+            index_by_id = memo[1]
+        else:
+            index_by_id = {id(op): i for i, op in enumerate(phase_ops)}
+            try:
+                setattr(model, memo_attr, (phase_ops, index_by_id))
+            except (AttributeError, TypeError):
+                pass  # slotted/frozen model objects: recompute per call
+        try:
+            indices = [index_by_id[id(op)] for op in ops]
+        except KeyError:
+            # An op outside the compiled phase list (the synthetic comm ops
+            # never come through here, so this is unexpected) — let the
+            # Python loop own it.
+            return None
+
+        prefix = int(runtime_config.prefix or 0)
+        try:
+            if is_context:
+                entries = evaluate_context_ops_with_rust(
+                    model,
+                    self._database,
+                    indices=indices,
+                    batch_size=batch_size,
+                    s=seq_len,
+                    prefix=prefix,
+                    seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
+                    x=x,
+                )
+            else:
+                entries = evaluate_generation_ops_with_rust(
+                    model,
+                    self._database,
+                    indices=indices,
+                    batch_size=batch_size,
+                    s=seq_len,
+                    gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
+                    prefix=prefix,
+                    x=x,
+                )
+        except RustEngineUnsupportedError as exc:
+            note_python_step_fallback("unsupported_op_graph:afd", str(exc))
+            return None
+
+        per_op = defaultdict(float)
+        for name, latency_ms, _energy_wms, _source in entries:
+            per_op[name] += float(latency_ms)
         return sum(per_op.values()), per_op
 
     def _afd_batch_shape(self) -> tuple[int, int, int, int, int]:
@@ -1314,7 +1419,7 @@ class AFDInferenceSession:
         return summary
 
     # Stride for sampling KV-cache length ``s`` along the decode trace.
-    # Mirrors ``base_backend._run_generation_phase`` so the AFD path
+    # Mirrors the retired ``base_backend._run_generation_phase`` walk so the AFD path
     # uses the same numerical integration grid as agg/disagg.
     _AFD_DECODE_STRIDE = 32
 
@@ -1340,7 +1445,7 @@ class AFDInferenceSession:
 
         Attention is the only op whose latency reads ``s``; sampling at
         ``stride = _AFD_DECODE_STRIDE`` mirrors the trapezoidal rule
-        used by ``_run_generation_phase`` and recovers the average
+        used by the retired ``_run_generation_phase`` walk and recovers the average
         per-step latency over the full decode trace.
 
         Returns ``(t_a_layer_avg, t_f_layer_avg, t_cycle_avg,
@@ -1459,7 +1564,7 @@ class AFDInferenceSession:
 
         Decode integrates per-step compute along the KV-cache length
         ``s`` (sampled every ``_AFD_DECODE_STRIDE`` tokens, mirroring
-        ``base_backend._run_generation_phase``). Attention is the only
+        the retired ``base_backend._run_generation_phase`` walk). Attention is the only
         op that reads ``s`` — sampling at a single ``s = isl + 1`` would
         under-count A-side latency by ~33% in the typical ``osl ~ isl``
         regime and several-fold for ``osl ≫ isl``, which silently flips

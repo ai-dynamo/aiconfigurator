@@ -34,8 +34,8 @@ fn context_ops() -> Vec<Op> {
             name: "rmsnorm".into(),
             scale_factor: 1.0,
             bytes_per_token: 8192.0,
-                scale_num_tokens: 1,
-                seq_split: 1,
+            scale_num_tokens: 1,
+            seq_split: 1,
         }),
         Op::Gemm(GemmOp {
             name: "qkv_gemm".into(),
@@ -45,7 +45,8 @@ fn context_ops() -> Vec<Op> {
             quant_mode: GemmQuantMode::Fp8Block,
             scale_num_tokens: 0,
             low_precision_input: false,
-                seq_split: 1,
+            seq_split: 1,
+            below_grid_sol: false,
         }),
         Op::ContextAttention(ContextAttentionOp {
             name: "context_attention".into(),
@@ -57,7 +58,7 @@ fn context_ops() -> Vec<Op> {
             kv_cache_dtype: KvCacheQuantMode::Fp8,
             fmha_quant_mode: FmhaQuantMode::Bfloat16,
             use_qk_norm: false,
-                cp_size: 1,
+            cp_size: 1,
         }),
     ]
 }
@@ -68,8 +69,8 @@ fn generation_ops() -> Vec<Op> {
             name: "rmsnorm".into(),
             scale_factor: 1.0,
             bytes_per_token: 8192.0,
-                scale_num_tokens: 1,
-                seq_split: 1,
+            scale_num_tokens: 1,
+            seq_split: 1,
         }),
         Op::GenerationAttention(GenerationAttentionOp {
             name: "generation_attention".into(),
@@ -91,6 +92,7 @@ fn fixture_engine_config() -> EngineConfig {
         systems_path: None,
         backend: BackendKind::Vllm,
         backend_version: Some("0.19.0".to_string()),
+        forward_model: None,
         kv_block_size: None,
         parallel: ParallelMapping {
             tp_size: 8,
@@ -98,7 +100,7 @@ fn fixture_engine_config() -> EngineConfig {
             attention_dp_size: Some(1),
             moe_tp_size: Some(1),
             moe_ep_size: Some(8),
-                cp_size: None,
+            cp_size: None,
         },
         quantization: QuantizationConfig {
             weight_dtype: None,
@@ -329,14 +331,8 @@ fn options_reject_zero_bounds() {
 #[test]
 fn options_default_directional_correction_factors() {
     let defaults = ForwardPassPerfOptions::default();
-    assert_eq!(
-        defaults.min_faster_correction_factor,
-        Some(0.5)
-    );
-    assert_eq!(
-        defaults.max_slower_correction_factor,
-        Some(2.0)
-    );
+    assert_eq!(defaults.min_faster_correction_factor, Some(0.5));
+    assert_eq!(defaults.max_slower_correction_factor, Some(2.0));
 
     let omitted: ForwardPassPerfOptions = serde_json::from_str("{}").unwrap();
     assert_eq!(omitted.min_faster_correction_factor, Some(0.5));

@@ -362,7 +362,8 @@ mod tests {
         let systems_root = PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
             .join("src/aiconfigurator_core/systems");
-        let mut db = PerfDatabase::load(&systems_root, "b200_sxm", backend, version).expect("db must load");
+        let mut db =
+            PerfDatabase::load(&systems_root, "b200_sxm", backend, version).expect("db must load");
         db.database_mode = DatabaseMode::Hybrid;
         db
     }
@@ -391,7 +392,10 @@ mod tests {
     }
 
     fn approx(a: f64, b: f64) {
-        assert!((a - b).abs() < 1e-9 * b.abs().max(1.0), "expected {b}, got {a}");
+        assert!(
+            (a - b).abs() < 1e-9 * b.abs().max(1.0),
+            "expected {b}, got {a}"
+        );
     }
 
     /// Oracle values from the Python reference (`ContextMSAModule` /
@@ -416,7 +420,7 @@ mod tests {
                 "0.19.0",
                 [
                     (1, 1024, 0, true, 0.44046553899838176),
-                    (2, 3000, 512, true, 12.825449653876566),
+                    (2, 3000, 512, true, 11.227158155846752),
                     (8, 1025, 0, false, 0.07392686165512992),
                     (4, 7777, 0, false, 0.0756313776883858),
                 ],

@@ -121,12 +121,30 @@ def _version_dir_is_partial(version_dir: str) -> bool:
     return os.path.isfile(os.path.join(version_dir, "INCOMPLETE.txt"))
 
 
+def _version_dir_is_unusable(version_dir: str) -> bool:
+    """Whether the whole directory must be excluded from data loading.
+
+    ``collection_meta.yaml`` with ``status: partial`` is structured coverage
+    metadata: successfully collected rows are valid and must remain primary,
+    while older versions fill missing coordinates. Only legacy
+    ``INCOMPLETE.txt`` lacks enough granularity to admit any of its rows.
+
+    A structured sidecar supersedes a stale legacy marker. Parse validation is
+    owned by perf_database's admission layer; this hot-path resolver only needs
+    to know that the structured sidecar exists.
+    """
+    if os.path.isfile(os.path.join(version_dir, "collection_meta.yaml")):
+        return False
+    return os.path.isfile(os.path.join(version_dir, "INCOMPLETE.txt"))
+
+
 def resolve_op_data_path(system_data_root: str, backend: str, version: str, op_filename: str) -> str:
     """Resolve one op table under the family-first layout, legacy fallback.
 
     Family dirs are discovered structurally (any first-level dir that is not
-    a known backend dir); dirs marked partial (yaml-first, txt fallback — see
-    ``_version_dir_is_partial``) are skipped. Candidates run through the
+    a known backend dir). Structured partial tables are loadable and use
+    older-version shape fill; only legacy whole-dir-incomplete directories
+    (see ``_version_dir_is_unusable``) are skipped. Candidates run through the
     .parquet->.txt fallback. When nothing exists, returns the legacy-shaped
     path so callers keep their missing-file semantics.
     """
@@ -139,7 +157,7 @@ def resolve_op_data_path(system_data_root: str, backend: str, version: str, op_f
         if entry.startswith(".") or entry in _KNOWN_BACKEND_DIRS:
             continue
         version_dir = os.path.join(system_data_root, entry, backend, version)
-        if not os.path.isdir(version_dir) or _version_dir_is_partial(version_dir):
+        if not os.path.isdir(version_dir) or _version_dir_is_unusable(version_dir):
             continue
         candidate = _resolve_perf_data_path(os.path.join(version_dir, op_filename))
         if os.path.exists(candidate):
@@ -226,12 +244,125 @@ class Operation:
         # major ops divide ``x`` by this in query(); default 1 means no shard.
         self._seq_split: int = seq_split
 
+    # How the deprecated ``query()`` shim maps this op's legacy kwargs onto
+    # the engine's op-list evaluation shape. Subclasses declare one of:
+    #   "tokens"     — token-major: query(x=<num tokens>)  (GEMM, MoE, comm, ...)
+    #   "context"    — batch-major prefill: query(batch_size=, s=, prefix=)
+    #   "generation" — batch-major decode:  query(batch_size=, s=)
+    #   "module"     — phase carried by the instance (``_is_context`` /
+    #                  ``_phase``) or the ``is_context=`` query kwarg
+    # ``None`` (default) = no shim: query() raises NotImplementedError.
+    _ENGINE_QUERY_SHAPE: ClassVar[str | None] = None
+
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        """Return latency (scaled by ``scale_factor``) plus energy/source data."""
-        raise NotImplementedError
+        """DEPRECATED (#1357): per-call query shim, removed next release.
+
+        Returns the compiled engine's op-level estimate for this op (scaled by
+        ``scale_factor``) as a ``PerformanceResult`` — the same value the
+        engine charges in a model run. Routed through the op-list FFI; the
+        Python per-call math is gone. Long-term callers use
+        ``EngineHandle.evaluate_ops_json`` (op-list) or the phase/run surface.
+        """
+        import warnings
+
+        from aiconfigurator_core.sdk.engine import QUERY_SHIM_DEPRECATION
+
+        warnings.warn(f"{type(self).__name__}.query: {QUERY_SHIM_DEPRECATION}", DeprecationWarning, stacklevel=2)
+        return self._engine_query(database, **kwargs)
+
+    def _engine_query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
+        """The shim body without the deprecation warning — internal callers
+        (the ``_sum_latency`` fallback loop, the AFD comm ops' orchestration)
+        route here so warnings fire only on the public deprecated surface."""
+        from aiconfigurator_core.sdk.engine import _evaluate_single_op
+
+        op, eval_kwargs = self._engine_query_plan(kwargs)
+        return _evaluate_single_op(database, op, **eval_kwargs)
+
+    def _engine_query_plan(self, kwargs: dict):
+        """Map legacy ``query(**kwargs)`` onto ``(op_to_evaluate, eval_kwargs)``
+        per the class's ``_ENGINE_QUERY_SHAPE``. Subclasses with per-call
+        overrides (MoE's ``quant_mode``) override this and rebuild the op.
+        Unrecognized kwargs are ignored, matching the legacy ``kwargs.get``
+        behavior (e.g. ``model_name``)."""
+        shape = self._ENGINE_QUERY_SHAPE
+        if shape is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} has no engine-backed query shim; evaluate it via "
+                "EngineHandle.evaluate_ops_json (op-list FFI)."
+            )
+        if shape == "tokens":
+            x = kwargs.get("x")
+            if x is None:
+                raise ValueError(f"{type(self).__name__}.query requires 'x' (num tokens).")
+            return self, {"is_context": True, "batch_size": 1, "s": 1, "x": int(x)}
+        if shape == "context":
+            is_context = True
+        elif shape == "generation":
+            is_context = False
+        else:
+            is_context = self._engine_query_is_context(kwargs)
+        beam_width = kwargs.get("beam_width", 1)
+        if not is_context and beam_width != 1:
+            raise ValueError(f"{type(self).__name__} only supports beam_width=1, got {beam_width}")
+        batch_size = kwargs.get("batch_size")
+        s = kwargs.get("s")
+        if batch_size is None or s is None:
+            raise ValueError(f"{type(self).__name__}.query requires 'batch_size' and 's'.")
+        if is_context:
+            scale = kwargs.get("seq_imbalance_correction_scale")
+        else:
+            scale = kwargs.get(
+                "gen_seq_imbalance_correction_scale",
+                kwargs.get("seq_imbalance_correction_scale"),
+            )
+        x = kwargs.get("x")
+        return self, {
+            "is_context": is_context,
+            "batch_size": int(batch_size),
+            "s": int(s),
+            "prefix": int(kwargs.get("prefix") or 0),
+            "x": None if x is None else int(x),
+            "imbalance_correction_scale": 1.0 if scale is None else float(scale),
+        }
+
+    def _engine_query_is_context(self, kwargs: dict) -> bool:
+        """Phase for ``_ENGINE_QUERY_SHAPE = "module"`` ops: explicit
+        ``is_context=`` kwarg wins, then the instance's own phase marker.
+        Composites (Overlap/Fallback) override to infer from children."""
+        hint = kwargs.get("is_context")
+        if hint is not None:
+            return bool(hint)
+        is_context = getattr(self, "_is_context", None)
+        if is_context is not None:
+            return bool(is_context)
+        # Instance phase markers: the mamba/gdn kernels use context/generation
+        # (KDA adds "verify" — speculative multi-token decode, generation-like
+        # for evaluation-context routing; the serialized spec keeps the verify
+        # phase + draft_tokens), FPMForwardOp uses prefill/decode.
+        phase = getattr(self, "_phase", None)
+        if phase in ("context", "prefill"):
+            return True
+        if phase in ("generation", "decode", "verify"):
+            return False
+        raise ValueError(f"{type(self).__name__}.query cannot infer the evaluation phase; pass is_context=True/False.")
 
     def get_weights(self, **kwargs):
-        raise NotImplementedError
+        """Constant weight bytes for this op, computed by the engine (PR-6).
+
+        The Python-side ``self._weights`` math retired; the compiled engine
+        owns the weight physics (``Op::weight_bytes``, including the
+        ``scale_factor`` treatment per family). Cached on the instance — op
+        fields are construction-time constants, and memory estimation
+        re-walks the same op lists per sweep point. Subclasses without an
+        opspec variant (the AFD orchestration ops, the deprecated ``Mamba2``
+        composite) keep explicit overrides."""
+        cached = getattr(self, "_engine_weight_bytes", None)
+        if cached is None:
+            from aiconfigurator_core.sdk import engine
+
+            cached = self._engine_weight_bytes = engine.weight_of_op(self)
+        return cached
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
@@ -322,9 +453,10 @@ def clear_all_op_caches() -> None:
     Operation._load_data_call_count.clear()
     # Lazy for the same cycle reason (rust_engine_step is imported by engine.py,
     # which imports operation modules).
-    from aiconfigurator_core.sdk import rust_engine_step
+    from aiconfigurator_core.sdk import engine, rust_engine_step
 
     rust_engine_step._engine_handle_cache_clear()
+    engine._clear_probe_handle_cache()
 
 
 def warm_all_op_data(database: PerfDatabase) -> None:

@@ -261,6 +261,9 @@ def test_run_afd_estimate_passes_prefix_and_nextn(monkeypatch):
             return summary
 
     monkeypatch.setattr("aiconfigurator.sdk.inference_session.AFDInferenceSession", FakeSession)
+    # Stub out the nvfp4 remap: this test uses a fake model_path that has no
+    # HF config, so the remap's _get_model_info would fail trying to download it.
+    monkeypatch.setattr("aiconfigurator.cli.api.resolve_nvfp4_for_system", lambda *a, **k: None)
 
     api._run_afd_estimate(
         model_path="test-model",

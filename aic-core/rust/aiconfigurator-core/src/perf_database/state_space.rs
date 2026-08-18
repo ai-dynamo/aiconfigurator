@@ -22,10 +22,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use super::perf_interp::{self, LeafValue, Node, OpInterpConfig};
+use super::{kernel_source_ok, resolve_op_sources};
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
-use super::perf_interp::{self, Node, OpInterpConfig};
-use super::{kernel_source_ok, resolve_op_sources};
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct StateSpaceTable {
@@ -123,8 +123,7 @@ impl StateSpaceTable {
         version: &str,
         perf_db_sources: &PerfDbSources,
     ) -> Self {
-        let mamba2_sources =
-            resolve_op_sources(perf_db_sources, "mamba2_perf.parquet", &data_root);
+        let mamba2_sources = resolve_op_sources(perf_db_sources, "mamba2_perf.parquet", &data_root);
         let gdn_sources = resolve_op_sources(perf_db_sources, "gdn_perf.parquet", &data_root);
         let kda_sources = resolve_op_sources(perf_db_sources, "kda_perf.parquet", &data_root);
         Self {
@@ -158,7 +157,7 @@ impl StateSpaceTable {
         n_groups: u32,
         chunk_size: u32,
         sol: &dyn Fn(f64, f64) -> f64,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         // Mirror Python v2's `load_mamba2_data` defaultdict bug (still
         // present today, verified 2026-07-09): the row-population pattern
         // `try { data[ks][ph][mk][bs] } except KeyError: ... = entry` never
@@ -237,7 +236,7 @@ impl StateSpaceTable {
         num_v_heads: u32,
         head_v_dim: u32,
         sol: &dyn Fn(f64, f64) -> f64,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         let grids = self.load_gdn()?;
         let key = GdnKey {
             kernel_source: kernel_source.to_string(),
@@ -249,70 +248,54 @@ impl StateSpaceTable {
             num_v_heads,
             head_v_dim,
         };
-        // Mirror Python `_query_gdn_table`: on exact-shape miss, fall back to
-        // any same-d_model entry, breaking ties by minimum `|num_v_heads -
-        // query.num_v_heads|`. (Mamba2 uses "first by d_model"; GDN uses
-        // "nearest by num_v_heads" — keep them distinct.) Surface as
-        // `PerfDatabase` if no d_model match exists.
+        // Mirror Python `_query_gdn_table`: exact geometry (or an exact
+        // physical-alias hit) only; any miss surfaces as `PerfDatabase` so
+        // the operator degrades to SOL.
+        //
+        // The framework's own persisted physical kernels (vLLM 0.24 names its
+        // context scan chunk_gated_delta_rule_*) take precedence: after the
+        // shared-layer merge the logical lane can hold cross-backend donor
+        // rows, which only serve as gap fill when no own physical lane covers
+        // the shape. Ambiguous physical data fails closed.
+        let aliases: &[&str] = if self.vllm_024_gdn_aliases {
+            match (key.kernel_source.as_str(), key.phase.as_str()) {
+                ("chunk_gated_delta_rule", "context") => &[
+                    "chunk_gated_delta_rule_flashinfer",
+                    "chunk_gated_delta_rule_triton",
+                    "chunk_gated_delta_rule_cutedsl",
+                ],
+                ("fused_sigmoid_gating_delta_rule_update", "generation") => {
+                    &["fused_recurrent_gated_delta_rule_packed_decode"]
+                }
+                _ => &[],
+            }
+        } else {
+            &[]
+        };
+        let alias_matches: Vec<_> = aliases
+            .iter()
+            .filter_map(|alias| {
+                let mut alias_key = key.clone();
+                alias_key.kernel_source = (*alias).to_string();
+                grids.by_keys.get_key_value(&alias_key)
+            })
+            .collect();
+        if alias_matches.len() > 1 {
+            let sources: Vec<_> = alias_matches
+                .iter()
+                .map(|(alias_key, _)| alias_key.kernel_source.as_str())
+                .collect();
+            return Err(AicError::PerfDatabase(format!(
+                "ambiguous vLLM 0.24.0 GDN physical kernels for {key:?}: {}",
+                sources.join(", ")
+            )));
+        }
+        if let Some((_, node)) = alias_matches.first() {
+            return engine_query(node, phase, batch_size, seq_len, sol);
+        }
         let node = match grids.by_keys.get(&key) {
             Some(node) => node,
-            None => {
-                // vLLM 0.24 persists the selected physical recurrence
-                // implementation, while model operators retain stable logical
-                // kernel names. Resolve a physical source only for an exact
-                // model shape. Exact logical data always wins, and ambiguous
-                // physical data fails closed.
-                let aliases: &[&str] = if self.vllm_024_gdn_aliases {
-                    match (key.kernel_source.as_str(), key.phase.as_str()) {
-                        ("chunk_gated_delta_rule", "context") => &[
-                            "chunk_gated_delta_rule_flashinfer",
-                            "chunk_gated_delta_rule_triton",
-                            "chunk_gated_delta_rule_cutedsl",
-                        ],
-                        ("fused_sigmoid_gating_delta_rule_update", "generation") => {
-                            &["fused_recurrent_gated_delta_rule_packed_decode"]
-                        }
-                        _ => &[],
-                    }
-                } else {
-                    &[]
-                };
-                let alias_matches: Vec<_> = aliases
-                    .iter()
-                    .filter_map(|alias| {
-                        let mut alias_key = key.clone();
-                        alias_key.kernel_source = (*alias).to_string();
-                        grids.by_keys.get_key_value(&alias_key)
-                    })
-                    .collect();
-                if alias_matches.len() > 1 {
-                    let sources: Vec<_> = alias_matches
-                        .iter()
-                        .map(|(alias_key, _)| alias_key.kernel_source.as_str())
-                        .collect();
-                    return Err(AicError::PerfDatabase(format!(
-                        "ambiguous vLLM 0.24.0 GDN physical kernels for {key:?}: {}",
-                        sources.join(", ")
-                    )));
-                }
-                if let Some((_, node)) = alias_matches.first() {
-                    return engine_query(node, phase, batch_size, seq_len, sol);
-                }
-
-                let nearest = grids
-                    .by_keys
-                    .iter()
-                    .filter(|(k, _)| {
-                        k.kernel_source == key.kernel_source
-                            && k.phase == key.phase
-                            && k.d_model == key.d_model
-                    })
-                    .min_by_key(|(k, _)| (k.num_v_heads as i64 - key.num_v_heads as i64).abs());
-                match nearest {
-                    Some((_, node)) => node,
-                    None => return Err(missing("GDN", &self.data_root, format!("{key:?}"))),
-                }
-            }
+            None => return Err(missing("GDN", &self.data_root, format!("{key:?}"))),
         };
         engine_query(node, phase, batch_size, seq_len, sol)
     }
@@ -339,7 +322,7 @@ impl StateSpaceTable {
         num_v_heads: u32,
         head_v_dim: u32,
         sol: &dyn Fn(f64, f64) -> f64,
-    ) -> Result<f64, AicError> {
+    ) -> Result<LeafValue, AicError> {
         let grids = self.load_kda()?;
         let key = KdaKey {
             kernel_source: kernel_source.to_string(),
@@ -385,16 +368,12 @@ impl StateSpaceTable {
     }
 
     fn load_gdn(&self) -> Result<&GdnGrids, AicError> {
-        let cell = self
-            .gdn
-            .get_or_init(|| load_gdn_parquet(&self.gdn_sources));
+        let cell = self.gdn.get_or_init(|| load_gdn_parquet(&self.gdn_sources));
         cell.as_ref().map_err(clone_err)
     }
 
     fn load_kda(&self) -> Result<&KdaGrids, AicError> {
-        let cell = self
-            .kda
-            .get_or_init(|| load_kda_parquet(&self.kda_sources));
+        let cell = self.kda.get_or_init(|| load_kda_parquet(&self.kda_sources));
         cell.as_ref().map_err(clone_err)
     }
 
@@ -461,12 +440,12 @@ fn engine_query(
     batch_size: u32,
     seq_len: u32,
     sol: &dyn Fn(f64, f64) -> f64,
-) -> Result<f64, AicError> {
+) -> Result<LeafValue, AicError> {
     if phase == "generation" {
         let s = seq_len as f64;
         let sol1 = move |c: &[f64]| sol(c[0], s);
         let cfg = OpInterpConfig::grid(&["batch"], &sol1);
-        perf_interp::query(&cfg, node, &[batch_size as f64])
+        perf_interp::query_value(&cfg, node, &[batch_size as f64])
     } else {
         // Python: `if seq_len is None or seq_len <= 0: return SOL` — surface
         // as a PerfDatabase error so the operator's SOL branch fires.
@@ -477,13 +456,13 @@ fn engine_query(
         }
         let sol2 = move |c: &[f64]| sol(c[0], c[1]);
         let cfg = OpInterpConfig::grid(&["batch", "seq_len"], &sol2);
-        perf_interp::query(&cfg, node, &[batch_size as f64, seq_len as f64])
+        perf_interp::query_value(&cfg, node, &[batch_size as f64, seq_len as f64])
     }
 }
 
-/// First-wins leaf insert (Python loaders skip rows whose coordinate is
-/// already populated; `Node::insert` would overwrite).
-fn insert_first_wins(root: &mut Node, path: &[u32], value: f64) {
+/// First-wins measured-leaf insert (Python loaders skip rows whose
+/// coordinate is already populated; `Node::insert_value` would overwrite).
+fn insert_first_wins(root: &mut Node, path: &[u32], value: LeafValue) {
     let Node::Branch(map) = root else {
         return; // malformed nesting; keep the earlier row
     };
@@ -523,6 +502,7 @@ fn load_mamba2_parquet(sources: &[PerfSource]) -> Result<Mamba2Grids, AicError> 
         let n_groups_col = reader.col("n_groups")?;
         let chunk_size_col = reader.col("chunk_size")?;
         let latency_col = reader.col("latency")?;
+        let power_col = reader.col_optional("power");
         let ks_col = reader.col_optional("kernel_source");
         for row in reader.rows()? {
             let row = row?;
@@ -549,10 +529,12 @@ fn load_mamba2_parquet(sources: &[PerfSource]) -> Result<Mamba2Grids, AicError> 
             let node = by_keys.entry(key).or_insert_with(Node::branch);
             let batch = row.u32(batch_size_col)?;
             let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
+            let leaf = LeafValue::with_power(latency, power);
             if phase == "generation" {
-                insert_first_wins(node, &[batch], latency);
+                insert_first_wins(node, &[batch], leaf);
             } else {
-                insert_first_wins(node, &[batch, row.u32(seq_len_col)?], latency);
+                insert_first_wins(node, &[batch, row.u32(seq_len_col)?], leaf);
             }
         }
     }
@@ -560,7 +542,10 @@ fn load_mamba2_parquet(sources: &[PerfSource]) -> Result<Mamba2Grids, AicError> 
         return Err(AicError::PerfDatabase(format!(
             "no Mamba2 rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     Ok(Mamba2Grids { by_keys })
@@ -575,7 +560,7 @@ fn load_mamba2_parquet(sources: &[PerfSource]) -> Result<Mamba2Grids, AicError> 
 /// canonical modeling identity; normalize the LOOKUP key here (mirrors
 /// Python `_GDN_DECODE_RECURRENCE_ALIASES`) — the parquet keeps the
 /// executed-kernel truth.
-fn normalize_gdn_kernel_source(kernel_source: String) -> String {
+pub(crate) fn normalize_gdn_kernel_source(kernel_source: String) -> String {
     match kernel_source.as_str() {
         "fused_recurrent_gated_delta_rule" | "fused_recurrent_gated_delta_rule_packed_decode" => {
             "fused_sigmoid_gating_delta_rule_update".to_string()
@@ -605,6 +590,7 @@ fn load_gdn_parquet(sources: &[PerfSource]) -> Result<GdnGrids, AicError> {
         let num_v_heads_col = reader.col("num_v_heads")?;
         let head_v_dim_col = reader.col("head_v_dim")?;
         let latency_col = reader.col("latency")?;
+        let power_col = reader.col_optional("power");
         let ks_col = reader.col_optional("kernel_source");
         for row in reader.rows()? {
             let row = row?;
@@ -628,10 +614,12 @@ fn load_gdn_parquet(sources: &[PerfSource]) -> Result<GdnGrids, AicError> {
             let node = by_keys.entry(key).or_insert_with(Node::branch);
             let batch = row.u32(batch_size_col)?;
             let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
+            let leaf = LeafValue::with_power(latency, power);
             if phase == "generation" {
-                insert_first_wins(node, &[batch], latency);
+                insert_first_wins(node, &[batch], leaf);
             } else {
-                insert_first_wins(node, &[batch, row.u32(seq_len_col)?], latency);
+                insert_first_wins(node, &[batch, row.u32(seq_len_col)?], leaf);
             }
         }
     }
@@ -639,7 +627,10 @@ fn load_gdn_parquet(sources: &[PerfSource]) -> Result<GdnGrids, AicError> {
         return Err(AicError::PerfDatabase(format!(
             "no GDN rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     Ok(GdnGrids { by_keys })
@@ -674,6 +665,7 @@ fn load_kda_parquet(sources: &[PerfSource]) -> Result<KdaGrids, AicError> {
         let num_v_heads_col = reader.col("num_v_heads")?;
         let head_v_dim_col = reader.col("head_v_dim")?;
         let latency_col = reader.col("latency")?;
+        let power_col = reader.col_optional("power");
         let ks_col = reader.col_optional("kernel_source");
         for row in reader.rows()? {
             let row = row?;
@@ -697,10 +689,12 @@ fn load_kda_parquet(sources: &[PerfSource]) -> Result<KdaGrids, AicError> {
             let node = by_keys.entry(key).or_insert_with(Node::branch);
             let batch = row.u32(batch_size_col)?;
             let latency = row.f64(latency_col)?;
+            let power = row.f64_optional(power_col)?.unwrap_or(0.0);
+            let leaf = LeafValue::with_power(latency, power);
             if phase == "context" || phase == "verify" {
-                insert_first_wins(node, &[batch, row.u32(seq_len_col)?], latency);
+                insert_first_wins(node, &[batch, row.u32(seq_len_col)?], leaf);
             } else {
-                insert_first_wins(node, &[batch], latency);
+                insert_first_wins(node, &[batch], leaf);
             }
         }
     }
@@ -708,14 +702,20 @@ fn load_kda_parquet(sources: &[PerfSource]) -> Result<KdaGrids, AicError> {
         return Err(AicError::PerfDatabase(format!(
             "no KDA rows loaded from {} source(s) (first: {})",
             sources.len(),
-            sources.first().map(|s| s.path().display().to_string()).unwrap_or_default()
+            sources
+                .first()
+                .map(|s| s.path().display().to_string())
+                .unwrap_or_default()
         )));
     }
     Ok(KdaGrids { by_keys })
 }
 
 fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {
-    AicError::PerfDatabase(format!("{table} data missing for {descriptor} at {}", data_root.display()))
+    AicError::PerfDatabase(format!(
+        "{table} data missing for {descriptor} at {}",
+        data_root.display()
+    ))
 }
 
 fn clone_err(err: &AicError) -> AicError {
@@ -769,10 +769,11 @@ mod tests {
                 head_v_dim: 128,
             };
             let node = by_keys.entry(key).or_insert_with(Node::branch);
+            let leaf = LeafValue::latency_only(latency);
             if phase == "generation" {
-                insert_first_wins(node, &[1], latency);
+                insert_first_wins(node, &[1], leaf);
             } else {
-                insert_first_wins(node, &[1, 1024], latency);
+                insert_first_wins(node, &[1, 1024], leaf);
             }
         }
         let table = StateSpaceTable::new(PathBuf::from("test-data"), backend, version);
@@ -786,19 +787,21 @@ mod tests {
         phase: &str,
         num_v_heads: u32,
     ) -> Result<f64, AicError> {
-        table.query_gdn(
-            kernel_source,
-            phase,
-            1,
-            1024,
-            5120,
-            4,
-            16,
-            128,
-            num_v_heads,
-            128,
-            &dummy_sol,
-        )
+        table
+            .query_gdn(
+                kernel_source,
+                phase,
+                1,
+                1024,
+                5120,
+                4,
+                16,
+                128,
+                num_v_heads,
+                128,
+                &dummy_sol,
+            )
+            .map(|v| v.latency)
     }
 
     #[test]
@@ -838,7 +841,9 @@ mod tests {
     }
 
     #[test]
-    fn vllm_024_gdn_exact_logical_key_wins_over_alias() {
+    fn vllm_024_gdn_own_physical_lane_wins_over_logical_lane() {
+        // The logical lane can hold cross-backend donor rows after the
+        // shared-layer merge; the own physical lane must beat it.
         let table = in_memory_gdn_table(
             "vllm",
             "0.24.0",
@@ -849,7 +854,7 @@ mod tests {
         );
         assert_eq!(
             query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).unwrap(),
-            1.0
+            2.0
         );
     }
 
@@ -867,10 +872,12 @@ mod tests {
 
     #[test]
     fn vllm_024_gdn_ambiguous_exact_aliases_error() {
+        // The logical-lane row must not mask the ambiguity between physical lanes.
         let table = in_memory_gdn_table(
             "vllm",
             "0.24.0",
             &[
+                ("chunk_gated_delta_rule", "context", 48, 1.0),
                 ("chunk_gated_delta_rule_flashinfer", "context", 48, 2.0),
                 ("chunk_gated_delta_rule_triton", "context", 48, 3.0),
             ],
@@ -896,7 +903,9 @@ mod tests {
     }
 
     #[test]
-    fn vllm_024_gdn_preserves_logical_source_nearest_fallback() {
+    fn vllm_024_gdn_does_not_borrow_nearest_shape_within_logical_source() {
+        // Exact geometry only: nearest-num_v_heads rows are never returned as
+        // silicon (mirrors the Python twin test).
         let table = in_memory_gdn_table(
             "vllm",
             "0.24.0",
@@ -906,10 +915,7 @@ mod tests {
                 ("chunk_gated_delta_rule", "context", 64, 5.0),
             ],
         );
-        assert_eq!(
-            query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).unwrap(),
-            5.0
-        );
+        assert!(query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).is_err());
     }
 
     /// In-memory KDA table over one fixed model shape (d_model=4096, heads
@@ -929,10 +935,11 @@ mod tests {
                 head_v_dim: 128,
             };
             let node = by_keys.entry(key).or_insert_with(Node::branch);
+            let leaf = LeafValue::latency_only(latency);
             if phase == "generation" {
-                insert_first_wins(node, &[1], latency);
+                insert_first_wins(node, &[1], leaf);
             } else {
-                insert_first_wins(node, &[1, 4], latency);
+                insert_first_wins(node, &[1, 4], leaf);
             }
         }
         let table = StateSpaceTable::new(PathBuf::from("test-data"), "sglang", "0.5.14");
@@ -946,9 +953,21 @@ mod tests {
         phase: &str,
         num_v_heads: u32,
     ) -> Result<f64, AicError> {
-        table.query_kda(
-            kernel_source, phase, 1, 4, 4096, 4, 16, 128, num_v_heads, 128, &dummy_sol,
-        )
+        table
+            .query_kda(
+                kernel_source,
+                phase,
+                1,
+                4,
+                4096,
+                4,
+                16,
+                128,
+                num_v_heads,
+                128,
+                &dummy_sol,
+            )
+            .map(|v| v.latency)
     }
 
     #[test]
@@ -959,14 +978,24 @@ mod tests {
         ]);
         // Verify resolves at [batch=1][seq=draft_tokens=4].
         assert_eq!(
-            query_kda_test_shape(&table, "fused_sigmoid_gating_delta_rule_update", "verify", 16)
-                .unwrap(),
+            query_kda_test_shape(
+                &table,
+                "fused_sigmoid_gating_delta_rule_update",
+                "verify",
+                16
+            )
+            .unwrap(),
             2.5
         );
         // Generation resolves on the 1-axis batch curve (seq feeds SOL only).
         assert_eq!(
-            query_kda_test_shape(&table, "fused_recurrent_kda_packed_decode", "generation", 16)
-                .unwrap(),
+            query_kda_test_shape(
+                &table,
+                "fused_recurrent_kda_packed_decode",
+                "generation",
+                16
+            )
+            .unwrap(),
             1.5
         );
     }
@@ -985,8 +1014,7 @@ mod tests {
         // Unlike GDN, a physical vLLM kernel name is NOT aliased at lookup:
         // querying the logical name against physical-only rows must miss
         // (the SOL byte model in the operator handles those names instead).
-        let table =
-            in_memory_kda_table(&[("chunk_kda_with_fused_gate", "context", 16, 2.0)]);
+        let table = in_memory_kda_table(&[("chunk_kda_with_fused_gate", "context", 16, 2.0)]);
         assert!(query_kda_test_shape(&table, "chunk_kda", "context", 16).is_err());
     }
 
@@ -1033,7 +1061,7 @@ mod tests {
         );
         eprintln!("query: {r:?}");
         assert!(r.is_ok(), "expected silicon lookup to succeed: {r:?}");
-        let latency = r.unwrap();
+        let latency = r.unwrap().latency;
         assert!(latency > 0.0, "non-zero latency: {latency}");
         eprintln!("latency: {latency}");
     }
@@ -1057,8 +1085,9 @@ mod tests {
         let bw = h100_sxm_mem_bw();
 
         // GDN causal_conv1d kernels: read = x*conv_channels*(d_conv+1)*2,
-        // write = x*conv_channels*2; x = b*s (context) or b (generation).
-        let conv_channels = (16 * 128 + 32 * 128) as f64;
+        // write = x*conv_channels*2; x = b*s (context) or b (generation);
+        // conv_channels is the packed q/k/v width (2K + V).
+        let conv_channels = (2 * 16 * 128 + 32 * 128) as f64;
         let gdn_conv_sol = move |x: f64| {
             (x * conv_channels * (4.0 + 1.0) * 2.0 + x * conv_channels * 2.0) / bw * 1000.0
         };
@@ -1071,7 +1100,7 @@ mod tests {
             (8, 1024, 0.03154560029506683),
             (8, 1536, 0.04624959975481033),
             (3, 1024, 0.011241600289940833),
-            (8, 65536, 1.7870464324951172),
+            (8, 65536, 1.8143790228535068),
         ];
         for &(b, s, expected) in ctx_cases {
             let got = gdn
@@ -1088,7 +1117,8 @@ mod tests {
                     128,
                     &gdn_ctx_sol,
                 )
-                .unwrap();
+                .unwrap()
+                .latency;
             assert!(
                 ((got - expected) / expected).abs() < 1e-9,
                 "gdn ctx (b={b}, s={s}): rust {got} vs python {expected}"
@@ -1115,7 +1145,8 @@ mod tests {
                     128,
                     &gdn_gen_sol,
                 )
-                .unwrap();
+                .unwrap()
+                .latency;
             assert!(
                 ((got - expected) / expected).abs() < 1e-9,
                 "gdn gen (b={b}): rust {got} vs python {expected}"
@@ -1128,11 +1159,15 @@ mod tests {
             let x = b * s;
             (x * conv_dim * (4.0 + 1.0) * 2.0 + x * conv_dim * 2.0) / bw * 1000.0
         };
-        let mamba2 = StateSpaceTable::new(data_root("h100_sxm/trtllm/1.3.0rc10"), "trtllm", "1.3.0rc10");
+        let mamba2 = StateSpaceTable::new(
+            data_root("h100_sxm/trtllm/1.3.0rc10"),
+            "trtllm",
+            "1.3.0rc10",
+        );
         let m2_cases: &[(u32, u32, f64)] = &[
             (4, 1024, 0.058057600259780885),
             (4, 1536, 0.07725920081138611),
-            (4, 65536, 2.520614433288574),
+            (4, 65536, 2.53553341830743),
         ];
         for &(b, s, expected) in m2_cases {
             let got = mamba2
@@ -1150,7 +1185,8 @@ mod tests {
                     128,
                     &m2_ctx_sol,
                 )
-                .unwrap();
+                .unwrap()
+                .latency;
             assert!(
                 ((got - expected) / expected).abs() < 1e-9,
                 "mamba2 ctx (b={b}, s={s}): rust {got} vs python {expected}"
@@ -1202,14 +1238,16 @@ mod tests {
         let kda_gen_sol = move |b: f64, _s: f64| {
             // kda_fused_decode = conv update + packed recurrence (+ folded norm).
             let x = b;
-            let read = x * kda_conv_ch * (4.0 + 1.0) * 2.0 + (x * 4.0 * kda_proj * 2.0 + kda_state * b);
+            let read =
+                x * kda_conv_ch * (4.0 + 1.0) * 2.0 + (x * 4.0 * kda_proj * 2.0 + kda_state * b);
             let write = x * kda_conv_ch * 2.0 + (x * kda_proj * 2.0 + kda_state * b);
             (read + write) / kda_bw * 1000.0
         };
         let kda_verify_sol = move |b: f64, s: f64| {
             // fused_kda_decode_mtp_dspark = conv update + chain-verify recurrence.
             let x = b * s;
-            let read = x * kda_conv_ch * (4.0 + 1.0) * 2.0 + (x * 4.0 * kda_proj * 2.0 + kda_state * b);
+            let read =
+                x * kda_conv_ch * (4.0 + 1.0) * 2.0 + (x * 4.0 * kda_proj * 2.0 + kda_state * b);
             let write = x * kda_conv_ch * 2.0 + (x * kda_proj * 2.0 + kda_state * x);
             (read + write) / kda_bw * 1000.0
         };
@@ -1220,12 +1258,25 @@ mod tests {
             (8, 1024, 0.35404798984527586),
             (8, 1536, 0.49525119066238404),
             (3, 1024, 0.16356800198554994),
-            (8, 65536, 18.784046049450055),
+            (8, 65536, 19.15999071181899),
         ];
         for &(b, s, expected) in kda_ctx_cases {
             let got = kda
-                .query_kda("chunk_kda", "context", b, s, 7168, 4, 12, 128, 12, 128, &kda_ctx_sol)
-                .unwrap();
+                .query_kda(
+                    "chunk_kda",
+                    "context",
+                    b,
+                    s,
+                    7168,
+                    4,
+                    12,
+                    128,
+                    12,
+                    128,
+                    &kda_ctx_sol,
+                )
+                .unwrap()
+                .latency;
             assert!(
                 ((got - expected) / expected).abs() < 1e-9,
                 "kda ctx (b={b}, s={s}): rust {got} vs python {expected}"
@@ -1252,7 +1303,8 @@ mod tests {
                     128,
                     &kda_gen_sol,
                 )
-                .unwrap();
+                .unwrap()
+                .latency;
             assert!(
                 ((got - expected) / expected).abs() < 1e-9,
                 "kda gen (b={b}): rust {got} vs python {expected}"
@@ -1264,7 +1316,7 @@ mod tests {
             (8, 8, 0.020873600244522096),
             (12, 4, 0.018801599740982056),
             (8, 6, 0.01780159994959831),
-            (1024, 8, 1.4328703880310059),
+            (1024, 8, 1.5144814803344375),
         ];
         for &(b, s, expected) in kda_verify_cases {
             let got = kda
@@ -1281,11 +1333,66 @@ mod tests {
                     128,
                     &kda_verify_sol,
                 )
-                .unwrap();
+                .unwrap()
+                .latency;
             assert!(
                 ((got - expected) / expected).abs() < 1e-9,
                 "kda verify (b={b}, draft={s}): rust {got} vs python {expected}"
             );
         }
+    }
+
+    /// ENERGY oracle on a synthetic power-carrying fixture. Python twin
+    /// (pandas fixture, `energy_test_fixtures` spec):
+    ///
+    /// ```text
+    /// db.query_gdn(phase="context", kernel_source="causal_conv1d_fn",
+    ///              batch_size=1, seq_len=1536, d_model=2048, num_k_heads=16,
+    ///              head_k_dim=128, num_v_heads=32, head_v_dim=128, d_conv=4)
+    /// # -> latency=2.0, energy=300.0
+    /// ```
+    #[test]
+    fn gdn_energy_matches_python_oracle() {
+        use crate::perf_database::energy_test_fixtures::{write_parquet, Col};
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &tmp.path().join("gdn_perf.parquet"),
+            &[
+                Col::Str("kernel_source", vec!["causal_conv1d_fn"; 2]),
+                Col::Str("phase", vec!["context", "context"]),
+                Col::I64("batch_size", vec![1, 1]),
+                Col::I64("seq_len", vec![1024, 2048]),
+                Col::I64("d_model", vec![2048, 2048]),
+                Col::I64("d_conv", vec![4, 4]),
+                Col::I64("num_k_heads", vec![16, 16]),
+                Col::I64("head_k_dim", vec![128, 128]),
+                Col::I64("num_v_heads", vec![32, 32]),
+                Col::I64("head_v_dim", vec![128, 128]),
+                Col::F64("latency", vec![1.0, 3.0]),
+                Col::F64("power", vec![100.0, 200.0]),
+            ],
+        );
+        let table = StateSpaceTable::new(tmp.path().to_path_buf(), "vllm", "1.0");
+        let v = table
+            .query_gdn(
+                "causal_conv1d_fn",
+                "context",
+                1,
+                1536,
+                2048,
+                4,
+                16,
+                128,
+                32,
+                128,
+                &dummy_sol,
+            )
+            .unwrap();
+        assert!((v.latency - 2.0).abs() < 1e-9, "latency {}", v.latency);
+        assert!(
+            (v.energy - 300.0).abs() < 1e-9 * 300.0,
+            "energy {}",
+            v.energy
+        );
     }
 }

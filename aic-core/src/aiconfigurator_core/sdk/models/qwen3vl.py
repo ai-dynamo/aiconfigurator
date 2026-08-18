@@ -7,7 +7,8 @@ from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
 from aiconfigurator_core.sdk.models.llama import LLAMAModel
 from aiconfigurator_core.sdk.models.moe import MOEModel
-from aiconfigurator_core.sdk.models.vit_ops import build_encoder_ops
+
+from .blocks.vit import build_encoder_ops
 
 
 @register_model("QWEN3VL")
@@ -49,7 +50,12 @@ class Qwen3VLModel(LLAMAModel):
         if encoder_config is None:
             return
         self.encoder_config = encoder_config
-        self.encoder_ops.extend(build_encoder_ops(encoder_config, self.config.tp_size, self.config.enable_encoder_dp))
+        # EPD language-only workers keep encoder_config (vision tokens still
+        # extend the LLM context) but never host the ViT ops.
+        if not self.config.language_only:
+            self.encoder_ops.extend(
+                build_encoder_ops(encoder_config, self.config.tp_size, self.config.enable_encoder_dp)
+            )
 
 
 @register_model("QWEN3VL_MOE")
@@ -88,4 +94,7 @@ class Qwen3VLMoEModel(MOEModel):
         if encoder_config is None:
             return
         self.encoder_config = encoder_config
-        self.encoder_ops.extend(build_encoder_ops(encoder_config, self.config.tp_size, self.config.enable_encoder_dp))
+        if not self.config.language_only:
+            self.encoder_ops.extend(
+                build_encoder_ops(encoder_config, self.config.tp_size, self.config.enable_encoder_dp)
+            )

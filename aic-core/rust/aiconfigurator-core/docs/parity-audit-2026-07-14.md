@@ -175,3 +175,26 @@ its trigger config to SMOKE_CASES / the scan matrix.**
 10. Wrap `build_engine_spec_json` call site (`base_backend.py:422`) so `OpConversionError` falls back to Python instead of crashing.
 11. Widen `_engine_config_json` identity (add collapsed-dtype + missing ModelConfig fields) to kill cache aliasing.
 12. Add `cargo test` to gating CI; fix `parse_b200_sxm`; update stale enum mirrors.
+
+---
+
+## Addendum — 2026-08-03 (large-EP port)
+
+The large-EP redesign's operators are native. `MoeAllToAll` and `MoeExpertCompute`
+(spec variants 33/34 on current `main`, appended — no index shift) execute over the unified
+`moe_a2a_perf` / `moe_expert_compute_perf` tables; the legacy on-disk layouts (deepep
+normal/low-latency, trtllm alltoall, sglang/trtllm wideep) load through
+per-layout adapters, oracle-verified against Python at ≤2e-16 max rel err.
+The spec emitter converts these ops natively — their Python engine-step
+fallback is gone.
+
+With no live consumer left, the wideEP MoE Rust surface was retired:
+`wideep_moe.rs` (op + table) and the deepep dispatch flavors are deleted,
+`WideEpTable` slimmed to `TrtllmAlltoallTable`. The removal is a wire change,
+so `ENGINE_SPEC_SCHEMA_VERSION` bumped 10 → 11 (wheel/crate lockstep), guarded
+by a version-gate test (schema-10 payloads reject) and a variant-index pin
+test (`Gemm`=0, `MoeAllToAll`=33, `MoeExpertCompute`=34).
+
+Parity coverage for the large-EP cases is re-enabled: 0.0000% observed drift
+(reporter floor) on the re-enabled classes, compile-engine suite 55/55 with
+zero skips, and the engine-step perf gate green.

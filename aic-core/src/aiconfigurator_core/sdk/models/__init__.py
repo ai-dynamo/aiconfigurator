@@ -42,6 +42,7 @@ from aiconfigurator_core.sdk.models.helpers import (
     resolve_dsv4_moe_arch,
     resolve_dsv4_moe_arch_mode,
     resolve_kimi_k3_moe_arch_mode,
+    resolve_nvfp4_for_system,
 )
 
 # Auto-import every other module in this package so ``@register_model``
@@ -52,6 +53,44 @@ for _, _name, _ in pkgutil.iter_modules(__path__):
     if _name not in _SKIP:
         importlib.import_module(f".{_name}", __name__)
 del _SKIP
+
+
+_FORWARD_MODELS = ("op_level", "fpm")
+
+
+def _apply_forward_model_fpm(model: BaseModel) -> BaseModel:
+    """Centralized fpm rewrite: each phase list becomes exactly one whole-model
+    op. No model class rewrites its own lists; metadata, parallelism, and the
+    public model type are unchanged."""
+    from aiconfigurator_core.sdk.operations.fpm_forward import FPMForwardOp
+
+    if model.encoder_ops:
+        raise NotImplementedError(
+            f"forward_model='fpm' does not support encoder/multimodal models "
+            f"(model_family={model.model_family!r} has encoder ops). Use forward_model='op_level'."
+        )
+    if getattr(model, "_nextn", 0):
+        # The collected whole-model curves carry neither the MTP-head cost nor
+        # the acceptance amortization that op_level encodes in
+        # mtp_scale_factor, so fpm would silently price MTP as plain decode.
+        raise NotImplementedError(
+            f"forward_model='fpm' does not support MTP speculative decoding (nextn={model._nextn}). "
+            "Use forward_model='op_level'."
+        )
+    # The ORIGINAL op-level lists stay alive inside the FPM ops as the
+    # whole-model roofline (queried in DatabaseMode.SOL at interpolation
+    # time) and as the weight-bytes inventory for memory estimation.
+    context_ops = list(model.context_ops)
+    generation_ops = list(model.generation_ops)
+    weight_bytes = float(sum(op.get_weights() for op in context_ops))
+    model.context_ops = [
+        FPMForwardOp("prefill", model.config, model.model_path, sol_ops=context_ops, weight_bytes=weight_bytes)
+    ]
+    model.generation_ops = [
+        FPMForwardOp("decode", model.config, model.model_path, sol_ops=generation_ops, weight_bytes=weight_bytes)
+    ]
+    model.forward_model = "fpm"
+    return model
 
 
 def get_model(
@@ -66,7 +105,15 @@ def get_model(
     classmethod. Per-family construction details (MoE prefix args, WideEP
     dispatch, post-construction hooks) live inside each model's
     ``create()``.
+
+    ``model_config.forward_model`` selects the forward-pass modeling mode:
+    the default "op_level" returns the granular op lists unchanged; "fpm"
+    rewrites each phase list to a single whole-model ``FPMForwardOp``.
     """
+    forward_model = getattr(model_config, "forward_model", "op_level") or "op_level"
+    if forward_model not in _FORWARD_MODELS:
+        raise ValueError(f"Unknown forward_model: {forward_model!r}. Valid values: {', '.join(_FORWARD_MODELS)}")
+
     # Shallow-copy so mutations below don't poison the @cache'd original.
     model_info = dict(_get_model_info(model_path))
     raw_config = model_info.get("raw_config", {})
@@ -113,28 +160,23 @@ def get_model(
     else:
         model_config.cp_style = "none"
 
-    return cls.create(model_info, model_config, backend_name)
+    model = cls.create(model_info, model_config, backend_name)
+    if forward_model == "fpm":
+        model = _apply_forward_model_fpm(model)
+    return model
 
 
 # Re-export concrete model classes for backward compatibility. Auto-discovery
 # above already imported them; we list them here for static analysis / IDE
 # support and so wildcard imports work.
-from aiconfigurator_core.sdk.models.deepseek import (
-    DeepSeekModel,
-    TrtllmWideEPDeepSeekModel,
-    WideEPDeepSeekModel,
-)
+from aiconfigurator_core.sdk.models.deepseek import DeepSeekModel
 from aiconfigurator_core.sdk.models.deepseek_v4 import DeepSeekV4Model
-from aiconfigurator_core.sdk.models.deepseek_v32 import (
-    DeepSeekV32Model,
-    TrtllmWideEPDeepSeekV32Model,
-    WideEPDeepSeekV32Model,
-)
+from aiconfigurator_core.sdk.models.deepseek_v32 import DeepSeekV32Model
 from aiconfigurator_core.sdk.models.gemma4 import Gemma4MixModel
 from aiconfigurator_core.sdk.models.gpt import GPTModel
 from aiconfigurator_core.sdk.models.hybrid_moe import HybridMoEModel
 from aiconfigurator_core.sdk.models.llama import LLAMAModel
-from aiconfigurator_core.sdk.models.moe import MOEModel, SGLangEPMOEModel
+from aiconfigurator_core.sdk.models.moe import MOEModel
 from aiconfigurator_core.sdk.models.nemotron_h import NemotronHModel
 from aiconfigurator_core.sdk.models.nemotron_nas import NemotronNas
 from aiconfigurator_core.sdk.models.qwen3vl import Qwen3VLModel, Qwen3VLMoEModel
@@ -155,11 +197,6 @@ __all__ = [
     "Qwen3VLMoEModel",
     "Qwen3VLModel",
     "Qwen35Model",
-    "SGLangEPMOEModel",
-    "TrtllmWideEPDeepSeekModel",
-    "TrtllmWideEPDeepSeekV32Model",
-    "WideEPDeepSeekModel",
-    "WideEPDeepSeekV32Model",
     "_apply_model_quant_defaults",
     "_architecture_to_model_family",
     "_get_model_info",
@@ -173,4 +210,5 @@ __all__ = [
     "resolve_dsv4_moe_arch",
     "resolve_dsv4_moe_arch_mode",
     "resolve_kimi_k3_moe_arch_mode",
+    "resolve_nvfp4_for_system",
 ]
