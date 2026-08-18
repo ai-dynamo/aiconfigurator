@@ -6,9 +6,8 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 import aiconfigurator_core
 from aiconfigurator_core.sdk import engine
@@ -16,6 +15,8 @@ from aiconfigurator_core.sdk import engine
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CORE_ROOT = REPO_ROOT / "aic-core"
 RUST_CONFIG = CORE_ROOT / "rust" / "aiconfigurator-core" / "src" / "config.rs"
+SUPPORTED_PYTHON = ">=3.11,<3.14"
+SUPPORTED_NUMPY = "numpy>=2.1,<3"
 
 
 def _project_version(path: Path) -> str:
@@ -37,6 +38,15 @@ def test_core_wheel_and_crate_versions_match() -> None:
     assert _project_version(CORE_ROOT / "pyproject.toml") == _crate_version(
         CORE_ROOT / "rust" / "aiconfigurator-core" / "Cargo.toml"
     )
+
+
+def test_python_and_numpy_support_contracts_match() -> None:
+    for pyproject in (REPO_ROOT / "pyproject.toml", CORE_ROOT / "pyproject.toml"):
+        project = tomllib.loads(pyproject.read_text())["project"]
+        assert project["requires-python"] == SUPPORTED_PYTHON
+        assert [dependency for dependency in project["dependencies"] if dependency.startswith("numpy")] == [
+            SUPPORTED_NUMPY
+        ]
 
 
 def test_engine_schema_versions_match_across_python_and_rust() -> None:

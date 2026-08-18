@@ -15,12 +15,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::common::enums::{DatabaseMode, FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
-use crate::operators::base::{PerformanceResult, Source};
+use crate::operators::base::{blend_sol, PerformanceResult, Source};
 use crate::operators::communication::NcclOp;
 use crate::operators::util_empirical::{self, UtilGrid};
 use crate::perf_database::dsa::{
-    bs_slice, dsa_context_sol_flops, dsa_context_sol_ms, dsa_dims, dsa_generation_sol_flops,
-    dsa_generation_sol_ms, dsa_sparse_file_prefix, lookup_2d, DsaHeadGrid, DsaKey, DsaSparseTables,
+    bs_slice, dsa_context_sol, dsa_context_sol_flops, dsa_context_sol_ms, dsa_dims,
+    dsa_generation_sol, dsa_generation_sol_flops, dsa_generation_sol_ms, dsa_sparse_file_prefix,
+    lookup_2d, DsaHeadGrid, DsaKey, DsaSparseTables,
 };
 use crate::perf_database::perf_interp::LeafValue;
 use crate::perf_database::PerfDatabase;
@@ -53,6 +54,23 @@ pub struct DsaModuleOp {
     /// keeps the pure-full path — the skip table is never touched.
     #[serde(default = "default_full_frac")]
     pub full_frac: f64,
+    /// Per-projection-group weight quant modes (Python
+    /// `dsa_block_weights_bytes`'s `projection_quant_modes`): a checkpoint
+    /// fact — e.g. DeepSeek-V3.2-NVFP4 keeps q/kv/indexer in BF16 but
+    /// quantizes o_proj. `None` (pre-field specs) falls back to
+    /// `gemm_quant_mode` for all four groups, exactly like the Python op's
+    /// default. Weight-estimation only; the latency path never reads it.
+    #[serde(default)]
+    pub attn_projection_quant_modes: Option<DsaProjectionQuants>,
+}
+
+/// The four DSA projection groups' quant modes (weight bytes only).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DsaProjectionQuants {
+    pub q: GemmQuantMode,
+    pub kv: GemmQuantMode,
+    pub o: GemmQuantMode,
+    pub indexer: GemmQuantMode,
 }
 
 fn default_cp_size() -> u32 {
@@ -85,7 +103,40 @@ impl DsaModuleOp {
             index_topk,
             cp_size: 1,
             full_frac: 1.0,
+            attn_projection_quant_modes: None,
         }
+    }
+
+    /// Python `operations/dsa.py::dsa_block_weights_bytes` × scale_factor:
+    /// per-layer per-rank DSA block weight bytes. q_a / kv_a(+mqa, incl. the
+    /// indexer K projection) and the indexer projections are replicated
+    /// across TP; q_b, the absorbed kv_b and o_proj shard by heads
+    /// (`num_heads` is already rank-local).
+    pub fn weight_bytes(&self) -> f64 {
+        let dims = crate::perf_database::dsa::dsa_dims(&self.architecture);
+        let h = dims.hidden_size as f64;
+        let q_lora = dims.q_lora_rank as f64;
+        let kv_lora = dims.kv_lora_rank as f64;
+        let qk = (dims.qk_nope_head_dim + dims.qk_rope_head_dim) as f64;
+        let v = dims.v_head_dim as f64;
+        let idx = (dims.index_head_dim * dims.index_n_heads) as f64;
+        let local_heads = f64::from(self.num_heads);
+        let quants = self.attn_projection_quant_modes.unwrap_or(DsaProjectionQuants {
+            q: self.gemm_quant_mode,
+            kv: self.gemm_quant_mode,
+            o: self.gemm_quant_mode,
+            indexer: self.gemm_quant_mode,
+        });
+        let q_params = h * q_lora + q_lora * local_heads * qk;
+        let kv_params = h * (kv_lora + dims.qk_rope_head_dim as f64)
+            + kv_lora * local_heads * (dims.qk_nope_head_dim as f64 + v);
+        let o_params = local_heads * v * h;
+        let indexer_params = q_lora * idx + h * dims.index_n_heads as f64;
+        let bytes = q_params * quants.q.mapping().memory
+            + kv_params * quants.kv.mapping().memory
+            + o_params * quants.o.mapping().memory
+            + indexer_params * quants.indexer.mapping().memory;
+        bytes * self.scale_factor
     }
 
     pub fn query_context(
@@ -95,6 +146,18 @@ impl DsaModuleOp {
         isl: u32,
         prefix: u32,
     ) -> Result<PerformanceResult, AicError> {
+        // CP composes latency-only sparse MQA/top-k deltas with the base DSA
+        // and all-gather results. Those collected deltas do not provide a
+        // defensible math-vs-memory split, so reject decomposition requests
+        // at the operator boundary instead of reaching PerOpSolFold with a
+        // non-zero result whose `sol` field is absent. Plain SOL remains
+        // supported because it requests only the composed roofline latency.
+        if self.cp_size > 1 && db.database_mode == DatabaseMode::SolFull {
+            return Err(AicError::InvalidEngineConfig(format!(
+                "DSA context SOL_FULL decomposition is not supported for cp_size={} because the CP sparse MQA/top-k deltas are latency-only",
+                self.cp_size
+            )));
+        }
         let w = self.full_frac;
         // CP (round-robin sequence split) prefill takes the sparse-delta
         // composition path (Python `ContextDSAModule.query` -> `_query_cp`
@@ -107,10 +170,14 @@ impl DsaModuleOp {
                 return Ok(full);
             }
             let skip = self.query_context_cp(db, batch_size, isl, prefix, true)?;
-            return Ok(PerformanceResult::new(
+            let mut result = PerformanceResult::new(
                 w * full.latency_ms + (1.0 - w) * skip.latency_ms,
                 full.source,
-            ));
+            );
+            if let Some(components) = blend_sol(w, full.sol, skip.sol) {
+                result = result.with_sol(components);
+            }
+            return Ok(result);
         }
         // Query at `isl` (new-token count) for the exact `prefix` slice — NOT
         // `isl + prefix`. The perf-DB layer resolves one 4-axis RAW grid via
@@ -126,13 +193,18 @@ impl DsaModuleOp {
             full
         } else {
             // GLM-5.2 shared-index amortization (Python ContextDSAModule.query):
-            // latency AND energy are each `w*full + (1-w)*skip`.
+            // latency AND energy are each `w*full + (1-w)*skip`; the SOL
+            // decomposition blends componentwise alongside.
             let skip = q(true)?;
-            PerformanceResult::with_energy(
+            let mut blended = PerformanceResult::with_energy(
                 w * full.latency_ms + (1.0 - w) * skip.latency_ms,
                 w * full.energy_wms + (1.0 - w) * skip.energy_wms,
                 full.source.combine(skip.source),
-            )
+            );
+            if let Some(components) = blend_sol(w, full.sol, skip.sol) {
+                blended = blended.with_sol(components);
+            }
+            blended
         };
         Ok(result.clamp_non_negative().scaled(self.scale_factor))
     }
@@ -322,11 +394,15 @@ impl DsaModuleOp {
             // GLM-5.2 shared-index amortization (decode side): latency AND
             // energy are each `w*full + (1-w)*skip`.
             let skip = q(true)?;
-            PerformanceResult::with_energy(
+            let mut blended = PerformanceResult::with_energy(
                 w * full.latency_ms + (1.0 - w) * skip.latency_ms,
                 w * full.energy_wms + (1.0 - w) * skip.energy_wms,
                 full.source.combine(skip.source),
-            )
+            );
+            if let Some(components) = blend_sol(w, full.sol, skip.sol) {
+                blended = blended.with_sol(components);
+            }
+            blended
         };
         Ok(result.clamp_non_negative().scaled(self.scale_factor))
     }
@@ -381,23 +457,20 @@ fn query_context_table(
             let spec = &db.system_spec;
             let dims = dsa_dims(&op.architecture);
             let flops = dsa_context_sol_flops(spec, op.gemm_quant_mode, op.fmha_quant_mode)?;
-            Ok(PerformanceResult::new(
-                dsa_context_sol_ms(
-                    spec,
-                    dims,
-                    op.index_topk as i64,
-                    op.kv_cache_dtype,
-                    op.fmha_quant_mode,
-                    op.gemm_quant_mode,
-                    b as i64,
-                    isl as i64,
-                    prefix as i64,
-                    op.num_heads as i64,
-                    skip_indexer,
-                    flops,
-                ),
-                Source::Sol,
-            ))
+            Ok(PerformanceResult::sol(dsa_context_sol(
+                spec,
+                dims,
+                op.index_topk as i64,
+                op.kv_cache_dtype,
+                op.fmha_quant_mode,
+                op.gemm_quant_mode,
+                b as i64,
+                isl as i64,
+                prefix as i64,
+                op.num_heads as i64,
+                skip_indexer,
+                flops,
+            )))
         }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             context_empirical(db, op, b, isl, prefix, dsa_backend, skip_indexer)?,
@@ -448,19 +521,16 @@ fn query_generation_table(
             let spec = &db.system_spec;
             let dims = dsa_dims(&op.architecture);
             let flops = dsa_generation_sol_flops(spec, op.gemm_quant_mode)?;
-            Ok(PerformanceResult::new(
-                dsa_generation_sol_ms(
-                    spec,
-                    dims,
-                    op.kv_cache_dtype,
-                    op.gemm_quant_mode,
-                    b as i64,
-                    s as i64,
-                    op.num_heads as i64,
-                    flops,
-                ),
-                Source::Sol,
-            ))
+            Ok(PerformanceResult::sol(dsa_generation_sol(
+                spec,
+                dims,
+                op.kv_cache_dtype,
+                op.gemm_quant_mode,
+                b as i64,
+                s as i64,
+                op.num_heads as i64,
+                flops,
+            )))
         }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             generation_empirical(db, op, b, s, dsa_backend, skip_indexer)?,
@@ -989,6 +1059,7 @@ mod tests {
             index_topk: 2048,
             cp_size,
             full_frac: 1.0,
+            attn_projection_quant_modes: None,
         }
     }
 

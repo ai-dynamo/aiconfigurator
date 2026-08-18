@@ -29,6 +29,14 @@ from ._aiconfigurator_core import (
     RustForwardPassPerfModel,
     _build_smoke,
     engine_spec_bincode_from_json,
+    engine_spec_schema_version,
+    gemm_quant_util_levels,
+    moe_quant_util_levels,
+    op_from_spec_json,
+    ops_json_from_ops,
+    resolve_op_sources_report_json,
+    table_view_attributes,
+    weights_ops_json,
 )
 
 __all__ = [
@@ -36,4 +44,12 @@ __all__ = [
     "RustForwardPassPerfModel",
     "_build_smoke",
     "engine_spec_bincode_from_json",
+    "engine_spec_schema_version",
+    "gemm_quant_util_levels",
+    "moe_quant_util_levels",
+    "op_from_spec_json",
+    "ops_json_from_ops",
+    "resolve_op_sources_report_json",
+    "table_view_attributes",
+    "weights_ops_json",
 ]

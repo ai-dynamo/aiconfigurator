@@ -11,7 +11,7 @@ on:
     paths:
       - ".github/actions/build-platform-wheel/**"
       - ".github/workflows/build-platform-wheels-copied-pr.yml"
-      - ".github/workflows/build-platform-wheels.yml"
+      - ".github/workflows/validate-platform-wheels.yml"
       - "docker/Dockerfile"
       - "LICENSE"
       - "pyproject.toml"
@@ -29,5 +29,4 @@ permissions:
 jobs:
   build:
     name: Build copied-PR platform wheels
-    uses: ./.github/workflows/build-platform-wheels.yml
-    secrets: inherit
+    uses: ./.github/workflows/validate-platform-wheels.yml

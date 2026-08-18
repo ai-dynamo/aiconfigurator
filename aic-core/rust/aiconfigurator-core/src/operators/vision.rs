@@ -3,7 +3,7 @@
 
 //! Vision encoder operators.
 //!
-//! Mirrors `aiconfigurator.sdk.models.vit_ops.build_encoder_ops`. The
+//! Mirrors `aiconfigurator.sdk.models.blocks.vit.build_encoder_ops`. The
 //! encoder runs once before the LLM context phase and is composed from
 //! standard transformer ops (QKV GEMM + encoder attention + out-proj GEMM
 //! + FFN GEMMs + ElementWise norms). This module exposes a single
@@ -55,6 +55,7 @@ impl VisionEncoderOp {
             scale_num_tokens: 1,
             low_precision_input: false,
             seq_split: 1,
+            below_grid_sol: false,
         };
         let attn = EncoderAttentionOp::new(
             format!("{}.attn", self.name),
@@ -71,6 +72,7 @@ impl VisionEncoderOp {
             scale_num_tokens: 1,
             low_precision_input: false,
             seq_split: 1,
+            below_grid_sol: false,
         };
         let ffn1 = GemmOp {
             name: format!("{}.ffn1", self.name),
@@ -81,6 +83,7 @@ impl VisionEncoderOp {
             scale_num_tokens: 1,
             low_precision_input: false,
             seq_split: 1,
+            below_grid_sol: false,
         };
         let ffn2 = GemmOp {
             name: format!("{}.ffn2", self.name),
@@ -91,6 +94,7 @@ impl VisionEncoderOp {
             scale_num_tokens: 1,
             low_precision_input: false,
             seq_split: 1,
+            below_grid_sol: false,
         };
         let norms = ElementwiseOp::new(
             format!("{}.norms", self.name),

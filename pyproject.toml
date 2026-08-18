@@ -15,9 +15,9 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Intended Audience :: Information Technology",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -37,14 +37,14 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.14"
 
 dependencies = [
     "aiconfigurator-core==0.11.0",
     "jinja2>=3.1.0",
     "packaging>=20.0",
     "matplotlib>=3.9.4",
-    "numpy~=1.26.4",
+    "numpy>=2.1,<3",
     "pandas>=2.2.3",
     "plotext>=5.3.2",
     "plotly>=6.0.1",
@@ -63,16 +63,17 @@ dev = [
     "uv",
     "ruff==0.14.1",
     "pre-commit==4.3.0",
-    "pytest>=8.3.5",
+    "pytest>=9.0.3",
     "pytest-asyncio>=0.26.0",
     "pytest-cov>=6.1.1",
-    "pytest-md-report==0.7.0",
+    "pytest-md-report==0.8.0",
     "pytest-mock>=3.14.0",
     "pytest-split>=0.10.0",
     "pytest-timeout>=2.3.1",
     "pytest-xdist==3.8.0",
     "prometheus-api-client==0.6.0",
     "import-ipynb==0.2",
+    "jsonschema>=4.23",
 ]
 service = [
     "fastapi>=0.115.12",
@@ -97,6 +98,7 @@ include-package-data = false
 [tool.setuptools.package-data]
 "aiconfigurator.cli" = ["*.yaml", "exps/*.yaml"]
 "aiconfigurator.generator" = ["config/**/*.yaml", "config/backend_templates/**/*.j2", "rule_plugin/**/*.rule", "facts/**/*.yaml", "environment/*.yaml"]
+"aiconfigurator.sdk.config_adapter" = ["schemas/*.json"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -108,7 +110,7 @@ aiconfigurator-core = { path = "aic-core", editable = true }
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
 extend-exclude = ["*.ipynb"]
 
 [tool.ruff.lint]

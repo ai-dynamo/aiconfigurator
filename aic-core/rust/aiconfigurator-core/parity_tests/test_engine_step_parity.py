@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Smoke parity checks for Python SDK engine-step latency versus Rust core.
+"""Smoke parity checks for the Rust engine step versus the frozen reference.
 
-Each test compares an apples-to-apples Python and Rust value for the
-surface under test (static_ctx + static_gen, the agg/disagg pipelines
-through `cli_estimate`, and Python's `_get_mix_step_latency` vs Rust's
-mix-step FPM). A drift outside ``PARITY_RTOL`` fails the assertion with
+Each test compares the LIVE Rust value for the surface under test
+(static_ctx + static_gen, the agg/disagg pipelines through `cli_estimate`,
+the mix-step composition) against a FROZEN golden fixture. The goldens were
+captured from the Python engine step while that path was still alive
+(dedup-plan Gate 2); with the Python step removed, they are the permanent
+regression oracle. A drift outside ``PARITY_RTOL`` fails the assertion with
 a per-metric delta report so the failure mode is informative.
 """
 
@@ -422,16 +424,18 @@ SMOKE_CASES = [
         ),
         id="gpt-oss-20b-b200-trtllm-130rc10-isl1024-osl2",
     ),
-    # Phase 4 D7-C: data-gap families. Python errors with
-    # `PerfDataNotAvailableError` because the perf DB doesn't ship the
-    # required tables for these shapes; Rust errors at the equivalent
-    # query point (`AicError::PerfDatabase`). The error-symmetry contract
-    # asserts both engines fail together — same outcome, even if the
-    # exact failure point in the op graph differs.
+    # Phase 4 D7-C: Llama-4 Scout was originally a data-gap case, but the
+    # tracked perf data now gives it full numeric parity on all four surfaces.
     pytest.param(
         EngineStepParityCase(model_path="meta-llama/Llama-4-Scout-17B-16E-Instruct"),
         id="llama4-scout-b200-vllm-019-isl1024-osl2",
     ),
+    # DeepSeek-V4 Flash remains a data-gap case. Python errors with
+    # `PerfDataNotAvailableError` because the perf DB doesn't ship the
+    # required tables for this shape; Rust errors at the equivalent
+    # query point (`AicError::PerfDatabase`). The error-symmetry contract
+    # asserts both engines fail together — same outcome, even if the
+    # exact failure point in the op graph differs.
     pytest.param(
         EngineStepParityCase(model_path="deepseek-ai/DeepSeek-V4-Flash"),
         id="deepseek-v4-flash-b200-vllm-019-isl1024-osl2",
@@ -445,7 +449,7 @@ SMOKE_CASES = [
     #   - Tuples where the NCCL/OneCCL path fix (5ce469ff) was the root
     #     cause now compute and assert numeric parity going forward.
     #   - Tuples where the perf-DB lacks data for the smoke shape
-    #     (`tp=8, moe_ep=8, isl=1024, osl=2`) error symmetrically in both
+    #     (`tp=8, moe_expert_compute=8, isl=1024, osl=2`) error symmetrically in both
     #     engines, exercising the error-symmetry contract.
     # See the support-matrix scan triage notes in the project docs for the
     # full triage / cluster table.
@@ -804,7 +808,6 @@ def _safe_value(thunk) -> float | _ErrorSentinel:
 def _static_metrics(
     case: EngineStepParityCase,
     *,
-    engine_step_backend: str,
     osl: int | None = None,
 ) -> dict[str, float | _ErrorSentinel]:
     kwargs = {
@@ -822,7 +825,9 @@ def _static_metrics(
         "moe_tp_size": case.moe_tp_size,
         "moe_ep_size": case.moe_ep_size,
         "stride": 1,
-        "engine_step_backend": engine_step_backend,
+        # The compiled engine is the only step executor; pinned so an ambient
+        # env override can never flip the harness off it.
+        "engine_step_backend": "rust",
         "database_mode": case.database_mode,
         "transfer_policy": case.transfer_policy,
         "moe_quant_mode": case.moe_quant_mode,
@@ -855,7 +860,7 @@ def _static_metrics(
     return metrics
 
 
-def _agg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dict[str, float | _ErrorSentinel]:
+def _agg_metrics(case: EngineStepParityCase) -> dict[str, float | _ErrorSentinel]:
     def call():
         return _quiet_call(
             cli_estimate,
@@ -874,7 +879,7 @@ def _agg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dic
             attention_dp_size=case.attention_dp_size,
             moe_tp_size=case.moe_tp_size,
             moe_ep_size=case.moe_ep_size,
-            engine_step_backend=engine_step_backend,
+            engine_step_backend="rust",
             database_mode=case.database_mode,
             transfer_policy=case.transfer_policy,
             moe_quant_mode=case.moe_quant_mode,
@@ -897,7 +902,7 @@ def _agg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dic
     }
 
 
-def _disagg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dict[str, float | _ErrorSentinel]:
+def _disagg_metrics(case: EngineStepParityCase) -> dict[str, float | _ErrorSentinel]:
     def call():
         return _quiet_call(
             cli_estimate,
@@ -918,7 +923,7 @@ def _disagg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> 
             prefill_num_workers=case.disagg_prefill_num_workers,
             decode_batch_size=case.disagg_decode_batch_size,
             decode_num_workers=case.disagg_decode_num_workers,
-            engine_step_backend=engine_step_backend,
+            engine_step_backend="rust",
             database_mode=case.database_mode,
             transfer_policy=case.transfer_policy,
             moe_quant_mode=case.moe_quant_mode,
@@ -939,7 +944,7 @@ def _disagg_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> 
     }
 
 
-def _afd_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dict[str, float | _ErrorSentinel]:
+def _afd_metrics(case: EngineStepParityCase) -> dict[str, float | _ErrorSentinel]:
     """AFD (attention-FFN disaggregation) estimate for the case's topology.
 
     Mirrors how ``cli/main.py`` maps the AFD flags onto
@@ -952,8 +957,8 @@ def _afd_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dic
     routing gate allows; that internal RuntimeConfig carries no explicit
     ``engine_step_backend`` (the kwarg reaches only the static complement),
     so callers pin the AFD side via the ``AICONFIGURATOR_ENGINE_STEP_BACKEND``
-    env var (regenerate_goldens.py exports "python"; the parity test sets
-    "rust").
+    env var (the parity test sets "rust"; the retired golden capture exported
+    "python" while that path was still alive).
     """
 
     def call():
@@ -978,7 +983,7 @@ def _afd_metrics(case: EngineStepParityCase, *, engine_step_backend: str) -> dic
             a_tp_size=case.afd_a_tp_size,
             a_batch_size=case.afd_a_batch_size,
             f_moe_ep_size=case.afd_f_moe_ep_size,
-            engine_step_backend=engine_step_backend,
+            engine_step_backend="rust",
             database_mode=case.database_mode,
             transfer_policy=case.transfer_policy,
             moe_quant_mode=case.moe_quant_mode,
@@ -1046,8 +1051,16 @@ def _case_model_config(case: EngineStepParityCase) -> config.ModelConfig:
     )
 
 
-def _python_mixed_step_ms(case: EngineStepParityCase) -> float:
-    """Python `_get_mix_step_latency` for the case's mix-step shape."""
+def _cp_static_ctx_ms(case: EngineStepParityCase) -> float:
+    """Context-phase static sum through the cp-aware model builder.
+
+    The "static" surface goes through `cli_estimate`, which has no cp knob —
+    a cp>1 case fails model validation there before any op runs. CP cases
+    anchor the context phase (the only phase the CP composition runs on)
+    with the same `_case_model_config` construction the mixed surface uses.
+    (The Python-side values were captured into the goldens before the Python
+    step path was removed; only the rust side runs live.)
+    """
     database = _case_database(case)
     if database is None:
         raise RuntimeError(
@@ -1061,26 +1074,12 @@ def _python_mixed_step_ms(case: EngineStepParityCase) -> float:
         isl=case.isl,
         osl=max(case.osl, 2),
         prefix=case.prefix,
-        # Pinned so this helper measures the FROZEN Python step: since the
-        # rust default flip (PR-1), a bare RuntimeConfig routes `run_mixed`
-        # to the compiled engine, which would silently turn this "python
-        # reference" into a rust self-comparison — and poison golden capture
-        # (same rationale as tools/prediction_regression_gate/collect_static.py).
-        engine_step_backend="python",
+        engine_step_backend="rust",
     )
-    shape = _mix_step_shape(case)
-    latency_ms, _, _, _ = _quiet_call(
-        backend._get_mix_step_latency,
-        model,
-        database,
-        runtime_config,
-        shape["ctx_tokens"],
-        shape["gen_tokens"],
-        shape["isl"],
-        shape["osl"],
-        shape["prefix"],
+    ctx_lat, _ctx_e, _gen_lat, _gen_e, _ctx_src, _gen_src = _quiet_call(
+        backend._run_static_breakdown, model, database, runtime_config, "static_ctx", 1
     )
-    return float(latency_ms)
+    return float(sum(ctx_lat.values()))
 
 
 def _rust_mixed_step_ms(case: EngineStepParityCase) -> float:
@@ -1167,10 +1166,12 @@ def _parity_mismatch_reason(
 
 
 # --------------------------------------------------------------------------- #
-# Surface plumbing shared with `regenerate_goldens.py`. A "surface" is one of
-# the four apples-to-apples comparison granularities; `_surface_metrics` maps
-# a (case, surface, engine side) triple to the comparison-metric dict, keyed
-# by the names the golden fixtures persist.
+# Surface plumbing. A "surface" is one of the apples-to-apples comparison
+# granularities; `_surface_metrics` maps a (case, surface) pair to the live
+# rust comparison-metric dict, keyed by the names the golden fixtures persist.
+# (The Python side of every fixture was captured by the retired
+# `regenerate_goldens.py` while the Python step path was still alive; the
+# goldens are frozen artifacts now — see README.)
 # --------------------------------------------------------------------------- #
 
 ENGINE_STEP_SURFACES = ("static", "mixed", "agg", "disagg")
@@ -1179,12 +1180,16 @@ ENGINE_STEP_SURFACES = ("static", "mixed", "agg", "disagg")
 def _surface_metrics(
     case: EngineStepParityCase,
     surface: str,
-    *,
-    engine_step_backend: str,
 ) -> dict[str, float | _ErrorSentinel]:
-    """Comparison metrics for one engine side of a (case, surface) pair."""
+    """LIVE compiled-engine metrics for a (case, surface) pair.
+
+    There is no engine selector anymore: the helpers pin
+    ``engine_step_backend="rust"`` internally (passing "python" would be a
+    silent rust-vs-rust self-comparison via the deprecation no-op — exactly
+    the vacuous-comparison class the golden rewiring exists to prevent).
+    """
     if surface == "static":
-        metrics = _static_metrics(case, engine_step_backend=engine_step_backend)
+        metrics = _static_metrics(case)
         out: dict[str, float | _ErrorSentinel] = {
             "static_ctx": metrics["context_ms"],
             "static_gen": metrics["generation_ms"],
@@ -1197,24 +1202,25 @@ def _surface_metrics(
             out["static_gen_power"] = metrics["gen_power_w"]
         return out
     if surface == "mixed":
-        step_ms = _python_mixed_step_ms if engine_step_backend == "python" else _rust_mixed_step_ms
-        return {"mixed_step": _safe_value(lambda: step_ms(case))}
+        return {"mixed_step": _safe_value(lambda: _rust_mixed_step_ms(case))}
+    if surface == "cp_static_ctx":
+        return {"cp_static_ctx": _safe_value(lambda: _cp_static_ctx_ms(case))}
     if surface == "agg":
-        metrics = _agg_metrics(case, engine_step_backend=engine_step_backend)
+        metrics = _agg_metrics(case)
         return {
             "agg_ttft": metrics["ttft_ms"],
             "agg_tpot": metrics["tpot_ms"],
             "agg_request": metrics["request_latency_ms"],
         }
     if surface == "disagg":
-        metrics = _disagg_metrics(case, engine_step_backend=engine_step_backend)
+        metrics = _disagg_metrics(case)
         return {
             "disagg_ttft": metrics["ttft_ms"],
             "disagg_tpot": metrics["tpot_ms"],
             "disagg_request": metrics["request_latency_ms"],
         }
     if surface == "afd":
-        metrics = _afd_metrics(case, engine_step_backend=engine_step_backend)
+        metrics = _afd_metrics(case)
         return {
             "afd_ttft": metrics["ttft_ms"],
             "afd_tpot": metrics["tpot_ms"],
@@ -1227,7 +1233,7 @@ def _comparison_metrics(
     surface: str,
 ) -> dict[str, tuple[float | _ErrorSentinel, float | _ErrorSentinel]]:
     """(python-golden, live-rust) pairs for every metric of the surface."""
-    rust_metrics = _surface_metrics(case, surface, engine_step_backend="rust")
+    rust_metrics = _surface_metrics(case, surface)
     python_metrics = _golden_python_metrics(case, surface, rust_metrics)
     return {name: (python_metrics[name], rust_metrics[name]) for name in rust_metrics}
 
@@ -1251,18 +1257,19 @@ def _disagg_comparison_metrics(case: EngineStepParityCase) -> dict[str, tuple[fl
 
 
 # --------------------------------------------------------------------------- #
-# Golden fixtures (dedup-plan Gate 2). The Python side of every comparison is
-# a FROZEN reference captured by `regenerate_goldens.py` while the Python
-# latency path is still alive; only the Rust side runs live. Regenerate the
-# fixtures whenever a case list / compared metric changes, or when a Python
-# reference change is deliberate and reviewed.
+# Golden fixtures (dedup-plan Gate 2, frozen at Gate 3). The Python side of
+# every comparison is a FROZEN reference captured while the Python latency
+# path was still alive; only the Rust side runs live. The Python-era records
+# never regenerate (the capture path is gone with the Python step). New cases
+# and deliberate rust-side modeling changes pin values from the live rust
+# engine via `pin_goldens.py` — the golden diff is the review artifact.
 # --------------------------------------------------------------------------- #
 
 GOLDEN_DIR = Path(__file__).resolve().parent / "goldens"
 _REGENERATE_HINT = (
-    "regenerate the golden fixtures with "
-    "`.venv/bin/python aic-core/rust/aiconfigurator-core/parity_tests/regenerate_goldens.py` "
-    "(captures the frozen Python reference; see parity_tests/README.md)"
+    "pin the missing/changed records with "
+    "`.venv/bin/python aic-core/rust/aiconfigurator-core/parity_tests/pin_goldens.py` "
+    "(appends records from the live rust engine; see parity_tests/README.md)"
 )
 _GOLDEN_CACHE: dict[str, dict] = {}
 
@@ -1423,7 +1430,7 @@ class TestRustEngineStepTieBreakParity:
 # (seq_split), ContextAttention models rank-0's zigzag chunk split, and
 # MoEDispatch all-gathers (pre) / reduce-scatters (combine) the CP-sharded
 # tokens. sglang CP requires tp_size=1 and attention_dp_size=1, so the width
-# (tp*dp*cp) is carried entirely by cp and matched by moe_tp*moe_ep.
+# (tp*dp*cp) is carried entirely by cp and matched by moe_tp*moe_expert_compute.
 #
 # Validated on the mix-step surface: the prefill chunk exercises the CP ops
 # (context attention, GEMMs, comm, MoE dispatch). Without the Rust CP support
@@ -1460,8 +1467,8 @@ CP_CASES = [
     ),
     # MLA context-parallelism: Kimi is MLA with bfloat16 FMHA (collected on
     # sglang), so it exercises the ContextMLA cp zigzag sharding. (DeepSeek-R1
-    # would need the uncollected fp8-FMHA context-MLA slice; DSA/dsv4 CP need
-    # uncollected sparse mqa/topk tables — both out of scope until collected.)
+    # would need the uncollected fp8-FMHA context-MLA slice; DSA CP needs
+    # uncollected sparse mqa/topk tables — out of scope until collected.)
     pytest.param(
         EngineStepParityCase(
             model_path="moonshotai/Kimi-K2.5",
@@ -1478,11 +1485,47 @@ CP_CASES = [
     ),
 ]
 
+# DeepSeek-V4 CSA context-parallelism on a REUSE-carrying version (issue
+# #1498): 0.5.12 ships no primary dsv4 sparse tables — the mqa/topk lookups
+# resolve through the approved `reuse.yaml` donors (from_version 0.5.14) —
+# so this case anchors the reuse-aware CP top_last loader on both engines
+# AND the CP composition itself (the `_query_cp` full/cp deltas +
+# all-gathers, plus the token-major mHC seq_split division whose absence in
+# Rust was the original 34% static_ctx divergence). isl=8192 pins the
+# adjudicated repro shape.
+#
+# Anchored on BOTH the `cp_static_ctx` surface (the adjudicated static repro,
+# 42.430756 ms) and the mixed surface. The mixed anchor additionally pins the
+# `run_mixed` pass-filter fix: Python's passes used to run the FULL op lists
+# and discard the non-consumed values, so the generation-MoE singleton
+# low-token miss in pass 3 (num_tokens=1, one measured point at 1024) raised
+# on the Python side only, while the rust mixed step never queries the ops it
+# does not consume. With the passes filtered to their consumed sets the case
+# computes bit-identically on both engines (46.0492671363915 ms).
+DSV4_CP_CASES = [
+    pytest.param(
+        EngineStepParityCase(
+            model_path="deepseek-ai/DeepSeek-V4-Flash",
+            system_name="b200_sxm",
+            backend_name="sglang",
+            backend_version="0.5.12",
+            isl=8192,
+            osl=8,
+            tp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            cp_size=8,
+        ),
+        id="dsv4-flash-b200-sglang-0512-cp8-reuse",
+    ),
+]
+
 
 class TestRustEngineStepCpMixedStepParity:
     """CP parity on the mix-step surface (CP ops run in the prefill chunk)."""
 
-    @pytest.mark.parametrize("case", CP_CASES)
+    @pytest.mark.parametrize("case", [*CP_CASES, *DSV4_CP_CASES])
     def test_cp_parity(
         self,
         case: EngineStepParityCase,
@@ -1492,6 +1535,89 @@ class TestRustEngineStepCpMixedStepParity:
 
         reason = _parity_mismatch_reason(_mixed_step_comparison_metrics(case))
         assert reason is None, reason
+
+
+class TestRustEngineStepCpStaticCtxParity:
+    """CP parity on the context-phase static surface (issue #1498 anchor).
+
+    Pins the adjudicated DSV4 CSA CP repro shape end to end on a
+    reuse-carrying version: the composition's four sparse-gate lookups
+    resolve through approved donors, the mHC ops divide by seq_split, and
+    the static_ctx sums agree. The same case is ALSO exercised on the mixed
+    surface (`TestRustEngineStepCpMixedStepParity` parametrizes
+    DSV4_CP_CASES) — this surface exists because `cli_estimate` has no cp
+    knob, so the plain "static" surface cannot express a cp>1 case.
+    """
+
+    @pytest.mark.parametrize("case", DSV4_CP_CASES)
+    def test_cp_static_ctx_parity(
+        self,
+        case: EngineStepParityCase,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _prepare_rust_core(monkeypatch)
+
+        reason = _parity_mismatch_reason(_comparison_metrics(case, "cp_static_ctx"))
+        assert reason is None, reason
+
+
+class TestRustEngineHandleDatabasePolicyIdentity:
+    """Handle-cache isolation across database-policy views (review finding).
+
+    `build_engine_spec_json` bakes the database's policy-dependent
+    `perf_db_sources` into the compiled handle, so a shared-layer-off view
+    and a shared-layer-on view of the SAME on-disk identity must not alias
+    one cached handle. The cache is cleared ONCE per ordering (not between
+    the two queries — that is the point): whichever view warms the cache
+    must not answer, or fail, for the other. Guards both directions on the
+    adjudicated DSV4 CP shape: the false FAILURE (off-warmed cache raising
+    for the reuse-carrying on-view) and the false SUCCESS (on-warmed cache
+    computing for the primary-only off-view that must raise).
+    """
+
+    ANCHOR_MS = 42.4307555484161  # the issue #1498 adjudicated static_ctx sum
+
+    def _static_ctx_ms(self, model, view) -> float:
+        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=8192, osl=8, prefix=0, engine_step_backend="rust")
+        ctx_latency, _gen, *_ = rust_engine_step.estimate_static_latency_breakdown_with_rust(
+            model, view, rc, "static_ctx", 1, 1.0
+        )
+        return float(sum(ctx_latency.values()))
+
+    def _build(self):
+        (case,) = DSV4_CP_CASES[0].values
+        model = _quiet_call(get_model, case.model_path, _case_model_config(case), case.backend_name)
+        off = _quiet_call(
+            perf_database.get_database_view,
+            case.system_name,
+            case.backend_name,
+            case.backend_version,
+            shared_layer=False,
+        )
+        on = _quiet_call(
+            perf_database.get_database_view,
+            case.system_name,
+            case.backend_name,
+            case.backend_version,
+            shared_layer=True,
+        )
+        if off is None or on is None:
+            pytest.skip("no perf database for the DSV4 CP case identity")
+        return model, off, on
+
+    def test_off_warmed_cache_does_not_fail_the_shared_on_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _prepare_rust_core(monkeypatch)  # the ONLY cache clear in this ordering
+        model, off, on = self._build()
+        with pytest.raises(errors.PerfDataNotAvailableError):
+            self._static_ctx_ms(model, off)
+        assert self._static_ctx_ms(model, on) == pytest.approx(self.ANCHOR_MS, rel=1e-9)
+
+    def test_on_warmed_cache_does_not_answer_for_the_shared_off_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _prepare_rust_core(monkeypatch)  # the ONLY cache clear in this ordering
+        model, off, on = self._build()
+        assert self._static_ctx_ms(model, on) == pytest.approx(self.ANCHOR_MS, rel=1e-9)
+        with pytest.raises(errors.PerfDataNotAvailableError):
+            self._static_ctx_ms(model, off)
 
 
 # HYBRID / EMPIRICAL parity cases: the util-space empirical layer
@@ -1861,14 +1987,15 @@ class TestRustEngineStepAfdParity:
 
 
 # The full engine-step golden matrix: every (case, surface) pair the parity
-# classes above compare, in one importable structure so
-# `regenerate_goldens.py` captures exactly what the tests consume (single
-# source of truth — the capture script defines no case of its own). Keep in
-# lockstep with the class parametrizations.
+# classes above compare, in one importable structure so `pin_goldens.py`
+# pins exactly what the tests consume (single source of truth — the pin
+# script defines no case of its own). Keep in lockstep with the class
+# parametrizations.
 ENGINE_STEP_GOLDEN_MATRIX: tuple[tuple[list, tuple[str, ...]], ...] = (
     (SMOKE_CASES, ENGINE_STEP_SURFACES),
     (POWER_CASES, ENGINE_STEP_SURFACES),
     (CP_CASES, ("mixed",)),
+    (DSV4_CP_CASES, ("cp_static_ctx", "mixed")),
     (HYBRID_CASES, ENGINE_STEP_SURFACES),
     (SOL_CASES, ("static", "mixed")),
     (TIE_AGG_CASES, ("agg",)),
@@ -2048,8 +2175,19 @@ class TestRustTypedErrorsAcrossFfi:
         assert not perf_database.has_perf_data_not_available_cause(excinfo.value)
         # Python classifies the same query point identically.
         database = _case_database(case)
+        from aiconfigurator_core.sdk.engine import _evaluate_single_op
+        from aiconfigurator_core.sdk.operations.mla import MLABmm
+
         with pytest.raises(errors.MissingSystemFlopsError):
-            database.query_mla_bmm(16, 16, common.GEMMQuantMode.nvfp4, database_mode=common.DatabaseMode.SILICON)
+            # The retired query_mla_bmm shim's exact twin, through the
+            # single-op plumbing (the database's live SILICON view).
+            _evaluate_single_op(
+                database,
+                MLABmm("mla_bmm_query", 1.0, 16, common.GEMMQuantMode.nvfp4, True),
+                is_context=False,
+                batch_size=16,
+                s=1,
+            )
 
     def test_pre_sm89_fp8_kv_generation_returns_shipped_silicon(self) -> None:
         # a100_sxm ships 2,534 measured generation-MLA rows with fp8 KV
@@ -2060,12 +2198,17 @@ class TestRustTypedErrorsAcrossFfi:
         # demanding an fp8_tc_flops entry a100 must never define (the
         # support-matrix FP8 gate is keyed on that entry's presence).
         database = _quiet_call(perf_database.get_database, "a100_sxm", "trtllm", "1.0.0")
-        fp8_kv = database.query_generation_mla(
-            1, 65, 64, common.KVCacheQuantMode.fp8, database_mode=common.DatabaseMode.SILICON
-        )
-        bf16_kv = database.query_generation_mla(
-            1, 65, 64, common.KVCacheQuantMode.bfloat16, database_mode=common.DatabaseMode.SILICON
-        )
+        from aiconfigurator_core.sdk.engine import _evaluate_single_op
+        from aiconfigurator_core.sdk.operations.mla import GenerationMLA
+
+        def _gen_mla(kv_mode):
+            # The retired query_generation_mla shim's exact twin (the
+            # database's live SILICON view).
+            op = GenerationMLA("generation_mla_query", 1.0, 64, kv_mode)
+            return _evaluate_single_op(database, op, is_context=False, batch_size=1, s=65)
+
+        fp8_kv = _gen_mla(common.KVCacheQuantMode.fp8)
+        bf16_kv = _gen_mla(common.KVCacheQuantMode.bfloat16)
         assert float(fp8_kv) > 0
         # Same silicon exact-hit region: the two dtypes' measured values sit
         # within a few percent of each other (dequant-to-bf16 pipeline).
@@ -2089,7 +2232,7 @@ class TestRustProvenanceCapture:
         _prepare_rust_core(monkeypatch)
         case = EngineStepParityCase(model_path="MiniMaxAI/MiniMax-M3", database_mode="HYBRID")
         with util_empirical.capture_provenance() as tags:
-            metrics = _static_metrics(case, engine_step_backend="rust")
+            metrics = _static_metrics(case)
         assert not isinstance(metrics["total_ms"], _ErrorSentinel), repr(metrics)
         assert util_empirical.worst_provenance(tags) == "xop", tags
 
@@ -2102,6 +2245,334 @@ class TestRustProvenanceCapture:
         _prepare_rust_core(monkeypatch)
         case = EngineStepParityCase(model_path="moonshotai/Kimi-K2.5")
         with util_empirical.capture_provenance() as tags:
-            metrics = _static_metrics(case, engine_step_backend="rust")
+            metrics = _static_metrics(case)
         assert not isinstance(metrics["total_ms"], _ErrorSentinel), repr(metrics)
         assert util_empirical.worst_provenance(tags) == "silicon", tags
+
+
+# --------------------------------------------------------------------------- #
+# forward_model="fpm": whole-model op parity over a synthetic dataset in a
+# temp systems root (no fpm_forward pair is checked in). Python resolves the
+# pair via `set_systems_paths`; the compiled spec carries the same root in
+# `engine.systems_path`, so the Rust `FpmForwardTable` reads the identical
+# file. Covers static_ctx / static_gen / mixed / genonly plus out-of-domain
+# error symmetry and the FpmForward op-transfer tags.
+# --------------------------------------------------------------------------- #
+
+_FPM_MODEL = "MiniMaxAI/MiniMax-M2.5"
+_FPM_VERSION = "0.19.0"
+# (workload_kind, batch, total_prefill, total_kv, latency_ms) — per-DP-rank
+# iteration totals, batch domains sized for the runtime points below.
+_FPM_ROWS = [
+    ("prefill", 1, 512, 0, 10.0),
+    ("prefill", 1, 1024, 0, 18.0),
+    ("prefill", 1, 2048, 0, 34.0),
+    ("prefill", 1, 1024, 1024, 21.0),
+    ("prefill", 2, 1024, 0, 18.5),
+    ("prefill", 2, 2048, 0, 35.0),
+    ("prefill", 2, 4096, 0, 69.0),
+    ("prefill", 4, 4096, 0, 68.0),
+    ("decode", 1, 0, 1, 2.0),
+    ("decode", 1, 0, 1025, 2.2),
+    ("decode", 1, 0, 65536, 3.1),
+    ("decode", 4, 0, 4, 4.0),
+    ("decode", 4, 0, 4100, 4.5),
+    ("decode", 4, 0, 262144, 7.9),
+    # CUDA-graph cliff pair at capture=512 plus an eager anchor: exercises
+    # the decode batch-axis regime routing on both engines.
+    ("decode", 512, 0, 4096, 10.0),
+    ("decode", 512, 0, 65536, 11.0),
+    ("decode", 512, 0, 262144, 12.0),
+    ("decode", 513, 0, 4096, 30.0),
+    ("decode", 513, 0, 65536, 33.0),
+    ("decode", 513, 0, 262144, 36.0),
+    ("decode", 1024, 0, 4096, 60.0),
+    ("decode", 1024, 0, 65536, 66.0),
+    ("decode", 1024, 0, 262144, 72.0),
+]
+
+
+def _fpm_write_pair(data_dir) -> None:
+    import hashlib
+    import json as _json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    identity = {
+        "gemm_quant_mode": "fp8_block",
+        "moe_quant_mode": "fp8_block",
+        "fmha_quant_mode": "bfloat16",
+        "comm_quant_mode": "half",
+        "kv_cache_dtype": "fp8",
+        "tp": 2,
+        "pp": 1,
+        "dp": 1,
+        "moe_tp": 1,
+        "moe_ep": 2,
+        "cp": 1,
+    }
+    rows = []
+    for kind, batch, prefill, kv, lat in _FPM_ROWS:
+        rows.append(
+            {
+                "cell_id": f"fpm-{kind}-{batch}-{prefill}-{kv}",
+                "model_path": _FPM_MODEL,
+                "system": "b200_sxm",
+                "backend": "vllm",
+                "backend_version": _FPM_VERSION,
+                "weight_quantization": "fp8_block",
+                **identity,
+                "moe_backend": "auto",
+                "attention_backend": "auto",
+                "enable_wideep": False,
+                "enable_eplb": False,
+                "workload_kind": kind,
+                "batch_size": batch,
+                "total_prefill_tokens": prefill,
+                "total_kv_read_tokens": kv,
+                "partition_policy": "balanced_v1",
+                "latency_ms": lat,
+            }
+        )
+    parquet_path = data_dir / "fpm_forward_perf.parquet"
+    pq.write_table(pa.Table.from_pylist(rows), parquet_path)
+    digest = hashlib.sha256(parquet_path.read_bytes()).hexdigest()
+    (data_dir / "fpm_forward_perf.metadata.json").write_text(
+        _json.dumps(
+            {
+                "schema_name": "aic_fpm_forward_perf",
+                "schema_version": 6,
+                "coordinate_system": "iteration_totals_balanced_v1",
+                "measurement_policy": "dynamo_native_single_sample_v1",
+                "system": "b200_sxm",
+                "backend": "vllm",
+                "backend_version": _FPM_VERSION,
+                "parquet_sha256": digest,
+                "row_count": len(rows),
+            }
+        )
+    )
+
+
+@pytest.fixture(scope="class")
+def fpm_systems_root(tmp_path_factory):
+    import shutil
+
+    root = tmp_path_factory.mktemp("fpm_systems")
+    pkg_systems = perf_database.get_systems_paths()[-1]
+    shutil.copy(f"{pkg_systems}/b200_sxm.yaml", root / "b200_sxm.yaml")
+    data_dir = root / "data" / "b200_sxm" / "vllm" / _FPM_VERSION
+    data_dir.mkdir(parents=True)
+    _fpm_write_pair(data_dir)
+
+    perf_database.set_systems_paths(f"{root},default")
+    rust_engine_step._engine_handle_cache_clear()
+    try:
+        yield root
+    finally:
+        perf_database.set_systems_paths("default")
+        rust_engine_step._engine_handle_cache_clear()
+
+
+# Frozen Python-side references for the FPM parity class, captured from the
+# live Python FPM walk immediately before its deletion (Phase 2 PR-3) on the
+# deterministic synthetic fixture above — the same freeze-then-delete pattern
+# as the golden fixtures. This class sits outside ENGINE_STEP_GOLDEN_MATRIX
+# because its dataset is generated per-run (`_FPM_ROWS`), so the frozen
+# values live inline; string entries are expected exception kinds
+# (error-symmetry contract).
+_FPM_STATIC_FROZEN = {
+    ("static_ctx", 1, 1024, 1, 0): 18.0,
+    ("static_ctx", 1, 2048, 1, 1024): 21.0,
+    ("static_ctx", 2, 1500, 1, 0): 50.8046875,
+    ("static_ctx", 3, 1024, 1, 0): 51.37999771084165,
+    ("static_gen", 1, 1024, 2, 0): 2.2,
+    ("static_gen", 4, 1024, 2, 0): 4.5,
+    ("static_gen", 2, 1024, 2, 0): 2.8812035914364387,
+    ("static_gen", 4, 9_000_000, 2, 0): "PerfDataNotAvailableError",
+    ("static_ctx", 16, 256, 1, 0): 68.0,
+    ("static_ctx", 16, 320, 1, 256): "PerfDataNotAvailableError",
+}
+_FPM_MIXED_FROZEN = {
+    (1024, 4, 1024, 2): 18.562552704189983,
+    (512, 4, 1024, 2): 10.587744831848209,
+    # ctx_tokens == 0 raises at MixedStepInput construction on both engines.
+    (0, 4, 1024, 2): "ValueError",
+    (0, 600, 100, 2): "ValueError",
+    (1024, 0, 1024, 2): 18.0,
+    (4096, 0, 256, 1): 68.0,
+}
+_FPM_GENONLY_FROZEN = 4.5
+
+
+class TestRustEngineStepFpmParity:
+    """forward_model='fpm' regression vs the frozen Python reference.
+
+    The Python FPM walk is gone (Phase 2 PR-3); the live side below is the
+    compiled engine (Op::FpmForward), compared against `_FPM_*_FROZEN`.
+    """
+
+    def _build(self):
+        from aiconfigurator.sdk.config_builders import build_model_config
+
+        cfg = build_model_config(
+            tp_size=2,
+            pp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=2,
+            gemm_quant_mode="fp8_block",
+            moe_quant_mode="fp8_block",
+            kvcache_quant_mode="fp8",
+            fmha_quant_mode="bfloat16",
+            comm_quant_mode="half",
+            forward_model="fpm",
+        )
+        model = get_model(_FPM_MODEL, cfg, "vllm")
+        database = _quiet_call(perf_database.get_database, "b200_sxm", "vllm", _FPM_VERSION)
+        return model, get_backend("vllm"), database
+
+    def _static(self, model, backend, database, mode, batch, isl, osl, prefix):
+        rc = config.RuntimeConfig(batch_size=batch, beam_width=1, isl=isl, osl=osl, prefix=prefix)
+
+        def thunk():
+            summary = backend.run_static(model, database, rc, mode=mode)
+            d = summary.get_context_latency_dict() if mode == "static_ctx" else summary.get_generation_latency_dict()
+            return sum(d.values())
+
+        return _safe_value(thunk)
+
+    @staticmethod
+    def _assert_frozen(frozen, rs, point):
+        if isinstance(frozen, str):
+            assert isinstance(rs, _ErrorSentinel) and rs.kind == frozen, (
+                f"{point}: expected symmetric {frozen}, got {rs!r}"
+            )
+            return
+        assert not isinstance(rs, _ErrorSentinel), f"{point}: frozen={frozen} but live raised {rs!r}"
+        allowed = max(abs(frozen) * PARITY_RTOL, 1e-9)
+        assert abs(rs - frozen) <= allowed, f"{point}: frozen={frozen} rs={rs} delta={abs(rs - frozen)}"
+
+    def test_fpm_arena_selects_the_fpm_engine(self, fpm_systems_root, monkeypatch):
+        # Review finding (#1461): from_native() dropped forward_model, so the
+        # FPM arena always compiled the op_level engine. A decode-only
+        # estimate hitting the fpm_forward table's exact row proves the
+        # whole-model engine was selected through the supported predictor API.
+        _prepare_rust_core(monkeypatch)
+        from aiconfigurator_core.sdk.rust_engine_step import RustForwardPassPerfModel
+
+        config = {
+            "schema_version": 1,
+            "model_name": _FPM_MODEL,
+            "system_name": "b200_sxm",
+            "backend": "vllm",
+            "backend_version": _FPM_VERSION,
+            "systems_path": str(fpm_systems_root),
+            "tp_size": 2,
+            "pp_size": 1,
+            "attention_dp_size": 1,
+            "moe_tp_size": 1,
+            "moe_ep_size": 2,
+            "weight_dtype": "fp8_block",
+            "moe_dtype": "fp8_block",
+            "activation_dtype": "bfloat16",
+            "kv_cache_dtype": "fp8",
+            "kv_block_size": None,
+            "nextn": None,
+            "forward_model": "fpm",
+        }
+        model = RustForwardPassPerfModel.from_native(config)
+        decode_only = [
+            {
+                "version": 1,
+                "scheduled_requests": {
+                    "num_decode_requests": 1,
+                    "sum_decode_kv_tokens": 1025,
+                },
+            }
+        ]
+        ms = model.estimate_forward_pass_time_ms(decode_only)
+        assert ms == pytest.approx(2.2)  # exact fpm decode row (1, 1025)
+
+    def test_fpm_spec_tags(self, fpm_systems_root, monkeypatch):
+        _prepare_rust_core(monkeypatch)
+        import json as _json
+
+        from aiconfigurator.sdk import engine as sdk_engine
+
+        model, _backend, database = self._build()
+        spec = _json.loads(
+            _quiet_call(
+                sdk_engine.build_engine_spec_json,
+                model,
+                model_path=_FPM_MODEL,
+                system="b200_sxm",
+                backend="vllm",
+                backend_version=_FPM_VERSION,
+                kv_block_size=None,
+                systems_path=None,
+                nextn=0,
+                database=database,
+            )
+        )
+        (ctx_tag,) = spec["context_ops"][0].keys()
+        (gen_tag,) = spec["generation_ops"][0].keys()
+        assert (ctx_tag, gen_tag) == ("FpmForward", "FpmForward")
+        ctx_op = spec["context_ops"][0]["FpmForward"]
+        assert ctx_op["phase"] == "prefill"
+        assert spec["generation_ops"][0]["FpmForward"]["phase"] == "decode"
+        assert len(ctx_op["match_identity"]) == 15
+        assert ctx_op["sol_ops"], "sol_ops must carry the original granular list"
+
+    @pytest.mark.parametrize(
+        ("mode", "batch", "isl", "osl", "prefix"),
+        [
+            ("static_ctx", 1, 1024, 1, 0),  # exact prefill hit
+            ("static_ctx", 1, 2048, 1, 1024),  # exact cached-prefill hit
+            ("static_ctx", 2, 1500, 1, 0),  # in-curve lerp
+            ("static_ctx", 3, 1024, 1, 0),  # uncollected batch -> transfer (SOL)
+            ("static_gen", 1, 1024, 2, 0),  # exact decode hit (kv = isl+1)
+            ("static_gen", 4, 1024, 2, 0),  # exact decode hit at B=4
+            ("static_gen", 2, 1024, 2, 0),  # uncollected batch -> transfer (SOL)
+            ("static_gen", 4, 9_000_000, 2, 0),  # out of domain -> both error
+            ("static_ctx", 16, 256, 1, 0),  # above the batch ceiling -> pure clamp (kv/T = 0)
+            ("static_ctx", 16, 320, 1, 256),  # high KV pressure -> SOL-rescaled clamp
+        ],
+    )
+    def test_fpm_static_parity(self, fpm_systems_root, monkeypatch, mode, batch, isl, osl, prefix):
+        _prepare_rust_core(monkeypatch)
+        model, backend, database = self._build()
+        rs = self._static(model, backend, database, mode, batch, isl, osl, prefix)
+        frozen = _FPM_STATIC_FROZEN[(mode, batch, isl, osl, prefix)]
+        self._assert_frozen(frozen, rs, f"{mode} B={batch} isl={isl} prefix={prefix}")
+
+    @pytest.mark.parametrize(
+        ("ctx_tokens", "gen_tokens", "isl", "osl"),
+        [
+            (1024, 4, 1024, 2),  # mixed: prefill chunk + marginal decode
+            (512, 4, 1024, 2),  # partial chunk (chunk_scale > 1)
+            (0, 4, 1024, 2),  # gen-only keeps full decode
+            (0, 600, 100, 2),  # gen-only across the decode regime boundary (eager side)
+            (1024, 0, 1024, 2),  # prefill-only chunk
+            (4096, 0, 256, 1),  # 16 whole prefills: certified batch clamp to the ceiling
+        ],
+    )
+    def test_fpm_mixed_step_parity(self, fpm_systems_root, monkeypatch, ctx_tokens, gen_tokens, isl, osl):
+        _prepare_rust_core(monkeypatch)
+        model, backend, database = self._build()
+
+        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=isl, osl=osl, prefix=0)
+        rs = _safe_value(
+            lambda: backend._get_mix_step_latency(model, database, rc, ctx_tokens, gen_tokens, isl, osl, 0)[0]
+        )
+        frozen = _FPM_MIXED_FROZEN[(ctx_tokens, gen_tokens, isl, osl)]
+        self._assert_frozen(frozen, rs, f"mixed ctx={ctx_tokens} gen={gen_tokens}")
+
+    def test_fpm_genonly_step_parity(self, fpm_systems_root, monkeypatch):
+        _prepare_rust_core(monkeypatch)
+        model, backend, database = self._build()
+
+        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=2, prefix=0)
+        rs = _safe_value(lambda: backend._get_genonly_step_latency(model, database, rc, 4, 1023, 2)[0])
+        self._assert_frozen(_FPM_GENONLY_FROZEN, rs, "genonly gen=4")

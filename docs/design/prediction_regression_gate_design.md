@@ -103,8 +103,10 @@ policy). Per point, record a three-state outcome:
 **Database discipline:** `database_mode=SILICON`, and **shared layer OFF**
 (the SDK knob in §3). Every combo's result then depends only on (code, that
 combo's own data files); sibling inheritance can't mask a per-version data
-hole. `engine_step_backend` is pinned to `python` so the in-flight Rust
-default flip is a deliberate, visible change.
+hole. `engine_step_backend` is pinned to `rust` — the Python step path has
+been removed, so this pin documents that baselines are captured on the
+compiled engine explicitly, protecting capture from ambient environment
+overrides.
 
 ### 2.3 Tier 2 — scheduling defense
 

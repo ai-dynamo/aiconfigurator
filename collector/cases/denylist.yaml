@@ -14,7 +14,7 @@
 # Entry format (substring match against str(test_case)):
 #   entries:
 #     - contains: "tp=32, ep=16"
-#       reason: "sglang wideep_moe tp=32 deadlocks in NCCL init on <version>"
+#       reason: "sglang moe_ep tp=32 deadlocks in NCCL init on <version>"
 #       added: 2026-07-04
 #
 # Keep entries dated. Re-audit on every framework version bump and delete

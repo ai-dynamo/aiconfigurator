@@ -222,7 +222,11 @@ def _load_chart_op_data(database, op: str) -> None:
 
 
 class SkippedSiliconPoints:
-    """Temporarily skip unavailable SILICON query points while drawing charts."""
+    """Temporarily skip unavailable SILICON query points while drawing charts.
+
+    ``query_source`` is whatever object the chart functions query — the
+    compiled-engine ``EngineReference`` (the visualizers' per-op reference
+    source since the notebook re-oracle)."""
 
     QUERY_METHODS = (
         "query_gemm",
@@ -232,8 +236,8 @@ class SkippedSiliconPoints:
         "query_generation_mla",
     )
 
-    def __init__(self, database):
-        self.database = database
+    def __init__(self, query_source):
+        self.query_source = query_source
         self.calls = 0
         self.successes = 0
         self.skipped = 0
@@ -241,16 +245,16 @@ class SkippedSiliconPoints:
 
     def __enter__(self):
         for name in self.QUERY_METHODS:
-            if not hasattr(self.database, name):
+            if not hasattr(self.query_source, name):
                 continue
-            original = getattr(self.database, name)
+            original = getattr(self.query_source, name)
             self._originals[name] = original
-            setattr(self.database, name, self._wrap(original))
+            setattr(self.query_source, name, self._wrap(original))
         return self
 
     def __exit__(self, exc_type, exc, tb):
         for name, original in self._originals.items():
-            setattr(self.database, name, original)
+            setattr(self.query_source, name, original)
 
     def _wrap(self, original):
         def wrapped(*args, **kwargs):
@@ -454,6 +458,11 @@ def create_charts(
             f.write("- Skipped ⚠️: no complete perf database is available for this system/backend/version\n")
         return
 
+    # Per-op reference values come from the compiled Rust engine (see
+    # tools/sanity_check/engine_reference.py) — the notebook visualizers take
+    # it alongside the database (which they still walk for grid enumeration).
+    reference = validate_database.EngineReference(database)
+
     # Create sanity check plots for each op and save them to the output directory.
     # Append the plot image URLs to the output md file.
     perf_files = set(perf_files)
@@ -479,8 +488,8 @@ def create_charts(
             try:
                 plt.close("all")
                 _load_chart_op_data(database, op)
-                with SkippedSiliconPoints(database) as skipped_points:
-                    create_chart_func(database)
+                with SkippedSiliconPoints(reference) as skipped_points:
+                    create_chart_func(database, reference)
                 if skipped_points.calls and not skipped_points.successes:
                     with open(output_md_file, "a") as f:
                         f.write(
