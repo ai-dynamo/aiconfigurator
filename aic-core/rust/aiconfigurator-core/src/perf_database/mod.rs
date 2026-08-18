@@ -92,9 +92,25 @@ fn shared_tables_key(
     key
 }
 
+/// Whether a version dir is excluded from data loading wholesale: a legacy
+/// `INCOMPLETE.txt` marker with NO structured `collection_meta.yaml` sidecar.
+/// Mirrors the CANONICAL `operations/base.py::_version_dir_is_unusable`
+/// (a structured sidecar supersedes a stale legacy marker; `status: partial`
+/// validation is the Python admission layer's job, not this existence check).
+pub(crate) fn version_dir_is_unusable(version_dir: &Path) -> bool {
+    if version_dir.join("collection_meta.yaml").is_file() {
+        return false;
+    }
+    version_dir.join("INCOMPLETE.txt").is_file()
+}
+
 /// Scan family-first sibling dirs for `<family>/<backend>/<version>/<basename>`,
 /// where `<data_dir>` (the family dirs' parent) and `<backend>/<version>` are
-/// derived from `data_root` (`<data_dir>/<backend>/<version>`).
+/// derived from `data_root` (`<data_dir>/<backend>/<version>`). Mirrors
+/// `operations/base.py::resolve_op_data_path`'s family walk: dot-dirs are
+/// skipped and a version dir carrying the legacy INCOMPLETE veto is never
+/// admitted (the legacy `<backend>/<version>` fallback stays UNvetoed there,
+/// so callers falling back to `data_root` keep that behavior).
 pub(crate) fn find_in_family_dirs(data_root: &Path, basename: &str) -> Option<PathBuf> {
     let version = data_root.file_name()?.to_str()?;
     let backend = data_root.parent()?.file_name()?.to_str()?;
@@ -105,10 +121,14 @@ pub(crate) fn find_in_family_dirs(data_root: &Path, basename: &str) -> Option<Pa
             Some(name) => name,
             None => continue,
         };
-        if KNOWN_BACKEND_DIRS.contains(&name) {
+        if name.starts_with('.') || KNOWN_BACKEND_DIRS.contains(&name) {
             continue;
         }
-        let candidate = entry.path().join(backend).join(version).join(basename);
+        let version_dir = entry.path().join(backend).join(version);
+        if version_dir_is_unusable(&version_dir) {
+            continue;
+        }
+        let candidate = version_dir.join(basename);
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -159,7 +179,10 @@ fn comm_root(system_data_root: &Path, backend_dir: &str, version: &str) -> PathB
         .join("comm")
         .join(backend_dir)
         .join(version);
-    if family_root.is_dir() {
+    // A family dir under the legacy INCOMPLETE veto is never admitted —
+    // Python's resolve_op_data_path skipped it and fell through to the
+    // legacy layout (which _build_op_sources admission-checks separately).
+    if family_root.is_dir() && !version_dir_is_unusable(&family_root) {
         family_root
     } else {
         system_data_root.join(backend_dir).join(version)

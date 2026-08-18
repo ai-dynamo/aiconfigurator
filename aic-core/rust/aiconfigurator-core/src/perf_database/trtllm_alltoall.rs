@@ -276,6 +276,16 @@ fn token_axis_curve(points: &std::collections::BTreeMap<u32, f64>) -> AxisCurve 
 /// - duplicates resolve FIRST-wins (Python `load_trtllm_alltoall_data`
 ///   guards with the standard skip-on-key-conflict idiom since #1423 —
 ///   shared-layer contract, design §6.1).
+/// LOAD-time `num_nodes` fallback when a legacy file carries no such column:
+/// `max(1, moe_ep_size // 4)` — 4 GPUs per node (GB200 NVL4), the retired
+/// loaders' shared rule (`load_trtllm_alltoall_data` /
+/// `_adapt_legacy_trtllm_alltoall`). Shared with moe_a2a's legacy adapter and
+/// the table view; the QUERY-time default above is a distinct Python rule
+/// that merely coincides numerically.
+pub(crate) fn legacy_num_nodes_fallback(moe_ep_size: u32) -> u32 {
+    (moe_ep_size / 4).max(1)
+}
+
 fn load_alltoall_parquet(sources: &[PerfSource]) -> Result<AlltoallGrids, AicError> {
     let mut by_keys: BTreeMap<AlltoallKey, BTreeMap<u32, f64>> = BTreeMap::new();
     let mut any_source = false;
@@ -311,7 +321,7 @@ fn load_alltoall_parquet(sources: &[PerfSource]) -> Result<AlltoallGrids, AicErr
                 quant: row.str_owned(moe_dtype_col)?,
                 num_nodes: row
                     .u32_optional(num_nodes_col)?
-                    .unwrap_or_else(|| (moe_ep_size / 4).max(1)),
+                    .unwrap_or_else(|| legacy_num_nodes_fallback(moe_ep_size)),
                 hidden_size: row.u32(hidden_size_col)?,
                 topk: row.u32(topk_col)?,
                 num_experts: row.u32(num_experts_col)?,

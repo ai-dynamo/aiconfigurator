@@ -37,7 +37,7 @@ use crate::perf_database::{kernel_source_ok, resolve_op_sources, PerfSource, Per
 #[derive(Clone, Debug)]
 pub enum ViewValue {
     F64(f64),
-    U64(u64),
+    I64(i64),
     Str(String),
     Bool(bool),
 }
@@ -146,7 +146,7 @@ impl ViewNode {
                     out.push(':');
                     match value {
                         ViewValue::F64(v) => write_json_f64(out, *v),
-                        ViewValue::U64(v) => {
+                        ViewValue::I64(v) => {
                             let _ = write!(out, "{v}");
                         }
                         ViewValue::Str(v) => write_json_string(out, v),
@@ -213,6 +213,7 @@ struct RowCtx<'a> {
     reader: &'a PerfReader,
     row: &'a PerfRow,
     power_col: Option<usize>,
+    ks_col: Option<usize>,
     path: &'a std::path::Path,
 }
 
@@ -250,6 +251,25 @@ fn fold_sources<F>(sources: &[PerfSource], mut per_row: F) -> Result<Option<()>,
 where
     F: FnMut(&RowCtx<'_>) -> Result<(), AicError>,
 {
+    fold_sources_grouped(sources, || (), |ctx, ()| per_row(ctx), |()| Ok(()))
+}
+
+/// `fold_sources` with a per-source accumulator — for folds whose merge rule
+/// distinguishes WITHIN-source from ACROSS-source conflicts (DSA:
+/// last-row-wins within one file, first-source-wins across files). Each
+/// existing source gets a fresh `new_state()`; its rows run through
+/// `per_row(ctx, &mut state)`; `flush(state)` fires at the source boundary.
+fn fold_sources_grouped<S, N, F, G>(
+    sources: &[PerfSource],
+    mut new_state: N,
+    mut per_row: F,
+    mut flush: G,
+) -> Result<Option<()>, AicError>
+where
+    N: FnMut() -> S,
+    F: FnMut(&RowCtx<'_>, &mut S) -> Result<(), AicError>,
+    G: FnMut(S) -> Result<(), AicError>,
+{
     let mut any_exists = false;
     for source in sources {
         let path = &source.0;
@@ -260,18 +280,24 @@ where
         let reader = PerfReader::open(path)?;
         let power_col = reader.col_optional("power");
         let ks_col = reader.col_optional("kernel_source");
+        let mut state = new_state();
         for row in reader.rows()? {
             let row = row?;
             if !kernel_source_ok(source.1.as_deref(), ks_col, &row)? {
                 continue;
             }
-            per_row(&RowCtx {
-                reader: &reader,
-                row: &row,
-                power_col,
-                path,
-            })?;
+            per_row(
+                &RowCtx {
+                    reader: &reader,
+                    row: &row,
+                    power_col,
+                    ks_col,
+                    path,
+                },
+                &mut state,
+            )?;
         }
+        flush(state)?;
     }
     Ok(if any_exists { Some(()) } else { None })
 }
@@ -326,7 +352,15 @@ pub fn view_context_attention(sources: &[PerfSource]) -> Result<Option<ViewNode>
         let n = ctx.row.u32(r.col("num_heads")?)?;
         let mut kv_n = ctx.row.u32(r.col("num_key_value_heads")?)?;
         let head_size = ctx.row.u32(r.col("head_dim")?)?;
-        let window_size = ctx.row.u32_optional(r.col_optional("window_size"))?.unwrap_or(0);
+        // Python: `try: row["window_size"] except KeyError: 0`, then int(x) —
+        // the 0 default applies ONLY when the COLUMN is absent. A null cell
+        // or NaN failed the load loudly, and a DOUBLE cell loaded its true
+        // (truncated) value — never a silent 0 that would conflate SWA rows
+        // with global-attention rows.
+        let window_size = match r.col_optional("window_size") {
+            Some(col) => int_cell_loud(ctx, col, "window_size")?,
+            None => 0,
+        };
         let latency = ctx.row.f64(r.col("latency")?)?;
         if kv_n == n {
             kv_n = 0;
@@ -359,7 +393,15 @@ pub fn view_generation_attention(sources: &[PerfSource]) -> Result<Option<ViewNo
         let mut kv_n = ctx.row.u32(r.col("num_key_value_heads")?)?;
         let head_size = ctx.row.u32(r.col("head_dim")?)?;
         let step = ctx.row.u32(r.col("step")?)?;
-        let window_size = ctx.row.u32_optional(r.col_optional("window_size"))?.unwrap_or(0);
+        // Python: `try: row["window_size"] except KeyError: 0`, then int(x) —
+        // the 0 default applies ONLY when the COLUMN is absent. A null cell
+        // or NaN failed the load loudly, and a DOUBLE cell loaded its true
+        // (truncated) value — never a silent 0 that would conflate SWA rows
+        // with global-attention rows.
+        let window_size = match r.col_optional("window_size") {
+            Some(col) => int_cell_loud(ctx, col, "window_size")?,
+            None => 0,
+        };
         let latency = ctx.row.f64(r.col("latency")?)?;
         if kv_n == n {
             kv_n = 0;
@@ -436,7 +478,7 @@ pub fn view_nccl(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicError> {
         let dtype = ctx.row.str_owned(r.col("nccl_dtype")?)?;
         let num_gpus = ctx.row.u32(r.col("num_gpus")?)?;
         let message_size = ctx.row.u64(r.col("message_size")?)?;
-        let op_name = ctx.row.str_owned(r.col("op_name")?)?;
+        let op_name = str_cell_or_empty(ctx, "op_name")?;
         let latency = ctx.row.f64(r.col("latency")?)?;
         let path = [dtype, op_name, num_gpus.to_string()];
         root.insert_first_wins(&path, &message_size.to_string(), classic_leaf(latency, ctx.power()?));
@@ -493,7 +535,7 @@ pub fn view_mla_bmm(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicError
         let quant = ctx.row.str_owned(r.col("bmm_dtype")?)?;
         let num_tokens = ctx.row.u32(r.col("num_tokens")?)?;
         let num_heads = ctx.row.u32(r.col("num_heads")?)?;
-        let op_name = ctx.row.str_owned(r.col("op_name")?)?;
+        let op_name = str_cell_or_empty(ctx, "op_name")?;
         let latency = ctx.row.f64(r.col("latency")?)?;
         let path = [quant, op_name, num_heads.to_string()];
         root.insert_first_wins(&path, &num_tokens.to_string(), classic_leaf(latency, ctx.power()?));
@@ -571,14 +613,22 @@ fn view_mla_module_native_heads(ctx: &RowCtx<'_>, num_heads: u32) -> Result<u32,
             ctx.path.display()
         ))
     })?;
-    // num_optional: DOUBLE-typed tp_size cells count like Python's
-    // int(float(x)) — an INT64-only read would silently bypass the #1429
-    // rank-local guard for exactly the files it exists to reject.
-    let tp_size = num_optional(ctx.row, r.col_optional("tp_size"))?
-        .map(|v| v as u32)
-        .filter(|v| *v != 0)
-        .unwrap_or(1);
-    if tp_size > 1 && num_heads * tp_size != native {
+    // Python: max(1, int(row.get("tp_size", 1) or 1)) — an absent column, a
+    // null cell and a falsy 0 all fall to 1, and a DOUBLE cell counts like
+    // int(float(x)). A NaN/inf cell made that int() raise: the load failed
+    // LOUDLY instead of quietly disarming the #1429 rank-local guard.
+    let tp_size = match num_optional(ctx.row, r.col_optional("tp_size"))? {
+        None => 1,
+        Some(v) if !v.is_finite() => {
+            return Err(AicError::PerfDatabase(format!(
+                "non-finite tp_size cell in an MLA module row at {}: the #1429 rank-local \
+                 guard needs a parseable tp_size (the retired loader's int() raised here)",
+                ctx.path.display()
+            )))
+        }
+        Some(v) => (v as i64).max(1) as u32,
+    };
+    if tp_size > 1 && num_heads.saturating_mul(tp_size) != native {
         return Err(AicError::PerfDatabase(format!(
             "MLA module row in {} for model {model:?} has num_heads={num_heads} at \
              tp_size={tp_size}, inconsistent with native {native} (num_heads must be \
@@ -690,8 +740,8 @@ pub fn view_mamba2(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicError>
     let mut root = ViewNode::branch();
     let found = fold_sources(sources, |ctx| {
         let r = ctx.reader;
-        let kernel_source = ctx.row.str_owned(r.col("kernel_source")?)?;
-        let phase = ctx.row.str_owned(r.col("phase")?)?;
+        let kernel_source = str_cell_or_empty(ctx, "kernel_source")?;
+        let phase = str_cell_or_empty(ctx, "phase")?;
         let b = ctx.row.u32(r.col("batch_size")?)?;
         let s = ctx.row.u32(r.col("seq_len")?)?;
         let model_key = tuple_key(&[
@@ -728,7 +778,7 @@ fn view_gdn_like(
     let mut root = ViewNode::branch();
     let found = fold_sources(sources, |ctx| {
         let r = ctx.reader;
-        let raw_ks = ctx.row.str_owned(r.col("kernel_source")?)?;
+        let raw_ks = str_cell_or_empty(ctx, "kernel_source")?;
         // The alias map is the query loader's (state_space.rs) — one home
         // for the sglang decode-kernel rename drift.
         let kernel_source = if alias {
@@ -736,7 +786,7 @@ fn view_gdn_like(
         } else {
             raw_ks
         };
-        let phase = ctx.row.str_owned(r.col("phase")?)?;
+        let phase = str_cell_or_empty(ctx, "phase")?;
         let b = ctx.row.u32(r.col("batch_size")?)?;
         let s = ctx.row.u32(r.col("seq_len")?)?;
         let mut key_parts = Vec::with_capacity(model_cols.len());
@@ -797,9 +847,9 @@ pub fn view_moe(sources: &[PerfSource]) -> Result<Option<(ViewNode, ViewNode)>, 
         let num_experts = ctx.row.u32(r.col("num_experts")?)?;
         let moe_tp = ctx.row.u32(r.col("moe_tp_size")?)?;
         let moe_ep = ctx.row.u32(r.col("moe_ep_size")?)?;
-        let distribution = ctx.row.str_owned(r.col("distribution")?)?;
+        let distribution = str_cell_or_empty(ctx, "distribution")?;
         let latency = ctx.row.f64(r.col("latency")?)?;
-        let kernel_source = ctx.row.str_owned(r.col("kernel_source")?)?;
+        let kernel_source = str_cell_or_empty(ctx, "kernel_source")?;
         // Kernel-routed quant remap: the query loader's rule (moe.rs).
         let quant = crate::perf_database::moe::moe_kernel_quant_rewrite(
             ctx.row.str_owned(r.col("moe_dtype")?)?,
@@ -841,7 +891,7 @@ pub fn view_wideep_moe(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicEr
         let num_experts = ctx.row.u32(r.col("num_experts")?)?;
         let moe_tp = ctx.row.u32(r.col("moe_tp_size")?)?;
         let moe_ep = ctx.row.u32(r.col("moe_ep_size")?)?;
-        let distribution = ctx.row.str_owned(r.col("distribution")?)?;
+        let distribution = str_cell_or_empty(ctx, "distribution")?;
         let latency = ctx.row.f64(r.col("latency")?)?;
         let path = [
             quant,
@@ -931,9 +981,13 @@ pub fn view_wideep_moe_compute(sources: &[PerfSource]) -> Result<Option<ViewNode
         let num_slots = ctx.row.u32(r.col("num_slots")?)?;
         let moe_tp = ctx.row.u32(r.col("moe_tp_size")?)?;
         let moe_ep = ctx.row.u32(r.col("moe_ep_size")?)?;
-        let distribution = ctx.row.str_owned(r.col("distribution")?)?;
+        let distribution = str_cell_or_empty(ctx, "distribution")?;
         let latency = ctx.row.f64(r.col("latency")?)?;
-        let kernel_source = str_col_or(ctx, "kernel_source", "moe_torch_flow")?;
+        let kernel_source = str_col_or(
+            ctx,
+            "kernel_source",
+            crate::perf_database::moe_expert_compute::LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE,
+        )?;
         let path = [
             kernel_source,
             quant,
@@ -964,7 +1018,7 @@ pub fn view_trtllm_alltoall(sources: &[PerfSource]) -> Result<Option<ViewNode>, 
         let r = ctx.reader;
         let num_nodes_col = r.col_optional("num_nodes");
         let has_num_nodes = *first_has_num_nodes.get_or_insert(num_nodes_col.is_some());
-        let op_name = ctx.row.str_owned(r.col("op_name")?)?;
+        let op_name = str_cell_or_empty(ctx, "op_name")?;
         let quant = ctx.row.str_owned(r.col("moe_dtype")?)?;
         let num_tokens = ctx.row.u32(r.col("num_tokens")?)?;
         let hidden = ctx.row.u32(r.col("hidden_size")?)?;
@@ -972,11 +1026,15 @@ pub fn view_trtllm_alltoall(sources: &[PerfSource]) -> Result<Option<ViewNode>, 
         let num_experts = ctx.row.u32(r.col("num_experts")?)?;
         let moe_ep = ctx.row.u32(r.col("moe_ep_size")?)?;
         let latency = ctx.row.f64(r.col("latency")?)?;
-        let kernel_source = str_col_or(ctx, "kernel_source", "NVLinkTwoSided")?;
+        let kernel_source = str_col_or(
+            ctx,
+            "kernel_source",
+            crate::perf_database::moe_a2a::LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE,
+        )?;
         let num_nodes = if has_num_nodes {
             ctx.row.u32(r.col("num_nodes")?)?
         } else {
-            (moe_ep / 4).max(1)
+            crate::perf_database::trtllm_alltoall::legacy_num_nodes_fallback(moe_ep)
         };
         let path = [
             kernel_source,
@@ -996,18 +1054,76 @@ pub fn view_trtllm_alltoall(sources: &[PerfSource]) -> Result<Option<ViewNode>, 
 
 /// Numeric cell as f64 regardless of the parquet storage type (DOUBLE or
 /// INT64) — Python read both through `int(float(x))` / `float(x)` without
-/// caring. None when the column is absent or the cell is null.
+/// caring, and without narrowing: negative and NaN cells pass through
+/// exactly like `float()` returned them. None when the column is absent or
+/// the cell is null.
 fn num_optional(row: &PerfRow, col: Option<usize>) -> Result<Option<f64>, AicError> {
     if let Some(v) = row.f64_optional(col)? {
         return Ok(Some(v));
     }
-    Ok(row.u32_optional(col)?.map(|v| v as f64))
+    Ok(row.i64_optional(col)?.map(|v| v as f64))
+}
+
+/// Python's `int(row[col])` INSIDE a try/except-continue: `Some` when the
+/// cell parses (a DOUBLE cell truncates toward zero like `int(float)`;
+/// negative values stay negative — Python kept them as negative keys),
+/// `None` when the retired loader skipped the row (null cell, NaN/inf,
+/// non-numeric storage — `int()` raised into the except).
+fn py_int_optional(row: &PerfRow, col: usize) -> Result<Option<i64>, AicError> {
+    if let Some(v) = row.i64_optional(Some(col))? {
+        return Ok(Some(v));
+    }
+    Ok(row
+        .f64_optional(Some(col))?
+        .and_then(|v| v.is_finite().then_some(v as i64)))
+}
+
+/// Python's fail-loud `int(row[col])` OUTSIDE any try/except: a null cell or
+/// a non-finite value raised ValueError and failed the whole load; a finite
+/// DOUBLE cell loaded its truncated value.
+fn int_cell_loud(ctx: &RowCtx<'_>, col: usize, what: &str) -> Result<i64, AicError> {
+    match py_int_optional(ctx.row, col)? {
+        Some(v) => Ok(v),
+        None => Err(AicError::PerfDatabase(format!(
+            "unparseable {what} cell (null or non-finite) in {}: the retired loader's int() \
+             failed the whole load here rather than skipping or defaulting",
+            ctx.path.display()
+        ))),
+    }
+}
+
+/// Python's `int(row.get(name) or default)`: an absent column, a null cell
+/// and a falsy ZERO cell all take the default; a finite DOUBLE truncates;
+/// NaN/inf made that int() raise and failed the load loudly.
+fn int_cell_or_falsy_default(ctx: &RowCtx<'_>, name: &str, default: i64) -> Result<i64, AicError> {
+    match num_optional(ctx.row, ctx.reader.col_optional(name))? {
+        None => Ok(default),
+        Some(v) if !v.is_finite() => Err(AicError::PerfDatabase(format!(
+            "unparseable {name} cell (non-finite) in {}: the retired loader's int() failed \
+             the whole load here rather than defaulting",
+            ctx.path.display()
+        ))),
+        Some(v) if v == 0.0 => Ok(default),
+        Some(v) => Ok(v as i64),
+    }
+}
+
+/// Mandatory string column with Python's null-as-"" read: `_read_perf_rows`
+/// mapped a present-but-null cell to "" and the retired loaders KEPT the row
+/// keyed under "" for plain-string key layers (enum-decoded layers crashed on
+/// "" either way and stay fail-loud via `str_owned`). A missing COLUMN still
+/// errors, like Python's KeyError.
+fn str_cell_or_empty(ctx: &RowCtx<'_>, name: &str) -> Result<String, AicError> {
+    let col = ctx.reader.col(name)?;
+    Ok(ctx.row.str_optional(Some(col))?.unwrap_or("").to_string())
 }
 
 /// `moe_comm.py::_row_power` — null/NaN/absent power -> 0.0; a measured but
-/// non-finite value is corrupt data.
+/// non-finite value is corrupt data. Reads through `num_optional` because
+/// Python's `float(raw)` was storage-agnostic: an integer-typed watts column
+/// (merged/legacy files) loaded its value rather than zeroing the family.
 fn row_power_lenient(ctx: &RowCtx<'_>) -> Result<f64, AicError> {
-    match ctx.row.f64_optional(ctx.power_col)? {
+    match num_optional(ctx.row, ctx.power_col)? {
         None => Ok(0.0),
         Some(v) if v.is_nan() => Ok(0.0),
         Some(v) if !v.is_finite() => Err(AicError::PerfDatabase(
@@ -1018,10 +1134,10 @@ fn row_power_lenient(ctx: &RowCtx<'_>) -> Result<f64, AicError> {
 }
 
 /// `moe_comm.py::_require_latency` — latency is schema-required and finite.
+/// Storage-agnostic like Python's `float(raw)`: an INT64 latency cell is a
+/// value, not a "null latency" corruption report.
 fn require_latency(ctx: &RowCtx<'_>, table: &str) -> Result<f64, AicError> {
-    let lat = ctx
-        .row
-        .f64_optional(ctx.reader.col_optional("latency"))?
+    let lat = num_optional(ctx.row, ctx.reader.col_optional("latency"))?
         .ok_or_else(|| {
             AicError::PerfDatabase(format!(
                 "null latency cell in a {table} row: latency is schema-required and must be \
@@ -1089,8 +1205,8 @@ pub fn view_moe_a2a(
                 let path = [
                     comm_backend.to_string(),
                     phase.to_string(),
-                    "default".to_string(),
-                    (node_num * 8).to_string(),
+                    crate::perf_database::moe_a2a::LEGACY_DEEPEP_DTYPE.to_string(),
+                    crate::perf_database::moe_a2a::legacy_deepep_ep_size(node_num).to_string(),
                     node_num.to_string(),
                     ctx.row.u32(r.col("hidden_size")?)?.to_string(),
                     ctx.row.u32(r.col("num_topk")?)?.to_string(),
@@ -1106,31 +1222,38 @@ pub fn view_moe_a2a(
     }
 
     // _adapt_legacy_trtllm_alltoall: latency already ms; per-row num_nodes
-    // fallback max(1, ep//4); unmapped kernel/op rows are skipped.
+    // fallback max(1, ep//4); unmapped kernel/op rows are skipped. The
+    // kernel->backend and op->phase/dtype maps are the query adapter's
+    // (moe_a2a.rs) — one home for the legacy-adaptation vocabulary.
     let found = fold_sources(legacy_trtllm_alltoall, |ctx| {
         let r = ctx.reader;
-        let kernel_source = str_col_or(ctx, "kernel_source", "NVLinkTwoSided")?;
-        let comm_backend = match kernel_source.as_str() {
-            "NVLinkTwoSided" => "nvlink_two_sided",
-            "NVLinkOneSided" => "nvlink_one_sided",
-            _ => return Ok(()),
+        let kernel_source = str_col_or(
+            ctx,
+            "kernel_source",
+            crate::perf_database::moe_a2a::LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE,
+        )?;
+        let Some(comm_backend) = crate::perf_database::moe_a2a::legacy_trtllm_backend(&kernel_source)
+        else {
+            return Ok(());
         };
-        let op_name = ctx.row.str_owned(r.col("op_name")?)?;
-        let (phase, fixed_dtype) = match op_name.as_str() {
-            "alltoall_prepare" => ("prepare", None),
-            "alltoall_dispatch" => ("dispatch", None),
-            "alltoall_combine" => ("combine", None),
-            "alltoall_combine_low_precision" => ("combine", Some("fp4")),
-            _ => return Ok(()),
+        // Null op_name reads as "" (unmapped) and skips the row, like the
+        // Python adapter's map .get('') miss.
+        let op_name = str_cell_or_empty(ctx, "op_name")?;
+        let Some((phase, fixed_dtype)) = crate::perf_database::moe_a2a::legacy_trtllm_phase_dtype(&op_name)
+        else {
+            return Ok(());
         };
         let comm_dtype = match fixed_dtype {
             Some(d) => d.to_string(),
-            None => ctx.row.str_owned(r.col("moe_dtype")?)?,
+            // Pass-through comm_dtype is a plain-string key: null reads ""
+            // and the row stays, like Python's row["moe_dtype"] after
+            // _read_perf_rows' null-as-"" mapping.
+            None => str_cell_or_empty(ctx, "moe_dtype")?,
         };
         let ep_size = ctx.row.u32(r.col("moe_ep_size")?)?;
         let node_num = match r.col_optional("num_nodes") {
             Some(col) => ctx.row.u32(col)?,
-            None => (ep_size / 4).max(1),
+            None => crate::perf_database::trtllm_alltoall::legacy_num_nodes_fallback(ep_size),
         };
         let latency = ctx.row.f64(r.col("latency")?)?;
         let power = row_power_lenient(ctx)?;
@@ -1159,9 +1282,9 @@ pub fn view_moe_a2a(
         // int-first with the is_finite guard.
         let sms = crate::perf_database::moe_a2a::normalize_sms(ctx.row, r.col_optional("sms"))?;
         let path = [
-            ctx.row.str_owned(r.col("comm_backend")?)?,
-            ctx.row.str_owned(r.col("phase")?)?,
-            ctx.row.str_owned(r.col("comm_dtype")?)?,
+            str_cell_or_empty(ctx, "comm_backend")?,
+            str_cell_or_empty(ctx, "phase")?,
+            str_cell_or_empty(ctx, "comm_dtype")?,
             ctx.row.u32(r.col("ep_size")?)?.to_string(),
             ctx.row.u32(r.col("node_num")?)?.to_string(),
             ctx.row.u32(r.col("hidden_size")?)?.to_string(),
@@ -1207,9 +1330,9 @@ pub fn view_moe_expert_compute(
             let power = row_power_lenient(ctx)?;
             let num_experts = ctx.row.u32(r.col("num_experts")?)?;
             let path = [
-                "deepep_moe".to_string(),
+                crate::perf_database::moe_expert_compute::SGLANG_ADAPTED_KERNEL_SOURCE.to_string(),
                 ctx.row.str_owned(r.col("moe_dtype")?)?,
-                ctx.row.str_owned(r.col("distribution")?)?,
+                str_cell_or_empty(ctx, "distribution")?,
                 inference_phase.to_string(),
                 ctx.row.u32(r.col("topk")?)?.to_string(),
                 num_experts.to_string(),
@@ -1230,12 +1353,16 @@ pub fn view_moe_expert_compute(
         let r = ctx.reader;
         let latency = ctx.row.f64(r.col("latency")?)?;
         let power = row_power_lenient(ctx)?;
-        let kernel_source = str_col_or(ctx, "kernel_source", "moe_torch_flow")?;
+        let kernel_source = str_col_or(
+            ctx,
+            "kernel_source",
+            crate::perf_database::moe_expert_compute::LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE,
+        )?;
         for inference_phase in ["context", "generation"] {
             let path = [
                 kernel_source.clone(),
                 ctx.row.str_owned(r.col("moe_dtype")?)?,
-                ctx.row.str_owned(r.col("distribution")?)?,
+                str_cell_or_empty(ctx, "distribution")?,
                 inference_phase.to_string(),
                 ctx.row.u32(r.col("topk")?)?.to_string(),
                 ctx.row.u32(r.col("num_experts")?)?.to_string(),
@@ -1256,10 +1383,10 @@ pub fn view_moe_expert_compute(
     let new_found = fold_sources(sources, |ctx| {
         let r = ctx.reader;
         let path = [
-            ctx.row.str_owned(r.col("kernel_source")?)?,
+            str_cell_or_empty(ctx, "kernel_source")?,
             ctx.row.str_owned(r.col("moe_dtype")?)?,
-            ctx.row.str_owned(r.col("distribution")?)?,
-            ctx.row.str_owned(r.col("inference_phase")?)?,
+            str_cell_or_empty(ctx, "distribution")?,
+            str_cell_or_empty(ctx, "inference_phase")?,
             ctx.row.u32(r.col("topk")?)?.to_string(),
             ctx.row.u32(r.col("num_experts")?)?.to_string(),
             ctx.row.u32(r.col("num_slots")?)?.to_string(),
@@ -1322,55 +1449,45 @@ fn view_dsa_module(
 ) -> Result<Option<ViewNode>, AicError> {
     let mut root = ViewNode::branch();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut any_exists = false;
     let mut first_has_power: Option<bool> = None;
 
-    for source in sources {
-        let path = &source.0;
-        if !path.exists() {
-            continue;
-        }
-        any_exists = true;
-        let reader = PerfReader::open(path)?;
-        let power_col = reader.col_optional("power");
-        let ks_col = reader.col_optional("kernel_source");
-        let mut source_values = DsaSourceValues::new();
-        for row in reader.rows()? {
-            let row = row?;
-            if !kernel_source_ok(source.1.as_deref(), ks_col, &row)? {
-                continue;
-            }
-            let has_power = *first_has_power.get_or_insert(power_col.is_some());
-            let op_name = row.str_optional(reader.col_optional("op_name"))?.unwrap_or("");
+    let found = fold_sources_grouped(
+        sources,
+        DsaSourceValues::new,
+        |ctx, source_values| {
+            let r = ctx.reader;
+            let row = ctx.row;
+            let has_power = *first_has_power.get_or_insert(ctx.power_col.is_some());
+            let op_name = row.str_optional(r.col_optional("op_name"))?.unwrap_or("");
             if op_name.contains("skip_indexer") != skip {
-                continue;
+                return Ok(());
             }
-            let num_heads = row.u32(reader.col("num_heads")?)?;
-            let b = row.u32(reader.col("batch_size")?)?;
-            let latency = row.f64(reader.col("latency")?)?;
+            let num_heads = row.u32(r.col("num_heads")?)?;
+            let b = row.u32(r.col("batch_size")?)?;
+            let latency = row.f64(r.col("latency")?)?;
             let power = if has_power {
                 // Fail-loud on a present-but-null cell, like the classic
                 // loaders; a LATER source file without the column still
                 // defaults per-row (Python's row.get).
-                match power_col {
+                match ctx.power_col {
                     Some(col) => row.f64(col)?,
                     None => 0.0,
                 }
             } else {
                 0.0
             };
-            let arch = match reader.col_optional("architecture") {
+            let arch = match r.col_optional("architecture") {
                 Some(col) => row.str_optional(Some(col))?.unwrap_or("").to_string(),
                 None => "DeepseekV32ForCausalLM".to_string(),
             };
-            let gemm = row.str_owned(reader.col("gemm_type")?)?;
-            let kv_dtype = row.str_owned(reader.col("kv_cache_dtype")?)?;
-            let ks = row.str_optional(ks_col)?.unwrap_or("").to_string();
+            let gemm = row.str_owned(r.col("gemm_type")?)?;
+            let kv_dtype = row.str_owned(r.col("kv_cache_dtype")?)?;
+            let ks = row.str_optional(ctx.ks_col)?.unwrap_or("").to_string();
             let leaf = classic_leaf(latency, power);
             if context {
-                let s = row.u32(reader.col("isl")?)?;
-                let fmha = row.str_owned(reader.col("mla_dtype")?)?;
-                let step = num_optional(&row, reader.col_optional("step"))?;
+                let s = row.u32(r.col("isl")?)?;
+                let fmha = row.str_owned(r.col("mla_dtype")?)?;
+                let step = num_optional(row, r.col_optional("step"))?;
                 let step_missing = step.is_none();
                 if arch == "GlmMoeDsaForCausalLM" && step_missing {
                     return Err(AicError::PerfDatabase(
@@ -1384,10 +1501,11 @@ fn view_dsa_module(
                 if step.is_some_and(|v| !v.is_finite()) {
                     return Err(AicError::PerfDatabase(format!(
                         "non-finite step cell in a DSA context row at {}",
-                        path.display()
+                        ctx.path.display()
                     )));
                 }
-                let prefix = step.map(|v| v as u32).unwrap_or(0);
+                // int(step): negative values stayed negative prefix keys.
+                let prefix = step.map(|v| v as i64).unwrap_or(0);
                 for backend in crate::perf_database::dsa::dsa_kernel_source_buckets(&ks, &kv_dtype) {
                     source_values.put(
                         vec![
@@ -1405,7 +1523,7 @@ fn view_dsa_module(
                     );
                 }
             } else {
-                let s = row.u32(reader.col("isl")?)? + row.u32(reader.col("step")?)?;
+                let s = row.u32(r.col("isl")?)? + row.u32(r.col("step")?)?;
                 for backend in crate::perf_database::dsa::dsa_kernel_source_buckets(&ks, &kv_dtype) {
                     source_values.put(
                         vec![
@@ -1421,18 +1539,23 @@ fn view_dsa_module(
                     );
                 }
             }
-        }
-        for (coordinate, leaf) in source_values.entries {
-            let key = coordinate.join("\x1f");
-            if !seen.insert(key) {
-                continue;
+            Ok(())
+        },
+        |source_values| {
+            // Sources are priority-ordered: first source wins across files.
+            for (coordinate, leaf) in source_values.entries {
+                let key = coordinate.join("\x1f");
+                if !seen.insert(key) {
+                    continue;
+                }
+                let (path_part, last) = coordinate.split_at(coordinate.len() - 1);
+                root.insert_first_wins(path_part, &last[0], leaf);
             }
-            let (path_part, last) = coordinate.split_at(coordinate.len() - 1);
-            root.insert_first_wins(path_part, &last[0], leaf);
-        }
-    }
+            Ok(())
+        },
+    )?;
 
-    Ok(if any_exists { Some(root) } else { None })
+    Ok(found.map(|_| root))
 }
 
 /// `operations/dsa.py::load_context_dsa_module_data` —
@@ -1455,7 +1578,7 @@ pub fn view_mhc_module(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicEr
     let mut first_power = FirstFilePower::new();
     let found = fold_sources(sources, |ctx| {
         let r = ctx.reader;
-        let op = ctx.row.str_owned(r.col("op_name")?)?;
+        let op = str_cell_or_empty(ctx, "op_name")?;
         let hc_mult = ctx.row.u32(r.col("hc_mult")?)?;
         let hidden = ctx.row.u32(r.col("hidden_size")?)?;
         let num_tokens = ctx.row.u32(r.col("num_tokens")?)?;
@@ -1513,13 +1636,14 @@ fn view_dsv4_kind_module(sources: &[PerfSource], context: bool) -> Result<Option
     // Two passes like Python: the semantics validator scans the full row set
     // first, then the fold runs. Collect the decoded fields once.
     struct Decoded {
-        b: u32,
-        s: u32,
-        prefix: u32,
-        cr: u32,
+        // Signed like Python's int(): negative key cells stayed negative keys.
+        b: i64,
+        s: i64,
+        prefix: i64,
+        cr: i64,
         latency: f64,
-        heads: u32,
-        tp: u32,
+        heads: i64,
+        tp: i64,
         power: f64,
         gemm: String,
         fmha: String,
@@ -1539,12 +1663,20 @@ fn view_dsv4_kind_module(sources: &[PerfSource], context: bool) -> Result<Option
         }
         let has_power = *first_has_power.get_or_insert(ctx.power_col.is_some());
         // Fingerprint scan mirrors Python: heads parseable -> observe;
-        // tp parseable -> saw_tp_size, else missing_tp_rows += 1.
-        let heads_opt = ctx.row.u32_optional(r.col_optional("num_heads"))?;
+        // tp parseable -> saw_tp_size, else missing_tp_rows += 1. "Parseable"
+        // is int(row[...]) succeeding: DOUBLE cells count like int(float(x)),
+        // but null and NaN/inf cells raised into the except — a NaN tp_size
+        // is MISSING (and via the preconditions fails the file loudly), never
+        // a silent tp=1 that would disarm the #1429 validator.
+        let py_cell = |name: &str| -> Result<Option<i64>, AicError> {
+            match r.col_optional(name) {
+                Some(col) => py_int_optional(ctx.row, col),
+                None => Ok(None), // Python's KeyError branch
+            }
+        };
+        let heads_opt = py_cell("num_heads")?;
         if let Some(heads) = heads_opt {
-            // num_optional: DOUBLE-typed tp_size counts as parseable like
-            // Python's int(float(x)) — INT64-only would fail the whole file.
-            let tp_opt = num_optional(ctx.row, r.col_optional("tp_size"))?.map(|v| v as u32);
+            let tp_opt = py_cell("tp_size")?;
             if tp_opt.is_some() {
                 saw_tp_size = true;
             } else {
@@ -1556,28 +1688,51 @@ fn view_dsv4_kind_module(sources: &[PerfSource], context: bool) -> Result<Option
                 .str_optional(r.col_optional("version"))?
                 .unwrap_or("")
                 .to_string();
-            fingerprint.push((heads, tp_opt, model, version));
+            fingerprint.push((
+                u32::try_from(heads).unwrap_or(0),
+                tp_opt.map(|v| u32::try_from(v.max(1)).unwrap_or(u32::MAX)),
+                model,
+                version,
+            ));
         }
-        // Row decode with skip-on-malformed semantics.
-        let (Some(b), Some(s_raw), Some(cr), Some(latency), Some(heads)) = (
-            ctx.row.u32_optional(r.col_optional("batch_size"))?,
-            ctx.row.u32_optional(r.col_optional("isl"))?,
-            ctx.row.u32_optional(r.col_optional("compress_ratio"))?,
-            ctx.row.f64_optional(r.col_optional("latency"))?,
+        // Row decode with the retired loader's try/except-continue semantics:
+        // DOUBLE cells load their truncated value, null/NaN cells skip the
+        // ROW (never abort the view, never silently empty the table), and
+        // negative values stay negative keys.
+        let (Some(b), Some(s_raw), Some(cr), Some(heads)) = (
+            py_cell("batch_size")?,
+            py_cell("isl")?,
+            py_cell("compress_ratio")?,
             heads_opt,
         ) else {
             return Ok(());
         };
-        let step = num_optional(ctx.row, r.col_optional("step"))?;
-        let (s, prefix) = if context {
-            (s_raw, step.map(|v| v as u32).unwrap_or(0))
-        } else {
-            let Some(step) = step else { return Ok(()) };
-            (s_raw + step as u32, 0)
+        // float(row["latency"]) inside the try: a null cell skips the row, an
+        // integer-typed column loads its value, a stored NaN stays NaN.
+        let Some(latency) = num_optional(ctx.row, r.col_optional("latency"))? else {
+            return Ok(());
         };
-        let tp = num_optional(ctx.row, r.col_optional("tp_size"))?
-            .map(|v| (v as u32).max(1))
-            .unwrap_or(1);
+        let (s, prefix) = if context {
+            // int(float(row.get("step", 0) or 0)): absent column and null
+            // cell -> 0; a NaN/inf cell raised inside the try -> row skipped.
+            let prefix = match num_optional(ctx.row, r.col_optional("step"))? {
+                None => 0,
+                Some(v) if !v.is_finite() => return Ok(()),
+                Some(v) => v as i64,
+            };
+            (s_raw, prefix)
+        } else {
+            // int(row["isl"]) + int(row["step"]): missing/null/NaN step -> skip.
+            let Some(step) = py_cell("step")? else { return Ok(()) };
+            (s_raw.saturating_add(step), 0)
+        };
+        // max(1, int(row.get("tp_size", 1) or 1)) inside the try: an absent
+        // column and a null cell fall to 1 (falsy 0 via max), NaN/inf -> skip.
+        let tp = match num_optional(ctx.row, r.col_optional("tp_size"))? {
+            None => 1,
+            Some(v) if !v.is_finite() => return Ok(()),
+            Some(v) => (v as i64).max(1),
+        };
         let power = if has_power {
             // Fail-loud on a present-but-null cell (see RowCtx::power); a
             // later source file without the column still defaults per-row.
@@ -1620,7 +1775,7 @@ fn view_dsv4_kind_module(sources: &[PerfSource], context: bool) -> Result<Option
 
     let mut root = ViewNode::branch();
     for row in decoded {
-        let native = row.heads * row.tp;
+        let native = row.heads.saturating_mul(row.tp);
         let leaf = classic_leaf(row.latency, row.power);
         if context {
             let path = [
@@ -1669,7 +1824,10 @@ pub fn view_dsv4_megamoe_module(data_root: &std::path::Path) -> Result<Option<Vi
     // family-first-then-legacy walk, never the shared-layer source list. A
     // legacy INCOMPLETE veto (or an admitted donor) must not substitute a
     // sibling file here, and an empty source list must not re-resolve a
-    // vetoed primary; resolving directly reproduces the retired loader.
+    // vetoed primary; resolving directly reproduces the retired loader
+    // (find_in_family_dirs carries resolve_op_data_path's INCOMPLETE veto
+    // and dot-dir skip; the legacy fallback below stays unvetoed, exactly
+    // like resolve_op_data_path's final branch).
     let basename = "dsv4_megamoe_module_perf.parquet";
     let primary = crate::perf_database::find_in_family_dirs(data_root, basename)
         .unwrap_or_else(|| data_root.join(basename));
@@ -1712,38 +1870,40 @@ pub fn view_dsv4_megamoe_module(data_root: &std::path::Path) -> Result<Option<Vi
             )));
         }
         let kernel_source = str_col_or(ctx, "kernel_source", "deepgemm_megamoe")?;
-        let kernel_dtype = ctx.row.str_owned(r.col("kernel_dtype")?)?;
+        let kernel_dtype = str_cell_or_empty(ctx, "kernel_dtype")?;
         let quant = ctx.row.str_owned(r.col("moe_dtype")?)?;
-        let pre_dispatch = ctx.row.str_owned(r.col("pre_dispatch")?)?;
-        let source_policy = ctx.row.str_owned(r.col("source_policy")?)?;
-        let distribution = ctx.row.str_owned(r.col("distribution")?)?;
+        let pre_dispatch = str_cell_or_empty(ctx, "pre_dispatch")?;
+        let source_policy = str_cell_or_empty(ctx, "source_policy")?;
+        let distribution = str_cell_or_empty(ctx, "distribution")?;
         let topk = ctx.row.u32(r.col("topk")?)?;
         let num_experts = ctx.row.u32(r.col("num_experts")?)?;
-        let num_fused = ctx
-            .row
-            .u32_optional(r.col_optional("num_fused_shared_experts"))?
-            .unwrap_or(0);
+        // int(row.get(name, DEFAULT)): the default applies only when the
+        // COLUMN is absent — a null cell raised loudly, a DOUBLE cell loaded
+        // its truncated value (never a silent 0/1).
+        let num_fused = match r.col_optional("num_fused_shared_experts") {
+            Some(col) => int_cell_loud(ctx, col, "num_fused_shared_experts")?,
+            None => 0,
+        };
         let hidden = ctx.row.u32(r.col("hidden_size")?)?;
         let inter = ctx.row.u32(r.col("inter_size")?)?;
-        let moe_tp = ctx.row.u32_optional(r.col_optional("moe_tp_size"))?.unwrap_or(1);
+        let moe_tp = match r.col_optional("moe_tp_size") {
+            Some(col) => int_cell_loud(ctx, col, "moe_tp_size")?,
+            None => 1,
+        };
         let moe_ep = ctx.row.u32(r.col("moe_ep_size")?)?;
         let num_tokens = ctx.row.u32(r.col("num_tokens")?)?;
         let latency = ctx.row.f64(r.col("latency")?)?;
-        let power = ctx.row.f64_optional(ctx.power_col)?.unwrap_or(0.0);
-        let num_max = ctx
-            .row
-            .u32_optional(r.col_optional("num_max_tokens_per_rank"))?
-            .unwrap_or(0);
-        let effective_num_max = ctx
-            .row
-            .u32_optional(r.col_optional("effective_num_max_tokens_per_rank"))?
-            .filter(|v| *v != 0)
-            .unwrap_or(num_max);
-        let global_tokens = ctx
-            .row
-            .u32_optional(r.col_optional("global_num_tokens"))?
-            .filter(|v| *v != 0)
-            .unwrap_or(num_tokens * moe_ep);
+        // float(row.get("power") or 0.0): absent/null/0 -> 0.0, an integer
+        // watts column loads its value, a NaN cell stays NaN.
+        let power = num_optional(ctx.row, ctx.power_col)?.unwrap_or(0.0);
+        let num_max = int_cell_or_falsy_default(ctx, "num_max_tokens_per_rank", 0)?;
+        let effective_num_max =
+            int_cell_or_falsy_default(ctx, "effective_num_max_tokens_per_rank", num_max)?;
+        let global_tokens = int_cell_or_falsy_default(
+            ctx,
+            "global_num_tokens",
+            num_tokens as i64 * moe_ep as i64,
+        )?;
         let phase = ctx.row.str_optional(r.col_optional("phase"))?.unwrap_or("").trim().to_string();
         if phase.is_empty() {
             return Err(AicError::PerfDatabase(format!(
@@ -1767,11 +1927,11 @@ pub fn view_dsv4_megamoe_module(data_root: &std::path::Path) -> Result<Option<Vi
             ("latency", ViewValue::F64(latency)),
             ("power", ViewValue::F64(power)),
             ("energy", ViewValue::F64(power * latency)),
-            ("global_num_tokens", ViewValue::U64(global_tokens as u64)),
-            ("num_max_tokens_per_rank", ViewValue::U64(num_max as u64)),
+            ("global_num_tokens", ViewValue::I64(global_tokens)),
+            ("num_max_tokens_per_rank", ViewValue::I64(num_max)),
             (
                 "effective_num_max_tokens_per_rank",
-                ViewValue::U64(effective_num_max as u64),
+                ViewValue::I64(effective_num_max),
             ),
             ("used_cuda_graph", ViewValue::Bool(true)),
             ("kernel_dtype", ViewValue::Str(kernel_dtype.clone())),
@@ -1818,23 +1978,22 @@ pub fn view_dsv4_sparse_kernel(sources: &[PerfSource]) -> Result<Option<ViewNode
     let mut any_leaf = false;
     let found = fold_sources(sources, |ctx| {
         let r = ctx.reader;
-        if ctx.row.u32_optional(r.col_optional("batch_size"))?.is_none() {
-            return Ok(()); // header-dup / null guard
-        }
         let mut keys: Vec<String> = Vec::with_capacity(KEY_COLS.len());
         for col in KEY_COLS {
+            // Python: _coerce = int(float(row[col])) with KeyError -> skip
+            // row; null and NaN/inf cells are "bad keys" that also skip the
+            // ROW (never abort the whole view), and a negative cell stayed a
+            // negative key (a collector-bug sentinel like step=-1 dropped
+            // only itself, filed under -1, never the whole family). This
+            // subsumes the loader's duplicate-header/blank batch_size guard.
             let Some(idx) = r.col_optional(col) else { return Ok(()) };
-            // Numeric coercion int(float(v)); non-finite/null keys skip the row.
-            let value = match ctx.row.u32_optional(Some(idx))? {
-                Some(v) => v,
-                None => match ctx.row.f64_optional(Some(idx))? {
-                    Some(v) if v.is_finite() => v as u32,
-                    _ => return Ok(()),
-                },
+            let Some(value) = py_int_optional(ctx.row, idx)? else {
+                return Ok(());
             };
             keys.push(value.to_string());
         }
-        let Some(latency) = ctx.row.f64_optional(r.col_optional("latency"))? else {
+        // float(row["latency"]): null -> skip row; integer-typed -> value.
+        let Some(latency) = num_optional(ctx.row, r.col_optional("latency"))? else {
             return Ok(());
         };
         let leaf = ViewNode::Leaf(vec![("latency", ViewValue::F64(latency))]);
@@ -1892,6 +2051,92 @@ fn merge_dsv4_split(parts: Vec<Option<ViewNode>>) -> Option<ViewNode> {
     }
 }
 
+/// Attribute registry: every table-view attribute [`table_view_json`]'s
+/// dispatch accepts, with the parquet basenames its fold consumes — exported
+/// over the FFI (`aiconfigurator_core.table_view_attributes()`) so the Python
+/// side derives its mirrors from THIS table instead of hand-syncing four
+/// stringly-typed sites (Rust match arms / `VIEW_KEY_LAYERS` / per-class
+/// `load_data` literals / the baseline codec) — the same
+/// single-source pattern as `gemm_quant_util_levels`. Completeness both ways
+/// is pinned by `tests/cross_package/test_table_view_registry.py`, which
+/// set-compares the export against `VIEW_KEY_LAYERS` and the codec inventory
+/// AND dispatches every exported attribute against a pinned database (so a
+/// registry/dispatch mismatch fails in CI rather than answering None on
+/// machines missing that family's data).
+pub const TABLE_VIEW_ATTRIBUTES: &[(&str, &[&str])] = &[
+    ("_gemm_data", &["gemm_perf.parquet"]),
+    ("_compute_scale_data", &["computescale_perf.parquet"]),
+    ("_scale_matrix_data", &["scale_matrix_perf.parquet"]),
+    ("_context_attention_data", &["context_attention_perf.parquet"]),
+    ("_generation_attention_data", &["generation_attention_perf.parquet"]),
+    ("_encoder_attention_data", &["encoder_attention_perf.parquet"]),
+    ("_context_mla_data", &["context_mla_perf.parquet"]),
+    ("_generation_mla_data", &["generation_mla_perf.parquet"]),
+    ("_mla_bmm_data", &["mla_bmm_perf.parquet"]),
+    ("_context_mla_module_data", &["mla_context_module_perf.parquet"]),
+    ("_generation_mla_module_data", &["mla_generation_module_perf.parquet"]),
+    ("_wideep_context_mla_data", &["wideep_context_mla_perf.parquet"]),
+    ("_wideep_generation_mla_data", &["wideep_generation_mla_perf.parquet"]),
+    ("_moe_data", &["moe_perf.parquet"]),
+    ("_moe_low_latency_data", &["moe_perf.parquet"]),
+    ("_wideep_context_moe_data", &["wideep_context_moe_perf.parquet"]),
+    ("_wideep_generation_moe_data", &["wideep_generation_moe_perf.parquet"]),
+    ("_wideep_deepep_normal_data", &["wideep_deepep_normal_perf.parquet"]),
+    ("_wideep_deepep_ll_data", &["wideep_deepep_ll_perf.parquet"]),
+    ("_wideep_moe_compute_data", &["wideep_moe_perf.parquet"]),
+    ("_trtllm_alltoall_data", &["trtllm_alltoall_perf.parquet"]),
+    (
+        "_moe_a2a_data",
+        &[
+            "moe_a2a_perf.parquet",
+            "wideep_deepep_normal_perf.parquet",
+            "wideep_deepep_ll_perf.parquet",
+            "trtllm_alltoall_perf.parquet",
+        ],
+    ),
+    (
+        "_moe_ep_data",
+        &[
+            "moe_expert_compute_perf.parquet",
+            "wideep_context_moe_perf.parquet",
+            "wideep_generation_moe_perf.parquet",
+            "wideep_moe_perf.parquet",
+        ],
+    ),
+    ("_custom_allreduce_data", &["custom_allreduce_perf.parquet"]),
+    ("_nccl_data", &["nccl_perf.parquet"]),
+    ("_oneccl_data", &["oneccl_perf.parquet"]),
+    ("_context_dsa_module_data", &["dsa_context_module_perf.parquet"]),
+    ("_context_dsa_module_skip_data", &["dsa_context_module_perf.parquet"]),
+    ("_generation_dsa_module_data", &["dsa_generation_module_perf.parquet"]),
+    ("_generation_dsa_module_skip_data", &["dsa_generation_module_perf.parquet"]),
+    ("_mhc_module_data", &["mhc_module_perf.parquet"]),
+    (
+        "_context_deepseek_v4_attention_module_data",
+        &[
+            "dsv4_csa_context_module_perf.parquet",
+            "dsv4_hca_context_module_perf.parquet",
+        ],
+    ),
+    (
+        "_generation_deepseek_v4_attention_module_data",
+        &[
+            "dsv4_csa_generation_module_perf.parquet",
+            "dsv4_hca_generation_module_perf.parquet",
+        ],
+    ),
+    (
+        "_dsv4_sparse_kernel_data.paged_mqa_logits",
+        &["dsv4_paged_mqa_logits_module_perf.parquet"],
+    ),
+    ("_dsv4_sparse_kernel_data.hca_attn", &["dsv4_hca_attn_module_perf.parquet"]),
+    ("_dsv4_sparse_kernel_data.csa_attn", &["dsv4_csa_attn_module_perf.parquet"]),
+    ("_dsv4_megamoe_module_data", &["dsv4_megamoe_module_perf.parquet"]),
+    ("_mamba2_data", &["mamba2_perf.parquet"]),
+    ("_gdn_data", &["gdn_perf.parquet"]),
+    ("_kda_data", &["kda_perf.parquet"]),
+];
+
 /// The engine-side table view: `attribute` is the PerfDatabase attribute name
 /// the retired Python loader used to fill (`"_gemm_data"`, ...). Returns
 /// `Ok(None)` exactly when that loader returned `None` (every source path
@@ -1902,8 +2147,14 @@ pub fn table_view_json(tables: &PerfTables, attribute: &str) -> Result<Option<St
     let src = |basename: &str| resolve_op_sources(&tables.perf_db_sources, basename, &tables.data_root);
     let comm_src = |root: Option<&std::path::Path>, basename: &str| -> Vec<PerfSource> {
         match root {
-            Some(dir) => vec![PerfSource(dir.join(basename), None)],
-            None => Vec::new(),
+            // _build_op_sources refused an EXISTING primary whose version dir
+            // carries the legacy INCOMPLETE veto ("Not admitting primary
+            // source ..."), leaving the comm op with no sources at all — the
+            // view answers None there, never the vetoed rows.
+            Some(dir) if !crate::perf_database::version_dir_is_unusable(dir) => {
+                vec![PerfSource(dir.join(basename), None)]
+            }
+            _ => Vec::new(),
         }
     };
     let node = match attribute {
@@ -1985,6 +2236,34 @@ pub fn table_view_json(tables: &PerfTables, attribute: &str) -> Result<Option<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attribute_registry_is_well_formed() {
+        let mut seen = std::collections::HashSet::new();
+        for (attribute, basenames) in TABLE_VIEW_ATTRIBUTES {
+            assert!(
+                seen.insert(*attribute),
+                "duplicate registry attribute {attribute:?}"
+            );
+            assert!(
+                attribute.starts_with('_'),
+                "registry attribute {attribute:?} is not an underscored PerfDatabase attribute"
+            );
+            assert!(
+                !basenames.is_empty(),
+                "registry attribute {attribute:?} lists no source basenames"
+            );
+            for basename in *basenames {
+                assert!(
+                    basename.ends_with(".parquet"),
+                    "registry basename {basename:?} for {attribute:?} is not a parquet file"
+                );
+            }
+        }
+        // Dispatch completeness both ways is pinned by
+        // tests/cross_package/test_table_view_registry.py, which fetches
+        // every exported attribute against a real pinned database.
+    }
 
     #[test]
     fn view_node_preserves_insertion_order_and_first_wins() {

@@ -297,14 +297,25 @@ fn query_sms_grid(
 }
 
 /// `comm_dtype` of every legacy DeepEP row: those tables were collected with
-/// no dtype axis (`_adapt_legacy_deepep`).
-const LEGACY_DEEPEP_DTYPE: &str = "default";
+/// no dtype axis (`_adapt_legacy_deepep`). Shared with the table view — the
+/// legacy-adaptation vocabulary has ONE home per family.
+pub(crate) const LEGACY_DEEPEP_DTYPE: &str = "default";
+
+/// `ep_size` of every legacy DeepEP row: `node_num * 8` — the legacy tables
+/// were collected on 8-GPU HGX fleets and carry no ep axis
+/// (`_adapt_legacy_deepep`). Saturating only to keep a corrupt row from
+/// panicking a debug build; real node counts are single digits. Shared with
+/// the table view.
+pub(crate) fn legacy_deepep_ep_size(node_num: u32) -> u32 {
+    node_num.saturating_mul(8)
+}
 
 /// `kernel_source` Python assumes when the legacy trtllm-alltoall file has no
 /// such COLUMN (`row.get("kernel_source", "NVLinkTwoSided")`). A column that
 /// exists with a NULL cell is a different case — see
-/// [`adapt_legacy_trtllm_alltoall`].
-const LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE: &str = "NVLinkTwoSided";
+/// [`adapt_legacy_trtllm_alltoall`]. Shared with the table view (and the raw
+/// `load_trtllm_alltoall_data` twin, which used the same default).
+pub(crate) const LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE: &str = "NVLinkTwoSided";
 
 /// Load the unified table: legacy adapters first (keep-first), then the new
 /// schema (first occurrence of a key overwrites, repeats keep first) —
@@ -383,9 +394,7 @@ fn legacy_deepep_key(
         comm_backend: comm_backend.to_string(),
         phase: phase.to_string(),
         comm_dtype: LEGACY_DEEPEP_DTYPE.to_string(),
-        // Saturating only to keep a corrupt row from panicking a debug build;
-        // real node counts are single digits.
-        ep_size: node_num.saturating_mul(8),
+        ep_size: legacy_deepep_ep_size(node_num),
         node_num,
         hidden_size,
         topk,
@@ -524,7 +533,8 @@ fn adapt_legacy_deepep_ll(sources: &[PerfSource], by_keys: &mut A2aGrid) -> Resu
 }
 
 /// `_LEGACY_TRTLLM_KERNEL_TO_BACKEND`; an unmapped kernel skips the row.
-fn legacy_trtllm_backend(kernel_source: &str) -> Option<&'static str> {
+/// Shared with the table view.
+pub(crate) fn legacy_trtllm_backend(kernel_source: &str) -> Option<&'static str> {
     match kernel_source {
         "NVLinkTwoSided" => Some("nvlink_two_sided"),
         "NVLinkOneSided" => Some("nvlink_one_sided"),
@@ -536,8 +546,8 @@ fn legacy_trtllm_backend(kernel_source: &str) -> Option<&'static str> {
 /// where `None` means the row's own `moe_dtype` passes through. The
 /// low-precision combine kernel gets its own `"fp4"` dtype key (an nvfp4
 /// run's STANDARD combine still keys as `"nvfp4"`). An unmapped op_name skips
-/// the row.
-fn legacy_trtllm_phase_dtype(op_name: &str) -> Option<(&'static str, Option<&'static str>)> {
+/// the row. Shared with the table view.
+pub(crate) fn legacy_trtllm_phase_dtype(op_name: &str) -> Option<(&'static str, Option<&'static str>)> {
     match op_name {
         "alltoall_prepare" => Some(("prepare", None)),
         "alltoall_dispatch" => Some(("dispatch", None)),
@@ -609,7 +619,7 @@ fn adapt_legacy_trtllm_alltoall(
                         path.display()
                     ))
                 })?,
-                None => (ep_size / 4).max(1),
+                None => crate::perf_database::trtllm_alltoall::legacy_num_nodes_fallback(ep_size),
             };
             let key = MoeA2aKey {
                 comm_backend: comm_backend.to_string(),
