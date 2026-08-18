@@ -24,7 +24,7 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, suppress
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -95,7 +95,7 @@ REMOTE_WORKDIR = "/tmp/fpm-bench"
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _deep_merge(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
