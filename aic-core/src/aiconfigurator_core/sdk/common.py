@@ -1109,6 +1109,10 @@ def _transfer_kind_from_token(token: str) -> TransferKind:
 class BackendName(Enum):
     """
     Backend name for inference.
+
+    Adding a backend here does not automatically enable communication-data
+    reuse. Validate its version namespace separately, then update
+    ``FRAMEWORK_VERSIONED_COMM_BACKENDS`` in the Rust source resolver.
     """
 
     trtllm = "trtllm"

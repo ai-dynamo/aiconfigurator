@@ -17,9 +17,10 @@ migration, PR 2, already made every marker dir single-family):
   effective newest-first donor, so behavior is preserved). A marker whose
   siblings hold no table at all (nothing to inherit) is dead data: fail
   closed and list the offender rather than emit an empty declaration.
-  EXCEPTION — design §6.5 rule 5 excludes the `comm` family from
-  sibling-version reuse ENTIRELY (NCCL/oneCCL curves are topology-bound, so
-  cross-version shape-filling is wrong there). A `SHARED_LAYER_REUSE.txt`
+  EXCEPTION — design §6.5 rule 5 excludes the `comm` family from DECLARED
+  reuse. Validated framework namespaces reuse strictly earlier versions
+  implicitly; NCCL/oneCCL and unknown backends remain primary-only. A
+  `SHARED_LAYER_REUSE.txt`
   marker inside a `<system>/comm/<backend>/<version>` dir is deleted with NO
   `reuse.yaml` emitted — a comm `reuse.yaml` would be a standing
   contradiction of that rule, and PR 4's loader/CI check must never see one.
@@ -108,9 +109,10 @@ def _spdx_header() -> str:
     )
 
 
-# Design §6.5 rule 5: comm is excluded from sibling-version reuse entirely.
+# Design §6.5 rule 5: comm forbids declared reuse; validated framework
+# namespaces get their earlier-version chain implicitly in the loader.
 COMM_FAMILY = "comm"
-COMM_EXCLUSION_LOG = "comm family excluded from sibling reuse (design §6.5 rule 5); marker dropped without declaration"
+COMM_EXCLUSION_LOG = "comm family excludes declared reuse (design §6.5 rule 5); marker dropped without declaration"
 
 
 class MigrationError(Exception):
@@ -157,8 +159,9 @@ class BackfillAction:
 class CommExclusionAction:
     """A `SHARED_LAYER_REUSE.txt` marker found inside a `comm`-family version dir.
 
-    Design §6.5 rule 5 excludes `comm` from sibling-version reuse entirely, so this
-    is deleted outright — no `reuse.yaml` is emitted for it.
+    Design §6.5 rule 5 gives validated framework namespaces implicit
+    earlier-version reuse and forbids declared comm reuse, so this is deleted
+    outright — no `reuse.yaml` is emitted for it.
     """
 
     src: Path  # relative SHARED_LAYER_REUSE.txt path
