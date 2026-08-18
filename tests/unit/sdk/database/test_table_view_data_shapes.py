@@ -476,9 +476,10 @@ def test_moe_load_data_retry_recovers_after_a_failed_later_fetch(systems_root: P
 
 
 def test_composite_weights_respect_child_weight_shields() -> None:
-    """A tombstoned MoEDispatch (deepep flavor, weight shielded to 0.0)
-    nested inside Overlap/Fallback must not crash memory estimation: the
-    composites recurse through each child's own get_weights."""
+    """A tombstoned MoEDispatch (RetiredDeepEp flavor — spec assembly and
+    query refuse it) nested inside Overlap/Fallback must not crash memory
+    estimation: the Rust ``Op::weight_bytes`` dispatch arm is 0.0 for every
+    flavor and the composite arms recurse natively."""
     from aiconfigurator.sdk.operations.moe import MoEDispatch
     from aiconfigurator.sdk.operations.overlap import FallbackOp, OverlapOp
 
@@ -492,6 +493,7 @@ def test_composite_weights_respect_child_weight_shields() -> None:
         moe_ep_size=16,
         attention_dp_size=1,
         pre_dispatch=False,
+        backend="sglang",
         moe_backend="deepep_moe",
     )
     assert dispatch.get_weights() == 0.0

@@ -360,6 +360,23 @@ impl Op {
         }
     }
 
+    /// CP sequence-shard factor for the token-major families that carry one;
+    /// 1 for every other variant (their constructors' CP audit gate refuses
+    /// `seq_split > 1`, so 1 is exact, not a guess). Backs the Python-side
+    /// `Operation._seq_split` default read.
+    pub fn seq_split(&self) -> u32 {
+        match self {
+            Op::Gemm(o) => o.seq_split,
+            Op::Embedding(o) => o.seq_split,
+            Op::Elementwise(o) => o.seq_split,
+            Op::CustomAllReduce(o) => o.seq_split,
+            Op::Nccl(o) => o.seq_split,
+            Op::P2P(o) => o.seq_split,
+            Op::Mhc(o) => o.seq_split,
+            _ => 1,
+        }
+    }
+
     /// True if this op's name matches Python's mix-step filter for the
     /// context-attention bucket. Python uses literal string equality on
     /// `"context_attention"` — that's the LLAMA / MOE attention op name.

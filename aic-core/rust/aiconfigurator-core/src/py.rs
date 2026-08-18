@@ -819,6 +819,17 @@ fn engine_spec_schema_version() -> u32 {
     crate::ENGINE_SPEC_SCHEMA_VERSION
 }
 
+/// Serialize a sequence of engine-backed op objects to the externally-tagged
+/// OpSpec JSON array `AicEngine.evaluate_ops_json` consumes. Refuses retired
+/// tombstone ops (recursively) exactly like `engine_spec_bincode_from_ops`:
+/// every surface where ops leave Python as a spec applies the same gate.
+#[pyfunction]
+fn ops_json_from_ops(ops: &Bound<'_, PyAny>) -> PyResult<String> {
+    let ops = crate::py_ops::ops_from_sequence(ops)?;
+    crate::py_ops::reject_retired_ops(&ops).map_err(PyValueError::new_err)?;
+    serde_json::to_string(&ops).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 /// Deserialize one externally-tagged opspec JSON document into an
 /// engine-backed op object (the FPMForwardOp adapter's bridge).
 #[pyfunction]
@@ -1412,6 +1423,7 @@ fn _aiconfigurator_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(table_view_attributes, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_op_sources_report_json, m)?)?;
     m.add_function(wrap_pyfunction!(engine_spec_bincode_from_ops, m)?)?;
+    m.add_function(wrap_pyfunction!(ops_json_from_ops, m)?)?;
     m.add_function(wrap_pyfunction!(engine_spec_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(op_from_spec_json, m)?)?;
     m.add_class::<AicEngine>()?;
@@ -1534,7 +1546,8 @@ mod tests {
                 kv_cache_dtype: None,
             },
             speculative: None,
-            perf_db_sources: Default::default(),
+            enable_shared_layer: None,
+            strict_provenance: false,
             database_mode: Default::default(),
             transfer_policy: None,
             extra: BTreeMap::new(),

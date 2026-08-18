@@ -83,10 +83,10 @@ def test_sol_full_is_per_call_diagnostic_never_default_mode(mutable_comprehensiv
 
     real_db = get_database("b200_sxm", "sglang", "0.5.14")
     mem_twin = ElementWise("mem_op_query", 1.0, -(-(1 << 20) // 2), 0)
-    ops_json = engine.build_ops_json(
-        [mem_twin], model=engine._PROBE_MODEL_STUB, backend=real_db.backend, database=real_db
-    )
+    ops_json = engine.build_ops_json([mem_twin])
     key, systems_path = engine._probe_spec_key(real_db, common.DatabaseMode.SOL.name)
     handle = engine._probe_handle_from_key(key, systems_path)
-    (_, sol_time, sol_math, sol_mem) = handle.evaluate_ops_sol_json(ops_json, is_context=True, batch_size=1, s=1, x=1)[0]
+    (_, sol_time, sol_math, sol_mem) = handle.evaluate_ops_sol_json(ops_json, is_context=True, batch_size=1, s=1, x=1)[
+        0
+    ]
     assert sol_time == pytest.approx(max(sol_math, sol_mem))

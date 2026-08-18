@@ -14,36 +14,35 @@ accounting (per-child weights themselves come from the engine since PR-6) —
 is tested here.
 """
 
-from unittest.mock import MagicMock
-
 import pytest
 
-from aiconfigurator.sdk.operations import OverlapOp, PerformanceResult
+from aiconfigurator.sdk.operations import OverlapOp
 
 pytestmark = pytest.mark.unit
-
-
-def _make_mock_op(latency: float, energy: float, weights: float = 0.0):
-    """Create a mock operation that returns the given latency/energy/weights."""
-    op = MagicMock()
-    op.query.return_value = PerformanceResult(latency, energy=energy)
-    op.get_weights.return_value = weights
-    return op
 
 
 class TestOverlapOp:
     """Test cases for OverlapOp class."""
 
     def test_initialization(self):
-        """Test that group_a and group_b are stored correctly."""
-        op_a = _make_mock_op(10.0, 1.0)
-        op_b = _make_mock_op(5.0, 2.0)
+        """Groups are captured by the Rust constructor; the getters re-wrap
+        children as Rust base classes with the same names and wire state
+        (Mock children are refused — composites require engine-backed ops)."""
+        from aiconfigurator.sdk import common
+        from aiconfigurator.sdk.operations import GEMM
+
+        op_a = GEMM("a", 1.0, 10, 5, common.GEMMQuantMode.bfloat16)
+        op_b = GEMM("b", 1.0, 5, 5, common.GEMMQuantMode.bfloat16)
 
         overlap = OverlapOp("test_overlap", group_a=[op_a], group_b=[op_b])
 
         assert overlap._name == "test_overlap"
-        assert overlap._group_a == [op_a]
-        assert overlap._group_b == [op_b]
+        assert [c._name for c in overlap._group_a] == ["a"]
+        assert [c._name for c in overlap._group_b] == ["b"]
+        assert overlap._group_a[0]._spec_json() == op_a._spec_json()
+
+        with pytest.raises(TypeError, match="engine-backed"):
+            OverlapOp("bad", group_a=[object()], group_b=[])
 
     def test_get_weights_sums_all_ops(self):
         """get_weights should return sum of weights from both groups.

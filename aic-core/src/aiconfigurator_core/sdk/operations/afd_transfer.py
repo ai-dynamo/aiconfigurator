@@ -40,7 +40,7 @@ from math import comb
 from typing import TYPE_CHECKING, Optional
 
 from aiconfigurator_core.sdk import common
-from aiconfigurator_core.sdk.operations.base import Operation
+from aiconfigurator_core.sdk.operations.base import PythonOperation
 from aiconfigurator_core.sdk.operations.communication import NCCL, P2P
 from aiconfigurator_core.sdk.operations.elementwise import ElementWise
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
 
 
-def _engine_comm_query(database: PerfDatabase, op: Operation) -> PerformanceResult:
+def _engine_comm_query(database: PerfDatabase, op) -> PerformanceResult:
     """Engine value for one comm probe op. ``x=1``: the probe carries the full
     message in its per-token field, so no token factorization is needed."""
     from aiconfigurator_core.sdk.engine import _evaluate_single_op
@@ -81,7 +81,7 @@ def _afd_send_prob(num_experts: int, topk: int, num_f_nodes: int) -> float:
     return 1.0 - comb(n_other, topk) / comb(num_experts, topk)
 
 
-class AFDTransfer(Operation):
+class AFDTransfer(PythonOperation):
     """Unidirectional cross-pool P2P transfer (A→F **or** F→A).
 
     Construct with ``direction="a2f"`` or ``direction="f2a"`` to declare
@@ -160,7 +160,7 @@ class AFDTransfer(Operation):
         return self._weights
 
 
-class AFDFAllGather(Operation):
+class AFDFAllGather(PythonOperation):
     """F-node intra-node AllGather along the **token** dimension before F compute.
 
     Each F-GPU within a node receives a subset of tokens from A-side P2P.
@@ -241,7 +241,7 @@ class AFDFAllGather(Operation):
         return self._weights
 
 
-class AFDFReduceScatter(Operation):
+class AFDFReduceScatter(PythonOperation):
     """F-node intra-node NCCL ReduceScatter after F compute.
 
     After MoE/FFN, every F-GPU within a node holds results for *all*
@@ -324,7 +324,7 @@ class AFDFReduceScatter(Operation):
         return self._weights
 
 
-class AFDCombine(Operation):
+class AFDCombine(PythonOperation):
     """A-side cross-EP combine: local HBM reduce-add of partial results.
 
     When F-side uses expert parallelism (``f_moe_ep_size > 1``), each

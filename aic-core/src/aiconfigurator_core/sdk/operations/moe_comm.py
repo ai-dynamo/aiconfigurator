@@ -32,8 +32,8 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator_core.sdk import common
-from aiconfigurator_core.sdk.operations.base import Operation
+import aiconfigurator_core._aiconfigurator_core as _core
+from aiconfigurator_core.sdk.operations.base import OpShellKit
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -140,7 +140,7 @@ def _validate_a2a_request(comm_backend: str, phase: str) -> None:
         )
 
 
-class MoEAllToAll(Operation):
+class MoEAllToAll(_core.MoEAllToAll, OpShellKit):
     """Unified large-EP MoE all-to-all comm op (one phase per instance).
 
     Owns ``_moe_a2a_data`` — the unified comm table loaded by
@@ -157,37 +157,19 @@ class MoEAllToAll(Operation):
     """
 
     _data_cache: ClassVar[dict] = {}
+    _trtllm_alltoall_data_cache: ClassVar[dict] = {}
 
     _SUPPORTED_BACKENDS: ClassVar[tuple[str, ...]] = ("sglang", "vllm", "trtllm")
 
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        *,
-        phase: str,
-        comm_backend: str,
-        hidden_size: int,
-        topk: int,
-        num_experts: int,
-        moe_ep_size: int,
-        node_num: int,
-        comm_dtype: str = "default",
-        sms: int = 0,
-        attention_tp_size: int = 1,
-    ) -> None:
-        super().__init__(name, scale_factor)
-        _validate_a2a_request(comm_backend, phase)
-        self._phase = phase
-        self._comm_backend = comm_backend
-        self._hidden_size = hidden_size
-        self._topk = topk
-        self._num_experts = num_experts
-        self._moe_ep_size = moe_ep_size
-        self._node_num = node_num
-        self._comm_dtype = comm_dtype
-        self._sms = sms
-        self._attention_tp_size = attention_tp_size
+    def __init__(self, *args, **kwargs) -> None:
+        """Ctor-time spec guard on top of the Rust ``__new__`` (which has
+        already consumed the args and built the op): the backend/phase matrix
+        (``MOE_A2A_BACKENDS``) is Python-owned policy, so the ValueError fires
+        here where the intent is expressed. Pickle rebuilds bypass this
+        (``__getnewargs_ex__`` -> ``__new__``), which is safe: those values
+        came from an already-validated instance."""
+        del args
+        _validate_a2a_request(kwargs["comm_backend"], kwargs["phase"])
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -215,18 +197,30 @@ class MoEAllToAll(Operation):
 
             cls._record_load()
 
+        # Rehomed from the deleted ``TrtLLMWideEPMoEDispatch`` (AIC-1357): the
+        # legacy trtllm alltoall view stays loadable for charts / the support
+        # matrix even though no op family constructs against it anymore.
+        if key not in cls._trtllm_alltoall_data_cache:
+            if database.backend == "trtllm":
+                cls._trtllm_alltoall_data_cache[key] = load_view(
+                    database, "_trtllm_alltoall_data", PerfDataFilename.trtllm_alltoall
+                )
+            else:
+                cls._trtllm_alltoall_data_cache[key] = None
+
         if "_moe_a2a_data" not in database.__dict__:
             database._moe_a2a_data = cls._data_cache[key]
+        if "_trtllm_alltoall_data" not in database.__dict__:
+            database._trtllm_alltoall_data = cls._trtllm_alltoall_data_cache[key]
 
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
+        cls._trtllm_alltoall_data_cache.clear()
 
     # ------------------------------------------------------------------
     # Op contract
     # ------------------------------------------------------------------
-
-    _ENGINE_QUERY_SHAPE = "tokens"
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +237,7 @@ def _validate_ep_phase(inference_phase: str) -> None:
         raise ValueError(f"Invalid inference_phase '{inference_phase}'. Must be one of {list(_EP_PHASES)}")
 
 
-class MoEExpertCompute(Operation):
+class MoEExpertCompute(_core.MoEExpertCompute, OpShellKit):
     """Unified large-EP MoE expert-compute op (one inference phase per instance).
 
     Owns ``_moe_ep_data`` — the unified compute table loaded by
@@ -256,7 +250,7 @@ class MoEExpertCompute(Operation):
     ``TrtLLMWideEPMoE`` query paths) and always queries ``moe_tp_size=1``:
     the large-EP family is EP-only. ``num_slots`` defaults to ``num_experts``
     (no EPLB redundancy); ``kernel_source=None`` auto-resolves per backend at
-    query time (see :meth:`_resolve_kernel_source`). ``enable_eplb=True`` is
+    query time inside the engine (`moe_expert_compute.rs`). ``enable_eplb=True`` is
     legacy fidelity with the sglang MoE query: tokens become
     ``int(tokens * 0.8)`` before the table lookup when the phase is context
     AND the resolved kernel leg is sglang-adapted
@@ -265,46 +259,15 @@ class MoEExpertCompute(Operation):
     """
 
     _data_cache: ClassVar[dict] = {}
+    _wideep_compute_data_cache: ClassVar[dict] = {}
 
     _SUPPORTED_BACKENDS: ClassVar[tuple[str, ...]] = ("sglang", "vllm", "trtllm")
 
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        *,
-        hidden_size: int,
-        inter_size: int,
-        topk: int,
-        num_experts: int,
-        moe_ep_size: int,
-        quant_mode: common.MoEQuantMode,
-        workload_distribution: str,
-        attention_dp_size: int,
-        inference_phase: str,
-        num_slots: int | None = None,
-        kernel_source: str | None = None,
-        is_gated: bool = True,
-        enable_eplb: bool = False,
-    ) -> None:
-        super().__init__(name, scale_factor)
-        _validate_ep_phase(inference_phase)
-        self._hidden_size = hidden_size
-        self._inter_size = inter_size
-        self._topk = topk
-        self._num_experts = num_experts
-        self._num_slots = num_slots if num_slots is not None else num_experts
-        self._moe_ep_size = moe_ep_size
-        self._quant_mode = quant_mode
-        self._workload_distribution = workload_distribution
-        self._attention_dp_size = attention_dp_size
-        self._inference_phase = inference_phase
-        self._kernel_source = kernel_source
-        self._is_gated = is_gated
-        self._enable_eplb = enable_eplb
-        # Weight bytes retired to the engine (Op::weight_bytes): EP-only
-        # sizing by num_experts NOT num_slots stays parity-pinned there
-        # (AIC-1674 tracks the intentional num_slots delta).
+    def __init__(self, *args, **kwargs) -> None:
+        """Ctor-time spec guard on top of the Rust ``__new__`` — see
+        ``MoEAllToAll.__init__`` for the pickle-bypass rationale."""
+        del args
+        _validate_ep_phase(kwargs["inference_phase"])
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -332,66 +295,27 @@ class MoEExpertCompute(Operation):
 
             cls._record_load()
 
+        # Rehomed from the deleted ``TrtLLMWideEPMoE`` (AIC-1357): the legacy
+        # trtllm wideep compute view stays loadable for charts / the support
+        # matrix even though no op family constructs against it anymore.
+        if key not in cls._wideep_compute_data_cache:
+            if database.backend == "trtllm":
+                cls._wideep_compute_data_cache[key] = load_view(
+                    database, "_wideep_moe_compute_data", PerfDataFilename.wideep_moe_compute
+                )
+            else:
+                cls._wideep_compute_data_cache[key] = None
+
         if "_moe_ep_data" not in database.__dict__:
             database._moe_ep_data = cls._data_cache[key]
+        if "_wideep_moe_compute_data" not in database.__dict__:
+            database._wideep_moe_compute_data = cls._wideep_compute_data_cache[key]
 
     @classmethod
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
-
-    # ------------------------------------------------------------------
-    # kernel_source auto-resolution (kernel_source=None)
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def _resolve_kernel_source(cls, database: PerfDatabase, quant_mode: common.MoEQuantMode) -> str:
-        """Resolve the collected kernel key when the caller pins none.
-
-        sglang/vllm large-EP MoE has a single collected kernel
-        (``"deepep_moe"``, spec §4.2). trtllm replicates
-        ``TrtLLMWideEPMoE._select_kernel`` (TensorRT-LLM's
-        ``MoEOpSelector.select_op``) against the unified table's kernel keys:
-        Blackwell (SM >= 100) + fp8_block -> ``"deepgemm"``, otherwise
-        ``"moe_torch_flow"`` (Cutlass); an absent preferred kernel falls back
-        to the first collected kernel key. Copied, not imported — the legacy
-        classmethod consults its trtllm-only ``_wideep_moe_compute_data``
-        table, which this family retires.
-        """
-        if database.backend in ("sglang", "vllm"):
-            return "deepep_moe"
-
-        cls.load_data(database)
-        sm_version = database.system_spec["gpu"]["sm_version"]
-        is_blackwell = sm_version >= 100
-        quant_mode_str = quant_mode.name if hasattr(quant_mode, "name") else str(quant_mode)
-        preferred = "deepgemm" if is_blackwell and "fp8_block" in quant_mode_str else "moe_torch_flow"
-
-        ep_data = database._moe_ep_data
-        if ep_data:
-            available_kernels = list(ep_data.keys())
-            if preferred in available_kernels:
-                return preferred
-            if available_kernels:
-                fallback = available_kernels[0]
-                logger.debug(f"Preferred MoE kernel '{preferred}' not available, falling back to '{fallback}'")
-                return fallback
-
-        return preferred
+        cls._wideep_compute_data_cache.clear()
 
     # ------------------------------------------------------------------
     # Op contract
     # ------------------------------------------------------------------
-
-    _ENGINE_QUERY_SHAPE = "tokens"
-
-    def _engine_query_plan(self, kwargs: dict):
-        """Legacy per-call ``quant_mode`` override: rebuild the twin with the
-        requested quant before engine evaluation."""
-        op, eval_kwargs = super()._engine_query_plan(kwargs)
-        quant_mode = kwargs.get("quant_mode")
-        if quant_mode is not None and quant_mode != self._quant_mode:
-            import copy
-
-            op = copy.copy(self)
-            op._quant_mode = quant_mode
-        return op, eval_kwargs

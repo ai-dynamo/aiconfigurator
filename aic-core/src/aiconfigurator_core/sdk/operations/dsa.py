@@ -30,8 +30,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator_core.sdk import common
-from aiconfigurator_core.sdk.operations.base import Operation
+import aiconfigurator_core._aiconfigurator_core as _core
+from aiconfigurator_core.sdk.operations.base import OpShellKit
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -110,7 +110,7 @@ def _cache_key(database: PerfDatabase) -> tuple:
     )
 
 
-class ContextDSAModule(Operation):
+class ContextDSAModule(_core.ContextDSAModule, OpShellKit):
     """
     Context phase DSA (DeepSeek Sparse Attention) module-level operation.
 
@@ -131,44 +131,6 @@ class ContextDSAModule(Operation):
     _raw_data_cache: ClassVar[dict] = {}
     _skip_data_cache: ClassVar[dict] = {}
     _raw_skip_data_cache: ClassVar[dict] = {}
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        num_heads: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode,
-        gemm_quant_mode: common.GEMMQuantMode,
-        architecture: str = "DeepseekV32ForCausalLM",
-        cp_size: int = 1,
-        index_topk_freq: int = 1,
-        dsa_full_layer_fraction: float | None = None,
-        attn_projection_quant_modes: dict | None = None,
-    ) -> None:
-        super().__init__(name, scale_factor)
-        self._num_heads = num_heads
-        self._kvcache_quant_mode = kvcache_quant_mode
-        self._fmha_quant_mode = fmha_quant_mode
-        self._gemm_quant_mode = gemm_quant_mode
-        self._architecture = architecture
-        self._cp_size = cp_size
-        # GLM-5.2 shares one DSA topk index across a group of layers: some compute
-        # the indexer (full), the rest reuse it (skip). query() amortizes
-        # per_layer = full_frac*full + (1-full_frac)*skip, using the directly-
-        # collected skip data (no delta). full_frac is the EXACT fraction of
-        # indexer-computing layers (honors index_skip_topk_offset/pattern), passed
-        # by the model; fall back to 1/freq only if not provided. full_frac==1.0
-        # (DeepSeek-V3.2 / GLM-5) => pure full, skip path never taken.
-        self._index_topk_freq = max(1, int(index_topk_freq or 1))
-        self._full_frac = (
-            float(dsa_full_layer_fraction) if dsa_full_layer_fraction is not None else 1.0 / self._index_topk_freq
-        )
-        # Persisted (not just consumed) so the opspec can carry the
-        # per-projection checkpoint fact to the engine's weight_bytes.
-        self._attn_projection_quant_modes = _normalize_projection_quant_modes(
-            attn_projection_quant_modes, gemm_quant_mode
-        )
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -234,8 +196,6 @@ class ContextDSAModule(Operation):
     # Op contract
     # ------------------------------------------------------------------
 
-    _ENGINE_QUERY_SHAPE = "context"
-
     # ------------------------------------------------------------------
     # Context-Parallel (CP) prefill model — GLM-5 DSA only.
     # See docs/CONTEXT_PARALLEL_DSA_MODELING.md. Per-card =
@@ -247,7 +207,7 @@ class ContextDSAModule(Operation):
     # ------------------------------------------------------------------
 
 
-class GenerationDSAModule(Operation):
+class GenerationDSAModule(_core.GenerationDSAModule, OpShellKit):
     """
     Generation phase DSA (DeepSeek Sparse Attention) module-level operation.
 
@@ -265,35 +225,6 @@ class GenerationDSAModule(Operation):
     _raw_data_cache: ClassVar[dict] = {}
     _skip_data_cache: ClassVar[dict] = {}
     _raw_skip_data_cache: ClassVar[dict] = {}
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        num_heads: int,
-        kv_cache_dtype: common.KVCacheQuantMode,
-        gemm_quant_mode: common.GEMMQuantMode,
-        architecture: str = "DeepseekV32ForCausalLM",
-        index_topk_freq: int = 1,
-        dsa_full_layer_fraction: float | None = None,
-        attn_projection_quant_modes: dict | None = None,
-    ) -> None:
-        super().__init__(name, scale_factor)
-        self._num_heads = num_heads
-        self._kv_cache_dtype = kv_cache_dtype
-        self._gemm_quant_mode = gemm_quant_mode
-        self._architecture = architecture
-        # GLM-5.2 shared-index amortization (see ContextDSAModule): exact
-        # full-layer fraction; fall back to 1/freq. full_frac==1.0 => pure full.
-        self._index_topk_freq = max(1, int(index_topk_freq or 1))
-        self._full_frac = (
-            float(dsa_full_layer_fraction) if dsa_full_layer_fraction is not None else 1.0 / self._index_topk_freq
-        )
-        # Persisted (not just consumed) so the opspec can carry the
-        # per-projection checkpoint fact to the engine's weight_bytes.
-        self._attn_projection_quant_modes = _normalize_projection_quant_modes(
-            attn_projection_quant_modes, gemm_quant_mode
-        )
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -354,8 +285,6 @@ class GenerationDSAModule(Operation):
     # ------------------------------------------------------------------
     # Op contract
     # ------------------------------------------------------------------
-
-    _ENGINE_QUERY_SHAPE = "generation"
 
 
 # ─────────────────────────────────────────────────────────

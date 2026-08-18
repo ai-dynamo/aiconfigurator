@@ -24,7 +24,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator_core.sdk.operations.base import Operation
+import aiconfigurator_core._aiconfigurator_core as _core
+from aiconfigurator_core.sdk.operations.base import OpShellKit
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -47,7 +48,7 @@ def _cache_key(database: PerfDatabase) -> tuple:
     )
 
 
-class Mamba2Kernel(Operation):
+class Mamba2Kernel(_core.Mamba2Kernel, OpShellKit):
     """
     Single Mamba2 kernel op (Conv1D or SSM) using collected mamba2_perf data.
 
@@ -59,32 +60,6 @@ class Mamba2Kernel(Operation):
     """
 
     _data_cache: ClassVar[dict] = {}
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        kernel_source: str,
-        phase: str,
-        hidden_size: int,
-        nheads: int,
-        head_dim: int,
-        d_state: int,
-        d_conv: int,
-        n_groups: int,
-        chunk_size: int,
-        seq_split: int = 1,
-    ) -> None:
-        super().__init__(name, scale_factor, seq_split=seq_split)
-        self._kernel_source = kernel_source
-        self._phase = phase
-        self._hidden_size = hidden_size
-        self._nheads = nheads
-        self._head_dim = head_dim
-        self._d_state = d_state
-        self._d_conv = d_conv
-        self._n_groups = n_groups
-        self._chunk_size = chunk_size
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -122,10 +97,8 @@ class Mamba2Kernel(Operation):
     # Op contract
     # ------------------------------------------------------------------
 
-    _ENGINE_QUERY_SHAPE = "module"
 
-
-class GDNKernel(Operation):
+class GDNKernel(_core.GDNKernel, OpShellKit):
     """
     Single Gated DeltaNet (GDN) kernel op for Qwen3.5 linear_attention layers.
 
@@ -144,30 +117,6 @@ class GDNKernel(Operation):
     """
 
     _data_cache: ClassVar[dict] = {}
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        kernel_source: str,
-        phase: str,
-        d_model: int,
-        num_k_heads: int,
-        head_k_dim: int,
-        num_v_heads: int,
-        head_v_dim: int,
-        d_conv: int,
-        seq_split: int = 1,
-    ) -> None:
-        super().__init__(name, scale_factor, seq_split=seq_split)
-        self._kernel_source = kernel_source
-        self._phase = phase
-        self._d_model = d_model
-        self._num_k_heads = num_k_heads
-        self._head_k_dim = head_k_dim
-        self._num_v_heads = num_v_heads
-        self._head_v_dim = head_v_dim
-        self._d_conv = d_conv
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -204,10 +153,8 @@ class GDNKernel(Operation):
     # Op contract
     # ------------------------------------------------------------------
 
-    _ENGINE_QUERY_SHAPE = "module"
 
-
-class KDAKernel(GDNKernel):
+class KDAKernel(_core.KDAKernel, OpShellKit):
     """
     Single KDA (Kimi Delta Attention) kernel op for Kimi-K3 linear_attention layers.
 
@@ -233,35 +180,11 @@ class KDAKernel(GDNKernel):
 
     _data_cache: ClassVar[dict] = {}
 
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        kernel_source: str,
-        phase: str,
-        d_model: int,
-        num_k_heads: int,
-        head_k_dim: int,
-        num_v_heads: int,
-        head_v_dim: int,
-        d_conv: int,
-        seq_split: int = 1,
-        draft_tokens: int = 0,
-    ) -> None:
-        super().__init__(
-            name,
-            scale_factor,
-            kernel_source,
-            phase,
-            d_model,
-            num_k_heads,
-            head_k_dim,
-            num_v_heads,
-            head_v_dim,
-            d_conv,
-            seq_split=seq_split,
-        )
-        self._draft_tokens = draft_tokens
+    @classmethod
+    def _cache_key(cls, database: PerfDatabase) -> tuple:
+        # Formerly inherited from the Python GDNKernel base; the Rust-backed
+        # shells are siblings, so the key lives here explicitly.
+        return _cache_key(database)
 
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
@@ -277,5 +200,3 @@ class KDAKernel(GDNKernel):
 
         if "_kda_data" not in database.__dict__:
             database._kda_data = cls._data_cache[key]
-
-    _ENGINE_QUERY_SHAPE = "module"

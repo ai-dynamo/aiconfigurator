@@ -36,10 +36,9 @@ from aiconfigurator_core.sdk.operations.moe_comm import MOE_A2A_BACKENDS, nodes_
 #: comm backend outside this set: HYBRIDMOE / MINIMAXM3 raise on it by design
 #: (their shared-expert wiring is not reproduced by the large-EP branch), and
 #: DEEPSEEKV4 owns its own MegaMoE path. QWEN3VL_MOE is deliberately excluded
-#: even though it rides MOEModel: ``Qwen3VLMoEModel.create`` never forwards
-#: ``backend_name``, so the builder would see an empty framework and pick the
-#: wrong large-EP shared-expert/reduce flavor. Wiring it is a documented
-#: follow-up.
+#: even though it rides MOEModel (``backend_name`` now threads through —
+#: MoEDispatch's comm flavor is a constructor field — but enabling the
+#: large-EP branch for it remains a documented follow-up).
 LARGE_EP_READY_FAMILIES = frozenset({"MOE", "DEEPSEEK", "DEEPSEEKV32", "KIMIK25"})
 
 
@@ -384,6 +383,7 @@ def _default_moe_block_ops(
                 True,
                 quant_mode=dispatch_quant_mode,
                 **dispatch_cp_kwargs,
+                backend=backend_name,
             ),
             ops.MoE(
                 f"{prefix}_moe",
@@ -410,6 +410,7 @@ def _default_moe_block_ops(
                 False,
                 quant_mode=dispatch_quant_mode,
                 **dispatch_cp_kwargs,
+                backend=backend_name,
             ),
         ]
     )

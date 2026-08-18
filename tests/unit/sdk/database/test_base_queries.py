@@ -41,17 +41,17 @@ def test_module_shape_phase_marker_inference(phase, expected):
     """The "module" shim shape must map BOTH phase vocabularies: the mamba/gdn
     kernels store context/generation (KDA adds verify — speculative decode,
     generation-like), FPMForwardOp stores prefill/decode (``fpm_forward._PHASES``)."""
-    from aiconfigurator_core.sdk.operations.base import Operation
+    from aiconfigurator_core.sdk.operations.base import PythonOperation
 
-    op = Operation("probe", 1.0)
+    op = PythonOperation("probe", 1.0)
     op._phase = phase
     assert op._engine_query_is_context({}) is expected
 
 
 def test_module_shape_phase_inference_hint_and_error():
-    from aiconfigurator_core.sdk.operations.base import Operation
+    from aiconfigurator_core.sdk.operations.base import PythonOperation
 
-    op = Operation("probe", 1.0)
+    op = PythonOperation("probe", 1.0)
     # explicit hint wins even with no marker
     assert op._engine_query_is_context({"is_context": False}) is False
     # no marker, no hint -> loud error naming the escape hatch
@@ -63,22 +63,23 @@ def test_fpm_forward_phase_tokens_stay_mapped():
     """Deliberate-edit tripwire: if ``fpm_forward._PHASES`` ever grows a token
     the base inference does not recognize, fail here instead of at query time."""
     from aiconfigurator_core.sdk.operations import fpm_forward
-    from aiconfigurator_core.sdk.operations.base import Operation
+    from aiconfigurator_core.sdk.operations.base import PythonOperation
 
     for phase in fpm_forward._PHASES:
-        op = Operation("probe", 1.0)
+        op = PythonOperation("probe", 1.0)
         op._phase = phase
         assert op._engine_query_is_context({}) in (True, False)
 
 
 def test_get_weights_survives_ops_without_an_opspec_variant():
     """The ``moe_backend='deepep_moe'`` MoEDispatch (still built by qwen35)
-    has no opspec variant — its serializer raises the AIC-1601 tombstone.
-    ``get_weights`` must stay the op's local 0.0 instead of crashing memory
-    estimation through the engine route (base ``Operation.get_weights``)."""
+    constructs as the RetiredDeepEp tombstone flavor — spec assembly and
+    query refuse it. ``get_weights`` must stay 0.0 (the Rust
+    ``Op::MoeDispatch`` weight arm is flavor-independent) instead of
+    crashing memory estimation."""
     from aiconfigurator_core.sdk.operations.moe import MoEDispatch
 
-    op = MoEDispatch("d", 1.0, 7168, 8, 256, 1, 16, 1, False, moe_backend="deepep_moe")
+    op = MoEDispatch("d", 1.0, 7168, 8, 256, 1, 16, 1, False, backend="sglang", moe_backend="deepep_moe")
     assert op.get_weights() == 0.0
 
 

@@ -268,6 +268,13 @@ impl PyOperation {
 
 #[pymethods]
 impl PyOperation {
+    /// Shim call-shape label (`None` on the base; each family overrides).
+    /// Read by `OpShellKit._engine_query` and the composite phase walker
+    /// (`overlap._infer_phase`), which sees Rust-wrapped children.
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: Option<&'static str> = None;
+
     /// Constant weight bytes for this op, computed by the engine
     /// (`Op::weight_bytes`, scale treatment included per family). The Rust
     /// value is cheap to recompute; the retired per-instance cache is gone.
@@ -297,6 +304,14 @@ impl PyOperation {
             .ok_or_else(|| PyTypeError::new_err("op family carries no scale_factor"))
     }
 
+    /// Default `_seq_split` read: the variant's CP shard factor where one
+    /// exists, else 1 (audit-gated). CP-aware family classes override this
+    /// getset pair with their own getter + setter.
+    #[getter(_seq_split)]
+    fn base_seq_split(&self) -> u32 {
+        self.inner.seq_split()
+    }
+
     /// The op's engine wire form (externally-tagged opspec JSON) — the same
     /// serde document `EngineHandle.evaluate_ops_json` consumes.
     fn _spec_json(&self) -> PyResult<String> {
@@ -322,6 +337,10 @@ impl PyGemm {
     #[classattr]
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = true;
+
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "tokens";
 
     #[new]
     #[pyo3(signature = (name, scale_factor, n, k, quant_mode, *, seq_split=1, scale_num_tokens=1, low_precision_input=false, below_grid_sol=false))]
@@ -424,6 +443,10 @@ impl PyEmbedding {
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = true;
 
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "tokens";
+
     #[new]
     #[pyo3(signature = (name, scale_factor, row_size, column_size, _empirical_bw_scaling_factor=0.3, *, seq_split=1))]
     fn new(
@@ -495,6 +518,10 @@ impl PyElementWise {
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = true;
 
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "tokens";
+
     #[new]
     #[pyo3(signature = (name, scale_factor, dim_in, dim_out, _empirical_bw_scaling_factor=0.8, *, seq_split=1, scale_num_tokens=1))]
     #[allow(clippy::too_many_arguments)]
@@ -565,6 +592,10 @@ impl PyCustomAllReduce {
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = true;
 
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "tokens";
+
     #[new]
     #[pyo3(signature = (name, scale_factor, h, tp_size, *, seq_split=1))]
     fn new(
@@ -628,6 +659,10 @@ impl PyNCCL {
     #[classattr]
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = true;
+
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "tokens";
 
     #[new]
     #[pyo3(signature = (name, scale_factor, nccl_op, num_elements_per_token, num_gpus, comm_quant_mode, *, seq_split=1))]
@@ -714,6 +749,10 @@ impl PyP2P {
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = true;
 
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "tokens";
+
     #[new]
     #[pyo3(signature = (name, scale_factor, h, pp_size, *, seq_split=1))]
     fn new(
@@ -781,6 +820,10 @@ impl PyDeepSeekV4MHCModule {
     #[classattr]
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = true;
+
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "tokens";
 
     #[new]
     #[pyo3(signature = (name, scale_factor, op, hidden_size, hc_mult, sinkhorn_iters, quant_mode, *, architecture, seq_split=1))]
@@ -891,6 +934,10 @@ impl PyContextAttention {
     #[classattr]
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
+
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "context";
 
     #[new]
     #[pyo3(signature = (name, scale_factor, n, n_kv, kvcache_quant_mode, fmha_quant_mode, window_size=0, head_size=128, use_qk_norm=false, cp_size=1))]
@@ -1008,6 +1055,10 @@ impl PyGenerationAttention {
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
 
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "generation";
+
     #[new]
     #[pyo3(signature = (name, scale_factor, n, n_kv, kv_cache_dtype, window_size=0, head_size=128, use_qk_norm=false))]
     #[allow(clippy::too_many_arguments)]
@@ -1093,6 +1144,10 @@ impl PyEncoderAttention {
     #[classattr]
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
+
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "context";
 
     #[new]
     #[pyo3(signature = (name, scale_factor, num_heads, head_size, fmha_quant_mode=None, partial_rotary_factor=0.0))]
@@ -1186,6 +1241,10 @@ impl PyContextMLA {
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
 
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "context";
+
     #[new]
     #[pyo3(signature = (name, scale_factor, num_heads, kvcache_quant_mode, fmha_quant_mode, cp_size=1))]
     fn new(
@@ -1269,6 +1328,10 @@ impl PyGenerationMLA {
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
 
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "generation";
+
     #[new]
     #[pyo3(signature = (name, scale_factor, num_heads, kv_cache_dtype))]
     fn new(
@@ -1327,6 +1390,10 @@ impl PyMLAModule {
     #[classattr]
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
+
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "module";
 
     #[new]
     #[pyo3(signature = (name, scale_factor, is_context, num_heads, kvcache_quant_mode, fmha_quant_mode, gemm_quant_mode, native_num_heads=None))]
@@ -1444,6 +1511,10 @@ impl PyMLABmm {
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
 
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "generation";
+
     #[new]
     #[pyo3(signature = (name, scale_factor, num_heads, quant_mode, if_pre=true))]
     fn new(
@@ -1508,6 +1579,10 @@ impl PyMoE {
     #[classattr]
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = true;
+
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "tokens";
 
     #[new]
     #[pyo3(signature = (name, scale_factor, hidden_size, inter_size, topk, num_experts, moe_tp_size, moe_ep_size, quant_mode, workload_distribution, attention_dp_size, is_context=true, is_gated=true, *, moe_backend=None, enable_eplb=false, seq_split=1))]
@@ -1682,6 +1757,10 @@ impl PyMoEDispatch {
     #[classattr]
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
+
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "tokens";
 
     #[new]
     #[pyo3(signature = (name, scale_factor, hidden_size, topk, num_experts, moe_tp_size, moe_ep_size, attention_dp_size, pre_dispatch, _enable_fp4_all2all=true, *, backend, sms=12, moe_backend=None, is_context=true, scale_num_tokens=1, quant_mode=None, _reduce_results=true, attn_cp_size=1, attn_ar_modeled=false))]
@@ -1914,6 +1993,10 @@ impl PyMoEAllToAll {
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
 
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "tokens";
+
     #[new]
     #[pyo3(signature = (name, scale_factor, *, phase, comm_backend, hidden_size, topk, num_experts, moe_ep_size, node_num, comm_dtype="default", sms=0, attention_tp_size=1))]
     #[allow(clippy::too_many_arguments)]
@@ -2039,6 +2122,10 @@ impl PyMoEExpertCompute {
     #[classattr]
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
+
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "tokens";
 
     #[new]
     #[pyo3(signature = (name, scale_factor, *, hidden_size, inter_size, topk, num_experts, moe_ep_size, quant_mode, workload_distribution, attention_dp_size, inference_phase, num_slots=None, kernel_source=None, is_gated=true, enable_eplb=false))]
@@ -2189,6 +2276,10 @@ impl PyDeepSeekV4MegaMoEModule {
     #[classattr]
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
+
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "tokens";
 
     #[new]
     #[pyo3(signature = (name, scale_factor, hidden_size, inter_size, topk, num_experts, moe_tp_size, moe_ep_size, quant_mode, workload_distribution, is_context=true, source_policy="random", pre_dispatch="sglang_jit", num_fused_shared_experts=0, kernel_source="deepgemm_megamoe", kernel_dtype="fp8_fp4"))]
@@ -2357,6 +2448,10 @@ impl PyMamba2Kernel {
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
 
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "module";
+
     #[new]
     #[pyo3(signature = (name, scale_factor, kernel_source, phase, hidden_size, nheads, head_dim, d_state, d_conv, n_groups, chunk_size, seq_split=1))]
     #[allow(clippy::too_many_arguments)]
@@ -2475,6 +2570,10 @@ impl PyGDNKernel {
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
 
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "module";
+
     #[new]
     #[pyo3(signature = (name, scale_factor, kernel_source, phase, d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv, seq_split=1))]
     #[allow(clippy::too_many_arguments)]
@@ -2587,6 +2686,10 @@ impl PyKDAKernel {
     #[classattr]
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
+
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "module";
 
     #[new]
     #[pyo3(signature = (name, scale_factor, kernel_source, phase, d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv, seq_split=1, draft_tokens=0))]
@@ -2728,6 +2831,10 @@ impl PyWideEPContextMLA {
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
 
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "context";
+
     #[new]
     #[pyo3(signature = (name, scale_factor, tp_size, kvcache_quant_mode, fmha_quant_mode, attn_backend="flashinfer", cp_size=1))]
     #[allow(clippy::too_many_arguments)]
@@ -2825,6 +2932,10 @@ impl PyWideEPGenerationMLA {
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
 
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "generation";
+
     #[new]
     #[pyo3(signature = (name, scale_factor, tp_size, kvcache_quant_mode, fmha_quant_mode, attn_backend="flashinfer"))]
     fn new(
@@ -2921,6 +3032,11 @@ macro_rules! msa_class {
             #[classattr]
             #[allow(non_upper_case_globals)]
             const _CP_AWARE: bool = false;
+
+            #[classattr]
+            #[allow(non_upper_case_globals)]
+            const _ENGINE_QUERY_SHAPE: &'static str =
+                if $is_context { "context" } else { "generation" };
 
             #[new]
             #[pyo3(signature = (name, scale_factor, num_heads, num_kv_heads, hidden_size, head_dim, v_head_dim, index_n_heads, index_head_dim, index_topk, block_size, kvcache_quant_mode, fmha_quant_mode, gemm_quant_mode, dsa_architecture="GlmMoeDsaForCausalLM", dsa_scale_k=1.0))]
@@ -3023,6 +3139,62 @@ macro_rules! msa_class {
                     &enum_token(&slf.as_super().msa()?.gemm_quant_mode),
                 )
             }
+
+            #[getter(_num_kv_heads)]
+            fn num_kv_heads(slf: PyRef<'_, Self>) -> PyResult<u32> {
+                Ok(slf.as_super().msa()?.num_kv_heads)
+            }
+
+            #[getter(_head_dim)]
+            fn head_dim(slf: PyRef<'_, Self>) -> PyResult<u32> {
+                Ok(slf.as_super().msa()?.head_dim)
+            }
+
+            #[getter(_v_head_dim)]
+            fn v_head_dim(slf: PyRef<'_, Self>) -> PyResult<u32> {
+                Ok(slf.as_super().msa()?.v_head_dim)
+            }
+
+            #[getter(_index_n_heads)]
+            fn index_n_heads(slf: PyRef<'_, Self>) -> PyResult<u32> {
+                Ok(slf.as_super().msa()?.index_n_heads)
+            }
+
+            #[getter(_index_head_dim)]
+            fn index_head_dim(slf: PyRef<'_, Self>) -> PyResult<u32> {
+                Ok(slf.as_super().msa()?.index_head_dim)
+            }
+
+            #[getter(_block_size)]
+            fn block_size(slf: PyRef<'_, Self>) -> PyResult<u32> {
+                Ok(slf.as_super().msa()?.block_size)
+            }
+
+            #[getter(_kvcache_quant_mode)]
+            fn kvcache_quant_mode<'py>(
+                slf: PyRef<'py, Self>,
+                py: Python<'py>,
+            ) -> PyResult<Bound<'py, PyAny>> {
+                py_enum_member(py, "KVCacheQuantMode", &enum_token(&slf.as_super().msa()?.kv_cache_dtype))
+            }
+
+            #[getter(_fmha_quant_mode)]
+            fn fmha_quant_mode<'py>(
+                slf: PyRef<'py, Self>,
+                py: Python<'py>,
+            ) -> PyResult<Bound<'py, PyAny>> {
+                py_enum_member(py, "FMHAQuantMode", &enum_token(&slf.as_super().msa()?.fmha_quant_mode))
+            }
+
+            #[getter(_dsa_architecture)]
+            fn dsa_architecture(slf: PyRef<'_, Self>) -> PyResult<String> {
+                Ok(slf.as_super().msa()?.dsa_architecture.clone())
+            }
+
+            #[getter(_dsa_scale_k)]
+            fn dsa_scale_k(slf: PyRef<'_, Self>) -> PyResult<f64> {
+                Ok(slf.as_super().msa()?.dsa_scale_k)
+            }
         }
     };
 }
@@ -3119,6 +3291,10 @@ impl PyContextDSAModule {
     #[classattr]
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
+
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "context";
 
     #[new]
     #[pyo3(signature = (name, scale_factor, num_heads, kvcache_quant_mode, fmha_quant_mode, gemm_quant_mode, architecture="DeepseekV32ForCausalLM", cp_size=1, index_topk_freq=1, dsa_full_layer_fraction=None, attn_projection_quant_modes=None))]
@@ -3245,6 +3421,10 @@ impl PyGenerationDSAModule {
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = false;
 
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "generation";
+
     #[new]
     #[pyo3(signature = (name, scale_factor, num_heads, kv_cache_dtype, gemm_quant_mode, architecture="DeepseekV32ForCausalLM", index_topk_freq=1, dsa_full_layer_fraction=None, attn_projection_quant_modes=None))]
     #[allow(clippy::too_many_arguments)]
@@ -3369,6 +3549,11 @@ macro_rules! dsv4_class {
             #[classattr]
             #[allow(non_upper_case_globals)]
             const _CP_AWARE: bool = false;
+
+            #[classattr]
+            #[allow(non_upper_case_globals)]
+            const _ENGINE_QUERY_SHAPE: &'static str =
+                if $is_context { "context" } else { "generation" };
 
             #[new]
             #[pyo3(signature = (name, scale_factor, num_heads, native_heads, tp_size, hidden_size, q_lora_rank, o_lora_rank, head_dim, rope_head_dim, index_n_heads, index_head_dim, index_topk, window_size, compress_ratio, o_groups, kvcache_quant_mode, fmha_quant_mode, gemm_quant_mode, *, architecture, cp_size=1))]
@@ -3554,6 +3739,36 @@ macro_rules! dsv4_class {
                 Ok(slf.as_super().dsv4()?.cp_size)
             }
 
+            #[getter(_head_dim)]
+            fn head_dim(slf: PyRef<'_, Self>) -> PyResult<u32> {
+                Ok(slf.as_super().dsv4()?.head_dim)
+            }
+
+            #[getter(_rope_head_dim)]
+            fn rope_head_dim(slf: PyRef<'_, Self>) -> PyResult<u32> {
+                Ok(slf.as_super().dsv4()?.rope_head_dim)
+            }
+
+            #[getter(_q_lora_rank)]
+            fn q_lora_rank(slf: PyRef<'_, Self>) -> PyResult<u32> {
+                Ok(slf.as_super().dsv4()?.q_lora_rank)
+            }
+
+            #[getter(_o_lora_rank)]
+            fn o_lora_rank(slf: PyRef<'_, Self>) -> PyResult<u32> {
+                Ok(slf.as_super().dsv4()?.o_lora_rank)
+            }
+
+            #[getter(_index_n_heads)]
+            fn index_n_heads(slf: PyRef<'_, Self>) -> PyResult<u32> {
+                Ok(slf.as_super().dsv4()?.index_n_heads)
+            }
+
+            #[getter(_index_head_dim)]
+            fn index_head_dim(slf: PyRef<'_, Self>) -> PyResult<u32> {
+                Ok(slf.as_super().dsv4()?.index_head_dim)
+            }
+
             #[setter(_cp_size)]
             fn set_cp_size(mut slf: PyRefMut<'_, Self>, value: u32) -> PyResult<()> {
                 slf.as_super().dsv4_mut()?.cp_size = value;
@@ -3629,6 +3844,10 @@ impl PyOverlapOp {
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = true;
 
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "module";
+
     #[new]
     #[pyo3(signature = (name, group_a, group_b, *, seq_split=1))]
     fn new(
@@ -3682,6 +3901,10 @@ impl PyFallbackOp {
     #[classattr]
     #[allow(non_upper_case_globals)]
     const _CP_AWARE: bool = true;
+
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const _ENGINE_QUERY_SHAPE: &'static str = "module";
 
     #[new]
     #[pyo3(signature = (name, primary, fallback, *, seq_split=1))]

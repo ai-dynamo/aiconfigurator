@@ -100,15 +100,12 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "attention.py": frozenset(
         {
-            "ContextAttention.__init__",
             "ContextAttention._cache_key",
             "ContextAttention.clear_cache",
             "ContextAttention.load_data",
-            "EncoderAttention.__init__",
             "EncoderAttention._cache_key",
             "EncoderAttention.clear_cache",
             "EncoderAttention.load_data",
-            "GenerationAttention.__init__",
             "GenerationAttention._cache_key",
             "GenerationAttention.clear_cache",
             "GenerationAttention.load_data",
@@ -117,15 +114,15 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "base.py": frozenset(
         {
-            "Operation.__init__",
-            "Operation._engine_query",
-            "Operation._engine_query_is_context",
-            "Operation._engine_query_plan",
-            "Operation._record_load",
-            "Operation.clear_cache",
-            "Operation.get_weights",
-            "Operation.load_data",
-            "Operation.supported_quant_modes",
+            "OpShellKit._engine_query",
+            "OpShellKit._engine_query_is_context",
+            "OpShellKit._engine_query_plan",
+            "OpShellKit._record_load",
+            "OpShellKit.clear_cache",
+            "OpShellKit.load_data",
+            "OpShellKit.supported_quant_modes",
+            "PythonOperation.__init__",
+            "PythonOperation.get_weights",
             "_all_operation_subclasses",
             "_read_filtered_rows",
             "_read_perf_rows",
@@ -139,25 +136,20 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "communication.py": frozenset(
         {
-            "CustomAllReduce.__init__",
             "CustomAllReduce._cache_key",
             "CustomAllReduce.clear_cache",
             "CustomAllReduce.load_data",
-            "NCCL.__init__",
             "NCCL._cache_key",
             "NCCL.clear_cache",
             "NCCL.load_data",
-            "P2P.__init__",
             "_cache_key",
         }
     ),
     "dsa.py": frozenset(
         {
-            "ContextDSAModule.__init__",
             "ContextDSAModule._cache_key",
             "ContextDSAModule.clear_cache",
             "ContextDSAModule.load_data",
-            "GenerationDSAModule.__init__",
             "GenerationDSAModule._cache_key",
             "GenerationDSAModule.clear_cache",
             "GenerationDSAModule.load_data",
@@ -172,36 +164,23 @@ OPERATIONS_DEF_INVENTORY = {
             "ContextDeepSeekV4AttentionModule.load_data",
             "ContextDeepSeekV4AttentionModule.load_data._load_sparse",
             "ContextDeepSeekV4AttentionModule.load_data._primary",
-            "DeepSeekV4MHCModule.__init__",
             "DeepSeekV4MHCModule._cache_key",
             "DeepSeekV4MHCModule.clear_cache",
             "DeepSeekV4MHCModule.load_data",
-            "DeepSeekV4MegaMoEModule.__init__",
             "DeepSeekV4MegaMoEModule._cache_key",
-            "DeepSeekV4MegaMoEModule._engine_query_plan",
-            "DeepSeekV4MegaMoEModule._normalize_distribution",
             "DeepSeekV4MegaMoEModule.clear_cache",
             "DeepSeekV4MegaMoEModule.load_data",
             "GenerationDeepSeekV4AttentionModule._cache_key",
             "GenerationDeepSeekV4AttentionModule.clear_cache",
             "GenerationDeepSeekV4AttentionModule.load_data",
-            "_BaseDeepSeekV4AttentionModule.__init__",
             "_cache_key",
             "load_dsv4_sparse_op_data",
             "load_dsv4_sparse_op_data._coerce",
             "load_dsv4_sparse_op_data._is_bad_key",
         }
     ),
-    "elementwise.py": frozenset(
-        {
-            "ElementWise.__init__",
-        }
-    ),
-    "embedding.py": frozenset(
-        {
-            "Embedding.__init__",
-        }
-    ),
+    "elementwise.py": frozenset(),
+    "embedding.py": frozenset(),
     "fpm_forward.py": frozenset(
         {
             "FPMForwardOp.__init__",
@@ -212,9 +191,7 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "gemm.py": frozenset(
         {
-            "GEMM.__init__",
             "GEMM._cache_key",
-            "GEMM._engine_query_plan",
             "GEMM.clear_cache",
             "GEMM.load_data",
             "GEMM.supported_quant_modes",
@@ -223,13 +200,11 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "mamba.py": frozenset(
         {
-            "GDNKernel.__init__",
             "GDNKernel._cache_key",
             "GDNKernel.clear_cache",
             "GDNKernel.load_data",
-            "KDAKernel.__init__",
+            "KDAKernel._cache_key",
             "KDAKernel.load_data",
-            "Mamba2Kernel.__init__",
             "Mamba2Kernel._cache_key",
             "Mamba2Kernel.clear_cache",
             "Mamba2Kernel.load_data",
@@ -238,28 +213,22 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "mla.py": frozenset(
         {
-            "ContextMLA.__init__",
             "ContextMLA._cache_key",
             "ContextMLA.clear_cache",
             "ContextMLA.load_data",
-            "GenerationMLA.__init__",
             "GenerationMLA._cache_key",
             "GenerationMLA.clear_cache",
             "GenerationMLA.load_data",
-            "MLABmm.__init__",
             "MLABmm._cache_key",
             "MLABmm._engine_query_plan",
             "MLABmm.clear_cache",
             "MLABmm.load_data",
-            "MLAModule.__init__",
             "MLAModule._cache_key",
             "MLAModule.clear_cache",
             "MLAModule.load_data",
-            "WideEPContextMLA.__init__",
             "WideEPContextMLA._cache_key",
             "WideEPContextMLA.clear_cache",
             "WideEPContextMLA.load_data",
-            "WideEPGenerationMLA.__init__",
             "WideEPGenerationMLA._cache_key",
             "WideEPGenerationMLA.clear_cache",
             "WideEPGenerationMLA.load_data",
@@ -268,31 +237,16 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "moe.py": frozenset(
         {
-            "MoE.__init__",
             "MoE._cache_key",
-            "MoE._engine_query_plan",
+            "MoE._seq_split",
+            "MoE._seq_split.setter",
             "MoE.clear_cache",
             "MoE.load_data",
             "MoEDispatch.__init__",
             "MoEDispatch._cache_key",
+            "MoEDispatch._quant_mode",
             "MoEDispatch.clear_cache",
-            "MoEDispatch.get_weights",
             "MoEDispatch.load_data",
-            "TrtLLMWideEPMoE.__init__",
-            "TrtLLMWideEPMoE._cache_key",
-            "TrtLLMWideEPMoE._engine_query_plan",
-            "TrtLLMWideEPMoE._select_kernel",
-            "TrtLLMWideEPMoE.clear_cache",
-            "TrtLLMWideEPMoE.get_weights",
-            "TrtLLMWideEPMoE.load_data",
-            "TrtLLMWideEPMoEDispatch.__init__",
-            "TrtLLMWideEPMoEDispatch._cache_key",
-            "TrtLLMWideEPMoEDispatch._engine_query_plan",
-            "TrtLLMWideEPMoEDispatch._normalize_quant_mode_for_table",
-            "TrtLLMWideEPMoEDispatch._select_alltoall_kernel",
-            "TrtLLMWideEPMoEDispatch.clear_cache",
-            "TrtLLMWideEPMoEDispatch.get_weights",
-            "TrtLLMWideEPMoEDispatch.load_data",
             "_cache_key",
             "xprofile_util_level_known",
         }
@@ -306,8 +260,6 @@ OPERATIONS_DEF_INVENTORY = {
             "MoECommBackendSpec.feasible",
             "MoEExpertCompute.__init__",
             "MoEExpertCompute._cache_key",
-            "MoEExpertCompute._engine_query_plan",
-            "MoEExpertCompute._resolve_kernel_source",
             "MoEExpertCompute.clear_cache",
             "MoEExpertCompute.load_data",
             "_cache_key",
@@ -316,28 +268,17 @@ OPERATIONS_DEF_INVENTORY = {
             "nodes_for",
         }
     ),
-    "msa.py": frozenset(
-        {
-            "_BaseMSAModule.__init__",
-            "_BaseMSAModule.load_data",
-        }
-    ),
+    "msa.py": frozenset(),
     "overlap.py": frozenset(
         {
-            "FallbackOp.__init__",
             "FallbackOp._engine_query_is_context",
             "FallbackOp._engine_query_plan",
-            # Composite weight recursion restored (review round 2): the base
-            # engine route would serialize the WHOLE composite and crash on a
-            # weight-shielded child with no opspec variant (tombstoned
-            # MoEDispatch deepep flavor). These recurse through each child's
-            # own get_weights — no performance math, values identical to
-            # Op::weight_bytes for convertible children.
-            "FallbackOp.get_weights",
-            "OverlapOp.__init__",
+            "FallbackOp._seq_split",
+            "FallbackOp._seq_split.setter",
             "OverlapOp._engine_query_is_context",
             "OverlapOp._engine_query_plan",
-            "OverlapOp.get_weights",
+            "OverlapOp._seq_split",
+            "OverlapOp._seq_split.setter",
             "_has_leaves",
             "_infer_phase",
         }
@@ -492,13 +433,22 @@ def test_no_perf_interp_references_in_operations():
 
 def _file_def_names(source_text: str) -> list[str]:
     """Every def at its qualified lexical path, in occurrence order (a list,
-    not a set, so duplicate qualified redefinitions surface as duplicates)."""
+    not a set, so duplicate qualified redefinitions surface as duplicates).
+    Property setter/deleter re-defs share the property's name by construction;
+    they are qualified with the decorator role so a getter/setter pair is not
+    flagged as an ambiguous redefinition."""
     out: list[str] = []
+
+    def role_suffix(node) -> str:
+        for dec in getattr(node, "decorator_list", []):
+            if isinstance(dec, ast.Attribute) and dec.attr in ("setter", "deleter"):
+                return f".{dec.attr}"
+        return ""
 
     def walk(node, prefix: str) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                qualified = f"{prefix}{child.name}"
+                qualified = f"{prefix}{child.name}{role_suffix(child)}"
                 out.append(qualified)
                 walk(child, qualified + ".")
             elif isinstance(child, ast.ClassDef):

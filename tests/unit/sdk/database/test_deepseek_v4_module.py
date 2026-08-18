@@ -106,6 +106,7 @@ def test_mhc_weight_memory_uses_quant_mode():
         4,
         20,
         common.GEMMQuantMode.bfloat16,
+        architecture="DeepseekV4ProForCausalLM",
     )
     fp8_op = ops.DeepSeekV4MHCModule(
         "mhc",
@@ -115,6 +116,7 @@ def test_mhc_weight_memory_uses_quant_mode():
         4,
         20,
         common.GEMMQuantMode.fp8_block,
+        architecture="DeepseekV4ProForCausalLM",
     )
     assert fp8_op.get_weights() == pytest.approx(bf16_op.get_weights() / 2)
 

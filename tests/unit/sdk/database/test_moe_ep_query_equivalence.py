@@ -302,11 +302,12 @@ def test_l1_sglang_context_eplb_token_correction_equivalence():
     not os.path.exists(SGLANG_CONTEXT_PATH),
     reason="shipped h200 sglang 0.5.6.post2 wideep parquets not present",
 )
-def test_moe_expert_compute_per_call_quant_mode_override_reaches_the_walk():
-    # Legacy expert-compute ops honor kwargs.get("quant_mode"); the op-level
-    # override must reach both kernel resolution and the table walk. Construct
-    # with an uncollected ctor mode and query with the collected one: only the
-    # override can make the walk succeed.
+def test_moe_expert_compute_quant_mode_is_a_constructor_fact():
+    # The per-call ``quant_mode`` override retired with the query shims
+    # (deprecation cleanup): quant is a CONSTRUCTOR fact that reaches both
+    # kernel resolution and the table walk. An uncollected ctor mode must
+    # MISS loudly; the collected mode (a fresh twin, the pattern production
+    # uses) must hit the same value as the direct table recompute.
     from aiconfigurator_core.sdk import common
     from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
     from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
@@ -314,26 +315,29 @@ def test_moe_expert_compute_per_call_quant_mode_override_reaches_the_walk():
     db = get_database("h200_sxm", "sglang", "0.5.6.post2")
     legacy_table = fetch_table_view(db, "_wideep_context_moe_data")
     (quant, dist, topk, experts, hidden, inter, tp, ep), tokens = next(_iter_slices(legacy_table, 8))
-    op = MoEExpertCompute(
-        "review_probe",
-        1.0,
-        hidden_size=hidden,
-        inter_size=inter,
-        topk=topk,
-        num_experts=experts,
-        moe_ep_size=ep,
-        quant_mode=common.MoEQuantMode.nvfp4,  # uncollected on this table
-        workload_distribution=dist,
-        attention_dp_size=1,
-        inference_phase="context",
-    )
+
+    def _probe(quant_mode):
+        return MoEExpertCompute(
+            "review_probe",
+            1.0,
+            hidden_size=hidden,
+            inter_size=inter,
+            topk=topk,
+            num_experts=experts,
+            moe_ep_size=ep,
+            quant_mode=quant_mode,
+            workload_distribution=dist,
+            attention_dp_size=1,
+            inference_phase="context",
+        )
+
     with pytest.raises(PerfDataNotAvailableError):
-        op._engine_query(db, x=min(tokens))  # ctor mode alone must miss
-    overridden = op._engine_query(db, x=min(tokens), quant_mode=quant)  # override hits
+        _probe(common.MoEQuantMode.nvfp4)._engine_query(db, x=min(tokens))  # uncollected mode must miss
+    hit = _probe(quant)._engine_query(db, x=min(tokens))
     direct = _query_ep(
         db, "deepep_moe", quant, dist, "context", topk, experts, experts, hidden, inter, tp, ep, min(tokens)
     )
-    assert float(overridden) == pytest.approx(float(direct), rel=1e-12)
+    assert float(hit) == pytest.approx(float(direct), rel=1e-12)
 
 
 if __name__ == "__main__":

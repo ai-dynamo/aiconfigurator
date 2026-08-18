@@ -19,6 +19,8 @@ through the migration window).
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from aiconfigurator.sdk import common
@@ -61,8 +63,13 @@ class _EngineStub:
             )
             volume = op._num_elements_per_token
         elif isinstance(op, ElementWise):
-            self.mem_calls.append(int(op._dim_in))
-            volume = (op._dim_in + op._dim_out) * 2
+            # AFD builds the mem twin as ElementWise(dim_in=ceil(bytes/2),
+            # dim_out=0); the Rust op folds dims to bytes_per_token =
+            # (dim_in + dim_out) * 2, so dim_in recovers exactly.
+            bytes_per_token = json.loads(op._spec_json())["Elementwise"]["bytes_per_token"]
+            dim_in = int(bytes_per_token) // 2
+            self.mem_calls.append(dim_in)
+            volume = bytes_per_token
         else:  # pragma: no cover — a new leg must extend this stub deliberately
             raise TypeError(f"unexpected probe op {type(op).__name__}")
         return PerformanceResult(latency=float(volume) / 1.0e9, energy=0.0)
