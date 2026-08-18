@@ -56,6 +56,10 @@ jobs:
           python -m pip install uv
           uv sync --extra dev
       - name: Test Python package contracts
+        env:
+          # Replay all 7 baseline pins: the default 2-pin subset leaves the
+          # b60/oneccl/trtllm-wideep folds untested (~80s extra, data ships in-repo).
+          AIC_DATA_PLANE_BASELINE_FULL: '1'
         run: |
           uv run pytest -q \
             tests/cross_package/test_core_public_api.py \
@@ -98,6 +102,9 @@ jobs:
           uv pip check
           uv run python -c 'import sys, numpy; from packaging.version import Version; assert f"{sys.version_info.major}.{sys.version_info.minor}" == "${{ matrix.python-version }}"; assert Version("2.1") <= Version(numpy.__version__) < Version("3")'
       - name: Test Python package contracts
+        env:
+          # Replay all 7 baseline pins (see the rust-crate job for rationale).
+          AIC_DATA_PLANE_BASELINE_FULL: '1'
         run: |
           uv run pytest -q \
             tests/cross_package/test_core_public_api.py \
