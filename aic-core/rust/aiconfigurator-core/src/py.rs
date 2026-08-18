@@ -779,39 +779,6 @@ fn resolve_op_sources_report_json(
     serde_json::to_string(&report).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
-/// Assemble a compiled `EngineSpec` DIRECTLY from engine-backed op objects
-/// (the pyo3 op unification): `engine_config_json` is the `EngineConfig`
-/// dict; the op lists are sequences of `Operation` instances (Rust family
-/// classes or their Python shells). The engine stamps its OWN
-/// `ENGINE_SPEC_SCHEMA_VERSION` — the schema has a single owner now. A graph
-/// carrying a retired tombstone op (deepep_moe dispatch) is refused here,
-/// exactly where the retired Python `_to_opspec` used to raise.
-#[pyfunction]
-fn engine_spec_bincode_from_ops(
-    py: Python<'_>,
-    engine_config_json: &str,
-    context_ops: &Bound<'_, PyAny>,
-    generation_ops: &Bound<'_, PyAny>,
-) -> PyResult<Py<pyo3::types::PyBytes>> {
-    let engine: crate::EngineConfig = serde_json::from_str(engine_config_json)
-        .map_err(|e| PyValueError::new_err(format!("invalid EngineConfig json: {e}")))?;
-    let context_ops = crate::py_ops::ops_from_sequence(context_ops)?;
-    let generation_ops = crate::py_ops::ops_from_sequence(generation_ops)?;
-    crate::py_ops::reject_retired_ops(&context_ops)
-        .and_then(|()| crate::py_ops::reject_retired_ops(&generation_ops))
-        .map_err(PyValueError::new_err)?;
-    let spec = crate::engine::spec::EngineSpec {
-        schema_version: crate::ENGINE_SPEC_SCHEMA_VERSION,
-        engine,
-        context_ops,
-        generation_ops,
-    };
-    let bytes = spec
-        .to_bincode()
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(pyo3::types::PyBytes::new(py, &bytes).unbind())
-}
-
 /// The engine's spec schema version (single owner since the pyo3 op
 /// unification; Python reads it for diagnostics instead of declaring a twin).
 #[pyfunction]
@@ -821,8 +788,9 @@ fn engine_spec_schema_version() -> u32 {
 
 /// Serialize a sequence of engine-backed op objects to the externally-tagged
 /// OpSpec JSON array `AicEngine.evaluate_ops_json` consumes. Refuses retired
-/// tombstone ops (recursively) exactly like `engine_spec_bincode_from_ops`:
-/// every surface where ops leave Python as a spec applies the same gate.
+/// tombstone ops (recursively) — the single gate on the one surface where
+/// ops leave Python as a spec (the compile path assembles its spec JSON
+/// through this same array).
 #[pyfunction]
 fn ops_json_from_ops(ops: &Bound<'_, PyAny>) -> PyResult<String> {
     let ops = crate::py_ops::ops_from_sequence(ops)?;
@@ -1422,7 +1390,6 @@ fn _aiconfigurator_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(moe_quant_util_levels, m)?)?;
     m.add_function(wrap_pyfunction!(table_view_attributes, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_op_sources_report_json, m)?)?;
-    m.add_function(wrap_pyfunction!(engine_spec_bincode_from_ops, m)?)?;
     m.add_function(wrap_pyfunction!(ops_json_from_ops, m)?)?;
     m.add_function(wrap_pyfunction!(engine_spec_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(op_from_spec_json, m)?)?;
