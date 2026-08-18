@@ -252,7 +252,7 @@ def cli_default(
         generator_config: Path to a unified generator YAML config file.
         generator_dynamo_version: Override Dynamo version used by the generator.
         engine_step_backend: Engine-step backend; "rust" (the compiled engine,
-            default and only executor) or the deprecated no-op "python".
+            default and only executor) is the only accepted value.
         forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None keeps the default.
 
     Returns:
@@ -476,7 +476,7 @@ def cli_recommend(
         top_n: Number of top configurations to return per mode. Default is 5.
         save_dir: Directory to save results. If None, results are not saved.
         engine_step_backend: Engine-step backend; "rust" (the compiled engine,
-            default and only executor) or the deprecated no-op "python".
+            default and only executor) is the only accepted value.
         forward_model: Forward-pass modeling mode ("op_level" or "fpm").
             None keeps the default.
 
@@ -1091,7 +1091,7 @@ def cli_estimate(
             Controls how many KV blocks TRT-LLM pre-allocates per sequence. Defaults
             to ``isl + osl`` when ``None``.
         engine_step_backend: Engine-step backend; "rust" (the compiled engine,
-            default and only executor) or the deprecated no-op "python".
+            default and only executor) is the only accepted value.
         prefix: (common) Prefix cache length (subset of ``isl`` already cached).
             Applied to agg, disagg, and all static modes. Default 0.
         nextn: (common) MTP draft length, or ``"auto"`` to use the checkpoint's

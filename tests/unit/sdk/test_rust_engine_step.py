@@ -22,9 +22,6 @@ def test_should_use_rust_engine_step_supports_runtime_config_and_env(monkeypatch
 
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig())
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="rust"))
-    # The retired escape hatch is a deprecation no-op: the config value is
-    # ignored and the env's "rust" wins the re-resolution.
-    assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"))
 
 
 def test_engine_step_backend_defaults_to_rust(monkeypatch) -> None:
@@ -34,44 +31,24 @@ def test_engine_step_backend_defaults_to_rust(monkeypatch) -> None:
     database = _real_database()
 
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(), database)
-    assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
     # Unknown values fail closed instead of silently picking an engine.
     with pytest.raises(ValueError, match="engine_step_backend"):
         rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="auto"), database)
 
 
-def test_python_backend_value_warns_once_and_noops(monkeypatch, caplog) -> None:
-    """The one-release deprecation contract: ``"python"`` is accepted, warns
-    exactly once per process, and routes to the compiled engine anyway."""
+def test_python_backend_value_is_removed(monkeypatch) -> None:
+    """The deprecated ``"python"`` no-op completed its one-release window
+    (deprecation-cleanup PR): the value now fails closed like any other
+    unknown backend, from both the config and the environment."""
     monkeypatch.delenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", raising=False)
-    rust_engine_step._python_step_fallback_reset()
     database = _real_database()
 
-    with caplog.at_level("WARNING", logger="aiconfigurator_core.sdk.rust_engine_step"):
-        assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
-        assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
-    deprecations = [r for r in caplog.records if "deprecated" in r.message]
-    assert len(deprecations) == 1
-    # A no-op is not a python-step use: telemetry must not count it.
-    assert "explicit_python" not in rust_engine_step.python_step_fallback_counts()
-    # "No-op" means AS IF UNSET — the non-PerfDatabase delegation still
-    # applies (an early True would upgrade the retired escape hatch into an
-    # explicit-rust request and bypass the synthetic-database delegation).
-    assert not rust_engine_step.should_use_rust_engine_step(
-        RuntimeConfig(engine_step_backend="python"),
-        SimpleNamespace(system="mock", backend="vllm", version="1.0.0"),
-    )
+    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'python'"):
+        rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
 
-
-def test_invalid_env_behind_deprecated_python_config_is_named_in_the_error(monkeypatch) -> None:
-    """Config ``"python"`` re-resolves to the env; when THAT value is invalid,
-    the error must name the re-resolved value actually being rejected, not
-    the config's retired ``"python"``."""
-    monkeypatch.setenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", "auto")
-    rust_engine_step._python_step_fallback_reset()
-    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'auto'"):
-        rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), _real_database())
-
+    monkeypatch.setenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", "python")
+    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'python'"):
+        rust_engine_step.should_use_rust_engine_step(RuntimeConfig(), database)
 
 def _real_database():
     """A real ``PerfDatabase`` instance (loader bypassed): default routing
@@ -1324,17 +1301,11 @@ def test_large_ep_op_graph_compiles_natively(caplog):
         rust_generation = sum(generation_latency.values())
         assert rust_context > 0.0 and rust_generation > 0.0
 
-        # (4) Parity with the Python step on the same config at rel <= 0.01
-        # (the PR 2.5 bar; the per-op oracles hold 1e-9, so this graph-level
-        # comparison has plenty of headroom).
-        python_runtime_config = RuntimeConfig(
-            batch_size=1, beam_width=1, isl=1024, osl=32, engine_step_backend="python"
-        )
-        python_summary = backend.run_static(model, database, python_runtime_config, mode="static", stride=32)
-        python_context = sum(python_summary.get_context_latency_dict().values())
-        python_generation = sum(python_summary.get_generation_latency_dict().values())
-        assert rust_context == pytest.approx(python_context, rel=0.01)
-        assert rust_generation == pytest.approx(python_generation, rel=0.01)
+        # (Step 4 of the original test — "parity with the Python step" via
+        # engine_step_backend="python" — retired with the value: since the
+        # PR-3 no-op it had become a vacuous rust-vs-rust self-comparison,
+        # and the value itself is gone after the deprecation window. The
+        # per-op oracle parity for this graph lives in parity_tests/.)
     finally:
         rust_engine_step._engine_handle_cache_clear()
 

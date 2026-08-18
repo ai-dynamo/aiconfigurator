@@ -729,7 +729,10 @@ class TestBuildExperimentTaskConfigs:
                 "model_path": "Qwen/Qwen3-32B",
                 "system_name": "h200_sxm",
                 "total_gpus": 8,
-                "engine_step_backend": "python",
+                # Plumbing token, not a real backend: Task is mocked, so this
+                # only proves the per-exp yaml value survives the global
+                # override (the retired "python" value used to play this role).
+                "engine_step_backend": "exp-level-token",
             },
         }
 
@@ -742,9 +745,9 @@ class TestBuildExperimentTaskConfigs:
             yaml_data = call.args[0]
             esb = call.kwargs.get("engine_step_backend", yaml_data.get("engine_step_backend"))
             by_backend[esb] = yaml_data
-        assert set(by_backend) == {"rust", "python"}
+        assert set(by_backend) == {"rust", "exp-level-token"}
         assert by_backend["rust"]["model_path"] == "Qwen/Qwen3-32B"
-        assert by_backend["python"]["model_path"] == "Qwen/Qwen3-32B"
+        assert by_backend["exp-level-token"]["model_path"] == "Qwen/Qwen3-32B"
 
     @patch("aiconfigurator.cli.main.Task")
     def test_default_database_mode_is_passed_to_task_yaml(self, mock_task):

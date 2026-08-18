@@ -146,11 +146,11 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
     )
     common_parser.add_argument(
         "--engine-step-backend",
-        choices=["python", "rust"],
+        choices=["rust"],
         default=None,
         help="Engine-step latency backend. The compiled Rust engine is the only step "
-        "executor; 'python' is DEPRECATED and now a no-op (it warns once and runs on "
-        "the compiled engine anyway — accepted for one release cycle, then removed).",
+        "executor ('rust'); the deprecated 'python' no-op was removed after its "
+        "one-release window.",
     )
     common_parser.add_argument(
         "--forward-model",
@@ -1547,8 +1547,8 @@ def build_default_tasks(
         moe_backend: Explicit SGLang MoE backend override ('deepep_moe' is
             deprecated and ignored; 'megamoe' is a real kernel selection).
         engine_step_backend: Engine-step latency backend. The compiled Rust
-            engine is the only step executor; "python" is a deprecated no-op
-            (warns once, runs on the compiled engine anyway).
+            engine is the only step executor; "rust" is the only accepted
+            value (the deprecated "python" no-op was removed).
         forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None
             keeps the default. Both evaluate on the compiled engine ("fpm"
             through its native FpmForward operation).
