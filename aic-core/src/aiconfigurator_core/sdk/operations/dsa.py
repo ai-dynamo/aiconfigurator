@@ -28,11 +28,10 @@ revisits their home.
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 from typing import TYPE_CHECKING, ClassVar
 
 from aiconfigurator_core.sdk import common
-from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows
+from aiconfigurator_core.sdk.operations.base import Operation
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -44,34 +43,6 @@ logger = logging.getLogger(__name__)
 # SGLang DSA collectors record the EXECUTED kernel; dense ragged prefill is
 # selected by SHAPE (isl <= 2048) under either configured backend, so its
 # rows back both buckets.
-_DSA_KERNEL_SOURCE_BUCKETS = {
-    "sglang_dsa_indexer_trtllm": ("trtllm",),
-    "sglang_dsa_skip_indexer_trtllm": ("trtllm",),
-    "sglang_dsa_indexer_flashmla_sparse": ("flashmla_kv",),
-    "sglang_dsa_skip_indexer_flashmla_sparse": ("flashmla_kv",),
-    "sglang_dsa_dense_mha_trtllm_ragged": ("trtllm", "flashmla_kv"),
-}
-
-
-def _dsa_kernel_source_buckets(kernel_source: str, kv_dtype) -> tuple[str, ...]:
-    """Configured-backend bucket(s) a DSA perf row supports.
-
-    The trtllm/flashmla_kv split mirrors serving's FP8-KV sub-backend selector
-    (an FP8-KV rule: SM90 -> flashmla_kv, SM100+ -> trtllm; BF16 KV stays on
-    framework defaults). With a BF16 KV cache there is exactly ONE real
-    execution path per shape, so every bf16 row backs BOTH buckets — a bare
-    substring test split one measured b200 sweep across the two buckets and
-    left the default query bucket with nothing beyond 2048 tokens. FP8 rows
-    bucket by executed-kernel name; legacy (pre-0.5.14) names keep the old
-    substring rule.
-    """
-    if kv_dtype is common.KVCacheQuantMode.bfloat16:
-        return ("trtllm", "flashmla_kv")
-    buckets = _DSA_KERNEL_SOURCE_BUCKETS.get(kernel_source)
-    if buckets is not None:
-        return buckets
-    return ("trtllm",) if "trtllm" in kernel_source else ("flashmla_kv",)
-
 
 DSA_MODEL_DIMS: dict[str, dict] = {
     "DeepseekV32ForCausalLM": {
@@ -136,29 +107,6 @@ def _cache_key(database: PerfDatabase) -> tuple:
         database.backend,
         database.version,
         database.enable_shared_layer,
-    )
-
-
-def _format_dsa_unavailable_message(
-    phase: str,
-    error: Exception,
-    *,
-    b: int,
-    s: int,
-    num_heads: int,
-    architecture: str,
-    index_n_heads: int,
-    index_head_dim: int,
-    index_topk: int,
-    prefix: int | None = None,
-) -> str:
-    """Format the ``PerfDataNotAvailableError`` message body. Lifted verbatim
-    from ``PerfDatabase._format_dsa_unavailable_message``."""
-    prefix_part = "" if prefix is None else f", prefix={prefix}"
-    return (
-        f"{phase} DSA module perf data unavailable for candidate "
-        f"b={b}, s={s}{prefix_part}, num_heads={num_heads}, architecture={architecture}, "
-        f"index_n_heads={index_n_heads}, index_head_dim={index_head_dim}, index_topk={index_topk}: {error}"
     )
 
 
@@ -413,177 +361,3 @@ class GenerationDSAModule(Operation):
 # ─────────────────────────────────────────────────────────
 # CSV loaders (moved here from perf_database.py so each op family owns its data + parser)
 # ─────────────────────────────────────────────────────────
-
-
-def _read_dsa_row_sources(file_or_sources):
-    """Read rows while retaining priority-source boundaries.
-
-    DSA files historically used last-row-wins for duplicates within one file.
-    Shared-layer inputs add a second requirement: an earlier source (the active
-    stack) must outrank every later sibling source. ``_read_filtered_rows``
-    intentionally flattens sources, so DSA keeps the groups here and applies
-    those two rules independently.
-    """
-    if isinstance(file_or_sources, str):
-        rows = _read_filtered_rows(file_or_sources)
-        return None if rows is None else [rows]
-
-    row_sources = []
-    any_source_exists = False
-    for source in file_or_sources:
-        rows = _read_filtered_rows([source])
-        if rows is None:
-            continue
-        any_source_exists = True
-        row_sources.append(rows)
-    return row_sources if any_source_exists else None
-
-
-def load_context_dsa_module_data(dsa_file: str, op_kind: str = "full"):
-    """
-    Load context DSA data.
-
-    Dict structure:
-        data[fmha_quant_mode][kv_cache_quant_mode][gemm_quant_mode][architecture][dsa_backend][num_heads][prefix][s][b]
-
-    Quant modes are the outermost keys so that ``_enum_key_names`` can
-    directly extract supported FMHAQuantMode names (aligned with
-    ``_context_attention_data``).  ``architecture`` (e.g.
-    "DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM") selects the
-    model-specific structural dimensions from ``DSA_MODEL_DIMS``.
-    Legacy CSV rows without an ``architecture`` column default to
-    "DeepseekV32ForCausalLM".
-
-    Full and skip-indexer (GLM-5.2 reuse-layer) rows live in the SAME file,
-    distinguished by the ``op_name`` column (``dsa_context_module`` vs
-    ``dsa_context_module_skip_indexer``) — no extra column. ``op_kind`` selects
-    which to keep: ``"full"`` (op_name without ``skip_indexer``) or ``"skip"``.
-    """
-    row_sources = _read_dsa_row_sources(dsa_file)
-    if row_sources is None:
-        logger.debug(f"DSA context data file {dsa_file} not found.")
-        return None
-
-    def _nest():
-        return defaultdict(_nest)
-
-    dsa_data = _nest()
-
-    first_row = next((row for source_rows in row_sources for row in source_rows), None)
-    has_power = first_row is not None and "power" in first_row
-    seen_coordinates = set()
-
-    for source_rows in row_sources:
-        # Preserve legacy last-row-wins behavior within each source.
-        source_values = {}
-        for row in source_rows:
-            # full vs skip-indexer share one file, split by op_name.
-            if ("skip_indexer" in (row.get("op_name") or "")) != (op_kind == "skip"):
-                continue
-            num_heads = int(row["num_heads"])
-            b = int(row["batch_size"])
-            s = int(row["isl"])
-            latency = float(row["latency"])
-            power = float(row.get("power", 0.0)) if has_power else 0.0
-            energy = power * latency
-
-            arch = row.get("architecture", DEFAULT_DSA_ARCHITECTURE)
-            step = row.get("step")
-            step_missing = step is None or (isinstance(step, str) and step.strip() == "")
-            if arch == "GlmMoeDsaForCausalLM" and step_missing:
-                raise ValueError(
-                    "GLM-5 context DSA module data requires a non-empty step column for prefix/past_kv length"
-                )
-            prefix = 0 if step_missing else int(step)
-            gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
-            fmha_mode = common.FMHAQuantMode[row["mla_dtype"]]
-            kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
-
-            ks = row.get("kernel_source") or ""
-            for dsa_backend in _dsa_kernel_source_buckets(ks, kv_dtype):
-                coordinate = (fmha_mode, kv_dtype, gemm_mode, arch, dsa_backend, num_heads, prefix, s, b)
-                source_values[coordinate] = {
-                    "latency": latency,
-                    "power": power,
-                    "energy": energy,
-                }
-
-        # Sources are priority-ordered: active first, shared fallbacks later.
-        for coordinate, value in source_values.items():
-            if coordinate in seen_coordinates:
-                continue
-            seen_coordinates.add(coordinate)
-            fmha_mode, kv_dtype, gemm_mode, arch, dsa_backend, num_heads, prefix, s, b = coordinate
-            dsa_data[fmha_mode][kv_dtype][gemm_mode][arch][dsa_backend][num_heads][prefix][s][b] = value
-
-    return dsa_data
-
-
-def load_generation_dsa_module_data(dsa_file: str, op_kind: str = "full"):
-    """
-    Load generation DSA data.
-
-    Dict structure:
-        data[kv_cache_quant_mode][gemm_quant_mode][architecture][dsa_backend][num_heads][b][s]
-
-    Quant modes are the outermost keys so that ``_enum_key_names`` can
-    directly extract supported KVCacheQuantMode names (aligned with
-    ``_generation_attention_data``).  ``architecture`` selects the
-    model-specific structural dimensions from ``DSA_MODEL_DIMS``.
-    Legacy CSV rows without an ``architecture`` column default to
-    "DeepseekV32ForCausalLM".
-
-    Full and skip-indexer rows share one file, split by the ``op_name`` column;
-    ``op_kind`` ("full"/"skip") selects which to keep.
-    """
-    row_sources = _read_dsa_row_sources(dsa_file)
-    if row_sources is None:
-        logger.debug(f"DSA generation data file {dsa_file} not found.")
-        return None
-
-    def _nest():
-        return defaultdict(_nest)
-
-    dsa_data = _nest()
-
-    first_row = next((row for source_rows in row_sources for row in source_rows), None)
-    has_power = first_row is not None and "power" in first_row
-    seen_coordinates = set()
-
-    for source_rows in row_sources:
-        # Preserve legacy last-row-wins behavior within each source.
-        source_values = {}
-        for row in source_rows:
-            if ("skip_indexer" in (row.get("op_name") or "")) != (op_kind == "skip"):
-                continue
-            num_heads = int(row["num_heads"])
-            b = int(row["batch_size"])
-            s = int(row["isl"]) + int(row["step"])
-            latency = float(row["latency"])
-            power = float(row.get("power", 0.0)) if has_power else 0.0
-            energy = power * latency
-
-            arch = row.get("architecture", DEFAULT_DSA_ARCHITECTURE)
-            gemm_mode = common.GEMMQuantMode[row["gemm_type"]]
-            kv_dtype = common.KVCacheQuantMode[row["kv_cache_dtype"]]
-
-            ks = row.get("kernel_source") or ""
-            # Total decode length is the canonical coordinate even if two rows
-            # decompose it into different isl/step pairs.
-            for dsa_backend in _dsa_kernel_source_buckets(ks, kv_dtype):
-                coordinate = (kv_dtype, gemm_mode, arch, dsa_backend, num_heads, b, s)
-                source_values[coordinate] = {
-                    "latency": latency,
-                    "power": power,
-                    "energy": energy,
-                }
-
-        # Sources are priority-ordered: active first, shared fallbacks later.
-        for coordinate, value in source_values.items():
-            if coordinate in seen_coordinates:
-                continue
-            seen_coordinates.add(coordinate)
-            kv_dtype, gemm_mode, arch, dsa_backend, num_heads, b, s = coordinate
-            dsa_data[kv_dtype][gemm_mode][arch][dsa_backend][num_heads][b][s] = value
-
-    return dsa_data

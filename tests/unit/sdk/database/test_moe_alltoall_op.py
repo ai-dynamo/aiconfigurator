@@ -24,7 +24,6 @@ import pytest
 
 from aiconfigurator_core.sdk.operations import MoEAllToAll
 from aiconfigurator_core.sdk.operations.base import resolve_op_data_path
-from aiconfigurator_core.sdk.operations.moe import load_wideep_deepep_normal_data
 
 pytestmark = pytest.mark.unit
 
@@ -210,13 +209,15 @@ def test_attention_tp_default_noop_on_shipped_l1_case():
     ``attention_tp_size`` the op must be byte-identical to the direct
     ``query_moe_a2a`` lookup and reproduce the legacy DeepEP-normal query
     (dispatch + combine) at the L1 tolerance."""
+    from aiconfigurator_core.sdk import engine
+    from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
     from aiconfigurator_core.sdk.perf_database import get_database
 
     db = get_database("h200_sxm", "sglang", "0.5.6.post2")
     assert db is not None
 
-    # First slice of the legacy table, deterministically (min at each level).
-    legacy_table = load_wideep_deepep_normal_data(DEEPEP_NORMAL_PATH)
+    # First slice of the legacy table (via the engine view), deterministically.
+    legacy_table = fetch_table_view(db, "_wideep_deepep_normal_data")
     assert legacy_table
     node = min(legacy_table)
     hidden = min(legacy_table[node])
@@ -228,21 +229,27 @@ def test_attention_tp_default_noop_on_shipped_l1_case():
 
     total = 0.0
     for phase in ("dispatch", "combine"):
-        op = MoEAllToAll(
-            f"tp_noop_{phase}",
-            1.0,
-            phase=phase,
-            comm_backend="deepep_ht",
-            hidden_size=hidden,
-            topk=topk,
-            num_experts=experts,
-            moe_ep_size=ep,
-            node_num=node,
-            sms=sms,
+
+        def _op(attention_tp_size: int = 1) -> MoEAllToAll:
+            return MoEAllToAll(
+                f"tp_noop_{phase}",
+                1.0,
+                phase=phase,
+                comm_backend="deepep_ht",
+                hidden_size=hidden,
+                topk=topk,
+                num_experts=experts,
+                moe_ep_size=ep,
+                node_num=node,
+                sms=sms,
+                attention_tp_size=attention_tp_size,
+            )
+
+        op_value = float(engine._evaluate_single_op(db, _op(), is_context=True, batch_size=1, s=1, x=int(tok)))
+        explicit = float(
+            engine._evaluate_single_op(db, _op(attention_tp_size=1), is_context=True, batch_size=1, s=1, x=int(tok))
         )
-        op_value = float(op.query(db, x=tok))
-        direct = float(db.query_moe_a2a("deepep_ht", phase, "default", ep, node, hidden, topk, experts, tok, sms=sms))
-        assert op_value == direct  # default attention_tp_size: byte-identical no-op
+        assert op_value == explicit  # default attention_tp_size: byte-identical no-op
         total += op_value
 
     # query_wideep_deepep_normal is a tombstone since #1357 PR-5; the legacy

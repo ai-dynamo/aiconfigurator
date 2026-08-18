@@ -1452,36 +1452,26 @@ def get_all_databases(
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Loader disposition after PR-6: the compiled engine owns the data plane —
-# every ``PerfDatabase._<family>_data`` attribute is served by the engine
-# table view (``sdk/engine_table_view.py``) in the retired parsers' exact
-# nested shape, and NO production path parses perf files in Python anymore.
-# The gemm/attention/comm/mla/mamba parsers are deleted outright. The
-# moe/moe_comm/dsa/dsv4 parsers below survive as TEST-ONLY schema-contract
-# fixtures: the collector suite (a separate module) hand-shakes its output
-# format against them, so their removal rides with PR-7's cross-module
-# cleanup rather than this PR. The DSA model-dims constants keep their
+# Loader disposition after the deprecation-cleanup PR: the compiled engine
+# owns the data plane — every ``PerfDatabase._<family>_data`` attribute is
+# served by the engine table view (``sdk/engine_table_view.py``) in the
+# retired parsers' exact nested shape, and NO path parses perf files in
+# Python anymore, tests included (the collector-format handshake asserts
+# against the engine view / frozen schema literals instead). One survivor:
+# ``load_dsv4_sparse_op_data`` with ``_TOPK_CALIB_KEYS`` — the
+# ``dsv4_csa_topk_calib_perf`` table has no engine view attribute yet, and
+# ``test_dsv4_cp_top_last_reuse.py`` pins its shipped reuse-donor values
+# (issue #1498). It retires when that view attribute lands alongside the
+# migration-baseline retirement. The DSA model-dims constants keep their
 # legacy import path.
 # ─────────────────────────────────────────────────────────────────────────
 from aiconfigurator_core.sdk.operations.dsa import (  # noqa: F401
     DEFAULT_DSA_ARCHITECTURE,
     DSA_MODEL_DIMS,
-    load_context_dsa_module_data,
-    load_generation_dsa_module_data,
 )
 from aiconfigurator_core.sdk.operations.dsv4 import (  # noqa: F401
-    load_context_dsv4_kind_module_data,
-    load_dsv4_sparse_kernel_data,
-    load_generation_dsv4_kind_module_data,
-    load_mhc_module_data,
-)
-from aiconfigurator_core.sdk.operations.moe import (  # noqa: F401
-    load_trtllm_alltoall_data,
-    load_wideep_context_moe_data,
-    load_wideep_deepep_ll_data,
-    load_wideep_deepep_normal_data,
-    load_wideep_generation_moe_data,
-    load_wideep_moe_compute_data,
+    _TOPK_CALIB_KEYS,
+    load_dsv4_sparse_op_data,
 )
 
 

@@ -20,38 +20,104 @@ pytestmark = pytest.mark.unit
 # --- B1: DSA kernel_source -> configured-backend bucket(s) ------------------
 
 
-def test_dsa_bf16_rows_back_both_backend_buckets():
-    from aiconfigurator.sdk.operations.dsa import _dsa_kernel_source_buckets
+def _dsa_bucket_view(tmp_path, rows):
+    """Serve the DSA context view over synthetic rows (the Python bucket
+    helper retired with the parsers; the rule is observed through which
+    backend buckets a row's isl lands under — same fixture pattern as
+    test_table_view_dsa_dsv4_shapes.py)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import yaml
 
-    for ks in (
+    from aiconfigurator.sdk.perf_database import PerfDatabase
+    from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
+
+    root = tmp_path / "systems"
+    root.mkdir(exist_ok=True)
+    (root / "h100_sxm.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "data_dir": "data/h100_sxm",
+                "gpu": {
+                    "sm_version": 90,
+                    "mem_bw": 4_800_000_000_000.0,
+                    "mem_bw_empirical_scaling_factor": 0.8,
+                    "mem_empirical_constant_latency": 0.000003,
+                    "bfloat16_tc_flops": 989_000_000_000_000.0,
+                    "fp8_tc_flops": 1_978_000_000_000_000.0,
+                },
+                "node": {
+                    "num_gpus_per_node": 8,
+                    "inter_node_bw": 50_000_000_000.0,
+                    "intra_node_bw": 450_000_000_000.0,
+                    "p2p_latency": 0.00001,
+                },
+                "misc": {"nccl_version": "2.26.2"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    path = root / "data/h100_sxm/sparse_attention/sglang/1.0.0/dsa_context_module_perf.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.table({k: [r[k] for r in rows] for k in rows[0]}), path)
+    db = PerfDatabase("h100_sxm", "sglang", "1.0.0", str(root), database_mode="HYBRID")
+    return fetch_table_view(db, "_context_dsa_module_data")
+
+
+def _dsa_bucket_row(ks: str, kv: str, isl: int) -> dict:
+    return {
+        "architecture": "DeepseekV32ForCausalLM",
+        "kernel_source": ks,
+        "gemm_type": "bfloat16",
+        "mla_dtype": "bfloat16",
+        "kv_cache_dtype": kv,
+        "num_heads": 32,
+        "batch_size": 1,
+        "isl": isl,
+        "step": 0,
+        "latency": 1.0,
+        "power": 1.0,
+    }
+
+
+def _buckets_containing(view, kv_mode, isl: int) -> tuple[str, ...]:
+    arch_table = view[common.FMHAQuantMode.bfloat16][kv_mode][common.GEMMQuantMode.bfloat16]["DeepseekV32ForCausalLM"]
+    return tuple(
+        bucket for bucket in ("trtllm", "flashmla_kv") if isl in arch_table.get(bucket, {}).get(32, {}).get(0, {})
+    )
+
+
+def test_dsa_bf16_rows_back_both_backend_buckets(tmp_path):
+    sources = (
         "sglang_dsa_indexer_trtllm",
         "sglang_dsa_indexer_flashmla_sparse",
         "sglang_dsa_dense_mha_trtllm_ragged",
         "legacy_whatever",
-    ):
-        assert _dsa_kernel_source_buckets(ks, common.KVCacheQuantMode.bfloat16) == (
+    )
+    rows = [_dsa_bucket_row(ks, "bfloat16", 100 + i) for i, ks in enumerate(sources)]
+    view = _dsa_bucket_view(tmp_path, rows)
+    for i, _ in enumerate(sources):
+        assert _buckets_containing(view, common.KVCacheQuantMode.bfloat16, 100 + i) == (
             "trtllm",
             "flashmla_kv",
         )
 
 
-def test_dsa_fp8_rows_bucket_by_executed_kernel_name():
-    from aiconfigurator.sdk.operations.dsa import _dsa_kernel_source_buckets
-
-    fp8 = common.KVCacheQuantMode.fp8
-    assert _dsa_kernel_source_buckets("sglang_dsa_indexer_trtllm", fp8) == ("trtllm",)
-    assert _dsa_kernel_source_buckets("sglang_dsa_skip_indexer_trtllm", fp8) == ("trtllm",)
-    assert _dsa_kernel_source_buckets("sglang_dsa_indexer_flashmla_sparse", fp8) == ("flashmla_kv",)
-    assert _dsa_kernel_source_buckets("sglang_dsa_skip_indexer_flashmla_sparse", fp8) == ("flashmla_kv",)
-    # Dense ragged prefill is selected by SHAPE under either configured
-    # backend, so its rows back both buckets.
-    assert _dsa_kernel_source_buckets("sglang_dsa_dense_mha_trtllm_ragged", fp8) == (
-        "trtllm",
-        "flashmla_kv",
-    )
-    # Legacy (pre-0.5.14) names keep the old substring rule.
-    assert _dsa_kernel_source_buckets("trtllm_gen", fp8) == ("trtllm",)
-    assert _dsa_kernel_source_buckets("default", fp8) == ("flashmla_kv",)
+def test_dsa_fp8_rows_bucket_by_executed_kernel_name(tmp_path):
+    cases = [
+        ("sglang_dsa_indexer_trtllm", ("trtllm",)),
+        ("sglang_dsa_indexer_flashmla_sparse", ("flashmla_kv",)),
+        # Dense ragged prefill is selected by SHAPE under either configured
+        # backend, so its rows back both buckets.
+        ("sglang_dsa_dense_mha_trtllm_ragged", ("trtllm", "flashmla_kv")),
+        # Legacy (pre-0.5.14) names keep the old substring rule.
+        ("trtllm_gen", ("trtllm",)),
+        ("default", ("flashmla_kv",)),
+    ]
+    rows = [_dsa_bucket_row(ks, "fp8", 100 + i) for i, (ks, _) in enumerate(cases)]
+    view = _dsa_bucket_view(tmp_path, rows)
+    for i, (_, expected) in enumerate(cases):
+        assert _buckets_containing(view, common.KVCacheQuantMode.fp8, 100 + i) == expected
 
 
 # --- B2: native DSV4 checkpoints remap to arch-specific MoE quant modes -----

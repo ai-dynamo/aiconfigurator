@@ -18,30 +18,76 @@ from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk import operations as ops
 from aiconfigurator.sdk.backends.sglang_backend import SGLANGBackend
 from aiconfigurator.sdk.models import get_model
-from aiconfigurator.sdk.perf_database import load_mhc_module_data
+from aiconfigurator.sdk.perf_database import PerfDatabase
 
 pytestmark = pytest.mark.unit
 
 
-def _write_mhc_perf(path, rows: list[str]) -> str:
-    header = "framework,version,device,op_name,kernel_source,architecture,num_tokens,hc_mult,hidden_size,latency"
-    path.write_text(header + "\n" + "\n".join(rows) + "\n")
-    return str(path)
+def _mhc_view_db(tmp_path, rows: list[dict] | None):
+    """Minimal systems tree serving the ``_mhc_module_data`` engine view
+    (the Python mhc parser retired with the deprecation-cleanup PR)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import yaml
 
-
-def test_mhc_module_loader_returns_none_for_missing_file(tmp_path):
-    assert load_mhc_module_data(str(tmp_path / "mhc_module_perf.txt")) is None
-
-
-def test_mhc_loader_keys_by_op_hc_mult_hidden_size_num_tokens(tmp_path):
-    path = _write_mhc_perf(
-        tmp_path / "mhc_module_perf.txt",
-        [
-            "VLLM,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,4096,1.5",
-            "VLLM,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,7168,2.5",
-        ],
+    root = tmp_path / "systems"
+    root.mkdir(exist_ok=True)
+    (root / "h100_sxm.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "data_dir": "data/h100_sxm",
+                "gpu": {
+                    "sm_version": 90,
+                    "mem_bw": 4_800_000_000_000.0,
+                    "mem_bw_empirical_scaling_factor": 0.8,
+                    "mem_empirical_constant_latency": 0.000003,
+                    "bfloat16_tc_flops": 989_000_000_000_000.0,
+                    "fp8_tc_flops": 1_978_000_000_000_000.0,
+                },
+                "node": {
+                    "num_gpus_per_node": 8,
+                    "inter_node_bw": 50_000_000_000.0,
+                    "intra_node_bw": 450_000_000_000.0,
+                    "p2p_latency": 0.00001,
+                },
+                "misc": {"nccl_version": "2.26.2"},
+            }
+        ),
+        encoding="utf-8",
     )
-    data = load_mhc_module_data(path)
+    if rows is not None:
+        path = root / "data/h100_sxm/sparse_attention/vllm/1.0.0/mhc_module_perf.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.table({k: [r[k] for r in rows] for k in rows[0]}), path)
+    return PerfDatabase("h100_sxm", "vllm", "1.0.0", str(root), database_mode="HYBRID")
+
+
+def _mhc_row(hidden_size: int, latency: float) -> dict:
+    return {
+        "framework": "VLLM",
+        "version": "test",
+        "device": "H20",
+        "op_name": "pre",
+        "kernel_source": "mhc",
+        "architecture": "DeepseekV4ForCausalLM",
+        "num_tokens": 512,
+        "hc_mult": 4,
+        "hidden_size": hidden_size,
+        "latency": latency,
+    }
+
+
+def test_mhc_module_view_returns_none_for_missing_file(tmp_path):
+    from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
+
+    assert fetch_table_view(_mhc_view_db(tmp_path, None), "_mhc_module_data") is None
+
+
+def test_mhc_view_keys_by_op_hc_mult_hidden_size_num_tokens(tmp_path):
+    from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
+
+    db = _mhc_view_db(tmp_path, [_mhc_row(4096, 1.5), _mhc_row(7168, 2.5)])
+    data = fetch_table_view(db, "_mhc_module_data")
 
     # data[op][hc_mult][hidden_size][num_tokens] — hidden_size distinguishes rows.
     assert set(data.keys()) == {"pre"}

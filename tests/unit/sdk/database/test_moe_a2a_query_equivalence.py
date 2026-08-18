@@ -29,12 +29,10 @@ from pathlib import Path
 
 import pytest
 
+from aiconfigurator_core.sdk import engine
+from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
 from aiconfigurator_core.sdk.operations.base import resolve_op_data_path
-from aiconfigurator_core.sdk.operations.moe import (
-    load_trtllm_alltoall_data,
-    load_wideep_deepep_ll_data,
-    load_wideep_deepep_normal_data,
-)
+from aiconfigurator_core.sdk.operations.moe_comm import MoEAllToAll
 from aiconfigurator_core.sdk.perf_database import get_database
 
 pytestmark = pytest.mark.unit
@@ -53,6 +51,25 @@ TRTLLM_ALLTOALL_PATH = resolve_op_data_path(
 )
 
 REL_TOL = 1e-9
+
+
+def _query_a2a(db, comm_backend, phase, comm_dtype, ep_size, node_num, hidden, topk, experts, tok, sms=0):
+    """The retired ``query_moe_a2a`` shim's exact twin: build the unified op
+    and evaluate it through the engine's single-op plumbing."""
+    op = MoEAllToAll(
+        "moe_a2a_query",
+        1.0,
+        phase=phase,
+        comm_backend=comm_backend,
+        hidden_size=hidden,
+        topk=topk,
+        num_experts=experts,
+        moe_ep_size=ep_size,
+        node_num=node_num,
+        comm_dtype=comm_dtype,
+        sms=sms,
+    )
+    return engine._evaluate_single_op(db, op, is_context=True, batch_size=1, s=1, x=int(tok))
 
 
 def _iter_slices(nested, depth):
@@ -85,15 +102,15 @@ def test_l1_deepep_query_equivalence():
     assert db is not None
 
     # Legacy table: [node][hidden][topk][experts][sms] -> {tokens: leaf (us)}.
-    legacy_normal = load_wideep_deepep_normal_data(DEEPEP_NORMAL_PATH)
+    legacy_normal = fetch_table_view(db, "_wideep_deepep_normal_data")
     assert legacy_normal
     normal_comparisons = 0
     for (node, hidden, topk, experts, sms), tokens in _iter_slices(legacy_normal, 5):
         ep = node * 8  # legacy 8-GPU HGX fleets
         for tok in _exact_token_probes(tokens):
-            unified = db.query_moe_a2a(
-                "deepep_ht", "dispatch", "default", ep, node, hidden, topk, experts, tok, sms=sms
-            ) + db.query_moe_a2a("deepep_ht", "combine", "default", ep, node, hidden, topk, experts, tok, sms=sms)
+            unified = _query_a2a(
+                db, "deepep_ht", "dispatch", "default", ep, node, hidden, topk, experts, tok, sms=sms
+            ) + _query_a2a(db, "deepep_ht", "combine", "default", ep, node, hidden, topk, experts, tok, sms=sms)
             context = f"deepep_ht {node=} {hidden=} {topk=} {experts=} {sms=} {tok=}"
             assert float(unified) == pytest.approx(tokens[tok]["latency"] / 1000.0, rel=REL_TOL), context
             normal_comparisons += 1
@@ -104,15 +121,15 @@ def test_l1_deepep_query_equivalence():
 
     # Legacy LL table: [node][hidden][topk][experts] -> {tokens: leaf (us)}; no
     # SM budget -> unified rows live under sms=0.
-    legacy_ll = load_wideep_deepep_ll_data(DEEPEP_LL_PATH)
+    legacy_ll = fetch_table_view(db, "_wideep_deepep_ll_data")
     assert legacy_ll
     ll_comparisons = 0
     for (node, hidden, topk, experts), tokens in _iter_slices(legacy_ll, 4):
         ep = node * 8
         for tok in _exact_token_probes(tokens):
-            unified = db.query_moe_a2a(
-                "deepep_ll", "dispatch", "default", ep, node, hidden, topk, experts, tok, sms=0
-            ) + db.query_moe_a2a("deepep_ll", "combine", "default", ep, node, hidden, topk, experts, tok, sms=0)
+            unified = _query_a2a(
+                db, "deepep_ll", "dispatch", "default", ep, node, hidden, topk, experts, tok, sms=0
+            ) + _query_a2a(db, "deepep_ll", "combine", "default", ep, node, hidden, topk, experts, tok, sms=0)
             context = f"deepep_ll {node=} {hidden=} {topk=} {experts=} {tok=}"
             assert float(unified) == pytest.approx(tokens[tok]["latency"] / 1000.0, rel=REL_TOL), context
             ll_comparisons += 1
@@ -151,7 +168,7 @@ def test_l1_trtllm_alltoall_query_equivalence():
     assert db is not None
 
     # Legacy table: [kernel][op][quant][node][hidden][topk][experts][ep] -> {tokens: leaf (ms)}.
-    legacy_table = load_trtllm_alltoall_data(TRTLLM_ALLTOALL_PATH)
+    legacy_table = fetch_table_view(db, "_trtllm_alltoall_data")
     assert legacy_table
 
     comparisons = 0
@@ -160,7 +177,7 @@ def test_l1_trtllm_alltoall_query_equivalence():
         phase, pinned_dtype = _OP_MAP[op_name]
         comm_dtype = pinned_dtype if pinned_dtype is not None else quant.name
         for tok in _exact_token_probes(tokens):
-            unified = db.query_moe_a2a(comm_backend, phase, comm_dtype, ep, node, hidden, topk, experts, tok, sms=0)
+            unified = _query_a2a(db, comm_backend, phase, comm_dtype, ep, node, hidden, topk, experts, tok, sms=0)
             context = f"{kernel_source} {op_name} {quant.name} {node=} {hidden=} {topk=} {experts=} {ep=} {tok=}"
             assert float(unified) == pytest.approx(tokens[tok]["latency"], rel=REL_TOL), context
             comparisons += 1
@@ -185,14 +202,14 @@ def test_l1_fp8_block_normalization_matches_legacy():
     db = get_database("gb200", "trtllm", "1.3.0rc10")
     assert db is not None
 
-    legacy_table = load_trtllm_alltoall_data(TRTLLM_ALLTOALL_PATH)
+    legacy_table = fetch_table_view(db, "_trtllm_alltoall_data")
     assert legacy_table
     dispatch_fp8 = legacy_table["NVLinkTwoSided"]["alltoall_dispatch"][common.MoEQuantMode.fp8]
     (node, hidden, topk, experts, ep), tokens = min(_iter_slices(dispatch_fp8, 5), key=lambda kv: kv[0])
 
     comparisons = 0
     for tok in _exact_token_probes(tokens):
-        unified = db.query_moe_a2a("nvlink_two_sided", "dispatch", "fp8_block", ep, node, hidden, topk, experts, tok)
+        unified = _query_a2a(db, "nvlink_two_sided", "dispatch", "fp8_block", ep, node, hidden, topk, experts, tok)
         assert float(unified) == pytest.approx(tokens[tok]["latency"], rel=REL_TOL), f"fp8_block {tok=}"
         comparisons += 1
     assert comparisons > 0

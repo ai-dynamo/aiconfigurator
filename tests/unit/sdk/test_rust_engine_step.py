@@ -50,6 +50,7 @@ def test_python_backend_value_is_removed(monkeypatch) -> None:
     with pytest.raises(ValueError, match=r"unknown engine_step_backend 'python'"):
         rust_engine_step.should_use_rust_engine_step(RuntimeConfig(), database)
 
+
 def _real_database():
     """A real ``PerfDatabase`` instance (loader bypassed): default routing
     requires the real type — synthetic database doubles delegate to the

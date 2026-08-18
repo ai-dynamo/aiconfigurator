@@ -167,8 +167,8 @@ def resolve_op_data_path(system_data_root: str, backend: str, version: str, op_f
 
 
 def _read_filtered_rows(file_or_sources):
-    """Read perf rows from one or more sources. Used by every ``load_*_data``
-    in this package.
+    """Read perf rows from one or more sources. Used by the one surviving
+    test-only parser (``dsv4.load_dsv4_sparse_op_data``).
 
     Accepts:
       - A single path string: yields all rows. Returns ``None`` if the file is
