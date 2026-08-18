@@ -3,14 +3,11 @@
 
 """Large-EP graph wiring and stock-MoE local-compute mapping."""
 
-from unittest.mock import Mock
-
 import pytest
 
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common, config
 from aiconfigurator_core.sdk.models.blocks import MoEBlockShape, build_moe_block_ops
-from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 pytestmark = pytest.mark.unit
 
@@ -74,31 +71,16 @@ def test_modeled_coordinates_use_balanced_ep_local_token_semantics():
     }
 
 
-def test_modeled_query_uses_stock_moe_and_marks_approximation():
+def test_modeled_op_serializes_as_estimated_ep_moe():
+    from aiconfigurator_core.sdk.engine import _to_opspec
+
     modeled = next(op for op in _build() if isinstance(op, ops.ModeledEPMoE))
-    database = Mock()
-    database.query_moe.return_value = PerformanceResult(0.25, energy=0.5, source="silicon")
+    payload = _to_opspec(modeled, backend="vllm", architecture="DEEPSEEK", database=None)
 
-    result = modeled.query(database, x=17)
-
-    database.query_moe.assert_called_once_with(
-        num_tokens=9,
-        hidden_size=7168,
-        inter_size=2048,
-        topk=8,
-        num_experts=256,
-        moe_tp_size=1,
-        moe_ep_size=16,
-        quant_mode=common.MoEQuantMode.fp8_block,
-        workload_distribution="balanced",
-        is_context=True,
-        moe_backend=None,
-        is_gated=True,
-        enable_eplb=False,
-    )
-    assert float(result) == pytest.approx(0.25 * 61)
-    assert result.energy == pytest.approx(0.5 * 61)
-    assert result.source == "estimated"
+    assert payload["EpMoe"]["scale_factor"] == 61
+    assert payload["EpMoe"]["attention_dp_size"] == 8
+    assert payload["EpMoe"]["moe_ep_size"] == 16
+    assert payload["EpMoe"]["workload_distribution"] == "balanced"
 
 
 def test_modeled_local_compute_has_no_eplb_or_num_slots_state():

@@ -775,6 +775,46 @@ def resolve_dsv4_moe_arch(
         model_config.moe_quant_mode = mode
 
 
+def resolve_nvfp4_for_system(
+    model_config: config.ModelConfig,
+    system_name: str | None,
+    model_path: str | None = None,
+) -> None:
+    """Remap native nvfp4 to weight-only nvfp4_wo on non-Blackwell systems.
+
+    Non-Blackwell hardware has no native FP4 tensor cores, so all runtimes
+    dequantize weights to BF16 before the MMA. nvfp4_wo captures this:
+    memory=9/16 (FP4 weight traffic) and compute=1 (BF16 speed). The
+    transfer ladder then models the Marlin-class memory savings via the
+    (0.5625, 1) util-level entry — no direct bfloat16 table aliasing needed.
+
+    Deployability (whether a runtime can load the checkpoint at a given
+    version) is a separate question handled by the support matrix.
+    """
+    from aiconfigurator_core.sdk.perf_database import is_blackwell_system
+
+    if is_blackwell_system(system_name):
+        return  # native FP4 TC — nvfp4 stays as-is
+
+    gemm_q = model_config.gemm_quant_mode
+    moe_q = model_config.moe_quant_mode
+    if (gemm_q is None or moe_q is None) and model_path:
+        info = _get_model_info(model_path)
+        inferred = _infer_quant_modes_from_raw_config(
+            info.get("raw_config", {}),
+            info.get("architecture", ""),
+        )
+        if gemm_q is None:
+            gemm_q = inferred.get("gemm_quant_mode")
+        if moe_q is None:
+            moe_q = inferred.get("moe_quant_mode")
+
+    if gemm_q == common.GEMMQuantMode.nvfp4:
+        model_config.gemm_quant_mode = common.GEMMQuantMode.nvfp4_wo
+    if moe_q == common.MoEQuantMode.nvfp4:
+        model_config.moe_quant_mode = common.MoEQuantMode.nvfp4_wo
+
+
 def resolve_context_fmha_by_data(
     model_config: config.ModelConfig,
     model_path: str,

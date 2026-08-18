@@ -23,7 +23,6 @@ from aiconfigurator.sdk.operations.base import _read_perf_rows
 from aiconfigurator.sdk.perf_database import (
     LoadedOpData,
     PerfDatabase,
-    PerfDataNotAvailableError,
     _resolve_perf_data_path,
     databases_cache,
     get_all_databases,
@@ -608,7 +607,7 @@ def test_load_dsv4_megamoe_module_data_requires_phase_for_unified_file(tmp_path)
         load_dsv4_megamoe_module_data(str(csv_file))
 
 
-def test_query_dsv4_megamoe_module_missing_data_raises(tmp_path):
+def test_dsv4_megamoe_module_support_matrix_empty_without_data(tmp_path):
     systems_root = tmp_path / "systems"
     data_dir = systems_root / "data" / "sglang" / "0.5.10"
     data_dir.mkdir(parents=True)
@@ -619,58 +618,11 @@ def test_query_dsv4_megamoe_module_missing_data_raises(tmp_path):
     db = PerfDatabase("gb200", "sglang", "0.5.10", str(systems_root))
 
     assert db.supported_quant_mode["dsv4_megamoe_module"] == []
-    with pytest.raises(PerfDataNotAvailableError, match="dsv4_megamoe_module"):
-        db.query_dsv4_megamoe_module(
-            num_tokens=1024,
-            hidden_size=7168,
-            inter_size=3072,
-            topk=6,
-            num_experts=384,
-            moe_tp_size=1,
-            moe_ep_size=8,
-            quant_mode=MoEQuantMode.w4a8_mxfp4_mxfp8,
-            workload_distribution="balanced",
-            is_context=True,
-        )
-
-
-def test_query_dsv4_megamoe_module_interpolates_energy_from_rows(tmp_path):
-    systems_root = tmp_path / "systems"
-    data_dir = systems_root / "data" / "sglang" / "0.5.10"
-    data_dir.mkdir(parents=True)
-    (systems_root / "gb200.yaml").write_text(yaml.safe_dump({"data_dir": "data", "misc": {"nccl_version": "test"}}))
-
-    _write_dsv4_megamoe_perf(
-        data_dir / "dsv4_megamoe_module_perf.txt",
-        _dsv4_megamoe_row(num_tokens=1024, latency=1.0, power=100.0),
-        _dsv4_megamoe_row(num_tokens=2048, latency=3.0, power=200.0),
-    )
-
-    db = PerfDatabase("gb200", "sglang", "0.5.10", str(systems_root))
-    result = db.query_dsv4_megamoe_module(
-        num_tokens=1536,
-        hidden_size=7168,
-        inter_size=3072,
-        topk=6,
-        num_experts=384,
-        moe_tp_size=1,
-        moe_ep_size=8,
-        quant_mode=MoEQuantMode.w4a8_mxfp4_mxfp8,
-        workload_distribution="balanced",
-        is_context=True,
-    )
-
-    assert float(result) == pytest.approx(2.0)
-    # perf_interp blends the measured POWER column (100, 200 -> 150) and
-    # re-derives energy = power * latency; the legacy path lerped ENERGY
-    # directly (conflating the latency growth into the blend, -> 350/175).
-    assert result.power == pytest.approx(150.0)
-    assert result.energy == pytest.approx(300.0)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 5) load_context_attention_data
-# ─────────────────────────────────────────────────────────────────────────────
+    # The typed query-side miss (and the perf_interp power-column energy
+    # blend the sibling test used to pin) retired to the compiled engine with
+    # #1357 PR-5 — the engine-routed shims load from disk and their miss /
+    # interpolation semantics are anchored by the frozen parity goldens and
+    # tests/cross_package/test_query_shim_baseline.py.
 
 
 def test_load_context_attention_data_nonexistent(tmp_path):

@@ -39,7 +39,7 @@
 use crate::common::enums::{DatabaseMode, MoeQuantMode, TransferKind, TransferPolicy};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
-use crate::operators::base::{PerformanceResult, Source};
+use crate::operators::base::{PerformanceResult, SolComponents, Source};
 use crate::operators::util_empirical::{self, UtilGrid};
 use crate::perf_database::gemm::quant_tc_flops;
 use crate::perf_database::moe::{MoeKernel, MoeSiblingSlice};
@@ -54,6 +54,7 @@ use std::sync::Arc;
 const MOE_QUANT_UTIL_LEVEL: &[(f64, f64, f64)] = &[
     (2.0, 1.0, 0.53),    // w16a16 / bfloat16              [data]
     (1.0, 1.0, 0.45),    // w8a16                          [inferred]
+    (0.5625, 1.0, 0.07), // w4a16+scales / nvfp4_wo (Marlin FP4) [copies measured (0.5,1)]
     (0.5, 1.0, 0.07),    // w4a16 (int4_wo, mxfp4)         [data]
     (1.0, 2.0, 0.40),    // w8a8 / fp8(_block)             [data]
     (0.5, 2.0, 0.15),    // w4a8 (w4afp8, mxfp4_mxfp8)     [data]
@@ -84,6 +85,7 @@ const ALL_MOE_QUANTS: &[MoeQuantMode] = &[
     MoeQuantMode::Fp8Block,
     MoeQuantMode::W4afp8,
     MoeQuantMode::Nvfp4,
+    MoeQuantMode::Nvfp4Wo,
     MoeQuantMode::W4a16Mxfp4,
     MoeQuantMode::W4a8Mxfp4Mxfp8,
     MoeQuantMode::W4a8Mxfp4Mxfp8Trtllm,
@@ -268,6 +270,19 @@ impl MoeOp {
         // deepseek-v3 / qwen3-235b SOL surface and diagnostic tools query
         // through the same handle.
         match db.database_mode {
+            // Python `_query_moe_table`: `get_sol(num_tokens, hidden_size,
+            // inter_size, topk, num_experts, moe_tp_size, moe_ep_size,
+            // quant_mode, workload_distribution)[0]` — the distribution never
+            // enters the math, and the RAW (attention-dp scaled, non-EPLB-
+            // corrected) token count feeds the formula.
+            DatabaseMode::Sol | DatabaseMode::SolFull => {
+                let tc_flops = quant_tc_flops(&db.system_spec, self.quant_mode.mapping())?;
+                Ok(
+                    PerformanceResult::sol(self.sol_components(db, num_tokens, tc_flops))
+                        .clamp_non_negative()
+                        .scaled(self.scale_factor),
+                )
+            }
             DatabaseMode::Empirical => Ok(PerformanceResult::new(
                 self.empirical_latency(db, num_tokens)?,
                 Source::Empirical,
@@ -284,14 +299,6 @@ impl MoeOp {
                 .scaled(self.scale_factor)),
                 Err(err) => Err(err),
             },
-            DatabaseMode::Sol | DatabaseMode::SolFull => {
-                let tc_flops = quant_tc_flops(&db.system_spec, self.quant_mode.mapping())?;
-                Ok(
-                    PerformanceResult::new(self.sol_latency_ms(db, num_tokens, tc_flops), Source::Sol)
-                        .clamp_non_negative()
-                        .scaled(self.scale_factor),
-                )
-            }
             _ => self.silicon_pr(db, num_tokens),
         }
     }
@@ -731,12 +738,12 @@ impl MoeOp {
     /// `get_sol` closure (`operations/moe.py:297`). Passed into the perf-DB
     /// engine query as the util-hold roofline; in-grid resolutions never
     /// consult it (1-axis RAW lerp / exact hit).
-    fn sol_latency_ms(&self, db: &PerfDatabase, num_tokens: u32, tc_flops: f64) -> f64 {
+    fn sol_components(&self, db: &PerfDatabase, num_tokens: u32, tc_flops: f64) -> SolComponents {
         // `num_gemms`: 3 for gated SwiGLU (gate + up + down), 2 for
         // non-gated Relu² (up + down). Matches Python `num_gemms = 3 if
         // is_gated else 2` (`operations/moe.py:115, 239`).
         let num_gemms: u64 = if self.is_gated { 3 } else { 2 };
-        moe_sol_latency_ms(
+        moe_sol(
             &db.system_spec,
             self.quant_mode,
             num_gemms,
@@ -750,6 +757,10 @@ impl MoeOp {
             tc_flops,
         )
     }
+
+    fn sol_latency_ms(&self, db: &PerfDatabase, num_tokens: u32, tc_flops: f64) -> f64 {
+        self.sol_components(db, num_tokens, tc_flops).time_ms()
+    }
 }
 
 /// MoE roofline SOL (ms) mirroring Python `MoE._query_moe_table.get_sol`
@@ -758,7 +769,7 @@ impl MoeOp {
 /// (`num_experts` folds into the min() weight term; `workload_distribution`
 /// never enters the math).
 #[allow(clippy::too_many_arguments)]
-fn moe_sol_latency_ms(
+fn moe_sol(
     spec: &SystemSpec,
     quant: MoeQuantMode,
     num_gemms: u64,
@@ -770,7 +781,7 @@ fn moe_sol_latency_ms(
     moe_tp_size: u32,
     moe_ep_size: u32,
     tc_flops: f64,
-) -> f64 {
+) -> SolComponents {
     let total_tokens = num_tokens as u64 * topk as u64;
     let moe_ep = (moe_ep_size as u64).max(1);
     let moe_tp = (moe_tp_size as u64).max(1);
@@ -789,7 +800,37 @@ fn moe_sol_latency_ms(
     // (strict per-dtype lookup; a missing `*_tc_flops` entry errors there).
     let sol_math = (ops as f64) / tc_flops * 1000.0;
     let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    SolComponents::new(sol_math, sol_mem)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn moe_sol_latency_ms(
+    spec: &SystemSpec,
+    quant: MoeQuantMode,
+    num_gemms: u64,
+    num_tokens: u32,
+    hidden_size: u32,
+    inter_size: u32,
+    topk: u32,
+    num_experts: u32,
+    moe_tp_size: u32,
+    moe_ep_size: u32,
+    tc_flops: f64,
+) -> f64 {
+    moe_sol(
+        spec,
+        quant,
+        num_gemms,
+        num_tokens,
+        hidden_size,
+        inter_size,
+        topk,
+        num_experts,
+        moe_tp_size,
+        moe_ep_size,
+        tc_flops,
+    )
+    .time_ms()
 }
 
 #[cfg(test)]
@@ -1037,6 +1078,61 @@ mod tests {
     ///     quant_mode=common.MoEQuantMode.nvfp4, workload_distribution="balanced",
     ///     database_mode=common.DatabaseMode.EMPIRICAL))
     /// ```
+    /// nvfp4_wo ladder-approach parity: no collected data exists, so the query
+    /// walks the transfer ladder (XPROFILE to bfloat16, rescaled by the
+    /// util-level ratio e(nvfp4_wo)/e(bfloat16)). Python oracle (shared_layer=False,
+    /// HYBRID, h200/vllm/0.19.0, same shape as the GEMM oracle):
+    ///
+    /// ```python
+    /// db = perf_database.get_database_view("h200_sxm", "vllm", "0.19.0",
+    ///     allow_missing_data=True, database_mode=DatabaseMode.HYBRID,
+    ///     transfer_policy=None, shared_layer=False)
+    /// float(MoE._query_moe_table(db, num_tokens=96, hidden_size=7168,
+    ///     inter_size=2048, topk=8, num_experts=256, moe_tp_size=1, moe_ep_size=1,
+    ///     quant_mode=MoEQuantMode.nvfp4_wo, workload_distribution="power_law_1.2",
+    ///     database_mode=DatabaseMode.HYBRID))
+    /// # → 8.439357376098632  (XPROFILE borrow from bfloat16, rescaled by 0.07/0.53)
+    /// ```
+    #[test]
+    fn moe_nvfp4_wo_ladder_matches_python_oracle() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
+        let db = PerfDatabase::load(&root, "h200_sxm", "vllm", "0.19.0")
+            .expect("h200/vllm/0.19.0 db loads")
+            .with_mode(
+                crate::common::enums::DatabaseMode::Hybrid,
+                TransferPolicy::ALL,
+            );
+
+        let op = MoeOp {
+            name: "moe-nvfp4wo-ladder".into(),
+            scale_factor: 1.0,
+            hidden_size: 7168,
+            inter_size: 2048,
+            topk: 8,
+            num_experts: 256,
+            moe_tp_size: 1,
+            moe_ep_size: 1,
+            quant_mode: MoeQuantMode::Nvfp4Wo,
+            workload_distribution: "power_law_1.2".into(),
+            attention_dp_size: 1,
+            is_gated: true,
+            moe_backend: None,
+            enable_eplb: false,
+            is_context: false,
+        };
+        let r = op
+            .query(&db, 96)
+            .expect("nvfp4_wo resolves via XPROFILE ladder");
+        assert_oracle(
+            &r,
+            8.439357376098632,
+            Source::Empirical,
+            "nvfp4_wo_ladder_t96",
+        );
+    }
+
     #[test]
     fn moe_empirical_low_latency_table_selection_matches_python_oracles() {
         let db = b200_trtllm_db().with_mode(

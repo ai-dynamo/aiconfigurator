@@ -71,9 +71,8 @@ pub fn write_parquet(path: &Path, cols: &[Col<'_>]) {
         .map(Col::parquet_type)
         .collect::<Vec<_>>()
         .join("\n");
-    let schema = Arc::new(
-        parse_message_type(&format!("message fixture {{\n{fields}\n}}")).unwrap(),
-    );
+    let schema =
+        Arc::new(parse_message_type(&format!("message fixture {{\n{fields}\n}}")).unwrap());
     let file = File::create(path).unwrap();
     let mut writer =
         SerializedFileWriter::new(file, schema, Arc::new(WriterProperties::builder().build()))

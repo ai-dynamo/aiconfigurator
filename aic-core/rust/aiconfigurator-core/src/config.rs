@@ -46,10 +46,8 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 //   `attn_ar_modeled`; renumbered at the rebase.
 // - 11 (AIC-1601): the wideEP MoE op variants (`WideEpMoe` /
 //   `WideEpMoeDispatch`) were removed mid-enum, shifting every later
-//   bincode enum index; large-EP is now modeled natively by the
-//   `MoeAllToAll` / `MoeExpertCompute` variants appended after
-//   `FpmForward`, and `MoeExpertComputeOp` carries the `enable_eplb`
-//   legacy-fidelity field.
+//   bincode enum index; large-EP now appends measured `MoeAllToAll` and
+//   modeled local-compute `EpMoe` variants after `FpmForward`.
 pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 11;
 
 /// Static engine identity and setup information carried by an

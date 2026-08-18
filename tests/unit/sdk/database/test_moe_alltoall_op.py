@@ -20,15 +20,11 @@ and the comm hard-exclusion keeps them primary-only (design §6.5 rule 5).
 import os
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
-from aiconfigurator_core.sdk import common
-from aiconfigurator_core.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
 from aiconfigurator_core.sdk.operations import MoEAllToAll
 from aiconfigurator_core.sdk.operations.base import resolve_op_data_path
 from aiconfigurator_core.sdk.operations.moe import load_wideep_deepep_normal_data
-from aiconfigurator_core.sdk.operations.moe_comm import load_moe_a2a_data
 
 pytestmark = pytest.mark.unit
 
@@ -127,186 +123,15 @@ def _make_op(scale_factor=1.0, **overrides):
 # ---------------------------------------------------------------------------
 # Query semantics on the injected store
 # ---------------------------------------------------------------------------
-
-
-def test_token_midpoint_interpolation_scales_by_scale_factor(a2a_db):
-    op = _make_op(scale_factor=2.0)
-    result = op.query(a2a_db, x=48)  # midpoint of the {32, 64} token curve
-    assert float(result) == pytest.approx(0.15 * 2.0, rel=1e-12)
-    # power lerps flat at 100 W -> energy = 100 * 0.15, scaled with latency.
-    assert result.energy == pytest.approx(100.0 * 0.15 * 2.0, rel=1e-12)
-    assert result.source == "silicon"
-
-
-def test_exact_token_hit_returns_leaf_value(a2a_db):
-    result = a2a_db.query_moe_a2a("deepep_ht", "combine", "default", 16, 2, 7168, 8, 256, 64, sms=20)
-    assert float(result) == pytest.approx(0.50, rel=1e-12)
-    assert result.energy == pytest.approx(100.0 * 0.50, rel=1e-12)
-
-
-def test_dtype_fallback_to_sole_untyped_default(a2a_db):
-    # Requested dtype is absent; the sole collected slice is the untyped
-    # "default" (adapted legacy DeepEP) — the one sanctioned stand-in.
-    op = _make_op(comm_backend="deepep_ll", sms=0, comm_dtype="fp8")
-    result = op.query(a2a_db, x=8)
-    assert float(result) == pytest.approx(0.40, rel=1e-12)
-
-
-def test_sole_typed_dtype_raises_named_miss(a2a_db):
-    # Shipped-GB200 shape: nvlink_one_sided combine carries ONLY nvfp4. A
-    # bf16/fp8/fp8_block request must raise the named miss (matched two-sided
-    # rows show 0.56x-3.48x bf16/nvfp4 ratios — substitution is material),
-    # exactly like the legacy query_trtllm_alltoall raise.
-    for req in ("bfloat16", "fp8", "fp8_block"):
-        with pytest.raises(PerfDataNotAvailableError, match="comm_dtype"):
-            a2a_db.query_moe_a2a("nvlink_one_sided", "combine", req, 16, 2, 7168, 8, 256, 16, sms=0)
-    # the collected dtype itself still hits.
-    ok = a2a_db.query_moe_a2a("nvlink_one_sided", "combine", "nvfp4", 16, 2, 7168, 8, 256, 16, sms=0)
-    assert float(ok) == pytest.approx(0.12, rel=1e-12)
-
-
-def test_multi_dtype_missing_requested_raises(a2a_db):
-    # dispatch has {fp8, bfloat16}: no sole dtype to fall back to.
-    with pytest.raises(PerfDataNotAvailableError, match="nvfp4"):
-        a2a_db.query_moe_a2a("nvlink_two_sided", "dispatch", "nvfp4", 16, 2, 7168, 8, 256, 16, sms=0)
-
-
-def test_fp8_block_normalizes_to_fp8_when_fp8_is_sole_dtype(a2a_db):
-    # fp8_block is a behavioral mode reusing the fp8 comm tables (the same
-    # normalization legacy query_trtllm_alltoall applies).
-    result = a2a_db.query_moe_a2a("nvlink_one_sided", "dispatch", "fp8_block", 16, 2, 7168, 8, 256, 16, sms=0)
-    assert float(result) == pytest.approx(0.08, rel=1e-12)
-
-
-def test_fp8_block_normalizes_to_fp8_among_multiple_dtypes(a2a_db):
-    # {fp8, bfloat16} collected: the sole-dtype fallback cannot answer here,
-    # so this pins the fp8_block -> fp8 aliasing specifically (the reviewer's
-    # gb200 repro shape).
-    result = a2a_db.query_moe_a2a("nvlink_two_sided", "dispatch", "fp8_block", 16, 2, 7168, 8, 256, 16, sms=0)
-    assert float(result) == pytest.approx(0.06, rel=1e-12)
-
-
-def test_exact_fp8_block_key_wins_over_normalization(a2a_db):
-    # combine has BOTH fp8_block (0.09) and fp8 (0.11): exact key first.
-    result = a2a_db.query_moe_a2a("nvlink_two_sided", "combine", "fp8_block", 16, 2, 7168, 8, 256, 16, sms=0)
-    assert float(result) == pytest.approx(0.09, rel=1e-12)
-
-
-def test_prepare_phase_query(a2a_db):
-    op = _make_op(comm_backend="nvlink_two_sided", phase="prepare", comm_dtype="fp8", sms=0)
-    result = op.query(a2a_db, x=16)
-    assert float(result) == pytest.approx(0.05, rel=1e-12)
-
-
-def test_missing_slice_raises_named_miss(a2a_db):
-    with pytest.raises(PerfDataNotAvailableError, match="requested slice"):
-        a2a_db.query_moe_a2a("deepep_ht", "dispatch", "default", 999, 2, 7168, 8, 256, 32, sms=20)
-
-
-def test_hybrid_missing_slice_raises_empirical_not_implemented(a2a_db):
-    with pytest.raises(EmpiricalNotImplementedError, match="silicon data required"):
-        a2a_db.query_moe_a2a(
-            "deepep_ht",
-            "dispatch",
-            "default",
-            999,
-            2,
-            7168,
-            8,
-            256,
-            32,
-            sms=20,
-            database_mode=common.DatabaseMode.HYBRID,
-        )
-
-
-# ---------------------------------------------------------------------------
-# attention_tp_size token divide (legacy fidelity: MoEDispatch applies
-# ``num_tokens // self._scale_num_tokens`` before its table lookups)
-# ---------------------------------------------------------------------------
-
-
-def test_attention_tp_size_divides_token_key(a2a_db):
-    # x=64 under attention_tp_size=2 must query the same 32-token key as x=32
-    # under the default.
-    scaled = _make_op(attention_tp_size=2).query(a2a_db, x=64)
-    assert float(scaled) == float(_make_op().query(a2a_db, x=32))
-    assert float(scaled) == pytest.approx(0.10, rel=1e-12)
-
-
-def test_attention_tp_size_uses_plain_floor_division(a2a_db):
-    # 65 // 2 = 32: plain floor exactly like the legacy divide (no rounding,
-    # no max(1, ...) guard).
-    assert float(_make_op(attention_tp_size=2).query(a2a_db, x=65)) == pytest.approx(0.10, rel=1e-12)
-
-
-def test_attention_tp_size_default_is_noop(a2a_db):
-    # Byte-for-byte: the default op and an explicit tp=1 op reproduce the
-    # pre-parameter midpoint lerp of the {32, 64} curve exactly.
-    default_result = _make_op().query(a2a_db, x=48)
-    explicit_result = _make_op(attention_tp_size=1).query(a2a_db, x=48)
-    assert float(default_result) == float(explicit_result)
-    assert default_result.energy == explicit_result.energy
-    assert float(default_result) == pytest.approx(0.15, rel=1e-12)
-
-
-# ---------------------------------------------------------------------------
-# Off-grid sms: 2-D (sms x tokens) interpolation vs the legacy oracle
-# ---------------------------------------------------------------------------
-
-
-def test_off_grid_sms_2d_interpolation_matches_legacy(stub_perf_db, tmp_path):
-    """Inherited off-grid-sms gate: sms=24 on a {16, 32} HT grid must take the
-    2-D (sms x tokens) interpolation path — strictly between the two grid
-    values at the same token count — and match the legacy
-    ``query_wideep_deepep_normal`` 2-D behavior on the same synthetic rows
-    (rel tolerance covers only the us-vs-ms rounding split; see the L1 sweep).
-    """
-    rows = []
-    for sms, base_us in ((16, 100.0), (32, 200.0)):
-        for tok, tok_scale in ((32, 1.0), (64, 2.0)):
-            rows.append(
-                {
-                    "node_num": 1,
-                    "hidden_size": 4096,
-                    "num_token": tok,
-                    "num_topk": 8,
-                    "num_experts": 64,
-                    "dispatch_sms": sms,
-                    "dispatch_transmit_us": base_us * tok_scale,
-                    "dispatch_notify_us": 10.0,
-                    "combine_transmit_us": 1.5 * base_us * tok_scale,
-                    "combine_notify_us": 20.0,
-                }
-            )
-    path = tmp_path / "wideep_deepep_normal_perf.parquet"
-    pd.DataFrame(rows).to_parquet(path, index=False)
-
-    # The same synthetic rows through both loaders; the ``__dict__`` gates in
-    # MoEAllToAll.load_data / MoEDispatch.load_data keep the injected tables.
-    stub_perf_db._moe_a2a_data = load_moe_a2a_data(
-        [(str(tmp_path / "moe_a2a_perf.parquet"), None)], legacy_normal_sources=[(str(path), None)]
-    )
-    stub_perf_db._wideep_deepep_normal_data = load_wideep_deepep_normal_data(str(path))
-
-    def unified(phase, sms):
-        # ep_size = node_num * 8 (legacy 8-GPU HGX fleets) at the collected
-        # 32-token point, so only the sms axis interpolates.
-        return float(stub_perf_db.query_moe_a2a("deepep_ht", phase, "default", 8, 1, 4096, 8, 64, 32, sms=sms))
-
-    for phase in ("dispatch", "combine"):
-        assert unified(phase, 16) < unified(phase, 24) < unified(phase, 32)
-
-    legacy = float(
-        stub_perf_db.query_wideep_deepep_normal(
-            node_num=1, num_tokens=32, num_experts=64, topk=8, hidden_size=4096, sms=24
-        )
-    )
-    assert unified("dispatch", 24) + unified("combine", 24) == pytest.approx(legacy, rel=1e-9)
-
-
-# ---------------------------------------------------------------------------
-# Validation and tier contract
+# Retired with #1357 PR-5 (single oracle = the compiled engine): the query
+# semantics previously pinned here on the injected store — token
+# interpolation/scale, exact leaf hits, comm-dtype fallback and fp8_block
+# normalization, typed misses, attention_tp token division, off-grid sms 2D
+# interpolation, and the estimation-tier EmpiricalNotImplementedError — live
+# in aic-core/rust/.../operators/moe_a2a.rs, anchored by
+# tests/cross_package/test_query_shim_baseline.py and the frozen parity
+# goldens (the shims answer from DISK, so injected in-memory stores are
+# invisible to them). Python-side boundary contracts stay below.
 # ---------------------------------------------------------------------------
 
 
@@ -335,17 +160,6 @@ def test_query_rejects_unknown_backend_and_phase(a2a_db):
         a2a_db.query_moe_a2a("bogus_backend", "dispatch", "default", 16, 2, 7168, 8, 256, 32)
     with pytest.raises(ValueError, match="phase"):
         a2a_db.query_moe_a2a("deepep_ht", "gather", "default", 16, 2, 7168, 8, 256, 32)
-
-
-@pytest.mark.parametrize("mode", [common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL])
-def test_estimation_tiers_raise_empirical_not_implemented(a2a_db, mode):
-    with pytest.raises(EmpiricalNotImplementedError) as excinfo:
-        a2a_db.query_moe_a2a("deepep_ht", "dispatch", "default", 16, 2, 7168, 8, 256, 32, sms=20, database_mode=mode)
-    message = str(excinfo.value)
-    assert "silicon data required (estimation tier is a planned follow-up)" in message
-    # Full query context is part of the message.
-    for fragment in ("deepep_ht", "dispatch", "7168", "256"):
-        assert fragment in message
 
 
 def test_get_weights_is_zero():
@@ -431,11 +245,9 @@ def test_attention_tp_default_noop_on_shipped_l1_case():
         assert op_value == direct  # default attention_tp_size: byte-identical no-op
         total += op_value
 
-    legacy = float(
-        db.query_wideep_deepep_normal(
-            node_num=node, num_tokens=tok, num_experts=experts, topk=topk, hidden_size=hidden, sms=sms
-        )
-    )
+    # query_wideep_deepep_normal is a tombstone since #1357 PR-5; the legacy
+    # expectation is the RAW summed dispatch+combine leaf (us) in ms.
+    legacy = legacy_table[node][hidden][topk][experts][sms][tok]["latency"] / 1000.0
     assert total == pytest.approx(legacy, rel=1e-9)
 
 

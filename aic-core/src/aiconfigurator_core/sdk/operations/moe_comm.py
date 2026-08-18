@@ -15,8 +15,8 @@ registry shared by all three inference backends. On TRT-LLM this covers the
 ``[comm_backend][phase][comm_dtype][ep_size][node_num][hidden_size][topk]
 [num_experts][sms][num_tokens]``.
 ``MoEAllToAll`` is the op class over that table: it owns the class-level
-cache + ``load_data`` and the ``_query_a2a_table`` lookup behind
-``PerfDatabase.query_moe_a2a``.
+cache + ``load_data`` (the retired per-call lookup lived behind
+``PerfDatabase.query_moe_a2a``).
 
 Large-EP expert compute is modeled from stock ``moe_perf`` by
 ``operations.moe.ModeledEPMoE``; this module owns communication only.
@@ -30,11 +30,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator_core.sdk import common, perf_interp
-from aiconfigurator_core.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
-from aiconfigurator_core.sdk.operations import util_empirical
 from aiconfigurator_core.sdk.operations.base import Operation, _read_filtered_rows, resolve_op_data_path
-from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -323,7 +319,7 @@ def _adapt_legacy_trtllm_alltoall(data: defaultdict, rows) -> None:
     """Adapt legacy trtllm ``trtllm_alltoall_perf`` rows into ``data``.
 
     UNITS: the legacy ``latency`` column is already in **milliseconds** —
-    ``load_trtllm_alltoall_data`` stores it raw and ``query_trtllm_alltoall``
+    ``load_trtllm_alltoall_data`` stores it raw and the retired per-phase query
     returns table values without the /1000 the DeepEP query path applies (its
     SOL tier computes ms directly; shipped gb200 values span ~0.01-17 ms).
     Stored raw here, no us->ms conversion.
@@ -495,46 +491,6 @@ def _validate_a2a_request(comm_backend: str, phase: str) -> None:
         )
 
 
-def _resolve_comm_dtype_slice(phase_slice, comm_dtype: str, query_context: str):
-    """Three-step dtype resolution: exact key -> fp8_block alias -> sole dtype.
-
-    1. Exact ``comm_dtype`` key.
-    2. ``fp8_block`` tries ``fp8`` (debug log): fp8_block is a behavioral mode
-       that reuses the fp8 comm tables — the same normalization the legacy
-       ``query_trtllm_alltoall`` applies via ``_normalize_quant_mode_for_table``.
-       Exact-first ordering keeps real fp8_block rows winning if a future
-       collection ships them.
-    3. The ``"default"`` slice when it is the sole collected key (debug log):
-       the legacy DeepEP tables have no dtype axis (their adapted rows live
-       under ``"default"``), so a caller asking for a payload dtype must
-       still reach them — untyped data is a stand-in for any request. A sole
-       TYPED key is NOT: shipped GB200 ``nvlink_one_sided`` carries only
-       nvfp4, and matched two-sided rows show bf16/nvfp4 dispatch ratios of
-       0.56x-3.48x, so substituting across payload dtypes is a material
-       silent error where the legacy query raised. Typed slices miss.
-    """
-    if comm_dtype in phase_slice:
-        return phase_slice[comm_dtype]
-    if comm_dtype == "fp8_block" and "fp8" in phase_slice:
-        logger.debug(
-            "moe_a2a: comm_dtype 'fp8_block' not collected; normalizing to 'fp8' "
-            "(behavioral mode reusing the fp8 comm tables; %s)",
-            query_context,
-        )
-        return phase_slice["fp8"]
-    if len(phase_slice) == 1 and "default" in phase_slice:
-        logger.debug(
-            "moe_a2a: comm_dtype %r not collected; falling back to the untyped 'default' slice (%s)",
-            comm_dtype,
-            query_context,
-        )
-        return phase_slice["default"]
-    raise PerfDataNotAvailableError(
-        f"Missing silicon data for the requested lookup; comm_dtype '{comm_dtype}' is not available for "
-        f"{query_context}; collected dtypes: {sorted(phase_slice)}."
-    )
-
-
 class MoEAllToAll(Operation):
     """Unified large-EP MoE all-to-all comm op (one phase per instance).
 
@@ -640,115 +596,10 @@ class MoEAllToAll(Operation):
         cls._data_cache.clear()
 
     # ------------------------------------------------------------------
-    # Query table (behind PerfDatabase.query_moe_a2a)
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def _query_a2a_table(
-        cls,
-        database: PerfDatabase,
-        comm_backend: str,
-        phase: str,
-        comm_dtype: str,
-        ep_size: int,
-        node_num: int,
-        hidden_size: int,
-        topk: int,
-        num_experts: int,
-        num_tokens: int,
-        sms: int = 0,
-        database_mode: common.DatabaseMode | None = None,
-    ) -> PerformanceResult:
-        """Silicon lookup against the unified moe_a2a table.
-
-        SILICON walks the slice (backend -> phase -> dtype-with-fallback ->
-        ep -> node -> hidden -> topk -> experts), then resolves ``sms``: an
-        exact sms key gets a 1-D token interpolation, otherwise a 2-D
-        (sms, tokens) grid — the same split the legacy DeepEP-normal query
-        uses. SOL/SOL_FULL/EMPIRICAL have no estimation tier yet and raise
-        ``EmpiricalNotImplementedError``; HYBRID falls back to that same
-        raise when silicon data misses.
-        """
-        cls.load_data(database)
-        _validate_a2a_request(comm_backend, phase)
-
-        if database_mode is None:
-            database_mode = database._default_database_mode
-
-        query_context = (
-            f"moe_a2a {comm_backend}/{phase}: {comm_dtype=}, {ep_size=}, {node_num=}, "
-            f"{hidden_size=}, {topk=}, {num_experts=}, {sms=}, {num_tokens=}"
-        )
-
-        if database_mode in (common.DatabaseMode.SOL, common.DatabaseMode.SOL_FULL, common.DatabaseMode.EMPIRICAL):
-            raise EmpiricalNotImplementedError(
-                f"{database_mode.name} mode is not available for {query_context}: "
-                "silicon data required (estimation tier is a planned follow-up)."
-            )
-
-        def get_silicon() -> PerformanceResult:
-            phase_slice = util_empirical.require_data_slice(database._moe_a2a_data, comm_backend, phase)
-            dtype_slice = _resolve_comm_dtype_slice(phase_slice, comm_dtype, query_context)
-            by_sms = util_empirical.require_data_slice(dtype_slice, ep_size, node_num, hidden_size, topk, num_experts)
-            # 1-D/2-D token curves with a linear token proxy SOL for the
-            # boundary util-hold: per-slice payload bytes scale ~linearly with
-            # tokens (hidden/topk/dtype fixed), so the proxy is
-            # ratio-equivalent to any bandwidth roofline (see the DeepEP notes
-            # in operations/moe.py).
-            if sms in by_sms:
-                config = perf_interp.OpInterpConfig(
-                    axes=("num_tokens",), resolver=perf_interp.Grid(), sol_fn=lambda t: float(t)
-                )
-                result = perf_interp.query(config, by_sms[sms], num_tokens)
-            else:
-                config = perf_interp.OpInterpConfig(
-                    axes=("sms", "num_tokens"), resolver=perf_interp.Grid(), sol_fn=lambda _sm, t: float(t)
-                )
-                result = perf_interp.query(config, by_sms, sms, num_tokens)
-            lat = perf_interp.get_value(result, "latency")
-            energy = perf_interp.get_value(result, "energy")
-            return database._interp_pr(lat, energy=energy)
-
-        def get_empirical() -> float:
-            raise EmpiricalNotImplementedError(
-                f"HYBRID empirical fallback is not available for {query_context}: "
-                "silicon data required (estimation tier is a planned follow-up)."
-            )
-
-        return database._query_silicon_or_hybrid(
-            get_silicon=get_silicon,
-            get_empirical=get_empirical,
-            database_mode=database_mode,
-            error_msg=f"Failed to query moe_a2a data for {query_context}",
-        )
-
-    # ------------------------------------------------------------------
     # Op contract
     # ------------------------------------------------------------------
 
-    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        num_tokens = kwargs.get("x")  # per-rank tokens — comm ops never ADP-scale
-        # Legacy fidelity: attention TP shards the token stream ahead of the
-        # A2A, mirroring MoEDispatch's ``num_tokens // self._scale_num_tokens``
-        # exactly — plain floor division, no max(1, ...) guard (0 is possible).
-        num_tokens = num_tokens // self._attention_tp_size
-        result = database.query_moe_a2a(
-            self._comm_backend,
-            self._phase,
-            self._comm_dtype,
-            self._moe_ep_size,
-            self._node_num,
-            self._hidden_size,
-            self._topk,
-            self._num_experts,
-            num_tokens,
-            sms=self._sms,
-        )
-        return PerformanceResult(
-            float(result) * self._scale_factor,
-            energy=result.energy * self._scale_factor,
-            source=getattr(result, "source", "silicon"),
-        )
+    _ENGINE_QUERY_SHAPE = "tokens"
 
     def get_weights(self, **kwargs) -> float:
         """All-to-all communication has no weight memory."""

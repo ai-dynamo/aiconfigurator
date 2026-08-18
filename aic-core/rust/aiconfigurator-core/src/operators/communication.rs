@@ -20,7 +20,7 @@
 use crate::common::enums::{CommQuantMode, DatabaseMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
-use crate::operators::base::{PerformanceResult, Source};
+use crate::operators::base::{PerformanceResult, SolComponents, Source};
 use crate::operators::util_empirical::{self, UtilGrid};
 use crate::perf_database::PerfDatabase;
 use serde::{Deserialize, Serialize};
@@ -120,11 +120,14 @@ fn query_custom_allreduce_table(
     };
     match db.database_mode {
         // Python `_query_custom_allreduce_table`:
-        // `get_sol(quant_mode, tp_size, size)[0]`.
+        // `get_sol(quant_mode, tp_size, size)[0]`; the SOL_FULL triple is
+        // `(sol_time, 0, 0)` — the ring bound is neither a FLOP nor a
+        // device-memory term, so both components stay 0.
         DatabaseMode::Sol | DatabaseMode::SolFull => Ok(PerformanceResult::new(
             custom_allreduce_sol_ms(&db.system_spec, tp_size, size),
             Source::Sol,
-        )),
+        )
+        .with_sol(SolComponents::new(0.0, 0.0))),
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             custom_allreduce_empirical(db, quant, tp_size, size)?,
             Source::Empirical,
@@ -244,12 +247,10 @@ impl NcclOp {
             // `num_gpus == 1` early return / empirical's `sol_q = 0`
             // guard) and "sol" in SOL mode (the SOL branch evaluates
             // `get_sol` whose `(n-1)` factor zeroes out).
-            let source = if matches!(db.database_mode, DatabaseMode::Sol | DatabaseMode::SolFull) {
-                Source::Sol
-            } else {
-                Source::Empirical
-            };
-            return Ok(PerformanceResult::new(0.0, source));
+            if matches!(db.database_mode, DatabaseMode::Sol | DatabaseMode::SolFull) {
+                return Ok(PerformanceResult::sol(SolComponents::new(0.0, 0.0)));
+            }
+            return Ok(PerformanceResult::new(0.0, Source::Empirical));
         }
         let per_rank_tokens = num_tokens.div_ceil(self.seq_split.max(1)); // CP: busiest rank
                                                                           // Python: message_size = ceil(x/seq_split) * num_elements_per_token —
@@ -277,11 +278,15 @@ fn query_nccl_table(
     match db.database_mode {
         // Python `_query_nccl_table`:
         // `get_sol(dtype, num_gpus, operation, message_size)[0]`
-        // (unknown collectives yield 0.0, not an error).
-        DatabaseMode::Sol | DatabaseMode::SolFull => Ok(PerformanceResult::new(
-            nccl_sol_ms(&db.system_spec, dtype, num_gpus, operation, message_size),
-            Source::Sol,
-        )),
+        // (unknown collectives yield 0.0, not an error). The SOL_FULL
+        // triple is `(sol_time, 0, sol_time)` — the bandwidth bound rides
+        // in the mem slot.
+        DatabaseMode::Sol | DatabaseMode::SolFull => {
+            Ok(PerformanceResult::sol(SolComponents::new(
+                0.0,
+                nccl_sol_ms(&db.system_spec, dtype, num_gpus, operation, message_size),
+            )))
+        }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             nccl_empirical(db, dtype, num_gpus, operation, message_size)?,
             Source::Empirical,
@@ -433,16 +438,18 @@ impl P2POp {
         // other mode — including SILICON/HYBRID, which have no P2P table —
         // uses the empirical formula tagged "empirical".
         let inter_bw = spec.node.inter_node_bw.max(1.0);
-        let (latency, source) = match db.database_mode {
-            DatabaseMode::Sol | DatabaseMode::SolFull => (bytes / inter_bw * 1000.0, Source::Sol),
-            _ => (
+        // The P2P SOL_FULL triple is `(sol_time, 0, sol_time)` — the
+        // inter-node bandwidth bound rides in the mem slot.
+        let result = match db.database_mode {
+            DatabaseMode::Sol | DatabaseMode::SolFull => {
+                PerformanceResult::sol(SolComponents::new(0.0, bytes / inter_bw * 1000.0))
+            }
+            _ => PerformanceResult::new(
                 (bytes / inter_bw + spec.node.p2p_latency) * 1000.0,
                 Source::Empirical,
             ),
         };
-        Ok(PerformanceResult::new(latency, source)
-            .clamp_non_negative()
-            .scaled(self.scale_factor))
+        Ok(result.clamp_non_negative().scaled(self.scale_factor))
     }
 }
 

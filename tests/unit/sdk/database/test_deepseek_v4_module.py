@@ -1,7 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import math
+"""DeepSeek-V4 module tests: data loading, op weight accounting, and model
+memory estimation.
+
+The attention/mHC SOL formulas and the silicon interpolation ladder that used
+to be tested here (``_deepseek_v4_attention_sol``, kNN past-frontier holds,
+prefix-resolved table reads, rank-local head-bucket resolution) retired to the
+compiled engine with #1357 PR-5; that behaviour is anchored by
+``tests/cross_package/test_query_shim_baseline.py`` and the frozen parity
+goldens.
+"""
 
 import pytest
 
@@ -9,88 +18,9 @@ from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk import operations as ops
 from aiconfigurator.sdk.backends.sglang_backend import SGLANGBackend
 from aiconfigurator.sdk.models import get_model
-from aiconfigurator.sdk.operations.attention import generation_attn_mode
-from aiconfigurator.sdk.operations.dsv4 import (
-    _deep_merge_dsv4_dicts,
-    _deepseek_v4_attention_sol,
-)
-from aiconfigurator.sdk.perf_database import (
-    LoadedOpData,
-    load_mhc_module_data,
-)
+from aiconfigurator.sdk.perf_database import load_mhc_module_data
 
 pytestmark = pytest.mark.unit
-
-
-def _deepseek_v4_attn_kwargs(compress_ratio: int) -> dict:
-    return {
-        "b": 2,
-        "s": 256,
-        "prefix": 0,
-        "num_heads": 16,
-        "native_heads": 128,
-        "tp_size": 8,
-        "hidden_size": 7168,
-        "q_lora_rank": 1536,
-        "o_lora_rank": 1024,
-        "head_dim": 512,
-        "rope_head_dim": 64,
-        "index_n_heads": 64,
-        "index_head_dim": 128,
-        "index_topk": 1024,
-        "window_size": 128,
-        "compress_ratio": compress_ratio,
-        "o_groups": 2,
-        "kvcache_quant_mode": common.KVCacheQuantMode.fp8,
-        "fmha_quant_mode": common.FMHAQuantMode.bfloat16,
-        "gemm_quant_mode": common.GEMMQuantMode.fp8_block,
-    }
-
-
-def _attention_sol_tuple(db, *, is_context: bool, **query_kwargs) -> tuple[float, float, float]:
-    """Direct call into the shared DSv4 SOL formula.
-
-    A direct stand-in for the per-call ``database_mode=SOL_FULL`` diagnostic:
-    takes the same kwargs the ``query_*_deepseek_v4_attention_module`` wrappers
-    take and returns the raw ``(sol_time, sol_math, sol_mem)`` tuple. Mirrors the
-    wrappers' pre-binding: ``native_heads``/``tp_size`` never enter the SOL,
-    and the generation path rebinds the fmha label from the kv-cache dtype
-    and pins ``prefix=0``.
-    """
-    kwargs = dict(query_kwargs)
-    kwargs.pop("native_heads", None)
-    kwargs.pop("tp_size", None)
-    if not is_context:
-        kwargs.pop("prefix", None)
-        kwargs["prefix"] = 0
-        kwargs["fmha_quant_mode"] = generation_attn_mode(db.system_spec, kwargs["kvcache_quant_mode"])
-    return _deepseek_v4_attention_sol(db, is_context=is_context, **kwargs)
-
-
-def _deepseek_v4_value(latency: float) -> dict[str, float]:
-    return {"latency": latency, "power": 10.0, "energy": latency * 10.0}
-
-
-def _knn_hold(leaves, sol, query, k=4):
-    """Independent reference for the multi-axis past-frontier hold: the k
-    nearest leaves in joint log2 space, blended with tapered modified-Shepard
-    weights w = ((R-d)/(R*d))^2, support radius R at the (k+1)-th distance
-    (R = inf -> plain 1/d^2)."""
-    logq = [math.log2(max(v, 1e-12)) for v in query]
-    scored = sorted((math.dist([math.log2(max(v, 1e-12)) for v in c], logq), sol(*c) / lat) for c, lat in leaves)
-    picked, rest = scored[:k], scored[k:]
-    support_r = rest[0][0] if rest else math.inf
-
-    def weight(d):
-        if math.isinf(support_r):
-            return 1.0 / (d * d + 1e-12)
-        return (max(0.0, support_r - d) / (support_r * d + 1e-12)) ** 2
-
-    weights = [weight(d) for d, _ in picked]
-    if sum(weights) <= 0:  # all picked sit on the support boundary
-        weights = [1.0 / (d * d + 1e-12) for d, _ in picked]
-    util = sum(w * u for w, (_, u) in zip(weights, picked, strict=True)) / sum(weights)
-    return sol(*query) / util
 
 
 def _write_mhc_perf(path, rows: list[str]) -> str:
@@ -99,595 +29,61 @@ def _write_mhc_perf(path, rows: list[str]) -> str:
     return str(path)
 
 
-def _context_deepseek_v4_data(
-    compress_ratio: int, attn_dict: dict, native_heads: int = 128, local_heads: int = 16
-) -> dict:
-    return {
-        common.FMHAQuantMode.bfloat16: {
-            common.KVCacheQuantMode.fp8: {
-                common.GEMMQuantMode.fp8_block: {
-                    native_heads: {
-                        local_heads: {
-                            compress_ratio: attn_dict,
-                        },
-                    },
-                },
-            },
-        },
-    }
-
-
-def _generation_deepseek_v4_data(
-    compress_ratio: int, attn_dict: dict, native_heads: int = 128, local_heads: int = 16
-) -> dict:
-    return {
-        common.KVCacheQuantMode.fp8: {
-            common.GEMMQuantMode.fp8_block: {
-                native_heads: {
-                    local_heads: {
-                        compress_ratio: attn_dict,
-                    },
-                },
-            },
-        },
-    }
-
-
-def _dsv4_sampled_batch_caps_grid() -> dict:
-    """Mock the real DSV4 sampled shape: b=1/2/4/8 with shrinking max s."""
-    return {
-        8: {
-            1024: {
-                1: _deepseek_v4_value(1.00),
-                2: _deepseek_v4_value(3.00),
-                4: _deepseek_v4_value(6.00),
-                8: _deepseek_v4_value(12.00),
-            },
-            2048: {
-                1: _deepseek_v4_value(2.00),
-                2: _deepseek_v4_value(4.80),
-                4: _deepseek_v4_value(8.00),
-            },
-            4096: {
-                1: _deepseek_v4_value(3.00),
-                2: _deepseek_v4_value(5.80),
-            },
-            8192: {
-                1: _deepseek_v4_value(4.00),
-            },
-        }
-    }
-
-
-def _dsv4_generation_sampled_grid() -> dict:
-    """Generation shape is [tp][b][s_total]; collector's minimum s_total is 2."""
-    return {
-        8: {
-            1: {
-                2: _deepseek_v4_value(0.20),
-                5: _deepseek_v4_value(0.50),
-            },
-            2: {
-                2: _deepseek_v4_value(0.40),
-                5: _deepseek_v4_value(1.00),
-            },
-        }
-    }
-
-
-def _dsv4_sparse_kernel_grid(lat_without_prefix: float = 0.02, lat_with_prefix: float = 0.05) -> dict:
-    return {
-        128: {
-            1: {
-                0: {
-                    54.0: {1: {"latency": lat_without_prefix}},
-                },
-                2816.0: {
-                    54.0: {1: {"latency": lat_with_prefix}},
-                },
-            }
-        }
-    }
-
-
 def test_mhc_module_loader_returns_none_for_missing_file(tmp_path):
     assert load_mhc_module_data(str(tmp_path / "mhc_module_perf.txt")) is None
 
 
-class TestDeepSeekV4MHCModule:
-    def test_mhc_empirical_raises_without_data(self, comprehensive_perf_db):
-        from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
+def test_mhc_loader_keys_by_op_hc_mult_hidden_size_num_tokens(tmp_path):
+    path = _write_mhc_perf(
+        tmp_path / "mhc_module_perf.txt",
+        [
+            "VLLM,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,4096,1.5",
+            "VLLM,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,7168,2.5",
+        ],
+    )
+    data = load_mhc_module_data(path)
 
-        with pytest.raises(EmpiricalNotImplementedError):
-            comprehensive_perf_db.query_mhc_module(
-                num_tokens=512,
-                hidden_size=7168,
-                hc_mult=4,
-                sinkhorn_iters=20,
-                op="pre",
-                quant_mode=common.GEMMQuantMode.bfloat16,
-                database_mode=common.DatabaseMode.EMPIRICAL,
-            )
-
-    def test_mhc_sol_mode_scalar(self, comprehensive_perf_db):
-        result = comprehensive_perf_db.query_mhc_module(
-            num_tokens=512,
-            hidden_size=7168,
-            hc_mult=4,
-            sinkhorn_iters=20,
-            op="both",
-            quant_mode=common.GEMMQuantMode.bfloat16,
-            database_mode=common.DatabaseMode.SOL,
-        )
-        assert float(result) > 0
-        assert result.source == "sol"
-
-    def test_mhc_weight_memory_uses_quant_mode(self, comprehensive_perf_db):
-        bf16_op = ops.DeepSeekV4MHCModule(
-            "mhc",
-            1,
-            "pre",
-            7168,
-            4,
-            20,
-            common.GEMMQuantMode.bfloat16,
-        )
-        fp8_op = ops.DeepSeekV4MHCModule(
-            "mhc",
-            1,
-            "pre",
-            7168,
-            4,
-            20,
-            common.GEMMQuantMode.fp8_block,
-        )
-        assert fp8_op.get_weights() == pytest.approx(bf16_op.get_weights() / 2)
-
-        # Lower-precision weights shrink both the FLOPs and the byte terms of
-        # the mHC roofline, so the SOL scalar must drop (the per-call SOL_FULL
-        # diagnostic tuple exposes the sol_mem slot in isolation).
-        bf16_sol = comprehensive_perf_db.query_mhc_module(
-            num_tokens=512,
-            hidden_size=7168,
-            hc_mult=4,
-            sinkhorn_iters=20,
-            op="pre",
-            quant_mode=common.GEMMQuantMode.bfloat16,
-            database_mode=common.DatabaseMode.SOL,
-        )
-        fp8_sol = comprehensive_perf_db.query_mhc_module(
-            num_tokens=512,
-            hidden_size=7168,
-            hc_mult=4,
-            sinkhorn_iters=20,
-            op="pre",
-            quant_mode=common.GEMMQuantMode.fp8_block,
-            database_mode=common.DatabaseMode.SOL,
-        )
-        assert float(fp8_sol) < float(bf16_sol)
-
-    def test_mhc_loader_and_query_use_shape(self, mutable_comprehensive_perf_db, tmp_path):
-        path = _write_mhc_perf(
-            tmp_path / "mhc_module_perf.txt",
-            [
-                "VLLM,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,4096,1.5",
-                "VLLM,test,H20,pre,mhc,DeepseekV4ForCausalLM,512,4,7168,2.5",
-            ],
-        )
-        db = mutable_comprehensive_perf_db
-        db._mhc_module_data = load_mhc_module_data(path)
-
-        result = db.query_mhc_module(
-            num_tokens=512,
-            hidden_size=7168,
-            hc_mult=4,
-            sinkhorn_iters=20,
-            op="pre",
-            quant_mode=common.GEMMQuantMode.bfloat16,
-            database_mode=common.DatabaseMode.SILICON,
-        )
-
-        assert float(result) == pytest.approx(2.5)
+    # data[op][hc_mult][hidden_size][num_tokens] — hidden_size distinguishes rows.
+    assert set(data.keys()) == {"pre"}
+    assert set(data["pre"][4].keys()) == {4096, 7168}
+    assert data["pre"][4][4096][512]["latency"] == pytest.approx(1.5)
+    assert data["pre"][4][7168][512]["latency"] == pytest.approx(2.5)
+    assert data["pre"][4][7168][512]["power"] == pytest.approx(0.0)
 
 
-class TestDeepSeekV4AttentionModule:
-    def test_generation_uses_pre_decode_kv_length(self, comprehensive_perf_db):
-        base = _deepseek_v4_attn_kwargs(4)
-        base.pop("prefix")
-        current = _attention_sol_tuple(comprehensive_perf_db, is_context=False, **{**base, "s": 512})
-        next_step = _attention_sol_tuple(comprehensive_perf_db, is_context=False, **{**base, "s": 513})
-
-        assert next_step[1] > current[1]
-
-    def test_generation_silicon_below_min_sampled_s_total_holds_boundary_util(self, mutable_comprehensive_perf_db):
-        """b=1, s_total=1 sits below the min sampled s_total=2: the engine
-        holds a util blended from the nearest measured leaves (joint log2
-        distance, so the small-coordinate corner dominates) and lets the
-        decode SOL carry the (tiny) difference, instead of the legacy
-        raw-linear downward extrapolation (which halved the latency straight
-        through the launch-overhead floor)."""
-        db = mutable_comprehensive_perf_db
-        # Silicon data is {native}{local}{cr}{b}{s_total}. The shared grid
-        # fixture is {tp}{b}{s_total}; strip the tp wrapper so it lands as
-        # {b}{s_total} under {native}{local}{cr}.
-        mock_grid = _dsv4_generation_sampled_grid()[8]
-        db._generation_deepseek_v4_attention_module_data = LoadedOpData(
-            _generation_deepseek_v4_data(4, mock_grid),
-            common.PerfDataFilename.dsv4_csa_generation_module,
-            "mock_dsv4_generation_module_tp8",
-        )
-        kwargs = _deepseek_v4_attn_kwargs(4)
-        kwargs.pop("prefix")
-
-        result = db.query_generation_deepseek_v4_attention_module(
-            **{
-                **kwargs,
-                "b": 1,
-                "s": 1,
-                "num_heads": 8,
-            },
-            database_mode=common.DatabaseMode.SILICON,
-        )
-
-        def sol(b, s_total):
-            return float(
-                db.query_generation_deepseek_v4_attention_module(
-                    **{**kwargs, "b": b, "s": s_total, "num_heads": 8},
-                    database_mode=common.DatabaseMode.SOL,
-                )
-            )
-
-        expected = _knn_hold(
-            [((1, 2), 0.20), ((1, 5), 0.50), ((2, 2), 0.40), ((2, 5), 1.00)],
-            sol,
-            (1, 1),
-        )
-        assert float(result) == pytest.approx(expected)
-        assert result.energy == pytest.approx(expected * 10.0)
-
-    def test_csa_topk_changes_attention_workload(self, comprehensive_perf_db):
-        base = _deepseek_v4_attn_kwargs(4)
-        low_topk = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
-            **{**base, "index_topk": 128, "s": 4096},
-            database_mode=common.DatabaseMode.SOL,
-        )
-        high_topk = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
-            **{**base, "index_topk": 1024, "s": 4096},
-            database_mode=common.DatabaseMode.SOL,
-        )
-        assert high_topk > low_topk
-
-    def test_attention_sol_covers_flash_and_pro_shapes(self, comprehensive_perf_db):
-        common_kwargs = {
-            "b": 2,
-            "s": 4096,
-            "prefix": 1024,
-            "tp_size": 8,
-            "head_dim": 512,
-            "rope_head_dim": 64,
-            "index_n_heads": 64,
-            "index_head_dim": 128,
-            "window_size": 128,
-            "compress_ratio": 4,
-            "kvcache_quant_mode": common.KVCacheQuantMode.fp8,
-            "fmha_quant_mode": common.FMHAQuantMode.bfloat16,
-            "gemm_quant_mode": common.GEMMQuantMode.fp8_block,
-        }
-        shapes = {
-            "flash": {
-                "num_heads": 8,
-                "native_heads": 64,
-                "hidden_size": 4096,
-                "q_lora_rank": 1024,
-                "o_lora_rank": 1024,
-                "index_topk": 512,
-                "o_groups": 1,
-            },
-            "pro": {
-                "num_heads": 16,
-                "native_heads": 128,
-                "hidden_size": 7168,
-                "q_lora_rank": 1536,
-                "o_lora_rank": 1024,
-                "index_topk": 1024,
-                "o_groups": 2,
-            },
-        }
-
-        context_results = {}
-        generation_results = {}
-        for name, shape in shapes.items():
-            context_result = _attention_sol_tuple(comprehensive_perf_db, is_context=True, **{**common_kwargs, **shape})
-            generation_kwargs = {**common_kwargs, **shape}
-            generation_kwargs.pop("prefix")
-            generation_result = _attention_sol_tuple(comprehensive_perf_db, is_context=False, **generation_kwargs)
-
-            assert context_result[0] == max(context_result[1], context_result[2])
-            assert generation_result[0] == max(generation_result[1], generation_result[2])
-            assert context_result[0] > 0
-            assert generation_result[0] > 0
-            # The SOL-mode query scalar must be exactly the formula's sol_time.
-            context_scalar = comprehensive_perf_db.query_context_deepseek_v4_attention_module(
-                **{**common_kwargs, **shape},
-                database_mode=common.DatabaseMode.SOL,
-            )
-            generation_scalar = comprehensive_perf_db.query_generation_deepseek_v4_attention_module(
-                **generation_kwargs,
-                database_mode=common.DatabaseMode.SOL,
-            )
-            assert math.isclose(float(context_scalar), context_result[0], rel_tol=1e-9)
-            assert math.isclose(float(generation_scalar), generation_result[0], rel_tol=1e-9)
-            context_results[name] = context_result
-            generation_results[name] = generation_result
-
-        assert context_results["pro"][1] > context_results["flash"][1]
-        assert generation_results["pro"][1] > generation_results["flash"][1]
-
-    def test_csa_context_silicon_reads_prefix_resolved_table(self, mutable_comprehensive_perf_db):
-        # SCHEME A reads the prefix-resolved silicon table {head}{cr}{prefix}{s}{b}
-        # directly (the topK regime change is modeled by the topK-calib DELTA, not
-        # a separate raw same-regime piecewise pass). Query (prefix=0, s=4097):
-        # c4_len = 4097//4 = 1024 <= index_topk, so the topK DELTA is 0 and the
-        # table value at s=4097 is returned unchanged.
-        attn_dict = {
-            0: {
-                4096: {2: _deepseek_v4_value(20.0)},
-                4097: {2: _deepseek_v4_value(21.0)},
-                8192: {2: _deepseek_v4_value(80.0)},
-                12288: {2: _deepseek_v4_value(100.0)},
-            }
-        }
-        db = mutable_comprehensive_perf_db
-        db._context_deepseek_v4_attention_module_data = LoadedOpData(
-            _context_deepseek_v4_data(4, attn_dict),
-            common.PerfDataFilename.dsv4_csa_context_module,
-            "models",
-        )
-        db._raw_context_deepseek_v4_attention_module_data = None
-
-        base = _deepseek_v4_attn_kwargs(4)
-        result = db.query_context_deepseek_v4_attention_module(
-            **{**base, "s": 4097, "prefix": 0},
-            database_mode=common.DatabaseMode.SILICON,
-        )
-
-        assert float(result) == pytest.approx(21.0)
-        assert result.energy == pytest.approx(21.0 * 10.0)
-
-    def test_generation_kv_bytes_independent_of_num_heads(self, comprehensive_perf_db):
-        """DeepSeek-V4 KV cache stores one ``head_dim``-sized vector per token,
-        shared across all attention heads (MLA / MQA-equivalent layout).
-
-        Therefore the KV-traffic component of the attention SOL ``sol_mem`` term
-        must NOT scale with ``num_heads``: scaling ``num_heads`` only changes the
-        compute (sol_math) and the projection-related weight/activation bytes.
-
-        Regression test for the bug where ``kv_cache_bytes`` was multiplied by
-        ``num_heads``, which produced unrealistically large ``sol_mem`` values
-        (often >100 ms per decode step at moderate batch sizes). The inflated
-        SOL caused HYBRID/silicon latency to fall *below* SOL latency in the
-        ``aiconfigurator cli estimate ... --detail all`` "Latency Summary"
-        report -- a physical impossibility, since SOL is the per-op roofline
-        lower bound and cannot exceed any silicon-measured execution time.
-        """
-        base = _deepseek_v4_attn_kwargs(4)
-        # Decode-mode shape: large batch, kv_len = s - 1, KV traffic dominates sol_mem.
-        kwargs = {
-            **base,
-            "b": 256,
-            "s": 8192,
-            "num_heads": 16,
-            "index_topk": 1024,
-        }
-        kwargs.pop("prefix")
-
-        # The direct sol call returns (max(sol_math, sol_mem), sol_math, sol_mem).
-        small = _attention_sol_tuple(comprehensive_perf_db, is_context=False, **kwargs)
-        large = _attention_sol_tuple(comprehensive_perf_db, is_context=False, **{**kwargs, "num_heads": 128})
-
-        # sol_math (index 1) must scale with num_heads: more compute per token.
-        assert large[1] > small[1]
-        # KV-cache traffic (a major component of sol_mem at this batch) must NOT
-        # scale with num_heads -- sol_mem should be much closer to the small case
-        # than the 128/16 = 8x ratio that the buggy formula would produce. We
-        # leave headroom for projection/activation/weight scaling that DOES
-        # legitimately depend on num_heads (Q projection output is num_heads x
-        # head_dim per token).
-        ratio = float(large[2]) / float(small[2])
-        assert ratio < 4.0, (
-            f"sol_mem scaled by {ratio:.2f}x when num_heads went 16→128. KV "
-            f"cache bytes should be MQA-style (head_dim only), independent of "
-            f"num_heads."
-        )
-
-    def test_context_silicon_resolves_rank_local_head_bucket(self, mutable_comprehensive_perf_db):
-        # Head identity is [native][local]: a Pro query at tp=8 (native 128 ->
-        # num_heads=16) must resolve the local-16 bucket inside the native-128
-        # bucket, not a smaller local-head bucket. cr=4 / prefix=0 ->
-        # c4_len=64 <= index_topk, so the topK DELTA is 0 and the raw latency is
-        # returned unchanged. Data is prefix-resolved:
-        # {native}{local}{cr}{prefix}{s}{b}.
-        db = mutable_comprehensive_perf_db
-        data = _context_deepseek_v4_data(
-            4,
-            {0: {256: {2: _deepseek_v4_value(11.0)}}},
-            local_heads=8,
-        )
-        pro_data = _context_deepseek_v4_data(
-            4,
-            {0: {256: {2: _deepseek_v4_value(22.0)}}},
-            local_heads=16,
-        )
-        _deep_merge_dsv4_dicts(data, pro_data)
-        db._context_deepseek_v4_attention_module_data = LoadedOpData(
-            data,
-            common.PerfDataFilename.dsv4_csa_context_module,
-            "models",
-        )
-        db._raw_context_deepseek_v4_attention_module_data = None
-
-        result = db.query_context_deepseek_v4_attention_module(
-            **_deepseek_v4_attn_kwargs(4),
-            database_mode=common.DatabaseMode.SILICON,
-        )
-
-        assert float(result) == pytest.approx(22.0)
-
-    def test_csa_indexer_logits_scale_with_compressed_length_not_topk_only(self, comprehensive_perf_db):
-        base = {**_deepseek_v4_attn_kwargs(4), "s": 4096}
-        short_cache = _attention_sol_tuple(
-            comprehensive_perf_db, is_context=True, **{**base, "prefix": 0, "index_topk": 16}
-        )
-        long_cache = _attention_sol_tuple(
-            comprehensive_perf_db, is_context=True, **{**base, "prefix": 4096, "index_topk": 16}
-        )
-        assert long_cache[1] > short_cache[1]
-
-    def test_kvcache_quant_changes_sol_memory(self, comprehensive_perf_db):
-        base = {**_deepseek_v4_attn_kwargs(128), "s": 4096, "prefix": 4096}
-        bf16 = _attention_sol_tuple(
-            comprehensive_perf_db,
-            is_context=True,
-            **{**base, "kvcache_quant_mode": common.KVCacheQuantMode.bfloat16},
-        )
-        fp8 = _attention_sol_tuple(
-            comprehensive_perf_db,
-            is_context=True,
-            **{**base, "kvcache_quant_mode": common.KVCacheQuantMode.fp8},
-        )
-        assert fp8[2] < bf16[2]
-
-    def test_gemm_quant_changes_sol_math_and_memory(self, comprehensive_perf_db):
-        base = {**_deepseek_v4_attn_kwargs(4), "s": 4096, "prefix": 1024}
-        bf16 = _attention_sol_tuple(
-            comprehensive_perf_db,
-            is_context=True,
-            **{**base, "gemm_quant_mode": common.GEMMQuantMode.bfloat16},
-        )
-        fp8 = _attention_sol_tuple(
-            comprehensive_perf_db,
-            is_context=True,
-            **{**base, "gemm_quant_mode": common.GEMMQuantMode.fp8_block},
-        )
-        assert fp8[1] < bf16[1]
-        assert fp8[2] < bf16[2]
-
-    def test_context_silicon_handles_bs1_s54_prefix2816_single_attn_module(self, mutable_comprehensive_perf_db):
-        """Full-query regression for the single bs=1, isl=54, prefix=2816 attention module."""
-        db = mutable_comprehensive_perf_db
-        module_grid = _dsv4_sampled_batch_caps_grid()
-        db._context_deepseek_v4_attention_module_data = LoadedOpData(
-            _context_deepseek_v4_data(4, module_grid),
-            common.PerfDataFilename.dsv4_csa_context_module,
-            "mock_dsv4_context_module_tp8",
-        )
-        db._raw_context_deepseek_v4_attention_module_data = LoadedOpData(
-            _context_deepseek_v4_data(4, module_grid),
-            common.PerfDataFilename.dsv4_csa_context_module,
-            "mock_raw_dsv4_context_module_tp8",
-        )
-        sparse_grid = _dsv4_sparse_kernel_grid()
-        db._dsv4_sparse_kernel_data = {
-            "paged_mqa_logits": LoadedOpData(
-                sparse_grid,
-                common.PerfDataFilename.dsv4_paged_mqa_logits_module,
-                "mock_dsv4_paged_mqa_logits_module",
-            ),
-        }
-
-        result = db.query_context_deepseek_v4_attention_module(
-            **{
-                **_deepseek_v4_attn_kwargs(4),
-                "b": 1,
-                "s": 54,
-                "prefix": 2816,
-                "num_heads": 8,
-            },
-            database_mode=common.DatabaseMode.SILICON,
-        )
-
-        assert float(result) > 0
-        assert result.energy >= 0
-
-    def test_context_silicon_uses_prefix_anchor_without_topk_calib(self, mutable_comprehensive_perf_db):
-        """SCHEME A correction is the topK-calib DELTA (flat - top_last), not the
-        old paged_mqa_logits sparse-kernel delta. When the topK calib is absent,
-        the prefix CSA query returns the measured module latency UNCORRECTED
-        (DELTA = 0) instead of raising — the prefix-resolved table already carries
-        the prefix in its leading axis, so there is no s+prefix double-count."""
-        db = mutable_comprehensive_perf_db
-        # prefix-resolved {head}{cr}{prefix}{s}{b}; prefix=8192/s=54 -> c4_len=2061
-        # > index_topk, so a correction WOULD apply if a calib were loaded.
-        db._context_deepseek_v4_attention_module_data = LoadedOpData(
-            _context_deepseek_v4_data(
-                4,
-                {
-                    0: {54: {1: _deepseek_v4_value(2.0)}},
-                    8192: {54: {1: _deepseek_v4_value(5.0)}},
-                },
-            ),
-            common.PerfDataFilename.dsv4_csa_context_module,
-            "models",
-        )
-        db._raw_context_deepseek_v4_attention_module_data = None
-        db._dsv4_csa_topk_calib = None  # no topK calibration loaded
-
-        base = {**_deepseek_v4_attn_kwargs(4), "b": 1, "s": 54, "num_heads": 16}
-        prefix0 = db.query_context_deepseek_v4_attention_module(
-            **{**base, "prefix": 0},
-            database_mode=common.DatabaseMode.SILICON,
-        )
-        prefix8192 = db.query_context_deepseek_v4_attention_module(
-            **{**base, "prefix": 8192},
-            database_mode=common.DatabaseMode.SILICON,
-        )
-
-        assert float(prefix0) == pytest.approx(2.0)
-        assert float(prefix8192) == pytest.approx(5.0)
-
-    def test_context_silicon_handles_b3_s2682_prefix0_num_heads8_from_sampled_batches(
-        self, mutable_comprehensive_perf_db
-    ):
-        """Full-query regression for sampled b=2/b=4 data and query b=3."""
-        db = mutable_comprehensive_perf_db
-        module_grid = _dsv4_sampled_batch_caps_grid()
-        db._context_deepseek_v4_attention_module_data = LoadedOpData(
-            _context_deepseek_v4_data(4, module_grid),
-            common.PerfDataFilename.dsv4_csa_context_module,
-            "mock_dsv4_context_module_tp8",
-        )
-        db._raw_context_deepseek_v4_attention_module_data = LoadedOpData(
-            _context_deepseek_v4_data(4, module_grid),
-            common.PerfDataFilename.dsv4_csa_context_module,
-            "mock_raw_dsv4_context_module_tp8",
-        )
-
-        result = db.query_context_deepseek_v4_attention_module(
-            **{
-                **_deepseek_v4_attn_kwargs(4),
-                "b": 3,
-                "s": 2682,
-                "prefix": 0,
-                "num_heads": 8,
-            },
-            database_mode=common.DatabaseMode.SILICON,
-        )
-
-        assert float(result) > 0
-        assert result.energy >= 0
+def test_mhc_weight_memory_uses_quant_mode():
+    bf16_op = ops.DeepSeekV4MHCModule(
+        "mhc",
+        1,
+        "pre",
+        7168,
+        4,
+        20,
+        common.GEMMQuantMode.bfloat16,
+    )
+    fp8_op = ops.DeepSeekV4MHCModule(
+        "mhc",
+        1,
+        "pre",
+        7168,
+        4,
+        20,
+        common.GEMMQuantMode.fp8_block,
+    )
+    assert fp8_op.get_weights() == pytest.approx(bf16_op.get_weights() / 2)
 
 
-def test_deepseek_v4_per_op_sol_queries_run_end_to_end(mutable_comprehensive_perf_db):
+def test_deepseek_v4_per_op_sol_queries_run_end_to_end():
     """Every DSV4 op must answer a per-op SOL query through the per-call
-    ``op.query()`` surface (the sanity notebook's substrate; the engine-step
-    SOL path itself is rust-routed and covered by the parity suite on real
-    databases). The fixture is a real PerfDatabase stuffed with synthetic
-    in-memory data the compiled engine could not resolve from disk, so the
-    per-call queries are looped directly."""
-    db = mutable_comprehensive_perf_db
-    db.system_spec["gpu"]["mem_capacity"] = 288400343040
-    db.system_spec["misc"]["nccl_mem"] = {1: 0, 2: 0, 4: 0, 8: 0}
-    db.system_spec["misc"]["other_mem"] = 0
+    ``op.query()`` surface (now a deprecation shim routed through the compiled
+    engine's model-less probe). The probe engine loads perf tables from disk,
+    so this runs on a real shipped database rather than the synthetic-stuffed
+    fixture (whose in-memory tables the engine cannot see)."""
+    from aiconfigurator.sdk.perf_database import get_database_view
+
+    # b200_sxm/sglang/0.5.14 ships the full DSV4 table set (csa modules, mhc),
+    # which the probe engine loads eagerly per op family even under SOL.
+    db = get_database_view("b200_sxm", "sglang", "0.5.14", database_mode="SOL")
     model_config = config.ModelConfig(
         tp_size=1,
         moe_tp_size=1,
@@ -695,8 +91,7 @@ def test_deepseek_v4_per_op_sol_queries_run_end_to_end(mutable_comprehensive_per
         nextn=1,
         overwrite_num_layers=2,
     )
-    model = get_model("sgl-project/DeepSeek-V4-Flash-FP8", model_config, backend_name="trtllm")
-    db.set_default_database_mode(common.DatabaseMode.SOL)
+    model = get_model("sgl-project/DeepSeek-V4-Flash-FP8", model_config, backend_name="sglang")
 
     context_total = sum(
         float(op.query(db, x=128, batch_size=1, beam_width=1, s=128, prefix=0)) for op in model.context_ops

@@ -119,8 +119,9 @@ class DeepSeekV32Model(BaseModel):
     @classmethod
     def supports_cp(cls, backend_name: str) -> bool:
         # GLM-5 DSA prefill CP: SGLang AllGather only. CP is modeled INSIDE
-        # ContextDSAModule (_query_cp) + DSA-specific MoE comm, NOT via the
-        # dense _cp_attn_comm_ops / seq_split skeleton.
+        # the engine's ContextDSAModule operator (operators/dsa.rs) +
+        # DSA-specific MoE comm, NOT via the dense _cp_attn_comm_ops /
+        # seq_split skeleton.
         return backend_name == "sglang"
 
     @classmethod

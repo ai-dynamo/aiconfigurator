@@ -164,10 +164,10 @@ mod tests {
     use crate::operators::op::{FallbackOp, OverlapOp};
     use crate::operators::{
         ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, DsaModuleOp, Dsv4MegaMoeOp,
-        Dsv4ModuleOp, ElementwiseOp, EmbeddingOp, EncoderAttentionOp, GdnOp, GemmOp,
-        FpmForwardOp, FpmPhase, GenerationAttentionOp, GenerationMlaOp, KdaOp, Mamba2Op,
-        MhcModuleOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, ModeledEpMoeOp, MoeAllToAllOp, MoeOp,
-        NcclOp, P2POp, VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp,
+        Dsv4ModuleOp, ElementwiseOp, EmbeddingOp, EncoderAttentionOp, FpmForwardOp, FpmPhase,
+        GdnOp, GemmOp, GenerationAttentionOp, GenerationMlaOp, KdaOp, Mamba2Op, MhcModuleOp,
+        MlaBmmOp, MlaModuleOp, MoEDispatchOp, ModeledEpMoeOp, MoeAllToAllOp, MoeOp, NcclOp, P2POp,
+        VisionEncoderOp, WideEpContextMlaOp, WideEpGenerationMlaOp,
     };
     use crate::perf_database::dsv4::AttnKind;
     use crate::{

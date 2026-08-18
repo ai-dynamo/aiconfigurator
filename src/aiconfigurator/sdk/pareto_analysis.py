@@ -863,11 +863,11 @@ def _quick_balance_ratio(
         "gen_seq_imbalance_correction_scale": runtime_config.gen_seq_imbalance_correction_scale,
     }
     t_a = sum(
-        float(op.query(database, x=batch_size, model_name=getattr(a_model, "model_name", ""), **kwargs_base))
+        float(op._engine_query(database, x=batch_size, model_name=getattr(a_model, "model_name", ""), **kwargs_base))
         for op in a_ops
     )
     t_f = sum(
-        float(op.query(database, x=batch_size, model_name=getattr(f_model, "model_name", ""), **kwargs_base))
+        float(op._engine_query(database, x=batch_size, model_name=getattr(f_model, "model_name", ""), **kwargs_base))
         for op in f_ops
     )
     return min(t_a, t_f) / max(t_a, t_f, 1e-9)

@@ -3,30 +3,16 @@
 
 """Unit tests for TrtLLMWideEPMoE operation."""
 
-from unittest.mock import MagicMock, patch
-
 import pytest
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.operations import PerformanceResult, TrtLLMWideEPMoE
+from aiconfigurator.sdk.operations import TrtLLMWideEPMoE
 
 pytestmark = pytest.mark.unit
 
 
 class TestTrtLLMWideEPMoE:
     """Test cases for TrtLLMWideEPMoE class."""
-
-    @pytest.fixture
-    def mock_database(self):
-        """Create a mock database for testing."""
-        mock_db = MagicMock()
-        mock_db.backend = "trtllm"
-        # Mock query_wideep_moe_compute to return a PerformanceResult-like object
-        mock_result = MagicMock()
-        mock_result.__float__ = MagicMock(return_value=10.5)
-        mock_result.energy = 2.5
-        mock_db.query_wideep_moe_compute.return_value = mock_result
-        return mock_db
 
     def test_initialization_with_default_num_slots(self):
         """Test TrtLLMWideEPMoE initialization with default num_slots."""
@@ -121,9 +107,8 @@ class TestTrtLLMWideEPMoE:
         assert moe._weights == expected_weights
         assert moe.get_weights() == expected_weights * 2.0  # scale_factor = 2.0
 
-    def test_query_basic(self, mock_database):
-        """Test basic query functionality."""
-        moe = TrtLLMWideEPMoE(
+    def _make(self, **overrides):
+        base = dict(
             name="test_moe",
             scale_factor=1.0,
             hidden_size=2048,
@@ -136,141 +121,13 @@ class TestTrtLLMWideEPMoE:
             workload_distribution="power_law_1.01_eplb",
             attention_dp_size=1,
         )
+        base.update(overrides)
+        return TrtLLMWideEPMoE(**base)
 
-        result = moe.query(mock_database, x=16)
-
-        # Verify database was called correctly
-        mock_database.query_wideep_moe_compute.assert_called_once_with(
-            num_tokens=16,  # x * attention_dp_size = 16 * 1
-            hidden_size=2048,
-            inter_size=8192,
-            topk=2,
-            num_experts=8,
-            num_slots=8,  # defaults to num_experts
-            moe_tp_size=2,
-            moe_ep_size=2,
-            quant_mode=common.MoEQuantMode.bfloat16,
-            workload_distribution="power_law_1.01_eplb",
-        )
-
-        # Verify result
-        assert isinstance(result, PerformanceResult)
-        assert float(result) == 10.5  # PerformanceResult IS the latency value
-        assert result.energy == 2.5  # mock energy value
-
-    def test_query_with_attention_dp_scaling(self, mock_database):
-        """Test query with attention_dp_size scaling."""
-        moe = TrtLLMWideEPMoE(
-            name="test_moe",
-            scale_factor=1.0,
-            hidden_size=2048,
-            inter_size=8192,
-            topk=2,
-            num_experts=8,
-            moe_tp_size=1,
-            moe_ep_size=1,
-            quant_mode=common.MoEQuantMode.bfloat16,
-            workload_distribution="uniform",
-            attention_dp_size=4,  # This should scale the input tokens
-        )
-
-        moe.query(mock_database, x=16)
-
-        # Verify tokens were scaled by attention_dp_size
-        mock_database.query_wideep_moe_compute.assert_called_once()
-        call_args = mock_database.query_wideep_moe_compute.call_args[1]
-        assert call_args["num_tokens"] == 64  # 16 * 4
-
-    def test_query_with_scale_factor(self, mock_database):
-        """Test query with scale_factor applied to results."""
-        moe = TrtLLMWideEPMoE(
-            name="test_moe",
-            scale_factor=3.0,
-            hidden_size=2048,
-            inter_size=8192,
-            topk=2,
-            num_experts=8,
-            moe_tp_size=1,
-            moe_ep_size=1,
-            quant_mode=common.MoEQuantMode.bfloat16,
-            workload_distribution="uniform",
-            attention_dp_size=1,
-        )
-
-        result = moe.query(mock_database, x=16)
-
-        # Verify scale_factor was applied
-        assert float(result) == 31.5  # 10.5 * 3.0 (PerformanceResult IS the latency)
-        assert result.energy == 7.5  # 2.5 * 3.0
-
-    def test_query_with_quant_mode_override(self, mock_database):
-        """Test query with quantization mode override."""
-        moe = TrtLLMWideEPMoE(
-            name="test_moe",
-            scale_factor=1.0,
-            hidden_size=2048,
-            inter_size=8192,
-            topk=2,
-            num_experts=8,
-            moe_tp_size=1,
-            moe_ep_size=1,
-            quant_mode=common.MoEQuantMode.bfloat16,  # Original mode
-            workload_distribution="uniform",
-            attention_dp_size=1,
-        )
-
-        # Override quant_mode in query
-        moe.query(mock_database, x=16, quant_mode=common.MoEQuantMode.nvfp4)
-
-        # Verify override was used
-        call_args = mock_database.query_wideep_moe_compute.call_args[1]
-        assert call_args["quant_mode"] == common.MoEQuantMode.nvfp4
-
-    def test_query_with_custom_num_slots(self, mock_database):
-        """Test query with custom num_slots for EPLB."""
-        moe = TrtLLMWideEPMoE(
-            name="test_moe",
-            scale_factor=1.0,
-            hidden_size=2048,
-            inter_size=8192,
-            topk=2,
-            num_experts=8,
-            num_slots=12,  # Custom slots for EPLB
-            moe_tp_size=1,
-            moe_ep_size=1,
-            quant_mode=common.MoEQuantMode.bfloat16,
-            workload_distribution="power_law_1.2_eplb",
-            attention_dp_size=1,
-        )
-
-        moe.query(mock_database, x=16)
-
-        # Verify custom num_slots was used
-        call_args = mock_database.query_wideep_moe_compute.call_args[1]
-        assert call_args["num_slots"] == 12
-
-    @patch("aiconfigurator.sdk.operations.moe.logger")
-    def test_query_debug_logging(self, mock_logger, mock_database):
-        """Test that debug logging is called during query."""
-        moe = TrtLLMWideEPMoE(
-            name="test_moe",
-            scale_factor=1.0,
-            hidden_size=2048,
-            inter_size=8192,
-            topk=2,
-            num_experts=8,
-            num_slots=16,
-            moe_tp_size=1,
-            moe_ep_size=1,
-            quant_mode=common.MoEQuantMode.bfloat16,
-            workload_distribution="uniform",
-            attention_dp_size=1,
-        )
-
-        moe.query(mock_database, x=16)
-
-        # Verify debug logging was called
-        mock_logger.debug.assert_called_with("TrtLLMWideEPMoE: Querying compute with num_slots=16")
+    def test_query_is_retired(self):
+        moe = self._make(moe_tp_size=1)
+        with pytest.raises(NotImplementedError, match="ModeledEPMoE"):
+            moe.query(object(), x=16)
 
 
 if __name__ == "__main__":

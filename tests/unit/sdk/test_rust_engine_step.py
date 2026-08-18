@@ -1227,7 +1227,7 @@ def _h200_sglang_wideep_paths() -> list[str]:
     reason="shipped h200_sxm sglang wideEP parquets not present",
 )
 def test_large_ep_op_graph_compiles_natively(caplog):
-    """AIC-1601 (PR 2.5): the large-EP ops (MoEAllToAll / MoEExpertCompute) now have
+    """AIC-1601: the large-EP ops (MoEAllToAll / ModeledEPMoE) now have
     ``_to_opspec`` branches and Rust mirrors, so a large-EP model compiles
     into the Rust engine natively — the documented Python-step fallback this
     test used to pin is retired. A rust-routed static run must answer with

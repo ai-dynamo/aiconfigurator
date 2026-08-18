@@ -7,6 +7,13 @@
 - :class:`AFDFAllGather` — F-node intra-node AllGather
 - :class:`AFDFReduceScatter` — F-node intra-node ReduceScatter
 - :class:`AFDCombine` — A-side cross-EP local reduce
+
+These assert the Python-side TOPOLOGY math (send probability, per-link and
+per-rank volumes, zero gates). The per-message latency comes from the
+compiled engine via ``afd_transfer._engine_comm_query`` — stubbed here at
+that seam, recording the probe twin op each leg builds. Value fidelity
+against the engine is covered by ``tests/cross_package/
+test_query_shim_baseline.py`` (afd-* cases on a real database).
 """
 
 from __future__ import annotations
@@ -22,29 +29,52 @@ from aiconfigurator.sdk.operations import (
     _afd_send_prob,
 )
 from aiconfigurator.sdk.performance_result import PerformanceResult
+from aiconfigurator_core.sdk.operations import afd_transfer as afd_transfer_module
+from aiconfigurator_core.sdk.operations.communication import NCCL, P2P
+from aiconfigurator_core.sdk.operations.elementwise import ElementWise
 
 pytestmark = pytest.mark.unit
 
 
-class _StubDatabase:
-    """Minimal PerfDatabase stub returning deterministic latencies."""
+def _half_ceil(num_bytes: int) -> int:
+    """The bf16-element count a byte volume becomes on a probe op."""
+    return -(-int(num_bytes) // 2)
+
+
+class _EngineStub:
+    """Stands in for ``_engine_comm_query``: records each probe twin op and
+    returns a deterministic latency proportional to its message volume."""
 
     def __init__(self) -> None:
-        self.p2p_calls: list[int] = []
+        self.p2p_calls: list[int] = []  # P2P probe hidden_size (= ceil(bytes/2))
         self.nccl_calls: list[tuple[common.CommQuantMode, int, str, int]] = []
-        self.mem_calls: list[int] = []
+        self.mem_calls: list[int] = []  # ElementWise probe dim_in (= ceil(bytes/2))
 
-    def query_p2p(self, message_bytes: int) -> PerformanceResult:
-        self.p2p_calls.append(int(message_bytes))
-        return PerformanceResult(latency=float(message_bytes) / 1.0e9, energy=0.0)
+    def __call__(self, database, op) -> PerformanceResult:
+        if isinstance(op, P2P):
+            self.p2p_calls.append(int(op._h))
+            volume = op._h * 2
+        elif isinstance(op, NCCL):
+            self.nccl_calls.append(
+                (op._comm_quant_mode, int(op._num_gpus), str(op._nccl_op), int(op._num_elements_per_token))
+            )
+            volume = op._num_elements_per_token
+        elif isinstance(op, ElementWise):
+            self.mem_calls.append(int(op._dim_in))
+            volume = (op._dim_in + op._dim_out) * 2
+        else:  # pragma: no cover — a new leg must extend this stub deliberately
+            raise TypeError(f"unexpected probe op {type(op).__name__}")
+        return PerformanceResult(latency=float(volume) / 1.0e9, energy=0.0)
 
-    def query_nccl(self, quant, tp, op_name, message_size):
-        self.nccl_calls.append((quant, int(tp), str(op_name), int(message_size)))
-        return PerformanceResult(latency=float(message_size) / 1.0e9, energy=0.0)
 
-    def query_mem_op(self, total_bytes: int) -> PerformanceResult:
-        self.mem_calls.append(int(total_bytes))
-        return PerformanceResult(latency=float(total_bytes) / 1.0e9, energy=0.0)
+@pytest.fixture()
+def engine(monkeypatch) -> _EngineStub:
+    stub = _EngineStub()
+    monkeypatch.setattr(afd_transfer_module, "_engine_comm_query", stub)
+    return stub
+
+
+_DB = object()  # the stub never touches the database
 
 
 # ---------------------------------------------------------------------------
@@ -93,18 +123,16 @@ class TestAFDTransfer:
         base.update(overrides)
         return AFDTransfer(**base)
 
-    def test_returns_performance_result(self):
-        db = _StubDatabase()
+    def test_returns_performance_result(self, engine):
         op = self._make()
-        result = op.query(db, x=32)
+        result = op.query(_DB, x=32)
         assert isinstance(result, PerformanceResult)
 
-    def test_single_direction_latency(self):
-        db = _StubDatabase()
+    def test_single_direction_latency(self, engine):
         a2f = self._make(direction="a2f")
         f2a = self._make(direction="f2a")
-        r_a2f = a2f.query(db, x=32)
-        r_f2a = f2a.query(db, x=32)
+        r_a2f = a2f.query(_DB, x=32)
+        r_f2a = f2a.query(_DB, x=32)
         assert float(r_a2f) == pytest.approx(float(r_f2a))
 
     def test_direction_property(self):
@@ -117,25 +145,23 @@ class TestAFDTransfer:
         with pytest.raises(ValueError, match="direction"):
             self._make(direction="both")
 
-    def test_dense_per_link_bytes(self):
-        db = _StubDatabase()
+    def test_dense_per_link_bytes(self, engine):
         op = self._make(n_a_workers=4, n_f_workers=16, gpus_per_node=8, hidden_size=1024)
-        op.query(db, x=32)
+        op.query(_DB, x=32)
         nf = 2  # 16 / 8
         p_send = _afd_send_prob(0, 0, nf)  # 1/nf = 0.5
         # per-link = single A-rank's tokens * p_send * hidden * bpe
         expected_bytes = int(p_send * 32 * 1024 * 2)
-        assert db.p2p_calls[0] == expected_bytes
+        assert engine.p2p_calls[0] == _half_ceil(expected_bytes)
 
-    def test_moe_selective_per_link_bytes(self):
-        db = _StubDatabase()
+    def test_moe_selective_per_link_bytes(self, engine):
         op = self._make(num_experts=256, topk=8)
-        op.query(db, x=32)
+        op.query(_DB, x=32)
         nf = 2
         p_send = _afd_send_prob(256, 8, nf)
         # per-link = single A-rank's 32 tokens
         expected_bytes = int(p_send * 32 * 1024 * 2)
-        assert db.p2p_calls[0] == expected_bytes
+        assert engine.p2p_calls[0] == _half_ceil(expected_bytes)
 
     def test_num_f_nodes_property(self):
         op = self._make(n_f_workers=20, gpus_per_node=8)
@@ -143,12 +169,10 @@ class TestAFDTransfer:
         op_single = self._make(n_f_workers=4, gpus_per_node=8)
         assert op_single.num_f_nodes == 1
 
-    def test_prefill_scales_linearly(self):
+    def test_prefill_scales_linearly(self, engine):
         op = self._make()
-        db1 = _StubDatabase()
-        db2 = _StubDatabase()
-        r_decode = op.query(db1, x=32)
-        r_prefill = op.query(db2, x=32 * 4096)
+        r_decode = op.query(_DB, x=32)
+        r_prefill = op.query(_DB, x=32 * 4096)
         assert float(r_prefill) == pytest.approx(float(r_decode) * 4096, rel=1e-3)
 
 
@@ -174,42 +198,37 @@ class TestAFDFAllGather:
         base.update(overrides)
         return AFDFAllGather(**base)
 
-    def test_returns_performance_result(self):
-        db = _StubDatabase()
+    def test_returns_performance_result(self, engine):
         op = self._make()
-        result = op.query(db, x=32)
+        result = op.query(_DB, x=32)
         assert isinstance(result, PerformanceResult)
 
-    def test_single_gpu_node_returns_zero(self):
-        db = _StubDatabase()
+    def test_single_gpu_node_returns_zero(self, engine):
         op = self._make(n_f_workers=1, gpus_per_node=1)
-        result = op.query(db, x=32)
+        result = op.query(_DB, x=32)
         assert float(result) == 0.0
-        assert db.nccl_calls == []
+        assert engine.nccl_calls == []
 
-    def test_broadcast_mapping_returns_zero(self):
-        db = _StubDatabase()
+    def test_broadcast_mapping_returns_zero(self, engine):
         op = self._make(rank_mapping="broadcast")
-        result = op.query(db, x=32)
+        result = op.query(_DB, x=32)
         assert float(result) == 0.0
 
-    def test_one_to_one_queries_nccl_allgather(self):
-        db = _StubDatabase()
+    def test_one_to_one_queries_nccl_allgather(self, engine):
         op = self._make(n_f_workers=16, gpus_per_node=8)
-        op.query(db, x=32)
-        assert len(db.nccl_calls) == 1
-        assert db.nccl_calls[0][2] == "all_gather"
-        assert db.nccl_calls[0][1] == 8  # min(16, 8) = 8 GPUs in node
+        op.query(_DB, x=32)
+        assert len(engine.nccl_calls) == 1
+        assert engine.nccl_calls[0][2] == "all_gather"
+        assert engine.nccl_calls[0][1] == 8  # min(16, 8) = 8 GPUs in node
 
-    def test_ep8_tp1_still_needs_allgather(self):
-        db = _StubDatabase()
+    def test_ep8_tp1_still_needs_allgather(self, engine):
         op = self._make(n_f_workers=8, gpus_per_node=8)
-        result = op.query(db, x=32)
+        result = op.query(_DB, x=32)
         assert float(result) > 0.0
-        assert db.nccl_calls[0][1] == 8
+        assert engine.nccl_calls[0][1] == 8
 
-    def test_message_size_is_per_rank_chunk(self):
-        """``query_nccl`` takes the per-rank sendcount, not the per-F-node total.
+    def test_message_size_is_per_rank_chunk(self, engine):
+        """The NCCL probe carries the per-rank sendcount, not the per-F-node total.
 
         AllGather participants are the ``f_local = min(n_f_workers,
         gpus_per_node)`` GPUs in a single F-node; each one contributes
@@ -217,15 +236,14 @@ class TestAFDFAllGather:
         the un-divided per-node total would over-report bandwidth by
         ``f_local``x and silently flip the comm-vs-compute bottleneck.
         """
-        db = _StubDatabase()
         op = self._make(n_a_workers=4, n_f_workers=16, gpus_per_node=8, hidden_size=1024)
-        op.query(db, x=32)
+        op.query(_DB, x=32)
         total = 32 * 4
         nf = 2
         f_local = 8  # min(n_f_workers, gpus_per_node) = min(16, 8)
         p_send = _afd_send_prob(0, 0, nf)
         expected_msg = int(p_send * total * 1024 / f_local)
-        assert db.nccl_calls[0][3] == expected_msg
+        assert engine.nccl_calls[0][3] == expected_msg
 
     def test_invalid_rank_mapping_raises(self):
         with pytest.raises(ValueError, match="rank_mapping"):
@@ -254,33 +272,29 @@ class TestAFDFReduceScatter:
         base.update(overrides)
         return AFDFReduceScatter(**base)
 
-    def test_returns_performance_result(self):
-        db = _StubDatabase()
+    def test_returns_performance_result(self, engine):
         op = self._make()
-        result = op.query(db, x=32)
+        result = op.query(_DB, x=32)
         assert isinstance(result, PerformanceResult)
 
-    def test_single_gpu_node_returns_zero(self):
-        db = _StubDatabase()
+    def test_single_gpu_node_returns_zero(self, engine):
         op = self._make(n_f_workers=1, gpus_per_node=1)
-        result = op.query(db, x=32)
+        result = op.query(_DB, x=32)
         assert float(result) == 0.0
 
-    def test_ep8_tp1_still_needs_reduce_scatter(self):
-        db = _StubDatabase()
+    def test_ep8_tp1_still_needs_reduce_scatter(self, engine):
         op = self._make(n_f_workers=8, gpus_per_node=8)
-        result = op.query(db, x=32)
+        result = op.query(_DB, x=32)
         assert float(result) > 0.0
-        assert db.nccl_calls[0][1] == 8
-        assert db.nccl_calls[0][2] == "reduce_scatter"
+        assert engine.nccl_calls[0][1] == 8
+        assert engine.nccl_calls[0][2] == "reduce_scatter"
 
-    def test_one_to_one_queries_nccl_reduce_scatter(self):
-        db = _StubDatabase()
+    def test_one_to_one_queries_nccl_reduce_scatter(self, engine):
         op = self._make(n_f_workers=16, gpus_per_node=8)
-        op.query(db, x=32)
-        assert len(db.nccl_calls) == 1
-        assert db.nccl_calls[0][2] == "reduce_scatter"
-        assert db.nccl_calls[0][1] == 8  # min(16, 8) = 8 GPUs in node
+        op.query(_DB, x=32)
+        assert len(engine.nccl_calls) == 1
+        assert engine.nccl_calls[0][2] == "reduce_scatter"
+        assert engine.nccl_calls[0][1] == 8  # min(16, 8) = 8 GPUs in node
 
     def test_invalid_rank_mapping_raises(self):
         with pytest.raises(ValueError, match="rank_mapping"):
@@ -305,40 +319,34 @@ class TestAFDCombine:
         base.update(overrides)
         return AFDCombine(**base)
 
-    def test_returns_performance_result(self):
-        db = _StubDatabase()
+    def test_returns_performance_result(self, engine):
         op = self._make(f_moe_ep_size=4)
-        result = op.query(db, x=32)
+        result = op.query(_DB, x=32)
         assert isinstance(result, PerformanceResult)
 
-    def test_dense_ep1_returns_zero(self):
-        db = _StubDatabase()
+    def test_dense_ep1_returns_zero(self, engine):
         op = self._make(f_moe_ep_size=1)
-        result = op.query(db, x=32)
+        result = op.query(_DB, x=32)
         assert float(result) == 0.0
-        assert db.mem_calls == []
+        assert engine.mem_calls == []
 
-    def test_ep_gt1_calls_mem_op(self):
-        db = _StubDatabase()
+    def test_ep_gt1_calls_mem_op(self, engine):
         op = self._make(f_moe_ep_size=4, tp_a=1)
-        op.query(db, x=32)
-        assert len(db.mem_calls) == 1
+        op.query(_DB, x=32)
+        assert len(engine.mem_calls) == 1
         expected_bytes = (4 + 1) * 32 * 1024 * 2
-        assert db.mem_calls[0] == expected_bytes
+        assert engine.mem_calls[0] == _half_ceil(expected_bytes)
 
-    def test_tp_a_divides_tokens(self):
-        db = _StubDatabase()
+    def test_tp_a_divides_tokens(self, engine):
         op = self._make(f_moe_ep_size=4, tp_a=2)
-        op.query(db, x=32)
+        op.query(_DB, x=32)
         expected_bytes = (4 + 1) * 16 * 1024 * 2
-        assert db.mem_calls[0] == expected_bytes
+        assert engine.mem_calls[0] == _half_ceil(expected_bytes)
 
-    def test_prefill_scales_linearly(self):
+    def test_prefill_scales_linearly(self, engine):
         op = self._make(f_moe_ep_size=4)
-        db1 = _StubDatabase()
-        db2 = _StubDatabase()
-        r_decode = op.query(db1, x=32)
-        r_prefill = op.query(db2, x=32 * 4096)
+        r_decode = op.query(_DB, x=32)
+        r_prefill = op.query(_DB, x=32 * 4096)
         assert float(r_prefill) == pytest.approx(float(r_decode) * 4096, rel=1e-3)
 
 
@@ -359,7 +367,6 @@ class TestNumericalEquivalence:
     def _query_split(
         self, *, x, n_a_workers=4, n_f_workers=16, gpus_per_node=8, tp_a=1, f_moe_ep_size=1, num_experts=0, topk=0
     ):
-        db = _StubDatabase()
         hidden_size = 1024
         qm = common.CommQuantMode.half
         common_kw = dict(
@@ -408,11 +415,11 @@ class TestNumericalEquivalence:
             comm_quant_mode=qm,
         )
 
-        t_a2f = a2f.query(db, x=x)
-        t_f2a = f2a.query(db, x=x)
-        t_ag = ag.query(db, x=x)
-        t_rs = rs.query(db, x=x)
-        t_comb = combine.query(db, x=x)
+        t_a2f = a2f.query(_DB, x=x)
+        t_f2a = f2a.query(_DB, x=x)
+        t_ag = ag.query(_DB, x=x)
+        t_rs = rs.query(_DB, x=x)
+        t_comb = combine.query(_DB, x=x)
 
         return {
             "t_a2f": float(t_a2f),
@@ -423,7 +430,7 @@ class TestNumericalEquivalence:
             "combine": float(t_comb),
         }
 
-    def test_dense_8gpu_node(self):
+    def test_dense_8gpu_node(self, engine):
         r = self._query_split(x=32, n_f_workers=16, gpus_per_node=8, f_moe_ep_size=1)
         assert r["t_a2f"] == pytest.approx(r["t_f2a"])
         assert r["t_c"] == pytest.approx(r["t_a2f"] + r["t_f2a"])
@@ -431,7 +438,7 @@ class TestNumericalEquivalence:
         assert r["ag"] > 0.0
         assert r["rs"] > 0.0
 
-    def test_moe_ep4(self):
+    def test_moe_ep4(self, engine):
         r = self._query_split(
             x=32,
             n_f_workers=16,
@@ -445,7 +452,7 @@ class TestNumericalEquivalence:
         assert r["ag"] > 0.0
         assert r["rs"] > 0.0
 
-    def test_single_gpu_node_zeroes_collectives(self):
+    def test_single_gpu_node_zeroes_collectives(self, engine):
         r = self._query_split(x=32, n_f_workers=1, gpus_per_node=1, f_moe_ep_size=1)
         assert r["ag"] == 0.0
         assert r["rs"] == 0.0

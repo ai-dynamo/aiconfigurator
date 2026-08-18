@@ -1041,7 +1041,9 @@ class AFDInferenceSession:
 
         per_op = defaultdict(float)
         for op in ops:
-            result = op.query(self._database, **kwargs_common)
+            # Internal shim entry (no DeprecationWarning): same engine-backed
+            # value as the deprecated public op.query().
+            result = op._engine_query(self._database, **kwargs_common)
             per_op[op._name] += float(result)
         return sum(per_op.values()), per_op
 

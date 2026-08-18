@@ -95,7 +95,7 @@ git clone https://github.com/ai-dynamo/aiconfigurator.git
 cd aiconfigurator
 
 # 2. Create and activate a virtual environment
-python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.10 or later)
+python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.11-3.13)
 
 # 3. Install the standalone core, then the upper package
 pip3 install ./aic-core
