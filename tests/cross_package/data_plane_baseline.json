@@ -487,75 +487,75 @@
       "latency",
       "power"
      ],
-     "n_leaves": 33488,
-     "ordered_sha256": "71245d6f0eb11667bdd1f5cf6d8efdf7943f989ebd8e4c680fb590058f9233a5",
+     "n_leaves": 66950,
+     "ordered_sha256": "2d73fa280e676f10dc424161e536a765be49f8ba945099d48c36afe87cccb7b2",
      "sample_leaves": [
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:64/i:0/i:4/i:1",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:16/i:1048568/i:8/i:32",
        {
         "energy": "0.0",
-        "latency": "0.4848",
+        "latency": "1.7906",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:32/i:12288/i:8/i:4",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:8/i:512/i:1024/i:1",
        {
         "energy": "0.0",
-        "latency": "0.3561",
+        "latency": "0.495",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:8/i:512/i:1024/i:8",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:32/i:12288/i:512/i:1",
        {
         "energy": "0.0",
-        "latency": "0.5195",
+        "latency": "0.3827",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:32/i:0/i:256/i:2",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:fp8_block/s:GlmMoeDsaForCausalLM/s:trtllm/i:16/i:1/i:16/i:512",
        {
         "energy": "0.0",
-        "latency": "0.4668",
+        "latency": "0.8353",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:16/i:12288/i:1024/i:2",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:fp8_block/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:32/i:1536/i:32/i:32",
        {
         "energy": "0.0",
-        "latency": "1.0982",
+        "latency": "1.8487",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:64/i:1024/i:128/i:64",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:64/i:32768/i:32/i:128",
        {
         "energy": "0.0",
-        "latency": "6.2189",
+        "latency": "1.7488",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:16/i:1/i:32/i:512",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:64/i:8/i:8/i:512",
        {
         "energy": "0.0",
-        "latency": "1.2603",
+        "latency": "1.8475",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:8/i:16384/i:128/i:8",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/e:GEMMQuantMode:fp8_block/s:GlmMoeDsaForCausalLM/s:trtllm/i:16/i:1/i:32/i:16",
        {
         "energy": "0.0",
-        "latency": "0.299",
+        "latency": "0.8565",
         "power": "0.0"
        }
       ]
      ],
-     "sorted_sha256": "c7fc4c6a24ed6291f294fdf90de01cd1f6a864c3f512987dd5e9c13a97170653",
+     "sorted_sha256": "194aa13aee2d06411037028aa04a4245178242b2b28db97fd1091c415f2af8eb",
      "state": "loaded"
     },
     "_context_mla_data": {
@@ -1367,75 +1367,75 @@
       "latency",
       "power"
      ],
-     "n_leaves": 1836,
-     "ordered_sha256": "0f448b4b302f85e159ee65af5804bba72649013d7ef68326d4c4b2ec6c5db284",
+     "n_leaves": 3672,
+     "ordered_sha256": "afeff81fbbfb16b7268469fc5b6ae1948cbcff34055a7d83763f011af7f9979e",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:64/i:1/i:2",
        {
         "energy": "0.0",
-        "latency": "0.0836",
+        "latency": "0.0851",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:16/i:8/i:32769",
+       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:8/i:1/i:2",
        {
         "energy": "0.0",
-        "latency": "0.053",
+        "latency": "0.0375",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:32/i:1/i:2",
+       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:16/i:1/i:2",
        {
         "energy": "0.0",
-        "latency": "0.0579",
+        "latency": "0.0415",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:64/i:8/i:32769",
+       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:fp8_block/s:GlmMoeDsaForCausalLM/s:trtllm/i:32/i:1/i:2",
        {
         "energy": "0.0",
-        "latency": "0.0986",
+        "latency": "0.0476",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:8/i:1/i:2",
+       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:fp8_block/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:64/i:1/i:2",
        {
         "energy": "0.0",
-        "latency": "0.0356",
+        "latency": "0.0692",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:32/i:8/i:32769",
+       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:fp8_block/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:8/i:1/i:2",
        {
         "energy": "0.0",
-        "latency": "0.076",
+        "latency": "0.0381",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:8/i:1/i:2",
+       "e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:16/i:1/i:2",
        {
         "energy": "0.0",
-        "latency": "0.0319",
+        "latency": "0.0376",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:16/i:8/i:32769",
+       "e:KVCacheQuantMode:fp8/e:GEMMQuantMode:fp8_block/s:GlmMoeDsaForCausalLM/s:trtllm/i:32/i:1/i:2",
        {
         "energy": "0.0",
-        "latency": "0.0419",
+        "latency": "0.0427",
         "power": "0.0"
        }
       ]
      ],
-     "sorted_sha256": "5e60e24a9e20b215f1f9978c743d8e1c905f0215c4e8e4bf3b8c75147cd76a58",
+     "sorted_sha256": "2e8099a073ad29077113ee56ae7e2bcc32a4873c85184d96d84da74fbd66fd44",
      "state": "loaded"
     },
     "_generation_mla_data": {
@@ -3182,75 +3182,75 @@
       "latency",
       "power"
      ],
-     "n_leaves": 33488,
-     "ordered_sha256": "71245d6f0eb11667bdd1f5cf6d8efdf7943f989ebd8e4c680fb590058f9233a5",
+     "n_leaves": 66950,
+     "ordered_sha256": "2d73fa280e676f10dc424161e536a765be49f8ba945099d48c36afe87cccb7b2",
      "sample_leaves": [
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:64/i:0/i:4/i:1",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:16/i:1048568/i:8/i:32",
        {
         "energy": "0.0",
-        "latency": "0.4848",
+        "latency": "1.7906",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:32/i:12288/i:8/i:4",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:8/i:512/i:1024/i:1",
        {
         "energy": "0.0",
-        "latency": "0.3561",
+        "latency": "0.495",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:8/i:512/i:1024/i:8",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:32/i:12288/i:512/i:1",
        {
         "energy": "0.0",
-        "latency": "0.5195",
+        "latency": "0.3827",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:32/i:0/i:256/i:2",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:fp8_block/s:GlmMoeDsaForCausalLM/s:trtllm/i:16/i:1/i:16/i:512",
        {
         "energy": "0.0",
-        "latency": "0.4668",
+        "latency": "0.8353",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:16/i:12288/i:1024/i:2",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:fp8_block/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:32/i:1536/i:32/i:32",
        {
         "energy": "0.0",
-        "latency": "1.0982",
+        "latency": "1.8487",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:64/i:1024/i:128/i:64",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:64/i:32768/i:32/i:128",
        {
         "energy": "0.0",
-        "latency": "6.2189",
+        "latency": "1.7488",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:16/i:1/i:32/i:512",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:64/i:8/i:8/i:512",
        {
         "energy": "0.0",
-        "latency": "1.2603",
+        "latency": "1.8475",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:8/i:16384/i:128/i:8",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/e:GEMMQuantMode:fp8_block/s:GlmMoeDsaForCausalLM/s:trtllm/i:16/i:1/i:32/i:16",
        {
         "energy": "0.0",
-        "latency": "0.299",
+        "latency": "0.8565",
         "power": "0.0"
        }
       ]
      ],
-     "sorted_sha256": "c7fc4c6a24ed6291f294fdf90de01cd1f6a864c3f512987dd5e9c13a97170653",
+     "sorted_sha256": "194aa13aee2d06411037028aa04a4245178242b2b28db97fd1091c415f2af8eb",
      "state": "loaded"
     },
     "_context_mla_data": {
@@ -4240,75 +4240,75 @@
       "latency",
       "power"
      ],
-     "n_leaves": 1836,
-     "ordered_sha256": "0f448b4b302f85e159ee65af5804bba72649013d7ef68326d4c4b2ec6c5db284",
+     "n_leaves": 3672,
+     "ordered_sha256": "afeff81fbbfb16b7268469fc5b6ae1948cbcff34055a7d83763f011af7f9979e",
      "sample_leaves": [
       [
        "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:64/i:1/i:2",
        {
         "energy": "0.0",
-        "latency": "0.0836",
+        "latency": "0.0851",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:16/i:8/i:32769",
+       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:8/i:1/i:2",
        {
         "energy": "0.0",
-        "latency": "0.053",
+        "latency": "0.0375",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:32/i:1/i:2",
+       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:16/i:1/i:2",
        {
         "energy": "0.0",
-        "latency": "0.0579",
+        "latency": "0.0415",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:64/i:8/i:32769",
+       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:fp8_block/s:GlmMoeDsaForCausalLM/s:trtllm/i:32/i:1/i:2",
        {
         "energy": "0.0",
-        "latency": "0.0986",
+        "latency": "0.0476",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:8/i:1/i:2",
+       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:fp8_block/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:64/i:1/i:2",
        {
         "energy": "0.0",
-        "latency": "0.0356",
+        "latency": "0.0692",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:32/i:8/i:32769",
+       "e:KVCacheQuantMode:bfloat16/e:GEMMQuantMode:fp8_block/s:GlmMoeDsaForCausalLM/s:flashmla_kv/i:8/i:1/i:2",
        {
         "energy": "0.0",
-        "latency": "0.076",
+        "latency": "0.0381",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:8/i:1/i:2",
+       "e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:16/i:1/i:2",
        {
         "energy": "0.0",
-        "latency": "0.0319",
+        "latency": "0.0376",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:fp8/e:GEMMQuantMode:bfloat16/s:GlmMoeDsaForCausalLM/s:trtllm/i:16/i:8/i:32769",
+       "e:KVCacheQuantMode:fp8/e:GEMMQuantMode:fp8_block/s:GlmMoeDsaForCausalLM/s:trtllm/i:32/i:1/i:2",
        {
         "energy": "0.0",
-        "latency": "0.0419",
+        "latency": "0.0427",
         "power": "0.0"
        }
       ]
      ],
-     "sorted_sha256": "5e60e24a9e20b215f1f9978c743d8e1c905f0215c4e8e4bf3b8c75147cd76a58",
+     "sorted_sha256": "2e8099a073ad29077113ee56ae7e2bcc32a4873c85184d96d84da74fbd66fd44",
      "state": "loaded"
     },
     "_generation_mla_data": {
