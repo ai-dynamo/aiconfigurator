@@ -30,6 +30,7 @@ from aiconfigurator.sdk.errors import (
     NoFeasibleConfigError,
     is_expected_cli_error,
 )
+from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import normalize_speculative_decoding
 from aiconfigurator.sdk.task_v2 import Task, _lookup_num_gpus_per_node, _warn_large_ep_flag
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
@@ -1561,6 +1562,8 @@ def build_default_tasks(
     Returns:
         Task objects keyed by serving mode and, when requested, backend.
     """
+    engine_step_backend = validate_engine_step_backend(engine_step_backend)
+
     # Deprecated large-EP knobs: warn once, then ignore (the flag is NOT
     # forwarded to the tasks; an explicit moe_backend value still passes
     # through unchanged — 'deepep_moe' is inert in modeling, 'megamoe' real).

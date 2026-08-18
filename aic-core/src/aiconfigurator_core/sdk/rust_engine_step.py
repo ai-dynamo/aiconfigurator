@@ -293,7 +293,7 @@ def validate_engine_step_backend(value: Any) -> str | None:
     caller cannot smuggle the retired ``"python"`` token (or any typo) into
     a path — like the AFD session — that never reaches the routing gate.
     """
-    requested = str(value).lower() if value else None
+    requested = None if value is None else str(value).lower()
     if requested is not None and requested != "rust":
         raise ValueError(
             f"unknown engine_step_backend {requested!r}: the compiled Rust engine is the only "
@@ -319,7 +319,9 @@ def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = N
     deprecation-cleanup PR; any other value raises — silently computing on
     an engine the caller did not ask for would be worse than failing.
     """
-    backend = getattr(runtime_config, "engine_step_backend", None) or os.environ.get(ENGINE_STEP_BACKEND_ENV)
+    backend = getattr(runtime_config, "engine_step_backend", None)
+    if backend is None:
+        backend = os.environ.get(ENGINE_STEP_BACKEND_ENV)
     requested = validate_engine_step_backend(backend)
     if requested is None:
         # Deferred import: perf_database is heavy and this module must stay

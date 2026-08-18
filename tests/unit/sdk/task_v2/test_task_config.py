@@ -2143,5 +2143,9 @@ def test_engine_step_backend_is_validated_at_task_construction():
         _task(engine_step_backend="python")
     with pytest.raises(ValueError, match=r"unknown engine_step_backend 'auto'"):
         _task(engine_step_backend="auto")
+    for falsey_value in ("", 0, False):
+        with pytest.raises(ValueError, match="unknown engine_step_backend"):
+            _task(engine_step_backend=falsey_value)
     assert _task(engine_step_backend="rust").engine_step_backend == "rust"
+    assert _task(engine_step_backend="RUST").engine_step_backend == "rust"
     assert _task(engine_step_backend=None).engine_step_backend is None

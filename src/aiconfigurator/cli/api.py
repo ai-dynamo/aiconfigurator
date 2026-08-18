@@ -34,6 +34,7 @@ from aiconfigurator.sdk.models import (
     resolve_dsv4_moe_arch,
     resolve_nvfp4_for_system,
 )
+from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import (
     SpeculativeDecodingProfile,
 )
@@ -1154,6 +1155,10 @@ def cli_estimate(
         get_systems_paths,
         set_systems_paths,
     )
+
+    # Validate at the public boundary because some AFD-only paths return
+    # without constructing a Task.
+    engine_step_backend = validate_engine_step_backend(engine_step_backend)
 
     # Resolve nextn="auto" against the checkpoint before mode dispatch so every
     # estimate path (agg/disagg/static/afd) sees a plain int.

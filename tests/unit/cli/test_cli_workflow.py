@@ -459,6 +459,32 @@ class TestBuildDefaultTaskConfigs:
     """Tests for build_default_tasks function."""
 
     @patch("aiconfigurator.cli.main.Task")
+    def test_normalizes_engine_step_backend_before_task_construction(self, mock_task_config):
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        build_default_tasks(
+            model_path="Qwen/Qwen3-32B",
+            total_gpus=1,
+            system="h200_sxm",
+            engine_step_backend="RUST",
+        )
+
+        assert mock_task_config.call_args.kwargs["engine_step_backend"] == "rust"
+
+    @pytest.mark.parametrize("falsey_value", ["", 0, False])
+    @patch("aiconfigurator.cli.main.Task")
+    def test_rejects_falsey_engine_step_backend(self, mock_task_config, falsey_value):
+        with pytest.raises(ValueError, match="unknown engine_step_backend"):
+            build_default_tasks(
+                model_path="Qwen/Qwen3-32B",
+                total_gpus=1,
+                system="h200_sxm",
+                engine_step_backend=falsey_value,
+            )
+
+        mock_task_config.assert_not_called()
+
+    @patch("aiconfigurator.cli.main.Task")
     def test_skips_disagg_when_total_gpus_less_than_2(self, mock_task_config):
         """Disagg config should be skipped when total_gpus < 2."""
         mock_task_config.return_value = MagicMock(name="MockTaskConfig")
