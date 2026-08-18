@@ -535,6 +535,28 @@ impl DsaTable {
             })
     }
 
+    /// Whether the GLM-5.2 skip-indexer (reuse-layer) rows are present in the
+    /// context file. `false` for a parquet that carries only
+    /// `dsa_context_module` rows (the sglang collector produces the skip split
+    /// from 0.5.14 on, and not on every system) — the loader returns its
+    /// no-rows error for that variant and the probe reports it as "absent"
+    /// WITHOUT surfacing the error, so `DsaModuleOp::query_context` can degrade
+    /// the shared-index amortization to all-full instead of failing. Mirrors
+    /// the Python slot test in `operations/dsa.py::_effective_full_frac`
+    /// (`database._context_dsa_module_skip_data` falsy).
+    pub fn has_context_skip_rows(&self) -> bool {
+        self.load_context_skip()
+            .map(|grids| !grids.by_keys.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Generation-side twin of [`Self::has_context_skip_rows`].
+    pub fn has_generation_skip_rows(&self) -> bool {
+        self.load_generation_skip()
+            .map(|grids| !grids.by_keys.is_empty())
+            .unwrap_or(false)
+    }
+
     fn load_context(&self) -> Result<&DsaGrids, AicError> {
         let cell = self
             .context
