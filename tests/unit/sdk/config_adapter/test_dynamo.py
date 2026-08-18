@@ -953,6 +953,17 @@ def test_dynamo_ci_decode_batch_override_preserves_nondivisible_concurrency():
     assert "decode batch size is explicitly overridden to 2" in adapted.request.provenance.assumptions[-1]
 
 
+def test_dynamo_ci_rejects_workload_exceeding_declared_decode_context_length():
+    recipe = _dynamo_ci_recipe()
+    recipe["benchmark"] = {"isl": 8192, "osl": 1024, "concurrencies": "8"}
+
+    outcome = adapt_config(DynamoRecipeSource(recipe)).outcomes[0]
+
+    assert outcome.status == "rejected"
+    assert "runtime.decode_max_seq_len (8192)" in outcome.diagnostics[-1].message
+    assert "workload.isl + workload.osl (9216)" in outcome.diagnostics[-1].message
+
+
 def test_dynamo_ci_preserves_role_specific_memory_fractions():
     recipe = _dynamo_ci_recipe()
     recipe["backend"]["sglang_config"]["decode"]["mem-fraction-static"] = 0.8

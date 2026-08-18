@@ -159,6 +159,40 @@ class EstimateRequestV1(_StrictModel):
     runtime: RuntimeSettingsV1 = Field(default_factory=RuntimeSettingsV1)
     provenance: SourceProvenanceV1
 
+    @model_validator(mode="after")
+    def _validate_runtime_sequence_limits(self) -> EstimateRequestV1:
+        decode_tokens = self.workload.isl + self.workload.osl
+        if self.topology.kind == "agg":
+            if self.runtime.max_seq_len is not None and self.runtime.max_seq_len < decode_tokens:
+                raise ValueError(
+                    f"runtime.max_seq_len ({self.runtime.max_seq_len}) must be at least "
+                    f"workload.isl + workload.osl ({decode_tokens}) for aggregated topology"
+                )
+            return self
+
+        prefill_limit = self.runtime.prefill_max_seq_len
+        prefill_field = "prefill_max_seq_len"
+        if prefill_limit is None:
+            prefill_limit = self.runtime.max_seq_len
+            prefill_field = "max_seq_len"
+        if prefill_limit is not None and prefill_limit < self.workload.isl:
+            raise ValueError(
+                f"runtime.{prefill_field} ({prefill_limit}) must be at least "
+                f"workload.isl ({self.workload.isl}) for prefill"
+            )
+
+        decode_limit = self.runtime.decode_max_seq_len
+        decode_field = "decode_max_seq_len"
+        if decode_limit is None:
+            decode_limit = self.runtime.max_seq_len
+            decode_field = "max_seq_len"
+        if decode_limit is not None and decode_limit < decode_tokens:
+            raise ValueError(
+                f"runtime.{decode_field} ({decode_limit}) must be at least "
+                f"workload.isl + workload.osl ({decode_tokens}) for decode"
+            )
+        return self
+
     @classmethod
     def schema_path(cls) -> Path:
         return Path(__file__).with_name("schemas") / "estimate-request-v1.schema.json"
