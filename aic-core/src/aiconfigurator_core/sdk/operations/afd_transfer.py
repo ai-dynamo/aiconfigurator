@@ -17,6 +17,21 @@ value comes from the compiled engine via a single-element op-list evaluation
 of the standard comm twin (``P2P`` / ``NCCL`` / ``ElementWise``). Byte-exact
 volumes are expressed as ``ceil(bytes/2)`` bf16 elements on the probe op —
 at most 1 byte of rounding on multi-MB messages.
+
+TODO(#1357 follow-up): consider porting these four ops into the compiled
+engine as real ``Op`` variants. Their call surface is already op-shaped
+(per-op performance queries whose values come from engine-evaluated twins),
+so they would slot into the same Rust op-binding pattern as every other
+family — the twin composition and the ``comm_overhead_factor`` scaling would
+simply move inside the Rust ``query``, and the Python classes would become
+the same thin engine-backed bindings as GEMM. Trigger points for doing it:
+a Rust-side consumer needing AFD at runtime (the Dynamo Mocker's embedded
+hot path cannot reach this Python-side math), or retiring the last
+``query()`` orchestration whitelist entries. The partition SEARCH
+(``afd_partition.py`` / the session's A-F sweep) stays with the caller
+either way. Flipping this is a modeling-boundary change: it needs a
+tracking issue + maintainer sign-off per ``.claude/rules/rust-core/
+parity.md`` ("Known intentional splits").
 """
 
 from __future__ import annotations
