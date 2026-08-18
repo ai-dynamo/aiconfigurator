@@ -48,6 +48,8 @@ _FETCH_VIEW_TARGET = "aiconfigurator_core.sdk.engine_table_view.fetch_table_view
 
 def _fake_fetch_table_view(overrides: dict[str, object]):
     def _fetch(database, attribute):
+        if _COMPREHENSIVE_OVERRIDES is not None and getattr(database, "system", None) == "test_system":
+            return _COMPREHENSIVE_OVERRIDES.get(attribute)
         return overrides.get(attribute)
 
     return _fetch
