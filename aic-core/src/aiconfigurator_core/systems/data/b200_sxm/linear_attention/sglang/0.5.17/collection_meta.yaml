@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+runtime:
+  framework: sglang
+  version: 0.5.17
+  image: lmsysorg/sglang:v0.5.17
+  image_digest: sha256:16aba8925507e631e1dc1e23d95d026533602591775f6a8db68b74ee99746155
+tables:
+  gdn_perf:
+    # 2026-08-19 (AIC-1762): Qwen3.8-Max GDN silicon rows (16k/128v ladder,
+    # both decode lanes) at sglang 0.5.17 -- the first release that serves
+    # this model (v0.5.14 predates it). Sparse version: Qwen/Qwen3.8-2.4T-A95B
+    # cases only; every other op/shape at this version inherits from 0.5.14
+    # via shared-layer query-time fallback. Auto-collect pipeline 63210773
+    # (AIC_OPS=moe,gdn,gemm; the moe leg of that same pipeline crashed at
+    # import -- see the moe_perf sidecar -- gdn/gemm were unaffected and
+    # completed normally), collector branch f5b4914 (one commit before this
+    # data's landing HEAD cdbfd10, which only touches collect_moe.py -- see
+    # the moe_perf sidecar for the fix story). 5 kernel_source lanes incl.
+    # flashinfer_gated_delta_rule_decode (SM100+ mandated bf16-state decode,
+    # ~0.51x the fla fp32-state lane at matched keys here, matching the 397B
+    # state-bytes-ratio precedent). 7 strict-completeness raises on the
+    # largest batch x seq inner points (memory-bound sweep tail, same
+    # pattern as the 0.5.14 sibling table); collected rows are unaffected.
+    # Zero failures otherwise; keys disjoint from every other version.
+    collector_ref: f5b49140a581809b3031775883fc1c2e55132c96
+    collector_hash: sha256:572bd2304dbf6cea5df47150a25ce111d70b6b27407294c9fbe809b121272b41
+    case_plan_hash: sha256:e4b0f34d0e44fc75373def8e06455f44dde784b41624ea3518a9ddb752243ff8
+    collected_at: '2026-08-18'
+    rows: 1209
+    status: complete

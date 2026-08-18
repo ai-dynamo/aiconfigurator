@@ -1545,6 +1545,14 @@ ops:
       - {framework: "sglang", version: "0.5.14", system: "l40s", op_name: "gdn", phase: "generation", backends: ["causal_conv1d", "fla_triton"], kernel_sources: ["causal_conv1d_update", "fused_recurrent_gated_delta_rule_packed_decode"]}
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "gdn", phase: "context", backends: ["fla_triton", "unverified"], kernel_sources: ["causal_conv1d_fn", "chunk_gated_delta_rule"]}
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "gdn", phase: "generation", backends: ["causal_conv1d", "fla_triton"], kernel_sources: ["causal_conv1d_update", "fused_recurrent_gated_delta_rule_packed_decode"]}
+      - {framework: "sglang", version: "0.5.17", system: "b200_sxm", op_name: "gdn", phase: "context", backends: ["fla_triton", "unverified"], kernel_sources: ["causal_conv1d_fn", "chunk_gated_delta_rule"]}
+      - {framework: "sglang", version: "0.5.17", system: "b200_sxm", op_name: "gdn", phase: "generation", backends: ["causal_conv1d", "fla_triton", "flashinfer"], kernel_sources: ["causal_conv1d_update", "flashinfer_gated_delta_rule_decode", "fused_recurrent_gated_delta_rule_packed_decode"]}
+      - {framework: "sglang", version: "0.5.17", system: "b300_sxm", op_name: "gdn", phase: "context", backends: ["fla_triton", "unverified"], kernel_sources: ["causal_conv1d_fn", "chunk_gated_delta_rule"]}
+      - {framework: "sglang", version: "0.5.17", system: "b300_sxm", op_name: "gdn", phase: "generation", backends: ["causal_conv1d", "fla_triton", "flashinfer"], kernel_sources: ["causal_conv1d_update", "flashinfer_gated_delta_rule_decode", "fused_recurrent_gated_delta_rule_packed_decode"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb200", op_name: "gdn", phase: "context", backends: ["fla_triton", "unverified"], kernel_sources: ["causal_conv1d_fn", "chunk_gated_delta_rule"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb200", op_name: "gdn", phase: "generation", backends: ["causal_conv1d", "fla_triton", "flashinfer"], kernel_sources: ["causal_conv1d_update", "flashinfer_gated_delta_rule_decode", "fused_recurrent_gated_delta_rule_packed_decode"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb300", op_name: "gdn", phase: "context", backends: ["fla_triton", "unverified"], kernel_sources: ["causal_conv1d_fn", "chunk_gated_delta_rule"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb300", op_name: "gdn", phase: "generation", backends: ["causal_conv1d", "fla_triton", "flashinfer"], kernel_sources: ["causal_conv1d_update", "flashinfer_gated_delta_rule_decode", "fused_recurrent_gated_delta_rule_packed_decode"]}
       - {framework: "sglang", version: "0.5.9", system: "b200_sxm", op_name: "gdn", phase: "context", backends: ["unverified"], kernel_sources: ["causal_conv1d_fn"]}
       - {framework: "sglang", version: "0.5.9", system: "b200_sxm", op_name: "gdn", phase: "generation", backends: ["causal_conv1d", "fla_triton"], kernel_sources: ["causal_conv1d_update", "fused_recurrent_gated_delta_rule"]}
       - {framework: "sglang", version: "0.5.9", system: "b300_sxm", op_name: "gdn", phase: "context", backends: ["unverified"], kernel_sources: ["causal_conv1d_fn"]}
@@ -1683,6 +1691,22 @@ ops:
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "gemm", gemm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["sglang_torch_linear"]}
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "gemm", gemm_dtype: "fp8", backends: ["cutlass"], kernel_sources: ["sglang_sgl_kernel_fp8_scaled_mm"]}
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "gemm", gemm_dtype: "nvfp4", backends: ["flashinfer_cutlass"], kernel_sources: ["sglang_flashinfer_cutlass_nvfp4"]}
+      - {framework: "sglang", version: "0.5.17", system: "b200_sxm", op_name: "gemm", gemm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["sglang_torch_linear"]}
+      - {framework: "sglang", version: "0.5.17", system: "b200_sxm", op_name: "gemm", gemm_dtype: "fp8", backends: ["cutlass"], kernel_sources: ["sglang_sgl_kernel_fp8_scaled_mm"]}
+      - {framework: "sglang", version: "0.5.17", system: "b200_sxm", op_name: "gemm", gemm_dtype: "fp8_block", backends: ["deepgemm"], kernel_sources: ["sglang_deepgemm_gemm_nt_f8f8bf16"]}
+      - {framework: "sglang", version: "0.5.17", system: "b200_sxm", op_name: "gemm", gemm_dtype: "nvfp4", backends: ["flashinfer_cutedsl"], kernel_sources: ["sglang_flashinfer_cutedsl_nvfp4"]}
+      - {framework: "sglang", version: "0.5.17", system: "b300_sxm", op_name: "gemm", gemm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["sglang_torch_linear"]}
+      - {framework: "sglang", version: "0.5.17", system: "b300_sxm", op_name: "gemm", gemm_dtype: "fp8", backends: ["cutlass"], kernel_sources: ["sglang_sgl_kernel_fp8_scaled_mm"]}
+      - {framework: "sglang", version: "0.5.17", system: "b300_sxm", op_name: "gemm", gemm_dtype: "fp8_block", backends: ["deepgemm"], kernel_sources: ["sglang_deepgemm_gemm_nt_f8f8bf16"]}
+      - {framework: "sglang", version: "0.5.17", system: "b300_sxm", op_name: "gemm", gemm_dtype: "nvfp4", backends: ["flashinfer_cutedsl"], kernel_sources: ["sglang_flashinfer_cutedsl_nvfp4"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb200", op_name: "gemm", gemm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["sglang_torch_linear"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb200", op_name: "gemm", gemm_dtype: "fp8", backends: ["cutlass"], kernel_sources: ["sglang_sgl_kernel_fp8_scaled_mm"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb200", op_name: "gemm", gemm_dtype: "fp8_block", backends: ["deepgemm"], kernel_sources: ["sglang_deepgemm_gemm_nt_f8f8bf16"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb200", op_name: "gemm", gemm_dtype: "nvfp4", backends: ["flashinfer_cutedsl"], kernel_sources: ["sglang_flashinfer_cutedsl_nvfp4"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb300", op_name: "gemm", gemm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["sglang_torch_linear"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb300", op_name: "gemm", gemm_dtype: "fp8", backends: ["cutlass"], kernel_sources: ["sglang_sgl_kernel_fp8_scaled_mm"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb300", op_name: "gemm", gemm_dtype: "fp8_block", backends: ["deepgemm"], kernel_sources: ["sglang_deepgemm_gemm_nt_f8f8bf16"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb300", op_name: "gemm", gemm_dtype: "nvfp4", backends: ["flashinfer_cutedsl"], kernel_sources: ["sglang_flashinfer_cutedsl_nvfp4"]}
       - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "gemm", gemm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["sglang"]}
       - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "gemm", gemm_dtype: "fp8", backends: ["cutlass"], kernel_sources: ["sglang"]}
       - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "gemm", gemm_dtype: "fp8_block", backends: ["deepgemm"], kernel_sources: ["sglang"]}
@@ -2944,6 +2968,18 @@ ops:
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "moe", moe_dtype: "int4_wo", backends: ["marlin"], kernel_sources: ["sglang_marlin_moe"]}
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "moe", moe_dtype: "nvfp4", backends: ["flashinfer_cutlass"], kernel_sources: ["sglang_flashinfer_cutlass_moe"]}
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "moe", moe_dtype: "w4a16_mxfp4", backends: ["marlin"], kernel_sources: ["sglang_marlin_moe", "sglang_marlin_moe_situ_as_silu"]}
+      - {framework: "sglang", version: "0.5.17", system: "b200_sxm", op_name: "moe", moe_dtype: "bfloat16", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
+      - {framework: "sglang", version: "0.5.17", system: "b200_sxm", op_name: "moe", moe_dtype: "fp8_block", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
+      - {framework: "sglang", version: "0.5.17", system: "b200_sxm", op_name: "moe", moe_dtype: "nvfp4", backends: ["flashinfer_trtllm_gen"], kernel_sources: ["sglang_flashinfer_trtllm_moe"]}
+      - {framework: "sglang", version: "0.5.17", system: "b300_sxm", op_name: "moe", moe_dtype: "bfloat16", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
+      - {framework: "sglang", version: "0.5.17", system: "b300_sxm", op_name: "moe", moe_dtype: "fp8_block", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
+      - {framework: "sglang", version: "0.5.17", system: "b300_sxm", op_name: "moe", moe_dtype: "nvfp4", backends: ["flashinfer_trtllm_gen"], kernel_sources: ["sglang_flashinfer_trtllm_moe"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb200", op_name: "moe", moe_dtype: "bfloat16", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb200", op_name: "moe", moe_dtype: "fp8_block", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb200", op_name: "moe", moe_dtype: "nvfp4", backends: ["flashinfer_trtllm_gen"], kernel_sources: ["sglang_flashinfer_trtllm_moe"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb300", op_name: "moe", moe_dtype: "bfloat16", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb300", op_name: "moe", moe_dtype: "fp8_block", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
+      - {framework: "sglang", version: "0.5.17", system: "gb300", op_name: "moe", moe_dtype: "nvfp4", backends: ["flashinfer_trtllm_gen"], kernel_sources: ["sglang_flashinfer_trtllm_moe"]}
       - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "moe", moe_dtype: "bfloat16", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
       - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "moe", moe_dtype: "fp8_block", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
       - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "moe", moe_dtype: "bfloat16", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
