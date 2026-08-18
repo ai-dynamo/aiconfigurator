@@ -1483,6 +1483,12 @@ def _run_collection_impl(
                 shutil.rmtree(stale_dir)
         _atomic_json(cell_dir / "cell.json", cell.to_dict())
         cell_started = time.monotonic()
+        # Collector-side phase segmentation for the run manifest (R16 §3):
+        # external segments only - engine-internal phases (kvwarm, seeding)
+        # come from the engine's own artifact fields once dynamo-fpm phase
+        # instrumentation lands. Plain monotonic marks; nothing is written
+        # on the measurement path.
+        phase_marks: dict[str, float] = {}
         started_at = _utc_now()
         attempt_id = uuid.uuid4().hex
         base_record = {
@@ -1522,9 +1528,13 @@ def _run_collection_impl(
             # and let the stale engine write into this attempt's freshly wiped
             # /results, so always drive a verified ignore-not-found delete
             # before applying.
+            phase_marks["render_s"] = round(time.monotonic() - cell_started, 3)
             resource.cleanup()
             resource.apply()
+            mark = time.monotonic()
             pods = resource.wait_ready(_expected_nodes(manifest))
+            phase_marks["schedule_s"] = round(time.monotonic() - mark, 3)
+            mark = time.monotonic()
             resource.stage(
                 pods,
                 [
@@ -1540,8 +1550,13 @@ def _run_collection_impl(
                 plan_sha256=plan.sha256,
                 attempt_id=attempt_id,
             )
+            phase_marks["stage_s"] = round(time.monotonic() - mark, 3)
+            mark = time.monotonic()
             resource.execute(pods)
+            phase_marks["execute_wall_s"] = round(time.monotonic() - mark, 3)
+            mark = time.monotonic()
             resource.collect(pods)
+            phase_marks["collect_s"] = round(time.monotonic() - mark, 3)
             runtime_collection = _runtime_collection_summary(
                 cell,
                 cell_dir / "raw",
@@ -1555,6 +1570,7 @@ def _run_collection_impl(
                 "pods": pods,
                 **runtime_collection,
                 **_runtime_timing_summary(cell_dir / "raw"),
+                "collector_phase_seconds": dict(phase_marks),
             }
         except KeyboardInterrupt:
             if resource is not None:
@@ -1605,6 +1621,47 @@ def _run_collection_impl(
             checkpoint["cells"][cell.cell_id]["completed_at"] = _utc_now()
             checkpoint["cells"][cell.cell_id]["duration_seconds"] = round(time.monotonic() - cell_started, 3)
             _atomic_json(checkpoint_path, checkpoint)
+    # R16 §3 run manifest: the machine-readable timing map for the speed-up
+    # campaign. Collector-observable segments land now; engine-internal
+    # phases (kvwarm/seeding splits) are declared interface fields sourced
+    # from the engine artifact once dynamo-fpm phase instrumentation exists.
+    manifest_cells: dict[str, Any] = {}
+    run_total = 0.0
+    for cell in target_cells:
+        entry = checkpoint["cells"].get(cell.cell_id)
+        if not isinstance(entry, dict):
+            continue
+        duration = float(entry.get("duration_seconds") or 0.0)
+        run_total += duration
+        manifest_cells[cell.cell_id] = {
+            "status": entry.get("status"),
+            "topology": cell.topology.to_dict(),
+            "workload_kind": cell.workload_kind,
+            "cell_total_s": duration,
+            "collector_phase_seconds": entry.get("collector_phase_seconds"),
+            "engine_timing": {
+                "benchmark_elapsed_seconds": entry.get("benchmark_elapsed_seconds"),
+                "measured_iteration_seconds": entry.get("measured_iteration_seconds"),
+            },
+            "engine_phase_seconds": {
+                "engine_launch_s": None,
+                "kvwarm_warmup_s": None,
+                "seeding_s": None,
+                "inference_s": entry.get("measured_iteration_seconds"),
+                "note": "pending dynamo-fpm phase instrumentation; interface per R16 §3",
+            },
+        }
+    _atomic_json(
+        root / "run-manifest.json",
+        {
+            "schema_name": "aic_fpm_run_manifest",
+            "schema_version": 1,
+            "plan_sha256": plan.sha256,
+            "smoke": smoke,
+            "run_total_s": round(run_total, 3),
+            "cells": manifest_cells,
+        },
+    )
     all_passed = all(checkpoint["cells"].get(cell.cell_id, {}).get("status") == "passed" for cell in target_cells)
     # Formal publication eligibility must agree with completion: a deliberate
     # partial run (cell_limit below the frozen plan) can pass every targeted

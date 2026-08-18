@@ -2242,3 +2242,73 @@ def test_partial_run_without_the_flag_still_refuses_to_publish(tmp_path):
     assert [e["classification"] for e in errors] == ["campaign_incomplete"]
     checkpoint = json.loads((checkpoint_dir / "fpm_forward.json").read_text())
     assert "database" not in checkpoint
+
+
+def test_run_manifest_records_collector_phases_and_engine_interface(monkeypatch, tmp_path):
+    """R16 §3: every run writes a machine-readable timing manifest - collector
+    phase segments now, engine phase fields as a declared interface until
+    dynamo-fpm phase instrumentation lands."""
+
+    cell = _cell()
+    plan = _plan(cell)
+
+    def render_cell(*args, **_kwargs):
+        cell_dir = args[2]
+        (cell_dir / "k8s_deploy.yaml").write_text("apiVersion: v1\nkind: Pod\nmetadata:\n  name: cell\n")
+        (cell_dir / "run.sh").write_text("#!/bin/sh\n")
+        (cell_dir / "fpm_env.sh").write_text("#!/bin/sh\n")
+
+    class FakeResource:
+        def __init__(self, _manifest, _cell_dir):
+            pass
+
+        def apply(self):
+            pass
+
+        def wait_ready(self, _expected_nodes):
+            return ["pod-0"]
+
+        def stage(self, _pods, _files):
+            pass
+
+        def prepare_attempt(self, _pods, **_kwargs):
+            pass
+
+        def execute(self, _pods):
+            pass
+
+        def collect(self, _pods, *, require_benchmark=True):
+            pass
+
+        def cleanup(self):
+            pass
+
+    monkeypatch.setattr(fpm_runner, "_render_cell", render_cell)
+    monkeypatch.setattr(fpm_runner, "KubernetesCellRunner", FakeResource)
+    monkeypatch.setattr(
+        fpm_runner,
+        "_runtime_collection_summary",
+        lambda *_args, **_kwargs: {"measured_point_count": 1},
+    )
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    artifact_root = tmp_path / "artifacts"
+
+    run_collection(
+        plan,
+        generator_overrides={},
+        checkpoint_dir=str(checkpoint_dir),
+        artifact_root=str(artifact_root),
+        resume=False,
+        retry_failed=False,
+        smoke=True,
+    )
+
+    manifest = json.loads((artifact_root / plan.sha256[:16] / "smoke" / "run-manifest.json").read_text())
+    assert manifest["schema_name"] == "aic_fpm_run_manifest"
+    assert manifest["run_total_s"] > 0
+    entry = manifest["cells"][cell.cell_id]
+    phases = entry["collector_phase_seconds"]
+    assert set(phases) == {"render_s", "schedule_s", "stage_s", "execute_wall_s", "collect_s"}
+    assert entry["engine_phase_seconds"]["kvwarm_warmup_s"] is None
+    assert "pending dynamo-fpm" in entry["engine_phase_seconds"]["note"]
