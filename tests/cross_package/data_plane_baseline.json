@@ -7452,7 +7452,7 @@
     }
    }
   },
-  "b60/vllm/0.20.0": {
+  "b60/vllm/0.26.0": {
    "aliases": {
     "_raw_context_deepseek_v4_attention_module_data": "same-object",
     "_raw_context_dsa_module_data": "same-object",
@@ -7483,8 +7483,8 @@
      "generation_mla": [],
      "mla_bmm": [],
      "moe": [
-      "bfloat16",
       "w4a16_mxfp4",
+      "bfloat16",
       "fp8"
      ],
      "nccl": [
@@ -7513,8 +7513,8 @@
      "generation_mla": [],
      "mla_bmm": [],
      "moe": [
-      "bfloat16",
       "w4a16_mxfp4",
+      "bfloat16",
       "fp8"
      ],
      "nccl": [
@@ -7537,75 +7537,75 @@
       "latency",
       "power"
      ],
-     "n_leaves": 17692,
-     "ordered_sha256": "b5bdc9962e38f2af1f873feec30b217cb3d1217d3a31c1e08893ab7eb110f8f0",
+     "n_leaves": 19434,
+     "ordered_sha256": "3a4bd8a3628694b3eeed7b246ee6e050f9422ba799cd2178c1899b68e3540b9c",
      "sample_leaves": [
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/i:4/i:64/i:0/i:64/i:16384/i:8",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/i:4/i:64/i:0/i:64/i:16384/i:2",
        {
         "energy": "0.0",
-        "latency": "368.73082999999997",
+        "latency": "80.58946133333333",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/i:4/i:128/i:0/i:8/i:1024/i:4",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/i:8/i:64/i:0/i:64/i:32/i:4",
        {
         "energy": "0.0",
-        "latency": "0.22556733333333331",
+        "latency": "0.10115733333333332",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/i:2/i:64/i:0/i:4/i:12288/i:4",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/i:2/i:64/i:128/i:24/i:128/i:32",
        {
         "energy": "0.0",
-        "latency": "6.843927999999999",
+        "latency": "0.15149333333333334",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/i:1/i:64/i:128/i:8/i:512/i:8",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:bfloat16/i:1/i:128/i:0/i:12/i:1024/i:4",
        {
         "energy": "0.0",
-        "latency": "0.09589666666666667",
+        "latency": "0.32946333333333333",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/i:4/i:64/i:0/i:64/i:16384/i:8",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/i:4/i:64/i:0/i:64/i:2048/i:32",
        {
         "energy": "0.0",
-        "latency": "872.6156746666666",
+        "latency": "38.074001333333335",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/i:4/i:128/i:0/i:8/i:1024/i:4",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/i:8/i:64/i:0/i:48/i:4096/i:4",
        {
         "energy": "0.0",
-        "latency": "0.8213833333333334",
+        "latency": "14.084928",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/i:2/i:64/i:0/i:4/i:12288/i:4",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/i:2/i:64/i:128/i:16/i:10240/i:4",
        {
         "energy": "0.0",
-        "latency": "15.660441333333333",
+        "latency": "2.1933426666666667",
         "power": "0.0"
        }
       ],
       [
-       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/i:1/i:64/i:128/i:8/i:512/i:8",
+       "e:FMHAQuantMode:bfloat16/e:KVCacheQuantMode:fp8/i:1/i:128/i:0/i:12/i:1/i:32",
        {
         "energy": "0.0",
-        "latency": "0.251394",
+        "latency": "0.07617133333333333",
         "power": "0.0"
        }
       ]
      ],
-     "sorted_sha256": "e156a6c709fc0f4d8fc15354d797f3bafdeabe33785663f3d1dbbac11baf7f91",
+     "sorted_sha256": "6c5e5fd820e3fc5e0fcb2b7d592563e7cde781fe8edeedb57ea7669c912dc979",
      "state": "loaded"
     },
     "_context_deepseek_v4_attention_module_data": {
@@ -7634,13 +7634,13 @@
       "power"
      ],
      "n_leaves": 69,
-     "ordered_sha256": "95f3b6c0159dcf9ecb9d44d33fda269f31f9dd13b78170b793b1623fe794f371",
+     "ordered_sha256": "daaf81cc1ee4dc90635546a6965f6ef8f37e69eb05d97c7eeadabb8425ebda36",
      "sample_leaves": [
       [
        "e:CommQuantMode:half/i:2/s:AUTO/i:128",
        {
         "energy": "0.0",
-        "latency": "0.03826784",
+        "latency": "0.08509176",
         "power": "0.0"
        }
       ],
@@ -7648,7 +7648,7 @@
        "e:CommQuantMode:half/i:2/s:AUTO/i:32768",
        {
         "energy": "0.0",
-        "latency": "0.04111379999999999",
+        "latency": "0.08185216",
         "power": "0.0"
        }
       ],
@@ -7656,7 +7656,7 @@
        "e:CommQuantMode:half/i:2/s:AUTO/i:16777216",
        {
         "energy": "0.0",
-        "latency": "1.98648268",
+        "latency": "1.57598116",
         "power": "0.0"
        }
       ],
@@ -7664,7 +7664,7 @@
        "e:CommQuantMode:half/i:4/s:AUTO/i:512",
        {
         "energy": "0.0",
-        "latency": "0.04313244",
+        "latency": "0.07651332",
         "power": "0.0"
        }
       ],
@@ -7672,7 +7672,7 @@
        "e:CommQuantMode:half/i:4/s:AUTO/i:262144",
        {
         "energy": "0.0",
-        "latency": "0.05264272",
+        "latency": "0.0737786399999999",
         "power": "0.0"
        }
       ],
@@ -7680,7 +7680,7 @@
        "e:CommQuantMode:half/i:4/s:AUTO/i:134217728",
        {
         "energy": "0.0",
-        "latency": "23.63268024",
+        "latency": "17.11881704",
         "power": "0.0"
        }
       ],
@@ -7688,7 +7688,7 @@
        "e:CommQuantMode:half/i:8/s:AUTO/i:4096",
        {
         "energy": "0.0",
-        "latency": "0.05146751999999999",
+        "latency": "0.07869108",
         "power": "0.0"
        }
       ],
@@ -7696,12 +7696,12 @@
        "e:CommQuantMode:half/i:8/s:AUTO/i:2097152",
        {
         "energy": "0.0",
-        "latency": "0.36575759999999996",
+        "latency": "0.37954228",
         "power": "0.0"
        }
       ]
      ],
-     "sorted_sha256": "ae5d2ccc25ce54f9b1ea61fdc7bc8b6d24560375fb65d7e39239ff3595b72caa",
+     "sorted_sha256": "e6a065c35d7400f1bdddd48df7b84e63c386718d7f9d2d026bd228cefe889660",
      "state": "loaded"
     },
     "_dsv4_megamoe_module_data": {
@@ -7739,74 +7739,74 @@
       "power"
      ],
      "n_leaves": 22176,
-     "ordered_sha256": "7bc8463d903d12e022f75991c59a1ce5a6c1243b4480f808f39fe716e9b1e790",
+     "ordered_sha256": "5ccccfad4d4fce41c4a01372d89e56ffbc5b09847b2b24103a1ffb9253b9091c",
      "sample_leaves": [
       [
-       "e:GEMMQuantMode:fp8/i:8192/i:12288/i:10240",
+       "e:GEMMQuantMode:fp8/i:8192/i:65536/i:12288",
        {
         "energy": "0.0",
-        "latency": "21.215686555555557",
+        "latency": "144.76070844444445",
         "power": "0.0"
        }
       ],
       [
-       "e:GEMMQuantMode:fp8/i:512/i:5120/i:32",
+       "e:GEMMQuantMode:fp8/i:512/i:10240/i:32",
        {
         "energy": "0.0",
-        "latency": "0.022550666666666667",
+        "latency": "0.0195592222222222",
         "power": "0.0"
        }
       ],
       [
-       "e:GEMMQuantMode:fp8/i:128/i:1536/i:3584",
+       "e:GEMMQuantMode:fp8/i:128/i:3584/i:1024",
        {
         "energy": "0.0",
-        "latency": "0.04340411111111111",
+        "latency": "0.0270501111111111",
         "power": "0.0"
        }
       ],
       [
-       "e:GEMMQuantMode:fp8/i:32/i:64/i:4096",
+       "e:GEMMQuantMode:fp8/i:32/i:768/i:4096",
        {
         "energy": "0.0",
-        "latency": "0.020216444444444443",
+        "latency": "0.0214658888888888",
         "power": "0.0"
        }
       ],
       [
-       "e:GEMMQuantMode:bfloat16/i:8192/i:12288/i:10240",
+       "e:GEMMQuantMode:bfloat16/i:8192/i:65536/i:10240",
        {
         "energy": "0.0",
-        "latency": "25.39968022222222",
+        "latency": "136.4724075",
         "power": "0.0"
        }
       ],
       [
-       "e:GEMMQuantMode:bfloat16/i:512/i:5120/i:512",
+       "e:GEMMQuantMode:bfloat16/i:512/i:10240/i:64",
        {
         "energy": "0.0",
-        "latency": "0.03431277777777778",
+        "latency": "0.0309862222222222",
         "power": "0.0"
        }
       ],
       [
-       "e:GEMMQuantMode:bfloat16/i:128/i:1536/i:768",
+       "e:GEMMQuantMode:bfloat16/i:128/i:3584/i:1536",
        {
         "energy": "0.0",
-        "latency": "0.028108888888888888",
+        "latency": "0.0443978888888888",
         "power": "0.0"
        }
       ],
       [
-       "e:GEMMQuantMode:bfloat16/i:32/i:64/i:10240",
+       "e:GEMMQuantMode:bfloat16/i:32/i:768/i:4096",
        {
         "energy": "0.0",
-        "latency": "0.03024522222222222",
+        "latency": "0.0372117777777777",
         "power": "0.0"
        }
       ]
      ],
-     "sorted_sha256": "d3cec35064d1ccf7f8b0764f7b081ea5c2b99d8d614f0d35e9e73cace95a800d",
+     "sorted_sha256": "79a1e6f0c385738c287dec3959a38e6837fd98c2b1706c04795c46655beab627",
      "state": "loaded"
     },
     "_generation_attention_data": {
@@ -7820,75 +7820,75 @@
       "latency",
       "power"
      ],
-     "n_leaves": 28418,
-     "ordered_sha256": "655d5ce88c06dd191585d507f9cbdbc3d24dbb3b98826026cf30fc7848ec8bf5",
+     "n_leaves": 33044,
+     "ordered_sha256": "fcffd8586e196aa435b230a16f5dd0078f469652ebce1c8841eed0e97a8f413b",
      "sample_leaves": [
       [
-       "e:KVCacheQuantMode:bfloat16/i:4/i:128/i:0/i:64/i:32/i:2",
+       "e:KVCacheQuantMode:bfloat16/i:4/i:64/i:0/i:64/i:32/i:2",
        {
         "energy": "0.0",
-        "latency": "0.107146",
+        "latency": "0.14044333333333334",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:bfloat16/i:8/i:128/i:0/i:48/i:2/i:8",
+       "e:KVCacheQuantMode:bfloat16/i:8/i:64/i:0/i:40/i:2/i:64",
        {
         "energy": "0.0",
-        "latency": "0.0617",
+        "latency": "0.10692066666666666",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:bfloat16/i:2/i:128/i:0/i:40/i:512/i:4",
+       "e:KVCacheQuantMode:bfloat16/i:2/i:64/i:128/i:8/i:2/i:2048",
        {
         "energy": "0.0",
-        "latency": "1.7035373333333332",
+        "latency": "0.07384",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:bfloat16/i:1/i:64/i:128/i:12/i:2/i:32",
+       "e:KVCacheQuantMode:bfloat16/i:1/i:128/i:0/i:4/i:4/i:32",
        {
         "energy": "0.0",
-        "latency": "0.067912",
+        "latency": "0.13444599999999998",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:fp8/i:4/i:64/i:128/i:64/i:32/i:2",
+       "e:KVCacheQuantMode:bfloat16/i:16/i:64/i:0/i:64/i:16/i:2048",
        {
         "energy": "0.0",
-        "latency": "0.0842",
+        "latency": "0.32838866666666666",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:fp8/i:8/i:64/i:0/i:48/i:2/i:4",
+       "e:KVCacheQuantMode:fp8/i:8/i:64/i:0/i:40/i:2/i:2048",
        {
         "energy": "0.0",
-        "latency": "0.0676",
+        "latency": "0.07117066666666666",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:fp8/i:2/i:128/i:0/i:40/i:512/i:4",
+       "e:KVCacheQuantMode:fp8/i:2/i:64/i:128/i:8/i:64/i:2",
        {
         "energy": "0.0",
-        "latency": "1.8645206666666665",
+        "latency": "0.112632",
         "power": "0.0"
        }
       ],
       [
-       "e:KVCacheQuantMode:fp8/i:1/i:64/i:0/i:12/i:2/i:32",
+       "e:KVCacheQuantMode:fp8/i:1/i:128/i:0/i:4/i:4/i:16384",
        {
         "energy": "0.0",
-        "latency": "0.0652",
+        "latency": "0.09876533333333333",
         "power": "0.0"
        }
       ]
      ],
-     "sorted_sha256": "ce54b14da0503a03c90adcecc8ca83ad94ae0b49a09219456d182e2ea49b9cf4",
+     "sorted_sha256": "d5dbedf3d17c398c8c62626944666958f4799838742e5890a76008f0d8023984",
      "state": "loaded"
     },
     "_generation_deepseek_v4_attention_module_data": {
@@ -7924,8 +7924,8 @@
     "_moe_data": {
      "l1_key_count": 3,
      "l1_keys": [
-      "e:MoEQuantMode:bfloat16",
       "e:MoEQuantMode:w4a16_mxfp4",
+      "e:MoEQuantMode:bfloat16",
       "e:MoEQuantMode:fp8"
      ],
      "leaf_fields": [
@@ -7933,75 +7933,75 @@
       "latency",
       "power"
      ],
-     "n_leaves": 2592,
-     "ordered_sha256": "f9d35e2fbb52a48822f074992b41d31b2595e95b592cf74cf84d092e9f850861",
+     "n_leaves": 2943,
+     "ordered_sha256": "e4dd9938d626ee1f4feffd2ceff43421da6c22cbf0552c0b330595ec9570ca37",
      "sample_leaves": [
-      [
-       "e:MoEQuantMode:bfloat16/s:power_law_1.01/i:4/i:60/i:2048/i:1408/i:1/i:1/i:1",
-       {
-        "energy": "0.0",
-        "latency": "0.3503136",
-        "power": "0.0"
-       }
-      ],
-      [
-       "e:MoEQuantMode:bfloat16/s:power_law_1.2/i:4/i:60/i:2048/i:1408/i:1/i:1/i:1",
-       {
-        "energy": "0.0",
-        "latency": "0.42989439999999995",
-        "power": "0.0"
-       }
-      ],
-      [
-       "e:MoEQuantMode:w4a16_mxfp4/s:power_law_1.01/i:4/i:128/i:2880/i:2880/i:1/i:1/i:1",
-       {
-        "energy": "0.0",
-        "latency": "0.3263104",
-        "power": "0.0"
-       }
-      ],
-      [
-       "e:MoEQuantMode:w4a16_mxfp4/s:power_law_1.01/i:4/i:128/i:2880/i:2880/i:32/i:1/i:1",
-       {
-        "energy": "0.0",
-        "latency": "0.1788176",
-        "power": "0.0"
-       }
-      ],
       [
        "e:MoEQuantMode:w4a16_mxfp4/s:power_law_1.2/i:4/i:128/i:2880/i:2880/i:1/i:1/i:1",
        {
         "energy": "0.0",
-        "latency": "0.330304",
+        "latency": "0.3084848",
         "power": "0.0"
        }
       ],
       [
-       "e:MoEQuantMode:w4a16_mxfp4/s:power_law_1.2/i:4/i:128/i:2880/i:2880/i:32/i:1/i:1",
+       "e:MoEQuantMode:w4a16_mxfp4/s:power_law_1.2/i:4/i:32/i:2880/i:2880/i:1/i:1/i:512",
        {
         "energy": "0.0",
-        "latency": "0.19799519999999998",
+        "latency": "4.5241456",
         "power": "0.0"
        }
       ],
       [
-       "e:MoEQuantMode:fp8/s:power_law_1.01/i:4/i:60/i:2048/i:1408/i:1/i:1/i:1",
+       "e:MoEQuantMode:w4a16_mxfp4/s:power_law_1.01/i:4/i:128/i:2880/i:2880/i:1/i:8/i:48",
        {
         "energy": "0.0",
-        "latency": "0.41497039999999996",
+        "latency": "0.9347728",
         "power": "0.0"
        }
       ],
       [
-       "e:MoEQuantMode:fp8/s:power_law_1.2/i:4/i:60/i:2048/i:1408/i:1/i:1/i:1",
+       "e:MoEQuantMode:w4a16_mxfp4/s:power_law_1.01/i:4/i:32/i:2880/i:2880/i:1/i:8/i:6144",
        {
         "energy": "0.0",
-        "latency": "0.35126",
+        "latency": "9.7445296",
+        "power": "0.0"
+       }
+      ],
+      [
+       "e:MoEQuantMode:bfloat16/s:power_law_1.01/i:8/i:128/i:4096/i:1536/i:1/i:1/i:256",
+       {
+        "energy": "0.0",
+        "latency": "13.5735288",
+        "power": "0.0"
+       }
+      ],
+      [
+       "e:MoEQuantMode:bfloat16/s:power_law_1.2/i:8/i:128/i:2048/i:768/i:1/i:4/i:8",
+       {
+        "energy": "0.0",
+        "latency": "0.33877999999999997",
+        "power": "0.0"
+       }
+      ],
+      [
+       "e:MoEQuantMode:fp8/s:power_law_1.01/i:8/i:128/i:2048/i:768/i:1/i:2/i:2048",
+       {
+        "energy": "0.0",
+        "latency": "3.4642711999999998",
+        "power": "0.0"
+       }
+      ],
+      [
+       "e:MoEQuantMode:fp8/s:power_law_1.2/i:8/i:128/i:2048/i:768/i:1/i:1/i:128",
+       {
+        "energy": "0.0",
+        "latency": "1.5083744",
         "power": "0.0"
        }
       ]
      ],
-     "sorted_sha256": "aa5228f41336e0680178db0b91fe1c6575e3e1884b8cf05aef80f8d3858ec403",
+     "sorted_sha256": "81ccb8eaa13989fa6f609e1d111826e8d4b47c803d0e9477163d292f7f0a1f94",
      "state": "loaded"
     },
     "_moe_ep_data": {
@@ -8031,75 +8031,75 @@
       "latency",
       "power"
      ],
-     "n_leaves": 252,
-     "ordered_sha256": "accf2a27d81a41955f0ea80c49c4c21c778890797be0ff8819dbaee6c8288efd",
+     "n_leaves": 315,
+     "ordered_sha256": "11e8bb293fa1e946564182e48802fc8da414daf4c6121c259b28d07e7ec50712",
      "sample_leaves": [
       [
        "e:CommQuantMode:half/s:all_gather/i:2/i:256",
        {
         "energy": "0.0",
-        "latency": "0.013296200000000001",
+        "latency": "0.0183541999999999",
         "power": "0.0"
        }
       ],
       [
-       "e:CommQuantMode:half/s:all_gather/i:4/i:262144",
+       "e:CommQuantMode:half/s:all_gather/i:4/i:67108864",
        {
         "energy": "0.0",
-        "latency": "0.0977196",
+        "latency": "14.5384",
         "power": "0.0"
        }
       ],
       [
-       "e:CommQuantMode:half/s:all_reduce/i:4/i:256",
+       "e:CommQuantMode:half/s:reduce_scatter/i:2/i:8388608",
        {
         "energy": "0.0",
-        "latency": "0.018303899999999998",
+        "latency": "2.8514",
         "power": "0.0"
        }
       ],
       [
-       "e:CommQuantMode:half/s:reduce_scatter/i:2/i:262144",
+       "e:CommQuantMode:half/s:reduce_scatter/i:8/i:2097152",
        {
         "energy": "0.0",
-        "latency": "0.0263963",
+        "latency": "0.195638",
         "power": "0.0"
        }
       ],
       [
-       "e:CommQuantMode:int8/s:all_gather/i:2/i:512",
+       "e:CommQuantMode:half/s:all_reduce/i:4/i:262144",
        {
         "energy": "0.0",
-        "latency": "0.012730499999999999",
+        "latency": "0.0634351",
         "power": "0.0"
        }
       ],
       [
-       "e:CommQuantMode:int8/s:all_gather/i:4/i:524288",
+       "e:CommQuantMode:int8/s:reduce_scatter/i:2/i:65536",
        {
         "energy": "0.0",
-        "latency": "0.0976895",
+        "latency": "0.0172479",
         "power": "0.0"
        }
       ],
       [
-       "e:CommQuantMode:int8/s:all_reduce/i:4/i:512",
+       "e:CommQuantMode:int8/s:reduce_scatter/i:8/i:16384",
        {
         "energy": "0.0",
-        "latency": "0.0181605",
+        "latency": "0.0262195",
         "power": "0.0"
        }
       ],
       [
-       "e:CommQuantMode:int8/s:reduce_scatter/i:2/i:524288",
+       "e:CommQuantMode:int8/s:all_reduce/i:4/i:2048",
        {
         "energy": "0.0",
-        "latency": "0.0263426",
+        "latency": "0.028883",
         "power": "0.0"
        }
       ]
      ],
-     "sorted_sha256": "54005a5bce82ef721e40002a429b1bb6de2d2703eadad1ef95ae9074ae56791d",
+     "sorted_sha256": "fc1030bf488ac164d3b094dd4eb347dd4bf3d0d6a2bd9d611558bc6ba4e312ea",
      "state": "loaded"
     },
     "_scale_matrix_data": {

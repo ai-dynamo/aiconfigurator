@@ -49,7 +49,7 @@ BASELINE_PATH = Path(__file__).resolve().parent / "data_plane_baseline.json"
 #  - b200_sxm/sglang/0.5.14   : sglang wideep MLA/MoE + deepep + gdn/dsa
 #  - b200_sxm/sglang/0.5.16   : kda (+ shared-layer fallback for the rest)
 #  - b200_sxm/vllm/0.24.0     : vllm families (mhc, dsv4)
-#  - b60/vllm/0.20.0          : oneccl comm tables
+#  - b60/vllm/0.26.0          : oneccl comm tables
 #  - l40s/trtllm/1.3.0rc20    : the known below-SOL GEMM system (raw rows)
 DATABASE_PINS: tuple[tuple[str, str, str], ...] = (
     ("h200_sxm", "trtllm", "1.2.0rc5"),
@@ -57,7 +57,7 @@ DATABASE_PINS: tuple[tuple[str, str, str], ...] = (
     ("b200_sxm", "sglang", "0.5.14"),
     ("b200_sxm", "sglang", "0.5.16"),
     ("b200_sxm", "vllm", "0.24.0"),
-    ("b60", "vllm", "0.20.0"),
+    ("b60", "vllm", "0.26.0"),
     ("l40s", "trtllm", "1.3.0rc20"),
 )
 
