@@ -160,7 +160,7 @@ class NCCL(Operation):
         from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
-        if key not in cls._data_cache:
+        if key not in cls._data_cache or key not in cls._oneccl_data_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
 
             # NCCL data lives under ``systems_data_root/nccl/<nccl_version>/``
@@ -172,14 +172,16 @@ class NCCL(Operation):
             # Optional like oneccl below (the Rust comm_root resolution is
             # Option-tolerant): a spec without misc.nccl_version binds an
             # unloaded wrapper instead of KeyError-ing the whole load.
+            # Locals first, commit last — a failed oneccl fetch must not
+            # leave only the nccl side cached (see GEMM.load_data).
             nccl_version = (database.system_spec.get("misc") or {}).get("nccl_version")
             if nccl_version:
                 nccl_primary = resolve_op_data_path(system_data_root, "nccl", nccl_version, PerfDataFilename.nccl.value)
-                cls._data_cache[key] = LoadedOpData(
+                nccl_loaded = LoadedOpData(
                     fetch_table_view(database, "_nccl_data"), PerfDataFilename.nccl, nccl_primary
                 )
             else:
-                cls._data_cache[key] = LoadedOpData(None, PerfDataFilename.nccl, PerfDataFilename.nccl.value)
+                nccl_loaded = LoadedOpData(None, PerfDataFilename.nccl, PerfDataFilename.nccl.value)
 
             # oneCCL fallback (XPU systems). Only loaded when system_spec
             # declares an ``oneccl_version`` under ``misc``.
@@ -188,12 +190,14 @@ class NCCL(Operation):
                 oneccl_primary = resolve_op_data_path(
                     system_data_root, "oneccl", oneccl_version, PerfDataFilename.oneccl.value
                 )
-                cls._oneccl_data_cache[key] = LoadedOpData(
+                oneccl_loaded = LoadedOpData(
                     fetch_table_view(database, "_oneccl_data"), PerfDataFilename.oneccl, oneccl_primary
                 )
             else:
-                cls._oneccl_data_cache[key] = None
+                oneccl_loaded = None
 
+            cls._data_cache[key] = nccl_loaded
+            cls._oneccl_data_cache[key] = oneccl_loaded
             cls._record_load()
 
         if "_nccl_data" not in database.__dict__:

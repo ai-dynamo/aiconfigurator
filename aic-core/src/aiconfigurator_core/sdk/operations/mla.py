@@ -305,13 +305,15 @@ class MLAModule(Operation):
         from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
-        if key not in cls._context_data_cache:
-            cls._context_data_cache[key] = load_view(
-                database, "_context_mla_module_data", PerfDataFilename.mla_context_module
-            )
-            cls._generation_data_cache[key] = load_view(
+        if key not in cls._context_data_cache or key not in cls._generation_data_cache:
+            # Locals first, commit last — a failed generation fetch must not
+            # leave only the context side cached (see GEMM.load_data).
+            context_loaded = load_view(database, "_context_mla_module_data", PerfDataFilename.mla_context_module)
+            generation_loaded = load_view(
                 database, "_generation_mla_module_data", PerfDataFilename.mla_generation_module
             )
+            cls._context_data_cache[key] = context_loaded
+            cls._generation_data_cache[key] = generation_loaded
             cls._record_load()
 
         if "_context_mla_module_data" not in database.__dict__:

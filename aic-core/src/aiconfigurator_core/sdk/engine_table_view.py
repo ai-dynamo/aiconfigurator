@@ -133,6 +133,8 @@ def _database_has_data_dir(database) -> bool:
     #1552's review rounds)."""
     import os
 
+    from aiconfigurator_core.sdk.operations.base import _KNOWN_BACKEND_DIRS
+
     root = os.path.join(database.systems_root, database.system_spec["data_dir"])
     if os.path.isdir(os.path.join(root, database.backend, database.version)):
         return True
@@ -140,7 +142,15 @@ def _database_has_data_dir(database) -> bool:
         family_dirs = os.listdir(root)
     except OSError:
         return False
-    return any(os.path.isdir(os.path.join(root, family, database.backend, database.version)) for family in family_dirs)
+    # Skip dot-dirs and backend-named first-level dirs exactly like the Rust
+    # gate (mod.rs::has_family_backend_version) and resolve_op_data_path — a
+    # prediction that scans MORE dirs than the load gate would build a strict
+    # probe the engine then refuses (estimate-only DBs must get SOL).
+    return any(
+        os.path.isdir(os.path.join(root, family, database.backend, database.version))
+        for family in family_dirs
+        if not family.startswith(".") and family not in _KNOWN_BACKEND_DIRS
+    )
 
 
 def fetch_table_view(database, attribute: str):
@@ -158,16 +168,25 @@ def fetch_table_view(database, attribute: str):
     """
     from aiconfigurator_core.sdk import engine as _engine
 
-    # One probe handle per database instance: _probe_handle_for's cache key
-    # is the probe-spec JSON itself, and BUILDING that key re-runs the
+    # One probe SPEC per database instance: _probe_handle_for's cache key is
+    # the probe-spec JSON itself, and BUILDING that key re-runs the
     # shared-layer source resolution for every op file — a full warm does
-    # ~40 fetches, so memoize the handle on the database (its sources are
-    # construction-time state; mode/policy views are separate objects).
-    handle = database.__dict__.get("_table_view_probe_handle")
-    if handle is None:
+    # ~40 fetches, so memoize the KEY on the database (its sources are
+    # construction-time state; mode/policy views are separate objects). The
+    # HANDLE itself always comes from the engine-side LRU, so the documented
+    # eviction levers (clear_all_op_caches / clear_database_runtime_caches /
+    # unload_database) govern every pinned Rust perf-DB load: the memo is
+    # (generation, key, systems_path) and re-resolves — sources and the
+    # SOL-mode decision both — whenever a lever advances the generation.
+    # Plain strings only, never a pyo3 object: a warmed database stays
+    # picklable and deep-copyable.
+    memo = database.__dict__.get("_table_view_probe_spec")
+    if memo is None or memo[0] != _engine._PROBE_CACHE_GENERATION:
         mode_token = None if _database_has_data_dir(database) else "SOL"
-        handle = _engine._probe_handle_for(database, mode_token)
-        database.__dict__["_table_view_probe_handle"] = handle
+        key, systems_path = _engine._probe_spec_key(database, mode_token)
+        memo = (_engine._PROBE_CACHE_GENERATION, key, systems_path)
+        database.__dict__["_table_view_probe_spec"] = memo
+    handle = _engine._probe_handle_from_key(memo[1], memo[2])
     raw = handle._engine.table_view_json(attribute)
     if raw is None:
         return None

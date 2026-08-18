@@ -4,10 +4,9 @@
 """Unit tests for DeepSeek-V4 sparse-kernel infrastructure.
 
 Covers:
-  * the per-(attn_kind, mode) module loaders and their split-file merge
+  * the per-(attn_kind, mode) module loaders (test-only parsers)
   * the sparse-kernel CSV loader (paged_mqa_logits / hca_attn)
   * ``_lookup_sparse_kernel`` (exact + engine resolve + tp fallback)
-  * ``_deep_merge_dsv4_dicts`` cross-kind dict merge
 """
 
 from __future__ import annotations
@@ -17,9 +16,6 @@ from pathlib import Path
 import pytest
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.operations.dsv4 import (
-    _deep_merge_dsv4_dicts,
-)
 from aiconfigurator.sdk.perf_database import (
     load_context_dsv4_kind_module_data,
     load_dsv4_sparse_kernel_data,
@@ -235,22 +231,6 @@ def test_load_generation_dsv4_kind_module_data_keeps_native_heads_separate(tmp_p
     # [native][local][cr][b][s_total]; tp=1 -> local == native
     assert data[_FLASH_NATIVE_HEADS][_FLASH_NATIVE_HEADS][128][1][1024]["latency"] == pytest.approx(0.2)
     assert data[_PRO_NATIVE_HEADS][_PRO_NATIVE_HEADS][128][1][1024]["latency"] == pytest.approx(0.6)
-
-
-# ───────────────────────────────────────────────────────────────────────
-# _deep_merge_dsv4_dicts — combining csa/hca split files
-# ───────────────────────────────────────────────────────────────────────
-
-
-def test_deep_merge_dsv4_dicts_preserves_disjoint_keys():
-    csa = {"f": {"k": {"g": {4: {"x": 1}}}}}
-    hca = {"f": {"k": {"g": {128: {"x": 2}}}}}
-    merged = {}
-    for d in (csa, hca):
-        _deep_merge_dsv4_dicts(merged, d)
-    assert sorted(merged["f"]["k"]["g"].keys()) == [4, 128]
-    assert merged["f"]["k"]["g"][4] == {"x": 1}
-    assert merged["f"]["k"]["g"][128] == {"x": 2}
 
 
 # Retired with #1357 PR-5: the ``_lookup_sparse_kernel`` query helper (tp

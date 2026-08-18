@@ -237,9 +237,7 @@ OPERATIONS_DEF_INVENTORY = {
             "GenerationDeepSeekV4AttentionModule.load_data",
             "_BaseDeepSeekV4AttentionModule.__init__",
             "_cache_key",
-            "_deep_merge_dsv4_dicts",
             "_dsv4_normalize_dtype",
-            "_load_dsv4_split",
             "_validate_dsv4_local_head_semantics",
             "load_context_dsv4_kind_module_data",
             "load_context_dsv4_kind_module_data._make_nested",
@@ -417,9 +415,17 @@ OPERATIONS_DEF_INVENTORY = {
             "FallbackOp.__init__",
             "FallbackOp._engine_query_is_context",
             "FallbackOp._engine_query_plan",
+            # Composite weight recursion restored (review round 2): the base
+            # engine route would serialize the WHOLE composite and crash on a
+            # weight-shielded child with no opspec variant (tombstoned
+            # MoEDispatch deepep flavor). These recurse through each child's
+            # own get_weights — no performance math, values identical to
+            # Op::weight_bytes for convertible children.
+            "FallbackOp.get_weights",
             "OverlapOp.__init__",
             "OverlapOp._engine_query_is_context",
             "OverlapOp._engine_query_plan",
+            "OverlapOp.get_weights",
             "_has_leaves",
             "_infer_phase",
         }

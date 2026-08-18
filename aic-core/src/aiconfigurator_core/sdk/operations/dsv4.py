@@ -57,29 +57,6 @@ def _cache_key(database: PerfDatabase) -> tuple:
 
 
 # ───────────────────────────────────────────────────────────────────────
-# Module-level helpers (moved from perf_database.py).
-# Re-exported from perf_database for back-compat with tests that imported
-# them via ``from aiconfigurator_core.sdk.perf_database import ...``.
-# ───────────────────────────────────────────────────────────────────────
-
-
-def _deep_merge_dsv4_dicts(dest, src):
-    """In-place merge ``src`` nested dict into ``dest``.
-
-    Used to combine the per-(attn_kind) CSVs into one nested dict. At any
-    level where both sides have a dict, recurse; otherwise overwrite.
-    """
-    if src is None:
-        return dest
-    for k, v in src.items():
-        if k in dest and isinstance(dest[k], dict) and isinstance(v, dict):
-            _deep_merge_dsv4_dicts(dest[k], v)
-        else:
-            dest[k] = v
-    return dest
-
-
-# ───────────────────────────────────────────────────────────────────────
 # DeepSeekV4MHCModule
 # ───────────────────────────────────────────────────────────────────────
 
@@ -251,37 +228,41 @@ class ContextDeepSeekV4AttentionModule(_BaseDeepSeekV4AttentionModule):
         from aiconfigurator_core.sdk.perf_database import LoadedOpData, PerfDataFilename
 
         key = cls._cache_key(database)
-        if key not in cls._data_cache:
+        if key not in cls._data_cache or key not in cls._raw_data_cache or key not in cls._sparse_kernel_cache:
             system_data_root = os.path.join(database.systems_root, database.system_spec["data_dir"])
 
             def _primary(filename_enum):
                 return resolve_op_data_path(system_data_root, database.backend, database.version, filename_enum.value)
 
+            # Locals first, commit last — a failed sparse fetch must not
+            # leave only the merged view cached (see GEMM.load_data).
             # The csa+hca merge happens engine-side; an absent-or-empty merge
-            # binds None, matching the retired _load_dsv4_split semantics
+            # binds None, matching the retired split-merge semantics
             # (whose filepath came from the csa side, loaded first).
             merged_view = fetch_table_view(database, "_context_deepseek_v4_attention_module_data")
             if merged_view:
-                cls._data_cache[key] = LoadedOpData(
+                merged_loaded = LoadedOpData(
                     merged_view,
                     PerfDataFilename.dsv4_csa_context_module,
                     _primary(PerfDataFilename.dsv4_csa_context_module),
                 )
             else:
-                cls._data_cache[key] = None
-            # The raw wrapper stays a plain alias for backward compatibility.
-            cls._raw_data_cache[key] = cls._data_cache[key]
+                merged_loaded = None
 
             def _load_sparse(sub_key, filename_enum):
                 view = fetch_table_view(database, f"_dsv4_sparse_kernel_data.{sub_key}")
                 return LoadedOpData(view, filename_enum, _primary(filename_enum))
 
-            cls._sparse_kernel_cache[key] = {
+            sparse_loaded = {
                 "paged_mqa_logits": _load_sparse("paged_mqa_logits", PerfDataFilename.dsv4_paged_mqa_logits_module),
                 "hca_attn": _load_sparse("hca_attn", PerfDataFilename.dsv4_hca_attn_module),
                 "csa_attn": _load_sparse("csa_attn", PerfDataFilename.dsv4_csa_attn_module),
             }
 
+            cls._data_cache[key] = merged_loaded
+            # The raw wrapper stays a plain alias for backward compatibility.
+            cls._raw_data_cache[key] = merged_loaded
+            cls._sparse_kernel_cache[key] = sparse_loaded
             cls._record_load()
 
         if "_context_deepseek_v4_attention_module_data" not in database.__dict__:
@@ -479,34 +460,6 @@ class DeepSeekV4MegaMoEModule(Operation):
             op = copy.copy(self)
             op._quant_mode = quant_mode
         return op, eval_kwargs
-
-
-# ───────────────────────────────────────────────────────────────────────
-# Init-time split-file merge helper (formerly in PerfDatabase.__init__)
-# ───────────────────────────────────────────────────────────────────────
-
-
-def _load_dsv4_split(loaded_list):
-    """Merge per-(attn_kind) loaded data into one combined ``LoadedOpData``.
-
-    Each DSV4 context/generation module CSV is collected per attention kind
-    (csa/hca). Each loader returns a nested dict scoped to one
-    compress_ratio. We merge into one aggregate dict so downstream queries
-    do not need to know which attention kind produced each row.
-    """
-    from aiconfigurator_core.sdk.perf_database import LoadedOpData
-
-    merged: dict = {}
-    first_loaded = next((x for x in loaded_list if x is not None), None)
-    if first_loaded is None:
-        return None
-    for loaded in loaded_list:
-        if loaded is None or not loaded.loaded:
-            continue
-        _deep_merge_dsv4_dicts(merged, loaded.data)
-    if not merged:
-        return None
-    return LoadedOpData(merged, first_loaded.op_name_enum, first_loaded.filepath)
 
 
 # ─────────────────────────────────────────────────────────

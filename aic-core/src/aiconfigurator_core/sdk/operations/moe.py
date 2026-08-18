@@ -178,25 +178,38 @@ class MoE(Operation):
         from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
-        if key not in cls._data_cache:
+        if (
+            key not in cls._data_cache
+            or key not in cls._low_latency_data_cache
+            or key not in cls._wideep_context_data_cache
+            or key not in cls._wideep_generation_data_cache
+        ):
+            # Fetch every view into locals first so a failure on a later
+            # fetch can't leave the caches half-populated — a retry would
+            # then KeyError at the bind lines below, masking the real error
+            # until clear_cache (same hardening as GEMM.load_data).
             # Regular MoE table — the engine folds one moe_perf read into the
             # default and low-latency views (rows tagged
             # ``kernel_source="moe_torch_flow_min_latency"`` route to the twin).
-            cls._data_cache[key] = load_view(database, "_moe_data", PerfDataFilename.moe)
-            cls._low_latency_data_cache[key] = load_view(database, "_moe_low_latency_data", PerfDataFilename.moe)
+            moe_loaded = load_view(database, "_moe_data", PerfDataFilename.moe)
+            low_latency_loaded = load_view(database, "_moe_low_latency_data", PerfDataFilename.moe)
 
             # WideEP MoE tables — SGLang-only.
             if database.backend == "sglang":
-                cls._wideep_context_data_cache[key] = load_view(
+                wideep_context_loaded = load_view(
                     database, "_wideep_context_moe_data", PerfDataFilename.wideep_context_moe
                 )
-                cls._wideep_generation_data_cache[key] = load_view(
+                wideep_generation_loaded = load_view(
                     database, "_wideep_generation_moe_data", PerfDataFilename.wideep_generation_moe
                 )
             else:
-                cls._wideep_context_data_cache[key] = None
-                cls._wideep_generation_data_cache[key] = None
+                wideep_context_loaded = None
+                wideep_generation_loaded = None
 
+            cls._data_cache[key] = moe_loaded
+            cls._low_latency_data_cache[key] = low_latency_loaded
+            cls._wideep_context_data_cache[key] = wideep_context_loaded
+            cls._wideep_generation_data_cache[key] = wideep_generation_loaded
             cls._record_load()
 
         if "_moe_data" not in database.__dict__:
@@ -313,18 +326,18 @@ class MoEDispatch(Operation):
         from aiconfigurator_core.sdk.perf_database import PerfDataFilename
 
         key = cls._cache_key(database)
-        if key not in cls._normal_data_cache:
+        if key not in cls._normal_data_cache or key not in cls._ll_data_cache:
+            # Locals first, commit last — a failed second fetch must not
+            # leave the caches half-populated (see GEMM.load_data).
             if database.backend == "sglang":
-                cls._normal_data_cache[key] = load_view(
-                    database, "_wideep_deepep_normal_data", PerfDataFilename.wideep_deepep_normal
-                )
-                cls._ll_data_cache[key] = load_view(
-                    database, "_wideep_deepep_ll_data", PerfDataFilename.wideep_deepep_ll
-                )
+                normal_loaded = load_view(database, "_wideep_deepep_normal_data", PerfDataFilename.wideep_deepep_normal)
+                ll_loaded = load_view(database, "_wideep_deepep_ll_data", PerfDataFilename.wideep_deepep_ll)
             else:
-                cls._normal_data_cache[key] = None
-                cls._ll_data_cache[key] = None
+                normal_loaded = None
+                ll_loaded = None
 
+            cls._normal_data_cache[key] = normal_loaded
+            cls._ll_data_cache[key] = ll_loaded
             cls._record_load()
 
         if "_wideep_deepep_normal_data" not in database.__dict__:
