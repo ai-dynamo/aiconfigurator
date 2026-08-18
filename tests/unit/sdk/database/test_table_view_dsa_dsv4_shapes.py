@@ -176,7 +176,7 @@ def test_dsa_generation_view_indexes_total_decode_length(systems_root: Path) -> 
     _write_parquet(
         systems_root,
         DSA_GEN_REL,
-        [_dsa_row(isl=1, step=149, latency=20.0, tp_size=1)],
+        [_dsa_row(isl=1, step=149, latency=20.0)],
     )
     data = _fetch(_build_db(systems_root), "_generation_dsa_module_data")
     value = data[common.KVCacheQuantMode.bfloat16][common.GEMMQuantMode.bfloat16][DEFAULT_DSA_ARCHITECTURE][

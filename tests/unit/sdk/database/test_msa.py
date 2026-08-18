@@ -42,8 +42,9 @@ def test_msa_sol_scales_with_workload():
     """SOL mode computes the three-group MSA SOL (gemm + fp8 indexer + sparse attn). Assert it
     RESPONDS to the workload rather than returning a constant: more new tokens (s) add work, and
     a longer cached prefix adds indexer/attention work (full_s > index_topk). Runs on a real
-    shipped database: ``op.query`` is a deprecation shim routed through the compiled engine's
-    probe, which loads its tables from disk (the synthetic fixture is invisible to it)."""
+    shipped database: ``op._engine_query`` is the permanent internal single-op plumbing routed
+    through the compiled engine's probe, which loads its tables from disk (the synthetic
+    fixture is invisible to it)."""
     from aiconfigurator.sdk.perf_database import get_database_view
 
     db = get_database_view("b200_sxm", "sglang", "0.5.14", database_mode="SOL")

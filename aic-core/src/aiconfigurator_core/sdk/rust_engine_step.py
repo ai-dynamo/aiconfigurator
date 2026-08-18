@@ -284,6 +284,25 @@ def _normalize_tuning_iterations(iterations: dict[str, Any] | list[Any]) -> list
     return iterations
 
 
+def validate_engine_step_backend(value: Any) -> str | None:
+    """Normalize + validate an ``engine_step_backend`` request.
+
+    Returns the lowered token (``"rust"``) or ``None`` when nothing was
+    requested; any other value raises. Shared by the step routing gate AND
+    the task/config entry points (``Task.__post_init__``) so a programmatic
+    caller cannot smuggle the retired ``"python"`` token (or any typo) into
+    a path — like the AFD session — that never reaches the routing gate.
+    """
+    requested = str(value).lower() if value else None
+    if requested is not None and requested != "rust":
+        raise ValueError(
+            f"unknown engine_step_backend {requested!r}: the compiled Rust engine is the only "
+            "engine-step executor ('rust' is the only accepted value; the deprecated 'python' "
+            "no-op was removed after its one-release window)."
+        )
+    return requested
+
+
 def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = None) -> bool:
     """Route the engine step to the compiled engine — the only step executor.
 
@@ -301,13 +320,7 @@ def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = N
     an engine the caller did not ask for would be worse than failing.
     """
     backend = getattr(runtime_config, "engine_step_backend", None) or os.environ.get(ENGINE_STEP_BACKEND_ENV)
-    requested = str(backend).lower() if backend else None
-    if requested is not None and requested != "rust":
-        raise ValueError(
-            f"unknown engine_step_backend {requested!r}: the compiled Rust engine is the only "
-            "engine-step executor ('rust' is the only accepted value; the deprecated 'python' "
-            "no-op was removed after its one-release window)."
-        )
+    requested = validate_engine_step_backend(backend)
     if requested is None:
         # Deferred import: perf_database is heavy and this module must stay
         # light to import (engine.py imports it at top level).

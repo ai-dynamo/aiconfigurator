@@ -56,6 +56,7 @@ from aiconfigurator.sdk.perf_database import (
     is_hopper_system,
     load_system_spec,
 )
+from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import (
     SpeculativeDecodingProfile,
     normalize_speculative_decoding,
@@ -820,6 +821,12 @@ class Task:
     # =====================================================================
 
     def __post_init__(self) -> None:
+        # Backend token first: every programmatic entry point (cli_default /
+        # cli_recommend / cli_estimate / build_default_tasks, AFD included)
+        # funnels through Task construction, so this single check fails
+        # closed on the retired "python" value (or any typo) even on paths
+        # that never reach the step routing gate.
+        validate_engine_step_backend(self.engine_step_backend)
         # Deprecation surface first, on the raw constructor values (both the
         # Task(...) and from_yaml paths land here): a truthy legacy flag or an
         # explicit user moe_backend="deepep_moe" warns once per key per

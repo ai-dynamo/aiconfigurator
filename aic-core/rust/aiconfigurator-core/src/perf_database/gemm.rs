@@ -191,9 +191,10 @@ impl GemmTable {
             .expect("fixed-map resolution is infallible")
     }
 
-    /// Construct with shared-layer (sibling/cross-version) sources resolved from
-    /// `perf_db_sources` (Python-supplied). Each GEMM-family file falls back to
-    /// its primary `data_root/<basename>` when absent from the map. No I/O.
+    /// Construct with shared-layer (sibling/cross-version) sources supplied by the
+    /// engine's `SourceResolver` (live resolution owns the shared-layer walk;
+    /// a fixed source map is the test-only path). Each GEMM-family file falls back to
+    /// its primary `data_root/<basename>` when the resolver names no override. No I/O.
     pub fn with_sources(
         data_root: PathBuf,
         system_spec: SystemSpec,
@@ -893,8 +894,9 @@ mod tests {
     /// admitted. Mirrors Python `_read_filtered_rows` + `load_gemm_data`.
     #[test]
     fn shared_layer_merges_siblings_with_kernel_source_filter_and_first_wins() {
-        // trtllm 1.3.0rc10 primary + 1.2.0rc5 sibling — the real shape Python's
-        // `_compute_perf_db_sources` emits for this backend.
+        // trtllm 1.3.0rc10 primary + 1.2.0rc5 sibling — the real shape the
+        // retired Python `_compute_perf_db_sources` emitted for this backend
+        // (the live resolver derives the same walk).
         let primary = b200_gemm_parquet("trtllm", "1.3.0rc10");
         let sibling = b200_gemm_parquet("trtllm", "1.2.0rc5");
 

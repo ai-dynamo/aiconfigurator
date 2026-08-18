@@ -2236,11 +2236,14 @@ class PerfDatabase:
         per database instance."""
         if self.__dict__.get("_source_reports_materialized"):
             return
-        self._source_reports_materialized = True
         system_data_root = os.path.join(self.systems_root, self.system_spec["data_dir"])
         for filename_enum in PerfDataFilename:
             primary_path = resolve_op_data_path(system_data_root, self.backend, self.version, filename_enum.value)
             self._build_op_sources(filename_enum, primary_path, system_data_root)
+        # Set only AFTER the sweep completes: a strict-provenance failure
+        # mid-sweep must leave the next call free to retry (and fail closed
+        # again) instead of short-circuiting with data_provenance half-filled.
+        self._source_reports_materialized = True
 
     def is_inter_node(self, num_gpus: int) -> bool:
         """

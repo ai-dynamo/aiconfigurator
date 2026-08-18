@@ -215,11 +215,11 @@ def test_a2a_non_finite_latency_cell_refuses_load(systems_root: Path) -> None:
 def test_a2a_missing_file_returns_none_and_empty_file_returns_empty(systems_root: Path) -> None:
     db = _build_db(systems_root)
     assert _fetch(db, "_moe_a2a_data") is None
-    _write_parquet(systems_root, A2A_REL, [A2A_ROW])
     # a fresh db avoids the per-db view cache; the empty-vs-missing split is
     # observable per load
     empty_root_row = {k: [] for k in A2A_ROW}
     path = systems_root / A2A_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(
         pa.table(
             {

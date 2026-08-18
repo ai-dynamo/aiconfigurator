@@ -123,8 +123,9 @@ def test_mhc_weight_memory_uses_quant_mode():
 
 def test_deepseek_v4_per_op_sol_queries_run_end_to_end():
     """Every DSV4 op must answer a per-op SOL query through the per-call
-    ``op._engine_query()`` surface (now a deprecation shim routed through the compiled
-    engine's model-less probe). The probe engine loads perf tables from disk,
+    ``op._engine_query()`` surface (the PERMANENT internal single-op plumbing,
+    routed through the compiled engine's model-less probe — not a deprecation
+    shim). The probe engine loads perf tables from disk,
     so this runs on a real shipped database rather than the synthetic-stuffed
     fixture (whose in-memory tables the engine cannot see)."""
     from aiconfigurator.sdk.perf_database import get_database_view

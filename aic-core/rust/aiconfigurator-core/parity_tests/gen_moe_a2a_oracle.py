@@ -218,7 +218,7 @@ def main() -> None:
 
     header = {
         "_regenerate": (".venv/bin/python aic-core/rust/aiconfigurator-core/parity_tests/gen_moe_a2a_oracle.py"),
-        "_source": "PerfDatabase.query_moe_a2a (shared_layer=False), SILICON mode",
+        "_source": "MoEAllToAll via engine._evaluate_single_op (shared_layer=False), SILICON mode",
         "_tuples": [f"{s}/{b}/{v}" for s, b, v in TUPLES],
     }
     out_path = os.path.normpath(OUT_PATH)

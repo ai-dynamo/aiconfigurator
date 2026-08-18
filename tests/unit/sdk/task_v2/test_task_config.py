@@ -2118,3 +2118,30 @@ def test_nvfp4_preserved_on_blackwell():
     )
     assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4
     assert t.moe_quant_mode == common.MoEQuantMode.nvfp4
+
+
+def test_engine_step_backend_is_validated_at_task_construction():
+    """Every programmatic entry point funnels through Task construction, so
+    the retired "python" token (and any typo) fails closed HERE — including
+    paths like the AFD session that never reach the step routing gate."""
+    import pytest
+
+    from aiconfigurator.sdk.task_v2 import Task
+
+    def _task(**kwargs):
+        return Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            backend_version="dummy",
+            total_gpus=8,
+            **kwargs,
+        )
+
+    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'python'"):
+        _task(engine_step_backend="python")
+    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'auto'"):
+        _task(engine_step_backend="auto")
+    assert _task(engine_step_backend="rust").engine_step_backend == "rust"
+    assert _task(engine_step_backend=None).engine_step_backend is None

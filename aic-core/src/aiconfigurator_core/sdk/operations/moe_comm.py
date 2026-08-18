@@ -165,11 +165,13 @@ class MoEAllToAll(_core.MoEAllToAll, OpShellKit):
         """Ctor-time spec guard on top of the Rust ``__new__`` (which has
         already consumed the args and built the op): the backend/phase matrix
         (``MOE_A2A_BACKENDS``) is Python-owned policy, so the ValueError fires
-        here where the intent is expressed. Pickle rebuilds bypass this
+        here where the intent is expressed. The values are read back from the
+        CONSTRUCTED op (not the call kwargs), so the guard holds however the
+        constructor was invoked. Pickle rebuilds bypass this
         (``__getnewargs_ex__`` -> ``__new__``), which is safe: those values
         came from an already-validated instance."""
-        del args
-        _validate_a2a_request(kwargs["comm_backend"], kwargs["phase"])
+        del args, kwargs
+        _validate_a2a_request(self._comm_backend, self._phase)
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -265,9 +267,10 @@ class MoEExpertCompute(_core.MoEExpertCompute, OpShellKit):
 
     def __init__(self, *args, **kwargs) -> None:
         """Ctor-time spec guard on top of the Rust ``__new__`` — see
-        ``MoEAllToAll.__init__`` for the pickle-bypass rationale."""
-        del args
-        _validate_ep_phase(kwargs["inference_phase"])
+        ``MoEAllToAll.__init__`` for the read-back and pickle-bypass
+        rationale."""
+        del args, kwargs
+        _validate_ep_phase(self._inference_phase)
 
     # ------------------------------------------------------------------
     # Data ownership

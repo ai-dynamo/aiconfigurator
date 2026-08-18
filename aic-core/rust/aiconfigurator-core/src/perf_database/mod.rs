@@ -117,7 +117,7 @@ pub(crate) fn find_in_family_dirs(data_root: &Path, basename: &str) -> Option<Pa
 /// accept a tuple whose data has migrated entirely off the legacy
 /// `<backend>/<version>` layout — no legacy dir needs to exist as long as some
 /// family dir holds the tuple. The actual per-file resolution then happens
-/// inside each table's `resolve_op_sources` call via `find_in_family_dirs`.
+/// inside each table's `resolver.sources_for` call via `find_in_family_dirs`.
 fn has_family_backend_version(system_data_root: &Path, backend: &str, version: &str) -> bool {
     let entries = match std::fs::read_dir(system_data_root) {
         Ok(entries) => entries,
@@ -450,7 +450,7 @@ impl PerfDatabase {
         // or at least one family-first `<family>/<backend>/<version>` dir
         // (family = any first-level dir under `system_data_root` other than
         // the known legacy backend names). `data_root` stays the legacy path
-        // either way — each table's `resolve_op_sources` call resolves the
+        // either way — each table's `resolver.sources_for` call resolves the
         // actual per-file location (legacy or family) independently.
         if !tolerate_missing_data
             && !data_root.is_dir()
