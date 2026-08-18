@@ -121,6 +121,22 @@ FPM_RESULTS_DIR = "/results"
 # artifacts such as ``benchmark_merged.json`` alongside the per-rank files).
 FPM_BENCHMARK_RESULT_GLOB = "benchmark*.json"
 
+# Resolved engine-config snapshots the rendered run script writes under
+# /results, one per node. The Generator renders the template (its ``run.sh``
+# substitutes ``{node_rank}`` at runtime); the collector's expected-marker
+# validation sweeps the glob over the collected results tree. Both sides
+# import the convention from here so it is spelled exactly once.
+FPM_RESOLVED_CONFIG_TEMPLATE = "resolved-config-node{node_rank}.json"
+FPM_RESOLVED_CONFIG_GLOB = "resolved-config*.json"
+
+
+def fpm_resolved_config_name(node_rank: int) -> str:
+    """Return the resolved-config snapshot filename for one node."""
+
+    if not isinstance(node_rank, int) or isinstance(node_rank, bool) or node_rank < 0:
+        raise ValueError("node_rank must be a non-negative integer")
+    return FPM_RESOLVED_CONFIG_TEMPLATE.format(node_rank=node_rank)
+
 
 def fpm_validate_benchmark_output_path(output_path: str) -> None:
     """Reject benchmark output paths the collector could never discover.
@@ -131,6 +147,11 @@ def fpm_validate_benchmark_output_path(output_path: str) -> None:
     :data:`FPM_RESULTS_DIR`. A path outside that surface renders and passes
     the gate, then burns the whole measurement before failing at collection
     -- so the render must fail closed instead.
+
+    Subdirectories under :data:`FPM_RESULTS_DIR` are permitted: the pod-side
+    manifest enumerates ``/results`` recursively, the transfer recreates the
+    relative directory layout, and every discovery sweep matches the glob
+    recursively (``**/``) -- so a nested path stays discoverable end to end.
     """
 
     path = PurePosixPath(output_path)
@@ -203,7 +224,10 @@ def fpm_workload_node_count(workload: dict[str, Any]) -> int:
     if kind == "Pod":
         return 1
     if kind == "LeaderWorkerSet":
-        return int(workload["spec"]["leaderWorkerTemplate"]["size"])
+        size = workload["spec"]["leaderWorkerTemplate"]["size"]
+        if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+            raise ValueError(f"FPM LeaderWorkerSet leaderWorkerTemplate.size must be a positive integer: {size!r}")
+        return size
     if kind == "PodCliqueSet":
         spec = workload.get("spec") or {}
         if not isinstance(spec, dict):
