@@ -317,6 +317,49 @@ impl Op {
         }
     }
 
+    /// Rename the op (Python's post-construction `op._name = ...` rewiring:
+    /// hybrid layer-type prefixes rename block ops after the shared builder
+    /// returns them). Every variant carries `name`.
+    pub fn set_name(&mut self, name: String) {
+        match self {
+            Op::Gemm(o) => o.name = name,
+            Op::Embedding(o) => o.name = name,
+            Op::Elementwise(o) => o.name = name,
+            Op::ContextAttention(o) => o.name = name,
+            Op::GenerationAttention(o) => o.name = name,
+            Op::EncoderAttention(o) => o.name = name,
+            Op::ContextMla(o) => o.name = name,
+            Op::GenerationMla(o) => o.name = name,
+            Op::MlaModuleContext(o) => o.name = name,
+            Op::MlaModuleGeneration(o) => o.name = name,
+            Op::MlaBmm(o) => o.name = name,
+            Op::Moe(o) => o.name = name,
+            Op::MoeDispatch(o) => o.name = name,
+            Op::CustomAllReduce(o) => o.name = name,
+            Op::Nccl(o) => o.name = name,
+            Op::P2P(o) => o.name = name,
+            Op::Vision(o) => o.name = name,
+            Op::DsaContext(o) => o.name = name,
+            Op::DsaGeneration(o) => o.name = name,
+            Op::MsaContext(o) => o.name = name,
+            Op::MsaGeneration(o) => o.name = name,
+            Op::Dsv4Context(o) => o.name = name,
+            Op::Dsv4Generation(o) => o.name = name,
+            Op::Mhc(o) => o.name = name,
+            Op::Mamba2(o) => o.name = name,
+            Op::Gdn(o) => o.name = name,
+            Op::WideEpContextMla(o) => o.name = name,
+            Op::WideEpGenerationMla(o) => o.name = name,
+            Op::FpmForward(o) => o.name = name,
+            Op::Overlap(o) => o.name = name,
+            Op::Fallback(o) => o.name = name,
+            Op::Dsv4MegaMoe(o) => o.name = name,
+            Op::Kda(o) => o.name = name,
+            Op::MoeAllToAll(o) => o.name = name,
+            Op::MoeExpertCompute(o) => o.name = name,
+        }
+    }
+
     /// True if this op's name matches Python's mix-step filter for the
     /// context-attention bucket. Python uses literal string equality on
     /// `"context_attention"` — that's the LLAMA / MOE attention op name.
