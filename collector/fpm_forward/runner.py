@@ -81,22 +81,32 @@ _FPM_VLLM_RUNTIME_ARGS = (
 # insensitive to both flags (measured 100-108 ms across all four combinations
 # at 8192 new tokens, M2.7 tp4+EP).
 _FPM_VLLM_PREFILL_ARGS = ("--no-async-scheduling",)
-# Decode keeps async scheduling on (vLLM's default) -- the steady-state
-# second step models a production decode iteration, and production overlaps
-# scheduler CPU work with the GPU. Against real traffic at (256, 2.1M KV):
-# async 26.5 ms (1.03x of the 25.8 ms measured), sync 31.3 ms (1.21x).
+# Decode always keeps async scheduling on (vLLM's default) -- the
+# steady-state second step models a production decode iteration, and
+# production overlaps scheduler CPU work with the GPU. Against real traffic
+# at (256, 2.1M KV): async 26.5 ms (1.03x of the 25.8 ms measured), sync
+# 31.3 ms (1.21x).
 #
-# Decode also keeps prefix caching on (vLLM's default). The engine's KV
-# warm-up reuses warmed prefixes across points and refuses to warm without
-# prefix caching (skip_reason="prefix_caching_disabled"), collapsing every
-# decode point back to the fake-KV fallback regime that underestimates
-# capture-mode decode. The old `--no-enable-prefix-caching` pin dated from
-# that fallback protocol, where each point admits batch_size synthetic
-# full-context requests and `Request.__init__` block hashing would run
-# inside the measured step (26.5 ms -> 121 ms at (batch 256, 2.1M KV) on
-# M2.7 tp4+EP); under KV warm-up the hashing happens at seed time, outside
-# the measured step, and the r15 parity baseline runs with the default.
-_FPM_VLLM_DECODE_ARGS = ()
+# Decode's prefix-caching flag is regime-conditional, matching the
+# engine-side KV warm-up eligibility predicate (_kvwarm_warm_eligible):
+#
+#   * kvwarm regime (EP-sharded MoE: tep/dep) -- prefix caching stays ON.
+#     Warm-depth reuse requires it (the engine skips warming with
+#     skip_reason="prefix_caching_disabled", collapsing every point into the
+#     fake-KV fallback convicted of underestimating capture-mode decode);
+#     full-context block hashing happens at seed time, outside the measured
+#     step, and points borrow warmed chains without re-admission. r15 parity:
+#     MAPE 1.61/1.70% with prefix ON + kvwarm, 2.1M-KV points included.
+#   * fake-KV regime (single/tp/pure_tp -- kvwarm exempts these) -- prefix
+#     caching stays OFF. Each point re-admits batch_size synthetic
+#     full-context requests; with prefix caching on, `Request.__init__`
+#     hashes the whole prompt through the block hasher INSIDE the measured
+#     step (26.5 ms -> 121 ms at (batch 256, 2.1M KV) on M2.7 tp4+EP), while
+#     production steady-state decode has no such per-step hash (requests stay
+#     resident). Disabling is the serving-faithful choice here.
+_FPM_VLLM_DECODE_FAKE_KV_ARGS = ("--no-enable-prefix-caching",)
+# Must stay in sync with the engine's _kvwarm_warm_eligible strategy set.
+_FPM_KVWARM_STRATEGIES = frozenset({"tep", "dep"})
 REMOTE_EXIT_MARKER = "__FPM_REMOTE_EXIT_CODE__="
 REMOTE_FILES_MARKER = "__FPM_REMOTE_FILES__="
 REMOTE_WORKDIR = "/tmp/fpm-bench"
@@ -1018,7 +1028,10 @@ def _cell_generator_overrides(
     merged.setdefault("K8sConfig", {})["extra_env"] = list(resolved_env.values())
 
     policy_args = ((policy.get("params") or {}).get("agg") or {}).get("extra_cli_args") or []
-    workload_args = _FPM_VLLM_DECODE_ARGS if cell.workload_kind == "decode" else _FPM_VLLM_PREFILL_ARGS
+    if cell.workload_kind == "decode":
+        workload_args = () if cell.parallel_strategy in _FPM_KVWARM_STRATEGIES else _FPM_VLLM_DECODE_FAKE_KV_ARGS
+    else:
+        workload_args = _FPM_VLLM_PREFILL_ARGS
     resolved_args = [*_FPM_VLLM_RUNTIME_ARGS, *workload_args, *model_args, *policy_args]
     has_benchmark_timeout = any(
         str(argument) == "--benchmark-timeout" or str(argument).startswith("--benchmark-timeout=")

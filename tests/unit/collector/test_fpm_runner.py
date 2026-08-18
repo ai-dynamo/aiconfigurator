@@ -1580,22 +1580,55 @@ def test_pure_tp_render_uses_shared_vllm_tp_without_expert_parallel(
     assert "--enable-expert-parallel" not in script
 
 
-@pytest.mark.parametrize("workload_kind", ["prefill", "decode"])
-def test_render_never_disables_prefix_caching(tmp_path, workload_kind):
-    """No workload kind may disable prefix caching: prefill stages cached-kv
-    points through the prefix cache, and decode's KV warm-up refuses to warm
-    without it (skip_reason="prefix_caching_disabled"), collapsing every
-    point into the fake-KV fallback regime convicted of underestimating
-    capture-mode decode."""
+@pytest.mark.parametrize(
+    ("workload_kind", "strategy", "topology", "flag_expected"),
+    [
+        # kvwarm regime (EP-sharded MoE): warm-depth reuse requires prefix
+        # caching; disabling it collapses decode into the fake-KV fallback
+        # (skip_reason="prefix_caching_disabled").
+        pytest.param(
+            "decode", "tep", ParallelTopology(tp=4, pp=1, dp=1, moe_tp=1, moe_ep=4, cp=1), False, id="decode-tep"
+        ),
+        pytest.param(
+            "decode", "dep", ParallelTopology(tp=1, pp=1, dp=4, moe_tp=1, moe_ep=4, cp=1), False, id="decode-dep"
+        ),
+        # fake-KV regime (kvwarm exempts pure_tp/dense): per-point re-admission
+        # would run full-context block hashing inside the measured step, so
+        # disabling prefix caching stays the serving-faithful choice.
+        pytest.param(
+            "decode",
+            "pure_tp",
+            ParallelTopology(tp=4, pp=1, dp=1, moe_tp=4, moe_ep=1, cp=1),
+            True,
+            id="decode-pure-tp",
+        ),
+        # prefill never disables prefix caching regardless of strategy.
+        pytest.param(
+            "prefill",
+            "pure_tp",
+            ParallelTopology(tp=4, pp=1, dp=1, moe_tp=4, moe_ep=1, cp=1),
+            False,
+            id="prefill-pure-tp",
+        ),
+        pytest.param(
+            "prefill", "tep", ParallelTopology(tp=4, pp=1, dp=1, moe_tp=1, moe_ep=4, cp=1), False, id="prefill-tep"
+        ),
+    ],
+)
+def test_decode_prefix_caching_follows_kvwarm_regime(tmp_path, workload_kind, strategy, topology, flag_expected):
+    """Prefix caching is regime-conditional, mirroring the engine's KV
+    warm-up eligibility (tep/dep warm; pure_tp/dense stay fake-KV): warm
+    cells must keep it on, fake-KV decode must keep it off, prefill never
+    disables it."""
 
     cell = FPMCell(
-        cell_id=f"prefix-cache-{workload_kind}",
+        cell_id=f"prefix-cache-{workload_kind}-{strategy}",
         workload_kind=workload_kind,
-        topology=ParallelTopology(tp=4, pp=1, dp=1, moe_tp=4, moe_ep=1, cp=1),
+        topology=topology,
         weight_quantization="nvfp4",
         kv_cache_dtype="fp8",
         backend_policy=BackendPolicy("baseline", {}, {}),
-        parallel_strategy="pure_tp",
+        parallel_strategy=strategy,
         gemm_quant_mode="nvfp4",
     )
     plan = _plan(cell)
@@ -1608,7 +1641,10 @@ def test_render_never_disables_prefix_caching(tmp_path, workload_kind):
     _render_cell(plan, cell, tmp_path, {})
 
     script = (tmp_path / "run.sh").read_text()
-    assert "--no-enable-prefix-caching" not in script
+    if flag_expected:
+        assert "--no-enable-prefix-caching" in script
+    else:
+        assert "--no-enable-prefix-caching" not in script
 
 
 def test_render_uses_frozen_model_config_without_resolving_model_path(tmp_path, monkeypatch):

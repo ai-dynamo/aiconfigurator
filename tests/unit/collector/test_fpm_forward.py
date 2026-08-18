@@ -1464,15 +1464,20 @@ def test_curated_systems_root_resolves_to_the_sdk_default_tree():
     assert root.is_dir()
 
 
-def _args_cell(workload_kind: str) -> FPMCell:
+def _args_cell(workload_kind: str, parallel_strategy: str = "tep") -> FPMCell:
+    topology = (
+        ParallelTopology(tp=4, pp=1, dp=1, moe_tp=4, moe_ep=1, cp=1)
+        if parallel_strategy == "pure_tp"
+        else ParallelTopology(tp=4, pp=1, dp=1, moe_tp=1, moe_ep=4, cp=1)
+    )
     return FPMCell(
-        cell_id=f"fpm-args-{workload_kind}",
+        cell_id=f"fpm-args-{workload_kind}-{parallel_strategy}",
         workload_kind=workload_kind,
-        topology=ParallelTopology(tp=4, pp=1, dp=1, moe_tp=1, moe_ep=4, cp=1),
+        topology=topology,
         weight_quantization="nvfp4",
         kv_cache_dtype="fp8",
         backend_policy=BackendPolicy("baseline_auto", {}, {}),
-        parallel_strategy="tep",
+        parallel_strategy=parallel_strategy,
         gemm_quant_mode="nvfp4",
         moe_quant_mode="nvfp4",
         fmha_quant_mode="fp8",
@@ -1494,30 +1499,46 @@ def _args_plan():
     )
 
 
-def _cell_cli_args(workload_kind: str) -> list[str]:
+def _cell_cli_args(workload_kind: str, parallel_strategy: str = "tep") -> list[str]:
     from collector.fpm_forward.runner import _cell_generator_overrides
 
-    merged = _cell_generator_overrides(_args_plan(), _args_cell(workload_kind), {})
+    merged = _cell_generator_overrides(_args_plan(), _args_cell(workload_kind, parallel_strategy), {})
     return merged["params"]["agg"]["extra_cli_args"]
 
 
-def test_decode_cells_keep_prefix_caching_and_async_overlap():
-    """Decode measures a production-shaped steady step on engine defaults.
+@pytest.mark.parametrize("strategy", ["tep", "dep"])
+def test_kvwarm_decode_cells_keep_prefix_caching_and_async_overlap(strategy):
+    """EP-sharded MoE decode (kvwarm regime) keeps engine defaults.
 
-    Prefix caching stays enabled: the engine's KV warm-up reuses warmed
-    prefixes across points and refuses to warm without it
+    Prefix caching stays enabled: KV warm-up reuses warmed prefixes across
+    points and refuses to warm without it
     (skip_reason="prefix_caching_disabled"), which would collapse every
     decode point into the fake-KV fallback regime convicted of
-    underestimating capture-mode decode. The old pin's block-hasher
-    contamination (26.5 ms -> 121 ms at (batch 256, 2.1M KV)) applied to the
-    fallback protocol only; under KV warm-up the hashing runs at seed time,
-    outside the measured step. Async scheduling also stays on: production
-    overlaps scheduler CPU work with the GPU (async 26.5 ms = 1.03x of the
-    25.8 ms measured on real traffic, sync 31.3 ms = 1.21x).
+    underestimating capture-mode decode. Under warm-up, full-context block
+    hashing runs at seed time, outside the measured step (r15 parity: MAPE
+    1.61/1.70% with prefix ON + kvwarm). Async scheduling also stays on:
+    production overlaps scheduler CPU work with the GPU (async 26.5 ms =
+    1.03x of the 25.8 ms measured on real traffic, sync 31.3 ms = 1.21x).
     """
-    args = _cell_cli_args("decode")
+    args = _cell_cli_args("decode", strategy)
 
     assert "--no-enable-prefix-caching" not in args
+    assert "--no-async-scheduling" not in args
+
+
+def test_fake_kv_decode_cells_still_disable_prefix_caching():
+    """pure_tp/dense decode (kvwarm-exempt) keeps the fake-KV pin.
+
+    These cells re-admit batch_size synthetic full-context requests per
+    point; with prefix caching on, ``Request.__init__`` hashes the whole
+    prompt through the block hasher INSIDE the measured step (26.5 ms ->
+    121 ms at (batch 256, 2.1M KV) on M2.7 tp4+EP), while production
+    steady-state decode has no such per-step hash. Disabling remains the
+    serving-faithful choice for this regime.
+    """
+    args = _cell_cli_args("decode", "pure_tp")
+
+    assert "--no-enable-prefix-caching" in args
     assert "--no-async-scheduling" not in args
 
 
