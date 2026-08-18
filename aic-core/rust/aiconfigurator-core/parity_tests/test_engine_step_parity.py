@@ -2175,8 +2175,19 @@ class TestRustTypedErrorsAcrossFfi:
         assert not perf_database.has_perf_data_not_available_cause(excinfo.value)
         # Python classifies the same query point identically.
         database = _case_database(case)
+        from aiconfigurator_core.sdk.engine import _evaluate_single_op
+        from aiconfigurator_core.sdk.operations.mla import MLABmm
+
         with pytest.raises(errors.MissingSystemFlopsError):
-            database.query_mla_bmm(16, 16, common.GEMMQuantMode.nvfp4, database_mode=common.DatabaseMode.SILICON)
+            # The retired query_mla_bmm shim's exact twin, through the
+            # single-op plumbing (the database's live SILICON view).
+            _evaluate_single_op(
+                database,
+                MLABmm("mla_bmm_query", 1.0, 16, common.GEMMQuantMode.nvfp4, True),
+                is_context=False,
+                batch_size=16,
+                s=1,
+            )
 
     def test_pre_sm89_fp8_kv_generation_returns_shipped_silicon(self) -> None:
         # a100_sxm ships 2,534 measured generation-MLA rows with fp8 KV
@@ -2187,12 +2198,17 @@ class TestRustTypedErrorsAcrossFfi:
         # demanding an fp8_tc_flops entry a100 must never define (the
         # support-matrix FP8 gate is keyed on that entry's presence).
         database = _quiet_call(perf_database.get_database, "a100_sxm", "trtllm", "1.0.0")
-        fp8_kv = database.query_generation_mla(
-            1, 65, 64, common.KVCacheQuantMode.fp8, database_mode=common.DatabaseMode.SILICON
-        )
-        bf16_kv = database.query_generation_mla(
-            1, 65, 64, common.KVCacheQuantMode.bfloat16, database_mode=common.DatabaseMode.SILICON
-        )
+        from aiconfigurator_core.sdk.engine import _evaluate_single_op
+        from aiconfigurator_core.sdk.operations.mla import GenerationMLA
+
+        def _gen_mla(kv_mode):
+            # The retired query_generation_mla shim's exact twin (the
+            # database's live SILICON view).
+            op = GenerationMLA("generation_mla_query", 1.0, 64, kv_mode)
+            return _evaluate_single_op(database, op, is_context=False, batch_size=1, s=65)
+
+        fp8_kv = _gen_mla(common.KVCacheQuantMode.fp8)
+        bf16_kv = _gen_mla(common.KVCacheQuantMode.bfloat16)
         assert float(fp8_kv) > 0
         # Same silicon exact-hit region: the two dtypes' measured values sit
         # within a few percent of each other (dequant-to-bf16 pipeline).

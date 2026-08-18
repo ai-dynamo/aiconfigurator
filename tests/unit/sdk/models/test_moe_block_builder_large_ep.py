@@ -119,15 +119,24 @@ def _names(op_list):
 
 
 def _assert_ops_identical(built, expected):
-    """Same op classes in order, same names, same constructor-derived state."""
+    """Same op classes in order, same names, same constructor-derived state.
+
+    Composite getters re-wrap children as the Rust base classes, so classes
+    compare by NAME; state compares on the engine wire form (``_spec_json``),
+    which carries every constructor-derived field."""
     assert _names(built) == _names(expected)
     for got, want in zip(built, expected, strict=True):
-        assert type(got) is type(want), got._name
-        assert got.__dict__ == want.__dict__, got._name
+        assert type(got).__name__ == type(want).__name__, got._name
+        assert got._spec_json() == want._spec_json(), got._name
 
 
 def _lat(op, db, x):
-    return float(op.query(db, x=x))
+    # Composite getters re-wrap children as Rust base classes (no shim kit),
+    # so evaluate through the single-op plumbing directly — the exact call
+    # the shells' token-shape ``_engine_query`` mapped to.
+    from aiconfigurator_core.sdk import engine
+
+    return float(engine._evaluate_single_op(db, op, is_context=True, batch_size=1, s=1, x=int(x)))
 
 
 def _assert_close(got, want, context):
@@ -381,7 +390,9 @@ def _trtllm_a2a_grid(db, op_name):
     ``_trtllm_alltoall_data`` at (NVLinkTwoSided [moe_backend="wideep" on
     SM100], op_name, nvfp4, node_num=4 [ep//4 on GB200 NVL4], hidden 7168,
     topk 8, experts 256, ep 16) — deepseek.py:759-813, 973-1011."""
-    ops.TrtLLMWideEPMoEDispatch.load_data(db)
+    # Rehomed since the class deletion (AIC-1357): MoEAllToAll owns the
+    # legacy trtllm alltoall view binding.
+    ops.MoEAllToAll.load_data(db)
     return db._trtllm_alltoall_data["NVLinkTwoSided"][op_name][TRTLLM_MOE_QUANT][4][7168][8][256][16]
 
 
@@ -401,18 +412,33 @@ def _legacy_trtllm_combine_op_name(phase):
 
 
 def _legacy_trtllm_moe_latency(db, phase, x, enable_eplb, num_slots):
-    """The legacy TrtLLMWideEPMoE query, recomputed via ``query_wideep_moe_compute``."""
-    result = db.query_wideep_moe_compute(
-        num_tokens=x * 16,  # attention_dp globalizes tokens
+    """The legacy TrtLLMWideEPMoE query, recomputed via the unified
+    expert-compute twin (the retired ``query_wideep_moe_compute`` shim's
+    exact construction) through the engine's single-op plumbing."""
+    from aiconfigurator_core.sdk import engine
+    from aiconfigurator_core.sdk.operations.moe_comm import MoEExpertCompute
+
+    op = MoEExpertCompute(
+        "wideep_moe_query",
+        1.0,
         hidden_size=7168,
         inter_size=2048,
         topk=8,
         num_experts=256,
-        num_slots=num_slots or 256,
-        moe_tp_size=1,
         moe_ep_size=16,
         quant_mode=TRTLLM_MOE_QUANT,
         workload_distribution=_trtllm_distribution(enable_eplb),
+        attention_dp_size=1,
+        inference_phase="context",
+        num_slots=num_slots or 256,
+    )
+    result = engine._evaluate_single_op(
+        db,
+        op,
+        is_context=True,
+        batch_size=1,
+        s=1,
+        x=int(x * 16),  # attention_dp globalizes tokens
     )
     return float(result) * _trtllm_scale(phase)
 

@@ -63,14 +63,46 @@ def _two_sided_result() -> ata.AlltoallBenchmarkResult:
 # ---------------------------------------------------------------------------
 
 
-def test_mappings_mirror_the_sdk_legacy_trtllm_adapter():
-    # The oracle: aic-core's _adapt_legacy_trtllm_alltoall keys legacy rows
-    # into the unified store with exactly these two maps. A drift here would
-    # put new-schema rows on different keys than adapted legacy rows.
-    from aiconfigurator_core.sdk.operations import moe_comm
+# The oracle: the engine's legacy trtllm alltoall adapter maps, frozen here
+# because the SDK-side Python twins retired with the parsers (the
+# deprecation-cleanup PR). Source of truth:
+#   aic-core/rust/aiconfigurator-core/src/perf_database/moe_a2a.rs
+#     legacy_trtllm_backend       (kernel_source -> comm_backend)
+#     legacy_trtllm_phase_dtype   (op_name -> (phase, pinned comm_dtype))
+# consumed by the query table AND the table-view fold. A drift here would put
+# new-schema rows on different keys than adapted legacy rows.
+_ENGINE_KERNEL_TO_BACKEND = {
+    "NVLinkTwoSided": "nvlink_two_sided",
+    "NVLinkOneSided": "nvlink_one_sided",
+}
+_ENGINE_OP_TO_PHASE_DTYPE = {
+    "alltoall_prepare": ("prepare", None),
+    "alltoall_dispatch": ("dispatch", None),
+    "alltoall_combine": ("combine", None),
+    "alltoall_combine_low_precision": ("combine", "fp4"),
+}
 
-    assert ata.KERNEL_SOURCE_TO_COMM_BACKEND == moe_comm._LEGACY_TRTLLM_KERNEL_TO_BACKEND
-    assert ata.OP_TO_PHASE_DTYPE == moe_comm._LEGACY_TRTLLM_OP_TO_PHASE_DTYPE
+# Rust match arms the frozen literals above must keep mirroring; checked as
+# TEXT (same style as test_collector_schema_contract's twin pins — no imports
+# across the module boundary, and no FFI export for a pub(crate) internal).
+_ENGINE_ADAPTER_SOURCE = "aic-core/rust/aiconfigurator-core/src/perf_database/moe_a2a.rs"
+_ENGINE_ADAPTER_ARMS = (
+    '"NVLinkTwoSided" => Some("nvlink_two_sided")',
+    '"NVLinkOneSided" => Some("nvlink_one_sided")',
+    '"alltoall_prepare" => Some(("prepare", None))',
+    '"alltoall_dispatch" => Some(("dispatch", None))',
+    '"alltoall_combine" => Some(("combine", None))',
+    '"alltoall_combine_low_precision" => Some(("combine", Some("fp4")))',
+)
+
+
+def test_mappings_mirror_the_engine_legacy_trtllm_adapter():
+    assert ata.KERNEL_SOURCE_TO_COMM_BACKEND == _ENGINE_KERNEL_TO_BACKEND
+    assert ata.OP_TO_PHASE_DTYPE == _ENGINE_OP_TO_PHASE_DTYPE
+
+    engine_source = (REPO_ROOT / _ENGINE_ADAPTER_SOURCE).read_text()
+    for arm in _ENGINE_ADAPTER_ARMS:
+        assert arm in engine_source, f"engine adapter arm drifted: {arm}"
 
 
 def test_four_way_op_name_to_phase_mapping_including_fp4():
@@ -174,21 +206,56 @@ def test_comparability_new_writer_leaf_equals_adapted_legacy_leaf(tmp_path):
     # 4-GPU nodes) written by the new writer and read through the new-schema
     # loader must land on the same key with the same ms leaf as the same
     # measurement in a legacy trtllm_alltoall row through the adapter.
-    from aiconfigurator_core.sdk.operations import moe_comm
+    # Both legs are read back through separate ENGINE table views (the
+    # SDK-side Python parsers retired with the deprecation-cleanup PR), so
+    # each adapter must independently land equal measurements on equal keys.
+    import pandas as pd
+    import yaml
+
+    from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
+    from aiconfigurator_core.sdk.perf_database import PerfDatabase
     from collector.helper import finalize_perf_files, log_perf
+
+    root = tmp_path / "systems"
+    root.mkdir()
+    (root / "h100_sxm.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "data_dir": "data/h100_sxm",
+                "gpu": {
+                    "sm_version": 90,
+                    "mem_bw": 4_800_000_000_000.0,
+                    "mem_bw_empirical_scaling_factor": 0.8,
+                    "mem_empirical_constant_latency": 0.000003,
+                    "bfloat16_tc_flops": 989_000_000_000_000.0,
+                    "fp8_tc_flops": 1_978_000_000_000_000.0,
+                },
+                "node": {
+                    "num_gpus_per_node": 8,
+                    "inter_node_bw": 50_000_000_000.0,
+                    "intra_node_bw": 450_000_000_000.0,
+                    "p2p_latency": 0.00001,
+                },
+                "misc": {"nccl_version": "2.26.2"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    data_dir = root / "data/h100_sxm/moe_comm/trtllm/1.3.0rc10"
+    data_dir.mkdir(parents=True)
 
     legacy_rows = [
         {
             "kernel_source": "NVLinkTwoSided",
             "op_name": op_name,
             "moe_dtype": "nvfp4",
-            "num_tokens": "4096",
-            "hidden_size": "7168",
-            "topk": "8",
-            "num_experts": "256",
-            "moe_ep_size": "8",  # legacy files carry no num_nodes: adapter derives 8 // 4 = 2
+            "num_tokens": 4096,
+            "hidden_size": 7168,
+            "topk": 8,
+            "num_experts": 256,
+            "moe_ep_size": 8,  # legacy files carry no num_nodes: adapter derives 8 // 4 = 2
             "distribution": "balanced",
-            "latency": str(latency_ms),
+            "latency": latency_ms,
         }
         for op_name, latency_ms in [
             ("alltoall_prepare", 0.05),
@@ -197,8 +264,31 @@ def test_comparability_new_writer_leaf_equals_adapted_legacy_leaf(tmp_path):
             ("alltoall_combine_low_precision", 0.6),
         ]
     ]
-    legacy_store = moe_comm._moe_a2a_store()
-    moe_comm._adapt_legacy_trtllm_alltoall(legacy_store, legacy_rows)
+    pd.DataFrame(legacy_rows).to_parquet(data_dir / "trtllm_alltoall_perf.parquet", index=False)
+
+    # Each leg gets its own tree and engine handle so neither source can mask
+    # a broken adapter/writer by overwriting the other's identical keys.
+    table_meta = {
+        "collector_ref": "test-fixture",
+        "collector_hash": "sha256:" + "0" * 64,
+        "case_plan_hash": provenance.case_plan_hash(["comparability"]),
+        "collected_at": "2026-08-18",
+        "rows": 4,
+        "status": provenance.STATUS_COMPLETE,
+    }
+    provenance.write_collection_meta(
+        data_dir,
+        {"framework": "trtllm", "version": "1.3.0rc10", "image": "test-fixture"},
+        {"trtllm_alltoall_perf": dict(table_meta)},
+    )
+    legacy_db = PerfDatabase("h100_sxm", "trtllm", "1.3.0rc10", str(root), database_mode="HYBRID")
+    legacy_loaded = fetch_table_view(legacy_db, "_moe_a2a_data")
+
+    unified_root = tmp_path / "unified-systems"
+    unified_root.mkdir()
+    (unified_root / "h100_sxm.yaml").write_bytes((root / "h100_sxm.yaml").read_bytes())
+    unified_data_dir = unified_root / "data/h100_sxm/moe_comm/trtllm/1.3.0rc10"
+    unified_data_dir.mkdir(parents=True)
 
     perf_file = tmp_path / "moe_a2a_perf.txt"
     for row in ata.build_unified_rows(_case(), _two_sided_result(), kernel_source="NVLinkTwoSided", node_num=2):
@@ -212,7 +302,21 @@ def test_comparability_new_writer_leaf_equals_adapted_legacy_leaf(tmp_path):
             perf_filename=str(perf_file),
         )
     [parquet_path] = finalize_perf_files([perf_file])
-    loaded = moe_comm.load_moe_a2a_data(str(parquet_path))
+    (unified_data_dir / "moe_a2a_perf.parquet").write_bytes(Path(parquet_path).read_bytes())
+
+    provenance.write_collection_meta(
+        unified_data_dir,
+        {"framework": "trtllm", "version": "1.3.0rc10", "image": "test-fixture"},
+        {"moe_a2a_perf": dict(table_meta)},
+    )
+    unified_db = PerfDatabase("h100_sxm", "trtllm", "1.3.0rc10", str(unified_root), database_mode="HYBRID")
+    unified_loaded = fetch_table_view(unified_db, "_moe_a2a_data")
+
+    def _leaf(view, key):
+        value = view
+        for part in key:
+            value = value[part]
+        return value
 
     for phase, comm_dtype, latency_ms in [
         ("prepare", "nvfp4", 0.05),
@@ -220,10 +324,12 @@ def test_comparability_new_writer_leaf_equals_adapted_legacy_leaf(tmp_path):
         ("combine", "nvfp4", 1.2),
         ("combine", "fp4", 0.6),
     ]:
-        legacy_leaf = legacy_store["nvlink_two_sided"][phase][comm_dtype][8][2][7168][8][256][0][4096]
-        new_leaf = loaded["nvlink_two_sided"][phase][comm_dtype][8][2][7168][8][256][0][4096]
-        assert legacy_leaf["latency"] == pytest.approx(latency_ms), (phase, comm_dtype)
-        assert new_leaf["latency"] == pytest.approx(legacy_leaf["latency"]), (phase, comm_dtype)
+        key = ("nvlink_two_sided", phase, comm_dtype, 8, 2, 7168, 8, 256, 0, 4096)
+        legacy_leaf = _leaf(legacy_loaded, key)
+        unified_leaf = _leaf(unified_loaded, key)
+        assert legacy_leaf["latency"] == pytest.approx(latency_ms), ("legacy", phase, comm_dtype)
+        assert unified_leaf["latency"] == pytest.approx(latency_ms), ("unified", phase, comm_dtype)
+        assert unified_leaf == legacy_leaf
 
 
 # ---------------------------------------------------------------------------

@@ -1,26 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Completeness of the table-view attribute registry across its four sites.
+"""Completeness of the table-view attribute registry across its sites.
 
-The 40-entry view registry used to live in four hand-synchronized,
-stringly-typed places: the Rust dispatch match arms (with per-attribute
-parquet basenames), Python's ``VIEW_KEY_LAYERS``, each op class's
-``load_data`` literals, and the baseline codec's ``TABLE_ATTRIBUTES``. Two of
-the drift modes were SILENT (an attribute missing from ``VIEW_KEY_LAYERS``
-only fails on machines that have that family's data; a basename typo in a
-Rust arm makes the view answer None with no error). The engine now exports
-the registry (``aiconfigurator_core.table_view_attributes()``, same
-single-source pattern as ``gemm_quant_util_levels``); these tests pin every
-other site to it:
+The view registry used to live in four hand-synchronized, stringly-typed
+places: the Rust dispatch match arms (with per-attribute parquet basenames),
+Python's ``VIEW_KEY_LAYERS``, each op class's ``load_data`` literals, and the
+retired migration baseline's codec. Two of the drift modes were SILENT (an
+attribute missing from ``VIEW_KEY_LAYERS`` only fails on machines that have
+that family's data; a basename typo in a Rust arm makes the view answer None
+with no error). The engine exports the registry
+(``aiconfigurator_core.table_view_attributes()``, same single-source pattern
+as ``gemm_quant_util_levels``); these tests pin every other site to it:
 
 * ``VIEW_KEY_LAYERS`` covers exactly the exported attributes;
-* the baseline codec's ``TABLE_ATTRIBUTES`` covers them too (modulo the
-  ``_dsv4_sparse_kernel_data.<sub>`` -> ``_dsv4_sparse_kernel_data``
-  aggregation);
 * every exported basename is a known ``PerfDataFilename`` value (a typo in
-  the registry cannot survive; a typo in a MATCH ARM is caught by the full
-  7-pin baseline replay, which CI runs with AIC_DATA_PLANE_BASELINE_FULL=1);
+  the registry cannot survive; a typo in a MATCH ARM is caught by the
+  synthetic-parquet view-shape suites, which pin each fold's dispatch);
 * every exported attribute actually dispatches (fetching it against a real
   pinned database returns a table or None — never "unknown attribute").
 """
@@ -28,7 +24,6 @@ other site to it:
 from __future__ import annotations
 
 import pytest
-from _data_plane_codec import TABLE_ATTRIBUTES
 
 import aiconfigurator_core
 from aiconfigurator_core.sdk.common import PerfDataFilename
@@ -41,27 +36,12 @@ def _exported() -> dict[str, list[str]]:
     return dict(aiconfigurator_core.table_view_attributes())
 
 
-def _aggregate(attribute: str) -> str:
-    """The PerfDatabase-attribute a registry entry binds to (the three DSV4
-    sparse sub-views aggregate under one attribute)."""
-    return attribute.split(".", 1)[0]
-
-
 def test_view_key_layers_match_the_engine_registry() -> None:
     exported = set(_exported())
     layered = set(VIEW_KEY_LAYERS)
     assert layered == exported, (
         f"VIEW_KEY_LAYERS drifted from the engine registry: "
         f"missing={sorted(exported - layered)} extra={sorted(layered - exported)}"
-    )
-
-
-def test_baseline_codec_inventory_matches_the_engine_registry() -> None:
-    exported = {_aggregate(attribute) for attribute in _exported()}
-    codec = set(TABLE_ATTRIBUTES)
-    assert codec == exported, (
-        f"baseline codec TABLE_ATTRIBUTES drifted from the engine registry: "
-        f"missing={sorted(exported - codec)} extra={sorted(codec - exported)}"
     )
 
 

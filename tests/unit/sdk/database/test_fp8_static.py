@@ -118,7 +118,7 @@ def test_sglang_supported_quant_modes_include_fp8_static_only_when_base_and_over
 # - the GEMM.query fp8_static overhead-subtraction closure and its SOL floor —
 #   fp8_static is one of the two approved semantic moves: the engine now
 #   prices it through the op model rather than the Python subtraction chain.
-# Value behaviour is anchored by tests/cross_package/test_query_shim_baseline.py
+# Value behaviour is anchored by the frozen parity goldens
 # and the frozen parity goldens. The support-matrix admission tests above stay:
 # they pin what LOADED data admits fp8_static, which is Python-owned.
 # ---------------------------------------------------------------------------

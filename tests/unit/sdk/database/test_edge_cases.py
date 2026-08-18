@@ -14,8 +14,7 @@ pytestmark = pytest.mark.unit
 # Retired with #1357 PR-5: the NCCL / custom-allreduce / GEMM query edge-case
 # math this file pinned on the synthetic fixture (single-GPU zero, silicon
 # interpolation, tp scaling, extrapolation) moved to the compiled engine and
-# is anchored by tests/cross_package/test_query_shim_baseline.py and the
-# frozen parity goldens.
+# is anchored by the frozen parity goldens.
 
 
 class TestInitializationEdgeCases:

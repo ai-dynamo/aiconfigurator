@@ -23,8 +23,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, ClassVar
 
-from aiconfigurator_core.sdk import common
-from aiconfigurator_core.sdk.operations.base import Operation
+import aiconfigurator_core._aiconfigurator_core as _core
+from aiconfigurator_core.sdk.operations.base import OpShellKit
 
 if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
@@ -53,7 +53,7 @@ def _cache_key(database: PerfDatabase) -> tuple:
     )
 
 
-class ContextAttention(Operation):
+class ContextAttention(_core.ContextAttention, OpShellKit):
     """
     Context (prefill) attention operation.
 
@@ -63,36 +63,6 @@ class ContextAttention(Operation):
     """
 
     _data_cache: ClassVar[dict] = {}
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        n: int,
-        n_kv: int,
-        kvcache_quant_mode: common.KVCacheQuantMode,
-        fmha_quant_mode: common.FMHAQuantMode,
-        window_size: int = 0,
-        head_size: int = 128,
-        use_qk_norm: bool = False,
-        cp_size: int = 1,
-    ) -> None:
-        """Initialize context attention query parameters."""
-        super().__init__(name, scale_factor)
-        self._n = n
-        self._n_kv = n_kv
-        self._kvcache_quant_mode = kvcache_quant_mode
-        self._fmha_quant_mode = fmha_quant_mode
-        self._window_size = window_size
-        self._head_size = head_size
-        self._use_qk_norm = use_qk_norm
-        # Context parallelism (sglang AllGather, zigzag in-seq split). When
-        # cp_size > 1, query() models ONE representative CP rank (rank 0): the
-        # sequence is split into 2*cp contiguous chunks, rank 0 owns chunk 0
-        # (prefix=0) and chunk 2*cp-1 (prefix=isl-c). Its two halves' work sums
-        # to the balanced per-rank total isl^2/(2*cp). See
-        # docs/CONTEXT_PARALLEL_DSA_MODELING.md (dense analog).
-        self._cp_size = cp_size
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -131,10 +101,8 @@ class ContextAttention(Operation):
     # Op contract: query() + get_weights()
     # ------------------------------------------------------------------
 
-    _ENGINE_QUERY_SHAPE = "context"
 
-
-class GenerationAttention(Operation):
+class GenerationAttention(_core.GenerationAttention, OpShellKit):
     """
     Generation (decode) attention operation.
 
@@ -145,26 +113,6 @@ class GenerationAttention(Operation):
 
     _data_cache: ClassVar[dict] = {}
     _raw_data_cache: ClassVar[dict] = {}
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        n: int,
-        n_kv: int,
-        kv_cache_dtype: common.KVCacheQuantMode,
-        window_size: int = 0,
-        head_size: int = 128,
-        use_qk_norm: bool = False,
-    ) -> None:
-        """Initialize generation attention query parameters."""
-        super().__init__(name, scale_factor)
-        self._n = n
-        self._n_kv = n_kv
-        self._kv_cache_dtype = kv_cache_dtype
-        self._window_size = window_size
-        self._head_size = head_size
-        self._use_qk_norm = use_qk_norm
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -219,10 +167,8 @@ class GenerationAttention(Operation):
     # Op contract: query() + get_weights()
     # ------------------------------------------------------------------
 
-    _ENGINE_QUERY_SHAPE = "generation"
 
-
-class EncoderAttention(Operation):
+class EncoderAttention(_core.EncoderAttention, OpShellKit):
     """
     Non-causal encoder attention: full N^2, MHA, no KV cache, optional partial RoPE.
 
@@ -240,26 +186,6 @@ class EncoderAttention(Operation):
     """
 
     _data_cache: ClassVar[dict] = {}
-
-    def __init__(
-        self,
-        name: str,
-        scale_factor: float,
-        num_heads: int,
-        head_size: int,
-        fmha_quant_mode: common.FMHAQuantMode = common.FMHAQuantMode.bfloat16,
-        partial_rotary_factor: float = 0.0,
-    ) -> None:
-        super().__init__(name, scale_factor)
-        # Encoder kernels currently only have bfloat16 perf data;
-        if fmha_quant_mode != common.FMHAQuantMode.bfloat16:
-            raise ValueError(f"EncoderAttention only supports FMHAQuantMode.bfloat16, got {fmha_quant_mode}")
-        if not 0.0 <= partial_rotary_factor <= 1.0:
-            raise ValueError(f"partial_rotary_factor must be in [0.0, 1.0], got {partial_rotary_factor}")
-        self._n = num_heads
-        self._head_size = head_size
-        self._fmha_quant_mode = fmha_quant_mode
-        self._partial_rotary_factor = partial_rotary_factor
 
     # ------------------------------------------------------------------
     # Data ownership
@@ -297,5 +223,3 @@ class EncoderAttention(Operation):
     # ------------------------------------------------------------------
     # Op contract: query() + get_weights()
     # ------------------------------------------------------------------
-
-    _ENGINE_QUERY_SHAPE = "context"

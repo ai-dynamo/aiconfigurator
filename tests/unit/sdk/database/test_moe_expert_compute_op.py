@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the unified ``MoEExpertCompute`` op and ``query_moe_expert_compute``.
+"""Unit tests for the unified ``MoEExpertCompute`` op.
 
 Query semantics against an injected expert-compute store (the
 ``__dict__``-gated bind in ``load_data`` honors pre-set attributes): ADP token
@@ -156,7 +156,7 @@ def _make_op(scale_factor=1.0, **overrides):
 # holds, the sglang EPLB 0.8 context correction, and per-backend
 # kernel-source auto-resolution — live in
 # aic-core/rust/.../operators/moe_expert_compute.rs, anchored by
-# tests/cross_package/test_query_shim_baseline.py and the frozen parity
+# the frozen parity
 # goldens (the shims answer from DISK, so the injected in-memory store is
 # invisible to them). Python-side contracts stay below.
 # ---------------------------------------------------------------------------
@@ -165,13 +165,6 @@ def _make_op(scale_factor=1.0, **overrides):
 def test_ctor_rejects_unknown_inference_phase():
     with pytest.raises(ValueError, match="inference_phase"):
         _make_op(inference_phase="prefill")
-
-
-def test_query_rejects_unknown_inference_phase(ep_db):
-    with pytest.raises(ValueError, match="inference_phase"):
-        ep_db.query_moe_expert_compute(
-            "deepep_moe", common.MoEQuantMode.fp8_block, "uniform", "prefill", 8, 256, 256, 7168, 2048, 1, 16, 32
-        )
 
 
 def test_gated_and_non_gated_weights_formula():

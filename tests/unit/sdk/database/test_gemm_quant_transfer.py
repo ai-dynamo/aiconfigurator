@@ -7,7 +7,7 @@ The quant-transfer LADDER this file used to exercise on the synthetic fixture
 (xquant same-profile borrowing, xprofile weight-only -> bf16 reference
 ordering, policy gating, HYBRID invariance for covered quants, SILICON's
 never-borrow contrast) retired to the compiled engine with #1357 PR-5; it is
-anchored by tests/cross_package/test_query_shim_baseline.py and the frozen
+anchored by the frozen
 parity goldens. What stays Python-owned is the util-LEVEL admission table
 (``xprofile_util_level_known`` metadata) below.
 """
