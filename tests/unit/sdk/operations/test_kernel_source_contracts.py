@@ -60,7 +60,8 @@ def _dsa_bucket_view(tmp_path, rows):
     path = root / "data/h100_sxm/sparse_attention/sglang/1.0.0/dsa_context_module_perf.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.table({k: [r[k] for r in rows] for k in rows[0]}), path)
-    db = PerfDatabase("h100_sxm", "sglang", "1.0.0", str(root), database_mode="HYBRID")
+    # Synthetic bucket-classification rows intentionally omit Collector V3 sidecars.
+    db = PerfDatabase("h100_sxm", "sglang", "1.0.0", str(root), database_mode="HYBRID", strict_provenance=False)
     return fetch_table_view(db, "_context_dsa_module_data")
 
 

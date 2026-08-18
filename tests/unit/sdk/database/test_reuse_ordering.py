@@ -82,12 +82,14 @@ def systems_root(tmp_path: Path) -> Path:
 
 
 def _build_db(systems_root: Path, *, backend: str, version: str, database_mode: str | None = "HYBRID") -> PerfDatabase:
+    # Synthetic source-ordering trees intentionally omit Collector V3 sidecars.
     return PerfDatabase(
         system="h100_sxm",
         backend=backend,
         version=version,
         systems_root=str(systems_root),
         database_mode=database_mode,
+        strict_provenance=False,
     )
 
 

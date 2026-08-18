@@ -118,7 +118,8 @@ def _view_db_over_row(tmp_path, header: str, row: dict, filename: str) -> PerfDa
     path = root / "data/h100_sxm/moe_comm/sglang/0.5.10" / filename
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([row], columns=columns).to_parquet(path, index=False)
-    return PerfDatabase("h100_sxm", "sglang", "0.5.10", str(root), database_mode="HYBRID")
+    # These hand-written rows test schema decoding, not collector provenance.
+    return PerfDatabase("h100_sxm", "sglang", "0.5.10", str(root), database_mode="HYBRID", strict_provenance=False)
 
 
 def test_moe_a2a_header_row_loads_with_us_to_ms_conversion(tmp_path):

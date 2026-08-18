@@ -70,12 +70,14 @@ def systems_root(tmp_path: Path) -> Path:
 
 
 def _build_db(systems_root: Path, *, backend: str = "sglang", version: str = "1.0.0") -> PerfDatabase:
+    # Synthetic table-shape fixtures intentionally omit Collector V3 sidecars.
     return PerfDatabase(
         system="h100_sxm",
         backend=backend,
         version=version,
         systems_root=str(systems_root),
         database_mode="HYBRID",
+        strict_provenance=False,
     )
 
 

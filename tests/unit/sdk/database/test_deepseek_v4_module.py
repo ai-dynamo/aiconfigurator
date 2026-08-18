@@ -59,7 +59,8 @@ def _mhc_view_db(tmp_path, rows: list[dict] | None):
         path = root / "data/h100_sxm/sparse_attention/vllm/1.0.0/mhc_module_perf.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(pa.table({k: [r[k] for r in rows] for k in rows[0]}), path)
-    return PerfDatabase("h100_sxm", "vllm", "1.0.0", str(root), database_mode="HYBRID")
+    # This fixture exercises table folding, not Collector V3 metadata.
+    return PerfDatabase("h100_sxm", "vllm", "1.0.0", str(root), database_mode="HYBRID", strict_provenance=False)
 
 
 def _mhc_row(hidden_size: int, latency: float) -> dict:
