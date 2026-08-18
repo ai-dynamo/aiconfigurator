@@ -25,15 +25,19 @@ tables:
   # fact templates.
   mla_context_module_perf:
     collector_ref: 9dc4e14
-    collector_hash: sha256:856fde0cbc5f1bbf1a0a1913a56b7dcf58abd9fb3c7846d166acbe26a52dac0a
-    case_plan_hash: sha256:31e7308fa596a933a6991ba16596a774d2ddde1d2ddfa53f1fd88de614891971
-    collected_at: '2026-08-17'
-    rows: 8684
+    collector_hash: sha256:e5663d332d70bdac514f675229f1ba673bad8007db6efc19023bb2cab812536a
+    case_plan_hash: sha256:24604f873f231f83878f6aaa29ae93d99bb91066398bb7e9c813363d112bbeb1
+    collected_at: '2026-08-18'
+    rows: 21860
     status: complete
+  # 2026-08-18 second pass: K3-targeted run with the widened vllm head axis
+  # ({128..1} + K3 shard family {96,48,24,12}); merged keep-last into the
+  # DS-baseline table (21860 rows = 8684 DSV3 + 13176 Kimi-K3).
   mla_generation_module_perf:
     collector_ref: 9dc4e14
-    collector_hash: sha256:856fde0cbc5f1bbf1a0a1913a56b7dcf58abd9fb3c7846d166acbe26a52dac0a
-    case_plan_hash: sha256:677099287a920aec3b20a8d29d08a9c6f31eccbbbb0d7a03a354e1b109cd20f3
-    collected_at: '2026-08-17'
-    rows: 8732
+    collector_hash: sha256:e5663d332d70bdac514f675229f1ba673bad8007db6efc19023bb2cab812536a
+    case_plan_hash: sha256:ed472fb58d5a24baf7882f48223c0ed036cf8beeef138eaaeb6d4ea033c0b0c7
+    collected_at: '2026-08-18'
+    rows: 21980
     status: complete
+  # Same second-pass merge for generation: 8732 DSV3 + 13248 Kimi-K3.
