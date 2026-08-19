@@ -181,7 +181,12 @@ from aiconfigurator_core.sdk.models.nemotron_h import NemotronHModel
 from aiconfigurator_core.sdk.models.nemotron_nas import NemotronNas
 from aiconfigurator_core.sdk.models.qwen3vl import Qwen3VLModel, Qwen3VLMoEModel
 from aiconfigurator_core.sdk.models.qwen35 import Qwen35Model
-from aiconfigurator_core.sdk.models.recipe import RecipeGapError, RecipeModel, get_recipe_model
+from aiconfigurator_core.sdk.models.recipe_check import (
+    RecipeCheckReport,
+    RecipeFinding,
+    RecipeGapError,
+    check_model_against_recipe,
+)
 
 __all__ = [
     "BaseModel",
@@ -198,17 +203,18 @@ __all__ = [
     "Qwen3VLMoEModel",
     "Qwen3VLModel",
     "Qwen35Model",
+    "RecipeCheckReport",
+    "RecipeFinding",
     "RecipeGapError",
-    "RecipeModel",
     "_apply_model_quant_defaults",
     "_architecture_to_model_family",
     "_get_model_info",
     "_infer_quant_modes_from_raw_config",
     "attention_op_keys",
     "check_is_moe",
+    "check_model_against_recipe",
     "get_model",
     "get_model_family",
-    "get_recipe_model",
     "mtp_scale_factor",
     "resolve_context_fmha_by_data",
     "resolve_dsv4_moe_arch",
