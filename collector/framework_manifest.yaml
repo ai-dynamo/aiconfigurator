@@ -85,17 +85,26 @@ frameworks:
         default: "vllm/vllm-openai:v0.24.0@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f"
         cu129: "vllm/vllm-openai:v0.24.0-cu129@sha256:6b005c78cd17a1f0215f31e95d183833f4dfd6167c4473241b80d1c8843b91e8"
     families:
-      # Kimi-K3 KDA kernels shipped upstream in 0.27.0
-      # (vllm/models/kimi_k3/* incl. fused_kda_decode + FlashKDA;
-      # verified in-image on GB300, previous preview pin
-      # 0.1.dev19262+gb6bbf29dd retired). Digest below is the public
-      # multi-arch manifest list of v0.27.0; on aarch64 hosts it resolves
-      # to the arm64 entry (sha256:7441a0579b7974fe00eec2c41a5710bcd0dc3da
-      # fc03edcdc5663158dd68286cf — verified serving Kimi-K3 TP8).
+      # Kimi-K3 KDA kernels exist on the official kimi-k3 preview image
+      # (CUDA 13 build with fused_kda_decode + FlashKDA; setuptools-scm
+      # version 0.1.dev19262+gb6bbf29dd) and upstreamed in v0.27.0 — but the
+      # family pin STAYS on the preview until the coordinated consumer fix
+      # lands (review jasonqinzhou #1559, comment 3808798129): at 0.27.0 the
+      # DS conv-state layout makes is_fused_kda_decode_supported false, so
+      # serving decode runs causal_conv1d_update +
+      # fused_recurrent_kda_packed_decode + explicit gated RMSNorm, while
+      # KimiK3Model._build_generation_ops still prices every vLLM non-spec
+      # decode as fused_kda_decode and drops the norm. The 0.27.0 gb300 kda
+      # rows collected by this PR are checked in as evidence
+      # (systems/data/gb300/kda/vllm/0.27.0); until the consumer routes by
+      # version, loading that version fills 44 fused_kda_decode rows from
+      # this preview sibling via the shared layer and misprices generation
+      # KDA. Re-pin when the consumer emits the conv-update + packed
+      # decode pair (and blocks preview fused fill) for 0.27.0+.
       kda:
-        version: "0.27.0"
+        version: "0.1.dev19262"
         images:
-          default: "vllm/vllm-openai:v0.27.0@sha256:07ea4e292adf3a26b05ac97114b28849cf4551a26beb1fbe7decd3842d752ed7"
+          default: "vllm/vllm-openai@sha256:e90e2603b2781936651ba019804137714367c69e10a7b25a2e57b46995225616"
       # moe: NO family pin (owner decision 2026-08-02, reverting the
       # 2026-08-01 family-wide preview pin — a temporary preview build must
       # not own a family default; a family pin here hijacks image selection

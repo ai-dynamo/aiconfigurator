@@ -42,9 +42,13 @@ Output:
 """
 
 # Serve-parity `metadata=` argument validated on the 0.27.0 release image
-# (Kimi-K3 landed upstream there; the kimi-k3 preview pin is retired in the
-# manifest kda family, so this module exactly pins 0.27.0).
-__compat__ = "vllm==0.27.0"
+# (Kimi-K3 landed upstream there). The manifest kda family pin stays on the
+# kimi-k3 preview build until the SDK consumer routes 0.27.0's split decode
+# (see collector/framework_manifest.yaml), so this module exactly pins the
+# preview version; it runs on either image — the DS-layout probe
+# (is_fused_kda_decode_supported) yields fused_kda_decode rows on the
+# preview and the packed conv-update + recurrence pair on 0.27.0.
+__compat__ = "vllm==0.1.dev19262"
 
 import gc
 import os
@@ -243,6 +247,24 @@ def run_kda_context_benchmark(
                 # ~0.8ms/iter floor on GB300 that dominated the 0.1.dev19262
                 # re-collect, conv1d SOL ~15%). Build it per-shape and pass
                 # it through like collect_gdn.py does.
+                #
+                # seq_len=1 divergence (recorded, not rerouted here): vLLM
+                # 0.27.0 classifies an all-1-token batch as pure decodes —
+                # GDNAttentionMetadataBuilder calls split_decodes_and_prefills
+                # (m, decode_threshold=1) (vllm/v1/attention/backends/
+                # gdn_attn.py:213; all-decode return at
+                # v1/attention/backends/utils.py:600-604) and builds conv
+                # metadata only when num_prefills > 0 (gdn_attn.py:391-401),
+                # so serving never runs causal_conv1d_fn for a 1-token batch
+                # (it runs causal_conv1d_update + the packed recurrence).
+                # The point stays in the shared kda.yaml context grid because
+                # sglang routes 1-token EXTEND batches through this same
+                # prefill conv (its mamba backend's extend branch builds
+                # extend query_start_loc with no short-extend reclassification
+                # — sglang layers/attention/hybrid_linear_attn_backend.py), and
+                # the base-op grid schema cannot express framework-conditional
+                # pruning. The rows remain real kernel measurements on both
+                # backends; only their vllm serving-reachability differs.
                 nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
                     torch.arange(0, nt + 1, seq_len, dtype=torch.int32),
                     device=device,
