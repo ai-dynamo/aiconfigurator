@@ -835,9 +835,23 @@ mod tests {
 
     /// Issue #1416: a measured cross-node TP slice must win over the
     /// node-capped one, and must NOT get the beyond-node bandwidth scaling
-    /// applied on top (the measured curve already carries that cost).
+    /// applied on top (the measured curve already carries that cost). The
+    /// assertions go through `query_custom_allreduce_scaled` — the actual
+    /// query boundary — so a regression in the scaling policy cannot slip
+    /// past this test. GB300 has 4 GPUs per node, so TP8/TP16 span nodes.
     #[test]
     fn custom_allreduce_prefers_measured_multinode_tp_slice() {
+        let spec = SystemSpec::load(&systems_root().join("gb300.yaml")).expect("gb300.yaml parse");
+        assert_eq!(spec.node.num_gpus_per_node, 4);
+        // The beyond-node fan-out factor `query_custom_allreduce_scaled`
+        // applies when the curve comes from a SMALLER slice than requested.
+        let beyond_node_scale = |tp: u32, effective: u32| {
+            let (f_tp, f_eff) = (tp as f64, effective as f64);
+            (f_tp - 1.0) / f_tp * f_eff / (f_eff - 1.0).max(1.0)
+                * spec.get_p2p_bandwidth(effective)
+                / spec.get_p2p_bandwidth(tp)
+        };
+
         let points = BTreeMap::from([(1024, 1.0), (4096, 4.0)]);
         let tp4 = ("half".to_string(), 4);
         let tp8 = ("half".to_string(), 8);
@@ -855,19 +869,56 @@ mod tests {
             BTreeMap::new(),
         );
         assert_eq!(with_tp8.measured_tp_slice(CommQuantMode::Half, 8, 4), 8);
+        // The measured TP8 curve is returned raw: no bandwidth correction
+        // stacked on top of real cross-node data.
+        let measured = with_tp8
+            .query_custom_allreduce_scaled(&spec, CommQuantMode::Half, 8, 1024.0)
+            .unwrap();
+        assert_eq!(measured, LeafValue::latency_only(7.0));
+        // TP8's raw value must differ from the scaled TP4 fallback below; the
+        // synthetic curves were picked so the policies cannot alias.
+        assert_ne!(measured.latency, 1.0 * beyond_node_scale(8, 4));
 
         // Without measured TP8 rows the node cap still applies (issue #1260
-        // compatibility path stays reachable).
+        // compatibility path stays reachable) and the TP4 fallback carries
+        // the beyond-node bandwidth factor.
         let without_tp8 = table_with_loaded_collectives(
             BTreeMap::from([(tp4, latency_curve(points))]),
             BTreeMap::new(),
             BTreeMap::new(),
         );
         assert_eq!(without_tp8.measured_tp_slice(CommQuantMode::Half, 8, 4), 4);
+        let fallback8 = without_tp8
+            .query_custom_allreduce_scaled(&spec, CommQuantMode::Half, 8, 1024.0)
+            .unwrap();
+        let expected8 = 1.0 * beyond_node_scale(8, 4);
+        assert!(
+            (fallback8.latency - expected8).abs() < 1e-15,
+            "TP8 fallback must scale the raw TP4 value: expected {expected8}, got {}",
+            fallback8.latency
+        );
+        assert!(
+            (fallback8.latency - 1.0).abs() > 1e-3,
+            "the no-TP8 query must not return the raw TP4 value unscaled"
+        );
+        assert_eq!(
+            without_tp8
+                .query_custom_allreduce_scaled(&spec, CommQuantMode::Half, 16, 4096.0)
+                .unwrap()
+                .latency,
+            4.0 * beyond_node_scale(16, 4)
+        );
 
-        // Within-node TP is unchanged either way.
+        // Within-node TP is unchanged either way: no slice remapping, no
+        // scaling.
         assert_eq!(without_tp8.measured_tp_slice(CommQuantMode::Half, 4, 4), 4);
         assert_eq!(without_tp8.measured_tp_slice(CommQuantMode::Half, 2, 4), 2);
+        assert_eq!(
+            without_tp8
+                .query_custom_allreduce_scaled(&spec, CommQuantMode::Half, 4, 4096.0)
+                .unwrap(),
+            LeafValue::latency_only(4.0)
+        );
     }
 
     #[test]
