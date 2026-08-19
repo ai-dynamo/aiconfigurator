@@ -22,6 +22,27 @@ Before adding a model, confirm that its runtime path is viable on at least one
 matrix system/backend/version combination. Deterministic unsupported paths
 must remain explicitly classified rather than reported as passing.
 
+## Multimodal encoder coverage
+
+The support matrix automatically exercises a checkpoint's vision encoder when
+the checkpoint declares one through a non-empty `vision_config` or AIC's
+multimodal architecture registry, and AIC implements that encoder. The
+canonical workload is **one 1024 x 1024 image per request**. The same
+image-bearing run covers the language backbone; multimodal checkpoints do not
+receive a second, redundant text-only run.
+
+An encoder-supported PASS means that the agg or disagg run used the canonical
+image workload and produced strictly positive encoder latency and encoder
+memory for every result row. `ImageHeight`, `ImageWidth`, and `NumImages` in the
+generated CSV, plus the matching replay-command arguments, record that workload.
+
+If a checkpoint declares `vision_config` but AIC cannot normalize its encoder
+configuration, the row fails with an `ENCODER_UNSUPPORTED` reason. If
+normalization succeeds but execution emits no positive encoder evidence, the
+row fails with `ENCODER_NOT_EXERCISED`. It must not inherit PASS from a
+successful text-backbone-only estimate. Text-only checkpoints keep their
+existing workload and leave the image metadata empty.
+
 ## Retired from default generation
 
 The following bundled configs remain usable explicitly but are superseded in

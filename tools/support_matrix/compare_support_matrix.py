@@ -39,21 +39,31 @@ from tools.support_matrix.support_matrix import (
     STATUS_PASS,
     SUPPORT_MATRIX_BASE_HEADER,
     SUPPORT_MATRIX_HEADER,
+    SUPPORT_MATRIX_HEADER_WITH_SOURCE,
     VALID_PROVENANCE_SOURCES,
     VALID_STATUSES,
     SupportMatrix,
+    _get_encoder_coverage,
 )
 
-# Accept the transitional 9-col header (base + Command, pre-Source) alongside the
-# current 10-col (base + Command + Source) and the legacy 8-col base. Some committed
-# per-system CSVs were generated at the 9-col stage; rejecting them breaks compare.
-# Mirrors support_matrix.py:_row_values, which already reads 8/9/10-col rows.
+# Accept the previous 10-col header, transitional 9-col header, and legacy
+# 8-col base alongside the current image-metadata schema. Existing checked-in
+# matrices remain readable while regenerated rows gain explicit image evidence.
 _SUPPORT_MATRIX_HEADER_WITH_COMMAND = SUPPORT_MATRIX_BASE_HEADER + ["Command"]
 SUPPORTED_HEADERS = (
     SUPPORT_MATRIX_HEADER,
+    SUPPORT_MATRIX_HEADER_WITH_SOURCE,
     _SUPPORT_MATRIX_HEADER_WITH_COMMAND,
     SUPPORT_MATRIX_BASE_HEADER,
 )
+
+
+def _has_declared_unimplemented_encoder(model: str) -> bool:
+    try:
+        coverage = _get_encoder_coverage(model)
+    except Exception:
+        return False
+    return coverage.checkpoint_declares_encoder and not coverage.aic_encoder_implemented
 
 
 def _read_single_csv(csv_path: Path) -> tuple[list[str], list[list[str]]]:
@@ -119,7 +129,12 @@ def read_csv(matrix_path: str) -> tuple[list[str], list[list[str]]]:
     return combined_header or [], combined_rows
 
 
-def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]:
+def check_csv_sanity(
+    header: list[str],
+    data_rows: list[list[str]],
+    *,
+    allow_legacy_header: bool = False,
+) -> list[str]:
     """
     Validate CSV structure and data.
 
@@ -134,12 +149,19 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
     if header not in SUPPORTED_HEADERS:
         errors.append(f"Invalid header: expected {SUPPORT_MATRIX_HEADER}, got {header}")
         return errors  # Can't continue without valid header
+    if header != SUPPORT_MATRIX_HEADER and not allow_legacy_header:
+        errors.append(
+            "New support matrix must use the current image-evidence header: "
+            f"expected {SUPPORT_MATRIX_HEADER}, got {header}"
+        )
+        return errors
 
     if len(data_rows) == 0:
         errors.append("CSV file has header but no data rows")
         return errors
 
     seen_keys: dict[tuple[str, ...], int] = {}
+    header_has_source = header in (SUPPORT_MATRIX_HEADER, SUPPORT_MATRIX_HEADER_WITH_SOURCE)
     for i, row in enumerate(data_rows, start=2):
         if len(row) != len(header):
             errors.append(f"Row {i} has {len(row)} columns, expected {len(header)}")
@@ -166,11 +188,11 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
             errors.append(
                 f"Row {i}: {STATUS_FRAMEWORK_INCOMPATIBLE} rows must include a framework incompatibility reason"
             )
-        if status == STATUS_HYBRID_PASS and header != SUPPORT_MATRIX_HEADER:
+        if status == STATUS_HYBRID_PASS and not header_has_source:
             errors.append(f"Row {i}: HYBRID_PASS requires the current header with Command and Source columns")
-        if header == SUPPORT_MATRIX_HEADER and not row[8].strip():
+        if header_has_source and not row[8].strip():
             errors.append(f"Row {i}: Command column must include the support-matrix rerun command")
-        if header == SUPPORT_MATRIX_HEADER:
+        if header_has_source:
             command = row[8]
             source = row[9].strip()
             if source and source not in VALID_PROVENANCE_SOURCES:
@@ -190,25 +212,122 @@ def check_csv_sanity(header: list[str], data_rows: list[list[str]]) -> list[str]
             except ValueError as exc:
                 errors.append(f"Row {i}: Command is not valid shell syntax: {exc}")
             else:
-                database_modes: list[str] = []
-                missing_database_mode_value = False
-                for part_index, part in enumerate(command_parts):
-                    if part == "--database-mode":
-                        if part_index + 1 >= len(command_parts) or command_parts[part_index + 1].startswith("-"):
-                            missing_database_mode_value = True
+                encoder_unsupported_replay = err_msg.startswith("ENCODER_UNSUPPORTED:")
+                if encoder_unsupported_replay:
+                    if status != STATUS_FAIL:
+                        errors.append(f"Row {i}: ENCODER_UNSUPPORTED rows must use status {STATUS_FAIL}")
+                    if "tools/support_matrix/generate_support_matrix.py" not in command_parts:
+                        errors.append(
+                            f"Row {i}: ENCODER_UNSUPPORTED replay command must invoke "
+                            "tools/support_matrix/generate_support_matrix.py"
+                        )
+                    if not _has_declared_unimplemented_encoder(row[0]):
+                        errors.append(
+                            f"Row {i}: ENCODER_UNSUPPORTED requires a checkpoint with a declared "
+                            "but unimplemented encoder"
+                        )
+
+                def _option_values(flag: str) -> list[str]:
+                    values = []
+                    for part_index, part in enumerate(command_parts):
+                        if part == flag:
+                            values.append(command_parts[part_index + 1] if part_index + 1 < len(command_parts) else "")
+                        elif part.startswith(f"{flag}="):
+                            values.append(part.partition("=")[2])
+                    return values
+
+                if encoder_unsupported_replay:
+                    required_values = {
+                        "--model": row[0],
+                        "--system": row[2],
+                        "--backend": row[3],
+                        "--backend-version": row[4],
+                        "--mode": row[5],
+                        "--expect-status": STATUS_FAIL,
+                        "--expect-error-prefix": "ENCODER_UNSUPPORTED:",
+                    }
+                    for flag, expected_value in required_values.items():
+                        actual_values = _option_values(flag)
+                        if actual_values != [expected_value]:
+                            errors.append(
+                                f"Row {i}: encoder-unsupported replay command must include exactly one "
+                                f"{flag} {expected_value}; found {actual_values or 'none'}"
+                            )
+                    if "--no-save" not in command_parts:
+                        errors.append(f"Row {i}: encoder-unsupported replay command must include --no-save")
+                else:
+                    database_modes = [value.upper() for value in _option_values("--database-mode")]
+                    if database_modes != [expected_database_mode]:
+                        errors.append(
+                            f"Row {i}: replay command must include exactly one effective "
+                            f"--database-mode {expected_database_mode}; found {database_modes or 'none'}"
+                        )
+
+                if header == SUPPORT_MATRIX_HEADER:
+                    image_values = row[10:13]
+                    populated_image_values = [value for value in image_values if value.strip()]
+                    image_flag_names = ("--image-height", "--image-width", "--num-images")
+                    if populated_image_values and len(populated_image_values) != 3:
+                        errors.append(
+                            f"Row {i}: ImageHeight, ImageWidth, and NumImages must be populated together or all empty"
+                        )
+                    elif populated_image_values:
+                        try:
+                            expected_image_values = [str(int(value)) for value in image_values]
+                        except ValueError:
+                            errors.append(f"Row {i}: image workload metadata must contain positive integers")
                         else:
-                            database_modes.append(command_parts[part_index + 1].upper())
-                    elif part.startswith("--database-mode="):
-                        value = part.partition("=")[2]
-                        if value:
-                            database_modes.append(value.upper())
-                        else:
-                            missing_database_mode_value = True
-                if missing_database_mode_value or database_modes != [expected_database_mode]:
-                    errors.append(
-                        f"Row {i}: replay command must include exactly one effective "
-                        f"--database-mode {expected_database_mode}; found {database_modes or 'none'}"
-                    )
+                            if any(int(value) <= 0 for value in expected_image_values):
+                                errors.append(f"Row {i}: image workload metadata must contain positive integers")
+                            image_flags = {
+                                "--image-height": expected_image_values[0],
+                                "--image-width": expected_image_values[1],
+                                "--num-images": expected_image_values[2],
+                            }
+                            for flag, expected_value in image_flags.items():
+                                actual_values = _option_values(flag)
+                                if actual_values != [expected_value]:
+                                    errors.append(
+                                        f"Row {i}: replay command must include exactly one {flag} {expected_value}; "
+                                        f"found {actual_values or 'none'}"
+                                    )
+                    elif any(
+                        part == flag or part.startswith(f"{flag}=")
+                        for part in command_parts
+                        for flag in image_flag_names
+                    ):
+                        errors.append(
+                            f"Row {i}: replay command includes image arguments but image workload metadata is empty"
+                        )
+
+                    try:
+                        encoder_coverage = _get_encoder_coverage(row[0])
+                    except Exception:
+                        encoder_coverage = None
+                    if encoder_coverage is not None:
+                        workload = encoder_coverage.workload
+                        actual_image_values = tuple(value.strip() for value in image_values)
+                        if workload is None and populated_image_values:
+                            errors.append(
+                                f"Row {i}: model has no AIC encoder workload; "
+                                "ImageHeight, ImageWidth, and NumImages must be empty"
+                            )
+                        elif workload is not None and actual_image_values != workload.csv_values():
+                            if status in {STATUS_PASS, STATUS_HYBRID_PASS} and not populated_image_values:
+                                errors.append(f"Row {i}: encoder PASS requires persisted image workload metadata")
+                            else:
+                                errors.append(
+                                    f"Row {i}: image workload metadata must match the canonical encoder workload "
+                                    f"{workload.csv_values()}; found {actual_image_values}"
+                                )
+
+                    if (
+                        status in {STATUS_PASS, STATUS_HYBRID_PASS}
+                        and encoder_coverage is not None
+                        and encoder_coverage.checkpoint_declares_encoder
+                        and not encoder_coverage.aic_encoder_implemented
+                    ):
+                        errors.append(f"Row {i}: encoder-unsupported checkpoint cannot use pass status {status}")
 
     return errors
 
@@ -311,23 +430,27 @@ def compare_csv_files(
 
 
 def find_metadata_changes(old_data_rows: list[list[str]], new_data_rows: list[list[str]]) -> list[tuple]:
-    """Return Command/Source changes for rows present in both matrices."""
+    """Return replay/provenance/image metadata changes for shared rows."""
 
-    def _metadata(row: list[str]) -> tuple[str, str]:
-        return (row[8] if len(row) > 8 else "", row[9] if len(row) > 9 else "")
+    def _metadata(row: list[str]) -> tuple[str, ...]:
+        return tuple((row[index] if len(row) > index else "") for index in range(8, 13))
 
     old_rows = {tuple(row[:6]): row for row in old_data_rows}
     new_rows = {tuple(row[:6]): row for row in new_data_rows}
     changes = []
     for key in sorted(old_rows.keys() & new_rows.keys()):
-        old_command, old_source = _metadata(old_rows[key])
-        new_command, new_source = _metadata(new_rows[key])
-        if (old_command, old_source) != (new_command, new_source):
-            changes.append((*key, old_command, new_command, old_source, new_source))
+        old_metadata = _metadata(old_rows[key])
+        new_metadata = _metadata(new_rows[key])
+        if old_metadata != new_metadata:
+            changes.append((*key, old_metadata, new_metadata))
     return changes
 
 
-def find_blocking_status_transitions(changed_rows: list[tuple]) -> list[str]:
+def find_blocking_status_transitions(
+    changed_rows: list[tuple],
+    new_data_rows: list[list[str]] | None = None,
+    old_data_rows: list[list[str]] | None = None,
+) -> list[str]:
     """
     Return status transitions that should block an automated support-matrix PR.
 
@@ -338,7 +461,36 @@ def find_blocking_status_transitions(changed_rows: list[tuple]) -> list[str]:
     investigated explicitly.
     """
     errors = []
+    old_rows = {tuple(row[:6]): row for row in old_data_rows or []}
+
+    def _is_legacy_backbone_only_row(row: list[str] | None) -> bool:
+        if row is None:
+            return False
+        if len(row) < len(SUPPORT_MATRIX_HEADER):
+            return True
+        try:
+            return not (int(row[10]) > 0 and int(row[11]) > 0 and int(row[12]) > 0)
+        except (TypeError, ValueError):
+            return True
+
+    encoder_migration_keys = set()
+    for row in new_data_rows or []:
+        key = tuple(row[:6])
+        if (
+            len(row) > 7
+            and row[6] == STATUS_FAIL
+            and row[7].strip().startswith("ENCODER_UNSUPPORTED:")
+            and _is_legacy_backbone_only_row(old_rows.get(key))
+            and _has_declared_unimplemented_encoder(row[0])
+        ):
+            encoder_migration_keys.add(key)
     for huggingface_id, architecture, system, backend, version, mode, old_status, new_status in changed_rows:
+        key = (huggingface_id, architecture, system, backend, version, mode)
+        if new_status == STATUS_FAIL and key in encoder_migration_keys:
+            # AIC-1738 intentionally replaces stale backbone-only coverage with
+            # an explicit encoder-unsupported classification. Only rows without
+            # prior image evidence receive this one-time migration waiver.
+            continue
         if old_status == STATUS_PASS and new_status != STATUS_PASS:
             errors.append(
                 f"Unexpected PASS -> {new_status} transition: "
@@ -421,7 +573,7 @@ def generate_pr_description(
         f"| {len(reclassified_framework)} |",
         f"| Removed rows | {len(removed_rows)} |",
         f"| Added rows | {len(added_rows)} |",
-        f"| Command/Source metadata changes | {len(metadata_changes)} |",
+        f"| Replay/provenance/workload metadata changes | {len(metadata_changes)} |",
         f"| Header changed | {'yes' if header_changed else 'no'} |",
         "",
     ]
@@ -682,7 +834,7 @@ def main():
     added_rows, removed_rows, changed_rows = compare_csv_files(old_data_rows, new_data_rows)
     metadata_changes = find_metadata_changes(old_data_rows, new_data_rows)
     header_changed = old_header != new_header
-    transition_errors = find_blocking_status_transitions(changed_rows)
+    transition_errors = find_blocking_status_transitions(changed_rows, new_data_rows, old_data_rows)
     validation_errors.extend(transition_errors)
 
     regression_count = len([r for r in changed_rows if r[6] == STATUS_PASS and r[7] != STATUS_PASS])
@@ -718,7 +870,7 @@ def main():
     print(f"Added rows: {len(added_rows)}")
     print(f"Removed rows: {len(removed_rows)}")
     print(f"Changed rows: {len(changed_rows)}")
-    print(f"Command/Source metadata changes: {len(metadata_changes)}")
+    print(f"Replay/provenance/workload metadata changes: {len(metadata_changes)}")
     print(f"Header changed: {header_changed}")
     print(f"  - Silicon regressions (PASS -> non-PASS): {regression_count}")
     print(f"  - Hybrid regressions ({STATUS_HYBRID_PASS} -> non-pass): {hybrid_regression_count}")

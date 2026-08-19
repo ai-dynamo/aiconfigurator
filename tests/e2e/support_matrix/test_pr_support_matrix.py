@@ -35,6 +35,10 @@ PR_CASES: list[tuple[str, str, str]] = [
     ("meta-llama/Meta-Llama-3.1-8B", "b200_sxm", "sglang"),
     ("MiniMaxAI/MiniMax-M2.5", "b200_sxm", "vllm"),
     ("openai/gpt-oss-20b", "h100_sxm", "trtllm"),
+    # Multimodal acceptance: dense and MoE backbones, with run_single_test
+    # exercising the canonical image workload in both agg and disagg modes.
+    ("Qwen/Qwen3-VL-8B-Instruct", "b200_sxm", "vllm"),
+    ("Qwen/Qwen3-VL-30B-A3B-Instruct", "b200_sxm", "vllm"),
 ]
 
 

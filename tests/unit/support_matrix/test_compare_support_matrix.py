@@ -30,6 +30,9 @@ def _row(
     err_msg: str = "",
     command: str = ("uv run aiconfigurator cli default --model-path Qwen/Qwen3-32B-FP8 --database-mode SILICON"),
     source: str | None = None,
+    image_height: str = "",
+    image_width: str = "",
+    num_images: str = "",
 ) -> list[str]:
     if source is None:
         source = "silicon" if status == STATUS_PASS else ""
@@ -44,6 +47,9 @@ def _row(
         err_msg,
         command,
         source,
+        image_height,
+        image_width,
+        num_images,
     ]
 
 
@@ -90,15 +96,22 @@ def test_csv_sanity_requires_hardware_incompatible_reason():
     assert any("must include a hardware incompatibility reason" in err for err in errors)
 
 
-def test_csv_sanity_accepts_transitional_9col_header():
-    """Committed per-system CSVs generated at the base+Command (9-col, pre-Source) stage
-    must still validate -- compare rejecting them would break the daily diff."""
+def test_csv_sanity_keeps_transitional_header_readable_for_legacy_input():
+    """Legacy inputs can be inspected, but cannot be accepted as newly generated output."""
     from tools.support_matrix.support_matrix import SUPPORT_MATRIX_BASE_HEADER
 
     header9 = SUPPORT_MATRIX_BASE_HEADER + ["Command"]
     row9 = _row(STATUS_PASS)[:9]  # drop the Source column
-    errors = check_csv_sanity(header9, [row9])
+    errors = check_csv_sanity(header9, [row9], allow_legacy_header=True)
     assert errors == []
+
+
+def test_csv_sanity_rejects_legacy_header_for_new_matrix():
+    from tools.support_matrix.support_matrix import SUPPORT_MATRIX_HEADER_WITH_SOURCE
+
+    errors = check_csv_sanity(SUPPORT_MATRIX_HEADER_WITH_SOURCE, [_row(STATUS_PASS)[:10]])
+
+    assert any("must use the current image-evidence header" in error for error in errors)
 
 
 def test_csv_sanity_rejects_hybrid_pass_without_source_column():
@@ -106,7 +119,7 @@ def test_csv_sanity_rejects_hybrid_pass_without_source_column():
 
     header9 = SUPPORT_MATRIX_BASE_HEADER + ["Command"]
     row9 = _row(STATUS_HYBRID_PASS)[:9]
-    errors = check_csv_sanity(header9, [row9])
+    errors = check_csv_sanity(header9, [row9], allow_legacy_header=True)
 
     assert any("HYBRID_PASS requires the current header" in err for err in errors)
 
@@ -165,6 +178,20 @@ def test_csv_sanity_accepts_replay_contract(_case, status, command, source):
             "silicon",
             "exactly one effective --database-mode SILICON",
         ),
+        (
+            "duplicate-trailing-bare-database-mode",
+            STATUS_PASS,
+            f"{SILICON_REPLAY} --database-mode",
+            "silicon",
+            "exactly one effective --database-mode SILICON",
+        ),
+        (
+            "duplicate-empty-equals-database-mode",
+            STATUS_PASS,
+            f"{SILICON_REPLAY} --database-mode=",
+            "silicon",
+            "exactly one effective --database-mode SILICON",
+        ),
         ("malformed-command", STATUS_PASS, "uv run 'unterminated", "silicon", "not valid shell syntax"),
         (
             "nonpass-with-hybrid-command",
@@ -180,6 +207,17 @@ def test_csv_sanity_accepts_replay_contract(_case, status, command, source):
 def test_csv_sanity_rejects_invalid_replay_contract(_case, status, command, source, expected_error):
     errors = check_csv_sanity(HEADER, [_row(status, command=command, source=source)])
     assert any(expected_error in error for error in errors)
+
+
+def test_csv_sanity_rejects_duplicate_image_flag_with_trailing_bare_occurrence():
+    command = f"{SILICON_REPLAY} --image-height 1024 --image-width 1024 --num-images 1 --image-height"
+
+    errors = check_csv_sanity(
+        HEADER,
+        [_row(STATUS_PASS, command=command, image_height="1024", image_width="1024", num_images="1")],
+    )
+
+    assert any("exactly one --image-height 1024" in error for error in errors)
 
 
 def test_csv_sanity_rejects_duplicate_configuration_key():
@@ -202,7 +240,8 @@ def test_metadata_diff_detects_replay_command_or_source_changes(old_command, new
     changes = find_metadata_changes([old], [new])
 
     assert len(changes) == 1
-    assert changes[0][-4:] == (old_command, new_command, old_source, new_source)
+    assert changes[0][-2] == (old_command, old_source, "", "", "")
+    assert changes[0][-1] == (new_command, new_source, "", "", "")
 
 
 def test_pass_to_hardware_incompatible_is_blocking_transition():
@@ -236,6 +275,73 @@ def test_hardware_incompatible_to_fail_is_blocking_transition():
 
     assert len(errors) == 1
     assert "HW_INCOMPATIBLE -> FAIL" in errors[0]
+
+
+@pytest.mark.parametrize("old_status", [STATUS_PASS, STATUS_HYBRID_PASS, STATUS_HW_INCOMPATIBLE])
+def test_explicit_encoder_unsupported_migration_is_not_blocking(old_status):
+    old_row = _row(old_status)
+    old_row[:2] = ["Qwen/Qwen3.5-27B", "Qwen3_5ForConditionalGeneration"]
+    new_row = _row(
+        STATUS_FAIL,
+        "ENCODER_UNSUPPORTED: checkpoint declares vision but AIC has no encoder implementation",
+    )
+    new_row[:2] = old_row[:2]
+    changed = (*old_row[:6], old_status, STATUS_FAIL)
+
+    errors = find_blocking_status_transitions([changed], [new_row], [old_row])
+
+    assert errors == []
+
+
+def test_text_only_model_cannot_claim_encoder_unsupported_migration():
+    new_row = _row(
+        STATUS_FAIL,
+        "ENCODER_UNSUPPORTED: bogus classification",
+        command=(
+            "uv run python tools/support_matrix/generate_support_matrix.py "
+            "--model Qwen/Qwen3-32B-FP8 --system a100_sxm --backend trtllm "
+            "--backend-version 1.0.0 --mode agg --max-workers 1 --no-save "
+            "--expect-status FAIL --expect-error-prefix ENCODER_UNSUPPORTED:"
+        ),
+    )
+
+    sanity_errors = check_csv_sanity(HEADER, [new_row])
+    transition_errors = find_blocking_status_transitions(
+        [_changed(STATUS_PASS, STATUS_FAIL)],
+        [new_row],
+        [_row(STATUS_PASS)],
+    )
+
+    assert any("declared but unimplemented encoder" in error for error in sanity_errors)
+    assert len(transition_errors) == 1
+    assert "PASS -> FAIL" in transition_errors[0]
+
+
+def test_encoder_unsupported_after_image_backed_pass_is_blocking():
+    old_row = _row(STATUS_PASS, image_height="1024", image_width="1024", num_images="1")
+    new_row = _row(
+        STATUS_FAIL,
+        "ENCODER_UNSUPPORTED: checkpoint declares vision but AIC has no encoder implementation",
+    )
+
+    errors = find_blocking_status_transitions(
+        [_changed(STATUS_PASS, STATUS_FAIL)],
+        [new_row],
+        [old_row],
+    )
+
+    assert len(errors) == 1
+    assert "PASS -> FAIL" in errors[0]
+
+
+def test_plain_pass_to_fail_remains_blocking_with_new_rows():
+    errors = find_blocking_status_transitions(
+        [_changed(STATUS_PASS, STATUS_FAIL)],
+        [_row(STATUS_FAIL, "unrelated runtime failure")],
+    )
+
+    assert len(errors) == 1
+    assert "PASS -> FAIL" in errors[0]
 
 
 def test_framework_incompatible_to_fail_is_blocking_transition():

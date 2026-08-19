@@ -19,7 +19,10 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 sys.path.insert(0, _REPO_ROOT)
 
-from tools.support_matrix.support_matrix import SupportMatrix
+from tools.support_matrix.support_matrix import (
+    VALID_STATUSES,
+    SupportMatrix,
+)
 
 
 def main():
@@ -70,6 +73,17 @@ def main():
         default=False,
         help="Run checks and print the summary without writing support-matrix CSV files.",
     )
+    parser.add_argument(
+        "--expect-status",
+        choices=sorted(VALID_STATUSES),
+        default=None,
+        help="Replay assertion: require every selected row to have this status.",
+    )
+    parser.add_argument(
+        "--expect-error-prefix",
+        default=None,
+        help="Replay assertion: require every selected row error to start with this prefix.",
+    )
     args = parser.parse_args()
 
     has_filters = (
@@ -78,6 +92,8 @@ def main():
     )
     if has_filters and not args.no_save and args.output == default_output:
         parser.error("filtered support-matrix runs require --no-save or an explicit --output path")
+    if (args.expect_status is not None or args.expect_error_prefix is not None) and not args.no_save:
+        parser.error("replay expectations require --no-save")
 
     if args.no_save:
         print("Running support-matrix checks without writing CSV output")
@@ -109,6 +125,23 @@ def main():
         combinations=combinations,
         modes_to_test=modes_to_test,
     )
+
+    if args.expect_status is not None or args.expect_error_prefix is not None:
+        mismatches = []
+        for model, _architecture, system, backend, version, mode, status, error, *_rest in results:
+            error = str(error or "")
+            print(
+                "Observed support-matrix result: "
+                f"{model} {system}/{backend} v{version} {mode}: {status}: {error or '<no error>'}"
+            )
+            if args.expect_status is not None and status != args.expect_status:
+                mismatches.append(f"expected status {args.expect_status}, observed {status}")
+            if args.expect_error_prefix is not None and not error.startswith(args.expect_error_prefix):
+                mismatches.append(
+                    f"expected error prefix {args.expect_error_prefix!r}, observed {error or '<no error>'!r}"
+                )
+        if mismatches:
+            parser.exit(1, "Replay expectation failed: " + "; ".join(mismatches) + "\n")
 
     if args.no_save:
         return
