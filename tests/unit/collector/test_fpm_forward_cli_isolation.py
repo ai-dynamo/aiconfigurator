@@ -227,6 +227,68 @@ def test_abbreviated_ops_spelling_selects_fpm_without_traceback(tmp_path):
     assert "cli-isolation-test" in completed.stdout
 
 
+def test_dedicated_fpm_entrypoint_prints_frozen_plan_without_shared_ops_cli():
+    command = [
+        sys.executable,
+        "-m",
+        "collector.fpm_forward",
+        "--model-path",
+        "nvidia/GLM-5.2-NVFP4",
+        "--gpu",
+        "b200_sxm",
+        "--fpm-max-gpus",
+        "4",
+        "--plan-only",
+    ]
+    env = {**os.environ, "FPM_COLLECTOR_SOURCE_REVISION": "standalone-cli-test"}
+
+    completed = subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert '"schema_name": "aic_fpm_collection_plan"' in completed.stdout
+    assert "standalone-cli-test" in completed.stdout
+
+
+def test_dedicated_fpm_entrypoint_reports_input_errors_without_traceback(tmp_path):
+    command = [
+        sys.executable,
+        "-m",
+        "collector.fpm_forward",
+        "--model-path",
+        "nvidia/GLM-5.2-NVFP4",
+        "--gpu",
+        "b200_sxm",
+        "--fpm-max-gpus",
+        "4",
+        "--generator-config",
+        str(tmp_path / "missing.yaml"),
+        "--plan-only",
+    ]
+
+    completed = subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "python -m collector.fpm_forward: error:" in completed.stderr
+    assert "missing.yaml" in completed.stderr
+    assert "Traceback" not in completed.stderr
+
+
 def test_generator_arguments_without_fpm_op_fail_closed(tmp_path):
     """The deployment flags are registered unconditionally, so supplying one
     on an ordinary op run must still exit 2 via the explicit-only rejection."""

@@ -306,11 +306,11 @@ class FPMCollectionOptions:
 
 
 def add_fpm_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add explicit-only FPM campaign controls to the existing collector CLI."""
+    """Add FPM campaign controls to a collector or dedicated parser."""
 
     group = parser.add_argument_group(
         "FPM forward collection",
-        "Used only when --ops fpm_forward is selected.",
+        "Whole-model forward-pass planning, execution, and publication.",
     )
     group.add_argument(
         "--fpm-max-gpus",

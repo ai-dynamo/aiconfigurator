@@ -3,9 +3,8 @@
 
 """Whole-model forward-pass collection support.
 
-This package is an internal campaign runner used by ``collector/collect.py``.
-It intentionally has no standalone CLI: users select ``--ops fpm_forward``
-through the existing collector entry point.
+Run the dedicated campaign entry point with ``python -m collector.fpm_forward``.
+The legacy ``collector/collect.py --ops fpm_forward`` route remains compatible.
 """
 
 from .config import FPM_FORWARD_OP, FPMCollectionOptions, add_fpm_arguments

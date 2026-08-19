@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Bridge from the existing collector CLI into the FPM campaign runner."""
+"""Resolve CLI inputs into the FPM campaign runner's frozen plan."""
 
 from __future__ import annotations
 
