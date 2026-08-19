@@ -97,7 +97,7 @@ prune). All retrievable from branch history.
   stock-lane K3 rows suffixed `_situ_as_silu` (h100 541 / h200 488 / rtx
   551 marlin; l40s 2997 triton), mirroring the vllm standard.
 - **2026-08-04 — kda absence-dependence treated as a one-off; hardened
-  tool exclusion** (not the SDK fix): `check_kernel_source.py` carries the
+  tool exclusion** (not a runtime-loader fix): `generate_perf_data_reuse_manifest.py` carries the
   documented ABSENCE_LOAD_BEARING denylist (see invariants).
 - **2026-08-04 — l40s h12 decode rows PRUNED** (22 rows, 1096→1074): no
   serving-truth backing (see findings); verify h12 rows kept
@@ -269,7 +269,7 @@ was superseded by the 2026-08-03 fix).
 
 - **ABSENCE_LOAD_BEARING (manifest tool denylist + graduation criterion).**
   `kda_perf: causal_conv1d_update, fused_recurrent_kda_packed_decode` are
-  emitted `tier: absence_load_bearing` (loader-inert): the SDK's per-key
+  emitted `tier: absence_load_bearing` (resolver-inert): runtime per-key
   fused-decode routing REQUIRES those keys absent for the covered shard,
   and a cross-backend fill of vllm's genuine 12-head Triton rows defeated
   the reroute (measured: b300 K3 agg spec bs1 tpot 3.296 → 3.336 ms; the

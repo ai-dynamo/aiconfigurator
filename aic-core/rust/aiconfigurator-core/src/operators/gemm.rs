@@ -159,8 +159,7 @@ impl GemmOp {
             source = Source::Estimated;
         }
 
-        let mut result =
-            PerformanceResult::with_energy(latency.max(latency_floor), energy, source);
+        let mut result = PerformanceResult::with_energy(latency.max(latency_floor), energy, source);
         if let Some(components) = sol {
             result = result.with_sol(components);
         }
@@ -447,9 +446,12 @@ fn query_compute_scale_table(
         // Python `_query_compute_scale_table::get_sol`:
         // `sol_mem = 2 m k / bw * 1000` (read + write of the activation);
         // triple is `(sol_mem, 0, sol_mem)` — pure memory bound.
-        DatabaseMode::Sol | DatabaseMode::SolFull => Ok(PerformanceResult::sol(
-            SolComponents::new(0.0, 2.0 * m as f64 * k as f64 / db.system_spec.gpu.mem_bw * 1000.0),
-        )),
+        DatabaseMode::Sol | DatabaseMode::SolFull => {
+            Ok(PerformanceResult::sol(SolComponents::new(
+                0.0,
+                2.0 * m as f64 * k as f64 / db.system_spec.gpu.mem_bw * 1000.0,
+            )))
+        }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             compute_scale_empirical(db, quant, m, k)?,
             Source::Empirical,
@@ -510,9 +512,12 @@ fn query_scale_matrix_table(
     match db.database_mode {
         // Python `_query_scale_matrix_table::get_sol`:
         // `sol_mem = 3 m k / bw * 1000`; triple `(sol_mem, 0, sol_mem)`.
-        DatabaseMode::Sol | DatabaseMode::SolFull => Ok(PerformanceResult::sol(
-            SolComponents::new(0.0, 3.0 * m as f64 * k as f64 / db.system_spec.gpu.mem_bw * 1000.0),
-        )),
+        DatabaseMode::Sol | DatabaseMode::SolFull => {
+            Ok(PerformanceResult::sol(SolComponents::new(
+                0.0,
+                3.0 * m as f64 * k as f64 / db.system_spec.gpu.mem_bw * 1000.0,
+            )))
+        }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             scale_matrix_empirical(db, quant, m, k)?,
             Source::Empirical,

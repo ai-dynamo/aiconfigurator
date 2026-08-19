@@ -227,6 +227,7 @@ def test_added_model_moe_profiles_resolve_targeted_aliases(monkeypatch):
         ("nvidia/DeepSeek-V4-Flash-NVFP4", "nvfp4"),
         ("nvidia/DeepSeek-V4-Pro-NVFP4", "nvfp4"),
         ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4", "nvfp4"),
+        ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4", "nvfp4"),
         ("nvidia/MiniMax-M3-NVFP4", "nvfp4"),
     ],
 )
@@ -455,24 +456,38 @@ def test_moe_model_quantization_policy_is_yaml_backed():
 
 
 def test_dsv4_moe_quantization_policy_prunes_unrelated_modes():
+    # AIC-1749: nvidia/DeepSeek-V4-{Flash,Pro}-NVFP4 are a real ModelOpt NVFP4
+    # export. Every backend that serves NVFP4 MoE declares exactly [nvfp4] on
+    # those rows (positive one-true-mode declarations, review follow-up), so
+    # assert the singleton set per backend explicitly rather than omitting the
+    # artifact (omission would look identical to "not yet declared").
     expected_by_backend = {
         "sglang": {
             "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
             "deepseek-ai/DeepSeek-V4-Pro": {"w4a8_mxfp4_mxfp8"},
             "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
+            # One true mode everywhere: the NVFP4 artifacts declare nvfp4 on
+            # every backend that serves NVFP4 MoE (review follow-up on
+            # PR #1548 — positive declarations, nothing excluded).
+            "nvidia/DeepSeek-V4-Flash-NVFP4": {"nvfp4"},
+            "nvidia/DeepSeek-V4-Pro-NVFP4": {"nvfp4"},
         },
         "trtllm": {
             "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
             "deepseek-ai/DeepSeek-V4-Pro": {"w4a8_mxfp4_mxfp8"},
             "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
+            "nvidia/DeepSeek-V4-Flash-NVFP4": {"nvfp4"},
+            "nvidia/DeepSeek-V4-Pro-NVFP4": {"nvfp4"},
         },
         "vllm": {
             "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
             "deepseek-ai/DeepSeek-V4-Pro": {"w4a8_mxfp4_mxfp8"},
             "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
+            "nvidia/DeepSeek-V4-Flash-NVFP4": {"nvfp4"},
+            "nvidia/DeepSeek-V4-Pro-NVFP4": {"nvfp4"},
         },
     }
 
@@ -791,7 +806,32 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # plus exact quant-sensitive rows for the current NVIDIA NVFP4 artifacts.
     # +198 from Step-3.7-Flash: 99 cases for each physical BF16/FP8 artifact.
     # +117 for the vLLM Nemotron Super FP8 latent-MoE row (1024/2688, 512x22).
-    assert len(moe_cases) == 6492
+    # +114 for nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4, the nvfp4
+    # checkpoint release of the 30B/A3B shape (AIC-1743/AIC-1748); same
+    # topk=6/e128/h2688/i1856 geometry as Nano-BF16, hence the identical
+    # per-model case count (114).
+    # +231 for AIC-1749's DeepSeek-V4 NVFP4 rows: +117 nvidia/DeepSeek-V4-Flash-NVFP4
+    # (matches deepseek-ai/DeepSeek-V4-Flash's 4096/2048 count) and +114
+    # nvidia/DeepSeek-V4-Pro-NVFP4 (matches deepseek-ai/DeepSeek-V4-Pro's
+    # 7168/3072 count) -- every backend declares exactly [nvfp4] for both
+    # new rows.
+    assert len(moe_cases) == 6606
+    assert any(
+        case.model_name == "nvidia/DeepSeek-V4-Flash-NVFP4"
+        and case.hidden_size == 4096
+        and case.inter_size == 2048
+        and case.topk == 6
+        and case.num_experts == 256
+        for case in moe_cases
+    )
+    assert any(
+        case.model_name == "nvidia/DeepSeek-V4-Pro-NVFP4"
+        and case.hidden_size == 7168
+        and case.inter_size == 3072
+        and case.topk == 6
+        and case.num_experts == 384
+        for case in moe_cases
+    )
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -803,6 +843,17 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
         and case.hidden_size == 2048
         and case.inter_size == 5120
         for case in moe_cases
+    )
+    # Every Lightning case, not just one: the documented +114 contribution,
+    # each carrying the exact checkpoint geometry (an `any(...)` pin would
+    # pass with 113 wrong-dimension siblings).
+    lightning_cases = [
+        case for case in moe_cases if case.model_name == "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
+    ]
+    assert len(lightning_cases) == 114
+    assert all(
+        case.hidden_size == 2688 and case.inter_size == 1856 and case.topk == 6 and case.num_experts == 128
+        for case in lightning_cases
     )
     # Step-3.7-Flash: assert both physical artifact identities, the shape, and
     # the routing contract. MoE loads the model config by model_name, so the
@@ -838,16 +889,14 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     assert {case.model_name for case in mamba_cases} >= {"MAMBA2_GENERIC_4K", "MAMBA2_GENERIC_1K"}
     assert len(get_common_gdn_test_cases()) == 74
     mhc_cases = get_common_mhc_test_cases()
-    assert len(mhc_cases) == 12
+    assert len(mhc_cases) == 8
     assert {(case.model_name, case.phase, case.hidden_size, case.hc_mult) for case in mhc_cases} == {
         (model_name, phase, hidden_size, 4)
         for model_name, hidden_size in (
             ("deepseek-ai/DeepSeek-V4-Flash", 4096),
             ("sgl-project/DeepSeek-V4-Flash-FP8", 4096),
-            ("nvidia/DeepSeek-V4-Flash-NVFP4", 4096),
             ("deepseek-ai/DeepSeek-V4-Pro", 7168),
             ("sgl-project/DeepSeek-V4-Pro-FP8", 7168),
-            ("nvidia/DeepSeek-V4-Pro-NVFP4", 7168),
         )
         for phase in ("pre", "post")
     }

@@ -104,8 +104,12 @@ impl WideEpMlaTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
-        Self::with_sources(data_root, system_spec, &SourceResolver::fixed(PerfDbSources::default()))
-            .expect("fixed-map resolution is infallible")
+        Self::with_sources(
+            data_root,
+            system_spec,
+            &SourceResolver::fixed(PerfDbSources::default()),
+        )
+        .expect("fixed-map resolution is infallible")
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources supplied by the
@@ -117,8 +121,10 @@ impl WideEpMlaTable {
         system_spec: SystemSpec,
         resolver: &SourceResolver,
     ) -> Result<Self, AicError> {
-        let context_sources = resolver.sources_for("wideep_context_mla_perf.parquet", &data_root)?;
-        let generation_sources = resolver.sources_for("wideep_generation_mla_perf.parquet", &data_root)?;
+        let context_sources =
+            resolver.sources_for("wideep_context_mla_perf.parquet", &data_root)?;
+        let generation_sources =
+            resolver.sources_for("wideep_generation_mla_perf.parquet", &data_root)?;
         Ok(Self {
             data_root,
             system_spec,

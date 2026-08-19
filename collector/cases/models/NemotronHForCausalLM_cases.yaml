@@ -12,6 +12,7 @@ model_paths:
   - nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16
   - nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8
   - nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+  - nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
   - nvidia/Nemotron-H-56B-Base-8K
   - nvidia/nemotron-ultra-rl-050826
 include_base: true
@@ -64,6 +65,45 @@ model_case_values:
           allowed_modes: [nvfp4]
         vllm:
           allowed_modes: [nvfp4]
+    # Lightning is the nvfp4-native checkpoint release of the 30B/A3B shape
+    # (same topk=6/e128/h2688/i1856 router geometry as Nano-BF16 above,
+    # verified against the published checkpoint config); a separate row
+    # keeps its quant-distinct identity out of the BF16 row
+    # (case_authoring.md: quant-sensitive checkpoint artifacts use separate
+    # model rows even when geometry is identical). vLLM's pinned FlashInfer
+    # NVFP4 path is limited to top-k <= 10 (see the Super/Ultra rows below,
+    # topk=22); this shape's topk=6 is under that limit, so the topk
+    # restriction does not apply here. AIC-1743/AIC-1748.
+    - model_path: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+      hidden_size: 2688
+      inter_size: 1856
+      topk: 6
+      num_experts: 128
+      sglang_moe_activation: relu2
+      sglang_moe_is_gated: false
+      sglang_moe_scoring_func: sigmoid
+      sglang_moe_routing_method_type: DeepSeekV3
+      sglang_moe_routed_scaling_factor: 2.5
+      sglang_moe_renormalize: true
+      sglang_moe_has_correction_bias: true
+      sglang_moe_num_expert_group: 1
+      sglang_moe_topk_group: 1
+      sglang_moe_backends:
+        nvfp4: {100: flashinfer_trtllm, 103: flashinfer_trtllm, 120: flashinfer_cutlass}
+      framework_quantization:
+        sglang:
+          allowed_modes: [nvfp4]
+        trtllm:
+          allowed_modes: [nvfp4]
+        vllm:
+          # Not the topk restriction (topk=6 is fine). vLLM's moe getter
+          # additionally needs a packaged HF config
+          # (collect_moe.py::_load_model_moe_config) at
+          # model_configs/nvidia--NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4_config.json
+          # -- outside collector/'s module boundary, so it was added as its
+          # own human-approved commit (layer_permissions.md) rather than
+          # bundled with this row. AIC-1743/AIC-1748.
+          allowed_modes: [nvfp4]
     - model_path: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
       hidden_size: 4096
       inter_size: 2688
@@ -86,7 +126,9 @@ model_case_values:
         trtllm:
           allowed_modes: [nvfp4]
         vllm:
-          # vLLM's pinned FlashInfer NVFP4 path is limited to top-k <= 10.
+          # vLLM's pinned FlashInfer NVFP4 path is limited to top-k <= 10;
+          # this row's topk=22 exceeds it (the 30B/Lightning shape's topk=6
+          # does not — see that row above). AIC-1743/AIC-1748.
           allowed_modes: []
     - model_path: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
       hidden_size: 1024
@@ -110,6 +152,8 @@ model_case_values:
         trtllm:
           allowed_modes: [nvfp4]
         vllm:
+          # Same topk=22 > 10 vLLM FlashInfer NVFP4 restriction as above.
+          # AIC-1743/AIC-1748.
           allowed_modes: []
     # vLLM routes Nemotron-H experts through moe_latent_size=1024.
     - model_path: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
@@ -226,6 +270,8 @@ model_case_values:
         nvfp4: {100: flashinfer_trtllm, 103: flashinfer_trtllm, 120: flashinfer_cutlass}
       framework_quantization:
         vllm:
+          # Same topk=22 > 10 vLLM FlashInfer NVFP4 restriction as the Super
+          # rows above. AIC-1743/AIC-1748.
           allowed_modes: []
   mamba2:
     - model_path: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16

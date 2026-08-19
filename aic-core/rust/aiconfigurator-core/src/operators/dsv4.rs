@@ -211,7 +211,8 @@ impl Dsv4ModuleOp {
         let index_head_dim = dims.index_head_dim as f64;
         let cr = self.attn_kind.compress_ratio() as u32;
 
-        let mut gemm_elems = h * q_lora + q_lora * heads * head_dim + h * head_dim + o_groups * o_lora * h;
+        let mut gemm_elems =
+            h * q_lora + q_lora * heads * head_dim + h * head_dim + o_groups * o_lora * h;
         let mut bf16_elems = heads * head_dim * o_lora;
         let mut f32_elems = heads;
         if cr != 0 {
@@ -225,7 +226,8 @@ impl Dsv4ModuleOp {
             bf16_elems += h * index_n_heads;
             f32_elems += cr as f64 * 2.0 * index_head_dim;
         }
-        let bytes = gemm_elems * self.gemm_quant_mode.mapping().memory + bf16_elems * 2.0 + f32_elems * 4.0;
+        let bytes =
+            gemm_elems * self.gemm_quant_mode.mapping().memory + bf16_elems * 2.0 + f32_elems * 4.0;
         bytes * self.scale_factor
     }
 
