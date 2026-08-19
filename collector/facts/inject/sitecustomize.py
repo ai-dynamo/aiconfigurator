@@ -14,6 +14,9 @@ import os
 _OUT = os.environ.get("AIC_PROBE_OUT")
 
 if _OUT:
+    import sys as _sys
+    print(f"[AIC-inject] armed pid={os.getpid()} out={_OUT}", file=_sys.stderr)
+
     def _install() -> None:
         import sglang.srt.model_executor.model_runner as mr_mod
 
@@ -101,6 +104,7 @@ if _OUT:
             return out
 
         mr_mod.ModelRunner.init_attention_backends = init_attn
+        print("[AIC-inject] model_runner hooked", file=__import__("sys").stderr)
 
     try:
         # defer until sglang is importable; cheap retry via import hook

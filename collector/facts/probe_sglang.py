@@ -124,6 +124,37 @@ def main() -> None:
     if args.stage >= 2 and not rec["errors"]:
         try:
             from sglang.bench_one_batch import load_model
+            # Replicate serving's global initialization sequence (scheduler.py
+            # does exactly this before building the model). Skipping it made the
+            # probe take a DIFFERENT dispatch path than a real deployment:
+            # MoE runner overrides live in process-global flags, not ServerArgs,
+            # so DSV4-NVFP4 silently fell back to marlin here while serving
+            # rejects the config outright.
+            from sglang.srt.layers.moe import initialize_moe_config
+            initialize_moe_config(sa)
+            # scheduler.py:726 — mamba/linear-attention models need this before
+            # any forward; bench_one_batch does NOT call it, so hybrid models
+            # fail there in ways real serving does not.
+            try:
+                from sglang.srt.managers.scheduler import (
+                    initialize_mamba_selective_state_update_backend,
+                )
+                initialize_mamba_selective_state_update_backend(sa)
+            except Exception as _e:
+                rec.setdefault("init_warnings", []).append(
+                    f"mamba_ssu_backend: {type(_e).__name__}")
+            for _fn in ("initialize_fp8_gemm_config", "initialize_fp4_gemm_config"):
+                try:
+                    getattr(__import__("sglang.benchmark.one_batch", fromlist=[_fn]), _fn)(sa)
+                except Exception as _e:
+                    rec.setdefault("init_warnings", []).append(f"{_fn}: {type(_e).__name__}")
+            rec["serving_init_applied"] = True
+            try:
+                from sglang.srt.layers.moe.utils import get_moe_runner_backend
+                rec["effective_moe_runner_backend"] = str(get_moe_runner_backend())
+            except Exception:
+                pass
+
 
             ret, _tok = load_model(sa, PortArgs.init_new(sa), 0, 0)
             # 0.5.16 wraps ModelRunner in _TorchBenchRunner(.torch_runner)
