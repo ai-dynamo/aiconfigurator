@@ -40,4 +40,5 @@ include = [
     "src/aiconfigurator_core/systems/**/*.parquet",
     "src/aiconfigurator_core/systems/data/**/*.yaml",
     "src/aiconfigurator_core/model_configs/*.json",
+    "src/aiconfigurator_core/recipes/*.yaml",
 ]
