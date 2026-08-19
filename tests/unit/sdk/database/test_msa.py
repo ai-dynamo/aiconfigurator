@@ -64,11 +64,15 @@ def test_rtx_trtllm_rc23_loads_and_m3_is_explicitly_rejected():
     fails with a typed empirical error (an explicitly rejected cell), never
     a silent fallback or a version-gate exit."""
     from aiconfigurator.sdk.perf_database import get_database_view
+    from aiconfigurator_core.sdk.errors import EmpiricalNotImplementedError
 
     db = get_database_view("rtx_pro_6000_server", "trtllm", "1.3.0rc23", database_mode="HYBRID")
     assert db is not None, "rc23 reuse markers must make the version root loadable"
     op = _ctx_msa()
-    with pytest.raises(Exception, match=r"(?i)empirical|no DSA util"):
+    # The EXACT typed contract (review 4972622548 item 3): the miss crosses
+    # the engine FFI as EmpiricalNotImplementedError — never a version-gate
+    # exit, never a silent fallback, never an untyped error.
+    with pytest.raises(EmpiricalNotImplementedError, match=r"(?i)no DSA util|empirical"):
         op._engine_query(db, batch_size=2, s=512, prefix=0)
 
 

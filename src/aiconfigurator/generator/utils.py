@@ -126,3 +126,38 @@ def resolve_backend_version_for_dynamo(
             f"Supported backends: {supported_backends or 'none'}."
         )
     return str(backend_version)
+
+
+def msa_sparse_implementation(backend_name: str, model_path: str, system_name: str) -> str | None:
+    """MiniMax-M3 x TRT-LLM on the SM100 family: prescribe the msa
+    (fmha_sm100) sparse-attention implementation.
+
+    TRT-LLM 1.3.0rc23 serving DEFAULTS to the Triton reference path; the
+    shipped SM100/103 MSA perf tables are collected with
+    ``implementation="msa"`` (the performance path the config field exists
+    for, hard-gated to those SMs by ``ensure_msa_available``). Emitting the
+    knob makes generated deployments — BOTH the optimized (module_bridge)
+    and the naive entry points — run exactly the configuration the perf
+    data represents (PR #1507 review 4969690316). Keyed on the checkpoint
+    ARCHITECTURE (never model-name patterns) and the system's sm_version
+    fact; returns None everywhere else so the field is dropped.
+    """
+    if backend_name != "trtllm":
+        return None
+    from aiconfigurator.sdk.perf_database import load_system_spec
+    from aiconfigurator.sdk.utils import get_model_config_from_model_path
+
+    try:
+        parsed = get_model_config_from_model_path(model_path)
+        architecture = parsed.get("architecture")
+    except (FileNotFoundError, KeyError, ValueError):
+        # Unresolvable model config (e.g. a user-local checkpoint the SDK
+        # does not bundle): leave the knob unset — serving falls back to its
+        # own default rather than receiving a wrong prescription.
+        return None
+    if architecture != "MiniMaxM3ForCausalLM":
+        return None
+    spec = load_system_spec(system_name)
+    if int(spec.get("gpu", {}).get("sm_version", -1)) in (100, 103):
+        return "msa"
+    return None

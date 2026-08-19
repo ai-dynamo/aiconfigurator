@@ -99,3 +99,29 @@ def test_bridge_prescribes_msa_only_for_m3_on_the_sm100_family(backend, model, s
     from aiconfigurator.generator.module_bridge import _msa_sparse_implementation
 
     assert _msa_sparse_implementation(_FakeTask(backend, model, system)) == expected
+
+
+def test_naive_generator_carries_the_msa_prescription():
+    """The naive entry point (`cli generate` path) must emit the same
+    MiniMax-M3/SM100-family prescription as the optimized path — otherwise a
+    naive deployment runs the TRT-LLM default the perf rows do not represent
+    (review 4972622548 item 1)."""
+    from aiconfigurator.generator.naive import build_naive_generator_params
+
+    params = build_naive_generator_params(
+        model_name="MiniMaxAI/MiniMax-M3",
+        total_gpus=8,
+        system_name="b200_sxm",
+        backend_name="trtllm",
+        mode="agg",
+    )
+    assert params["ModelConfig"]["msa_sparse_implementation"] == "msa"
+
+    off_family = build_naive_generator_params(
+        model_name="MiniMaxAI/MiniMax-M3",
+        total_gpus=8,
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        mode="agg",
+    )
+    assert "msa_sparse_implementation" not in off_family["ModelConfig"]
