@@ -32,6 +32,18 @@ WORK = "/work"  # container mount of ROOT
 SCRATCH_QUEUES = ROOT / "archive" / "queues"
 
 
+def model_config_from_dummy(model_dir_in_container: str) -> dict:
+    """Derive ModelConfig facts from the variant's config.json instead of
+    hardcoding (is_moe=True bit a review; dense targets would have gotten
+    MoE-branch parallelism args). nextn is reported as 0 because the dummy
+    generator zeroes MTP modules — a recorded decision, not an assumption."""
+    cfg_path = ROOT / model_dir_in_container.replace(WORK + "/", "") / "config.json"
+    cfg = json.loads(cfg_path.read_text())
+    tc = cfg.get("text_config", cfg)
+    experts = tc.get("n_routed_experts") or tc.get("num_local_experts") or 0
+    return {"is_moe": bool(experts and experts > 1), "prefix": 0, "nextn": 0}
+
+
 def render_sglang_cli(model_dir_in_container: str, tp: int, version: str) -> str:
     """Render the generator's cli_args_agg for one config — the deployment-true
     engine args are the probe input (zero translation drift)."""
@@ -47,7 +59,7 @@ def render_sglang_cli(model_dir_in_container: str, tp: int, version: str) -> str
         "WorkerConfig": {"agg_workers": 1, "agg_gpus_per_worker": tp, "prefill_workers": 0, "decode_workers": 0},
         "NodeConfig": {"system_name": "h200_sxm", "num_gpus_per_node": 8},
         "SlaConfig": {"isl": 1024, "osl": 256},
-        "ModelConfig": {"is_moe": True, "prefix": 0, "nextn": 0},
+        "ModelConfig": model_config_from_dummy(model_dir_in_container),
         "BenchConfig": {},
         "params": {"agg": {"tensor_parallel_size": tp, "pipeline_parallel_size": 1, "data_parallel_size": 1,
                            "gpus_per_worker": tp, "max_batch_size": 64, "max_num_tokens": 4096,
@@ -115,7 +127,7 @@ def render_vllm_run_sh(run: dict) -> str:
                          "prefill_workers": 0, "decode_workers": 0},
         "NodeConfig": {"system_name": "h200_sxm", "num_gpus_per_node": 8},
         "SlaConfig": {"isl": 1024, "osl": 256},
-        "ModelConfig": {"is_moe": True, "prefix": 0, "nextn": 0},
+        "ModelConfig": model_config_from_dummy(model),
         "BenchConfig": {},
         "params": {"agg": {"tensor_parallel_size": run["tp"], "pipeline_parallel_size": 1,
                            "data_parallel_size": 1, "gpus_per_worker": run["tp"],

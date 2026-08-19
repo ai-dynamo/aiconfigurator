@@ -109,8 +109,13 @@ families:
     dummy_variants: []          # dummy_adapter: todo (hybrid linear-attention layer pattern, custom code)
     status: config_fetched_adapter_pending
 
-topologies:  # per-entry probe runs; mocked entries validated by the real ones
-  - {tp: 1, ep: 1, evidence: real}
-  - {tp: 2, ep: 2, evidence: real}
-  - {tp: 4, ep: 4, evidence: mocked}
-  - {tp: 8, ep: 8, evidence: mocked}
+topologies:
+  - {tp: 1, ep: 1, evidence: real, status: implemented}
+# Parallelism policy (probed 2026-08-19, GLM-5.2-FP8, tp2 ep1 vs tp2 ep2 via
+# the rank-injection probe): for the triton MoE family the MAIN kernel is
+# identical under TEP and EP (fused_moe_kernel); differences are the
+# activation variant (_run_activation_inplace vs _filtered_inplace), reduce
+# template params, and weight shard shapes. Verdict: no routine dual-topology
+# sweeps. Instead, ONE TEP-vs-EP audit per MoE runner family; pending:
+# marlin, flashinfer_trtllm (quantized MoE families may genuinely fork).
+# Multi-rank runs use probe inject/ (per-rank facts shards).
