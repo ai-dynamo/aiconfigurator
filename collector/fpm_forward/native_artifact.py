@@ -27,6 +27,11 @@ class NativePointMeasurement:
     rank_wall_times: tuple[tuple[int, float], ...]
 
 
+# Distinguishes "no artifact seen yet" from a legitimately absent (legacy)
+# kvwarm block during cross-rank consistency checking.
+_KVWARM_UNSEEN = object()
+
+
 @dataclass(frozen=True, slots=True)
 class NativeCollection:
     points: tuple[NativePointMeasurement, ...]
@@ -207,6 +212,8 @@ def validate_native_collection(
     canonical_points: list[dict[str, Any]] | None = None
     canonical_groups: list[dict[str, Any]] | None = None
     run_identity: tuple[str, str] | None = None
+    kvwarm_meta: dict[str, Any] | None = None
+    kvwarm_seen: object = _KVWARM_UNSEEN
     local_fpms: dict[tuple[int, int], dict[str, Any]] = {}
     rank_timings: list[tuple[int, float, float]] = []
 
@@ -263,6 +270,20 @@ def validate_native_collection(
             run_identity = typed_identity
         elif typed_identity != run_identity:
             raise ValueError(f"native DP ranks have different run identities: {path}")
+
+        # Engine-reported KV warm-up envelope. Absent on artifacts predating
+        # the kvwarm-enabled runtime (legacy); when present, the regime facts
+        # (warm_eligible/skip_reason) must agree across DP ranks -- they
+        # describe one shared measurement protocol, not per-rank state.
+        kvwarm = payload.get("kvwarm")
+        if kvwarm is not None and not isinstance(kvwarm, dict):
+            raise TypeError(f"native kvwarm block is not a mapping: {path}")
+        kvwarm_regime = None if kvwarm is None else (kvwarm.get("warm_eligible"), kvwarm.get("skip_reason"))
+        if kvwarm_seen is _KVWARM_UNSEEN:
+            kvwarm_seen = kvwarm_regime
+            kvwarm_meta = kvwarm
+        elif kvwarm_regime != kvwarm_seen:
+            raise ValueError(f"native DP ranks disagree on the KV warm-up regime (warm_eligible/skip_reason): {path}")
 
         timing = payload.get("timing")
         if not isinstance(timing, dict):
@@ -380,4 +401,5 @@ def validate_native_collection(
         collector_attempt_id=collector_attempt_id,
         runtime_run_id=run_identity[0],
         runtime_grid_digest=run_identity[1],
+        kvwarm_meta=kvwarm_meta,
     )

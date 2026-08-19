@@ -1678,14 +1678,14 @@ def test_pure_tp_render_uses_shared_vllm_tp_without_expert_parallel(
         pytest.param(
             "decode", "dep", ParallelTopology(tp=1, pp=1, dp=4, moe_tp=1, moe_ep=4, cp=1), False, id="decode-dep"
         ),
-        # fake-KV regime (kvwarm exempts pure_tp/dense): per-point re-admission
-        # would run full-context block hashing inside the measured step, so
-        # disabling prefix caching stays the serving-faithful choice.
+        # pure_tp joined the warm set (A2, 2026-08-20): expert-activation
+        # dispersion is content-driven even with cross-GPU balance by
+        # construction, so warm coverage applies (engine gc-warmtp+).
         pytest.param(
             "decode",
             "pure_tp",
             ParallelTopology(tp=4, pp=1, dp=1, moe_tp=4, moe_ep=1, cp=1),
-            True,
+            False,
             id="decode-pure-tp",
         ),
         # prefill never disables prefix caching regardless of strategy.

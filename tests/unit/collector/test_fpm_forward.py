@@ -1142,6 +1142,206 @@ def test_formal_database_first_publisher_wins_on_rerun_overlap(tmp_path):
     assert parquet2.read_bytes() == sealed
 
 
+def _synthetic_decode_cell(tmp_path, *, kvwarm, markers=("kvwarm_real_kv", "kvwarm_fake_fallback")):
+    """Single-rank decode cell with one point per marker entry (None = no
+    kvwarm marker in sample_reasons); ``kvwarm`` is the artifact's top-level
+    engine envelope (None = legacy artifact without the block)."""
+
+    topology = ParallelTopology(tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1, cp=1)
+    cell = FPMCell(
+        cell_id="fpm-test-decode",
+        workload_kind="decode",
+        topology=topology,
+        weight_quantization="nvfp4",
+        kv_cache_dtype="fp8",
+        backend_policy=BackendPolicy("baseline_auto", {}, {}),
+        parallel_strategy="tep",
+        gemm_quant_mode="nvfp4",
+        moe_quant_mode="nvfp4",
+        fmha_quant_mode="fp8",
+        comm_quant_mode="half",
+    )
+    plan = SimpleNamespace(
+        sha256="plan-sha",
+        aic_revision="revision",
+        model_path="org/model",
+        system="b200_sxm",
+        backend="vllm",
+        options=SimpleNamespace(warmup_iterations=0),
+        capability=SimpleNamespace(
+            support_level="exact",
+            template_id="aic_exact:dsa_module",
+            template_version=1,
+            aic_database_version="0.24.0",
+        ),
+    )
+    rows = []
+    groups = []
+    for index, marker in enumerate(markers, start=1):
+        point = {
+            "point_type": "decode",
+            "benchmark_id": index,
+            "total_prefill_tokens": 0,
+            "total_kv_read_tokens": 128 * index,
+            "batch_size": 4,
+            "expected_cudagraph_mode": "FULL",
+            "expected_capture_size": 4,
+            "padding_tokens": 0,
+            "sample_reasons": ["capture"] + ([marker] if marker else []),
+        }
+        fpm = {
+            "counter_id": index,
+            "dp_rank": 0,
+            "wall_time": 0.01 * index,
+            "scheduled_requests": {
+                "num_prefill_requests": 0,
+                "sum_prefill_tokens": 0,
+                "sum_prefill_kv_tokens": 0,
+                "num_decode_requests": 4,
+                "sum_decode_kv_tokens": 128 * index,
+            },
+        }
+        rows.append({"point": point, "fpms": [fpm]})
+        groups.append(
+            {
+                "benchmark_id": index,
+                "point": point,
+                "expected_dp_ranks": [0],
+                "complete": True,
+                "wall_time": fpm["wall_time"],
+                "rank_results": [{"dp_rank": 0, "fpms": [fpm]}],
+            }
+        )
+    measured = sum(0.01 * index for index in range(1, len(markers) + 1))
+    payload = {
+        "schema_version": 2,
+        "artifact_type": "rank",
+        "status": "complete",
+        "valid": True,
+        "usable": True,
+        "timing_valid": True,
+        "stop_reason": None,
+        "error": None,
+        "run_id": "run",
+        "grid_digest": "grid",
+        "config": {"mode": "decode"},
+        "coverage": {"expected_points": len(markers), "completed_points": len(markers), "skipped_points": 0},
+        "dp": {"rank": 0, "size": 1},
+        "results": rows,
+        "iteration_groups": groups,
+        "skipped_points": [],
+        "missing_phases": [],
+        "timing": {"benchmark_elapsed_seconds": measured + 1.0, "measured_iteration_seconds": measured},
+    }
+    if kvwarm is not None:
+        payload["kvwarm"] = kvwarm
+    cell_dir = tmp_path / "cell"
+    output = cell_dir / "raw" / "pod-0" / "benchmark.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _write_provenance(output.parent / "collector-provenance.json", cell_id=cell.cell_id)
+    output.write_text(json.dumps(payload))
+    return plan, cell, cell_dir
+
+
+def test_kv_seed_regime_derives_from_point_markers_in_warm_cells(tmp_path):
+    """A warm-eligible cell records the per-point protocol: real_kv for
+    warm-chain points, fake_fallback for points the chain could not reach."""
+
+    plan, cell, cell_dir = _synthetic_decode_cell(
+        tmp_path,
+        kvwarm={"enabled": True, "warm_eligible": True, "skip_reason": None},
+    )
+    rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+
+    regimes = [row["kv_seed_regime"] for row in sorted(rows, key=lambda row: row["total_kv_read_tokens"])]
+    assert regimes == ["real_kv", "fake_fallback"]
+
+
+def test_kv_seed_regime_cell_skip_reason_overrides_point_markers(tmp_path):
+    """Warm-ineligible topologies mark EVERY point kvwarm_fake_fallback
+    (measured tp4: 1659/1659), so the cell-level skip_reason must win --
+    otherwise a downstream fake_fallback filter would wipe whole legitimate
+    cells."""
+
+    plan, cell, cell_dir = _synthetic_decode_cell(
+        tmp_path,
+        kvwarm={
+            "enabled": True,
+            "warm_eligible": False,
+            "skip_reason": "moe_tp_balanced_by_construction",
+        },
+        markers=("kvwarm_fake_fallback", "kvwarm_fake_fallback"),
+    )
+    rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+
+    assert {row["kv_seed_regime"] for row in rows} == {"skip:moe_tp_balanced_by_construction"}
+
+
+def test_kv_seed_regime_is_legacy_without_kvwarm_block_and_na_for_prefill(tmp_path):
+    """Artifacts predating the kvwarm runtime carry no envelope -> legacy;
+    prefill rows are out of the decode seeding protocol entirely -> n/a."""
+
+    plan, cell, cell_dir = _synthetic_decode_cell(tmp_path, kvwarm=None, markers=(None, None))
+    rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+    assert {row["kv_seed_regime"] for row in rows} == {"legacy"}
+
+    prefill_plan, prefill_cell, prefill_dir = _synthetic_plan_and_cell(tmp_path / "prefill")
+    prefill_rows = aggregate_cell(prefill_plan, prefill_cell, prefill_dir, expected_attempt_id="attempt")
+    assert {row["kv_seed_regime"] for row in prefill_rows} == {"n/a"}
+
+
+def test_native_validation_rejects_cross_rank_kvwarm_disagreement(tmp_path):
+    """The kvwarm regime describes one shared measurement protocol; DP ranks
+    reporting different warm_eligible/skip_reason facts are a contract
+    violation, not a mergeable difference."""
+
+    plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
+    for rank, block in enumerate(
+        (
+            {"enabled": True, "warm_eligible": True, "skip_reason": None},
+            {"enabled": True, "warm_eligible": False, "skip_reason": "moe_tp_balanced_by_construction"},
+        )
+    ):
+        artifact = cell_dir / "raw" / f"pod-{rank}" / ("benchmark.json" if rank == 0 else f"benchmark_dp{rank}.json")
+        payload = json.loads(artifact.read_text())
+        payload["kvwarm"] = block
+        artifact.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="disagree on the KV warm-up regime"):
+        aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+
+
+def test_formal_database_merges_rows_without_kv_seed_regime_as_null(tmp_path):
+    """kv_seed_regime is additive (not in the row key): merging onto a
+    parquet written before the column existed keeps the old rows (null) and
+    lands the new rows' values, with the row count intact."""
+
+    import pyarrow.parquet as pq
+
+    plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
+    old_rows = [
+        {key: value for key, value in row.items() if key != "kv_seed_regime"}
+        for row in aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+    ]
+    systems_root = tmp_path / "systems"
+    write_formal_database(plan, old_rows, systems_root=systems_root)
+
+    decode_plan, decode_cell, decode_dir = _synthetic_decode_cell(
+        tmp_path / "decode",
+        kvwarm={"enabled": True, "warm_eligible": True, "skip_reason": None},
+    )
+    decode_plan.sha256 = plan.sha256
+    new_rows = aggregate_cell(decode_plan, decode_cell, decode_dir, expected_attempt_id="attempt")
+    parquet, _metadata, skipped = write_formal_database(decode_plan, new_rows, systems_root=systems_root)
+
+    assert skipped == ()
+    published = pq.read_table(parquet).to_pylist()
+    assert len(published) == len(old_rows) + len(new_rows)
+    by_cell = {row["cell_id"]: row["kv_seed_regime"] for row in published}
+    assert by_cell["fpm-test"] is None
+    assert by_cell["fpm-test-decode"] in {"real_kv", "fake_fallback"}
+
+
 def test_formal_database_mixed_overlap_skips_sealed_cell_and_lands_the_rest(tmp_path):
     """A plan overlapping one sealed cell publishes its fresh cells while the
     sealed cell's rows stay first-publisher-owned: partial skip, rest lands."""
@@ -1465,11 +1665,12 @@ def test_curated_systems_root_resolves_to_the_sdk_default_tree():
 
 
 def _args_cell(workload_kind: str, parallel_strategy: str = "tep") -> FPMCell:
-    topology = (
-        ParallelTopology(tp=4, pp=1, dp=1, moe_tp=4, moe_ep=1, cp=1)
-        if parallel_strategy == "pure_tp"
-        else ParallelTopology(tp=4, pp=1, dp=1, moe_tp=1, moe_ep=4, cp=1)
-    )
+    if parallel_strategy == "pure_tp":
+        topology = ParallelTopology(tp=4, pp=1, dp=1, moe_tp=4, moe_ep=1, cp=1)
+    elif parallel_strategy == "tp":
+        topology = ParallelTopology(tp=4, pp=1, dp=1, moe_tp=1, moe_ep=1, cp=1)
+    else:
+        topology = ParallelTopology(tp=4, pp=1, dp=1, moe_tp=1, moe_ep=4, cp=1)
     return FPMCell(
         cell_id=f"fpm-args-{workload_kind}-{parallel_strategy}",
         workload_kind=workload_kind,
@@ -1506,7 +1707,7 @@ def _cell_cli_args(workload_kind: str, parallel_strategy: str = "tep") -> list[s
     return merged["params"]["agg"]["extra_cli_args"]
 
 
-@pytest.mark.parametrize("strategy", ["tep", "dep"])
+@pytest.mark.parametrize("strategy", ["tep", "dep", "pure_tp"])
 def test_kvwarm_decode_cells_keep_prefix_caching_and_async_overlap(strategy):
     """EP-sharded MoE decode (kvwarm regime) keeps engine defaults.
 
@@ -1527,7 +1728,8 @@ def test_kvwarm_decode_cells_keep_prefix_caching_and_async_overlap(strategy):
 
 
 def test_fake_kv_decode_cells_still_disable_prefix_caching():
-    """pure_tp/dense decode (kvwarm-exempt) keeps the fake-KV pin.
+    """Dense decode (kvwarm-exempt: no experts, physically immune to
+    activation dispersion) keeps the fake-KV pin.
 
     These cells re-admit batch_size synthetic full-context requests per
     point; with prefix caching on, ``Request.__init__`` hashes the whole
@@ -1536,7 +1738,7 @@ def test_fake_kv_decode_cells_still_disable_prefix_caching():
     steady-state decode has no such per-step hash. Disabling remains the
     serving-faithful choice for this regime.
     """
-    args = _cell_cli_args("decode", "pure_tp")
+    args = _cell_cli_args("decode", "tp")
 
     assert "--no-enable-prefix-caching" in args
     assert "--no-async-scheduling" not in args

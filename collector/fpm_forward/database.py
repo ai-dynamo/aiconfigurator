@@ -155,6 +155,32 @@ def aggregate_cell(
             dropped_clamped,
         )
 
+    # KV seed regime (schema v6 additive column): a per-row RECORD of the
+    # engine's measurement protocol for this point, consumed by the modeling
+    # loader (which may exclude fake_fallback rows). The collector records
+    # and never filters (layer_permissions: run it or raise).
+    #
+    # Cell-level skip_reason takes priority over the per-point markers:
+    # warm-ineligible topologies mark every point kvwarm_fake_fallback
+    # (measured tp4: 1659/1659), so point-level derivation alone would let a
+    # downstream fake_fallback filter wipe entire legitimate cells.
+    kvwarm_meta = collection.kvwarm_meta
+
+    def _kv_seed_regime(point: dict[str, Any], phase: str) -> str:
+        if phase == "prefill":
+            return "n/a"
+        if kvwarm_meta is None:
+            return "legacy"
+        skip_reason = kvwarm_meta.get("skip_reason")
+        if skip_reason:
+            return f"skip:{skip_reason}"
+        reasons = point.get("sample_reasons") or []
+        if "kvwarm_real_kv" in reasons:
+            return "real_kv"
+        if "kvwarm_fake_fallback" in reasons:
+            return "fake_fallback"
+        return "legacy"
+
     rows = []
     for measurement in selected:
         point = measurement.point
@@ -189,6 +215,7 @@ def aggregate_cell(
                 "total_prefill_tokens": total_prefill,
                 "total_kv_read_tokens": total_kv,
                 "partition_policy": "balanced_v1",
+                "kv_seed_regime": _kv_seed_regime(point, phase),
                 "latency_ms": max(latency for _rank, latency in measurement.rank_wall_times) * 1000.0,
                 "global_warmup_iterations": plan.options.warmup_iterations,
                 "warmup_repeats": 0,
@@ -449,6 +476,14 @@ def write_formal_database(
             index[key] = row
             merged.append(row)
         merged.sort(key=lambda row: tuple(row[name] for name in _ROW_KEY))
+
+        # Additive schema evolution: rows merged from a parquet written before
+        # kv_seed_regime existed lack the key, and pyarrow's from_pylist
+        # derives its schema from the first rows -- without normalization the
+        # new column silently vanishes from the merged file. Old rows publish
+        # as null instead.
+        for row in merged:
+            row.setdefault("kv_seed_regime", None)
 
         temporary = _temporary_path(parquet_path)
         temporary_metadata = _temporary_path(metadata_path)
