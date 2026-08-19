@@ -25,7 +25,7 @@ import yaml
 ROOT = Path(os.environ.get("AIC_PROBE_WORKSPACE", Path.cwd()))
 # generator source: this repo by default; override to pin a specific checkout
 AIC_SRC = os.environ.get("AIC_GENERATOR_SRC",
-                         str(Path(__file__).resolve().parents[1] / "src"))
+                         str(Path(__file__).resolve().parents[2] / "src"))
 if AIC_SRC not in sys.path:
     sys.path.insert(0, AIC_SRC)
 WORK = "/work"  # container mount of ROOT

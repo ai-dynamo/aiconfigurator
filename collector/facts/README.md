@@ -1,4 +1,4 @@
-# op_harness — runtime identity probing for collector/generator correctness
+# collector/facts — runtime identity probing for collector/generator correctness
 
 Probes what a serving framework ACTUALLY does — which quant method binds to
 each module, which Python API an op flows through, which CUDA kernels execute —
@@ -46,15 +46,15 @@ first MoE forward; vLLM routes it to fused_marlin_moe and runs").
 
 ```bash
 # 1. dummy models (fetch configs once; AIC model_configs/ are reused when present)
-python3 op_harness/gen_dummy_models.py --configs <cfg_dir> --out <ws>/dummy_models
+python3 collector/facts/gen_dummy_models.py --configs <cfg_dir> --out <ws>/dummy_models
 
 # 2. plan + queues (renders engine args from this repo's generator)
-AIC_PROBE_WORKSPACE=<ws> python3 op_harness/gen_archive.py --emit-queues --backends sglang,vllm,trtllm
+AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/gen_archive.py --emit-queues --backends sglang,vllm,trtllm
 bash <ws>/archive/queues/gpu0.sh   # ... one per GPU; done-guard makes reruns incremental
 
 # 3. collect + curate
-AIC_PROBE_WORKSPACE=<ws> python3 op_harness/gen_archive.py --collect
-AIC_PROBE_WORKSPACE=<ws> python3 op_harness/make_records.py
+AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/gen_archive.py --collect
+AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/make_records.py
 ```
 
 A full three-backend sweep of 12 checkpoints is ~36 runs, minutes each on one
