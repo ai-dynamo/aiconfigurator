@@ -567,6 +567,7 @@ pub(crate) fn gemm_quant_by_name(name: &str) -> Option<GemmQuantMode> {
         "fp8_ootb" => Fp8Ootb,
         "nvfp4" => Nvfp4,
         "nvfp4_wo" => Nvfp4Wo,
+        "w4a16_nvfp4" => W4a16Nvfp4,
         _ => return None,
     })
 }
@@ -977,6 +978,32 @@ mod tests {
             .latency;
         assert!(latency > 0.0, "interpolated latency must be positive");
         assert!(latency < 100.0, "shape this small shouldn't take 100ms");
+    }
+
+    #[test]
+    fn w4a16_nvfp4_does_not_alias_int4_table() {
+        use crate::perf_database::energy_test_fixtures::{energy_test_spec, write_parquet, Col};
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &tmp.path().join("gemm_perf.parquet"),
+            &[
+                Col::Str("gemm_dtype", vec!["int4_wo", "int4_wo"]),
+                Col::I64("m", vec![128, 256]),
+                Col::I64("n", vec![1024, 1024]),
+                Col::I64("k", vec![1024, 1024]),
+                Col::F64("latency", vec![1.0, 3.0]),
+            ],
+        );
+
+        let table = GemmTable::new(tmp.path().to_path_buf(), energy_test_spec());
+        assert!(table
+            .query(GemmQuantMode::Int4Wo, 1, 1024, 1024)
+            .is_ok());
+        assert!(table
+            .query(GemmQuantMode::W4a16Nvfp4, 1, 1024, 1024)
+            .is_err());
+        assert_eq!(query_cache_len(&table), 1);
     }
 
     #[test]

@@ -253,6 +253,9 @@ pub enum DataType {
     W4a8Mxfp4Mxfp8Trtllm,
     #[serde(rename = "w4a16_mxfp4_cutlass")]
     W4a16Mxfp4Cutlass,
+    // Append-only wire extension: keep existing bincode discriminants stable.
+    #[serde(rename = "w4a16_nvfp4")]
+    W4a16Nvfp4,
 }
 
 #[cfg(test)]

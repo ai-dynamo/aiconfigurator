@@ -728,6 +728,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn w4a16_nvfp4_uses_xprofile_only_in_hybrid() {
+        let systems_root = PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
+        let mut db = PerfDatabase::load(&systems_root, "h200_sxm", "trtllm", "1.3.0rc20")
+            .expect("database must load");
+
+        let silicon = query_gemm_table(&db, GemmQuantMode::W4a16Nvfp4, 8192, 1536, 32);
+        assert!(matches!(silicon, Err(AicError::PerfDatabase(_))));
+
+        db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
+        let hybrid = query_gemm_table(&db, GemmQuantMode::W4a16Nvfp4, 8192, 1536, 32)
+            .expect("XPROFILE transfer should make W4A16-NVFP4 HYBRID-estimable");
+        assert_eq!(hybrid.source, Source::Empirical);
+        assert!(hybrid.latency_ms.is_finite() && hybrid.latency_ms > 0.0);
+    }
+
     /// HYBRID on a quant with NO collected table under a policy WITHOUT
     /// XProfile must surface the terminal EmpiricalNotImplemented miss, never
     /// a fabricated value (mirrors the Python contract: cross-profile

@@ -19,9 +19,11 @@ from aiconfigurator.sdk.errors import (
     KVCacheCapacityError,
     NoFeasibleConfigError,
 )
+from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 from aiconfigurator.sdk.sweep import (
     _DEFAULT_AGG_BATCH_SCHEDULE,
     _agg_ctx_tokens_list,
+    _preferred_sweep_exception,
     sweep_disagg,
 )
 
@@ -66,6 +68,16 @@ def test_default_agg_batch_schedule_is_monotonic_and_capped():
     assert sorted(_DEFAULT_AGG_BATCH_SCHEDULE) == _DEFAULT_AGG_BATCH_SCHEDULE
     assert _DEFAULT_AGG_BATCH_SCHEDULE[0] == 1
     assert _DEFAULT_AGG_BATCH_SCHEDULE[-1] == 1024
+
+
+def test_sweep_terminal_error_prefers_structured_perf_data_miss():
+    data_miss = RuntimeError("valid parallel config lacks measured data")
+    data_miss.__cause__ = PerfDataNotAvailableError("missing W4A16 lane")
+    invalid_tp = AssertionError("num_heads must be divisible by tp_size")
+    other_error = ValueError("other")
+
+    assert _preferred_sweep_exception([data_miss, invalid_tp]) is data_miss
+    assert _preferred_sweep_exception([invalid_tp, other_error]) is other_error
 
 
 # ---------------------------------------------------------------------------

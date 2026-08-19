@@ -1922,16 +1922,13 @@ class TestDSV4NVFP4QuantResolution:
 
     @pytest.mark.parametrize("hf_id", ["nvidia/DeepSeek-V4-Flash-NVFP4", "nvidia/DeepSeek-V4-Pro-NVFP4"])
     def test_nvfp4_export_resolves_offline_without_phantom_gemm_quant(self, hf_id: str):
-        """The packaged sidecar quantizes ONLY the routed experts, so gemm must
-        stay bfloat16 (the pre-fix phantom was gemm=nvfp4, a key no collector
-        can emit). MoE currently resolves w4a8_mxfp4_mxfp8 via the DeepSeek-V4
-        ``expert_dtype == "fp4"`` override — whether these ModelOpt NVFP4
-        artifacts should instead sweep with their own nvfp4 MoE rows is the
-        open module-key decision tracked on AIC-1749/AIC-1750; this pin
-        documents the current behavior, not that decision.
+        """The packaged sidecar preserves the base checkpoint's FP8-block
+        non-expert lane and quantizes the routed experts as NVFP4. The explicit
+        sidecar MoE mode must win over the native DeepSeek-V4 ``expert_dtype``
+        fallback so the SDK key matches the Collector artifact contract.
         """
         model_config = config.ModelConfig(tp_size=1, pp_size=1, attention_dp_size=8, moe_tp_size=1, moe_ep_size=8)
         model = models.get_model(hf_id, model_config, backend_name="vllm")
-        assert model.config.gemm_quant_mode == common.GEMMQuantMode.bfloat16
-        assert model.config.moe_quant_mode == common.MoEQuantMode.w4a8_mxfp4_mxfp8
+        assert model.config.gemm_quant_mode == common.GEMMQuantMode.fp8_block
+        assert model.config.moe_quant_mode == common.MoEQuantMode.nvfp4
         assert model.config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
