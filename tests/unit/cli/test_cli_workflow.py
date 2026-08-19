@@ -686,14 +686,20 @@ class TestBuildDefaultTaskConfigs:
     # The flag-conditioned SGLang DeepEP task variants (agg_deepep/disagg_deepep)
     # and their perf-data skip probe are gone: large-EP/DeepEP participation is
     # coverage-driven per tuple inside the ONE task per (model, serving mode).
-    @patch("aiconfigurator.cli.main._vllm_megamoe_perf_data_available", return_value=True)
     @patch("aiconfigurator.cli.main.Task")
     @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
-    def test_auto_megamoe_includes_vllm_when_rows_exist(
-        self, mock_supported_databases, mock_task_config, _mock_vllm_megamoe_available
+    def test_auto_megamoe_kimi_gb300_keeps_only_vllm_when_sglang_rows_do_not_resolve(
+        self, mock_supported_databases, mock_task_config
     ):
-        """Where measured vLLM MegaMoE rows resolve (gb300 @ 0.27.0), the auto
-        sweep must include vLLM; the data probe is the seam that decides."""
+        """Kimi-K3/GB300 regression (review): the default build used to seed
+        agg_sglang@0.5.16 alongside agg_vllm@0.27.0, and the SGLang
+        configuration then died executing with PerfDataNotAvailableError
+        because no MegaMoE table resolves for GB300/SGLang at the latest
+        declared version. The auto seed must probe SGLang the same way it
+        probes vLLM. The probes below run against the real data tree:
+        gb300/sglang latest=0.5.16 has no megamoe table, gb300/vllm @ 0.27.0
+        has the Kimi-K3 rows. The SGLang lane's own query-level death is
+        covered by test_kimi_k3_megamoe.py."""
         mock_supported_databases.return_value = {
             "gb300": {
                 "trtllm": ["0.5.10"],
@@ -711,28 +717,30 @@ class TestBuildDefaultTaskConfigs:
             moe_backend="megamoe",
         )
 
-        assert set(result) == {"agg_sglang", "disagg_sglang", "agg_vllm", "disagg_vllm"}
-        assert mock_task_config.call_count == 4
+        assert set(result) == {"agg_vllm", "disagg_vllm"}
+        assert mock_task_config.call_count == 2
         for call in mock_task_config.call_args_list:
             backend = call.kwargs.get("backend_name") or call.kwargs.get("prefill_backend_name")
-            assert backend in {"sglang", "vllm"}
+            assert backend == "vllm"
             assert call.kwargs["moe_backend"] == "megamoe"
 
-    @patch("aiconfigurator.cli.main._vllm_megamoe_perf_data_available", return_value=True)
+    @patch("aiconfigurator.cli.main._megamoe_perf_data_available", return_value=True)
     @patch("aiconfigurator.cli.main.Task")
     @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
     def test_auto_megamoe_vllm_probe_is_model_gated(
-        self, mock_supported_databases, mock_task_config, _mock_vllm_megamoe_available
+        self, mock_supported_databases, mock_task_config, _mock_megamoe_available
     ):
-        """vLLM MegaMoE rows exist only for Kimi-K3. On systems holding those
-        rows (gb300), a DeepSeek-V4-Pro auto sweep would otherwise gain two
-        guaranteed-dead vLLM experiments (rows exist on disk, but not for the
-        DSv4 shape) — the probe gates on the model, not just file presence."""
+        """vLLM MegaMoE rows exist only for Kimi-K3. On systems whose data
+        probe passes, a DeepSeek-V4-Pro auto sweep must still not gain vLLM
+        experiments (rows exist on disk, but not for the DSv4 shape) — the
+        sweep gates on the model, not just file presence. Both lane probes
+        are stubbed True here; the probe's own file awareness is covered by
+        the real-data tests above."""
         mock_supported_databases.return_value = {
-            "gb300": {
+            "gb200": {
                 "trtllm": ["0.5.10"],
-                "sglang": ["0.5.16"],
-                "vllm": ["0.27.0"],
+                "sglang": ["0.5.10"],
+                "vllm": ["0.5.10"],
             }
         }
         mock_task_config.return_value = MagicMock(name="MockTaskConfig")
@@ -740,8 +748,9 @@ class TestBuildDefaultTaskConfigs:
         result = build_default_tasks(
             model_path="deepseek-ai/DeepSeek-V4-Pro",
             total_gpus=2,
-            system="gb300",
+            system="gb200",
             backend="auto",
+            backend_version="0.5.10",
             moe_backend="megamoe",
         )
 
@@ -751,6 +760,43 @@ class TestBuildDefaultTaskConfigs:
             backend = call.kwargs.get("backend_name") or call.kwargs.get("prefill_backend_name")
             assert backend == "sglang"
             assert call.kwargs["moe_backend"] == "megamoe"
+
+    @patch("aiconfigurator.cli.main.Task")
+    @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
+    def test_megamoe_disagg_requires_decode_side_rows_but_keeps_agg(self, mock_supported_databases, mock_task_config):
+        """CodeRabbit review: when decode_system differs and its database has
+        no MegaMoE rows for the backend, the disagg task for that backend must
+        be rejected — but the aggregate vLLM task must NOT be suppressed.
+        Probes run against the real data tree: Kimi-K3 rows exist only on
+        gb300/vllm @ 0.27.0, so gb200 as decode system rejects disagg_vllm."""
+        mock_supported_databases.return_value = {
+            "gb300": {
+                "trtllm": ["0.5.10"],
+                "sglang": ["0.5.16"],
+                "vllm": ["0.27.0"],
+            },
+            "gb200": {
+                "trtllm": ["0.5.10"],
+                "sglang": ["0.5.10"],
+                "vllm": ["0.5.10"],
+            },
+        }
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        result = build_default_tasks(
+            model_path="moonshotai/Kimi-K3",
+            total_gpus=2,
+            system="gb300",
+            decode_system="gb200",
+            backend="auto",
+            moe_backend="megamoe",
+        )
+
+        assert set(result) == {"agg_vllm"}
+        assert mock_task_config.call_count == 1
+        (call,) = mock_task_config.call_args_list
+        assert call.kwargs["backend_name"] == "vllm"
+        assert call.kwargs["serving_mode"] == "agg"
 
     @patch("aiconfigurator.cli.main.Task")
     def test_moe_sglang_builds_one_task_per_mode(self, mock_task_config):

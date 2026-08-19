@@ -1495,17 +1495,17 @@ def _resolve_version_for_matching(system_name: str, backend_name: str, backend_v
         return backend_version
 
 
-def _vllm_megamoe_perf_data_available(system_name: str, backend_version: str | None) -> bool:
-    """True when measured vLLM MegaMoE rows resolve for the system.
+def _megamoe_perf_data_available(backend_name: str, system_name: str, backend_version: str | None) -> bool:
+    """True when measured MegaMoE rows resolve for (backend, system, version).
 
     Probes the unified ``dsv4_megamoe_module`` table at the requested (or
-    latest declared) vLLM version. Lanes whose rows would arrive only through
-    reuse donors are deliberately not chased: the auto sweep should enumerate
-    only lanes holding their own measured MegaMoE rows.
+    latest declared) version for the backend. Lanes whose rows would arrive
+    only through reuse donors are deliberately not chased: the auto sweep
+    should enumerate only lanes holding their own measured MegaMoE rows.
     """
     resolved_version = backend_version or perf_database.get_latest_database_version(
         system=system_name,
-        backend=common.BackendName.vllm.value,
+        backend=backend_name,
     )
     if resolved_version is None:
         return False
@@ -1514,7 +1514,7 @@ def _vllm_megamoe_perf_data_available(system_name: str, backend_version: str | N
         return False
     resolved_path = resolve_op_data_path(
         system_data_root,
-        common.BackendName.vllm.value,
+        backend_name,
         resolved_version,
         common.PerfDataFilename.dsv4_megamoe_module.value,
     )
@@ -1733,19 +1733,30 @@ def build_default_tasks(
 
     backends_to_sweep = [b.value for b in common.BackendName] if backend == "auto" else [backend]
     if backend == "auto" and moe_backend == "megamoe":
-        # SGLang carries measured MegaMoE data on every supported Blackwell
-        # system. vLLM joins the auto sweep only for models WITH measured vLLM
-        # MegaMoE rows (today: Kimi-K3 only — DeepSeek-V4 has SGLang rows but
-        # none on vLLM, so without the model gate a DSv4 auto sweep would add
-        # two guaranteed-dead vLLM experiments) AND only where those rows
-        # resolve (today: gb300 @ 0.27.0); anywhere else the vLLM megamoe task
-        # would build fine and then die at query time with
-        # PerfDataNotAvailableError, so it stays out of the sweep there.
-        # Explicit --backend vllm --moe-backend megamoe still builds anywhere.
-        backends_to_sweep = [common.BackendName.sglang.value]
+        # Join only lanes whose measured MegaMoE rows resolve at the requested
+        # (or latest declared) framework version on this system — a lane with
+        # no table there builds fine and then dies at query time with
+        # PerfDataNotAvailableError (e.g. Kimi-K3 on gb300/sglang @ latest
+        # 0.5.16, whose megamoe family stops at 0.5.10). SGLang carries rows
+        # on several Blackwell systems; vLLM joins only for models WITH
+        # measured vLLM MegaMoE rows (today: Kimi-K3 only — DeepSeek-V4 has
+        # SGLang rows but none on vLLM) AND only where those rows resolve
+        # (today: gb300 @ 0.27.0).
+        # Explicit --backend <name> --moe-backend megamoe still builds anywhere.
+        backends_to_sweep = []
+        if _megamoe_perf_data_available(common.BackendName.sglang.value, system, backend_version):
+            backends_to_sweep.append(common.BackendName.sglang.value)
+        else:
+            logger.warning(
+                "Skipping sglang MegaMoE sweep: no measured MegaMoE rows resolve for system=%s backend_version=%s.",
+                system,
+                backend_version or "latest",
+            )
         from aiconfigurator.sdk.models.helpers import _is_kimi_k3_checkpoint
 
-        if _is_kimi_k3_checkpoint(model_path) and _vllm_megamoe_perf_data_available(system, backend_version):
+        if _is_kimi_k3_checkpoint(model_path) and _megamoe_perf_data_available(
+            common.BackendName.vllm.value, system, backend_version
+        ):
             backends_to_sweep.append(common.BackendName.vllm.value)
 
     if backend == "auto":
@@ -1830,14 +1841,14 @@ def build_default_tasks(
         if decode_system == system or not _database_mode_requires_declared_perf_database(database_mode):
             return True
         # The decode database needs its own measured MegaMoE rows; a decode
-        # system with vllm data but no MegaMoE table would die at query.
+        # system with framework data but no MegaMoE table would die at query.
         if (
-            backend_name == common.BackendName.vllm.value
+            backend_name in (common.BackendName.sglang.value, common.BackendName.vllm.value)
             and moe_backend == "megamoe"
-            and (not _vllm_megamoe_perf_data_available(decode_system, backend_version))
+            and (not _megamoe_perf_data_available(backend_name, decode_system, backend_version))
         ):
             logger.warning(
-                "Skipping disagg for backend %s: no measured vLLM MegaMoE rows for decode system %s.",
+                "Skipping disagg for backend %s: no measured MegaMoE rows for decode system %s.",
                 backend_name,
                 decode_system,
             )

@@ -118,6 +118,38 @@ def test_kimi_k3_megamoe_vllm_agg_answers_via_compiled_engine():
     assert megamoe_sources == {"silicon"}, f"megamoe sources: {megamoe_sources}"
 
 
+def test_kimi_k3_megamoe_sglang_gb300_latest_dies_at_measured_query():
+    """Why the CLI auto sweep must not seed the SGLang lane for Kimi/GB300.
+
+    The sglang megamoe family on gb300 stops at 0.5.10 (DeepSeek-V4-Pro rows),
+    so the latest declared sglang version (0.5.16) has no MegaMoE table: an
+    SGLang MegaMoE estimate built anyway dies at the measured query with
+    PerfDataNotAvailableError. build_default_tasks therefore omits the lane
+    (regression pair: test_auto_megamoe_kimi_gb300_... in test_cli_workflow.py).
+    """
+    from aiconfigurator.sdk import perf_database, rust_engine_step
+    from aiconfigurator.sdk.backends.factory import get_backend
+    from aiconfigurator.sdk.config import RuntimeConfig
+    from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+
+    version = perf_database.get_latest_database_version(system="gb300", backend="sglang")
+    database = perf_database.get_database("gb300", "sglang", version)
+    if not rust_engine_step.should_use_rust_engine_step(RuntimeConfig(), database):
+        pytest.skip("compiled engine unavailable: python fallback would mask the family-resolution regression")
+    model = models.get_model(
+        "moonshotai/Kimi-K3",
+        _model_config(moe_ep=16, attn_dp=16, moe_backend="megamoe"),
+        "sglang",
+    )
+    with pytest.raises(PerfDataNotAvailableError, match="DSv4 MegaMoE module data not loaded"):
+        get_backend("sglang").run_agg(
+            model=model,
+            database=database,
+            runtime_config=RuntimeConfig(isl=4000, osl=1000, batch_size=8),
+            ctx_tokens=4000,
+        )
+
+
 def test_kimi_k3_megamoe_rejects_unsupported_backend():
     with pytest.raises(ValueError, match="SGLang and vLLM"):
         models.get_model("moonshotai/Kimi-K3", _model_config(moe_backend="megamoe"), "trtllm")
