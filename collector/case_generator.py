@@ -2370,10 +2370,12 @@ _DSV4_MODULE_TP_SIZES = _as_int_list(_DSV4_CONFIG["module_tp_sizes"], field_name
 def _dsv4_module_budgets() -> dict:
     """Declared universal sweep budgets for the DSV4 module collectors.
 
-    Unresolvable declarations fail loudly (case_authoring.md): missing or
-    malformed budget fields raise instead of defaulting.
+    Declared at the BASE-OP layer (cases/base_ops/dsv4_attention.yaml —
+    op budgets are op-level facts, not model properties; case_authoring.md).
+    Unresolvable declarations fail loudly: missing or malformed budget
+    fields raise instead of defaulting.
     """
-    budgets = _DSV4_CONFIG["module_budgets"]
+    budgets = _required_base_common_case_values("dsv4_module_budgets")
     return {
         "max_seq_len": int(budgets["max_seq_len"]),
         "max_context_query_tokens": int(budgets["max_context_query_tokens"]),

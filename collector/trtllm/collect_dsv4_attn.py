@@ -238,11 +238,14 @@ def generation_request_geometry(seq_len: int) -> dict[str, int]:
     """Decode-request state triple, single-sourced so the serving invariant
     cannot drift between construction sites.
 
-    Serving population (model_engine.py generation branch @1.3.0rc23):
-    ``past_seen_token_num = request.max_beam_num_tokens - 1`` (:4148),
-    ``position_ids.extend(range(past_seen_token_num, ...))`` (:4164-4167) and
-    ``num_cached_tokens_per_seq.append(past_seen_token_num - ...)`` (:4168-4169)
-    — i.e. the new token's POSITION equals the PAST-SEEN/CACHED token count.
+    Serving population (model_engine.py ORDINARY decode branch @1.3.0rc23):
+    ``past_seen_token_num = request.max_beam_num_tokens - 1`` (:4308),
+    ``position_id = past_seen_token_num`` (:4315),
+    ``request.cached_tokens = past_seen_token_num`` (:4332) and
+    ``num_cached_tokens_per_seq.append(past_seen_token_num - ...)``
+    (:4333-4335) — i.e. the new token's POSITION equals the PAST-SEEN/CACHED
+    token count. (The extend/spec-decode branch at :4148,4164-4169 keeps the
+    same invariant; this collector's cases are ordinary decode.)
     The collector's decode dummy request registers ``seq_len + 1`` beam tokens
     (``request_tokens = max_seq = seq_len + 1``), so past-seen == cached ==
     position == ``seq_len``, and the persisted row ``step`` (past-KV length,
@@ -445,12 +448,17 @@ def create_dsv4_kv_cache_and_metadata(
     device: str = "cuda:0",
 ):
     """DSV4 cache manager + attention metadata, following the serving
-    construction path (pyexecutor/_util.py::_create_kv_cache_manager and
-    model_engine.py::_set_up_attn_metadata @runtime version) exactly like
-    collect_mla_module.create_kv_cache_and_metadata does for MLA/DSA —
-    every hand-set field below inherits that file's serving citations
-    (prompt_lens chunk-local semantics, cached-KV flags), re-verified for
-    the DSV4 metadata subclass at bring-up on 1.3.0rc23.
+    construction path with a DIRECT pinned citation on every hand-set field
+    (layer_permissions.md metadata-parity rule; audited against TensorRT-LLM
+    1.3.0rc23 sources, 2026-08-19):
+
+    - manager construction  -> pyexecutor/_util.py:1843-1867 (is_mla branch)
+    - Metadata construction -> pyexecutor/model_engine.py:2475-2489
+      (_set_up_attn_metadata)
+    - per-batch field population -> model_engine.py:3257-3271
+      (prompt_lens/num_contexts/KVCacheParams/prepare), context requests
+      :3960-3998 (begin_compute = past-seen prefix), ordinary decode
+      requests :4308-4337 (past_seen/position/cached/prompt_len)
     """
     from tensorrt_llm._torch.attention_backend.interface import (
         AttentionRuntimeFeatures,
@@ -530,10 +538,11 @@ def create_dsv4_kv_cache_and_metadata(
     # resolution from kv_cache_quant_algo (set by _apply_gemm_type_quant).
     kv_cache_dtype = DataType.FP8
 
-    # Serving construction site: pyexecutor/_util.py is_mla branch
-    # (@1.3.0rc23: head_dim=kv_lora_rank+qk_rope_head_dim, num_kv_heads=1,
-    # dtype=kv_cache_dtype, vocab_size=config.vocab_size,
-    # sparse_attention_config + pretrained_config forwarded).
+    # Serving construction site: pyexecutor/_util.py:1843-1867 @1.3.0rc23
+    # (is_mla branch): CacheType.SELFKONLY :1846, num_kv_heads=1 :1848,
+    # head_dim=kv_lora_rank+qk_rope_head_dim :1849, dtype=kv_cache_dtype,
+    # vocab_size=config.vocab_size :1856, sparse_attention_config :1862,
+    # pretrained_config + layer_mask forwarded (single-layer here).
     kv_cache_manager = kv_cache_manager_cls(
         kv_cache_config,
         CacheType.SELFKONLY,
@@ -559,8 +568,11 @@ def create_dsv4_kv_cache_and_metadata(
     try:
         request_ids = list(range(batch_size))
         token_nums = [request_tokens] * batch_size
-        # is_gen mirrors the request phase (KVCacheManagerV2.add_dummy_requests;
-        # generation metadata below declares num_contexts=0 with cached KV).
+        # add_dummy_requests is serving's own warmup-request mechanism
+        # (model_engine.py:2141-2160, :2277, :2300 @1.3.0rc23 register dummy
+        # requests the same way before capture/warmup); is_gen mirrors the
+        # request phase (generation metadata below declares num_contexts=0
+        # with cached KV).
         kv_cache_manager.add_dummy_requests(request_ids, token_nums, is_gen=not is_context)
 
         attention_cls = get_attention_backend(
@@ -572,31 +584,52 @@ def create_dsv4_kv_cache_and_metadata(
             pretrained_config=config
         )
 
+        # Constructor kwargs mirror _set_up_attn_metadata
+        # (model_engine.py:2475-2489 @1.3.0rc23); per-batch fields mirror the
+        # _prepare_tp_inputs population sites cited per field below.
         attn_metadata = attention_cls.Metadata(
+            # max_num_requests=batch_size / max_num_tokens: engine capacity
+            # bounds (model_engine.py:2476-2477); sized to this one batch.
             max_num_requests=batch_size,
             max_num_tokens=total_tokens,
             kv_cache_manager=kv_cache_manager,
             mapping=mapping,
+            # seq_lens: per-request current-step token counts — context
+            # appends the fresh chunk length, decode appends 1
+            # (model_engine.py context :3960-3998 / decode :4308-4341).
             seq_lens=torch.tensor([seq_len_q] * batch_size, dtype=torch.int32),
             position_ids=None,
+            # num_contexts: count of context-phase requests in the batch
+            # (ordinary decode batches carry 0, model_engine.py:3259-3263).
             num_contexts=batch_size if is_context else 0,
+            # num_cached_tokens_per_seq: context = begin_compute prefix
+            # (:3973-3976); decode = past_seen - compressed (:4333-4335,
+            # compressed offset 0 for these single-layer dummy weights).
             kv_cache_params=KVCacheParams(
                 use_cache=True,
                 num_cached_tokens_per_seq=[kv_cache_len] * batch_size,
             ),
             cross=None,
             request_ids=request_ids,
-            # Chunk-local prompt_lens + cached-KV flags: see the serving
-            # citations in collect_mla_module.create_kv_cache_and_metadata
-            # (model_engine.py prompt_tokens slicing / cache-reuse state).
+            # prompt_lens: context = chunk-local fresh length (:3960-3972,
+            # the SM100 cached-KV walker consumes chunk-local semantics);
+            # decode = py_prompt_len ~ past KV for these dummy requests
+            # (:4336).
             prompt_lens=[seq_len_q if is_context else kv_cache_len] * batch_size,
+            # cached-KV context flag: is_mla AND cache_reuse|chunked_prefill
+            # (model_engine.py:2419-2422) — true here exactly for
+            # prefix-carrying context cases.
             enable_context_mla_with_cached_kv=bool(is_context and prefix_len > 0),
             runtime_features=AttentionRuntimeFeatures(
                 chunked_prefill=False,
                 cache_reuse=bool(is_context and prefix_len > 0),
             ),
+            # all_rank_num_tokens stays None: attention-DP only
+            # (model_engine.py:3280-3283); single-process collection.
             all_rank_num_tokens=None,
             workspace=torch.tensor([], device=device, dtype=torch.int8),
+            # sparse_metadata_params: same to_sparse_metadata_params call
+            # serving makes (model_engine.py:2442-2446).
             sparse_metadata_params=sparse_metadata_params,
         )
 
@@ -690,9 +723,10 @@ def run_dsv4_attn(
         else:
             num_tokens = batch_size
             # position == past-seen/cached count, NOT seq_len - 1: see
-            # generation_request_geometry (model_engine.py:4148,4164-4169
-            # @1.3.0rc23). Off-by-one here rotates rope one step early; it
-            # does not change kernel shapes or measured cost.
+            # generation_request_geometry (ordinary decode,
+            # model_engine.py:4308,4315,4332-4335 @1.3.0rc23). Off-by-one
+            # here rotates rope one step early; it does not change kernel
+            # shapes or measured cost.
             position_ids = torch.full(
                 (batch_size,),
                 generation_request_geometry(seq_len)["position"],

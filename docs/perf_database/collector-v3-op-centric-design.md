@@ -300,10 +300,10 @@ missing. The migrated tree carries a small set of these (l40s), each with a
 
 This channel is also what makes per-op pinning cheap: on a scheduled upgrade
 to 0.5.15, families whose kernels did not move are not recollected — each gets
-a one-entry `reuse.yaml` backed by the evidence policy (§9: kernel-identity
-evidence from the #1345 facts registry plus a spot benchmark on one system per
-SM generation), and the fleet-wide GPU cost of the upgrade shrinks to the
-families that actually changed.
+a one-entry `reuse.yaml` under the evidence policy (§9 as revised 2026-08-19:
+an explicit `approved_by` owner sign-off; kernel-identity facts and spot
+benchmarks are optional strengthening), and the fleet-wide GPU cost of the
+upgrade shrinks to the families that actually changed.
 
 ### 6.4 Channel 3 — cross-framework fill (kernel-identity gated)
 
@@ -495,17 +495,18 @@ data. V3 makes that cycle computed and mostly declarative:
    the evidence policy (§9) allows exactly two moves: recollect the family's
    tables inside the new pinned image (new
    `data/<system>/<family>/<backend>/<new_version>/` dirs with provenance), or
-   declare reuse (`reuse.yaml` ← previous quarter's version) backed by
-   kernel-identity evidence from the #1345 facts plus a spot benchmark per SM
-   generation. How to choose, per changed family:
+   declare reuse (`reuse.yaml` ← previous quarter's version) with an explicit
+   `approved_by` owner sign-off (§9 as revised 2026-08-19). How to choose,
+   per changed family:
 
    1. **Default: recollect.** Fresh collection is always valid and needs no
       extra justification.
-   2. **Reuse is allowed only if BOTH hold:** the kernel-identity facts
-      (#1345) show the family's kernels are the same before and after the
-      pin bump, AND a spot benchmark on one system per SM generation
-      confirms it (median latency delta within the policy threshold).
-   3. **If either check fails, recollect.** This is a plan-time decision:
+   2. **Reuse is an owner-accepted approximation.** The declaration's
+      `reason` states the known facts honestly (kernel-identity notes and
+      spot benchmarks are optional strengthening — recommended when the
+      framework diff touches the family's dispatch); the owner sign-off is
+      the acceptance of the residual risk.
+   3. **When the owner declines the risk, recollect.** This is a plan-time decision:
       the data PR ships one move or the other, the evidence gate verifies
       whichever was shipped, and the loader never switches between them at
       query time.

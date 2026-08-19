@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Evidence-gate exceptions (Collector V3 design §9 "Exceptions"): scoped,
+# approved, expiring waivers against resolver-emitted requirements. The
+# enforcing CI gate is a tracked deliverable; until it lands these entries
+# are consumed by human review against `evidence_check.py` output.
+
+schema_version: 1
+exceptions:
+
+# --- PR #1486: shared-file manifest fan-out ------------------------------
+# The changed-op manifest flags every family whose hash closure includes a
+# shared file. This PR's shared-file edits are: (a) the derive_table_status
+# semantics change (metadata-only; alters no case expansion and no kernel
+# invocation), (b) the DSV4 budget relocation into the base-op layer (DSV4
+# plan hashes verified bit-identical to the shipped sidecars; no other
+# family reads those fields), (c) comment-level edits to
+# kernel_source_backends.yaml, and (d) collect.py checkpoint/finalize
+# mechanics. None alter another family's case plan or invoked kernels; the
+# full collector unit corpus (3,696 tests) is green on the merged tree.
+- scope:
+    reasons: [collector_code, case_plan]
+    frameworks: [sglang, vllm, trtllm, wideep_sglang, wideep_trtllm]
+    note: >-
+      Applies to every (framework, family) pair whose ONLY change reasons
+      are the shared-file edits above — i.e. all manifest entries except
+      trtllm/sparse_attention and trtllm/moe, whose fresh rc23 silicon is
+      shipped in this PR.
+  requirement_waived: [before_after_diff, collect_new_cases_only]
+  reason: shared-file no-op fan-out; plan-preserving refactors (see note)
+  approved_by: tianhaox
+  expires: 2026-10-31
+
+# --- PR #1486: Blackwell mHC fused_hc serving-path parity ----------------
+# Owner decision (tianhaox, 2026-08-19/20): the fused_hc collection on
+# SM100/103 is REJECTED for now. The shipped mhc_module_perf tables measure
+# the unfused pre_mapping + post_mapping path on every SM (kernel_source
+# labels record this); rc23 Blackwell serving defaults to fused_hc, so
+# default Blackwell mHC predictions carry a bounded, conservative
+# (cost-overestimating) approximation — measured share: mHC is 9-14% of the
+# DSV4 per-layer cost on b200 (attn+moe+mhc at 128/4k/16k tokens). No
+# Blackwell fused/unfused A/B is attached; the owner accepts the unbounded
+# fraction of that share explicitly. Follow-up (fused table + SDK consumer
+# switch) is tracked in PR #1486.
+- scope:
+    rule: serving-dispatch parity (layer_permissions.md) for mhc on SM100/103
+    tables: [mhc_module_perf]
+    systems: [b200_sxm, b300_sxm, gb200, gb300]
+  requirement_waived: [fused-path collection / consumer-visible fused identity]
+  reason: owner-rejected follow-up; approximation documented in the collector docstring and PR
+  approved_by: tianhaox
+  expires: 2026-10-31
