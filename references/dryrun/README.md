@@ -1,20 +1,19 @@
-# Dry-run evidence JSONs
+# Dry-run evidence summaries
 
-Raw probe outputs from REAL framework loads of depth-cut dummy variants (one
-JSON per layer-kind variant × quant identity; GLM-5.2 family, sglang 0.5.16,
-SM90, tp1). These are the single evidence artifact for model facts — there is
-no intermediate "recipe" format.
+Distilled evidence from REAL framework loads, one small YAML per
+(model, framework version, platform): per layer kind, the per-module
+quant-method classes, the runtime MoE / dense-MLP shape, the kv identity, and
+compact prefill-branch evidence (kernel switch + the config threshold
+candidate). Provenance points back to the raw probe traces.
 
-Each JSON records: per-module quant-method classes, full parameter shapes,
-resolved server args (kv dtype, attention backends), and ordered per-op traces
-with tensor shapes / kernels / framework call paths per (phase, batch, isl).
+These are summarized material, not raw data: the probe's full trace JSONs
+(ordered op sequences, kernel timings, call paths, weight tables;
+~100-180KB per variant) stay in the facts archive (opharness workspace) and
+are deliberately NOT checked in. `summarize_dryruns` in
+`aiconfigurator_core.sdk.models.facts` is the single owner of this format —
+re-run it over refreshed traces to regenerate a summary.
 
-Consumed by `aiconfigurator_core.sdk.models.facts.check_facts_against_dryrun`
-(validating the hf→config conversion) and readable as authoring evidence when
-writing or updating a model class ("what does the framework actually execute
-for this checkpoint"). Identity matters: a JSON validates facts for its own
+Consumed by `check_facts_against_dryrun` (validating the hf→config
+conversion) and readable as authoring evidence when writing or updating a
+model class. Identity matters: a summary validates facts for its own
 (framework version, platform, quant identity) only.
-
-Produced by the opharness probe (`probe/recipe_probe.py` there); regeneration
-is one containerized dummy load per variant (~5 min bf16, +DeepGEMM JIT for
-fp8). Candidate `collector/` stage if this direction is funded.

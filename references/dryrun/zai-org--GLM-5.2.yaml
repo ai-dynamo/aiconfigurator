@@ -1,0 +1,70 @@
+schema: aic-dryrun-summary/v1
+model: zai-org/GLM-5.2
+framework:
+  name: sglang
+  version: 0.5.16
+platform: sm90
+tp: 1
+kv_cache_dtype: bfloat16
+layer_kinds:
+  full_indexer_dense:
+    quant_by_module:
+      mlp.down_proj: UnquantizedLinearMethod
+      mlp.gate_up_proj: UnquantizedLinearMethod
+      self_attn.fused_qkv_a_proj_with_mqa: UnquantizedLinearMethod
+      self_attn.indexer.wk_weights_proj: UnquantizedLinearMethod
+      self_attn.indexer.wq_b: UnquantizedLinearMethod
+      self_attn.kv_b_proj: UnquantizedLinearMethod
+      self_attn.o_proj: UnquantizedLinearMethod
+      self_attn.q_b_proj: UnquantizedLinearMethod
+    dense_mlp:
+      inter: 12288
+    prefill_branch:
+      isl32: cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAttnFwd
+      isl4096: sm90::fwd::sparse_attn_fwd_kernel<sm90::fwd::KernelTemplate<576, false
+      threshold_candidates:
+        index_topk: 2048
+  full_indexer_moe:
+    quant_by_module:
+      mlp.experts: UnquantizedFusedMoEMethod
+      self_attn.fused_qkv_a_proj_with_mqa: UnquantizedLinearMethod
+      self_attn.indexer.wk_weights_proj: UnquantizedLinearMethod
+      self_attn.indexer.wq_b: UnquantizedLinearMethod
+      self_attn.kv_b_proj: UnquantizedLinearMethod
+      self_attn.o_proj: UnquantizedLinearMethod
+      self_attn.q_b_proj: UnquantizedLinearMethod
+    moe_runtime:
+      num_experts: 257
+      inter: 2048
+      router_width: 256
+      topk: 9
+    prefill_branch:
+      isl32: cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAttnFwd
+      isl4096: sm90::fwd::sparse_attn_fwd_kernel<sm90::fwd::KernelTemplate<576, false
+      threshold_candidates:
+        index_topk: 2048
+  shared_indexer_moe:
+    quant_by_module:
+      mlp.experts: UnquantizedFusedMoEMethod
+      self_attn.fused_qkv_a_proj_with_mqa: UnquantizedLinearMethod
+      self_attn.indexer.wk_weights_proj: UnquantizedLinearMethod
+      self_attn.indexer.wq_b: UnquantizedLinearMethod
+      self_attn.kv_b_proj: UnquantizedLinearMethod
+      self_attn.o_proj: UnquantizedLinearMethod
+      self_attn.q_b_proj: UnquantizedLinearMethod
+    moe_runtime:
+      num_experts: 257
+      inter: 2048
+      router_width: 256
+      topk: 9
+    prefill_branch:
+      isl32: cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAttnFwd
+      isl4096: sm90::fwd::sparse_attn_fwd_kernel<sm90::fwd::KernelTemplate<576, false
+      threshold_candidates:
+        index_topk: 2048
+provenance:
+  probe: opharness probe/recipe_probe.py
+  traces:
+  - /work/dummy_models/glm/GLM-5.2__full_indexer_dense
+  - /work/dummy_models/glm/GLM-5.2__full_indexer_moe
+  - /work/dummy_models/glm/GLM-5.2__shared_indexer_moe

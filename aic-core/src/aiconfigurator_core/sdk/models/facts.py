@@ -302,8 +302,18 @@ def assemble_model_facts(
 
 
 # ---------------------------------------------------------------------------
-# Check 1: facts vs dry-run evidence (real framework loads).
+# Dry-run evidence: distilled summaries, not raw dumps.
+#
+# The probe's raw trace JSON (~100-180KB per variant: ordered op sequences,
+# kernel timings, call paths, full weight tables) belongs to the facts
+# archive. What the repo carries — and what checks consume — is the DISTILLED
+# summary: per layer kind, the per-module quant classes, the runtime MoE /
+# dense-MLP shape, the kv identity, and compact branch evidence, plus
+# provenance pointing back to the raw traces. ``summarize_dryruns`` is the
+# single owner of that format (producer and consumer live together).
 # ---------------------------------------------------------------------------
+
+DRYRUN_SUMMARY_SCHEMA = "aic-dryrun-summary/v1"
 
 
 def _parse_shape(s: str | None) -> tuple[str | None, list[int]]:
@@ -312,7 +322,7 @@ def _parse_shape(s: str | None) -> tuple[str | None, list[int]]:
 
 
 def _norm_module(name: str) -> str:
-    return _LAYER_RE.sub("model.layers.*.", name)
+    return _LAYER_RE.sub("", name).removeprefix("model.layers.")
 
 
 def _dryrun_kind(rec: dict) -> str:
@@ -330,77 +340,148 @@ def _dryrun_topk(rec: dict) -> int | None:
     return None
 
 
-def check_facts_against_dryrun(facts: ModelFacts, dryrun_paths: list[str | Path]) -> FactCheckReport:
-    """Validate config-derived facts against dry-run trace JSONs (one JSON per
-    dummy layer-kind variant, produced by the probe on a real framework load).
+def _prefill_attn_kernels(rec: dict) -> dict[int, str]:
+    """isl -> leading attention kernel per traced prefill phase (branch evidence)."""
+    out: dict[int, str] = {}
+    for key, phase in (rec.get("phases") or {}).items():
+        m = re.match(r"prefill:.*isl(\d+)", key)
+        if not m:
+            continue
+        for o in phase.get("ops") or []:
+            if o.get("span", "").startswith("AIC::attn::") and o.get("depth") == 1 and o.get("kernels"):
+                out[int(m.group(1))] = next(iter(o["kernels"])).removeprefix("void ")[:70]
+                break
+    return out
 
-    Reports per fact area; layer kinds without any dry-run evidence come back
-    ``UNCHECKED`` (coverage is targets.yaml's job — surface, never silence).
+
+def summarize_dryruns(raw_records: list[dict]) -> dict:
+    """Distill raw probe trace records (one per layer-kind variant) into the
+    per-model evidence summary the checks consume. Deterministic; re-run it
+    whenever traces are refreshed."""
+    if not raw_records:
+        raise FactsGapError("no dry-run records to summarize")
+    first = raw_records[0]
+    summary: dict = {
+        "schema": DRYRUN_SUMMARY_SCHEMA,
+        "model": Path(first.get("model_path", "")).name.split("__")[0],
+        "framework": {"name": "sglang", "version": first.get("sglang_version")},
+        "platform": "sm90",
+        "tp": first.get("tp", 1),
+        "kv_cache_dtype": (first.get("server_args_resolved") or {}).get("kv_cache_dtype"),
+        "layer_kinds": {},
+        "provenance": {"probe": "opharness probe/recipe_probe.py",
+                       "traces": [rec.get("model_path") for rec in raw_records]},
+    }
+    for rec in raw_records:
+        kind = _dryrun_kind(rec)
+        qmods = {}
+        for mod, cls in (rec.get("quant_methods_by_module") or {}).items():
+            key = _norm_module(mod)
+            if key.startswith(("self_attn.", "mlp.")):
+                if qmods.get(key, cls) != cls:
+                    raise FactsGapError(f"{kind}: quant class differs across layers for {key}")
+                qmods[key] = cls
+        entry: dict = {"quant_by_module": dict(sorted(qmods.items()))}
+        w13 = next((v for k, v in (rec.get("weights") or {}).items()
+                    if "mlp.experts.w13_weight" in k), None)
+        _, w13_shape = _parse_shape(w13)
+        if len(w13_shape) == 3:
+            gate = next((v for k, v in (rec.get("weights") or {}).items()
+                         if "mlp.gate.weight" in k), None)
+            entry["moe_runtime"] = {
+                "num_experts": w13_shape[0], "inter": w13_shape[1] // 2,
+                "router_width": _parse_shape(gate)[1][0] if gate else w13_shape[0],
+                "topk": _dryrun_topk(rec),
+            }
+        gu = next((v for k, v in (rec.get("weights") or {}).items()
+                   if "mlp.gate_up_proj.weight" in k), None)
+        if gu:
+            entry["dense_mlp"] = {"inter": _parse_shape(gu)[1][0] // 2}
+        kernels_by_isl = _prefill_attn_kernels(rec)
+        if len(kernels_by_isl) >= 2:
+            lo, hi = min(kernels_by_isl), max(kernels_by_isl)
+            if kernels_by_isl[lo] != kernels_by_isl[hi]:
+                branch_params = (rec.get("model_config") or {}).get("branch_params") or {}
+                entry["prefill_branch"] = {
+                    f"isl{lo}": kernels_by_isl[lo], f"isl{hi}": kernels_by_isl[hi],
+                    # only config scalars that lie between the two probed lengths
+                    # can be the switch threshold (dummy-variant fields filtered out)
+                    "threshold_candidates": {k: v for k, v in branch_params.items()
+                                             if isinstance(v, int) and lo <= v < hi},
+                }
+        summary["layer_kinds"][kind] = entry
+    return summary
+
+
+def check_facts_against_dryrun(facts: ModelFacts, summary: dict | str | Path) -> FactCheckReport:
+    """Validate config-derived facts against a distilled dry-run summary
+    (``summarize_dryruns`` output; see ``references/dryrun/``).
+
+    Reports per fact area; layer kinds without evidence come back ``UNCHECKED``
+    (coverage is the probe target matrix's job — surface, never silence).
     """
-    report = FactCheckReport(subject=f"{facts.model_path} facts vs {len(dryrun_paths)} dry-run JSONs")
-    recs = [json.loads(Path(p).read_text()) for p in dryrun_paths]
-    by_kind = {_dryrun_kind(r): r for r in recs}
+    if not isinstance(summary, dict):
+        import yaml
 
-    unknown = sorted(set(by_kind) - set(facts.layer_kinds))
+        summary = yaml.safe_load(Path(summary).read_text())
+    kinds_ev: dict = summary.get("layer_kinds") or {}
+    report = FactCheckReport(subject=f"{facts.model_path} facts vs dry-run summary "
+                                     f"({summary.get('framework', {}).get('version')}, "
+                                     f"{summary.get('platform')})")
+
+    unknown = sorted(set(kinds_ev) - set(facts.layer_kinds))
     if unknown:
         report.findings.append(FactFinding(
             "coverage/kinds", DIVERGENT,
             f"dry-run kinds {unknown} do not exist in config-derived taxonomy "
             f"{sorted(facts.layer_kinds)}"))
-    for kind in sorted(set(facts.layer_kinds) - set(by_kind)):
+    for kind in sorted(set(facts.layer_kinds) - set(kinds_ev)):
         report.findings.append(FactFinding(
             "coverage/kinds", UNCHECKED,
             f"layer kind '{kind}' ({facts.layer_kinds[kind]} layers) has no dry-run evidence"))
 
-    for kind, rec in sorted(by_kind.items()):
+    kv_traced = KV_BY_DTYPE.get(summary.get("kv_cache_dtype"))
+    report.findings.append(FactFinding(
+        "identity/kv", MATCH if kv_traced == facts.quant["kvcache"] else DIVERGENT,
+        f"facts kv {getattr(facts.quant['kvcache'], 'name', None)} vs framework "
+        f"{getattr(kv_traced, 'name', None)}"))
+
+    for kind, ev in sorted(kinds_ev.items()):
         if kind not in facts.layer_kinds:
             continue
-        area = f"{kind}"
-        # kv identity
-        kv_traced = KV_BY_DTYPE.get((rec.get("server_args_resolved") or {}).get("kv_cache_dtype"))
-        report.findings.append(FactFinding(
-            f"kv/{area}", MATCH if kv_traced == facts.quant["kvcache"] else DIVERGENT,
-            f"facts kv {getattr(facts.quant['kvcache'], 'name', None)} vs framework "
-            f"{getattr(kv_traced, 'name', None)}"))
-        # per-module quant classes vs the resolved gemm mode (attention projections)
-        qmods = {_norm_module(k): v for k, v in (rec.get("quant_methods_by_module") or {}).items()}
-        o_cls = next((c for m, c in qmods.items() if "self_attn.o_proj" in m), None)
+        o_cls = (ev.get("quant_by_module") or {}).get("self_attn.o_proj")
         if o_cls is not None:
             traced_gemm = GEMM_QUANT_BY_CLASS.get(o_cls)
             report.findings.append(FactFinding(
-                f"quant/{area}",
+                f"quant/{kind}",
                 MATCH if traced_gemm == facts.quant["gemm"] else DIVERGENT,
                 f"facts gemm {getattr(facts.quant['gemm'], 'name', None)} vs framework "
-                f"attention projections {o_cls} ({getattr(traced_gemm, 'name', '?')})"))
-        # runtime MoE shape vs config-derived (fused shared expert -> declared approx)
-        if kind.endswith("_moe") or kind == "moe":
-            w13 = next((v for k, v in (rec.get("weights") or {}).items()
-                        if "mlp.experts.w13_weight" in k), None)
-            _, w13_shape = _parse_shape(w13)
-            topk_rt = _dryrun_topk(rec)
-            if facts.moe and len(w13_shape) == 3 and topk_rt is not None:
-                cfg = facts.moe
-                fused = (w13_shape[0] == cfg["num_routed"] + cfg["n_shared"]
-                         and topk_rt == cfg["topk"] + cfg["n_shared"])
-                exact = w13_shape[0] == cfg["num_routed"] and topk_rt == cfg["topk"]
-                inter_ok = w13_shape[1] // 2 == cfg["inter"]
-                if exact and inter_ok:
-                    status, note = MATCH, "runtime MoE matches config decomposition"
-                elif fused and inter_ok and "fused_shared_expert_decomposed" in facts.approximations:
-                    status = APPROX
-                    note = (f"runtime fuses shared expert: ({w13_shape[0]} experts, topk {topk_rt}) "
-                            f"vs config ({cfg['num_routed']}, {cfg['topk']}, +{cfg['n_shared']} shared) "
-                            f"— declared approximation 'fused_shared_expert_decomposed'")
-                else:
-                    status = DIVERGENT
-                    note = (f"runtime MoE ({w13_shape[0]} experts, topk {topk_rt}, "
-                            f"inter {w13_shape[1] // 2}) matches neither config "
-                            f"({cfg['num_routed']}, {cfg['topk']}, inter {cfg['inter']}) nor a "
-                            f"declared approximation")
-                report.findings.append(FactFinding(f"moe/{area}", status, note))
-            else:
+                f"attention projections {o_cls}"))
+        rt = ev.get("moe_runtime")
+        if rt is not None:
+            if not facts.moe:
                 report.findings.append(FactFinding(
-                    f"moe/{area}", UNCHECKED, "runtime MoE shape not extractable from dry-run JSON"))
+                    f"moe/{kind}", DIVERGENT, "framework runs MoE but facts derive none"))
+                continue
+            cfg = facts.moe
+            fused = (rt["num_experts"] == cfg["num_routed"] + cfg["n_shared"]
+                     and rt.get("topk") == cfg["topk"] + cfg["n_shared"])
+            exact = rt["num_experts"] == cfg["num_routed"] and rt.get("topk") == cfg["topk"]
+            inter_ok = rt["inter"] == cfg["inter"]
+            if exact and inter_ok:
+                status, note = MATCH, "runtime MoE matches config decomposition"
+            elif fused and inter_ok and "fused_shared_expert_decomposed" in facts.approximations:
+                status = APPROX
+                note = (f"runtime fuses shared expert: ({rt['num_experts']} experts, topk "
+                        f"{rt.get('topk')}) vs config ({cfg['num_routed']}, {cfg['topk']}, "
+                        f"+{cfg['n_shared']} shared) — declared approximation "
+                        f"'fused_shared_expert_decomposed'")
+            else:
+                status = DIVERGENT
+                note = (f"runtime MoE ({rt['num_experts']} experts, topk {rt.get('topk')}, "
+                        f"inter {rt['inter']}) matches neither config ({cfg['num_routed']}, "
+                        f"{cfg['topk']}, inter {cfg['inter']}) nor a declared approximation")
+            report.findings.append(FactFinding(f"moe/{kind}", status, note))
     return report
 
 

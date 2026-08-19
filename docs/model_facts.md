@@ -28,9 +28,12 @@ HF config ──► assemble_model_facts(model_path, model_config, backend, syst
 ```
 
 Checks report `MATCH / APPROX / DIVERGENT / UNCHECKED`, never block, and run
-at authoring time + CI — not in the build hot path. The evidence artifact is
-the **raw dry-run JSON** (real framework loads of depth-cut dummy variants,
-`references/dryrun/`); there is no intermediate format.
+at authoring time + CI — not in the build hot path. The evidence artifact is a
+**distilled dry-run summary** (`references/dryrun/*.yaml`, ~70 lines per
+model: per-kind quant classes, runtime MoE/dense shapes, kv identity, branch
+evidence) produced by `summarize_dryruns` from the probe's raw traces — the
+raw dumps (op sequences, kernel timings, call paths, weight tables) stay in
+the facts archive and are not checked in.
 
 ## Declared approximations (facts vs modeling, both owner decisions)
 

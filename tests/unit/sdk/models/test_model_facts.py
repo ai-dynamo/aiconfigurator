@@ -26,6 +26,7 @@ from aiconfigurator.sdk.models import (
     check_model_against_facts,
     get_model,
     resolve_model_quant_modes,
+    summarize_dryruns,
 )
 
 pytestmark = pytest.mark.unit
@@ -41,8 +42,8 @@ def _mc(tp: int = 1) -> config.ModelConfig:
     return config.ModelConfig(tp_size=tp, moe_tp_size=tp, moe_ep_size=1)
 
 
-def _dryruns(prefix: str) -> list[Path]:
-    return sorted(_DRYRUN.glob(f"{prefix}__*.tp1.json"))
+def _summary(model: str) -> Path:
+    return _DRYRUN / f"{model.replace('/', '--')}.yaml"
 
 
 def _statuses(report, area_prefix):
@@ -87,10 +88,10 @@ def test_compile_engine_applies_system_aware_resolution(monkeypatch):
 
 def test_facts_vs_dryrun_glm52():
     facts = assemble_model_facts(_GLM, _mc(), "sglang", system_name="b200_sxm")
-    report = check_facts_against_dryrun(facts, _dryruns("GLM-5.2"))
+    report = check_facts_against_dryrun(facts, _summary(_GLM))
     # all three config-derived kinds have evidence; kv and quant agree
     assert not any(f.status == "UNCHECKED" and f.area.startswith("coverage") for f in report.findings)
-    assert _statuses(report, "kv/") == {"MATCH"}
+    assert _statuses(report, "identity/kv") == {"MATCH"}
     assert _statuses(report, "quant/") == {"MATCH"}
     # runtime fuses the shared expert -> recognized as the declared approximation
     assert _statuses(report, "moe/") == {"APPROX"}
@@ -98,10 +99,50 @@ def test_facts_vs_dryrun_glm52():
 
 
 def test_facts_vs_dryrun_missing_kind_is_surfaced():
+    import yaml
+
     facts = assemble_model_facts(_GLM, _mc(), "sglang", system_name="b200_sxm")
-    partial = [p for p in _dryruns("GLM-5.2") if "dense" not in p.name]
+    partial = yaml.safe_load(_summary(_GLM).read_text())
+    del partial["layer_kinds"]["full_indexer_dense"]
     report = check_facts_against_dryrun(facts, partial)
     assert any(f.status == "UNCHECKED" and "full_indexer_dense" in f.detail for f in report.findings)
+
+
+def test_summarize_dryruns_distills_raw_probe_records():
+    """The summary format has one owner: this distiller. Pin what it keeps
+    (quant classes, runtime shapes, branch evidence) and what it drops
+    (op sequences, kernel timings, weight tables)."""
+    raw = {
+        "model_path": "/work/dummy_models/glm/Fake-1B__moe",
+        "sglang_version": "0.5.16", "tp": 1,
+        "server_args_resolved": {"kv_cache_dtype": "fp8_e4m3"},
+        "model_config": {"branch_params": {"index_topk": 2048, "index_topk_freq": 4}},
+        "quant_methods_by_module": {
+            "model.layers.0.self_attn.o_proj": "Fp8LinearMethod",
+            "model.layers.1.self_attn.o_proj": "Fp8LinearMethod",
+            "model.layers.0.mlp.experts": "Fp8MoEMethod",
+            "model.embed_tokens": "UnquantizedEmbeddingMethod",  # non-layer: dropped
+        },
+        "weights": {"model.layers.0.mlp.experts.w13_weight": "float8_e4m3fn[9, 512, 128]",
+                    "model.layers.0.mlp.gate.weight": "bfloat16[8, 128]"},
+        "phases": {
+            "prefill:b2_isl32": {"ops": [
+                {"span": "AIC::attn::X.forward_extend::m", "depth": 1, "kernels": {"void fa3_kernel<a>": {}}}]},
+            "prefill:b1_isl4096": {"ops": [
+                {"span": "AIC::attn::X.forward_extend::m", "depth": 1, "kernels": {"void sparse_kernel<b>": {}}}]},
+            "decode:b2_isl32": {"ops": [
+                {"span": "AIC::moe::f", "depth": 1, "in": ["topk_output.topk_ids=int32[2, 3]"]}]},
+        },
+    }
+    s = summarize_dryruns([raw])
+    kind = s["layer_kinds"]["moe"]
+    assert kind["quant_by_module"] == {"mlp.experts": "Fp8MoEMethod",
+                                       "self_attn.o_proj": "Fp8LinearMethod"}
+    assert kind["moe_runtime"] == {"num_experts": 9, "inter": 256, "router_width": 8, "topk": 3}
+    assert kind["prefill_branch"]["threshold_candidates"] == {"index_topk": 2048}
+    assert kind["prefill_branch"]["isl32"].startswith("fa3_kernel")
+    assert s["kv_cache_dtype"] == "fp8_e4m3"
+    assert "weights" not in s and "phases" not in s  # raw bulk stays in the archive
 
 
 def test_hand_model_vs_facts_glm52():

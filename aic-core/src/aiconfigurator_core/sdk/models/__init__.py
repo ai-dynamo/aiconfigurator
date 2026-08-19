@@ -190,6 +190,7 @@ from aiconfigurator_core.sdk.models.facts import (
     check_facts_against_dryrun,
     check_model_against_facts,
     resolve_model_quant_modes,
+    summarize_dryruns,
 )
 
 __all__ = [
@@ -223,6 +224,7 @@ __all__ = [
     "get_model",
     "get_model_family",
     "resolve_model_quant_modes",
+    "summarize_dryruns",
     "mtp_scale_factor",
     "resolve_context_fmha_by_data",
     "resolve_dsv4_moe_arch",
