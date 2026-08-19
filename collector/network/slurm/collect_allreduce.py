@@ -44,7 +44,9 @@ class NCCLProfiler:
 
 
 world_size = int(os.environ["SLURM_NTASKS"])
-rank = int(os.environ["RANK"])
+# srun exports the per-task rank as SLURM_PROCID, not RANK; honor an explicit
+# RANK (torchrun-style launch) and otherwise fall back to the Slurm variable.
+rank = int(os.environ.get("RANK") or os.environ["SLURM_PROCID"])
 gpus_per_node = int(os.environ["SLURM_NTASKS_PER_NODE"])
 local_rank = int(os.environ["SLURM_LOCALID"])
 
