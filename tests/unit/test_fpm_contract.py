@@ -72,6 +72,8 @@ def test_fpm_validate_benchmark_output_path_accepts_discoverable_paths(output_pa
         pytest.param("relative/benchmark.json", "must be absolute", id="relative"),
         pytest.param("/results/benchmark", "basename must match", id="extensionless"),
         pytest.param("/results", "must live under /results", id="results-dir-itself"),
+        pytest.param("/results/benchmark_merged.json", "reserved for merged", id="merged-default"),
+        pytest.param("/results/benchmark.smoke_merged.json", "reserved for merged", id="merged-multi-dot"),
     ],
 )
 def test_fpm_validate_benchmark_output_path_rejects_undiscoverable_paths(output_path, match):

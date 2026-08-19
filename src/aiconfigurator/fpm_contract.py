@@ -164,6 +164,8 @@ def fpm_validate_benchmark_output_path(output_path: str) -> None:
             f"benchmark output basename must match {FPM_BENCHMARK_RESULT_GLOB!r} "
             f"so collector discovery can find it: {output_path!r}"
         )
+    if path.stem.endswith("_merged"):
+        raise ValueError(f"benchmark output basename is reserved for merged artifacts: {output_path!r}")
 
 
 def fpm_benchmark_result_name(output_path: str, dp_rank: int) -> str:
