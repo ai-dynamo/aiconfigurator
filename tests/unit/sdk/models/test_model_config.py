@@ -1921,14 +1921,29 @@ class TestDSV4NVFP4QuantResolution:
             assert hf_id in common.SupportMatrixHFModels
 
     @pytest.mark.parametrize("hf_id", ["nvidia/DeepSeek-V4-Flash-NVFP4", "nvidia/DeepSeek-V4-Pro-NVFP4"])
-    def test_nvfp4_export_resolves_offline_without_phantom_gemm_quant(self, hf_id: str):
+    def test_nvfp4_export_resolves_offline_without_phantom_gemm_quant(self, hf_id: str, monkeypatch):
         """The packaged sidecar preserves the base checkpoint's FP8-block
         non-expert lane and quantizes the routed experts as NVFP4. The explicit
         sidecar MoE mode must win over the native DeepSeek-V4 ``expert_dtype``
         fallback so the SDK key matches the Collector artifact contract.
         """
-        model_config = config.ModelConfig(tp_size=1, pp_size=1, attention_dp_size=8, moe_tp_size=1, moe_ep_size=8)
-        model = models.get_model(hf_id, model_config, backend_name="vllm")
-        assert model.config.gemm_quant_mode == common.GEMMQuantMode.fp8_block
-        assert model.config.moe_quant_mode == common.MoEQuantMode.nvfp4
-        assert model.config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+        import aiconfigurator.sdk.utils as sdk_utils
+        from aiconfigurator_core.sdk.models.helpers import _get_model_info
+
+        def _no_network(*args, **kwargs):
+            raise AssertionError("network path reached")
+
+        monkeypatch.setattr(sdk_utils, "_download_hf_config", _no_network, raising=False)
+        sdk_utils.get_model_config_from_model_path.cache_clear()
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+        _get_model_info.cache_clear()
+        try:
+            model_config = config.ModelConfig(tp_size=1, pp_size=1, attention_dp_size=8, moe_tp_size=1, moe_ep_size=8)
+            model = models.get_model(hf_id, model_config, backend_name="vllm")
+            assert model.config.gemm_quant_mode == common.GEMMQuantMode.fp8_block
+            assert model.config.moe_quant_mode == common.MoEQuantMode.nvfp4
+            assert model.config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+        finally:
+            sdk_utils.get_model_config_from_model_path.cache_clear()
+            sdk_utils._load_model_config_from_model_path.cache_clear()
+            _get_model_info.cache_clear()
