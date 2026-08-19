@@ -181,8 +181,11 @@ def test_selected_combos_unset_and_all_run_full_matrix(monkeypatch):
 
 
 FULL_MATRIX_TRIGGER_PATHS = [
-    # global source manifest: governs cross-backend/cross-system fill routing
+    # Global reuse/source manifests govern cross-backend/cross-system fill
+    # routing. Keep the legacy name covered while maintained branches converge
+    # on perf_data_reuse_manifest.yaml.
     "aic-core/src/aiconfigurator_core/systems/op_kernel_source_manifest.yaml",
+    "aic-core/src/aiconfigurator_core/systems/perf_data_reuse_manifest.yaml",
     # compiled Rust database, engine, operator, and Python-binding paths
     "aic-core/rust/aiconfigurator-core/src/perf_database/interpolation.rs",
     "aic-core/rust/aiconfigurator-core/src/engine/runtime.rs",
