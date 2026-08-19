@@ -11,6 +11,7 @@ tables:
   # were added 2026-08-12 from a 4-node x 4-GPU GB300 NVL fleet via
   # torchrun, closing the num_gpus > 4 gap behind issue #1416 (GB300 is
   # 4 GPUs per node, so serving-relevant TP sizes all span nodes and had
-  # no measured data). 23 message sizes (128B..512MB) x {graph, eager}.
+  # no measured data). 23 message sizes x {graph, eager}; message_size
+  # counts BF16 elements, so the 128..536,870,912 range spans 256B..1GiB.
   custom_allreduce_perf:
     status: complete
