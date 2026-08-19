@@ -255,12 +255,42 @@ def collect() -> None:
     print(f"{out}: {n_ok} ok, {n_err} with recorded errors, {n_missing} missing")
 
 
+
+def check_coverage(targets: dict) -> None:
+    """Coverage floor: the collector's declared model roster is a LOWER bound
+    for probe targets (targets may exceed it, never trail it)."""
+    import re
+    cases = Path(AIC_SRC).parent / "collector" / "cases" / "models"
+    mentioned: set[str] = set()
+    org = r"(?:deepseek-ai|zai-org|moonshotai|nvidia|openai|meta-llama|mistralai|google|Qwen|XiaomiMiMo|MiniMaxAI|sgl-project)"
+    for f in cases.glob("*_cases.yaml"):
+        mentioned.update(re.findall(rf"\b({org}/[\w.\-]+)", f.read_text()))
+    covered = {ck["repo"] for fam in targets["families"].values() for ck in fam["checkpoints"]}
+    inaccessible = set()
+    for inacc in (ROOT / "configs" / "inaccessible.json",
+                  Path(__file__).parent / "configs" / "inaccessible.json"):
+        if inacc.exists():
+            inaccessible = set(json.loads(inacc.read_text()))
+            break
+    missing = sorted(mentioned - covered - inaccessible)
+    print(f"collector mentions {len(mentioned)} repos; targets cover {len(covered)}; "
+          f"gated/inaccessible {len(mentioned & inaccessible)}")
+    if missing:
+        print("MISSING FROM TARGETS (coverage floor violated):")
+        for r in missing:
+            print("  ", r)
+        raise SystemExit(1)
+    print("coverage floor satisfied")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--targets", type=Path, default=Path(__file__).parent / "targets.yaml")
     ap.add_argument("--plan", action="store_true")
     ap.add_argument("--emit-queues", action="store_true")
     ap.add_argument("--collect", action="store_true")
+    ap.add_argument("--check-coverage", action="store_true",
+                    help="every model repo the collector's case yamls mention must be a target")
     ap.add_argument("--full", action="store_true", help="all variants x both sglang versions (default: representative)")
     ap.add_argument("--gpus", type=int, default=4)
     ap.add_argument("--gpu-offset", type=int, default=0)
@@ -270,6 +300,9 @@ def main() -> None:
 
     if args.collect:
         collect()
+        return
+    if args.check_coverage:
+        check_coverage(yaml.safe_load(args.targets.read_text()))
         return
     targets = yaml.safe_load(args.targets.read_text())
     runs = enumerate_runs(targets, args.full, args.backends.split(","))

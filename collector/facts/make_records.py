@@ -11,11 +11,10 @@ Usage: python3 probe/make_records.py   -> archive/records.jsonl
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 
-ROOT = Path(os.environ.get("AIC_PROBE_WORKSPACE", Path.cwd()))
+ROOT = Path(__file__).resolve().parent.parent
 
 # kernels that are infrastructure, never op identity
 KERNEL_DENY = re.compile(
@@ -52,6 +51,30 @@ def clean_path(path: str) -> str:
     return " <- ".join(kept[:5])
 
 
+def load_taxonomy():
+    import yaml
+    path = Path(__file__).parent / "kernel_taxonomy.yaml"
+    rules = yaml.safe_load(path.read_text())["rules"]
+    return [(re.compile(r["match"]), r["backend"], r["role"]) for r in rules]
+
+
+_TAXONOMY = load_taxonomy()
+
+
+def label_kernels(kernels):
+    """kernel names -> ({backend labels}, {unmatched kernels})."""
+    labels, unmatched = set(), set()
+    for k in kernels:
+        for rx, backend, role in _TAXONOMY:
+            if rx.search(k):
+                if backend not in ("infra", "framework_native"):
+                    labels.add(backend)
+                break
+        else:
+            unmatched.add(k)
+    return labels, unmatched
+
+
 def build_ops(facts: dict) -> tuple[list[dict], list[str]]:
     """Merge api_trace spans into ops; return (ops, orphan_kernels)."""
     ops: list[dict] = []
@@ -76,13 +99,21 @@ def build_ops(facts: dict) -> tuple[list[dict], list[str]]:
                      if not FRAME_DENY.search(p) and not KERNEL_DENY.search(p.split("<-")[0])]
             if paths and (slot["api"] is None or kind != "quant_apply"):
                 slot["api"] = paths[0]
-        ops.extend(v for v in merged.values() if v["kernels"] or v["op"])
+        for v in merged.values():
+            if v["kernels"] or v["op"]:
+                labels, unmatched = label_kernels(v["kernels"])
+                v["backends"] = sorted(labels) or None
+                if unmatched:
+                    v["unclassified_kernels"] = sorted(unmatched)
+                ops.append(v)
     # trtllm probe: flat kernels list, no spans
     if not ops and facts.get("kernels"):
         kerns = sorted(set(filter(None, (normalize_kernel(k["kernel"]) for k in facts["kernels"]))))
         attributed |= set(kerns)
+        labels, unmatched = label_kernels(kerns)
         ops.append({"phase": "generate", "op": "all", "quant": None, "api": None,
-                    "kernels": kerns, "calls": 1})
+                    "kernels": kerns, "calls": 1, "backends": sorted(labels) or None,
+                    "unclassified_kernels": sorted(unmatched) or None})
     orphans: list[str] = []
     for tbl in ("prefill_kernels", "decode_kernels"):
         for k in (trace.get(tbl) or []):

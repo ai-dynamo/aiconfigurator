@@ -34,8 +34,10 @@ from pathlib import Path
 # Collector ground truth (collect_dsv4_attn.py:313-316): csa=4, hca=128.
 DSV4_RATIO_KIND = {4: "csa", 128: "hca", 0: "full"}
 
-REPOS = {
-    # repo_id: family adapter key
+# Special-family adapters keyed by exact repo; EVERYTHING else uses the
+# generic adapter. The roster itself lives in repos.txt (one repo per line,
+# optional "<repo> <family>") so growing coverage never edits code.
+_SPECIAL = {
     "deepseek-ai/DeepSeek-V4-Pro-0813": "dsv4",
     "deepseek-ai/DeepSeek-V4-Flash-0731": "dsv4",
     "nvidia/DeepSeek-V4-Pro-NVFP4": "dsv4",
@@ -48,27 +50,26 @@ REPOS = {
     "nvidia/MiniMax-M3-NVFP4": "m3",
     "openai/gpt-oss-120b": "gptoss",
     "openai/gpt-oss-20b": "gptoss",
-    # special-attention architectures from the collector support matrix, each
-    # in the identities that exist upstream (default / fp8 / nvfp4)
-    "deepseek-ai/DeepSeek-V3.2": "generic",
-    "nvidia/DeepSeek-V3.1-NVFP4": "generic",
-    "zai-org/GLM-5.1": "generic",
-    "zai-org/GLM-5.1-FP8": "generic",
-    "nvidia/GLM-5.1-NVFP4": "generic",
-    "moonshotai/Kimi-K2.5": "generic",
-    "nvidia/Kimi-K2.5-NVFP4": "generic",
-    "google/gemma-4-26B-A4B": "generic",
-    "XiaomiMiMo/MiMo-V2-Flash": "generic",
-    "MiniMaxAI/MiniMax-M2.7": "generic",
-    "nvidia/MiniMax-M2.7-NVFP4": "generic",
-    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "generic",
-    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4": "generic",
-    "Qwen/Qwen3.5-9B": "generic",
-    "Qwen/Qwen3.5-35B-A3B": "generic",
-    "Qwen/Qwen3-30B-A3B": "generic",
-    "Qwen/Qwen3-30B-A3B-FP8": "generic",
-    "nvidia/Qwen3-235B-A22B-NVFP4": "generic",
 }
+
+
+def load_repos(configs_dir: Path) -> dict[str, str]:
+    roster = configs_dir / "repos.txt"
+    repos: dict[str, str] = {}
+    if roster.exists():
+        for line in roster.read_text().splitlines():
+            line = line.split("#")[0].strip()
+            if not line:
+                continue
+            parts = line.split()
+            repos[parts[0]] = parts[1] if len(parts) > 1 else _SPECIAL.get(parts[0], "generic")
+    else:  # fall back to every fetched config
+        for f in configs_dir.glob("*.json"):
+            if f.name.endswith("_hfquant.json"):
+                continue
+            repo = f.stem.replace("_", "/", 1)
+            repos[repo] = _SPECIAL.get(repo, "generic")
+    return repos
 
 _LAYER_REF_RE = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|\*|$)")
 
@@ -314,7 +315,7 @@ def _layer_axis(cfg: dict) -> tuple[str | None, list]:
     tc = cfg.get("text_config", cfg)
     n = tc.get("num_hidden_layers")
     for key in ("layer_types", "attn_type_list", "hybrid_layer_pattern",
-                "indexer_types", "mlp_layer_types", "moe_layer_freq"):
+                "layers_block_type", "indexer_types", "mlp_layer_types", "moe_layer_freq"):
         v = tc.get(key)
         if isinstance(v, list) and n and len(v) == n and len(set(map(str, v))) > 1:
             return key, v
@@ -329,6 +330,8 @@ def variants_generic(cfg: dict) -> list[dict]:
     detected interleave axis (plus a mixed pair), or a single 2-layer variant
     for homogeneous models. MoE models skip the leading dense block."""
     tc = cfg.get("text_config", cfg)
+    if "num_hidden_layers" not in tc and isinstance(tc.get("layers_block_type"), list):
+        tc["num_hidden_layers"] = len(tc["layers_block_type"])  # Nemotron-Ultra schema
     n = tc["num_hidden_layers"]
     skip = int(tc.get("first_k_dense_replace") or 0)
     min_depth = _min_depth_for_periods(tc)
@@ -400,7 +403,7 @@ def main() -> int:
 
     manifest = {"generator": Path(__file__).name, "rule": "depth-only cut, width preserved", "variants": []}
     failures = 0
-    for repo, family in REPOS.items():
+    for repo, family in load_repos(args.configs).items():
         src = args.configs / (repo.replace("/", "_") + ".json")
         if not src.exists():
             print(f"MISSING {src}", file=sys.stderr)

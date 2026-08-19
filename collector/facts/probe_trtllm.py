@@ -121,13 +121,19 @@ def main() -> None:
     # where its ops never execute. Give ONLY the generated-ops module a
     # permissive stub (PEP 562 __getattr__): imports succeed, attribute
     # accesses yield dummies, nothing SM90 actually runs is affected.
+    # Only stub when the real module is actually broken (rc20 image had a
+    # stale _cutlass_ir C lib); newer images import it fine and must not be
+    # shadowed.
     import types
-
-    _gen = types.ModuleType("cutlass._mlir.dialects._iket_ops_gen")
-    _gen.__all__ = []
-    _gen.__getattr__ = lambda name: type(name, (object,), {"__init__": lambda self, *a, **k: None})
-    sys.modules["cutlass._mlir.dialects._iket_ops_gen"] = _gen
-    rec["cutlass_stub_modules"] = ["cutlass._mlir.dialects._iket_ops_gen"]
+    try:
+        import cutlass._mlir.dialects._iket_ops_gen  # noqa: F401
+        rec["cutlass_stub_modules"] = []
+    except Exception:
+        _gen = types.ModuleType("cutlass._mlir.dialects._iket_ops_gen")
+        _gen.__all__ = []
+        _gen.__getattr__ = lambda name: type(name, (object,), {"__init__": lambda self, *a, **k: None})
+        sys.modules["cutlass._mlir.dialects._iket_ops_gen"] = _gen
+        rec["cutlass_stub_modules"] = ["cutlass._mlir.dialects._iket_ops_gen"]
     try:
         from tensorrt_llm import LLM
         from tensorrt_llm.llmapi import KvCacheConfig
