@@ -99,11 +99,11 @@ frameworks:
       mla:
         version: "0.27.0"
         images:
-          default: "vllm/vllm-openai:v0.27.0@sha256:07ea4e292adf3a26b05ac97114b28849cf4551a26beb1fbe7decd3842d752ed7"
+          default: &vllm_0270_image "vllm/vllm-openai:v0.27.0@sha256:07ea4e292adf3a26b05ac97114b28849cf4551a26beb1fbe7decd3842d752ed7"
       mla_bmm:
         version: "0.27.0"
         images:
-          default: "vllm/vllm-openai:v0.27.0@sha256:07ea4e292adf3a26b05ac97114b28849cf4551a26beb1fbe7decd3842d752ed7"
+          default: *vllm_0270_image
       # moe: NO family pin (owner decision 2026-08-02, reverting the
       # 2026-08-01 family-wide preview pin — a temporary preview build must
       # not own a family default; a family pin here hijacks image selection
