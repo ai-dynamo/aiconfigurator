@@ -106,7 +106,12 @@ _FPM_VLLM_PREFILL_ARGS = ("--no-async-scheduling",)
 #     resident). Disabling is the serving-faithful choice here.
 _FPM_VLLM_DECODE_FAKE_KV_ARGS = ("--no-enable-prefix-caching",)
 # Must stay in sync with the engine's _kvwarm_warm_eligible strategy set.
-_FPM_KVWARM_STRATEGIES = frozenset({"tep", "dep"})
+# pure_tp added 2026-08-20: the "moe_tp balanced by construction" immunity
+# assumption only covers cross-GPU balance; expert-activation dispersion is
+# still content-driven (same-pod fake/warm pairing measured -15.3% mid-band,
+# full-grid re-collection 10.43%->4.80%). Requires the engine image with the
+# matching _kvwarm_warm_eligible change (gc-warmtp-20260820 or later).
+_FPM_KVWARM_STRATEGIES = frozenset({"tep", "dep", "pure_tp"})
 REMOTE_EXIT_MARKER = "__FPM_REMOTE_EXIT_CODE__="
 REMOTE_FILES_MARKER = "__FPM_REMOTE_FILES__="
 REMOTE_WORKDIR = "/tmp/fpm-bench"

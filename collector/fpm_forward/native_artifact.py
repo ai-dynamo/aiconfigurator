@@ -35,6 +35,9 @@ class NativeCollection:
     collector_attempt_id: str
     runtime_run_id: str
     runtime_grid_digest: str
+    # Engine-reported KV warm-up envelope (warm_eligible/skip_reason/...);
+    # None only for artifacts predating the kvwarm-enabled runtime.
+    kvwarm_meta: dict[str, Any] | None = None
 
 
 def _validate_collector_provenance(
