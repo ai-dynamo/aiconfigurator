@@ -149,7 +149,15 @@ def render_vllm_run_sh(run: dict) -> str:
         else:
             params["params"]["agg"][k] = v
     arts = render_backend_templates(params, "vllm", version=run["version"], deployment_target="fpm")
-    return arts["run.sh"]
+    # FPM V1 has preconditions (agg mode, no router/planner, single worker);
+    # when they do not hold the generator SILENTLY falls back to the default
+    # dynamo target, which emits run_0.sh instead of run.sh. Accept either —
+    # both carry the engine command — and record which one we got.
+    for key in ("run.sh", "run_0.sh"):
+        if key in arts:
+            run["render_artifact"] = key
+            return arts[key]
+    raise KeyError(f"no run script in rendered artifacts: {list(arts)}")
 
 
 def _generator_src_commit() -> dict:
@@ -202,7 +210,9 @@ def emit_queues(runs: list[dict], n_gpus: int, gpu_offset: int, plan_name: str) 
                    f"--trace --out {WORK}/archive/raw/{run['id']}.json 2>&1 | tail -1 ; }}")
         else:  # trtllm: probe-default engine args (generator fidelity pending)
             run["engine_args_fidelity"] = "probe-defaults"
-            trc = "--trust-remote-code " if run["family"] in ("m3", "kimi_k3") else ""
+            # any checkpoint with custom code (auto_map) needs it; cheapest
+            # correct rule is to always pass it for dummy probing
+            trc = "--trust-remote-code "
             cmd = (head.replace("docker run --rm ",
                                 "docker run --rm -e TLLM_WORKER_USE_SINGLE_PROCESS=1 ")
                    + f"{run['image']} bash -lc 'python3 {WORK}/probe/probe_trtllm.py "

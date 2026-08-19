@@ -135,7 +135,19 @@ def main() -> None:
                 "resolved": {k: v for k, v in sa.items() if v is not None},
                 "identity": {
                     "model_class": f.get("model_class"),
-                    "attn_backend": (f.get("attn_backend") or "").rsplit(".", 1)[-1] or None,
+                    # sglang exposes the backend object; vllm/trtllm only reveal
+                    # it through the wrapped attention spans — take either.
+                    # sglang: backend object; vllm: wrapped attention spans;
+                    # trtllm: no spans — fall back to the attention kernel family
+                    "attn_backend": ((f.get("attn_backend") or "").rsplit(".", 1)[-1]
+                                     or next((s.split("::")[2] for s in (f.get("api_trace") or {})
+                                              if "::attn::" in s), None)
+                                     or next((normalize_kernel(k["kernel"])
+                                              for k in (f.get("kernels") or [])
+                                              if re.search(r"fmha|flash_?attn|flash_fwd|"
+                                                           r"mla_|attention_kernel|paged_kv",
+                                                           k["kernel"], re.I)
+                                              and "norm" not in k["kernel"].lower()), None)),
                     "modules": {k.rsplit(".", 1)[-1]: v.get("modules", v.get("examples", []))
                                 for k, v in (f.get("quant_methods") or {}).items()},
                     "param_dtypes": f.get("param_dtypes"),
