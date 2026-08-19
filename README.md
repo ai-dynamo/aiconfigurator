@@ -41,13 +41,20 @@ Let's get started.
 > set to Artifactory when platform-wheel staging is enabled. These Artifactory
 > artifacts are separate from public PyPI: Linux aarch64 and macOS arm64 users
 > with access to the release artifacts can install the matching wheel set.
+> Each staged set publishes `_MANIFEST.json` with immutable wheel SHA-256 and
+> size metadata, then writes `_COMPLETE.json` last with the manifest checksum.
+> Consumers must verify both files before installing a wheel.
+> Copied pull-request workflows validate wheels only on isolated GitHub-hosted
+> runners. They do not use the persistent release runners, receive Artifactory
+> credentials, or publish wheel artifacts.
 > Windows has no supported installation path.
 
 ```bash
 pip3 install aiconfigurator
 ```
 
-The upper `aiconfigurator` wheel contains the CLI and generator.
+The upper `aiconfigurator` wheel contains the CLI, generator, and versioned
+server-config adapter.
 It depends on the exact matching `aiconfigurator-core` wheel, which independently
 owns the SDK, model/system data, and native extension. Installing
 `aiconfigurator` therefore installs the complete product, while core-only
@@ -88,7 +95,7 @@ git clone https://github.com/ai-dynamo/aiconfigurator.git
 cd aiconfigurator
 
 # 2. Create and activate a virtual environment
-python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.10 or later)
+python3 -m venv myenv && source myenv/bin/activate # (requires Python 3.11-3.13)
 
 # 3. Install the standalone core, then the upper package
 pip3 install ./aic-core
@@ -190,6 +197,31 @@ print(result["parallelism"]) # {'tp': 1, 'pp': 1, 'replicas': 8, 'gpus_used': 8}
 agg, disagg = cli_support(model_path="Qwen/Qwen3-32B-FP8", system="h200_sxm")
 print(f"Agg supported: {agg}, Disagg supported: {disagg}")
 ```
+
+Serving configs can be adapted into validated estimate requests without running
+an estimate. InferenceX DB records, DynamoGraphDeployments, and concrete
+`dynamo-ci` SGLang benchmark recipes are supported:
+
+```python
+from pathlib import Path
+
+from aiconfigurator.sdk.config_adapter import (
+    AdapterOverrides,
+    DynamoRecipeSource,
+    adapt_config,
+    to_cli_estimate_kwargs,
+)
+
+report = adapt_config(
+    DynamoRecipeSource(Path("deploy.yaml"), Path("perf.yaml")),
+    AdapterOverrides(system_name="h200_sxm"),
+)
+for request in report.requests:
+    kwargs = to_cli_estimate_kwargs(request)
+```
+
+See the [Config Adapter Guide](docs/config_adapter.md) for schema, precedence,
+supported recipe shapes, diagnostics, and explicit estimate execution.
 
 An example here,
 ```bash

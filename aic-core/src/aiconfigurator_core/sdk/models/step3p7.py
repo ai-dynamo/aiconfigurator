@@ -51,6 +51,7 @@ class Step3p7Model(HybridMoEModel):
             model_info["vocab"],
             model_info["context"],
             model_config,
+            backend_name=backend_name,
         )
         raw_config = model_info.get("raw_config", {}) or {}
         model._share_expert_dim = int(raw_config.get("share_expert_dim", 0) or 0)

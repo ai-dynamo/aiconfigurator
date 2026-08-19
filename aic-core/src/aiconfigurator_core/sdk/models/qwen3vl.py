@@ -50,7 +50,12 @@ class Qwen3VLModel(LLAMAModel):
         if encoder_config is None:
             return
         self.encoder_config = encoder_config
-        self.encoder_ops.extend(build_encoder_ops(encoder_config, self.config.tp_size, self.config.enable_encoder_dp))
+        # EPD language-only workers keep encoder_config (vision tokens still
+        # extend the LLM context) but never host the ViT ops.
+        if not self.config.language_only:
+            self.encoder_ops.extend(
+                build_encoder_ops(encoder_config, self.config.tp_size, self.config.enable_encoder_dp)
+            )
 
 
 @register_model("QWEN3VL_MOE")
@@ -79,14 +84,23 @@ class Qwen3VLMoEModel(MOEModel):
             model_config,
             model_info["extra_params"],
         )
-        return cls(*moe_args, *base_args, encoder_config=model_info["extra_params"])
+        return cls(*moe_args, *base_args, encoder_config=model_info["extra_params"], backend_name=backend_name)
 
     def __init__(
-        self, topk: int, num_experts: int, moe_inter_size: int, *args, encoder_config: common.VisionEncoderConfig
+        self,
+        topk: int,
+        num_experts: int,
+        moe_inter_size: int,
+        *args,
+        encoder_config: common.VisionEncoderConfig,
+        backend_name: str = "",
     ) -> None:
-        super().__init__(topk, num_experts, moe_inter_size, *args)
+        super().__init__(topk, num_experts, moe_inter_size, *args, backend_name=backend_name)
 
         if encoder_config is None:
             return
         self.encoder_config = encoder_config
-        self.encoder_ops.extend(build_encoder_ops(encoder_config, self.config.tp_size, self.config.enable_encoder_dp))
+        if not self.config.language_only:
+            self.encoder_ops.extend(
+                build_encoder_ops(encoder_config, self.config.tp_size, self.config.enable_encoder_dp)
+            )

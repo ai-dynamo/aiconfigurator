@@ -176,10 +176,10 @@ def test_agg_cache_key_distinguishes_fraction():
     summaries resolved under different fractions must not share an entry."""
     backend = VLLMBackend()
     key_090 = backend._make_agg_cache_key(
-        1024, 1024, 8, 512, "python", backend._resolve_agg_kwargs({}, isl=1024, osl=1024, backend_version="0.19.0")
+        1024, 1024, 8, 512, backend._resolve_agg_kwargs({}, isl=1024, osl=1024, backend_version="0.19.0")
     )
     key_092 = backend._make_agg_cache_key(
-        1024, 1024, 8, 512, "python", backend._resolve_agg_kwargs({}, isl=1024, osl=1024, backend_version="0.22.0")
+        1024, 1024, 8, 512, backend._resolve_agg_kwargs({}, isl=1024, osl=1024, backend_version="0.22.0")
     )
     assert key_090 != key_092
 

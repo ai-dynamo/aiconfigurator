@@ -78,7 +78,7 @@ def _ep_rows(phases=(("context", _HT_PAIRS), ("generation", _LL_PAIRS))) -> list
             for num_tokens in (128, 1024):
                 rows.append(
                     {
-                        "kernel_source": "deepep",
+                        "kernel_source": "deepep_moe",
                         "moe_dtype": _EP_QUANT,
                         "distribution": "power_law_1.2",
                         "inference_phase": phase,
@@ -216,10 +216,10 @@ def test_covered_model_gets_union_of_wideep_and_fused_ladders(synth_systems):
     explores both regimes."""
     t = _synth_task()
     assert t.agg_num_gpu_candidates == [1, 2, 4, 8, 16, 32, 64]
-    assert t.agg_tp_candidates == [1, 2, 4, 8]
+    assert t.agg_tp_candidates == [1, 2, 4, 8, 16]
     assert t.agg_pp_candidates == [1]
     assert t.agg_dp_candidates == [1, 2, 4, 8, 16, 32, 64]
-    assert t.agg_moe_tp_candidates == [1, 2, 4, 8]
+    assert t.agg_moe_tp_candidates == [1, 2, 4, 8, 16]
     assert t.agg_moe_ep_candidates == [1, 2, 4, 8, 16, 32, 64]
 
 
@@ -254,7 +254,7 @@ def test_compute_coverage_is_quant_specific(synth_systems):
     by the run's MoE quant mode, so another quant gets no large-EP tuples."""
     t = _synth_task(moe_quant_mode=common.MoEQuantMode.fp8_block)
     assert t._resolve_moe_comm_backend("agg", _tuple(dp=8, moe_ep=8)) is None
-    assert t.agg_moe_ep_candidates == [1, 2, 4, 8]  # fused defaults
+    assert t.agg_moe_ep_candidates == [1, 2, 4, 8, 16]  # fused defaults
 
 
 def test_unready_family_never_resolves_a_backend(synth_systems, monkeypatch):
@@ -348,7 +348,7 @@ def test_generation_only_coverage_keeps_decode_fused_and_warns(synth_systems_gen
     assert len(warnings) == 1, warnings
     assert "context phase is not" in warnings[0]
     # ...and the whole task falls back to the fused ladders/tuples.
-    assert t.decode_moe_ep_candidates == [1, 2, 4, 8]
+    assert t.decode_moe_ep_candidates == [1, 2, 4, 8, 16]
     assert all(t._resolve_moe_comm_backend("decode", tup) is None for tup in t.iter_parallel("decode"))
 
 
@@ -391,8 +391,8 @@ def test_uncovered_model_keeps_fused_defaults_and_logs_once(caplog):
             total_gpus=8,
         )
         t._large_ep_coverage("agg")  # a second probe must not re-log
-    assert t.agg_moe_ep_candidates == [1, 2, 4, 8]
-    assert t.agg_num_gpu_candidates == [1, 2, 4, 8]
+    assert t.agg_moe_ep_candidates == [1, 2, 4, 8, 16]
+    assert t.agg_num_gpu_candidates == [1, 2, 4, 8]  # capped to total_gpus=8
     assert all(t._resolve_moe_comm_backend("agg", tup) is None for tup in t.iter_parallel("agg"))
     hits = [r for r in caplog.records if "large-EP" in r.message and "collector" in r.message]
     assert len(hits) == 1, [r.message for r in caplog.records]
@@ -538,7 +538,9 @@ def test_single_regime_tasks_match_the_pre_change_key_logic(kwargs, expect_large
     assert pairs[0] == attention_op_keys(t.model_family, t.backend_name, expect_large_ep)
     assert t._attention_op_keys("agg") == pairs[0]
     if expect_raises:
-        with pytest.raises(Exception):  # noqa: B017 - type pinned in test_run_validates_by_default
+        from aiconfigurator.sdk.errors import UnsupportedWideepConfigError
+
+        with pytest.raises(UnsupportedWideepConfigError):
             t.validate()
     else:
         t.validate()

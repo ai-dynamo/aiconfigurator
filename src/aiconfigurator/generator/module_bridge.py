@@ -92,6 +92,14 @@ def task_config_to_generator_config(
             in the generated config.
     """
 
+    # Fail closed: rendering an EPD row would emit a deploy config that
+    # contradicts the recommendation.
+    if getattr(task_config, "enable_epd", False) or _safe_int(_series_val(result_df, "(e)workers", 0), 0) > 0:
+        raise ValueError(
+            "EPD results are not supported by the generator bridge yet: the dedicated "
+            "encode pool ((a)/(e) columns) is not mapped into deployment configs."
+        )
+
     overrides = copy.deepcopy(generator_overrides or {})
 
     # The deployment generator has no video benchmark schema yet. Refuse to
@@ -265,9 +273,9 @@ def task_config_to_generator_config(
     if decode_params:
         decode_workers = _safe_int(worker_count_overrides.get("decode_workers"), decode_workers)
 
-    # Multimodal EPD: the encode worker is not produced by the SDK sweep (the
-    # encoder is modeled colocated with prefill). Inject it from explicit
-    # overrides -- --generator-set Workers.encode.* + WorkerConfig.encode_workers.
+    # Multimodal encode workers: the default sweep models the encoder colocated
+    # with prefill/agg, so no encode worker is derived here.  Inject explicit
+    # workers via --generator-set Workers.encode.* + WorkerConfig.encode_workers.
     # Absent -> no encode worker, output unchanged.
     encode_override = worker_overrides.get("encode")
     encode_params = None

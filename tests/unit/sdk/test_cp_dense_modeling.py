@@ -16,14 +16,11 @@ Covers the parts added on top of the GLM-5 DSA CP path (see
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
 import pytest
 
 import aiconfigurator.sdk.common as common
 import aiconfigurator.sdk.operations as ops
 from aiconfigurator.sdk import config as cfgmod
-from aiconfigurator.sdk.performance_result import PerformanceResult
 from aiconfigurator.sdk.utils import enumerate_parallel_config
 
 pytestmark = pytest.mark.unit
@@ -91,6 +88,7 @@ def test_model_width_assert_includes_cp():
             8192,
             _mkcfg(4, ep=8),
             {},
+            backend_name="trtllm",
         )
 
 
@@ -169,34 +167,13 @@ def test_enumerate_cp_rejected_on_non_sglang():
 # --------------------------------------------------------------------------
 # ContextAttention zigzag chunk math
 # --------------------------------------------------------------------------
-
-
-def _recording_db():
-    db = MagicMock()
-    db.query_context_attention.return_value = PerformanceResult(1.0, energy=0.0, source="silicon")
-    db.query_mem_op.return_value = PerformanceResult(0.0, energy=0.0, source="silicon")
-    return db
-
-
-def test_context_attention_cp1_single_full_chunk():
-    db = _recording_db()
-    op = ops.ContextAttention("a", 1, 8, 8, common.KVCacheQuantMode.bfloat16, common.FMHAQuantMode.bfloat16, cp_size=1)
-    op.query(db, batch_size=1, s=8000, prefix=0)
-    calls = db.query_context_attention.call_args_list
-    assert len(calls) == 1
-    assert (calls[0].args[1], calls[0].args[2]) == (8000, 0)
-
-
-def test_context_attention_zigzag_two_balanced_chunks():
-    db = _recording_db()
-    op = ops.ContextAttention("a", 1, 8, 8, common.KVCacheQuantMode.bfloat16, common.FMHAQuantMode.bfloat16, cp_size=2)
-    op.query(db, batch_size=1, s=8000, prefix=0)
-    calls = db.query_context_attention.call_args_list
-    # c = ceil(8000 / (2*cp)) = ceil(8000/4) = 2000.
-    # chunk_prev attends [0, prefix+c); chunk_next attends [0, prefix+isl).
-    sp = sorted((c.args[1], c.args[2]) for c in calls)
-    assert len(calls) == 2
-    assert sp == [(2000, 0), (2000, 6000)]
+# ContextAttention zigzag chunk decomposition: retired to the compiled engine
+# with #1357 PR-5. The per-chunk facade-call seam this section stubbed
+# (query_context_attention per zigzag chunk + the mem-op leg) no longer
+# exists in Python; the engine performs the zigzag internally (its CP path
+# also prices the CP gather traffic, so no facade-side recomposition is
+# exact). Anchored by the frozen parity goldens.
+# --------------------------------------------------------------------------
 
 
 # --------------------------------------------------------------------------
@@ -257,6 +234,7 @@ def test_gemma4_cp_per_type_allgather_and_zigzag():
         8192,
         _mkcfg(8, ep=8),
         {},
+        backend_name="trtllm",
     )
     m.set_gemma4_config(
         common.Gemma4MixConfig(
@@ -298,6 +276,7 @@ def test_hybrid_moe_cp_per_type_allgather():
         40960,
         _mkcfg(8, ep=8),
         {},
+        backend_name="trtllm",
     )
     m.set_hybrid_config(
         common.HybridMoEConfig(

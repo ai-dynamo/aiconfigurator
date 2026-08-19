@@ -3,6 +3,8 @@
 
 """Qwen3.5 hybrid GDN + full-attention LM modeling contracts."""
 
+import json
+
 import pytest
 
 from aiconfigurator.sdk import common, models
@@ -75,11 +77,11 @@ def test_qwen35_dense_and_moe_variants_preserve_language_and_build_vision_encode
         "encoder_rope_apply",
     } <= {op._name for op in model.encoder_ops}
     position_embed = next(op for op in model.encoder_ops if op._name == "encoder_position_embed")
-    assert position_embed._dim_in == 2 * 1152
-    assert position_embed._dim_out == 1152
+    position_spec = json.loads(position_embed._spec_json())["Elementwise"]
+    assert position_spec["bytes_per_token"] == 2 * (2 * 1152 + 1152)
     merger_norm = next(op for op in model.encoder_ops if op._name == "encoder_merger_norm")
-    assert merger_norm._dim_in == 1152
-    assert merger_norm._dim_out == 1152
+    merger_spec = json.loads(merger_norm._spec_json())["Elementwise"]
+    assert merger_spec["bytes_per_token"] == 2 * (1152 + 1152)
 
 
 def test_qwen35_encoder_dp_replicates_vit_and_gathers_projected_tokens():

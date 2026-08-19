@@ -283,7 +283,9 @@ Documented, deliberate divergences (accepted, not bugs):
   Porting those SOLs is a tracked follow-up.
 - **MiniMax-M3 cannot compile to a Rust FPM spec at all**: `_to_opspec` has
   no MSA converter, so `compile_engine` fails loudly (`OpConversionError`);
-  M3 + fpm must use `engine_step_backend="python"` until MSA lands.
+  M3 + fpm is unsupported until MSA lands (the historical
+  `engine_step_backend="python"` escape hatch was removed after its
+  deprecation window).
 - **OnceLock caches load errors for the process lifetime** (crate-wide table
   convention); Python retries failed loads on the next query.
 - **Neighbor tie-break on EXACT log2-distance ties** may pick different

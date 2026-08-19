@@ -24,7 +24,13 @@ from aiconfigurator_core.sdk.operations.afd_transfer import (
     _afd_send_prob,
 )
 from aiconfigurator_core.sdk.operations.attention import ContextAttention, EncoderAttention, GenerationAttention
-from aiconfigurator_core.sdk.operations.base import Operation, clear_all_op_caches, warm_all_op_data
+from aiconfigurator_core.sdk.operations.base import (
+    Operation,
+    OpShellKit,
+    PythonOperation,
+    clear_all_op_caches,
+    warm_all_op_data,
+)
 from aiconfigurator_core.sdk.operations.communication import NCCL, P2P, CustomAllReduce
 from aiconfigurator_core.sdk.operations.dsa import ContextDSAModule, GenerationDSAModule
 from aiconfigurator_core.sdk.operations.dsv4 import (
@@ -32,13 +38,12 @@ from aiconfigurator_core.sdk.operations.dsv4 import (
     DeepSeekV4MegaMoEModule,
     DeepSeekV4MHCModule,
     GenerationDeepSeekV4AttentionModule,
-    _BaseDeepSeekV4AttentionModule,
 )
 from aiconfigurator_core.sdk.operations.elementwise import ElementWise
 from aiconfigurator_core.sdk.operations.embedding import Embedding
 from aiconfigurator_core.sdk.operations.fpm_forward import FPMForwardOp
 from aiconfigurator_core.sdk.operations.gemm import GEMM
-from aiconfigurator_core.sdk.operations.mamba import GDNKernel, KDAKernel, Mamba2, Mamba2Kernel
+from aiconfigurator_core.sdk.operations.mamba import GDNKernel, KDAKernel, Mamba2Kernel
 from aiconfigurator_core.sdk.operations.mla import (
     ContextMLA,
     GenerationMLA,
@@ -47,7 +52,7 @@ from aiconfigurator_core.sdk.operations.mla import (
     WideEPContextMLA,
     WideEPGenerationMLA,
 )
-from aiconfigurator_core.sdk.operations.moe import MoE, MoEDispatch, TrtLLMWideEPMoE, TrtLLMWideEPMoEDispatch
+from aiconfigurator_core.sdk.operations.moe import MoE, MoEDispatch
 from aiconfigurator_core.sdk.operations.moe_comm import MoEAllToAll, MoEExpertCompute
 from aiconfigurator_core.sdk.operations.msa import ContextMSAModule, GenerationMSAModule
 from aiconfigurator_core.sdk.operations.overlap import FallbackOp, OverlapOp
@@ -87,20 +92,18 @@ __all__ = [
     "KDAKernel",
     "MLABmm",
     "MLAModule",
-    "Mamba2",
     "Mamba2Kernel",
     "MoE",
     "MoEAllToAll",
     "MoEDispatch",
     "MoEExpertCompute",
+    "OpShellKit",
     "Operation",
     "OverlapOp",
     "PerformanceResult",
-    "TrtLLMWideEPMoE",
-    "TrtLLMWideEPMoEDispatch",
+    "PythonOperation",
     "WideEPContextMLA",
     "WideEPGenerationMLA",
-    "_BaseDeepSeekV4AttentionModule",
     "_afd_send_prob",
     "clear_all_op_caches",
     "warm_all_op_data",

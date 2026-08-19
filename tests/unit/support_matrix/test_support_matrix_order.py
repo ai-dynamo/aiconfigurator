@@ -139,10 +139,11 @@ def test_task_uses_silicon_database_mode(monkeypatch):
         backend="sglang",
         version="0.5.12",
         constraints=TestConstraints(total_gpus=4, isl=256, osl=256, prefix=128, ttft=1500.0, tpot=50.0),
-        engine_step_backend=None,
     )
 
     assert captured_kwargs["database_mode"] == common.DatabaseMode.SILICON.name
+    # The engine backend is hardcoded inside _create_task (host-independence pin).
+    assert captured_kwargs["engine_step_backend"] == "rust"
 
 
 def test_qwen35_support_matrix_runs_and_replays_with_image_workload(monkeypatch):
@@ -162,14 +163,12 @@ def test_qwen35_support_matrix_runs_and_replays_with_image_workload(monkeypatch)
         backend="vllm",
         version="0.24.0",
         constraints=constraints,
-        engine_step_backend=None,
     )
     command = _support_matrix_row_command(
         model="Qwen/Qwen3.5-27B",
         system="b200_sxm",
         backend="vllm",
         version="0.24.0",
-        mode="agg",
         constraints=constraints,
     )
 

@@ -14,13 +14,16 @@ import dataclasses
 import logging
 import warnings
 from functools import cache
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from aiconfigurator_core.sdk import common, config
 from aiconfigurator_core.sdk.utils import (
     get_model_config_from_model_path,
     parse_compressed_tensors_quant,
 )
+
+if TYPE_CHECKING:
+    from aiconfigurator_core.sdk.models.blocks.moe import MoEBlockShape
 
 logger = logging.getLogger(__name__)
 
@@ -187,9 +190,67 @@ def large_ep_gpus_per_node(model_config: config.ModelConfig) -> int:
     Raises:
         ValueError: If ``num_gpus_per_node`` is unset.
     """
-    if model_config.num_gpus_per_node is None:
+    value = model_config.num_gpus_per_node
+    if value is None:
         raise ValueError("moe_comm_backend is set but num_gpus_per_node is not — the enumerator must set both")
-    return model_config.num_gpus_per_node
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        # The coordinate selects the all-to-all performance slice: zero would
+        # ZeroDivisionError in nodes_for, a negative or fractional value
+        # silently mis-prices a custom/direct builder call.
+        raise ValueError(f"num_gpus_per_node must be a positive integer (hardware fact), got {value!r}")
+    return value
+
+
+def build_large_ep_moe_ops(
+    phase: str,
+    shape: MoEBlockShape,
+    cfg: config.ModelConfig,
+    *,
+    scale_factor: float,
+    backend_name: str,
+    model_family: str,
+    power_law_alpha: float,
+    gpus_per_node: int,
+    shared_gemm_quant_mode: common.GEMMQuantMode | None = None,
+) -> list:
+    """One MoE block for a large-EP config (``cfg.moe_comm_backend`` set).
+
+    The shared body of ``DeepSeekModel._large_ep_moe_ops`` and
+    ``DeepSeekV32Model._large_ep_moe_ops``: resolve the model-owned
+    workload-distribution string, then delegate to ``build_moe_block_ops``.
+    ``shared_gemm_quant_mode`` is the one caller-specific difference — the
+    DeepSeekV32 family passes its ``dsa_shared_expert_quant_mode`` on trtllm.
+
+    Workload-distribution strings are transcribed from the deleted wideEP
+    classes at commit 8372e60: sglang flattens the prefill alpha to 0.6 under
+    EPLB (deepseek.py:1089-1101 / deepseek_v32.py:740-751), while trtllm keeps
+    the model alpha in both phases and marks EPLB with the ``_eplb`` suffix
+    instead (deepseek.py:626-636 / deepseek_v32.py:479-486).
+    """
+    # Deferred import: blocks/moe.py imports this module (check_is_moe) at
+    # import time, so a top-level import here would be circular.
+    from aiconfigurator_core.sdk.models.blocks.moe import build_moe_block_ops
+
+    base = cfg.workload_distribution
+    if backend_name == "trtllm":
+        distribution = power_law_distribution(base, power_law_alpha, eplb_suffix=cfg.enable_eplb)
+    else:
+        alpha = 0.6 if (phase == "context" and cfg.enable_eplb) else power_law_alpha
+        distribution = power_law_distribution(base, alpha)
+    return build_moe_block_ops(
+        phase,
+        shape,
+        cfg,
+        cfg.moe_quant_mode,
+        distribution,
+        scale_factor=scale_factor,
+        backend_name=backend_name,
+        inference_phase=phase,
+        model_family=model_family,
+        attn_cp_size=cfg.cp_size,
+        gpus_per_node=gpus_per_node,
+        shared_gemm_quant_mode=shared_gemm_quant_mode,
+    )
 
 
 def validate_trtllm_large_ep(
@@ -712,6 +773,46 @@ def resolve_dsv4_moe_arch(
         mode = resolve_kimi_k3_moe_arch_mode(model_path, system_name, backend_name)
     if mode is not None:
         model_config.moe_quant_mode = mode
+
+
+def resolve_nvfp4_for_system(
+    model_config: config.ModelConfig,
+    system_name: str | None,
+    model_path: str | None = None,
+) -> None:
+    """Remap native nvfp4 to weight-only nvfp4_wo on non-Blackwell systems.
+
+    Non-Blackwell hardware has no native FP4 tensor cores, so all runtimes
+    dequantize weights to BF16 before the MMA. nvfp4_wo captures this:
+    memory=9/16 (FP4 weight traffic) and compute=1 (BF16 speed). The
+    transfer ladder then models the Marlin-class memory savings via the
+    (0.5625, 1) util-level entry — no direct bfloat16 table aliasing needed.
+
+    Deployability (whether a runtime can load the checkpoint at a given
+    version) is a separate question handled by the support matrix.
+    """
+    from aiconfigurator_core.sdk.perf_database import is_blackwell_system
+
+    if is_blackwell_system(system_name):
+        return  # native FP4 TC — nvfp4 stays as-is
+
+    gemm_q = model_config.gemm_quant_mode
+    moe_q = model_config.moe_quant_mode
+    if (gemm_q is None or moe_q is None) and model_path:
+        info = _get_model_info(model_path)
+        inferred = _infer_quant_modes_from_raw_config(
+            info.get("raw_config", {}),
+            info.get("architecture", ""),
+        )
+        if gemm_q is None:
+            gemm_q = inferred.get("gemm_quant_mode")
+        if moe_q is None:
+            moe_q = inferred.get("moe_quant_mode")
+
+    if gemm_q == common.GEMMQuantMode.nvfp4:
+        model_config.gemm_quant_mode = common.GEMMQuantMode.nvfp4_wo
+    if moe_q == common.MoEQuantMode.nvfp4:
+        model_config.moe_quant_mode = common.MoEQuantMode.nvfp4_wo
 
 
 def resolve_context_fmha_by_data(

@@ -6,7 +6,7 @@
 //! Mirrors the raw SILICON-path layout of
 //! `aiconfigurator.sdk.operations.moe.MoE._query_moe_table`:
 //!
-//! `moe_data[quant][distribution][topk][num_experts][hidden][inter][moe_tp][moe_ep]`
+//! `moe_data[quant][distribution][topk][num_experts][hidden][inter][moe_tp][moe_expert_compute]`
 //! returns a `{num_tokens -> latency_ms}` dict.
 //!
 //! Resolution mirrors Python v2's `_resolve_tokens`: the token curve rides
@@ -24,8 +24,9 @@
 //! `workload_distribution` falls back to `"uniform"` when the requested
 //! variant is absent for the given quant, matching Python's behavior.
 //!
-//! WideEP / DeepEP / TRT-LLM all-to-all variants live in
-//! `perf_database::wideep`, `wideep_mla`, and `wideep_moe`.
+//! WideEP MLA lives in `perf_database::wideep_mla`; the TRT-LLM all-to-all
+//! table in `perf_database::trtllm_alltoall`; large-EP expert compute in
+//! `perf_database::moe_expert_compute`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -34,7 +35,7 @@ use std::sync::OnceLock;
 use super::axis_curve::LeafAxisCurve;
 use super::moe_index::{MoeIndex, MoeShapeKey};
 use super::perf_interp::LeafValue;
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
@@ -59,7 +60,7 @@ pub enum MoeKernel {
 }
 
 /// One collected sibling slice of the MoE table for a fixed
-/// `(quant, distribution, moe_tp, moe_ep)`: the categorical shape features
+/// `(quant, distribution, moe_tp, moe_expert_compute)`: the categorical shape features
 /// plus its `num_tokens -> latency_ms` curve. Consumed by the operator
 /// layer's cross-shape/cross-quant transfer ladder (the algorithm lives in
 /// `operators/moe.rs`; this is a data accessor payload only).
@@ -125,19 +126,21 @@ impl MoeTable {
     /// perf file is sourced solely from `data_root/moe_perf.parquet` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf) -> Self {
-        Self::with_sources(data_root, &PerfDbSources::default())
+        Self::with_sources(data_root, &SourceResolver::fixed(PerfDbSources::default()))
+            .expect("fixed-map resolution is infallible")
     }
 
-    /// Construct with shared-layer (sibling/cross-version) sources resolved from
-    /// `perf_db_sources` (Python-supplied). The MoE file falls back to its
-    /// primary `data_root/moe_perf.parquet` when absent from the map. No I/O.
-    pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
-        let moe_sources = resolve_op_sources(perf_db_sources, "moe_perf.parquet", &data_root);
-        Self {
+    /// Construct with shared-layer (sibling/cross-version) sources supplied by the
+    /// engine's `SourceResolver` (live resolution owns the shared-layer walk;
+    /// a fixed source map is the test-only path). The MoE file falls back to its
+    /// primary `data_root/moe_perf.parquet` when the resolver names no override. No I/O.
+    pub fn with_sources(data_root: PathBuf, resolver: &SourceResolver) -> Result<Self, AicError> {
+        let moe_sources = resolver.sources_for("moe_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             moe_sources,
             moe: OnceLock::new(),
-        }
+        })
     }
 
     /// Raw MoE value (latency ms + power/energy) via the perf_interp v2
@@ -209,7 +212,7 @@ impl MoeTable {
     ///
     /// Returns `Ok(Some(value))` when the loaded `low_latency` grid
     /// contains a matching `(quant, distribution-after-uniform-fallback,
-    /// topk, num_experts, hidden, inter, moe_tp, moe_ep)` entry, and
+    /// topk, num_experts, hidden, inter, moe_tp, moe_expert_compute)` entry, and
     /// `Ok(None)` when the shape is absent — the caller should then fall
     /// through to `query()` (the default grid).
     ///
@@ -324,7 +327,7 @@ impl MoeTable {
     }
 
     /// All collected sibling slices for `(quant, distribution-after-uniform-
-    /// fallback, moe_tp, moe_ep)`; empty curves skipped, an empty result is
+    /// fallback, moe_tp, moe_expert_compute)`; empty curves skipped, an empty result is
     /// data (not an error). Mirrors the enumeration in Python `_collect`
     /// (`MoE._query_moe_table`), which walks the nested
     /// `topk -> num_experts -> hidden -> inter` dicts. NOTE: Python yields
@@ -393,6 +396,21 @@ impl MoeTable {
 /// `load_moe_data` skip-on-key-conflict. Missing files are skipped (a sibling
 /// declared in the manifest need not exist for every system); an error is
 /// returned only when no source yields rows.
+/// Kernel-routed quant remaps (Python `load_moe_data`'s two rules) — the
+/// single home shared by the query loader and the table view, so the next
+/// per-GPU-generation mxfp4-style remap lands once:
+/// - Blackwell trtllm-gen MXFP4xMXFP8 rows get their dedicated quant mode;
+/// - Hopper flashinfer-cutlass SM90 mixed-GEMM rows likewise.
+pub(crate) fn moe_kernel_quant_rewrite(raw_quant: String, kernel_source: &str) -> String {
+    match (raw_quant.as_str(), kernel_source) {
+        ("w4a8_mxfp4_mxfp8", "sglang_mxfp4_flashinfer_trtllm_moe") => {
+            "w4a8_mxfp4_mxfp8_trtllm".to_string()
+        }
+        ("w4a16_mxfp4", "sglang_flashinfer_cutlass_moe") => "w4a16_mxfp4_cutlass".to_string(),
+        _ => raw_quant,
+    }
+}
+
 fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> {
     let mut default_index: MoeIndex<MoeShapeKey, BTreeMap<u32, LeafValue>> = MoeIndex::default();
     let mut low_latency_index: MoeIndex<MoeShapeKey, BTreeMap<u32, LeafValue>> =
@@ -441,16 +459,7 @@ fn load_moe_parquet(sources: &[PerfSource]) -> Result<LoadedMoeGrids, AicError> 
             //  - Hopper flashinfer cutlass SM90 mixed-GEMM:
             //    w4a16_mxfp4 + sglang_flashinfer_cutlass_moe
             //      -> w4a16_mxfp4_cutlass
-            let raw_quant = row.str_owned(moe_dtype_col)?;
-            let quant = match (raw_quant.as_str(), kernel_source.as_str()) {
-                ("w4a8_mxfp4_mxfp8", "sglang_mxfp4_flashinfer_trtllm_moe") => {
-                    "w4a8_mxfp4_mxfp8_trtllm".to_string()
-                }
-                ("w4a16_mxfp4", "sglang_flashinfer_cutlass_moe") => {
-                    "w4a16_mxfp4_cutlass".to_string()
-                }
-                _ => raw_quant,
-            };
+            let quant = moe_kernel_quant_rewrite(row.str_owned(moe_dtype_col)?, &kernel_source);
             let distribution = row.str_owned(distribution_col)?;
             let shape = MoeShapeKey {
                 topk: row.u32(topk_col)?,

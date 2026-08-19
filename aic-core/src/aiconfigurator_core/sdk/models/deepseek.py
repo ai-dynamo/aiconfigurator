@@ -8,12 +8,12 @@ import logging
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
-from aiconfigurator_core.sdk.models.blocks.moe import MoEBlockShape, build_moe_block_ops
+from aiconfigurator_core.sdk.models.blocks.moe import MoEBlockShape
 from aiconfigurator_core.sdk.models.helpers import (
     attention_projection_exclusions,
+    build_large_ep_moe_ops,
     large_ep_gpus_per_node,
     mtp_scale_factor,
-    power_law_distribution,
     validate_trtllm_large_ep,
 )
 
@@ -87,29 +87,18 @@ class DeepSeekModel(BaseModel):
     def _large_ep_moe_ops(self, phase: str, shape: MoEBlockShape, scale_factor: float) -> list:
         """MoE block for a large-EP config (``cfg.moe_comm_backend`` set).
 
-        Workload-distribution strings are model-owned and transcribed from the
-        deleted wideEP classes at commit 8372e60: sglang flattens the prefill
-        alpha to 0.6 under EPLB (deepseek.py:1089-1101), while trtllm keeps
-        alpha 1.01 in both phases and marks EPLB with the ``_eplb`` suffix
-        instead (deepseek.py:626-636).
+        Body shared with the DeepSeekV32 family in
+        ``helpers.build_large_ep_moe_ops`` (distribution transcription notes
+        live there); this family keeps the model-wide shared-expert quant mode.
         """
-        base = self.config.workload_distribution
-        if self._backend_name == "trtllm":
-            distribution = power_law_distribution(base, self._power_law_alpha, eplb_suffix=self.config.enable_eplb)
-        else:
-            alpha = 0.6 if (phase == "context" and self.config.enable_eplb) else self._power_law_alpha
-            distribution = power_law_distribution(base, alpha)
-        return build_moe_block_ops(
+        return build_large_ep_moe_ops(
             phase,
             shape,
             self.config,
-            self.config.moe_quant_mode,
-            distribution,
             scale_factor=scale_factor,
             backend_name=self._backend_name,
-            inference_phase=phase,
             model_family=self.model_family,
-            attn_cp_size=self.config.cp_size,
+            power_law_alpha=self._power_law_alpha,
             gpus_per_node=self._gpus_per_node,
         )
 
@@ -282,6 +271,9 @@ class DeepSeekModel(BaseModel):
                 wideep_num_slots=self.config.wideep_num_slots,
                 enable_eplb=self.config.enable_eplb,
             )
+            # Attention projections follow the checkpoint's per-projection
+            # dtype (attn_*_gemm_quant_mode above) — #1423, carried from the
+            # deleted TrtllmWideEPDeepSeekModel.
             # _gen_layer_scale = num_layers * mtp_scale * pdl_factor
             gen_scale = self._num_layers * self._mtp_scale_factor * self._PDL_FACTOR
             # Context phase does NOT use CUDA Graph, so maybe_execute_in_parallel
@@ -291,7 +283,13 @@ class DeepSeekModel(BaseModel):
                     ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
                     ops.ElementWise("context_add_norm_1", self._num_layers, 2 * h, 2 * h, 0.8),
                     # kv_a_proj_with_mqa: hidden_size -> q_lora + kv_lora + qk_rope.
-                    ops.GEMM("context_downscale_gemm", self._num_layers, downscale_width, h, gemm_quant_mode),
+                    ops.GEMM(
+                        "context_downscale_gemm",
+                        self._num_layers,
+                        downscale_width,
+                        h,
+                        attn_downscale_gemm_quant_mode,
+                    ),
                     # q_a_layernorm: RMSNorm on q_compressed.
                     ops.ElementWise("context_q_a_layernorm", self._num_layers, q_lora_rank, q_lora_rank, 0.8),
                     ops.GEMM(
@@ -299,14 +297,14 @@ class DeepSeekModel(BaseModel):
                         self._num_layers,
                         q_projection_width // tp_size,
                         q_lora_rank,
-                        gemm_quant_mode,
+                        attn_q_gemm_quant_mode,
                     ),
                     ops.GEMM(
                         "context_kv_b_proj_gemm",
                         self._num_layers,
                         kv_projection_width // tp_size,
                         kv_lora_rank,
-                        gemm_quant_mode,
+                        attn_kv_gemm_quant_mode,
                     ),
                     ops.ContextMLA(
                         "context_attention",
@@ -320,7 +318,7 @@ class DeepSeekModel(BaseModel):
                         self._num_layers,
                         h,
                         o_projection_width // tp_size,
-                        gemm_quant_mode,
+                        attn_o_gemm_quant_mode,
                     ),
                     ops.ElementWise("context_add_norm_2", self._num_layers, 2 * h, 2 * h, 0.8),
                 ]
@@ -342,7 +340,13 @@ class DeepSeekModel(BaseModel):
                 [
                     ops.Embedding("generation_embedding", 1 * self._mtp_scale_factor, self._vocab_size, h, 0.3),
                     ops.ElementWise("generation_add_norm_1", gen_scale, 2 * h, 2 * h, 0.8),
-                    ops.GEMM("generation_downscale_gemm", gen_scale, downscale_width, h, gemm_quant_mode),
+                    ops.GEMM(
+                        "generation_downscale_gemm",
+                        gen_scale,
+                        downscale_width,
+                        h,
+                        attn_downscale_gemm_quant_mode,
+                    ),
                     # q_a_layernorm: RMSNorm on q_compressed. In TRT-LLM
                     # kv_a_layernorm runs in parallel but is much smaller,
                     # so we model only q_a_layernorm as the dominant one.
@@ -352,7 +356,7 @@ class DeepSeekModel(BaseModel):
                         gen_scale,
                         q_projection_width // tp_size,
                         q_lora_rank,
-                        gemm_quant_mode,
+                        attn_q_gemm_quant_mode,
                     ),
                     # BMM_pre (Absorption) || RoPE+KV cache prep (overlap on two streams)
                     # Main stream: q_nope * W_absorption -> absorbed_q
@@ -393,7 +397,7 @@ class DeepSeekModel(BaseModel):
                         gen_scale,
                         h,
                         o_projection_width // tp_size,
-                        gemm_quant_mode,
+                        attn_o_gemm_quant_mode,
                     ),
                     ops.ElementWise("generation_add_norm_2", gen_scale, 2 * h, 2 * h, 0.8),
                 ]
@@ -697,6 +701,7 @@ class DeepSeekModel(BaseModel):
                         True,
                         quant_mode=moe_quant_mode,
                         attn_cp_size=cp,
+                        backend=self._backend_name,
                     )
                 ]
             )
@@ -735,6 +740,7 @@ class DeepSeekModel(BaseModel):
                         False,
                         quant_mode=moe_quant_mode,
                         attn_cp_size=cp,
+                        backend=self._backend_name,
                     )
                 ]
             )
@@ -931,6 +937,7 @@ class DeepSeekModel(BaseModel):
                     quant_mode=moe_quant_mode,
                     attn_cp_size=cp,
                     is_context=False,
+                    backend=self._backend_name,
                 ),
                 ops.MoE(
                     "generation_moe",
@@ -958,6 +965,7 @@ class DeepSeekModel(BaseModel):
                     quant_mode=moe_quant_mode,
                     attn_cp_size=cp,
                     is_context=False,
+                    backend=self._backend_name,
                 ),
             ]
 

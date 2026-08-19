@@ -30,6 +30,7 @@ from aiconfigurator.sdk.errors import (
     NoFeasibleConfigError,
     is_expected_cli_error,
 )
+from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import normalize_speculative_decoding
 from aiconfigurator.sdk.task_v2 import Task, _lookup_num_gpus_per_node, _warn_large_ep_flag
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
@@ -146,12 +147,11 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
     )
     common_parser.add_argument(
         "--engine-step-backend",
-        choices=["python", "rust"],
+        choices=["rust"],
         default=None,
-        help="Engine-step latency backend. By default the compiled Rust engine answers "
-        "(energy crosses the FFI, so power-carrying databases run on the compiled "
-        "engine too); use 'python' as the escape hatch or 'rust' to force the "
-        "compiled engine.",
+        help="Engine-step latency backend. The compiled Rust engine is the only step "
+        "executor ('rust'); the deprecated 'python' no-op was removed after its "
+        "one-release window.",
     )
     common_parser.add_argument(
         "--forward-model",
@@ -426,6 +426,33 @@ def _add_default_mode_arguments(parser):
         action="store_true",
         help="Model the vision encoder as TP-sharded instead of the default data-parallel "
         "(vLLM mm_encoder_tp_mode='data' / SGLang --mm-enable-dp-encoder semantics).",
+    )
+    parser.add_argument(
+        "--enable-epd",
+        action="store_true",
+        help="EPD (vision-language models): run the vision encoder on dedicated encode workers "
+        "instead of colocated. Turns the disagg experiment into E+P+D and the agg experiment "
+        "into E+agg; requires an image workload (--image-height/--image-width).",
+    )
+    parser.add_argument(
+        "--encoder-tp",
+        type=int,
+        nargs="+",
+        default=None,
+        help="EPD encode-worker TP sizes to sweep (requires --enable-epd). Default: 1 2 4 8.",
+    )
+    parser.add_argument(
+        "--encoder-system",
+        type=str,
+        default=None,
+        help="System (GPU type) for EPD encode workers (requires --enable-epd). "
+        "Defaults to the prefill/agg side's system.",
+    )
+    parser.add_argument(
+        "--encoder-latency-correction",
+        type=float,
+        default=1.0,
+        help="Latency correction scale for EPD encode workers (requires --enable-epd). Default: 1.0.",
     )
     parser.add_argument(
         "--ttft",
@@ -850,6 +877,30 @@ def _add_estimate_mode_arguments(parser):
         action="store_true",
         help="Model the vision encoder as TP-sharded instead of the default data-parallel "
         "(vLLM mm_encoder_tp_mode='data' / SGLang --mm-enable-dp-encoder semantics).",
+    )
+    parser.add_argument(
+        "--enable-epd",
+        action="store_true",
+        help="EPD single point: overlay a fixed encode-worker pool on the agg/disagg point; "
+        "the LM side becomes language-only. Supports --estimate-mode agg/disagg.",
+    )
+    parser.add_argument(
+        "--encoder-tp",
+        type=int,
+        default=None,
+        help="EPD encode-worker TP (required with --enable-epd).",
+    )
+    parser.add_argument(
+        "--encoder-batch-size",
+        type=int,
+        default=None,
+        help="EPD encode-worker batch size. Default: 1.",
+    )
+    parser.add_argument(
+        "--encoder-num-workers",
+        type=int,
+        default=None,
+        help="EPD encode workers in the pool. Default: 1.",
     )
     parser.add_argument(
         "--batch-size",
@@ -1475,6 +1526,10 @@ def build_default_tasks(
     image_width: int = 0,
     num_images: int = 1,
     enable_encoder_dp: bool = True,
+    enable_epd: bool = False,
+    encoder_tp: list[int] | None = None,
+    encoder_system: str | None = None,
+    encoder_latency_correction: float = 1.0,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -1533,11 +1588,12 @@ def build_default_tasks(
             serving mode. Restrict with *_moe_ep_candidates in an exp YAML.
         moe_backend: Explicit SGLang MoE backend override ('deepep_moe' is
             deprecated and ignored; 'megamoe' is a real kernel selection).
-        engine_step_backend: Engine-step latency backend ("python" or "rust");
-            unset defaults to the compiled Rust engine (SDK callers passing
-            synthetic database objects the compiled engine cannot re-load
-            from disk still delegate to the Python step).
-        forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None keeps the default.
+        engine_step_backend: Engine-step latency backend. The compiled Rust
+            engine is the only step executor; "rust" is the only accepted
+            value (the deprecated "python" no-op was removed).
+        forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None
+            keeps the default. Both evaluate on the compiled engine ("fpm"
+            through its native FpmForward operation).
         serving_mode: Serving modes to build. ``"auto"`` builds agg and disagg,
             ``"all"`` also includes AFD, and an explicit mode builds only that mode.
         afd_max_a_batch_size: Maximum attention batch size considered by AFD.
@@ -1547,6 +1603,8 @@ def build_default_tasks(
     Returns:
         Task objects keyed by serving mode and, when requested, backend.
     """
+    engine_step_backend = validate_engine_step_backend(engine_step_backend)
+
     # Deprecated large-EP knobs: warn once, then ignore (the flag is NOT
     # forwarded to the tasks; an explicit moe_backend value still passes
     # through unchanged — 'deepep_moe' is inert in modeling, 'megamoe' real).
@@ -1564,6 +1622,8 @@ def build_default_tasks(
         modes_to_sweep = {"agg", "disagg", "afd"}
     else:
         modes_to_sweep = {serving_mode}
+    if enable_epd and not (modes_to_sweep & {"agg", "disagg"}):
+        raise ValueError("enable_epd requires an agg or disagg experiment; 'afd' does not support EPD.")
     needs_disagg = "disagg" in modes_to_sweep
 
     backends_to_sweep = [b.value for b in common.BackendName] if backend == "auto" else [backend]
@@ -1716,6 +1776,10 @@ def build_default_tasks(
             backend_version=backend_version,
             enable_chunked_prefill=enable_chunked_prefill,
             moe_backend=moe_backend_value,
+            enable_epd=enable_epd,
+            encoder_tp_candidates=encoder_tp,
+            encoder_system_name=encoder_system,
+            encoder_latency_correction=encoder_latency_correction,
             **global_kwargs,
         )
 
@@ -1732,6 +1796,10 @@ def build_default_tasks(
             decode_backend_version=backend_version,
             prefill_enable_chunked_prefill=enable_chunked_prefill,
             moe_backend=moe_backend_value,
+            enable_epd=enable_epd,
+            encoder_tp_candidates=encoder_tp,
+            encoder_system_name=encoder_system,
+            encoder_latency_correction=encoder_latency_correction,
             **global_kwargs,
         )
 
@@ -2411,9 +2479,135 @@ def _print_per_ops_latency(per_ops_data: dict) -> None:
             _print_per_ops_section("AFD Transfer (per layer, a2f + f2a)", directional)
 
 
+def _run_estimate_epd(args, estimate_mode: str) -> None:
+    """EPD single-point estimate via Task.run_single_* (dedicated encode pool)."""
+    from aiconfigurator.cli.api import apply_row_power_coverage_gate
+    from aiconfigurator.sdk.task_v2 import _QUANT_ENUM_TABLES, Task
+
+    if estimate_mode not in ("agg", "disagg"):
+        raise SystemExit("--enable-epd supports --estimate-mode agg or disagg only.")
+    workload = dict(
+        enable_epd=True,
+        backend_version=args.backend_version,
+        database_mode=args.database_mode,
+        transfer_policy=args.transfer_policy,
+        isl=args.isl,
+        osl=args.osl,
+        prefix=args.prefix,
+        image_height=args.image_height,
+        image_width=args.image_width,
+        num_images_per_request=args.num_images,
+        free_gpu_memory_fraction=args.free_gpu_memory_fraction,
+        max_seq_len=args.max_seq_len,
+        engine_step_backend=args.engine_step_backend,
+        forward_model=args.forward_model,
+        nextn=args.nextn,
+        nextn_accepted=args.nextn_accepted,
+    )
+    workload.update({name: getattr(args, name) for name in _QUANT_ENUM_TABLES if getattr(args, name, None)})
+    encoder_kwargs = dict(
+        encoder_tp=args.encoder_tp,
+        encoder_batch_size=1 if args.encoder_batch_size is None else args.encoder_batch_size,
+        encoder_num_workers=1 if args.encoder_num_workers is None else args.encoder_num_workers,
+    )
+    if estimate_mode == "agg":
+        task = Task.from_cli(
+            serving_mode="agg",
+            model_path=args.model_path,
+            system_name=args.system,
+            backend_name=args.backend,
+            **workload,
+        )
+        row = task.run_single_agg(
+            tp=args.tp_size,
+            pp=args.pp_size,
+            dp=args.attention_dp_size,
+            moe_tp=args.moe_tp_size,
+            moe_ep=args.moe_ep_size,
+            batch_size=args.batch_size,
+            ctx_tokens=args.ctx_tokens,
+            **encoder_kwargs,
+        )
+    else:
+        # Required disagg params and shared-arg fallbacks mirror cli_estimate.
+        for name in ("prefill_batch_size", "prefill_num_workers", "decode_batch_size", "decode_num_workers"):
+            if getattr(args, name) is None:
+                raise SystemExit(f"{name} is required for disagg mode.")
+
+        def _role(value, shared):
+            return value if value is not None else shared
+
+        # Shared quant/version args map to the per-role fields: disagg Tasks
+        # reject top-level worker fields and silently ignore backend_version.
+        role_shared = {"backend_version": workload.pop("backend_version", None)}
+        for name in [k for k in workload if k.endswith("quant_mode")]:
+            role_shared[name] = workload.pop(name)
+        task = Task.from_cli(
+            serving_mode="disagg",
+            prefill_model_path=args.model_path,
+            decode_model_path=args.model_path,
+            prefill_system_name=args.system,
+            decode_system_name=args.decode_system or args.system,
+            prefill_backend_name=args.backend,
+            decode_backend_name=args.backend,
+            **{f"prefill_{k}": v for k, v in role_shared.items()},
+            **{f"decode_{k}": v for k, v in role_shared.items()},
+            **workload,
+        )
+        row = task.run_single_disagg(
+            prefill_tp=_role(args.prefill_tp_size, args.tp_size),
+            prefill_pp=_role(args.prefill_pp_size, args.pp_size),
+            prefill_dp=_role(args.prefill_attention_dp_size, args.attention_dp_size),
+            prefill_moe_tp=_role(args.prefill_moe_tp_size, args.moe_tp_size),
+            prefill_moe_ep=_role(args.prefill_moe_ep_size, args.moe_ep_size),
+            prefill_batch_size=args.prefill_batch_size,
+            prefill_num_workers=args.prefill_num_workers,
+            decode_tp=_role(args.decode_tp_size, args.tp_size),
+            decode_pp=_role(args.decode_pp_size, args.pp_size),
+            decode_dp=_role(args.decode_attention_dp_size, args.attention_dp_size),
+            decode_moe_tp=_role(args.decode_moe_tp_size, args.moe_tp_size),
+            decode_moe_ep=_role(args.decode_moe_ep_size, args.moe_ep_size),
+            decode_batch_size=args.decode_batch_size,
+            decode_num_workers=args.decode_num_workers,
+            **encoder_kwargs,
+        )
+    row = apply_row_power_coverage_gate(row)
+    logger.info("EPD %s single-point estimate:", estimate_mode)
+    keys = (
+        "ttft",
+        "tpot",
+        "encoder_latency",
+        "request_latency",
+        "seq/s",
+        "tokens/s/gpu",
+        "num_total_gpus",
+        "(a)workers",
+        "(p)workers",
+        "(d)workers",
+        "(e)workers",
+        "(e)tp",
+        "(e)bs",
+        "(e)memory",
+        "power_w",
+    )
+    for key in keys:
+        if key not in row:
+            continue
+        value = row[key]
+        if key == "power_w" and value is None:
+            logger.info("  %-16s unavailable (%.0f%% power-data coverage)", key, row.get("power_coverage", 0.0) * 100)
+            continue
+        logger.info("  %-16s %s", key, f"{value:.3f}" if isinstance(value, float) else value)
+
+
 def _run_estimate_mode(args):
     """Run the estimate mode to predict TTFT, TPOT, and power for a single config."""
     from aiconfigurator.cli.api import cli_estimate
+
+    if not args.enable_epd and any(
+        v is not None for v in (args.encoder_tp, args.encoder_batch_size, args.encoder_num_workers)
+    ):
+        raise SystemExit("--encoder-tp/--encoder-batch-size/--encoder-num-workers require --enable-epd.")
 
     estimate_mode = args.estimate_mode
 
@@ -2428,6 +2622,10 @@ def _run_estimate_mode(args):
     )
 
     _resolve_and_validate_nextn(args)
+
+    if args.enable_epd:
+        _run_estimate_epd(args, estimate_mode)
+        return
 
     # Resolve --detail before running the estimate so time detail can compare
     # against a second SOL-mode result.
@@ -2886,6 +3084,11 @@ def main(args):
             or getattr(args, "target_concurrency", None) is not None
         )
         if getattr(args, "total_gpus", None) is None and has_load_target:
+            if args.enable_epd or args.encoder_tp or args.encoder_system or args.encoder_latency_correction != 1.0:
+                raise SystemExit(
+                    "--enable-epd/encoder_* flags are not supported by the auto-recommend routing "
+                    "(load target without --total-gpus); pass --total-gpus to run the EPD sweep."
+                )
             _run_recommend(args)
             return
         if has_load_target:
@@ -2936,6 +3139,10 @@ def main(args):
             num_videos=args.num_videos,
             num_video_tokens=args.num_video_tokens,
             enable_encoder_dp=not args.disable_encoder_dp,
+            enable_epd=args.enable_epd,
+            encoder_tp=args.encoder_tp,
+            encoder_system=args.encoder_system,
+            encoder_latency_correction=args.encoder_latency_correction,
             ttft=args.ttft,
             tpot=args.tpot,
             request_latency=args.request_latency,

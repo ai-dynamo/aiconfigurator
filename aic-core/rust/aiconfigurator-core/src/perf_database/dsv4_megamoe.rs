@@ -92,8 +92,16 @@ fn moe_dtype_from_name(name: &str) -> Option<MoeQuantMode> {
 impl Dsv4MegaMoeTable {
     /// Construct for the given data directory. No I/O.
     pub fn new(data_root: PathBuf) -> Self {
+        Self::with_primary(data_root.join("dsv4_megamoe_module_perf.parquet"))
+    }
+
+    /// Construct with a fully resolved primary file path (single-primary by
+    /// design, but the path itself must be sources/family-first resolved —
+    /// the parquet ships under the family layout, e.g.
+    /// `<system>/moe/<backend>/<version>/`). No I/O.
+    pub fn with_primary(primary_path: PathBuf) -> Self {
         Self {
-            primary_path: data_root.join("dsv4_megamoe_module_perf.parquet"),
+            primary_path,
             module: OnceLock::new(),
         }
     }

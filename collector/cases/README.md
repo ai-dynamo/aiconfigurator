@@ -66,7 +66,7 @@ all_frameworks_op_cases:
 
 framework_specific_op_cases:
   sglang:
-    wideep_moe:
+    mla_context:
       cases: all
 ```
 
@@ -149,6 +149,11 @@ narrows that list with `framework_quantization.<backend>.allowed_modes`.
 Quant-sensitive checkpoint artifacts use separate model rows even when all
 geometry fields are identical.
 
+Artifact-keyed vLLM MoE rows also require a checked-in
+`src/aiconfigurator/model_configs/<org>--<model>_config.json`. The collector
+uses that local structural config to reproduce serving routing without a Hub
+download.
+
 When frameworks invoke different routed-expert geometry for the same artifact,
 a MoE model row may positively declare `frameworks: [vllm]` (or another list).
 Omitting the field means all frameworks. `get_common_moe_test_cases()` without
@@ -192,7 +197,7 @@ mode that fail-fast + failure log cannot handle:
 ```yaml
 entries:
   - contains: "tp=32, ep=16"
-    reason: "sglang wideep_moe tp=32 deadlocks in NCCL init on 0.5.10"
+    reason: "sglang moe_ep tp=32 deadlocks in NCCL init on 0.5.10"
     added: 2026-07-04
 ```
 

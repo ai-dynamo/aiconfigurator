@@ -261,6 +261,9 @@ def test_run_afd_estimate_passes_prefix_and_nextn(monkeypatch):
             return summary
 
     monkeypatch.setattr("aiconfigurator.sdk.inference_session.AFDInferenceSession", FakeSession)
+    # Stub out the nvfp4 remap: this test uses a fake model_path that has no
+    # HF config, so the remap's _get_model_info would fail trying to download it.
+    monkeypatch.setattr("aiconfigurator.cli.api.resolve_nvfp4_for_system", lambda *a, **k: None)
 
     api._run_afd_estimate(
         model_path="test-model",
@@ -907,6 +910,14 @@ def _install_estimate_perf_db_stubs(monkeypatch):
         "get_database",
         lambda system, backend, version, systems_paths=None, allow_missing_data=False: object(),
     )
+
+
+def test_cli_estimate_afd_rejects_invalid_engine_step_backend():
+    """AFD-only estimates validate before their early return path."""
+    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'python'"):
+        api.cli_estimate(
+            **_afd_cli_estimate_kwargs(engine_step_backend="python", afd_combined_with_pd=False),
+        )
 
 
 def test_cli_estimate_afd_combined_with_pd_false_skips_static(monkeypatch):

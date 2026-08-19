@@ -228,7 +228,7 @@ def test_legacy_disagg_sweep_uses_nested_qwen35_vision_config(monkeypatch, model
         vision_config=vision_config,
     )
     monkeypatch.setattr(
-        "aiconfigurator.sdk.inference_session.get_model_config_from_model_path",
+        "aiconfigurator_core.sdk.utils.get_model_config_from_model_path",
         lambda _model_path: {"extra_params": qwen_config},
     )
 

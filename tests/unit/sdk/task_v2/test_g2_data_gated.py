@@ -321,7 +321,7 @@ def test_candidate_graph_builds_and_large_ep_ops_query_finitely(synth_systems, s
     # 128 * dp8 = 1024 on the compute curve (in range).
     database = get_database(SYNTH_SYSTEM, backend, SYNTH_VERSION)
     for op in large_ops:
-        latency = float(op.query(database, x=128))
+        latency = float(op._engine_query(database, x=128))
         assert math.isfinite(latency) and latency > 0.0, op._name
 
 
@@ -334,6 +334,22 @@ def test_uncovered_tuple_of_the_same_task_builds_the_fused_graph(synth_systems, 
     assert _large_ep_ops(model.context_ops) + _large_ep_ops(model.generation_ops) == []
     fused_names = {op._name for op in model.context_ops}
     assert {"context_moe_pre_dispatch", "context_moe", "context_moe_post_dispatch"} <= fused_names
+
+
+# ---------------------------------------------------------------------------
+# guard: a str-typed moe_quant_mode is a caller bug, not "no coverage"
+# ---------------------------------------------------------------------------
+
+
+def test_str_moe_quant_mode_raises_type_error(synth_systems, synth_model_path):
+    """The compute-coverage probe keys the moe_ep table on ``MoEQuantMode``
+    members; a str (a caller bypassing ``_resolve_quant_str``) would miss every
+    key and silently disable large-EP exploration — raise loudly instead."""
+    t = _synth_task(synth_model_path, "sglang")
+    t.moe_quant_mode = "bfloat16"
+    t._large_ep_coverage_cache.clear()
+    with pytest.raises(TypeError, match="MoEQuantMode"):
+        t._large_ep_coverage("agg")
 
 
 # ---------------------------------------------------------------------------

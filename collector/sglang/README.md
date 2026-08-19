@@ -64,14 +64,14 @@ python collect.py --backend sglang
 # Run stock DSA module operators in the v0.5.14 container
 python collect.py --backend sglang --ops dsa_context_module dsa_generation_module
 
-# Run the retained WideEP MoE operator separately in the v0.5.10 container
-python collect.py --backend sglang --ops wideep_moe
+# Run the large-EP MoE compute operator separately in the v0.5.10 container
+python collect.py --backend sglang --ops moe_ep
 
 # Mixed: operations run in order; cases within each operation use the GPU pool
 python collect.py --backend sglang --ops mla_bmm_gen_pre dsa_context_module
 ```
 
-**Selected operators (`wideep_moe` requires its separate v0.5.10 run):**
+**Selected operators (`moe_ep` requires its separate v0.5.10 run):**
 
 | Category | Operator | Description |
 |----------|----------|-------------|
@@ -85,7 +85,7 @@ python collect.py --backend sglang --ops mla_bmm_gen_pre dsa_context_module
 | Kernel | `attention_generation` | Standard Attention decode |
 | Module | `dsa_context_module` | DSA module prefill (DeepSeek-V3.2, GLM-5) |
 | Module | `dsa_generation_module` | DSA module decode (DeepSeek-V3.2, GLM-5) |
-| Wideep | `wideep_moe` | Wideep MOE |
+| Wideep | `moe_ep` | Large-EP MoE expert compute (unified `moe_expert_compute_perf` table) |
 
 **Note:** Requested operators run sequentially. Cases within one operator are
 distributed across the selected GPU workers. Module-level operators use
@@ -172,7 +172,7 @@ python ../wideep/sglang/collect_deepep_moe.py --device cuda:0 --output-path /pat
 
 #### Framework Mode
 ```bash
-python collect.py --backend sglang --ops wideep_moe
+python collect.py --backend sglang --ops moe_ep
 ```
 
 #### Environment Variables
@@ -216,10 +216,10 @@ The simulated EP size is calculated as: `simulated_ep_size = 256 / num_experts *
 
 ### Output
 Results are saved to:
-- `wideep_context_moe_perf.txt`: Prefill phase performance data
-- `wideep_generation_moe_perf.txt`: Decode phase performance data
+- `moe_expert_compute_perf.txt`: both phases in one table, split by the `inference_phase`
+  column (`context` / `generation`)
 
 Output format:
-```
-framework,version,device,op_name,kernel_source,moe_dtype,num_tokens,hidden_size,inter_size,topk,num_experts,moe_tp_size,moe_ep_size,distribution,latency
+```csv
+framework,version,device,op_name,kernel_source,moe_dtype,distribution,inference_phase,num_tokens,hidden_size,inter_size,topk,num_experts,num_slots,moe_tp_size,moe_ep_size,latency
 ```

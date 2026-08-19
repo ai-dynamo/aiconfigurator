@@ -30,6 +30,41 @@ def test_default_task_config_is_agg_with_default_workload():
     assert t.tpot == 50.0
 
 
+def test_enable_epd_pins_encoder_dp_off():
+    # EPD encode workers model the engines' encoder-instance default
+    # (weight-sharded ViT); the colocated encoder-DP default stays True
+    # only outside EPD.
+    assert Task().enable_encoder_dp is True
+    assert Task(enable_epd=True).enable_encoder_dp is False
+
+
+def test_enable_epd_rejects_afd_serving_mode():
+    # sweep_afd carries no EPD parameters; accepting the combination would
+    # silently run a plain AFD sweep with every encoder knob dropped.
+    with pytest.raises(ValueError, match="serving_mode 'agg' or 'disagg'"):
+        Task(serving_mode="afd", enable_epd=True)
+
+
+def test_run_single_epd_arg_validation():
+    with pytest.raises(ValueError, match="requires encoder_tp"):
+        Task(enable_epd=True).run_single_agg(tp=1, batch_size=1)
+    with pytest.raises(ValueError, match="positive int"):
+        Task(enable_epd=True).run_single_agg(tp=1, batch_size=1, encoder_tp=1, encoder_num_workers=0)
+    with pytest.raises(ValueError, match="require enable_epd"):
+        Task().run_single_agg(tp=1, batch_size=1, encoder_tp=2)
+    with pytest.raises(ValueError, match="positive finite"):
+        Task(enable_epd=True, rate_match_encoder_degradation=-1.0).run_single_agg(tp=1, batch_size=1, encoder_tp=1)
+    with pytest.raises(ValueError, match="require enable_epd"):
+        Task(rate_match_encoder_degradation=0.7).run_single_agg(tp=1, batch_size=1)
+    with pytest.raises(ValueError, match="positive finite"):
+        Task(rate_match_prefill_degradation=-1.0).run_single_disagg(prefill_tp=1, decode_tp=1, decode_batch_size=1)
+
+
+def test_from_cli_resolves_quant_strings():
+    t = Task.from_cli(gemm_quant_mode="fp8", prefill_kvcache_quant_mode=None)
+    assert t.gemm_quant_mode is common.GEMMQuantMode.fp8
+
+
 def test_agg_with_model_resolves_identity_and_backend():
     t = Task(
         serving_mode="agg",
@@ -42,7 +77,7 @@ def test_agg_with_model_resolves_identity_and_backend():
     assert t.nextn is not None
     assert t.backend_version is not None  # resolved to latest
     # Search space defaults populated
-    assert t.agg_tp_candidates == [1, 2, 4, 8]
+    assert t.agg_tp_candidates == [1, 2, 4, 8, 16]
     assert t.agg_pp_candidates == [1]
 
 
@@ -1105,8 +1140,8 @@ def test_sglang_agg_default_moe_ep_search():
     the union with the multi-node ladder instead (test_coverage_candidates)."""
     qwen = "Qwen/Qwen3-235B-A22B"
     t = Task(serving_mode="agg", model_path=qwen, system_name="h200_sxm", backend_name="sglang")
-    assert t.agg_moe_tp_candidates == [1, 2, 4, 8]
-    assert t.agg_moe_ep_candidates == [1, 2, 4, 8]
+    assert t.agg_moe_tp_candidates == [1, 2, 4, 8, 16]
+    assert t.agg_moe_ep_candidates == [1, 2, 4, 8, 16]
     t2 = Task(
         serving_mode="agg",
         model_path=qwen,
@@ -1115,7 +1150,7 @@ def test_sglang_agg_default_moe_ep_search():
         moe_backend="deepep_moe",
     )
     assert t2.agg_moe_tp_candidates == [1]
-    assert t2.agg_moe_ep_candidates == [1, 2, 4, 8]
+    assert t2.agg_moe_ep_candidates == [1, 2, 4, 8, 16]
 
 
 def test_run_validates_by_default():
@@ -1529,6 +1564,7 @@ def _build_fake_summary(result_dict: dict | None = None, oom: bool = False):
     import pandas as pd
 
     s.get_summary_df.return_value = pd.DataFrame([result_dict or {"tokens/s/gpu": 100.0, "ttft": 50.0, "tpot": 20.0}])
+    s.get_power_data_coverage.return_value = 1.0
     return s
 
 
@@ -1927,6 +1963,42 @@ def test_validate_gemm_quant_transfer_reachable_in_hybrid():
             make(mode, policy, quant=common.GEMMQuantMode.nvfp4).validate()
 
 
+def test_validate_nvfp4_wo_ladder_admitted_in_hybrid():
+    """nvfp4_wo has no collected MoE data on any system, but its util-level
+    entry is present so it is XPROFILE-reachable in HYBRID. SILICON rejects
+    (no data, no transfer). GEMM nvfp4_wo also goes through the XPROFILE
+    ladder to bfloat16.
+
+    This pins the ladder approach: validate admits without any alias, purely
+    through profile reachability — consistent with GEMM's treatment.
+    """
+
+    def make(mode, policy=None):
+        # vLLM 0.24.0 on H100: nvfp4 → nvfp4_wo (non-Blackwell remap)
+        return Task(
+            serving_mode="agg",
+            model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+            system_name="h100_sxm",
+            backend_name="vllm",
+            backend_version="0.24.0",
+            database_mode=mode,
+            transfer_policy=policy,
+        )
+
+    # HYBRID: util-level entry present → XPROFILE-reachable for both GEMM and MoE
+    make("HYBRID").validate()
+    make("HYBRID", "xprofile").validate()
+
+    # SILICON: no data, no transfer → both quant modes are rejected
+    with pytest.raises(ValueError, match="nvfp4_wo"):
+        make("SILICON").validate()
+
+    # With XPROFILE disabled: ladder cannot reach nvfp4_wo → rejected
+    for disabled in ("off", "conservative", "xquant"):
+        with pytest.raises(ValueError, match="nvfp4_wo"):
+            make("HYBRID", disabled).validate()
+
+
 def test_validate_fp8_static_not_transfer_admitted_in_hybrid():
     """fp8_static is a composite mode (fp8 base minus compute_scale/scale_matrix);
     the overhead tables have no transfer ladder, so HYBRID must NOT admit it via
@@ -2038,7 +2110,7 @@ def test_to_dict_emits_resolved_state_with_enum_names():
     # Backend version resolved automatically
     assert d["backend_version"] is not None
     # Search candidates populated
-    assert d["agg_tp_candidates"] == [1, 2, 4, 8]
+    assert d["agg_tp_candidates"] == [1, 2, 4, 8, 16]
 
 
 def test_to_dict_excludes_internal_fields():
@@ -2115,3 +2187,58 @@ def test_trtllm_dp1_tep_tuples_stay_fused():
     for tup in t.iter_parallel("agg"):
         if t._resolve_moe_comm_backend("agg", tup) is not None:
             assert tup[2] > 1, f"dp=1 large-EP tuple leaked: {tup}"
+
+
+def test_nvfp4_remapped_to_nvfp4_wo_on_hopper():
+    """nvfp4 models on non-Blackwell get remapped to nvfp4_wo unconditionally."""
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+        system_name="h100_sxm",
+        backend_name="trtllm",
+    )
+    assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4_wo
+    assert t.moe_quant_mode == common.MoEQuantMode.nvfp4_wo
+
+
+def test_nvfp4_preserved_on_blackwell():
+    """Blackwell keeps native nvfp4 quant modes."""
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+        system_name="b200_sxm",
+        backend_name="trtllm",
+    )
+    assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4
+    assert t.moe_quant_mode == common.MoEQuantMode.nvfp4
+
+
+def test_engine_step_backend_is_validated_at_task_construction():
+    """Every programmatic entry point funnels through Task construction, so
+    the retired "python" token (and any typo) fails closed HERE — including
+    paths like the AFD session that never reach the step routing gate."""
+    import pytest
+
+    from aiconfigurator.sdk.task_v2 import Task
+
+    def _task(**kwargs):
+        return Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            backend_version="dummy",
+            total_gpus=8,
+            **kwargs,
+        )
+
+    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'python'"):
+        _task(engine_step_backend="python")
+    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'auto'"):
+        _task(engine_step_backend="auto")
+    for falsey_value in ("", 0, False):
+        with pytest.raises(ValueError, match="unknown engine_step_backend"):
+            _task(engine_step_backend=falsey_value)
+    assert _task(engine_step_backend="rust").engine_step_backend == "rust"
+    assert _task(engine_step_backend="RUST").engine_step_backend == "rust"
+    assert _task(engine_step_backend=None).engine_step_backend is None

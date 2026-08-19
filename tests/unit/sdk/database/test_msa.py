@@ -1,16 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""MiniMax Sparse Attention (MSA) op: SOL and the cross-op (XOP) transfer from DSA.
+"""MiniMax Sparse Attention (MSA) op: per-op SOL coverage through the query shim.
 
-MSA has no own silicon data, so its empirical path is a cross-op transfer gated by the
-XOP transfer kind. These tests cover the SOL path and the XOP gate (the headline new op
-otherwise had no coverage)."""
+The cross-op (XOP) DSA-to-MSA utilization transfer this file also used to pin
+(policy gating + xop provenance tagging via the ``_dsa_context_util`` seam)
+retired to the compiled engine with #1357 PR-5; transfer-ladder behaviour is
+anchored by the frozen parity goldens and
+the frozen parity goldens."""
 
 import pytest
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.errors import EmpiricalNotImplementedError
 
 pytestmark = pytest.mark.unit
 
@@ -37,47 +38,20 @@ def _ctx_msa():
     )
 
 
-def test_msa_sol_scales_with_workload(comprehensive_perf_db):
+def test_msa_sol_scales_with_workload():
     """SOL mode computes the three-group MSA SOL (gemm + fp8 indexer + sparse attn). Assert it
     RESPONDS to the workload rather than returning a constant: more new tokens (s) add work, and
-    a longer cached prefix adds indexer/attention work (full_s > index_topk)."""
-    comprehensive_perf_db.set_default_database_mode(common.DatabaseMode.SOL)
-    try:
-        op = _ctx_msa()
-        small = float(op.query(comprehensive_perf_db, batch_size=8, s=512, prefix=0))
-        large = float(op.query(comprehensive_perf_db, batch_size=8, s=2048, prefix=0))
-        with_prefix = float(op.query(comprehensive_perf_db, batch_size=8, s=2048, prefix=2048))
-        assert 0 < small < large  # scales with new-token count
-        assert with_prefix > large  # cached prefix adds indexer work beyond index_topk
-    finally:
-        comprehensive_perf_db.set_default_database_mode(common.DatabaseMode.SILICON)
+    a longer cached prefix adds indexer/attention work (full_s > index_topk). Runs on a real
+    shipped database: ``op._engine_query`` is the permanent internal single-op plumbing routed
+    through the compiled engine's probe, which loads its tables from disk (the synthetic
+    fixture is invisible to it)."""
+    from aiconfigurator.sdk.perf_database import get_database_view
 
-
-def test_msa_xop_gating(comprehensive_perf_db, monkeypatch):
-    """The DSA-to-MSA utilization transfer is gated and tagged as XOP."""
-    from aiconfigurator.sdk.operations import util_empirical
-
-    util_queries = []
-
-    def dsa_util(_database, **kwargs):
-        util_queries.append(kwargs)
-        return 0.5
-
-    monkeypatch.setattr("aiconfigurator.sdk.operations.msa._dsa_context_util", dsa_util)
-    comprehensive_perf_db.set_default_database_mode(common.DatabaseMode.HYBRID)
-    kw = dict(batch_size=8, s=2048, prefix=0)
-    try:
-        comprehensive_perf_db.set_transfer_policy(["xshape", "xquant"])  # no XOP
-        with pytest.raises(EmpiricalNotImplementedError) as exc:
-            _ctx_msa().query(comprehensive_perf_db, **kw)
-        assert "xop" in str(exc.value).lower()  # gated at the policy, not a data miss
-        assert util_queries == []
-
-        comprehensive_perf_db.set_transfer_policy(None)  # XOP allowed
-        with util_empirical.capture_provenance() as tags:
-            assert float(_ctx_msa().query(comprehensive_perf_db, **kw)) > 0
-        assert len(util_queries) == 1
-        assert util_empirical.worst_provenance(tags) == "xop"
-    finally:
-        comprehensive_perf_db.set_transfer_policy(None)
-        comprehensive_perf_db.set_default_database_mode(common.DatabaseMode.SILICON)
+    db = get_database_view("b200_sxm", "sglang", "0.5.14", database_mode="SOL")
+    assert db is not None, "b200_sxm/sglang/0.5.14 data missing"
+    op = _ctx_msa()
+    small = float(op._engine_query(db, batch_size=8, s=512, prefix=0))
+    large = float(op._engine_query(db, batch_size=8, s=2048, prefix=0))
+    with_prefix = float(op._engine_query(db, batch_size=8, s=2048, prefix=2048))
+    assert 0 < small < large  # scales with new-token count
+    assert with_prefix > large  # cached prefix adds indexer work beyond index_topk

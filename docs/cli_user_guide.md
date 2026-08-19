@@ -16,8 +16,8 @@ These flags are shared across modes (a few are sweep-only, as noted):
 - `--top-n N`: Number of top configurations to output — per experiment in `exp` mode, or per serving mode (agg/disagg) in `default` mode. Default: `5`. (`default`, `exp`, `generate`, `estimate`)
 - `--systems-paths`: System search paths (comma-separated). Use `default` for the built-in systems path; the first match wins for an identical system/backend/version. (`default`, `exp`, `generate`, `estimate`)
 - `--deployment-target`: Generated-artifact platform — `dynamo-j2` (default), `dynamo-python`, `llm-d-helm`, `llm-d-kustomize`, or `fpm`. See [Deployment Target Selection](#deployment-target-selection). (`default`, `exp`, `generate`, `estimate`)
-- `--engine-step-backend`: Engine-step latency backend — unset defaults to the compiled Rust engine (databases with measured power data delegate to the Python step until energy crosses the FFI); `python` is the escape hatch, `rust` forces the compiled engine. Accepted by all modes but inert in `generate`, which performs no latency estimation. (`default`, `exp`, `generate`, `estimate`)
-- `--forward-model`: Forward-pass modeling mode — `op_level` (default; granular per-op modeling) or `fpm` (predicts from collected whole-model forward-pass data; requires `fpm_forward_perf` data for the exact model/system/backend/version and never extrapolates outside the collected domain). Runs on either engine-step backend (the compiled engine has a native FPM operation). `fpm` predictions are only as accurate as the match between the deployed engine configuration and the collected data — in particular the CUDA-graph capture surface: regime cliffs are encoded in the data, not modeled, so a deployment whose capture config differs from the collection will mispredict. V1 accepts only vLLM identities the standard deployment path can reproduce: automatic MoE/attention backend selection with EPLB disabled. Pinned backend or EPLB identities are rejected until structured generator support lands. Not supported in the `afd` estimate mode. (`default`, `exp`, `generate`, `estimate`)
+- `--engine-step-backend`: Engine-step latency backend. The compiled Rust engine is the only step executor; `rust` is the only accepted value (the deprecated `python` no-op was removed after its one-release window); any other value raises an error. Accepted by the five modes below (not `support`) but inert in `generate`, which performs no latency estimation. (`default`, `recommend`, `exp`, `generate`, `estimate`)
+- `--forward-model`: Forward-pass modeling mode — `op_level` (default; granular per-op modeling) or `fpm` (predicts from collected whole-model forward-pass data; requires `fpm_forward_perf` data for the exact model/system/backend/version and never extrapolates outside the collected domain). Evaluates on the compiled engine's native FPM operation. `fpm` predictions are only as accurate as the match between the deployed engine configuration and the collected data — in particular the CUDA-graph capture surface: regime cliffs are encoded in the data, not modeled, so a deployment whose capture config differs from the collection will mispredict. V1 accepts only vLLM identities the standard deployment path can reproduce: automatic MoE/attention backend selection with EPLB disabled. Pinned backend or EPLB identities are rejected until structured generator support lands. Not supported in the `afd` estimate mode. (`default`, `exp`, `generate`, `estimate`)
 
 The `support` mode accepts only `--log-level`, `--debug`, and `--no-color` from this list. Generator-artifact flags (`--generator-config`, `--generator-set`, `--generator-help`, `--generator-help-backend`, `--generated-config-version`, `--generator-dynamo-version`) are documented under [Default mode](#default-mode).
 
@@ -212,6 +212,14 @@ result = cli_estimate(
     decode_batch_size=64, decode_num_workers=2,
 )
 ```
+
+#### EPD single point (`--enable-epd`)
+
+For vision-language models with image inputs, `--enable-epd` overlays a fixed encode-worker pool on an `agg` or `disagg` estimate (other estimate modes reject it):
+
+- `--encoder-tp`: Encode-worker TP (required with `--enable-epd`).
+- `--encoder-batch-size`: Encode batch size. Default: `1` (maximum: 8).
+- `--encoder-num-workers`: Encode workers in the pool. Default: `1`.
 
 #### Static estimate modes (`static`, `static_ctx`, `static_gen`)
 
@@ -416,8 +424,8 @@ Beyond `--ttft`, `--tpot`, `--isl`, `--osl`, and `--prefix`, `default` mode acce
 - `--free-gpu-memory-fraction`: Fraction of free GPU memory TRT-LLM allocates for KV cache (default: `1.0`). Filters batch sizes that would exceed KV cache capacity.
 - `--max-seq-len`: TRT-LLM `--max_seq_len` (default: `isl + osl`). Controls how many KV blocks are pre-allocated per sequence; set to match your deployment for accurate KV-capacity filtering.
 - `--enable-chunked-prefill`: Enable chunked prefill for a finer-grained context-token sweep. When off (default), the context-token stride is aligned to ISL for faster sweeping.
-- `--enable-wideep`: **Deprecated and ignored** (accepted with a one-time warning). Large-EP (wideEP) is explored automatically — see the note below.
-- `--moe-backend`: Explicit SGLang MoE backend. `megamoe` is a real kernel selection (use it to model DeepSeek-V4 MegaMoE on Blackwell); `deepep_moe` is deprecated and ignored (large-EP is explored automatically from data coverage).
+- `--enable-wideep`: **Deprecated and ignored for large-EP modeling** (accepted with a one-time warning). On SGLang, it still narrows the default `moe_tp` candidates to `[1]`; explicit `*_moe_tp_candidates` values take precedence. Large-EP (wideEP) is explored automatically — see the note below.
+- `--moe-backend`: Explicit SGLang MoE backend. `megamoe` is a real kernel selection (use it to model DeepSeek-V4 MegaMoE on Blackwell); `deepep_moe` is deprecated: it is ignored for modeling (large-EP is explored automatically from data coverage), but on SGLang it still narrows the default `moe_tp` candidates to `[1]` — explicit `*_moe_tp_candidates` always win.
 
 > **Large-EP (wideEP) is explored automatically.** For MoE models, multi-node EP-only
 > parallelism joins the search whenever the performance database covers the model's MoE
@@ -443,6 +451,15 @@ The image and video input flags are also available in `recommend` mode.
 
 Image and video workloads must currently be estimated separately. Qwen3-VL dense/MoE and Qwen3.5 video token accounting uses each model's temporal patch size before the spatial merge.
 Visual encoder workloads are not supported by AFD mode. Video estimates are supported for functional estimation, but saving deployment artifacts for a video workload is rejected until the generator has a video benchmark schema; run without `--save-dir`.
+
+**Encoder disaggregation (EPD)** — serve the vision encoder from a dedicated encode-worker pool rate-matched against the LM workers (agg becomes E+agg, disagg becomes E+P+D). Requires image inputs; the LM workers are modeled language-only. Result rows carry `(e)workers`/`(e)tp`/`(e)bs` columns.
+
+- `--enable-epd`: Sweep dedicated encode workers alongside the LM sweep.
+- `--encoder-tp`: Encode-worker TP sizes to sweep. Default: `1 2 4 8`.
+- `--encoder-system`: System (GPU type) for the encode pool. Defaults to the LM-side system; backend and version always follow the P/agg side.
+- `--encoder-latency-correction`: Latency correction scale for encode workers. Default: `1.0`.
+
+Encode batch sizes are swept over `1 2 4 8`, capped at 8 (SGLang's `SGLANG_ENCODER_MAX_BATCH_SIZE` default); explicit candidates above the cap are rejected. Further knobs (`encoder_batch_candidates`, `max_encoder_workers`, `rate_match_encoder_degradation`) are Task fields for `exp`-mode YAML — see [Advanced Tuning](advanced_tuning.md). EPD rows are excluded from generator artifacts (see [Generator Overview](generator_overview.md)).
 
 The SLA, precision, and speculative-decoding flags (`--strict-sla`, `--request-latency`, `--inclusive-tpot`, `--nextn`, `--nextn-accepted`, `--database-mode`) have dedicated subsections below. Shared flags such as `--save-dir`, `--top-n`, and `--systems-paths` are described in [Common Arguments](#common-arguments-all-modes).
 

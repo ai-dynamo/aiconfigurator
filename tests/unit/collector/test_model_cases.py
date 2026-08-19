@@ -65,8 +65,11 @@ def test_model_case_plan_merges_required_base_and_framework_specific_ops():
     assert "moe" in plan.selected_ops
     assert "mla_context" in plan.selected_ops
     assert "wideep_mla_context" not in plan.selected_ops
-    assert "wideep_moe" not in plan.selected_ops
-    assert "trtllm_moe_wideep" not in plan.selected_ops
+    # The sglang plan keeps moe_ep out (separate WideEP 0.5.10 runtime); the
+    # trtllm plan activates it (same image as stock trtllm) — see
+    # tests/unit/collector/trtllm/test_collect_moe_ep.py.
+    assert "moe_ep" not in plan.selected_ops
+    assert "trtllm_moe_wideep" not in plan.selected_ops  # retired op name
 
 
 def test_attention_head_configs_preserve_real_model_structures_without_cross_mixing():
@@ -501,10 +504,13 @@ def test_sglang_registry_marks_unvalidated_dsa_and_moe_platforms_explicitly():
     sm100 = build_collection_case_plan(backend="sglang", full=True, sm_version=100)
     entries = {entry.op: entry for entry in REGISTRY}
 
+    # SM90 unparked by the h100/h200 probe collections (2026-08-14..15,
+    # pipelines 62700025 + 62872230): 67,532 context + 4,896 generation
+    # skip rows, fa3/flashmla buckets clean.
     for op in ("dsa_context_module_skip_indexer", "dsa_generation_module_skip_indexer"):
         assert op in sm90.selected_ops
         assert op in sm100.selected_ops
-        assert entries[op].unverified_sms == (90, 120)
+        assert entries[op].unverified_sms == (120,)
 
     # SM103 unparked by the B300 hardware probe (2026-07-13, pipeline
     # 57716023): sampled dsa cases ran clean across all three kernel buckets.
@@ -577,6 +583,7 @@ def test_deepseek_minimax_and_nemotron_moe_quantization_is_artifact_specific():
             "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": set() if backend == "sglang" else {"fp8"},
         }
         if backend == "vllm":
+            expected_by_artifact["nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8"] = {"fp8"}
             expected_by_artifact["nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"] = set()
             expected_by_artifact["nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"] = set()
         for model_path, expected in expected_by_artifact.items():
@@ -740,7 +747,8 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # registered in moe.yaml base_ops.
     # +114 for Kimi-K3's LatentMoE row (3584/3072, 896x16, w4a16_mxfp4).
     # +198 from Step-3.7-Flash: 99 cases for each physical BF16/FP8 artifact.
-    assert len(moe_cases) == 5223
+    # +117 for the vLLM Nemotron Super FP8 latent-MoE row (1024/2688, 512x22).
+    assert len(moe_cases) == 5340
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -1240,7 +1248,7 @@ def test_dsv4_plan_only_uses_backend_specific_case_plan():
 
     assert payload["ops"] == expected_ops
     assert "dsv4_csa_topk_calib" in payload["ops"]
-    assert "wideep_moe" not in payload["ops"]
+    assert "moe_ep" not in payload["ops"]
 
 
 def test_vllm_024_schedules_consumed_dsv4_modules_only():
@@ -1336,7 +1344,7 @@ def test_vllm_024_model_plans_only_schedule_representable_attention_paths():
         "mla_context",
         "mla_generation",
         "moe",
-        "trtllm_moe_wideep",
+        "moe_ep",
     ]
     assert build_collection_case_plan(backend="vllm_xpu", model_path=kimi_path).ops == ["gemm", "moe"]
 
@@ -1515,6 +1523,7 @@ def test_quant_sensitive_moe_artifacts_use_quant_equivalent_representatives(monk
         "nvidia/DeepSeek-V3.1-NVFP4": "nvidia/DeepSeek-V3.1-NVFP4",
         "nvidia/MiniMax-M2.5-NVFP4": "nvidia/MiniMax-M2.5-NVFP4",
         "nvidia/MiniMax-M2.7-NVFP4": "nvidia/MiniMax-M2.5-NVFP4",
+        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
@@ -1524,6 +1533,34 @@ def test_quant_sensitive_moe_artifacts_use_quant_equivalent_representatives(monk
         monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
         cases = get_common_moe_test_cases()
         assert cases and {case.model_name for case in cases} == {expected_representative}
+
+
+def test_nemotron_super_fp8_vllm_moe_case_covers_missing_consumer_key(monkeypatch):
+    from collector.case_generator import get_common_moe_test_cases
+
+    model_path = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8"
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+
+    cases = get_common_moe_test_cases(backend="vllm")
+
+    assert cases
+    assert {case.model_name for case in cases} == {model_path}
+    assert any(
+        case.hidden_size == 1024
+        and case.inter_size == 2688
+        and case.topk == 22
+        and case.num_experts == 512
+        and case.tp == 1
+        and case.ep == 4
+        and case.token_expert_distribution == "power_law"
+        and case.power_law_alpha == 1.01
+        for case in cases
+    )
+    assert moe_model_allows_quantization("vllm", model_path, "fp8")
+    assert not moe_model_allows_quantization("vllm", model_path, "bfloat16")
+
+    config_path = REPO_ROOT / "src/aiconfigurator/model_configs" / f"{model_path.replace('/', '--')}_config.json"
+    assert config_path.is_file()
 
 
 def test_nemotron_ultra_quant_artifact_keeps_moe_path_but_reuses_mamba_profile(monkeypatch):
