@@ -9,8 +9,9 @@ runtime:
   image: vllm/vllm-openai:v0.27.0
   image_digest: sha256:07ea4e292adf3a26b05ac97114b28849cf4551a26beb1fbe7decd3842d752ed7
 tables:
-  # SM103 (GB300) vllm kda at upstream v0.27.0 (Kimi-K3 landed upstream;
-  # preview 0.1.dev19262 retired in the manifest kda family). Collected
+  # SM103 (GB300) vllm kda at upstream v0.27.0 (Kimi-K3 landed upstream; the
+  # manifest kda family pin stays on the preview until the consumer routes
+  # 0.27.0's split decode — see collector/framework_manifest.yaml). Collected
   # 2026-08-17 on GB300 NVL72 pods with fix/vllm-kda-context-conv-metadata:
   # context conv now passes serving-parity GDNAttentionMetadata to
   # causal_conv1d_fn (previously the metadata=None numpy+D2H branch added a
@@ -19,16 +20,18 @@ tables:
   # 0.1.dev19262 kda context rows) and times via repeat_n=10 CUDA-graph
   # replay. The former unverified nt*proj>=2**31 int32 guard is deleted
   # (0.27.0 causal_conv1d is int64 end-to-end; formerly-vetoed cells pass
-  # with SOL-sane timings). 1198 rows. Accepted cell gaps, both long-tail
-  # and consistent with the preview era: (1) generation
-  # fused_recurrent_kda_packed_decode at (batch_size=1024, num_v_heads=96)
-  # fails launch with "Triton Error [CUDA]: invalid argument" on both
-  # 0.1.dev19262 and 0.27.0 build — kernel-side limit, the same cell is
+  # with SOL-sane timings). The KDA plan is 1200 cases; the parquet has 1198
+  # rows, so this table is partial — two unresolved cell failures are
+  # recorded in the run checkpoint: (1) generation
+  # fused_recurrent_kda_packed_decode at (num_v_heads=96, batch_size=1024)
+  # fails launch with "Triton Error [CUDA]: invalid argument" on both the
+  # 0.1.dev19262 and 0.27.0 builds — kernel-side limit, the same cell is
   # covered by causal_conv1d_update (and by fused_kda_decode on the
   # preview); (2) context (num_v_heads=96, batch_size=64, seq_len=32768)
   # OOMs at input allocation (~155GB mixed-QKV tensor vs 277GB card with
-  # concurrent workers) — missing both kernel rows for that cell, SDK
-  # interpolation covers it. fused_kda_decode rows are intentionally absent
+  # concurrent workers) — misses only the flashkda_fwd row for that cell
+  # (the causal_conv1d_fn_qkv3 row collected fine); SDK interpolation
+  # covers the gap. fused_kda_decode rows are intentionally absent
   # everywhere at 0.27.0: the is_fused_kda_decode_supported predicate
   # rejects DS conv-state layout (VLLM_SSM_CONV_STATE_LAYOUT=DS, matching
   # serving on this image), so generation runs packed_decode + conv update.
@@ -38,4 +41,4 @@ tables:
     case_plan_hash: sha256:6a42ea30c5fe48538d365ca28a5b1f4f0c79a511f808ed5324efd46010d1cd66
     collected_at: '2026-08-17'
     rows: 1198
-    status: complete
+    status: partial
