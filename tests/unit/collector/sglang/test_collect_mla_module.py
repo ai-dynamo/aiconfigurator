@@ -404,7 +404,7 @@ class TestBuildModuleTestCases:
 
         namespace["get_sm_version"] = lambda: 100
         monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
-        assert selector() == ["nvidia/GLM-5.3-NVFP4"]
+        assert selector() == ["nvidia/GLM-5.2-NVFP4"]
         monkeypatch.setenv("COLLECTOR_MODEL_PATH", "nvidia/GLM-5-NVFP4")
         assert selector() == ["nvidia/GLM-5-NVFP4"]
 

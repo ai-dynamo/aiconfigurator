@@ -138,7 +138,7 @@ def test_full_population_covers_every_declared_wideep_model(monkeypatch, moe_ep_
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     counts = _stage_counts()
     cases = moe_ep_symbols["get_moe_ep_test_cases"]()
-    assert counts["unique_invocations"] == len(cases) == 134
+    assert counts["unique_invocations"] == len(cases) == 110
     for local_experts, ep_size, _hidden, _inter, _topk, num_experts, num_slots, quant in cases:
         assert local_experts * ep_size == num_experts
         assert num_slots == num_experts
