@@ -282,10 +282,14 @@ def _context_shapes(batch_size: int, max_pos: int | None):
 def _generation_shapes(max_pos: int | None):
     """(batch_size, kv_len) grid for the generation phase."""
     sweep = get_mla_module_sweep_spec("sglang")
+    # MSA carries its own decode budget (generation.msa_max_tokens): the
+    # shared generation.max_tokens is the MLA/DSA memory contract, while MSA
+    # decode coverage needs the large-batch x long-kv corner.
+    budget = sweep.generation_msa_max_tokens or sweep.generation_max_tokens
     shapes = []
     for b in sweep.generation_batch_sizes:
         for kv in sweep.generation_sequence_lengths:
-            if b * kv > sweep.generation_max_tokens:
+            if b * kv > budget:
                 continue
             if (
                 sweep.generation_large_sequence_min

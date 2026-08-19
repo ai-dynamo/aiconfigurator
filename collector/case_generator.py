@@ -721,6 +721,12 @@ class MLAModuleSweepSpec:
     generation_large_sequence_max_batch_size: int
     generation_large_cache_tokens: int
     context_prefix_lengths: list[int]
+    # Optional MSA-specific decode budget: MSA decode coverage needs the
+    # large batch x long-kv corner (raised for the shipped MSA tables),
+    # while the shared generation.max_tokens stays the MLA/DSA collectors'
+    # memory contract (their guard tests pin it). None -> fall back to
+    # generation_max_tokens.
+    generation_msa_max_tokens: int | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -974,6 +980,7 @@ def get_mla_module_sweep_spec(backend: str | None = None) -> MLAModuleSweepSpec:
         context_large_sequence_min=_optional_int(context.get("large_sequence_min")),
         context_large_sequence_max_batch_size=_optional_int(context.get("large_sequence_max_batch_size")),
         generation_max_tokens=int(generation["max_tokens"]),
+        generation_msa_max_tokens=_optional_int(generation.get("msa_max_tokens")),
         generation_large_sequence_min=_optional_int(generation.get("large_sequence_min")),
         generation_large_sequence_max_batch_size=_optional_int(generation.get("large_sequence_max_batch_size")),
         generation_large_cache_tokens=_optional_int(generation.get("large_cache_tokens")),
