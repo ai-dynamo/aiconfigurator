@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Step-1 archive generator: targets.yaml -> generator-rendered engine args
+"""Facts generator (sweep driver): targets.yaml -> generator-rendered engine args
 -> probe runs -> facts archive with provenance.
 
 Runs on the host (needs the aiconfigurator repo importable for rendering).
 
-  PYTHONPATH=<aic>/src python3 probe/gen_archive.py --plan            # show runs
-  PYTHONPATH=<aic>/src python3 probe/gen_archive.py --emit-queues     # write per-GPU queue scripts
-  python3 probe/gen_archive.py --collect                              # raw JSONs -> archive.jsonl
+  PYTHONPATH=<aic>/src python3 probe/gen_facts.py --plan            # show runs
+  PYTHONPATH=<aic>/src python3 probe/gen_facts.py --emit-queues     # write per-GPU queue scripts
+  python3 probe/gen_facts.py --collect                              # raw JSONs -> archive.jsonl
 """
 
 from __future__ import annotations
