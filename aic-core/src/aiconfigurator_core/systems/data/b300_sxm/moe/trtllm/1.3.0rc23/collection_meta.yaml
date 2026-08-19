@@ -12,7 +12,7 @@ tables:
   moe_perf:
     collector_ref: 2e16b74d44365ac03a8a625a1f388242058bc009
     collector_hash: sha256:9fc22916e30113f18f4254b5d123fc9d852123956e1072a2a17785fe7c26907c
-    case_plan_hash: sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    case_plan_hash: sha256:b29773cac038346c6cb77edff53b604d1f41e808fd3ddb86190c215b4476d47e
     collected_at: '2026-08-08'
     rows: 5101
     status: complete

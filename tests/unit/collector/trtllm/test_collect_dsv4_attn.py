@@ -156,3 +156,14 @@ def test_module_cache_reuses_same_geometry_and_evicts_on_change(monkeypatch):
     assert list(module._MODULE_CACHE) == [("m/flash", "hca", 4, "cuda:0")]
     assert b1 is not a1
     module._MODULE_CACHE.clear()
+
+
+def test_generation_geometry_matches_serving_invariant(monkeypatch):
+    """position == past-seen/cached == persisted step (model_engine.py:4148,
+    4164-4169 @1.3.0rc23): the decode dummy request registers seq_len+1 beam
+    tokens, so all three sides of the triple are seq_len. Guards the
+    off-by-one found in review (position was seq_len - 1)."""
+    module = _load_module_with_torch_stub(monkeypatch)
+    for seq_len in (1, 4, 512, 65536):
+        geo = module.generation_request_geometry(seq_len)
+        assert geo["position"] == geo["num_cached_tokens"] == geo["persisted_step"] == seq_len

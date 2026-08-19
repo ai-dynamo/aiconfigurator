@@ -72,6 +72,7 @@ ARCHITECTURE = "DeepseekV4ForCausalLM"
 try:
     from case_generator import (
         _DSV4_MODULE_BATCH_SIZES,
+        _DSV4_MODULE_BUDGETS,
         _DSV4_MODULE_SEQ_LENGTHS,
         _DSV4_MODULE_TP_SIZES,
         _selected_dsv4_models,
@@ -79,6 +80,7 @@ try:
 except ModuleNotFoundError:
     from collector.case_generator import (
         _DSV4_MODULE_BATCH_SIZES,
+        _DSV4_MODULE_BUDGETS,
         _DSV4_MODULE_SEQ_LENGTHS,
         _DSV4_MODULE_TP_SIZES,
         _selected_dsv4_models,
@@ -86,12 +88,14 @@ except ModuleNotFoundError:
 
 ATTN_KIND_TO_COMPRESS_RATIO = {"csa": 4, "hca": 128}
 
-# Sweep budget caps — mirrored from the vllm module collector so the three
-# frameworks' module tables cover comparable grids
-# (collector/vllm/collect_dsv4_attn.py:90-95).
-MAX_SEQ_LEN = int(os.environ.get("AIC_TRTLLM_DSV4_MAX_SEQ_LEN", "65536"))
-MAX_CONTEXT_QUERY_TOKENS = int(os.environ.get("AIC_TRTLLM_DSV4_MAX_CONTEXT_QUERY_TOKENS", "262144"))
-MAX_GENERATION_KV_TOKENS = int(os.environ.get("AIC_TRTLLM_DSV4_MAX_GENERATION_KV_TOKENS", "1048576"))
+# Universal sweep budgets are DECLARED in
+# cases/models/DeepseekV4ForCausalLM_cases.yaml (module_budgets) and enforced
+# at generation time with counted drops — the declaration layer owns them
+# (case_authoring.md), the collector only reads the declared values.
+MAX_SEQ_LEN = _DSV4_MODULE_BUDGETS["max_seq_len"]
+MAX_CONTEXT_QUERY_TOKENS = _DSV4_MODULE_BUDGETS["max_context_query_tokens"]
+MAX_GENERATION_KV_TOKENS = _DSV4_MODULE_BUDGETS["max_generation_kv_tokens"]
+DECODE_BATCH_LADDER = _DSV4_MODULE_BUDGETS["decode_batch_ladder"]
 CONTEXT_PREFIX_ANCHORS = (0, 128, 2048, 4096)
 
 _MODEL_CONFIG_DIR = os.path.join(
@@ -146,15 +150,8 @@ def _filter_shapes(mode: str, drops: dict[str, int] | None = None):
                 if bs * sl > MAX_GENERATION_KV_TOKENS:
                     _drop("generation_kv_tokens_cap")
                     continue
-                # Decode batch ladder (vllm collector:867-878).
-                if (
-                    (sl >= 524288 and bs > 1)
-                    or (sl >= 262144 and bs > 2)
-                    or (sl >= 131072 and bs > 4)
-                    or (sl >= 65536 and bs > 8)
-                    or (sl >= 32768 and bs > 16)
-                    or (sl >= 8192 and bs > 64)
-                ):
+                # Declared decode batch ladder (module_budgets).
+                if any(sl >= floor and bs > max_bs for floor, max_bs in DECODE_BATCH_LADDER):
                     _drop("decode_batch_ladder")
                     continue
                 shapes.append((bs, sl, 0))
@@ -235,6 +232,23 @@ def _cached_dsv4_attention_module(model_path: str, attn_kind: str, tp_size: int,
     entry = create_dsv4_attention_module(model_path=model_path, attn_kind=attn_kind, tp_size=tp_size, device=device)
     _MODULE_CACHE[key] = entry
     return entry
+
+
+def generation_request_geometry(seq_len: int) -> dict[str, int]:
+    """Decode-request state triple, single-sourced so the serving invariant
+    cannot drift between construction sites.
+
+    Serving population (model_engine.py generation branch @1.3.0rc23):
+    ``past_seen_token_num = request.max_beam_num_tokens - 1`` (:4148),
+    ``position_ids.extend(range(past_seen_token_num, ...))`` (:4164-4167) and
+    ``num_cached_tokens_per_seq.append(past_seen_token_num - ...)`` (:4168-4169)
+    — i.e. the new token's POSITION equals the PAST-SEEN/CACHED token count.
+    The collector's decode dummy request registers ``seq_len + 1`` beam tokens
+    (``request_tokens = max_seq = seq_len + 1``), so past-seen == cached ==
+    position == ``seq_len``, and the persisted row ``step`` (past-KV length,
+    #1429 row semantics) is the same value.
+    """
+    return {"num_cached_tokens": seq_len, "position": seq_len, "persisted_step": seq_len}
 
 
 def _patched_config_dir(model_path: str, compress_ratio: int, tp_size: int) -> tuple[str, dict]:
@@ -480,7 +494,7 @@ def create_dsv4_kv_cache_and_metadata(
         max_seq = seq_len + 1
         total_tokens = batch_size
         seq_len_q = 1
-        kv_cache_len = seq_len
+        kv_cache_len = generation_request_geometry(seq_len)["num_cached_tokens"]
     # Serving's max_seq_len is the ENGINE envelope, not the request length:
     # the DSV4 metadata derives num_sparse_topk = window(128) +
     # next_pow2(ceil(max_seq_len/128)) (sparse_deepseek_v4.py:435-444
@@ -675,7 +689,16 @@ def run_dsv4_attn(
             )
         else:
             num_tokens = batch_size
-            position_ids = torch.full((batch_size,), seq_len - 1, device=torch_device, dtype=torch.int32)
+            # position == past-seen/cached count, NOT seq_len - 1: see
+            # generation_request_geometry (model_engine.py:4148,4164-4169
+            # @1.3.0rc23). Off-by-one here rotates rope one step early; it
+            # does not change kernel shapes or measured cost.
+            position_ids = torch.full(
+                (batch_size,),
+                generation_request_geometry(seq_len)["position"],
+                device=torch_device,
+                dtype=torch.int32,
+            )
 
         hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=torch_device)
 
@@ -715,7 +738,7 @@ def run_dsv4_attn(
         if is_context:
             isl, step = seq_len, prefix_len
         else:
-            isl, step = 1, seq_len
+            isl, step = 1, generation_request_geometry(seq_len)["persisted_step"]
 
         log_perf(
             item_list=[

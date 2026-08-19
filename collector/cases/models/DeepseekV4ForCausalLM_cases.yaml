@@ -170,6 +170,24 @@ model_case_values:
     attention_kinds:
       - csa
       - hca
+    # Universal module-sweep budgets (case_authoring.md: an op's universal
+    # budgets are DECLARED here and enforced by the generators at case
+    # generation time with counted drops — never filtered ad hoc in collector
+    # code). Shared by the trtllm and vllm DSV4 module collectors so the
+    # three frameworks cover comparable grids.
+    module_budgets:
+      max_seq_len: 65536
+      max_context_query_tokens: 262144
+      max_generation_kv_tokens: 1048576
+      # decode batch ladder: [seq_len_floor, max_batch] — a decode shape with
+      # sl >= seq_len_floor and bs > max_batch is out of budget.
+      decode_batch_ladder:
+        - [524288, 1]
+        - [262144, 2]
+        - [131072, 4]
+        - [65536, 8]
+        - [32768, 16]
+        - [8192, 64]
     module_batch_sizes:
       - 1
       - 2
