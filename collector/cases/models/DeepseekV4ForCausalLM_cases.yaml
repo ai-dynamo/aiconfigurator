@@ -155,14 +155,20 @@ model_case_values:
         # MIXED_PRECISION, routed-expert layers at NVFP4 (moe_quant_algo
         # NVFP4), attention/shared-experts/head/mtp excluded. This is a new,
         # quant-distinct artifact row (case_authoring.md) — never merged into
-        # the deepseek-ai/DeepSeek-V4-Flash row above. AIC-1749 recipes only
-        # need vllm; sglang/trtllm are explicitly closed here rather than left
-        # to the open per-op defaults (bfloat16/fp8_block would otherwise be
-        # collectible for both and mislabel this NVFP4 checkpoint).
+        # the deepseek-ai/DeepSeek-V4-Flash row above. nvfp4 is declared on
+        # every backend that really serves NVFP4 MoE (sglang and trtllm ship
+        # nvfp4 moe rows on Blackwell today; same shape as the
+        # nvidia/GLM-5.2-NVFP4 declaration) — the artifact's ONE true mode
+        # everywhere, so no case can carry a wrong identity and nothing is
+        # excluded. The AIC-1749 recipes consume the vllm rows first; the
+        # sglang/trtllm cases are ordinary coverage that runs or fails into
+        # the classified log (failure_handling.md).
         sglang:
-          allowed_modes: []
+          allowed_modes:
+            - nvfp4
         trtllm:
-          allowed_modes: []
+          allowed_modes:
+            - nvfp4
         vllm:
           # Generic CompressedTensorsConfig nvfp4-pack-quantized path
           # (collector/vllm/collect_moe.py moe_type == "nvfp4"); architecture-
@@ -184,11 +190,14 @@ model_case_values:
       framework_quantization:
         # See the Flash-NVFP4 note above (same real ModelOpt MIXED_PRECISION
         # export shape, verified against nvidia/DeepSeek-V4-Pro-NVFP4's own
-        # published config.json/hf_quant_config.json).
+        # published config.json/hf_quant_config.json; same one-true-mode
+        # declaration on every backend).
         sglang:
-          allowed_modes: []
+          allowed_modes:
+            - nvfp4
         trtllm:
-          allowed_modes: []
+          allowed_modes:
+            - nvfp4
         vllm:
           allowed_modes:
             - nvfp4
@@ -214,17 +223,16 @@ model_case_values:
     # Default calib collection stays on the canonical artifact via
     # calib_model_paths (cost policy); targeted runs may collect any supported
     # model's calibration — consumers key the DELTA per native geometry (#1460).
-    # nvidia/DeepSeek-V4-{Flash,Pro}-NVFP4 (AIC-1749) are geometry-duplicates
-    # of the deepseek-ai/* rows (same native head counts) — same "one artifact
-    # per geometry per plan" reasoning keeps them out of default_model_paths
-    # and routes them through targeted deepseek-ai/*-style runs instead
-    # (supported_model_paths only). Also: the vLLM/SGLang module collectors'
-    # gemm_type sweep here is bfloat16/fp8_block only (case_generator.py
+    # nvidia/DeepSeek-V4-{Flash,Pro}-NVFP4 (AIC-1749) are deliberately NOT
+    # listed for module collection at all: the module collectors' gemm_type
+    # sweep is bfloat16/fp8_block only (case_generator.py
     # _dsv4_module_precision_combos; collector/vllm/collect_dsv4_attn.py
-    # SUPPORTED_GEMM_TYPES) — neither has an nvfp4 dispatch branch yet, so a
-    # targeted run against these paths does not yet produce an nvfp4-keyed
-    # module row; that collector-code gap is a follow-up, out of this task's
-    # case-plan-only scope.
+    # SUPPORTED_GEMM_TYPES), and the persisted module key carries no artifact
+    # dimension — so even a targeted run against these paths could only stamp
+    # rows with a label that misrepresents the artifact ("cases that carry
+    # the wrong identity are worse than no cases", case_authoring.md). They
+    # join supported_model_paths together with the collector gemm-label work
+    # tracked on AIC-1749.
     default_model_paths:
       - sgl-project/DeepSeek-V4-Flash-FP8
       - sgl-project/DeepSeek-V4-Pro-FP8
@@ -235,8 +243,6 @@ model_case_values:
       - deepseek-ai/DeepSeek-V4-Pro
       - sgl-project/DeepSeek-V4-Flash-FP8
       - sgl-project/DeepSeek-V4-Pro-FP8
-      - nvidia/DeepSeek-V4-Flash-NVFP4
-      - nvidia/DeepSeek-V4-Pro-NVFP4
     attention_kinds:
       - csa
       - hca
