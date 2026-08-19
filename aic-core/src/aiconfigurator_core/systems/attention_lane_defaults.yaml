@@ -4,6 +4,28 @@
 # Framework-DEFAULT attention kernel per (backend, version, sm). Used as the
 # lane-precedence head when no attention_backend override is set. Citations
 # per collector-rule discipline; re-verify on version bumps.
+#
+# This global map is a per-(backend, version, sm) SINGLE value -- it cannot
+# express "the framework dispatches differently depending on which model is
+# being served at the same (backend, version, sm)", which is exactly what
+# happens for sglang's hybrid-GDN Qwen3.5 family (AIC-1762 final-review
+# finding I1): Qwen3_5MoeForConditionalGeneration (the 397B/35B/122B
+# checkpoints) is on an sglang architecture allowlist that force-selects
+# triton, while Qwen3_5MoeForCausalLM (Qwen3.8-Max) is NOT on that allowlist
+# and genuinely dispatches to trtllm_mha/fa3/flashinfer by SM. Before this
+# section existed, every Qwen3.5-family model silently shared the 397B's
+# triton entry via the version floor-match, which was wrong for Max.
+#
+# `architectures:` below adds PER-ARCHITECTURE defaults for exactly the
+# models that need one. An architecture entry, when it floor-matches, fully
+# replaces this global map for that resolution (it is not layered on top of
+# it) -- the global map remains the mechanism-level fallback, used whenever
+# no override is given AND (the architecture is unlisted, OR it has no entry
+# for the requested backend, OR the requested version is below its floor, OR
+# it has no entry for the requested sm). Every architecture NOT listed under
+# `architectures:` -- including Qwen3_5MoeForConditionalGeneration itself --
+# is completely unaffected by that section and keeps resolving through this
+# global map exactly as before.
 sglang:
   "0.5.14":
     # collector/cases/models/Qwen3_5MoeForConditionalGeneration_cases.yaml
@@ -18,3 +40,51 @@ vllm:
     90: default
     100: default
     103: default
+
+# Per-architecture defaults (AIC-1762 finding I1). Schema mirrors the global
+# maps above with one extra outer level: architecture -> backend -> version
+# -> {sm: lane}. Same version floor-match rule as the global maps (highest
+# key <= the requested version); a query below an architecture's floor here
+# falls through to the global map above, never to a lower architecture-level
+# entry (there is only one version per architecture below).
+architectures:
+  Qwen3_5MoeForCausalLM:
+    sglang:
+      "0.5.17":
+        # Verified against the pinned sglang v0.5.17 clone (tag v0.5.17,
+        # commit b6a09f38) -- copied from the byte-verified citation trail in
+        # collector/cases/models/Qwen3_5MoeForCausalLM_cases.yaml:37-72
+        # (dated 2026-08-17/19, re-verified twice this campaign), not
+        # re-derived here. Qwen3_5MoeForCausalLM IS a registered, servable
+        # sglang architecture (models/qwen3_5_text.py:208 EntryClass) but is
+        # absent from the SM100 triton-forcing allowlist
+        # `_qwen3_5_hybrid_overrides` (arg_groups/overrides.py:1234-1239,
+        # decorating the function at :1240) -- that allowlist covers
+        # Qwen3NextForCausalLM, Qwen3_5MoeForConditionalGeneration (the 397B/
+        # 35B/122B checkpoints' own architecture), InternS2PreviewForConditionalGeneration,
+        # and Qwen3_5ForConditionalGeneration, NOT Qwen3_5MoeForCausalLM.
+        #
+        # With no override firing, attention_backend stays unset and resolves
+        # through the generic default (_get_default_attn_backend,
+        # server_args.py:5655-5727; this model has no attention sinks):
+        # SM90 Hopper+CUDA>=12.3 -> fa3 (:5682-5688); SM100/103 -> trtllm_mha
+        # (:5689-5701, is_sm100_supported() matches capability major 10 --
+        # not the v0.5.17 fa4 branch there, since fa4 needs
+        # model_config.has_asymmetric_kv=True and this model's head_dim=256
+        # with no separate v_head_dim/swa_head_dim keeps that False, per
+        # configs/model_config.py:738-746/811-824); SM120 -> flashinfer
+        # (:5706-5710). The hybrid-GDN backend-compatibility guard
+        # (layers/attention/attention_registry.py:396-414) still admits both
+        # choices (hybrid_gdn_config() keys on the CONFIG CLASS, an isinstance
+        # check, not the architecture string).
+        #
+        # This architecture cannot serve below sglang 0.5.17 -- it is not a
+        # registered EntryClass before that release (day-0 support,
+        # collector/cases/models/Qwen3_5MoeForCausalLM_cases.yaml:4-11) -- so
+        # the "queries below this floor fall to the global map" fallback
+        # above is unreachable in practice for this architecture, but stays
+        # correct/harmless if ever queried at an older pinned version.
+        90: fa3
+        100: trtllm_mha
+        103: trtllm_mha
+        120: flashinfer

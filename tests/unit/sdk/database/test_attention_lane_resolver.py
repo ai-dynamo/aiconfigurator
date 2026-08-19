@@ -46,10 +46,10 @@ def systems_root(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _resolve(backend, version, sm_version, override, systems_root):
+def _resolve(backend, version, sm_version, override, systems_root, architecture=None):
     from aiconfigurator_core.sdk.attention_lanes import resolve_attention_lane_order
 
-    return resolve_attention_lane_order(backend, version, sm_version, override, systems_root)
+    return resolve_attention_lane_order(backend, version, sm_version, override, systems_root, architecture)
 
 
 # ---------------------------------------------------------------------------
@@ -242,3 +242,166 @@ def test_real_shipped_yaml_sglang_0514_sm103_triton():
     result = _resolve("sglang", "0.5.14", 103, None, None)
     assert result[0] == "triton", f"real shipped YAML must yield triton head for sglang/0.5.14/sm103; got {result}"
     assert result[-1] == "default", "real shipped YAML result must end with 'default'"
+
+
+# ---------------------------------------------------------------------------
+# AIC-1762: per-architecture defaults (final-review finding I1)
+#
+# ONE architecture is declared in the shipped YAML: Qwen3_5MoeForCausalLM
+# (Qwen3.8-Max) -> sglang -> "0.5.17" -> {90: fa3, 100: trtllm_mha,
+# 103: trtllm_mha, 120: flashinfer}. These tests exercise the new precedence
+# step directly against a synthetic fixture (mirroring the shipped schema)
+# AND pin the real shipped file at the bottom.
+# ---------------------------------------------------------------------------
+
+_ARCH_YAML = """\
+# Test fixture: minimal copy of attention_lane_defaults.yaml + architectures:
+sglang:
+  "0.5.14":
+    90: fa3
+    100: triton
+    103: triton
+    120: flashinfer
+vllm:
+  "0.24.0":
+    90: default
+    100: default
+    103: default
+architectures:
+  Qwen3_5MoeForCausalLM:
+    sglang:
+      "0.5.17":
+        90: fa3
+        100: trtllm_mha
+        103: trtllm_mha
+        120: flashinfer
+"""
+
+_MAX_ARCH = "Qwen3_5MoeForCausalLM"
+_CONDGEN_ARCH = "Qwen3_5MoeForConditionalGeneration"  # the 397B/35B/122B architecture — deliberately NOT declared
+
+
+@pytest.fixture
+def arch_systems_root(tmp_path):
+    """systems_root holding both the global maps and one architecture entry."""
+    (tmp_path / "attention_lane_defaults.yaml").write_text(_ARCH_YAML, encoding="utf-8")
+    return str(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "sm_version,expected_head",
+    [(90, "fa3"), (100, "trtllm_mha"), (103, "trtllm_mha"), (120, "flashinfer")],
+)
+def test_architecture_default_heads_by_sm_when_no_override(arch_systems_root, sm_version, expected_head):
+    """Max at sglang/0.5.17, no override: the architecture's own per-sm lane heads
+    the order — trtllm_mha at sm100/103 (NOT the inherited triton), per I1."""
+    result = _resolve("sglang", "0.5.17", sm_version, None, arch_systems_root, architecture=_MAX_ARCH)
+    assert result[0] == expected_head, f"sm{sm_version}: expected {expected_head} head; got {result}"
+    assert result[-1] == "default"
+
+
+def test_architecture_default_pinned_head_is_the_architecture_lane_alone(arch_systems_root):
+    """The architecture default REPLACES the global map for this resolution —
+    it is not stacked as a second pin ahead of the (wrong, inherited) triton
+    entry. Only trtllm_mha is pinned; triton is an ordinary alphabetical donor."""
+    from aiconfigurator_core.sdk.attention_lanes import split_attention_lane_tiers
+
+    result = _resolve("sglang", "0.5.17", 103, None, arch_systems_root, architecture=_MAX_ARCH)
+    pinned, donors = split_attention_lane_tiers(result)
+    assert pinned == ("trtllm_mha",), f"expected trtllm_mha as the sole pinned lane; got {pinned}"
+    assert "triton" in donors, "triton must still be reachable as an ordinary donor, just not pinned"
+
+
+def test_architecture_default_only_applies_to_its_own_backend():
+    """The shipped/fixture architecture entry only declares sglang; a vllm
+    query for the same architecture must fall straight to the global vllm map
+    -- byte-identical to omitting the architecture argument. (The global
+    vllm map's lane VALUE is itself the string "default", which the donor-
+    tier rule treats as "nothing real pinned" -- see test_default_exactly_once_and_last
+    -- so both sides resolve to the plain alphabetical + "default" tail, not
+    a single-element ("default",) tuple; the equality is what this test
+    actually guards.)"""
+    result_arch = _resolve("vllm", "0.24.0", 100, None, None, architecture=_MAX_ARCH)
+    result_noarch = _resolve("vllm", "0.24.0", 100, None, None, architecture=None)
+    assert result_arch == result_noarch == _KNOWN_LANES_SORTED + ("default",), (
+        f"vllm must be untouched by the sglang-only architecture entry; got {result_arch}"
+    )
+
+
+def test_override_wins_over_architecture_default(arch_systems_root):
+    """An explicit override still wins outright, even for an architecture with
+    its own default -- 'explicit intent stays first-class' (owner design)."""
+    result = _resolve("sglang", "0.5.17", 103, "triton", arch_systems_root, architecture=_MAX_ARCH)
+    assert result[0] == "triton", f"override must win over the architecture default; got {result}"
+    assert result.count("triton") == 1, "override lane must not be duplicated by a later step"
+
+
+def test_conditional_generation_397b_architecture_is_byte_identical_to_no_architecture(arch_systems_root):
+    """Qwen3_5MoeForConditionalGeneration (397B/35B/122B) is deliberately NOT
+    declared under architectures: — passing it must not change anything
+    relative to omitting the architecture argument entirely (the whole point
+    of I1's fix: only Max's serving-true dispatch differs)."""
+    with_arch = _resolve("sglang", "0.5.14", 103, None, arch_systems_root, architecture=_CONDGEN_ARCH)
+    without_arch = _resolve("sglang", "0.5.14", 103, None, arch_systems_root, architecture=None)
+    assert with_arch == without_arch == ("triton", "fa3", "fla", "flashinfer", "trtllm_mha", "default")
+
+
+def test_unlisted_architecture_is_byte_identical_to_no_architecture(arch_systems_root):
+    """An architecture with no entry at all (not just 397B specifically) must
+    resolve identically to the pre-AIC-1762 (no architecture argument) call."""
+    with_arch = _resolve("sglang", "0.5.14", 103, None, arch_systems_root, architecture="SomeUnrelatedArchitecture")
+    without_arch = _resolve("sglang", "0.5.14", 103, None, arch_systems_root, architecture=None)
+    assert with_arch == without_arch
+
+
+def test_version_below_architecture_floor_falls_back_to_global_map(arch_systems_root):
+    """Max's own architecture entry starts at 0.5.17; a query at 0.5.14 (below
+    that floor) must fall through to the global sglang map (triton @ sm103),
+    NOT silently reuse the architecture's own data across a floor it declares."""
+    below_floor = _resolve("sglang", "0.5.14", 103, None, arch_systems_root, architecture=_MAX_ARCH)
+    global_only = _resolve("sglang", "0.5.14", 103, None, arch_systems_root, architecture=None)
+    assert below_floor == global_only == ("triton", "fa3", "fla", "flashinfer", "trtllm_mha", "default")
+
+
+@pytest.mark.parametrize(
+    "malformed_yaml,match",
+    [
+        # Unknown lane name (typo: hyphen instead of underscore).
+        (
+            'architectures:\n  Qwen3_5MoeForCausalLM:\n    sglang:\n      "0.5.17":\n        100: trtllm-mha\n',
+            "not a known lane",
+        ),
+        # sm key is a string, not an int (YAML would need explicit quoting to do this).
+        (
+            'architectures:\n  Qwen3_5MoeForCausalLM:\n    sglang:\n      "0.5.17":\n        "100": trtllm_mha\n',
+            "must be an int",
+        ),
+        # version level is a scalar, not a mapping.
+        (
+            'architectures:\n  Qwen3_5MoeForCausalLM:\n    sglang:\n      "0.5.17": trtllm_mha\n',
+            "must be a mapping",
+        ),
+    ],
+)
+def test_malformed_architecture_entry_fails_loudly(tmp_path, malformed_yaml, match):
+    """A structurally broken architectures: entry must raise, never silently
+    resolve to None and masquerade as an ordinary "unlisted architecture" miss
+    (the repo's fail-closed convention)."""
+    (tmp_path / "attention_lane_defaults.yaml").write_text(malformed_yaml, encoding="utf-8")
+    with pytest.raises(ValueError, match=match):
+        _resolve("sglang", "0.5.17", 100, None, str(tmp_path), architecture=_MAX_ARCH)
+
+
+def test_real_shipped_yaml_qwen38max_sm100_trtllm_mha():
+    """Sanity-pin against the REAL shipped YAML (not a fixture): Max at
+    sglang/0.5.17/sm100, no override -> trtllm_mha heads the order."""
+    result = _resolve("sglang", "0.5.17", 100, None, None, architecture=_MAX_ARCH)
+    assert result[0] == "trtllm_mha", f"real shipped YAML must yield trtllm_mha head for Max @ sm100; got {result}"
+    assert result[-1] == "default"
+
+
+def test_real_shipped_yaml_397b_still_triton_at_sm103():
+    """Sanity-pin: the 397B architecture on the REAL shipped YAML is untouched
+    — still triton @ sm103 (the pre-AIC-1762 answer)."""
+    result = _resolve("sglang", "0.5.14", 103, None, None, architecture=_CONDGEN_ARCH)
+    assert result[0] == "triton", f"397B must still resolve triton @ sm103; got {result}"

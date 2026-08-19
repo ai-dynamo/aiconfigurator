@@ -35,26 +35,34 @@ logger = logging.getLogger(__name__)
 
 
 @functools.lru_cache(maxsize=256)
-def _lane_order_cached(backend, version, sm_version, override, systems_root) -> tuple[str, ...]:
+def _lane_order_cached(backend, version, sm_version, override, architecture, systems_root) -> tuple[str, ...]:
     """Memoized :func:`resolve_attention_lane_order`.
 
     The resolution reads a YAML map and builds a list; the engine-spec build
     needs it per attention op, so memoize on the full input tuple. One entry
-    per (database identity x override) — a sweep resolves each order exactly
-    once.
+    per (database identity x override x architecture) — a sweep resolves each
+    order exactly once. ``architecture`` (AIC-1762) MUST be part of the key:
+    two architectures sharing every other coordinate (same database identity,
+    same override) can still resolve different per-architecture defaults, so
+    omitting it would let one architecture's cached order leak into another's.
     """
-    return resolve_attention_lane_order(backend, version, sm_version, override, systems_root)
+    return resolve_attention_lane_order(backend, version, sm_version, override, systems_root, architecture)
 
 
-def resolve_lane_order(database, override: str | None = None) -> tuple[str, ...]:
+def resolve_lane_order(database, override: str | None = None, architecture: str | None = None) -> tuple[str, ...]:
     """Attention lane precedence for *database* under an optional *override*.
 
     The override is the user-facing ``attention_backend`` knob carried by the
     op; everything else comes off the database handle (backend, version,
-    ``sm_version``, systems root). ``"default"`` is always the last element.
+    ``sm_version``, systems root). *architecture* (AIC-1762) is the model's
+    HF architecture string, used to consult the per-architecture default
+    (``attention_lane_defaults.yaml``'s ``architectures:`` section) when
+    *override* is not given. ``"default"`` is always the last element.
     """
     sm_version = database.system_spec["gpu"].get("sm_version") or -1
-    return _lane_order_cached(database.backend, database.version, sm_version, override, database.systems_root)
+    return _lane_order_cached(
+        database.backend, database.version, sm_version, override, architecture, database.systems_root
+    )
 
 
 def lane_walk_order(density: dict[str, tuple[int, int]], lane_order: tuple[str, ...]) -> tuple[str, ...]:
@@ -109,7 +117,9 @@ def lane_walk_order(density: dict[str, tuple[int, int]], lane_order: tuple[str, 
     return pinned + tuple(known) + tail + tuple(leftovers)
 
 
-def resolved_lane_order_for_op(database, table_attr: str, override: str | None = None) -> list[str]:
+def resolved_lane_order_for_op(
+    database, table_attr: str, override: str | None = None, architecture: str | None = None
+) -> list[str]:
     """Kernel-lane precedence for an attention op, RESOLVED python-side.
 
     Since the pyo3 op unification, ``ContextAttention``/``GenerationAttention``
@@ -146,7 +156,7 @@ def resolved_lane_order_for_op(database, table_attr: str, override: str | None =
     if database is None:
         return ["default"]
     try:
-        order = resolve_lane_order(database, override)
+        order = resolve_lane_order(database, override, architecture)
         from aiconfigurator_core.sdk.engine_table_view import fetch_attention_lane_density
 
         density = fetch_attention_lane_density(database, table_attr)

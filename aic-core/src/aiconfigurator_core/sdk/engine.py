@@ -389,7 +389,9 @@ def build_ops_json(ops: Any) -> str:
     return _ops_json(ops)
 
 
-def _resolve_attention_lane_orders(ops: Any, database: Any, override: str | None) -> None:
+def _resolve_attention_lane_orders(
+    ops: Any, database: Any, override: str | None, architecture: str | None = None
+) -> None:
     """Set ``_lane_order`` on every ``ContextAttention``/``GenerationAttention``
     in *ops*, mutating in place.
 
@@ -400,6 +402,11 @@ def _resolve_attention_lane_orders(ops: Any, database: Any, override: str | None
     same place ``_wideep_moe`` pre-bakes its kernel_source. Every op not
     explicitly re-resolved keeps the always-valid ``["default"]`` its pyo3
     constructor already carries.
+
+    AIC-1762: *architecture* is the per-architecture attention-backend
+    default's key (``attention_lane_defaults.yaml``'s ``architectures:``
+    section) — a model-level signal exactly like *override*, threaded the
+    same way for the same reason (ops carry no model identity of their own).
     """
     from aiconfigurator_core.sdk.operations.attention import (
         ContextAttention,
@@ -409,9 +416,9 @@ def _resolve_attention_lane_orders(ops: Any, database: Any, override: str | None
 
     for op in ops:
         if isinstance(op, ContextAttention):
-            op._lane_order = resolved_lane_order_for_op(database, "_context_attention_data", override)
+            op._lane_order = resolved_lane_order_for_op(database, "_context_attention_data", override, architecture)
         elif isinstance(op, GenerationAttention):
-            op._lane_order = resolved_lane_order_for_op(database, "_generation_attention_data", override)
+            op._lane_order = resolved_lane_order_for_op(database, "_generation_attention_data", override, architecture)
 
 
 def build_engine_spec_json(
@@ -436,9 +443,15 @@ def build_engine_spec_json(
     # `attention_backend` override is a model-level knob (`ModelConfig`, not
     # per-op) — every model family gets a valid, table-aware lane order this
     # way, whether or not it exposes the override.
+    # AIC-1762: `architecture` is likewise read straight off `model` — every
+    # `BaseModel` carries it unconditionally (`self.architecture`, set from
+    # `model_info["architecture"]` at construction) — so a per-architecture
+    # default reaches resolution for every model family without any change
+    # to that family's own model file.
     override = getattr(getattr(model, "config", None), "attention_backend", None)
-    _resolve_attention_lane_orders(model.context_ops, database, override)
-    _resolve_attention_lane_orders(model.generation_ops, database, override)
+    architecture = getattr(model, "architecture", None)
+    _resolve_attention_lane_orders(model.context_ops, database, override, architecture)
+    _resolve_attention_lane_orders(model.generation_ops, database, override, architecture)
 
     # Vision encoder ops are intentionally NOT emitted into the spec.
     #

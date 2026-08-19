@@ -400,6 +400,142 @@ def test_resolved_lane_order_for_op_surfaces_leftover_lanes_on_an_unmapped_backe
 
 
 # ---------------------------------------------------------------------------
+# AIC-1762: per-architecture default lane, end-to-end through
+# resolved_lane_order_for_op (the choke point engine.py's
+# build_engine_spec_json / _resolve_attention_lane_orders calls once a
+# database is in hand — see that module's docstring). Since the pyo3 op
+# unification these ops have no Python __init__/query() of their own, so
+# "op.query() end-to-end" (the pre-rebase shape of this test group) is
+# replaced by exercising the same production choke point directly, exactly
+# like test_resolved_lane_order_for_op_* above.
+# ---------------------------------------------------------------------------
+
+_ARCH_LANE_DEFAULTS_YAML = """\
+# Test fixture: global sglang/0.5.14 map + one architecture entry at 0.5.17.
+sglang:
+  "0.5.14":
+    90: fa3
+    100: triton
+    103: triton
+    120: flashinfer
+architectures:
+  Qwen3_5MoeForCausalLM:
+    sglang:
+      "0.5.17":
+        90: fa3
+        100: trtllm_mha
+        103: trtllm_mha
+        120: flashinfer
+"""
+
+_MAX_ARCHITECTURE = "Qwen3_5MoeForCausalLM"
+_CONDGEN_ARCHITECTURE = "Qwen3_5MoeForConditionalGeneration"  # 397B/35B/122B — deliberately NOT declared
+
+
+@pytest.fixture
+def arch_lane_systems_root(tmp_path):
+    """systems_root holding the global map plus the Max architecture entry."""
+    root = tmp_path / "systems"
+    root.mkdir()
+    (root / "attention_lane_defaults.yaml").write_text(_ARCH_LANE_DEFAULTS_YAML, encoding="utf-8")
+    return str(root)
+
+
+def _max_db(systems_root, **kwargs):
+    """A gb300-like (sm103) stub database at sglang 0.5.17 (the Max version)."""
+    db = _StubDatabase(systems_root, sm_version=103, **kwargs)
+    db.version = "0.5.17"
+    return db
+
+
+def test_resolved_lane_order_for_op_selects_architecture_default_without_override(arch_lane_systems_root):
+    """A Max-architecture context op with no attention_backend override must
+    resolve trtllm_mha (its own serving-true default) instead of the
+    inherited triton entry — the I1 fix, end-to-end through the production
+    choke point."""
+    from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
+
+    db = _max_db(
+        arch_lane_systems_root,
+        context_lanes={"triton": _ctx_lane(_SLOW_LATENCY), "trtllm_mha": _ctx_lane(_FAST_LATENCY)},
+    )
+
+    no_architecture = resolved_lane_order_for_op(db, "_context_attention_data", None, None)
+    max_architecture = resolved_lane_order_for_op(db, "_context_attention_data", None, _MAX_ARCHITECTURE)
+
+    assert no_architecture[0] == "triton", f"no architecture: unchanged inherited triton; got {no_architecture}"
+    assert max_architecture[0] == "trtllm_mha", f"Max architecture: own trtllm_mha default; got {max_architecture}"
+
+
+def test_resolved_lane_order_for_op_architecture_default_generation_twin(arch_lane_systems_root):
+    """Generation twin of the context architecture-default test above."""
+    from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
+
+    db = _max_db(
+        arch_lane_systems_root,
+        generation_lanes={"triton": _gen_lane(_SLOW_LATENCY), "trtllm_mha": _gen_lane(_FAST_LATENCY)},
+    )
+
+    no_architecture = resolved_lane_order_for_op(db, "_generation_attention_data", None, None)
+    max_architecture = resolved_lane_order_for_op(db, "_generation_attention_data", None, _MAX_ARCHITECTURE)
+
+    assert no_architecture[0] == "triton"
+    assert max_architecture[0] == "trtllm_mha"
+
+
+def test_resolved_lane_order_for_op_override_wins_over_architecture_default(arch_lane_systems_root):
+    """An explicit override still wins outright, even for a Max-architecture
+    op — explicit intent stays first-class (owner design)."""
+    from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
+
+    db = _max_db(
+        arch_lane_systems_root,
+        context_lanes={"triton": _ctx_lane(_SLOW_LATENCY), "trtllm_mha": _ctx_lane(_FAST_LATENCY)},
+    )
+
+    order = resolved_lane_order_for_op(db, "_context_attention_data", "triton", _MAX_ARCHITECTURE)
+
+    assert order[0] == "triton", f"explicit override must beat the architecture default; got {order}"
+    assert order.count("triton") == 1, "override lane must not be duplicated by a later (donor-tier) step"
+
+
+def test_resolved_lane_order_for_op_397b_architecture_is_unaffected(arch_lane_systems_root):
+    """The 397B architecture string has no entry under architectures: — a
+    query carrying it must resolve byte-identically to one carrying none at
+    all (both fall through to the untouched global map)."""
+    from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
+
+    db = _max_db(
+        arch_lane_systems_root,
+        context_lanes={"triton": _ctx_lane(_SLOW_LATENCY), "trtllm_mha": _ctx_lane(_FAST_LATENCY)},
+    )
+
+    no_architecture = resolved_lane_order_for_op(db, "_context_attention_data", None, None)
+    conditional_generation = resolved_lane_order_for_op(db, "_context_attention_data", None, _CONDGEN_ARCHITECTURE)
+
+    assert no_architecture == conditional_generation, (
+        f"397B architecture must be byte-identical to no architecture; got {conditional_generation} "
+        f"vs {no_architecture}"
+    )
+    assert no_architecture[0] == "triton"
+
+
+def test_lane_order_cache_distinguishes_by_architecture(arch_lane_systems_root):
+    """Regression guard for the LRU memo (`_lane_order_cached`): two
+    architectures sharing the same database identity and override must NOT
+    collide in the cache — each resolves its own order."""
+    from aiconfigurator_core.sdk.operations.attention import resolve_lane_order
+
+    db = _max_db(arch_lane_systems_root)
+
+    max_order = resolve_lane_order(db, None, _MAX_ARCHITECTURE)
+    condgen_order = resolve_lane_order(db, None, _CONDGEN_ARCHITECTURE)
+
+    assert max_order[0] == "trtllm_mha", f"got {max_order}"
+    assert condgen_order[0] == "triton", f"got {condgen_order}"
+
+
+# ---------------------------------------------------------------------------
 # _lane_order pickle/deepcopy round-trip (rebase-4 review, minor 4): the two
 # ops encode it asymmetrically in __getnewargs_ex__ (py_ops.rs) --
 # ContextAttention rides it as the 11th POSITIONAL __new__ arg (after
