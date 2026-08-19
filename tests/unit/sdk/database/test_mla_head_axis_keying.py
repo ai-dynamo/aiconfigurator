@@ -28,6 +28,7 @@ _MLA_MODULE_NATIVE_HEADS = {
     "deepseek-ai/DeepSeek-V3": 128,
     "deepseek-ai/DeepSeek-R1": 128,
     "nvidia/DeepSeek-V3.1-NVFP4": 128,
+    "moonshotai/Kimi-K3": 96,
 }
 
 _DSV3 = "deepseek-ai/DeepSeek-V3"
