@@ -37,12 +37,22 @@ def test_kda_context_conv_passes_serve_parity_metadata():
     tree = ast.parse(SOURCE_PATH.read_text(encoding="utf-8"), filename=str(SOURCE_PATH))
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "run_kda_context_benchmark":
-            conv_calls = (
+            conv_calls = [
                 call
                 for call in ast.walk(node)
                 if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "causal_conv1d_fn"
+            ]
+            # Materialized before asserting: a generator is always truthy and
+            # all() over an empty one is vacuously true, so an assertion built
+            # on a generator passes even when no causal_conv1d_fn call exists.
+            assert len(conv_calls) == 1, (
+                f"run_kda_context_benchmark must call causal_conv1d_fn at exactly one site, found {len(conv_calls)}"
             )
-            assert conv_calls and all(any(kw.arg == "metadata" for kw in call.keywords) for call in conv_calls)
+            assert any(kw.arg == "metadata" for kw in conv_calls[0].keywords), (
+                "run_kda_context_benchmark's causal_conv1d_fn call must pass metadata= "
+                "(serve-parity GDNAttentionMetadata); the metadata=None branch adds a "
+                "numpy + D2H floor inside every timed call"
+            )
             return
     raise AssertionError("run_kda_context_benchmark not found / no causal_conv1d_fn call")
 
