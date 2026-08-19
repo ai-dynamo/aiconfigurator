@@ -110,12 +110,18 @@ families:
     status: config_fetched_adapter_pending
 
 topologies:
-  - {tp: 1, ep: 1, evidence: real, status: implemented}
-# Parallelism policy (probed 2026-08-19, GLM-5.2-FP8, tp2 ep1 vs tp2 ep2 via
-# the rank-injection probe): for the triton MoE family the MAIN kernel is
-# identical under TEP and EP (fused_moe_kernel); differences are the
-# activation variant (_run_activation_inplace vs _filtered_inplace), reduce
-# template params, and weight shard shapes. Verdict: no routine dual-topology
-# sweeps. Instead, ONE TEP-vs-EP audit per MoE runner family; pending:
-# marlin, flashinfer_trtllm (quantized MoE families may genuinely fork).
-# Multi-rank runs use probe inject/ (per-rank facts shards).
+  # Topology is a first-class facts key: ALWAYS record it, even when two
+  # topologies agree — "same kernels" is itself a fact that a later version
+  # bump can invalidate. (Superseded an earlier "prove-it-irrelevant, then
+  # drop" policy: Kimi-K3 TEP8 is known to select different kernels, so
+  # per-family generalization from GLM/DSV4 was unsound.)
+  sm90: [{tp: 1, ep: 1}, {tp: 8, ep: 1}, {tp: 8, ep: 8}]
+  sm100: [{tp: 1, ep: 1}, {tp: 8, ep: 1}, {tp: 8, ep: 8}]   # needs Blackwell host
+  sm103: [{tp: 1, ep: 1}, {tp: 8, ep: 1}, {tp: 8, ep: 8}]   # needs Blackwell host
+  sm89: [{tp: 1, ep: 1}]
+  sm120: [{tp: 1, ep: 1}]
+  # Multi-rank runs go through inject/sitecustomize.py (per-rank facts shards).
+  # Measured so far (sm90, world=2, bench path): triton family (GLM-5.2-FP8)
+  # same main kernel, activation-variant + reduce-template + shard-shape
+  # differences; marlin family (DSV4-NVFP4, explicit runner) identical kernel
+  # set. world=8 in progress. flashinfer_trtllm family cannot run on sm90.
