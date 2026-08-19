@@ -160,11 +160,12 @@ def aggregate_cell(
     # loader (which may exclude fake_fallback rows). The collector records
     # and never filters (layer_permissions: run it or raise).
     #
-    # Cell-level skip_reason takes priority over the per-point markers:
-    # warm-ineligible topologies mark every point kvwarm_fake_fallback
-    # (measured tp4: 1659/1659), so point-level derivation alone would let a
-    # downstream fake_fallback filter wipe entire legitimate cells.
+    # Only protocol-approved warm-ineligible reasons may override per-point
+    # evidence. Other skips mean real KV was not established and must stay in
+    # the fake_fallback bucket so consumers cannot mistake biased points for a
+    # legitimate topology regime.
     kvwarm_meta = collection.kvwarm_meta
+    approved_skip_reasons = {"moe_tp_balanced_by_construction"}
 
     def _kv_seed_regime(point: dict[str, Any], phase: str) -> str:
         if phase == "prefill":
@@ -172,12 +173,16 @@ def aggregate_cell(
         if kvwarm_meta is None:
             return "legacy"
         skip_reason = kvwarm_meta.get("skip_reason")
-        if skip_reason:
+        if skip_reason in approved_skip_reasons:
             return f"skip:{skip_reason}"
         reasons = point.get("sample_reasons") or []
         if "kvwarm_real_kv" in reasons:
+            if skip_reason:
+                raise ValueError(f"native point reports real KV under warm-up skip_reason={skip_reason!r}")
             return "real_kv"
         if "kvwarm_fake_fallback" in reasons:
+            return "fake_fallback"
+        if skip_reason:
             return "fake_fallback"
         return "legacy"
 

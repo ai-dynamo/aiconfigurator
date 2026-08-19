@@ -215,7 +215,7 @@ def _native_payload(*, phase: str, rank: int, dp: int, run_id: str = "run") -> d
         rank_results.append({"dp_rank": dp_rank, "fpms": [rank_fpm]})
     local_fpm = rank_results[rank]["fpms"][0]
     group_wall_time = max(item["fpms"][0]["wall_time"] for item in rank_results)
-    return {
+    payload = {
         "schema_version": 2,
         "artifact_type": "rank",
         "status": "complete",
@@ -250,6 +250,9 @@ def _native_payload(*, phase: str, rank: int, dp: int, run_id: str = "run") -> d
             "measured_iteration_seconds": group_wall_time,
         },
     }
+    if phase == "decode":
+        payload["kvwarm"] = {"enabled": True, "warm_eligible": True, "skip_reason": None}
+    return payload
 
 
 def test_apply_skips_client_validation_and_verifies_created_object(tmp_path):
@@ -1010,6 +1013,35 @@ def test_decode_render_keeps_dynamo_runtime_limits_and_capture_axis():
     assert "--prefill-max-new-token-samples" not in args
 
 
+@pytest.mark.parametrize(
+    ("strategy", "expected"),
+    [("tep", "enabled"), ("dep", "enabled"), ("pure_tp", "enabled"), ("tp", "disabled")],
+)
+def test_decode_checkpoint_records_rendered_prefix_caching_policy(strategy, expected):
+    cell = _cell(phase="decode", strategy=strategy)
+
+    assert _configured_sampling_metadata(_plan(cell), cell, smoke=False) == {"decode_prefix_caching": expected}
+
+
+@pytest.mark.parametrize(
+    ("strategy", "argument"),
+    [("pure_tp", "--no-enable-prefix-caching"), ("tp", "--enable-prefix-caching")],
+)
+def test_decode_render_rejects_policy_prefix_caching_conflict(strategy, argument):
+    cell = _cell(phase="decode", strategy=strategy)
+    cell = dataclasses.replace(
+        cell,
+        backend_policy=BackendPolicy(
+            "conflict",
+            {"params": {"agg": {"extra_cli_args": [argument]}}},
+            {},
+        ),
+    )
+
+    with pytest.raises(ValueError, match="requires prefix caching"):
+        _cell_generator_overrides(_plan(cell), cell, {})
+
+
 def test_formal_prefill_metadata_records_candidate_axis_counts():
     cell = _cell()
 
@@ -1144,6 +1176,7 @@ def test_native_collection_validation_accepts_execution_order_decoupled_from_ids
         "dp": {"rank": 0, "size": 1},
         "results": rows,
         "iteration_groups": groups,
+        "kvwarm": {"enabled": True, "warm_eligible": True, "skip_reason": None},
         "skipped_points": [],
         "missing_phases": [],
         "timing": {"benchmark_elapsed_seconds": measured + 1.0, "measured_iteration_seconds": measured},
@@ -1703,7 +1736,7 @@ def test_pure_tp_render_uses_shared_vllm_tp_without_expert_parallel(
 )
 def test_decode_prefix_caching_follows_kvwarm_regime(tmp_path, workload_kind, strategy, topology, flag_expected):
     """Prefix caching is regime-conditional, mirroring the engine's KV
-    warm-up eligibility (tep/dep warm; pure_tp/dense stay fake-KV): warm
+    warm-up eligibility (tep/dep/pure_tp warm; dense stays fake-KV): warm
     cells must keep it on, fake-KV decode must keep it off, prefill never
     disables it."""
 

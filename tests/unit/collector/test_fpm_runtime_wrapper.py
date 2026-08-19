@@ -246,7 +246,41 @@ def test_preflight_writes_failed_audit_when_runtime_import_fails(tmp_path, monke
     assert "dynamo" in audit["import_error"]
     assert audit["missing_fields"] == []
     assert audit["missing_methods"] == []
-    assert audit["runtime_contract"] == "dynamo_pr11509_native_schema_v2"
+    assert audit["runtime_contract"] == "dynamo_pr11509_native_schema_v2_kvwarm_v1"
+
+
+def test_preflight_rejects_runtime_without_kvwarm_capability(tmp_path, monkeypatch):
+    """A native-schema image is still incompatible when it predates the
+    strategy-aware KV warm-up predicate required by pure-TP decode."""
+
+    import sys
+    from types import ModuleType
+
+    from collector.fpm_forward.runtime import preflight
+
+    benchmark_point = type(
+        "BenchmarkPoint",
+        (),
+        {"__dataclass_fields__": {name: object() for name in preflight.GRAPH_AWARE_FIELDS}},
+    )
+    scheduler = type(
+        "InstrumentedScheduler",
+        (),
+        {name: lambda self: None for name in preflight.GRAPH_AWARE_METHODS if name != "_kvwarm_warm_eligible"},
+    )
+    module = ModuleType("dynamo.vllm.instrumented_scheduler")
+    module.BenchmarkPoint = benchmark_point
+    module.InstrumentedScheduler = scheduler
+    audit_path = tmp_path / "runtime-preflight.json"
+    monkeypatch.setattr(preflight, "_AUDIT_PATH", audit_path)
+    monkeypatch.setitem(sys.modules, "dynamo.vllm.instrumented_scheduler", module)
+
+    with pytest.raises(RuntimeError, match="_kvwarm_warm_eligible"):
+        preflight.main()
+
+    audit = json.loads(audit_path.read_text())
+    assert audit["status"] == "failed"
+    assert audit["missing_methods"] == ["_kvwarm_warm_eligible"]
 
 
 def test_fpm_exec_propagates_fail_closed_env_source(tmp_path):

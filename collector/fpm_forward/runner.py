@@ -46,6 +46,7 @@ from aiconfigurator.fpm_contract import (
 
 from .native_artifact import COLLECTOR_PROVENANCE_FILENAME, validate_native_collection
 from .planner import FPMCell, FPMCollectionPlan
+from .types import KVWARM_STRATEGIES
 
 logger = logging.getLogger(__name__)
 
@@ -90,14 +91,14 @@ _FPM_VLLM_PREFILL_ARGS = ("--no-async-scheduling",)
 # Decode's prefix-caching flag is regime-conditional, matching the
 # engine-side KV warm-up eligibility predicate (_kvwarm_warm_eligible):
 #
-#   * kvwarm regime (EP-sharded MoE: tep/dep) -- prefix caching stays ON.
+#   * kvwarm regime (tep/dep/pure_tp) -- prefix caching stays ON.
 #     Warm-depth reuse requires it (the engine skips warming with
 #     skip_reason="prefix_caching_disabled", collapsing every point into the
 #     fake-KV fallback convicted of underestimating capture-mode decode);
 #     full-context block hashing happens at seed time, outside the measured
 #     step, and points borrow warmed chains without re-admission. r15 parity:
 #     MAPE 1.61/1.70% with prefix ON + kvwarm, 2.1M-KV points included.
-#   * fake-KV regime (single/tp/pure_tp -- kvwarm exempts these) -- prefix
+#   * fake-KV regime (single/tp -- kvwarm exempts these) -- prefix
 #     caching stays OFF. Each point re-admits batch_size synthetic
 #     full-context requests; with prefix caching on, `Request.__init__`
 #     hashes the whole prompt through the block hasher INSIDE the measured
@@ -111,7 +112,6 @@ _FPM_VLLM_DECODE_FAKE_KV_ARGS = ("--no-enable-prefix-caching",)
 # still content-driven (same-pod fake/warm pairing measured -15.3% mid-band,
 # full-grid re-collection 10.43%->4.80%). Requires the engine image with the
 # matching _kvwarm_warm_eligible change (gc-warmtp-20260820 or later).
-_FPM_KVWARM_STRATEGIES = frozenset({"tep", "dep", "pure_tp"})
 REMOTE_EXIT_MARKER = "__FPM_REMOTE_EXIT_CODE__="
 REMOTE_FILES_MARKER = "__FPM_REMOTE_FILES__="
 REMOTE_WORKDIR = "/tmp/fpm-bench"
@@ -1034,7 +1034,22 @@ def _cell_generator_overrides(
 
     policy_args = ((policy.get("params") or {}).get("agg") or {}).get("extra_cli_args") or []
     if cell.workload_kind == "decode":
-        workload_args = () if cell.parallel_strategy in _FPM_KVWARM_STRATEGIES else _FPM_VLLM_DECODE_FAKE_KV_ARGS
+        prefix_caching = _decode_prefix_caching_mode(cell)
+        policy_disables = any(
+            str(argument) == "--no-enable-prefix-caching" or str(argument).startswith("--no-enable-prefix-caching=")
+            for argument in policy_args
+        )
+        policy_enables = any(
+            str(argument) == "--enable-prefix-caching" or str(argument).startswith("--enable-prefix-caching=")
+            for argument in policy_args
+        )
+        if prefix_caching == "enabled" and policy_disables:
+            raise ValueError(f"FPM decode strategy {cell.parallel_strategy!r} requires prefix caching for KV warm-up")
+        if prefix_caching == "disabled" and policy_enables:
+            raise ValueError(
+                f"FPM decode strategy {cell.parallel_strategy!r} requires prefix caching disabled for fake-KV"
+            )
+        workload_args = () if prefix_caching == "enabled" else _FPM_VLLM_DECODE_FAKE_KV_ARGS
     else:
         workload_args = _FPM_VLLM_PREFILL_ARGS
     resolved_args = [*_FPM_VLLM_RUNTIME_ARGS, *workload_args, *model_args, *policy_args]
@@ -1053,6 +1068,12 @@ def _cell_generator_overrides(
     return merged
 
 
+def _decode_prefix_caching_mode(cell: FPMCell) -> str:
+    """Return the rendering/checkpoint policy for one decode strategy."""
+
+    return "enabled" if cell.parallel_strategy in KVWARM_STRATEGIES else "disabled"
+
+
 def _configured_sampling_metadata(
     plan: FPMCollectionPlan,
     cell: FPMCell,
@@ -1060,9 +1081,10 @@ def _configured_sampling_metadata(
     smoke: bool,
 ) -> dict[str, int | str]:
     if cell.workload_kind != "prefill":
-        # Auditable measurement condition: decode engines run with prefix
-        # caching pinned off (see _cell_generator_overrides).
-        return {"decode_prefix_caching": "disabled"}
+        # Derive checkpoint evidence from the same strategy predicate used to
+        # render the engine flags. _cell_generator_overrides rejects policy
+        # arguments that conflict with this resolved protocol.
+        return {"decode_prefix_caching": _decode_prefix_caching_mode(cell)}
     if smoke:
         return {"prefill_max_new_token_samples": 2}
     profile = plan.options.prefill_sampling

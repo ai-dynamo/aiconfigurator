@@ -7,6 +7,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
+# Decode strategies whose measurements require the engine's real-KV warm-up
+# protocol. This is shared by rendering and artifact validation so an image
+# cannot be rendered under one protocol and published under another.
+KVWARM_STRATEGIES = frozenset({"tep", "dep", "pure_tp"})
+
 
 @dataclass(frozen=True, slots=True)
 class ParallelTopology:

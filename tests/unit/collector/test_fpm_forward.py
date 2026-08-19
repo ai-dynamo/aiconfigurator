@@ -1142,7 +1142,13 @@ def test_formal_database_first_publisher_wins_on_rerun_overlap(tmp_path):
     assert parquet2.read_bytes() == sealed
 
 
-def _synthetic_decode_cell(tmp_path, *, kvwarm, markers=("kvwarm_real_kv", "kvwarm_fake_fallback")):
+def _synthetic_decode_cell(
+    tmp_path,
+    *,
+    kvwarm,
+    markers=("kvwarm_real_kv", "kvwarm_fake_fallback"),
+    parallel_strategy="tep",
+):
     """Single-rank decode cell with one point per marker entry (None = no
     kvwarm marker in sample_reasons); ``kvwarm`` is the artifact's top-level
     engine envelope (None = legacy artifact without the block)."""
@@ -1155,7 +1161,7 @@ def _synthetic_decode_cell(tmp_path, *, kvwarm, markers=("kvwarm_real_kv", "kvwa
         weight_quantization="nvfp4",
         kv_cache_dtype="fp8",
         backend_policy=BackendPolicy("baseline_auto", {}, {}),
-        parallel_strategy="tep",
+        parallel_strategy=parallel_strategy,
         gemm_quant_mode="nvfp4",
         moe_quant_mode="nvfp4",
         fmha_quant_mode="fp8",
@@ -1271,6 +1277,7 @@ def test_kv_seed_regime_cell_skip_reason_overrides_point_markers(tmp_path):
             "skip_reason": "moe_tp_balanced_by_construction",
         },
         markers=("kvwarm_fake_fallback", "kvwarm_fake_fallback"),
+        parallel_strategy="tp",
     )
     rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
 
@@ -1281,13 +1288,51 @@ def test_kv_seed_regime_is_legacy_without_kvwarm_block_and_na_for_prefill(tmp_pa
     """Artifacts predating the kvwarm runtime carry no envelope -> legacy;
     prefill rows are out of the decode seeding protocol entirely -> n/a."""
 
-    plan, cell, cell_dir = _synthetic_decode_cell(tmp_path, kvwarm=None, markers=(None, None))
+    plan, cell, cell_dir = _synthetic_decode_cell(
+        tmp_path,
+        kvwarm=None,
+        markers=(None, None),
+        parallel_strategy="tp",
+    )
     rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
     assert {row["kv_seed_regime"] for row in rows} == {"legacy"}
 
     prefill_plan, prefill_cell, prefill_dir = _synthetic_plan_and_cell(tmp_path / "prefill")
     prefill_rows = aggregate_cell(prefill_plan, prefill_cell, prefill_dir, expected_attempt_id="attempt")
     assert {row["kv_seed_regime"] for row in prefill_rows} == {"n/a"}
+
+
+@pytest.mark.parametrize(
+    "kvwarm",
+    [None, {"enabled": True, "warm_eligible": False, "skip_reason": "prefix_caching_disabled"}],
+)
+def test_native_validation_rejects_pure_tp_without_real_kv_warmup(tmp_path, kvwarm):
+    """pure_tp is a warm-required strategy; neither a legacy artifact nor a
+    warm-ineligible result may be published for that rendered protocol."""
+
+    plan, cell, cell_dir = _synthetic_decode_cell(
+        tmp_path,
+        kvwarm=kvwarm,
+        markers=("kvwarm_fake_fallback", "kvwarm_fake_fallback"),
+        parallel_strategy="pure_tp",
+    )
+
+    with pytest.raises(ValueError, match=r"required KV warm-up metadata|protocol mismatch"):
+        aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+
+
+@pytest.mark.parametrize("skip_reason", ["prefix_caching_disabled", "unknown_architecture"])
+def test_non_protocol_kvwarm_skips_remain_fake_fallback(tmp_path, skip_reason):
+    plan, cell, cell_dir = _synthetic_decode_cell(
+        tmp_path,
+        kvwarm={"enabled": True, "warm_eligible": False, "skip_reason": skip_reason},
+        markers=("kvwarm_fake_fallback", "kvwarm_fake_fallback"),
+        parallel_strategy="tp",
+    )
+
+    rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+
+    assert {row["kv_seed_regime"] for row in rows} == {"fake_fallback"}
 
 
 def test_native_validation_rejects_cross_rank_kvwarm_disagreement(tmp_path):
@@ -1709,7 +1754,7 @@ def _cell_cli_args(workload_kind: str, parallel_strategy: str = "tep") -> list[s
 
 @pytest.mark.parametrize("strategy", ["tep", "dep", "pure_tp"])
 def test_kvwarm_decode_cells_keep_prefix_caching_and_async_overlap(strategy):
-    """EP-sharded MoE decode (kvwarm regime) keeps engine defaults.
+    """Warm-required MoE decode keeps engine defaults.
 
     Prefix caching stays enabled: KV warm-up reuses warmed prefixes across
     points and refuses to warm without it

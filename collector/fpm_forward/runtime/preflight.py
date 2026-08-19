@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fail before model loading unless the image provides PR11509 native FPM."""
+"""Fail before model loading unless the image provides native FPM + KV warm-up."""
 
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ GRAPH_AWARE_METHODS = {
     "_bench_cache_fake_prefixes",
     "_bench_save_current_point",
     "_bench_write_results",
+    "_kvwarm_warm_eligible",
 }
 
 
@@ -47,7 +48,7 @@ def main() -> None:
         _write_audit(
             {
                 "schema_version": 1,
-                "runtime_contract": "dynamo_pr11509_native_schema_v2",
+                "runtime_contract": "dynamo_pr11509_native_schema_v2_kvwarm_v1",
                 "benchmark_point_fields": [],
                 "missing_fields": [],
                 "missing_methods": [],
@@ -56,7 +57,7 @@ def main() -> None:
             }
         )
         raise RuntimeError(
-            "Dynamo runtime lacks the required PR11509 native FPM contract; "
+            "Dynamo runtime lacks the required native FPM/KV-warm contract; "
             f"importing dynamo.vllm.instrumented_scheduler failed: {error}. "
             "Provide a compatible Dynamo image."
         ) from error
@@ -66,7 +67,7 @@ def main() -> None:
     missing_methods = sorted(name for name in GRAPH_AWARE_METHODS if not hasattr(InstrumentedScheduler, name))
     audit = {
         "schema_version": 1,
-        "runtime_contract": "dynamo_pr11509_native_schema_v2",
+        "runtime_contract": "dynamo_pr11509_native_schema_v2_kvwarm_v1",
         "benchmark_point_fields": sorted(fields),
         "missing_fields": missing_fields,
         "missing_methods": missing_methods,
@@ -75,7 +76,7 @@ def main() -> None:
     _write_audit(audit)
     if missing_fields or missing_methods:
         raise RuntimeError(
-            "Dynamo runtime lacks the required PR11509 native FPM contract; "
+            "Dynamo runtime lacks the required native FPM/KV-warm contract; "
             f"missing_fields={missing_fields}, missing_methods={missing_methods}. "
             "Provide a compatible Dynamo image."
         )

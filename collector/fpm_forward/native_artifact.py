@@ -17,6 +17,7 @@ from aiconfigurator.fpm_contract import (
 )
 
 from .planner import FPMCell
+from .types import KVWARM_STRATEGIES
 
 COLLECTOR_PROVENANCE_FILENAME = "collector-provenance.json"
 
@@ -30,6 +31,42 @@ class NativePointMeasurement:
 # Distinguishes "no artifact seen yet" from a legitimately absent (legacy)
 # kvwarm block during cross-rank consistency checking.
 _KVWARM_UNSEEN = object()
+
+
+def _validate_kvwarm_contract(cell: FPMCell, kvwarm: object, path: Path) -> dict[str, Any] | None:
+    """Validate that engine protocol evidence matches the rendered strategy."""
+
+    if cell.workload_kind != "decode":
+        if kvwarm is not None and not isinstance(kvwarm, dict):
+            raise TypeError(f"native kvwarm block is not a mapping: {path}")
+        return kvwarm
+    requires_warm = cell.parallel_strategy in KVWARM_STRATEGIES
+    if kvwarm is None:
+        if requires_warm:
+            raise ValueError(
+                f"native decode result lacks required KV warm-up metadata for strategy "
+                f"{cell.parallel_strategy!r}: {path}"
+            )
+        return None
+    if not isinstance(kvwarm, dict):
+        raise TypeError(f"native kvwarm block is not a mapping: {path}")
+    enabled = kvwarm.get("enabled")
+    warm_eligible = kvwarm.get("warm_eligible")
+    skip_reason = kvwarm.get("skip_reason")
+    if not isinstance(enabled, bool):
+        raise TypeError(f"native kvwarm.enabled must be a boolean: {path}")
+    if not isinstance(warm_eligible, bool):
+        raise TypeError(f"native kvwarm.warm_eligible must be a boolean: {path}")
+    if warm_eligible and skip_reason is not None:
+        raise ValueError(f"native warm-eligible result must not declare kvwarm.skip_reason: {path}")
+    if not warm_eligible and (not isinstance(skip_reason, str) or not skip_reason):
+        raise ValueError(f"native warm-ineligible result must declare a non-empty kvwarm.skip_reason: {path}")
+    if requires_warm and (not enabled or not warm_eligible):
+        raise ValueError(
+            f"native KV warm-up protocol mismatch for strategy {cell.parallel_strategy!r}: "
+            f"enabled={enabled!r}, skip_reason={skip_reason!r}: {path}"
+        )
+    return kvwarm
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,10 +312,10 @@ def validate_native_collection(
         # the kvwarm-enabled runtime (legacy); when present, the regime facts
         # (warm_eligible/skip_reason) must agree across DP ranks -- they
         # describe one shared measurement protocol, not per-rank state.
-        kvwarm = payload.get("kvwarm")
-        if kvwarm is not None and not isinstance(kvwarm, dict):
-            raise TypeError(f"native kvwarm block is not a mapping: {path}")
-        kvwarm_regime = None if kvwarm is None else (kvwarm.get("warm_eligible"), kvwarm.get("skip_reason"))
+        kvwarm = _validate_kvwarm_contract(cell, payload.get("kvwarm"), path)
+        kvwarm_regime = (
+            None if kvwarm is None else (kvwarm.get("enabled"), kvwarm.get("warm_eligible"), kvwarm.get("skip_reason"))
+        )
         if kvwarm_seen is _KVWARM_UNSEEN:
             kvwarm_seen = kvwarm_regime
             kvwarm_meta = kvwarm
