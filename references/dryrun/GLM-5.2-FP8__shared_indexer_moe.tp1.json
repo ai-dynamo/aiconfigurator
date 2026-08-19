@@ -1,0 +1,3692 @@
+{
+ "model_path": "/work/dummy_models/glm/GLM-5.2-FP8__shared_indexer_moe",
+ "tp": 1,
+ "rank": 0,
+ "errors": {},
+ "sglang_version": "0.5.16",
+ "engine_cli": "--tensor-parallel-size \"1\" --pipeline-parallel-size \"1\" --data-parallel-size \"1\" --page-size \"64\" --context-length \"8192\" --max-running-requests \"512\" --max-prefill-tokens \"2524\" --enable-mixed-chunk --trust-remote-code",
+ "engine_cli_unknown_args": [],
+ "server_args_resolved": {
+  "tokenizer_backend": "huggingface",
+  "quantization": null,
+  "quantization_param_path": null,
+  "kv_cache_dtype": "fp8_e4m3",
+  "modelopt_quant": null,
+  "quantize_and_serve": false,
+  "rl_quant_profile": null,
+  "page_size": 64,
+  "prefill_only_disable_kv_cache": false,
+  "enable_page_major_kv_layout": false,
+  "moe_dp_size": 1,
+  "enable_dsa_cache_layer_split": false,
+  "enable_dsa_prefill_context_parallel": false,
+  "dsa_prefill_cp_mode": "round-robin-split",
+  "enable_dp_attention": false,
+  "enable_dp_attention_local_control_broadcast": false,
+  "attention_backend": "dsa",
+  "decode_attention_backend": null,
+  "prefill_attention_backend": null,
+  "sampling_backend": "flashinfer",
+  "grammar_backend": "xgrammar",
+  "radix_cache_backend": null,
+  "mm_attention_backend": null,
+  "fp8_gemm_runner_backend": "auto",
+  "fp4_gemm_runner_backend": "auto",
+  "bf16_gemm_backend": "auto",
+  "dsa_prefill_backend": "flashmla_kv",
+  "dsa_decode_backend": "flashmla_kv",
+  "dsa_paged_mqa_logits_backend": "auto",
+  "dsa_topk_backend": "sgl-kernel",
+  "mamba_backend": "triton",
+  "cuda_graph_backend_decode": null,
+  "cuda_graph_backend_prefill": null,
+  "triton_attention_reduce_in_fp32": false,
+  "triton_attention_num_kv_splits": 8,
+  "triton_attention_split_tile_size": null,
+  "enable_fused_moe_sum_all_reduce": false,
+  "enable_quant_communications": false,
+  "flashinfer_allreduce_fusion_backend": null,
+  "speculative_attention_mode": "prefill",
+  "speculative_draft_attention_backend": null,
+  "speculative_moe_runner_backend": "auto",
+  "speculative_moe_a2a_backend": null,
+  "speculative_draft_model_quantization": null,
+  "moe_a2a_backend": "none",
+  "moe_runner_backend": "auto",
+  "flashinfer_mxfp4_moe_precision": "default",
+  "moe_dense_tp_size": null,
+  "elastic_ep_backend": null,
+  "disable_flashinfer_cutlass_moe_fp4_allgather": false,
+  "max_mamba_cache_size": null,
+  "mamba_ssm_dtype": null,
+  "enable_mamba_cache_stochastic_rounding": false,
+  "mamba_cache_philox_rounds": 0,
+  "mamba_full_memory_ratio": 0.9,
+  "mamba_radix_cache_strategy": "auto",
+  "uses_mamba_radix_cache": false,
+  "mamba_track_interval": 256,
+  "enable_int8_mamba_checkpoint": false,
+  "int8_mamba_ckpt_size": null,
+  "linear_attn_backend": "triton",
+  "linear_attn_decode_backend": null,
+  "linear_attn_prefill_backend": null,
+  "hicache_io_backend": "kernel",
+  "hicache_storage_backend": null,
+  "hicache_storage_backend_extra_config": null,
+  "lora_backend": "csgmv",
+  "disaggregation_transfer_backend": "mooncake",
+  "encoder_transfer_backend": "zmq_to_scheduler",
+  "remote_instance_weight_loader_backend": "nccl"
+ },
+ "model_config": {
+  "architectures": [
+   "GlmMoeDsaForCausalLM"
+  ],
+  "num_hidden_layers": 2,
+  "resolved_quantization": "fp8",
+  "branch_params": {
+   "index_topk": 2048,
+   "index_topk_freq": 4,
+   "index_skip_topk_offset": 3,
+   "first_k_dense_replace": 0,
+   "indexer_types": [
+    "shared",
+    "shared"
+   ],
+   "mlp_layer_types": [
+    "sparse",
+    "sparse"
+   ]
+  }
+ },
+ "attn_backend": "DeepseekSparseAttnBackend",
+ "weights": {
+  "model.embed_tokens.weight": "bfloat16[154880, 6144]",
+  "model.layers.0.self_attn.fused_qkv_a_proj_with_mqa.weight": "float8_e4m3fn[2624, 6144]",
+  "model.layers.0.self_attn.fused_qkv_a_proj_with_mqa.weight_scale_inv": "float32[21, 48]",
+  "model.layers.0.self_attn.q_a_layernorm.weight": "bfloat16[2048]",
+  "model.layers.0.self_attn.q_b_proj.weight": "float8_e4m3fn[16384, 2048]",
+  "model.layers.0.self_attn.q_b_proj.weight_scale_inv": "float32[128, 16]",
+  "model.layers.0.self_attn.indexer.wq_b.weight": "float8_e4m3fn[4096, 2048]",
+  "model.layers.0.self_attn.indexer.wq_b.weight_scale_inv": "float32[32, 16]",
+  "model.layers.0.self_attn.indexer.wk_weights_proj.weight": "bfloat16[160, 6144]",
+  "model.layers.0.self_attn.indexer.k_norm.bias": "float32[128]",
+  "model.layers.0.self_attn.indexer.k_norm.weight": "float32[128]",
+  "model.layers.0.self_attn.kv_b_proj.weight": "float8_e4m3fn[28672, 512]",
+  "model.layers.0.self_attn.kv_b_proj.weight_scale_inv": "float32[224, 4]",
+  "model.layers.0.self_attn.o_proj.weight": "float8_e4m3fn[6144, 16384]",
+  "model.layers.0.self_attn.o_proj.weight_scale_inv": "float32[48, 128]",
+  "model.layers.0.self_attn.kv_a_layernorm.weight": "bfloat16[512]",
+  "model.layers.0.self_attn.attn_mqa.k_scale": "float32[]",
+  "model.layers.0.self_attn.attn_mqa.v_scale": "float32[]",
+  "model.layers.0.self_attn.attn_mha.k_scale": "float32[]",
+  "model.layers.0.self_attn.attn_mha.v_scale": "float32[]",
+  "model.layers.0.mlp.gate.weight": "bfloat16[256, 6144]",
+  "model.layers.0.mlp.gate.e_score_correction_bias": "float32[256]",
+  "model.layers.0.mlp.experts.w13_weight": "float8_e4m3fn[257, 4096, 6144]",
+  "model.layers.0.mlp.experts.w2_weight": "float8_e4m3fn[257, 6144, 2048]",
+  "model.layers.0.mlp.experts.w13_weight_scale_inv": "float32[257, 32, 48]",
+  "model.layers.0.mlp.experts.w2_weight_scale_inv": "float32[257, 48, 16]",
+  "model.layers.0.input_layernorm.weight": "bfloat16[6144]",
+  "model.layers.0.post_attention_layernorm.weight": "bfloat16[6144]",
+  "model.layers.1.self_attn.fused_qkv_a_proj_with_mqa.weight": "float8_e4m3fn[2624, 6144]",
+  "model.layers.1.self_attn.fused_qkv_a_proj_with_mqa.weight_scale_inv": "float32[21, 48]",
+  "model.layers.1.self_attn.q_a_layernorm.weight": "bfloat16[2048]",
+  "model.layers.1.self_attn.q_b_proj.weight": "float8_e4m3fn[16384, 2048]",
+  "model.layers.1.self_attn.q_b_proj.weight_scale_inv": "float32[128, 16]",
+  "model.layers.1.self_attn.indexer.wq_b.weight": "float8_e4m3fn[4096, 2048]",
+  "model.layers.1.self_attn.indexer.wq_b.weight_scale_inv": "float32[32, 16]",
+  "model.layers.1.self_attn.indexer.wk_weights_proj.weight": "bfloat16[160, 6144]",
+  "model.layers.1.self_attn.indexer.k_norm.bias": "float32[128]",
+  "model.layers.1.self_attn.indexer.k_norm.weight": "float32[128]",
+  "model.layers.1.self_attn.kv_b_proj.weight": "float8_e4m3fn[28672, 512]",
+  "model.layers.1.self_attn.kv_b_proj.weight_scale_inv": "float32[224, 4]",
+  "model.layers.1.self_attn.o_proj.weight": "float8_e4m3fn[6144, 16384]",
+  "model.layers.1.self_attn.o_proj.weight_scale_inv": "float32[48, 128]",
+  "model.layers.1.self_attn.kv_a_layernorm.weight": "bfloat16[512]",
+  "model.layers.1.self_attn.attn_mqa.k_scale": "float32[]",
+  "model.layers.1.self_attn.attn_mqa.v_scale": "float32[]",
+  "model.layers.1.self_attn.attn_mha.k_scale": "float32[]",
+  "model.layers.1.self_attn.attn_mha.v_scale": "float32[]",
+  "model.layers.1.mlp.gate.weight": "bfloat16[256, 6144]",
+  "model.layers.1.mlp.gate.e_score_correction_bias": "float32[256]",
+  "model.layers.1.mlp.experts.w13_weight": "float8_e4m3fn[257, 4096, 6144]",
+  "model.layers.1.mlp.experts.w2_weight": "float8_e4m3fn[257, 6144, 2048]",
+  "model.layers.1.mlp.experts.w13_weight_scale_inv": "float32[257, 32, 48]",
+  "model.layers.1.mlp.experts.w2_weight_scale_inv": "float32[257, 48, 16]",
+  "model.layers.1.input_layernorm.weight": "bfloat16[6144]",
+  "model.layers.1.post_attention_layernorm.weight": "bfloat16[6144]",
+  "model.norm.weight": "bfloat16[6144]",
+  "lm_head.weight": "bfloat16[154880, 6144]"
+ },
+ "quant_methods_by_module": {
+  "model.embed_tokens": "UnquantizedEmbeddingMethod",
+  "model.layers.0.self_attn.fused_qkv_a_proj_with_mqa": "Fp8LinearMethod",
+  "model.layers.0.self_attn.q_b_proj": "Fp8LinearMethod",
+  "model.layers.0.self_attn.indexer.wq_b": "Fp8LinearMethod",
+  "model.layers.0.self_attn.indexer.wk_weights_proj": "UnquantizedLinearMethod",
+  "model.layers.0.self_attn.kv_b_proj": "Fp8LinearMethod",
+  "model.layers.0.self_attn.o_proj": "Fp8LinearMethod",
+  "model.layers.0.self_attn.attn_mqa": "Fp8KVCacheMethod",
+  "model.layers.0.self_attn.attn_mha": "Fp8KVCacheMethod",
+  "model.layers.0.mlp.experts": "Fp8MoEMethod",
+  "model.layers.1.self_attn.fused_qkv_a_proj_with_mqa": "Fp8LinearMethod",
+  "model.layers.1.self_attn.q_b_proj": "Fp8LinearMethod",
+  "model.layers.1.self_attn.indexer.wq_b": "Fp8LinearMethod",
+  "model.layers.1.self_attn.indexer.wk_weights_proj": "UnquantizedLinearMethod",
+  "model.layers.1.self_attn.kv_b_proj": "Fp8LinearMethod",
+  "model.layers.1.self_attn.o_proj": "Fp8LinearMethod",
+  "model.layers.1.self_attn.attn_mqa": "Fp8KVCacheMethod",
+  "model.layers.1.self_attn.attn_mha": "Fp8KVCacheMethod",
+  "model.layers.1.mlp.experts": "Fp8MoEMethod",
+  "lm_head": "UnquantizedEmbeddingMethod"
+ },
+ "phases": {
+  "prefill:b2_isl32": {
+   "batch": 2,
+   "isl": 32,
+   "ops": [
+    {
+     "i": 0,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.0.self_attn.fused_qkv_a_proj_with_mqa",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.fused_qkv_a_proj_with_mqa",
+     "in": [
+      "bfloat16[64, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 808.6020000000008,
+     "kernel_us": 17.0,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 15.456000000000131,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.5360000000000582,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/models/deepseek_v2.py(1997): prepare_qkv_latent": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 1,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.0.self_attn.q_b_proj",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.q_b_proj",
+     "in": [
+      "bfloat16[64, 2048]"
+     ],
+     "kw": {},
+     "dur_us": 351.1879999999983,
+     "kernel_us": 24.4,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 23.072000000000116,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.3440000000009604,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mha.py(155): forward_normal_prepare": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 2,
+     "span": "AIC::quant_apply::UnquantizedLinearMethod::model.layers.0.self_attn.indexer.wk_weights_proj",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.indexer.wk_weights_proj",
+     "in": [
+      "bfloat16[64, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 169.4930000000004,
+     "kernel_us": 7.7,
+     "autotune_us": 0.0,
+     "kernels": {
+      "nvjet_sm90_tst_64x32_64x16_4x2_h_bz_splitK_TNT": {
+       "us": 6.143999999998414,
+       "launches": 1
+      },
+      "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16,": {
+       "us": 1.5360000000000582,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::mm <- sglang/srt/layers/quantization/unquant.py(201): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/layers/attention/dsa/dsa_indexer.py(539): _fused_k_weights <- sglang/srt/layers/attention/dsa/dsa_indexer.py(1307): _forward_cuda_k_only <- sglang/srt/layers/attention/dsa/dsa_indexer.py(1727): forward_cuda <- sglang/srt/layers/utils/multi_platform.py(81): forward": {
+       "kernels": [
+        "nvjet_sm90_tst_64x32_64x16_4x2_h_bz_splitK_TNT",
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __n"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 3,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.0.self_attn.kv_b_proj",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.kv_b_proj",
+     "in": [
+      "bfloat16[64, 512]"
+     ],
+     "kw": {},
+     "dur_us": 345.005000000001,
+     "kernel_us": 14.6,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 13.280000000000655,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.2800000000006548,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mha.py(155): forward_normal_prepare": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 4,
+     "span": "AIC::attn::DeepseekSparseAttnBackend.forward::model.layers.0.self_attn.attn_mha",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.attn_mha",
+     "in": [
+      "bfloat16[64, 64, 256]",
+      "bfloat16[64, 64, 256]",
+      "bfloat16[64, 64, 256]",
+      "input_ids=int64[64]",
+      "req_pool_indices=int64[2]",
+      "seq_lens=int64[2]",
+      "out_cache_loc=int64[64]",
+      "orig_seq_lens=int32[2]"
+     ],
+     "kw": {},
+     "dur_us": 425.26700000000164,
+     "kernel_us": 24.3,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<flash::CollectiveMainloopFwdSm90<2, cute": {
+       "us": 21.536000000000058,
+       "launches": 1
+      },
+      "void flash::prepare_varlen_num_blocks_kernel<1, true>": {
+       "us": 2.7520000000004075,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sgl_kernel::fwd <- sgl_kernel/flash_attn.py(273): flash_attn_varlen_func <- sglang/jit_kernel/flash_attention_v3.py(19): _call_fa3_kernel <- sglang/jit_kernel/flash_attention_v3.py(187): flash_attn_varlen_func <- sglang/jit_kernel/flash_attention.py(221): flash_attn_varlen_func <- sglang/srt/layers/attention/dsa_backend.py(2554): _forward_standard_mha <- sglang/srt/layers/attention/dsa_backend.py(1846): forward_extend": {
+       "kernels": [
+        "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<",
+        "void flash::prepare_varlen_num_blocks_kernel<1, true>"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 5,
+     "span": "AIC::attn::DeepseekSparseAttnBackend.forward_extend::model.layers.0.self_attn.attn_mha",
+     "depth": 1,
+     "module": "model.layers.0.self_attn.attn_mha",
+     "in": [
+      "bfloat16[64, 64, 256]",
+      "bfloat16[64, 64, 256]",
+      "bfloat16[64, 64, 256]",
+      "input_ids=int64[64]",
+      "req_pool_indices=int64[2]",
+      "seq_lens=int64[2]",
+      "out_cache_loc=int64[64]",
+      "orig_seq_lens=int32[2]"
+     ],
+     "kw": {},
+     "dur_us": 271.97299999999996,
+     "kernel_us": 24.3,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<flash::CollectiveMainloopFwdSm90<2, cute": {
+       "us": 21.536000000000058,
+       "launches": 1
+      },
+      "void flash::prepare_varlen_num_blocks_kernel<1, true>": {
+       "us": 2.7520000000004075,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sgl_kernel::fwd <- sgl_kernel/flash_attn.py(273): flash_attn_varlen_func <- sglang/jit_kernel/flash_attention_v3.py(19): _call_fa3_kernel <- sglang/jit_kernel/flash_attention_v3.py(187): flash_attn_varlen_func <- sglang/jit_kernel/flash_attention.py(221): flash_attn_varlen_func <- sglang/srt/layers/attention/dsa_backend.py(2554): _forward_standard_mha <- sglang/srt/layers/attention/dsa_backend.py(1846): forward_extend": {
+       "kernels": [
+        "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<",
+        "void flash::prepare_varlen_num_blocks_kernel<1, true>"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 6,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.0.self_attn.o_proj",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.o_proj",
+     "in": [
+      "bfloat16[64, 16384]"
+     ],
+     "kw": {},
+     "dur_us": 623.9480000000003,
+     "kernel_us": 58.7,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 56.44800000000032,
+       "launches": 1
+      },
+      "void ": {
+       "us": 2.2079999999987194,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(1560): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(1560): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mha.py(364): forward_normal_core": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 7,
+     "span": "AIC::router::MoEGate::model.layers.0.mlp.gate",
+     "depth": 0,
+     "module": "model.layers.0.mlp.gate",
+     "in": [
+      "bfloat16[64, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 177.38800000000083,
+     "kernel_us": 7.6,
+     "autotune_us": 0.0,
+     "kernels": {
+      "nvjet_sm90_tss_64x32_64x16_4x2_h_bz_splitK_TNT": {
+       "us": 5.983000000000175,
+       "launches": 1
+      },
+      "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, false, fal": {
+       "us": 1.6000000000003638,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::mm <- sglang/jit_kernel/dsv4/gemm.py(16): linear_bf16_fp32 <- sglang/srt/models/deepseek_v2.py(482): forward <- sglang/srt/models/deepseek_v2.py(1024): forward_normal <- sglang/srt/models/deepseek_v2.py(863): forward <- sglang/srt/models/deepseek_v2.py(2198): forward <- sglang/srt/models/deepseek_v2.py(2504): forward": {
+       "kernels": [
+        "nvjet_sm90_tss_64x32_64x16_4x2_h_bz_splitK_TNT",
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, fals"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 8,
+     "span": "AIC::quant_apply::Fp8MoEMethod::model.layers.0.mlp.experts",
+     "depth": 0,
+     "module": "model.layers.0.mlp.experts",
+     "in": [],
+     "kw": {
+      "dispatch_output": "hidden_states=bfloat16[64, 6144]"
+     },
+     "dur_us": 1436.5959999999995,
+     "kernel_us": 233.8,
+     "autotune_us": 0.0,
+     "kernels": {
+      "fused_moe_kernel": {
+       "us": 217.60000000000218,
+       "launches": 2
+      },
+      "void ": {
+       "us": 6.9760000000005675,
+       "launches": 3
+      },
+      "void moe_sum_reduce_kernel<c10::BFloat16, 9>": {
+       "us": 4.799999999999272,
+       "launches": 1
+      },
+      "void moe_align_block_size_kernel<int>": {
+       "us": 2.878999999998996,
+       "launches": 1
+      },
+      "void count_and_sort_expert_tokens_kernel<int>": {
+       "us": 1.5689999999995052,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run <- sglang/srt/layers/quantization/fp8.py(2150): apply <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1321): run_moe_core <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1277): forward_impl": {
+       "kernels": [
+        "fused_moe_kernel"
+       ],
+       "launches": 2
+      },
+      "sgl_kernel::moe_align_block_size <- sglang/kernels/ops/moe/__init__.py(60): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py(22): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(363): _prepare_fused_moe_run <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void count_and_sort_expert_tokens_kernel<int>",
+        "void moe_align_block_size_kernel<int>"
+       ],
+       "launches": 2
+      },
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/kernels/ops/moe/fused_moe_triton_kernels.py(714): invoke_fused_moe_kernel <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 2
+      },
+      "sglang::_run_activation_inplace <- sglang/jit_kernel/activation.py(83): run_activation <- sglang/jit_kernel/activation.py(144): silu_and_mul <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sgl_kernel::moe_sum_reduce <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run": {
+       "kernels": [
+        "void moe_sum_reduce_kernel<c10::BFloat16, 9>"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 9,
+     "span": "AIC::moe::fused_experts_none_to_triton",
+     "depth": 1,
+     "module": null,
+     "in": [
+      "hidden_states=bfloat16[64, 6144]",
+      "topk_output.topk_weights=float32[64, 9]",
+      "topk_output.topk_ids=int32[64, 9]",
+      "topk_output.router_logits=float32[64, 256]",
+      "w13_weight=float8_e4m3fn[257, 4096, 6144]",
+      "w2_weight=float8_e4m3fn[257, 6144, 2048]",
+      "w13_scale=float32[257, 32, 48]",
+      "w2_scale=float32[257, 48, 16]"
+     ],
+     "kw": {},
+     "dur_us": 1234.8439999999991,
+     "kernel_us": 233.8,
+     "autotune_us": 0.0,
+     "kernels": {
+      "fused_moe_kernel": {
+       "us": 217.60000000000218,
+       "launches": 2
+      },
+      "void ": {
+       "us": 6.9760000000005675,
+       "launches": 3
+      },
+      "void moe_sum_reduce_kernel<c10::BFloat16, 9>": {
+       "us": 4.799999999999272,
+       "launches": 1
+      },
+      "void moe_align_block_size_kernel<int>": {
+       "us": 2.878999999998996,
+       "launches": 1
+      },
+      "void count_and_sort_expert_tokens_kernel<int>": {
+       "us": 1.5689999999995052,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run <- sglang/srt/layers/quantization/fp8.py(2150): apply <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1321): run_moe_core <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1277): forward_impl": {
+       "kernels": [
+        "fused_moe_kernel"
+       ],
+       "launches": 2
+      },
+      "sgl_kernel::moe_align_block_size <- sglang/kernels/ops/moe/__init__.py(60): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py(22): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(363): _prepare_fused_moe_run <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void count_and_sort_expert_tokens_kernel<int>",
+        "void moe_align_block_size_kernel<int>"
+       ],
+       "launches": 2
+      },
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/kernels/ops/moe/fused_moe_triton_kernels.py(714): invoke_fused_moe_kernel <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 2
+      },
+      "sglang::_run_activation_inplace <- sglang/jit_kernel/activation.py(83): run_activation <- sglang/jit_kernel/activation.py(144): silu_and_mul <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sgl_kernel::moe_sum_reduce <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run": {
+       "kernels": [
+        "void moe_sum_reduce_kernel<c10::BFloat16, 9>"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 10,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.1.self_attn.fused_qkv_a_proj_with_mqa",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.fused_qkv_a_proj_with_mqa",
+     "in": [
+      "bfloat16[64, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 345.8060000000005,
+     "kernel_us": 17.0,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 15.391999999999825,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.5999999999985448,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/models/deepseek_v2.py(1997): prepare_qkv_latent": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 11,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.1.self_attn.q_b_proj",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.q_b_proj",
+     "in": [
+      "bfloat16[64, 2048]"
+     ],
+     "kw": {},
+     "dur_us": 312.30699999999706,
+     "kernel_us": 24.3,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 22.976999999998952,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.2799999999988358,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mha.py(155): forward_normal_prepare": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 12,
+     "span": "AIC::quant_apply::UnquantizedLinearMethod::model.layers.1.self_attn.indexer.wk_weights_proj",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.indexer.wk_weights_proj",
+     "in": [
+      "bfloat16[64, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 117.86399999999776,
+     "kernel_us": 7.6,
+     "autotune_us": 0.0,
+     "kernels": {
+      "nvjet_sm90_tst_64x32_64x16_4x2_h_bz_splitK_TNT": {
+       "us": 6.1120000000009895,
+       "launches": 1
+      },
+      "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16,": {
+       "us": 1.504000000000815,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::mm <- sglang/srt/layers/quantization/unquant.py(201): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/layers/attention/dsa/dsa_indexer.py(539): _fused_k_weights <- sglang/srt/layers/attention/dsa/dsa_indexer.py(1307): _forward_cuda_k_only <- sglang/srt/layers/attention/dsa/dsa_indexer.py(1727): forward_cuda <- sglang/srt/layers/utils/multi_platform.py(81): forward": {
+       "kernels": [
+        "nvjet_sm90_tst_64x32_64x16_4x2_h_bz_splitK_TNT",
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __n"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 13,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.1.self_attn.kv_b_proj",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.kv_b_proj",
+     "in": [
+      "bfloat16[64, 512]"
+     ],
+     "kw": {},
+     "dur_us": 315.2479999999996,
+     "kernel_us": 14.4,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 13.087999999999738,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.2799999999988358,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mha.py(155): forward_normal_prepare": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 14,
+     "span": "AIC::attn::DeepseekSparseAttnBackend.forward::model.layers.1.self_attn.attn_mha",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.attn_mha",
+     "in": [
+      "bfloat16[64, 64, 256]",
+      "bfloat16[64, 64, 256]",
+      "bfloat16[64, 64, 256]",
+      "input_ids=int64[64]",
+      "req_pool_indices=int64[2]",
+      "seq_lens=int64[2]",
+      "out_cache_loc=int64[64]",
+      "orig_seq_lens=int32[2]"
+     ],
+     "kw": {},
+     "dur_us": 299.1280000000006,
+     "kernel_us": 24.4,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<flash::CollectiveMainloopFwdSm90<2, cute": {
+       "us": 21.631000000001222,
+       "launches": 1
+      },
+      "void flash::prepare_varlen_num_blocks_kernel<1, true>": {
+       "us": 2.7520000000004075,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sgl_kernel::fwd <- sgl_kernel/flash_attn.py(273): flash_attn_varlen_func <- sglang/jit_kernel/flash_attention_v3.py(19): _call_fa3_kernel <- sglang/jit_kernel/flash_attention_v3.py(187): flash_attn_varlen_func <- sglang/jit_kernel/flash_attention.py(221): flash_attn_varlen_func <- sglang/srt/layers/attention/dsa_backend.py(2554): _forward_standard_mha <- sglang/srt/layers/attention/dsa_backend.py(1846): forward_extend": {
+       "kernels": [
+        "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<",
+        "void flash::prepare_varlen_num_blocks_kernel<1, true>"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 15,
+     "span": "AIC::attn::DeepseekSparseAttnBackend.forward_extend::model.layers.1.self_attn.attn_mha",
+     "depth": 1,
+     "module": "model.layers.1.self_attn.attn_mha",
+     "in": [
+      "bfloat16[64, 64, 256]",
+      "bfloat16[64, 64, 256]",
+      "bfloat16[64, 64, 256]",
+      "input_ids=int64[64]",
+      "req_pool_indices=int64[2]",
+      "seq_lens=int64[2]",
+      "out_cache_loc=int64[64]",
+      "orig_seq_lens=int32[2]"
+     ],
+     "kw": {},
+     "dur_us": 161.6280000000006,
+     "kernel_us": 24.4,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<flash::CollectiveMainloopFwdSm90<2, cute": {
+       "us": 21.631000000001222,
+       "launches": 1
+      },
+      "void flash::prepare_varlen_num_blocks_kernel<1, true>": {
+       "us": 2.7520000000004075,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sgl_kernel::fwd <- sgl_kernel/flash_attn.py(273): flash_attn_varlen_func <- sglang/jit_kernel/flash_attention_v3.py(19): _call_fa3_kernel <- sglang/jit_kernel/flash_attention_v3.py(187): flash_attn_varlen_func <- sglang/jit_kernel/flash_attention.py(221): flash_attn_varlen_func <- sglang/srt/layers/attention/dsa_backend.py(2554): _forward_standard_mha <- sglang/srt/layers/attention/dsa_backend.py(1846): forward_extend": {
+       "kernels": [
+        "void cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<",
+        "void flash::prepare_varlen_num_blocks_kernel<1, true>"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 16,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.1.self_attn.o_proj",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.o_proj",
+     "in": [
+      "bfloat16[64, 16384]"
+     ],
+     "kw": {},
+     "dur_us": 557.4540000000015,
+     "kernel_us": 60.2,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 57.98400000000038,
+       "launches": 1
+      },
+      "void ": {
+       "us": 2.2079999999987194,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(1560): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(1560): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mha.py(364): forward_normal_core": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 17,
+     "span": "AIC::router::MoEGate::model.layers.1.mlp.gate",
+     "depth": 0,
+     "module": "model.layers.1.mlp.gate",
+     "in": [
+      "bfloat16[64, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 134.08699999999953,
+     "kernel_us": 7.6,
+     "autotune_us": 0.0,
+     "kernels": {
+      "nvjet_sm90_tss_64x32_64x16_4x2_h_bz_splitK_TNT": {
+       "us": 6.079999999998108,
+       "launches": 1
+      },
+      "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, false, fal": {
+       "us": 1.5680000000029395,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::mm <- sglang/jit_kernel/dsv4/gemm.py(16): linear_bf16_fp32 <- sglang/srt/models/deepseek_v2.py(482): forward <- sglang/srt/models/deepseek_v2.py(1024): forward_normal <- sglang/srt/models/deepseek_v2.py(863): forward <- sglang/srt/models/deepseek_v2.py(2198): forward <- sglang/srt/models/deepseek_v2.py(2504): forward": {
+       "kernels": [
+        "nvjet_sm90_tss_64x32_64x16_4x2_h_bz_splitK_TNT",
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, fals"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 18,
+     "span": "AIC::quant_apply::Fp8MoEMethod::model.layers.1.mlp.experts",
+     "depth": 0,
+     "module": "model.layers.1.mlp.experts",
+     "in": [],
+     "kw": {
+      "dispatch_output": "hidden_states=bfloat16[64, 6144]"
+     },
+     "dur_us": 1165.1939999999995,
+     "kernel_us": 234.8,
+     "autotune_us": 0.0,
+     "kernels": {
+      "fused_moe_kernel": {
+       "us": 218.78399999999965,
+       "launches": 2
+      },
+      "void ": {
+       "us": 6.9759999999987485,
+       "launches": 3
+      },
+      "void moe_sum_reduce_kernel<c10::BFloat16, 9>": {
+       "us": 4.7039999999979045,
+       "launches": 1
+      },
+      "void moe_align_block_size_kernel<int>": {
+       "us": 2.912000000000262,
+       "launches": 1
+      },
+      "void count_and_sort_expert_tokens_kernel<int>": {
+       "us": 1.407999999999447,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run <- sglang/srt/layers/quantization/fp8.py(2150): apply <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1321): run_moe_core <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1277): forward_impl": {
+       "kernels": [
+        "fused_moe_kernel"
+       ],
+       "launches": 2
+      },
+      "sgl_kernel::moe_align_block_size <- sglang/kernels/ops/moe/__init__.py(60): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py(22): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(363): _prepare_fused_moe_run <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void count_and_sort_expert_tokens_kernel<int>",
+        "void moe_align_block_size_kernel<int>"
+       ],
+       "launches": 2
+      },
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/kernels/ops/moe/fused_moe_triton_kernels.py(714): invoke_fused_moe_kernel <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 2
+      },
+      "sglang::_run_activation_inplace <- sglang/jit_kernel/activation.py(83): run_activation <- sglang/jit_kernel/activation.py(144): silu_and_mul <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sgl_kernel::moe_sum_reduce <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run": {
+       "kernels": [
+        "void moe_sum_reduce_kernel<c10::BFloat16, 9>"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 19,
+     "span": "AIC::moe::fused_experts_none_to_triton",
+     "depth": 1,
+     "module": null,
+     "in": [
+      "hidden_states=bfloat16[64, 6144]",
+      "topk_output.topk_weights=float32[64, 9]",
+      "topk_output.topk_ids=int32[64, 9]",
+      "topk_output.router_logits=float32[64, 256]",
+      "w13_weight=float8_e4m3fn[257, 4096, 6144]",
+      "w2_weight=float8_e4m3fn[257, 6144, 2048]",
+      "w13_scale=float32[257, 32, 48]",
+      "w2_scale=float32[257, 48, 16]"
+     ],
+     "kw": {},
+     "dur_us": 999.6389999999992,
+     "kernel_us": 234.8,
+     "autotune_us": 0.0,
+     "kernels": {
+      "fused_moe_kernel": {
+       "us": 218.78399999999965,
+       "launches": 2
+      },
+      "void ": {
+       "us": 6.9759999999987485,
+       "launches": 3
+      },
+      "void moe_sum_reduce_kernel<c10::BFloat16, 9>": {
+       "us": 4.7039999999979045,
+       "launches": 1
+      },
+      "void moe_align_block_size_kernel<int>": {
+       "us": 2.912000000000262,
+       "launches": 1
+      },
+      "void count_and_sort_expert_tokens_kernel<int>": {
+       "us": 1.407999999999447,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run <- sglang/srt/layers/quantization/fp8.py(2150): apply <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1321): run_moe_core <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1277): forward_impl": {
+       "kernels": [
+        "fused_moe_kernel"
+       ],
+       "launches": 2
+      },
+      "sgl_kernel::moe_align_block_size <- sglang/kernels/ops/moe/__init__.py(60): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py(22): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(363): _prepare_fused_moe_run <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void count_and_sort_expert_tokens_kernel<int>",
+        "void moe_align_block_size_kernel<int>"
+       ],
+       "launches": 2
+      },
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/kernels/ops/moe/fused_moe_triton_kernels.py(714): invoke_fused_moe_kernel <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 2
+      },
+      "sglang::_run_activation_inplace <- sglang/jit_kernel/activation.py(83): run_activation <- sglang/jit_kernel/activation.py(144): silu_and_mul <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sgl_kernel::moe_sum_reduce <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run": {
+       "kernels": [
+        "void moe_sum_reduce_kernel<c10::BFloat16, 9>"
+       ],
+       "launches": 1
+      }
+     }
+    }
+   ]
+  },
+  "decode:b2_isl32": {
+   "batch": 2,
+   "kv_len": 33,
+   "ops": [
+    {
+     "i": 0,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.0.self_attn.fused_qkv_a_proj_with_mqa",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.fused_qkv_a_proj_with_mqa",
+     "in": [
+      "bfloat16[2, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 487.90200000000004,
+     "kernel_us": 18.4,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 17.11999999999989,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.2479999999995925,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/models/deepseek_v2.py(1997): prepare_qkv_latent": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 1,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.0.self_attn.q_b_proj",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.q_b_proj",
+     "in": [
+      "bfloat16[2, 2048]"
+     ],
+     "kw": {},
+     "dur_us": 321.2419999999993,
+     "kernel_us": 24.2,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 23.00799999999981,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.1840000000001965,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward <- sglang/srt/models/deepseek_v2.py(2009): q_b_proj_forward": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 2,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.0.self_attn.indexer.wq_b",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.indexer.wq_b",
+     "in": [
+      "bfloat16[2, 2048]"
+     ],
+     "kw": {},
+     "dur_us": 321.4499999999998,
+     "kernel_us": 10.3,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 9.087999999999738,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.2160000000003492,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/layers/attention/dsa/dsa_indexer.py(727): _fused_q_prepare_and_store": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 3,
+     "span": "AIC::quant_apply::UnquantizedLinearMethod::model.layers.0.self_attn.indexer.wk_weights_proj",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.indexer.wk_weights_proj",
+     "in": [
+      "bfloat16[2, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 169.22100000000046,
+     "kernel_us": 6.0,
+     "autotune_us": 0.0,
+     "kernels": {
+      "nvjet_sm90_tst_64x8_64x16_4x1_v_bz_splitK_TNT": {
+       "us": 4.543999999999869,
+       "launches": 1
+      },
+      "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16,": {
+       "us": 1.4400000000005093,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::mm <- sglang/srt/layers/quantization/unquant.py(201): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/layers/attention/dsa/dsa_indexer.py(727): _fused_q_prepare_and_store <- sglang/srt/layers/attention/dsa/dsa_indexer.py(1727): forward_cuda <- sglang/srt/layers/utils/multi_platform.py(81): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(260): forward_absorb_prepare": {
+       "kernels": [
+        "nvjet_sm90_tst_64x8_64x16_4x1_v_bz_splitK_TNT",
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __n"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 4,
+     "span": "AIC::attn::DeepseekSparseAttnBackend.forward::model.layers.0.self_attn.attn_mqa",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.attn_mqa",
+     "in": [
+      "bfloat16[2, 64, 512]",
+      "bfloat16[2, 1, 512]",
+      "bfloat16[2, 1, 512]",
+      "input_ids=int64[2]",
+      "req_pool_indices=int64[2]",
+      "seq_lens=int64[2]",
+      "out_cache_loc=int64[2]",
+      "orig_seq_lens=int32[2]"
+     ],
+     "kw": {
+      "q_rope": "bfloat16[2, 64, 64]",
+      "k_rope": "bfloat16[2, 1, 64]",
+      "topk_indices": "int32[2, 2048]"
+     },
+     "dur_us": 843.5509999999995,
+     "kernel_us": 23.1,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::decode::sparse_fp8::KernelTemplate<": {
+       "us": 12.479999999999563,
+       "launches": 1
+      },
+      "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96, 256>": {
+       "us": 9.376000000000204,
+       "launches": 1
+      },
+      "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda": {
+       "us": 1.2480000000014115,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::copy_ <- sglang/kernels/ops/attention/dsa/quant_k_cache.py(190): _quantize_k_cache_fast_separate <- sglang/kernels/ops/attention/dsa/quant_k_cache.py(10): quantize_k_cache_separate <- sglang/srt/mem_cache/memory_pool.py(3940): _write_mla_kv_buffer <- sglang/srt/mem_cache/memory_pool.py(3989): set_mla_kv_buffer <- sglang/srt/layers/attention/dsa_backend.py(2123): forward_decode <- sglang/srt/layers/attention/base_attn_backend.py(167): forward": {
+       "kernels": [
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<a"
+       ],
+       "launches": 1
+      },
+      "sgl_kernel::fwd_kvcache_mla <- sgl_kernel/flash_mla.py(87): flash_mla_with_kvcache <- sglang/srt/layers/attention/dsa_backend.py(2493): _forward_flashmla_kv <- sglang/srt/layers/attention/dsa_backend.py(2123): forward_decode <- sglang/srt/layers/attention/base_attn_backend.py(167): forward <- sglang/srt/layers/radix_attention.py(143): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::dec",
+        "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96,"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 5,
+     "span": "AIC::attn::DeepseekSparseAttnBackend.forward_decode::model.layers.0.self_attn.attn_mqa",
+     "depth": 1,
+     "module": "model.layers.0.self_attn.attn_mqa",
+     "in": [
+      "bfloat16[2, 64, 512]",
+      "bfloat16[2, 1, 512]",
+      "bfloat16[2, 1, 512]",
+      "input_ids=int64[2]",
+      "req_pool_indices=int64[2]",
+      "seq_lens=int64[2]",
+      "out_cache_loc=int64[2]",
+      "orig_seq_lens=int32[2]"
+     ],
+     "kw": {
+      "q_rope": "bfloat16[2, 64, 64]",
+      "k_rope": "bfloat16[2, 1, 64]",
+      "topk_indices": "int32[2, 2048]"
+     },
+     "dur_us": 685.389000000001,
+     "kernel_us": 23.1,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::decode::sparse_fp8::KernelTemplate<": {
+       "us": 12.479999999999563,
+       "launches": 1
+      },
+      "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96, 256>": {
+       "us": 9.376000000000204,
+       "launches": 1
+      },
+      "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda": {
+       "us": 1.2480000000014115,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::copy_ <- sglang/kernels/ops/attention/dsa/quant_k_cache.py(190): _quantize_k_cache_fast_separate <- sglang/kernels/ops/attention/dsa/quant_k_cache.py(10): quantize_k_cache_separate <- sglang/srt/mem_cache/memory_pool.py(3940): _write_mla_kv_buffer <- sglang/srt/mem_cache/memory_pool.py(3989): set_mla_kv_buffer <- sglang/srt/layers/attention/dsa_backend.py(2123): forward_decode <- sglang/srt/layers/attention/base_attn_backend.py(167): forward": {
+       "kernels": [
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<a"
+       ],
+       "launches": 1
+      },
+      "sgl_kernel::fwd_kvcache_mla <- sgl_kernel/flash_mla.py(87): flash_mla_with_kvcache <- sglang/srt/layers/attention/dsa_backend.py(2493): _forward_flashmla_kv <- sglang/srt/layers/attention/dsa_backend.py(2123): forward_decode <- sglang/srt/layers/attention/base_attn_backend.py(167): forward <- sglang/srt/layers/radix_attention.py(143): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::dec",
+        "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96,"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 6,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.0.self_attn.o_proj",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.o_proj",
+     "in": [
+      "bfloat16[2, 16384]"
+     ],
+     "kw": {},
+     "dur_us": 349.91199999999844,
+     "kernel_us": 60.3,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 59.00799999999981,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.2799999999988358,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(1560): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(1560): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 7,
+     "span": "AIC::router::MoEGate::model.layers.0.mlp.gate",
+     "depth": 0,
+     "module": "model.layers.0.mlp.gate",
+     "in": [
+      "bfloat16[2, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 100.34799999999996,
+     "kernel_us": 3.0,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void ": {
+       "us": 3.006999999999607,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::dsv3_router_gemm <- sglang/jit_kernel/dsv3_router_gemm.py(64): dsv3_router_gemm <- sglang/srt/models/deepseek_v2.py(482): forward <- sglang/srt/models/deepseek_v2.py(1024): forward_normal <- sglang/srt/models/deepseek_v2.py(863): forward <- sglang/srt/models/deepseek_v2.py(2198): forward <- sglang/srt/models/deepseek_v2.py(2504): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 8,
+     "span": "AIC::quant_apply::Fp8MoEMethod::model.layers.0.mlp.experts",
+     "depth": 0,
+     "module": "model.layers.0.mlp.experts",
+     "in": [],
+     "kw": {
+      "dispatch_output": "hidden_states=bfloat16[2, 6144]"
+     },
+     "dur_us": 1516.1009999999987,
+     "kernel_us": 189.2,
+     "autotune_us": 9.0,
+     "kernels": {
+      "fused_moe_kernel": {
+       "us": 180.83199999999852,
+       "launches": 2
+      },
+      "void ": {
+       "us": 4.191999999999098,
+       "launches": 3
+      },
+      "void moe_align_block_size_kernel<int>": {
+       "us": 2.8479999999999563,
+       "launches": 1
+      },
+      "void count_and_sort_expert_tokens_kernel<int>": {
+       "us": 1.3760000000002037,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run <- sglang/srt/layers/quantization/fp8.py(2150): apply <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1321): run_moe_core <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1277): forward_impl": {
+       "kernels": [
+        "fused_moe_kernel"
+       ],
+       "launches": 2
+      },
+      "sgl_kernel::moe_align_block_size <- sglang/kernels/ops/moe/__init__.py(60): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py(22): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(363): _prepare_fused_moe_run <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void count_and_sort_expert_tokens_kernel<int>",
+        "void moe_align_block_size_kernel<int>"
+       ],
+       "launches": 2
+      },
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/kernels/ops/moe/fused_moe_triton_kernels.py(714): invoke_fused_moe_kernel <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 2
+      },
+      "sglang::_run_activation_inplace <- sglang/jit_kernel/activation.py(83): run_activation <- sglang/jit_kernel/activation.py(144): silu_and_mul <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 9,
+     "span": "AIC::moe::fused_experts_none_to_triton",
+     "depth": 1,
+     "module": null,
+     "in": [
+      "hidden_states=bfloat16[2, 6144]",
+      "topk_output.topk_weights=float32[2, 9]",
+      "topk_output.topk_ids=int32[2, 9]",
+      "topk_output.router_logits=float32[2, 256]",
+      "w13_weight=float8_e4m3fn[257, 4096, 6144]",
+      "w2_weight=float8_e4m3fn[257, 6144, 2048]",
+      "w13_scale=float32[257, 32, 48]",
+      "w2_scale=float32[257, 48, 16]"
+     ],
+     "kw": {},
+     "dur_us": 1333.2129999999997,
+     "kernel_us": 189.2,
+     "autotune_us": 9.0,
+     "kernels": {
+      "fused_moe_kernel": {
+       "us": 180.83199999999852,
+       "launches": 2
+      },
+      "void ": {
+       "us": 4.191999999999098,
+       "launches": 3
+      },
+      "void moe_align_block_size_kernel<int>": {
+       "us": 2.8479999999999563,
+       "launches": 1
+      },
+      "void count_and_sort_expert_tokens_kernel<int>": {
+       "us": 1.3760000000002037,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run <- sglang/srt/layers/quantization/fp8.py(2150): apply <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1321): run_moe_core <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1277): forward_impl": {
+       "kernels": [
+        "fused_moe_kernel"
+       ],
+       "launches": 2
+      },
+      "sgl_kernel::moe_align_block_size <- sglang/kernels/ops/moe/__init__.py(60): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py(22): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(363): _prepare_fused_moe_run <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void count_and_sort_expert_tokens_kernel<int>",
+        "void moe_align_block_size_kernel<int>"
+       ],
+       "launches": 2
+      },
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/kernels/ops/moe/fused_moe_triton_kernels.py(714): invoke_fused_moe_kernel <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 2
+      },
+      "sglang::_run_activation_inplace <- sglang/jit_kernel/activation.py(83): run_activation <- sglang/jit_kernel/activation.py(144): silu_and_mul <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 10,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.1.self_attn.fused_qkv_a_proj_with_mqa",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.fused_qkv_a_proj_with_mqa",
+     "in": [
+      "bfloat16[2, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 363.7699999999986,
+     "kernel_us": 18.4,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 17.247999999999593,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.1520000000000437,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/models/deepseek_v2.py(1997): prepare_qkv_latent": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 11,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.1.self_attn.q_b_proj",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.q_b_proj",
+     "in": [
+      "bfloat16[2, 2048]"
+     ],
+     "kw": {},
+     "dur_us": 296.84100000000035,
+     "kernel_us": 24.3,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 23.103000000000975,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.183999999999287,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward <- sglang/srt/models/deepseek_v2.py(2009): q_b_proj_forward": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 12,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.1.self_attn.indexer.wq_b",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.indexer.wq_b",
+     "in": [
+      "bfloat16[2, 2048]"
+     ],
+     "kw": {},
+     "dur_us": 324.6949999999997,
+     "kernel_us": 10.4,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 8.99200000000019,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.4400000000005093,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/layers/attention/dsa/dsa_indexer.py(727): _fused_q_prepare_and_store": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 13,
+     "span": "AIC::quant_apply::UnquantizedLinearMethod::model.layers.1.self_attn.indexer.wk_weights_proj",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.indexer.wk_weights_proj",
+     "in": [
+      "bfloat16[2, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 116.86900000000242,
+     "kernel_us": 6.2,
+     "autotune_us": 0.0,
+     "kernels": {
+      "nvjet_sm90_tst_64x8_64x16_4x1_v_bz_splitK_TNT": {
+       "us": 4.640000000003056,
+       "launches": 1
+      },
+      "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16,": {
+       "us": 1.5360000000000582,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::mm <- sglang/srt/layers/quantization/unquant.py(201): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/layers/attention/dsa/dsa_indexer.py(727): _fused_q_prepare_and_store <- sglang/srt/layers/attention/dsa/dsa_indexer.py(1727): forward_cuda <- sglang/srt/layers/utils/multi_platform.py(81): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(260): forward_absorb_prepare": {
+       "kernels": [
+        "nvjet_sm90_tst_64x8_64x16_4x1_v_bz_splitK_TNT",
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __n"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 14,
+     "span": "AIC::attn::DeepseekSparseAttnBackend.forward::model.layers.1.self_attn.attn_mqa",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.attn_mqa",
+     "in": [
+      "bfloat16[2, 64, 512]",
+      "bfloat16[2, 1, 512]",
+      "bfloat16[2, 1, 512]",
+      "input_ids=int64[2]",
+      "req_pool_indices=int64[2]",
+      "seq_lens=int64[2]",
+      "out_cache_loc=int64[2]",
+      "orig_seq_lens=int32[2]"
+     ],
+     "kw": {
+      "q_rope": "bfloat16[2, 64, 64]",
+      "k_rope": "bfloat16[2, 1, 64]",
+      "topk_indices": "int32[2, 2048]"
+     },
+     "dur_us": 723.6049999999996,
+     "kernel_us": 26.8,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96, 256>": {
+       "us": 12.83299999999872,
+       "launches": 1
+      },
+      "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::decode::sparse_fp8::KernelTemplate<": {
+       "us": 12.831999999998516,
+       "launches": 1
+      },
+      "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda": {
+       "us": 1.087999999999738,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::copy_ <- sglang/kernels/ops/attention/dsa/quant_k_cache.py(190): _quantize_k_cache_fast_separate <- sglang/kernels/ops/attention/dsa/quant_k_cache.py(10): quantize_k_cache_separate <- sglang/srt/mem_cache/memory_pool.py(3940): _write_mla_kv_buffer <- sglang/srt/mem_cache/memory_pool.py(3989): set_mla_kv_buffer <- sglang/srt/layers/attention/dsa_backend.py(2123): forward_decode <- sglang/srt/layers/attention/base_attn_backend.py(167): forward": {
+       "kernels": [
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<a"
+       ],
+       "launches": 1
+      },
+      "sgl_kernel::fwd_kvcache_mla <- sgl_kernel/flash_mla.py(87): flash_mla_with_kvcache <- sglang/srt/layers/attention/dsa_backend.py(2493): _forward_flashmla_kv <- sglang/srt/layers/attention/dsa_backend.py(2123): forward_decode <- sglang/srt/layers/attention/base_attn_backend.py(167): forward <- sglang/srt/layers/radix_attention.py(143): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::dec",
+        "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96,"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 15,
+     "span": "AIC::attn::DeepseekSparseAttnBackend.forward_decode::model.layers.1.self_attn.attn_mqa",
+     "depth": 1,
+     "module": "model.layers.1.self_attn.attn_mqa",
+     "in": [
+      "bfloat16[2, 64, 512]",
+      "bfloat16[2, 1, 512]",
+      "bfloat16[2, 1, 512]",
+      "input_ids=int64[2]",
+      "req_pool_indices=int64[2]",
+      "seq_lens=int64[2]",
+      "out_cache_loc=int64[2]",
+      "orig_seq_lens=int32[2]"
+     ],
+     "kw": {
+      "q_rope": "bfloat16[2, 64, 64]",
+      "k_rope": "bfloat16[2, 1, 64]",
+      "topk_indices": "int32[2, 2048]"
+     },
+     "dur_us": 570.4470000000001,
+     "kernel_us": 26.8,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96, 256>": {
+       "us": 12.83299999999872,
+       "launches": 1
+      },
+      "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::decode::sparse_fp8::KernelTemplate<": {
+       "us": 12.831999999998516,
+       "launches": 1
+      },
+      "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda": {
+       "us": 1.087999999999738,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::copy_ <- sglang/kernels/ops/attention/dsa/quant_k_cache.py(190): _quantize_k_cache_fast_separate <- sglang/kernels/ops/attention/dsa/quant_k_cache.py(10): quantize_k_cache_separate <- sglang/srt/mem_cache/memory_pool.py(3940): _write_mla_kv_buffer <- sglang/srt/mem_cache/memory_pool.py(3989): set_mla_kv_buffer <- sglang/srt/layers/attention/dsa_backend.py(2123): forward_decode <- sglang/srt/layers/attention/base_attn_backend.py(167): forward": {
+       "kernels": [
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<a"
+       ],
+       "launches": 1
+      },
+      "sgl_kernel::fwd_kvcache_mla <- sgl_kernel/flash_mla.py(87): flash_mla_with_kvcache <- sglang/srt/layers/attention/dsa_backend.py(2493): _forward_flashmla_kv <- sglang/srt/layers/attention/dsa_backend.py(2123): forward_decode <- sglang/srt/layers/attention/base_attn_backend.py(167): forward <- sglang/srt/layers/radix_attention.py(143): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::dec",
+        "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96,"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 16,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.1.self_attn.o_proj",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.o_proj",
+     "in": [
+      "bfloat16[2, 16384]"
+     ],
+     "kw": {},
+     "dur_us": 343.1310000000012,
+     "kernel_us": 59.5,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 58.241000000001804,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.2799999999988358,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(1560): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(1560): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 17,
+     "span": "AIC::router::MoEGate::model.layers.1.mlp.gate",
+     "depth": 0,
+     "module": "model.layers.1.mlp.gate",
+     "in": [
+      "bfloat16[2, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 78.47199999999793,
+     "kernel_us": 3.2,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void ": {
+       "us": 3.1680000000014843,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::dsv3_router_gemm <- sglang/jit_kernel/dsv3_router_gemm.py(64): dsv3_router_gemm <- sglang/srt/models/deepseek_v2.py(482): forward <- sglang/srt/models/deepseek_v2.py(1024): forward_normal <- sglang/srt/models/deepseek_v2.py(863): forward <- sglang/srt/models/deepseek_v2.py(2198): forward <- sglang/srt/models/deepseek_v2.py(2504): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 18,
+     "span": "AIC::quant_apply::Fp8MoEMethod::model.layers.1.mlp.experts",
+     "depth": 0,
+     "module": "model.layers.1.mlp.experts",
+     "in": [],
+     "kw": {
+      "dispatch_output": "hidden_states=bfloat16[2, 6144]"
+     },
+     "dur_us": 1363.8929999999964,
+     "kernel_us": 189.1,
+     "autotune_us": 9.0,
+     "kernels": {
+      "fused_moe_kernel": {
+       "us": 180.92799999999988,
+       "launches": 2
+      },
+      "void ": {
+       "us": 3.9679999999971187,
+       "launches": 3
+      },
+      "void moe_align_block_size_kernel<int>": {
+       "us": 2.8480000000017753,
+       "launches": 1
+      },
+      "void count_and_sort_expert_tokens_kernel<int>": {
+       "us": 1.3760000000002037,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run <- sglang/srt/layers/quantization/fp8.py(2150): apply <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1321): run_moe_core <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1277): forward_impl": {
+       "kernels": [
+        "fused_moe_kernel"
+       ],
+       "launches": 2
+      },
+      "sgl_kernel::moe_align_block_size <- sglang/kernels/ops/moe/__init__.py(60): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py(22): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(363): _prepare_fused_moe_run <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void count_and_sort_expert_tokens_kernel<int>",
+        "void moe_align_block_size_kernel<int>"
+       ],
+       "launches": 2
+      },
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/kernels/ops/moe/fused_moe_triton_kernels.py(714): invoke_fused_moe_kernel <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 2
+      },
+      "sglang::_run_activation_inplace <- sglang/jit_kernel/activation.py(83): run_activation <- sglang/jit_kernel/activation.py(144): silu_and_mul <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 19,
+     "span": "AIC::moe::fused_experts_none_to_triton",
+     "depth": 1,
+     "module": null,
+     "in": [
+      "hidden_states=bfloat16[2, 6144]",
+      "topk_output.topk_weights=float32[2, 9]",
+      "topk_output.topk_ids=int32[2, 9]",
+      "topk_output.router_logits=float32[2, 256]",
+      "w13_weight=float8_e4m3fn[257, 4096, 6144]",
+      "w2_weight=float8_e4m3fn[257, 6144, 2048]",
+      "w13_scale=float32[257, 32, 48]",
+      "w2_scale=float32[257, 48, 16]"
+     ],
+     "kw": {},
+     "dur_us": 1198.2289999999994,
+     "kernel_us": 189.1,
+     "autotune_us": 9.0,
+     "kernels": {
+      "fused_moe_kernel": {
+       "us": 180.92799999999988,
+       "launches": 2
+      },
+      "void ": {
+       "us": 3.9679999999971187,
+       "launches": 3
+      },
+      "void moe_align_block_size_kernel<int>": {
+       "us": 2.8480000000017753,
+       "launches": 1
+      },
+      "void count_and_sort_expert_tokens_kernel<int>": {
+       "us": 1.3760000000002037,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run <- sglang/srt/layers/quantization/fp8.py(2150): apply <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1321): run_moe_core <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1277): forward_impl": {
+       "kernels": [
+        "fused_moe_kernel"
+       ],
+       "launches": 2
+      },
+      "sgl_kernel::moe_align_block_size <- sglang/kernels/ops/moe/__init__.py(60): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py(22): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(363): _prepare_fused_moe_run <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void count_and_sort_expert_tokens_kernel<int>",
+        "void moe_align_block_size_kernel<int>"
+       ],
+       "launches": 2
+      },
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/kernels/ops/moe/fused_moe_triton_kernels.py(714): invoke_fused_moe_kernel <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 2
+      },
+      "sglang::_run_activation_inplace <- sglang/jit_kernel/activation.py(83): run_activation <- sglang/jit_kernel/activation.py(144): silu_and_mul <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      }
+     }
+    }
+   ]
+  },
+  "prefill:b1_isl4096": {
+   "batch": 1,
+   "isl": 4096,
+   "ops": [
+    {
+     "i": 0,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.0.self_attn.fused_qkv_a_proj_with_mqa",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.fused_qkv_a_proj_with_mqa",
+     "in": [
+      "bfloat16[4096, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 513.0199999999995,
+     "kernel_us": 617.7,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 591.4250000000002,
+       "launches": 1
+      },
+      "void ": {
+       "us": 26.23999999999978,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/models/deepseek_v2.py(1997): prepare_qkv_latent": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 1,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.0.self_attn.q_b_proj",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.q_b_proj",
+     "in": [
+      "bfloat16[4096, 2048]"
+     ],
+     "kw": {},
+     "dur_us": 321.03399999999965,
+     "kernel_us": 1236.5,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 1227.9390000000003,
+       "launches": 1
+      },
+      "void ": {
+       "us": 8.543999999999869,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward <- sglang/srt/models/deepseek_v2.py(2009): q_b_proj_forward": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 2,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.0.self_attn.indexer.wq_b",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.indexer.wq_b",
+     "in": [
+      "bfloat16[4096, 2048]"
+     ],
+     "kw": {},
+     "dur_us": 303.77700000000004,
+     "kernel_us": 400.6,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 390.5609999999997,
+       "launches": 1
+      },
+      "void ": {
+       "us": 10.079999999999927,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/layers/attention/dsa/dsa_indexer.py(727): _fused_q_prepare_and_store": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 3,
+     "span": "AIC::quant_apply::UnquantizedLinearMethod::model.layers.0.self_attn.indexer.wk_weights_proj",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.indexer.wk_weights_proj",
+     "in": [
+      "bfloat16[4096, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 113.07600000000002,
+     "kernel_us": 72.9,
+     "autotune_us": 0.0,
+     "kernels": {
+      "nvjet_sm90_tst_80x128_64x8_2x1_v_bz_TNN": {
+       "us": 72.89699999999993,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::mm <- sglang/srt/layers/quantization/unquant.py(201): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/layers/attention/dsa/dsa_indexer.py(727): _fused_q_prepare_and_store <- sglang/srt/layers/attention/dsa/dsa_indexer.py(1727): forward_cuda <- sglang/srt/layers/utils/multi_platform.py(81): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(260): forward_absorb_prepare": {
+       "kernels": [
+        "nvjet_sm90_tst_80x128_64x8_2x1_v_bz_TNN"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 4,
+     "span": "AIC::attn::DeepseekSparseAttnBackend.forward::model.layers.0.self_attn.attn_mqa",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.attn_mqa",
+     "in": [
+      "bfloat16[4096, 64, 512]",
+      "bfloat16[4096, 1, 512]",
+      "bfloat16[4096, 1, 512]",
+      "input_ids=int64[4096]",
+      "req_pool_indices=int64[1]",
+      "seq_lens=int64[1]",
+      "out_cache_loc=int64[4096]",
+      "orig_seq_lens=int32[1]"
+     ],
+     "kw": {
+      "q_rope": "bfloat16[4096, 64, 64]",
+      "k_rope": "bfloat16[4096, 1, 64]",
+      "topk_indices": "int32[4096, 2048]"
+     },
+     "dur_us": 758.9150000000009,
+     "kernel_us": 9047.0,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::decode::sparse_fp8::KernelTemplate<": {
+       "us": 8991.028,
+       "launches": 1
+      },
+      "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96, 256>": {
+       "us": 52.89600000000064,
+       "launches": 1
+      },
+      "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda": {
+       "us": 3.039999999999054,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::copy_ <- sglang/kernels/ops/attention/dsa/quant_k_cache.py(190): _quantize_k_cache_fast_separate <- sglang/kernels/ops/attention/dsa/quant_k_cache.py(10): quantize_k_cache_separate <- sglang/srt/mem_cache/memory_pool.py(3940): _write_mla_kv_buffer <- sglang/srt/mem_cache/memory_pool.py(3989): set_mla_kv_buffer <- sglang/srt/layers/attention/dsa_backend.py(1846): forward_extend <- sglang/srt/layers/attention/base_attn_backend.py(167): forward": {
+       "kernels": [
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<a"
+       ],
+       "launches": 1
+      },
+      "sgl_kernel::fwd_kvcache_mla <- sgl_kernel/flash_mla.py(87): flash_mla_with_kvcache <- sglang/srt/layers/attention/dsa_backend.py(2493): _forward_flashmla_kv <- sglang/srt/layers/attention/dsa_backend.py(1846): forward_extend <- sglang/srt/layers/attention/base_attn_backend.py(167): forward <- sglang/srt/layers/radix_attention.py(143): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::dec",
+        "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96,"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 5,
+     "span": "AIC::attn::DeepseekSparseAttnBackend.forward_extend::model.layers.0.self_attn.attn_mqa",
+     "depth": 1,
+     "module": "model.layers.0.self_attn.attn_mqa",
+     "in": [
+      "bfloat16[4096, 64, 512]",
+      "bfloat16[4096, 1, 512]",
+      "bfloat16[4096, 1, 512]",
+      "input_ids=int64[4096]",
+      "req_pool_indices=int64[1]",
+      "seq_lens=int64[1]",
+      "out_cache_loc=int64[4096]",
+      "orig_seq_lens=int32[1]"
+     ],
+     "kw": {
+      "q_rope": "bfloat16[4096, 64, 64]",
+      "k_rope": "bfloat16[4096, 1, 64]",
+      "topk_indices": "int32[4096, 2048]"
+     },
+     "dur_us": 596.4259999999995,
+     "kernel_us": 9047.0,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::decode::sparse_fp8::KernelTemplate<": {
+       "us": 8991.028,
+       "launches": 1
+      },
+      "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96, 256>": {
+       "us": 52.89600000000064,
+       "launches": 1
+      },
+      "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda": {
+       "us": 3.039999999999054,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::copy_ <- sglang/kernels/ops/attention/dsa/quant_k_cache.py(190): _quantize_k_cache_fast_separate <- sglang/kernels/ops/attention/dsa/quant_k_cache.py(10): quantize_k_cache_separate <- sglang/srt/mem_cache/memory_pool.py(3940): _write_mla_kv_buffer <- sglang/srt/mem_cache/memory_pool.py(3989): set_mla_kv_buffer <- sglang/srt/layers/attention/dsa_backend.py(1846): forward_extend <- sglang/srt/layers/attention/base_attn_backend.py(167): forward": {
+       "kernels": [
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<a"
+       ],
+       "launches": 1
+      },
+      "sgl_kernel::fwd_kvcache_mla <- sgl_kernel/flash_mla.py(87): flash_mla_with_kvcache <- sglang/srt/layers/attention/dsa_backend.py(2493): _forward_flashmla_kv <- sglang/srt/layers/attention/dsa_backend.py(1846): forward_extend <- sglang/srt/layers/attention/base_attn_backend.py(167): forward <- sglang/srt/layers/radix_attention.py(143): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::dec",
+        "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96,"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 6,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.0.self_attn.o_proj",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.o_proj",
+     "in": [
+      "bfloat16[4096, 16384]"
+     ],
+     "kw": {},
+     "dur_us": 361.1809999999987,
+     "kernel_us": 3462.2,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 3397.5750000000007,
+       "launches": 1
+      },
+      "void ": {
+       "us": 64.67199999999866,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(1560): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(1560): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 7,
+     "span": "AIC::router::MoEGate::model.layers.0.mlp.gate",
+     "depth": 0,
+     "module": "model.layers.0.mlp.gate",
+     "in": [
+      "bfloat16[4096, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 145.91799999999967,
+     "kernel_us": 105.8,
+     "autotune_us": 0.0,
+     "kernels": {
+      "nvjet_sm90_tss_128x160_64x5_2x1_v_bz_splitK_TNT": {
+       "us": 97.50500000000102,
+       "launches": 1
+      },
+      "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, false, fal": {
+       "us": 8.256000000001222,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::mm <- sglang/jit_kernel/dsv4/gemm.py(16): linear_bf16_fp32 <- sglang/srt/models/deepseek_v2.py(482): forward <- sglang/srt/models/deepseek_v2.py(1024): forward_normal <- sglang/srt/models/deepseek_v2.py(863): forward <- sglang/srt/models/deepseek_v2.py(2198): forward <- sglang/srt/models/deepseek_v2.py(2504): forward": {
+       "kernels": [
+        "nvjet_sm90_tss_128x160_64x5_2x1_v_bz_splitK_TNT",
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, fals"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 8,
+     "span": "AIC::quant_apply::Fp8MoEMethod::model.layers.0.mlp.experts",
+     "depth": 0,
+     "module": "model.layers.0.mlp.experts",
+     "in": [],
+     "kw": {
+      "dispatch_output": "hidden_states=bfloat16[4096, 6144]"
+     },
+     "dur_us": 1387.5040000000008,
+     "kernel_us": 10533.4,
+     "autotune_us": 0.0,
+     "kernels": {
+      "fused_moe_kernel": {
+       "us": 10165.558999999997,
+       "launches": 2
+      },
+      "void ": {
+       "us": 217.5689999999995,
+       "launches": 3
+      },
+      "void moe_sum_reduce_warp_per_token_vec_kernel<8>": {
+       "us": 129.5679999999993,
+       "launches": 1
+      },
+      "void count_and_sort_expert_tokens_kernel<int>": {
+       "us": 10.816000000002532,
+       "launches": 1
+      },
+      "void moe_align_block_size_kernel<int>": {
+       "us": 9.855999999999767,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run <- sglang/srt/layers/quantization/fp8.py(2150): apply <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1321): run_moe_core <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1277): forward_impl": {
+       "kernels": [
+        "fused_moe_kernel"
+       ],
+       "launches": 2
+      },
+      "sgl_kernel::moe_align_block_size <- sglang/kernels/ops/moe/__init__.py(60): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py(22): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(363): _prepare_fused_moe_run <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void count_and_sort_expert_tokens_kernel<int>",
+        "void moe_align_block_size_kernel<int>"
+       ],
+       "launches": 2
+      },
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/kernels/ops/moe/fused_moe_triton_kernels.py(714): invoke_fused_moe_kernel <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 2
+      },
+      "sglang::_run_activation_inplace <- sglang/jit_kernel/activation.py(83): run_activation <- sglang/jit_kernel/activation.py(144): silu_and_mul <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sgl_kernel::moe_sum_reduce <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run": {
+       "kernels": [
+        "void moe_sum_reduce_warp_per_token_vec_kernel<8>"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 9,
+     "span": "AIC::moe::fused_experts_none_to_triton",
+     "depth": 1,
+     "module": null,
+     "in": [
+      "hidden_states=bfloat16[4096, 6144]",
+      "topk_output.topk_weights=float32[4096, 9]",
+      "topk_output.topk_ids=int32[4096, 9]",
+      "topk_output.router_logits=float32[4096, 256]",
+      "w13_weight=float8_e4m3fn[257, 4096, 6144]",
+      "w2_weight=float8_e4m3fn[257, 6144, 2048]",
+      "w13_scale=float32[257, 32, 48]",
+      "w2_scale=float32[257, 48, 16]"
+     ],
+     "kw": {},
+     "dur_us": 1197.0679999999993,
+     "kernel_us": 10533.4,
+     "autotune_us": 0.0,
+     "kernels": {
+      "fused_moe_kernel": {
+       "us": 10165.558999999997,
+       "launches": 2
+      },
+      "void ": {
+       "us": 217.5689999999995,
+       "launches": 3
+      },
+      "void moe_sum_reduce_warp_per_token_vec_kernel<8>": {
+       "us": 129.5679999999993,
+       "launches": 1
+      },
+      "void count_and_sort_expert_tokens_kernel<int>": {
+       "us": 10.816000000002532,
+       "launches": 1
+      },
+      "void moe_align_block_size_kernel<int>": {
+       "us": 9.855999999999767,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run <- sglang/srt/layers/quantization/fp8.py(2150): apply <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1321): run_moe_core <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1277): forward_impl": {
+       "kernels": [
+        "fused_moe_kernel"
+       ],
+       "launches": 2
+      },
+      "sgl_kernel::moe_align_block_size <- sglang/kernels/ops/moe/__init__.py(60): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py(22): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(363): _prepare_fused_moe_run <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void count_and_sort_expert_tokens_kernel<int>",
+        "void moe_align_block_size_kernel<int>"
+       ],
+       "launches": 2
+      },
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/kernels/ops/moe/fused_moe_triton_kernels.py(714): invoke_fused_moe_kernel <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 2
+      },
+      "sglang::_run_activation_inplace <- sglang/jit_kernel/activation.py(83): run_activation <- sglang/jit_kernel/activation.py(144): silu_and_mul <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sgl_kernel::moe_sum_reduce <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run": {
+       "kernels": [
+        "void moe_sum_reduce_warp_per_token_vec_kernel<8>"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 10,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.1.self_attn.fused_qkv_a_proj_with_mqa",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.fused_qkv_a_proj_with_mqa",
+     "in": [
+      "bfloat16[4096, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 361.4969999999994,
+     "kernel_us": 617.3,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 589.474000000002,
+       "launches": 1
+      },
+      "void ": {
+       "us": 27.840000000003783,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/models/deepseek_v2.py(1997): prepare_qkv_latent": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 11,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.1.self_attn.q_b_proj",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.q_b_proj",
+     "in": [
+      "bfloat16[4096, 2048]"
+     ],
+     "kw": {},
+     "dur_us": 305.0540000000001,
+     "kernel_us": 1227.7,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 1219.1070000000036,
+       "launches": 1
+      },
+      "void ": {
+       "us": 8.544000000001688,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward <- sglang/srt/models/deepseek_v2.py(2009): q_b_proj_forward": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 12,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.1.self_attn.indexer.wq_b",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.indexer.wq_b",
+     "in": [
+      "bfloat16[4096, 2048]"
+     ],
+     "kw": {},
+     "dur_us": 295.6419999999998,
+     "kernel_us": 392.5,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 347.87199999999575,
+       "launches": 1
+      },
+      "void ": {
+       "us": 44.67199999999866,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/layers/attention/dsa/dsa_indexer.py(727): _fused_q_prepare_and_store": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 13,
+     "span": "AIC::quant_apply::UnquantizedLinearMethod::model.layers.1.self_attn.indexer.wk_weights_proj",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.indexer.wk_weights_proj",
+     "in": [
+      "bfloat16[4096, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 100.63400000000001,
+     "kernel_us": 72.4,
+     "autotune_us": 0.0,
+     "kernels": {
+      "nvjet_sm90_tst_80x128_64x8_2x1_v_bz_TNN": {
+       "us": 72.44900000000052,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::mm <- sglang/srt/layers/quantization/unquant.py(201): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/layers/attention/dsa/dsa_indexer.py(727): _fused_q_prepare_and_store <- sglang/srt/layers/attention/dsa/dsa_indexer.py(1727): forward_cuda <- sglang/srt/layers/utils/multi_platform.py(81): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(260): forward_absorb_prepare": {
+       "kernels": [
+        "nvjet_sm90_tst_80x128_64x8_2x1_v_bz_TNN"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 14,
+     "span": "AIC::attn::DeepseekSparseAttnBackend.forward::model.layers.1.self_attn.attn_mqa",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.attn_mqa",
+     "in": [
+      "bfloat16[4096, 64, 512]",
+      "bfloat16[4096, 1, 512]",
+      "bfloat16[4096, 1, 512]",
+      "input_ids=int64[4096]",
+      "req_pool_indices=int64[1]",
+      "seq_lens=int64[1]",
+      "out_cache_loc=int64[4096]",
+      "orig_seq_lens=int32[1]"
+     ],
+     "kw": {
+      "q_rope": "bfloat16[4096, 64, 64]",
+      "k_rope": "bfloat16[4096, 1, 64]",
+      "topk_indices": "int32[4096, 2048]"
+     },
+     "dur_us": 693.7360000000008,
+     "kernel_us": 9040.6,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::decode::sparse_fp8::KernelTemplate<": {
+       "us": 8984.339999999997,
+       "launches": 1
+      },
+      "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96, 256>": {
+       "us": 53.34399999999732,
+       "launches": 1
+      },
+      "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda": {
+       "us": 2.9120000000039,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::copy_ <- sglang/kernels/ops/attention/dsa/quant_k_cache.py(190): _quantize_k_cache_fast_separate <- sglang/kernels/ops/attention/dsa/quant_k_cache.py(10): quantize_k_cache_separate <- sglang/srt/mem_cache/memory_pool.py(3940): _write_mla_kv_buffer <- sglang/srt/mem_cache/memory_pool.py(3989): set_mla_kv_buffer <- sglang/srt/layers/attention/dsa_backend.py(1846): forward_extend <- sglang/srt/layers/attention/base_attn_backend.py(167): forward": {
+       "kernels": [
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<a"
+       ],
+       "launches": 1
+      },
+      "sgl_kernel::fwd_kvcache_mla <- sgl_kernel/flash_mla.py(87): flash_mla_with_kvcache <- sglang/srt/layers/attention/dsa_backend.py(2493): _forward_flashmla_kv <- sglang/srt/layers/attention/dsa_backend.py(1846): forward_extend <- sglang/srt/layers/attention/base_attn_backend.py(167): forward <- sglang/srt/layers/radix_attention.py(143): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::dec",
+        "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96,"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 15,
+     "span": "AIC::attn::DeepseekSparseAttnBackend.forward_extend::model.layers.1.self_attn.attn_mqa",
+     "depth": 1,
+     "module": "model.layers.1.self_attn.attn_mqa",
+     "in": [
+      "bfloat16[4096, 64, 512]",
+      "bfloat16[4096, 1, 512]",
+      "bfloat16[4096, 1, 512]",
+      "input_ids=int64[4096]",
+      "req_pool_indices=int64[1]",
+      "seq_lens=int64[1]",
+      "out_cache_loc=int64[4096]",
+      "orig_seq_lens=int32[1]"
+     ],
+     "kw": {
+      "q_rope": "bfloat16[4096, 64, 64]",
+      "k_rope": "bfloat16[4096, 1, 64]",
+      "topk_indices": "int32[4096, 2048]"
+     },
+     "dur_us": 527.6660000000011,
+     "kernel_us": 9040.6,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::decode::sparse_fp8::KernelTemplate<": {
+       "us": 8984.339999999997,
+       "launches": 1
+      },
+      "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96, 256>": {
+       "us": 53.34399999999732,
+       "launches": 1
+      },
+      "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda": {
+       "us": 2.9120000000039,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::copy_ <- sglang/kernels/ops/attention/dsa/quant_k_cache.py(190): _quantize_k_cache_fast_separate <- sglang/kernels/ops/attention/dsa/quant_k_cache.py(10): quantize_k_cache_separate <- sglang/srt/mem_cache/memory_pool.py(3940): _write_mla_kv_buffer <- sglang/srt/mem_cache/memory_pool.py(3989): set_mla_kv_buffer <- sglang/srt/layers/attention/dsa_backend.py(1846): forward_extend <- sglang/srt/layers/attention/base_attn_backend.py(167): forward": {
+       "kernels": [
+        "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<a"
+       ],
+       "launches": 1
+      },
+      "sgl_kernel::fwd_kvcache_mla <- sgl_kernel/flash_mla.py(87): flash_mla_with_kvcache <- sglang/srt/layers/attention/dsa_backend.py(2493): _forward_flashmla_kv <- sglang/srt/layers/attention/dsa_backend.py(1846): forward_extend <- sglang/srt/layers/attention/base_attn_backend.py(167): forward <- sglang/srt/layers/radix_attention.py(143): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::dec",
+        "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96,"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 16,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.1.self_attn.o_proj",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.o_proj",
+     "in": [
+      "bfloat16[4096, 16384]"
+     ],
+     "kw": {},
+     "dur_us": 338.98199999999997,
+     "kernel_us": 3476.7,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 3412.5190000000002,
+       "launches": 1
+      },
+      "void ": {
+       "us": 64.16100000000006,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(1560): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(1560): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 17,
+     "span": "AIC::router::MoEGate::model.layers.1.mlp.gate",
+     "depth": 0,
+     "module": "model.layers.1.mlp.gate",
+     "in": [
+      "bfloat16[4096, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 115.57900000000154,
+     "kernel_us": 106.2,
+     "autotune_us": 0.0,
+     "kernels": {
+      "nvjet_sm90_tss_128x160_64x5_2x1_v_bz_splitK_TNT": {
+       "us": 97.85599999999977,
+       "launches": 1
+      },
+      "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, false, float, float, float, true, false, fal": {
+       "us": 8.351999999998952,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::mm <- sglang/jit_kernel/dsv4/gemm.py(16): linear_bf16_fp32 <- sglang/srt/models/deepseek_v2.py(482): forward <- sglang/srt/models/deepseek_v2.py(1024): forward_normal <- sglang/srt/models/deepseek_v2.py(863): forward <- sglang/srt/models/deepseek_v2.py(2198): forward <- sglang/srt/models/deepseek_v2.py(2504): forward": {
+       "kernels": [
+        "nvjet_sm90_tss_128x160_64x5_2x1_v_bz_splitK_TNT",
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, fals"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 18,
+     "span": "AIC::quant_apply::Fp8MoEMethod::model.layers.1.mlp.experts",
+     "depth": 0,
+     "module": "model.layers.1.mlp.experts",
+     "in": [],
+     "kw": {
+      "dispatch_output": "hidden_states=bfloat16[4096, 6144]"
+     },
+     "dur_us": 1156.7439999999988,
+     "kernel_us": 10552.5,
+     "autotune_us": 0.0,
+     "kernels": {
+      "fused_moe_kernel": {
+       "us": 10183.862999999998,
+       "launches": 2
+      },
+      "void ": {
+       "us": 218.04900000000634,
+       "launches": 3
+      },
+      "void moe_sum_reduce_warp_per_token_vec_kernel<8>": {
+       "us": 129.85599999999977,
+       "launches": 1
+      },
+      "void count_and_sort_expert_tokens_kernel<int>": {
+       "us": 10.848999999994703,
+       "launches": 1
+      },
+      "void moe_align_block_size_kernel<int>": {
+       "us": 9.855999999999767,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run <- sglang/srt/layers/quantization/fp8.py(2150): apply <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1321): run_moe_core <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1277): forward_impl": {
+       "kernels": [
+        "fused_moe_kernel"
+       ],
+       "launches": 2
+      },
+      "sgl_kernel::moe_align_block_size <- sglang/kernels/ops/moe/__init__.py(60): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py(22): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(363): _prepare_fused_moe_run <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void count_and_sort_expert_tokens_kernel<int>",
+        "void moe_align_block_size_kernel<int>"
+       ],
+       "launches": 2
+      },
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/kernels/ops/moe/fused_moe_triton_kernels.py(714): invoke_fused_moe_kernel <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 2
+      },
+      "sglang::_run_activation_inplace <- sglang/jit_kernel/activation.py(83): run_activation <- sglang/jit_kernel/activation.py(144): silu_and_mul <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sgl_kernel::moe_sum_reduce <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run": {
+       "kernels": [
+        "void moe_sum_reduce_warp_per_token_vec_kernel<8>"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 19,
+     "span": "AIC::moe::fused_experts_none_to_triton",
+     "depth": 1,
+     "module": null,
+     "in": [
+      "hidden_states=bfloat16[4096, 6144]",
+      "topk_output.topk_weights=float32[4096, 9]",
+      "topk_output.topk_ids=int32[4096, 9]",
+      "topk_output.router_logits=float32[4096, 256]",
+      "w13_weight=float8_e4m3fn[257, 4096, 6144]",
+      "w2_weight=float8_e4m3fn[257, 6144, 2048]",
+      "w13_scale=float32[257, 32, 48]",
+      "w2_scale=float32[257, 48, 16]"
+     ],
+     "kw": {},
+     "dur_us": 991.0489999999991,
+     "kernel_us": 10552.5,
+     "autotune_us": 0.0,
+     "kernels": {
+      "fused_moe_kernel": {
+       "us": 10183.862999999998,
+       "launches": 2
+      },
+      "void ": {
+       "us": 218.04900000000634,
+       "launches": 3
+      },
+      "void moe_sum_reduce_warp_per_token_vec_kernel<8>": {
+       "us": 129.85599999999977,
+       "launches": 1
+      },
+      "void count_and_sort_expert_tokens_kernel<int>": {
+       "us": 10.848999999994703,
+       "launches": 1
+      },
+      "void moe_align_block_size_kernel<int>": {
+       "us": 9.855999999999767,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run <- sglang/srt/layers/quantization/fp8.py(2150): apply <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1321): run_moe_core <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1277): forward_impl": {
+       "kernels": [
+        "fused_moe_kernel"
+       ],
+       "launches": 2
+      },
+      "sgl_kernel::moe_align_block_size <- sglang/kernels/ops/moe/__init__.py(60): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py(22): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(363): _prepare_fused_moe_run <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void count_and_sort_expert_tokens_kernel<int>",
+        "void moe_align_block_size_kernel<int>"
+       ],
+       "launches": 2
+      },
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/kernels/ops/moe/fused_moe_triton_kernels.py(714): invoke_fused_moe_kernel <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 2
+      },
+      "sglang::_run_activation_inplace <- sglang/jit_kernel/activation.py(83): run_activation <- sglang/jit_kernel/activation.py(144): silu_and_mul <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sgl_kernel::moe_sum_reduce <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run": {
+       "kernels": [
+        "void moe_sum_reduce_warp_per_token_vec_kernel<8>"
+       ],
+       "launches": 1
+      }
+     }
+    }
+   ]
+  },
+  "decode:b1_isl4096": {
+   "batch": 1,
+   "kv_len": 4097,
+   "ops": [
+    {
+     "i": 0,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.0.self_attn.fused_qkv_a_proj_with_mqa",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.fused_qkv_a_proj_with_mqa",
+     "in": [
+      "bfloat16[1, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 486.4390000000003,
+     "kernel_us": 18.2,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 17.056000000000495,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.1520000000000437,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/models/deepseek_v2.py(1997): prepare_qkv_latent": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 1,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.0.self_attn.q_b_proj",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.q_b_proj",
+     "in": [
+      "bfloat16[1, 2048]"
+     ],
+     "kw": {},
+     "dur_us": 327.5129999999999,
+     "kernel_us": 24.1,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 22.944000000000415,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.1520000000000437,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward <- sglang/srt/models/deepseek_v2.py(2009): q_b_proj_forward": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 2,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.0.self_attn.indexer.wq_b",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.indexer.wq_b",
+     "in": [
+      "bfloat16[1, 2048]"
+     ],
+     "kw": {},
+     "dur_us": 314.9469999999992,
+     "kernel_us": 10.1,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 8.928000000000793,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.1840000000001965,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/layers/attention/dsa/dsa_indexer.py(727): _fused_q_prepare_and_store": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 3,
+     "span": "AIC::quant_apply::UnquantizedLinearMethod::model.layers.0.self_attn.indexer.wk_weights_proj",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.indexer.wk_weights_proj",
+     "in": [
+      "bfloat16[1, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 173.97699999999986,
+     "kernel_us": 6.2,
+     "autotune_us": 0.0,
+     "kernels": {
+      "nvjet_sm90_tst_64x8_64x16_4x1_v_bz_splitK_TNT": {
+       "us": 4.576000000000931,
+       "launches": 1
+      },
+      "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16,": {
+       "us": 1.6640000000006694,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::mm <- sglang/srt/layers/quantization/unquant.py(201): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/layers/attention/dsa/dsa_indexer.py(727): _fused_q_prepare_and_store <- sglang/srt/layers/attention/dsa/dsa_indexer.py(1727): forward_cuda <- sglang/srt/layers/utils/multi_platform.py(81): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(260): forward_absorb_prepare": {
+       "kernels": [
+        "nvjet_sm90_tst_64x8_64x16_4x1_v_bz_splitK_TNT",
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __n"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 4,
+     "span": "AIC::attn::DeepseekSparseAttnBackend.forward::model.layers.0.self_attn.attn_mqa",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.attn_mqa",
+     "in": [
+      "bfloat16[1, 64, 512]",
+      "bfloat16[1, 1, 512]",
+      "bfloat16[1, 1, 512]",
+      "input_ids=int64[1]",
+      "req_pool_indices=int64[1]",
+      "seq_lens=int64[1]",
+      "out_cache_loc=int64[1]",
+      "orig_seq_lens=int32[1]"
+     ],
+     "kw": {
+      "q_rope": "bfloat16[1, 64, 64]",
+      "k_rope": "bfloat16[1, 1, 64]",
+      "topk_indices": "int32[1, 2048]"
+     },
+     "dur_us": 774.0740000000005,
+     "kernel_us": 24.9,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::decode::sparse_fp8::KernelTemplate<": {
+       "us": 13.631999999999607,
+       "launches": 1
+      },
+      "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96, 256>": {
+       "us": 11.296000000000276,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sgl_kernel::fwd_kvcache_mla <- sgl_kernel/flash_mla.py(87): flash_mla_with_kvcache <- sglang/srt/layers/attention/dsa_backend.py(2493): _forward_flashmla_kv <- sglang/srt/layers/attention/dsa_backend.py(2123): forward_decode <- sglang/srt/layers/attention/base_attn_backend.py(167): forward <- sglang/srt/layers/radix_attention.py(143): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::dec",
+        "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96,"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 5,
+     "span": "AIC::attn::DeepseekSparseAttnBackend.forward_decode::model.layers.0.self_attn.attn_mqa",
+     "depth": 1,
+     "module": "model.layers.0.self_attn.attn_mqa",
+     "in": [
+      "bfloat16[1, 64, 512]",
+      "bfloat16[1, 1, 512]",
+      "bfloat16[1, 1, 512]",
+      "input_ids=int64[1]",
+      "req_pool_indices=int64[1]",
+      "seq_lens=int64[1]",
+      "out_cache_loc=int64[1]",
+      "orig_seq_lens=int32[1]"
+     ],
+     "kw": {
+      "q_rope": "bfloat16[1, 64, 64]",
+      "k_rope": "bfloat16[1, 1, 64]",
+      "topk_indices": "int32[1, 2048]"
+     },
+     "dur_us": 614.0030000000006,
+     "kernel_us": 24.9,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::decode::sparse_fp8::KernelTemplate<": {
+       "us": 13.631999999999607,
+       "launches": 1
+      },
+      "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96, 256>": {
+       "us": 11.296000000000276,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sgl_kernel::fwd_kvcache_mla <- sgl_kernel/flash_mla.py(87): flash_mla_with_kvcache <- sglang/srt/layers/attention/dsa_backend.py(2493): _forward_flashmla_kv <- sglang/srt/layers/attention/dsa_backend.py(2123): forward_decode <- sglang/srt/layers/attention/base_attn_backend.py(167): forward <- sglang/srt/layers/radix_attention.py(143): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::dec",
+        "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96,"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 6,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.0.self_attn.o_proj",
+     "depth": 0,
+     "module": "model.layers.0.self_attn.o_proj",
+     "in": [
+      "bfloat16[1, 16384]"
+     ],
+     "kw": {},
+     "dur_us": 346.97400000000016,
+     "kernel_us": 60.8,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 59.457000000000335,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.3760000000002037,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(1560): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(1560): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 7,
+     "span": "AIC::router::MoEGate::model.layers.0.mlp.gate",
+     "depth": 0,
+     "module": "model.layers.0.mlp.gate",
+     "in": [
+      "bfloat16[1, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 91.63400000000001,
+     "kernel_us": 2.7,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void ": {
+       "us": 2.720000000001164,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::dsv3_router_gemm <- sglang/jit_kernel/dsv3_router_gemm.py(64): dsv3_router_gemm <- sglang/srt/models/deepseek_v2.py(482): forward <- sglang/srt/models/deepseek_v2.py(1024): forward_normal <- sglang/srt/models/deepseek_v2.py(863): forward <- sglang/srt/models/deepseek_v2.py(2198): forward <- sglang/srt/models/deepseek_v2.py(2504): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 8,
+     "span": "AIC::quant_apply::Fp8MoEMethod::model.layers.0.mlp.experts",
+     "depth": 0,
+     "module": "model.layers.0.mlp.experts",
+     "in": [],
+     "kw": {
+      "dispatch_output": "hidden_states=bfloat16[1, 6144]"
+     },
+     "dur_us": 1501.1760000000013,
+     "kernel_us": 187.5,
+     "autotune_us": 1.5,
+     "kernels": {
+      "fused_moe_kernel": {
+       "us": 179.61599999999999,
+       "launches": 2
+      },
+      "void ": {
+       "us": 3.8070000000006985,
+       "launches": 3
+      },
+      "void moe_align_block_size_kernel<int>": {
+       "us": 2.815999999998894,
+       "launches": 1
+      },
+      "void count_and_sort_expert_tokens_kernel<int>": {
+       "us": 1.2800000000006548,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run <- sglang/srt/layers/quantization/fp8.py(2150): apply <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1321): run_moe_core <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1277): forward_impl": {
+       "kernels": [
+        "fused_moe_kernel"
+       ],
+       "launches": 2
+      },
+      "sgl_kernel::moe_align_block_size <- sglang/kernels/ops/moe/__init__.py(60): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py(22): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(363): _prepare_fused_moe_run <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void count_and_sort_expert_tokens_kernel<int>",
+        "void moe_align_block_size_kernel<int>"
+       ],
+       "launches": 2
+      },
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/kernels/ops/moe/fused_moe_triton_kernels.py(714): invoke_fused_moe_kernel <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 2
+      },
+      "sglang::_run_activation_inplace <- sglang/jit_kernel/activation.py(83): run_activation <- sglang/jit_kernel/activation.py(144): silu_and_mul <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 9,
+     "span": "AIC::moe::fused_experts_none_to_triton",
+     "depth": 1,
+     "module": null,
+     "in": [
+      "hidden_states=bfloat16[1, 6144]",
+      "topk_output.topk_weights=float32[1, 9]",
+      "topk_output.topk_ids=int32[1, 9]",
+      "topk_output.router_logits=float32[1, 256]",
+      "w13_weight=float8_e4m3fn[257, 4096, 6144]",
+      "w2_weight=float8_e4m3fn[257, 6144, 2048]",
+      "w13_scale=float32[257, 32, 48]",
+      "w2_scale=float32[257, 48, 16]"
+     ],
+     "kw": {},
+     "dur_us": 1319.8909999999996,
+     "kernel_us": 187.5,
+     "autotune_us": 1.5,
+     "kernels": {
+      "fused_moe_kernel": {
+       "us": 179.61599999999999,
+       "launches": 2
+      },
+      "void ": {
+       "us": 3.8070000000006985,
+       "launches": 3
+      },
+      "void moe_align_block_size_kernel<int>": {
+       "us": 2.815999999998894,
+       "launches": 1
+      },
+      "void count_and_sort_expert_tokens_kernel<int>": {
+       "us": 1.2800000000006548,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run <- sglang/srt/layers/quantization/fp8.py(2150): apply <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1321): run_moe_core <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1277): forward_impl": {
+       "kernels": [
+        "fused_moe_kernel"
+       ],
+       "launches": 2
+      },
+      "sgl_kernel::moe_align_block_size <- sglang/kernels/ops/moe/__init__.py(60): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py(22): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(363): _prepare_fused_moe_run <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void count_and_sort_expert_tokens_kernel<int>",
+        "void moe_align_block_size_kernel<int>"
+       ],
+       "launches": 2
+      },
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/kernels/ops/moe/fused_moe_triton_kernels.py(714): invoke_fused_moe_kernel <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 2
+      },
+      "sglang::_run_activation_inplace <- sglang/jit_kernel/activation.py(83): run_activation <- sglang/jit_kernel/activation.py(144): silu_and_mul <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 10,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.1.self_attn.fused_qkv_a_proj_with_mqa",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.fused_qkv_a_proj_with_mqa",
+     "in": [
+      "bfloat16[1, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 361.97799999999916,
+     "kernel_us": 18.2,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 17.023999999999432,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.1520000000000437,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/models/deepseek_v2.py(1997): prepare_qkv_latent": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 11,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.1.self_attn.q_b_proj",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.q_b_proj",
+     "in": [
+      "bfloat16[1, 2048]"
+     ],
+     "kw": {},
+     "dur_us": 292.73199999999997,
+     "kernel_us": 24.2,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 23.009000000000015,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.183999999999287,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(468): forward <- sglang/srt/models/deepseek_v2.py(2009): q_b_proj_forward": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 12,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.1.self_attn.indexer.wq_b",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.indexer.wq_b",
+     "in": [
+      "bfloat16[1, 2048]"
+     ],
+     "kw": {},
+     "dur_us": 304.9549999999999,
+     "kernel_us": 10.3,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 9.024999999999636,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.3119999999998981,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/layers/attention/dsa/dsa_indexer.py(727): _fused_q_prepare_and_store": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 13,
+     "span": "AIC::quant_apply::UnquantizedLinearMethod::model.layers.1.self_attn.indexer.wk_weights_proj",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.indexer.wk_weights_proj",
+     "in": [
+      "bfloat16[1, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 112.02499999999782,
+     "kernel_us": 6.0,
+     "autotune_us": 0.0,
+     "kernels": {
+      "nvjet_sm90_tst_64x8_64x16_4x1_v_bz_splitK_TNT": {
+       "us": 4.576000000000931,
+       "launches": 1
+      },
+      "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __nv_bfloat16, false, float, __nv_bfloat16,": {
+       "us": 1.4720000000015716,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "aten::mm <- sglang/srt/layers/quantization/unquant.py(201): apply <- sglang/srt/layers/linear.py(278): forward <- sglang/srt/layers/attention/dsa/dsa_indexer.py(727): _fused_q_prepare_and_store <- sglang/srt/layers/attention/dsa/dsa_indexer.py(1727): forward_cuda <- sglang/srt/layers/utils/multi_platform.py(81): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(260): forward_absorb_prepare": {
+       "kernels": [
+        "nvjet_sm90_tst_64x8_64x16_4x1_v_bz_splitK_TNT",
+        "void cublasLt::splitKreduce_kernel<32, 16, int, float, __nv_bfloat16, float, __n"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 14,
+     "span": "AIC::attn::DeepseekSparseAttnBackend.forward::model.layers.1.self_attn.attn_mqa",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.attn_mqa",
+     "in": [
+      "bfloat16[1, 64, 512]",
+      "bfloat16[1, 1, 512]",
+      "bfloat16[1, 1, 512]",
+      "input_ids=int64[1]",
+      "req_pool_indices=int64[1]",
+      "seq_lens=int64[1]",
+      "out_cache_loc=int64[1]",
+      "orig_seq_lens=int32[1]"
+     ],
+     "kw": {
+      "q_rope": "bfloat16[1, 64, 64]",
+      "k_rope": "bfloat16[1, 1, 64]",
+      "topk_indices": "int32[1, 2048]"
+     },
+     "dur_us": 675.1039999999994,
+     "kernel_us": 27.0,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::decode::sparse_fp8::KernelTemplate<": {
+       "us": 13.503999999997177,
+       "launches": 1
+      },
+      "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96, 256>": {
+       "us": 13.503999999997177,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sgl_kernel::fwd_kvcache_mla <- sgl_kernel/flash_mla.py(87): flash_mla_with_kvcache <- sglang/srt/layers/attention/dsa_backend.py(2493): _forward_flashmla_kv <- sglang/srt/layers/attention/dsa_backend.py(2123): forward_decode <- sglang/srt/layers/attention/base_attn_backend.py(167): forward <- sglang/srt/layers/radix_attention.py(143): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::dec",
+        "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96,"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 15,
+     "span": "AIC::attn::DeepseekSparseAttnBackend.forward_decode::model.layers.1.self_attn.attn_mqa",
+     "depth": 1,
+     "module": "model.layers.1.self_attn.attn_mqa",
+     "in": [
+      "bfloat16[1, 64, 512]",
+      "bfloat16[1, 1, 512]",
+      "bfloat16[1, 1, 512]",
+      "input_ids=int64[1]",
+      "req_pool_indices=int64[1]",
+      "seq_lens=int64[1]",
+      "out_cache_loc=int64[1]",
+      "orig_seq_lens=int32[1]"
+     ],
+     "kw": {
+      "q_rope": "bfloat16[1, 64, 64]",
+      "k_rope": "bfloat16[1, 1, 64]",
+      "topk_indices": "int32[1, 2048]"
+     },
+     "dur_us": 513.2959999999985,
+     "kernel_us": 27.0,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::decode::sparse_fp8::KernelTemplate<": {
+       "us": 13.503999999997177,
+       "launches": 1
+      },
+      "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96, 256>": {
+       "us": 13.503999999997177,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sgl_kernel::fwd_kvcache_mla <- sgl_kernel/flash_mla.py(87): flash_mla_with_kvcache <- sglang/srt/layers/attention/dsa_backend.py(2493): _forward_flashmla_kv <- sglang/srt/layers/attention/dsa_backend.py(2123): forward_decode <- sglang/srt/layers/attention/base_attn_backend.py(167): forward <- sglang/srt/layers/radix_attention.py(143): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90::dec",
+        "void smxx::decode::flash_fwd_mla_combine_kernel<cutlass::bfloat16_t, 512, 8, 96,"
+       ],
+       "launches": 2
+      }
+     }
+    },
+    {
+     "i": 16,
+     "span": "AIC::quant_apply::Fp8LinearMethod::model.layers.1.self_attn.o_proj",
+     "depth": 0,
+     "module": "model.layers.1.self_attn.o_proj",
+     "in": [
+      "bfloat16[1, 16384]"
+     ],
+     "kw": {},
+     "dur_us": 345.89600000000064,
+     "kernel_us": 59.3,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void deep_gemm::sm90_fp8_gemm_1d2d_impl<": {
+       "us": 58.016999999999825,
+       "launches": 1
+      },
+      "void ": {
+       "us": 1.2479999999995925,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(1560): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      },
+      "sglang::deep_gemm_fp8_fp8_bf16_nt <- <built-in method deep_gemm_fp8_fp8_bf16_nt of pybind11_builtins.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1 object at 0x7ffba186e2b0> <- sglang/kernels/ops/quantization/fp8_kernel.py(1368): w8a8_block_fp8_matmul_deepgemm <- sglang/srt/layers/quantization/fp8_utils.py(787): deepgemm_w8a8_block_fp8_linear_with_fallback <- sglang/srt/layers/quantization/fp8.py(893): apply <- sglang/srt/layers/linear.py(1560): forward <- sglang/srt/models/deepseek_common/attention_forward_methods/forward_mla.py(619): forward_absorb_core": {
+       "kernels": [
+        "void deep_gemm::sm90_fp8_gemm_1d2d_impl<"
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 17,
+     "span": "AIC::router::MoEGate::model.layers.1.mlp.gate",
+     "depth": 0,
+     "module": "model.layers.1.mlp.gate",
+     "in": [
+      "bfloat16[1, 6144]"
+     ],
+     "kw": {},
+     "dur_us": 75.22299999999814,
+     "kernel_us": 2.8,
+     "autotune_us": 0.0,
+     "kernels": {
+      "void ": {
+       "us": 2.7520000000004075,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::dsv3_router_gemm <- sglang/jit_kernel/dsv3_router_gemm.py(64): dsv3_router_gemm <- sglang/srt/models/deepseek_v2.py(482): forward <- sglang/srt/models/deepseek_v2.py(1024): forward_normal <- sglang/srt/models/deepseek_v2.py(863): forward <- sglang/srt/models/deepseek_v2.py(2198): forward <- sglang/srt/models/deepseek_v2.py(2504): forward": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 18,
+     "span": "AIC::quant_apply::Fp8MoEMethod::model.layers.1.mlp.experts",
+     "depth": 0,
+     "module": "model.layers.1.mlp.experts",
+     "in": [],
+     "kw": {
+      "dispatch_output": "hidden_states=bfloat16[1, 6144]"
+     },
+     "dur_us": 1329.7839999999997,
+     "kernel_us": 188.4,
+     "autotune_us": 1.7,
+     "kernels": {
+      "fused_moe_kernel": {
+       "us": 180.29000000000087,
+       "launches": 2
+      },
+      "void ": {
+       "us": 4.03099999999904,
+       "launches": 3
+      },
+      "void moe_align_block_size_kernel<int>": {
+       "us": 2.815999999998894,
+       "launches": 1
+      },
+      "void count_and_sort_expert_tokens_kernel<int>": {
+       "us": 1.2479999999995925,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run <- sglang/srt/layers/quantization/fp8.py(2150): apply <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1321): run_moe_core <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1277): forward_impl": {
+       "kernels": [
+        "fused_moe_kernel"
+       ],
+       "launches": 2
+      },
+      "sgl_kernel::moe_align_block_size <- sglang/kernels/ops/moe/__init__.py(60): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py(22): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(363): _prepare_fused_moe_run <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void count_and_sort_expert_tokens_kernel<int>",
+        "void moe_align_block_size_kernel<int>"
+       ],
+       "launches": 2
+      },
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/kernels/ops/moe/fused_moe_triton_kernels.py(714): invoke_fused_moe_kernel <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 2
+      },
+      "sglang::_run_activation_inplace <- sglang/jit_kernel/activation.py(83): run_activation <- sglang/jit_kernel/activation.py(144): silu_and_mul <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      }
+     }
+    },
+    {
+     "i": 19,
+     "span": "AIC::moe::fused_experts_none_to_triton",
+     "depth": 1,
+     "module": null,
+     "in": [
+      "hidden_states=bfloat16[1, 6144]",
+      "topk_output.topk_weights=float32[1, 9]",
+      "topk_output.topk_ids=int32[1, 9]",
+      "topk_output.router_logits=float32[1, 256]",
+      "w13_weight=float8_e4m3fn[257, 4096, 6144]",
+      "w2_weight=float8_e4m3fn[257, 6144, 2048]",
+      "w13_scale=float32[257, 32, 48]",
+      "w2_scale=float32[257, 48, 16]"
+     ],
+     "kw": {},
+     "dur_us": 1167.9959999999992,
+     "kernel_us": 188.4,
+     "autotune_us": 1.7,
+     "kernels": {
+      "fused_moe_kernel": {
+       "us": 180.29000000000087,
+       "launches": 2
+      },
+      "void ": {
+       "us": 4.03099999999904,
+       "launches": 3
+      },
+      "void moe_align_block_size_kernel<int>": {
+       "us": 2.815999999998894,
+       "launches": 1
+      },
+      "void count_and_sort_expert_tokens_kernel<int>": {
+       "us": 1.2479999999995925,
+       "launches": 1
+      }
+     },
+     "py_paths": {
+      "sglang::inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts <- sglang/srt/layers/moe/moe_runner/triton.py(175): fused_experts_none_to_triton <- sglang/srt/layers/moe/moe_runner/runner.py(114): run <- sglang/srt/layers/quantization/fp8.py(2150): apply <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1321): run_moe_core <- sglang/srt/layers/moe/fused_moe_triton/layer.py(1277): forward_impl": {
+       "kernels": [
+        "fused_moe_kernel"
+       ],
+       "launches": 2
+      },
+      "sgl_kernel::moe_align_block_size <- sglang/kernels/ops/moe/__init__.py(60): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py(22): moe_align_block_size <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(363): _prepare_fused_moe_run <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void count_and_sort_expert_tokens_kernel<int>",
+        "void moe_align_block_size_kernel<int>"
+       ],
+       "launches": 2
+      },
+      "sglang::per_token_group_quant_8bit_v2 <- sglang/jit_kernel/per_token_group_quant_8bit_v2.py(101): per_token_group_quant_8bit_v2 <- sglang/kernels/ops/quantization/fp8_kernel.py(526): _run_per_token_group_quant_8bit_kernel <- sglang/kernels/ops/quantization/fp8_kernel.py(622): sglang_per_token_group_quant_fp8 <- sglang/kernels/ops/moe/fused_moe_triton_kernels.py(714): invoke_fused_moe_kernel <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 2
+      },
+      "sglang::_run_activation_inplace <- sglang/jit_kernel/activation.py(83): run_activation <- sglang/jit_kernel/activation.py(144): silu_and_mul <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(425): _fused_moe_kernel_sequence <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(832): fused_experts_impl <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(101): inplace_fused_experts <- sglang/srt/layers/moe/moe_runner/triton_utils/fused_moe.py(232): fused_experts": {
+       "kernels": [
+        "void "
+       ],
+       "launches": 1
+      }
+     }
+    }
+   ]
+  }
+ }
+}

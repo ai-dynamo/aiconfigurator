@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Compatibility alias for aiconfigurator_core.sdk.models.recipe_check."""
+"""Compatibility alias for aiconfigurator_core.sdk.models.facts."""
 
 from aiconfigurator.sdk._compat import alias_module as _alias_module
 
-_alias_module(__name__, "aiconfigurator_core.sdk.models.recipe_check")
+_alias_module(__name__, "aiconfigurator_core.sdk.models.facts")

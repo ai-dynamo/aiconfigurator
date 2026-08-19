@@ -181,11 +181,15 @@ from aiconfigurator_core.sdk.models.nemotron_h import NemotronHModel
 from aiconfigurator_core.sdk.models.nemotron_nas import NemotronNas
 from aiconfigurator_core.sdk.models.qwen3vl import Qwen3VLModel, Qwen3VLMoEModel
 from aiconfigurator_core.sdk.models.qwen35 import Qwen35Model
-from aiconfigurator_core.sdk.models.recipe_check import (
-    RecipeCheckReport,
-    RecipeFinding,
-    RecipeGapError,
-    check_model_against_recipe,
+from aiconfigurator_core.sdk.models.facts import (
+    FactCheckReport,
+    FactFinding,
+    FactsGapError,
+    ModelFacts,
+    assemble_model_facts,
+    check_facts_against_dryrun,
+    check_model_against_facts,
+    resolve_model_quant_modes,
 )
 
 __all__ = [
@@ -203,18 +207,22 @@ __all__ = [
     "Qwen3VLMoEModel",
     "Qwen3VLModel",
     "Qwen35Model",
-    "RecipeCheckReport",
-    "RecipeFinding",
-    "RecipeGapError",
+    "FactCheckReport",
+    "FactFinding",
+    "FactsGapError",
+    "ModelFacts",
     "_apply_model_quant_defaults",
     "_architecture_to_model_family",
     "_get_model_info",
     "_infer_quant_modes_from_raw_config",
     "attention_op_keys",
+    "assemble_model_facts",
+    "check_facts_against_dryrun",
     "check_is_moe",
-    "check_model_against_recipe",
+    "check_model_against_facts",
     "get_model",
     "get_model_family",
+    "resolve_model_quant_modes",
     "mtp_scale_factor",
     "resolve_context_fmha_by_data",
     "resolve_dsv4_moe_arch",

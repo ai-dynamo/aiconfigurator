@@ -349,6 +349,15 @@ def compile_engine(
     # Apply MTP BEFORE get_model so the walked op lists carry the
     # (L+nextn)/L compute scale; accepted-token progress is applied above core.
     apply_nextn(model_config, nextn)
+    # System-aware quant resolution (nvfp4-on-non-Blackwell remap, DSV4 FP4
+    # expert arch modes). The CLI/task paths run these before get_model; this
+    # embedded path (Rust build_aic_engine / Dynamo Mocker) previously did NOT,
+    # so e.g. an nvfp4 checkpoint kept native-FP4 compute assumptions on
+    # Hopper. Explicitly-passed quant kwargs still win (resolvers only touch
+    # unset/inferred fields).
+    from aiconfigurator_core.sdk.models.facts import resolve_model_quant_modes
+
+    resolve_model_quant_modes(model_config, model_path, backend, system_name=system)
     model = get_model(model_path, model_config, backend)
 
     # The database supplies the shared-layer perf sources, the query mode and
