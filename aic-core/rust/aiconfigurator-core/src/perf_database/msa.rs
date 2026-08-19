@@ -34,10 +34,11 @@ use super::dsa::{
     select_dsa_backend, DsaGrids, DsaKey, NodeCache,
 };
 use super::perf_interp::{self, OpInterpConfig};
-use super::resolve_op_sources;
+use super::source_resolution::SourceResolver;
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
-use crate::config::{PerfDbSources, PerfSource};
+use crate::config::PerfSource;
+use std::sync::Arc;
 
 pub struct MsaTable {
     data_root: PathBuf,
@@ -51,18 +52,18 @@ pub struct MsaTable {
 }
 
 impl MsaTable {
-    /// Construct with shared-layer sources resolved from `perf_db_sources`
-    /// (Python-supplied); each file falls back to its primary
-    /// `data_root/<basename>` when absent from the map. No I/O.
-    pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
+    /// Construct with sources resolved by the engine-owned [`SourceResolver`]
+    /// (family-first, shared-layer aware — same contract as [`DsaTable`]).
+    /// No I/O beyond the resolver's directory walk.
+    pub fn with_sources(
+        data_root: PathBuf,
+        resolver: &Arc<SourceResolver>,
+    ) -> Result<Self, AicError> {
         let context_sources =
-            resolve_op_sources(perf_db_sources, "msa_context_module_perf.parquet", &data_root);
-        let generation_sources = resolve_op_sources(
-            perf_db_sources,
-            "msa_generation_module_perf.parquet",
-            &data_root,
-        );
-        Self {
+            resolver.sources_for("msa_context_module_perf.parquet", &data_root)?;
+        let generation_sources =
+            resolver.sources_for("msa_generation_module_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             context_sources,
             generation_sources,
@@ -70,7 +71,7 @@ impl MsaTable {
             generation: OnceLock::new(),
             context_nodes: OnceLock::new(),
             generation_nodes: OnceLock::new(),
-        }
+        })
     }
 
     /// Context-MSA module latency: one 4-axis Grid RAW engine query on the raw
