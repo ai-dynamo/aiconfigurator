@@ -414,10 +414,10 @@ def test_moe_model_quantization_policy_is_yaml_backed():
 
 def test_dsv4_moe_quantization_policy_prunes_unrelated_modes():
     # AIC-1749: nvidia/DeepSeek-V4-{Flash,Pro}-NVFP4 are a real ModelOpt NVFP4
-    # export, vllm-only -- sglang/trtllm are explicitly closed via
-    # allowed_modes: [] on those rows, so assert the empty set for them
-    # explicitly rather than omitting the artifact (omission would look
-    # identical to "not yet declared").
+    # export. Every backend that serves NVFP4 MoE declares exactly [nvfp4] on
+    # those rows (positive one-true-mode declarations, review follow-up), so
+    # assert the singleton set per backend explicitly rather than omitting the
+    # artifact (omission would look identical to "not yet declared").
     expected_by_backend = {
         "sglang": {
             "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
@@ -769,8 +769,8 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # +231 for AIC-1749's DeepSeek-V4 NVFP4 rows: +117 nvidia/DeepSeek-V4-Flash-NVFP4
     # (matches deepseek-ai/DeepSeek-V4-Flash's 4096/2048 count) and +114
     # nvidia/DeepSeek-V4-Pro-NVFP4 (matches deepseek-ai/DeepSeek-V4-Pro's
-    # 7168/3072 count) -- vllm-only allowed_modes: [nvfp4], sglang/trtllm
-    # closed for both new rows.
+    # 7168/3072 count) -- every backend declares exactly [nvfp4] for both
+    # new rows.
     assert len(moe_cases) == 5685
     assert any(
         case.model_name == "nvidia/DeepSeek-V4-Flash-NVFP4"
