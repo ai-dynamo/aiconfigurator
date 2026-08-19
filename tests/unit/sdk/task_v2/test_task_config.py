@@ -851,6 +851,28 @@ def test_dsv4_native_sglang_moe_remap():
     assert moe("sglang", mp="sgl-project/DeepSeek-V4-Flash-FP8") != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
 
 
+@pytest.mark.parametrize(
+    ("model_path", "replacement"),
+    [
+        ("nvidia/DeepSeek-V4-Flash-NVFP4", "sgl-project/DeepSeek-V4-Flash-FP8"),
+        ("nvidia/DeepSeek-V4-Pro-NVFP4", "sgl-project/DeepSeek-V4-Pro-FP8"),
+    ],
+)
+def test_dsv4_nvfp4_exports_get_the_curated_hopper_rejection(model_path, replacement):
+    """The ModelOpt NVFP4 exports carry the same native FP4 routed-expert
+    weights as the deepseek-ai checkpoints, so Hopper tasks must get the
+    curated use-the-FP8-build redirect, not a downstream missing-data error
+    (AIC-1749 registration follow-through)."""
+    with pytest.raises(ValueError, match="native FP4 routed-expert") as exc:
+        Task(
+            serving_mode="agg",
+            model_path=model_path,
+            system_name="h200_sxm",
+            backend_name="sglang",
+        )
+    assert replacement in str(exc.value)
+
+
 def test_dsv4_third_party_fp4_sglang_moe_remap_on_hopper():
     """Third-party FP4-expert DSV4 checkpoints (e.g. RedHatAI) get the sglang
     MoE remap based on expert_dtype rather than hardcoded model paths.
