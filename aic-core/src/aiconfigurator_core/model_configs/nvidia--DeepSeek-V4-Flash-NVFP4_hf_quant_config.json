@@ -1,0 +1,191 @@
+{
+    "producer": {
+        "name": "modelopt",
+        "version": "dsv4-nvfp4-experts"
+    },
+    "quantization": {
+        "quant_algo": "MIXED_PRECISION",
+        "kv_cache_quant_algo": null,
+        "group_size": 16,
+        "quantized_layers": {
+            "layers.0.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.1.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.10.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.11.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.12.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.13.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.14.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.15.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.16.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.17.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.18.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.19.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.2.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.20.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.21.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.22.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.23.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.24.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.25.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.26.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.27.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.28.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.29.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.3.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.30.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.31.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.32.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.33.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.34.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.35.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.36.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.37.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.38.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.39.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.4.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.40.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.41.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.42.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.5.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.6.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.7.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.8.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            },
+            "layers.9.ffn.experts": {
+                "quant_algo": "NVFP4",
+                "group_size": 16
+            }
+        },
+        "exclude_modules": [
+            "*.attn.*",
+            "*.ffn.shared_experts.*",
+            "head",
+            "mtp.*"
+        ]
+    }
+}
