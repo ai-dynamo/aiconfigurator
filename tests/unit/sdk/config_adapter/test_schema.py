@@ -69,6 +69,39 @@ def test_unknown_schema_version_and_fields_are_rejected():
         EstimateRequestV1.model_validate(payload)
 
 
+def test_request_rejects_undersized_aggregate_sequence_limit():
+    payload = _request().model_dump(mode="python")
+    payload["runtime"]["max_seq_len"] = 1151
+
+    with pytest.raises(ValidationError, match=r"runtime\.max_seq_len \(1151\).+\(1152\)"):
+        EstimateRequestV1.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("runtime", "message"),
+    [
+        ({"max_seq_len": 1151}, r"runtime\.max_seq_len \(1151\).+\(1152\).+decode"),
+        (
+            {"max_seq_len": 2048, "prefill_max_seq_len": 1023},
+            r"runtime\.prefill_max_seq_len \(1023\).+\(1024\).+prefill",
+        ),
+        (
+            {"max_seq_len": 2048, "decode_max_seq_len": 1151},
+            r"runtime\.decode_max_seq_len \(1151\).+\(1152\).+decode",
+        ),
+    ],
+)
+def test_request_rejects_undersized_effective_disagg_sequence_limit(runtime, message):
+    payload = _request().model_dump(mode="python")
+    worker = payload["topology"]["worker"]
+    payload["topology"] = {"kind": "disagg", "prefill": worker, "decode": worker}
+    payload["systems"]["decode"] = payload["systems"]["prefill"]
+    payload["runtime"].update(runtime)
+
+    with pytest.raises(ValidationError, match=message):
+        EstimateRequestV1.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     "values",
     [
