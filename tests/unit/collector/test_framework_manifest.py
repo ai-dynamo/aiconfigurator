@@ -6,6 +6,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from collector.framework_manifest import get_collector_runtime, require_collector_runtime, resolve_op_runtime
 from collector.sglang.registry import REGISTRY as SGLANG_REGISTRY
@@ -65,10 +66,11 @@ def test_wideep_runtime_stays_independent_from_default_framework_runtime():
 
 
 def test_deepep_ops_resolve_to_the_comm_family_runtime(monkeypatch):
-    # The `comm` family override retargets exactly the two DeepEP ops; wideep_moe
-    # is family `moe` and stays on the DeepSeek-V4 runtime its 0.5.10 dataset was
-    # collected with, where DSv4 module support is verified.
-    moe = resolve_op_runtime("wideep_sglang", "wideep_moe")
+    # The `comm` family override retargets exactly the two DeepEP ops; moe_ep
+    # (the retired wideep_moe's successor) is family `moe` and stays on the
+    # DeepSeek-V4 runtime its 0.5.10 dataset was collected with, where DSv4
+    # module support is verified.
+    moe = resolve_op_runtime("wideep_sglang", "moe_ep")
     assert (moe.family, moe.version) == ("moe", "0.5.10")
     assert "deepseek-v4" in moe.image()
 
@@ -87,10 +89,10 @@ def test_deepep_ops_resolve_to_the_comm_family_runtime(monkeypatch):
 
 def test_deepep_and_wideep_moe_cannot_share_one_container():
     with pytest.raises(RuntimeError) as excinfo:
-        require_collector_runtime("sglang", "0.5.12", requested_ops={"wideep_moe", "deepep_ll"}, wideep_ops=WIDEEP_OPS)
+        require_collector_runtime("sglang", "0.5.12", requested_ops={"moe_ep", "deepep_ll"}, wideep_ops=WIDEEP_OPS)
     message = str(excinfo.value)
     assert "deepep_ll→0.5.12" in message
-    assert "wideep_moe→0.5.10" in message
+    assert "moe_ep→0.5.10" in message
     assert "run each version group in its own container" in message
 
 
@@ -190,7 +192,7 @@ WIDEEP_OPS = {entry.op for entry in WIDEEP_SGLANG_REGISTRY}
         # expectation is asserted on an explicit default-family op instead.
         ("0.5.14+cu130", {"gemm"}, "default", "0.5.14"),
         ("0.5.16", {"kda"}, "default", "0.5.16"),
-        ("0.5.10", {"wideep_moe"}, "wideep", "0.5.10"),
+        ("0.5.10", {"moe_ep"}, "wideep", "0.5.10"),
     ],
 )
 def test_runtime_selection_accepts_only_the_matching_pin(installed_version, requested_ops, workload, version):
@@ -204,8 +206,8 @@ def test_runtime_selection_accepts_only_the_matching_pin(installed_version, requ
         ("0.5.13", {"gemm"}, r"stock collector requires exactly 0\.5\.14"),
         ("0.5.14rc1", {"gemm"}, r"stock collector requires exactly 0\.5\.14"),
         ("0.5.14.post1", {"gemm"}, r"stock collector requires exactly 0\.5\.14"),
-        ("0.5.14", {"wideep_moe"}, r"WideEP collector requires exactly 0\.5\.10"),
-        ("0.5.14", {"gemm", "wideep_moe"}, r"0\.5\.14 != 0\.5\.10.*separate containers"),
+        ("0.5.14", {"moe_ep"}, r"WideEP collector requires exactly 0\.5\.10"),
+        ("0.5.14", {"gemm", "moe_ep"}, r"0\.5\.14 != 0\.5\.10.*separate containers"),
         # kda runs only on the kimi-k3 branch runtime (families.kda pin):
         # mixing it with a default-family op must fail closed.
         ("0.5.14", {"gemm", "kda"}, r"multiple runtime versions"),
@@ -235,12 +237,12 @@ def test_wideep_registry_entries_are_separate_from_stock_backend_registries():
 
     assert "wideep_mla_context" not in sglang_modules
     assert "wideep_mla_generation" not in sglang_modules
-    assert "wideep_moe" not in sglang_modules
-    assert "trtllm_moe_wideep" not in trtllm_modules
+    assert "moe_ep" not in sglang_modules
+    assert "moe_ep" not in trtllm_modules
     assert "wideep_mla_context" not in wideep_sglang_modules
     assert "wideep_mla_generation" not in wideep_sglang_modules
-    assert wideep_sglang_modules["wideep_moe"].startswith("collector.wideep.sglang.")
-    assert wideep_trtllm_modules["trtllm_moe_wideep"].startswith("collector.wideep.trtllm.")
+    assert wideep_sglang_modules["moe_ep"].startswith("collector.wideep.sglang.")
+    assert wideep_trtllm_modules["moe_ep"].startswith("collector.wideep.trtllm.")
 
 
 def test_deepep_collectors_live_under_wideep_namespace():
@@ -251,6 +253,29 @@ def test_deepep_collectors_live_under_wideep_namespace():
     assert not (COLLECTOR_ROOT / "deep_collector").exists()
     assert not (COLLECTOR_ROOT / "sglang" / "collect_wideep_deepep_moe.py").exists()
     assert not (COLLECTOR_ROOT / "trtllm" / "collect_wideep_moe_compute.py").exists()
+
+
+def test_retired_wideep_mla_shim_stays_gone():
+    # collector/wideep/sglang/collect_mla_module.py was a pure re-export shim
+    # over collector.sglang.collect_mla_module with zero importers; retired in
+    # the moe_a2a/moe_ep registration change. It must not come back, and no
+    # registry or hash-closure entry may reference it.
+    retired_module = "collector.wideep.sglang.collect_mla_module"
+    assert not (COLLECTOR_ROOT / "wideep" / "sglang" / "collect_mla_module.py").exists()
+
+    for registry in (
+        SGLANG_REGISTRY,
+        TRTLLM_REGISTRY,
+        VLLM_REGISTRY,
+        WIDEEP_SGLANG_REGISTRY,
+        WIDEEP_TRTLLM_REGISTRY,
+    ):
+        for entry in registry:
+            assert entry.module != retired_module
+            assert all(route.module != retired_module for route in entry.versions)
+
+    closures = yaml.safe_load((COLLECTOR_ROOT / "hash_closures.yaml").read_text(encoding="utf-8"))
+    assert retired_module not in closures
 
 
 def test_family_overrides_split_ops_across_runtimes(tmp_path):
@@ -396,8 +421,8 @@ frameworks:
         require_collector_runtime(
             "sglang",
             "0.5.14",
-            requested_ops={"gemm", "wideep_moe"},
-            wideep_ops={"wideep_moe"},
+            requested_ops={"gemm", "moe_ep"},
+            wideep_ops={"moe_ep"},
             path=tmp_path / "framework_manifest.yaml",
         )
     message = str(excinfo.value)

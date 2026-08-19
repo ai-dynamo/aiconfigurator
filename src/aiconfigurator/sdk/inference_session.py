@@ -21,7 +21,7 @@ from aiconfigurator.sdk.picking import (
 )
 from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
 from aiconfigurator.sdk.step_estimate import MixedStepInput, StepEstimate
-from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, get_model_config_from_model_path
+from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
 
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -573,6 +573,8 @@ class DisaggInferenceSession:
             target_ttft=target_ttft,
             target_tpot=target_tpot,
             top_n=top_n,
+            prefill_degradation_factor=self._rate_matching_prefill_degradation_factor,
+            decode_degradation_factor=self._rate_matching_decode_degradation_factor,
         )
 
         disagg_summary_df = result["best_config_df"]
@@ -824,14 +826,7 @@ class DisaggInferenceSession:
         else:
             decode_batch_size_range = [i for i in decode_batch_size_list_default if i <= decode_max_num_tokens]
 
-        try:
-            enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
-        except Exception:
-            logger.debug("Could not resolve model config for VL effective ISL; using text ISL", exc_info=True)
-            enc_cfg = None
-        prefill_effective_isl = runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(
-            enc_cfg, runtime_config
-        )
+        prefill_effective_isl = BaseBackend.effective_prefill_isl(model_path, runtime_config)
         if prefill_max_num_tokens < prefill_effective_isl:
             logger.warning("prefill_max_num_tokens is less than effective prefill ISL, set to effective prefill ISL")
             prefill_max_num_tokens = prefill_effective_isl
@@ -867,7 +862,7 @@ class DisaggInferenceSession:
             logger.debug(f"No prefill or decode workers found for {model_path} with given configs.")
             return disagg_summary
 
-        # ----- autoscale mode: pick P and D independently, no rate matching -----
+        # ----- autoscale mode: pick P and D independently, no worker-count rate matching -----
         if autoscale:
             return self._pick_autoscale(
                 prefill_summary_df=prefill_summary_df,
@@ -1046,7 +1041,9 @@ class AFDInferenceSession:
 
         per_op = defaultdict(float)
         for op in ops:
-            result = op.query(self._database, **kwargs_common)
+            # Internal shim entry (no DeprecationWarning): same engine-backed
+            # value as the deprecated public op.query().
+            result = op._engine_query(self._database, **kwargs_common)
             per_op[op._name] += float(result)
         return sum(per_op.values()), per_op
 
@@ -1422,7 +1419,7 @@ class AFDInferenceSession:
         return summary
 
     # Stride for sampling KV-cache length ``s`` along the decode trace.
-    # Mirrors ``base_backend._run_generation_phase`` so the AFD path
+    # Mirrors the retired ``base_backend._run_generation_phase`` walk so the AFD path
     # uses the same numerical integration grid as agg/disagg.
     _AFD_DECODE_STRIDE = 32
 
@@ -1448,7 +1445,7 @@ class AFDInferenceSession:
 
         Attention is the only op whose latency reads ``s``; sampling at
         ``stride = _AFD_DECODE_STRIDE`` mirrors the trapezoidal rule
-        used by ``_run_generation_phase`` and recovers the average
+        used by the retired ``_run_generation_phase`` walk and recovers the average
         per-step latency over the full decode trace.
 
         Returns ``(t_a_layer_avg, t_f_layer_avg, t_cycle_avg,
@@ -1567,7 +1564,7 @@ class AFDInferenceSession:
 
         Decode integrates per-step compute along the KV-cache length
         ``s`` (sampled every ``_AFD_DECODE_STRIDE`` tokens, mirroring
-        ``base_backend._run_generation_phase``). Attention is the only
+        the retired ``base_backend._run_generation_phase`` walk). Attention is the only
         op that reads ``s`` — sampling at a single ``s = isl + 1`` would
         under-count A-side latency by ~33% in the typical ``osl ~ isl``
         regime and several-fold for ``osl ≫ isl``, which silently flips

@@ -90,6 +90,12 @@ reviews:
       instructions: |
         - Verify core SDK API changes remain compatible with legacy aiconfigurator.sdk imports, generator inputs, profiler data flow, and documented examples.
         - Flag upper-layer dependencies or silent schema drift introduced into the minimal core distribution.
+    - path: "aic-core/src/aiconfigurator_core/sdk/operations/**"
+      instructions: |
+        - Enforce `.claude/rules/rust-core/parity.md` Rule 2 and its executable contract, tests/cross_package/test_single_oracle_contract.py; flag any change those sources prohibit.
+    - path: "aic-core/src/aiconfigurator_core/sdk/perf_database.py"
+      instructions: |
+        - Enforce `.claude/rules/rust-core/parity.md` Rule 2 and tests/cross_package/test_single_oracle_contract.py for the `query_*` surface. Data loading remains in scope for this file and fine to extend.
     - path: "src/aiconfigurator/generator/module_bridge.py"
       instructions: |
         - Treat this as a compatibility bridge between profiler/SDK outputs and generator inputs.

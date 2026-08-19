@@ -27,7 +27,7 @@ time, so a composed metric is comparable with a single-column one.
 The script emits three artifacts:
   - JSON of per-group raw stats
   - Markdown report table
-  - YAML manifest consumed by the SDK loader
+  - YAML manifest consumed by the compiled engine source resolver
 
 Usage:
     python3 tools/perf_database/generate_perf_data_reuse_manifest.py \\
@@ -36,11 +36,12 @@ Usage:
         --out-md   docs/perf_database/perf-data-reuse-analysis.md \\
         --out-manifest aic-core/src/aiconfigurator_core/systems/perf_data_reuse_manifest.yaml
 
-The manifest lives under aic-core/src/aiconfigurator_core/systems/ so the SDK
-loader (aic-core/src/aiconfigurator_core/sdk/perf_database.py) reads it as
-package data and decides,
-per (op_file, kernel_source), which sibling backend/version directories the
-active backend may inherit from. No perf data is moved or rewritten on disk.
+The manifest lives under aic-core/src/aiconfigurator_core/systems/ so the
+compiled source resolver
+(aic-core/rust/aiconfigurator-core/src/perf_database/source_resolution.rs)
+reads it as package data and decides, per (op_file, kernel_source), which
+sibling backend/version directories the active backend may inherit from. No
+perf data is moved or rewritten on disk.
 """
 
 from __future__ import annotations
@@ -128,7 +129,7 @@ def classify_tier(kernel_source: str) -> str:
 # keys on absence.
 #
 # Entries listed here are emitted with tier `absence_load_bearing`: still
-# visible in the manifest with their stats, but outside the SDK loader's
+# visible in the manifest with their stats, but outside the runtime resolver's
 # {shared, shared_fallback} admission, so they never join a cross-backend
 # kernel_source filter.
 #
@@ -418,10 +419,10 @@ def render_markdown(summaries: list[dict]) -> str:
         "Classifies every `(system, op_file, kernel_source)` triple in the perf database into one of two tiers:\n"
     )
     lines.append(
-        "- **`shared`** — named kernel_source. The SDK loader inherits these rows from sibling backend/version "
-        "directories (cross-version and cross-backend) when the database is loaded in HYBRID mode.\n"
+        "- **`shared`** — named kernel_source. The engine resolver inherits these rows from sibling backend/version "
+        "directories (cross-version and cross-backend) when shared-layer reuse is enabled.\n"
         "- **`shared_fallback`** — `kernel_source = default`. Framework-implicit, low-fidelity. "
-        "Inherited alongside `shared` rows in HYBRID mode (HYBRID already accepts coarser fallbacks).\n"
+        "Inherited alongside `shared` rows because shared-layer modes already accept coarser fallbacks.\n"
         "\n"
         "Rows with a blank/`<unknown>` kernel_source are skipped during the scan (the current corpus has none).\n"
     )
@@ -507,7 +508,7 @@ def render_markdown(summaries: list[dict]) -> str:
 
 
 def render_manifest(summaries: list[dict]) -> str:
-    """Render the YAML manifest consumed by the SDK loader.
+    """Render the YAML manifest consumed by the compiled source resolver.
 
     Aggregates per-(op_file, kernel_source) across systems — same kernel_source
     on different systems shares a tier.
@@ -548,18 +549,18 @@ def render_manifest(summaries: list[dict]) -> str:
         "#   the kernel belongs to ('shared' or 'shared_fallback').",
         "#",
         "# How it's used:",
-        "#   aic-core/src/aiconfigurator_core/sdk/perf_database.py reads this file",
-        "#   at PerfDatabase",
-        "#   construction time. When the database is loaded in HYBRID mode, the loader",
+        "#   aic-core/rust/aiconfigurator-core/src/perf_database/source_resolution.rs",
+        "#   reads this file while resolving each op table. When shared-layer reuse is",
+        "#   enabled, the resolver",
         "#   walks sibling <system>/<family>/<framework>/<version>/<op_file> directories",
         "#   and inherits",
         "#   rows tagged with the kernel_sources this manifest declares the active backend",
         "#   may consume — keeping the active backend's own rows on key conflict. Both",
         "#   `tier=shared` and `tier=shared_fallback` (kernel_source=default,",
-        "#   framework-implicit) rows are inherited; HYBRID already accepts coarser",
+        "#   framework-implicit) rows are inherited; shared-layer modes already accept",
         "#   fallbacks, so they are not gated separately. `tier=absence_load_bearing`",
-        "#   entries are documentation only — the loader ignores them, because the",
-        "#   SDK's routing keys on those rows being ABSENT from the active backend's",
+        "#   entries are documentation only — the resolver ignores them, because runtime",
+        "#   routing keys on those rows being ABSENT from the active backend's",
         "#   table (see ABSENCE_LOAD_BEARING in the generator).",
         "#",
         "# How to regenerate:",
@@ -577,7 +578,7 @@ def render_manifest(summaries: list[dict]) -> str:
         "#   kernel_source:               kernel name as it appears in the perf table's kernel_source column",
         "#   tier:                        'shared' (named, high-fidelity),",
         "#                                'shared_fallback' (default, framework-implicit), or",
-        "#                                'absence_load_bearing' (loader-inert; the SDK",
+        "#                                'absence_load_bearing' (resolver-inert; runtime",
         "#                                routes on these keys being absent)",
         "#   systems:                     systems where rows for this (op_file, kernel_source) exist",
         "#   frameworks:                  backends that produce rows (= the inheritance whitelist)",
@@ -588,7 +589,7 @@ def render_manifest(summaries: list[dict]) -> str:
     ]
     for (_op, _ks), agg in sorted(by_pair.items()):
         med = statistics.median(agg["median_pct_divergence"]) if agg["median_pct_divergence"] else None
-        # Absence-load-bearing pairs are demoted to a loader-inert tier so
+        # Absence-load-bearing pairs are demoted to a resolver-inert tier so
         # they can never join a cross-backend inheritance filter (see the
         # ABSENCE_LOAD_BEARING docstring for the invariant and evidence).
         tier = "absence_load_bearing" if (_op, _ks) in ABSENCE_LOAD_BEARING else agg["tier"]
@@ -618,7 +619,7 @@ def main() -> None:
         "--out-manifest",
         type=Path,
         default=None,
-        help="Write a YAML manifest consumed by the SDK loader.",
+        help="Write a YAML manifest consumed by the compiled source resolver.",
     )
     parser.add_argument(
         "--op-file",

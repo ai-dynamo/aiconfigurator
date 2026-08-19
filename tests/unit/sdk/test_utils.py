@@ -630,6 +630,7 @@ class TestGemma4MixModelBuilder:
             262144,  # context_length
             model_config,
             None,  # extra_params (we use set_gemma4_config instead)
+            backend_name="trtllm",
         )
         model.set_gemma4_config(cfg)
         return model
@@ -665,6 +666,7 @@ class TestGemma4MixModelBuilder:
             262144,
             TestGemma4MixModelBuilder._make_model_config(),  # tp=1, moe_tp=1, moe_ep=1
             None,
+            backend_name="trtllm",
         )
         model.set_gemma4_config(cfg)
         return model
@@ -784,6 +786,7 @@ class TestGemma4MixModelBuilder:
             262144,
             self._make_model_config(),
             None,
+            backend_name="trtllm",
         )
         with pytest.raises(ValueError, match="requires a Gemma4MixConfig"):
             model.set_gemma4_config(common.HybridMoEConfig(attn_layer_pattern=(0, 1), moe_layer_freq=(1, 1)))
@@ -807,6 +810,7 @@ class TestGemma4MixModelBuilder:
             262144,
             self._make_model_config(),
             None,
+            backend_name="trtllm",
         )
         bad_cfg = common.Gemma4MixConfig(
             layer_types=("sliding_attention",) * 5,  # only 5, but num_layers=30
@@ -896,6 +900,7 @@ class TestGemma4MixModelBuilder:
                 262144,
                 bad_config,
                 None,
+                backend_name="trtllm",
             )
 
 
@@ -943,6 +948,7 @@ class TestHybridMoEModelBuilder:
             152576,
             262144,
             self._make_model_config(),
+            backend_name="trtllm",
         )
         model.set_hybrid_config(hybrid_cfg)
 
@@ -978,6 +984,7 @@ class TestHybridMoEModelBuilder:
             202048,
             10485760,
             self._make_model_config(),
+            backend_name="trtllm",
         )
         model.set_hybrid_config(hybrid_cfg)
 
@@ -1014,6 +1021,7 @@ class TestHybridMoEModelBuilder:
             202048,
             1048576,
             self._make_model_config(),
+            backend_name="trtllm",
         )
         model.set_hybrid_config(hybrid_cfg)
 
@@ -1415,8 +1423,10 @@ class TestEnumerateParallelConfigSGLangMoE:
             f"Should include at least one config with moe_ep > 1, got moe_ep values: {set(moe_ep_values)}"
         )
 
-    def test_sglang_wideep_moe_excludes_moe_tp_gt_1(self):
-        """Test that SGLang + enable_wideep=True excludes configs with moe_tp > 1."""
+    def test_sglang_megamoe_excludes_moe_tp_gt_1(self):
+        """MegaMoE is the only SGLang MoE backend that is still EP-only in the
+        enumerator: large EP is decided per config from data coverage now, so
+        the deprecated enable_wideep flag no longer narrows the search space."""
         configs = enumerate_parallel_config(
             num_gpu_list=[8, 16, 32],
             tp_list=[1, 2, 4, 8],
@@ -1426,12 +1436,30 @@ class TestEnumerateParallelConfigSGLangMoE:
             moe_ep_list=[8, 16, 32],
             is_moe=True,
             backend=common.BackendName.sglang,
-            enable_wideep=True,
+            moe_backend="megamoe",
         )
         assert len(configs) > 0, "Should generate at least one config"
-        # All configs should have moe_tp == 1 (EP-only for wideep)
+        # All configs should have moe_tp == 1 (EP-only for megamoe)
         for c in configs:
-            assert c[3] == 1, f"WideEP config should have moe_tp=1, got {c}"
+            assert c[3] == 1, f"MegaMoE config should have moe_tp=1, got {c}"
+
+    def test_sglang_enable_wideep_is_inert(self):
+        """The deprecated flag is accepted and ignored: the same lists enumerate
+        the same configs with and without it (coverage decides large EP)."""
+        lists = dict(
+            num_gpu_list=[8, 16, 32],
+            tp_list=[1, 2, 4, 8],
+            pp_list=[1],
+            dp_list=[1, 2, 4, 8, 16, 32],
+            moe_tp_list=[1, 2, 4, 8],
+            moe_ep_list=[8, 16, 32],
+            is_moe=True,
+            backend=common.BackendName.sglang,
+        )
+        assert enumerate_parallel_config(**lists, enable_wideep=True) == enumerate_parallel_config(
+            **lists, enable_wideep=False
+        )
+        assert any(c[3] > 1 for c in enumerate_parallel_config(**lists, enable_wideep=True))
 
     def test_sglang_non_wideep_moe_allows_mixed_tp_ep(self):
         """Test that SGLang + enable_wideep=False allows configs with both moe_tp > 1 and moe_ep > 1."""
@@ -1456,8 +1484,10 @@ class TestEnumerateParallelConfigSGLangMoE:
         assert has_ep_gt_1, "Should include configs with moe_ep > 1"
         assert has_mixed, "Should include mixed configs with both moe_tp > 1 and moe_ep > 1"
 
-    def test_sglang_deepep_intranode_excludes_moe_tp_gt_1(self):
-        """SGLang + moe_backend=deepep_moe + enable_wideep=False excludes moe_tp > 1."""
+    def test_sglang_deepep_moe_no_longer_narrows_the_enumeration(self):
+        """``moe_backend="deepep_moe"`` was a wideEP selector; it is deprecated
+        and inert in the enumerator now (Task narrows the deepep_moe LADDER to
+        moe_tp=[1], and per-config large EP comes from coverage)."""
         configs = enumerate_parallel_config(
             num_gpu_list=[1, 2, 4, 8],
             tp_list=[1, 2, 4, 8],
@@ -1467,13 +1497,10 @@ class TestEnumerateParallelConfigSGLangMoE:
             moe_ep_list=[1, 2, 4, 8],
             is_moe=True,
             backend=common.BackendName.sglang,
-            enable_wideep=False,
             moe_backend="deepep_moe",
         )
         assert len(configs) > 0, "Should generate at least one config"
-        for c in configs:
-            assert c[3] == 1, f"DeepEP config should have moe_tp=1, got {c}"
-        # Should still include ep > 1 configs
+        assert any(c[3] > 1 for c in configs), "deepep_moe must not exclude moe_tp > 1 any more"
         moe_ep_values = [c[4] for c in configs]
         assert any(ep > 1 for ep in moe_ep_values), "Should include configs with moe_ep > 1"
 

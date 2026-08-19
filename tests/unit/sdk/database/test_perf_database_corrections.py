@@ -4,61 +4,14 @@
 
 import pytest
 
-from aiconfigurator.sdk import common
-
 pytestmark = pytest.mark.unit
 
-
-class TestCorrectData:
-    """Test cases for per-op ``_correct_sol`` SOL clamping.
-
-    The ``PerfDatabase._correct_data`` wrapper has been retired;
-    callers invoke ``GEMM._correct_sol(db)`` / ``GenerationAttention._correct_sol(db)``
-    directly. These tests exercise the SOL clamp on a database whose
-    instance attributes have been mutated to artificially low values."""
-
-    def test_correct_gemm_data(self, mutable_comprehensive_perf_db, caplog):
-        """``GEMM._correct_sol`` clamps GEMM data to >= SOL."""
-        from aiconfigurator.sdk.operations.gemm import GEMM
-
-        db = mutable_comprehensive_perf_db
-        quant_mode = common.GEMMQuantMode.bfloat16
-        m, n, k = 64, 128, 256
-
-        # Calculate what SOL should be
-        sol_value = db.query_gemm(m, n, k, quant_mode, database_mode=common.DatabaseMode.SOL)
-
-        # Set an artificially low value
-        db._gemm_data[quant_mode][m][n][k] = sol_value * 0.5
-
-        with caplog.at_level("DEBUG"):
-            GEMM._correct_sol(db)
-
-        assert db._gemm_data[quant_mode][m][n][k] >= sol_value
-        assert f"sol {sol_value} > perf_db" in caplog.text or "gemm quant" in caplog.text
-
-    def test_correct_generation_attention_data(self, mutable_comprehensive_perf_db, caplog):
-        """``GenerationAttention._correct_sol`` clamps generation attention data to >= SOL."""
-        from aiconfigurator.sdk.operations.attention import GenerationAttention
-
-        db = mutable_comprehensive_perf_db
-        kv_cache_quant_mode = common.KVCacheQuantMode.bfloat16
-        n_kv = 0  # MHA case
-        n, b, s = 16, 4, 64
-
-        # Calculate SOL
-        sol_value = db.query_generation_attention(
-            b, s, n, n, kv_cache_quant_mode, database_mode=common.DatabaseMode.SOL
-        )
-
-        # Set an artificially low value
-        db._generation_attention_data[kv_cache_quant_mode][n_kv][128][0][n][b][s] = sol_value * 0.5
-
-        with caplog.at_level("DEBUG"):
-            GenerationAttention._correct_sol(db)
-
-        corrected_value = db._generation_attention_data[kv_cache_quant_mode][n_kv][128][0][n][b][s]
-        assert corrected_value >= sol_value
+# The load-time SOL clamp this file used to pin (``GEMM._correct_sol`` /
+# ``GenerationAttention._correct_sol``: loaded latencies floored at the SOL
+# roofline) retired with the Python query math (#1357 PR-5). The loaded
+# Python table is now the RAW collected data plane; the compiled engine
+# applies the same clamp on its own load (aic-core/rust perf_database), and
+# query values stay SOL-floored via the frozen parity goldens.
 
 
 class TestUpdateSupportMatrix:

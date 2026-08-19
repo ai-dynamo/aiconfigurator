@@ -169,6 +169,11 @@ def enumerate_parallel_config(
         is_moe: whether to use moe
         backend: backend name enum. Important for moe parallel enumeration as different backends
             have different moe parallel support.
+        enable_wideep: DEPRECATED and ignored. Large-EP participation is decided per
+            parallel config from perf-data coverage (``PerfDatabase.moe_a2a_coverage`` /
+            ``moe_expert_compute_coverage``), not by a flag, so this no longer narrows the
+            enumeration. Still accepted so existing callers keep working; restrict the
+            search with ``moe_ep_list`` instead.
         real_silicon_sweep: when True, exclude PP (force pp_list=[1]) and filter by
             min_num_gpus/max_num_gpus bounds on total GPUs per config. For MoE models,
             only allows pure TEP, pure DEP, and (optionally) pure TP.
@@ -217,8 +222,8 @@ def enumerate_parallel_config(
                                     continue
                                 # sglang
                                 elif backend == common.BackendName.sglang:
-                                    if (enable_wideep or moe_backend in {"deepep_moe", "megamoe"}) and moe_tp > 1:
-                                        continue  # SGLang EP-only MoE backends require moe_tp=1.
+                                    if moe_backend == "megamoe" and moe_tp > 1:
+                                        continue  # SGLang MegaMoE is EP-only (moe_tp=1).
                                 elif backend == common.BackendName.vllm:  # noqa: SIM102
                                     if moe_tp > 1 and moe_ep > 1:
                                         continue  # vllm does not support MoE TP and MoE EP simultaneously
@@ -572,8 +577,17 @@ def _parse_hf_config_json(config: dict) -> dict:
     if topk is None:
         topk = config.get("top_k_experts")
     if topk is None:
+        # Step-3.7/3.5 spell the routing width moe_top_k.
+        topk = config.get("moe_top_k")
+    if topk is None:
         topk = 0
-    num_experts = config.get("num_local_experts") or config.get("n_routed_experts") or config.get("num_experts", 0)
+    num_experts = (
+        config.get("num_local_experts")
+        or config.get("n_routed_experts")
+        # Step-3.7/3.5 spell the expert count moe_num_experts.
+        or config.get("moe_num_experts")
+        or config.get("num_experts", 0)
+    )
     moe_inter_size = config.get("moe_intermediate_size", 0) or config.get("intermediate_size", 0)
 
     # Handle NemotronH-specific configuration (only fields unique to NemotronH)
@@ -796,6 +810,78 @@ def _parse_hf_config_json(config: dict) -> dict:
             f"global_layers={extra_params.layer_types.count('full_attention')}, "
             f"num_experts={num_experts}, top_k={topk}, "
             f"sw={extra_params.sliding_window_size}, k_eq_v_global={extra_params.attention_k_eq_v}"
+        )
+    elif architecture in {
+        "Step3p7ForConditionalGeneration",
+        "Step3p5ForCausalLM",
+        "Step3p7FlashForCausalLM",
+        "Step3p5FlashForCausalLM",
+    }:
+        # StepFun Step-3.7-Flash: hybrid SWA/global attention (Gemma-style
+        # ``layer_types``) + dense-first-``first_k_dense_replace`` then MoE FFN,
+        # with one shared expert on the MoE layers. attn_layer_pattern: 1=full,
+        # 0=sliding.
+        #
+        # The authoritative HF config nests the decoder under ``text_config`` and
+        # declares a SECOND attention geometry under
+        # ``text_config.attention_other_setting`` — the sliding layers run 96 query
+        # heads against the global layers' 64. Reading only the flat top level both
+        # rejects real checkpoints and silently sizes every sliding layer with the
+        # global head count.
+        other = config.get("attention_other_setting") or {}
+        swa_n_heads = int(other.get("num_attention_heads", 0) or 0)
+        swa_hd_other = int(other.get("head_dim", 0) or 0)
+        layer_types_raw = config.get("layer_types", [])
+        # The published config sizes layer_types over the decoder PLUS the MTP
+        # predict layers (45 + 3 = 48), so trim to the decoder's share before
+        # building the per-layer pattern.
+        mtp_layers = int(config.get("num_nextn_predict_layers", 0) or 0)
+        if len(layer_types_raw) == layers + mtp_layers and mtp_layers:
+            layer_types_raw = layer_types_raw[:layers]
+        if len(layer_types_raw) != layers:
+            raise ValueError(
+                f"Step3p7 layer_types length {len(layer_types_raw)} != num_hidden_layers {layers} "
+                f"(num_nextn_predict_layers={mtp_layers})"
+            )
+        if any(lt not in ("sliding_attention", "full_attention") for lt in layer_types_raw):
+            raise ValueError("Step3p7 layer_types must contain only 'sliding_attention' or 'full_attention'")
+        attn_pattern = tuple(1 if lt == "full_attention" else 0 for lt in layer_types_raw)
+        # MoE placement: the published config enumerates the MoE layer indices in
+        # ``moe_layers_enum`` (a comma-separated string); the curated fixtures use
+        # the DeepSeek-style ``first_k_dense_replace`` prefix count. Honour both,
+        # preferring the authoritative enumeration.
+        moe_enum_raw = config.get("moe_layers_enum")
+        moe_indices: set[int] | None = None
+        if isinstance(moe_enum_raw, str) and moe_enum_raw.strip():
+            moe_indices = {int(tok) for tok in moe_enum_raw.split(",") if tok.strip()}
+        elif isinstance(moe_enum_raw, (list, tuple)) and moe_enum_raw:
+            moe_indices = {int(tok) for tok in moe_enum_raw}
+        if moe_indices is not None:
+            moe_freq = tuple(1 if i in moe_indices else 0 for i in range(layers))
+        else:
+            first_k_dense = int(config.get("first_k_dense_replace", 0) or 0)
+            moe_freq = tuple(0 if i < first_k_dense else 1 for i in range(layers))
+        extra_params = HybridMoEConfig(
+            attn_layer_pattern=attn_pattern,
+            moe_layer_freq=moe_freq,
+            # 0 on any field = fall back to the model-level default.
+            swa_num_heads=swa_n_heads,
+            swa_head_dim=swa_hd_other,
+            sliding_window_size=config.get("sliding_window", 0) or config.get("sliding_window_size", 0),
+            dense_inter_size=0,  # dense layers use model-level inter_size
+            # Step3p7Attention builds q_norm/k_norm unconditionally, so there is
+            # no config flag to read -- it is on for every layer of this family.
+            use_qk_norm=True,
+            use_head_wise_attn_gate=bool(config.get("use_head_wise_attn_gate", False)),
+        )
+        logger.info(
+            f"Step3p7 hybrid config: "
+            f"global_attn_layers={sum(attn_pattern)}, swa_layers={attn_pattern.count(0)}, "
+            f"moe_layers={sum(moe_freq)}, dense_layers={moe_freq.count(0)}, "
+            f"sliding_window_size={extra_params.sliding_window_size}, "
+            f"swa_num_heads={extra_params.swa_num_heads or 'default'}, "
+            f"head_wise_attn_gate={extra_params.use_head_wise_attn_gate}, "
+            f"share_expert_dim={config.get('share_expert_dim', 0)}"
         )
     elif architecture in {"Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration"}:
         # Qwen3.5 hybrid GDN + full-attention model.

@@ -44,7 +44,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.13"
 
       - name: Install manifest generator dependencies
         run: pip install "tqdm>=4.0.0" pandas pyarrow numpy pyyaml

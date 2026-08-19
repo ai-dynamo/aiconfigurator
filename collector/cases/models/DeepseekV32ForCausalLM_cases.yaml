@@ -31,7 +31,7 @@ framework_specific_op_cases:
       cases: all
     dsa_generation_module:
       cases: all
-    trtllm_moe_wideep:
+    moe_ep:
       cases: all
   vllm:
     dsa_context_module:

@@ -121,6 +121,9 @@ class HybridMoEConfig:
     SWA/local attention dims — set to 0 to fall back to model-level defaults
     (head_dim / num_kv_heads). MiMo-V2-Flash has different dims per attention type;
     Llama 4 uses the same dims for all layers so all four fields are 0.
+        swa_num_heads:    Query heads for SWA/local layers (0 → num_heads). Step-3.7-Flash
+                          declares these separately (96 on sliding vs 64 global) in
+                          ``text_config.attention_other_setting``.
         swa_num_kv_heads: KV heads for SWA/local layers  (0 → num_kv_heads)
         swa_head_dim:     Q/K head dim for SWA layers     (0 → head_dim)
         swa_v_head_dim:   V head dim for SWA layers       (0 → head_dim)
@@ -128,6 +131,12 @@ class HybridMoEConfig:
 
     sliding_window_size: token window for SWA/local attention layers
     dense_inter_size: intermediate size for dense FFN layers (0 → use inter_size)
+
+    Step-specific attention extras, both off by default so the shared families
+    (MiMo-V2-Flash, Llama 4, Gemma 4) are unaffected:
+        use_qk_norm: per-head RMSNorm on Q and K before RoPE, every layer.
+        use_head_wise_attn_gate: g_proj (hidden_size → num_heads) whose sigmoid
+                          scales each head's attention output before o_proj.
     """
 
     attn_layer_pattern: tuple[int, ...]  # per-layer: 0=SWA/local, 1=global
@@ -138,6 +147,12 @@ class HybridMoEConfig:
     global_v_head_dim: int = 0
     sliding_window_size: int = 0
     dense_inter_size: int = 0
+    # New fields are appended, never inserted: this dataclass has a generated
+    # positional constructor, so inserting ahead of an existing optional field
+    # silently changes what a legacy positional call means.
+    swa_num_heads: int = 0
+    use_qk_norm: bool = False
+    use_head_wise_attn_gate: bool = False
 
 
 @dataclass(frozen=True)
@@ -583,6 +598,7 @@ DefaultHFModels = {
     # NVIDIA Nemotron
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
     "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
     "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
@@ -590,6 +606,9 @@ DefaultHFModels = {
     "nvidia/Nemotron-H-56B-Base-8K",
     # Google Gemma 4 Models
     "google/gemma-4-26B-A4B",
+    # StepFun Step-3.7 Models
+    "stepfun-ai/Step-3.7-Flash",
+    "stepfun-ai/Step-3.7-Flash-FP8",
 }
 
 # Bundled model configs and the default support-matrix roster intentionally have
@@ -654,6 +673,7 @@ ModelFamily = {
     "QWEN3VL_MOE",
     "GEMMA4MIX",
     "MINIMAXM3",
+    "STEP3P7",
 }
 ARCHITECTURE_TO_MODEL_FAMILY = {
     "LlamaForCausalLM": "LLAMA",
@@ -679,6 +699,14 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "MiniMaxM2ForCausalLM": "MOE",
     "MiniMaxM3ForCausalLM": "MINIMAXM3",
     "MiniMaxM3SparseForConditionalGeneration": "MINIMAXM3",
+    # The published checkpoints declare Step3p7ForConditionalGeneration at the top
+    # level with a nested text_config architecture of Step3p5ForCausalLM. The
+    # *Flash* spellings only ever existed in this repo's curated configs, so both
+    # are mapped: real checkpoints and the curated fixtures.
+    "Step3p7ForConditionalGeneration": "STEP3P7",
+    "Step3p5ForCausalLM": "STEP3P7",
+    "Step3p7FlashForCausalLM": "STEP3P7",
+    "Step3p5FlashForCausalLM": "STEP3P7",
     "MiMoV2FlashForCausalLM": "HYBRIDMOE",
     "Llama4ForConditionalGeneration": "HYBRIDMOE",
     "Qwen3_5ForConditionalGeneration": "QWEN35",
@@ -691,6 +719,11 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
 MULTIMODAL_TEXT_CONFIG_KEY = {
     "KimiK25ForConditionalGeneration": "text_config",
     "KimiK3ForConditionalGeneration": "text_config",
+    # Step-3.7/3.5-Flash ship a vision tower and nest the whole decoder under
+    # text_config; without this the parser reads the top level and rejects real
+    # checkpoints for having no num_hidden_layers.
+    "Step3p7ForConditionalGeneration": "text_config",
+    "Step3p7FlashForCausalLM": "text_config",
     "Llama4ForConditionalGeneration": "text_config",
     "Qwen3_5ForConditionalGeneration": "text_config",
     "Qwen3_5MoeForConditionalGeneration": "text_config",
@@ -805,6 +838,18 @@ ColumnsAgg = [
     "power_w",  # NEW: E2E weighted average power in watts
 ]
 
+# E+agg (enable_epd) rows: ColumnsAgg plus the rate-matched cell columns
+# ((a)workers agg workers paired with an (e)* encode pool).
+ColumnsAggEpd = ColumnsAgg + [
+    "(a)workers",
+    "(e)workers",
+    "(e)tp",
+    "(e)pp",
+    "(e)bs",
+    "(e)parallel",
+    "(e)memory",
+]
+
 """
 Columns for disaggregated inference summary dataframe
 """
@@ -867,6 +912,7 @@ ColumnsDisagg = [
     "(e)workers",
     "(e)tp",
     "(e)pp",
+    "(e)bs",
     "(e)parallel",
     "(e)memory",
     "power_w",  # NEW: E2E weighted average power in watts
@@ -1094,6 +1140,9 @@ class PerfDataFilename(Enum):
     wideep_deepep_ll = "wideep_deepep_ll_perf.parquet"
     # TensorRT-LLM WideEP specific
     wideep_moe_compute = "wideep_moe_perf.parquet"
+    # Unified large-EP MoE comm family (SGLang / vLLM / TRT-LLM wideEP; see operations/moe_comm.py)
+    moe_a2a = "moe_a2a_perf.parquet"
+    moe_expert_compute = "moe_expert_compute_perf.parquet"
     # TensorRT-LLM AlltoAll (covers WideEP NVLinkTwoSided + CutlassFusedMoE NVLinkOneSided)
     trtllm_alltoall = "trtllm_alltoall_perf.parquet"
     compute_scale = "computescale_perf.parquet"
@@ -1119,8 +1168,9 @@ class PerfDataFilename(Enum):
     dsv4_hca_context_module = "dsv4_hca_context_module_perf.parquet"
     dsv4_csa_generation_module = "dsv4_csa_generation_module_perf.parquet"
     dsv4_hca_generation_module = "dsv4_hca_generation_module_perf.parquet"
-    # DeepSeek-V4 sparse-op family — all share one column schema and load
-    # through ``operations.dsv4.load_dsv4_sparse_op_data``:
+    # DeepSeek-V4 sparse-op family — all share one column schema, served by
+    # the engine table view (``_dsv4_sparse_kernel_data.*`` /
+    # ``_dsv4_csa_topk_calib_data``):
     #   csa_attn / hca_attn / paged_mqa_logits : FMLA & indexer kernel latency,
     #     keyed ``num_heads -> tp -> past_kv -> isl -> bs`` (kernel-level Δ data,
     #     queried by ``_lookup_sparse_kernel``).
@@ -1133,7 +1183,7 @@ class PerfDataFilename(Enum):
     dsv4_megamoe_module = "dsv4_megamoe_module_perf.parquet"
     # Whole-model forward-pass data (forward_model="fpm"). Paired with a
     # mandatory ``fpm_forward_perf.metadata.json`` sidecar; loaded/validated by
-    # ``operations.fpm_forward``, never through the shared layer.
+    # the Rust core (perf_database/fpm_forward.rs), never through the shared layer.
     fpm_forward = "fpm_forward_perf.parquet"
 
 
@@ -1163,6 +1213,7 @@ class GEMMQuantMode(Enum):
         1, 2, "fp8_ootb", "fp8"
     )  # in future, should deprecate this mode as it's specific for trtllm trt backend
     nvfp4 = QuantMapping(9 / 16, 4, "nvfp4", "fp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
+    nvfp4_wo = QuantMapping(9 / 16, 1, "nvfp4_wo", "bfloat16")  # nvfp4 sw dequant to bf16 (non-Blackwell)
 
 
 class MoEQuantMode(Enum):
@@ -1176,6 +1227,7 @@ class MoEQuantMode(Enum):
     fp8_block = QuantMapping(1, 2, "fp8_block", "fp8")  # specific for trtllm torch ds fp8
     w4afp8 = QuantMapping(0.5, 2, "w4afp8", "fp8")  # specific for trtllm torch ds w4a8
     nvfp4 = QuantMapping(9 / 16, 4, "nvfp4", "fp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
+    nvfp4_wo = QuantMapping(9 / 16, 1, "nvfp4_wo", "bfloat16")  # nvfp4 sw dequant to bf16 (non-Blackwell)
     w4a16_mxfp4 = QuantMapping(0.5, 1, "w4a16_mxfp4", "bfloat16")  # native data format for gpt oss
     w4a8_mxfp4_mxfp8 = QuantMapping(0.5, 2, "w4a8_mxfp4_mxfp8", "fp8")
     # mxfp4 weights, mxfp8 activations (recommended for Blackwell)

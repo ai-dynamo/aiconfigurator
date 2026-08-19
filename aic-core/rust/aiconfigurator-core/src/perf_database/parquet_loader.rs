@@ -195,6 +195,24 @@ impl PerfRow {
         }
     }
 
+    /// Optional INT64 kept SIGNED. Returns None when the cell is missing/null
+    /// (or stored under a non-integer physical type). The table-view folds use
+    /// this to mirror Python's `int(row[...])`, which never narrowed: a
+    /// negative key cell loaded as a negative key instead of erroring.
+    pub fn i64_optional(&self, col: Option<usize>) -> Result<Option<i64>, AicError> {
+        let Some(idx) = col else {
+            return Ok(None);
+        };
+        match self.row.get_long(idx) {
+            Ok(v) => Ok(Some(v)),
+            Err(parquet::errors::ParquetError::General(_)) => Ok(None),
+            Err(source) => Err(AicError::Parquet {
+                path: self.path.clone(),
+                source,
+            }),
+        }
+    }
+
     /// INT64 → u64. Used by columns that legitimately need the full range
     /// (e.g. NCCL `message_size`).
     pub fn u64(&self, col: usize) -> Result<u64, AicError> {
@@ -234,6 +252,17 @@ impl PerfRow {
             s.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "y"
         ))
+    }
+
+    /// BOOLEAN column with NO type coercion: identity flags (FPM schema v6
+    /// `enable_*`) must be real booleans — Python's loader rejects anything
+    /// else, so coercing a stringly-typed flag here would silently diverge
+    /// from it. A type mismatch is a loud data bug.
+    pub fn bool_strict(&self, col: usize) -> Result<bool, AicError> {
+        self.row.get_bool(col).map_err(|source| AicError::Parquet {
+            path: self.path.clone(),
+            source,
+        })
     }
 
     /// Optional double. Returns None when the column lookup is None OR the
