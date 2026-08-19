@@ -1,0 +1,11 @@
+{
+ "Qwen/Qwen3-32B-FP8-Static-PerTensor": "401",
+ "meta-llama/Llama-4-Maverick-17B-128E-Instruct": "401",
+ "meta-llama/Llama-4-Scout-17B-16E": "401",
+ "meta-llama/Llama-4-Scout-17B-16E-Instruct": "401",
+ "meta-llama/Meta-Llama-3.1-405B": "401",
+ "meta-llama/Meta-Llama-3.1-70B": "401",
+ "meta-llama/Meta-Llama-3.1-8B": "401",
+ "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8": "401",
+ "nvidia/nemotron-ultra-rl-050826": "401"
+}

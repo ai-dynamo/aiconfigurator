@@ -39,8 +39,11 @@ first MoE forward; vLLM routes it to fused_marlin_moe and runs").
 | `gen_facts.py` | Driver: targets -> generator-rendered engine args (`render_backend_templates`, so the probe runs exactly what a deployment would) -> per-GPU probe queues -> `archive.jsonl` with provenance (incl. generator src commit). |
 | `probe_sglang.py` | sglang in-container probe. `--engine-cli` parses generator output through sglang's own CLI parser; overrides (dummy load, KV-pool cap, cuda-graph off) are appended as CLI flags so `ServerArgs.__post_init__` sees them. `--trace` runs one eager prefill+decode under the profiler. |
 | `probe_vllm.py` | vLLM probe via the FPM path: parse `run.sh`'s `engine_command`, strip FPM-owned flags, feed vLLM's `EngineArgs.from_cli_args`, in-process EngineCore, generic attention-class scan on the loaded model. |
-| `probe_trtllm.py` | TRT-LLM probe: llmapi with `TLLM_WORKER_USE_SINGLE_PROCESS=1` (in-process worker), dummy load, kernel capture. Includes narrowly-scoped shims for a broken cutlass-DSL package walk in the 1.3.0rc20 image (documented inline). |
-| `make_records.py` | Raw facts -> curated records: kernel-name normalization, infrastructure-noise filters, nested-span merge, compressed errors. Raw JSONs remain as evidence; records are the consumption layer. |
+| `probe_trtllm.py` | TRT-LLM probe: llmapi with `TLLM_WORKER_USE_SINGLE_PROCESS=1` (in-process worker), dummy load, kernel capture. Includes narrowly-scoped shims for a broken cutlass-DSL package walk (needed on both 1.3.0rc20 and rc23 images; the stub tries the real import first and only fills genuine holes, documented inline). |
+| `make_records.py` | Raw facts -> curated records: kernel-name normalization, infrastructure-noise filters, nested-span merge, compressed errors. Labels every op's kernels with canonical backends via the taxonomy; unmatched kernels surface as `unclassified_kernels`. Raw JSONs remain as evidence; records are the consumption layer. |
+| `kernel_taxonomy.yaml` | Observed CUDA kernel name -> canonical backend (regex rules, first match wins). Uses the SAME backend vocabulary as `collector/kernel_source_backends.yaml`, so probe evidence and collector claims translate through one namespace. Seeded from a 258-kernel SM90 inventory; unmatched kernels are the file's backlog signal. |
+| `check_facts.py` | Conformance checker: for every `op_backend_facts.yaml` row on a probe-adjudicable system, translate its `kernel_sources` to canonical backends and check the probe actually observed them executing. Verdicts: confirmed / contradicted / needs-taxonomy / unprobed. |
+| `configs/repos.txt` + `configs/inaccessible.json` | The probe roster (every checkpoint the collector's case yamls mention, plus probe-only additions) and the gated-repo exemption list. `gen_facts.py --check-coverage` enforces the collector roster as a coverage LOWER bound. |
 
 ## Usage
 
@@ -57,9 +60,16 @@ AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/gen_facts.py --collect
 AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/make_records.py
 ```
 
-A full three-backend sweep of 12 checkpoints is ~36 runs, minutes each on one
-GPU per run (DeepGEMM/flashinfer JIT warmup dominates; mount a shared cache to
-amortize).
+A full three-backend sweep of the 76-checkpoint roster is ~226 runs, minutes
+each on one GPU per run (DeepGEMM/flashinfer JIT warmup dominates; mount a
+shared cache to amortize). Every checkpoint runs individually — architecture
+dedup is deliberately NOT done, because quant-artifact siblings of one
+architecture have been observed to select different backends.
+
+```bash
+# 4. conformance: probe records vs the hand-written collector facts
+AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/check_facts.py --ignore-version
+```
 
 ## Selected findings from the first sweeps (SM90, details in records)
 
@@ -84,5 +94,7 @@ amortize).
 - Identity probing only — no performance numbers (dummy weights distort
   data-dependent paths; that is the collectors' job).
 - tp/ep > 2 selection facts require capability-mocked enumeration (designed,
-  not yet implemented); tp in {1,2} run real.
-- Kimi-K3 dummy adapter pending (VL wrapper + hybrid linear-attention pattern).
+  not yet implemented); tp in {1,2,8} run real (8-GPU rank-injection probe).
+- See `UPGRADE_GATE.md` for the proposed process change that consumes this
+  module: facts-before-upgrade as playbook step 0, and facts-record citations
+  replacing source-reading citations in the collector rules.

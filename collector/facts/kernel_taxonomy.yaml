@@ -1,0 +1,96 @@
+# aic-kernel-taxonomy/v1 — observed CUDA kernel name -> canonical backend label.
+#
+# Labels reuse collector/kernel_source_backends.yaml's backend vocabulary
+# (cublas, cutlass, deepgemm, fa3, flashmla, marlin, triton_fused_moe,
+# trtllm_mha, ...) so probe records and collector facts translate through ONE
+# vocabulary. `role` is a second axis (attention/gemm/moe/quant/kvcache/...)
+# used for coverage analysis, not identity matching.
+#
+# Matching: regex, first match wins, applied to the NORMALIZED kernel name
+# (make_records.normalize_kernel). Unmatched kernels stay unlabeled — the
+# conformance checker reports them as needs-taxonomy, which is this file's
+# backlog signal. Seeded 2026-08-20 from a 258-kernel SM90 inventory across
+# sglang 0.5.14/0.5.16, vllm 0.24, trtllm 1.3.0rc20.
+
+schema: aic-kernel-taxonomy/v1
+
+rules:
+  # ---------------------------------------------------------------- attention
+  - {backend: fa3, role: attention,
+     match: "^flash::(FlashAttnFwd|prepare_varlen)|^sgl_kernel::fwd$|vllmvllm_flash_attncuteflash_fwd_sm90"}
+  - {backend: flashmla, role: attention,
+     match: "flash_fwd_splitkv_mla|flash_fwd_mla_combine|fwd_kvcache_mla|get_mla_metadata|flash_mla"}
+  - {backend: dsa_nsa, role: attention,
+     match: "sparse_attn_fwd_kernel|_gqa_share_sparse|_flash_attn_fwd_with_block_score|_decode_score_kernel|_merge_topk_attn_out"}
+  - {backend: trtllm_mha, role: attention,
+     match: "^fmha_v2_flash_attention|^kernel_mha$"}
+  - {backend: triton, role: attention,
+     match: "^_fwd_grouped_kernel_stage1|^_fwd_kernel(_stage2)?$"}
+
+  # -------------------------------------------------- linear attention / mamba
+  - {backend: fla_triton, role: linear_attention,
+     match: "gated_delta_rule|ChunkGatedDeltaRule|chunk_fwd_kernel_o|chunk_local_cumsum|recompute_w_u_fwd|fused_gdn_gating|fused_qkv_split_gdn|fused_qkvzba_split"}
+  - {backend: trtllm_internal, role: linear_attention,
+     match: "FlatKernelTmaWarpSpecializedDeltaRule|kernel_cutlass_gdn_decode"}
+  - {backend: causal_conv1d, role: linear_attention,
+     match: "causal_conv1d"}
+  - {backend: mamba_triton, role: linear_attention,
+     match: "_selective_scan_update|selective_state_update|_chunk_(scan|state|cumsum)_fwd|_state_passing_fwd|_bmm_chunk_fwd|_chunk_state_varlen"}
+
+  # ---------------------------------------------------------------- gemm
+  - {backend: deepgemm, role: gemm,
+     match: "^deep_gemm::sm90_fp8_gemm|^deep_gemm::fp8_gemm|^deep_gemm::transpose"}
+  - {backend: deepgemm, role: dsa_indexer,
+     match: "^deep_gemm::sm90_fp8_paged_mqa_logits"}
+  - {backend: cutlass, role: gemm,
+     match: "cutlass_3x_gemm_sm90_fp8|fp8_blockscale_gemm|^fused_a_gemm_kernel"}
+  - {backend: marlin, role: gemm,
+     match: "^(device::)?marlin::Marlin"}
+  - {backend: marlin, role: moe_gemm,
+     match: "marlin_moe"}
+  - {backend: cublas, role: gemm,
+     match: "^nvjet_|^cublasLt::|^internal::gemvx|^reduce_1Block_kernel|^dot_kernel|^memcpy32_post"}
+  - {backend: cutlass, role: moe_gemm,
+     match: "^_ZN7cutlass13device_kernelINS_4gemm6kernel13GemmUniversal"}
+  - {backend: torch, role: gemm,
+     match: "^tinygemm_kernel|^cutlass::Kernel2"}
+
+  # ---------------------------------------------------------------- moe
+  - {backend: triton_fused_moe, role: moe_gemm,
+     match: "^fused_moe_kernel$"}
+  - {backend: triton_fused_moe, role: moe_gemm,
+     match: "^_matmul_ogs_|^fused_moe_oss::"}
+  - {backend: sgl_kernel, role: moe_infra,
+     match: "^(sgl_kernel::)?moe_(align_block_size|sum_reduce)|^count_and_sort_expert_tokens|^moe_align_block_size"}
+  - {backend: vllm_kernel, role: moe_infra,
+     match: "^vllm::moe::"}
+  - {backend: trtllm_internal, role: moe_infra,
+     match: "cutlass_kernels::(expandInputRows|finalizeMoeRouting|doActivation|blockExpertPrefixSum|computeStrides|fusedBuildExpertMaps)"}
+  - {backend: triton, role: routing,
+     match: "_router_triton_kernel|_gemma4_routing|deepseek_v3_topk|customMoeRouting|topkGating|cooperative_topk|_topk_forward|_topk_index_kernel|router_gemm_kernel|_bitmatrix_metadata|_sum_bitmatrix_rows"}
+  - {backend: torch, role: routing,
+     match: "gatherTopK|bitonicSortKVInPlace"}
+
+  # ---------------------------------------------------------------- quant
+  - {backend: sgl_kernel, role: quant,
+     match: "per_token_group_quant|_static_quant_fp8|_quantize_k_cache|quantize_k_cache"}
+  - {backend: vllm_kernel, role: quant,
+     match: "scaled_fp8_quant|indexer_k_quant_and_cache"}
+  - {backend: trtllm_internal, role: quant,
+     match: "scaleMatrixPerTensorVec|scale_1x128_kernel|_dequant_nvfp4|_cast_scatter_fp32|_gather_cast_vk"}
+
+  # ---------------------------------------------------------------- kvcache
+  - {backend: framework_native, role: kvcache,
+     match: "reshape_and_cache|concat_and_cache|set_mla_kv_buffer|concat_and_cast_mha_k|applyBiasRopeUpdateKVCache|applyMLARopeAppendPagedKV|indexerKCacheScatter|write_req_to_token_pool|create_flashinfer_kv_indices|alloc_extend_kernel|_convert_req_index_to_global|convertReqIndexToGlobal|ConcatMLAQKernel"}
+
+  # ------------------------------------------------------------ norm / rope
+  - {backend: framework_native, role: norm_rope,
+     match: "rmsnorm|RMSNorm|rms_norm|LayerNormFn|_layer_norm_fwd|l2norm_fwd|rotary_embedding|BatchQKApplyRotary|fusedQKNormRope|_fused_qk_rmsnorm_rope|_gemma_(dual_rmsnorm|qkv_rmsnorm)"}
+
+  # -------------------------------------------------- activation / elementwise
+  - {backend: framework_native, role: activation,
+     match: "act_and_mul|silu_and_mul|_run_activation|_sigmoid_gate_mul|_fused_(gate_)?sigmoid_mul|triton_poi_fused_add.*sigmoid|triton_poi_fused_copy|triton_per_fused|triton_red_fused|_split_qkv_contiguous|_typeConvert|fusedMiniMaxM3QNormRope"}
+
+  # ----------------------------------------------------------------- infra
+  - {backend: infra, role: infra,
+     match: "^cuda[A-Z]|^cuLaunch|^Activity$|^Buffer$|^at_cuda_detail::|^_ragged_tensor_metadata|computeSeqAndPaddingOffsets|^get_num_kv_splits|^namespace$|^operator$|^_reduce$|vectorized_gather|DeviceScan|sglang\\.vlm\\.|^tensorrt_llm::_v1::kernels$"}
