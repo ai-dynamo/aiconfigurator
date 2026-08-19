@@ -261,6 +261,8 @@ mappings:
   - {framework: vllm, kernel_source: vllm_modeloptfp8moe_triton_tritonexperts, backend: triton_fused_moe, source: "PR#1344 collect_moe.py"}
   - {framework: vllm, kernel_source: vllm_modeloptfp8moe_flashinfer_cutlass_flashinferexperts, backend: flashinfer_cutlass, source: "PR#1344 collect_moe.py"}
   - {framework: vllm, kernel_source: vllm_modeloptfp8moe_flashinfer_trtllm_trtllmfp8expertsmonolithic, backend: flashinfer_trtllm_gen, source: "PR#1344 collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_compressedtensorsw8a8fp8moe_triton_tritonexperts, backend: triton_fused_moe, source: "PR#1515 collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_compressedtensorsw8a8fp8moe_flashinfer_cutlass_flashinferexperts, backend: flashinfer_cutlass, source: "PR#1515 collect_moe.py"}
   - {framework: vllm, kernel_source: vllm_compressedtensorsw4a4nvfp4moe_flashinfer_cutlass_flashinferexperts, backend: flashinfer_cutlass, source: "PR#1344 collect_moe.py"}
   - {framework: vllm, kernel_source: vllm_compressedtensorsw4a4nvfp4moe_flashinfer_trtllm_trtllmnvfp4expertsmodular, backend: flashinfer_trtllm_gen, source: "PR#1344 collect_moe.py"}
   - {framework: vllm, kernel_source: vllm_compressedtensorsw4a4nvfp4moe_flashinfer_trtllm_trtllmnvfp4expertsmonolithic, backend: flashinfer_trtllm_gen, source: "PR#1344 collect_moe.py"}

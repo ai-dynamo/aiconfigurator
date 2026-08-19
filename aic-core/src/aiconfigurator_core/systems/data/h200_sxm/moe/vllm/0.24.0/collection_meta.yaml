@@ -17,4 +17,22 @@ tables:
     # marlin_moe_wna16 does NOT have the Hopper EP>1 crash that blocks
     # the sglang 0.5.14 marlin lane. Same 3 classified moe_tp=32 marlin
     # tile-limit failures ("Invalid thread config") as every other system.
+    #
+    # 2026-08-17: appended 972 Laguna S fp8_block rows (36 grouped cases x 27
+    # token counts, hidden 3072 / inter 1024 / topk 10 / 256 experts)
+    # collected on H200 SXM in the stock vllm/vllm-openai:v0.24.0 image
+    # (sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f)
+    # from poolside/Laguna-S-2.1-FP8 @ fc72eb90, with zero collector errors.
+    # collector_hash
+    # sha256:14a5d1f21cc31819e5f508002c352cbfffbcfb664b36aeee6abf3168d3bfdd8b,
+    # case_plan_hash
+    # sha256:850d9505b455eb5ef19a6aa0f92a5bb6273499782006e4d0d0df0ddd499dc7a2.
+    # Keys disjoint from the base table, so nothing is replaced.
+    #
+    # poolside/Laguna-XS.2-FP8 @ 607820a6 contributes no rows: its MoE
+    # geometry (hidden 2048 / inter 512 / topk 8 / 256 experts, fp8_block)
+    # maps onto consumer keys this table already carries from Qwen3.5, and
+    # MoeKey does not include kernel_source, so it reuses those rows by
+    # design. Collection for it is fail-closed in
+    # collector/cases/models/LagunaForCausalLM_cases.yaml.
     status: complete

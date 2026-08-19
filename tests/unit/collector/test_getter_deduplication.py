@@ -385,12 +385,11 @@ def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkey
         "sgl-project/DeepSeek-V4-Pro-FP8",
     }
 
-    # 1887 pre-Kimi-K3, +39 K3 w4a16_mxfp4 cases (grouped-topk mapping for
-    # model_type kimi_linear), +99 Step-3.7-Flash executions after identical
-    # physical invocations are deduplicated by their consumer key, and +42
-    # Nemotron Super FP8 cases.
-    assert len(cases) == 2067
-    assert sum(len(case[1]) for case in cases) == 55809
+    laguna_cases = [case for case in cases if case[8] == "poolside/Laguna-S-2.1-FP8"]
+    assert len(laguna_cases) == 36
+    assert sum(len(case[1]) for case in laguna_cases) == 972
+    laguna_xs_cases = [case for case in cases if case[8] == "poolside/Laguna-XS.2-FP8"]
+    assert laguna_xs_cases == []
     # Native artifacts stay excluded on SM90 (vLLM 0.24.0 serves them there
     # as Marlin W4A16, so the SM100-gated w4a8_mxfp4_mxfp8 label must not
     # expand); the converted FP8 artifacts are collected as fp8_block only —
@@ -634,3 +633,31 @@ def test_canonical_routed_scaling_factor_of_zero_is_preserved(monkeypatch):
     # Neither declared -> 1.0.
     monkeypatch.setattr(module, "_load_model_moe_config", lambda _model_name: {})
     assert module._resolve_moe_runtime_config("test/neither", {})["routed_scaling_factor"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "poolside/Laguna-S-2.1-FP8",
+        "poolside/Laguna-XS.2-FP8",
+    ],
+)
+def test_vllm_laguna_runtime_config_matches_serving(monkeypatch, model_name):
+    _install_vllm_stubs(monkeypatch)
+    module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
+    config_path = (
+        Path(__file__).resolve().parents[3]
+        / "aic-core/src/aiconfigurator_core/model_configs"
+        / f"{model_name.replace('/', '--')}_config.json"
+    )
+    model_config = json.loads(config_path.read_text())
+    monkeypatch.setattr(module, "_load_model_moe_config", lambda _model_name: model_config)
+
+    runtime_config = module._resolve_moe_runtime_config(model_name, {})
+
+    assert runtime_config["scoring_func"] == "sigmoid"
+    assert runtime_config["renormalize"] is True
+    assert runtime_config["routed_scaling_factor"] == 2.5
+    assert runtime_config["use_routing_bias"] is True
+    assert runtime_config["router_logits_float32"] is True
+    assert runtime_config["apply_routed_scale_to_output"] is True

@@ -8,6 +8,24 @@ runtime:
   version: 0.24.0
 tables:
   context_attention_perf:
+    # 2026-08-17: appended 1666 Laguna dense-attention rows (hybrid full +
+    # sliding-window geometries) collected on H200 SXM in the stock
+    # vllm/vllm-openai:v0.24.0 image
+    # (sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f)
+    # from poolside/Laguna-S-2.1-FP8 @ fc72eb90 and
+    # poolside/Laguna-XS.2-FP8 @ 607820a6. collector_hash
+    # sha256:e0e6c099fe64786c893c603bbd0352bed949be8042da816f443d1117d355180f,
+    # case_plan_hash sha256:c2ff9865... (S) and sha256:342b3840... (XS).
+    # The two runs measured 3332 cases (1904 + 1428) with zero collector
+    # errors. Of those, 1666 keys were absent here and were appended; the
+    # other 1666 already existed and kept their published values, which the
+    # fresh measurements agree with to a median of 0.87%. Nothing is replaced.
     status: complete
   generation_attention_perf:
+    # 2026-08-17: appended 2080 Laguna dense-attention rows from the same two
+    # runs as context_attention_perf above. case_plan_hash
+    # sha256:938c36f3... (S) and sha256:64b5ef7e... (XS). The runs measured
+    # 4248 cases (2424 + 1824) with zero collector errors; the 2168 keys that
+    # already existed kept their published values, which the fresh
+    # measurements agree with to a median of 0.83%.
     status: complete

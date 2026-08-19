@@ -112,20 +112,25 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
     declared_routing_bias = model_config.get("use_routing_bias")
     if declared_routing_bias is None:
         declared_routing_bias = model_config.get("use_moe_router_bias")
+    # Laguna serving constructs FusedMoE with sigmoid scoring, normalized
+    # top-k, FP32 correction bias, routed output scaling, and then upcasts
+    # router logits before invocation (models/laguna.py:191-237 @0.24.0).
     use_routing_bias = (
         model_config.get("topk_method") == "noaux_tc"
         or bool(declared_routing_bias)
-        or model_type in {"mimo_v2_flash", "glm_moe_dsa", "nemotron_h"}
+        or model_type in {"mimo_v2_flash", "glm_moe_dsa", "laguna", "nemotron_h"}
     )
     # Resolve on declaration, not truthiness: a canonical routed_scaling_factor
     # of 0.0 is a real value (it zeroes the routed contribution) and must not
     # fall through to the vendor key or the 1.0 default.
     declared_routed_scale = model_config.get("routed_scaling_factor")
     if declared_routed_scale is None:
+        declared_routed_scale = model_config.get("moe_routed_scaling_factor")
+    if declared_routed_scale is None:
         declared_routed_scale = model_config.get("moe_router_scaling_factor")
 
     scoring_func = str(model_config.get("scoring_func") or "softmax")
-    if model_type == "nemotron_h":
+    if model_type in {"laguna", "nemotron_h"}:
         scoring_func = "sigmoid"
 
     custom_routing = None
@@ -187,7 +192,7 @@ def _resolve_moe_runtime_config(model_name: str, module_config: dict) -> dict:
         "use_grouped_topk": use_grouped_topk,
         "num_expert_group": num_expert_group,
         "topk_group": topk_group,
-        "apply_routed_scale_to_output": model_type in {"deepseek_v3", "kimi_k2", "glm_moe_dsa", "nemotron_h"},
+        "apply_routed_scale_to_output": model_type in {"deepseek_v3", "kimi_k2", "glm_moe_dsa", "laguna", "nemotron_h"},
         "use_routing_bias": use_routing_bias,
         "router_logits_float32": use_routing_bias or scoring_func in {"sigmoid", "sqrtsoftplus"},
         "custom_routing": custom_routing,
@@ -414,14 +419,21 @@ def run_moe_torch(
             exclude_modules=[],
         )
     elif moe_type == "fp8_block":
-        # Block-FP8 serving (DeepSeek-style checkpoints) is per-128-block
-        # weights with dynamic per-group activations; Fp8Config rejects
-        # static for block quant (fp8.py:130-134).
-        quant_config = Fp8Config(
-            is_checkpoint_fp8_serialized=True,
-            activation_scheme="dynamic",
-            weight_block_size=[128, 128],
-        )
+        model_quantization = _load_model_moe_config(model_name).get("quantization_config")
+        if isinstance(model_quantization, dict) and model_quantization.get("quant_method") == "compressed-tensors":
+            # Construct the same artifact-owned quantization method serving
+            # selects instead of approximating it with generic Fp8Config:
+            # weight_utils.get_quant_config returns quant_cls.from_config on
+            # the checkpoint descriptor (weight_utils.py:240-291 @0.24.0).
+            quant_config = CompressedTensorsConfig.from_config(model_quantization)
+        else:
+            # Native block-FP8 checkpoints use per-128-block weights with
+            # dynamic per-group activations.
+            quant_config = Fp8Config(
+                is_checkpoint_fp8_serialized=True,
+                activation_scheme="dynamic",
+                weight_block_size=[128, 128],
+            )
     elif moe_type == "w4a16_mxfp4":
         checkpoint_qc = _load_model_moe_config(model_name).get("quantization_config") or {}
         is_ct_mxfp4 = checkpoint_qc.get("quant_method") == "compressed-tensors" and "mxfp4" in str(

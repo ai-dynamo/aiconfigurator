@@ -182,6 +182,7 @@ from aiconfigurator_core.sdk.models.deepseek_v32 import DeepSeekV32Model
 from aiconfigurator_core.sdk.models.gemma4 import Gemma4MixModel
 from aiconfigurator_core.sdk.models.gpt import GPTModel
 from aiconfigurator_core.sdk.models.hybrid_moe import HybridMoEModel
+from aiconfigurator_core.sdk.models.laguna import LagunaModel
 from aiconfigurator_core.sdk.models.llama import LLAMAModel
 from aiconfigurator_core.sdk.models.moe import MOEModel
 from aiconfigurator_core.sdk.models.nemotron_h import NemotronHModel
@@ -198,6 +199,7 @@ __all__ = [
     "Gemma4MixModel",
     "HybridMoEModel",
     "LLAMAModel",
+    "LagunaModel",
     "MOEModel",
     "NemotronHModel",
     "NemotronNas",

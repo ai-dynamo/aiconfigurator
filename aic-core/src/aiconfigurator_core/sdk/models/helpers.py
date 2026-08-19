@@ -39,6 +39,7 @@ _MOE_MODEL_FAMILIES = {
     "GEMMA4MIX",
     "MINIMAXM3",
     "STEP3P7",
+    "LAGUNA",
 }
 
 

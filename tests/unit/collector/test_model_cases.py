@@ -799,23 +799,20 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
     moe_cases = get_common_moe_test_cases()
-    # +117 per new GLM model path: GLM-5.1 (BF16/FP8/NVFP4) and GLM-5.2
-    # (BF16/FP8) share GLM-5's MoE dims. nvidia/GLM-5.1-NVFP4 is also
-    # registered in moe.yaml base_ops.
-    # +114 for Kimi-K3's LatentMoE row (3584/3072, 896x16, w4a16_mxfp4),
-    # plus exact quant-sensitive rows for the current NVIDIA NVFP4 artifacts.
-    # +198 from Step-3.7-Flash: 99 cases for each physical BF16/FP8 artifact.
-    # +117 for the vLLM Nemotron Super FP8 latent-MoE row (1024/2688, 512x22).
-    # +114 for nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4, the nvfp4
-    # checkpoint release of the 30B/A3B shape (AIC-1743/AIC-1748); same
-    # topk=6/e128/h2688/i1856 geometry as Nano-BF16, hence the identical
-    # per-model case count (114).
-    # +231 for AIC-1749's DeepSeek-V4 NVFP4 rows: +117 nvidia/DeepSeek-V4-Flash-NVFP4
-    # (matches deepseek-ai/DeepSeek-V4-Flash's 4096/2048 count) and +114
-    # nvidia/DeepSeek-V4-Pro-NVFP4 (matches deepseek-ai/DeepSeek-V4-Pro's
-    # 7168/3072 count) -- every backend declares exactly [nvfp4] for both
-    # new rows.
-    assert len(moe_cases) == 6606
+    laguna_moe_cases = [case for case in moe_cases if case.model_name == "poolside/Laguna-S-2.1-FP8"]
+    assert len(laguna_moe_cases) == 90
+    assert len({repr(case) for case in laguna_moe_cases}) == len(laguna_moe_cases)
+    assert all(case.tp < 16 for case in laguna_moe_cases)
+    assert {(case.hidden_size, case.inter_size, case.topk, case.num_experts) for case in laguna_moe_cases} == {
+        (3072, 1024, 10, 256)
+    }
+    laguna_xs_moe_cases = [case for case in moe_cases if case.model_name == "poolside/Laguna-XS.2-FP8"]
+    assert laguna_xs_moe_cases
+    assert len({repr(case) for case in laguna_xs_moe_cases}) == len(laguna_xs_moe_cases)
+    assert all(case.tp < 8 for case in laguna_xs_moe_cases)
+    assert {(case.hidden_size, case.inter_size, case.topk, case.num_experts) for case in laguna_xs_moe_cases} == {
+        (2048, 512, 8, 256)
+    }
     assert any(
         case.model_name == "nvidia/DeepSeek-V4-Flash-NVFP4"
         and case.hidden_size == 4096

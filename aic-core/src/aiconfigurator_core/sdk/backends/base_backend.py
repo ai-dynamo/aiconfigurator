@@ -61,6 +61,7 @@ class BaseBackend:
         "DEEPSEEKV32",
         "DEEPSEEKV4",
         "KIMIK25",
+        "LAGUNA",
     )
 
     # Minimum activation memory, in bytes (clamps from below).
