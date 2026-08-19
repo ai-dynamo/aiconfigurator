@@ -1933,7 +1933,7 @@ class TestDSV4NVFP4QuantResolution:
         def _no_network(*args, **kwargs):
             raise AssertionError("network path reached")
 
-        monkeypatch.setattr(sdk_utils, "_download_hf_config", _no_network, raising=False)
+        monkeypatch.setattr(sdk_utils, "_download_hf_config", _no_network)
         sdk_utils.get_model_config_from_model_path.cache_clear()
         sdk_utils._load_model_config_from_model_path.cache_clear()
         _get_model_info.cache_clear()
