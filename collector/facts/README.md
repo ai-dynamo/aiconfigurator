@@ -36,7 +36,7 @@ first MoE forward; vLLM routes it to fused_marlin_moe and runs").
 |---|---|
 | `targets.yaml` | Target matrix: model families x checkpoints (default / FP8 / NVFP4 / MXFP4...), KV pairing copied from AIC `_PROFILE_TO_QUANT`, backend images, dummy-variant taxonomy, per-backend overrides. Known findings are recorded inline as `known:` fields. |
 | `gen_dummy_models.py` | HF config -> depth-cut dummy model dirs. Width is NEVER shrunk (TP divisibility and quant shape checks must behave like the real checkpoint). One variant per interleaved layer kind; per-layer quant-config entries filtered and renumbered; a post-check fails loudly on any surviving out-of-range layer reference. |
-| `gen_archive.py` | Driver: targets -> generator-rendered engine args (`render_backend_templates`, so the probe runs exactly what a deployment would) -> per-GPU probe queues -> `archive.jsonl` with provenance (incl. generator src commit). |
+| `gen_facts.py` | Driver: targets -> generator-rendered engine args (`render_backend_templates`, so the probe runs exactly what a deployment would) -> per-GPU probe queues -> `archive.jsonl` with provenance (incl. generator src commit). |
 | `probe_sglang.py` | sglang in-container probe. `--engine-cli` parses generator output through sglang's own CLI parser; overrides (dummy load, KV-pool cap, cuda-graph off) are appended as CLI flags so `ServerArgs.__post_init__` sees them. `--trace` runs one eager prefill+decode under the profiler. |
 | `probe_vllm.py` | vLLM probe via the FPM path: parse `run.sh`'s `engine_command`, strip FPM-owned flags, feed vLLM's `EngineArgs.from_cli_args`, in-process EngineCore, generic attention-class scan on the loaded model. |
 | `probe_trtllm.py` | TRT-LLM probe: llmapi with `TLLM_WORKER_USE_SINGLE_PROCESS=1` (in-process worker), dummy load, kernel capture. Includes narrowly-scoped shims for a broken cutlass-DSL package walk in the 1.3.0rc20 image (documented inline). |
@@ -49,11 +49,11 @@ first MoE forward; vLLM routes it to fused_marlin_moe and runs").
 python3 collector/facts/gen_dummy_models.py --configs <cfg_dir> --out <ws>/dummy_models
 
 # 2. plan + queues (renders engine args from this repo's generator)
-AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/gen_archive.py --emit-queues --backends sglang,vllm,trtllm
+AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/gen_facts.py --emit-queues --backends sglang,vllm,trtllm
 bash <ws>/archive/queues/gpu0.sh   # ... one per GPU; done-guard makes reruns incremental
 
 # 3. collect + curate
-AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/gen_archive.py --collect
+AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/gen_facts.py --collect
 AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/make_records.py
 ```
 
