@@ -28,7 +28,8 @@ export NCCL_CUMEM_ENABLE=1
 export NCCL_CUMEM_HOST_ENABLE=0
 export TRTLLM_DEEPSEEK_EAGER_FUSION_DISABLED=0
 
-# collect_allreduce.py reads SLURM_NTASKS / SLURM_NTASKS_PER_NODE / SLURM_LOCALID / RANK.
+# collect_allreduce.py reads SLURM_NTASKS / SLURM_NTASKS_PER_NODE / SLURM_LOCALID;
+# the per-task rank comes from RANK if set, else SLURM_PROCID (what srun exports).
 srun -l \
     --ntasks 16 --ntasks-per-node 4 \
     --container-image=/path/to/trtllm_aarch64_release_v1.0.0rc2.sqsh \
