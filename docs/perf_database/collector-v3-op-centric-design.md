@@ -443,7 +443,7 @@ human review against the resolver's output.)*
 
 | Change | Required evidence |
 |---|---|
-| Pin version change | Fresh silicon for the family's tables on every system in the manifest — **or** a `reuse.yaml` declaration backed by kernel-identity evidence (#1345 facts showing unchanged kernels) plus a before/after spot-benchmark on one system per SM generation |
+| Pin version change | Fresh silicon for the family's tables on every system in the manifest — **or** a `reuse.yaml` declaration with an explicit `approved_by` owner sign-off. A reuse declaration is an owner-accepted approximation: the sibling version's rows answer the new version's queries by decision, not by proven equivalence (owner decision, tianhaox 2026-08-19, revising the earlier kernel-identity + spot-benchmark requirement). Kernel-identity notes and spot benchmarks remain OPTIONAL strengthening evidence — recommended when the framework diff touches the family's dispatch — and the next full collection at the new version retires the declaration |
 | Collector code change, same pin | Before/after `parquet_diff` on affected tables from an evidence system (one designated system per SM generation, named in `evidence_policy.yaml`); median latency delta beyond threshold (initial: 5%) escalates to full recollection |
 | Case plan additions | Collect the new cases only (additive); removals prune with the diff visible |
 

@@ -5,5 +5,11 @@ schema_version: 1
 reuse:
 - table: mhc_module_perf
   from_version: 1.3.0rc20
-  reason: DSV4 enablement (issue #1480) — trtllm 1.3.0rc23 adds only the DSV4 sparse-attention family; shared-layer tables reuse the 1.3.0rc20 collection pending the rc23 upgrade audit
+  reason: >-
+    DSV4 enablement (#1480) — rc23 adds only the DSV4 sparse-attention family;
+    the mhc table reuses the 1.3.0rc20 collection as an owner-approved
+    declaration (design §9 as revised 2026-08-19). Strengthening note — the
+    measured pre_mapping/post_mapping paths are source-identical between rc20
+    and rc23 (verified diff of _torch/modules/mhc: every change sits in the
+    fused_hc tactic space, which these rows do not measure).
   approved_by: tianhaox

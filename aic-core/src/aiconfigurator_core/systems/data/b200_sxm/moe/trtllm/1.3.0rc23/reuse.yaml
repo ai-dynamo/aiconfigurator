@@ -5,5 +5,13 @@ schema_version: 1
 reuse:
 - table: moe_perf
   from_version: 1.3.0rc20
-  reason: DSV4 enablement (issue #1480) — trtllm 1.3.0rc23 adds only the DSV4 sparse-attention family; shared-layer tables reuse the 1.3.0rc20 collection pending the rc23 upgrade audit
+  reason: >-
+    DSV4 enablement (#1480) — rc23 collects the DSV4 moe shapes fresh (see
+    collection_meta.yaml beside this file); the remaining moe shapes reuse the
+    1.3.0rc20 collection. Evidence (design §9 reuse rule) — the rc23
+    DSV4-shape recollection reproduced the rc20 rows point-for-point within
+    2% on all four Blackwell systems (campaign 2026-08-08, PR #1486), a
+    before/after spot benchmark on the blackwell evidence generation;
+    kernel_source for the reused rows is the unchanged trtllm unified moe op
+    (moe_torch_flow -> trtllm_internal, op_backend_facts.yaml).
   approved_by: tianhaox
