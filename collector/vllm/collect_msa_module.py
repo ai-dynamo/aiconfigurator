@@ -72,7 +72,11 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from collector.case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
+from collector.case_generator import (
+    get_mla_module_model_specs,
+    get_mla_module_precision_specs,
+    get_mla_module_sweep_spec,
+)
 from collector.helper import _resolve_local_model_path, benchmark_with_power, get_sm_version, log_perf
 from collector.registry_types import PerfFile
 from collector.vllm.utils import (
@@ -94,54 +98,19 @@ if "minimax_m3" not in _CONFIG_REGISTRY:
 
 
 def _get_precision_combos(phase: str):
-    """Return (compute_dtype, kv_cache_dtype, gemm_type) triples for MSA.
-
-    Precision axes:
-      gemm_type    — linear-layer GEMMs (fused qkv+index projection + o_proj)
-        bfloat16:  always (the only declared M3 artifact is BF16)
-        fp8_block: SM >= 89 — vLLM's blockwise-FP8 checkpoint path
-                   (Fp8Config → Fp8LinearMethod block_quant → DeepGEMM /
-                   W8A8BlockFp8LinearOp); the M3 projections take the
-                   generic quant path (MinimaxM3QKVParallelLinearWithIndexer
-                   forwards quant_config into ColumnParallelLinear,
-                   linear.py:1379-1389@v0.24.0; o_proj is a plain
-                   RowParallelLinear, nvidia/model.py:449-456)
-        nvfp4:     SM >= 100 — ModelOpt NVFP4 checkpoint path, same generic
-                   linear quant dispatch
-
-      (compute_dtype, kv_cache_dtype) — attention compute + KV cache
-        bf16/bf16: the BF16 checkpoint's default serving config
-                   (cache_dtype "auto" resolves to the model dtype).
-        bf16/fp8:  serving's global ``--kv-cache-dtype fp8`` (vLLM
-                   CacheDType "fp8" = fp8_e4m3 on CUDA, config/cache.py
-                   :75-78@v0.24.0), declared on every SM this collector
-                   runs on: the M3 sparse backend accepts fp8 KV on all
-                   platforms (supported_kv_cache_dtypes, common/
-                   sparse_attention.py:56-62@v0.24.0 — "bf16 or fp8
-                   (e4m3/e5m2): the Triton kernels dequant fp8 before the
-                   dots"). Off the SM100 family the Triton attend
-                   reinterprets the cache as the platform fp8 dtype and
-                   dequantizes in-kernel (:298-306, view at :352); on the
-                   SM100 family select_main_impl_cls excludes only
-                   "fp8_e5m2", so "fp8" (e4m3) rides the MSA attend
-                   (:391-422, gate :407; the MSA impl shares the base
-                   impl's fp8 view, nvidia/sparse_attention_msa.py:49).
-                   The indexer's K side-cache is governed by the
-                   independent attention_config.indexer_kv_dtype knob and
-                   stays at its serving default "bf16" (config/attention
-                   .py:55; nvidia/model.py:490-491) — an fp8 indexer
-                   cache is a non-default opt-in, not collected here.
-    """
-    sm = get_sm_version()
-
-    gemm_types = ["bfloat16"]
-    if sm >= 89:
-        gemm_types.append("fp8_block")
-    if sm >= 100:
-        gemm_types.append("nvfp4")
-
-    attn_combos = [("bfloat16", "bfloat16"), ("bfloat16", "fp8")]
-    return [(c, kv, g) for g in gemm_types for c, kv in attn_combos]
+    """(compute_dtype, kv_cache_dtype, gemm_type) triples for MSA, consumed
+    from the declared precision policy in cases/base_ops/mla_module.yaml
+    (mla_module_vllm module_precision_combos, attention_types [msa]) — the
+    single declaration surface for sweep density and SM floors (fp8-KV carries
+    NO SM floor for MSA, unlike the MLA/DSA combos) — serving
+    citations live on the YAML combos. Never re-implement SM gates here
+    (review 4969690316 S4)."""
+    return [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs(
+            "vllm", phase=phase, sm_version=get_sm_version(), attention_type="msa"
+        )
+    ]
 
 
 # Native MiniMax-M3 GQA ratio: 64 q heads / 4 kv heads (bundled config

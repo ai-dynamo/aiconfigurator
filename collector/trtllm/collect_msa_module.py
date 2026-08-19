@@ -101,7 +101,11 @@ if _REPO_ROOT not in sys.path:
 # before registering the model_type.
 import tensorrt_llm._torch.configs as _trtllm_configs
 
-from collector.case_generator import get_mla_module_model_specs, get_mla_module_sweep_spec
+from collector.case_generator import (
+    get_mla_module_model_specs,
+    get_mla_module_precision_specs,
+    get_mla_module_sweep_spec,
+)
 from collector.helper import _resolve_local_model_path, benchmark_with_power, get_sm_version, log_perf
 from collector.registry_types import PerfFile
 
@@ -117,33 +121,18 @@ if "minimax_m3" not in _CONFIG_REGISTRY:
 
 
 def _get_precision_combos(phase: str):
-    """Return (compute_dtype, kv_cache_dtype, gemm_type) triples for MSA.
-
-    Precision axes:
-      gemm_type    — linear-layer GEMMs (q/k/v/o + index projections)
-        bfloat16:  always
-        fp8_block: SM >= 89 (Ada / Hopper / Blackwell)
-        nvfp4:     SM >= 100 (Blackwell)
-
-      (compute_dtype, kv_cache_dtype) — attention compute + KV cache
-        M3 sparse attention at 1.3.0rc20 is bf16-only end to end: the
-        sparse backend gathers paged K/V and runs torch matmul GQA +
-        Triton softmax in the cache dtype (sparse/minimax_m3/backend.py
-        _sparse_gqa_masked@1.3.0rc20), and the index-K side cache is
-        allocated bf16 (cache_manager._torch_dtype_for_index_cache
-        falls back to bf16 for non-fp16/fp32 main dtypes). No fp8-KV
-        combo is declared until the framework grows one.
-    """
-    sm = get_sm_version()
-
-    gemm_types = ["bfloat16"]
-    if sm >= 89:
-        gemm_types.append("fp8_block")
-    if sm >= 100:
-        gemm_types.append("nvfp4")
-
-    attn_combos = [("bfloat16", "bfloat16")]
-    return [(c, kv, g) for g in gemm_types for c, kv in attn_combos]
+    """(compute_dtype, kv_cache_dtype, gemm_type) triples for MSA, consumed
+    from the declared precision policy in cases/base_ops/mla_module.yaml
+    (mla_module_trtllm module_precision_combos, attention_types [msa]) — the
+    single declaration surface for sweep density and SM floors — serving
+    citations live on the YAML combos. Never re-implement SM gates here
+    (review 4969690316 S4)."""
+    return [
+        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+        for spec in get_mla_module_precision_specs(
+            "trtllm", phase=phase, sm_version=get_sm_version(), attention_type="msa"
+        )
+    ]
 
 
 def get_context_test_cases():

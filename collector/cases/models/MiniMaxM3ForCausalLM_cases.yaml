@@ -73,7 +73,18 @@ model_case_values:
         vllm:
           allowed_modes: [nvfp4]
   mla_module:
+    # model_aliases (NOT model_paths): the MSA module benchmark is
+    # artifact-insensitive — dummy weights, identical sparse geometry in both
+    # checkpoints' configs, and the GEMM/KV precision is an explicit sweep
+    # axis (never resolved from the artifact), so the NVFP4 artifact provably
+    # cannot change the invoked kernel or the persisted key
+    # (case_authoring.md aliasing rule). The alias keeps exact-targeting
+    # COLLECTOR_MODEL_PATH=nvidia/MiniMax-M3-NVFP4 populating the MSA plan
+    # (review 4969690316 Spec-2: an advertised artifact must not expand to
+    # zero cases) while rows stay keyed to the single canonical model.
     - model_path: MiniMaxAI/MiniMax-M3
+      model_aliases:
+        - nvidia/MiniMax-M3-NVFP4
       attention_type: msa
       native_num_heads: 64
 

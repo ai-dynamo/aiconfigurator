@@ -38,11 +38,10 @@ attention step upgrades to the fmha_sm100 MSA kernel when available
 (minimax_sparse_backend.py:68-88, minimax_sparse_ops/msa.py:41-56
 @v0.5.16). On CC 8.9 (SM89) and CC major 12 (SM120/121) the M3 override
 has NO branch and SGLang's generic default (flashinfer + page 1) crashes
-at backend init on the M3 KV pool, so the collector passes the serving
-user's own escape hatch ``attention_backend="triton"`` — the one owner-authorized
-explicit-backend exception (2026-08-09; full evidence at the ServerArgs
-construction in ``load_model_runner``). Beyond that knob the collector
-never pins a kernel: it records what the backend actually selected in
+at backend init on the M3 KV pool — every case on those SMs fails
+classified (the honest unsupported signal; see the ServerArgs
+construction note in ``load_model_runner``). The collector never pins a
+kernel: it records what the backend actually selected in
 ``kernel_source``.
 
 Op names / perf schema are aligned with collector/trtllm/collect_msa_module.py
@@ -594,54 +593,21 @@ def load_model_runner(
         raw_config = json.load(f)
     override_args = _build_model_override_args(raw_config, num_heads, target_tp_size, num_layers)
 
-    # ── SM89 (CC 8.9, e.g. L40S) and SM120/121 (CC major 12, e.g. RTX PRO
-    # 6000 Blackwell): explicit attention_backend="triton" —
-    # owner-authorized exception (2026-08-09).
-    #
-    # Failure evidence: v0.5.16's M3 server-args handler has no branch for
-    # CC major 8 or 12 (arg_groups/overrides.py:465-548 — is_hip() → triton
-    # :480-482, elif is_sm100_supported() → fa4 + page 128 :502-511,
-    # elif is_sm90_supported() → fa3 + page 128 :520-529; the predicates are
-    # capability-major-exact, utils/common.py:296/:286 majors [9]/[10], and
-    # is_sm120_supported :281-285 is never consulted by the handler), so
-    # ServerArgs falls to the generic MHA default = flashinfer + page_size 1
-    # (server_args.py:4880-4931 _get_default_attn_backend — its docstring
-    # even notes "trtllm_mha does not support SM120, which will fall back to
-    # flashinfer"; overrides.py:1917-1936 _page_size_default). FlashInfer
-    # then crashes at backend init on EVERY M3 case: the M3 KV pool
-    # MiniMaxSparseKVPool (memory_pool.py:4626) carries no quant_method, so
-    # get_kv_cache_quant_method() (memory_pool.py:1661-1676) returns None
-    # and flashinfer_backend.py:328 raises AttributeError: 'NoneType' object
-    # has no attribute 'resolve_attention_access' — observed as 16/16
-    # context + 8/8 generation failures in the SM120 smoke run (2026-08-09)
-    # and, with the identical resolved args (flashinfer + page 1) and
-    # identical traceback, as 44/44 context + 4/4 generation subprocess-group
-    # failures in the SM89 l40s full run (2026-08-09). Default-config
-    # serving crashes identically, so there is no framework-selected default
-    # to record on these platforms.
-    #
-    # The pin is a legitimate serving knob, not a collector invention:
-    # --attention-backend triton is the user-facing ServerArgs escape hatch
-    # (server_args.py:1398; explicit values are respected via the
-    # value-based is_attention_backend_not_set :7503-7508), triton is the
-    # backend the M3 handler itself selects on the HIP platform — with no
-    # page_size override there either (overrides.py:480-482) — and
-    # attn_backend_wrapper wraps ANY dense backend with the MiniMax sparse
-    # backend (attention_registry.py:263-283). page_size is deliberately
-    # left to the generic default (1): the only page==128 requirement in
-    # the M3 sparse path gates use_msa (minimax_sparse_backend.py:81-88),
-    # unreachable on CC 12 because msa_available() is SM100-family-only
-    # (minimax_sparse_ops/msa.py:41-56); the Triton sparse kernels address
-    # per-token req_to_token slots and constrain only block_size_k
-    # (kernels/ops/attention/minimax_sparse/prefill/topk_sparse.py:279-292).
-    #
-    # Dispatch-not-skip: this changes HOW the case is constructed (a
-    # ServerArgs knob), never WHETHER it runs; kernel_source still records
-    # the sparse path the backend actually selected. Smoke-validated on
-    # SM120; SM89 evidenced by the l40s full-run failure log above; SM121
-    # shares the identical source-level gap (major-12 predicates) and stays
-    # registry-gated (unverified_sms) until validated.
-    attention_backend = "triton" if get_sm_version() in (89, 120, 121) else None
+    # attention_backend deliberately stays framework-selected (None): the
+    # collector measures serving truth. KNOWN GAP — v0.5.16's M3 server-args
+    # handler has no branch for CC major 8 or 12 (arg_groups/overrides.py
+    # :465-548; predicates are capability-major-exact, majors [9]/[10]), so
+    # SM89/SM120/SM121 fall to the generic flashinfer + page-1 default,
+    # which crashes at backend init on the M3 KV pool
+    # (get_kv_cache_quant_method returns None -> flashinfer_backend.py:328
+    # AttributeError). Every case on those SMs therefore FAILS CLASSIFIED —
+    # the honest unsupported signal. An earlier revision worked around this
+    # with the user-facing ``--attention-backend triton`` escape hatch and
+    # collected l40s/rtx tables, but serving's own default deployment cannot
+    # initialize there and the generator does not emit the knob, so those
+    # tables were withdrawn (review 4969690316 Standards-1) — re-collect
+    # when SGLang grows the CC-8.9/12 branches upstream.
+    attention_backend = None
 
     server_args = ServerArgs(
         model_path=local_model_path,
@@ -1149,9 +1115,8 @@ def run_msa_module(
         )
 
     # Pre-load allocation-feasibility bound. 128 is the M3 serving page on
-    # SM90/SM100 (overrides.py:502-529); on SM89 and CC 12 the triton escape
-    # hatch resolves page_size=1 (see load_model_runner), for which page-128
-    # rounding is a strict upper bound — post-load drops re-check against
+    # SM90/SM100 (overrides.py:502-529); page-128 rounding is an upper bound
+    # for any smaller resolved page — post-load checks re-validate against
     # the real kv_pool_page_size(model_runner) below.
     page_size_guess = 128
     max_total_tokens = max(

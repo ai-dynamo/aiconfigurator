@@ -1098,6 +1098,14 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("fp8", "fp8", "fp8_block"),
         ("bfloat16", "bfloat16", "nvfp4"),
         ("bfloat16", "fp8", "nvfp4"),
+        # MSA-scoped combos (attention_types [msa]; declared after the
+        # bf16/fp8 nvfp4 pair): unfiltered enumeration includes them.
+        ("bfloat16", "bfloat16", "bfloat16"),
+        ("bfloat16", "fp8", "bfloat16"),
+        ("bfloat16", "bfloat16", "fp8_block"),
+        ("bfloat16", "fp8", "fp8_block"),
+        ("bfloat16", "bfloat16", "nvfp4"),
+        ("bfloat16", "fp8", "nvfp4"),
         ("fp8", "fp8", "nvfp4"),
     ]
     assert get_mla_module_sweep_spec("sglang").context_sequence_lengths[-2:] == [8192, 16384]
@@ -1112,6 +1120,13 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
         for spec in get_mla_module_precision_specs("vllm", phase="generation", sm_version=90)
     ] == [
+        ("bfloat16", "bfloat16", "bfloat16"),
+        ("bfloat16", "fp8", "bfloat16"),
+        ("bfloat16", "bfloat16", "fp8_block"),
+        ("bfloat16", "fp8", "fp8_block"),
+        # MSA-scoped combos (attention_types [msa]) at SM90: both KV dtypes
+        # for the bf16 and fp8_block gemm tiers (fp8-KV has no SM floor for
+        # MSA — see the mla_module.yaml combo note).
         ("bfloat16", "bfloat16", "bfloat16"),
         ("bfloat16", "fp8", "bfloat16"),
         ("bfloat16", "bfloat16", "fp8_block"),
@@ -1133,12 +1148,22 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("bfloat16", "bfloat16", "nvfp4"),
         ("bfloat16", "fp8", "nvfp4"),
     ]
+    # The mla scope adds the fp8 prefill-query compute combos on top of the
+    # dsa set; it no longer equals the unfiltered enumeration, which now also
+    # carries the msa-scoped combos.
     assert [
         (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
         for spec in get_mla_module_precision_specs("vllm", phase="context", sm_version=100, attention_type="mla")
     ] == [
-        (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
-        for spec in get_mla_module_precision_specs("vllm", phase="context", sm_version=100)
+        ("bfloat16", "bfloat16", "bfloat16"),
+        ("bfloat16", "fp8", "bfloat16"),
+        ("fp8", "fp8", "bfloat16"),
+        ("bfloat16", "bfloat16", "fp8_block"),
+        ("bfloat16", "fp8", "fp8_block"),
+        ("fp8", "fp8", "fp8_block"),
+        ("bfloat16", "bfloat16", "nvfp4"),
+        ("bfloat16", "fp8", "nvfp4"),
+        ("fp8", "fp8", "nvfp4"),
     ]
 
     with pytest.raises(ValueError, match="attention_type"):
@@ -1176,37 +1201,63 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
     assert trtllm_specs == vllm_specs
 
 
-def test_vllm_msa_module_precision_combos_declare_fp8_kv_cache():
-    """The vLLM MSA collector declares its precision combos in-file (not via
-    mla_module.yaml). vLLM 0.24.0's M3 sparse backend accepts an fp8 (e4m3)
-    main KV cache on every platform — Triton in-kernel dequant off the SM100
-    family, MSA attend on it (supported_kv_cache_dtypes common/
-    sparse_attention.py:56-62, view :352, select_main_impl_cls :391-422
-    @v0.24.0) — so every gemm tier pairs with both KV dtypes; only the gemm
-    axis is SM-gated."""
-    source_path = REPO_ROOT / "collector/vllm/collect_msa_module.py"
-    tree = ast.parse(source_path.read_text(), filename=str(source_path))
-    helper = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_get_precision_combos"
-    )
+def test_msa_precision_combos_match_declared_specs():
+    """The MSA collectors consume the YAML-declared precision policy
+    (mla_module.yaml module_precision_combos, attention_types [msa]) instead
+    of re-implementing SM gates in Python (review 4969690316 S4). Assert the
+    emitted (compute, kv, gemm) sets equal the declared specs across the SM
+    matrix, and pin the declared policy itself: trtllm is bf16-KV only with
+    fp8_block from SM89 and nvfp4 from SM100; vLLM pairs every gemm tier
+    with both KV dtypes (fp8-KV has NO SM floor for MSA — vLLM's M3 sparse
+    backend accepts an fp8 main KV cache on every SM, supported_kv_cache_
+    dtypes common/sparse_attention.py:56-62@v0.24.0)."""
+    from collector.case_generator import get_mla_module_precision_specs
 
-    def combos(sm, phase):
-        namespace = {"get_sm_version": lambda: sm}
+    def emitted(source_rel, sm, phase):
+        source_path = REPO_ROOT / source_rel
+        tree = ast.parse(source_path.read_text(), filename=str(source_path))
+        helper = next(
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_get_precision_combos"
+        )
+        namespace = {
+            "get_sm_version": lambda: sm,
+            "get_mla_module_precision_specs": get_mla_module_precision_specs,
+        }
         exec(compile(ast.Module(body=[helper], type_ignores=[]), str(source_path), "exec"), namespace)
         return set(namespace["_get_precision_combos"](phase))
 
-    sm90_expected = {
+    def declared(fw, sm, phase):
+        return {
+            (spec.compute_dtype, spec.kv_cache_dtype, spec.gemm_type)
+            for spec in get_mla_module_precision_specs(fw, phase=phase, sm_version=sm, attention_type="msa")
+        }
+
+    for fw, source_rel in (
+        ("trtllm", "collector/trtllm/collect_msa_module.py"),
+        ("vllm", "collector/vllm/collect_msa_module.py"),
+    ):
+        for sm in (89, 90, 100, 103, 120):
+            for phase in ("context", "generation"):
+                assert emitted(source_rel, sm, phase) == declared(fw, sm, phase), (fw, sm, phase)
+
+    trtllm_sm90 = declared("trtllm", 90, "context")
+    assert trtllm_sm90 == {
+        ("bfloat16", "bfloat16", "bfloat16"),
+        ("bfloat16", "bfloat16", "fp8_block"),
+    }
+    assert declared("trtllm", 100, "context") == trtllm_sm90 | {("bfloat16", "bfloat16", "nvfp4")}
+
+    vllm_sm89 = declared("vllm", 89, "context")
+    assert vllm_sm89 == {
         ("bfloat16", "bfloat16", "bfloat16"),
         ("bfloat16", "fp8", "bfloat16"),
         ("bfloat16", "bfloat16", "fp8_block"),
         ("bfloat16", "fp8", "fp8_block"),
     }
-    for phase in ("context", "generation"):
-        assert combos(90, phase) == sm90_expected
-        assert combos(100, phase) == sm90_expected | {
-            ("bfloat16", "bfloat16", "nvfp4"),
-            ("bfloat16", "fp8", "nvfp4"),
-        }
+    assert declared("vllm", 100, "context") == vllm_sm89 | {
+        ("bfloat16", "bfloat16", "nvfp4"),
+        ("bfloat16", "fp8", "nvfp4"),
+    }
 
 
 def test_mla_module_targeted_artifacts_keep_requested_checkpoint(monkeypatch):
@@ -1762,3 +1813,21 @@ def test_vllm_msa_persist_row_raises_when_log_perf_fails():
 
     with pytest.raises(RuntimeError, match="failed to persist MSA row"):
         run(False)
+
+
+def test_nvfp4_checkpoint_targets_msa_module_specs(monkeypatch):
+    """Exact-targeting the advertised NVFP4 artifact must populate the MSA
+    plan for every backend (review 4969690316 Spec-2: a declared artifact
+    expanding to zero cases with no logged drop is a population bug). The
+    artifact aliases onto the canonical MiniMax-M3 MSA row — the module
+    benchmark is artifact-insensitive (dummy weights, identical sparse
+    geometry, precision as explicit sweep axes)."""
+    from collector.case_generator import get_mla_module_model_specs
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", "nvidia/MiniMax-M3-NVFP4")
+    for backend in ("trtllm", "vllm", "sglang"):
+        specs = get_mla_module_model_specs("msa", backend=backend)
+        assert specs, f"NVFP4 exact-targeting produced zero MSA specs for {backend}"
+        assert all(s.model_path == "MiniMaxAI/MiniMax-M3" for s in specs), (
+            "alias rows must stay keyed to the canonical model path"
+        )
