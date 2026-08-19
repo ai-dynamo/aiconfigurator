@@ -565,7 +565,8 @@ mod tests {
     /// fp8 query (no fp8 table exists).
     fn one_row_gemm_db() -> (tempfile::TempDir, PerfDatabase) {
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let data = crate::perf_database::energy_test_fixtures::write_energy_systems_root(tmp.path());
+        let data =
+            crate::perf_database::energy_test_fixtures::write_energy_systems_root(tmp.path());
         write_parquet(
             &data.join("gemm_perf.parquet"),
             &[
@@ -635,7 +636,11 @@ mod tests {
         ));
         let r = op.query(&db, &ctx()).expect("query");
         assert!((r.latency_ms - 1.0).abs() < 1e-12);
-        assert_eq!(r.source, Source::Silicon, "zero-valued nested composite must be source-neutral");
+        assert_eq!(
+            r.source,
+            Source::Silicon,
+            "zero-valued nested composite must be source-neutral"
+        );
     }
 
     #[test]
@@ -648,7 +653,11 @@ mod tests {
         ));
         let r = op.query(&db, &ctx()).expect("query");
         assert!((r.latency_ms - 1.0).abs() < 1e-12);
-        assert_eq!(r.source, Source::Silicon, "zero-valued opposite group must be source-neutral");
+        assert_eq!(
+            r.source,
+            Source::Silicon,
+            "zero-valued opposite group must be source-neutral"
+        );
     }
 
     #[test]
@@ -670,4 +679,3 @@ mod tests {
         assert_eq!(r.source, Source::Silicon);
     }
 }
-

@@ -848,9 +848,11 @@ class TestGptOssHybridKVCache:
         *,
         tp_size: int = 1,
         kvcache_quant_mode: common.KVCacheQuantMode = common.KVCacheQuantMode.fp8,
+        nextn: int = 0,
     ):
         model_config = config.ModelConfig(tp_size=tp_size, moe_tp_size=tp_size, moe_ep_size=1)
         model_config.kvcache_quant_mode = kvcache_quant_mode
+        model_config.nextn = nextn
         return get_model(cls.MODEL, model_config, backend_name="vllm")
 
     def test_long_sequence_uses_hybrid_layout(self):
@@ -907,6 +909,58 @@ class TestGptOssHybridKVCache:
         max_tokens = model.get_kvcache_max_tokens(budget)
         assert model.get_kvcache_bytes_per_sequence(max_tokens) <= budget
         assert model.get_kvcache_bytes_per_sequence(max_tokens + 1) > budget
+
+    @pytest.mark.parametrize("nextn", [0, 1, 3], ids=("spec-off", "nextn1", "nextn3"))
+    def test_kv_bytes_is_nextn_independent(self, nextn: int):
+        """Speculative decoding must not re-linearize the window-capped KV curve.
+
+        Draft tokens are a per-step compute cost, not extra resident KV, so the
+        hybrid-SWA byte count is identical with spec decode on and off.
+        """
+        model = self._model(nextn=nextn)
+        seq_len = 65_936  # 65536 ISL + 400 OSL, the 64k agentic recipe shape
+        assert model.get_kvcache_bytes_per_sequence(seq_len) == pytest.approx(self._expected_bytes(seq_len), rel=1e-9)
+
+    def test_backend_memory_kv_stays_window_aware_under_spec_decode(self):
+        """The breakdown's ``kvcache`` (``base_backend._get_memory_usage``, the sole
+        KV sizing site) must follow the window-capped curve with ``nextn > 0``.
+
+        Pins the recipe operating point: batch 48 at ISL 65536 / OSL 400, fp8 KV,
+        TP1 -> 54.4 GiB, not the ~2x all-layers-full-context value that false-OOMs
+        the shipped 8xB200 agg recipe.
+        """
+        from types import SimpleNamespace
+
+        from aiconfigurator.sdk.backends.factory import get_backend
+
+        batch_size, isl, osl = 48, 65_536, 400
+        seq_len = isl + osl
+        model = self._model(nextn=3)
+        database = SimpleNamespace(system_spec={"misc": {"nccl_mem": {1: 0}, "other_mem": 0}})
+
+        memory = get_backend("vllm")._get_memory_usage(
+            model, database, batch_size=batch_size, beam_width=1, isl=isl, osl=osl
+        )
+
+        expected_gib = batch_size * self._expected_bytes(seq_len) / (1 << 30)
+        assert memory["kvcache"] == pytest.approx(expected_gib, rel=1e-9)
+        assert memory["kvcache"] == pytest.approx(54.4, abs=0.1)
+        linear_gib = batch_size * seq_len * self.LAYERS * 2 * self.KV_HEADS * self.HEAD_SIZE / (1 << 30)
+        assert memory["kvcache"] < 0.52 * linear_gib
+
+    def test_kv_bytes_scale_linearly_with_kvcache_dtype(self):
+        """Guard against misreading a dtype difference as a layout regression.
+
+        The window-aware bf16 figure (2.268 GiB/seq at 65,936) is within 0.2% of
+        the *linear* fp8 figure (2.264 GiB/seq) that the hybrid override removed,
+        so the two are easy to confuse when reading a CLI breakdown. Pin that the
+        only difference between the two dtypes is the element size.
+        """
+        seq_len = 65_936
+        fp8 = self._model().get_kvcache_bytes_per_sequence(seq_len)
+        bf16 = self._model(kvcache_quant_mode=common.KVCacheQuantMode.bfloat16).get_kvcache_bytes_per_sequence(seq_len)
+        assert bf16 == pytest.approx(2 * fp8, rel=1e-9)
+        assert bf16 == pytest.approx(self._expected_bytes(seq_len, bytes_per_elem=2), rel=1e-9)
 
 
 class TestGetKvcacheMaxTokens:

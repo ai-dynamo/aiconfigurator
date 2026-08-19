@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
-Report cross-framework shareability of perf-database perf tables.
+Generate the runtime manifest that controls cross-backend perf-data reuse.
 
 For every (system, op_file, kernel_source) triple, compute:
   - which (framework, version) pairs contributed rows
@@ -27,20 +27,21 @@ time, so a composed metric is comparable with a single-column one.
 The script emits three artifacts:
   - JSON of per-group raw stats
   - Markdown report table
-  - YAML manifest consumed by the SDK loader
+  - YAML manifest consumed by the compiled engine source resolver
 
 Usage:
-    python3 tools/perf_database/check_kernel_source.py \\
+    python3 tools/perf_database/generate_perf_data_reuse_manifest.py \\
         --data-root aic-core/src/aiconfigurator_core/systems/data \\
-        --out-json $TMPDIR/op-kernel-sources.json \\
-        --out-md   docs/perf_database/op-kernel-sources.md \\
-        --out-manifest aic-core/src/aiconfigurator_core/systems/op_kernel_source_manifest.yaml
+        --out-json $TMPDIR/perf-data-reuse-analysis.json \\
+        --out-md   docs/perf_database/perf-data-reuse-analysis.md \\
+        --out-manifest aic-core/src/aiconfigurator_core/systems/perf_data_reuse_manifest.yaml
 
-The manifest lives under aic-core/src/aiconfigurator_core/systems/ so the SDK
-loader (aic-core/src/aiconfigurator_core/sdk/perf_database.py) reads it as
-package data and decides,
-per (op_file, kernel_source), which sibling backend/version directories the
-active backend may inherit from. No perf data is moved or rewritten on disk.
+The manifest lives under aic-core/src/aiconfigurator_core/systems/ so the
+compiled source resolver
+(aic-core/rust/aiconfigurator-core/src/perf_database/source_resolution.rs)
+reads it as package data and decides, per (op_file, kernel_source), which
+sibling backend/version directories the active backend may inherit from. No
+perf data is moved or rewritten on disk.
 """
 
 from __future__ import annotations
@@ -50,18 +51,21 @@ import csv
 import json
 import logging
 import statistics
+import sys
 from collections import defaultdict
-from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from tqdm import tqdm
 
-logger = logging.getLogger(__name__)
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
 
-# Columns that never participate in the shape key.
-_META_COLUMNS = {"framework", "version", "device", "op_name", "kernel_source"}
+from perf_data_layout import META_COLUMNS, iter_data_files
+
+logger = logging.getLogger(__name__)
 
 # How to derive a comparable latency metric from a perf table's header.
 #
@@ -88,24 +92,6 @@ _LATENCY_COLUMN_GROUPS = (
         "combine_notify_us",
     ),
 )
-
-# Files to skip entirely (markers, already-shared layers, irregular formats).
-# reuse.yaml/collection_meta.yaml (Collector V3 structured markers) never match
-# the *.parquet/*.txt glob in _iter_data_files below, so listing them here is
-# defensive/documentation-only, not currently load-bearing.
-_SKIP_FILE_BASENAMES = {"INCOMPLETE.txt", "reuse.yaml", "collection_meta.yaml"}
-
-# Backend directory names to skip — these are framework-agnostic by construction.
-_SKIP_BACKEND_DIRS = {"nccl", "oneccl"}
-
-# Legacy top-level backend dirs. Family-first layout (Collector V3) treats any
-# other first-level directory under a system dir as a family dir containing
-# <backend>/<version> subtrees. Keep this set textually identical to the
-# CANONICAL _KNOWN_BACKEND_DIRS in
-# aic-core/src/aiconfigurator_core/sdk/operations/base.py minus
-# _SKIP_BACKEND_DIRS (a deliberate 3-entry variant: consumer backends only,
-# no comm pseudo-backends; base.py lists every copy that must stay in sync).
-_LEGACY_BACKEND_DIRS = {"trtllm", "sglang", "vllm"}
 
 
 def classify_tier(kernel_source: str) -> str:
@@ -143,7 +129,7 @@ def classify_tier(kernel_source: str) -> str:
 # keys on absence.
 #
 # Entries listed here are emitted with tier `absence_load_bearing`: still
-# visible in the manifest with their stats, but outside the SDK loader's
+# visible in the manifest with their stats, but outside the runtime resolver's
 # {shared, shared_fallback} admission, so they never join a cross-backend
 # kernel_source filter.
 #
@@ -279,48 +265,8 @@ def _compose_latency(row: dict[str, str], latency_cols: tuple[str, ...]) -> floa
 
 
 def _build_shape_key(row: dict[str, str], header: list[str], latency_cols: tuple[str, ...]) -> tuple:
-    keys = [c for c in header if c not in _META_COLUMNS and c not in latency_cols]
+    keys = [c for c in header if c not in META_COLUMNS and c not in latency_cols]
     return tuple((c, row.get(c, "")) for c in keys)
-
-
-def _iter_backend_dirs(system_dir: Path) -> Iterable[tuple[str, Path]]:
-    """Yield (backend, backend_path) for every backend dir under a system dir,
-    across both the legacy (<backend>/<version>) and family-first
-    (<family>/<backend>/<version>) layouts. `_SKIP_BACKEND_DIRS` entries are
-    excluded at whichever level they appear (top-level or inside a family dir).
-    """
-    for entry in sorted(system_dir.iterdir()):
-        if not entry.is_dir() or entry.name in _SKIP_BACKEND_DIRS:
-            continue
-        if entry.name in _LEGACY_BACKEND_DIRS:
-            yield entry.name, entry
-        else:  # family dir
-            for backend_dir in sorted(entry.iterdir()):
-                if not backend_dir.is_dir() or backend_dir.name in _SKIP_BACKEND_DIRS:
-                    continue
-                yield backend_dir.name, backend_dir
-
-
-def _iter_data_files(data_root: Path, op_files: frozenset[str] | None = None) -> Iterable[tuple[str, str, str, Path]]:
-    """Yield (system, backend, version, path) for every perf data table, across
-    both the legacy and family-first (Collector V3) tree layouts.
-
-    `op_files`, when given, restricts the walk to those table basenames.
-    """
-    for system_dir in sorted(data_root.iterdir()):
-        if not system_dir.is_dir():
-            continue
-        for backend, backend_dir in _iter_backend_dirs(system_dir):
-            for version_dir in sorted(backend_dir.iterdir()):
-                if not version_dir.is_dir():
-                    continue
-                paths = sorted([*version_dir.glob("*.parquet"), *version_dir.glob("*.txt")])
-                for path in paths:
-                    if path.name in _SKIP_FILE_BASENAMES:
-                        continue
-                    if op_files is not None and path.name not in op_files:
-                        continue
-                    yield system_dir.name, backend, version_dir.name, path
 
 
 @dataclass
@@ -406,7 +352,7 @@ def scan(data_root: Path, op_files: frozenset[str] | None = None) -> dict[tuple[
     # Materialize the file list up front so the progress bar can show a total
     # and the walk doesn't appear stuck on slow disks. The list is small
     # (~hundreds).
-    file_list = list(_iter_data_files(data_root, op_files))
+    file_list = list(iter_data_files(data_root, op_files))
     total_files = len(file_list)
 
     with ThreadPoolExecutor(max_workers=_SCAN_THREADS) as pool:
@@ -473,10 +419,10 @@ def render_markdown(summaries: list[dict]) -> str:
         "Classifies every `(system, op_file, kernel_source)` triple in the perf database into one of two tiers:\n"
     )
     lines.append(
-        "- **`shared`** — named kernel_source. The SDK loader inherits these rows from sibling backend/version "
-        "directories (cross-version and cross-backend) when the database is loaded in HYBRID mode.\n"
+        "- **`shared`** — named kernel_source. The engine resolver inherits these rows from sibling backend/version "
+        "directories (cross-version and cross-backend) when shared-layer reuse is enabled.\n"
         "- **`shared_fallback`** — `kernel_source = default`. Framework-implicit, low-fidelity. "
-        "Inherited alongside `shared` rows in HYBRID mode (HYBRID already accepts coarser fallbacks).\n"
+        "Inherited alongside `shared` rows because shared-layer modes already accept coarser fallbacks.\n"
         "\n"
         "Rows with a blank/`<unknown>` kernel_source are skipped during the scan (the current corpus has none).\n"
     )
@@ -562,7 +508,7 @@ def render_markdown(summaries: list[dict]) -> str:
 
 
 def render_manifest(summaries: list[dict]) -> str:
-    """Render the YAML manifest consumed by the SDK loader.
+    """Render the YAML manifest consumed by the compiled source resolver.
 
     Aggregates per-(op_file, kernel_source) across systems — same kernel_source
     on different systems shares a tier.
@@ -594,7 +540,7 @@ def render_manifest(summaries: list[dict]) -> str:
         "# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
         "# SPDX-License-Identifier: Apache-2.0",
         "#",
-        "# Perf-database op-kernel-source manifest.",
+        "# Perf-data reuse manifest.",
         "#",
         "# What this is:",
         "#   The runtime contract for cross-backend / cross-version measurement reuse.",
@@ -603,36 +549,36 @@ def render_manifest(summaries: list[dict]) -> str:
         "#   the kernel belongs to ('shared' or 'shared_fallback').",
         "#",
         "# How it's used:",
-        "#   aic-core/src/aiconfigurator_core/sdk/perf_database.py reads this file",
-        "#   at PerfDatabase",
-        "#   construction time. When the database is loaded in HYBRID mode, the loader",
+        "#   aic-core/rust/aiconfigurator-core/src/perf_database/source_resolution.rs",
+        "#   reads this file while resolving each op table. When shared-layer reuse is",
+        "#   enabled, the resolver",
         "#   walks sibling <system>/<family>/<framework>/<version>/<op_file> directories",
         "#   and inherits",
         "#   rows tagged with the kernel_sources this manifest declares the active backend",
         "#   may consume — keeping the active backend's own rows on key conflict. Both",
         "#   `tier=shared` and `tier=shared_fallback` (kernel_source=default,",
-        "#   framework-implicit) rows are inherited; HYBRID already accepts coarser",
+        "#   framework-implicit) rows are inherited; shared-layer modes already accept",
         "#   fallbacks, so they are not gated separately. `tier=absence_load_bearing`",
-        "#   entries are documentation only — the loader ignores them, because the",
-        "#   SDK's routing keys on those rows being ABSENT from the active backend's",
+        "#   entries are documentation only — the resolver ignores them, because runtime",
+        "#   routing keys on those rows being ABSENT from the active backend's",
         "#   table (see ABSENCE_LOAD_BEARING in the generator).",
         "#",
         "# How to regenerate:",
-        "#   Generated by tools/perf_database/check_kernel_source.py from the data tree —",
+        "#   Generated by tools/perf_database/generate_perf_data_reuse_manifest.py from the data tree —",
         "#   do not hand-edit. Re-run whenever a perf table under",
         "#   aic-core/src/aiconfigurator_core/systems/data/",
         "#   is added, removed, or has its kernel_source values changed:",
         "#",
-        "#     python3 tools/perf_database/check_kernel_source.py \\",
+        "#     python3 tools/perf_database/generate_perf_data_reuse_manifest.py \\",
         "#         --data-root aic-core/src/aiconfigurator_core/systems/data \\",
-        "#         --out-manifest aic-core/src/aiconfigurator_core/systems/op_kernel_source_manifest.yaml",
+        "#         --out-manifest aic-core/src/aiconfigurator_core/systems/perf_data_reuse_manifest.yaml",
         "#",
         "# Schema (per group):",
         "#   op_file:                     perf table basename, e.g. gemm_perf.parquet",
         "#   kernel_source:               kernel name as it appears in the perf table's kernel_source column",
         "#   tier:                        'shared' (named, high-fidelity),",
         "#                                'shared_fallback' (default, framework-implicit), or",
-        "#                                'absence_load_bearing' (loader-inert; the SDK",
+        "#                                'absence_load_bearing' (resolver-inert; runtime",
         "#                                routes on these keys being absent)",
         "#   systems:                     systems where rows for this (op_file, kernel_source) exist",
         "#   frameworks:                  backends that produce rows (= the inheritance whitelist)",
@@ -643,7 +589,7 @@ def render_manifest(summaries: list[dict]) -> str:
     ]
     for (_op, _ks), agg in sorted(by_pair.items()):
         med = statistics.median(agg["median_pct_divergence"]) if agg["median_pct_divergence"] else None
-        # Absence-load-bearing pairs are demoted to a loader-inert tier so
+        # Absence-load-bearing pairs are demoted to a resolver-inert tier so
         # they can never join a cross-backend inheritance filter (see the
         # ABSENCE_LOAD_BEARING docstring for the invariant and evidence).
         tier = "absence_load_bearing" if (_op, _ks) in ABSENCE_LOAD_BEARING else agg["tier"]
@@ -673,7 +619,7 @@ def main() -> None:
         "--out-manifest",
         type=Path,
         default=None,
-        help="Write a YAML manifest consumed by the SDK loader.",
+        help="Write a YAML manifest consumed by the compiled source resolver.",
     )
     parser.add_argument(
         "--op-file",

@@ -266,6 +266,45 @@ class TestBuildModuleTestCases:
         assert config["architectures"] == ["GlmMoeDsaForCausalLM"]
         assert config["index_topk_freq"] == 4
 
+    @pytest.mark.parametrize(
+        "model_path",
+        ["zai-org/GLM-5.3", "zai-org/GLM-5.3-FP8", "nvidia/GLM-5.3-NVFP4"],
+    )
+    def test_glm53_alias_configs_match_glm52_geometry(self, model_path):
+        mod = _import_module()
+        geometry_keys = (
+            "hidden_size",
+            "intermediate_size",
+            "moe_intermediate_size",
+            "num_experts_per_tok",
+            "n_routed_experts",
+            "n_shared_experts",
+            "scoring_func",
+            "routed_scaling_factor",
+            "norm_topk_prob",
+            "num_hidden_layers",
+            "indexer_types",
+            "index_n_heads",
+            "index_head_dim",
+            "index_topk",
+            "index_topk_freq",
+            "num_attention_heads",
+            "kv_lora_rank",
+            "q_lora_rank",
+            "qk_nope_head_dim",
+            "qk_rope_head_dim",
+            "v_head_dim",
+            "max_position_embeddings",
+        )
+
+        def geometry(path):
+            local_path = Path(mod._resolve_local_model_path(path))
+            config = json.loads((local_path / "config.json").read_text())
+            assert len(config["indexer_types"]) == config["num_hidden_layers"]
+            return {key: config[key] for key in geometry_keys}
+
+        assert geometry(model_path) == geometry("zai-org/GLM-5.2")
+
     def test_module_precision_respects_outer_sm_gate(self):
         mod = _import_module()
         with patch.object(mod, "get_sm_version", return_value=89):

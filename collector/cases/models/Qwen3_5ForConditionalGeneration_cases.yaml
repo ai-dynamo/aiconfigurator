@@ -10,6 +10,7 @@ model_paths:
   - Qwen/Qwen3.5-4B
   - Qwen/Qwen3.5-9B
   - Qwen/Qwen3.5-27B
+  - nvidia/Qwen3.6-27B-NVFP4
 include_base: true
 base_ops:
   - attention_context
@@ -42,6 +43,8 @@ model_case_values:
       tensor_parallel_sizes: [1, 2, 4, 8, 16]
     - id: qwen35_27b_attention
       model_path: Qwen/Qwen3.5-27B
+      model_aliases:
+        - nvidia/Qwen3.6-27B-NVFP4
       num_attention_heads: 24
       num_key_value_heads: 4
       head_dim: 256
@@ -63,6 +66,8 @@ model_case_values:
       output_feature_sizes: [4, 8, 16]
       input_feature_sizes: [4096]
     - model_path: Qwen/Qwen3.5-27B
+      model_aliases:
+        - nvidia/Qwen3.6-27B-NVFP4
       output_feature_sizes: [12, 24, 48, 96]
       input_feature_sizes: [5120]
   gdn:
@@ -99,6 +104,8 @@ model_case_values:
       head_v_dim: 128
       tensor_parallel_sizes: [1, 2, 4, 8, 16]
     - model_path: Qwen/Qwen3.5-27B
+      model_aliases:
+        - nvidia/Qwen3.6-27B-NVFP4
       d_model: 5120
       d_conv: 4
       num_k_heads: 16

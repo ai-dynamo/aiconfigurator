@@ -71,8 +71,7 @@ impl MhcTable {
     /// primary `data_root/mhc_module_perf.parquet` when the resolver names no override.
     /// No I/O.
     pub fn with_sources(data_root: PathBuf, resolver: &SourceResolver) -> Result<Self, AicError> {
-        let mhc_sources =
-            resolver.sources_for("mhc_module_perf.parquet", &data_root)?;
+        let mhc_sources = resolver.sources_for("mhc_module_perf.parquet", &data_root)?;
         Ok(Self {
             data_root,
             mhc_sources,
