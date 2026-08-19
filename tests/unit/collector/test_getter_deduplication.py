@@ -387,10 +387,11 @@ def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkey
 
     # 1887 pre-Kimi-K3, +39 K3 w4a16_mxfp4 cases (grouped-topk mapping for
     # model_type kimi_linear), +99 Step-3.7-Flash executions after identical
-    # physical invocations are deduplicated by their consumer key,
-    # +39 for MiniMax-M3's MoE row (6144/3072, 128x4, bf16).
-    assert len(cases) == 2064
-    assert sum(len(case[1]) for case in cases) == 55728
+    # physical invocations are deduplicated by their consumer key, +42
+    # Nemotron Super FP8 cases, and +39 for MiniMax-M3's MoE row
+    # (6144/3072, 128x4, bf16).
+    assert len(cases) == 2106
+    assert sum(len(case[1]) for case in cases) == 56862
     # MiniMax-M3's declared MoE geometry must be present as its own rows —
     # a generator defect could drop it while unrelated cases preserve the
     # aggregate counts above. (case[:8] = moe_type, num_tokens, hidden,
@@ -446,13 +447,14 @@ def test_vllm_sm100_repository_moe_getter_expands_native_dsv4_w4a8_cases(monkeyp
 
 
 @pytest.mark.parametrize(
-    ("model_path", "moe_type"),
+    ("model_path", "moe_type", "expected_hidden_size"),
     [
-        ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "bfloat16"),
-        ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8", "fp8"),
+        ("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8", "fp8", 1024),
+        ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "bfloat16", 2048),
+        ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8", "fp8", 2048),
     ],
 )
-def test_vllm_nemotron_ultra_uses_latent_moe_width(monkeypatch, model_path, moe_type):
+def test_vllm_nemotron_uses_latent_moe_width(monkeypatch, model_path, moe_type, expected_hidden_size):
     monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
     _install_vllm_stubs(monkeypatch)
     module = _load_collector(monkeypatch, "collector.vllm.collect_moe", "collector/vllm/collect_moe.py")
@@ -463,7 +465,7 @@ def test_vllm_nemotron_ultra_uses_latent_moe_width(monkeypatch, model_path, moe_
     assert len(cases) == 42
     assert sum(len(case[1]) for case in cases) == 1134
     assert {case[0] for case in cases} == {moe_type}
-    assert {case[2] for case in cases} == {2048}
+    assert {case[2] for case in cases} == {expected_hidden_size}
 
 
 @pytest.mark.parametrize(

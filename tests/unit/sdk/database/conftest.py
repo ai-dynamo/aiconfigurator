@@ -35,54 +35,45 @@ def _reset_op_load_counts():
 
 
 # ---------------------------------------------------------------------------
-# Single source of truth: every loader function that any op class's
-# ``load_data`` may invoke via its module-local reference.
-#
-# Each entry maps ``loader_name -> (target_module, default_stub_return)``.
-# ``target_module`` is where the function is defined — each loader lives
-# in the op module that owns the data it parses, so patches must target
-# that location, not the legacy ``perf_database`` re-exports.
-#
-#   * Most loaders return ``None`` when the perf file is absent.
-#   * ``load_moe_data`` is special: it returns a *tuple* of two dicts.
-#   * ``load_nccl_data`` covers both nccl and oneccl keys.
-#
-# Both ``_patch_all_loaders_and_yaml()`` and
-# ``_get_comprehensive_db_singleton()`` derive their patch lists from
-# this dict so they cannot drift.
+# Synthetic-table injection (PR-6): op ``load_data`` binds ENGINE table views
+# (``engine_table_view.fetch_table_view``), so tests stub that single choke
+# point instead of the retired per-module loader functions. Overrides are
+# keyed by the PerfDatabase attribute name and hold the REHYDRATED table
+# shape (enum/int keys — exactly what the old loaders returned); anything not
+# overridden fetches as ``None`` ("no source files"), which the binding wraps
+# as an unloaded ``LoadedOpData`` (or ``None`` where the loader did).
 # ---------------------------------------------------------------------------
-_OPS_PKG = "aiconfigurator.sdk.operations"
-_LOADER_STUBS: dict[str, tuple[str, object]] = {
-    "load_gemm_data": (f"{_OPS_PKG}.gemm", None),
-    "load_compute_scale_data": (f"{_OPS_PKG}.gemm", None),
-    "load_scale_matrix_data": (f"{_OPS_PKG}.gemm", None),
-    "load_context_attention_data": (f"{_OPS_PKG}.attention", None),
-    "load_encoder_attention_data": (f"{_OPS_PKG}.attention", None),
-    "load_generation_attention_data": (f"{_OPS_PKG}.attention", None),
-    "load_moe_data": (f"{_OPS_PKG}.moe", (None, None)),  # returns tuple
-    "load_wideep_context_moe_data": (f"{_OPS_PKG}.moe", None),
-    "load_wideep_generation_moe_data": (f"{_OPS_PKG}.moe", None),
-    "load_wideep_deepep_normal_data": (f"{_OPS_PKG}.moe", None),
-    "load_wideep_deepep_ll_data": (f"{_OPS_PKG}.moe", None),
-    "load_wideep_moe_compute_data": (f"{_OPS_PKG}.moe", None),
-    "load_trtllm_alltoall_data": (f"{_OPS_PKG}.moe", None),
-    "load_context_mla_data": (f"{_OPS_PKG}.mla", None),
-    "load_generation_mla_data": (f"{_OPS_PKG}.mla", None),
-    "load_mla_bmm_data": (f"{_OPS_PKG}.mla", None),
-    "load_wideep_context_mla_data": (f"{_OPS_PKG}.mla", None),
-    "load_wideep_generation_mla_data": (f"{_OPS_PKG}.mla", None),
-    "load_context_mla_module_data": (f"{_OPS_PKG}.mla", None),
-    "load_generation_mla_module_data": (f"{_OPS_PKG}.mla", None),
-    "load_context_dsa_module_data": (f"{_OPS_PKG}.dsa", None),
-    "load_generation_dsa_module_data": (f"{_OPS_PKG}.dsa", None),
-    "load_context_msa_module_data": (f"{_OPS_PKG}.msa", None),
-    "load_generation_msa_module_data": (f"{_OPS_PKG}.msa", None),
-    "load_mhc_module_data": (f"{_OPS_PKG}.dsv4", None),
-    "load_custom_allreduce_data": (f"{_OPS_PKG}.communication", None),
-    "load_nccl_data": (f"{_OPS_PKG}.communication", None),  # also used for oneccl
-    "load_mamba2_data": (f"{_OPS_PKG}.mamba", None),
-    "load_gdn_data": (f"{_OPS_PKG}.mamba", None),
-}
+_FETCH_VIEW_TARGET = "aiconfigurator_core.sdk.engine_table_view.fetch_table_view"
+
+
+def _fake_fetch_table_view(overrides: dict[str, object]):
+    def _fetch(database, attribute):
+        return overrides.get(attribute)
+
+    return _fetch
+
+
+# ---------------------------------------------------------------------------
+# Module-level view router for the comprehensive singleton's fake system.
+# Installed ONCE at conftest import — i.e. before any test's monkeypatch can
+# run — so scoped fetch patches always layer ON TOP of it and their teardown
+# restores back TO it. The synthetic tables arrive later via
+# _COMPREHENSIVE_OVERRIDES (set when the singleton is built); until then the
+# router is a transparent pass-through.
+# ---------------------------------------------------------------------------
+from aiconfigurator_core.sdk import engine_table_view as _etv
+
+_COMPREHENSIVE_OVERRIDES: dict[str, object] | None = None
+_REAL_FETCH_TABLE_VIEW = _etv.fetch_table_view
+
+
+def _routed_fetch(database, attribute):
+    if _COMPREHENSIVE_OVERRIDES is not None and getattr(database, "system", None) == "test_system":
+        return _COMPREHENSIVE_OVERRIDES.get(attribute)
+    return _REAL_FETCH_TABLE_VIEW(database, attribute)
+
+
+_etv.fetch_table_view = _routed_fetch
 
 
 def _patch_all_loaders_and_yaml(monkeypatch) -> None:
@@ -158,30 +149,16 @@ def _patch_all_loaders_and_yaml(monkeypatch) -> None:
         }
     }
 
-    # Per-loader overrides for stub_perf_db (most stay at the default from _LOADER_STUBS)
+    # Per-attribute view overrides for stub_perf_db; everything else fetches
+    # as None. The full/skip DSA split is two distinct attributes now, so an
+    # op_kind-swallowing stub cannot mask skip/full mis-wiring anymore.
     overrides = {
-        "load_gemm_data": dummy_gemm_data,
-        "load_custom_allreduce_data": dummy_custom_allreduce_data,
-        "load_moe_data": ({}, {}),
+        "_gemm_data": dummy_gemm_data,
+        "_custom_allreduce_data": dummy_custom_allreduce_data,
+        "_moe_data": {},
+        "_moe_low_latency_data": {},
     }
-
-    # The DSA module loaders take op_kind="full"/"skip". A stub that swallows
-    # op_kind would MASK skip/full mis-wiring (both collapse to one value, so a
-    # test passes even if skip_indexer is routed to the wrong loader mode). When
-    # an override supplies op_kind-keyed data ({"full": ..., "skip": ...}), honor
-    # op_kind. The default (None) is unchanged: both op_kinds return the same value.
-    _op_kind_loaders = {"load_context_dsa_module_data", "load_generation_dsa_module_data"}
-    for name, (target_module, default_value) in _LOADER_STUBS.items():
-        ret = overrides.get(name, default_value)
-        if name in _op_kind_loaders and isinstance(ret, dict) and set(ret) <= {"full", "skip"}:
-            monkeypatch.setattr(
-                f"{target_module}.{name}",
-                lambda path, *args, _m=ret, op_kind="full", **kwargs: _m.get(op_kind),
-            )
-        else:
-            # Accept arbitrary extra args/kwargs so loaders with optional params
-            # (e.g. load_*_dsa_module_data(path, op_kind="full")) stub cleanly.
-            monkeypatch.setattr(f"{target_module}.{name}", lambda path, *args, _r=ret, **kwargs: _r)
+    monkeypatch.setattr(_FETCH_VIEW_TARGET, _fake_fetch_table_view(overrides))
 
 
 @pytest.fixture
@@ -406,36 +383,42 @@ def _get_comprehensive_db_singleton() -> PerfDatabase:
     with open(yaml_file, "w") as f:
         yaml.dump(system_spec, f)
 
-    # Use unittest.mock.patch (not monkeypatch) so we can call this outside a fixture.
-    # Per-loader overrides — anything not listed here falls through to
-    # the default in _LOADER_STUBS (None for most, (None, None) for moe).
+    # Per-attribute view overrides — anything not listed fetches as None.
+    # (The old tuple-returning load_moe_data fed BOTH moe tables the same
+    # dict; keep that shape.)
     overrides = {
-        "load_gemm_data": cached["gemm_data"],
-        "load_context_attention_data": cached["context_attention_data"],
-        "load_generation_attention_data": cached["generation_attention_data"],
-        "load_encoder_attention_data": cached["encoder_attention_data"],
-        "load_moe_data": (cached["moe_data"], cached["moe_data"]),
-        "load_custom_allreduce_data": cached["custom_allreduce_data"],
-        "load_nccl_data": cached["nccl_data"],
-        "load_context_mla_data": cached["context_mla_data"],
-        "load_generation_mla_data": cached["generation_mla_data"],
-        "load_mla_bmm_data": cached["mla_bmm_data"],
+        "_gemm_data": cached["gemm_data"],
+        "_context_attention_data": cached["context_attention_data"],
+        "_generation_attention_data": cached["generation_attention_data"],
+        "_encoder_attention_data": cached["encoder_attention_data"],
+        "_moe_data": cached["moe_data"],
+        "_moe_low_latency_data": cached["moe_data"],
+        "_custom_allreduce_data": cached["custom_allreduce_data"],
+        "_nccl_data": cached["nccl_data"],
+        "_context_mla_data": cached["context_mla_data"],
+        "_generation_mla_data": cached["generation_mla_data"],
+        "_mla_bmm_data": cached["mla_bmm_data"],
     }
-    patches = [
-        patch("yaml.load", side_effect=lambda stream, Loader=None: system_spec),  # noqa: N803
-    ]
-    for name, (target_module, default_value) in _LOADER_STUBS.items():
-        ret = overrides.get(name, default_value)
-        patches.append(patch(f"{target_module}.{name}", return_value=ret))
 
-    for p in patches:
-        p.start()
+    # Publish the synthetic tables to the MODULE-LEVEL router (installed at
+    # conftest import, before any monkeypatch can run — see _routed_fetch
+    # below the stub helpers). Publishing state instead of swapping the
+    # function here keeps two properties: the routing survives any later
+    # ``clear_all_op_caches()`` (a re-load of the singleton or a deepcopy
+    # must keep resolving to the synthetic tables), AND a scoped
+    # ``stub_perf_db`` monkeypatch that happens to be active while this
+    # singleton is first built cannot be captured as the "real" fetch and
+    # then torn down out from under the router.
+    global _COMPREHENSIVE_OVERRIDES
+    _COMPREHENSIVE_OVERRIDES = overrides
+
+    yaml_patch = patch("yaml.load", side_effect=lambda stream, Loader=None: system_spec)  # noqa: N803
+    yaml_patch.start()
     try:
         _comprehensive_db_singleton = PerfDatabase("test_system", "trtllm", "v1", tmp_dir)
         _warm_lazy_op_caches(_comprehensive_db_singleton)
     finally:
-        for p in patches:
-            p.stop()
+        yaml_patch.stop()
 
     return _comprehensive_db_singleton
 

@@ -23,6 +23,7 @@ import logging
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common
 from aiconfigurator_core.sdk.models.base import BaseModel, register_model
+from aiconfigurator_core.sdk.models.blocks.moe import MoEBlockShape, build_moe_block_ops
 from aiconfigurator_core.sdk.models.helpers import mtp_scale_factor
 
 logger = logging.getLogger(__name__)
@@ -57,10 +58,22 @@ class MiniMaxM3Model(BaseModel):
             model_info["context"],
             model_config,
         )
-        return cls(*moe_args, *base_args, dict(model_info["extra_params"] or {}))
+        return cls(*moe_args, *base_args, dict(model_info["extra_params"] or {}), backend_name=backend_name)
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, backend_name: str = "") -> None:
         super().__init__(*args)
+        self._backend_name = backend_name
+        # Fused-only family: the MoE-block builder keys its large-EP emission
+        # off cfg.moe_comm_backend, but this family calls the builder with
+        # num_shared_experts=0 (shared triplet hand-wired) and resolves no
+        # node width — a comm backend here would silently drop the shared
+        # experts from the routed path and mis-price the all-to-all. Loud,
+        # not silent (same principle as the num_gpus_per_node raise).
+        if getattr(self.config, "moe_comm_backend", None):
+            raise ValueError(
+                "large-EP is not wired for the MINIMAXM3 family yet — moe_comm_backend "
+                "must not be set; see models/README blocks/ section"
+            )
         assert (
             self.config.tp_size * self.config.attention_dp_size == self.config.moe_tp_size * self.config.moe_ep_size
         ), (
@@ -77,9 +90,6 @@ class MiniMaxM3Model(BaseModel):
 
         h = self._hidden_size
         tp_size = self.config.tp_size
-        moe_tp_size = self.config.moe_tp_size
-        moe_ep_size = self.config.moe_ep_size
-        attention_dp_size = self.config.attention_dp_size
         pp_size = self.config.pp_size
 
         gemm_quant_mode = self.config.gemm_quant_mode
@@ -123,39 +133,38 @@ class MiniMaxM3Model(BaseModel):
         def _shared_ffn2(name, scale):
             return ops.GEMM(name, scale, h, self._moe_inter_size // tp_size, gemm_quant_mode)
 
-        def _router(name, scale):
-            return ops.GEMM(name, scale, self._num_experts, h, common.GEMMQuantMode.bfloat16)
+        nl = self._num_layers
+        # Routed MoE path (router + dispatch/compute/combine) via the generic
+        # builder. ``num_shared_experts=0``: the checkpoint's shared expert
+        # stays hand-wired below because its PLACEMENT diverges from the
+        # builder's fused pipeline (context: shared triplet BEFORE the router;
+        # generation: the OverlapOp's group_b) while the builder emits
+        # router-first flat lists. Names and TP-sharded sizing happen to match
+        # the builder's fused triplet exactly.
+        moe_shape = MoEBlockShape(
+            hidden_size=h,
+            moe_inter_size=self._moe_inter_size,
+            topk=self._topk,
+            num_experts=self._num_experts,
+            num_shared_experts=0,
+            # Descriptor-only: the builder scales by the caller scale_factor
+            # (all layers modeled as MoE, first_k_dense_replace approximated).
+            num_moe_layers=nl,
+        )
 
-        def _dispatch(name, scale, pre):
-            return ops.MoEDispatch(
-                name,
-                scale,
-                h,
-                self._topk,
-                self._num_experts,
-                moe_tp_size,
-                moe_ep_size,
-                attention_dp_size,
-                pre,
-                quant_mode=moe_quant_mode,
-            )
-
-        def _moe(name, scale):
-            return ops.MoE(
-                name,
-                scale,
-                h,
-                self._moe_inter_size,
-                self._topk,
-                self._num_experts,
-                moe_tp_size,
-                moe_ep_size,
+        def _routed_moe_ops(phase, scale):
+            return build_moe_block_ops(
+                phase,
+                moe_shape,
+                self.config,
                 moe_quant_mode,
                 workload_distribution,
-                attention_dp_size,
+                scale_factor=scale,
+                backend_name=self._backend_name,
+                inference_phase=phase,
+                model_family=self.model_family,
             )
 
-        nl = self._num_layers
         self.context_ops.extend(
             [
                 ops.Embedding("context_embedding", 1, self._vocab_size, h, 0.3),
@@ -171,10 +180,7 @@ class MiniMaxM3Model(BaseModel):
                     0.8,
                 ),
                 _shared_ffn2("context_shared_ffn2_gemm", nl),
-                _router("context_router_gemm", nl),
-                _dispatch("context_moe_pre_dispatch", nl, True),
-                _moe("context_moe", nl),
-                _dispatch("context_moe_post_dispatch", nl, False),
+                *_routed_moe_ops("context", nl),
                 ops.GEMM("context_logits_gemm", 1, self._vocab_size // tp_size, h, common.GEMMQuantMode.bfloat16),
             ]
         )
@@ -199,14 +205,10 @@ class MiniMaxM3Model(BaseModel):
             ),
             _shared_ffn2("generation_shared_ffn2_gemm", nl * mtp),
         ]
-        gen_routed_ops = [
-            _router("generation_router_gemm", nl * mtp),
-            _dispatch("generation_moe_pre_dispatch", nl * mtp, True),
-            _moe("generation_moe", nl * mtp),
-            _dispatch("generation_moe_post_dispatch", nl * mtp, False),
-        ]
         self.generation_ops.append(
-            ops.OverlapOp("generation_moe_overlap", group_a=gen_routed_ops, group_b=gen_shared_ops)
+            ops.OverlapOp(
+                "generation_moe_overlap", group_a=_routed_moe_ops("generation", nl * mtp), group_b=gen_shared_ops
+            )
         )
         self.generation_ops.append(
             ops.GEMM("generation_logits_gemm", 1 * mtp, self._vocab_size // tp_size, h, common.GEMMQuantMode.bfloat16)

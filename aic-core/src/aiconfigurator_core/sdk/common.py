@@ -599,6 +599,7 @@ DefaultHFModels = {
     # NVIDIA Nemotron
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
     "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
     "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
@@ -838,6 +839,18 @@ ColumnsAgg = [
     "power_w",  # NEW: E2E weighted average power in watts
 ]
 
+# E+agg (enable_epd) rows: ColumnsAgg plus the rate-matched cell columns
+# ((a)workers agg workers paired with an (e)* encode pool).
+ColumnsAggEpd = ColumnsAgg + [
+    "(a)workers",
+    "(e)workers",
+    "(e)tp",
+    "(e)pp",
+    "(e)bs",
+    "(e)parallel",
+    "(e)memory",
+]
+
 """
 Columns for disaggregated inference summary dataframe
 """
@@ -900,6 +913,7 @@ ColumnsDisagg = [
     "(e)workers",
     "(e)tp",
     "(e)pp",
+    "(e)bs",
     "(e)parallel",
     "(e)memory",
     "power_w",  # NEW: E2E weighted average power in watts
@@ -1127,6 +1141,9 @@ class PerfDataFilename(Enum):
     wideep_deepep_ll = "wideep_deepep_ll_perf.parquet"
     # TensorRT-LLM WideEP specific
     wideep_moe_compute = "wideep_moe_perf.parquet"
+    # Unified large-EP MoE comm family (SGLang / vLLM / TRT-LLM wideEP; see operations/moe_comm.py)
+    moe_a2a = "moe_a2a_perf.parquet"
+    moe_expert_compute = "moe_expert_compute_perf.parquet"
     # TensorRT-LLM AlltoAll (covers WideEP NVLinkTwoSided + CutlassFusedMoE NVLinkOneSided)
     trtllm_alltoall = "trtllm_alltoall_perf.parquet"
     compute_scale = "computescale_perf.parquet"
@@ -1155,8 +1172,9 @@ class PerfDataFilename(Enum):
     dsv4_hca_context_module = "dsv4_hca_context_module_perf.parquet"
     dsv4_csa_generation_module = "dsv4_csa_generation_module_perf.parquet"
     dsv4_hca_generation_module = "dsv4_hca_generation_module_perf.parquet"
-    # DeepSeek-V4 sparse-op family — all share one column schema and load
-    # through ``operations.dsv4.load_dsv4_sparse_op_data``:
+    # DeepSeek-V4 sparse-op family — all share one column schema, served by
+    # the engine table view (``_dsv4_sparse_kernel_data.*`` /
+    # ``_dsv4_csa_topk_calib_data``):
     #   csa_attn / hca_attn / paged_mqa_logits : FMLA & indexer kernel latency,
     #     keyed ``num_heads -> tp -> past_kv -> isl -> bs`` (kernel-level Δ data,
     #     queried by ``_lookup_sparse_kernel``).
@@ -1169,7 +1187,7 @@ class PerfDataFilename(Enum):
     dsv4_megamoe_module = "dsv4_megamoe_module_perf.parquet"
     # Whole-model forward-pass data (forward_model="fpm"). Paired with a
     # mandatory ``fpm_forward_perf.metadata.json`` sidecar; loaded/validated by
-    # ``operations.fpm_forward``, never through the shared layer.
+    # the Rust core (perf_database/fpm_forward.rs), never through the shared layer.
     fpm_forward = "fpm_forward_perf.parquet"
 
 
@@ -1199,6 +1217,7 @@ class GEMMQuantMode(Enum):
         1, 2, "fp8_ootb", "fp8"
     )  # in future, should deprecate this mode as it's specific for trtllm trt backend
     nvfp4 = QuantMapping(9 / 16, 4, "nvfp4", "fp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
+    nvfp4_wo = QuantMapping(9 / 16, 1, "nvfp4_wo", "bfloat16")  # nvfp4 sw dequant to bf16 (non-Blackwell)
 
 
 class MoEQuantMode(Enum):
@@ -1212,6 +1231,7 @@ class MoEQuantMode(Enum):
     fp8_block = QuantMapping(1, 2, "fp8_block", "fp8")  # specific for trtllm torch ds fp8
     w4afp8 = QuantMapping(0.5, 2, "w4afp8", "fp8")  # specific for trtllm torch ds w4a8
     nvfp4 = QuantMapping(9 / 16, 4, "nvfp4", "fp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
+    nvfp4_wo = QuantMapping(9 / 16, 1, "nvfp4_wo", "bfloat16")  # nvfp4 sw dequant to bf16 (non-Blackwell)
     w4a16_mxfp4 = QuantMapping(0.5, 1, "w4a16_mxfp4", "bfloat16")  # native data format for gpt oss
     w4a8_mxfp4_mxfp8 = QuantMapping(0.5, 2, "w4a8_mxfp4_mxfp8", "fp8")
     # mxfp4 weights, mxfp8 activations (recommended for Blackwell)

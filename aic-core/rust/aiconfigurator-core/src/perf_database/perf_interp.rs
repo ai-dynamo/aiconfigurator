@@ -590,23 +590,27 @@ pub(crate) fn hold_anchor_weights(
     // (distance, coords, leaf), ascending by distance, at most m entries.
     let mut best: Vec<(f64, Vec<u32>, LeafValue)> = Vec::with_capacity(m + 1);
     let mut n_leaves = 0usize;
-    visit_leaves(data, &mut Vec::new(), &mut |path: &[u32], leaf: LeafValue| {
-        n_leaves += 1;
-        let mut dd = 0.0;
-        for (i, &v) in path.iter().enumerate() {
-            let delta = ((v as f64).max(1e-12)).log2() - q_log[i];
-            dd += delta * delta;
-        }
-        let d = dd.sqrt();
-        if best.len() == m {
-            if d >= best[m - 1].0 {
-                return;
+    visit_leaves(
+        data,
+        &mut Vec::new(),
+        &mut |path: &[u32], leaf: LeafValue| {
+            n_leaves += 1;
+            let mut dd = 0.0;
+            for (i, &v) in path.iter().enumerate() {
+                let delta = ((v as f64).max(1e-12)).log2() - q_log[i];
+                dd += delta * delta;
             }
-            best.pop();
-        }
-        let pos = best.partition_point(|e| e.0 <= d);
-        best.insert(pos, (d, path.to_vec(), leaf));
-    });
+            let d = dd.sqrt();
+            if best.len() == m {
+                if d >= best[m - 1].0 {
+                    return;
+                }
+                best.pop();
+            }
+            let pos = best.partition_point(|e| e.0 <= d);
+            best.insert(pos, (d, path.to_vec(), leaf));
+        },
+    );
     if n_leaves == 0 {
         return Err(miss(
             cfg,
@@ -886,14 +890,11 @@ impl SiteIndex {
         // the config opted into coverage fallback: treat the own site as
         // absent for the transfer below.
         let mut excluded_site: Option<&[u32]> = None;
-        let site_ints: Option<Vec<u32>> = site_axes
-            .iter()
-            .map(|&p| as_exact_key(coords[p]))
-            .collect();
+        let site_ints: Option<Vec<u32>> =
+            site_axes.iter().map(|&p| as_exact_key(coords[p])).collect();
         if let Some(key) = &site_ints {
             if let Some(curve) = self.sites.get(key) {
-                let covers =
-                    (curve[0].0 as f64) <= q && q <= (curve[curve.len() - 1].0 as f64);
+                let covers = (curve[0].0 as f64) <= q && q <= (curve[curve.len() - 1].0 as f64);
                 if !(*own_curve_coverage_fallback && !covers) {
                     return self.eval_curve(cfg, curve, key, q, coords);
                 }
@@ -1467,7 +1468,10 @@ mod tests {
     fn short_own_site_table() -> Node {
         let mut t = Node::branch();
         for m in [16u32, 32, 64] {
-            t.insert(&[m, 4096, 1024], 2.0 * gemm_lat(&[m as f64, 4096.0, 1024.0]));
+            t.insert(
+                &[m, 4096, 1024],
+                2.0 * gemm_lat(&[m as f64, 4096.0, 1024.0]),
+            );
         }
         for m in [16u32, 32, 64, 128, 256, 512, 1024] {
             t.insert(&[m, 5120, 2048], gemm_lat(&[m as f64, 5120.0, 2048.0]));
@@ -1537,7 +1541,10 @@ mod tests {
             transform_axis: None,
         };
         // B=3 is uncollected; KV=0 matches the collected sites' zero axis.
-        approx(query(&cfg, &t, &[3.0, 2048.0, 0.0]).unwrap(), lat(&[3.0, 2048.0]));
+        approx(
+            query(&cfg, &t, &[3.0, 2048.0, 0.0]).unwrap(),
+            lat(&[3.0, 2048.0]),
+        );
     }
 
     #[test]
@@ -1697,7 +1704,10 @@ mod tests {
         let sol: &dyn Fn(&[f64]) -> f64 = &lat1;
         let cfg = OpInterpConfig {
             axes: &["size"],
-            resolver: Resolver::Grid { k_tail: 3, nn_leaves: 4 },
+            resolver: Resolver::Grid {
+                k_tail: 3,
+                nn_leaves: 4,
+            },
             sol_fn: sol,
             value_transform: ValueTransform::Raw,
             transform_axis: None,
@@ -1872,7 +1882,6 @@ mod tests {
         1e-6 * c[0] * c[1] * c[2] // decode physics: [n][b][s], linear in both
     }
 
-
     fn gen_split_table() -> Node {
         let mut root = Node::branch();
         for s in [512u32, 1024, 2048] {
@@ -1883,7 +1892,6 @@ mod tests {
         }
         root
     }
-
 
     #[test]
     fn grid_hold_is_continuous_across_outer_midpoint() {
@@ -1900,7 +1908,6 @@ mod tests {
         assert!((lat_193 / lat_192 - sol_step).abs() < 0.01);
     }
 
-
     #[test]
     fn grid_hold_prefers_nearby_saturated_evidence() {
         // A query deep past the short row's end (b=256, s=4096) must not
@@ -1915,7 +1922,6 @@ mod tests {
         assert!(ratio > 0.95, "got {ratio}");
     }
 
-
     /// Perf comparison for the hold selection (review P2): single-pass
     /// best-M buffer vs the former collect-all + full-sort. Not asserted (CI
     /// timing is flaky); run manually:
@@ -1928,7 +1934,9 @@ mod tests {
         let mut t = Node::branch();
         for n in [8u32, 16, 32, 64] {
             for b in [1u32, 2, 4, 8, 16, 32, 64, 128, 256, 512] {
-                for s in [2u32, 8, 32, 128, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536] {
+                for s in [
+                    2u32, 8, 32, 128, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
+                ] {
                     t.insert(&[n, b, s], 1e-6 * (n * b) as f64 * s as f64);
                 }
             }
@@ -1974,7 +1982,6 @@ mod tests {
         println!("hold selection on 1920 leaves: collect+sort {old_ns} ns/query, single-pass {new_ns} ns/query");
     }
 
-
     #[test]
     fn grid_hold_boundary_ties_carry_zero_weight() {
         // Power-of-two grids tie EXACTLY. Under the tapered weights, leaves
@@ -2002,7 +2009,10 @@ mod tests {
 
         let expected = 1.00; // util held from the single live anchor
         let lat = query(&cfg, &t, &[64.0, 32.0, 1.0]).unwrap();
-        assert!((lat - expected).abs() <= 1e-9 * expected, "got {lat}, want {expected}");
+        assert!(
+            (lat - expected).abs() <= 1e-9 * expected,
+            "got {lat}, want {expected}"
+        );
 
         let mut swapped = Node::branch();
         for (c, lat) in lat_of {
@@ -2010,9 +2020,11 @@ mod tests {
         }
         let cfg_swapped = OpInterpConfig::grid(&["num_heads", "seq_len", "batch"], &sol);
         let lat_swapped = query(&cfg_swapped, &swapped, &[64.0, 1.0, 32.0]).unwrap();
-        assert!((lat - lat_swapped).abs() <= 1e-12 * lat, "nesting changed the tie blend");
+        assert!(
+            (lat - lat_swapped).abs() <= 1e-12 * lat,
+            "nesting changed the tie blend"
+        );
     }
-
 
     #[test]
     fn grid_hold_is_continuous_across_rank_swaps() {
@@ -2043,7 +2055,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn grid_hold_is_axis_order_independent() {
         // The hold works on joint coordinates, not the nesting order: the
@@ -2063,5 +2074,4 @@ mod tests {
         let lat_swapped = query(&cfg_swapped, &swapped, &[64.0, 4096.0, 200.0]).unwrap();
         assert!((lat - lat_swapped).abs() <= 1e-12 * lat.abs());
     }
-
 }

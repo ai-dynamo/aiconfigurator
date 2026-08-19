@@ -28,13 +28,11 @@ from aiconfigurator.sdk.config_builders import resolve_nextn_auto
 from aiconfigurator.sdk.errors import (
     ExperimentOutcome,
     NoFeasibleConfigError,
-    UnsupportedWideepConfigError,
     is_expected_cli_error,
 )
-from aiconfigurator.sdk.models import check_is_moe
-from aiconfigurator.sdk.operations.base import resolve_op_data_path
+from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import normalize_speculative_decoding
-from aiconfigurator.sdk.task_v2 import Task, _lookup_num_gpus_per_node
+from aiconfigurator.sdk.task_v2 import Task, _lookup_num_gpus_per_node, _warn_large_ep_flag
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -149,12 +147,11 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
     )
     common_parser.add_argument(
         "--engine-step-backend",
-        choices=["python", "rust"],
+        choices=["rust"],
         default=None,
-        help="Engine-step latency backend. By default the compiled Rust engine answers "
-        "(energy crosses the FFI, so power-carrying databases run on the compiled "
-        "engine too); use 'python' as the escape hatch or 'rust' to force the "
-        "compiled engine.",
+        help="Engine-step latency backend. The compiled Rust engine is the only step "
+        "executor ('rust'); the deprecated 'python' no-op was removed after its "
+        "one-release window.",
     )
     common_parser.add_argument(
         "--forward-model",
@@ -421,6 +418,33 @@ def _add_default_mode_arguments(parser):
         "(vLLM mm_encoder_tp_mode='data' / SGLang --mm-enable-dp-encoder semantics).",
     )
     parser.add_argument(
+        "--enable-epd",
+        action="store_true",
+        help="EPD (vision-language models): run the vision encoder on dedicated encode workers "
+        "instead of colocated. Turns the disagg experiment into E+P+D and the agg experiment "
+        "into E+agg; requires an image workload (--image-height/--image-width).",
+    )
+    parser.add_argument(
+        "--encoder-tp",
+        type=int,
+        nargs="+",
+        default=None,
+        help="EPD encode-worker TP sizes to sweep (requires --enable-epd). Default: 1 2 4 8.",
+    )
+    parser.add_argument(
+        "--encoder-system",
+        type=str,
+        default=None,
+        help="System (GPU type) for EPD encode workers (requires --enable-epd). "
+        "Defaults to the prefill/agg side's system.",
+    )
+    parser.add_argument(
+        "--encoder-latency-correction",
+        type=float,
+        default=1.0,
+        help="Latency correction scale for EPD encode workers (requires --enable-epd). Default: 1.0.",
+    )
+    parser.add_argument(
         "--ttft",
         type=float,
         default=2000.0,
@@ -508,16 +532,16 @@ def _add_default_mode_arguments(parser):
         "--enable-wideep",
         action="store_true",
         default=False,
-        help="Enable Wide Expert Parallelism (WideEP) for MoE models. "
-        "When set, MoE models use EP-only parallelism with deepep_moe backend. "
-        "Applies to both DeepSeek and Qwen3-235B on SGLang.",
+        help="Deprecated and ignored: large-EP is explored automatically from data coverage. "
+        "Restrict with *_moe_ep_candidates in an exp YAML.",
     )
     parser.add_argument(
         "--moe-backend",
         type=str,
         choices=["deepep_moe", "megamoe"],
         default=None,
-        help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell.",
+        help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell. "
+        "'deepep_moe' is deprecated and ignored (large-EP is explored automatically from data coverage).",
     )
 
 
@@ -682,14 +706,16 @@ def _add_recommend_mode_arguments(parser):
         "--enable-wideep",
         action="store_true",
         default=False,
-        help="Enable Wide Expert Parallelism (WideEP) for MoE models.",
+        help="Deprecated and ignored: large-EP is explored automatically from data coverage. "
+        "Restrict with *_moe_ep_candidates in an exp YAML.",
     )
     parser.add_argument(
         "--moe-backend",
         type=str,
         choices=["deepep_moe", "megamoe"],
         default=None,
-        help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell.",
+        help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell. "
+        "'deepep_moe' is deprecated and ignored (large-EP is explored automatically from data coverage).",
     )
 
 
@@ -821,6 +847,30 @@ def _add_estimate_mode_arguments(parser):
         action="store_true",
         help="Model the vision encoder as TP-sharded instead of the default data-parallel "
         "(vLLM mm_encoder_tp_mode='data' / SGLang --mm-enable-dp-encoder semantics).",
+    )
+    parser.add_argument(
+        "--enable-epd",
+        action="store_true",
+        help="EPD single point: overlay a fixed encode-worker pool on the agg/disagg point; "
+        "the LM side becomes language-only. Supports --estimate-mode agg/disagg.",
+    )
+    parser.add_argument(
+        "--encoder-tp",
+        type=int,
+        default=None,
+        help="EPD encode-worker TP (required with --enable-epd).",
+    )
+    parser.add_argument(
+        "--encoder-batch-size",
+        type=int,
+        default=None,
+        help="EPD encode-worker batch size. Default: 1.",
+    )
+    parser.add_argument(
+        "--encoder-num-workers",
+        type=int,
+        default=None,
+        help="EPD encode workers in the pool. Default: 1.",
     )
     parser.add_argument(
         "--batch-size",
@@ -1351,65 +1401,11 @@ def _get_system_data_root(system_name: str) -> str | None:
     return None
 
 
-def _get_backend_data_path(system_name: str, backend_name: str, backend_version: str, op_filename: str) -> str | None:
-    """Resolve one perf-data file's on-disk path for (system, backend, version),
-    across both the family-first and legacy tree layouts (see resolve_op_data_path)."""
-    system_data_root = _get_system_data_root(system_name)
-    if system_data_root is None:
-        return None
-    return resolve_op_data_path(system_data_root, backend_name, backend_version, op_filename)
-
-
-_SGLANG_DEEPEP_REQUIRED_FILES = (
-    common.PerfDataFilename.wideep_deepep_normal.value,
-    common.PerfDataFilename.wideep_deepep_ll.value,
-)
-
-
 def _database_mode_requires_declared_perf_database(database_mode: str | None) -> bool:
     return (database_mode or "").upper() in {
         common.DatabaseMode.SILICON.name,
         common.DatabaseMode.HYBRID.name,
     }
-
-
-def _sglang_deepep_perf_data_skip_reason(
-    system_name: str,
-    decode_system_name: str | None,
-    backend_version: str | None,
-) -> str | None:
-    """Return a concise skip reason when optional SGLang DeepEP data is absent."""
-    missing_paths: list[str] = []
-    missing_versions: list[str] = []
-
-    systems_to_check = [system_name]
-    if decode_system_name and decode_system_name != system_name:
-        systems_to_check.append(decode_system_name)
-
-    for system_to_check in systems_to_check:
-        resolved_version = backend_version or perf_database.get_latest_database_version(
-            system=system_to_check,
-            backend=common.BackendName.sglang.value,
-        )
-        if resolved_version is None:
-            missing_versions.append(f"{system_to_check}/{common.BackendName.sglang.value}")
-            continue
-
-        for filename in _SGLANG_DEEPEP_REQUIRED_FILES:
-            resolved_path = _get_backend_data_path(
-                system_to_check, common.BackendName.sglang.value, resolved_version, filename
-            )
-            if resolved_path is None or not os.path.isfile(resolved_path):
-                missing_paths.append(
-                    resolved_path
-                    or f"{system_to_check}/{common.BackendName.sglang.value}/{resolved_version}/{filename}"
-                )
-
-    if missing_versions:
-        return "no database version available for " + ", ".join(missing_versions)
-    if missing_paths:
-        return "missing required DeepEP perf data: " + ", ".join(missing_paths)
-    return None
 
 
 def _ensure_backend_version_available(
@@ -1500,6 +1496,10 @@ def build_default_tasks(
     image_width: int = 0,
     num_images: int = 1,
     enable_encoder_dp: bool = True,
+    enable_epd: bool = False,
+    encoder_tp: list[int] | None = None,
+    encoder_system: str | None = None,
+    encoder_latency_correction: float = 1.0,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -1542,13 +1542,17 @@ def build_default_tasks(
             (0 <= nextn_accepted <= nextn). Required when the draft depth
             resolves to > 0; never inferred.
         enable_chunked_prefill: Whether to enable chunked prefill for finer context token sweep.
-        enable_wideep: Whether to enable Wide Expert Parallelism (WideEP) for MoE models.
-        moe_backend: Explicit SGLang MoE backend override.
-        engine_step_backend: Engine-step latency backend ("python" or "rust");
-            unset defaults to the compiled Rust engine (SDK callers passing
-            synthetic database objects the compiled engine cannot re-load
-            from disk still delegate to the Python step).
-        forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None keeps the default.
+        enable_wideep: DEPRECATED and ignored (warns once): large-EP is explored
+            automatically from data coverage inside the single MoE task per
+            serving mode. Restrict with *_moe_ep_candidates in an exp YAML.
+        moe_backend: Explicit SGLang MoE backend override ('deepep_moe' is
+            deprecated and ignored; 'megamoe' is a real kernel selection).
+        engine_step_backend: Engine-step latency backend. The compiled Rust
+            engine is the only step executor; "rust" is the only accepted
+            value (the deprecated "python" no-op was removed).
+        forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None
+            keeps the default. Both evaluate on the compiled engine ("fpm"
+            through its native FpmForward operation).
         serving_mode: Serving modes to build. ``"auto"`` builds agg and disagg,
             ``"all"`` also includes AFD, and an explicit mode builds only that mode.
         afd_max_a_batch_size: Maximum attention batch size considered by AFD.
@@ -1558,6 +1562,16 @@ def build_default_tasks(
     Returns:
         Task objects keyed by serving mode and, when requested, backend.
     """
+    engine_step_backend = validate_engine_step_backend(engine_step_backend)
+
+    # Deprecated large-EP knobs: warn once, then ignore (the flag is NOT
+    # forwarded to the tasks; an explicit moe_backend value still passes
+    # through unchanged — 'deepep_moe' is inert in modeling, 'megamoe' real).
+    if enable_wideep:
+        _warn_large_ep_flag("enable_wideep")
+    if moe_backend == "deepep_moe":
+        _warn_large_ep_flag("moe_backend=deepep_moe")
+
     decode_system = decode_system or system
     if serving_mode not in ("auto", "all", "agg", "disagg", "afd"):
         raise ValueError(f"Invalid serving_mode: {serving_mode!r}. Use 'auto', 'all', 'agg', 'disagg', or 'afd'.")
@@ -1567,6 +1581,8 @@ def build_default_tasks(
         modes_to_sweep = {"agg", "disagg", "afd"}
     else:
         modes_to_sweep = {serving_mode}
+    if enable_epd and not (modes_to_sweep & {"agg", "disagg"}):
+        raise ValueError("enable_epd requires an agg or disagg experiment; 'afd' does not support EPD.")
     needs_disagg = "disagg" in modes_to_sweep
 
     backends_to_sweep = [b.value for b in common.BackendName] if backend == "auto" else [backend]
@@ -1697,10 +1713,12 @@ def build_default_tasks(
         global_kwargs["enable_encoder_dp"] = False
 
     def _sglang_moe_backend_override(backend_name: str) -> str | None:
+        # An explicit --moe-backend applies to SGLang tasks only (matches the
+        # legacy behavior); the deprecated enable_wideep flag no longer spells
+        # deepep_moe here — large EP is coverage-driven inside the one task.
         if backend_name != common.BackendName.sglang.value:
             return None
-        # Auto-set the DeepEP MoE runner for SGLang WideEP unless explicitly overridden.
-        return moe_backend or ("deepep_moe" if enable_wideep else None)
+        return moe_backend
 
     def _make_agg(backend_name: str, moe_backend_value: str | None) -> Task:
         return Task(
@@ -1709,9 +1727,12 @@ def build_default_tasks(
             system_name=system,
             backend_name=backend_name,
             backend_version=backend_version,
-            enable_wideep=enable_wideep,
             enable_chunked_prefill=enable_chunked_prefill,
             moe_backend=moe_backend_value,
+            enable_epd=enable_epd,
+            encoder_tp_candidates=encoder_tp,
+            encoder_system_name=encoder_system,
+            encoder_latency_correction=encoder_latency_correction,
             **global_kwargs,
         )
 
@@ -1726,16 +1747,21 @@ def build_default_tasks(
             decode_backend_name=backend_name,
             prefill_backend_version=backend_version,
             decode_backend_version=backend_version,
-            prefill_enable_wideep=enable_wideep,
-            decode_enable_wideep=enable_wideep,
             prefill_enable_chunked_prefill=enable_chunked_prefill,
             moe_backend=moe_backend_value,
+            enable_epd=enable_epd,
+            encoder_tp_candidates=encoder_tp,
+            encoder_system_name=encoder_system,
+            encoder_latency_correction=encoder_latency_correction,
             **global_kwargs,
         )
 
-    tasks: dict[str, Any] = {}
-    is_moe_model = check_is_moe(model_path)
-
+    # ONE task per (model, serving mode): the flag-driven wideep/non-wideep
+    # variants and the flag-conditioned extra SGLang DeepEP sweeps are gone.
+    # Each MoE task auto-explores the fused AND (when perf data covers the
+    # model shape) the multi-node large-EP regimes per parallel tuple, so the
+    # frontier is the union of what the removed variants produced.
+    tasks: dict[str, Task] = {}
     afd_feasible = False
     if "afd" in modes_to_sweep:
         afd_gpus_per_node = _lookup_num_gpus_per_node(system)
@@ -1758,19 +1784,6 @@ def build_default_tasks(
         if "agg" in modes_to_sweep:
             exp_name = f"agg_{backend_name}" if backend == "auto" else "agg"
             tasks[exp_name] = _make_agg(backend_name, backend_moe)
-
-            if backend_name == "sglang" and not enable_wideep and moe_backend is None and is_moe_model:
-                skip_reason = _sglang_deepep_perf_data_skip_reason(system, None, backend_version)
-                if skip_reason:
-                    logger.info("Skipping SGLang DeepEP agg sweep: %s", skip_reason)
-                else:
-                    try:
-                        deepep_task = _make_agg(backend_name, "deepep_moe")
-                    except UnsupportedWideepConfigError as exc:
-                        logger.info("Skipping SGLang DeepEP agg sweep: %s", exc)
-                    else:
-                        deepep_name = f"agg_{backend_name}_deepep" if backend == "auto" else "agg_deepep"
-                        tasks[deepep_name] = deepep_task
 
         if "afd" in modes_to_sweep and afd_feasible:
             try:
@@ -1804,19 +1817,6 @@ def build_default_tasks(
 
         exp_name = f"disagg_{backend_name}" if backend == "auto" else "disagg"
         tasks[exp_name] = _make_disagg(backend_name, backend_moe)
-
-        if backend_name == "sglang" and not enable_wideep and moe_backend is None and is_moe_model:
-            skip_reason = _sglang_deepep_perf_data_skip_reason(system, decode_system, backend_version)
-            if skip_reason:
-                logger.info("Skipping SGLang DeepEP disagg sweep: %s", skip_reason)
-            else:
-                try:
-                    deepep_disagg_task = _make_disagg(backend_name, "deepep_moe")
-                except UnsupportedWideepConfigError as exc:
-                    logger.info("Skipping SGLang DeepEP disagg sweep: %s", exc)
-                else:
-                    deepep_name = f"disagg_{backend_name}_deepep" if backend == "auto" else "disagg_deepep"
-                    tasks[deepep_name] = deepep_disagg_task
 
     if not tasks:
         logger.error("No task configs could be built for serving_mode=%s.", serving_mode)
@@ -2432,9 +2432,135 @@ def _print_per_ops_latency(per_ops_data: dict) -> None:
             _print_per_ops_section("AFD Transfer (per layer, a2f + f2a)", directional)
 
 
+def _run_estimate_epd(args, estimate_mode: str) -> None:
+    """EPD single-point estimate via Task.run_single_* (dedicated encode pool)."""
+    from aiconfigurator.cli.api import apply_row_power_coverage_gate
+    from aiconfigurator.sdk.task_v2 import _QUANT_ENUM_TABLES, Task
+
+    if estimate_mode not in ("agg", "disagg"):
+        raise SystemExit("--enable-epd supports --estimate-mode agg or disagg only.")
+    workload = dict(
+        enable_epd=True,
+        backend_version=args.backend_version,
+        database_mode=args.database_mode,
+        transfer_policy=args.transfer_policy,
+        isl=args.isl,
+        osl=args.osl,
+        prefix=args.prefix,
+        image_height=args.image_height,
+        image_width=args.image_width,
+        num_images_per_request=args.num_images,
+        free_gpu_memory_fraction=args.free_gpu_memory_fraction,
+        max_seq_len=args.max_seq_len,
+        engine_step_backend=args.engine_step_backend,
+        forward_model=args.forward_model,
+        nextn=args.nextn,
+        nextn_accepted=args.nextn_accepted,
+    )
+    workload.update({name: getattr(args, name) for name in _QUANT_ENUM_TABLES if getattr(args, name, None)})
+    encoder_kwargs = dict(
+        encoder_tp=args.encoder_tp,
+        encoder_batch_size=1 if args.encoder_batch_size is None else args.encoder_batch_size,
+        encoder_num_workers=1 if args.encoder_num_workers is None else args.encoder_num_workers,
+    )
+    if estimate_mode == "agg":
+        task = Task.from_cli(
+            serving_mode="agg",
+            model_path=args.model_path,
+            system_name=args.system,
+            backend_name=args.backend,
+            **workload,
+        )
+        row = task.run_single_agg(
+            tp=args.tp_size,
+            pp=args.pp_size,
+            dp=args.attention_dp_size,
+            moe_tp=args.moe_tp_size,
+            moe_ep=args.moe_ep_size,
+            batch_size=args.batch_size,
+            ctx_tokens=args.ctx_tokens,
+            **encoder_kwargs,
+        )
+    else:
+        # Required disagg params and shared-arg fallbacks mirror cli_estimate.
+        for name in ("prefill_batch_size", "prefill_num_workers", "decode_batch_size", "decode_num_workers"):
+            if getattr(args, name) is None:
+                raise SystemExit(f"{name} is required for disagg mode.")
+
+        def _role(value, shared):
+            return value if value is not None else shared
+
+        # Shared quant/version args map to the per-role fields: disagg Tasks
+        # reject top-level worker fields and silently ignore backend_version.
+        role_shared = {"backend_version": workload.pop("backend_version", None)}
+        for name in [k for k in workload if k.endswith("quant_mode")]:
+            role_shared[name] = workload.pop(name)
+        task = Task.from_cli(
+            serving_mode="disagg",
+            prefill_model_path=args.model_path,
+            decode_model_path=args.model_path,
+            prefill_system_name=args.system,
+            decode_system_name=args.decode_system or args.system,
+            prefill_backend_name=args.backend,
+            decode_backend_name=args.backend,
+            **{f"prefill_{k}": v for k, v in role_shared.items()},
+            **{f"decode_{k}": v for k, v in role_shared.items()},
+            **workload,
+        )
+        row = task.run_single_disagg(
+            prefill_tp=_role(args.prefill_tp_size, args.tp_size),
+            prefill_pp=_role(args.prefill_pp_size, args.pp_size),
+            prefill_dp=_role(args.prefill_attention_dp_size, args.attention_dp_size),
+            prefill_moe_tp=_role(args.prefill_moe_tp_size, args.moe_tp_size),
+            prefill_moe_ep=_role(args.prefill_moe_ep_size, args.moe_ep_size),
+            prefill_batch_size=args.prefill_batch_size,
+            prefill_num_workers=args.prefill_num_workers,
+            decode_tp=_role(args.decode_tp_size, args.tp_size),
+            decode_pp=_role(args.decode_pp_size, args.pp_size),
+            decode_dp=_role(args.decode_attention_dp_size, args.attention_dp_size),
+            decode_moe_tp=_role(args.decode_moe_tp_size, args.moe_tp_size),
+            decode_moe_ep=_role(args.decode_moe_ep_size, args.moe_ep_size),
+            decode_batch_size=args.decode_batch_size,
+            decode_num_workers=args.decode_num_workers,
+            **encoder_kwargs,
+        )
+    row = apply_row_power_coverage_gate(row)
+    logger.info("EPD %s single-point estimate:", estimate_mode)
+    keys = (
+        "ttft",
+        "tpot",
+        "encoder_latency",
+        "request_latency",
+        "seq/s",
+        "tokens/s/gpu",
+        "num_total_gpus",
+        "(a)workers",
+        "(p)workers",
+        "(d)workers",
+        "(e)workers",
+        "(e)tp",
+        "(e)bs",
+        "(e)memory",
+        "power_w",
+    )
+    for key in keys:
+        if key not in row:
+            continue
+        value = row[key]
+        if key == "power_w" and value is None:
+            logger.info("  %-16s unavailable (%.0f%% power-data coverage)", key, row.get("power_coverage", 0.0) * 100)
+            continue
+        logger.info("  %-16s %s", key, f"{value:.3f}" if isinstance(value, float) else value)
+
+
 def _run_estimate_mode(args):
     """Run the estimate mode to predict TTFT, TPOT, and power for a single config."""
     from aiconfigurator.cli.api import cli_estimate
+
+    if not args.enable_epd and any(
+        v is not None for v in (args.encoder_tp, args.encoder_batch_size, args.encoder_num_workers)
+    ):
+        raise SystemExit("--encoder-tp/--encoder-batch-size/--encoder-num-workers require --enable-epd.")
 
     estimate_mode = args.estimate_mode
 
@@ -2449,6 +2575,10 @@ def _run_estimate_mode(args):
     )
 
     _resolve_and_validate_nextn(args)
+
+    if args.enable_epd:
+        _run_estimate_epd(args, estimate_mode)
+        return
 
     # Resolve --detail before running the estimate so time detail can compare
     # against a second SOL-mode result.
@@ -2884,6 +3014,11 @@ def main(args):
             or getattr(args, "target_concurrency", None) is not None
         )
         if getattr(args, "total_gpus", None) is None and has_load_target:
+            if args.enable_epd or args.encoder_tp or args.encoder_system or args.encoder_latency_correction != 1.0:
+                raise SystemExit(
+                    "--enable-epd/encoder_* flags are not supported by the auto-recommend routing "
+                    "(load target without --total-gpus); pass --total-gpus to run the EPD sweep."
+                )
             _run_recommend(args)
             return
         if has_load_target:
@@ -2929,6 +3064,10 @@ def main(args):
             image_width=args.image_width,
             num_images=args.num_images,
             enable_encoder_dp=not args.disable_encoder_dp,
+            enable_epd=args.enable_epd,
+            encoder_tp=args.encoder_tp,
+            encoder_system=args.encoder_system,
+            encoder_latency_correction=args.encoder_latency_correction,
             ttft=args.ttft,
             tpot=args.tpot,
             request_latency=args.request_latency,

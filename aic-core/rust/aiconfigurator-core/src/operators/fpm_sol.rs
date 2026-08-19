@@ -189,13 +189,7 @@ fn elementwise_sol(op: &ElementwiseOp, spec: &SystemSpec, x: f64) -> f64 {
 /// attention.py:319-341 — the prefix-aware context SOL (the crate's
 /// `context_attention_sol_ms` is the prefix=0 specialization used by the
 /// silicon interp anchors, so it cannot be reused here).
-fn context_sol_one(
-    op: &ContextAttentionOp,
-    spec: &SystemSpec,
-    b: f64,
-    s: f64,
-    p: f64,
-) -> f64 {
+fn context_sol_one(op: &ContextAttentionOp, spec: &SystemSpec, b: f64, s: f64, p: f64) -> f64 {
     let (n, n_kv, h, w) = (
         op.n as f64,
         op.n_kv as f64,
@@ -252,19 +246,18 @@ fn context_attention_sol(
 
 /// attention.py:710-733: generation SOL. No extras, no 5-sample smoothing
 /// (both are silicon-only), no prefix.
-fn generation_attention_sol(
-    op: &GenerationAttentionOp,
-    spec: &SystemSpec,
-    b: f64,
-    s: f64,
-) -> f64 {
+fn generation_attention_sol(op: &GenerationAttentionOp, spec: &SystemSpec, b: f64, s: f64) -> f64 {
     let (n, n_kv, h, w) = (
         op.n as f64,
         op.n_kv as f64,
         op.head_size as f64,
         op.window_size as f64,
     );
-    let kv_len = if op.window_size > 0 { (s - 1.0).min(w) } else { s - 1.0 };
+    let kv_len = if op.window_size > 0 {
+        (s - 1.0).min(w)
+    } else {
+        s - 1.0
+    };
     // fp8 KV -> fp8 compute; everything else (incl. int8 KV) -> bf16 compute.
     let compute = if op.kv_cache_dtype == crate::common::enums::KvCacheQuantMode::Fp8 {
         2.0
@@ -289,7 +282,10 @@ fn moe_sol(op: &MoeOp, spec: &SystemSpec, x: f64) -> f64 {
     let (ep, tp) = (op.moe_ep_size.max(1) as f64, op.moe_tp_size.max(1) as f64);
     let total_tokens = x * dp * op.topk as f64;
     // ops = TT*H*I*G*2 // ep // tp
-    let ops = floor_div(floor_div(total_tokens * h * inter * num_gemms * 2.0, ep), tp);
+    let ops = floor_div(
+        floor_div(total_tokens * h * inter * num_gemms * 2.0, ep),
+        tp,
+    );
     // mem = m * ( TT//ep*H*2 + TT//ep*I*G//tp + H*I*G//tp * min(E//ep, TT//ep) )
     let tt_ep = floor_div(total_tokens, ep);
     let mem = op.quant_mode.mapping().memory
@@ -381,6 +377,13 @@ fn moe_dispatch_sol(op: &MoEDispatchOp, spec: &SystemSpec, x: f64) -> Result<f64
     let half_bytes = 2.0; // CommQuantMode::Half.memory — MoEDispatch always passes half
 
     let comm = match op.flavor {
+        DispatchFlavor::RetiredDeepEp => {
+            return Err(AicError::InvalidEngineConfig(format!(
+                "MoEDispatch '{}' (moe_backend='deepep_moe') has no native SOL \
+                 (retired with AIC-1601; large-EP comm is modeled by MoeAllToAll)",
+                op.name
+            )))
+        }
         DispatchFlavor::CustomAllReduce => match op.backend {
             // vllm (moe.py:1222-1239): additive.
             BackendKind::Vllm => {
@@ -434,14 +437,6 @@ fn moe_dispatch_sol(op: &MoEDispatchOp, spec: &SystemSpec, x: f64) -> Result<f64
                 }
             }
         },
-        // Python SOL raises NotImplementedError for both DeepEP tables
-        // (moe.py:986-987, :1031-1032) — no closed form exists.
-        DispatchFlavor::DeepEpNormal | DispatchFlavor::DeepEpLowLatency => {
-            return Err(AicError::UnsupportedModel(format!(
-                "WideEP deepep operation's sol is not implemented (op {})",
-                op.name
-            )));
-        }
         // trtllm SM100 (moe.py:1095-1193).
         DispatchFlavor::TrtllmAlltoall => {
             let is_nvl72 = spec.node.num_gpus_per_node >= 72;
@@ -449,16 +444,20 @@ fn moe_dispatch_sol(op: &MoEDispatchOp, spec: &SystemSpec, x: f64) -> Result<f64
             if enable_alltoall {
                 // trtllm_alltoall SOL (moe.py:2068-2107): dispatch moves the
                 // moe-quant-compressed activations, combine moves bf16.
-                let node_num = if op.moe_ep_size < 4 { 1 } else { op.moe_ep_size / 4 };
+                let node_num = if op.moe_ep_size < 4 {
+                    1
+                } else {
+                    op.moe_ep_size / 4
+                };
                 let bw = if node_num > 1 {
                     spec.node.inter_node_bw
                 } else {
                     spec.node.intra_node_bw
                 };
-                let remote_ranks = op
-                    .topk
-                    .min(op.num_experts)
-                    .min(op.moe_ep_size.saturating_sub(1)) as f64;
+                let remote_ranks =
+                    op.topk
+                        .min(op.num_experts)
+                        .min(op.moe_ep_size.saturating_sub(1)) as f64;
                 let bytes_per_elem = if pre {
                     op.moe_quant.mapping().memory
                 } else {
@@ -513,8 +512,8 @@ mod tests {
     }
 
     fn db() -> PerfDatabase {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../src/aiconfigurator_core/systems");
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src/aiconfigurator_core/systems");
         PerfDatabase::load(&root, "b200_sxm", "vllm", "0.19.0").expect("db")
     }
 
@@ -703,7 +702,10 @@ mod tests {
             2.0 * size * 2.0 / 4.0 * 3.0 / bw * 1000.0,
         );
         // tp==1 -> 0
-        let car1 = CustomAllReduceOp { tp_size: 1, ..car.clone() };
+        let car1 = CustomAllReduceOp {
+            tp_size: 1,
+            ..car.clone()
+        };
         assert_eq!(custom_allreduce_op_sol(&car1, &s, 8192.0), 0.0);
 
         // P2P: always inter_node_bw, no latency constant
@@ -766,12 +768,6 @@ mod tests {
             moe_dispatch_sol(&op, &s, 8192.0).unwrap(),
             2.0 * volume * 2.0 / 4.0 * 3.0 / bw * 1000.0,
         );
-        // deepep flavors error like Python's NotImplementedError
-        let deepep = MoEDispatchOp {
-            flavor: crate::operators::moe_dispatch::DispatchFlavor::DeepEpNormal,
-            ..op
-        };
-        assert!(moe_dispatch_sol(&deepep, &s, 8192.0).is_err());
     }
 
     #[test]

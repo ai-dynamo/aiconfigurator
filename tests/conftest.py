@@ -25,15 +25,10 @@ from aiconfigurator.cli.main import configure_parser as configure_cli_parser
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--aic-engine-step-backend",
-        choices=["python", "rust"],
+        choices=["rust"],
         default=None,
-        help="Run Python tests with a selected static engine-step backend.",
-    )
-    parser.addoption(
-        "--aic-rust-core-autobuild",
-        action="store_true",
-        default=False,
-        help="Build the Rust core shared library on demand when --aic-engine-step-backend=rust is used.",
+        help="Pin the engine-step backend env for the test run. 'rust' is the only "
+        "value (the compiled engine is the only step executor).",
     )
 
 
@@ -41,8 +36,6 @@ def pytest_configure(config: pytest.Config) -> None:
     engine_step_backend = config.getoption("--aic-engine-step-backend")
     if engine_step_backend:
         os.environ["AICONFIGURATOR_ENGINE_STEP_BACKEND"] = engine_step_backend
-    if config.getoption("--aic-rust-core-autobuild"):
-        os.environ["AICONFIGURATOR_RUST_CORE_AUTOBUILD"] = "1"
 
 
 @pytest.fixture

@@ -29,7 +29,7 @@
 //! `uv run maturin develop -m aic-core/rust/aiconfigurator-core/Cargo.toml --release`:
 //! ```text
 //! AIC_REQUIRE_EMBEDDED_ROUND_TRIP=1 \
-//!   PYTHONPATH="$PWD/aic-core/src:$PWD/.venv/lib/python3.12/site-packages:$PWD/src" \
+//!   PYTHONPATH="$PWD/aic-core/src:$PWD/.venv/lib/python3.13/site-packages:$PWD/src" \
 //!   cargo test -p aiconfigurator-core --test memory_round_trip -- --nocapture
 //! ```
 //!
@@ -102,7 +102,8 @@ fn request(tolerance_fraction: Option<f64>) -> KvCacheEstimateRequest {
                 kv_cache_dtype: None,
             },
             speculative: None,
-            perf_db_sources: BTreeMap::new(),
+            enable_shared_layer: None,
+            strict_provenance: false,
             database_mode: Default::default(),
             transfer_policy: None,
             extra: BTreeMap::new(),

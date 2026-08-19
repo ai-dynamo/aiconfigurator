@@ -185,9 +185,9 @@
     "deepseek-v32-b200-vllm-019-empirical": {
       "agg": {
         "values": {
-          "agg_request": 402.2583800204085,
-          "agg_tpot": 163.46276706842752,
-          "agg_ttft": 238.79561295198098
+          "agg_request": 402.25838002040837,
+          "agg_tpot": 163.46276706842747,
+          "agg_ttft": 238.7956129519809
         }
       },
       "disagg": {
@@ -199,7 +199,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 163.46276706842752
+          "mixed_step": 163.46276706842747
         }
       },
       "static": {
@@ -327,28 +327,28 @@
     "glm52-b200-sglang-0514-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 194.3770274667802,
-          "agg_tpot": 65.89051778534922,
-          "agg_ttft": 128.48650968143096
+          "agg_request": 192.29190178318646,
+          "agg_tpot": 65.18369551972422,
+          "agg_ttft": 127.10820626346224
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 133.37,
-          "disagg_tpot": 8.252,
-          "disagg_ttft": 125.118
+          "disagg_request": 131.946,
+          "disagg_tpot": 8.363,
+          "disagg_ttft": 123.583
         }
       },
       "mixed": {
         "values": {
-          "mixed_step": 65.90014960181429
+          "mixed_step": 65.24439354712678
         }
       },
       "static": {
         "values": {
-          "static_ctx": 63.191,
-          "static_gen": 6.424,
-          "static_total": 69.61500000000001
+          "static_ctx": 62.416,
+          "static_gen": 6.544,
+          "static_total": 68.96
         }
       }
     },
@@ -432,9 +432,9 @@
     "kimi-k25-b200-vllm-019-empirical": {
       "agg": {
         "values": {
-          "agg_request": 396.3907052607567,
-          "agg_tpot": 160.70150835800317,
-          "agg_ttft": 235.68919690275357
+          "agg_request": 396.3907052607566,
+          "agg_tpot": 160.7015083580031,
+          "agg_ttft": 235.6891969027535
         }
       },
       "disagg": {
@@ -446,7 +446,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 160.70150835800317
+          "mixed_step": 160.7015083580031
         }
       },
       "static": {
@@ -872,37 +872,37 @@
     "llama4-scout-b200-vllm-019-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 86.85553858397297,
-          "agg_tpot": 20.543782863046108,
-          "agg_ttft": 66.31175572092687
+          "agg_request": 87.79945956540416,
+          "agg_tpot": 20.9879809719549,
+          "agg_ttft": 66.81147859344927
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 41.778,
-          "disagg_tpot": 2.14,
-          "disagg_ttft": 39.638
+          "disagg_request": 42.481,
+          "disagg_tpot": 2.262,
+          "disagg_ttft": 40.219
         }
       },
       "mixed": {
         "values": {
-          "mixed_step": 20.543782863046108
+          "mixed_step": 20.9879809719549
         }
       },
       "static": {
         "values": {
-          "static_ctx": 20.019,
-          "static_gen": 1.962,
-          "static_total": 21.980999999999998
+          "static_ctx": 20.313,
+          "static_gen": 2.061,
+          "static_total": 22.374
         }
       }
     },
     "llama4-scout-gb200-vllm-024-tiebreak-disagg": {
       "disagg": {
         "values": {
-          "disagg_request": 53.056,
-          "disagg_tpot": 6.351,
-          "disagg_ttft": 46.705
+          "disagg_request": 53.72,
+          "disagg_tpot": 6.466,
+          "disagg_ttft": 47.254
         }
       }
     },
@@ -965,9 +965,9 @@
     "minimax-m25-b200-vllm-019-empirical": {
       "agg": {
         "values": {
-          "agg_request": 129.33261794214428,
-          "agg_tpot": 34.60358491395025,
-          "agg_ttft": 94.72903302819404
+          "agg_request": 129.33261794214425,
+          "agg_tpot": 34.603584913950236,
+          "agg_ttft": 94.72903302819401
         }
       },
       "disagg": {
@@ -979,7 +979,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 34.60358491395025
+          "mixed_step": 34.603584913950236
         }
       },
       "static": {
@@ -1132,30 +1132,42 @@
     },
     "minimax-m25-nvfp4-h200-vllm-019-hybrid-balanced-miss": {
       "agg": {
-        "error": "MissingSystemFlopsError"
+        "error": "EmpiricalNotImplementedError"
       },
       "disagg": {
-        "error": "MissingSystemFlopsError"
+        "error": "EmpiricalNotImplementedError"
       },
       "mixed": {
         "error": "MissingSystemFlopsError"
       },
       "static": {
-        "error": "MissingSystemFlopsError"
+        "error": "EmpiricalNotImplementedError"
       }
     },
     "minimax-m25-nvfp4-h200-vllm-019-hybrid-xprofile": {
       "agg": {
-        "error": "MissingSystemFlopsError"
+        "values": {
+          "agg_request": 210.6834999458623,
+          "agg_tpot": 72.8863529156999,
+          "agg_ttft": 137.7971470301624
+        }
       },
       "disagg": {
-        "error": "MissingSystemFlopsError"
+        "values": {
+          "disagg_request": 152.294,
+          "disagg_tpot": 9.466,
+          "disagg_ttft": 142.828
+        }
       },
       "mixed": {
         "error": "MissingSystemFlopsError"
       },
       "static": {
-        "error": "MissingSystemFlopsError"
+        "values": {
+          "static_ctx": 72.135,
+          "static_gen": 6.818,
+          "static_total": 78.953
+        }
       }
     },
     "minimax-m27-b200-vllm-019-isl1024-osl2": {
@@ -1189,28 +1201,28 @@
     "minimax-m3-b200-sglang-0514-hybrid-xop": {
       "agg": {
         "values": {
-          "agg_request": 166.5146849856586,
-          "agg_tpot": 56.445655927341896,
-          "agg_ttft": 110.0690290583167
+          "agg_request": 121.80698536871574,
+          "agg_tpot": 41.2905035148189,
+          "agg_ttft": 80.51648185389685
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 118.749,
-          "disagg_tpot": 10.627,
-          "disagg_ttft": 108.122
+          "disagg_request": 85.485,
+          "disagg_tpot": 7.295,
+          "disagg_ttft": 78.19
         }
       },
       "mixed": {
         "values": {
-          "mixed_step": 56.31369489762832
+          "mixed_step": 41.176839515364186
         }
       },
       "static": {
         "values": {
-          "static_ctx": 54.608,
-          "static_gen": 7.84,
-          "static_total": 62.44799999999999
+          "static_ctx": 39.49,
+          "static_gen": 2.994,
+          "static_total": 42.484
         }
       }
     },
@@ -1245,9 +1257,9 @@
     "minimax-m3-b200-vllm-019-hybrid-xop": {
       "agg": {
         "values": {
-          "agg_request": 209.93175912860633,
-          "agg_tpot": 73.37965135463827,
-          "agg_ttft": 136.55210777396806
+          "agg_request": 209.9317591286063,
+          "agg_tpot": 73.37965135463826,
+          "agg_ttft": 136.55210777396803
         }
       },
       "disagg": {
@@ -1259,7 +1271,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 73.37965135463827
+          "mixed_step": 73.37965135463826
         }
       },
       "static": {
@@ -1567,9 +1579,9 @@
     "qwen3-235b-a22b-b200-vllm-019-empirical": {
       "agg": {
         "values": {
-          "agg_request": 180.70708434268093,
-          "agg_tpot": 45.22686322008514,
-          "agg_ttft": 135.4802211225958
+          "agg_request": 180.70708434268087,
+          "agg_tpot": 45.226863220085114,
+          "agg_ttft": 135.48022112259576
         }
       },
       "disagg": {
@@ -1581,7 +1593,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 45.22686322008514
+          "mixed_step": 45.226863220085114
         }
       },
       "static": {
@@ -1595,8 +1607,8 @@
     "qwen3-235b-a22b-b200-vllm-019-hybrid-xprofile": {
       "agg": {
         "values": {
-          "agg_request": 188.0494483452657,
-          "agg_tpot": 48.68209333894856,
+          "agg_request": 188.04944834526566,
+          "agg_tpot": 48.68209333894854,
           "agg_ttft": 139.36735500631713
         }
       },
@@ -1609,7 +1621,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 48.68209333894856
+          "mixed_step": 48.68209333894854
         }
       },
       "static": {
@@ -1623,9 +1635,9 @@
     "qwen3-235b-a22b-b200-vllm-019-hybrid-xquant": {
       "agg": {
         "values": {
-          "agg_request": 278.9533949859332,
-          "agg_tpot": 91.46042116985089,
-          "agg_ttft": 187.49297381608227
+          "agg_request": 278.9533949859331,
+          "agg_tpot": 91.46042116985083,
+          "agg_ttft": 187.4929738160822
         }
       },
       "disagg": {
@@ -1637,7 +1649,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 91.46042116985089
+          "mixed_step": 91.46042116985083
         }
       },
       "static": {
@@ -1934,7 +1946,7 @@
       "agg": {
         "values": {
           "agg_request": 95.062174059207,
-          "agg_tpot": 17.629258380803293,
+          "agg_tpot": 17.629258380803297,
           "agg_ttft": 77.4329156784037
         }
       },
@@ -1947,7 +1959,7 @@
       },
       "mixed": {
         "values": {
-          "mixed_step": 17.629258380803293
+          "mixed_step": 17.629258380803297
         }
       },
       "static": {
@@ -2334,8 +2346,8 @@
     "case_count": 94,
     "command": "python aic-core/rust/aiconfigurator-core/parity_tests/regenerate_goldens.py",
     "engine_step_backend": "python",
-    "git_describe": "d21e24e5",
-    "git_head": "d21e24e53be49af9c4630042d7e3f7879efc95ed",
+    "git_describe": "996917fb",
+    "git_head": "996917fb71f5aa1a98e4b765cf1345e2ed056127",
     "surface_count": 348,
     "thread_caps": {
       "MKL_NUM_THREADS": "1",
@@ -2343,6 +2355,24 @@
       "OMP_NUM_THREADS": "1",
       "OPENBLAS_NUM_THREADS": "1",
       "RAYON_NUM_THREADS": "1"
+    }
+  },
+  "post_freeze_pins": {
+    "glm52-b200-sglang-0514-isl1024-osl2::agg": {
+      "engine": "rust",
+      "git_head": "1c5d7b282a8c9187ad507927683dd0bf0fbd249f"
+    },
+    "glm52-b200-sglang-0514-isl1024-osl2::disagg": {
+      "engine": "rust",
+      "git_head": "1c5d7b282a8c9187ad507927683dd0bf0fbd249f"
+    },
+    "glm52-b200-sglang-0514-isl1024-osl2::mixed": {
+      "engine": "rust",
+      "git_head": "1c5d7b282a8c9187ad507927683dd0bf0fbd249f"
+    },
+    "glm52-b200-sglang-0514-isl1024-osl2::static": {
+      "engine": "rust",
+      "git_head": "1c5d7b282a8c9187ad507927683dd0bf0fbd249f"
     }
   }
 }

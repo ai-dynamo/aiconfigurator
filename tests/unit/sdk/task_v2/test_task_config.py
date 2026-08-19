@@ -30,6 +30,41 @@ def test_default_task_config_is_agg_with_default_workload():
     assert t.tpot == 50.0
 
 
+def test_enable_epd_pins_encoder_dp_off():
+    # EPD encode workers model the engines' encoder-instance default
+    # (weight-sharded ViT); the colocated encoder-DP default stays True
+    # only outside EPD.
+    assert Task().enable_encoder_dp is True
+    assert Task(enable_epd=True).enable_encoder_dp is False
+
+
+def test_enable_epd_rejects_afd_serving_mode():
+    # sweep_afd carries no EPD parameters; accepting the combination would
+    # silently run a plain AFD sweep with every encoder knob dropped.
+    with pytest.raises(ValueError, match="serving_mode 'agg' or 'disagg'"):
+        Task(serving_mode="afd", enable_epd=True)
+
+
+def test_run_single_epd_arg_validation():
+    with pytest.raises(ValueError, match="requires encoder_tp"):
+        Task(enable_epd=True).run_single_agg(tp=1, batch_size=1)
+    with pytest.raises(ValueError, match="positive int"):
+        Task(enable_epd=True).run_single_agg(tp=1, batch_size=1, encoder_tp=1, encoder_num_workers=0)
+    with pytest.raises(ValueError, match="require enable_epd"):
+        Task().run_single_agg(tp=1, batch_size=1, encoder_tp=2)
+    with pytest.raises(ValueError, match="positive finite"):
+        Task(enable_epd=True, rate_match_encoder_degradation=-1.0).run_single_agg(tp=1, batch_size=1, encoder_tp=1)
+    with pytest.raises(ValueError, match="require enable_epd"):
+        Task(rate_match_encoder_degradation=0.7).run_single_agg(tp=1, batch_size=1)
+    with pytest.raises(ValueError, match="positive finite"):
+        Task(rate_match_prefill_degradation=-1.0).run_single_disagg(prefill_tp=1, decode_tp=1, decode_batch_size=1)
+
+
+def test_from_cli_resolves_quant_strings():
+    t = Task.from_cli(gemm_quant_mode="fp8", prefill_kvcache_quant_mode=None)
+    assert t.gemm_quant_mode is common.GEMMQuantMode.fp8
+
+
 def test_agg_with_model_resolves_identity_and_backend():
     t = Task(
         serving_mode="agg",
@@ -42,7 +77,7 @@ def test_agg_with_model_resolves_identity_and_backend():
     assert t.nextn is not None
     assert t.backend_version is not None  # resolved to latest
     # Search space defaults populated
-    assert t.agg_tp_candidates == [1, 2, 4, 8]
+    assert t.agg_tp_candidates == [1, 2, 4, 8, 16]
     assert t.agg_pp_candidates == [1]
 
 
@@ -86,18 +121,20 @@ def test_disagg_with_separate_role_specs():
     assert t.max_prefill_workers == 32
 
 
-def test_disagg_wideep_sets_larger_replica_budget():
+def test_disagg_large_ep_sets_larger_replica_budget():
+    """A model/system with large-EP coverage (DeepSeek nvfp4 on gb200/trtllm)
+    gets the multi-node replica budget -- no flag involved."""
     t = Task(
         serving_mode="disagg",
         prefill_model_path="deepseek-ai/DeepSeek-V3",
         prefill_system_name="gb200",
-        prefill_enable_wideep=True,
+        prefill_moe_quant_mode=common.MoEQuantMode.nvfp4,
         decode_model_path="deepseek-ai/DeepSeek-V3",
         decode_system_name="gb200",
-        decode_enable_wideep=True,
+        decode_moe_quant_mode=common.MoEQuantMode.nvfp4,
     )
     assert t.max_gpu_per_replica == 512
-    assert t.num_gpu_per_replica is None  # wideep doesn't set a fixed list
+    assert t.num_gpu_per_replica is None  # large EP doesn't set a fixed list
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +145,9 @@ def test_disagg_wideep_sets_larger_replica_budget():
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("enable_wideep", True),
+        # enable_wideep is no longer in this list: the deprecated flag is
+        # accepted + warned + ignored instead of raising (downgrade pinned by
+        # test_wideep_deprecation.test_disagg_top_level_enable_wideep_warns_instead_of_raising).
         ("enable_chunked_prefill", True),
         ("enable_eplb", True),
         ("gemm_quant_mode", common.GEMMQuantMode.fp8),
@@ -367,26 +406,30 @@ def test_sweep_disagg_kwargs_shape():
     assert kwargs["autoscale_ttft_correction_factor"] == 1.8
 
 
-def test_sweep_disagg_require_same_tp_sglang_non_wideep():
-    """SGLang non-wideep disagg must enforce prefill/decode TP equality (dynamo#5870).
+def test_sweep_disagg_require_same_tp_sglang_fused():
+    """SGLang fused disagg must enforce prefill/decode TP equality (dynamo#5870).
 
-    WideEP relaxes it; other backends never get the SGLang-specific constraint.
+    Large EP relaxes it per PAIR now (a covered task hands sweep a predicate
+    instead of a bool -- see test_coverage_candidates); other backends never get
+    the SGLang-specific constraint.
     """
 
-    def mk(backend, **extra):
+    def mk(backend, model="deepseek-ai/DeepSeek-V3", **extra):
         return Task(
             serving_mode="disagg",
-            prefill_model_path="deepseek-ai/DeepSeek-V3",
+            prefill_model_path=model,
             prefill_system_name="h200_sxm",
             prefill_backend_name=backend,
-            decode_model_path="deepseek-ai/DeepSeek-V3",
+            decode_model_path=model,
             decode_system_name="h200_sxm",
             decode_backend_name=backend,
             **extra,
         ).sweep_disagg_kwargs(prefill_database=None, decode_database=None)
 
-    assert mk("sglang")["require_same_tp"] is True
-    assert mk("sglang", prefill_enable_wideep=True, decode_enable_wideep=True)["require_same_tp"] is False
+    # Qwen3 has no large-EP coverage on h200/sglang -> nothing can be exempt.
+    assert mk("sglang", model="Qwen/Qwen3-235B-A22B")["require_same_tp"] is True
+    # A covered model (DeepSeek on sglang) gets the per-pair predicate.
+    assert callable(mk("sglang")["require_same_tp"])
     assert mk("trtllm")["require_same_tp"] is False
 
 
@@ -468,6 +511,25 @@ def test_fmha_data_fallback_unknown_arch_downgrades_with_warning(caplog):
     assert not any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
 
 
+def test_fmha_data_fallback_afd_uses_the_aggregate_role(caplog):
+    import logging
+
+    from aiconfigurator.sdk import common
+
+    with caplog.at_level(logging.WARNING):
+        task = Task(
+            serving_mode="afd",
+            model_path="Qwen/Qwen3-32B-FP8-Static-PerTensor",
+            system_name="a100_sxm",
+            backend_name="sglang",
+            total_gpus=16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+        )
+    assert task.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+    fallback_msgs = [r.message for r in caplog.records if "falling back to bfloat16 FMHA" in r.message]
+    assert len(fallback_msgs) == 1 and fallback_msgs[0].startswith("agg ")
+
+
 def test_fmha_data_fallback_skips_generation_only_decode(caplog):
     """A generic-attention decode role never reads fmha data (generation tables
     key on kv dtype; validate checks fmha only for context roles), so the
@@ -505,7 +567,7 @@ def test_fmha_data_fallback_without_bf16_slice_left_untouched(monkeypatch, caplo
 
     from aiconfigurator.sdk import common
 
-    monkeypatch.setattr(Task, "_context_fmha_supported_modes", lambda self, role: ["fp8_block"])
+    monkeypatch.setattr(Task, "_context_fmha_supported_modes", lambda self, role, ctx_op=None: ["fp8_block"])
     with caplog.at_level(logging.WARNING):
         t = Task(
             serving_mode="agg",
@@ -581,12 +643,16 @@ def test_fmha_fallback_uses_joint_fmha_kv_capability(caplog):
     assert any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
 
 
-def test_wideep_trtllm_context_fmha_capability_uses_granular_table(caplog):
-    """trtllm wideep context queries the granular context_mla table directly, so
+def test_large_ep_trtllm_context_fmha_capability_uses_granular_table(caplog):
+    """trtllm large-EP context queries the granular context_mla table directly, so
     the fmha fallback must key capability off the granular slices -- the merged
     context_mla list can contain module-only fp8 rows inherited cross-framework
-    via the shared layer (gb200: vllm module data), which the wideep path can
+    via the shared layer (gb200: vllm module data), which the large-EP path can
     never hit.  Regression for the deepseek_wideep_trtllm.yaml e2e failure.
+
+    Large EP is coverage-driven now (nvfp4 is the MoE quant the gb200 EP tables
+    carry), and the task's ladders mix both regimes, so bfloat16 is picked as
+    the mode that serves the granular AND the module table.
     """
     import logging
 
@@ -598,7 +664,8 @@ def test_wideep_trtllm_context_fmha_capability_uses_granular_table(caplog):
             model_path="deepseek-ai/DeepSeek-V3",
             system_name="gb200",
             backend_name="trtllm",
-            enable_wideep=True,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
         )
     assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
     assert any("context_mla_granular" in r.message for r in caplog.records)
@@ -735,15 +802,24 @@ def test_nextn_explicit_override_warns(caplog):
 
 def test_moe_backend_flows_into_model_config():
     """Task.moe_backend must reach the per-role ModelConfig so get_model selects the
-    right MoE kernel (v1 set it; v2 build_model_config used to drop it -> None)."""
-    t = Task(
-        serving_mode="agg",
-        model_path="deepseek-ai/DeepSeek-V3",
-        system_name="h200_sxm",
-        backend_name="sglang",
-        moe_backend="deepep_moe",
-    )
-    assert t.build_model_config(role="agg").moe_backend == "deepep_moe"
+    right MoE kernel (v1 set it; v2 build_model_config used to drop it -> None).
+
+    ``deepep_moe`` is the exception: it used to select the wideEP model classes
+    and the wideep MoE compute tables, both of which are coverage-driven per
+    tuple now, so forwarding it would mis-price the fused tuples."""
+
+    def mc(moe_backend, model="deepseek-ai/DeepSeek-V3", **kw):
+        return Task(
+            serving_mode="agg",
+            model_path=model,
+            system_name="b200_sxm",
+            backend_name="sglang",
+            moe_backend=moe_backend,
+            **kw,
+        ).build_model_config(role="agg")
+
+    assert mc("megamoe", model="deepseek-ai/DeepSeek-V4-Pro").moe_backend == "megamoe"
+    assert mc("deepep_moe").moe_backend is None
 
 
 def test_dsv4_native_sglang_moe_remap():
@@ -963,27 +1039,32 @@ def test_megamoe_sglang_parallel_lists_and_validation():
 
 
 def test_sglang_agg_default_moe_ep_search():
-    """SGLang non-wideep MoE agg DEFAULT search must include moe_ep>1 (standard comm) /
+    """SGLang fused MoE agg DEFAULT search must include moe_ep>1 (standard comm) /
     EP-only for deepep_moe (v1 standard vs deepep_moe branches). Was moe_ep=[1] — a bug
-    masked by always passing explicit candidates, caught by default-path parity."""
-    t = Task(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="h200_sxm", backend_name="sglang")
-    assert t.agg_moe_tp_candidates == [1, 2, 4, 8]
-    assert t.agg_moe_ep_candidates == [1, 2, 4, 8]
+    masked by always passing explicit candidates, caught by default-path parity.
+
+    Probed on Qwen3 (no large-EP coverage on h200/sglang): a covered model gets
+    the union with the multi-node ladder instead (test_coverage_candidates)."""
+    qwen = "Qwen/Qwen3-235B-A22B"
+    t = Task(serving_mode="agg", model_path=qwen, system_name="h200_sxm", backend_name="sglang")
+    assert t.agg_moe_tp_candidates == [1, 2, 4, 8, 16]
+    assert t.agg_moe_ep_candidates == [1, 2, 4, 8, 16]
     t2 = Task(
         serving_mode="agg",
-        model_path="deepseek-ai/DeepSeek-V3",
+        model_path=qwen,
         system_name="h200_sxm",
         backend_name="sglang",
         moe_backend="deepep_moe",
     )
     assert t2.agg_moe_tp_candidates == [1]
-    assert t2.agg_moe_ep_candidates == [1, 2, 4, 8]
+    assert t2.agg_moe_ep_candidates == [1, 2, 4, 8, 16]
 
 
 def test_run_validates_by_default():
-    """run() validates first (v1 fail-fast); validate=False skips it. An EXPLICIT fmha
-    quant the WideEP MLA table lacks (it only carries the fp8_block label) makes validate
-    raise -- the explicit value is preserved (not auto-resolved) so it fails fast."""
+    """run() validates first (v1 fail-fast); validate=False skips it. An sglang
+    DeepSeek task whose tuples are ALL large-EP has only the wideep_context_mla
+    table to serve fmha, and that table carries fp8_block only -> validate
+    raises (a task that also has fused tuples falls back to them instead)."""
     from aiconfigurator.sdk.errors import UnsupportedWideepConfigError
 
     t = Task(
@@ -991,118 +1072,25 @@ def test_run_validates_by_default():
         model_path="deepseek-ai/DeepSeek-V3",
         system_name="h200_sxm",
         backend_name="sglang",
-        enable_wideep=True,
         total_gpus=64,
-        fmha_quant_mode=common.FMHAQuantMode.fp8,
+        agg_num_gpu_candidates=[8, 16, 32],
+        agg_tp_candidates=[1],
+        agg_pp_candidates=[1],
+        agg_dp_candidates=[8, 16, 32],
+        agg_moe_tp_candidates=[1],
+        agg_moe_ep_candidates=[8, 16, 32],
     )
     with pytest.raises(UnsupportedWideepConfigError):
         t.run()  # default validate=True
 
 
-def test_wideep_deepseek_resolves_fp8_block_mla_labels():
-    """WideEP DeepSeek queries the wideep_*_mla tables, which the collector labels
-    fp8_block (fmha) / fp8 (kv) even though physically a bf16 run (collect_mla_module.py).
-    The task must resolve those labels so DB validation matches -- NOT the narrow-EP bf16
-    downgrade that applies without WideEP."""
-    t = Task(
-        serving_mode="agg",
-        model_path="deepseek-ai/DeepSeek-V3",
-        system_name="h200_sxm",
-        backend_name="sglang",
-        enable_wideep=True,
-        total_gpus=64,
-    )
-    assert t.moe_backend == "deepep_moe"
-    assert t.fmha_quant_mode == common.FMHAQuantMode.fp8_block
-    assert t.kvcache_quant_mode == common.KVCacheQuantMode.fp8
-
-    # Without WideEP the same model keeps the narrow-EP bf16 downgrade.
-    t_narrow = Task(
-        serving_mode="agg",
-        model_path="deepseek-ai/DeepSeek-V3",
-        system_name="h200_sxm",
-        backend_name="sglang",
-        total_gpus=8,
-    )
-    assert t_narrow.fmha_quant_mode == common.FMHAQuantMode.bfloat16
-
-
-def test_wideep_kimi_skips_deepseek_mla_label_remap():
-    """Kimi K2.5 reuses the DeepSeek architecture but is deliberately OUT of the WideEP
-    path (models/deepseek.py routes KIMIK25 away from WideEPDeepSeekModel), so the
-    fp8_block/fp8 MLA label remap above must not fire for it -- otherwise the task
-    labels a WideEP config that model construction never builds. Kimi WideEP support
-    is deferred to its own PR; this pins the deferral."""
-    t = Task(
-        serving_mode="agg",
-        model_path="moonshotai/Kimi-K2.5",
-        system_name="h200_sxm",
-        backend_name="sglang",
-        enable_wideep=True,
-        total_gpus=64,
-    )
-    assert t.moe_backend == "deepep_moe"
-    assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
-    assert t.kvcache_quant_mode == common.KVCacheQuantMode.bfloat16
-
-
-def test_deepep_moe_without_enable_wideep_keys_wideep_mla_tables():
-    """The intra-node DeepEP sweep (cli ``agg_deepep`` / ``disagg_deepep``) sets
-    moe_backend=deepep_moe with enable_wideep UNSET, and models/deepseek.py dispatches
-    to WideEPDeepSeekModel -- which builds WideEPContextMLA / WideEPGenerationMLA -- on
-    moe_backend alone. So the op keys validate against must be the wideep_*_mla tables,
-    matching the fp8_block/fp8 labels _resolve_quant_modes assigns on that same
-    predicate. Keying the tables on enable_wideep instead resolved fmha=fp8_block but
-    checked narrow-EP context_mla (bfloat16 only), rejecting a config the model layer
-    builds happily."""
-    t = Task(
-        serving_mode="agg",
-        model_path="deepseek-ai/DeepSeek-V3",
-        system_name="h200_sxm",
-        backend_name="sglang",
-        moe_backend="deepep_moe",
-        total_gpus=8,
-    )
-    assert t.enable_wideep is False
-    # The quant remap and the table selection must agree, or validate rejects the pair.
-    assert t.fmha_quant_mode == common.FMHAQuantMode.fp8_block
-    assert t.kvcache_quant_mode == common.KVCacheQuantMode.fp8
-    assert t._attention_op_keys("agg") == ("wideep_context_mla", "wideep_generation_mla")
-
-    # Plain narrow EP (no deepep_moe) keeps the narrow-EP tables and the bf16 downgrade.
-    t_narrow = Task(
-        serving_mode="agg",
-        model_path="deepseek-ai/DeepSeek-V3",
-        system_name="h200_sxm",
-        backend_name="sglang",
-        total_gpus=8,
-    )
-    assert t_narrow._attention_op_keys("agg") == ("context_mla", "generation_mla")
-
-
-def test_deepep_moe_kimi_keeps_narrow_ep_mla_tables():
-    """Guard for the guard above: Kimi K2.5 is routed away from WideEPDeepSeekModel
-    (models/deepseek.py dispatches on the DeepSeek architecture), so deepep_moe must NOT
-    pull it into the wideep_*_mla tables -- that would validate against tables whose ops
-    are never built, the mirror of the bug the DeepSeek case pins. Widening the
-    DeepseekV3ForCausalLM guard in _attention_op_keys fails here, and would also break
-    test_wideep_kimi_skips_deepseek_mla_label_remap."""
-    t = Task(
-        serving_mode="agg",
-        model_path="moonshotai/Kimi-K2.5",
-        system_name="h200_sxm",
-        backend_name="sglang",
-        moe_backend="deepep_moe",
-        total_gpus=8,
-    )
-    assert t._architecture != "DeepseekV3ForCausalLM"
-    assert t._attention_op_keys("agg") == ("context_mla", "generation_mla")
-    assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
-
-
 def test_enable_wideep_normalizes_moe_backend():
-    """enable_wideep implies the deepep_moe MoE backend (mirrors v1 __init__), so DB
-    validation selects the wideep_*_moe ops."""
+    """The deprecated flag still spells the deprecated moe_backend on the
+    RESOLVED task (v1 __init__ parity, and the effective-config artifact the
+    gate compares) -- while being inert in modeling: the per-tuple ModelConfig
+    never carries deepep_moe, so a fused tuple cannot inherit the wideEP
+    compute tables. The user-facing deprecation warnings are pinned in
+    test_wideep_deprecation.py."""
     t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
@@ -1111,21 +1099,28 @@ def test_enable_wideep_normalizes_moe_backend():
         enable_wideep=True,
     )
     assert t.moe_backend == "deepep_moe"
+    assert t.to_dict()["moe_backend"] == "deepep_moe"
+    assert t.build_model_config(role="agg", parallel=(1, 1, 8, 1, 8, 1)).moe_backend is None
+    assert t.build_model_config(role="agg").moe_backend is None
 
 
-def test_wideep_replica_size_is_bounded():
-    """WideEP num_gpu_list (replica sizes) must be range(1, max_gpu_per_replica+1), not
+def test_large_ep_replica_size_is_bounded():
+    """Large-EP num_gpu_list (replica sizes) must be range(1, max_gpu_per_replica+1), not
     unbounded -- v2 sweep gates replica size by this list, mirroring v1 get_working_list."""
+    from aiconfigurator.sdk import common
+
     t = Task(
         serving_mode="disagg",
-        prefill_model_path="Qwen/Qwen3-235B-A22B",
-        prefill_system_name="b200_sxm",
+        prefill_model_path="deepseek-ai/DeepSeek-R1",
+        prefill_system_name="gb200",
         prefill_backend_name="trtllm",
-        prefill_enable_wideep=True,
-        decode_model_path="Qwen/Qwen3-235B-A22B",
-        decode_system_name="b200_sxm",
+        prefill_moe_quant_mode=common.MoEQuantMode.nvfp4,
+        prefill_gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+        decode_model_path="deepseek-ai/DeepSeek-R1",
+        decode_system_name="gb200",
         decode_backend_name="trtllm",
-        decode_enable_wideep=True,
+        decode_moe_quant_mode=common.MoEQuantMode.nvfp4,
+        decode_gemm_quant_mode=common.GEMMQuantMode.nvfp4,
         total_gpus=64,
     )
     kw = t.sweep_disagg_kwargs(prefill_database=None, decode_database=None)
@@ -1476,6 +1471,7 @@ def _build_fake_summary(result_dict: dict | None = None, oom: bool = False):
     import pandas as pd
 
     s.get_summary_df.return_value = pd.DataFrame([result_dict or {"tokens/s/gpu": 100.0, "ttft": 50.0, "tpot": 20.0}])
+    s.get_power_data_coverage.return_value = 1.0
     return s
 
 
@@ -1874,6 +1870,42 @@ def test_validate_gemm_quant_transfer_reachable_in_hybrid():
             make(mode, policy, quant=common.GEMMQuantMode.nvfp4).validate()
 
 
+def test_validate_nvfp4_wo_ladder_admitted_in_hybrid():
+    """nvfp4_wo has no collected MoE data on any system, but its util-level
+    entry is present so it is XPROFILE-reachable in HYBRID. SILICON rejects
+    (no data, no transfer). GEMM nvfp4_wo also goes through the XPROFILE
+    ladder to bfloat16.
+
+    This pins the ladder approach: validate admits without any alias, purely
+    through profile reachability — consistent with GEMM's treatment.
+    """
+
+    def make(mode, policy=None):
+        # vLLM 0.24.0 on H100: nvfp4 → nvfp4_wo (non-Blackwell remap)
+        return Task(
+            serving_mode="agg",
+            model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+            system_name="h100_sxm",
+            backend_name="vllm",
+            backend_version="0.24.0",
+            database_mode=mode,
+            transfer_policy=policy,
+        )
+
+    # HYBRID: util-level entry present → XPROFILE-reachable for both GEMM and MoE
+    make("HYBRID").validate()
+    make("HYBRID", "xprofile").validate()
+
+    # SILICON: no data, no transfer → both quant modes are rejected
+    with pytest.raises(ValueError, match="nvfp4_wo"):
+        make("SILICON").validate()
+
+    # With XPROFILE disabled: ladder cannot reach nvfp4_wo → rejected
+    for disabled in ("off", "conservative", "xquant"):
+        with pytest.raises(ValueError, match="nvfp4_wo"):
+            make("HYBRID", disabled).validate()
+
+
 def test_validate_fp8_static_not_transfer_admitted_in_hybrid():
     """fp8_static is a composite mode (fp8 base minus compute_scale/scale_matrix);
     the overhead tables have no transfer ladder, so HYBRID must NOT admit it via
@@ -1985,7 +2017,7 @@ def test_to_dict_emits_resolved_state_with_enum_names():
     # Backend version resolved automatically
     assert d["backend_version"] is not None
     # Search candidates populated
-    assert d["agg_tp_candidates"] == [1, 2, 4, 8]
+    assert d["agg_tp_candidates"] == [1, 2, 4, 8, 16]
 
 
 def test_to_dict_excludes_internal_fields():
@@ -2038,3 +2070,82 @@ def test_fmha_data_fallback_mixed_identity_judged_on_granular_table(caplog):
         )
     assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
     assert any("falling back to bfloat16 FMHA data" in r.message for r in caplog.records)
+
+
+def test_trtllm_dp1_tep_tuples_stay_fused():
+    """A dp=1 TEP tuple cannot build a TRT-LLM large-EP model
+    (validate_trtllm_large_ep requires attention_dp_size > 1), so the
+    resolver must keep it fused instead of resolving a comm backend and
+    then dying in model construction — across the DEFAULT enumerated
+    search, not just a pinned YAML."""
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/DeepSeek-V3.1-NVFP4",
+        system_name="gb200",
+        backend_name="trtllm",
+        backend_version="1.3.0rc10",
+        total_gpus=64,
+    )
+    # dp=1 with EP>1: fused, always (the reviewer's repro tuple).
+    assert t._resolve_moe_comm_backend("agg", (2, 1, 1, 1, 2, 1)) is None
+    # dp>1 resolves from the shipped gb200 nvfp4 wideep coverage.
+    assert t._resolve_moe_comm_backend("agg", (1, 1, 2, 1, 2, 1)) is not None
+    # No enumerated large-EP tuple carries dp=1.
+    for tup in t.iter_parallel("agg"):
+        if t._resolve_moe_comm_backend("agg", tup) is not None:
+            assert tup[2] > 1, f"dp=1 large-EP tuple leaked: {tup}"
+
+
+def test_nvfp4_remapped_to_nvfp4_wo_on_hopper():
+    """nvfp4 models on non-Blackwell get remapped to nvfp4_wo unconditionally."""
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+        system_name="h100_sxm",
+        backend_name="trtllm",
+    )
+    assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4_wo
+    assert t.moe_quant_mode == common.MoEQuantMode.nvfp4_wo
+
+
+def test_nvfp4_preserved_on_blackwell():
+    """Blackwell keeps native nvfp4 quant modes."""
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+        system_name="b200_sxm",
+        backend_name="trtllm",
+    )
+    assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4
+    assert t.moe_quant_mode == common.MoEQuantMode.nvfp4
+
+
+def test_engine_step_backend_is_validated_at_task_construction():
+    """Every programmatic entry point funnels through Task construction, so
+    the retired "python" token (and any typo) fails closed HERE — including
+    paths like the AFD session that never reach the step routing gate."""
+    import pytest
+
+    from aiconfigurator.sdk.task_v2 import Task
+
+    def _task(**kwargs):
+        return Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            backend_version="dummy",
+            total_gpus=8,
+            **kwargs,
+        )
+
+    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'python'"):
+        _task(engine_step_backend="python")
+    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'auto'"):
+        _task(engine_step_backend="auto")
+    for falsey_value in ("", 0, False):
+        with pytest.raises(ValueError, match="unknown engine_step_backend"):
+            _task(engine_step_backend=falsey_value)
+    assert _task(engine_step_backend="rust").engine_step_backend == "rust"
+    assert _task(engine_step_backend="RUST").engine_step_backend == "rust"
+    assert _task(engine_step_backend=None).engine_step_backend is None

@@ -87,7 +87,16 @@ mod tests {
         // merge from concurrent claims of v5/v7/v8).
         // v10: MhcModuleOp gained seq_split (issue #1498; renumbered at the
         // rebase from a concurrent claim of v7).
-        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 10);
+        // v11: wideEP MoE variants removed, MoeAllToAll/MoeExpertCompute
+        // appended after FpmForward; MoeExpertComputeOp gained enable_eplb
+        // (AIC-1601).
+        // v12: DsaModuleOp gained attn_projection_quant_modes (PR-6 weight
+        // physics) — a positional bincode op-layout change.
+        // v13: the engine owns shared-layer source resolution — EngineConfig
+        // dropped the Python-resolved perf_db_sources map (a bincode
+        // config-layout change) for enable_shared_layer + strict_provenance
+        // (deprecation-cleanup PR).
+        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 13);
         assert_eq!(FPM_VERSION, 1);
         assert_eq!(ForwardPassMetrics::default().version, FPM_VERSION);
     }

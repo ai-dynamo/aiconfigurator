@@ -16,11 +16,12 @@
 
 use crate::common::enums::{DatabaseMode, GemmQuantMode, TransferKind};
 use crate::common::error::AicError;
-use crate::operators::base::{PerformanceResult, Source};
+use crate::operators::base::{subtract_sol, PerformanceResult, SolComponents, Source};
 use crate::operators::moe::policy_fingerprint;
 use crate::operators::util_empirical::{self, UtilGrid, ZeroAwareDeltaLookup};
 use crate::perf_database::gemm::{
-    gemm_quant_by_name, gemm_sol_latency_ms_with_flops, normalize_fp8_static_quant, quant_tc_flops,
+    gemm_quant_by_name, gemm_sol_latency_ms_with_flops, gemm_sol_with_flops,
+    normalize_fp8_static_quant, quant_tc_flops,
 };
 use crate::perf_database::PerfDatabase;
 use serde::{Deserialize, Serialize};
@@ -99,23 +100,21 @@ impl GemmOp {
                     && db.gemm.has_quant(quant)? =>
             {
                 let tc_flops = quant_tc_flops(&db.system_spec, quant.mapping())?;
-                PerformanceResult::new(
-                    gemm_sol_latency_ms_with_flops(
-                        &db.system_spec,
-                        quant,
-                        tc_flops,
-                        m as f64,
-                        self.n as f64,
-                        self.k as f64,
-                    ),
-                    Source::Sol,
-                )
+                PerformanceResult::sol(gemm_sol_with_flops(
+                    &db.system_spec,
+                    quant,
+                    tc_flops,
+                    m as f64,
+                    self.n as f64,
+                    self.k as f64,
+                ))
             }
             other => other?,
         };
         let mut latency = base.latency_ms;
         let mut energy = base.energy_wms;
         let mut source = base.source;
+        let mut sol = base.sol;
         let mut latency_floor = 0.0_f64;
 
         if quant == GemmQuantMode::Fp8Static {
@@ -125,11 +124,13 @@ impl GemmOp {
             let cs = query_compute_scale_table(db, quant, m, self.k)?;
             latency -= cs.latency_ms;
             energy -= cs.energy_wms;
+            sol = subtract_sol(sol, cs.sol);
 
             if self.low_precision_input {
                 let sm = query_scale_matrix_table(db, quant, m, self.k)?;
                 latency -= sm.latency_ms;
                 energy -= sm.energy_wms;
+                sol = subtract_sol(sol, sm.sol);
             }
             // Python (`operations/gemm.py`): the subtraction leaves a path
             // that still contains the GEMM; independently interpolated
@@ -139,7 +140,7 @@ impl GemmOp {
             // plus overhead tables, not measured directly). Energy has no
             // analogous SOL model, so it keeps the plain non-negative clamp.
             let tc_flops = quant_tc_flops(&db.system_spec, quant.mapping())?;
-            latency_floor = gemm_sol_latency_ms_with_flops(
+            let floor_components = gemm_sol_with_flops(
                 &db.system_spec,
                 quant,
                 tc_flops,
@@ -147,14 +148,23 @@ impl GemmOp {
                 self.n as f64,
                 self.k as f64,
             );
+            latency_floor = floor_components.time_ms();
+            // When the floor fires, the result IS the GEMM's own roofline —
+            // its decomposition replaces the subtracted one. (Under SOL mode
+            // the floor always fires: the subtrahends are non-negative SOL
+            // values taken off exactly this roofline.)
+            if sol.is_some() && latency < latency_floor {
+                sol = Some(floor_components);
+            }
             source = Source::Estimated;
         }
 
-        Ok(
-            PerformanceResult::with_energy(latency.max(latency_floor), energy, source)
-                .clamp_non_negative()
-                .scaled(self.scale_factor),
-        )
+        let mut result =
+            PerformanceResult::with_energy(latency.max(latency_floor), energy, source);
+        if let Some(components) = sol {
+            result = result.with_sol(components);
+        }
+        Ok(result.clamp_non_negative().scaled(self.scale_factor))
     }
 
     /// Per-tensor weight count in bytes, matching Python's
@@ -193,17 +203,14 @@ fn query_gemm_table(
         // RAW quant mode (not the fp8_static-normalized table quant).
         DatabaseMode::Sol | DatabaseMode::SolFull => {
             let tc_flops = quant_tc_flops(&db.system_spec, quant.mapping())?;
-            Ok(PerformanceResult::new(
-                gemm_sol_latency_ms_with_flops(
-                    &db.system_spec,
-                    quant,
-                    tc_flops,
-                    m as f64,
-                    n as f64,
-                    k as f64,
-                ),
-                Source::Sol,
-            ))
+            Ok(PerformanceResult::sol(gemm_sol_with_flops(
+                &db.system_spec,
+                quant,
+                tc_flops,
+                m as f64,
+                n as f64,
+                k as f64,
+            )))
         }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             gemm_empirical(db, quant, m, n, k)?,
@@ -226,9 +233,10 @@ fn query_gemm_table(
 /// (`operations/gemm.py`); consumed ONLY by the cross-profile relation of
 /// the quant-transfer ladder, and only as the ratio `e(query)/e(ref)`.
 /// Derivation method + LOO evidence documented on the Python table.
-const GEMM_QUANT_UTIL_LEVEL: &[(f64, f64, f64)] = &[
+pub(crate) const GEMM_QUANT_UTIL_LEVEL: &[(f64, f64, f64)] = &[
     (2.0, 1.0, 0.70),    // w16a16 / bfloat16              [data 0.55-0.79]
     (1.0, 1.0, 0.55),    // w8a16 / int8_wo                [inferred]
+    (0.5625, 1.0, 0.45), // w4a16+scales / nvfp4_wo (Marlin FP4) [copies inferred (0.5,1)]
     (0.5, 1.0, 0.45),    // w4a16 / int4_wo                [inferred]
     (1.0, 2.0, 0.45),    // w8a8 / fp8(_block/_ootb), sq   [data 0.28-0.55]
     (0.5, 2.0, 0.35),    // w4a8                           [inferred]
@@ -437,10 +445,10 @@ fn query_compute_scale_table(
     };
     match db.database_mode {
         // Python `_query_compute_scale_table::get_sol`:
-        // `sol_mem = 2 m k / bw * 1000` (read + write of the activation).
-        DatabaseMode::Sol | DatabaseMode::SolFull => Ok(PerformanceResult::new(
-            2.0 * m as f64 * k as f64 / db.system_spec.gpu.mem_bw * 1000.0,
-            Source::Sol,
+        // `sol_mem = 2 m k / bw * 1000` (read + write of the activation);
+        // triple is `(sol_mem, 0, sol_mem)` — pure memory bound.
+        DatabaseMode::Sol | DatabaseMode::SolFull => Ok(PerformanceResult::sol(
+            SolComponents::new(0.0, 2.0 * m as f64 * k as f64 / db.system_spec.gpu.mem_bw * 1000.0),
         )),
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             compute_scale_empirical(db, quant, m, k)?,
@@ -501,10 +509,9 @@ fn query_scale_matrix_table(
     };
     match db.database_mode {
         // Python `_query_scale_matrix_table::get_sol`:
-        // `sol_mem = 3 m k / bw * 1000`.
-        DatabaseMode::Sol | DatabaseMode::SolFull => Ok(PerformanceResult::new(
-            3.0 * m as f64 * k as f64 / db.system_spec.gpu.mem_bw * 1000.0,
-            Source::Sol,
+        // `sol_mem = 3 m k / bw * 1000`; triple `(sol_mem, 0, sol_mem)`.
+        DatabaseMode::Sol | DatabaseMode::SolFull => Ok(PerformanceResult::sol(
+            SolComponents::new(0.0, 3.0 * m as f64 * k as f64 / db.system_spec.gpu.mem_bw * 1000.0),
         )),
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             scale_matrix_empirical(db, quant, m, k)?,
@@ -638,7 +645,9 @@ mod tests {
             below_grid_sol: true,
             ..strict
         };
-        let result = op.query(&db, 8, None).expect("below-grid opt-in must degrade to SOL");
+        let result = op
+            .query(&db, 8, None)
+            .expect("below-grid opt-in must degrade to SOL");
         assert_eq!(result.source, Source::Sol);
         assert!(
             (result.latency_ms - 4.78961038961039e-06).abs() < 1e-15,

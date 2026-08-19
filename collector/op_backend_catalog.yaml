@@ -125,6 +125,7 @@ families:
   - family: moe
     op_files:
       - moe_perf
+      - moe_expert_compute_perf
       - dsv4_megamoe_module_perf
       - wideep_moe_perf
       - wideep_context_moe_perf
@@ -197,6 +198,7 @@ families:
   - family: comm
     op_files:
       - custom_allreduce_perf
+      - moe_a2a_perf
       - nccl_perf
       - oneccl_perf
       - trtllm_alltoall_perf

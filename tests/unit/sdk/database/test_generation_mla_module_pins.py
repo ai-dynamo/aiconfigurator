@@ -38,13 +38,21 @@ pytestmark = pytest.mark.unit
     ],
 )
 def test_generation_mla_module_fp8_kv_exact_values(system, b, s, num_heads, gemm, expected_ms):
+    from aiconfigurator_core.sdk.engine import _evaluate_single_op
+    from aiconfigurator_core.sdk.operations.mla import MLAModule
+
     db = get_database(system, "trtllm", "1.3.0rc10")
     db.set_default_database_mode(common.DatabaseMode.SILICON)
-    result = db.query_generation_mla_module(
-        b=b,
-        s=s,
-        num_heads=num_heads,
-        kv_cache_dtype=common.KVCacheQuantMode.fp8,
-        gemm_quant_mode=gemm,
+    # The retired query_generation_mla_module shim's exact twin (bfloat16
+    # FMHA is ignored by the decode table).
+    op = MLAModule(
+        "generation_mla_module_query",
+        1.0,
+        False,
+        num_heads,
+        common.KVCacheQuantMode.fp8,
+        common.FMHAQuantMode.bfloat16,
+        gemm,
     )
+    result = _evaluate_single_op(db, op, is_context=False, batch_size=int(b), s=int(s))
     assert float(result) == pytest.approx(expected_ms, rel=1e-9)
