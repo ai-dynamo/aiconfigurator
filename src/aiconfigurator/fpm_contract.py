@@ -138,6 +138,26 @@ def fpm_resolved_config_name(node_rank: int) -> str:
     return FPM_RESOLVED_CONFIG_TEMPLATE.format(node_rank=node_rank)
 
 
+def fpm_validate_resolved_config_path(output_path: str) -> None:
+    """Reject resolved-config paths the collector's marker sweep cannot find.
+
+    A Generator override may retain the ``{node_rank}`` placeholder that
+    ``run.sh`` substitutes at runtime. The surrounding path and basename must
+    still remain inside the collector's recursive discovery surface.
+    """
+
+    path = PurePosixPath(output_path)
+    if not path.is_absolute() or any(part in (".", "..") for part in path.parts):
+        raise ValueError(f"resolved-config path must be absolute without '.' or '..' segments: {output_path!r}")
+    if PurePosixPath(FPM_RESULTS_DIR) not in path.parents:
+        raise ValueError(f"resolved-config path must live under {FPM_RESULTS_DIR}: {output_path!r}")
+    if not fnmatch.fnmatch(path.name, FPM_RESOLVED_CONFIG_GLOB):
+        raise ValueError(
+            f"resolved-config basename must match {FPM_RESOLVED_CONFIG_GLOB!r} "
+            f"so collector marker discovery can find it: {output_path!r}"
+        )
+
+
 def fpm_validate_benchmark_output_path(output_path: str) -> None:
     """Reject benchmark output paths the collector could never discover.
 

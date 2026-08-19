@@ -19,6 +19,7 @@ from aiconfigurator.fpm_contract import (
     fpm_expected_result_paths,
     fpm_resolved_config_name,
     fpm_validate_benchmark_output_path,
+    fpm_validate_resolved_config_path,
     fpm_workload_node_count,
 )
 
@@ -120,6 +121,34 @@ def test_fpm_resolved_config_name_matches_the_shared_glob():
 def test_fpm_resolved_config_name_rejects_invalid_ranks(node_rank):
     with pytest.raises(ValueError, match="node_rank must be a non-negative integer"):
         fpm_resolved_config_name(node_rank)
+
+
+@pytest.mark.parametrize(
+    "output_path",
+    [
+        pytest.param("/results/resolved-config-node0.json", id="default-single-node"),
+        pytest.param("/results/resolved-config.json", id="custom-conforming"),
+        pytest.param("/results/run1/resolved-config-node{node_rank}.json", id="nested-placeholder"),
+    ],
+)
+def test_fpm_validate_resolved_config_path_accepts_discoverable_paths(output_path):
+    fpm_validate_resolved_config_path(output_path)
+
+
+@pytest.mark.parametrize(
+    ("output_path", "match"),
+    [
+        pytest.param("/results/custom-config.json", "basename must match", id="glob-mismatch"),
+        pytest.param("/tmp/resolved-config-node0.json", "must live under /results", id="outside-results"),
+        pytest.param("/results/../tmp/resolved-config.json", "without '.' or '..'", id="traversal"),
+        pytest.param("relative/resolved-config.json", "must be absolute", id="relative"),
+        pytest.param("/results/resolved-config", "basename must match", id="extensionless"),
+        pytest.param("/results", "must live under /results", id="results-dir-itself"),
+    ],
+)
+def test_fpm_validate_resolved_config_path_rejects_undiscoverable_paths(output_path, match):
+    with pytest.raises(ValueError, match=match):
+        fpm_validate_resolved_config_path(output_path)
 
 
 def test_fpm_expected_result_paths_window_covers_the_node_local_rank_range():
