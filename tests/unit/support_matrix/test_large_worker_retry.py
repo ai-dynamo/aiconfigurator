@@ -109,7 +109,7 @@ def test_run_single_test_can_return_row_replay_commands(monkeypatch):
             "uv run aiconfigurator cli default --model-path zai-org/GLM-5 --total-gpus 32 "
             "--system b200_sxm --backend sglang --backend-version 0.5.10 "
             "--database-mode SILICON --isl 256 --osl 256 --prefix 128 --ttft 2000.0 "
-            "--tpot 50.0 --top-n 1 --no-color"
+            "--tpot 50.0 --top-n 1 --no-color --engine-step-backend rust"
         )
     }
 
@@ -196,11 +196,6 @@ def test_generate_support_matrix_replay_asserts_status_and_error_prefix(monkeypa
 def test_metadata_failure_aborts_sequential_retry(monkeypatch):
     combo = ("example/model", "b200_sxm", "vllm", "0.24.0")
     matrix = object.__new__(SupportMatrix)
-    matrix.compare_engine_step_backends = False
-    matrix.engine_step_comparison_rtol = 0.05
-    matrix.engine_step_comparison_atol = 1e-3
-    matrix.engine_step_frontier_rtol = 0.75
-    matrix.engine_step_frontier_atol = 1e-3
     monkeypatch.setattr(matrix, "get_architecture", lambda _model: "ExampleForCausalLM")
     monkeypatch.setattr(
         matrix,

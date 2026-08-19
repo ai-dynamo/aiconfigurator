@@ -168,41 +168,8 @@ class TestLoadedOpDataRaiseIfNotLoaded:
         assert "SILICON mode" in str(exc_info.value)
 
 
-class TestLoadedOpDataIntegration:
-    """Test LoadedOpData integration scenarios."""
-
-    def test_used_in_perf_database_query(self, mutable_comprehensive_perf_db):
-        """Test that LoadedOpData works when used in PerfDatabase queries."""
-        db = mutable_comprehensive_perf_db
-        # Provide enough points for 2D interpolation (>=2 keys in each axis).
-        # This is similar to what we do in test_fp8_static.py
-        compute_scale_data_dict = {
-            common.GEMMQuantMode.fp8: {
-                64: {
-                    256: {"latency": 1.0, "energy": 10.0},
-                    512: {"latency": 2.0, "energy": 20.0},
-                },
-                128: {
-                    256: {"latency": 1.5, "energy": 15.0},
-                    512: {"latency": 2.5, "energy": 25.0},
-                },
-            }
-        }
-        db._compute_scale_data = LoadedOpData(
-            compute_scale_data_dict, common.PerfDataFilename.compute_scale, "dummy_path"
-        )
-
-        # Query should work - test exact match
-        result = db.query_compute_scale(64, 256, common.GEMMQuantMode.fp8)
-        assert float(result) == pytest.approx(1.0)
-        assert result.energy == pytest.approx(10.0)
-
-    def test_error_when_querying_unloaded_data(self, mutable_comprehensive_perf_db, tmp_path):
-        """Test that querying unloaded data raises appropriate error."""
-        db = mutable_comprehensive_perf_db
-        filepath = str(tmp_path / "nonexistent.txt")
-        db._compute_scale_data = LoadedOpData(None, common.PerfDataFilename.compute_scale, filepath)
-
-        # Query should raise error in SILICON mode
-        with pytest.raises(PerfDataNotAvailableError):
-            db.query_compute_scale(64, 256, common.GEMMQuantMode.fp8)
+# ``TestLoadedOpDataIntegration`` retired with #1357 PR-5: it observed the
+# wrapper through ``query_compute_scale``, which is now a tombstoned facade
+# (the engine loads its own tables from disk). The wrapper's own contracts —
+# dict passthrough, ``loaded``, and the ``raise_if_not_loaded`` error surface
+# (op file, path, SILICON-mode hint) — are pinned directly above.

@@ -11,7 +11,7 @@ WORKDIR /workspace
 ENV VIRTUAL_ENV=/opt/aiconfigurator/venv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN mkdir /opt/aiconfigurator && \
-    uv venv --python 3.12 ${VIRTUAL_ENV} && \
+    uv venv --python 3.13 ${VIRTUAL_ENV} && \
     chmod a+rx /root && \
     chmod -R a+rX /root/.local
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
@@ -43,8 +43,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-connrefused --retry-d
     && sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain 1.96.0 \
     && rm /tmp/rustup-init.sh
 
-# Pin to the image's CPython 3.12 so uv/maturin never fetch a standalone one.
-ENV UV_PYTHON=/opt/python/cp312-cp312/bin/python3
+# Pin to the image's CPython 3.13 so uv/maturin never fetch a standalone one.
+ENV UV_PYTHON=/opt/python/cp313-cp313/bin/python3
 COPY src/ /workspace/src/
 COPY aic-core/ /workspace/aic-core/
 COPY LICENSE pyproject.toml README.md /workspace/
@@ -72,7 +72,7 @@ RUN MATURIN_PEP517_ARGS="--compatibility manylinux_2_28" \
 # Exercise the real wheel boundary outside the checkout: core-only (including
 # the aiconfigurator_core.sdk import contract), full install, upper uninstall
 # (core survives), and core uninstall (upper files survive).
-RUN uv venv --python 3.12 /tmp/aic-wheel-test && \
+RUN uv venv --python 3.13 /tmp/aic-wheel-test && \
     CORE_WHL=$(ls /workspace/dist/aiconfigurator_core-*.whl) && \
     AIC_WHL=$(ls /workspace/dist/aiconfigurator-*.whl) && \
     uv pip install --python /tmp/aic-wheel-test/bin/python "${CORE_WHL}" && \
@@ -93,7 +93,7 @@ RUN uv venv --python 3.12 /tmp/aic-wheel-test && \
 # Start from another empty environment and install only the upper wheel argument.
 # Dependency resolution must pull the matching core wheel from the wheelhouse,
 # after which the canonical aiconfigurator.sdk import contract must work.
-RUN uv venv --python 3.12 /tmp/aic-upper-install-test && \
+RUN uv venv --python 3.13 /tmp/aic-upper-install-test && \
     AIC_WHL=$(ls /workspace/dist/aiconfigurator-*.whl) && \
     uv pip install --python /tmp/aic-upper-install-test/bin/python \
         --find-links /workspace/dist "${AIC_WHL}" && \
@@ -148,3 +148,4 @@ COPY aic-core/ /workspace/aic-core/
 COPY tools/ /workspace/tools/
 COPY collector/ /workspace/collector/
 COPY docs/support-matrix/index.html /workspace/docs/support-matrix/index.html
+COPY .agents/ /workspace/.agents/

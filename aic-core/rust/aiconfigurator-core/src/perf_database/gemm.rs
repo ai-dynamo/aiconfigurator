@@ -25,9 +25,10 @@ use super::interpolation::Grid3;
 use super::perf_interp::{
     self, LeafValue, Node, OpInterpConfig, Resolver, SiteIndex, ValueTransform,
 };
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::GemmQuantMode;
 use crate::common::error::AicError;
+use crate::operators::base::SolComponents;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
 use crate::perf_database::parquet_loader::PerfReader;
@@ -186,23 +187,25 @@ impl GemmTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
-        Self::with_sources(data_root, system_spec, &PerfDbSources::default())
+        Self::with_sources(data_root, system_spec, &SourceResolver::fixed(PerfDbSources::default()))
+            .expect("fixed-map resolution is infallible")
     }
 
-    /// Construct with shared-layer (sibling/cross-version) sources resolved from
-    /// `perf_db_sources` (Python-supplied). Each GEMM-family file falls back to
-    /// its primary `data_root/<basename>` when absent from the map. No I/O.
+    /// Construct with shared-layer (sibling/cross-version) sources supplied by the
+    /// engine's `SourceResolver` (live resolution owns the shared-layer walk;
+    /// a fixed source map is the test-only path). Each GEMM-family file falls back to
+    /// its primary `data_root/<basename>` when the resolver names no override. No I/O.
     pub fn with_sources(
         data_root: PathBuf,
         system_spec: SystemSpec,
-        perf_db_sources: &PerfDbSources,
-    ) -> Self {
-        let gemm_sources = resolve_op_sources(perf_db_sources, "gemm_perf.parquet", &data_root);
+        resolver: &SourceResolver,
+    ) -> Result<Self, AicError> {
+        let gemm_sources = resolver.sources_for("gemm_perf.parquet", &data_root)?;
         let compute_scale_sources =
-            resolve_op_sources(perf_db_sources, "computescale_perf.parquet", &data_root);
+            resolver.sources_for("computescale_perf.parquet", &data_root)?;
         let scale_matrix_sources =
-            resolve_op_sources(perf_db_sources, "scale_matrix_perf.parquet", &data_root);
-        Self {
+            resolver.sources_for("scale_matrix_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             system_spec,
             gemm_sources,
@@ -212,7 +215,7 @@ impl GemmTable {
             compute_scale: OnceLock::new(),
             scale_matrix: OnceLock::new(),
             query_cache: OnceLock::new(),
-        }
+        })
     }
 
     /// Query the GEMM measured value (`{latency ms, power W, energy W·ms}`)
@@ -478,12 +481,29 @@ impl GemmTable {
     }
 }
 
-/// Speed-of-light GEMM latency in ms, from a pre-resolved `tc_flops`.
+/// Speed-of-light GEMM roofline components, from a pre-resolved `tc_flops`.
 ///
 /// Mirrors Python's `GEMM._query_gemm_table::get_sol`:
 /// - `sol_math = 2 * m * n * k / tc_flops * 1000`
 /// - `sol_mem  = quant.memory * (m*n + m*k + n*k) / mem_bw * 1000`
 /// - `sol      = max(sol_math, sol_mem)`
+pub(crate) fn gemm_sol_with_flops(
+    spec: &SystemSpec,
+    quant: GemmQuantMode,
+    tc_flops: f64,
+    m: f64,
+    n: f64,
+    k: f64,
+) -> SolComponents {
+    let mapping = quant.mapping();
+    let sol_math = 2.0 * m * n * k / tc_flops * 1000.0;
+    let sol_mem = mapping.memory * (m * n + m * k + n * k) / spec.gpu.mem_bw * 1000.0;
+    SolComponents::new(sol_math, sol_mem)
+}
+
+/// `max(sol_math, sol_mem)` of [`gemm_sol_with_flops`] — the scalar SOL
+/// latency for callers that don't need the decomposition (grid clamps,
+/// empirical sol_fn closures, the fp8_static floor).
 pub(crate) fn gemm_sol_latency_ms_with_flops(
     spec: &SystemSpec,
     quant: GemmQuantMode,
@@ -492,10 +512,7 @@ pub(crate) fn gemm_sol_latency_ms_with_flops(
     n: f64,
     k: f64,
 ) -> f64 {
-    let mapping = quant.mapping();
-    let sol_math = 2.0 * m * n * k / tc_flops * 1000.0;
-    let sol_mem = mapping.memory * (m * n + m * k + n * k) / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    gemm_sol_with_flops(spec, quant, tc_flops, m, n, k).time_ms()
 }
 
 // Strict resolver lives in common/system_spec.rs (it depends only on
@@ -546,6 +563,7 @@ pub(crate) fn gemm_quant_by_name(name: &str) -> Option<GemmQuantMode> {
         "fp8_block" => Fp8Block,
         "fp8_ootb" => Fp8Ootb,
         "nvfp4" => Nvfp4,
+        "nvfp4_wo" => Nvfp4Wo,
         _ => return None,
     })
 }
@@ -576,6 +594,7 @@ fn gemm_engine_config<'a>(sol: &'a dyn Fn(&[f64]) -> f64) -> OpInterpConfig<'a> 
             max_site_distance: Some(2.0),
             require_curve_coverage: true,
             k_tail: 3,
+            own_curve_coverage_fallback: false,
         },
         sol_fn: sol,
         value_transform: ValueTransform::Raw,
@@ -875,8 +894,9 @@ mod tests {
     /// admitted. Mirrors Python `_read_filtered_rows` + `load_gemm_data`.
     #[test]
     fn shared_layer_merges_siblings_with_kernel_source_filter_and_first_wins() {
-        // trtllm 1.3.0rc10 primary + 1.2.0rc5 sibling — the real shape Python's
-        // `_compute_perf_db_sources` emits for this backend.
+        // trtllm 1.3.0rc10 primary + 1.2.0rc5 sibling — the real shape the
+        // retired Python `_compute_perf_db_sources` emitted for this backend
+        // (the live resolver derives the same walk).
         let primary = b200_gemm_parquet("trtllm", "1.3.0rc10");
         let sibling = b200_gemm_parquet("trtllm", "1.2.0rc5");
 

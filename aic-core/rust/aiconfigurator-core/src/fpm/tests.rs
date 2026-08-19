@@ -92,6 +92,7 @@ fn fixture_engine_config() -> EngineConfig {
         systems_path: None,
         backend: BackendKind::Vllm,
         backend_version: Some("0.19.0".to_string()),
+        forward_model: None,
         kv_block_size: None,
         parallel: ParallelMapping {
             tp_size: 8,
@@ -108,7 +109,8 @@ fn fixture_engine_config() -> EngineConfig {
             kv_cache_dtype: None,
         },
         speculative: None,
-        perf_db_sources: Default::default(),
+        enable_shared_layer: None,
+        strict_provenance: false,
         database_mode: Default::default(),
         transfer_policy: None,
         extra: BTreeMap::new(),

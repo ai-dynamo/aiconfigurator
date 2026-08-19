@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Benchmark Python SDK and Rust engine-step latency.
+"""Benchmark the Rust engine-step latency through the Python SDK.
+
+(The former Python engine-step arm — and the speedup-vs-python columns — went
+with the Python step path; historical comparative numbers live in
+``../docs/perf-speedup-report.md``.)
 
 - `maturin develop` / `cargo build` (compilation overhead): not timed; the
   maturin-built `aiconfigurator_core` extension must be importable already.
 - Rust estimator setup: timed separately from step latency. Includes the
   `aiconfigurator_core` extension import, Rust model metadata load, Rust perf
   DB load, and estimator construction, but not the build.
-- Rust/Python step latency: timed samples use already-created runners. `hot`
-  warms runtime query caches before timing; `cold` clears runtime query caches
+- Step latency: timed samples use already-created runners. `hot` warms
+  runtime query caches before timing; `cold` clears runtime query caches
   before each timed call. Cache clearing itself is not timed.
 """
 
@@ -63,8 +67,8 @@ CASES = {
         tp_size=4,
         moe_ep_size=1,
     ),
-    # MoE family (non-DeepSeek). Smoke uses tp=4, moe_ep=4 for this model;
-    # tp=8/moe_ep=8 misses perf data.
+    # MoE family (non-DeepSeek). Smoke uses tp=4, moe_expert_compute=4 for this model;
+    # tp=8/moe_expert_compute=8 misses perf data.
     "qwen3-30b-a3b": BenchmarkCase(
         model_path="Qwen/Qwen3-30B-A3B",
         tp_size=4,
@@ -187,11 +191,10 @@ def _phase_call(
     runtime_config: config.RuntimeConfig,
     *,
     phase: str,
-    engine_step_backend: str,
     suppress_output: bool,
 ) -> Callable[[], float]:
     mode = {"context": "static_ctx", "generation": "static_gen"}[phase]
-    runtime = replace(runtime_config, engine_step_backend=engine_step_backend)
+    runtime = replace(runtime_config, engine_step_backend="rust")
 
     def call() -> float:
         with _suppress_output(suppress_output):
@@ -200,11 +203,7 @@ def _phase_call(
     return call
 
 
-def _reset_python_runtime_caches(session: InferenceSession) -> None:
-    session._database.clear_runtime_caches()
-
-
-def _measure_python_session_setup_ms(
+def _measure_session_setup_ms(
     case: BenchmarkCase,
     *,
     suppress_loader_output: bool,
@@ -221,20 +220,6 @@ def _measure_rust_estimator_setup_ms(session: InferenceSession) -> float:
     return (time.perf_counter_ns() - start) / 1_000_000.0
 
 
-def _record_phase_results(
-    results: dict,
-    phase: str,
-    python: dict[str, float],
-    rust: dict[str, float],
-) -> None:
-    rust["speedup_vs_python_mean"] = python["call_mean_us"] / rust["call_mean_us"]
-    rust["speedup_vs_python_median"] = python["call_median_us"] / rust["call_median_us"]
-    rust["speedup_vs_python_p50"] = python["call_p50_us"] / rust["call_p50_us"]
-    rust["speedup_vs_python_p90"] = python["call_p90_us"] / rust["call_p90_us"]
-    rust["speedup_vs_python_p99"] = python["call_p99_us"] / rust["call_p99_us"]
-    results["phases"][phase] = {"python": python, "rust": rust}
-
-
 def _run_case(
     case: BenchmarkCase,
     *,
@@ -246,7 +231,7 @@ def _run_case(
     _clear_caches(case)
     _ensure_rust_library_present()
 
-    python_session_setup_ms, session, runtime_config = _measure_python_session_setup_ms(
+    session_setup_ms, session, runtime_config = _measure_session_setup_ms(
         case,
         suppress_loader_output=suppress_output,
     )
@@ -254,42 +239,26 @@ def _run_case(
     results = {
         "case": asdict(case),
         "cache_mode": cache_mode,
-        "python_session_setup_ms": python_session_setup_ms,
+        "session_setup_ms": session_setup_ms,
         "rust_estimator_setup_ms": rust_estimator_setup_ms,
         "phases": {},
     }
 
     for phase in ("context", "generation"):
-        python_reset = lambda: _reset_python_runtime_caches(session)
         rust_reset = lambda: rust_engine_step._engine_handle_cache_clear()
-
-        python_reset()
-        python = _measure(
-            _phase_call(
-                session,
-                runtime_config,
-                phase=phase,
-                engine_step_backend="python",
-                suppress_output=suppress_output,
-            ),
-            warmup=warmup,
-            iterations=iterations,
-            before_call=python_reset if cache_mode == "cold" else None,
-        )
         rust_reset()
         rust = _measure(
             _phase_call(
                 session,
                 runtime_config,
                 phase=phase,
-                engine_step_backend="rust",
                 suppress_output=suppress_output,
             ),
             warmup=warmup,
             iterations=iterations,
             before_call=rust_reset if cache_mode == "cold" else None,
         )
-        _record_phase_results(results, phase, python, rust)
+        results["phases"][phase] = {"rust": rust}
 
     return results
 
@@ -305,33 +274,29 @@ def _print_table(result: dict) -> None:
     )
     print(f"Cache mode: {result['cache_mode']}")
     print(
-        "Python session setup (model + perf DB + backend): "
-        f"{result['python_session_setup_ms']:.2f} ms (one-time, excluded from step latency)"
+        "Session setup (model + perf DB + backend): "
+        f"{result['session_setup_ms']:.2f} ms (one-time, excluded from step latency)"
     )
     print(
         "Rust estimator setup (extension import + Rust model/perf DB load + constructor): "
         f"{result['rust_estimator_setup_ms']:.2f} ms (one-time, excluded from step latency)"
     )
     print()
-    print("phase       engine    mean_us   p50_us   p90_us   p99_us   speedup")
-    print("----------  -------  --------  -------  -------  -------  -------")
+    print("phase       engine    mean_us   p50_us   p90_us   p99_us")
+    print("----------  -------  --------  -------  -------  -------")
     for phase, engines in result["phases"].items():
-        for engine_name in ("python", "rust"):
-            row = engines[engine_name]
-            speedup = row.get("speedup_vs_python_p50")
-            speedup_text = "-" if speedup is None else f"{speedup:.2f}x"
-            print(
-                f"{phase:<10}  {engine_name:<7}  "
-                f"{row['call_mean_us']:>8.2f}  "
-                f"{row['call_p50_us']:>7.2f}  "
-                f"{row['call_p90_us']:>7.2f}  "
-                f"{row['call_p99_us']:>7.2f}  "
-                f"{speedup_text:>7}"
-            )
+        row = engines["rust"]
+        print(
+            f"{phase:<10}  {'rust':<7}  "
+            f"{row['call_mean_us']:>8.2f}  "
+            f"{row['call_p50_us']:>7.2f}  "
+            f"{row['call_p90_us']:>7.2f}  "
+            f"{row['call_p99_us']:>7.2f}"
+        )
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark cached Python SDK vs Rust engine-step calls.")
+    parser = argparse.ArgumentParser(description="Benchmark cached Rust engine-step calls through the Python SDK.")
     parser.add_argument("--case", choices=sorted(CASES), help="Benchmark one predefined case. Defaults to all cases.")
     parser.add_argument("--model-path")
     parser.add_argument("--system-name")

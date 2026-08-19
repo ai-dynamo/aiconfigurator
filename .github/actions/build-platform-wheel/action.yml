@@ -38,10 +38,17 @@ runs:
         build-args: WHEEL_BUILD_BASE=${{ inputs.wheel_base }}
         outputs: type=local,dest=./wheelhouse
 
+    # Docker builds only: the host interpreter drives the Linux smoke test.
+    # The native-macos path deliberately skips setup-python — on the
+    # self-hosted arm64 runner its install script needs `sudo installer`
+    # (no passwordless sudo there), which broke every main-push wheel build
+    # once 3.13 was requested (#1549); uv provisions a managed interpreter
+    # user-space instead (see the venv step below).
     - name: Set up Python
+      if: inputs.build_method != 'native-macos'
       uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
       with:
-        python-version: "3.12"
+        python-version: "3.13"
         architecture: ${{ inputs.python_architecture }}
 
     - name: Set up uv
@@ -54,12 +61,19 @@ runs:
     - name: Create isolated macOS Python environment
       if: inputs.build_method == 'native-macos'
       shell: bash
+      env:
+        # Hermetic interpreter: always the python-build-standalone build uv
+        # manages (installed under ~/.local/share/uv/python by default; the
+        # per-run UV_CACHE_DIR below is separate) — never whatever python the
+        # host happens to carry, and no sudo anywhere.
+        UV_PYTHON_PREFERENCE: only-managed
+        UV_PYTHON_DOWNLOADS: automatic
       run: |
         uv_cache_dir="${RUNNER_TEMP}/aiconfigurator-uv-cache-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
         export UV_CACHE_DIR="${uv_cache_dir}"
         echo "UV_CACHE_DIR=${uv_cache_dir}" >> "${GITHUB_ENV}"
 
-        uv venv --python 3.12 "${RUNNER_TEMP}/aiconfigurator-wheel-venv"
+        uv venv --python 3.13 "${RUNNER_TEMP}/aiconfigurator-wheel-venv"
         echo "${RUNNER_TEMP}/aiconfigurator-wheel-venv/bin" >> "${GITHUB_PATH}"
         echo "VIRTUAL_ENV=${RUNNER_TEMP}/aiconfigurator-wheel-venv" >> "${GITHUB_ENV}"
 

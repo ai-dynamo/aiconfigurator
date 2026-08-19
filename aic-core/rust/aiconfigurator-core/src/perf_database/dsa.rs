@@ -39,10 +39,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use super::gemm::quant_tc_flops;
 use super::perf_interp::{self, LeafValue, Node, OpInterpConfig};
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
+use crate::operators::base::SolComponents;
 use crate::config::{PerfDbSources, PerfSource};
 use crate::perf_database::parquet_loader::PerfReader;
 
@@ -69,12 +70,11 @@ pub struct DsaTable {
     /// Engine-ready per-`DsaKey` generation tables with the Python v2 axis
     /// order `[num_heads][batch][seq = isl + step]`, built once at load.
     generation_nodes: OnceLock<Result<NodeCache, AicError>>,
-    /// Shared-layer source map retained for the lazily-resolved CP sparse
+    /// Source resolver retained for the lazily-resolved CP sparse
     /// sub-kernel files (`<prefix>_{mqa_logits,topk,dsa_attn}_module_perf.parquet`,
-    /// prefix = glm5 / dsv32 by architecture). Python reads these primary-only
-    /// (`_load_glm5_sparse` -> `pd.read_parquet(data_dir/<fn>)`); the default
-    /// (empty-map) resolution here is exactly that single primary file.
-    perf_db_sources: PerfDbSources,
+    /// prefix = glm5 / dsv32 by architecture) — their basenames depend on the
+    /// queried architecture, so resolution happens at query time.
+    source_resolver: Arc<SourceResolver>,
     /// CP sparse sub-kernel tables keyed by (file_prefix, num_heads) — the
     /// Rust mirror of Python `ContextDSAModule._glm5_sparse_cache`.
     sparse: Mutex<BTreeMap<(String, u32), Arc<DsaSparseTables>>>,
@@ -186,6 +186,26 @@ const GLM_MOE_DSA_DIMS: DsaDims = DsaDims {
     index_n_heads: 32,
 };
 
+/// Configured-backend bucket(s) a DSA perf row supports — the single home
+/// for the serving rule (Python `_dsa_kernel_source_buckets`), shared by the
+/// query loader and the table view so a kernel rename lands once. BF16-KV
+/// rows back BOTH buckets (one real execution path per shape); FP8 rows
+/// bucket by the executed kernel, legacy names keep the substring rule.
+pub(crate) fn dsa_kernel_source_buckets(kernel_source: &str, kv_quant: &str) -> &'static [&'static str] {
+    if kv_quant == "bfloat16" {
+        return &["trtllm", "flashmla_kv"];
+    }
+    match kernel_source {
+        "sglang_dsa_indexer_trtllm" | "sglang_dsa_skip_indexer_trtllm" => &["trtllm"],
+        "sglang_dsa_indexer_flashmla_sparse" | "sglang_dsa_skip_indexer_flashmla_sparse" => {
+            &["flashmla_kv"]
+        }
+        "sglang_dsa_dense_mha_trtllm_ragged" => &["trtllm", "flashmla_kv"],
+        ks if ks.contains("trtllm") => &["trtllm"],
+        _ => &["flashmla_kv"],
+    }
+}
+
 pub(crate) fn dsa_dims(architecture: &str) -> &'static DsaDims {
     match architecture {
         "GlmMoeDsaForCausalLM" => &GLM_MOE_DSA_DIMS,
@@ -198,24 +218,21 @@ impl DsaTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf) -> Self {
-        Self::with_sources(data_root, &PerfDbSources::default())
+        Self::with_sources(data_root, &Arc::new(SourceResolver::fixed(PerfDbSources::default())))
+            .expect("fixed-map resolution is infallible")
     }
 
-    /// Construct with shared-layer (sibling/cross-version) sources resolved from
-    /// `perf_db_sources` (Python-supplied). Each DSA file falls back to its
-    /// primary `data_root/<basename>` when absent from the map. No I/O.
-    pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
-        let context_sources = resolve_op_sources(
-            perf_db_sources,
-            "dsa_context_module_perf.parquet",
-            &data_root,
-        );
-        let generation_sources = resolve_op_sources(
-            perf_db_sources,
-            "dsa_generation_module_perf.parquet",
-            &data_root,
-        );
-        Self {
+    /// Construct with shared-layer (sibling/cross-version) sources supplied by the
+    /// engine's `SourceResolver` (live resolution owns the shared-layer walk;
+    /// a fixed source map is the test-only path). Each DSA file falls back to its
+    /// primary `data_root/<basename>` when the resolver names no override. No I/O.
+    pub fn with_sources(
+        data_root: PathBuf,
+        resolver: &Arc<SourceResolver>,
+    ) -> Result<Self, AicError> {
+        let context_sources = resolver.sources_for("dsa_context_module_perf.parquet", &data_root)?;
+        let generation_sources = resolver.sources_for("dsa_generation_module_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             context_sources,
             generation_sources,
@@ -227,9 +244,9 @@ impl DsaTable {
             generation_skip_nodes: OnceLock::new(),
             context_nodes: OnceLock::new(),
             generation_nodes: OnceLock::new(),
-            perf_db_sources: perf_db_sources.clone(),
+            source_resolver: Arc::clone(resolver),
             sparse: Mutex::new(BTreeMap::new()),
-        }
+        })
     }
 
     /// Load the DSA CP sparse sub-kernel tables (mqa / topk / dsa_attn) for
@@ -257,11 +274,8 @@ impl DsaTable {
         let mut tables = DsaSparseTables::default();
         // mqa logits: every row goes to `mqa`.
         load_sparse_parquet(
-            &resolve_op_sources(
-                &self.perf_db_sources,
-                &format!("{file_prefix}_mqa_logits_module_perf.parquet"),
-                &self.data_root,
-            ),
+            &self.source_resolver
+                .sources_for(&format!("{file_prefix}_mqa_logits_module_perf.parquet"), &self.data_root)?,
             num_heads,
             |_| SparseKind::Mqa,
             &mut tables,
@@ -269,11 +283,8 @@ impl DsaTable {
         // topk: split by `score_mode` — "flat" -> topk_flat, else topk_last
         // (Python: `"topk_flat" if str(r.get("score_mode","")) == "flat" else "topk_last"`).
         load_sparse_parquet(
-            &resolve_op_sources(
-                &self.perf_db_sources,
-                &format!("{file_prefix}_topk_module_perf.parquet"),
-                &self.data_root,
-            ),
+            &self.source_resolver
+                .sources_for(&format!("{file_prefix}_topk_module_perf.parquet"), &self.data_root)?,
             num_heads,
             |score_mode| {
                 if score_mode == Some("flat") {
@@ -286,11 +297,8 @@ impl DsaTable {
         )?;
         // dsa_attn: optional, not used by the CP delta.
         load_sparse_parquet(
-            &resolve_op_sources(
-                &self.perf_db_sources,
-                &format!("{file_prefix}_dsa_attn_module_perf.parquet"),
-                &self.data_root,
-            ),
+            &self.source_resolver
+                .sources_for(&format!("{file_prefix}_dsa_attn_module_perf.parquet"), &self.data_root)?,
             num_heads,
             |_| SparseKind::DsaAttn,
             &mut tables,
@@ -700,7 +708,7 @@ fn indexer_cache_entry_bytes(index_head_dim: i64) -> i64 {
 /// attention group (fmha_quant) whose exact KV pair count is
 /// `sum_{i=0..s-1} min(prefix+i+1, index_topk)`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn dsa_context_sol_ms(
+pub(crate) fn dsa_context_sol(
     spec: &SystemSpec,
     dims: &DsaDims,
     index_topk: i64,
@@ -713,7 +721,7 @@ pub(crate) fn dsa_context_sol_ms(
     num_heads: i64,
     skip_indexer: bool,
     flops: DsaSolFlops,
-) -> f64 {
+) -> SolComponents {
     let (hidden, q_lora, kv_lora) = (dims.hidden_size, dims.q_lora_rank, dims.kv_lora_rank);
     let (inh, ihd) = (dims.index_n_heads, dims.index_head_dim);
     let qk_head_dim = dims.qk_nope_head_dim + dims.qk_rope_head_dim;
@@ -796,14 +804,47 @@ pub(crate) fn dsa_context_sol_ms(
         + sparse_attn_ops as f64 / attn_flops)
         * 1000.0;
     let sol_mem = total_mem / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    SolComponents::new(sol_math, sol_mem)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dsa_context_sol_ms(
+    spec: &SystemSpec,
+    dims: &DsaDims,
+    index_topk: i64,
+    kv_quant: KvCacheQuantMode,
+    fmha_quant: FmhaQuantMode,
+    gemm_quant: GemmQuantMode,
+    b: i64,
+    s: i64,
+    prefix: i64,
+    num_heads: i64,
+    skip_indexer: bool,
+    flops: DsaSolFlops,
+) -> f64 {
+    dsa_context_sol(
+        spec,
+        dims,
+        index_topk,
+        kv_quant,
+        fmha_quant,
+        gemm_quant,
+        b,
+        s,
+        prefix,
+        num_heads,
+        skip_indexer,
+        flops,
+    )
+    .time_ms()
 }
 
 /// Generation DSA analytic roofline. Verbatim port of Python
 /// `GenerationDSAModule._query_generation_dsa_module_table::get_sol`
 /// (1 token per request; the attention group is hardcoded bfloat16 in
 /// Python — `fmha_mode = FMHAQuantMode.bfloat16` — so no fmha arg here).
-pub(crate) fn dsa_generation_sol_ms(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dsa_generation_sol(
     spec: &SystemSpec,
     dims: &DsaDims,
     kv_quant: KvCacheQuantMode,
@@ -812,7 +853,7 @@ pub(crate) fn dsa_generation_sol_ms(
     s: i64,
     num_heads: i64,
     flops: DsaSolFlops,
-) -> f64 {
+) -> SolComponents {
     let (b, s, num_heads) = (b as i128, s as i128, num_heads as i128);
     let (hidden, q_lora, kv_lora) = (
         dims.hidden_size as i128,
@@ -869,7 +910,21 @@ pub(crate) fn dsa_generation_sol_ms(
         + sparse_attn_ops as f64 / attn_flops)
         * 1000.0;
     let sol_mem = total_mem / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    SolComponents::new(sol_math, sol_mem)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dsa_generation_sol_ms(
+    spec: &SystemSpec,
+    dims: &DsaDims,
+    kv_quant: KvCacheQuantMode,
+    gemm_quant: GemmQuantMode,
+    b: i64,
+    s: i64,
+    num_heads: i64,
+    flops: DsaSolFlops,
+) -> f64 {
+    dsa_generation_sol(spec, dims, kv_quant, gemm_quant, b, s, num_heads, flops).time_ms()
 }
 
 /// Load a DSA module table from an ordered, priority-sorted source list, with
@@ -972,18 +1027,7 @@ fn load_dsa_parquet(
             // backs both. Legacy (pre-0.5.14) names keep the old substring
             // rule.
             let ks_name = row.str_optional(ks_col)?.unwrap_or("").to_string();
-            let buckets: &[&str] = if key.kv_quant == "bfloat16" {
-                &["trtllm", "flashmla_kv"]
-            } else {
-                match ks_name.as_str() {
-                    "sglang_dsa_indexer_trtllm" | "sglang_dsa_skip_indexer_trtllm" => &["trtllm"],
-                    "sglang_dsa_indexer_flashmla_sparse"
-                    | "sglang_dsa_skip_indexer_flashmla_sparse" => &["flashmla_kv"],
-                    "sglang_dsa_dense_mha_trtllm_ragged" => &["trtllm", "flashmla_kv"],
-                    _ if ks_name.contains("trtllm") => &["trtllm"],
-                    _ => &["flashmla_kv"],
-                }
-            };
+            let buckets = dsa_kernel_source_buckets(&ks_name, &key.kv_quant);
             let (step, isl) = if collapse_isl_step_to_seq {
                 // Generation: canonical coordinate is s = isl + step (see fn
                 // doc); same-`s` rows overwrite in file order below.
@@ -1392,10 +1436,10 @@ mod tests {
         approx_rel(q(3, 1024, 0, 128, dsv32), 3.0913);
         // interior prefix blend on the GLM step axis (0 < 64 < 128)
         approx_rel(q(1, 128, 64, 16, glm), 1.2492999999999999);
-        // seq util-hold beyond the 32768 frontier (validates the context SOL)
-        approx_rel(q(1, 65536, 0, 128, dsv32), 89.56218926395842);
-        // prefix util-hold beyond the 128 step frontier
-        approx_rel(q(1, 2048, 4096, 128, dsv32), 3.2580009866421995);
+        // seq tapered util-hold beyond the 32768 frontier (validates the context SOL)
+        approx_rel(q(1, 65536, 0, 128, dsv32), 93.51797494885695);
+        // prefix tapered util-hold beyond the 128 step frontier
+        approx_rel(q(1, 2048, 4096, 128, dsv32), 3.270467722991338);
     }
 
     // ------------------------------------------------------------------
@@ -1636,8 +1680,8 @@ mod tests {
         approx_rel(q(16, 3000), 0.261390380859375);
         // interior batch blend (16 < 24 < 32)
         approx_rel(q(24, 4097), 0.27545);
-        // seq util-hold beyond the frontier (validates the decode SOL)
-        approx_rel(q(16, 300000), 0.5461828075504237);
+        // seq tapered util-hold beyond the frontier (validates the decode SOL)
+        approx_rel(q(16, 300000), 0.5491372293318538);
     }
 
     /// Write one synthetic DSA module parquet with the collector's column set

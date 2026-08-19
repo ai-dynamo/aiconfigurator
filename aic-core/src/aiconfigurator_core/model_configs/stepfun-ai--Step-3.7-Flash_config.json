@@ -67,5 +67,7 @@
   "share_expert_dim": 1280,
   "n_shared_experts": 1,
   "scoring_func": "sigmoid",
-  "num_nextn_predict_layers": 3
+  "num_nextn_predict_layers": 3,
+  "use_moe_router_bias": true,
+  "moe_router_scaling_factor": 3.0
 }

@@ -13,7 +13,6 @@ For every (model, system, backend, version) combination the test:
   2. If unsupported → the test is skipped.
   3. If supported   → runs the full ``SupportMatrix.run_single_test`` pipeline
      and **fails** the test when the result disagrees with the matrix.
-  4. For supported modes, compares Rust engine-step output against Python.
 """
 
 from __future__ import annotations
@@ -79,7 +78,7 @@ def _build_param_grid() -> list[pytest.param]:
 
 @pytest.mark.parametrize("model, system, backend, version", _build_param_grid())
 def test_pr_support_matrix(model: str, system: str, backend: str, version: str):
-    """Validate that supported model/system/backend combos produce Python/Rust comparable results."""
+    """Validate that supported model/system/backend combos run the pipeline successfully."""
     if not version:
         pytest.fail(f"No latest database version found for {system=}, {backend=}")
 
@@ -95,7 +94,6 @@ def test_pr_support_matrix(model: str, system: str, backend: str, version: str):
         system=system,
         backend=backend,
         version=version,
-        compare_engine_step_backends=True,
     )
 
     failures: list[str] = []

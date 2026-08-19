@@ -28,7 +28,7 @@ use std::sync::OnceLock;
 
 use super::axis_curve::LeafAxisCurve;
 use super::perf_interp::LeafValue;
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::CommQuantMode;
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
@@ -83,7 +83,8 @@ impl CommunicationTable {
         nccl_root: Option<PathBuf>,
         oneccl_root: Option<PathBuf>,
     ) -> Self {
-        Self::with_sources(data_root, nccl_root, oneccl_root, &PerfDbSources::default())
+        Self::with_sources(data_root, nccl_root, oneccl_root, &SourceResolver::fixed(PerfDbSources::default()))
+            .expect("fixed-map resolution is infallible")
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources resolved from
@@ -96,11 +97,11 @@ impl CommunicationTable {
         data_root: PathBuf,
         nccl_root: Option<PathBuf>,
         oneccl_root: Option<PathBuf>,
-        perf_db_sources: &PerfDbSources,
-    ) -> Self {
+        resolver: &SourceResolver,
+    ) -> Result<Self, AicError> {
         let custom_allreduce_sources =
-            resolve_op_sources(perf_db_sources, "custom_allreduce_perf.parquet", &data_root);
-        Self {
+            resolver.sources_for("custom_allreduce_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             nccl_root,
             oneccl_root,
@@ -108,7 +109,17 @@ impl CommunicationTable {
             custom_allreduce: OnceLock::new(),
             nccl: OnceLock::new(),
             oneccl: OnceLock::new(),
-        }
+        })
+    }
+
+    /// System-wide NCCL data dir (for the table view's primary-only load).
+    pub(crate) fn nccl_root(&self) -> Option<&Path> {
+        self.nccl_root.as_deref()
+    }
+
+    /// System-wide OneCCL data dir (vLLM/XPU systems only).
+    pub(crate) fn oneccl_root(&self) -> Option<&Path> {
+        self.oneccl_root.as_deref()
     }
 
     /// Raw custom-allreduce value (latency ms + power/energy), 1-D

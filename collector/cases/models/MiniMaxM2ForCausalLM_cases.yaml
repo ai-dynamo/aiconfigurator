@@ -75,5 +75,5 @@ all_frameworks_op_cases:
 
 framework_specific_op_cases:
   trtllm:
-    trtllm_moe_wideep:
+    moe_ep:
       cases: all

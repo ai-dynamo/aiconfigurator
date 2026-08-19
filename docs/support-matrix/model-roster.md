@@ -25,10 +25,11 @@ must remain explicitly classified rather than reported as passing.
 ## Multimodal encoder coverage
 
 The support matrix automatically exercises a checkpoint's vision encoder when
-the checkpoint contains a non-empty `vision_config` and AIC implements that
-encoder. The canonical workload is **one 1024 x 1024 image per request**. The
-same image-bearing run covers the language backbone; multimodal checkpoints do
-not receive a second, redundant text-only run.
+the checkpoint declares one through a non-empty `vision_config` or AIC's
+multimodal architecture registry, and AIC implements that encoder. The
+canonical workload is **one 1024 x 1024 image per request**. The same
+image-bearing run covers the language backbone; multimodal checkpoints do not
+receive a second, redundant text-only run.
 
 An encoder-supported PASS means that the agg or disagg run used the canonical
 image workload and produced strictly positive encoder latency and encoder
