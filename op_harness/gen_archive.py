@@ -168,14 +168,14 @@ def emit_queues(runs: list[dict], n_gpus: int, gpu_offset: int, plan_name: str) 
             cli = render_sglang_cli(run["model_dir"], run["tp"], run["version"])
             run["engine_cli"] = cli
             kv = f"--kv-dtype {run['kv_cli']} " if run["kv_cli"] else ""
-            cmd = (head + f"{run['image']} python3 {WORK}/probe/probe_runner.py "
+            cmd = (head + f"{run['image']} python3 {WORK}/probe/probe_sglang.py "
                    f"--model {run['model_dir']} --engine-cli {shlex.quote(cli)} {kv}--trace "
                    f"--out {WORK}/archive/raw/{run['id']}.json 2>&1 | tail -1 ; }}")
         elif run["backend"] == "vllm":  # via the FPM adapter
             rsh = ROOT / "archive" / "run_sh" / f"{run['id']}.sh"
             rsh.write_text(render_vllm_run_sh(run))
             run["run_sh"] = str(rsh)
-            cmd = (head + f"--entrypoint python3 {run['image']} {WORK}/probe/fpm_adapter.py "
+            cmd = (head + f"--entrypoint python3 {run['image']} {WORK}/probe/probe_vllm.py "
                    f"--run-sh {WORK}/archive/run_sh/{run['id']}.sh --model-override {run['model_dir']} "
                    f"--trace --out {WORK}/archive/raw/{run['id']}.json 2>&1 | tail -1 ; }}")
         else:  # trtllm: probe-default engine args (generator fidelity pending)
@@ -183,7 +183,7 @@ def emit_queues(runs: list[dict], n_gpus: int, gpu_offset: int, plan_name: str) 
             trc = "--trust-remote-code " if run["family"] in ("m3", "kimi_k3") else ""
             cmd = (head.replace("docker run --rm ",
                                 "docker run --rm -e TLLM_WORKER_USE_SINGLE_PROCESS=1 ")
-                   + f"{run['image']} bash -lc 'python3 {WORK}/probe/trtllm_probe.py "
+                   + f"{run['image']} bash -lc 'python3 {WORK}/probe/probe_trtllm.py "
                    f"--model {run['model_dir']} {trc}--out {WORK}/archive/raw/{run['id']}.json' "
                    f"2>&1 | tail -1 ; }}")
         queues[g].append(cmd)
