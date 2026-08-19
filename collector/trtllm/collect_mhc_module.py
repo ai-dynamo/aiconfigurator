@@ -34,6 +34,17 @@ statically-instantiated MMA sizes) fused_hc is the serving fast path and
 pre+post is the documented approximation. Aligning row semantics with the
 fused path is a coordinated producer+consumer contract change; do not
 switch variants unilaterally.
+
+OWNER DECISION (tianhaox, 2026-08-19, PR #1486 review item 3): the
+Blackwell fused_hc collection is DEFERRED; the shipped mhc_module_perf
+tables measure the unfused pre+post path on every SM, and the rows'
+kernel_source labels (trtllm_mhc_pre_* / trtllm_mhc_post_mapping) make the
+measured variant explicit. Bound on the modeling error: on b200, mHC is
+9-14% of the DSV4 per-layer cost (attn+moe+mhc at 128/4k/16k tokens,
+shipped rc23 tables), so even a free fused_hc would move layer cost by at
+most that share; realistic fused speedups put the error at a few percent,
+in the conservative (cost-overestimating) direction. Follow-up: a
+coordinated fused_hc table + SDK consumer switch for SM100/103.
 """
 
 from __future__ import annotations
