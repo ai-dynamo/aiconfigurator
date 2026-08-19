@@ -989,6 +989,16 @@ def test_kimi_mla_plan_includes_generation_bmm_helpers():
         assert required_ops <= plan.selected_ops
 
 
+def test_kimi_k3_vllm_plan_activates_mla_module_ops():
+    vllm_plan = build_collection_case_plan(backend="vllm", model_path="moonshotai/Kimi-K3")
+    assert {"mla_context_module", "mla_generation_module"} <= vllm_plan.selected_ops
+
+    # Framework scoping: sglang keeps the granular MLA lane.
+    sglang_plan = build_collection_case_plan(backend="sglang", model_path="moonshotai/Kimi-K3")
+    assert {"mla_context_module", "mla_generation_module"}.isdisjoint(sglang_plan.selected_ops)
+    assert {"mla_context", "mla_generation"} <= sglang_plan.selected_ops
+
+
 def test_kimi_k3_moe_is_planned_per_framework_and_never_for_trtllm():
     # K3 has no trtllm serving lane. moe activation is framework-specific
     # (sglang/vllm), so a K3-scoped trtllm run plans NO moe at all — a
