@@ -14,6 +14,42 @@ from .aggregators import collect_generator_params
 from .rendering import apply_defaults
 
 
+def _msa_sparse_implementation(task_config) -> str | None:
+    """MiniMax-M3 x TRT-LLM on the SM100 family: prescribe the msa
+    (fmha_sm100) sparse-attention implementation.
+
+    TRT-LLM 1.3.0rc23 serving DEFAULTS to the Triton reference path; the
+    shipped SM100/103 MSA perf tables are collected with
+    ``implementation="msa"`` (the performance path the config field exists
+    for, hard-gated to those SMs by ``ensure_msa_available``). Emitting the
+    knob makes generated deployments run exactly the configuration the perf
+    data represents (PR #1507 review 4969690316, cross-module finding) —
+    without it, a default deployment would receive latency from a different
+    implementation. Keyed on the checkpoint ARCHITECTURE (never model-name
+    patterns) and the system's sm_version fact; returns None everywhere
+    else so the field is dropped from ModelConfig.
+    """
+    if getattr(task_config, "primary_backend_name", None) != "trtllm":
+        return None
+    from aiconfigurator.sdk.perf_database import load_system_spec
+    from aiconfigurator.sdk.utils import get_model_config_from_model_path
+
+    try:
+        parsed = get_model_config_from_model_path(task_config.primary_model_path)
+        architecture = parsed.get("architecture")
+    except (FileNotFoundError, KeyError, ValueError):
+        # Unresolvable model config (e.g. a user-local checkpoint the SDK
+        # does not bundle): leave the knob unset — serving falls back to its
+        # own default rather than receiving a wrong prescription.
+        return None
+    if architecture != "MiniMaxM3ForCausalLM":
+        return None
+    spec = load_system_spec(task_config.primary_system_name)
+    if int(spec.get("gpu", {}).get("sm_version", -1)) in (100, 103):
+        return "msa"
+    return None
+
+
 def _deep_merge(target: dict, extra: dict | None) -> dict:
     """
     Recursively merge the contents of the 'extra' dictionary into 'target',
@@ -183,6 +219,7 @@ def task_config_to_generator_config(
         "is_moe": task_config.is_moe,
         "nextn": task_config.nextn,
         "nextn_accepted": task_config.nextn_accepted if task_config.nextn else None,
+        "msa_sparse_implementation": _msa_sparse_implementation(task_config),
     }
     model_cfg = {k: v for k, v in model_cfg.items() if v is not None}
     model_cfg = _deep_merge(model_cfg, overrides.get("ModelConfig"))
