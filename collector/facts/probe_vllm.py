@@ -34,9 +34,23 @@ def parse_run_sh(path: str) -> tuple[list[str], dict[str, str]]:
     """Extract the engine argv (launcher + FPM flags stripped) and exported env."""
     text = open(path).read()
     m = re.search(r"engine_command=\((.*?)\)\s*$", text, re.M | re.S)
-    if not m:
-        raise ValueError(f"no engine_command=(...) found in {path}")
-    argv = shlex.split(m.group(1))
+    if m:
+        argv = shlex.split(m.group(1))
+    else:
+        # dynamo target (generator falls back to it when FPM preconditions
+        # do not hold): a multi-line `python3 -m dynamo.vllm \` invocation
+        # with shell variables. Take that block and resolve $MODEL_PATH.
+        # take ONLY the backslash-continued invocation, not the shell plumbing
+        # that follows it (pipes, subshell/loop tails)
+        blk = re.search(r"python3 -m dynamo\.vllm((?:[^\n]*\\\n)*[^\n]*)", text)
+        if not blk:
+            raise ValueError(f"no engine command found in {path}")
+        line = blk.group(1).replace("\\\n", " ")
+        line = re.split(r"\s(?:2>&1|\||&|;|\))", line)[0]
+        model = re.search(r'^export MODEL_PATH=\$\{MODEL_PATH:-"([^"]+)"\}', text, re.M)
+        line = line.replace('"$MODEL_PATH"', model.group(1) if model else "")
+        line = re.sub(r'"?\$\{?[A-Z_]+\}?"?', "", line)  # drop unresolved vars
+        argv = shlex.split(line)
     # strip launcher prefix: python3 -m dynamo.vllm / vllm serve ...
     while argv and not argv[0].startswith("--"):
         argv.pop(0)
