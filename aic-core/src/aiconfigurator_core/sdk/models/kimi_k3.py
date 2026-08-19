@@ -227,9 +227,12 @@ class KimiK3Model(BaseModel):
             # identity). The granular GQA stack below stays as FallbackOp
             # fallback for systems whose module tables still have no rows
             # (e.g. before per-head-count collection lands).
+            context_mla_q_b = ops.GEMM("context_mla_q_b_gemm", c, mla["q_b_out"] // tp, cfg.q_lora_rank, gemm_q)
+            context_mla_kv_b = ops.GEMM("context_mla_kv_b_gemm", c, mla["kv_b_out"] // tp, cfg.kv_lora_rank, gemm_q)
+            context_mla_o = ops.GEMM("context_mla_o_gemm", c, h, mla["o_in"] // tp, gemm_q, low_precision_input=True)
             context_mla_granular = [
-                ops.GEMM("context_mla_q_b_gemm", c, mla["q_b_out"] // tp, cfg.q_lora_rank, gemm_q),
-                ops.GEMM("context_mla_kv_b_gemm", c, mla["kv_b_out"] // tp, cfg.kv_lora_rank, gemm_q),
+                context_mla_q_b,
+                context_mla_kv_b,
                 ops.ContextAttention(
                     "context_attention",
                     c,
@@ -239,7 +242,7 @@ class KimiK3Model(BaseModel):
                     fmha_q,
                     head_size=cfg.v_head_dim,
                 ),
-                ops.GEMM("context_mla_o_gemm", c, h, mla["o_in"] // tp, gemm_q, low_precision_input=True),
+                context_mla_o,
             ]
             if self._backend_name == "vllm":
                 context_mla_block = [
@@ -261,8 +264,8 @@ class KimiK3Model(BaseModel):
             else:
                 # sglang keeps the granular ContextMLA tables.
                 context_mla_block = [
-                    context_mla_granular[0],
-                    context_mla_granular[1],
+                    context_mla_q_b,
+                    context_mla_kv_b,
                     ops.ContextMLA(
                         "context_attention",
                         c,
@@ -270,7 +273,7 @@ class KimiK3Model(BaseModel):
                         kvcache_q,
                         fmha_q,
                     ),
-                    context_mla_granular[3],
+                    context_mla_o,
                 ]
             self.context_ops.extend(
                 [
@@ -444,8 +447,12 @@ class KimiK3Model(BaseModel):
             # so price the block against the module-level MLA tables; the
             # granular GQA stack is the FallbackOp fallback for systems whose
             # module tables have no rows yet.
+            generation_mla_q_b = ops.GEMM("generation_mla_q_b_gemm", c, mla["q_b_out"] // tp, cfg.q_lora_rank, gemm_q)
+            generation_mla_o = ops.GEMM(
+                "generation_mla_o_gemm", c, h, mla["o_in"] // tp, gemm_q, low_precision_input=True
+            )
             generation_mla_granular = [
-                ops.GEMM("generation_mla_q_b_gemm", c, mla["q_b_out"] // tp, cfg.q_lora_rank, gemm_q),
+                generation_mla_q_b,
                 ops.GenerationAttention(
                     "generation_attention",
                     c,
@@ -454,7 +461,7 @@ class KimiK3Model(BaseModel):
                     kvcache_q,
                     head_size=cfg.v_head_dim,
                 ),
-                ops.GEMM("generation_mla_o_gemm", c, h, mla["o_in"] // tp, gemm_q, low_precision_input=True),
+                generation_mla_o,
             ]
             if self._backend_name == "vllm":
                 generation_mla_block = [
@@ -481,7 +488,7 @@ class KimiK3Model(BaseModel):
                 # next-pow2 DeepSeek slice scaled by the head ratio — see
                 # engine's mla_bmm table (operators/mla.rs).
                 generation_mla_block = [
-                    generation_mla_granular[0],
+                    generation_mla_q_b,
                     ops.MLABmm(
                         "generation_bmm_pre",
                         c,
@@ -502,7 +509,7 @@ class KimiK3Model(BaseModel):
                         mla_bmm_q,
                         if_pre=False,
                     ),
-                    generation_mla_granular[2],
+                    generation_mla_o,
                 ]
             self.generation_ops.extend(
                 [
