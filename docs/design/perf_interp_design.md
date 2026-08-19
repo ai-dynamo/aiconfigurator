@@ -1,8 +1,12 @@
 # perf_interp — the unified perf-table interpolation engine
 
-Status: shipped with PR #1303. This document covers the design, the
-leave-one-out accuracy evidence gathered during the migration, and the
-legacy defensive machinery the redesign made unnecessary.
+Status: HISTORICAL — superseded by #1357 PR-5 (single-oracle). The
+`sdk/perf_interp/` package this document describes was retired; its role
+(per-op interpolation, SOL rooflines, `util_empirical` estimation) is served
+by the compiled Rust engine (`aic-core/rust/aiconfigurator-core`:
+`perf_database/*.rs`, `operators/*.rs`, `operators/util_empirical.rs`).
+Kept for the design rationale and the leave-one-out accuracy evidence that
+still anchor the Rust implementation. Originally shipped with PR #1303.
 
 ## 1. Problem
 

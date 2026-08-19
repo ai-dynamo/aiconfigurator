@@ -21,9 +21,10 @@ class DeepSeekV4Model(BaseModel):
     @classmethod
     def supports_cp(cls, backend_name: str) -> bool:
         # DeepSeek-V4 CSA/HCA prefill CP: SGLang AllGather only. CP is modeled
-        # INSIDE ContextDeepSeekV4AttentionModule._query_cp (GLM-5-style mqa
-        # full/cp + topk full/cp deltas; HCA adds a windowed-KV all-gather),
-        # NOT via the dense _cp_attn_comm_ops / seq_split-only skeleton.
+        # INSIDE the engine's ContextDeepSeekV4AttentionModule operator
+        # (operators/dsv4.rs: GLM-5-style mqa full/cp + topk full/cp deltas;
+        # HCA adds a windowed-KV all-gather), NOT via the dense
+        # _cp_attn_comm_ops / seq_split-only skeleton.
         return backend_name == "sglang"
 
     @classmethod
@@ -55,6 +56,7 @@ class DeepSeekV4Model(BaseModel):
 
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, backend_name: str = "") -> None:
         super().__init__(*args)
+        self._backend_name = backend_name
 
         if not isinstance(self.extra_params, common.DeepSeekV4Config):
             raise TypeError("DeepSeekV4Model requires DeepSeekV4Config extra_params")
@@ -87,8 +89,8 @@ class DeepSeekV4Model(BaseModel):
         attention_dp_size = self.config.attention_dp_size
         pp_size = self.config.pp_size
         # Context parallelism (sglang AllGather, prefill-only):
-        #  - attention modules: cp_size -> _query_cp (GLM-5-style mqa/topk full/cp
-        #    deltas + CSA/HCA all-gathers);
+        #  - attention modules: cp_size on the module spec -> the engine's CP
+        #    path (GLM-5-style mqa/topk full/cp deltas + CSA/HCA all-gathers);
         #  - token-major context ops (Embedding/MHC/norm/GEMM): seq_split=cp;
         #  - context MoEDispatch: attn_cp_size=cp (AG_hidden+RS comm), MoE compute
         #    cp-invariant. Generation/decode is NOT CP'd.
@@ -148,6 +150,7 @@ class DeepSeekV4Model(BaseModel):
                     fmha_quant_mode,
                     gemm_quant_mode,
                     cp_size=(cp if is_context else 1),
+                    architecture=self.architecture,
                 )
                 for ratio, count in ratio_counts.items()
                 if count > 0
@@ -186,6 +189,7 @@ class DeepSeekV4Model(BaseModel):
                     True,
                     quant_mode=moe_quant_mode,
                     attn_cp_size=attn_cp,
+                    backend=self._backend_name,
                 ),
                 ops.MoE(
                     f"{phase}_moe",
@@ -212,6 +216,7 @@ class DeepSeekV4Model(BaseModel):
                     False,
                     quant_mode=moe_quant_mode,
                     attn_cp_size=attn_cp,
+                    backend=self._backend_name,
                 ),
             ]
 
@@ -228,6 +233,7 @@ class DeepSeekV4Model(BaseModel):
                     deepseek_v4_cfg.hc_sinkhorn_iters,
                     common.GEMMQuantMode.bfloat16,
                     seq_split=cp,
+                    architecture=self.architecture,
                 ),
                 ops.ElementWise("context_attn_norm", self._num_layers, h, h, 0.8, seq_split=cp),
                 *_attention_ops(is_context=True, scale_factor=1.0),
@@ -240,6 +246,7 @@ class DeepSeekV4Model(BaseModel):
                     deepseek_v4_cfg.hc_sinkhorn_iters,
                     common.GEMMQuantMode.bfloat16,
                     seq_split=cp,
+                    architecture=self.architecture,
                 ),
                 ops.ElementWise("context_ffn_norm", self._num_layers, h, h, 0.8, seq_split=cp),
                 ops.GEMM(
@@ -292,6 +299,7 @@ class DeepSeekV4Model(BaseModel):
                     deepseek_v4_cfg.hc_mult,
                     deepseek_v4_cfg.hc_sinkhorn_iters,
                     common.GEMMQuantMode.bfloat16,
+                    architecture=self.architecture,
                 ),
                 ops.ElementWise("generation_attn_norm", self._num_layers * self._mtp_scale_factor, h, h, 0.8),
                 *_attention_ops(is_context=False, scale_factor=self._mtp_scale_factor),
@@ -303,6 +311,7 @@ class DeepSeekV4Model(BaseModel):
                     deepseek_v4_cfg.hc_mult,
                     deepseek_v4_cfg.hc_sinkhorn_iters,
                     common.GEMMQuantMode.bfloat16,
+                    architecture=self.architecture,
                 ),
                 ops.ElementWise("generation_ffn_norm", self._num_layers * self._mtp_scale_factor, h, h, 0.8),
             ]

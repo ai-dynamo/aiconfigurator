@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+op: moe_a2a
+description: >
+  Base collector cases for the unified MoE all-to-all comm table
+  (moe_a2a_perf). The workload axes below are crossed with the MoE shape
+  tuples declared in cases/models/*_cases.yaml (model_case_values.moe rows
+  carrying `wideep: true`), which supply the correlated
+  (hidden_size, topk, num_experts) triple. The remaining key axes --
+  ep_size, node_num -- are properties of the distributed world the collector
+  is launched into (WORLD_SIZE / --gpus-per-node) and are never declared
+  here.
+common_case_values:
+  moe_a2a:
+    # HT ("normal") DeepEP kernels: prefill-scale per-rank token counts.
+    # Ported verbatim from the retired manual pipeline's sweep
+    # (deepep/test_internode.py:352-366).
+    ht_token_counts:
+    - 16
+    - 32
+    - 64
+    - 128
+    - 256
+    - 512
+    - 1024
+    - 2048
+    - 4096
+    - 8192
+    - 16384
+    - 32768
+    - 65536
+    # LL ("low-latency") DeepEP kernels: decode-scale per-rank token counts.
+    # Ported verbatim from deepep/test_internode.py:367 (the same list
+    # deepep/test_low_latency.py is driven with).
+    ll_token_counts:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 12
+    - 16
+    - 24
+    - 32
+    - 48
+    - 64
+    - 96
+    - 128
+    - 160
+    - 256
+    # SM budget handed to deep_ep.Config / num_qps_per_rank for the HT
+    # kernels (deepep/test_internode.py:351). It is a persisted key column,
+    # so it is declared rather than probed. LL rows carry no SM budget and
+    # persist sms=0 -- the same value the SDK's legacy LL adapter assigns
+    # (aic-core .../sdk/operations/moe_comm.py:191).
+    sms:
+    - 16
+    - 20
+    - 24
+    # Identities enforced in the collector's case builder (documented here
+    # the same way cases/base_ops/moe.yaml documents its own; neither is
+    # parsed by case_generator):
+    #   num_experts % ep_size   == 0   (DeepEP shards experts over ranks)
+    #   num_experts % node_num  == 0   (HT group-limited routing buckets
+    #                                   experts per RDMA node)

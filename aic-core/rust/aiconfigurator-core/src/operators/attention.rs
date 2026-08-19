@@ -22,11 +22,12 @@
 use crate::common::enums::{DatabaseMode, FmhaQuantMode, KvCacheQuantMode, TransferKind};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
-use crate::operators::base::{PerformanceResult, Source};
+use crate::operators::base::{PerformanceResult, SolComponents, Source};
 use crate::operators::util_empirical::{self, UtilGrid};
 use crate::perf_database::attention::{
-    context_attention_sol_ms, context_attention_sol_with_prefix_ms, encoder_attention_sol_ms,
-    generation_attention_sol_ms, generation_attn_flops,
+    context_attention_sol_ms, context_attention_sol_with_prefix,
+    context_attention_sol_with_prefix_ms, encoder_attention_sol, encoder_attention_sol_ms,
+    generation_attention_sol, generation_attention_sol_ms, generation_attn_flops,
 };
 use crate::perf_database::gemm::quant_tc_flops;
 use crate::perf_database::PerfDatabase;
@@ -48,10 +49,11 @@ pub(crate) fn mem_op_latency_ms(spec: &SystemSpec, mem_bytes: f64) -> f64 {
 /// other mode shares the empirical formula tagged `Source::Empirical`.
 pub(crate) fn query_mem_op(db: &PerfDatabase, mem_bytes: f64) -> PerformanceResult {
     match db.database_mode {
-        DatabaseMode::Sol | DatabaseMode::SolFull => PerformanceResult::new(
+        // Pure memory bound: SOL components are `(math=0, mem=sol_time)`.
+        DatabaseMode::Sol | DatabaseMode::SolFull => PerformanceResult::sol(SolComponents::new(
+            0.0,
             mem_bytes / db.system_spec.gpu.mem_bw.max(1.0) * 1000.0,
-            Source::Sol,
-        ),
+        )),
         _ => PerformanceResult::new(
             mem_op_latency_ms(&db.system_spec, mem_bytes),
             Source::Empirical,
@@ -459,21 +461,18 @@ fn query_context_attention_table(
         // at the REAL n_kv (no MHA sentinel).
         DatabaseMode::Sol | DatabaseMode::SolFull => {
             let attn_flops = quant_tc_flops(&db.system_spec, fmha_quant.mapping())?;
-            Ok(PerformanceResult::new(
-                context_attention_sol_with_prefix_ms(
-                    &db.system_spec,
-                    b as f64,
-                    s as f64,
-                    prefix as f64,
-                    n as f64,
-                    n_kv as f64,
-                    head_size,
-                    window_size,
-                    kv_quant,
-                    attn_flops,
-                ),
-                Source::Sol,
-            ))
+            Ok(PerformanceResult::sol(context_attention_sol_with_prefix(
+                &db.system_spec,
+                b as f64,
+                s as f64,
+                prefix as f64,
+                n as f64,
+                n_kv as f64,
+                head_size,
+                window_size,
+                kv_quant,
+                attn_flops,
+            )))
         }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             context_attention_empirical(
@@ -723,20 +722,17 @@ fn query_generation_attention_table(
         // for table slicing, and `n_kv > 0` resolves to itself in the formula.
         DatabaseMode::Sol | DatabaseMode::SolFull => {
             let attn_flops = generation_attn_flops(&db.system_spec, kv_quant)?;
-            Ok(PerformanceResult::new(
-                generation_attention_sol_ms(
-                    &db.system_spec,
-                    n_kv,
-                    head_size,
-                    window_size,
-                    kv_quant,
-                    n as f64,
-                    b as f64,
-                    s as f64,
-                    attn_flops,
-                ),
-                Source::Sol,
-            ))
+            Ok(PerformanceResult::sol(generation_attention_sol(
+                &db.system_spec,
+                n_kv,
+                head_size,
+                window_size,
+                kv_quant,
+                n as f64,
+                b as f64,
+                s as f64,
+                attn_flops,
+            )))
         }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             generation_attention_empirical(db, b, s, n, n_kv, head_size, window_size, kv_quant)?,
@@ -946,17 +942,14 @@ fn query_encoder_attention_table(
         // `get_sol(b, s, n, head_size, fmha_quant_mode)[0]`.
         DatabaseMode::Sol | DatabaseMode::SolFull => {
             let attn_flops = quant_tc_flops(&db.system_spec, fmha_quant.mapping())?;
-            Ok(PerformanceResult::new(
-                encoder_attention_sol_ms(
-                    &db.system_spec,
-                    head_size,
-                    n as f64,
-                    s as f64,
-                    b as f64,
-                    attn_flops,
-                ),
-                Source::Sol,
-            ))
+            Ok(PerformanceResult::sol(encoder_attention_sol(
+                &db.system_spec,
+                head_size,
+                n as f64,
+                s as f64,
+                b as f64,
+                attn_flops,
+            )))
         }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             encoder_attention_empirical(db, b, s, n, head_size, fmha_quant)?,
@@ -1074,16 +1067,20 @@ mod tests {
         let db = b200_vllm_db();
         let op = GenerationAttentionOp::new("gen", 64, 4, 128, KvCacheQuantMode::Fp8);
         // b=32 isl+step=2 n=64 n_kv=4. The query averages 5 interp samples
-        // over s ∈ [1, 2] (s_samples = [1,1,1,1,2]) on the densified grid,
-        // matching Python's `_query_generation_attention_table`. Verified
-        // against `PerfDatabase.query_generation_attention` (= 0.0086442669).
+        // over s ∈ [1, 2] (s_samples = [1,1,1,1,2]) on the raw grid,
+        // matching Python's `_query_generation_attention_table`; s=1 sits
+        // below the collected range, so it resolves via the past-frontier
+        // hold (util blended from the nearest measured leaves in joint log2
+        // space). Verified against
+        // `PerfDatabase.query_generation_attention(32, 2, 64, 4, fp8,
+        // SILICON, 0, 128)` on b200_sxm/vllm/0.19.0.
         let result = op
             .query(&db, 32, 2, 1.0)
             .expect("gen attention query must succeed");
         assert!(
-            // Python v2 engine value (raw table, no densified lattice); the
-            // pre-perf_interp expectation was 0.008644266923268636.
-            (result.latency_ms - 0.008451361751014535).abs() < 1e-9,
+            // Python v2 engine value (tapered past-frontier hold); the
+            // nearest-path-snap expectation was 0.008451361751014535.
+            (result.latency_ms - 0.009131092737966444).abs() < 1e-9,
             "expected 5-sample-averaged gen latency, got {}",
             result.latency_ms
         );

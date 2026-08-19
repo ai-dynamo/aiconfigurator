@@ -234,6 +234,51 @@ class TestUnmappable:
         assert "profiles" in str(exc.value)
 
 
+class TestEnableWideepDeprecationWarn:
+    """convert_v1_to_v2 itself warns (once per process) when the V1 config
+    carries a truthy enable_wideep -- the key keeps mapping (mechanics
+    unchanged, asserted in TestConvertAgg/TestConvertDisagg); this is only
+    the user-facing deprecation surface."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_warned_keys(self):
+        before = set(task_v2._warned_large_ep_keys)
+        task_v2._warned_large_ep_keys.clear()
+        try:
+            yield
+        finally:
+            task_v2._warned_large_ep_keys.clear()
+            task_v2._warned_large_ep_keys.update(before)
+
+    @pytest.mark.parametrize("spelling", [True, "true", 1])
+    def test_top_level_truthy_enable_wideep_warns(self, spelling):
+        v1 = {"mode": "patch", "serving_mode": "agg", "model_path": "x", "enable_wideep": spelling}
+        with pytest.warns(DeprecationWarning, match="'enable_wideep' is deprecated and ignored"):
+            out = convert_v1_to_v2(v1)
+        assert out["enable_wideep"] == spelling  # passthrough untouched
+
+    def test_worker_config_enable_wideep_warns(self):
+        v1 = {
+            "mode": "patch",
+            "serving_mode": "disagg",
+            "model_path": "x",
+            "system_name": "h200_sxm",
+            "config": {"prefill_worker_config": {"enable_wideep": True}},
+        }
+        with pytest.warns(DeprecationWarning, match="'enable_wideep' is deprecated and ignored"):
+            out = convert_v1_to_v2(v1)
+        assert out["prefill_enable_wideep"] is True
+
+    def test_false_enable_wideep_does_not_warn(self):
+        import warnings
+
+        v1 = {"mode": "patch", "serving_mode": "agg", "model_path": "x", "enable_wideep": False}
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            convert_v1_to_v2(v1)
+        assert [w for w in record if "deprecated and ignored" in str(w.message)] == []
+
+
 class TestFromYamlAutoConvert:
     def test_v1_yaml_detected_warns_and_converts(self, monkeypatch):
         # Skip heavy __post_init__ (model/DB resolution) — we test the convert seam only.

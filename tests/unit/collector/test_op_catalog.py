@@ -45,6 +45,17 @@ def test_family_for_perf_file_matches_txt_parquet_and_enum(tmp_path):
     assert family_for_perf_file("nonexistent_perf.txt", family_map) is None
 
 
+def test_real_catalog_maps_moe_comm_tables():
+    # Producer half of the moe_a2a/moe_ep contract (consumer loaders shipped in
+    # PR 1): the real catalog must place the new table stems in their families.
+    family_map = load_family_map()
+    assert family_map is not None
+    assert family_map["moe_a2a_perf"] == "comm"
+    assert family_map["moe_expert_compute_perf"] == "moe"
+    assert family_for_perf_file(str(PerfFile.MOE_A2A), family_map) == "comm"
+    assert family_for_perf_file(str(PerfFile.MOE_EXPERT_COMPUTE), family_map) == "moe"
+
+
 def test_duplicate_table_across_families_is_rejected(tmp_path):
     path = tmp_path / "op_backend_catalog.yaml"
     path.write_text(

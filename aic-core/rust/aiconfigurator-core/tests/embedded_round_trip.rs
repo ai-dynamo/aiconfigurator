@@ -37,7 +37,7 @@
 //! (relative paths do not resolve under cargo's test cwd):
 //! ```text
 //! AIC_REQUIRE_EMBEDDED_ROUND_TRIP=1 \
-//!   PYTHONPATH="$PWD/aic-core/src:$PWD/.venv/lib/python3.12/site-packages" \
+//!   PYTHONPATH="$PWD/aic-core/src:$PWD/.venv/lib/python3.13/site-packages" \
 //!   cargo test -p aiconfigurator-core --test embedded_round_trip -- --nocapture
 //! ```
 //! (run after `uv run maturin develop -m aic-core/rust/aiconfigurator-core/Cargo.toml

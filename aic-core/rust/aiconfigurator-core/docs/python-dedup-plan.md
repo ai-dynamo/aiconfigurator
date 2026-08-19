@@ -5,6 +5,184 @@ SPDX-License-Identifier: Apache-2.0
 
 # Phase 2 Execution Plan — Rust-default flip and Python latency-path removal
 
+**Status (2026-08-14): PR-1 (#1454), PR-2 (#1496) and PR-2.5 (#1508) MERGED;
+PR-3 (#1521 — the PR carrying this text) delivers the ENGINE-STEP-path
+retirement and is in flight until it merges — see "PR-3 disposition"
+below.** The original PR-3 scope ("delete the per-call query stack
+wholesale") was revised after FPM (#1384) landed a live consumer of that
+stack; #1461's Rust FPM port (Op::FpmForward + fpm_sol.rs) then let PR-3
+delete the Python FPM walk too.
+
+## PR-3 disposition (2026-08-14) — what was deleted, what was kept, and why
+
+**Deleted (the engine-step path, both op-level and FPM):**
+
+- `base_backend`'s Python step branches: the phase runners
+  (`_run_context_phase` / `_run_generation_phase`), `run_mixed`'s three-pass
+  composition, `_get_fpm_mix_step_latency`, the encoder `op.query()`
+  fallback loop, and the `RustEngineUnsupportedError` "parity by
+  delegation" rescue arms — an inexpressible op graph is a hard error now
+  (the opspec coverage tripwire keeps that unreachable for shipped ops). A
+  non-`PerfDatabase` database on a step surface raises `TypeError` (the
+  compiled engine resolves perf data from disk by identity). En route, the
+  two #1461 leftover guards that still forced FPM static/decode onto the
+  Python walk were closed (rust-first, verified answer-preserving to full
+  precision on the synthetic parity fixture).
+- `fpm_forward.py`'s query machinery: `query`/`query_totals`/
+  `query_pass_baseline`, the parquet+sidecar loader and validators, the
+  perf_interp configs, and `_oplevel_sol_fn` (the per-op DatabaseMode.SOL
+  roofline closure). The Rust core owns FPM end to end
+  (`perf_database/fpm_forward.rs`, `operators/fpm_forward.rs`,
+  `operators/fpm_sol.rs`); `FPMForwardOp` keeps only the construction
+  surface `_to_opspec` and the memory model consume.
+- The `"python"` value of `engine_step_backend` became a warn-once
+  deprecation NO-OP (routes to the compiled engine; accepted one release
+  cycle, then dropped). Unknown values now raise. The gate keeps only the
+  non-`PerfDatabase` delegation (consumed by the AFD orchestration).
+- The live-Python golden capture harness (`regenerate_goldens.py` + guard
+  tests): the goldens are frozen artifacts; `pin_goldens.py` appends/
+  refreshes records from the live rust engine (provenance-marked
+  `post_freeze_pins`), making the golden diff the review artifact. The FPM
+  parity class freezes its Python-side references inline
+  (`_FPM_*_FROZEN`) since its dataset is generated per-run.
+- The relative Rust-vs-Python CI perf gate and the benchmark's python arm;
+  the python-vs-rust support-matrix compare machinery
+  (`scan_rust_parity.py`, `--compare-engine-step-backends`); the
+  `prediction_regression_gate` python pin flipped to rust.
+- (Correction, cleanup PR: an earlier revision listed the dead `Mamba2`
+  composite as deleted here. It was NOT — PR-3 kept it as a deprecated
+  five-leg composite on the query whitelist; it was deleted with the
+  per-call shims in the deprecation-cleanup PR.)
+
+**Kept — the PER-CALL query stack (`operations/*.py` `query()` +
+`_query_*_table`, `perf_database.query_*`, `perf_interp/`,
+`util_empirical.py`) stays intact.** Its load-bearing consumers:
+
+1. **AFD comm ops** (`afd_transfer.py`, permanent Python orchestration)
+   query `query_nccl` / `query_p2p` / `query_mem_op` EMPIRICALLY, and
+   `_sum_latency` keeps its `op.query()` fallback loop.
+2. **`tools/sanity_check/validate_database.ipynb`** (+ its e2e) exercises
+   10 `PerfDatabase.query_*` methods per-call, including the SOL_FULL
+   raw-tuple diagnostic — which therefore stays as-is.
+3. **Internal couplings** that make partial carving unsafe: GEMM's silicon
+   path re-queries SOL (fp8_static floor), `_correct_sol` needs table
+   lookups at load time, mamba has no mode dispatch, MSA's empirical path
+   divides DSA-SOL by DSA-SILICON.
+
+(FPM was the third hard dependent when PR-3 was first scoped — its
+roofline queried every op-level op in SOL — but #1461 moved that to
+`fpm_sol.rs`, which is what unlocked deleting the walk.)
+
+**Sequel ladder (tracked in #1357 Phase 3):**
+
+1. **PR-4 — notebook re-oracle** (independent of PR-3; can run in
+   parallel): re-oracle `validate_database.ipynb` onto the per-op
+   evaluation FFI (needs a small FFI addition if the sol_math/sol_mem
+   decomposition plots are to survive; rust computes both components
+   internally). This is the prerequisite that unblocks the per-call
+   deletion — the notebook is the `query_*` facade's biggest live
+   consumer.
+2. **PR-5 — per-call query-stack retirement** (needs PR-3 + PR-4): delete
+   the per-call stack family-by-family (#1357's thin-delegation shape),
+   retiring `query_*`, the empirical/silicon table bodies, and
+   `util_empirical`'s math (keep the provenance constants) — with the AFD
+   comm-table queries re-pointed at the op-list FFI or kept as the last
+   per-call island. The deprecated `Mamba2` composite's disposition lands
+   here too. **DONE — this PR.** Landed in one PR rather than
+   family-by-family: the pinned pre-retirement baseline
+   (`tests/cross_package/test_query_shim_baseline.py`, 120 cases captured
+   from the Python math before deletion) made the whole-surface swap
+   verifiable at once. `query_*`/`Operation.query` survive one release as
+   engine-routed deprecation shims (5 tombstones raise: the two GEMM
+   overhead sub-table queries, the two legacy deepep walks, and the
+   per-phase `query_trtllm_alltoall`); AFD's three query points and the
+   `Mamba2` composite's five legs evaluate standard twin ops through the
+   single-op plumbing.
+3. **PR-6 — data-plane FFI + weight physics** (independent of the
+   deprecation window; runs while the PR-5 shims bake). **DONE — this
+   PR.** The engine table view (`perf_database/table_view.rs`,
+   `AicEngine.table_view_json`) re-folds the raw parquet sources into
+   every retired Python loader's exact nested-dict shape — values, key
+   TYPES (rehydrated to enums/ints/tuples in
+   `sdk/engine_table_view.py`), insertion order, and empty subtrees —
+   and every `PerfDatabase._<family>_data` attribute now binds it, so
+   the notebook grids, support matrix, task validation gate, and every
+   other consumer kept their code unchanged. Per-op weight physics moved
+   to `Op::weight_bytes` (batch FFI `weights_ops_json`); the base
+   `Operation.get_weights` routes there and the per-class `_weights`
+   math is deleted. The `_GEMM/_MOE_QUANT_UTIL_LEVEL` dicts are
+   projections of the Rust tables. Verified by a pinned pre-deletion
+   baseline (7 databases × every table attribute + support matrices +
+   per-op weights, `tests/cross_package/test_data_plane_baseline.py`;
+   retired in the deprecation-cleanup PR once the equivalence landed).
+   Deferred to the cleanup PR from the original cut: the Python-side shared-layer
+   source resolution (`_build_op_sources` still feeds the engine's
+   source map — moving it is orthogonal to the view work), kv-cache
+   bytes (model-level polymorphism, needs a model-geometry spec), and
+   the moe/moe_comm/dsa/dsv4 parsers, which survive as TEST-ONLY
+   schema-contract fixtures for the collector suite's format handshake
+   (no production path parses perf files in Python anymore).
+4. **Deprecation-cleanup PR — removal + pyo3 op unification**
+   (time-locked). **DONE — this PR.** Landed exactly as planned, in four
+   segments:
+   - *Deprecated-surface removal:* the `"python"` `engine_step_backend`
+     value, `PerfDatabase.query_*` / `Operation.query` (shims and
+     tombstones alike), `_evaluate_single_op`'s re-moding dimension, and
+     the `Mamba2` composite. `_evaluate_single_op` survives as the
+     PERMANENT internal single-op plumbing behind the AFD twins and the
+     fallback loop.
+   - *Source resolution:* `_build_op_sources` moved to the engine
+     (`perf_database/source_resolution.rs`; schema v13 —
+     `EngineConfig` dropped the Python-resolved `perf_db_sources` map for
+     `enable_shared_layer` + `strict_provenance` policy flags; structured
+     resolver warnings re-emit through the Python warn-once registries).
+   - *pyo3 op unification:* the Rust op structs ARE the Python classes
+     (`py_ops.rs`, 32 families + the base); `models/*.py` construct them
+     directly, `operations/*.py` keeps thin data-plane shells, and the
+     `_to_opspec` serializer family, the per-op weight FFI wrapper and
+     the two-sided `ENGINE_SPEC_SCHEMA_VERSION` sync are deleted
+     (`engine_spec_schema_version()` is the single owner; ops
+     self-serialize via `_spec_json` / `ops_json_from_ops`, which refuses
+     the RetiredDeepEp dispatch tombstone). The pickle prerequisite
+     resolved via `__getnewargs_ex__` (shell identity survives
+     `ProcessPoolExecutor` fork+spawn).
+   - *Baseline + parser retirement:* both migration baselines retired
+     with the surfaces they froze (`query_shim_baseline.json` with the
+     shims; `data_plane_baseline.json` + its codec once the last parser
+     left) — succeeded by the synthetic-parquet view-shape suites, which
+     don't depend on shipped data staying byte-stable. The last Python
+     perf parser (`load_dsv4_sparse_op_data`) retired when the
+     `_dsv4_csa_topk_calib_data` view attribute landed; the collector
+     contract tests assert against the engine view / frozen schema
+     literals.
+
+   Still deferred (unchanged from PR-6): kv-cache bytes (model-level
+   polymorphism, needs a model-geometry spec) and the AFD orchestration
+   quartet (Python-side by design; per-op values already cross the
+   engine's single-op plumbing — see the `afd_transfer.py` module TODO
+   for the port triggers).
+
+**Post-PR-5 invariant (the single-oracle rule):** per-op performance VALUES
+(latency, energy, SOL decomposition) are computed ONLY by the compiled
+engine (`aic-core/rust/aiconfigurator-core`). Python owns model/topology
+composition, model-config loading and shared-layer SOURCE SELECTION, and
+orchestration — never estimation math, and (since PR-6) never
+perf-data parsing: the engine loads and serves the performance tables,
+Python consumes them through the table-view FFI. New
+per-op access goes through the op-list FFI (`EngineHandle.evaluate_ops_json`
+/ `evaluate_ops_sol_json`), the per-phase surface (`run_static_per_op`), or
+whole runs; there is no supported per-call Python query surface after the
+shims' window closes. Enforced by
+`tests/cross_package/test_single_oracle_contract.py` (frozen shim surface,
+no `_query_*_table`/`get_sol`/`get_empirical` defs, whitelisted `query`
+overrides, `perf_interp` stays deleted) and mirrored in `.coderabbit.yaml`
+path instructions; the `.claude/rules/rust-core/parity.md` Rule 2 update landed with this
+migration at maintainer direction.
+
+The keep/delete inventory and Gate-3 text below are retained as the
+original plan of record; where they conflict with this disposition, the
+disposition wins.
+
 **Status (2026-08-06): PR-1 (#1454) MERGED 2026-08-05; PR-2 in flight.**
 PR-2 closes every gap listed below and lands the Gate-2 golden anchor. State
 of the former gaps:

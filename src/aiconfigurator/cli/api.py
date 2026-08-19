@@ -28,7 +28,13 @@ from aiconfigurator.sdk.config_builders import apply_nextn as _apply_nextn
 from aiconfigurator.sdk.config_builders import build_model_config as _build_model_config
 from aiconfigurator.sdk.config_builders import resolve_nextn_auto as _resolve_nextn_auto
 from aiconfigurator.sdk.errors import ExperimentOutcome, NoFeasibleConfigError, is_gpu_retriable
-from aiconfigurator.sdk.models import check_is_moe, resolve_context_fmha_by_data, resolve_dsv4_moe_arch
+from aiconfigurator.sdk.models import (
+    check_is_moe,
+    resolve_context_fmha_by_data,
+    resolve_dsv4_moe_arch,
+    resolve_nvfp4_for_system,
+)
+from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import (
     SpeculativeDecodingProfile,
 )
@@ -168,6 +174,10 @@ def cli_default(
     image_width: int = 0,
     num_images: int = 1,
     enable_encoder_dp: bool = True,
+    enable_epd: bool = False,
+    encoder_tp: list[int] | None = None,
+    encoder_system: str | None = None,
+    encoder_latency_correction: float = 1.0,
     ttft: float = 2000.0,
     tpot: float = 30.0,
     request_latency: float | None = None,
@@ -227,6 +237,14 @@ def cli_default(
             Used to filter batch sizes that would exceed KV cache capacity.
         max_seq_len: TRT-LLM ``--max_seq_len`` setting. Controls how many KV blocks are
             pre-allocated per sequence. Defaults to ``isl + osl`` when ``None``.
+        enable_epd: VL models -- serve the vision encoder from a dedicated
+            encode-worker pool (agg becomes E+agg, disagg becomes E+P+D).
+            Requires an image workload (image_height/image_width).
+        encoder_tp: EPD encode-worker TP sizes to sweep (default [1, 2, 4, 8]).
+        encoder_system: System (GPU type) for the encode workers; defaults to
+            the prefill/agg side's system.
+        encoder_latency_correction: Latency correction scale for the encode
+            workers.  Default 1.0.
         top_n: Number of top configurations to return for each mode (agg/disagg). Default is 5.
         save_dir: Directory to save results. If None, results are not saved to disk.
         generator_set: List of inline generator overrides in KEY=VALUE format (e.g.,
@@ -234,7 +252,8 @@ def cli_default(
             Equivalent to repeating ``--generator-set`` on the CLI.
         generator_config: Path to a unified generator YAML config file.
         generator_dynamo_version: Override Dynamo version used by the generator.
-        engine_step_backend: Experimental static latency backend ("python" or "rust").
+        engine_step_backend: Engine-step backend; "rust" (the compiled engine,
+            default and only executor) is the only accepted value.
         forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None keeps the default.
 
     Returns:
@@ -294,6 +313,10 @@ def cli_default(
         image_width=image_width,
         num_images=num_images,
         enable_encoder_dp=enable_encoder_dp,
+        enable_epd=enable_epd,
+        encoder_tp=encoder_tp,
+        encoder_system=encoder_system,
+        encoder_latency_correction=encoder_latency_correction,
         ttft=ttft,
         tpot=tpot,
         request_latency=request_latency,
@@ -453,7 +476,8 @@ def cli_recommend(
         moe_backend: Explicit SGLang MoE backend override.
         top_n: Number of top configurations to return per mode. Default is 5.
         save_dir: Directory to save results. If None, results are not saved.
-        engine_step_backend: Experimental static latency backend.
+        engine_step_backend: Engine-step backend; "rust" (the compiled engine,
+            default and only executor) is the only accepted value.
         forward_model: Forward-pass modeling mode ("op_level" or "fpm").
             None keeps the default.
 
@@ -888,9 +912,22 @@ def _apply_power_coverage_gate(summary, result_dict: dict) -> dict:
     power is unavailable without treating the whole estimate as failed.
     """
     gated = dict(result_dict)
-    coverage = summary.get_power_data_coverage()
-    gated["power_coverage"] = coverage
-    if coverage < POWER_DATA_COVERAGE_THRESHOLD:
+    gated["power_coverage"] = summary.get_power_data_coverage()
+    return apply_row_power_coverage_gate(gated)
+
+
+def apply_row_power_coverage_gate(row: dict) -> dict:
+    """Hide ``power_w`` when ``power_coverage`` is missing, non-finite, or
+    below the coverage threshold (fail-closed)."""
+    import math
+
+    gated = dict(row)
+    coverage = gated.get("power_coverage")
+    if (
+        not isinstance(coverage, (int, float))
+        or not math.isfinite(coverage)
+        or coverage < POWER_DATA_COVERAGE_THRESHOLD
+    ):
         gated["power_w"] = None
     return gated
 
@@ -1054,7 +1091,8 @@ def cli_estimate(
         max_seq_len: The TRT-LLM ``--max_seq_len`` setting used at serving time.
             Controls how many KV blocks TRT-LLM pre-allocates per sequence. Defaults
             to ``isl + osl`` when ``None``.
-        engine_step_backend: Experimental static latency backend ("python" or "rust").
+        engine_step_backend: Engine-step backend; "rust" (the compiled engine,
+            default and only executor) is the only accepted value.
         prefix: (common) Prefix cache length (subset of ``isl`` already cached).
             Applied to agg, disagg, and all static modes. Default 0.
         nextn: (common) MTP draft length, or ``"auto"`` to use the checkpoint's
@@ -1117,6 +1155,10 @@ def cli_estimate(
         get_systems_paths,
         set_systems_paths,
     )
+
+    # Validate at the public boundary because some AFD-only paths return
+    # without constructing a Task.
+    engine_step_backend = validate_engine_step_backend(engine_step_backend)
 
     # Resolve nextn="auto" against the checkpoint before mode dispatch so every
     # estimate path (agg/disagg/static/afd) sees a plain int.
@@ -1501,6 +1543,7 @@ def _run_agg_estimate(
         model_config, model_path, load_database(system_name), backend_name, is_context_role=True
     )
     resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
+    resolve_nvfp4_for_system(model_config, system_name, model_path)
     runtime_config = RuntimeConfig(
         isl=isl,
         osl=osl,
@@ -1647,6 +1690,7 @@ def _run_static_estimate(
         is_context_role=static_mode != "static_gen",
     )
     resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
+    resolve_nvfp4_for_system(model_config, system_name, model_path)
 
     runtime_config = RuntimeConfig(
         batch_size=batch_size,
@@ -1813,12 +1857,14 @@ def _run_disagg_estimate(
         prefill_model_config, model_path, load_database(system_name), backend_name, is_context_role=True
     )
     resolve_dsv4_moe_arch(prefill_model_config, model_path, system_name=system_name, backend_name=backend_name)
+    resolve_nvfp4_for_system(prefill_model_config, system_name, model_path)
     resolve_dsv4_moe_arch(
         decode_model_config,
         model_path,
         system_name=decode_system_name or system_name,
         backend_name=backend_name,
     )
+    resolve_nvfp4_for_system(decode_model_config, decode_system_name or system_name, model_path)
 
     runtime_config = RuntimeConfig(
         isl=isl,
@@ -2123,7 +2169,9 @@ def _run_afd_estimate(
         a_model_config, model_path, database, backend_name, is_context_role=afd_phase in ("prefill", "both")
     )
     resolve_dsv4_moe_arch(a_model_config, model_path, system_name=system_name, backend_name=backend_name)
+    resolve_nvfp4_for_system(a_model_config, system_name, model_path)
     resolve_dsv4_moe_arch(f_model_config, model_path, system_name=system_name, backend_name=backend_name)
+    resolve_nvfp4_for_system(f_model_config, system_name, model_path)
 
     afd_config = AFDConfig(
         n_a_nodes=n_a_nodes,

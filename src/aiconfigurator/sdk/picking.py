@@ -191,6 +191,7 @@ def _build_disagg_summary_dict(
         "(e)workers": 0,
         "(e)tp": 0,
         "(e)pp": 0,
+        "(e)bs": 0,
         "(e)parallel": "",
         "(e)memory": encoder_memory,
         "power_w": disagg_power_avg,
@@ -440,11 +441,14 @@ def pick_autoscale(
     top_n: int = 5,
     *,
     ttft_correction_factor: float | None = None,
+    prefill_degradation_factor: float = _RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
+    decode_degradation_factor: float = _RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
 ) -> dict[str, Any]:
     """Pick prefill and decode engines independently for autoscaling.
 
-    No rate matching is performed.  Returns disagg configs with
-    ``(p)workers=1`` and ``(d)workers=1``.
+    No worker-count rate matching is performed.  Returns disagg configs with
+    ``(p)workers=1`` and ``(d)workers=1``; the min-rate calculation still
+    applies the degradation factors below.
 
     Args:
         prefill_df: Prefill candidates DataFrame (``ColumnsStatic`` schema).
@@ -455,6 +459,14 @@ def pick_autoscale(
         ttft_correction_factor: TTFT pre-correction multiplier for queueing
             under concurrency.  Defaults to
             :data:`_AUTOSCALE_TTFT_CORRECTION_FACTOR` when ``None``.
+        prefill_degradation_factor: Multiplicative prefill-throughput
+            degradation applied during rate matching (default
+            :data:`_RATE_MATCHING_PREFILL_DEGRADATION_FACTOR`). Exposed so
+            callers can calibrate the analytical disagg point to measured
+            silicon instead of relying on the built-in constant.
+        decode_degradation_factor: Multiplicative decode-throughput degradation
+            applied during rate matching (default
+            :data:`_RATE_MATCHING_DECODE_DEGRADATION_FACTOR`).
 
     Returns:
         Dict with keys:
@@ -535,6 +547,8 @@ def pick_autoscale(
                 prefill_num_worker=1,
                 decode_summary_dict=d_row.to_dict(),
                 decode_num_worker=1,
+                prefill_degradation_factor=prefill_degradation_factor,
+                decode_degradation_factor=decode_degradation_factor,
             )
             all_combos.append(combo)
 
