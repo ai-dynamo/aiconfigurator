@@ -413,24 +413,38 @@ def test_moe_model_quantization_policy_is_yaml_backed():
 
 
 def test_dsv4_moe_quantization_policy_prunes_unrelated_modes():
+    # AIC-1749: nvidia/DeepSeek-V4-{Flash,Pro}-NVFP4 are a real ModelOpt NVFP4
+    # export. Every backend that serves NVFP4 MoE declares exactly [nvfp4] on
+    # those rows (positive one-true-mode declarations, review follow-up), so
+    # assert the singleton set per backend explicitly rather than omitting the
+    # artifact (omission would look identical to "not yet declared").
     expected_by_backend = {
         "sglang": {
             "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
             "deepseek-ai/DeepSeek-V4-Pro": {"w4a8_mxfp4_mxfp8"},
             "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
+            # One true mode everywhere: the NVFP4 artifacts declare nvfp4 on
+            # every backend that serves NVFP4 MoE (review follow-up on
+            # PR #1548 — positive declarations, nothing excluded).
+            "nvidia/DeepSeek-V4-Flash-NVFP4": {"nvfp4"},
+            "nvidia/DeepSeek-V4-Pro-NVFP4": {"nvfp4"},
         },
         "trtllm": {
             "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
             "deepseek-ai/DeepSeek-V4-Pro": {"w4a8_mxfp4_mxfp8"},
             "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
+            "nvidia/DeepSeek-V4-Flash-NVFP4": {"nvfp4"},
+            "nvidia/DeepSeek-V4-Pro-NVFP4": {"nvfp4"},
         },
         "vllm": {
             "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
             "deepseek-ai/DeepSeek-V4-Pro": {"w4a8_mxfp4_mxfp8"},
             "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
+            "nvidia/DeepSeek-V4-Flash-NVFP4": {"nvfp4"},
+            "nvidia/DeepSeek-V4-Pro-NVFP4": {"nvfp4"},
         },
     }
 
@@ -752,7 +766,28 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # checkpoint release of the 30B/A3B shape (AIC-1743/AIC-1748); same
     # topk=6/e128/h2688/i1856 geometry as Nano-BF16, hence the identical
     # per-model case count (114).
-    assert len(moe_cases) == 5454
+    # +231 for AIC-1749's DeepSeek-V4 NVFP4 rows: +117 nvidia/DeepSeek-V4-Flash-NVFP4
+    # (matches deepseek-ai/DeepSeek-V4-Flash's 4096/2048 count) and +114
+    # nvidia/DeepSeek-V4-Pro-NVFP4 (matches deepseek-ai/DeepSeek-V4-Pro's
+    # 7168/3072 count) -- every backend declares exactly [nvfp4] for both
+    # new rows.
+    assert len(moe_cases) == 5685
+    assert any(
+        case.model_name == "nvidia/DeepSeek-V4-Flash-NVFP4"
+        and case.hidden_size == 4096
+        and case.inter_size == 2048
+        and case.topk == 6
+        and case.num_experts == 256
+        for case in moe_cases
+    )
+    assert any(
+        case.model_name == "nvidia/DeepSeek-V4-Pro-NVFP4"
+        and case.hidden_size == 7168
+        and case.inter_size == 3072
+        and case.topk == 6
+        and case.num_experts == 384
+        for case in moe_cases
+    )
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024

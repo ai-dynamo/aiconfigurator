@@ -132,6 +132,8 @@ common_case_values:
       min_sm: 100
       allowed_model_paths:
       - nvidia/DeepSeek-V3.1-NVFP4
+      - nvidia/DeepSeek-V4-Flash-NVFP4
+      - nvidia/DeepSeek-V4-Pro-NVFP4
       - nvidia/GLM-5-NVFP4
       - nvidia/GLM-5.1-NVFP4
       - nvidia/GLM-5.2-NVFP4
