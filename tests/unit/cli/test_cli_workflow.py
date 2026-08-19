@@ -18,7 +18,6 @@ import pytest
 from aiconfigurator.cli.main import (
     _execute_tasks,
     _resolve_cli_log_level,
-    _sglang_deepep_perf_data_skip_reason,
     _validate_fpm_sweep_tasks,
     build_default_tasks,
     build_experiment_tasks,
@@ -301,6 +300,20 @@ class TestCLIIntegration:
         assert exc_info.value.code == 2
         assert "the following arguments are required" in capsys.readouterr().err
 
+    def test_recommend_help_marks_legacy_large_ep_options_deprecated_and_ignored(self, capsys):
+        parser = argparse.ArgumentParser()
+        configure_parser(parser)
+
+        with pytest.raises(SystemExit) as exc_info:
+            parser.parse_args(["recommend", "--help"])
+
+        assert exc_info.value.code == 0
+        help_text = capsys.readouterr().out
+        normalized_help = " ".join(help_text.split())
+        assert "--enable-wideep" in help_text
+        assert "Deprecated and ignored" in help_text
+        assert "'deepep_moe' is deprecated and ignored" in normalized_help
+
     @pytest.mark.parametrize(
         "builder_patch",
         [
@@ -444,6 +457,32 @@ exp_with_db_mode:
 
 class TestBuildDefaultTaskConfigs:
     """Tests for build_default_tasks function."""
+
+    @patch("aiconfigurator.cli.main.Task")
+    def test_normalizes_engine_step_backend_before_task_construction(self, mock_task_config):
+        mock_task_config.return_value = MagicMock(name="MockTaskConfig")
+
+        build_default_tasks(
+            model_path="Qwen/Qwen3-32B",
+            total_gpus=1,
+            system="h200_sxm",
+            engine_step_backend="RUST",
+        )
+
+        assert mock_task_config.call_args.kwargs["engine_step_backend"] == "rust"
+
+    @pytest.mark.parametrize("falsey_value", ["", 0, False])
+    @patch("aiconfigurator.cli.main.Task")
+    def test_rejects_falsey_engine_step_backend(self, mock_task_config, falsey_value):
+        with pytest.raises(ValueError, match="unknown engine_step_backend"):
+            build_default_tasks(
+                model_path="Qwen/Qwen3-32B",
+                total_gpus=1,
+                system="h200_sxm",
+                engine_step_backend=falsey_value,
+            )
+
+        mock_task_config.assert_not_called()
 
     @patch("aiconfigurator.cli.main.Task")
     def test_skips_disagg_when_total_gpus_less_than_2(self, mock_task_config):
@@ -613,102 +652,90 @@ class TestBuildDefaultTaskConfigs:
             assert backend == "sglang"
             assert call.kwargs["moe_backend"] == "megamoe"
 
-    @patch("aiconfigurator.cli.main.check_is_moe", return_value=True)
+    # The flag-conditioned SGLang DeepEP task variants (agg_deepep/disagg_deepep)
+    # and their perf-data skip probe are gone: large-EP/DeepEP participation is
+    # coverage-driven per tuple inside the ONE task per (model, serving mode).
     @patch("aiconfigurator.cli.main.Task")
-    def test_skips_optional_sglang_deepep_when_perf_data_missing(
-        self,
-        mock_task_config,
-        _mock_check_is_moe,
-        tmp_path,
-        caplog,
-    ):
-        """Optional SGLang DeepEP sweeps should not be scheduled without DeepEP op data."""
+    def test_moe_sglang_builds_one_task_per_mode(self, mock_task_config):
+        """No DeepEP fan-out: an sglang MoE model yields exactly one agg and one
+        disagg task; auto-exploration replaces both flag variants."""
         mock_task_config.return_value = MagicMock(name="MockTaskConfig")
-        caplog.set_level(logging.INFO, logger="aiconfigurator.cli.main")
 
-        with patch(
-            "aiconfigurator.cli.main._get_backend_data_path",
-            side_effect=lambda system, backend, version, filename: str(tmp_path / filename),
-        ):
-            result = build_default_tasks(
-                model_path="deepseek-ai/DeepSeek-R1",
-                total_gpus=8,
-                system="b200_sxm",
-                backend="sglang",
-                backend_version="0.5.10",
-                database_mode="HYBRID",
-            )
+        result = build_default_tasks(
+            model_path="deepseek-ai/DeepSeek-R1",
+            total_gpus=8,
+            system="h100_sxm",
+            backend="sglang",
+            backend_version="0.5.6.post2",
+        )
 
         assert set(result) == {"agg", "disagg"}
         assert mock_task_config.call_count == 2
-        assert "Skipping SGLang DeepEP agg sweep" in caplog.text
-        assert "Skipping SGLang DeepEP disagg sweep" in caplog.text
-        assert "wideep_deepep_normal_perf.parquet" in caplog.text
+        for call in mock_task_config.call_args_list:
+            # The deprecated flag is never forwarded to the Task, and no
+            # moe_backend is forced (deepep_moe used to be auto-set).
+            assert "enable_wideep" not in call.kwargs
+            assert "prefill_enable_wideep" not in call.kwargs
+            assert call.kwargs["moe_backend"] is None
 
-    @patch("aiconfigurator.cli.main.check_is_moe", return_value=True)
-    @patch("aiconfigurator.cli.main.Task")
-    def test_includes_optional_sglang_deepep_when_perf_data_exists(
-        self,
-        mock_task_config,
-        _mock_check_is_moe,
-        tmp_path,
-    ):
-        """SGLang DeepEP sweeps remain available when required DeepEP op data exists."""
+
+class TestDeprecatedWideepCliFlags:
+    """--enable-wideep / --moe-backend deepep_moe are accepted, warn once, and
+    have zero effect on the built task list."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_warned_keys(self):
+        # Warn-once dedupe is process-global; isolate each test (same pattern
+        # as the task_v2 deprecation tests).
+        from aiconfigurator.sdk import task_v2
+
+        before = set(task_v2._warned_large_ep_keys)
+        task_v2._warned_large_ep_keys.clear()
+        try:
+            yield
+        finally:
+            task_v2._warned_large_ep_keys.clear()
+            task_v2._warned_large_ep_keys.update(before)
+
+    def _build(self, mock_task_config, **kwargs):
         mock_task_config.return_value = MagicMock(name="MockTaskConfig")
-        for filename in ("wideep_deepep_normal_perf.parquet", "wideep_deepep_ll_perf.parquet"):
-            (tmp_path / filename).write_text("header\n", encoding="utf-8")
+        return build_default_tasks(
+            model_path="deepseek-ai/DeepSeek-R1",
+            total_gpus=8,
+            system="h100_sxm",
+            backend="sglang",
+            backend_version="0.5.6.post2",
+            **kwargs,
+        )
 
-        with patch(
-            "aiconfigurator.cli.main._get_backend_data_path",
-            side_effect=lambda system, backend, version, filename: str(tmp_path / filename),
-        ):
-            result = build_default_tasks(
-                model_path="deepseek-ai/DeepSeek-R1",
-                total_gpus=8,
-                system="h100_sxm",
-                backend="sglang",
-                backend_version="0.5.6.post2",
-            )
+    @patch("aiconfigurator.cli.main.Task")
+    def test_enable_wideep_warns_and_is_ignored(self, mock_task_config):
+        with pytest.warns(DeprecationWarning, match="'enable_wideep' is deprecated and ignored"):
+            flagged = self._build(mock_task_config, enable_wideep=True)
+        flagged_calls = [call.kwargs for call in mock_task_config.call_args_list]
 
-        assert set(result) == {"agg", "agg_deepep", "disagg", "disagg_deepep"}
-        assert mock_task_config.call_count == 4
+        mock_task_config.reset_mock()
+        flagless = self._build(mock_task_config)
+        flagless_calls = [call.kwargs for call in mock_task_config.call_args_list]
 
+        assert set(flagged) == set(flagless) == {"agg", "disagg"}
+        assert flagged_calls == flagless_calls  # zero effect on the built tasks
 
-class TestSglangDeepepPerfDataSkipReason:
-    """`_sglang_deepep_perf_data_skip_reason` must find DeepEP perf files under the
-    family-first layout (e.g. comm/sglang/<version>/), not just the legacy
-    sglang/<version>/ shape."""
+    @patch("aiconfigurator.cli.main.Task")
+    def test_moe_backend_deepep_moe_warns_megamoe_does_not(self, mock_task_config):
+        import warnings
 
-    def _write_system_yaml(self, systems_root, system_name, data_dir):
-        (systems_root / f"{system_name}.yaml").write_text(f"data_dir: {data_dir}\n", encoding="utf-8")
+        with pytest.warns(DeprecationWarning, match="'moe_backend=deepep_moe' is deprecated and ignored"):
+            result = self._build(mock_task_config, moe_backend="deepep_moe")
+        # The explicit value still passes through to the sglang tasks (kept, inert).
+        assert all(call.kwargs["moe_backend"] == "deepep_moe" for call in mock_task_config.call_args_list)
+        assert set(result) == {"agg", "disagg"}
 
-    @patch("aiconfigurator.cli.main.perf_database.get_systems_paths")
-    def test_none_when_both_files_exist_under_family_dir(self, mock_systems_paths, tmp_path):
-        systems_root = tmp_path
-        mock_systems_paths.return_value = [str(systems_root)]
-        self._write_system_yaml(systems_root, "fake_sys", "data/fake_sys")
-
-        version_dir = systems_root / "data" / "fake_sys" / "comm" / "sglang" / "0.5.6.post2"
-        version_dir.mkdir(parents=True)
-        (version_dir / "wideep_deepep_normal_perf.parquet").write_bytes(b"stub")
-        (version_dir / "wideep_deepep_ll_perf.parquet").write_bytes(b"stub")
-
-        reason = _sglang_deepep_perf_data_skip_reason("fake_sys", None, "0.5.6.post2")
-
-        assert reason is None
-
-    @patch("aiconfigurator.cli.main.perf_database.get_systems_paths")
-    def test_names_missing_files_when_absent(self, mock_systems_paths, tmp_path):
-        systems_root = tmp_path
-        mock_systems_paths.return_value = [str(systems_root)]
-        self._write_system_yaml(systems_root, "fake_sys", "data/fake_sys")
-        (systems_root / "data" / "fake_sys").mkdir(parents=True)
-
-        reason = _sglang_deepep_perf_data_skip_reason("fake_sys", None, "0.5.6.post2")
-
-        assert reason is not None
-        assert "wideep_deepep_normal_perf.parquet" in reason
-        assert "wideep_deepep_ll_perf.parquet" in reason
+        mock_task_config.reset_mock()
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            self._build(mock_task_config, moe_backend="megamoe")
+        assert [w for w in record if "deprecated and ignored" in str(w.message)] == []
 
 
 class TestBuildExperimentTaskConfigs:
@@ -728,7 +755,10 @@ class TestBuildExperimentTaskConfigs:
                 "model_path": "Qwen/Qwen3-32B",
                 "system_name": "h200_sxm",
                 "total_gpus": 8,
-                "engine_step_backend": "python",
+                # Plumbing token, not a real backend: Task is mocked, so this
+                # only proves the per-exp yaml value survives the global
+                # override (the retired "python" value used to play this role).
+                "engine_step_backend": "exp-level-token",
             },
         }
 
@@ -741,9 +771,9 @@ class TestBuildExperimentTaskConfigs:
             yaml_data = call.args[0]
             esb = call.kwargs.get("engine_step_backend", yaml_data.get("engine_step_backend"))
             by_backend[esb] = yaml_data
-        assert set(by_backend) == {"rust", "python"}
+        assert set(by_backend) == {"rust", "exp-level-token"}
         assert by_backend["rust"]["model_path"] == "Qwen/Qwen3-32B"
-        assert by_backend["python"]["model_path"] == "Qwen/Qwen3-32B"
+        assert by_backend["exp-level-token"]["model_path"] == "Qwen/Qwen3-32B"
 
     @patch("aiconfigurator.cli.main.Task")
     def test_default_database_mode_is_passed_to_task_yaml(self, mock_task):

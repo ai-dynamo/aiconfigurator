@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dsv4-pro-disagg-bench
+spec:
+  template:
+    spec:
+      containers:
+        - name: bench
+          env:
+            - {name: ISL, value: "8192"}
+            - {name: OSL, value: "1024"}
+            - {name: CONCURRENCIES, value: "1 8 64 128 256 512 1024"}

@@ -3,10 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # TensorRT-LLM MoE AlltoAll Benchmark - Submit multiple parallel jobs
-# All results append to the same output file
+# One output directory (unified moe_a2a_perf parquet + collection_meta.yaml
+# sidecar) per job; within a job, cases append one CSV via log_perf's lockfile
 #
 # Usage:
-#   bash submit_trtllm_alltoall.sh                                                # default: NVLinkTwoSided, 2,4,8,16,32,48,64,72 GPUs, 4 GPUs/node
+#   bash submit_trtllm_alltoall.sh                                                # default: NVLinkTwoSided, 2,4,8,16,32,64 GPUs, 4 GPUs/node
 #   bash submit_trtllm_alltoall.sh --kernel-source NVLinkOneSided --gpu-list 2,4  # NVLinkOneSided, 2 and 4 GPUs
 #   bash submit_trtllm_alltoall.sh --gpu-list 4,8,16                              # NVLinkTwoSided, 4,8,16 GPUs
 
@@ -18,7 +19,7 @@ Options:
   --kernel-source <name>   Communication strategy: NVLinkTwoSided or NVLinkOneSided
                            (default: NVLinkTwoSided)
   --gpu-list <list>        Comma-separated GPU counts to benchmark
-                           (default: 2,4,8,16,32,48,64,72)
+                           (default: 2,4,8,16,32,64)
   --gpus-per-node <n>      GPUs per node for node/task calculation
                            (default: \${GPUS_PER_NODE:-4})
   -h, --help               Show this help message
@@ -38,17 +39,28 @@ EOF
 }
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc5}"
-CONTAINER_MOUNTS="${CONTAINER_MOUNTS:-${HOME}/repo/aiconfigurator:${HOME}/repo/aiconfigurator}"
+REPO_DIR=$(cd "${SCRIPT_DIR}/../../.." && pwd)
+
+# Default image = the collector/framework_manifest.yaml `trtllm` pin. The
+# collector gates the installed tensorrt_llm version against that pin, so a
+# stale image here fails loudly instead of collecting misattributed rows.
+# The value is duplicated because login nodes cannot be assumed to have the
+# repo's Python deps; it is kept in sync with the manifest by
+# tests/unit/collector/test_network_layout.py::test_submit_trtllm_alltoall_default_image_matches_manifest.
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20@sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88}"
+CONTAINER_MOUNTS="${CONTAINER_MOUNTS:-${REPO_DIR}:${REPO_DIR}}"
 ACCOUNT="${ACCOUNT:-coreai_tritoninference_triton3}"
 PARTITION="${PARTITION:-gb200}"
 
 COLLECTOR_SCRIPT="${SCRIPT_DIR}/collect_trtllm_alltoall.py"
-OUTPUT_FILE="${SCRIPT_DIR}/results/trtllm_alltoall_perf.txt"
 
-# Defaults
+# Defaults. 48 and 72 are deliberately absent: the collector's sole declared
+# shape has 256 experts, which shards evenly into neither world, so those jobs
+# would expand to zero cases and fail after reserving up to a full rack. Kept
+# in sync by tests/unit/collector/test_network_layout.py::
+# test_advertised_default_worlds_expand_to_at_least_one_case.
 KERNEL_SOURCE="NVLinkTwoSided"
-GPU_LIST="2,4,8,16,32,48,64,72"
+GPU_LIST="2,4,8,16,32,64"
 GPUS_PER_NODE="${GPUS_PER_NODE:-4}"
 
 # Parse arguments
@@ -76,7 +88,7 @@ IFS=',' read -ra GPU_COUNTS <<< "${GPU_LIST}"
 echo "=========================================="
 echo "TensorRT-LLM MoE AlltoAll Benchmark [${KERNEL_SOURCE}]"
 echo "Submitting parallel jobs for: ${GPU_LIST} GPUs"
-echo "Output: ${OUTPUT_FILE}"
+echo "Results: ${SCRIPT_DIR}/results/moe_a2a_${KERNEL_SOURCE}.<N>gpu/job_<jobid>/"
 echo "=========================================="
 
 for NUM_GPUS in "${GPU_COUNTS[@]}"; do
@@ -90,7 +102,15 @@ for NUM_GPUS in "${GPU_COUNTS[@]}"; do
     fi
     
     JOB_NAME="${ACCOUNT}-alltoall-${KERNEL_SOURCE}.${NUM_GPUS}gpu"
-    
+    # One output directory per job: the collector finalizes a parquet and a
+    # collection_meta.yaml sidecar per run (per world), so jobs cannot share
+    # one file. Within a job, cases append one moe_a2a_perf.txt via
+    # helper.log_perf's lockfile. The job-scoped subdirectory (resolved inside
+    # the job, where SLURM_JOB_ID exists) keeps a resubmission from appending
+    # after a previous attempt's stale rows — the collector refuses a
+    # directory that already holds owned artifacts.
+    OUTPUT_DIR="${SCRIPT_DIR}/results/moe_a2a_${KERNEL_SOURCE}.${NUM_GPUS}gpu"
+
     echo "Submitting: ${JOB_NAME} (${NUM_NODES} nodes, ${NUM_GPUS} GPUs)"
     
     # get full rack
@@ -116,12 +136,12 @@ for NUM_GPUS in "${GPU_COUNTS[@]}"; do
                     --container-image=\"${CONTAINER_IMAGE}\" \
                     --container-mounts=\"${CONTAINER_MOUNTS}\" \
                     --mpi=pmix \
-                    -- python \"${COLLECTOR_SCRIPT}\" --kernel-source \"${KERNEL_SOURCE}\" --output \"${OUTPUT_FILE}\""
+                    -- python \"${COLLECTOR_SCRIPT}\" --kernel-source \"${KERNEL_SOURCE}\" --gpus-per-node \"${TASKS_PER_NODE}\" --image-ref \"${CONTAINER_IMAGE}\" --output-path \"${OUTPUT_DIR}/job_\${SLURM_JOB_ID}\""
 done
 
 echo ""
 echo "=========================================="
 echo "All jobs submitted!"
 echo "Check status: squeue -u \$USER"
-echo "Results: ${OUTPUT_FILE}"
+echo "Results: ${SCRIPT_DIR}/results/moe_a2a_${KERNEL_SOURCE}.<N>gpu/job_<jobid>/moe_a2a_perf.parquet (+ collection_meta.yaml)"
 echo "=========================================="

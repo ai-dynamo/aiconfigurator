@@ -9,6 +9,7 @@ from aiconfigurator.sdk.backends.factory import get_backend
 from aiconfigurator.sdk.inference_session import InferenceSession
 from aiconfigurator.sdk.models import get_model
 from aiconfigurator.sdk.perf_database import get_database
+from aiconfigurator.sdk.task_v2 import _warn_large_ep_flag
 
 
 def parse(args):
@@ -116,7 +117,8 @@ def parse(args):
     parser.add_argument(
         "--enable_wideep",
         action="store_true",
-        help="Enable WideEP DeepSeek modeling (effective for trtllm and sglang backends with DeepSeek model).",
+        help="Deprecated and ignored: large-EP is explored automatically from data "
+        "coverage; restrict EP sizes with *_moe_ep_candidates.",
     )
     parser.add_argument(
         "--wideep_num_slots",
@@ -142,6 +144,10 @@ def parse(args):
 
 
 def main(args):
+    # Deprecated and ignored (warn once): the flag selects no modeling path;
+    # it is not forwarded to ModelConfig. wideep_num_slots stays a real knob.
+    if args.enable_wideep:
+        _warn_large_ep_flag("enable_wideep")
     database = get_database(system=args.system, backend=args.backend, version=args.version)
     model_config = config.ModelConfig(
         tp_size=args.tp_size,
@@ -155,7 +161,6 @@ def main(args):
         workload_distribution=args.workload_distribution,
         attention_dp_size=args.attention_dp_size,
         overwrite_num_layers=args.overwrite_num_layers,
-        enable_wideep=args.enable_wideep,
         enable_eplb=args.enable_eplb,
         wideep_num_slots=args.wideep_num_slots,
         moe_backend=args.moe_backend,

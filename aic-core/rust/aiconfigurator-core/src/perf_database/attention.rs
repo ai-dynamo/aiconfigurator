@@ -39,11 +39,12 @@ use std::sync::OnceLock;
 use super::gemm::quant_tc_flops;
 use super::interpolation::Grid3;
 use super::perf_interp::{self, LeafValue, Node, OpInterpConfig};
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::{FmhaQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
+use crate::operators::base::SolComponents;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct AttentionTable {
@@ -101,33 +102,28 @@ impl AttentionTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
-        Self::with_sources(data_root, system_spec, &PerfDbSources::default())
+        Self::with_sources(
+            data_root,
+            system_spec,
+            &SourceResolver::fixed(PerfDbSources::default()),
+        )
+        .expect("fixed-map resolution is infallible")
     }
 
-    /// Construct with shared-layer (sibling/cross-version) sources resolved from
-    /// `perf_db_sources` (Python-supplied). Each attention file falls back to
-    /// its primary `data_root/<basename>` when absent from the map. No I/O.
+    /// Construct with shared-layer (sibling/cross-version) sources supplied by the
+    /// engine's `SourceResolver` (live resolution owns the shared-layer walk;
+    /// a fixed source map is the test-only path). Each attention file falls back to
+    /// its primary `data_root/<basename>` when the resolver names no override. No I/O.
     pub fn with_sources(
         data_root: PathBuf,
         system_spec: SystemSpec,
-        perf_db_sources: &PerfDbSources,
-    ) -> Self {
-        let context_sources = resolve_op_sources(
-            perf_db_sources,
-            "context_attention_perf.parquet",
-            &data_root,
-        );
-        let generation_sources = resolve_op_sources(
-            perf_db_sources,
-            "generation_attention_perf.parquet",
-            &data_root,
-        );
-        let encoder_sources = resolve_op_sources(
-            perf_db_sources,
-            "encoder_attention_perf.parquet",
-            &data_root,
-        );
-        Self {
+        resolver: &SourceResolver,
+    ) -> Result<Self, AicError> {
+        let context_sources = resolver.sources_for("context_attention_perf.parquet", &data_root)?;
+        let generation_sources =
+            resolver.sources_for("generation_attention_perf.parquet", &data_root)?;
+        let encoder_sources = resolver.sources_for("encoder_attention_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             system_spec,
             context_sources,
@@ -136,7 +132,7 @@ impl AttentionTable {
             context: OnceLock::new(),
             generation: OnceLock::new(),
             encoder: OnceLock::new(),
-        }
+        })
     }
 
     /// Raw interpolated context attention value (latency ms + power/energy).
@@ -680,7 +676,8 @@ fn load_generation_parquet(
 /// `n_kv_lookup == 0` means MHA (n_kv tracks n); a positive `window_size`
 /// smaller than the seq cuts the O(s^2) causal work to O(s*w).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn context_attention_sol_ms(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn context_attention_sol(
     spec: &SystemSpec,
     n_kv_lookup: u32,
     head_size: u32,
@@ -690,7 +687,7 @@ pub(crate) fn context_attention_sol_ms(
     s: f64,
     b: f64,
     attn_flops: f64,
-) -> f64 {
+) -> SolComponents {
     let h = head_size as f64;
     let w = window_size as f64;
     let n_kv = if n_kv_lookup == 0 {
@@ -709,7 +706,33 @@ pub(crate) fn context_attention_sol_ms(
         2.0 * b * (n * s * h + n * s * h) + kv_quant.mapping().memory * b * (2.0 * n_kv * s * h);
     let sol_math = ops / attn_flops * 1000.0;
     let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    SolComponents::new(sol_math, sol_mem)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn context_attention_sol_ms(
+    spec: &SystemSpec,
+    n_kv_lookup: u32,
+    head_size: u32,
+    window_size: u32,
+    kv_quant: KvCacheQuantMode,
+    n: f64,
+    s: f64,
+    b: f64,
+    attn_flops: f64,
+) -> f64 {
+    context_attention_sol(
+        spec,
+        n_kv_lookup,
+        head_size,
+        window_size,
+        kv_quant,
+        n,
+        s,
+        b,
+        attn_flops,
+    )
+    .time_ms()
 }
 
 /// Speed-of-light context-attention latency in ms for a QUERY with a prefix.
@@ -724,7 +747,7 @@ pub(crate) fn context_attention_sol_ms(
 /// the empirical query SOL. `n_kv` is the REAL kv-head count (not the MHA
 /// sentinel).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn context_attention_sol_with_prefix_ms(
+pub(crate) fn context_attention_sol_with_prefix(
     spec: &SystemSpec,
     b: f64,
     s: f64,
@@ -735,7 +758,7 @@ pub(crate) fn context_attention_sol_with_prefix_ms(
     window_size: u32,
     kv_quant: KvCacheQuantMode,
     attn_flops: f64,
-) -> f64 {
+) -> SolComponents {
     let h = head_size as f64;
     let w = window_size as f64;
     let full_s = s + prefix;
@@ -748,7 +771,35 @@ pub(crate) fn context_attention_sol_with_prefix_ms(
         + kv_quant.mapping().memory * b * (2.0 * n_kv * full_s * h);
     let sol_math = ops / attn_flops * 1000.0;
     let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    SolComponents::new(sol_math, sol_mem)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn context_attention_sol_with_prefix_ms(
+    spec: &SystemSpec,
+    b: f64,
+    s: f64,
+    prefix: f64,
+    n: f64,
+    n_kv: f64,
+    head_size: u32,
+    window_size: u32,
+    kv_quant: KvCacheQuantMode,
+    attn_flops: f64,
+) -> f64 {
+    context_attention_sol_with_prefix(
+        spec,
+        b,
+        s,
+        prefix,
+        n,
+        n_kv,
+        head_size,
+        window_size,
+        kv_quant,
+        attn_flops,
+    )
+    .time_ms()
 }
 
 /// Speed-of-light encoder-attention latency in ms.
@@ -756,6 +807,22 @@ pub(crate) fn context_attention_sol_with_prefix_ms(
 /// Mirrors Python's `EncoderAttention._query_encoder_attention_table::get_sol`:
 /// non-causal full N^2 (no /2), no KV-cache read — Q/K/V read + output write
 /// in bf16 only.
+pub(crate) fn encoder_attention_sol(
+    spec: &SystemSpec,
+    head_size: u32,
+    n: f64,
+    s: f64,
+    b: f64,
+    attn_flops: f64,
+) -> SolComponents {
+    let h = head_size as f64;
+    let ops = 2.0 * b * s * s * n * h * 2.0; // 2 for fma, 2 for q*k^t + *v
+    let mem_bytes = 2.0 * b * (3.0 * n * s * h + n * s * h); // Q/K/V read + output write, bf16
+    let sol_math = ops / attn_flops * 1000.0;
+    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+    SolComponents::new(sol_math, sol_mem)
+}
+
 pub(crate) fn encoder_attention_sol_ms(
     spec: &SystemSpec,
     head_size: u32,
@@ -764,12 +831,7 @@ pub(crate) fn encoder_attention_sol_ms(
     b: f64,
     attn_flops: f64,
 ) -> f64 {
-    let h = head_size as f64;
-    let ops = 2.0 * b * s * s * n * h * 2.0; // 2 for fma, 2 for q*k^t + *v
-    let mem_bytes = 2.0 * b * (3.0 * n * s * h + n * s * h); // Q/K/V read + output write, bf16
-    let sol_math = ops / attn_flops * 1000.0;
-    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    encoder_attention_sol(spec, head_size, n, s, b, attn_flops).time_ms()
 }
 
 /// Speed-of-light generation-attention latency in ms.
@@ -778,7 +840,8 @@ pub(crate) fn encoder_attention_sol_ms(
 /// as wired into the perf_interp sol_fn: c = [n, b, s]. `n_kv_lookup == 0`
 /// means MHA (n_kv tracks n); `window_size > 0` clamps `kv_len` to
 /// `min(s-1, window_size)`.
-pub(crate) fn generation_attention_sol_ms(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generation_attention_sol(
     spec: &SystemSpec,
     n_kv_lookup: u32,
     head_size: u32,
@@ -788,7 +851,7 @@ pub(crate) fn generation_attention_sol_ms(
     b: f64,
     s: f64,
     attn_flops: f64,
-) -> f64 {
+) -> SolComponents {
     let n_kv = if n_kv_lookup == 0 {
         n
     } else {
@@ -805,7 +868,33 @@ pub(crate) fn generation_attention_sol_ms(
     let mem_bytes = b * (n * h * 2.0 + 2.0 * n_kv * kv_len * h * kv_mem + n * h * 2.0);
     let sol_math = ops / attn_flops * 1000.0;
     let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    SolComponents::new(sol_math, sol_mem)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generation_attention_sol_ms(
+    spec: &SystemSpec,
+    n_kv_lookup: u32,
+    head_size: u32,
+    window_size: u32,
+    kv_quant: KvCacheQuantMode,
+    n: f64,
+    b: f64,
+    s: f64,
+    attn_flops: f64,
+) -> f64 {
+    generation_attention_sol(
+        spec,
+        n_kv_lookup,
+        head_size,
+        window_size,
+        kv_quant,
+        n,
+        b,
+        s,
+        attn_flops,
+    )
+    .time_ms()
 }
 
 /// Decode-attention TC-FLOPS: Python derives the FMHA mode from the kv-cache
@@ -1018,7 +1107,7 @@ mod tests {
             .query_generation(256, 2561, 32, 8, 128, 0, KvCacheQuantMode::Bfloat16)
             .expect("ragged-corner query must succeed")
             .latency;
-        let expected = 0.4923998240128304;
+        let expected = 0.37153384771269;
         assert!(
             ((latency - expected) / expected).abs() < 1e-9,
             "rust {latency} vs python {expected}"
@@ -1065,7 +1154,7 @@ mod tests {
             .query_generation(32, 2, 64, 4, 128, 0, KvCacheQuantMode::Fp8)
             .expect("query must succeed")
             .latency;
-        let expected = 0.008451361751014535;
+        let expected = 0.009131092737966444;
         assert!(
             ((latency - expected) / expected).abs() < 1e-9,
             "rust {latency} vs python {expected}"
@@ -1086,7 +1175,7 @@ mod tests {
         let cases: &[(u32, u32, f64)] = &[
             (8, 16384, 19.820667266845703),  // exact hit
             (8, 12000, 11.515825737734879),  // seq interp (sqrt blend)
-            (64, 16384, 158.56533813476562), // batch beyond staircase (util-hold)
+            (64, 16384, 184.03017609528183), // batch beyond staircase (tapered util-hold)
         ];
         for &(b, s, expected) in cases {
             let got = table
@@ -1166,9 +1255,9 @@ mod tests {
     fn encoder_attention_query_matches_python_v2_engine() {
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let cases: &[(u32, u32, f64)] = &[
-            (1, 1024, 0.03258133431275686), // exact hit
-            (2, 1400, 0.0779337721462867),  // seq interp (sqrt blend)
-            (64, 65536, 9775.049479166666), // batch beyond staircase (util-hold)
+            (1, 1024, 0.03258133431275686),  // exact hit
+            (2, 1400, 0.0779337721462867),   // seq interp (sqrt blend)
+            (64, 65536, 10944.346873534367), // batch beyond staircase (tapered util-hold)
         ];
         for &(b, s, expected) in cases {
             let got = table

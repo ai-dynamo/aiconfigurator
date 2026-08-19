@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+architecture: MiniMaxM3SparseForConditionalGeneration
+model_path: nvidia/MiniMax-M3-NVFP4
+model_paths:
+  - nvidia/MiniMax-M3-NVFP4
+include_base: true
+description: >
+  MiniMax-M3 NVFP4 sparse-model collection plan. Base-op coverage only for
+  now: the MSA attention module has no collector op yet, so MSA-dependent
+  support stays HYBRID/estimated until that op and its model shapes are
+  authored.

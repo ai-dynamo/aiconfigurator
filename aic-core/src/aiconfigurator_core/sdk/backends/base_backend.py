@@ -18,11 +18,9 @@ from aiconfigurator_core.sdk.inference_summary import InferenceSummary
 from aiconfigurator_core.sdk.models import BaseModel
 from aiconfigurator_core.sdk.perf_database import PerfDatabase
 from aiconfigurator_core.sdk.rust_engine_step import (
-    RustEngineUnsupportedError,
     estimate_decode_step_breakdown_with_rust,
     estimate_mixed_step_breakdown_with_rust,
     estimate_static_latency_breakdown_with_rust,
-    note_python_step_fallback,
     should_use_rust_engine_step,
 )
 from aiconfigurator_core.sdk.step_estimate import MixedStepInput, StepEstimate
@@ -58,6 +56,7 @@ class BaseBackend:
     # the base activation budget.
     MOE_WORKSPACE_FAMILIES: ClassVar[tuple[str, ...]] = (
         "GEMMA4MIX",
+        "STEP3P7",
         "DEEPSEEK",
         "DEEPSEEKV32",
         "DEEPSEEKV4",
@@ -160,16 +159,24 @@ class BaseBackend:
         """
         return step_throughput
 
-    def _resolve_agg_kwargs(self, kwargs: dict, isl: int, osl: int) -> dict:
+    def _resolve_agg_kwargs(self, kwargs: dict, isl: int, osl: int, backend_version: str | None = None) -> dict:
         """Resolve backend-specific run_agg kwargs to defaults.
 
-        Default: returns an empty dict. TRT-LLM resolves ``max_seq_len`` /
-        ``max_num_tokens`` / ``free_gpu_memory_fraction`` here so both
-        ``run_agg`` and ``find_best_agg_result_under_constraints`` see the
-        same values when forwarding. Idempotent — calling with already-resolved
-        kwargs returns the same values.
+        Default: resolves ``free_gpu_memory_fraction`` — an explicit kwarg
+        wins, else the backend default (possibly version-dependent, see
+        ``get_default_free_gpu_memory_fraction``). Backends without a default
+        return an empty dict. TRT-LLM overrides to also resolve
+        ``max_seq_len`` / ``max_num_tokens``, so both ``run_agg`` and
+        ``find_best_agg_result_under_constraints`` see the same values when
+        forwarding. Idempotent — calling with already-resolved kwargs returns
+        the same values.
         """
-        return {}
+        fraction = kwargs.get("free_gpu_memory_fraction")
+        if fraction is None:
+            fraction = self.get_default_free_gpu_memory_fraction(backend_version)
+        if fraction is None:
+            return {}
+        return {"free_gpu_memory_fraction": fraction}
 
     def _make_agg_cache_key(
         self,
@@ -177,24 +184,33 @@ class BaseBackend:
         osl: int,
         b: int,
         ctx_tokens: int,
-        engine_step_backend_key: str,
         agg_extra: dict,
     ) -> tuple:
-        """Build the cache key for ``run_agg`` results."""
-        return (isl, osl, b, ctx_tokens, engine_step_backend_key)
+        """Build the cache key for ``run_agg`` results.
+
+        The resolved fraction is part of the key: the cached summary embeds
+        the KV-budget OOM verdict, which depends on it.
+        """
+        return (isl, osl, b, ctx_tokens, agg_extra.get("free_gpu_memory_fraction"))
 
     @staticmethod
     def _runtime_config_for_agg_candidate(runtime_config: RuntimeConfig, batch_size: int) -> RuntimeConfig:
         return dataclasses.replace(runtime_config, batch_size=batch_size)
 
-    def _memory_usage_kwargs_for_agg(self, num_tokens: int, agg_extra: dict) -> dict:
+    def _memory_usage_kwargs_for_agg(
+        self, num_tokens: int, agg_extra: dict, mtp_scaled_tokens: int | None = None
+    ) -> dict:
         """Kwargs for the ``_get_memory_usage`` call from ``run_agg``.
 
-        Default: pass the locally-computed ``num_tokens``. TRT-LLM passes
-        ``max_num_tokens`` (BuildConfig.max_num_tokens) for activation sizing
-        and forwards ``max_seq_len`` for KV cache sizing.
+        Default: pass the locally-computed ``num_tokens`` plus the decode-token
+        share for MTP activation scaling. TRT-LLM passes ``max_num_tokens``
+        (BuildConfig.max_num_tokens) for activation sizing and forwards
+        ``max_seq_len`` for KV cache sizing; it does not forward
+        ``mtp_scaled_tokens``, which RETAINS the legacy full ``(nextn+1)``
+        multiplier on that path pending its own analysis (see the comment in
+        ``TRTLLMBackend._memory_usage_kwargs_for_agg``).
         """
-        return {"num_tokens": num_tokens}
+        return {"num_tokens": num_tokens, "mtp_scaled_tokens": mtp_scaled_tokens}
 
     def _oom_check_kwargs(self, agg_extra: dict) -> dict:
         """Extra kwargs for ``InferenceSummary.set_memory_and_check_oom``.
@@ -208,11 +224,44 @@ class BaseBackend:
     # ============== STATIC INFERENCE (shared) ==========================
 
     @staticmethod
+    def _require_rust_engine_step(runtime_config: RuntimeConfig, database, *, surface: str) -> None:
+        """Raise when the step cannot route to the compiled engine.
+
+        The compiled engine is the ONLY engine-step executor; it re-loads
+        perf data from disk by (system, backend, version) identity, so a
+        duck-typed/synthetic database has nothing it could resolve.
+        """
+        if should_use_rust_engine_step(runtime_config, database):
+            return
+        raise TypeError(
+            f"the compiled engine is the only {surface} engine-step executor, and it resolves "
+            f"perf data from disk by (system, backend, version) — a {type(database).__name__} "
+            "database has no on-disk identity. Use a PerfDatabase from "
+            "get_database()/get_database_view()."
+        )
+
+    @staticmethod
     def _visual_context_tokens_from_encoder_config(enc_cfg, runtime_config: RuntimeConfig) -> int:
         if not isinstance(enc_cfg, common.VisionEncoderConfig) or runtime_config.num_images_per_request <= 0:
             return 0
         post_merge, _ = BaseBackend._encoder_pre_merge_per_visual(runtime_config, enc_cfg)
         return post_merge * runtime_config.num_images_per_request
+
+    @staticmethod
+    def effective_prefill_isl(model_path: str, runtime_config: RuntimeConfig) -> int:
+        """Text ISL + vision context tokens for one request.
+
+        Single source for the effective prefill ISL: every token/batch budget
+        derived from it must divide by this same value, never a recomputed one.
+        """
+        from aiconfigurator_core.sdk.utils import get_model_config_from_model_path
+
+        try:
+            enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
+        except Exception:
+            logger.debug("Could not resolve model config for the effective ISL; using text ISL", exc_info=True)
+            enc_cfg = None
+        return runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(enc_cfg, runtime_config)
 
     @staticmethod
     def _visual_context_tokens(model: BaseModel, runtime_config: RuntimeConfig) -> int:
@@ -229,7 +278,7 @@ class BaseBackend:
         RuntimeConfig + VisionEncoderConfig.
 
         Resolution order:
-            1. image_height + image_width (computed from patch/merge sizes)
+            1. image_height + image_width (smart-resized, then patch/merge sizes)
             2. num_image_tokens (explicit per-image override)
 
         Returns ``(tokens_post_merge_per_image, pre_merge_per_image)``.
@@ -237,11 +286,16 @@ class BaseBackend:
         """
         has_image_dims = runtime_config.image_height > 0 and runtime_config.image_width > 0
         if has_image_dims:
+            # Upstream VL processors (Qwen smart_resize) round each raw
+            # dimension to the *nearest* multiple of patch_size * merge_size
+            # before patchify; plain floor under-counts tokens for
+            # non-aligned inputs.  The processor's min/max_pixels rescaling
+            # is a preprocessor knob AIC does not model.
             img_stride = enc_cfg.patch_size * enc_cfg.spatial_merge_size
-            tokens_per_image = (runtime_config.image_height // img_stride) * (runtime_config.image_width // img_stride)
-            pre_merge_per_image = (runtime_config.image_height // enc_cfg.patch_size) * (
-                runtime_config.image_width // enc_cfg.patch_size
-            )
+            h_bar = max(img_stride, round(runtime_config.image_height / img_stride) * img_stride)
+            w_bar = max(img_stride, round(runtime_config.image_width / img_stride) * img_stride)
+            tokens_per_image = (h_bar // img_stride) * (w_bar // img_stride)
+            pre_merge_per_image = (h_bar // enc_cfg.patch_size) * (w_bar // enc_cfg.patch_size)
         elif runtime_config.num_image_tokens > 0:
             tokens_per_image = runtime_config.num_image_tokens
             pre_merge_per_image = tokens_per_image * (enc_cfg.spatial_merge_size**2)
@@ -297,35 +351,14 @@ class BaseBackend:
                 return pre_merge_per_image
             return tokens_per_image if use_post else pre_merge_per_image
 
-        if should_use_rust_engine_step(runtime_config, database):
-            rust = self._run_encoder_phase_with_rust(
-                model,
-                database,
-                images_local,
-                _encoder_eff_s,
-                include_energy=include_energy,
-            )
-            if rust is not None:
-                encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict = rust
-                return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, n_img_post
-
-        for op in model.encoder_ops:
-            eff_batch, eff_s = images_local, _encoder_eff_s(op)
-            x = eff_batch * eff_s
-            result = op.query(
-                database,
-                x=x,
-                batch_size=eff_batch,
-                beam_width=1,
-                s=eff_s,
-                prefix=0,
-                model_name=getattr(model, "model_name", ""),
-            )
-            encoder_latency_dict[op._name] += float(result)
-            if include_energy:
-                encoder_energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
-            encoder_source_dict[op._name] = getattr(result, "source", "silicon")
-
+        self._require_rust_engine_step(runtime_config, database, surface="encoder")
+        encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict = self._run_encoder_phase_with_rust(
+            model,
+            database,
+            images_local,
+            _encoder_eff_s,
+            include_energy=include_energy,
+        )
         return encoder_latency_dict, encoder_energy_wms_dict, encoder_source_dict, n_img_post
 
     def _run_encoder_phase_with_rust(
@@ -336,23 +369,22 @@ class BaseBackend:
         eff_s_of,
         *,
         include_energy: bool,
-    ) -> tuple[dict[str, float], dict[str, float], dict[str, str]] | None:
-        """Compiled-engine path of the encoder per-op loop, or ``None`` for
-        the Python ``op.query()`` fallback.
+    ) -> tuple[dict[str, float], dict[str, float], dict[str, str]]:
+        """Compiled-engine path of the encoder per-op loop.
 
         Encoder ops are deliberately NOT in the compiled ``EngineSpec`` (the
         compile path threads no image configuration), so they travel through
         the ad-hoc op-list evaluation FFI: ops are grouped by their resolved
         ``eff_s`` (the shape math above), each group serialized to OpSpec
         JSON and evaluated at ``batch=images_local, s=eff_s, x=batch*s``.
-        Accumulation matches the Python loop for the shipped encoder op
-        lists (unique names): latency/energy fold with ``+=``; sources are
-        last-wins ACROSS shape groups, while duplicate names WITHIN one
-        group would merge to ``"mixed"`` inside the engine (the Python loop
-        is last-wins there — divergent only for duplicate-name encoder ops,
-        which ``build_encoder_ops`` never emits today).
+        Latency/energy fold with ``+=``; sources are last-wins ACROSS shape
+        groups, while duplicate names WITHIN one group would merge to
+        ``"mixed"`` inside the engine (``build_encoder_ops`` never emits
+        duplicate names today). An encoder op the spec cannot express raises
+        ``OpConversionError`` — the opspec coverage tripwire keeps that
+        unreachable for shipped models.
         """
-        from aiconfigurator_core.sdk.engine import OpConversionError, build_ops_json
+        from aiconfigurator_core.sdk.engine import build_ops_json
         from aiconfigurator_core.sdk.rust_engine_step import evaluate_ops_json_with_rust
 
         groups: dict[int, list] = {}
@@ -362,123 +394,55 @@ class BaseBackend:
         latency_dict: dict[str, float] = defaultdict(float)
         energy_dict: dict[str, float] = defaultdict(float)
         source_dict: dict[str, str] = {}
-        backend_name = getattr(database.backend, "value", database.backend)
-        try:
-            for eff_s, ops in groups.items():
-                ops_json = build_ops_json(ops, model=model, backend=str(backend_name), database=database)
-                entries = evaluate_ops_json_with_rust(
-                    model,
-                    database,
-                    ops_json=ops_json,
-                    is_context=True,
-                    batch_size=images_local,
-                    s=eff_s,
-                    prefix=0,
-                    x=images_local * eff_s,
-                )
-                for name, latency_ms, energy_wms, source in entries:
-                    latency_dict[name] += float(latency_ms)
-                    if include_energy:
-                        energy_dict[name] += float(energy_wms)
-                    source_dict[name] = source
-        except (OpConversionError, RustEngineUnsupportedError) as exc:
-            note_python_step_fallback("unsupported_op_graph:encoder", str(exc))
-            return None
+        for eff_s, ops in groups.items():
+            ops_json = build_ops_json(ops)
+            entries = evaluate_ops_json_with_rust(
+                model,
+                database,
+                ops_json=ops_json,
+                is_context=True,
+                batch_size=images_local,
+                s=eff_s,
+                prefix=0,
+                x=images_local * eff_s,
+            )
+            for name, latency_ms, energy_wms, source in entries:
+                latency_dict[name] += float(latency_ms)
+                if include_energy:
+                    energy_dict[name] += float(energy_wms)
+                source_dict[name] = source
         return latency_dict, energy_dict, source_dict
 
-    def _run_context_phase(
+    def run_encoder_static(
         self,
         model: BaseModel,
         database: PerfDatabase,
         runtime_config: RuntimeConfig,
         batch_size: int,
-        isl: int,
-        prefix: int,
-        *,
-        include_energy: bool = True,
-    ) -> tuple[dict[str, float], dict[str, float], dict[str, str]]:
-        context_latency_dict = defaultdict(float)
-        context_energy_wms_dict = defaultdict(float)
-        # Per-op data source, accumulated by merging across calls to the same op.
-        # Same-source repeated calls keep the tag; mismatched calls collapse to "mixed".
-        context_source_dict: dict[str, str] = {}
+        latency_correction_scale: float = 1.0,
+    ) -> tuple[float, float, dict[str, float], float]:
+        """Encoder-only static evaluation for a disaggregated encode (EPD) worker.
 
-        effective_isl = isl - prefix
-        if effective_isl <= 0:
-            raise ValueError(f"isl must be greater than 0 after removing prefix, but got {effective_isl}")
-
-        for op in model.context_ops:
-            x = batch_size * effective_isl if "logits_gemm" not in op._name else batch_size
-            result = op.query(
-                database,
-                x=x,
-                batch_size=batch_size,
-                beam_width=1,
-                s=effective_isl,
-                prefix=prefix,
-                seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
-            )
-            context_latency_dict[op._name] += float(result)
-            if include_energy:
-                context_energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
-            new_src = getattr(result, "source", "silicon")
-            existing = context_source_dict.get(op._name)
-            if existing is None or existing == new_src:
-                context_source_dict[op._name] = new_src
-            else:
-                context_source_dict[op._name] = "mixed"
-
-        return context_latency_dict, context_energy_wms_dict, context_source_dict
-
-    def _run_generation_phase(
-        self,
-        model: BaseModel,
-        database: PerfDatabase,
-        runtime_config: RuntimeConfig,
-        batch_size: int,
-        beam_width: int,
-        isl: int,
-        osl: int,
-        stride: int,
-        *,
-        include_energy: bool = True,
-    ) -> tuple[dict[str, float], dict[str, float], dict[str, str]]:
-        generation_latency_dict = defaultdict(float)
-        generation_energy_wms_dict = defaultdict(float)
-        generation_source_dict: dict[str, str] = {}
-
-        batch_size = batch_size * (model._nextn + 1)
-
-        for i in range(0, osl - 1, stride):
-            latency_dict = defaultdict(float)
-            energy_wms_dict = defaultdict(float)
-
-            for op in model.generation_ops:
-                result = op.query(
-                    database,
-                    x=batch_size * beam_width,
-                    batch_size=batch_size,
-                    beam_width=beam_width,
-                    s=isl + i + 1,
-                    gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
-                )
-                latency_dict[op._name] += float(result)
-                if include_energy:
-                    energy_wms_dict[op._name] += getattr(result, "energy", 0.0)
-                new_src = getattr(result, "source", "silicon")
-                existing = generation_source_dict.get(op._name)
-                if existing is None or existing == new_src:
-                    generation_source_dict[op._name] = new_src
-                else:
-                    generation_source_dict[op._name] = "mixed"
-
-            repeat_count = min(stride, osl - 1 - i)
-            for op in latency_dict:
-                generation_latency_dict[op] += latency_dict[op] * repeat_count
-                if include_energy:
-                    generation_energy_wms_dict[op] += energy_wms_dict[op] * repeat_count
-
-        return generation_latency_dict, generation_energy_wms_dict, generation_source_dict
+        Runs just the vision-encoder phase for one batch of ``batch_size``
+        requests and returns ``(latency_ms, power_w, memory_dict,
+        power_coverage)``.  ``model`` may be any object carrying
+        ``encoder_ops``, ``encoder_config`` and ``config`` (e.g.
+        ``EncoderOnlyModel``); ``power_w`` is the phase-average power,
+        invariant to the correction.  ``power_coverage`` is the
+        latency-weighted fraction of ops with recorded energy, mirroring
+        ``InferenceSummary.get_power_data_coverage``.
+        """
+        encoder_latency_dict, encoder_energy_wms_dict, _, _ = self._run_encoder_phase(
+            model, database, runtime_config, batch_size
+        )
+        raw_latency = sum(encoder_latency_dict.values())
+        power_w = sum(encoder_energy_wms_dict.values()) / raw_latency if raw_latency > 0 else 0.0
+        covered_latency = sum(
+            latency for op, latency in encoder_latency_dict.items() if encoder_energy_wms_dict.get(op, 0.0) > 0
+        )
+        power_coverage = covered_latency / raw_latency if raw_latency > 0 else 0.0
+        memory = self._get_encoder_component_memory_for_runtime(model, runtime_config, batch_size)
+        return raw_latency * latency_correction_scale, power_w, memory, power_coverage
 
     # TODO: refactor this 6-tuple return into a NamedTuple (or @dataclass) for
     # readability; current call sites unpack positionally and the signature is
@@ -501,115 +465,34 @@ class BaseBackend:
         dict[str, str],
         dict[str, str],
     ]:
-        batch_size, beam_width, isl, osl, prefix = (
-            runtime_config.batch_size,
-            runtime_config.beam_width,
-            runtime_config.isl,
-            runtime_config.osl,
-            runtime_config.prefix,
+        isl_eff = runtime_config.isl + img_ctx_tokens
+
+        self._require_rust_engine_step(runtime_config, database, surface="static")
+        rust_runtime_config = runtime_config
+        if img_ctx_tokens:
+            rust_runtime_config = copy.copy(runtime_config)
+            rust_runtime_config.isl = isl_eff
+        (
+            context_latency_dict,
+            generation_latency_dict,
+            context_energy_wms_dict,
+            generation_energy_wms_dict,
+            context_source_dict,
+            generation_source_dict,
+        ) = estimate_static_latency_breakdown_with_rust(
+            model,
+            database,
+            rust_runtime_config,
+            mode,
+            stride,
+            latency_correction_scale,
         )
-        isl_eff = isl + img_ctx_tokens
-
-        context_latency_dict, context_energy_wms_dict, context_source_dict = {}, {}, {}
-        generation_latency_dict, generation_energy_wms_dict, generation_source_dict = {}, {}, {}
-
-        # FPM models compile to no Rust op variant yet; force the Python phases
-        # (which handle the single whole-model op naturally).
-        if model.forward_model != "fpm" and should_use_rust_engine_step(runtime_config, database):
-            try:
-                rust_runtime_config = runtime_config
-                if img_ctx_tokens:
-                    rust_runtime_config = copy.copy(runtime_config)
-                    rust_runtime_config.isl = isl_eff
-                (
-                    context_latency_dict,
-                    generation_latency_dict,
-                    context_energy_wms_dict,
-                    generation_energy_wms_dict,
-                    context_source_dict,
-                    generation_source_dict,
-                ) = estimate_static_latency_breakdown_with_rust(
-                    model,
-                    database,
-                    rust_runtime_config,
-                    mode,
-                    stride,
-                    latency_correction_scale,
-                )
-                if not include_energy:
-                    # Latency-only callers must not observe energy; keep the
-                    # key sets identical to the latency dicts (the power
-                    # coverage gate pairs latency and energy by name).
-                    context_energy_wms_dict = dict.fromkeys(context_latency_dict, 0.0)
-                    generation_energy_wms_dict = dict.fromkeys(generation_latency_dict, 0.0)
-                return (
-                    context_latency_dict,
-                    context_energy_wms_dict,
-                    generation_latency_dict,
-                    generation_energy_wms_dict,
-                    context_source_dict,
-                    generation_source_dict,
-                )
-            except RustEngineUnsupportedError as exc:
-                # Op graph not expressible as a compiled EngineSpec: fall back
-                # to the Python step (parity by delegation — Python computes
-                # what Rust cannot yet express). Perf-data misses are NOT
-                # caught here; they must stay error-symmetric.
-                note_python_step_fallback("unsupported_op_graph:static", str(exc))
-
-        if mode == "static_ctx":
-            context_latency_dict, context_energy_wms_dict, context_source_dict = self._run_context_phase(
-                model,
-                database,
-                runtime_config,
-                batch_size,
-                isl_eff,
-                prefix,
-                include_energy=include_energy,
-            )
-        elif mode == "static_gen":
-            generation_latency_dict, generation_energy_wms_dict, generation_source_dict = self._run_generation_phase(
-                model,
-                database,
-                runtime_config,
-                batch_size,
-                beam_width,
-                isl_eff,
-                osl,
-                stride,
-                include_energy=include_energy,
-            )
-        else:
-            context_latency_dict, context_energy_wms_dict, context_source_dict = self._run_context_phase(
-                model,
-                database,
-                runtime_config,
-                batch_size,
-                isl_eff,
-                prefix,
-                include_energy=include_energy,
-            )
-            generation_latency_dict, generation_energy_wms_dict, generation_source_dict = self._run_generation_phase(
-                model,
-                database,
-                runtime_config,
-                batch_size,
-                beam_width,
-                isl_eff,
-                osl,
-                stride,
-                include_energy=include_energy,
-            )
-
-        if latency_correction_scale != 1.0:
-            logger.debug(f"latency_correction_scale: {latency_correction_scale} is applied")
-            for op in context_latency_dict:
-                context_latency_dict[op] *= latency_correction_scale
-                context_energy_wms_dict[op] *= latency_correction_scale
-            for op in generation_latency_dict:
-                generation_latency_dict[op] *= latency_correction_scale
-                generation_energy_wms_dict[op] *= latency_correction_scale
-
+        if not include_energy:
+            # Latency-only callers must not observe energy; keep the key sets
+            # identical to the latency dicts (the power coverage gate pairs
+            # latency and energy by name).
+            context_energy_wms_dict = dict.fromkeys(context_latency_dict, 0.0)
+            generation_energy_wms_dict = dict.fromkeys(generation_latency_dict, 0.0)
         return (
             context_latency_dict,
             context_energy_wms_dict,
@@ -634,7 +517,9 @@ class BaseBackend:
         This shares the same latency breakdown path as ``run_static`` but skips
         building an ``InferenceSummary``.
         """
-        if mode == "static_gen":
+        # Workers without encoder ops (text-only models, or EPD language-only
+        # prefill workers) still count vision tokens in the LLM context.
+        if mode == "static_gen" or not model.encoder_ops:
             encoder_latency = 0.0
             img_ctx_tokens = self._visual_context_tokens(model, runtime_config)
         else:
@@ -678,6 +563,7 @@ class BaseBackend:
         stride: int = 32,
         latency_correction_scale: float = 1.0,
         free_gpu_memory_fraction: float | None = None,
+        max_seq_len: int | None = None,
     ) -> InferenceSummary:
         """
         Run the static inference.
@@ -692,16 +578,11 @@ class BaseBackend:
             latency_correction_scale (float): the correction scale to adjust the latency,
                 default is 1.0.
                 corrected latency = latency * latency_correction_scale
+            max_seq_len: Optional per-slot KV cache allocation length.
         """
 
         def _run_encoder(batch_size: int) -> tuple[dict[str, float], dict[str, float], dict[str, str], int]:
             return self._run_encoder_phase(model, database, runtime_config, batch_size)
-
-        def _run_context(bs: int, effective_isl: int, pfx: int):
-            return self._run_context_phase(model, database, runtime_config, bs, effective_isl, pfx)
-
-        def _run_generation(bs: int, bw: int, effective_isl: int, eff_osl: int, strd: int):
-            return self._run_generation_phase(model, database, runtime_config, bs, bw, effective_isl, eff_osl, strd)
 
         summary = InferenceSummary(runtime_config)
         batch_size, beam_width, isl, osl, prefix = (
@@ -712,7 +593,9 @@ class BaseBackend:
             runtime_config.prefix,
         )
 
-        if mode == "static_gen":
+        # Workers without encoder ops (text-only models, or EPD language-only
+        # prefill workers) still count vision tokens in the LLM context.
+        if mode == "static_gen" or not model.encoder_ops:
             encoder_latency_dict, encoder_energy_wms_dict = defaultdict(float), defaultdict(float)
             encoder_source_dict = {}
             img_ctx_tokens = self._visual_context_tokens(model, runtime_config)
@@ -732,6 +615,9 @@ class BaseBackend:
             else self._get_encoder_component_memory_for_runtime(model, runtime_config, batch_size)
         )
         encoder_memory_total = encoder_memory.get("total", 0.0)
+        memory_extra = {}
+        if max_seq_len is not None and "max_seq_len" in inspect.signature(self._get_memory_usage).parameters:
+            memory_extra["max_seq_len"] = max_seq_len
 
         (
             context_latency_dict,
@@ -751,6 +637,8 @@ class BaseBackend:
         )
 
         if mode == "static_ctx":
+            # Prefill-only step: no decode tokens, so no share of the activation
+            # footprint verifies nextn+1 draft tokens (mtp_scaled_tokens=0).
             memory = self._get_memory_usage(
                 model,
                 database,
@@ -760,6 +648,8 @@ class BaseBackend:
                 1,
                 prefix=prefix,
                 encoder_memory=encoder_memory,
+                mtp_scaled_tokens=0,
+                **memory_extra,
             )
         elif mode == "static_gen":
             memory = self._get_memory_usage(
@@ -771,8 +661,15 @@ class BaseBackend:
                 osl,
                 num_tokens=batch_size * beam_width,
                 prefix=prefix,
+                **memory_extra,
             )
         else:
+            # "static": activations default to the context token count
+            # ((isl - prefix) * batch_size), i.e. the prefill peak — the decode
+            # steps of a static batch only ever process
+            # batch_size * beam_width * (nextn + 1) tokens, far fewer. So this
+            # footprint has no decode share either (mtp_scaled_tokens=0), the
+            # same rule the static_ctx branch above already applies.
             memory = self._get_memory_usage(
                 model,
                 database,
@@ -782,6 +679,8 @@ class BaseBackend:
                 osl,
                 prefix=prefix,
                 encoder_memory=encoder_memory,
+                mtp_scaled_tokens=0,
+                **memory_extra,
             )
 
         # Calculate total latencies and energies (simple sums - decoupled!)
@@ -1005,8 +904,16 @@ class BaseBackend:
             "num_tokens": num_tokens,
             "prefix": prefix,
         }
-        if "max_seq_len" in inspect.signature(self._get_memory_usage).parameters:
+        memory_usage_params = inspect.signature(self._get_memory_usage).parameters
+        if "max_seq_len" in memory_usage_params:
             kwargs["max_seq_len"] = max_seq_len
+        # ``num_tokens == 0`` (AFD's ``phase == "prefill"`` callers) makes
+        # ``_get_memory_usage`` derive the count from ``(isl - prefix) * batch_size``
+        # — a prefill-only footprint, so it carries no decode share that
+        # verifies nextn+1 draft tokens. Decode callers pass ``num_tokens > 0``
+        # (one token per request) and keep the full ``(nextn+1)`` multiplier.
+        if num_tokens == 0 and "mtp_scaled_tokens" in memory_usage_params:
+            kwargs["mtp_scaled_tokens"] = 0
 
         memory = self._get_memory_usage(
             model,
@@ -1120,14 +1027,6 @@ class BaseBackend:
         ``isl`` must be the text-only isl; :meth:`run_mixed` derives the visual
         context tokens from ``runtime_config``'s image fields.
         """
-        if model.forward_model == "fpm":
-            # The 3-pass split below recognizes granular attention op NAMES
-            # ("context_attention"/"generation_attention"); a whole-model op
-            # matches neither and would be mis-accounted. FPM must take the
-            # explicit pure-prefill + pure-decode branch instead.
-            return self._get_fpm_mix_step_latency(
-                model, database, runtime_config, ctx_tokens, gen_tokens, isl, osl, prefix
-            )
         mixed_runtime_config = copy.copy(runtime_config)
         mixed_runtime_config.isl = isl
         mixed_runtime_config.osl = osl
@@ -1172,264 +1071,29 @@ class BaseBackend:
         isl += self._visual_context_tokens(model, runtime_config)
 
         decode_query_tokens = step.num_decode_requests * (model._nextn + 1)
-        if model.forward_model == "fpm":
-            # The 3-pass split below recognizes granular attention op NAMES
-            # ("context_attention"/"generation_attention"); a whole-model op
-            # matches neither and would be mis-accounted. FPM also compiles to
-            # no Rust op variant yet, so always take the explicit
-            # pure-prefill + marginal-decode composition.
-            latency_ms, energy_wms, per_op_latency_ms, per_op_source = self._get_fpm_mix_step_latency(
-                model,
-                database,
-                runtime_config,
-                step.context_tokens,
-                step.num_decode_requests,
-                isl,
-                osl,
-                prefix,
-            )
-            return StepEstimate(
-                latency_ms=latency_ms,
-                energy_wms=energy_wms,
-                per_op_latency_ms=per_op_latency_ms,
-                per_op_source=per_op_source,
-                context_tokens=step.context_tokens,
-                num_decode_requests=step.num_decode_requests,
-                num_decode_query_tokens=decode_query_tokens,
-            )
-        if should_use_rust_engine_step(runtime_config, database):
-            try:
-                components = estimate_mixed_step_breakdown_with_rust(
-                    model,
-                    database,
-                    ctx_tokens=step.context_tokens,
-                    gen_tokens=step.num_decode_requests,
-                    isl=isl,
-                    osl=osl,
-                    prefix=prefix,
-                    seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
-                    gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
-                )
-            except RustEngineUnsupportedError as exc:
-                note_python_step_fallback("unsupported_op_graph:mixed", str(exc))
-            else:
-                return StepEstimate(
-                    latency_ms=components["latency_ms"],
-                    energy_wms=components["energy_wms"],
-                    component_latency_ms=components["component_latency_ms"],
-                    component_energy_wms=components["component_energy_wms"],
-                    per_op_latency_ms=components["per_op_latency_ms"],
-                    per_op_source=components["per_op_source"],
-                    context_tokens=step.context_tokens,
-                    num_decode_requests=step.num_decode_requests,
-                    num_decode_query_tokens=decode_query_tokens,
-                )
-
-        ctx_scale = runtime_config.seq_imbalance_correction_scale
-        gen_scale = runtime_config.gen_seq_imbalance_correction_scale
-
-        # Pass 1: combined single-batch inference to extract non-attention latency.
-        # Every decode request verifies one target token plus all scheduled
-        # drafts. Acceptance does not reduce this current-iteration work.
-        num_tokens_combined = step.context_tokens + decode_query_tokens
-        summary = self.run_static(
+        self._require_rust_engine_step(runtime_config, database, surface="mixed")
+        components = estimate_mixed_step_breakdown_with_rust(
             model,
             database,
-            # num tokens for gemm needs to be adjusted for prefix, depends on the avg prefix len per request
-            RuntimeConfig(
-                batch_size=1,
-                beam_width=1,
-                isl=num_tokens_combined,
-                osl=1,
-                prefix=prefix * np.floor(step.context_tokens / isl),
-                seq_imbalance_correction_scale=ctx_scale,
-                engine_step_backend=runtime_config.engine_step_backend,
-            ),
-            mode="static_ctx",
+            ctx_tokens=step.context_tokens,
+            gen_tokens=step.num_decode_requests,
+            isl=isl,
+            osl=osl,
+            prefix=prefix,
+            seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
+            gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
         )
-        latency_dict = summary.get_context_latency_dict()
-        energy_wms_dict = summary.get_context_energy_wms_dict()
-        source_dict = summary.get_context_source_dict()
-        non_attention_latency_ms = 0.0
-        non_attention_energy_wms = 0.0
-        mix_non_attn_ops: dict[str, float] = {}
-        mix_non_attn_sources: dict[str, str] = {}
-        for layer_name, latency in latency_dict.items():
-            if layer_name != "context_attention":
-                non_attention_latency_ms += latency
-                non_attention_energy_wms += energy_wms_dict.get(layer_name, 0.0)
-                mix_non_attn_ops[layer_name] = latency
-                mix_non_attn_sources[layer_name] = source_dict.get(layer_name, "silicon")
-
-        # Pass 2: context attention split full isl over num_steps and averaged.
-        batch_size = np.ceil(step.context_tokens / isl)
-        summary = self.run_static(
-            model,
-            database,
-            RuntimeConfig(
-                batch_size=batch_size,
-                beam_width=1,
-                isl=isl,
-                osl=1,
-                prefix=prefix,
-                seq_imbalance_correction_scale=ctx_scale,
-                engine_step_backend=runtime_config.engine_step_backend,
-            ),
-            mode="static_ctx",
-        )
-        latency_dict = summary.get_context_latency_dict()
-        energy_wms_dict = summary.get_context_energy_wms_dict()
-        ctx_attn_source = summary.get_context_source_dict().get("context_attention", "silicon")
-        scale_factor = np.ceil(isl / step.context_tokens)
-        ctx_attention_latency_ms = latency_dict["context_attention"] / scale_factor
-        ctx_attention_energy_wms = energy_wms_dict.get("context_attention", 0.0) / scale_factor
-
-        # Pass 3: generation attention (use isl + osl//2 for the avg seq len).
-        gen_attention_latency_ms = 0.0
-        gen_attention_energy_wms = 0.0
-        gen_attn_source = "silicon"
-        if step.num_decode_requests > 0:
-            summary = self.run_static(
-                model,
-                database,
-                RuntimeConfig(
-                    batch_size=step.num_decode_requests,
-                    beam_width=1,
-                    isl=isl + osl // 2,
-                    osl=2,
-                    gen_seq_imbalance_correction_scale=gen_scale,
-                    engine_step_backend=runtime_config.engine_step_backend,
-                ),
-                mode="static_gen",
-            )
-            latency_dict = summary.get_generation_latency_dict()
-            energy_wms_dict = summary.get_generation_energy_wms_dict()
-            gen_attention_latency_ms = latency_dict["generation_attention"]
-            gen_attention_energy_wms = energy_wms_dict.get("generation_attention", 0.0)
-            gen_attn_source = summary.get_generation_source_dict().get("generation_attention", "silicon")
-
-        per_ops_step_data: dict[str, float] = {
-            **mix_non_attn_ops,
-            "context_attention (scaled)": ctx_attention_latency_ms,
-            "generation_attention": gen_attention_latency_ms,
-        }
-        per_ops_step_source = {
-            **mix_non_attn_sources,
-            "context_attention (scaled)": ctx_attn_source,
-            "generation_attention": gen_attn_source,
-        }
-
-        component_latency_ms = {
-            "shared_non_attention": non_attention_latency_ms,
-            "context_attention": ctx_attention_latency_ms,
-            "decode_attention": gen_attention_latency_ms,
-        }
-        component_energy_wms = {
-            "shared_non_attention": non_attention_energy_wms,
-            "context_attention": ctx_attention_energy_wms,
-            "decode_attention": gen_attention_energy_wms,
-        }
         return StepEstimate(
-            latency_ms=sum(component_latency_ms.values()),
-            energy_wms=sum(component_energy_wms.values()),
-            component_latency_ms=component_latency_ms,
-            component_energy_wms=component_energy_wms,
-            per_op_latency_ms=per_ops_step_data,
-            per_op_source=per_ops_step_source,
+            latency_ms=components["latency_ms"],
+            energy_wms=components["energy_wms"],
+            component_latency_ms=components["component_latency_ms"],
+            component_energy_wms=components["component_energy_wms"],
+            per_op_latency_ms=components["per_op_latency_ms"],
+            per_op_source=components["per_op_source"],
             context_tokens=step.context_tokens,
             num_decode_requests=step.num_decode_requests,
             num_decode_query_tokens=decode_query_tokens,
         )
-
-    def _get_fpm_mix_step_latency(
-        self,
-        model: BaseModel,
-        database: PerfDatabase,
-        runtime_config: RuntimeConfig,
-        ctx_tokens: int,
-        gen_tokens: int,
-        isl: int,
-        osl: int,
-        prefix: int,
-    ) -> tuple[float, float, dict, dict]:
-        """Mixed step for FPM models: pure-prefill query plus the decode
-        work's MARGINAL cost. No mixed database row exists or is synthesized.
-
-        A mixed step is one shared forward pass: weight reads, kernel
-        launches, and per-step fixed overheads are paid once, by the prefill
-        component. Summing a full pure-decode step would pay them twice, so
-        the decode component is composed as
-        ``decode(B, KV) - decode_pass_baseline(B)`` — the KV-axis floor of the
-        decode curve cancels the shared-pass part, keeping only the
-        KV-read/attention cost that genuinely adds to the iteration. A
-        generation-only step (``ctx_tokens == 0``) has no pass to ride on and
-        keeps the full decode latency.
-
-        The workload mapping mirrors the op-level passes: the prefill
-        component runs ``ceil(ctx_tokens/isl)`` requests of ``isl`` tokens and
-        is divided by the chunk count when ``ctx_tokens < isl`` (average
-        per-chunk cost); the decode component runs ``gen_tokens`` requests at
-        the average sequence length ``isl + osl//2``.
-        """
-        per_ops_step_data: dict[str, float] = {}
-        per_ops_step_source: dict[str, str] = {}
-        total_latency_ms = 0.0
-        total_energy_wms = 0.0
-
-        if ctx_tokens > 0:
-            summary = self.run_static(
-                model,
-                database,
-                RuntimeConfig(
-                    batch_size=np.ceil(ctx_tokens / isl),
-                    beam_width=1,
-                    isl=isl,
-                    osl=1,
-                    prefix=prefix,
-                    seq_imbalance_correction_scale=runtime_config.seq_imbalance_correction_scale,
-                ),
-                mode="static_ctx",
-            )
-            chunk_scale = np.ceil(isl / ctx_tokens)
-            energy_dict = summary.get_context_energy_wms_dict()
-            source_dict = summary.get_context_source_dict()
-            for op_name, latency in summary.get_context_latency_dict().items():
-                latency = latency / chunk_scale
-                per_ops_step_data[op_name] = latency
-                per_ops_step_source[op_name] = source_dict.get(op_name, "silicon")
-                total_latency_ms += latency
-                total_energy_wms += energy_dict.get(op_name, 0.0) / chunk_scale
-
-        if gen_tokens > 0:
-            summary = self.run_static(
-                model,
-                database,
-                RuntimeConfig(
-                    batch_size=gen_tokens,
-                    beam_width=1,
-                    isl=isl + osl // 2,
-                    osl=2,
-                    gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
-                ),
-                mode="static_gen",
-            )
-            pass_baseline_ms = 0.0
-            if ctx_tokens > 0:
-                # _run_generation_phase scaled the batch by (nextn + 1); the
-                # baseline must be sampled at the same effective batch.
-                pass_baseline_ms = float(
-                    model.generation_ops[0].query_pass_baseline(database, batch_size=gen_tokens * (model._nextn + 1))
-                )
-            energy_dict = summary.get_generation_energy_wms_dict()
-            source_dict = summary.get_generation_source_dict()
-            for op_name, latency in summary.get_generation_latency_dict().items():
-                latency = max(latency - pass_baseline_ms, 0.0)
-                per_ops_step_data[op_name] = per_ops_step_data.get(op_name, 0.0) + latency
-                per_ops_step_source[op_name] = source_dict.get(op_name, "silicon")
-                total_latency_ms += latency
-                total_energy_wms += energy_dict.get(op_name, 0.0)
-
-        return total_latency_ms, total_energy_wms, per_ops_step_data, per_ops_step_source
 
     def _get_genonly_step_latency(
         self,
@@ -1447,46 +1111,15 @@ class BaseBackend:
         """
         if gen_tokens <= 0:
             return 0.0, 0.0, {}, {}
-        if model.forward_model != "fpm" and should_use_rust_engine_step(runtime_config, database):
-            try:
-                return estimate_decode_step_breakdown_with_rust(
-                    model,
-                    database,
-                    gen_tokens=gen_tokens,
-                    isl=isl,
-                    osl=osl,
-                    gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
-                )
-            except RustEngineUnsupportedError as exc:
-                note_python_step_fallback("unsupported_op_graph:decode", str(exc))
-
-        gen_scale = runtime_config.gen_seq_imbalance_correction_scale
-        summary = self.run_static(
+        self._require_rust_engine_step(runtime_config, database, surface="decode")
+        return estimate_decode_step_breakdown_with_rust(
             model,
             database,
-            RuntimeConfig(
-                batch_size=gen_tokens,
-                beam_width=1,
-                isl=isl + osl // 2,
-                osl=2,
-                gen_seq_imbalance_correction_scale=gen_scale,
-                engine_step_backend=runtime_config.engine_step_backend,
-            ),
-            mode="static_gen",
+            gen_tokens=gen_tokens,
+            isl=isl,
+            osl=osl,
+            gen_seq_imbalance_correction_scale=runtime_config.gen_seq_imbalance_correction_scale,
         )
-        latency_dict = summary.get_generation_latency_dict()
-        energy_wms_dict = summary.get_generation_energy_wms_dict()
-        source_dict = summary.get_generation_source_dict()
-        total_latency_ms = 0.0
-        total_energy_wms = 0.0
-        per_ops_step_data: dict[str, float] = {}
-        per_ops_step_source: dict[str, str] = {}
-        for layer_name, latency in latency_dict.items():
-            total_latency_ms += latency
-            total_energy_wms += energy_wms_dict.get(layer_name, 0.0)
-            per_ops_step_data[layer_name] = latency
-            per_ops_step_source[layer_name] = source_dict.get(layer_name, "silicon")
-        return total_latency_ms, total_energy_wms, per_ops_step_data, per_ops_step_source
 
     # ============== AGG INFERENCE (shared) =============================
 
@@ -1549,7 +1182,6 @@ class BaseBackend:
         b = runtime_config.batch_size
         img_ctx_tokens = self._visual_context_tokens(model, runtime_config)
         isl = text_isl + img_ctx_tokens
-        engine_step_backend_key = "rust" if should_use_rust_engine_step(runtime_config, database) else "python"
         ctx_tokens = kwargs.get("ctx_tokens")
         assert ctx_tokens is not None, "ctx_tokens is required"
         # None (or an omitted kwarg) means the caller did not model speculative
@@ -1571,8 +1203,8 @@ class BaseBackend:
         balance_score = isl * b / ctx_tokens / decode_iterations
 
         # Backend-specific kwargs (TRT-LLM: max_seq_len / max_num_tokens /
-        # free_gpu_memory_fraction; others: {}).
-        agg_extra = self._resolve_agg_kwargs(kwargs, isl=isl, osl=osl)
+        # free_gpu_memory_fraction; vLLM / SGLang: free_gpu_memory_fraction).
+        agg_extra = self._resolve_agg_kwargs(kwargs, isl=isl, osl=osl, backend_version=database.version)
 
         visual_cache_key = (
             runtime_config.image_height,
@@ -1580,13 +1212,18 @@ class BaseBackend:
             runtime_config.num_images_per_request,
         )
         cache_key = (
-            self._make_agg_cache_key(isl, osl, b, ctx_tokens, engine_step_backend_key, agg_extra),
+            self._make_agg_cache_key(isl, osl, b, ctx_tokens, agg_extra),
             visual_cache_key,
             # Explicit progress and an omitted kwarg schedule identically at
             # 1.0 but record different scheduling metadata, so they must not
             # share a cache entry.
             decode_tokens_per_iteration if speculative_scheduling else None,
         )
+        # Cache identity intentionally no longer includes the retired backend
+        # selector. Preserve the live request contract on hits nonetheless:
+        # unknown values must still raise, ``python`` must still warn, and a
+        # synthetic database must not inherit a prior PerfDatabase result.
+        self._require_rust_engine_step(runtime_config, database, surface="aggregate")
         cached = self._agg_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -1731,8 +1368,15 @@ class BaseBackend:
             # will not be corrected by balance score when it's larger than 1.0
             # in order to indicate what's happening
             num_tokens = num_gen_requests + ctx_tokens
+            # Only the decode requests' tokens verify nextn+1 under speculative
+            # decoding; the context share is processed once (see the MTP
+            # correction in _get_memory_usage).
+            mtp_scaled_tokens = int(num_gen_requests)
         else:
+            # b == 1 starts with a context-only step; the later decode peak is
+            # compared below when the workload schedules output tokens.
             num_tokens = ctx_tokens
+            mtp_scaled_tokens = 0
 
         memory = self._get_memory_usage(
             model,
@@ -1743,8 +1387,33 @@ class BaseBackend:
             osl,
             prefix=prefix,
             encoder_memory=encoder_memory,
-            **self._memory_usage_kwargs_for_agg(num_tokens=num_tokens, agg_extra=agg_extra),
+            **self._memory_usage_kwargs_for_agg(
+                num_tokens=num_tokens,
+                agg_extra=agg_extra,
+                mtp_scaled_tokens=mtp_scaled_tokens,
+            ),
         )
+        if b == 1 and osl > 1:
+            # A single-request agg run starts with a context-only step but is
+            # followed by decode-only iterations. Peak HBM is the larger of
+            # those sequential footprints: the context step does not scale for
+            # MTP, while the decode step verifies nextn+1 tokens.
+            decode_memory = self._get_memory_usage(
+                model,
+                database,
+                b,
+                1,
+                isl,
+                osl,
+                prefix=prefix,
+                encoder_memory=encoder_memory,
+                **self._memory_usage_kwargs_for_agg(
+                    num_tokens=int(num_gen_requests),
+                    agg_extra=agg_extra,
+                    mtp_scaled_tokens=None,
+                ),
+            )
+            memory = max((memory, decode_memory), key=lambda footprint: footprint["total"])
         tp = model.config.tp_size
         pp = model.config.pp_size
         dp = model.config.attention_dp_size
@@ -1902,7 +1571,7 @@ class BaseBackend:
 
         # Resolve backend-specific kwargs once; forward into run_agg so each
         # (b, ctx_tokens) point sees the same backend params.
-        sweep_extra = self._resolve_agg_kwargs(kwargs, isl=isl_eff, osl=osl)
+        sweep_extra = self._resolve_agg_kwargs(kwargs, isl=isl_eff, osl=osl, backend_version=database.version)
 
         # when b is larger than 1024, the result is not good as the data collection is not enough
         # to cover this.
@@ -1998,6 +1667,7 @@ class BaseBackend:
         max_seq_len: int | None = None,
         encoder_memory: dict[str, float] | None = None,
         mtp_activation_scaling: bool = True,
+        mtp_scaled_tokens: int | None = None,
     ) -> dict[str, float]:
         """
         Get the memory usage of the backend.
@@ -2056,7 +1726,20 @@ class BaseBackend:
         # (draft tokens included) -- re-multiplying there double-counts and can drive the
         # prefill worker's KV budget negative.
         if mtp_activation_scaling and model.config.nextn > 0:
-            activations = activations * (model.config.nextn + 1)
+            if mtp_scaled_tokens is not None and num_tokens > 0:
+                # Mixed context+decode step (agg): only the decode-token share
+                # verifies nextn+1 tokens; context tokens are processed once.
+                # Scaling the whole footprint models (nextn+1)*(context+decode)
+                # instead of context+(nextn+1)*decode, which at long ISL
+                # inflates activations ~(nextn+1)x and over-prunes concurrency.
+                decode_share = min(max(mtp_scaled_tokens, 0), num_tokens)
+                activations = (
+                    activations * (num_tokens - decode_share + decode_share * (model.config.nextn + 1)) / num_tokens
+                )
+            else:
+                # Decode-only steps (disagg decode worker): every token in the
+                # step is part of verification, so the full multiplier applies.
+                activations = activations * (model.config.nextn + 1)
 
         # Backend-level activation overhead (SGLang only by default).
         if self.ACTIVATION_OVERHEAD_FRAC > 0:

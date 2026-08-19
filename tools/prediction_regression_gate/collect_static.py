@@ -60,9 +60,12 @@ CSV_HEADER = [
     "err",
 ]
 
-# Pinned so the in-flight Rust engine-step default flip is a deliberate,
-# reviewed baseline regeneration instead of ambient drift.
-ENGINE_STEP_BACKEND = "python"
+# The Python engine-step path has been removed; the compiled Rust engine is the
+# only executor. Pinning it explicitly documents that baselines are captured on
+# the compiled engine and shields baseline capture from ambient environment
+# overrides (the config value takes precedence over
+# AICONFIGURATOR_ENGINE_STEP_BACKEND).
+ENGINE_STEP_BACKEND = "rust"
 
 
 def _row_key(row: dict) -> tuple:

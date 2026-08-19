@@ -113,8 +113,21 @@ def _build_mock_backend():
     """
     backend = MagicMock()
     backend.name = SimpleNamespace(value="sglang")
+    backend.static_memory_fractions = []
+    backend.static_max_seq_lens = []
 
-    def _run_static(model, database, runtime_config, mode, stride=32, latency_correction_scale=1.0):
+    def _run_static(
+        model,
+        database,
+        runtime_config,
+        mode,
+        stride=32,
+        latency_correction_scale=1.0,
+        free_gpu_memory_fraction=None,
+        max_seq_len=None,
+    ):
+        backend.static_memory_fractions.append(free_gpu_memory_fraction)
+        backend.static_max_seq_lens.append(max_seq_len)
         tp = model._tp
         pp = model._pp
         dp = model._dp
@@ -249,6 +262,46 @@ class TestRequireSameTPFiltering:
         assert result.get_encoder_source_dict() == {"encoder_attention": "mixed"}
         assert result.get_power_data_coverage() == 1.0
 
+    def test_run_disagg_uses_role_specific_memory_fractions(self, disagg_session, runtime_config, model_config):
+        disagg_session.run_disagg(
+            model_path="test-model",
+            runtime_config=runtime_config,
+            prefill_model_config=model_config,
+            prefill_batch_size=1,
+            prefill_num_worker=1,
+            decode_model_config=model_config,
+            decode_batch_size=1,
+            decode_num_worker=1,
+            free_gpu_memory_fraction=0.9,
+            prefill_free_gpu_memory_fraction=0.85,
+            decode_free_gpu_memory_fraction=0.7,
+            max_seq_len=8192,
+            prefill_max_seq_len=9000,
+            decode_max_seq_len=11000,
+        )
+
+        assert disagg_session._prefill_backend.static_memory_fractions == [0.85]
+        assert disagg_session._decode_backend.static_memory_fractions == [0.7]
+        assert disagg_session._prefill_backend.static_max_seq_lens == [9000]
+        assert disagg_session._decode_backend.static_max_seq_lens == [11000]
+
+        disagg_session._prefill_backend.static_memory_fractions.clear()
+        disagg_session._decode_backend.static_memory_fractions.clear()
+        disagg_session.run_disagg(
+            model_path="test-model",
+            runtime_config=runtime_config,
+            prefill_model_config=model_config,
+            prefill_batch_size=1,
+            prefill_num_worker=1,
+            decode_model_config=model_config,
+            decode_batch_size=1,
+            decode_num_worker=1,
+            free_gpu_memory_fraction=0.9,
+        )
+
+        assert disagg_session._prefill_backend.static_memory_fractions == [0.9]
+        assert disagg_session._decode_backend.static_memory_fractions == [0.9]
+
     def test_false_allows_mismatched_tp(self, disagg_session, runtime_config, model_config):
         """require_same_tp=False → results are non-empty (mismatched TP is fine)."""
         result = _run(
@@ -321,6 +374,29 @@ class TestRateMatchingDegradationFactors:
         disagg_session.set_rate_matching_degradation_factors(decode_degradation_factor=0.8)
         assert disagg_session._rate_matching_prefill_degradation_factor == 0.9
         assert disagg_session._rate_matching_decode_degradation_factor == 0.8
+
+    def test_factors_forwarded_to_autoscale_picker(self, monkeypatch, disagg_session, runtime_config):
+        """The session setter must affect the autoscale picker path."""
+        captured = {}
+
+        def fake_pick_autoscale(**kwargs):
+            captured.update(kwargs)
+            return {"best_config_df": pd.DataFrame()}
+
+        monkeypatch.setattr("aiconfigurator.sdk.picking.pick_autoscale", fake_pick_autoscale)
+        disagg_session.set_rate_matching_degradation_factors(0.61, 0.73)
+        summary = InferenceSummary(runtime_config=runtime_config)
+
+        result = disagg_session._pick_autoscale(
+            prefill_summary_df=pd.DataFrame(),
+            decode_summary_df=pd.DataFrame(),
+            runtime_config=runtime_config,
+            disagg_summary=summary,
+        )
+
+        assert result is summary
+        assert captured["prefill_degradation_factor"] == 0.61
+        assert captured["decode_degradation_factor"] == 0.73
 
     def test_factors_used_in_disagg_result(self, disagg_session, runtime_config, model_config):
         """Custom factors propagate into find_best_disagg_result_under_constraints output."""

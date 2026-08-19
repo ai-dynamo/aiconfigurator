@@ -28,7 +28,7 @@ use std::sync::OnceLock;
 
 use super::axis_curve::LeafAxisCurve;
 use super::perf_interp::LeafValue;
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
 use crate::perf_database::parquet_loader::PerfReader;
@@ -61,21 +61,22 @@ impl MhcTable {
     /// perf file is sourced solely from `data_root/mhc_module_perf.parquet`
     /// with no `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf) -> Self {
-        Self::with_sources(data_root, &PerfDbSources::default())
+        Self::with_sources(data_root, &SourceResolver::fixed(PerfDbSources::default()))
+            .expect("fixed-map resolution is infallible")
     }
 
-    /// Construct with shared-layer (sibling/cross-version) sources resolved from
-    /// `perf_db_sources` (Python-supplied). The mHC file falls back to its
-    /// primary `data_root/mhc_module_perf.parquet` when absent from the map.
+    /// Construct with shared-layer (sibling/cross-version) sources supplied by the
+    /// engine's `SourceResolver` (live resolution owns the shared-layer walk;
+    /// a fixed source map is the test-only path). The mHC file falls back to its
+    /// primary `data_root/mhc_module_perf.parquet` when the resolver names no override.
     /// No I/O.
-    pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
-        let mhc_sources =
-            resolve_op_sources(perf_db_sources, "mhc_module_perf.parquet", &data_root);
-        Self {
+    pub fn with_sources(data_root: PathBuf, resolver: &SourceResolver) -> Result<Self, AicError> {
+        let mhc_sources = resolver.sources_for("mhc_module_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             mhc_sources,
             module: OnceLock::new(),
-        }
+        })
     }
 
     /// Query one mHC op (latency ms + power/energy). `op` is `pre`, `post`,

@@ -3,7 +3,7 @@
 
 import pytest
 
-from aiconfigurator.cli.api import _apply_power_coverage_gate
+from aiconfigurator.cli.api import _apply_power_coverage_gate, apply_row_power_coverage_gate
 from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.inference_summary import InferenceSummary
 
@@ -48,3 +48,10 @@ def test_sufficient_power_coverage_preserves_power() -> None:
 
     assert gated["power_w"] == 450.0
     assert gated["power_coverage"] == pytest.approx(0.9)
+
+
+def test_row_gate_applies_same_rule_to_prestamped_rows() -> None:
+    assert apply_row_power_coverage_gate({"power_w": 450.0, "power_coverage": 0.95})["power_w"] == 450.0
+    # Fail-closed: no evidence (missing / NaN coverage) hides the power too.
+    assert apply_row_power_coverage_gate({"power_w": 450.0})["power_w"] is None
+    assert apply_row_power_coverage_gate({"power_w": 450.0, "power_coverage": float("nan")})["power_w"] is None

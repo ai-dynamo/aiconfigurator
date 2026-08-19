@@ -16,6 +16,9 @@ class ModelConfig:
     tp_size: int = 1
     pp_size: int = 1
     gemm_quant_mode: common.GEMMQuantMode | None = None
+    # Internal provenance carried through dataclasses.replace() during sweeps.
+    # None preserves the legacy direct-caller rule (non-None mode is explicit).
+    _gemm_quant_mode_is_explicit: bool | None = field(default=None, repr=False, compare=False, kw_only=True)
     moe_quant_mode: common.MoEQuantMode | None = None
     kvcache_quant_mode: common.KVCacheQuantMode | None = None
     fmha_quant_mode: common.FMHAQuantMode | None = None
@@ -32,6 +35,11 @@ class ModelConfig:
     # this in their op pipeline; GLM-5 DSA ignores it (handled in ContextDSAModule).
     cp_style: str = "none"
     workload_distribution: str = "power_law"
+    # EPD: this worker hosts only the language model -- the vision encoder
+    # is served elsewhere (mirrors SGLang --language-only).  Like tp_size,
+    # this describes the deployed worker, not the model: vision tokens still
+    # extend the context; the ViT ops are simply not hosted here.
+    language_only: bool = False
     # quantization options
     # MTP speculative decoding: draft length (compute/verification cost only).
     # Accepted-token progress belongs to the upper prediction/simulation layer.
@@ -41,6 +49,11 @@ class ModelConfig:
     sms: int = 20
     moe_backend: str = None  # SGLang MoE backend: deepep_moe, megamoe, or None
     attention_backend: str = "flashinfer"  # 'flashinfer' or 'fa3', for sglang wideep only
+    # DEPRECATED and ignored (large-EP is selected per tuple via
+    # moe_comm_backend); kept for a compatibility window because ModelConfig
+    # is exported through the supported core SDK facade and removal breaks
+    # ModelConfig(enable_wideep=...) callers AND silently shifts positional
+    # arguments after this slot.
     enable_wideep: bool = False
     enable_eplb: bool = False  # Expert Parallel Load Balancing
     wideep_num_slots: int = None  # EPLB num_slots, defaults to num_experts if None
@@ -49,6 +62,12 @@ class ModelConfig:
     # fpm_forward op backed by collected forward-pass data (see
     # operations/fpm_forward.py). Validated in models.get_model.
     forward_model: str = "op_level"
+    # internal — per-phase comm backend {"context": ..., "generation": ...}; set by the enumerator, never a user flag
+    moe_comm_backend: dict | None = None
+    # internal — set alongside moe_comm_backend by the enumerator (system topology).
+    # No default: a wrong node width silently mis-prices cross-node all-to-all, so
+    # large-EP construction raises when it is missing (models.helpers.large_ep_gpus_per_node).
+    num_gpus_per_node: int | None = None
 
     def resolve_moe_parallelism(self) -> tuple[int, int]:
         """Resolve and validate MoE parallelism dimensions in-place.
@@ -99,7 +118,6 @@ class ModelConfig:
         _validate_positive("moe_tp_size", moe_tp_size)
         _validate_positive("moe_ep_size", moe_ep_size)
 
-        # TODO: enforce moe_tp_size == 1 when enable_wideep is set.
         moe_width = moe_tp_size * moe_ep_size
         if attn_width != moe_width:
             raise ValueError(
@@ -150,8 +168,9 @@ class RuntimeConfig:
     seq_imbalance_correction_scale: float = 1.0
     # Separate correction scale for generation/decoding stage (do NOT reuse ctx scale).
     gen_seq_imbalance_correction_scale: float = 1.0
-    # Optional experimental static-latency backend. "python" preserves existing behavior;
-    # "rust" routes static step estimates through the Rust FPM estimator.
+    # Engine-step executor selector. "rust" (the compiled engine) is the only
+    # accepted value; None defaults to it. The deprecated "python" no-op was
+    # removed after its one-release window (deprecation-cleanup PR).
     engine_step_backend: str | None = None
     image_height: int = 0
     image_width: int = 0

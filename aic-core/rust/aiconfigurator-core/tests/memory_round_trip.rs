@@ -18,7 +18,7 @@
 //! `tolerance_adjusted`). This test restores that coverage: a typo in a forwarded
 //! kwarg name or a parsed dict key fails here instead of first surfacing in the
 //! deferred downstream Mocker PR. It mirrors `embedded_round_trip.rs`, the sibling
-//! `build_aic_engine` round-trip.
+//! `AicEngineBuilder` round-trip.
 //!
 //! ## Run requirements
 //!
@@ -29,7 +29,7 @@
 //! `uv run maturin develop -m aic-core/rust/aiconfigurator-core/Cargo.toml --release`:
 //! ```text
 //! AIC_REQUIRE_EMBEDDED_ROUND_TRIP=1 \
-//!   PYTHONPATH="$PWD/aic-core/src:$PWD/.venv/lib/python3.12/site-packages:$PWD/src" \
+//!   PYTHONPATH="$PWD/aic-core/src:$PWD/.venv/lib/python3.13/site-packages:$PWD/src" \
 //!   cargo test -p aiconfigurator-core --test memory_round_trip -- --nocapture
 //! ```
 //!
@@ -85,6 +85,7 @@ fn request(tolerance_fraction: Option<f64>) -> KvCacheEstimateRequest {
             systems_path: None,
             backend: BackendKind::Trtllm,
             backend_version: Some("1.3.0rc10".to_string()),
+            forward_model: None,
             kv_block_size: None,
             parallel: ParallelMapping {
                 tp_size: 1,
@@ -101,7 +102,8 @@ fn request(tolerance_fraction: Option<f64>) -> KvCacheEstimateRequest {
                 kv_cache_dtype: None,
             },
             speculative: None,
-            perf_db_sources: BTreeMap::new(),
+            enable_shared_layer: None,
+            strict_provenance: false,
             database_mode: Default::default(),
             transfer_policy: None,
             extra: BTreeMap::new(),

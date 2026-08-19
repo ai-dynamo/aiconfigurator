@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use super::perf_interp::{self, LeafValue, Node, OpInterpConfig};
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
 use crate::perf_database::parquet_loader::PerfReader;
@@ -111,22 +111,29 @@ impl StateSpaceTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, backend: &str, version: &str) -> Self {
-        Self::with_sources(data_root, backend, version, &PerfDbSources::default())
+        Self::with_sources(
+            data_root,
+            backend,
+            version,
+            &SourceResolver::fixed(PerfDbSources::default()),
+        )
+        .expect("fixed-map resolution is infallible")
     }
 
-    /// Construct with shared-layer (sibling/cross-version) sources resolved from
-    /// `perf_db_sources` (Python-supplied). Each state-space file falls back to
-    /// its primary `data_root/<basename>` when absent from the map. No I/O.
+    /// Construct with shared-layer (sibling/cross-version) sources supplied by the
+    /// engine's `SourceResolver` (live resolution owns the shared-layer walk;
+    /// a fixed source map is the test-only path). Each state-space file falls back to
+    /// its primary `data_root/<basename>` when the resolver names no override. No I/O.
     pub fn with_sources(
         data_root: PathBuf,
         backend: &str,
         version: &str,
-        perf_db_sources: &PerfDbSources,
-    ) -> Self {
-        let mamba2_sources = resolve_op_sources(perf_db_sources, "mamba2_perf.parquet", &data_root);
-        let gdn_sources = resolve_op_sources(perf_db_sources, "gdn_perf.parquet", &data_root);
-        let kda_sources = resolve_op_sources(perf_db_sources, "kda_perf.parquet", &data_root);
-        Self {
+        resolver: &SourceResolver,
+    ) -> Result<Self, AicError> {
+        let mamba2_sources = resolver.sources_for("mamba2_perf.parquet", &data_root)?;
+        let gdn_sources = resolver.sources_for("gdn_perf.parquet", &data_root)?;
+        let kda_sources = resolver.sources_for("kda_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             mamba2_sources,
             gdn_sources,
@@ -135,7 +142,7 @@ impl StateSpaceTable {
             mamba2: OnceLock::new(),
             gdn: OnceLock::new(),
             kda: OnceLock::new(),
-        }
+        })
     }
 
     /// Mamba2 latency for a layer instance, resolved on the perf_interp
@@ -248,70 +255,54 @@ impl StateSpaceTable {
             num_v_heads,
             head_v_dim,
         };
-        // Mirror Python `_query_gdn_table`: on exact-shape miss, fall back to
-        // any same-d_model entry, breaking ties by minimum `|num_v_heads -
-        // query.num_v_heads|`. (Mamba2 uses "first by d_model"; GDN uses
-        // "nearest by num_v_heads" — keep them distinct.) Surface as
-        // `PerfDatabase` if no d_model match exists.
+        // Mirror Python `_query_gdn_table`: exact geometry (or an exact
+        // physical-alias hit) only; any miss surfaces as `PerfDatabase` so
+        // the operator degrades to SOL.
+        //
+        // The framework's own persisted physical kernels (vLLM 0.24 names its
+        // context scan chunk_gated_delta_rule_*) take precedence: after the
+        // shared-layer merge the logical lane can hold cross-backend donor
+        // rows, which only serve as gap fill when no own physical lane covers
+        // the shape. Ambiguous physical data fails closed.
+        let aliases: &[&str] = if self.vllm_024_gdn_aliases {
+            match (key.kernel_source.as_str(), key.phase.as_str()) {
+                ("chunk_gated_delta_rule", "context") => &[
+                    "chunk_gated_delta_rule_flashinfer",
+                    "chunk_gated_delta_rule_triton",
+                    "chunk_gated_delta_rule_cutedsl",
+                ],
+                ("fused_sigmoid_gating_delta_rule_update", "generation") => {
+                    &["fused_recurrent_gated_delta_rule_packed_decode"]
+                }
+                _ => &[],
+            }
+        } else {
+            &[]
+        };
+        let alias_matches: Vec<_> = aliases
+            .iter()
+            .filter_map(|alias| {
+                let mut alias_key = key.clone();
+                alias_key.kernel_source = (*alias).to_string();
+                grids.by_keys.get_key_value(&alias_key)
+            })
+            .collect();
+        if alias_matches.len() > 1 {
+            let sources: Vec<_> = alias_matches
+                .iter()
+                .map(|(alias_key, _)| alias_key.kernel_source.as_str())
+                .collect();
+            return Err(AicError::PerfDatabase(format!(
+                "ambiguous vLLM 0.24.0 GDN physical kernels for {key:?}: {}",
+                sources.join(", ")
+            )));
+        }
+        if let Some((_, node)) = alias_matches.first() {
+            return engine_query(node, phase, batch_size, seq_len, sol);
+        }
         let node = match grids.by_keys.get(&key) {
             Some(node) => node,
-            None => {
-                // vLLM 0.24 persists the selected physical recurrence
-                // implementation, while model operators retain stable logical
-                // kernel names. Resolve a physical source only for an exact
-                // model shape. Exact logical data always wins, and ambiguous
-                // physical data fails closed.
-                let aliases: &[&str] = if self.vllm_024_gdn_aliases {
-                    match (key.kernel_source.as_str(), key.phase.as_str()) {
-                        ("chunk_gated_delta_rule", "context") => &[
-                            "chunk_gated_delta_rule_flashinfer",
-                            "chunk_gated_delta_rule_triton",
-                            "chunk_gated_delta_rule_cutedsl",
-                        ],
-                        ("fused_sigmoid_gating_delta_rule_update", "generation") => {
-                            &["fused_recurrent_gated_delta_rule_packed_decode"]
-                        }
-                        _ => &[],
-                    }
-                } else {
-                    &[]
-                };
-                let alias_matches: Vec<_> = aliases
-                    .iter()
-                    .filter_map(|alias| {
-                        let mut alias_key = key.clone();
-                        alias_key.kernel_source = (*alias).to_string();
-                        grids.by_keys.get_key_value(&alias_key)
-                    })
-                    .collect();
-                if alias_matches.len() > 1 {
-                    let sources: Vec<_> = alias_matches
-                        .iter()
-                        .map(|(alias_key, _)| alias_key.kernel_source.as_str())
-                        .collect();
-                    return Err(AicError::PerfDatabase(format!(
-                        "ambiguous vLLM 0.24.0 GDN physical kernels for {key:?}: {}",
-                        sources.join(", ")
-                    )));
-                }
-                if let Some((_, node)) = alias_matches.first() {
-                    return engine_query(node, phase, batch_size, seq_len, sol);
-                }
-
-                let nearest = grids
-                    .by_keys
-                    .iter()
-                    .filter(|(k, _)| {
-                        k.kernel_source == key.kernel_source
-                            && k.phase == key.phase
-                            && k.d_model == key.d_model
-                    })
-                    .min_by_key(|(k, _)| (k.num_v_heads as i64 - key.num_v_heads as i64).abs());
-                match nearest {
-                    Some((_, node)) => node,
-                    None => return Err(missing("GDN", &self.data_root, format!("{key:?}"))),
-                }
-            }
+            None => return Err(missing("GDN", &self.data_root, format!("{key:?}"))),
         };
         engine_query(node, phase, batch_size, seq_len, sol)
     }
@@ -576,7 +567,7 @@ fn load_mamba2_parquet(sources: &[PerfSource]) -> Result<Mamba2Grids, AicError> 
 /// canonical modeling identity; normalize the LOOKUP key here (mirrors
 /// Python `_GDN_DECODE_RECURRENCE_ALIASES`) — the parquet keeps the
 /// executed-kernel truth.
-fn normalize_gdn_kernel_source(kernel_source: String) -> String {
+pub(crate) fn normalize_gdn_kernel_source(kernel_source: String) -> String {
     match kernel_source.as_str() {
         "fused_recurrent_gated_delta_rule" | "fused_recurrent_gated_delta_rule_packed_decode" => {
             "fused_sigmoid_gating_delta_rule_update".to_string()
@@ -857,7 +848,9 @@ mod tests {
     }
 
     #[test]
-    fn vllm_024_gdn_exact_logical_key_wins_over_alias() {
+    fn vllm_024_gdn_own_physical_lane_wins_over_logical_lane() {
+        // The logical lane can hold cross-backend donor rows after the
+        // shared-layer merge; the own physical lane must beat it.
         let table = in_memory_gdn_table(
             "vllm",
             "0.24.0",
@@ -868,7 +861,7 @@ mod tests {
         );
         assert_eq!(
             query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).unwrap(),
-            1.0
+            2.0
         );
     }
 
@@ -886,10 +879,12 @@ mod tests {
 
     #[test]
     fn vllm_024_gdn_ambiguous_exact_aliases_error() {
+        // The logical-lane row must not mask the ambiguity between physical lanes.
         let table = in_memory_gdn_table(
             "vllm",
             "0.24.0",
             &[
+                ("chunk_gated_delta_rule", "context", 48, 1.0),
                 ("chunk_gated_delta_rule_flashinfer", "context", 48, 2.0),
                 ("chunk_gated_delta_rule_triton", "context", 48, 3.0),
             ],
@@ -915,7 +910,9 @@ mod tests {
     }
 
     #[test]
-    fn vllm_024_gdn_preserves_logical_source_nearest_fallback() {
+    fn vllm_024_gdn_does_not_borrow_nearest_shape_within_logical_source() {
+        // Exact geometry only: nearest-num_v_heads rows are never returned as
+        // silicon (mirrors the Python twin test).
         let table = in_memory_gdn_table(
             "vllm",
             "0.24.0",
@@ -925,10 +922,7 @@ mod tests {
                 ("chunk_gated_delta_rule", "context", 64, 5.0),
             ],
         );
-        assert_eq!(
-            query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).unwrap(),
-            5.0
-        );
+        assert!(query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).is_err());
     }
 
     /// In-memory KDA table over one fixed model shape (d_model=4096, heads
@@ -1098,8 +1092,9 @@ mod tests {
         let bw = h100_sxm_mem_bw();
 
         // GDN causal_conv1d kernels: read = x*conv_channels*(d_conv+1)*2,
-        // write = x*conv_channels*2; x = b*s (context) or b (generation).
-        let conv_channels = (16 * 128 + 32 * 128) as f64;
+        // write = x*conv_channels*2; x = b*s (context) or b (generation);
+        // conv_channels is the packed q/k/v width (2K + V).
+        let conv_channels = (2 * 16 * 128 + 32 * 128) as f64;
         let gdn_conv_sol = move |x: f64| {
             (x * conv_channels * (4.0 + 1.0) * 2.0 + x * conv_channels * 2.0) / bw * 1000.0
         };
@@ -1112,7 +1107,7 @@ mod tests {
             (8, 1024, 0.03154560029506683),
             (8, 1536, 0.04624959975481033),
             (3, 1024, 0.011241600289940833),
-            (8, 65536, 1.7870464324951172),
+            (8, 65536, 1.8143790228535068),
         ];
         for &(b, s, expected) in ctx_cases {
             let got = gdn
@@ -1179,7 +1174,7 @@ mod tests {
         let m2_cases: &[(u32, u32, f64)] = &[
             (4, 1024, 0.058057600259780885),
             (4, 1536, 0.07725920081138611),
-            (4, 65536, 2.520614433288574),
+            (4, 65536, 2.53553341830743),
         ];
         for &(b, s, expected) in m2_cases {
             let got = mamba2
@@ -1270,7 +1265,7 @@ mod tests {
             (8, 1024, 0.35404798984527586),
             (8, 1536, 0.49525119066238404),
             (3, 1024, 0.16356800198554994),
-            (8, 65536, 18.784046049450055),
+            (8, 65536, 19.15999071181899),
         ];
         for &(b, s, expected) in kda_ctx_cases {
             let got = kda
@@ -1328,7 +1323,7 @@ mod tests {
             (8, 8, 0.020873600244522096),
             (12, 4, 0.018801599740982056),
             (8, 6, 0.01780159994959831),
-            (1024, 8, 1.4328703880310059),
+            (1024, 8, 1.5144814803344375),
         ];
         for &(b, s, expected) in kda_verify_cases {
             let got = kda

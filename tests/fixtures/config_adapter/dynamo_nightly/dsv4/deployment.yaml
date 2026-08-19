@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Sanitized from the resolved Dynamo-CI RecipeDeployment nightly bundle.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv4
+spec:
+  backendFramework: vllm
+  services:
+    VllmPrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      multinode: {nodeCount: 2}
+      resources: {limits: {gpu: "4"}}
+      extraPodSpec:
+        mainContainer:
+          env:
+            - {name: MODEL_PATH, value: deepseek-ai/DeepSeek-V4-Pro}
+          command: [/bin/sh, -c]
+          args:
+            - |
+              # Bind vLLM's DP coordinator so the operator's probe reaches the real server.
+              exec python3 -m dynamo.vllm \
+                --model "${MODEL_PATH}" \
+                --tensor-parallel-size 1 \
+                --pipeline-parallel-size 1 \
+                --data-parallel-size 8 \
+                --disaggregation-mode prefill \
+                --enable-expert-parallel \
+                --max-model-len 9280 \
+                --max-num-seqs 16 \
+                --gpu-memory-utilization 0.8
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      multinode: {nodeCount: 2}
+      resources: {limits: {gpu: "4"}}
+      extraPodSpec:
+        mainContainer:
+          env:
+            - {name: MODEL_PATH, value: deepseek-ai/DeepSeek-V4-Pro}
+          command: [/bin/sh, -c]
+          args:
+            - |
+              # See the prefill worker's coordinator rationale.
+              exec python3 -m dynamo.vllm \
+                --model "${MODEL_PATH}" \
+                --tensor-parallel-size 1 \
+                --pipeline-parallel-size 1 \
+                --data-parallel-size 8 \
+                --disaggregation-mode decode \
+                --enable-expert-parallel \
+                --max-model-len 9280 \
+                --max-num-seqs 128 \
+                --gpu-memory-utilization 0.9

@@ -12,14 +12,18 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import warnings
 from functools import cache
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from aiconfigurator_core.sdk import common, config
 from aiconfigurator_core.sdk.utils import (
     get_model_config_from_model_path,
     parse_compressed_tensors_quant,
 )
+
+if TYPE_CHECKING:
+    from aiconfigurator_core.sdk.models.blocks.moe import MoEBlockShape
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,7 @@ _MOE_MODEL_FAMILIES = {
     "QWEN3VL_MOE",
     "GEMMA4MIX",
     "MINIMAXM3",
+    "STEP3P7",
 }
 
 
@@ -109,15 +114,29 @@ def attention_modules_excluded_from_quant(raw_config: dict) -> bool:
     return bool(attention_projection_exclusions(raw_config))
 
 
-def attention_op_keys(model_family: str, backend_name: str, enable_wideep: bool = False) -> tuple[str, str]:
+def attention_op_keys(
+    model_family: str,
+    backend_name: str,
+    is_large_ep: bool = False,
+    *,
+    enable_wideep: bool | None = None,
+) -> tuple[str, str]:
     """(context_op, generation_op) support-matrix keys for a model family /
-    backend / wideep combination.
+    backend / large-EP combination.
 
     Single source of truth shared by ``task_v2.Task`` (resolve-time FMHA
     fallback + validate) and the estimate-path FMHA guard
     (:func:`resolve_context_fmha_by_data`). Every context op keys on fmha at
     the top level; every generation op keys on kv dtype.
     """
+    if enable_wideep is not None:
+        warnings.warn(
+            "'enable_wideep' is deprecated; use 'is_large_ep' instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        is_large_ep = enable_wideep
+
     if model_family == "DEEPSEEKV4":
         return "deepseek_v4_context_module", "deepseek_v4_generation_module"
     if model_family == "DEEPSEEKV32":
@@ -130,7 +149,7 @@ def attention_op_keys(model_family: str, backend_name: str, enable_wideep: bool 
         # models/kimi_k3.py) so it falls through to the GQA keys below.
         return "context_mla", "generation_mla"
     if model_family in ("DEEPSEEK", "KIMIK25") and backend_name != "vllm":
-        if enable_wideep:
+        if is_large_ep:
             if backend_name == "sglang":
                 return "wideep_context_mla", "wideep_generation_mla"
             # trtllm wideep context queries the granular context_mla table
@@ -143,6 +162,155 @@ def attention_op_keys(model_family: str, backend_name: str, enable_wideep: bool 
     return "context_attention", "generation_attention"
 
 
+def power_law_distribution(base: str, alpha: float, *, eplb_suffix: bool = False) -> str:
+    """Model-owned workload-distribution string for a MoE block.
+
+    ``power_law`` is the only distribution with an alpha axis; any other value
+    (``uniform``, ...) passes through untouched. ``eplb_suffix`` appends the
+    TRT-LLM large-EP ``_eplb`` marker — those tables carry EPLB-balanced rows
+    under their own distribution key instead of correcting the token count.
+    """
+    if base != "power_law":
+        return base
+    return f"{base}_{alpha}_eplb" if eplb_suffix else f"{base}_{alpha}"
+
+
+def large_ep_gpus_per_node(model_config: config.ModelConfig) -> int:
+    """Node width for a large-EP config; raises when the enumerator omitted it.
+
+    The comm node span (``nodes_for(moe_ep * moe_tp, gpus_per_node)``) is a
+    hardware fact that the model classes have no other channel to — the legacy
+    ops read it from ``database.system_spec["node"]["num_gpus_per_node"]`` at
+    query time, while the large-EP ops take ``node_num`` at construction (the
+    PR 1 op contract). A default would therefore be silently wrong rather than
+    merely approximate: on a GB200 NVL72 (4 GPUs/node) an EP32 decode would be
+    priced as a 4-node cross-rack all-to-all instead of an intra-node one. Only
+    large-EP construction calls this; fused configs never need the value.
+
+    Raises:
+        ValueError: If ``num_gpus_per_node`` is unset.
+    """
+    value = model_config.num_gpus_per_node
+    if value is None:
+        raise ValueError("moe_comm_backend is set but num_gpus_per_node is not — the enumerator must set both")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        # The coordinate selects the all-to-all performance slice: zero would
+        # ZeroDivisionError in nodes_for, a negative or fractional value
+        # silently mis-prices a custom/direct builder call.
+        raise ValueError(f"num_gpus_per_node must be a positive integer (hardware fact), got {value!r}")
+    return value
+
+
+def build_large_ep_moe_ops(
+    phase: str,
+    shape: MoEBlockShape,
+    cfg: config.ModelConfig,
+    *,
+    scale_factor: float,
+    backend_name: str,
+    model_family: str,
+    power_law_alpha: float,
+    gpus_per_node: int,
+    shared_gemm_quant_mode: common.GEMMQuantMode | None = None,
+) -> list:
+    """One MoE block for a large-EP config (``cfg.moe_comm_backend`` set).
+
+    The shared body of ``DeepSeekModel._large_ep_moe_ops`` and
+    ``DeepSeekV32Model._large_ep_moe_ops``: resolve the model-owned
+    workload-distribution string, then delegate to ``build_moe_block_ops``.
+    ``shared_gemm_quant_mode`` is the one caller-specific difference — the
+    DeepSeekV32 family passes its ``dsa_shared_expert_quant_mode`` on trtllm.
+
+    Workload-distribution strings are transcribed from the deleted wideEP
+    classes at commit 8372e60: sglang flattens the prefill alpha to 0.6 under
+    EPLB (deepseek.py:1089-1101 / deepseek_v32.py:740-751), while trtllm keeps
+    the model alpha in both phases and marks EPLB with the ``_eplb`` suffix
+    instead (deepseek.py:626-636 / deepseek_v32.py:479-486).
+    """
+    # Deferred import: blocks/moe.py imports this module (check_is_moe) at
+    # import time, so a top-level import here would be circular.
+    from aiconfigurator_core.sdk.models.blocks.moe import build_moe_block_ops
+
+    base = cfg.workload_distribution
+    if backend_name == "trtllm":
+        distribution = power_law_distribution(base, power_law_alpha, eplb_suffix=cfg.enable_eplb)
+    else:
+        alpha = 0.6 if (phase == "context" and cfg.enable_eplb) else power_law_alpha
+        distribution = power_law_distribution(base, alpha)
+    return build_moe_block_ops(
+        phase,
+        shape,
+        cfg,
+        cfg.moe_quant_mode,
+        distribution,
+        scale_factor=scale_factor,
+        backend_name=backend_name,
+        inference_phase=phase,
+        model_family=model_family,
+        attn_cp_size=cfg.cp_size,
+        gpus_per_node=gpus_per_node,
+        shared_gemm_quant_mode=shared_gemm_quant_mode,
+    )
+
+
+def validate_trtllm_large_ep(
+    *,
+    attention_dp_size: int,
+    moe_ep_size: int,
+    topk: int,
+    num_experts: int,
+    wideep_num_slots: int | None,
+    enable_eplb: bool,
+) -> None:
+    """Validate a TRT-LLM large-EP (wideEP) config.
+
+    Transcribed verbatim from the deleted ``TrtllmWideEPDeepSeekModel`` /
+    ``TrtllmWideEPDeepSeekV32Model`` constructors (deepseek.py:638-678 at
+    commit 8372e60), which derive the rules from TensorRT-LLM's WideEPMoE
+    constraints (``fused_moe_wide_ep.py``).
+
+    Raises:
+        ValueError: attention DP disabled, EP size not above 1, or a
+            ``wideep_num_slots`` value that EPLB cannot serve.
+    """
+    # 1. Attention DP must be enabled for WideEP
+    if attention_dp_size <= 1:
+        raise ValueError(
+            f"WideEP requires attention_dp_size > 1, got {attention_dp_size}. Attention DP should be used with WideEP."
+        )
+
+    # 2. EP size must be > 1 for WideEP (parallel_size > 1)
+    if moe_ep_size <= 1:
+        raise ValueError(
+            f"WideEP requires moe_ep_size > 1, got {moe_ep_size}. WideEP should only be enabled with parallel_size > 1."
+        )
+
+    # 3. EP size must be > top_k for AlltoAll to be effective
+    # FIXME: this warning should make the comm mode fallback to NCCL!!
+    if moe_ep_size <= topk:
+        logger.warning(
+            f"moe_ep_size ({moe_ep_size}) <= top_k ({topk}), "
+            "AlltoAll communication will be disabled. Consider increasing moe_ep_size."
+        )
+
+    # 4. num_slots validation
+    num_slots = wideep_num_slots if wideep_num_slots else num_experts
+
+    # num_slots must be >= num_experts
+    if num_slots < num_experts:
+        raise ValueError(
+            f"wideep_num_slots ({num_slots}) must be >= num_experts ({num_experts}). "
+            "There should be at least num_experts slots in the model engine."
+        )
+
+    # When EPLB is off, num_slots must equal num_experts
+    if not enable_eplb and num_slots != num_experts:
+        raise ValueError(
+            f"When enable_eplb=False, wideep_num_slots ({num_slots}) must equal "
+            f"num_experts ({num_experts}). Redundant slots require EPLB to be enabled."
+        )
+
+
 @cache
 def _get_model_info(model_path: str) -> dict:
     """
@@ -152,9 +320,82 @@ def _get_model_info(model_path: str) -> dict:
         model_path: HuggingFace model path (e.g., 'meta-llama/Llama-2-7b-hf') or local path
 
     Returns:
-        dict: Model configuration parameters and raw config under "raw_config".
+        dict: Model configuration parameters and raw config under "raw_config",
+        plus the derived MoE fields "num_shared_experts" and "num_moe_layers"
+        (both 0 for dense models).
     """
-    return get_model_config_from_model_path(model_path)
+    # Shallow-copy: get_model_config_from_model_path is @cache'd, so mutating
+    # its return value would poison every other caller's dict.
+    info = dict(get_model_config_from_model_path(model_path))
+    info["num_shared_experts"] = _derive_num_shared_experts(info)
+    info["num_moe_layers"] = _derive_num_moe_layers(info)
+    return info
+
+
+def _moe_source_config(info: dict) -> dict:
+    """Raw HF config dict the MoE keys are read from.
+
+    Mirrors ``_parse_hf_config_json``: for multimodal architectures the LLM
+    parameters (including all MoE fields) live under a nested text config.
+    """
+    raw_config = info.get("raw_config")
+    raw_config = raw_config if isinstance(raw_config, dict) else {}
+    text_key = common.MULTIMODAL_TEXT_CONFIG_KEY.get(info.get("architecture"))
+    nested = raw_config.get(text_key) if text_key else None
+    return nested if isinstance(nested, dict) else raw_config
+
+
+def _derive_num_shared_experts(info: dict) -> int:
+    """Shared (always-active) expert count derived from the HF config.
+
+    Sources, in order: an explicit count (``n_shared_experts`` /
+    ``num_shared_experts``; DeepSeek/GLM/Kimi/MiniMax/NemotronH spelling), else
+    a shared-expert intermediate size (``shared_expert_intermediate_size`` /
+    ``moe_shared_expert_intermediate_size``; Qwen-MoE spelling) expressed as a
+    multiple of the routed-expert intermediate size, else 0.
+    """
+    raw_config = _moe_source_config(info)
+    for key in ("n_shared_experts", "num_shared_experts"):
+        count = raw_config.get(key)
+        # Explicit ``null`` (e.g. MiMo-V2-Flash) means "no shared experts".
+        if count is not None:
+            return int(count)
+    shared_inter_size = (
+        raw_config.get("shared_expert_intermediate_size") or raw_config.get("moe_shared_expert_intermediate_size") or 0
+    )
+    moe_inter_size = info.get("moe_inter_size") or 0
+    if shared_inter_size and moe_inter_size:
+        return max(1, int(shared_inter_size) // int(moe_inter_size))
+    return 0
+
+
+def _derive_num_moe_layers(info: dict) -> int:
+    """Number of transformer layers that carry an MoE block; 0 for dense models.
+
+    Honors the per-layer patterns the config parser already normalized into
+    ``extra_params`` (NemotronH hybrid pattern; MiMo/Llama4 ``moe_layer_freq`` /
+    ``interleave_moe_layer_step``), else derives from ``num_hidden_layers``
+    minus ``first_k_dense_replace``, honoring a raw ``moe_layer_freq`` when
+    present (HF DeepSeek semantics: layer ``i`` is MoE iff ``i >=
+    first_k_dense_replace and i % moe_layer_freq == 0``).
+    """
+    if not info.get("num_experts") or not info.get("topk"):
+        return 0
+    extra_params = info.get("extra_params")
+    if isinstance(extra_params, common.NemotronHConfig):
+        return extra_params.hybrid_override_pattern.count("E")
+    if isinstance(extra_params, common.HybridMoEConfig):
+        return sum(1 for is_moe in extra_params.moe_layer_freq if is_moe)
+    raw_config = _moe_source_config(info)
+    layers = int(info["layers"])
+    first_k_dense = int(raw_config.get("first_k_dense_replace") or 0)
+    moe_layer_freq = raw_config.get("moe_layer_freq", 1)
+    if isinstance(moe_layer_freq, (list, tuple)):
+        return sum(1 for is_moe in moe_layer_freq if is_moe)
+    moe_layer_freq = int(moe_layer_freq) if moe_layer_freq else 1
+    if moe_layer_freq <= 1:
+        return max(0, layers - first_k_dense)
+    return sum(1 for layer_idx in range(first_k_dense, layers) if layer_idx % moe_layer_freq == 0)
 
 
 def _architecture_to_model_family(architecture: str) -> str:
@@ -185,8 +426,10 @@ def _normalize_mixed_precision_layer_algo(value: object) -> str | None:
         "fp8": "fp8",
         "e4m3": "fp8",
         "e5m2": "fp8",
+        "mxfp8": "mxfp8",
         "nvfp4": "nvfp4",
         "fp4": "nvfp4",
+        "w4a16_nvfp4": "w4a16_nvfp4",
     }
     return aliases.get(algo, algo)
 
@@ -219,7 +462,7 @@ def _is_routing_expert_target(target: object) -> bool:
     target_name = str(target).lower()
     if "shared_expert" in target_name:
         return False
-    return ".experts." in target_name or "routing_expert" in target_name
+    return ".experts." in target_name or target_name.endswith(".experts") or "routing_expert" in target_name
 
 
 def _collect_mixed_precision_layer_algos(raw_config: dict) -> tuple[set[str], set[str]]:
@@ -274,15 +517,37 @@ def _infer_mixed_precision_quant_modes(raw_config: dict, quant_dynamic: bool | N
     gemm_algos, moe_algos = _collect_mixed_precision_layer_algos(raw_config)
     overrides: dict[str, object] = {}
 
-    if "fp8" in gemm_algos:
+    # Some expert-only requants retain the base checkpoint's non-expert lane
+    # in the mixed-precision header. Prefer that explicit base description to
+    # broad config-group targets such as ``Linear``: the latter are filtered
+    # by ``ignore`` at runtime and must not reclassify attention/shared GEMMs.
+    quant_cfg = raw_config.get("quantization_config")
+    base_quant_method = str(quant_cfg.get("quant_method", "")).lower() if isinstance(quant_cfg, dict) else ""
+    weight_block_size = quant_cfg.get("weight_block_size") if isinstance(quant_cfg, dict) else None
+    if base_quant_method == "fp8" and weight_block_size:
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8_block
+    elif base_quant_method == "fp8":
+        overrides["gemm_quant_mode"] = (
+            common.GEMMQuantMode.fp8 if quant_dynamic is True else common.GEMMQuantMode.fp8_static
+        )
+    elif "fp8" in gemm_algos:
         if quant_dynamic is not True:
             overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8_static
         else:
             overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8
+    elif "mxfp8" in gemm_algos:
+        # The SDK has no distinct MXFP8 GEMM mode yet. Model MXFP8 as the
+        # dynamic FP8 compute lane, which has the same byte width and tensor-
+        # core family, while preserving any routed-expert NVFP4 override.
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8
+    elif "w4a16_nvfp4" in gemm_algos:
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.w4a16_nvfp4
     elif "nvfp4" in gemm_algos:
         overrides["gemm_quant_mode"] = common.GEMMQuantMode.nvfp4
 
-    if "nvfp4" in moe_algos:
+    if "w4a16_nvfp4" in moe_algos:
+        overrides["moe_quant_mode"] = common.MoEQuantMode.w4a16_nvfp4
+    elif "nvfp4" in moe_algos:
         overrides["moe_quant_mode"] = common.MoEQuantMode.nvfp4
     elif "fp8" in moe_algos:
         overrides["moe_quant_mode"] = common.MoEQuantMode.fp8
@@ -343,7 +608,11 @@ def _infer_quant_modes_from_raw_config(raw_config: dict, architecture: str | Non
 
     # DeepSeek-V4 native checkpoints use MXFP4 routed-expert weights with MXFP8
     # activations, while non-expert weights remain FP8 block quantized.
-    if architecture == "DeepseekV4ForCausalLM" and str(raw_config.get("expert_dtype", "")).lower() == "fp4":
+    if (
+        architecture == "DeepseekV4ForCausalLM"
+        and str(raw_config.get("expert_dtype", "")).lower() == "fp4"
+        and overrides.get("moe_quant_mode") != common.MoEQuantMode.nvfp4
+    ):
         overrides["moe_quant_mode"] = common.MoEQuantMode.w4a8_mxfp4_mxfp8
 
     # KVCache quant mode
@@ -443,13 +712,19 @@ def _is_dsv4_fp4_expert_model(model_path: str) -> bool:
 
     Checks ``expert_dtype == "fp4"`` in the HF config rather than hardcoded
     paths, so third-party requant artifacts (e.g. RedHatAI NVFP4-FP8) are
-    recognized. FP8-only requants (sgl-project) have no ``expert_dtype`` and
-    return False.
+    recognized. Checkpoints with explicit NVFP4 routed-expert metadata are not
+    native MXFP4 checkpoints even when the base config retains
+    ``expert_dtype == "fp4"``. FP8-only requants (sgl-project) have no
+    ``expert_dtype`` and return False.
     """
     info = _get_model_info(model_path)
     if info.get("architecture") != "DeepseekV4ForCausalLM":
         return False
-    return str(info.get("raw_config", {}).get("expert_dtype") or "").lower() == "fp4"
+    raw_config = info.get("raw_config", {})
+    if str(raw_config.get("expert_dtype") or "").lower() != "fp4":
+        return False
+    _gemm_algos, moe_algos = _collect_mixed_precision_layer_algos(raw_config)
+    return "nvfp4" not in moe_algos
 
 
 def resolve_dsv4_moe_arch_mode(
@@ -532,6 +807,46 @@ def resolve_dsv4_moe_arch(
         mode = resolve_kimi_k3_moe_arch_mode(model_path, system_name, backend_name)
     if mode is not None:
         model_config.moe_quant_mode = mode
+
+
+def resolve_nvfp4_for_system(
+    model_config: config.ModelConfig,
+    system_name: str | None,
+    model_path: str | None = None,
+) -> None:
+    """Remap native nvfp4 to weight-only nvfp4_wo on non-Blackwell systems.
+
+    Non-Blackwell hardware has no native FP4 tensor cores, so all runtimes
+    dequantize weights to BF16 before the MMA. nvfp4_wo captures this:
+    memory=9/16 (FP4 weight traffic) and compute=1 (BF16 speed). The
+    transfer ladder then models the Marlin-class memory savings via the
+    (0.5625, 1) util-level entry — no direct bfloat16 table aliasing needed.
+
+    Deployability (whether a runtime can load the checkpoint at a given
+    version) is a separate question handled by the support matrix.
+    """
+    from aiconfigurator_core.sdk.perf_database import is_blackwell_system
+
+    if is_blackwell_system(system_name):
+        return  # native FP4 TC — nvfp4 stays as-is
+
+    gemm_q = model_config.gemm_quant_mode
+    moe_q = model_config.moe_quant_mode
+    if (gemm_q is None or moe_q is None) and model_path:
+        info = _get_model_info(model_path)
+        inferred = _infer_quant_modes_from_raw_config(
+            info.get("raw_config", {}),
+            info.get("architecture", ""),
+        )
+        if gemm_q is None:
+            gemm_q = inferred.get("gemm_quant_mode")
+        if moe_q is None:
+            moe_q = inferred.get("moe_quant_mode")
+
+    if gemm_q == common.GEMMQuantMode.nvfp4:
+        model_config.gemm_quant_mode = common.GEMMQuantMode.nvfp4_wo
+    if moe_q == common.MoEQuantMode.nvfp4:
+        model_config.moe_quant_mode = common.MoEQuantMode.nvfp4_wo
 
 
 def resolve_context_fmha_by_data(

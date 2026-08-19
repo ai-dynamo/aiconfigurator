@@ -16,15 +16,12 @@ exp_disagg_wideep:
   osl: 100
   nextn: 1
   nextn_accepted: 0.85
-  moe_backend: deepep_moe
   attention_backend: flashinfer
   prefill_model_path: deepseek-ai/DeepSeek-V3
   prefill_backend_name: sglang
-  prefill_enable_wideep: true
   prefill_enable_eplb: true
   decode_model_path: deepseek-ai/DeepSeek-V3
   decode_backend_name: sglang
-  decode_enable_wideep: true
   decode_enable_eplb: true
   prefill_system_name: h200_sxm
   decode_system_name: h200_sxm
@@ -96,10 +93,8 @@ exp_disagg_non_wideep:
   nextn_accepted: 0.85
   prefill_model_path: deepseek-ai/DeepSeek-V3
   prefill_backend_name: sglang
-  prefill_enable_wideep: false
   decode_model_path: deepseek-ai/DeepSeek-V3
   decode_backend_name: sglang
-  decode_enable_wideep: false
   prefill_system_name: h200_sxm
   decode_system_name: h200_sxm
   prefill_gemm_quant_mode: fp8_block

@@ -28,9 +28,10 @@ logger = logging.getLogger(__name__)
 ENGINE_STEP_BACKEND_ENV = "AICONFIGURATOR_ENGINE_STEP_BACKEND"
 
 
-# Freeze-window telemetry (#1357 Phase 1): count every Python-step use by
-# reason and warn once per reason, so sweep logs stay readable while "who
-# still uses the Python step" stays measurable during the freeze.
+# Python-step telemetry (#1357): count every remaining Python op.query() use
+# by reason and warn once per reason. Post-retirement the reasons are the
+# permanent delegations only — synthetic (non-PerfDatabase) databases and the
+# AFD orchestration's op-list fallback.
 _PYTHON_STEP_FALLBACK_COUNTS: dict[str, int] = {}
 _PYTHON_STEP_FALLBACK_WARNED: set[str] = set()
 _PYTHON_STEP_FALLBACK_LOCK = threading.Lock()
@@ -65,17 +66,20 @@ def python_step_fallback_counts() -> dict[str, int]:
 
 def _python_step_fallback_reset() -> None:
     """Test hook: clear telemetry counters and the warn-once memory."""
+    global _PYTHON_BACKEND_DEPRECATION_WARNED
     with _PYTHON_STEP_FALLBACK_LOCK:
         _PYTHON_STEP_FALLBACK_COUNTS.clear()
         _PYTHON_STEP_FALLBACK_WARNED.clear()
+        _PYTHON_BACKEND_DEPRECATION_WARNED = False
 
 
 class RustEngineUnsupportedError(RuntimeError):
     """The model's op graph cannot be expressed as a compiled ``EngineSpec``
-    (``engine.OpConversionError``). Python CAN compute these configs, so the
-    ``base_backend`` gates catch this and fall back to the Python step
-    (parity by delegation) instead of crashing the sweep. Distinct from
-    perf-data misses, which must stay error-symmetric on both engines."""
+    (``engine.OpConversionError``). For op-level models this is a hard error —
+    the opspec coverage tripwire keeps it unreachable for shipped ops — while
+    the AFD op-list evaluation catches it and lets the Python ``op.query()``
+    loop own those ops. Distinct from perf-data misses, which stay
+    error-symmetric between the engines."""
 
 
 class RustForwardPassPerfModel:
@@ -280,39 +284,45 @@ def _normalize_tuning_iterations(iterations: dict[str, Any] | list[Any]) -> list
     return iterations
 
 
-# Database modes the compiled engine answers itself: SILICON, the util-space
-# empirical layer (HYBRID / EMPIRICAL, mirroring
-# `sdk/operations/util_empirical.py`), and SOL (per-op speed-of-light
-# dispatch, ported with the SOL_FULL retirement). The only excluded name is
-# SOL_FULL, a per-call-only diagnostic that can never be a database's active mode —
-# the mode-based delegation below is vestigial belt-and-braces.
-_RUST_SUPPORTED_DATABASE_MODES = {"SILICON", "HYBRID", "EMPIRICAL", "SOL"}
+def validate_engine_step_backend(value: Any) -> str | None:
+    """Normalize + validate an ``engine_step_backend`` request.
+
+    Returns the lowered token (``"rust"``) or ``None`` when nothing was
+    requested; any other value raises. Shared by the step routing gate AND
+    the task/config entry points (``Task.__post_init__``) so a programmatic
+    caller cannot smuggle the retired ``"python"`` token (or any typo) into
+    a path — like the AFD session — that never reaches the routing gate.
+    """
+    requested = None if value is None else str(value).lower()
+    if requested is not None and requested != "rust":
+        raise ValueError(
+            f"unknown engine_step_backend {requested!r}: the compiled Rust engine is the only "
+            "engine-step executor ('rust' is the only accepted value; the deprecated 'python' "
+            "no-op was removed after its one-release window)."
+        )
+    return requested
 
 
 def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = None) -> bool:
-    """Route to the compiled engine only when it can give the SAME answer.
+    """Route the engine step to the compiled engine — the only step executor.
 
-    The compiled engine is the DEFAULT — including on power-carrying
-    databases, now that per-op energy crosses the FFI. The Python step
-    remains reachable two ways, both answer-parity delegations rather than
-    capabilities:
+    Returns ``False`` only for the one remaining delegation: by default (not
+    when ``"rust"`` is explicitly requested), a non-``PerfDatabase`` object —
+    the compiled engine re-loads perf data from disk by identity, which a
+    synthetic database does not have. Callers own what ``False`` means: the
+    AFD orchestration keeps its per-call twin-op loop, while the
+    engine-step surfaces in ``base_backend`` raise (there is no Python step
+    left to delegate to).
 
-    * an explicit ``engine_step_backend="python"`` (config or env) — the
-      escape hatch retained for one release cycle;
-    * by default (not when ``"rust"`` is explicitly requested), a
-      non-``PerfDatabase`` object — the compiled engine re-loads perf data
-      from disk by identity, which a synthetic database does not have.
-
-    The compiled engine answers every selectable database mode (SILICON /
-    HYBRID / EMPIRICAL / SOL). The mode gate below only rejects unknown
-    names — in practice just SOL_FULL (per-call diagnostic only), which mode entry already
-    refuses to activate — so the mode-based delegation is empty in practice.
+    ``"rust"`` is the only accepted value. The deprecated ``"python"``
+    no-op completed its one-release cycle and was dropped with the
+    deprecation-cleanup PR; any other value raises — silently computing on
+    an engine the caller did not ask for would be worse than failing.
     """
-    backend = getattr(runtime_config, "engine_step_backend", None) or os.environ.get(ENGINE_STEP_BACKEND_ENV)
-    requested = str(backend).lower() if backend else None
-    if requested is not None and requested != "rust":
-        note_python_step_fallback("explicit_python", requested)
-        return False
+    backend = getattr(runtime_config, "engine_step_backend", None)
+    if backend is None:
+        backend = os.environ.get(ENGINE_STEP_BACKEND_ENV)
+    requested = validate_engine_step_backend(backend)
     if requested is None:
         # Deferred import: perf_database is heavy and this module must stay
         # light to import (engine.py imports it at top level).
@@ -324,17 +334,6 @@ def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = N
             # no on-disk identity it could resolve. Only an explicit "rust"
             # request bypasses this (and owns the resulting load error).
             note_python_step_fallback("non_perf_database", type(database).__name__)
-            return False
-    if database is not None:
-        mode = getattr(database, "get_default_database_mode", lambda: None)()
-        if mode is not None and getattr(mode, "name", str(mode)) not in _RUST_SUPPORTED_DATABASE_MODES:
-            note_python_step_fallback("database_mode", str(getattr(mode, "name", mode)))
-            logger.debug(
-                "engine-step backend 'rust' requested but database_mode=%s; "
-                "using the python step (compiled engine implements "
-                "SILICON/HYBRID/EMPIRICAL/SOL only).",
-                getattr(mode, "name", mode),
-            )
             return False
     return True
 
@@ -371,6 +370,26 @@ def _scale_or_one(value: Any) -> float:
     return 1.0 if value is None else float(value)
 
 
+# The PyO3 boundary collapses every Rust error into ValueError (py.rs::
+# aic_to_py — the uniform-ValueError contract). But the perf-DB miss class
+# ("not collected" / out-of-domain / no cell match / interp miss) is
+# semantically Python's PerfDataNotAvailableError, and callers above this
+# layer branch on that TYPE: sweep.py marks such points unanswerable and
+# skips them, where a genuine ValueError aborts the parallel config. All
+# `AicError::PerfDatabase` messages carry this display prefix; re-raise them
+# as the class the Python route raises for the same conditions, so both
+# routes expose ONE error taxonomy to the sweep.
+_RUST_PERF_MISS_PREFIX = "perf database error: "
+
+
+def _reraise_engine_error(exc: ValueError) -> None:
+    from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
+
+    if str(exc).startswith(_RUST_PERF_MISS_PREFIX):
+        raise PerfDataNotAvailableError(str(exc)) from exc
+    raise exc
+
+
 def _fold_per_op(
     entries: Any,
     scale: float = 1.0,
@@ -382,7 +401,7 @@ def _fold_per_op(
     (it also keeps duck-typed handles in tests correct): duplicate names
     accumulate with ``+=`` and sources merge to ``"mixed"`` on mismatch —
     byte-for-byte the accumulation semantics of
-    ``base_backend._run_context_phase``. ``scale`` is the flat
+    the retired Python phase runners. ``scale`` is the flat
     ``latency_correction_scale`` post-multiply, applied to latency AND energy
     per key exactly like the Python phase runners' downstream scaling. The
     three dicts share one key set (the power-coverage gate pairs latency and
@@ -422,7 +441,7 @@ def estimate_static_latency_breakdown_with_rust(
     Routes through ``EngineHandle.run_static_per_op`` (the "Python builds,
     Rust executes" path). The engine performs the decode stride quadrature and
     the ``(nextn + 1)`` decode-batch scaling internally (mirroring
-    ``base_backend._run_generation_phase``) and returns every queried op's
+    the retired Python ``_run_generation_phase``) and returns every queried op's
     ``(name, latency_ms, energy_wms, source)``; this side folds them into the
     same name-keyed dicts the Python phase runners produce — real op names,
     real energies, real provenance tags. Returns ``(context_latency,
@@ -431,17 +450,20 @@ def estimate_static_latency_breakdown_with_rust(
     """
     handle = _cached_engine_handle(model, database)
     engine_mode = mode if mode in {"static", "static_ctx", "static_gen"} else "static"
-    context_ops, generation_ops = handle.run_static_per_op(
-        batch_size=int(runtime_config.batch_size),
-        isl=int(runtime_config.isl),
-        osl=int(runtime_config.osl),
-        prefix=int(runtime_config.prefix or 0),
-        beam_width=int(runtime_config.beam_width or 1),
-        seq_imbalance_correction_scale=_scale_or_one(runtime_config.seq_imbalance_correction_scale),
-        gen_seq_imbalance_correction_scale=_scale_or_one(runtime_config.gen_seq_imbalance_correction_scale),
-        mode=engine_mode,
-        stride=int(stride),
-    )
+    try:
+        context_ops, generation_ops = handle.run_static_per_op(
+            batch_size=int(runtime_config.batch_size),
+            isl=int(runtime_config.isl),
+            osl=int(runtime_config.osl),
+            prefix=int(runtime_config.prefix or 0),
+            beam_width=int(runtime_config.beam_width or 1),
+            seq_imbalance_correction_scale=_scale_or_one(runtime_config.seq_imbalance_correction_scale),
+            gen_seq_imbalance_correction_scale=_scale_or_one(runtime_config.gen_seq_imbalance_correction_scale),
+            mode=engine_mode,
+            stride=int(stride),
+        )
+    except ValueError as exc:
+        _reraise_engine_error(exc)
     _note_rust_provenance(handle)
 
     context_latency, context_energy, context_source = _fold_per_op(context_ops, latency_correction_scale)
@@ -478,15 +500,18 @@ def estimate_mixed_step_latency_with_rust(
     straight through with no Python-side pre-math.
     """
     handle = _cached_engine_handle(model, database)
-    latency_ms = handle.mixed_step_latency(
-        int(ctx_tokens),
-        int(gen_tokens),
-        int(isl),
-        int(osl),
-        int(prefix or 0),
-        seq_imbalance_correction_scale=_scale_or_one(seq_imbalance_correction_scale),
-        gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
-    )
+    try:
+        latency_ms = handle.mixed_step_latency(
+            int(ctx_tokens),
+            int(gen_tokens),
+            int(isl),
+            int(osl),
+            int(prefix or 0),
+            seq_imbalance_correction_scale=_scale_or_one(seq_imbalance_correction_scale),
+            gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
+        )
+    except ValueError as exc:
+        _reraise_engine_error(exc)
     _note_rust_provenance(handle)
     return latency_ms
 
@@ -514,15 +539,18 @@ def estimate_mixed_step_breakdown_with_rust(
     ``base_backend.run_mixed``'s Python branch key-for-key, energies included.
     """
     handle = _cached_engine_handle(model, database)
-    shared_ops, ctx_attn_ops, decode_attn_ops = handle.mixed_step_breakdown_per_op(
-        int(ctx_tokens),
-        int(gen_tokens),
-        int(isl),
-        int(osl),
-        int(prefix or 0),
-        seq_imbalance_correction_scale=_scale_or_one(seq_imbalance_correction_scale),
-        gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
-    )
+    try:
+        shared_ops, ctx_attn_ops, decode_attn_ops = handle.mixed_step_breakdown_per_op(
+            int(ctx_tokens),
+            int(gen_tokens),
+            int(isl),
+            int(osl),
+            int(prefix or 0),
+            seq_imbalance_correction_scale=_scale_or_one(seq_imbalance_correction_scale),
+            gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
+        )
+    except ValueError as exc:
+        _reraise_engine_error(exc)
     _note_rust_provenance(handle)
 
     shared_latency, shared_energy, shared_source = _fold_per_op(shared_ops)
@@ -584,12 +612,15 @@ def estimate_decode_step_latency_with_rust(
     applied internally, so the raw args pass straight through.
     """
     handle = _cached_engine_handle(model, database)
-    latency_ms = handle.decode_step_latency(
-        int(gen_tokens),
-        int(isl),
-        int(osl),
-        gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
-    )
+    try:
+        latency_ms = handle.decode_step_latency(
+            int(gen_tokens),
+            int(isl),
+            int(osl),
+            gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
+        )
+    except ValueError as exc:
+        _reraise_engine_error(exc)
     _note_rust_provenance(handle)
     return latency_ms
 
@@ -879,6 +910,14 @@ def _engine_config_json(model: Any, database: Any) -> str:
         "kv_cache_dtype": _quant_to_dtype(getattr(model_config, "kvcache_quant_mode", None)),
         "kv_block_size": None,
         "nextn": int(nextn) if nextn is not None else None,
+        # An op_level and an fpm model with identical parallel/quant configs
+        # compile to DIFFERENT engines (granular op list vs one whole-model op
+        # per phase); without this key they would share a cached handle and
+        # silently answer with the other mode's engine.
+        "forward_model": getattr(model, "forward_model", "op_level"),
+        # Same identity built against different systems roots reads different
+        # perf trees; the root is part of the engine identity.
+        "systems_root": str(getattr(database, "systems_root", "") or ""),
         # Mode + transfer policy are part of the engine identity: a HYBRID or
         # EMPIRICAL view of the same model/system must not reuse a SILICON
         # handle (the compiled engine bakes the mode into its query dispatch).
@@ -913,9 +952,31 @@ def _engine_config_json(model: Any, database: Any) -> str:
                         "sms": getattr(model_config, "sms", None),
                         "moe_backend": getattr(model_config, "moe_backend", None),
                         "attention_backend": getattr(model_config, "attention_backend", None),
-                        "enable_wideep": bool(getattr(model_config, "enable_wideep", False)),
+                        # enable_wideep is gone from the identity: the deprecated
+                        # flag is constant False on every Task-built ModelConfig;
+                        # moe_comm_backend + num_gpus_per_node below carry the
+                        # large-EP regime.
                         "enable_eplb": bool(getattr(model_config, "enable_eplb", False)),
                         "wideep_num_slots": getattr(model_config, "wideep_num_slots", None),
+                        # Large EP: the per-phase comm backend selects a whole
+                        # different MoE graph (MoEAllToAll/MoEExpertCompute vs the fused
+                        # dispatch/MoE pair) and the node width prices its
+                        # cross-node all-to-all — two configs differing only in
+                        # these must not share one cached handle.
+                        "moe_comm_backend": getattr(model_config, "moe_comm_backend", None),
+                        "num_gpus_per_node": getattr(model_config, "num_gpus_per_node", None),
+                    },
+                    # Data-resolution policy. `build_engine_spec_json` bakes
+                    # these flags into the compiled handle and the engine
+                    # resolves per-op sources from them (schema v13), so two
+                    # views of the same on-disk identity that differ only in
+                    # shared-layer or strict-provenance policy must not share
+                    # a cached handle — a warmed primary-only handle would
+                    # otherwise answer (or fail) for the reuse-carrying view
+                    # depending on call order.
+                    "database_policy": {
+                        "enable_shared_layer": bool(getattr(database, "enable_shared_layer", False)),
+                        "strict_provenance": bool(getattr(database, "strict_provenance", False)),
                     },
                 },
                 sort_keys=True,
@@ -976,9 +1037,17 @@ def _quant_to_dtype(value: Any) -> str | None:
         return "fp8_block"
     if name == "nvfp4":
         return "nvfp4"
+    if name == "w4a16_nvfp4":
+        return "w4a16_nvfp4"
     if name in {"int8", "int8_wo", "sq"}:
         return "int8"
-    if name in {"int4", "int4_wo", "w4afp8", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}:
+    if name in {
+        "int4",
+        "int4_wo",
+        "w4afp8",
+        "w4a16_mxfp4",
+        "w4a8_mxfp4_mxfp8",
+    }:
         return "int4"
     return None
 

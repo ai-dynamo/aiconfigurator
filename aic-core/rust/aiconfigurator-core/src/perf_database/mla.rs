@@ -35,11 +35,12 @@ use super::attention::generation_attn_flops;
 use super::gemm::quant_tc_flops;
 use super::interpolation::Grid3;
 use super::perf_interp::{self, LeafValue, Node, OpInterpConfig};
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
+use crate::operators::base::SolComponents;
 use crate::perf_database::parquet_loader::PerfReader;
 
 /// Axes for context-type MLA tables (op-level and module-level).
@@ -92,7 +93,7 @@ struct GenModuleGrids {
 /// Native-head pin for MLA module tables — byte-equal with Python's
 /// `_MLA_MODULE_NATIVE_HEADS` (operations/mla.py). Unknown models fail the
 /// load: extending the pin is part of landing new module data.
-fn mla_module_native_heads(model: &str) -> Option<u32> {
+pub(crate) fn mla_module_native_heads(model: &str) -> Option<u32> {
     match model {
         "deepseek-ai/DeepSeek-V3" => Some(128),
         // vllm 0.22.0 provenance aliases of the same 128-native geometry.
@@ -172,34 +173,32 @@ impl MlaTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
-        Self::with_sources(data_root, system_spec, &PerfDbSources::default())
+        Self::with_sources(
+            data_root,
+            system_spec,
+            &SourceResolver::fixed(PerfDbSources::default()),
+        )
+        .expect("fixed-map resolution is infallible")
     }
 
-    /// Construct with shared-layer (sibling/cross-version) sources resolved from
-    /// `perf_db_sources` (Python-supplied). Each MLA-family file falls back to
-    /// its primary `data_root/<basename>` when absent from the map. No I/O.
+    /// Construct with shared-layer (sibling/cross-version) sources supplied by the
+    /// engine's `SourceResolver` (live resolution owns the shared-layer walk;
+    /// a fixed source map is the test-only path). Each MLA-family file falls back to
+    /// its primary `data_root/<basename>` when the resolver names no override. No I/O.
     pub fn with_sources(
         data_root: PathBuf,
         system_spec: SystemSpec,
-        perf_db_sources: &PerfDbSources,
-    ) -> Self {
-        let context_mla_sources =
-            resolve_op_sources(perf_db_sources, "context_mla_perf.parquet", &data_root);
+        resolver: &SourceResolver,
+    ) -> Result<Self, AicError> {
+        let context_mla_sources = resolver.sources_for("context_mla_perf.parquet", &data_root)?;
         let generation_mla_sources =
-            resolve_op_sources(perf_db_sources, "generation_mla_perf.parquet", &data_root);
-        let mla_bmm_sources =
-            resolve_op_sources(perf_db_sources, "mla_bmm_perf.parquet", &data_root);
-        let mla_context_module_sources = resolve_op_sources(
-            perf_db_sources,
-            "mla_context_module_perf.parquet",
-            &data_root,
-        );
-        let mla_generation_module_sources = resolve_op_sources(
-            perf_db_sources,
-            "mla_generation_module_perf.parquet",
-            &data_root,
-        );
-        Self {
+            resolver.sources_for("generation_mla_perf.parquet", &data_root)?;
+        let mla_bmm_sources = resolver.sources_for("mla_bmm_perf.parquet", &data_root)?;
+        let mla_context_module_sources =
+            resolver.sources_for("mla_context_module_perf.parquet", &data_root)?;
+        let mla_generation_module_sources =
+            resolver.sources_for("mla_generation_module_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             system_spec,
             context_mla_sources,
@@ -212,7 +211,7 @@ impl MlaTable {
             bmm: OnceLock::new(),
             context_module: OnceLock::new(),
             generation_module: OnceLock::new(),
-        }
+        })
     }
 
     /// Op-level context MLA value (latency ms + power/energy; raw — no
@@ -687,6 +686,24 @@ pub(crate) fn context_mla_sol_ms(
 /// - `sol_math = ops / attn_flops * 1000`
 /// - `sol_mem  = mem / mem_bw * 1000`
 /// - `sol      = max(sol_math, sol_mem)`
+pub(crate) fn context_mla_sol_prefix(
+    spec: &SystemSpec,
+    kv_quant: KvCacheQuantMode,
+    n: f64,
+    s: f64,
+    prefix: f64,
+    b: f64,
+    attn_flops: f64,
+) -> SolComponents {
+    let full_s = s + prefix;
+    let ops = b * n * 2.0 / 2.0 * (192.0 + 128.0) * (full_s * full_s - prefix * prefix);
+    let mem_bytes =
+        b * n * (kv_quant.mapping().memory * full_s * (192.0 + 128.0) + 2.0 * s * (192.0 + 128.0));
+    let sol_math = ops / attn_flops * 1000.0;
+    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+    SolComponents::new(sol_math, sol_mem)
+}
+
 pub(crate) fn context_mla_sol_prefix_ms(
     spec: &SystemSpec,
     kv_quant: KvCacheQuantMode,
@@ -696,13 +713,7 @@ pub(crate) fn context_mla_sol_prefix_ms(
     b: f64,
     attn_flops: f64,
 ) -> f64 {
-    let full_s = s + prefix;
-    let ops = b * n * 2.0 / 2.0 * (192.0 + 128.0) * (full_s * full_s - prefix * prefix);
-    let mem_bytes =
-        b * n * (kv_quant.mapping().memory * full_s * (192.0 + 128.0) + 2.0 * s * (192.0 + 128.0));
-    let sol_math = ops / attn_flops * 1000.0;
-    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    context_mla_sol_prefix(spec, kv_quant, n, s, prefix, b, attn_flops).time_ms()
 }
 
 /// Generation MLA SOL in ms. Mirrors
@@ -714,6 +725,21 @@ pub(crate) fn context_mla_sol_prefix_ms(
 /// - `sol_math = ops / attn_flops * 1000`
 /// - `sol_mem  = mem / mem_bw * 1000`
 /// - `sol      = max(sol_math, sol_mem)`
+pub(crate) fn generation_mla_sol(
+    spec: &SystemSpec,
+    kv_quant: KvCacheQuantMode,
+    n: f64,
+    b: f64,
+    s: f64,
+    attn_flops: f64,
+) -> SolComponents {
+    let ops = 2.0 * b * n * 1088.0 * s;
+    let mem_bytes = b * (n * 1088.0 * 2.0 + (s - 1.0) * 576.0 * kv_quant.mapping().memory);
+    let sol_math = ops / attn_flops * 1000.0;
+    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+    SolComponents::new(sol_math, sol_mem)
+}
+
 pub(crate) fn generation_mla_sol_ms(
     spec: &SystemSpec,
     kv_quant: KvCacheQuantMode,
@@ -722,11 +748,7 @@ pub(crate) fn generation_mla_sol_ms(
     s: f64,
     attn_flops: f64,
 ) -> f64 {
-    let ops = 2.0 * b * n * 1088.0 * s;
-    let mem_bytes = b * (n * 1088.0 * 2.0 + (s - 1.0) * 576.0 * kv_quant.mapping().memory);
-    let sol_math = ops / attn_flops * 1000.0;
-    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    generation_mla_sol(spec, kv_quant, n, b, s, attn_flops).time_ms()
 }
 
 /// MLA BMM SOL in ms. Mirrors `MLABmm._query_mla_bmm_table::get_sol` (uses
@@ -738,6 +760,20 @@ pub(crate) fn generation_mla_sol_ms(
 /// - `sol_math = ops / bmm_flops * 1000`
 /// - `sol_mem  = mem / mem_bw * 1000`
 /// - `sol      = max(sol_math, sol_mem)`
+pub(crate) fn mla_bmm_sol(
+    spec: &SystemSpec,
+    quant: GemmQuantMode,
+    n: f64,
+    t: f64,
+    bmm_flops: f64,
+) -> SolComponents {
+    let ops = 2.0 * t * n * 128.0 * 512.0;
+    let mem_bytes = n * (t * 640.0 + 128.0 * 512.0) * quant.mapping().memory;
+    let sol_math = ops / bmm_flops * 1000.0;
+    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
+    SolComponents::new(sol_math, sol_mem)
+}
+
 pub(crate) fn mla_bmm_sol_ms(
     spec: &SystemSpec,
     quant: GemmQuantMode,
@@ -745,11 +781,7 @@ pub(crate) fn mla_bmm_sol_ms(
     t: f64,
     bmm_flops: f64,
 ) -> f64 {
-    let ops = 2.0 * t * n * 128.0 * 512.0;
-    let mem_bytes = n * (t * 640.0 + 128.0 * 512.0) * quant.mapping().memory;
-    let sol_math = ops / bmm_flops * 1000.0;
-    let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
-    sol_math.max(sol_mem)
+    mla_bmm_sol(spec, quant, n, t, bmm_flops).time_ms()
 }
 
 /// Generation MLA module SOL in ms. Mirrors
@@ -765,7 +797,7 @@ pub(crate) fn mla_bmm_sol_ms(
 /// - `sol_mem  = (attn_mem + bmm_mem) / mem_bw`
 /// - `sol      = max(sol_math, sol_mem)`
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn generation_mla_module_sol_ms(
+pub(crate) fn generation_mla_module_sol(
     spec: &SystemSpec,
     kv_quant: KvCacheQuantMode,
     gemm_quant: GemmQuantMode,
@@ -774,7 +806,7 @@ pub(crate) fn generation_mla_module_sol_ms(
     s: f64,
     attn_flops: f64,
     bmm_flops: f64,
-) -> f64 {
+) -> SolComponents {
     // MLA attention ops
     let attn_ops = 2.0 * b * n * 1088.0 * s;
     let mem_bytes = b * (n * 1088.0 * 2.0 + (s - 1.0) * 576.0 * kv_quant.mapping().memory);
@@ -787,7 +819,21 @@ pub(crate) fn generation_mla_module_sol_ms(
     let bmm_mem_time = bmm_mem / spec.gpu.mem_bw * 1000.0;
     sol_math += bmm_math;
     sol_mem += bmm_mem_time;
-    sol_math.max(sol_mem)
+    SolComponents::new(sol_math, sol_mem)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generation_mla_module_sol_ms(
+    spec: &SystemSpec,
+    kv_quant: KvCacheQuantMode,
+    gemm_quant: GemmQuantMode,
+    n: f64,
+    b: f64,
+    s: f64,
+    attn_flops: f64,
+    bmm_flops: f64,
+) -> f64 {
+    generation_mla_module_sol(spec, kv_quant, gemm_quant, n, b, s, attn_flops, bmm_flops).time_ms()
 }
 
 fn grid3_to_node(grid: &Grid3<LeafValue>) -> Node {
@@ -1458,7 +1504,7 @@ mod tests {
         let ctx_cases: &[(u32, u32, f64)] = &[
             (4, 4096, 2.4523092905680337),   // exact hit
             (4, 5000, 3.551457374840901),    // seq interior (sqrt blend)
-            (4, 100000, 1456.7266741020528), // beyond seq range (util-hold)
+            (4, 100000, 1392.4843754587866), // beyond seq range (tapered util-hold)
         ];
         for &(b, s, expected) in ctx_cases {
             let got = table
@@ -1478,7 +1524,7 @@ mod tests {
         let gen_cases: &[(u32, u32, f64)] = &[
             (1, 4096, 0.02057066683967908),   // exact hit
             (1, 3000, 0.018758271161156394),  // seq interior (raw blend)
-            (1, 500000, 0.22062800915836348), // beyond seq range (util-hold)
+            (1, 500000, 0.19686579992539105), // beyond seq range (tapered util-hold)
         ];
         for &(b, s, expected) in gen_cases {
             let got = table
@@ -1514,7 +1560,7 @@ mod tests {
         let ctx_mod_cases: &[(u32, u32, f64)] = &[
             (2, 4096, 2.6503),              // exact hit
             (2, 5000, 3.532393382077576),   // seq interior (sqrt blend)
-            (2, 100000, 702.2051140666009), // beyond seq range (util-hold)
+            (2, 100000, 705.5935422351143), // beyond seq range (tapered util-hold)
         ];
         for &(b, s, expected) in ctx_mod_cases {
             let got = table
@@ -1536,7 +1582,7 @@ mod tests {
         let gen_mod_cases: &[(u32, u32, f64)] = &[
             (8, 4097, 0.0938),               // exact hit
             (8, 3000, 0.0918716796875),      // seq interior (raw blend)
-            (8, 500000, 1.0565041038424121), // beyond seq range (util-hold)
+            (8, 500000, 1.0705697352947636), // beyond seq range (tapered util-hold)
         ];
         for &(b, s, expected) in gen_mod_cases {
             let got = table

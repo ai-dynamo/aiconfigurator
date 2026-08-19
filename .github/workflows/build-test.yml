@@ -11,6 +11,12 @@ on:
       - synchronize
   workflow_dispatch:
 
+concurrency:
+  # One in-flight run per PR: a superseded push cancels the previous run.
+  # Push events group by SHA so main/release runs never cancel each other.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   cargo-deny:
     name: Cargo Deny
@@ -48,7 +54,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
-          python-version: '3.12'
+          python-version: '3.13'
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            .
+            aic-core/rust/aiconfigurator-core
       - name: Test crate without Python embedding
         run: cargo test --workspace --no-default-features
       - name: Install the local wheel and upper compatibility package
@@ -60,18 +72,54 @@ jobs:
           uv run pytest -q \
             tests/cross_package/test_core_public_api.py \
             tests/cross_package/test_core_version_contract.py \
-            tests/cross_package/test_import_contract.py
+            tests/cross_package/test_import_contract.py \
+            tests/cross_package/test_single_oracle_contract.py
       - name: Test crate with Python embedding
         env:
           AIC_REQUIRE_EMBEDDED_ROUND_TRIP: '1'
           PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
-          PYTHONPATH: ${{ github.workspace }}/aic-core/src:${{ github.workspace }}/.venv/lib/python3.12/site-packages:${{ github.workspace }}/src
+          PYTHONPATH: ${{ github.workspace }}/aic-core/src:${{ github.workspace }}/.venv/lib/python3.13/site-packages:${{ github.workspace }}/src
         run: cargo test --workspace --all-features
+
+  python-compatibility:
+    name: Python ${{ matrix.python-version }} compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install AIC and test dependencies
+        run: |
+          python -m pip install uv
+          uv sync --python ${{ matrix.python-version }} --extra dev --locked
+      - name: Verify Python and NumPy compatibility
+        run: |
+          uv pip check
+          uv run python -c 'import sys, numpy; from packaging.version import Version; assert f"{sys.version_info.major}.{sys.version_info.minor}" == "${{ matrix.python-version }}"; assert Version("2.1") <= Version(numpy.__version__) < Version("3")'
+      - name: Test Python package contracts
+        run: |
+          uv run pytest -q \
+            tests/cross_package/test_core_public_api.py \
+            tests/cross_package/test_core_version_contract.py \
+            tests/cross_package/test_import_contract.py \
+            tests/cross_package/test_single_oracle_contract.py
 
   build-and-test:
     name: Build and Test (${{ matrix.suite.name }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -81,7 +129,7 @@ jobs:
             workers: "-n 2"
           - name: e2e
             paths: tests/e2e
-            workers: "-n 2"
+            workers: "-n 4"
     steps:
       - name: Checkout repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -89,7 +137,7 @@ jobs:
           persist-credentials: false
           lfs: true
           fetch-depth: 0
-      - name: Detect generator golden changes
+      - name: Detect diff-scoped test selection
         id: generator-golden-changes
         shell: bash
         run: |
@@ -114,6 +162,31 @@ jobs:
           else
             echo "run_golden=false" >> "${GITHUB_OUTPUT}"
           fi
+
+          # Scope test_validate_database (e2e sanity check) to the diff:
+          # "all" when a dependency of the sanity notebook changed (loader,
+          # engine/operations, Rust perf-database, global source manifest,
+          # the tooling itself), otherwise the changed perf-data paths
+          # (empty -> sentinel combo only). Consumed via AIC_SANITY_TARGETS
+          # in tests/e2e/tools/test_sanity_check.py. The trigger regex lives
+          # in tools/sanity_check/sanity_full_matrix_triggers.txt (single
+          # source of truth, pinned by selector tests inside the container).
+          sanity_all_regex="$(cat tools/sanity_check/sanity_full_matrix_triggers.txt)"
+          changed_systems="$(printf '%s\n' "${changed_files}" | grep -E '^aic-core/src/aiconfigurator_core/systems/' || true)"
+          if printf '%s\n' "${changed_files}" | grep -Eq "${sanity_all_regex}"; then
+            sanity_targets="all"
+          elif [ "$(printf '%s\n' "${changed_systems}" | grep -c .)" -gt 200 ]; then
+            # Campaign-scale data PR: passing thousands of paths would blow
+            # env-var size limits, and the full matrix is appropriate anyway.
+            sanity_targets="all"
+          else
+            sanity_targets="${changed_systems}"
+          fi
+          {
+            echo "sanity_targets<<AIC_SANITY_EOF"
+            printf '%s\n' "${sanity_targets}"
+            echo "AIC_SANITY_EOF"
+          } >> "${GITHUB_OUTPUT}"
       - name: Git LFS Pull
         run: git lfs pull
       - name: Print runner resources
@@ -125,6 +198,11 @@ jobs:
           docker build -f docker/Dockerfile -t aiconfigurator:build --target build .
       - name: Run tests in container
         shell: bash
+        env:
+          # Env indirection (not ${{ }} inline in the script) so fork-PR
+          # filenames can never be shell-interpreted; docker -e forwards the
+          # value verbatim.
+          AIC_SANITY_TARGETS: ${{ steps.generator-golden-changes.outputs.sanity_targets }}
         run: |
           test_paths=(${{ matrix.suite.paths }})
           if [ "${{ matrix.suite.name }}" = "unit" ] && [ "${{ steps.generator-golden-changes.outputs.run_golden }}" = "true" ]; then
@@ -135,7 +213,7 @@ jobs:
           docker build -f docker/Dockerfile -t aiconfigurator:test --target test .
           # Fail-closed loader provenance checks (Collector V3 design §7.4); the
           # committed data tree is fully sidecar-covered post-PR3, so this must stay green.
-          docker run --name aic -e AIC_STRICT_PROVENANCE=1 aiconfigurator:test \
+          docker run --name aic -e AIC_STRICT_PROVENANCE=1 -e AIC_SANITY_TARGETS aiconfigurator:test \
             pytest \
             "${test_paths[@]}" \
             -m "unit or build" \
@@ -166,7 +244,15 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
-          python-version: '3.12'
+          python-version: '3.13'
+      - name: Cache Rust build artifacts
+        # Caches ~/.cargo registry + incremental target dirs, keyed on
+        # Cargo.lock + rustc version; correctness-neutral (stale keys miss).
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            .
+            aic-core/rust/aiconfigurator-core
       - name: Install AIC and test dependencies
         run: |
           python -m pip install uv
@@ -192,25 +278,15 @@ jobs:
           PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: cargo test --release --lib
       - name: Run Rust/Python engine-step parity suite
+        # -n 4 matches the 4-vCPU hosted runner; every case builds its own
+        # engines, so the suite is xdist-safe. The perf gate below must stay
+        # serial (it measures p50 timings).
         run: |
-          "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rx \
+          "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rx -n 4 \
             aic-core/rust/aiconfigurator-core/parity_tests/test_engine_step_parity.py
       - name: Run compile-engine (EngineHandle) parity suite
         # Parity for the compile_engine -> EngineHandle path: op-transfer bincode
         # round-trip fidelity plus integration parity vs the Python BaseBackend.
         run: |
-          "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rx \
+          "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rx -n 4 \
             aic-core/rust/aiconfigurator-core/parity_tests/test_compile_engine_parity.py
-      - name: Run Rust/Python engine-step perf gate
-        # Guards against Rust hot-path perf regressions (e.g. an O(n log n)
-        # per-query resolve). Compares Rust-vs-Python p50 back-to-back on the
-        # SAME runner, so the ratio largely cancels absolute machine speed;
-        # floors are generous (see the test's docstring) so runner noise never
-        # fails a healthy build. Pin BLAS threads so the Python side's p50 is
-        # stable on BLAS-backed runners (matches the benchmark docs).
-        env:
-          OMP_NUM_THREADS: "1"
-          MKL_NUM_THREADS: "1"
-        run: |
-          "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rA \
-            aic-core/rust/aiconfigurator-core/parity_tests/test_engine_step_perf.py

@@ -118,8 +118,8 @@ def test_resolve_op_path_skips_incomplete_family_dir(systems_root):
     _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
     _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/INCOMPLETE.txt", b"x")
     _write(systems_root, "data/h200_sxm/sglang/0.5.14/gemm_perf.parquet")  # legacy fallback
-    assert resolve_op_data_path(root, "sglang", "0.5.14", "gemm_perf.parquet").endswith(
-        "sglang/0.5.14/gemm_perf.parquet"
+    assert resolve_op_data_path(root, "sglang", "0.5.14", "gemm_perf.parquet") == str(
+        systems_root / "data/h200_sxm/sglang/0.5.14/gemm_perf.parquet"
     )
 
 
@@ -182,10 +182,9 @@ def test_reuse_yaml_with_zero_entries_is_not_declared(systems_root):
     assert supported["h200_sxm"]["sglang"] == ["0.5.14"]
 
 
-def test_collection_meta_partial_table_excludes_that_family_path(systems_root):
-    # partial in ONE family dir hides that path; the version stays declared
-    # through the other family dir (per-path semantics preserved, mirrors the
-    # existing INCOMPLETE.txt behavior).
+def test_collection_meta_partial_table_keeps_family_path_declared(systems_root):
+    # Structured partial coverage keeps successful rows usable. The version
+    # remains declared and older sibling versions may fill missing shapes.
     _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
     _write(systems_root, "data/h200_sxm/attention/sglang/0.5.14/context_attention_perf.parquet")
     _write_yaml(
@@ -197,7 +196,7 @@ def test_collection_meta_partial_table_excludes_that_family_path(systems_root):
     assert supported["h200_sxm"]["sglang"] == ["0.5.14"]
 
 
-def test_collection_meta_partial_in_all_paths_means_undeclared(systems_root):
+def test_collection_meta_partial_in_all_paths_remains_declared(systems_root):
     _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
     _write_yaml(
         systems_root,
@@ -205,7 +204,7 @@ def test_collection_meta_partial_in_all_paths_means_undeclared(systems_root):
         {"tables": {"gemm_perf": {"status": "partial"}}},
     )
     supported = get_supported_databases(str(systems_root))
-    assert supported["h200_sxm"].get("sglang", []) == []
+    assert supported["h200_sxm"]["sglang"] == ["0.5.14"]
 
 
 def test_shared_layer_reuse_txt_fallback_warns_once_per_data_dir(systems_root, caplog):
@@ -275,7 +274,7 @@ def test_reuse_yaml_non_list_reuse_key_raises(systems_root):
         _declared_versions(data_dir, "sglang")
 
 
-def test_resolve_op_path_skips_partial_collection_meta_family_dir(systems_root):
+def test_resolve_op_path_uses_partial_collection_meta_family_dir(systems_root):
     root = str(systems_root / "data/h200_sxm")
     _write(systems_root, "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet")
     _write_yaml(
@@ -285,6 +284,6 @@ def test_resolve_op_path_skips_partial_collection_meta_family_dir(systems_root):
     )
     _write(systems_root, "data/h200_sxm/sglang/0.5.14/gemm_perf.parquet")  # legacy fallback
 
-    assert resolve_op_data_path(root, "sglang", "0.5.14", "gemm_perf.parquet").endswith(
-        "sglang/0.5.14/gemm_perf.parquet"
+    assert resolve_op_data_path(root, "sglang", "0.5.14", "gemm_perf.parquet") == str(
+        systems_root / "data/h200_sxm/gemm/sglang/0.5.14/gemm_perf.parquet"
     )

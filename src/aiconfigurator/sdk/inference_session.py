@@ -21,7 +21,7 @@ from aiconfigurator.sdk.picking import (
 )
 from aiconfigurator.sdk.speculative import SpeculativeDecodingProfile
 from aiconfigurator.sdk.step_estimate import MixedStepInput, StepEstimate
-from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints, get_model_config_from_model_path
+from aiconfigurator.sdk.utils import enumerate_ttft_tpot_constraints
 
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -62,6 +62,7 @@ class InferenceSession:
         stride: int = 32,
         latency_correction_scale: float = 1.0,
         free_gpu_memory_fraction: float | None = None,
+        max_seq_len: int | None = None,
     ) -> InferenceSummary:
         """
         Run static inference
@@ -74,13 +75,18 @@ class InferenceSession:
             free_gpu_memory_fraction: Explicit KV-cache memory fraction for the
                 budget check (backend-defined semantics). When omitted the
                 backend applies its version-derived default.
+            max_seq_len: Optional per-slot KV cache allocation length.
 
         Returns:
             InferenceSummary: the summary of the inference result
         """
-        # Forward the fraction only when set so stubbed/injected backends
-        # predating the kwarg keep working (same compat rule as predict.py).
-        extra = {} if free_gpu_memory_fraction is None else {"free_gpu_memory_fraction": free_gpu_memory_fraction}
+        # Forward optional memory settings only when set so stubbed/injected
+        # backends predating the kwargs keep working.
+        extra = {}
+        if free_gpu_memory_fraction is not None:
+            extra["free_gpu_memory_fraction"] = free_gpu_memory_fraction
+        if max_seq_len is not None:
+            extra["max_seq_len"] = max_seq_len
         return self._backend.run_static(
             self._model,
             self._database,
@@ -295,6 +301,11 @@ class DisaggInferenceSession:
         decode_num_worker: int,
         speculative_profile: SpeculativeDecodingProfile | None = None,
         free_gpu_memory_fraction: float | None = None,
+        prefill_free_gpu_memory_fraction: float | None = None,
+        decode_free_gpu_memory_fraction: float | None = None,
+        max_seq_len: int | None = None,
+        prefill_max_seq_len: int | None = None,
+        decode_max_seq_len: int | None = None,
     ) -> InferenceSummary:
         """
         Run disagg with given prefill/decode worker info
@@ -310,10 +321,16 @@ class DisaggInferenceSession:
             decode_num_worker (int): the number of decode workers
             speculative_profile: Optional accepted-token progress assumption.
                 Projects decode metrics before prefill/decode rate matching.
-            free_gpu_memory_fraction: Explicit KV-cache memory fraction applied
-                to BOTH worker evaluations (semantics are backend-defined, see
-                run_static). When omitted, each run_static falls back to the
-                backend's version-derived default.
+            free_gpu_memory_fraction: Shared KV-cache memory fraction used by
+                both workers unless a role-specific value is provided.
+            prefill_free_gpu_memory_fraction: Prefill-specific KV-cache memory
+                fraction. Overrides the shared value for the prefill worker.
+            decode_free_gpu_memory_fraction: Decode-specific KV-cache memory
+                fraction. Overrides the shared value for the decode worker.
+            max_seq_len: Shared maximum sequence length used by both workers
+                unless a role-specific value is provided.
+            prefill_max_seq_len: Prefill-specific maximum sequence length.
+            decode_max_seq_len: Decode-specific maximum sequence length.
 
         Returns:
             InferenceSummary: the summary of the inference result
@@ -331,7 +348,12 @@ class DisaggInferenceSession:
             mode="static_ctx",
             runtime_config=prefill_runtime_config,
             latency_correction_scale=self._prefill_latency_correction_scale,
-            free_gpu_memory_fraction=free_gpu_memory_fraction,
+            free_gpu_memory_fraction=(
+                prefill_free_gpu_memory_fraction
+                if prefill_free_gpu_memory_fraction is not None
+                else free_gpu_memory_fraction
+            ),
+            max_seq_len=prefill_max_seq_len if prefill_max_seq_len is not None else max_seq_len,
         )
         decode_runtime_config = copy.deepcopy(runtime_config)
         decode_runtime_config.batch_size = decode_batch_size
@@ -340,7 +362,12 @@ class DisaggInferenceSession:
             mode="static_gen",
             runtime_config=decode_runtime_config,
             latency_correction_scale=self._decode_latency_correction_scale,
-            free_gpu_memory_fraction=free_gpu_memory_fraction,
+            free_gpu_memory_fraction=(
+                decode_free_gpu_memory_fraction
+                if decode_free_gpu_memory_fraction is not None
+                else free_gpu_memory_fraction
+            ),
+            max_seq_len=decode_max_seq_len if decode_max_seq_len is not None else max_seq_len,
         )
         if speculative_profile is not None:
             decode_summary = speculative_profile.project_summary(decode_summary, role="decode")
@@ -573,6 +600,8 @@ class DisaggInferenceSession:
             target_ttft=target_ttft,
             target_tpot=target_tpot,
             top_n=top_n,
+            prefill_degradation_factor=self._rate_matching_prefill_degradation_factor,
+            decode_degradation_factor=self._rate_matching_decode_degradation_factor,
         )
 
         disagg_summary_df = result["best_config_df"]
@@ -824,14 +853,7 @@ class DisaggInferenceSession:
         else:
             decode_batch_size_range = [i for i in decode_batch_size_list_default if i <= decode_max_num_tokens]
 
-        try:
-            enc_cfg = get_model_config_from_model_path(model_path).get("extra_params")
-        except Exception:
-            logger.debug("Could not resolve model config for VL effective ISL; using text ISL", exc_info=True)
-            enc_cfg = None
-        prefill_effective_isl = runtime_config.isl + BaseBackend._visual_context_tokens_from_encoder_config(
-            enc_cfg, runtime_config
-        )
+        prefill_effective_isl = BaseBackend.effective_prefill_isl(model_path, runtime_config)
         if prefill_max_num_tokens < prefill_effective_isl:
             logger.warning("prefill_max_num_tokens is less than effective prefill ISL, set to effective prefill ISL")
             prefill_max_num_tokens = prefill_effective_isl
@@ -867,7 +889,7 @@ class DisaggInferenceSession:
             logger.debug(f"No prefill or decode workers found for {model_path} with given configs.")
             return disagg_summary
 
-        # ----- autoscale mode: pick P and D independently, no rate matching -----
+        # ----- autoscale mode: pick P and D independently, no worker-count rate matching -----
         if autoscale:
             return self._pick_autoscale(
                 prefill_summary_df=prefill_summary_df,
@@ -1046,7 +1068,9 @@ class AFDInferenceSession:
 
         per_op = defaultdict(float)
         for op in ops:
-            result = op.query(self._database, **kwargs_common)
+            # Internal shim entry (no DeprecationWarning): same engine-backed
+            # value as the deprecated public op.query().
+            result = op._engine_query(self._database, **kwargs_common)
             per_op[op._name] += float(result)
         return sum(per_op.values()), per_op
 
@@ -1422,7 +1446,7 @@ class AFDInferenceSession:
         return summary
 
     # Stride for sampling KV-cache length ``s`` along the decode trace.
-    # Mirrors ``base_backend._run_generation_phase`` so the AFD path
+    # Mirrors the retired ``base_backend._run_generation_phase`` walk so the AFD path
     # uses the same numerical integration grid as agg/disagg.
     _AFD_DECODE_STRIDE = 32
 
@@ -1448,7 +1472,7 @@ class AFDInferenceSession:
 
         Attention is the only op whose latency reads ``s``; sampling at
         ``stride = _AFD_DECODE_STRIDE`` mirrors the trapezoidal rule
-        used by ``_run_generation_phase`` and recovers the average
+        used by the retired ``_run_generation_phase`` walk and recovers the average
         per-step latency over the full decode trace.
 
         Returns ``(t_a_layer_avg, t_f_layer_avg, t_cycle_avg,
@@ -1567,7 +1591,7 @@ class AFDInferenceSession:
 
         Decode integrates per-step compute along the KV-cache length
         ``s`` (sampled every ``_AFD_DECODE_STRIDE`` tokens, mirroring
-        ``base_backend._run_generation_phase``). Attention is the only
+        the retired ``base_backend._run_generation_phase`` walk). Attention is the only
         op that reads ``s`` — sampling at a single ``s = isl + 1`` would
         under-count A-side latency by ~33% in the typical ``osl ~ isl``
         regime and several-fold for ``osl ≫ isl``, which silently flips

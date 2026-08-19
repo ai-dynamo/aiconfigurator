@@ -15,12 +15,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::common::enums::{DatabaseMode, FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
-use crate::operators::base::{PerformanceResult, Source};
+use crate::operators::base::{blend_sol, PerformanceResult, Source};
 use crate::operators::communication::NcclOp;
 use crate::operators::util_empirical::{self, UtilGrid};
 use crate::perf_database::dsa::{
-    bs_slice, dsa_context_sol_flops, dsa_context_sol_ms, dsa_dims, dsa_generation_sol_flops,
-    dsa_generation_sol_ms, dsa_sparse_file_prefix, lookup_2d, DsaHeadGrid, DsaKey, DsaSparseTables,
+    bs_slice, dsa_context_sol, dsa_context_sol_flops, dsa_context_sol_ms, dsa_dims,
+    dsa_generation_sol, dsa_generation_sol_flops, dsa_generation_sol_ms, dsa_sparse_file_prefix,
+    lookup_2d, DsaHeadGrid, DsaKey, DsaSparseTables,
 };
 use crate::perf_database::perf_interp::LeafValue;
 use crate::perf_database::PerfDatabase;
@@ -53,6 +54,23 @@ pub struct DsaModuleOp {
     /// keeps the pure-full path — the skip table is never touched.
     #[serde(default = "default_full_frac")]
     pub full_frac: f64,
+    /// Per-projection-group weight quant modes (Python
+    /// `dsa_block_weights_bytes`'s `projection_quant_modes`): a checkpoint
+    /// fact — e.g. DeepSeek-V3.2-NVFP4 keeps q/kv/indexer in BF16 but
+    /// quantizes o_proj. `None` (pre-field specs) falls back to
+    /// `gemm_quant_mode` for all four groups, exactly like the Python op's
+    /// default. Weight-estimation only; the latency path never reads it.
+    #[serde(default)]
+    pub attn_projection_quant_modes: Option<DsaProjectionQuants>,
+}
+
+/// The four DSA projection groups' quant modes (weight bytes only).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DsaProjectionQuants {
+    pub q: GemmQuantMode,
+    pub kv: GemmQuantMode,
+    pub o: GemmQuantMode,
+    pub indexer: GemmQuantMode,
 }
 
 fn default_cp_size() -> u32 {
@@ -85,6 +103,67 @@ impl DsaModuleOp {
             index_topk,
             cp_size: 1,
             full_frac: 1.0,
+            attn_projection_quant_modes: None,
+        }
+    }
+
+    /// Python `operations/dsa.py::dsa_block_weights_bytes` × scale_factor:
+    /// per-layer per-rank DSA block weight bytes. q_a / kv_a(+mqa, incl. the
+    /// indexer K projection) and the indexer projections are replicated
+    /// across TP; q_b, the absorbed kv_b and o_proj shard by heads
+    /// (`num_heads` is already rank-local).
+    pub fn weight_bytes(&self) -> f64 {
+        let dims = crate::perf_database::dsa::dsa_dims(&self.architecture);
+        let h = dims.hidden_size as f64;
+        let q_lora = dims.q_lora_rank as f64;
+        let kv_lora = dims.kv_lora_rank as f64;
+        let qk = (dims.qk_nope_head_dim + dims.qk_rope_head_dim) as f64;
+        let v = dims.v_head_dim as f64;
+        let idx = (dims.index_head_dim * dims.index_n_heads) as f64;
+        let local_heads = f64::from(self.num_heads);
+        let quants = self
+            .attn_projection_quant_modes
+            .unwrap_or(DsaProjectionQuants {
+                q: self.gemm_quant_mode,
+                kv: self.gemm_quant_mode,
+                o: self.gemm_quant_mode,
+                indexer: self.gemm_quant_mode,
+            });
+        let q_params = h * q_lora + q_lora * local_heads * qk;
+        let kv_params = h * (kv_lora + dims.qk_rope_head_dim as f64)
+            + kv_lora * local_heads * (dims.qk_nope_head_dim as f64 + v);
+        let o_params = local_heads * v * h;
+        let indexer_params = q_lora * idx + h * dims.index_n_heads as f64;
+        let bytes = q_params * quants.q.mapping().memory
+            + kv_params * quants.kv.mapping().memory
+            + o_params * quants.o.mapping().memory
+            + indexer_params * quants.indexer.mapping().memory;
+        bytes * self.scale_factor
+    }
+
+    /// Amortization weight after the missing-skip-table degradation. Verbatim
+    /// mirror of Python `operations/dsa.py::_effective_full_frac`: the
+    /// `*_skip_indexer` rows are produced only by the sglang collector and only
+    /// from 0.5.14 on, so a (system, backend, version) whose parquet omits them
+    /// degrades to all-full (`w = 1.0`) instead of failing the query — the same
+    /// policy `models/deepseek_v32.py` already applies to backends with no skip
+    /// producer ("we just cannot model their saving without data, so we count
+    /// them as full"). PESSIMISTIC: the indexer is charged on every layer.
+    ///
+    /// KNOWN GAP (accepted, AIC-1747 review): the degradation is SILENT.
+    /// The crate has no logging facility (the "Rust has no logging"
+    /// convention recorded at `operators/dsv4.rs`), and since the per-call
+    /// Python query stack was retired behind engine-routed shims (PR-5/PR-6)
+    /// there is no Python query path left to carry the one-time warning the
+    /// pre-migration design emitted. Surfacing fidelity degradation belongs
+    /// to an engine-side degradation/provenance surface — tracked as
+    /// AIC-1767 (AIC-1753 owns the adjacent support-matrix reporting
+    /// tier). Do not "fix" this by adding a log crate to the hot path.
+    fn effective_full_frac(&self, has_skip_rows: bool) -> f64 {
+        if self.full_frac >= 1.0 || has_skip_rows {
+            self.full_frac
+        } else {
+            1.0
         }
     }
 
@@ -95,7 +174,32 @@ impl DsaModuleOp {
         isl: u32,
         prefix: u32,
     ) -> Result<PerformanceResult, AicError> {
-        let w = self.full_frac;
+        // CP composes latency-only sparse MQA/top-k deltas with the base DSA
+        // and all-gather results. Those collected deltas do not provide a
+        // defensible math-vs-memory split, so reject decomposition requests
+        // at the operator boundary instead of reaching PerOpSolFold with a
+        // non-zero result whose `sol` field is absent. Plain SOL remains
+        // supported because it requests only the composed roofline latency.
+        if self.cp_size > 1 && db.database_mode == DatabaseMode::SolFull {
+            return Err(AicError::InvalidEngineConfig(format!(
+                "DSA context SOL_FULL decomposition is not supported for cp_size={} because the CP sparse MQA/top-k deltas are latency-only",
+                self.cp_size
+            )));
+        }
+        // full_frac >= 1.0 (DeepSeek-V3.2 / GLM-5) and the analytic SOL modes
+        // never consult the skip table — short-circuit BEFORE the probe so it
+        // is not even evaluated for them (the "skip path never taken"
+        // invariant documented on `full_frac`). SOL is skip-aware directly
+        // (the get_sol ports zero the indexer terms), so it keeps the
+        // configured blend — mirrors the retired Python
+        // `_effective_full_frac` mode gate.
+        let w = if self.full_frac >= 1.0
+            || matches!(db.database_mode, DatabaseMode::Sol | DatabaseMode::SolFull)
+        {
+            self.full_frac
+        } else {
+            self.effective_full_frac(db.dsa.has_context_skip_rows()?)
+        };
         // CP (round-robin sequence split) prefill takes the sparse-delta
         // composition path (Python `ContextDSAModule.query` -> `_query_cp`
         // when `_cp_size > 1`). GLM-5.2 amortizes full/skip on the CP path
@@ -107,10 +211,14 @@ impl DsaModuleOp {
                 return Ok(full);
             }
             let skip = self.query_context_cp(db, batch_size, isl, prefix, true)?;
-            return Ok(PerformanceResult::new(
+            let mut result = PerformanceResult::new(
                 w * full.latency_ms + (1.0 - w) * skip.latency_ms,
                 full.source,
-            ));
+            );
+            if let Some(components) = blend_sol(w, full.sol, skip.sol) {
+                result = result.with_sol(components);
+            }
+            return Ok(result);
         }
         // Query at `isl` (new-token count) for the exact `prefix` slice — NOT
         // `isl + prefix`. The perf-DB layer resolves one 4-axis RAW grid via
@@ -126,13 +234,18 @@ impl DsaModuleOp {
             full
         } else {
             // GLM-5.2 shared-index amortization (Python ContextDSAModule.query):
-            // latency AND energy are each `w*full + (1-w)*skip`.
+            // latency AND energy are each `w*full + (1-w)*skip`; the SOL
+            // decomposition blends componentwise alongside.
             let skip = q(true)?;
-            PerformanceResult::with_energy(
+            let mut blended = PerformanceResult::with_energy(
                 w * full.latency_ms + (1.0 - w) * skip.latency_ms,
                 w * full.energy_wms + (1.0 - w) * skip.energy_wms,
                 full.source.combine(skip.source),
-            )
+            );
+            if let Some(components) = blend_sol(w, full.sol, skip.sol) {
+                blended = blended.with_sol(components);
+            }
+            blended
         };
         Ok(result.clamp_non_negative().scaled(self.scale_factor))
     }
@@ -309,7 +422,15 @@ impl DsaModuleOp {
         batch_size: u32,
         s: u32,
     ) -> Result<PerformanceResult, AicError> {
-        let w = self.full_frac;
+        // Same short-circuit as query_context: no probe for full_frac >= 1.0
+        // or the analytic SOL modes.
+        let w = if self.full_frac >= 1.0
+            || matches!(db.database_mode, DatabaseMode::Sol | DatabaseMode::SolFull)
+        {
+            self.full_frac
+        } else {
+            self.effective_full_frac(db.dsa.has_generation_skip_rows()?)
+        };
         // `dsa_backend="trtllm"` mirrors Python's generation default
         // (`_query_generation_dsa_module_table(dsa_backend="trtllm")`).
         let q = |skip_indexer: bool| {
@@ -322,11 +443,15 @@ impl DsaModuleOp {
             // GLM-5.2 shared-index amortization (decode side): latency AND
             // energy are each `w*full + (1-w)*skip`.
             let skip = q(true)?;
-            PerformanceResult::with_energy(
+            let mut blended = PerformanceResult::with_energy(
                 w * full.latency_ms + (1.0 - w) * skip.latency_ms,
                 w * full.energy_wms + (1.0 - w) * skip.energy_wms,
                 full.source.combine(skip.source),
-            )
+            );
+            if let Some(components) = blend_sol(w, full.sol, skip.sol) {
+                blended = blended.with_sol(components);
+            }
+            blended
         };
         Ok(result.clamp_non_negative().scaled(self.scale_factor))
     }
@@ -381,23 +506,20 @@ fn query_context_table(
             let spec = &db.system_spec;
             let dims = dsa_dims(&op.architecture);
             let flops = dsa_context_sol_flops(spec, op.gemm_quant_mode, op.fmha_quant_mode)?;
-            Ok(PerformanceResult::new(
-                dsa_context_sol_ms(
-                    spec,
-                    dims,
-                    op.index_topk as i64,
-                    op.kv_cache_dtype,
-                    op.fmha_quant_mode,
-                    op.gemm_quant_mode,
-                    b as i64,
-                    isl as i64,
-                    prefix as i64,
-                    op.num_heads as i64,
-                    skip_indexer,
-                    flops,
-                ),
-                Source::Sol,
-            ))
+            Ok(PerformanceResult::sol(dsa_context_sol(
+                spec,
+                dims,
+                op.index_topk as i64,
+                op.kv_cache_dtype,
+                op.fmha_quant_mode,
+                op.gemm_quant_mode,
+                b as i64,
+                isl as i64,
+                prefix as i64,
+                op.num_heads as i64,
+                skip_indexer,
+                flops,
+            )))
         }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             context_empirical(db, op, b, isl, prefix, dsa_backend, skip_indexer)?,
@@ -448,19 +570,16 @@ fn query_generation_table(
             let spec = &db.system_spec;
             let dims = dsa_dims(&op.architecture);
             let flops = dsa_generation_sol_flops(spec, op.gemm_quant_mode)?;
-            Ok(PerformanceResult::new(
-                dsa_generation_sol_ms(
-                    spec,
-                    dims,
-                    op.kv_cache_dtype,
-                    op.gemm_quant_mode,
-                    b as i64,
-                    s as i64,
-                    op.num_heads as i64,
-                    flops,
-                ),
-                Source::Sol,
-            ))
+            Ok(PerformanceResult::sol(dsa_generation_sol(
+                spec,
+                dims,
+                op.kv_cache_dtype,
+                op.gemm_quant_mode,
+                b as i64,
+                s as i64,
+                op.num_heads as i64,
+                flops,
+            )))
         }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             generation_empirical(db, op, b, s, dsa_backend, skip_indexer)?,
@@ -989,6 +1108,7 @@ mod tests {
             index_topk: 2048,
             cp_size,
             full_frac: 1.0,
+            attn_projection_quant_modes: None,
         }
     }
 
@@ -1154,6 +1274,30 @@ mod tests {
         db
     }
 
+    /// Any shipped system at sglang 0.5.14 — the release that first split the
+    /// DSA tables into full + `*_skip_indexer` rows (and did not do so on
+    /// every system).
+    fn sglang_db(system: &str, version: &str, mode: DatabaseMode) -> PerfDatabase {
+        let systems_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
+        let mut db = PerfDatabase::load(&systems_root, system, "sglang", version)
+            .unwrap_or_else(|e| panic!("{system} db must load: {e}"));
+        db.database_mode = mode;
+        db
+    }
+
+    /// GLM-5.2: 21 indexer-computing layers out of 78 (`index_topk_freq=4`,
+    /// `index_skip_topk_offset=3`) — the weight Python's
+    /// `_dsa_full_layer_fraction` derives from the checkpoint config.
+    const GLM52_FULL_FRAC: f64 = 21.0 / 78.0;
+
+    fn glm52_op(kv: KvCacheQuantMode, full_frac: f64) -> DsaModuleOp {
+        let mut op = dsa_op(GLM, 64, kv);
+        op.full_frac = full_frac;
+        op
+    }
+
     fn dsa_op(architecture: &str, num_heads: u32, kv: KvCacheQuantMode) -> DsaModuleOp {
         DsaModuleOp::new(
             "dsa_module",
@@ -1171,6 +1315,162 @@ mod tests {
             ((got - want) / want).abs() < 1e-9,
             "rust {got} vs python {want}"
         );
+    }
+
+    /// AIC-1747: the sglang 0.5.9–0.5.12-era tables ship `dsa_context_module`
+    /// / `dsa_generation_module` rows ONLY — the collector's `*_skip_indexer`
+    /// split never ran there (0.5.14's gap closed with the AIC-1747 probe
+    /// collection, PR #1556). GLM-5.2 (`full_frac` = 21/78) used to take the
+    /// skip branch and die on the whole sweep. The amortization must degrade
+    /// to all-full, mirroring Python `operations/dsa.py::_effective_full_frac`.
+    /// Anchored to h200/0.5.10 — a table no in-flight data PR touches — so the
+    /// fixture holds in either merge order with #1556.
+    #[test]
+    fn missing_skip_indexer_variant_degrades_amortization_to_all_full() {
+        let db = sglang_db("h200_sxm", "0.5.10", DatabaseMode::Silicon);
+        assert!(
+            !db.dsa.has_context_skip_rows().expect("probe"),
+            "h200/0.5.10 ships full rows only"
+        );
+        assert!(!db.dsa.has_generation_skip_rows().expect("probe"));
+
+        let glm52 = glm52_op(KvCacheQuantMode::Bfloat16, GLM52_FULL_FRAC);
+        let all_full = glm52_op(KvCacheQuantMode::Bfloat16, 1.0);
+
+        let degraded = glm52
+            .query_context(&db, 2, 4096, 512)
+            .expect("context query must not fail on a full-only table");
+        approx_rel_1e9(
+            degraded.latency_ms,
+            all_full
+                .query_context(&db, 2, 4096, 512)
+                .expect("all-full context")
+                .latency_ms,
+        );
+        approx_rel_1e9(degraded.latency_ms, 10.447453783383576);
+
+        let degraded_gen = glm52
+            .query_generation(&db, 2, 4096)
+            .expect("generation query must not fail on a full-only table");
+        approx_rel_1e9(
+            degraded_gen.latency_ms,
+            all_full
+                .query_generation(&db, 2, 4096)
+                .expect("all-full generation")
+                .latency_ms,
+        );
+        approx_rel_1e9(degraded_gen.latency_ms, 0.161296826171875);
+    }
+
+    /// The other half of AIC-1747: where the skip rows DO exist
+    /// (gb200/sglang/0.5.14 — anchored there because no in-flight data PR
+    /// touches that table, so the pins hold in either merge order with
+    /// #1556) the mixed amortization is untouched — the degradation must
+    /// never become the default. Pinned numerically so a silent collapse to
+    /// all-full fails here.
+    #[test]
+    fn present_skip_indexer_variant_keeps_mixed_amortization() {
+        let db = sglang_db("gb200", "0.5.14", DatabaseMode::Silicon);
+        assert!(
+            db.dsa.has_context_skip_rows().expect("probe"),
+            "gb200 ships both variants"
+        );
+        assert!(db.dsa.has_generation_skip_rows().expect("probe"));
+
+        let glm52 = glm52_op(KvCacheQuantMode::Bfloat16, GLM52_FULL_FRAC);
+        let all_full = glm52_op(KvCacheQuantMode::Bfloat16, 1.0);
+
+        let mixed = glm52
+            .query_context(&db, 2, 4096, 512)
+            .expect("context query")
+            .latency_ms;
+        let full_only = all_full
+            .query_context(&db, 2, 4096, 512)
+            .expect("all-full context")
+            .latency_ms;
+        assert!(
+            mixed < full_only,
+            "skip layers must lower the amortized cost: {mixed} vs {full_only}"
+        );
+        // Exact blend identity: w*full + (1-w)*skip (full_frac = 0.0 is the
+        // pure-skip probe). Pinned too, so a data refresh that silently moves
+        // the amortization is caught either way.
+        let skip_only = glm52_op(KvCacheQuantMode::Bfloat16, 0.0)
+            .query_context(&db, 2, 4096, 512)
+            .expect("pure-skip context")
+            .latency_ms;
+        approx_rel_1e9(
+            mixed,
+            GLM52_FULL_FRAC * full_only + (1.0 - GLM52_FULL_FRAC) * skip_only,
+        );
+        approx_rel_1e9(mixed, 6.599784615384616);
+
+        let mixed_gen = glm52
+            .query_generation(&db, 2, 4096)
+            .expect("generation query")
+            .latency_ms;
+        let full_only_gen = all_full
+            .query_generation(&db, 2, 4096)
+            .expect("all-full generation")
+            .latency_ms;
+        assert!(mixed_gen < full_only_gen);
+        approx_rel_1e9(mixed_gen, 0.10149143817608174);
+    }
+
+    /// PR #1540 review follow-up: SOL is analytic and skip-aware directly
+    /// (the context get_sol port zeroes the indexer terms on skip layers), so
+    /// a full-only table must NOT degrade the configured blend there. Without
+    /// the mode gate the degraded op (w -> 1.0) collapses to the all-full SOL;
+    /// with it the blend keeps the cheaper skip layers and stays strictly
+    /// below. Generation SOL is not skip-aware (the indexer term is charged
+    /// unconditionally, matching Python), so its value is blend-neutral —
+    /// asserted only to not fail on the skip-less table.
+    #[test]
+    fn sol_mode_keeps_configured_amortization_on_full_only_table() {
+        let db = sglang_db("h200_sxm", "0.5.10", DatabaseMode::Sol);
+        assert!(
+            !db.dsa.has_context_skip_rows().expect("probe"),
+            "anchor must be full-only"
+        );
+
+        let glm52 = glm52_op(KvCacheQuantMode::Bfloat16, GLM52_FULL_FRAC);
+        let all_full = glm52_op(KvCacheQuantMode::Bfloat16, 1.0);
+
+        let mixed_sol = glm52
+            .query_context(&db, 2, 4096, 512)
+            .expect("SOL context query must not fail on a full-only table")
+            .latency_ms;
+        let full_sol = all_full
+            .query_context(&db, 2, 4096, 512)
+            .expect("all-full SOL context")
+            .latency_ms;
+        assert!(
+            mixed_sol < full_sol,
+            "SOL must keep the configured blend (degradation would collapse it to all-full): {mixed_sol} vs {full_sol}"
+        );
+        // Exact blend identity, same construction as the Silicon-mode mixed
+        // test: full_frac = 0.0 is the pure-skip SOL probe (the gate keeps
+        // configured fractions in SOL, so w stays 0.0 on the skip-less table).
+        let skip_sol = glm52_op(KvCacheQuantMode::Bfloat16, 0.0)
+            .query_context(&db, 2, 4096, 512)
+            .expect("pure-skip SOL context")
+            .latency_ms;
+        approx_rel_1e9(
+            mixed_sol,
+            GLM52_FULL_FRAC * full_sol + (1.0 - GLM52_FULL_FRAC) * skip_sol,
+        );
+
+        // Generation SOL is not skip-aware, so the blend is value-neutral:
+        // the mixed op must equal the all-full op exactly (and not fail).
+        let mixed_gen_sol = glm52
+            .query_generation(&db, 2, 4096)
+            .expect("SOL generation query must not fail on a full-only table")
+            .latency_ms;
+        let full_gen_sol = all_full
+            .query_generation(&db, 2, 4096)
+            .expect("all-full SOL generation")
+            .latency_ms;
+        approx_rel_1e9(mixed_gen_sol, full_gen_sol);
     }
 
     /// Context EMPIRICAL parity on b200_sxm/vllm/0.19.0. Fired variants

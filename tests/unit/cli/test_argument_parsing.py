@@ -51,6 +51,73 @@ class TestCLIArgumentParsing:
         action = next(action for action in cli_parser._actions if action.dest == "mode")
         assert set(action.choices.keys()) == {"default", "exp", "generate", "support", "estimate", "recommend"}
 
+    @pytest.mark.parametrize("mode", ["default", "recommend", "estimate"])
+    def test_free_gpu_memory_fraction_defaults_to_backend_default(self, cli_parser, mode):
+        """``--free-gpu-memory-fraction`` must default to None, not a hardcoded number.
+
+        The backend resolves None to the framework's own default, version-aware for
+        vLLM (``gpu_memory_utilization`` 0.92 on 0.22+). A concrete argparse default
+        is never None and therefore bypasses that resolution entirely: the sweep then
+        packs KV to the hardcoded fraction and recommends decode batch sizes the
+        engine cannot admit (ai-dynamo/aiconfigurator#1396).
+        """
+        subparser_action = next(action for action in cli_parser._actions if action.dest == "mode")
+        mode_parser = subparser_action.choices[mode]
+
+        action = next(a for a in mode_parser._actions if a.dest == "free_gpu_memory_fraction")
+        assert action.default is None
+
+    def test_estimate_accepts_role_specific_memory_fractions(self, cli_parser):
+        args = cli_parser.parse_args(
+            [
+                "estimate",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--system",
+                "h200_sxm",
+                "--prefill-free-gpu-memory-fraction",
+                "0.85",
+                "--decode-free-gpu-memory-fraction",
+                "0.7",
+                "--prefill-max-seq-len",
+                "9000",
+                "--decode-max-seq-len",
+                "11000",
+            ]
+        )
+
+        assert args.prefill_free_gpu_memory_fraction == 0.85
+        assert args.decode_free_gpu_memory_fraction == 0.7
+        assert args.prefill_max_seq_len == 9000
+        assert args.decode_max_seq_len == 11000
+
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [
+            ("--prefill-free-gpu-memory-fraction", "0"),
+            ("--prefill-free-gpu-memory-fraction", "1.01"),
+            ("--prefill-free-gpu-memory-fraction", "nan"),
+            ("--prefill-free-gpu-memory-fraction", "inf"),
+            ("--decode-free-gpu-memory-fraction", "0"),
+            ("--decode-free-gpu-memory-fraction", "1.01"),
+            ("--decode-free-gpu-memory-fraction", "nan"),
+            ("--decode-free-gpu-memory-fraction", "inf"),
+        ],
+    )
+    def test_estimate_rejects_invalid_role_specific_memory_fractions(self, cli_parser, option, value):
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(
+                [
+                    "estimate",
+                    "--model-path",
+                    "Qwen/Qwen3-32B",
+                    "--system",
+                    "h200_sxm",
+                    option,
+                    value,
+                ]
+            )
+
     def test_generate_mode_required_args(self, cli_parser):
         """Test that generate mode requires the correct arguments."""
         subparsers = [action for action in cli_parser._actions if action.dest == "mode"]

@@ -7,6 +7,7 @@ Unit tests for model configuration functionality.
 Tests model validation, default models, and model-specific configurations.
 """
 
+import json
 from collections import Counter
 from typing import ClassVar
 from unittest.mock import patch
@@ -51,6 +52,7 @@ class TestSupportedModels:
             "sgl-project/DeepSeek-V4-Pro-FP8",
             "zai-org/GLM-5-FP8",
             "nvidia/GLM-5-NVFP4",
+            "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
             "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
             "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
             "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
@@ -96,6 +98,7 @@ class TestSupportedModels:
             ("Qwen/Qwen3-VL-235B-A22B-Instruct", True),
             # NemotronH: check hybrid_override_pattern for 'E' (MoE layers)
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' in pattern
+            ("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8", True),  # Has 'E' in pattern
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", True),  # Has 'E' in derived pattern
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8", True),  # Has 'E' in derived pattern
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4", True),  # Has 'E' in derived pattern
@@ -262,6 +265,7 @@ class TestHFModelSupport:
             ("nvidia/GLM-5-NVFP4", "DEEPSEEKV32"),
             ("Qwen/Qwen3-30B-A3B", "MOE"),
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "NEMOTRONH"),
+            ("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8", "NEMOTRONH"),
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "NEMOTRONH"),
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8", "NEMOTRONH"),
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4", "NEMOTRONH"),
@@ -293,6 +297,7 @@ class TestHFModelSupport:
             ("Qwen/Qwen3-VL-235B-A22B-Instruct", True),
             # NemotronH: is_moe depends on 'E' in hybrid_override_pattern
             ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", True),  # Has 'E' (MoE layers)
+            ("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8", True),  # Has 'E' (MoE layers)
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", True),  # Has 'E' in derived pattern
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8", True),  # Has 'E' in derived pattern
             ("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4", True),  # Has 'E' in derived pattern
@@ -330,15 +335,35 @@ class TestHFModelSupport:
         assert extra.mamba_head_dim == 64
         assert extra.moe_shared_expert_intermediate_size == 10240
 
+    def test_nemotron_super_fp8_config_shape(self):
+        """Test the cached Super FP8 config used by native estimation."""
+        model_info = get_model_config_from_model_path("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8")
+
+        assert model_info["architecture"] == "NemotronHForCausalLM"
+        assert model_info["layers"] == 88
+        assert model_info["hidden_size"] == 4096
+        assert model_info["inter_size"] == 2688
+        assert model_info["topk"] == 22
+        assert model_info["num_experts"] == 512
+
     @pytest.mark.parametrize(
-        "hf_id,expected_gemm_quant,expected_moe_quant,expected_kvcache_quant,expected_fmha_quant",
+        "hf_id,expected_gemm_quant,expected_moe_quant,expected_kvcache_quant,expected_fmha_quant,expected_block_counts",
         [
+            (
+                "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
+                common.GEMMQuantMode.fp8_static,
+                common.MoEQuantMode.fp8,
+                common.KVCacheQuantMode.fp8,
+                common.FMHAQuantMode.fp8,
+                (40, 40, 8),
+            ),
             (
                 "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
                 common.GEMMQuantMode.bfloat16,
                 common.MoEQuantMode.bfloat16,
                 common.KVCacheQuantMode.bfloat16,
                 common.FMHAQuantMode.bfloat16,
+                (48, 48, 12),
             ),
             (
                 "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8",
@@ -346,6 +371,7 @@ class TestHFModelSupport:
                 common.MoEQuantMode.fp8,
                 common.KVCacheQuantMode.fp8,
                 common.FMHAQuantMode.fp8,
+                (48, 48, 12),
             ),
             (
                 "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
@@ -353,18 +379,20 @@ class TestHFModelSupport:
                 common.MoEQuantMode.nvfp4,
                 common.KVCacheQuantMode.fp8,
                 common.FMHAQuantMode.fp8,
+                (48, 48, 12),
             ),
         ],
     )
-    def test_nemotron_ultra_quant_defaults(
+    def test_nemotron_quant_defaults(
         self,
         hf_id,
         expected_gemm_quant,
         expected_moe_quant,
         expected_kvcache_quant,
         expected_fmha_quant,
+        expected_block_counts,
     ):
-        """Test official Nemotron 3 Ultra precision-specific quant defaults."""
+        """Test official Nemotron 3 precision-specific quant defaults."""
         model_config = config.ModelConfig(
             tp_size=8,
             pp_size=1,
@@ -379,9 +407,10 @@ class TestHFModelSupport:
         assert model_config.moe_quant_mode == expected_moe_quant
         assert model_config.kvcache_quant_mode == expected_kvcache_quant
         assert model_config.fmha_quant_mode == expected_fmha_quant
-        assert sum(op._scale_factor for op in model.context_ops if op._name == "context_mamba_norm") == 48
-        assert sum(op._scale_factor for op in model.context_ops if op._name == "context_moe_norm") == 48
-        assert sum(op._scale_factor for op in model.context_ops if op._name == "context_attn_norm") == 12
+        mamba_blocks, moe_blocks, attention_blocks = expected_block_counts
+        assert sum(op._scale_factor for op in model.context_ops if op._name == "context_mamba_norm") == mamba_blocks
+        assert sum(op._scale_factor for op in model.context_ops if op._name == "context_moe_norm") == moe_blocks
+        assert sum(op._scale_factor for op in model.context_ops if op._name == "context_attn_norm") == attention_blocks
 
     @pytest.mark.parametrize(
         "hf_id,expected_layers,expected_hidden,expected_index_topk,expected_ratio_counts,expected_moe_quant",
@@ -518,12 +547,14 @@ class TestHFModelSupport:
         generation_down = next(op for op in generation_overlap._group_b if op._name == "generation_shared_ffn2_gemm")
 
         assert context_gate._n == 2 * local_inter_size
-        assert context_act._dim_in == 2 * local_inter_size
-        assert context_act._dim_out == local_inter_size
+        # ElementWise folds dims to bytes_per_token = (dim_in + dim_out) * 2
+        # on the wire; dim_in = 2*local_inter, dim_out = local_inter.
+        ctx_act_spec = json.loads(context_act._spec_json())["Elementwise"]
+        assert ctx_act_spec["bytes_per_token"] == 3 * local_inter_size * 2
         assert context_down._k == local_inter_size
         assert generation_gate._n == 2 * local_inter_size
-        assert generation_act._dim_in == 2 * local_inter_size
-        assert generation_act._dim_out == local_inter_size
+        gen_act_spec = json.loads(generation_act._spec_json())["Elementwise"]
+        assert gen_act_spec["bytes_per_token"] == 3 * local_inter_size * 2
         assert generation_down._k == local_inter_size
 
     def test_deepseek_v4_sglang_megamoe_backend_uses_megamoe_module(self):
@@ -566,15 +597,26 @@ class TestHFModelSupport:
         assert "context_moe_pre_dispatch" in context_names
         assert "context_moe_post_dispatch" in context_names
 
-    def test_deepseek_v4_megamoe_module_query_uses_local_rank_tokens(self):
-        class FakeDatabase:
-            system_spec: ClassVar[dict[str, dict[str, int]]] = {"gpu": {"sm_version": 100}}
+    def test_deepseek_v4_megamoe_module_query_routes_local_rank_tokens_through_engine(self, monkeypatch):
+        """The megamoe op's query shim hands the engine LOCAL-rank tokens
+        (x is NOT globalized by dp) and a twin whose ctor already normalized
+        the workload distribution (uniform -> balanced) and pinned the random
+        source policy — the rebinding the retired Python query body used to
+        do per call. Restubbed at the #1357 PR-5 seam
+        (``engine._evaluate_single_op``)."""
+        from aiconfigurator_core.sdk import engine as engine_module
 
-            def query_dsv4_megamoe_module(self, **kwargs):
-                self.kwargs = kwargs
-                return PerformanceResult(2.0, energy=3.0)
+        recorded = {}
 
-        database = FakeDatabase()
+        def fake_evaluate_single_op(database, op, **eval_kwargs):
+            recorded["database"] = database
+            recorded["op"] = op
+            recorded["eval_kwargs"] = eval_kwargs
+            return PerformanceResult(2.0, energy=3.0, source="silicon")
+
+        monkeypatch.setattr(engine_module, "_evaluate_single_op", fake_evaluate_single_op)
+
+        database = object()  # the stubbed seam never touches it
         op = ops.DeepSeekV4MegaMoEModule(
             "test_megamoe",
             2,
@@ -588,17 +630,25 @@ class TestHFModelSupport:
             workload_distribution="uniform",
         )
 
-        result = op.query(database, x=16)
+        result = op._engine_query(database, x=16)
 
-        assert float(result) == 4.0
-        assert result.energy == 6.0
-        assert database.kwargs["num_tokens"] == 16
-        assert database.kwargs["workload_distribution"] == "balanced"
-        assert database.kwargs["source_policy"] == "random"
+        # The engine owns scale-factor application now; the shim returns the
+        # engine's value untouched.
+        assert float(result) == 2.0
+        assert result.energy == 3.0
+        assert recorded["database"] is database
+        assert recorded["eval_kwargs"]["x"] == 16  # local-rank tokens, no dp scaling
+        twin = recorded["op"]
+        assert twin is op
+        assert twin._scale_factor == 2
+        assert twin._workload_distribution == "balanced"
+        assert twin._source_policy == "random"
 
     def test_deepseek_v4_megamoe_module_rejects_non_blackwell_database(self):
-        class FakeDatabase:
-            system_spec: ClassVar[dict[str, dict[str, int]]] = {"gpu": {"sm_version": 90}}
+        """The Blackwell-only guard moved to the compiled engine
+        (operators/dsv4.rs); it must still surface as a ValueError through the
+        query shim on a real pre-Blackwell (sm90) database."""
+        from aiconfigurator.sdk.perf_database import get_database
 
         op = ops.DeepSeekV4MegaMoEModule(
             "test_megamoe",
@@ -614,7 +664,7 @@ class TestHFModelSupport:
         )
 
         with pytest.raises(ValueError, match="Blackwell"):
-            op.query(FakeDatabase(), x=16)
+            op._engine_query(get_database("h200_sxm", "sglang", "0.5.6.post2"), x=16)
 
     def test_deepseek_v32_kvcache_bytes_include_indexer_cache(self):
         model_config = config.ModelConfig(
@@ -773,6 +823,144 @@ class TestKVCacheElementsPerToken:
         )
         assert gqa_elems != model.get_kvcache_elements_per_token()
         assert model.get_kvcache_elements_per_token() == model._num_layers * (512 + 64)
+
+
+class TestGptOssHybridKVCache:
+    """gpt-oss KV-cache memory must honor its hybrid SWA/global layout."""
+
+    MODEL = "openai/gpt-oss-120b"
+    LAYERS = 36
+    KV_HEADS = 8
+    HEAD_SIZE = 64
+    WINDOW = 128
+
+    @classmethod
+    def _expected_bytes(cls, seq_len: int, *, tp_size: int = 1, bytes_per_elem: int = 1) -> float:
+        kv_heads_per_gpu = (cls.KV_HEADS + tp_size - 1) // tp_size
+        per_layer_token = kv_heads_per_gpu * cls.HEAD_SIZE * 2 * bytes_per_elem
+        num_swa = cls.LAYERS // 2
+        num_global = cls.LAYERS - num_swa
+        return per_layer_token * (num_swa * min(seq_len, cls.WINDOW) + num_global * seq_len)
+
+    @classmethod
+    def _model(
+        cls,
+        *,
+        tp_size: int = 1,
+        kvcache_quant_mode: common.KVCacheQuantMode = common.KVCacheQuantMode.fp8,
+        nextn: int = 0,
+    ):
+        model_config = config.ModelConfig(tp_size=tp_size, moe_tp_size=tp_size, moe_ep_size=1)
+        model_config.kvcache_quant_mode = kvcache_quant_mode
+        model_config.nextn = nextn
+        return get_model(cls.MODEL, model_config, backend_name="vllm")
+
+    def test_long_sequence_uses_hybrid_layout(self):
+        model = self._model()
+        seq_len = 65_936
+        got = model.get_kvcache_bytes_per_sequence(seq_len)
+        assert got == pytest.approx(self._expected_bytes(seq_len), rel=1e-9)
+
+        all_global = seq_len * self.LAYERS * 2 * self.KV_HEADS * self.HEAD_SIZE
+        assert got < 0.52 * all_global
+
+    @pytest.mark.parametrize(
+        ("tp_size", "kvcache_quant_mode"),
+        [
+            (1, common.KVCacheQuantMode.bfloat16),
+            (16, common.KVCacheQuantMode.fp8),
+        ],
+    )
+    def test_storage_width_and_tp_partitioning(
+        self,
+        tp_size: int,
+        kvcache_quant_mode: common.KVCacheQuantMode,
+    ):
+        model = self._model(tp_size=tp_size, kvcache_quant_mode=kvcache_quant_mode)
+        seq_len = 50_000
+        got = model.get_kvcache_bytes_per_sequence(seq_len)
+        assert got == pytest.approx(
+            self._expected_bytes(
+                seq_len,
+                tp_size=tp_size,
+                bytes_per_elem=kvcache_quant_mode.value.memory,
+            ),
+            rel=1e-9,
+        )
+
+    def test_below_window_matches_linear_layout(self):
+        model = self._model()
+        seq_len = 100
+        linear = seq_len * self.LAYERS * 2 * self.KV_HEADS * self.HEAD_SIZE
+        assert model.get_kvcache_bytes_per_sequence(seq_len) == pytest.approx(linear, rel=1e-9)
+
+        per_layer_token = self.KV_HEADS * self.HEAD_SIZE * 2
+        at_window = model.get_kvcache_bytes_per_sequence(self.WINDOW)
+        assert at_window == pytest.approx(self.WINDOW * self.LAYERS * per_layer_token, rel=1e-9)
+
+        above_window = model.get_kvcache_bytes_per_sequence(self.WINDOW + 1)
+        num_global = self.LAYERS - self.LAYERS // 2
+        assert above_window == pytest.approx(at_window + num_global * per_layer_token, rel=1e-9)
+
+    def test_max_tokens_inverts_piecewise_curve(self):
+        model = self._model()
+        seq_len = 50_000
+        budget = model.get_kvcache_bytes_per_sequence(seq_len)
+        max_tokens = model.get_kvcache_max_tokens(budget)
+        assert model.get_kvcache_bytes_per_sequence(max_tokens) <= budget
+        assert model.get_kvcache_bytes_per_sequence(max_tokens + 1) > budget
+
+    @pytest.mark.parametrize("nextn", [0, 1, 3], ids=("spec-off", "nextn1", "nextn3"))
+    def test_kv_bytes_is_nextn_independent(self, nextn: int):
+        """Speculative decoding must not re-linearize the window-capped KV curve.
+
+        Draft tokens are a per-step compute cost, not extra resident KV, so the
+        hybrid-SWA byte count is identical with spec decode on and off.
+        """
+        model = self._model(nextn=nextn)
+        seq_len = 65_936  # 65536 ISL + 400 OSL, the 64k agentic recipe shape
+        assert model.get_kvcache_bytes_per_sequence(seq_len) == pytest.approx(self._expected_bytes(seq_len), rel=1e-9)
+
+    def test_backend_memory_kv_stays_window_aware_under_spec_decode(self):
+        """The breakdown's ``kvcache`` (``base_backend._get_memory_usage``, the sole
+        KV sizing site) must follow the window-capped curve with ``nextn > 0``.
+
+        Pins the recipe operating point: batch 48 at ISL 65536 / OSL 400, fp8 KV,
+        TP1 -> 54.4 GiB, not the ~2x all-layers-full-context value that false-OOMs
+        the shipped 8xB200 agg recipe.
+        """
+        from types import SimpleNamespace
+
+        from aiconfigurator.sdk.backends.factory import get_backend
+
+        batch_size, isl, osl = 48, 65_536, 400
+        seq_len = isl + osl
+        model = self._model(nextn=3)
+        database = SimpleNamespace(system_spec={"misc": {"nccl_mem": {1: 0}, "other_mem": 0}})
+
+        memory = get_backend("vllm")._get_memory_usage(
+            model, database, batch_size=batch_size, beam_width=1, isl=isl, osl=osl
+        )
+
+        expected_gib = batch_size * self._expected_bytes(seq_len) / (1 << 30)
+        assert memory["kvcache"] == pytest.approx(expected_gib, rel=1e-9)
+        assert memory["kvcache"] == pytest.approx(54.4, abs=0.1)
+        linear_gib = batch_size * seq_len * self.LAYERS * 2 * self.KV_HEADS * self.HEAD_SIZE / (1 << 30)
+        assert memory["kvcache"] < 0.52 * linear_gib
+
+    def test_kv_bytes_scale_linearly_with_kvcache_dtype(self):
+        """Guard against misreading a dtype difference as a layout regression.
+
+        The window-aware bf16 figure (2.268 GiB/seq at 65,936) is within 0.2% of
+        the *linear* fp8 figure (2.264 GiB/seq) that the hybrid override removed,
+        so the two are easy to confuse when reading a CLI breakdown. Pin that the
+        only difference between the two dtypes is the element size.
+        """
+        seq_len = 65_936
+        fp8 = self._model().get_kvcache_bytes_per_sequence(seq_len)
+        bf16 = self._model(kvcache_quant_mode=common.KVCacheQuantMode.bfloat16).get_kvcache_bytes_per_sequence(seq_len)
+        assert bf16 == pytest.approx(2 * fp8, rel=1e-9)
+        assert bf16 == pytest.approx(self._expected_bytes(seq_len, bytes_per_elem=2), rel=1e-9)
 
 
 class TestGetKvcacheMaxTokens:
@@ -1030,13 +1218,22 @@ class TestMOEModelFP8BlockQuantizationValidation:
 
 
 class TestGetModelMOESGLangDispatch:
-    """Test get_model() dispatch logic for MOE family with SGLang backend.
+    """get_model() for the MOE family: one class, two MoE-block regimes.
 
-    Dispatch keys on moe_backend (communication path), not enable_wideep (scale intent).
+    ``SGLangEPMOEModel`` is gone -- ``MOEModel`` now emits the large-EP block
+    when the enumerator set ``ModelConfig.moe_comm_backend``. The A6 name
+    mapping is legacy ``{p}_moe_pre_dispatch`` == ``{p}_moe_dispatch`` +
+    ``{p}_moe_combine`` (one legacy op rode a summed deepep table row).
     """
 
-    def test_sglang_moe_deepep_returns_sglang_ep_moe_model(self):
-        """DeepEP backend (inter-node, enable_wideep=True) → SGLangEPMOEModel."""
+    LARGE_EP_COMM: ClassVar[dict[str, str]] = {"context": "deepep_ht", "generation": "deepep_ll"}
+
+    @staticmethod
+    def _moe_block_names(model, prefix):
+        return [op._name for op in getattr(model, f"{prefix}_ops") if "moe" in op._name or "router" in op._name]
+
+    def test_sglang_moe_large_ep_emits_the_ep_block(self):
+        """DeepEP comm backend (inter-node) -> MoEAllToAll/MoEExpertCompute block."""
         model_config = config.ModelConfig(
             tp_size=1,
             pp_size=1,
@@ -1045,14 +1242,23 @@ class TestGetModelMOESGLangDispatch:
             moe_tp_size=1,
             moe_ep_size=8,
             attention_dp_size=8,
-            enable_wideep=True,
             moe_backend="deepep_moe",
+            moe_comm_backend=dict(self.LARGE_EP_COMM),
+            num_gpus_per_node=8,
         )
         model = models.get_model("Qwen/Qwen3-235B-A22B", model_config, "sglang")
-        assert isinstance(model, models.SGLangEPMOEModel)
+        assert isinstance(model, models.MOEModel)
+        assert self._moe_block_names(model, "context") == [
+            "context_router_gemm",
+            "context_moe_dispatch",
+            "context_moe",
+            "context_moe_combine",
+        ]
+        assert isinstance(model.context_ops[7], ops.MoEAllToAll)
+        assert isinstance(model.context_ops[8], ops.MoEExpertCompute)
 
-    def test_sglang_moe_deepep_intranode_returns_sglang_ep_moe_model(self):
-        """DeepEP intra-node (enable_wideep=False, moe_backend=deepep_moe) → SGLangEPMOEModel."""
+    def test_sglang_moe_large_ep_intranode_emits_the_ep_block(self):
+        """Intra-node large EP (ep=4) uses the same block; only the span differs."""
         model_config = config.ModelConfig(
             tp_size=1,
             pp_size=1,
@@ -1061,14 +1267,21 @@ class TestGetModelMOESGLangDispatch:
             moe_tp_size=1,
             moe_ep_size=4,
             attention_dp_size=4,
-            enable_wideep=False,
             moe_backend="deepep_moe",
+            moe_comm_backend=dict(self.LARGE_EP_COMM),
+            num_gpus_per_node=8,
         )
         model = models.get_model("Qwen/Qwen3-235B-A22B", model_config, "sglang")
-        assert isinstance(model, models.SGLangEPMOEModel)
+        assert isinstance(model, models.MOEModel)
+        assert self._moe_block_names(model, "generation") == [
+            "generation_router_gemm",
+            "generation_moe_dispatch",
+            "generation_moe",
+            "generation_moe_combine",
+        ]
 
-    def test_sglang_moe_no_deepep_returns_moe_model(self):
-        """Standard comm (no moe_backend) → MOEModel."""
+    def test_sglang_moe_no_comm_backend_stays_fused(self):
+        """No moe_comm_backend (even with moe_backend=deepep_moe) -> fused block."""
         model_config = config.ModelConfig(
             tp_size=2,
             pp_size=1,
@@ -1077,14 +1290,19 @@ class TestGetModelMOESGLangDispatch:
             moe_tp_size=1,
             moe_ep_size=2,
             attention_dp_size=1,
-            enable_wideep=False,
+            moe_backend="deepep_moe",
         )
         model = models.get_model("Qwen/Qwen3-235B-A22B", model_config, "sglang")
         assert isinstance(model, models.MOEModel)
-        assert not isinstance(model, models.SGLangEPMOEModel)
+        assert self._moe_block_names(model, "context") == [
+            "context_router_gemm",
+            "context_moe_pre_dispatch",
+            "context_moe",
+            "context_moe_post_dispatch",
+        ]
 
     def test_trtllm_moe_returns_moe_model(self):
-        """trtllm always → MOEModel (moe_backend irrelevant for non-sglang)."""
+        """trtllm without a comm backend -> the fused MOEModel block."""
         model_config = config.ModelConfig(
             tp_size=2,
             pp_size=1,
@@ -1093,11 +1311,10 @@ class TestGetModelMOESGLangDispatch:
             moe_tp_size=2,
             moe_ep_size=1,
             attention_dp_size=1,
-            enable_wideep=True,
         )
         model = models.get_model("Qwen/Qwen3-235B-A22B", model_config, "trtllm")
         assert isinstance(model, models.MOEModel)
-        assert not isinstance(model, models.SGLangEPMOEModel)
+        assert "context_moe_post_dispatch" in [op._name for op in model.context_ops]
 
 
 class TestDeepSeekTPAllReduce:
@@ -1593,6 +1810,21 @@ class TestAttentionProjectionExclusions:
 class TestBundledModelConfigsOffline:
     """Bundled configs must load without network (P2: DefaultHFModels registration)."""
 
+    def test_step3p7_fp8_loads_from_bundle(self, monkeypatch):
+        import aiconfigurator.sdk.utils as sdk_utils
+
+        def _no_network(*a, **k):
+            raise AssertionError("network path reached")
+
+        monkeypatch.setattr(sdk_utils, "_download_hf_config", _no_network, raising=False)
+        sdk_utils.get_model_config_from_model_path.cache_clear()
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+        cfg = sdk_utils.get_model_config_from_model_path("stepfun-ai/Step-3.7-Flash-FP8")
+        assert cfg["architecture"] == "Step3p7FlashForCausalLM"
+        assert cfg["raw_config"]["quantization_config"]["quant_method"] == "fp8"
+        sdk_utils.get_model_config_from_model_path.cache_clear()
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+
     def test_dsv32_nvfp4_loads_from_bundle(self, monkeypatch):
         import aiconfigurator.sdk.utils as sdk_utils
 
@@ -1608,9 +1840,11 @@ class TestBundledModelConfigsOffline:
 
 
 class TestWideEPAttentionExclusions:
-    """TRT-LLM WideEP must inherit the checkpoint's per-projection attention
-    dtypes (reviewer finding: exclusions were not threaded, so q/kv projection
-    perf rows and weights used global NVFP4 — ~5.7 GiB/rank undercount)."""
+    """TRT-LLM large-EP must inherit the checkpoint's per-projection attention
+    dtypes (reviewer finding on the retired WideEP classes: exclusions were
+    not threaded, so q/kv projection perf rows and weights used global NVFP4 —
+    ~5.7 GiB/rank undercount). The legacy ``enable_wideep`` flag is gone;
+    the large-EP regime is selected by ``ModelConfig.moe_comm_backend``."""
 
     @staticmethod
     def _wideep_ops(hf_id: str):
@@ -1624,7 +1858,8 @@ class TestWideEPAttentionExclusions:
             moe_quant_mode=common.MoEQuantMode.nvfp4,
             kvcache_quant_mode=common.KVCacheQuantMode.fp8,
             fmha_quant_mode=common.FMHAQuantMode.bfloat16,
-            enable_wideep=True,
+            moe_comm_backend={"context": "nvlink_two_sided", "generation": "nvlink_two_sided"},
+            num_gpus_per_node=4,
         )
         model = models.get_model(hf_id, model_config, backend_name="trtllm")
         return {getattr(op, "_name", ""): op for op in model.context_ops + model.generation_ops}
@@ -1640,3 +1875,75 @@ class TestWideEPAttentionExclusions:
         assert by_name["generation_proj_gemm"]._quant_mode == common.GEMMQuantMode.nvfp4
         # fused q_a+kv_a downscale: BF16 iff both groups excluded.
         assert by_name["context_downscale_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+
+
+class TestDSV4NVFP4QuantResolution:
+    """AIC-1749: quant resolution for the nvidia/DeepSeek-V4-*-NVFP4 exports.
+
+    Their ModelOpt sidecars name the expert stack as bare module paths
+    (``layers.N.ffn.experts`` — no trailing tensor segment), which the
+    routing-expert classifier used to miss, flooding ``gemm_algos`` with
+    nvfp4 and driving every sweep into the phantom
+    ``ModuleKey { gemm_quant: "nvfp4" }`` lookup. The checkpoints were also
+    absent from ``DEEPSEEK_V4_HF_MODELS``, so ``get_model`` bypassed the
+    packaged configs and re-downloaded the HF ``quantization_config`` (whose
+    blanket ``Linear`` config-group target re-created the same phantom).
+    """
+
+    @pytest.mark.parametrize(
+        ("target", "expected"),
+        [
+            # The DSV4 sidecar shape: bare module path, no trailing segment.
+            ("layers.0.ffn.experts", True),
+            # Tensor under the expert stack (the historical shape).
+            ("model.layers.3.mlp.experts.7.down_proj", True),
+            ("routing_expert_gemm", True),
+            # Shared experts are dense-path, never routed.
+            ("layers.0.ffn.shared_experts", False),
+            ("layers.0.ffn.shared_experts.0.up_proj", False),
+            ("layers.0.self_attn.q_proj", False),
+            # Suffix precision: "experts" embedded in a longer leaf name is
+            # not the expert module.
+            ("layers.0.ffn.experts_gate", False),
+        ],
+    )
+    def test_routing_expert_target_classification(self, target: str, expected: bool):
+        from aiconfigurator_core.sdk.models.helpers import _is_routing_expert_target
+
+        assert _is_routing_expert_target(target) is expected
+
+    def test_nvfp4_exports_are_registered_for_offline_configs(self):
+        for hf_id in ("nvidia/DeepSeek-V4-Flash-NVFP4", "nvidia/DeepSeek-V4-Pro-NVFP4"):
+            assert hf_id in common.DEEPSEEK_V4_HF_MODELS
+            assert hf_id in common.DefaultHFModels
+            # Derived roster: they join the daily support matrix (the AIC-1743
+            # §3 coverage gap) unless explicitly retired.
+            assert hf_id in common.SupportMatrixHFModels
+
+    @pytest.mark.parametrize("hf_id", ["nvidia/DeepSeek-V4-Flash-NVFP4", "nvidia/DeepSeek-V4-Pro-NVFP4"])
+    def test_nvfp4_export_resolves_offline_without_phantom_gemm_quant(self, hf_id: str, monkeypatch):
+        """The packaged sidecar preserves the base checkpoint's FP8-block
+        non-expert lane and quantizes the routed experts as NVFP4. The explicit
+        sidecar MoE mode must win over the native DeepSeek-V4 ``expert_dtype``
+        fallback so the SDK key matches the Collector artifact contract.
+        """
+        import aiconfigurator.sdk.utils as sdk_utils
+        from aiconfigurator_core.sdk.models.helpers import _get_model_info
+
+        def _no_network(*args, **kwargs):
+            raise AssertionError("network path reached")
+
+        monkeypatch.setattr(sdk_utils, "_download_hf_config", _no_network)
+        sdk_utils.get_model_config_from_model_path.cache_clear()
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+        _get_model_info.cache_clear()
+        try:
+            model_config = config.ModelConfig(tp_size=1, pp_size=1, attention_dp_size=8, moe_tp_size=1, moe_ep_size=8)
+            model = models.get_model(hf_id, model_config, backend_name="vllm")
+            assert model.config.gemm_quant_mode == common.GEMMQuantMode.fp8_block
+            assert model.config.moe_quant_mode == common.MoEQuantMode.nvfp4
+            assert model.config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+        finally:
+            sdk_utils.get_model_config_from_model_path.cache_clear()
+            sdk_utils._load_model_config_from_model_path.cache_clear()
+            _get_model_info.cache_clear()

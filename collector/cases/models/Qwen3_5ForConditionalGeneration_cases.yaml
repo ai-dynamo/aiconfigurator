@@ -10,6 +10,7 @@ model_paths:
   - Qwen/Qwen3.5-4B
   - Qwen/Qwen3.5-9B
   - Qwen/Qwen3.5-27B
+  - nvidia/Qwen3.6-27B-NVFP4
 include_base: true
 base_ops:
   - attention_context
@@ -42,12 +43,33 @@ model_case_values:
       tensor_parallel_sizes: [1, 2, 4, 8, 16]
     - id: qwen35_27b_attention
       model_path: Qwen/Qwen3.5-27B
+      model_aliases:
+        - nvidia/Qwen3.6-27B-NVFP4
       num_attention_heads: 24
       num_key_value_heads: 4
       head_dim: 256
       window_size: 0
       sglang_backends: {90: fa3, 100: triton, 103: triton, 120: flashinfer}
       tensor_parallel_sizes: [1, 2, 4, 8]
+  gemm:
+    # GDN in_proj_ba widths (2 * num_v_heads / tp) off the base feature grid.
+    - model_path: Qwen/Qwen3.5-0.8B
+      output_feature_sizes: [4, 8, 16]
+      input_feature_sizes: [1024]
+    - model_path: Qwen/Qwen3.5-2B
+      output_feature_sizes: [4, 8, 16]
+      input_feature_sizes: [2048]
+    - model_path: Qwen/Qwen3.5-4B
+      output_feature_sizes: [4, 8, 16]
+      input_feature_sizes: [2560]
+    - model_path: Qwen/Qwen3.5-9B
+      output_feature_sizes: [4, 8, 16]
+      input_feature_sizes: [4096]
+    - model_path: Qwen/Qwen3.5-27B
+      model_aliases:
+        - nvidia/Qwen3.6-27B-NVFP4
+      output_feature_sizes: [12, 24, 48, 96]
+      input_feature_sizes: [5120]
   gdn:
     - model_path: Qwen/Qwen3.5-0.8B
       d_model: 1024
@@ -56,6 +78,7 @@ model_case_values:
       head_k_dim: 128
       num_v_heads: 16
       head_v_dim: 128
+      tensor_parallel_sizes: [1, 2, 4, 8]
     - model_path: Qwen/Qwen3.5-2B
       d_model: 2048
       d_conv: 4
@@ -63,6 +86,7 @@ model_case_values:
       head_k_dim: 128
       num_v_heads: 16
       head_v_dim: 128
+      tensor_parallel_sizes: [1, 2, 4, 8]
     - model_path: Qwen/Qwen3.5-4B
       d_model: 2560
       d_conv: 4
@@ -70,6 +94,7 @@ model_case_values:
       head_k_dim: 128
       num_v_heads: 32
       head_v_dim: 128
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
     - model_path: Qwen/Qwen3.5-9B
       d_model: 4096
       d_conv: 4
@@ -77,13 +102,17 @@ model_case_values:
       head_k_dim: 128
       num_v_heads: 32
       head_v_dim: 128
+      tensor_parallel_sizes: [1, 2, 4, 8, 16]
     - model_path: Qwen/Qwen3.5-27B
+      model_aliases:
+        - nvidia/Qwen3.6-27B-NVFP4
       d_model: 5120
       d_conv: 4
       num_k_heads: 16
       head_k_dim: 128
       num_v_heads: 48
       head_v_dim: 128
+      tensor_parallel_sizes: [1, 2, 4, 8]
 
 all_frameworks_op_cases:
   gdn:

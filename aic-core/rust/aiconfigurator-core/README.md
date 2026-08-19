@@ -20,14 +20,16 @@ not a native binary. Python builds the spec as JSON, it is re-encoded to bincode
 bytes as the Python → Rust wire format, and the Rust `Engine` deserializes and
 interprets it — closer to a compiled query plan than a compiled executable. The
 one-time compile just resolves the model into a fixed, serializable op list so
-the hot path never re-walks the model or re-enters Python.
+the hot path never re-walks the model or re-enters Python. The wire format is
+versioned: both sides carry `ENGINE_SPEC_SCHEMA_VERSION` (currently 11, bumped
+from 10 when the wideEP MoE variants were removed and the native large-EP
+variants were appended), the wheel and crate move in
+lockstep, and the Rust `Engine` rejects a spec with any other version.
 
-- `AicEngineBuilder` is the preferred Rust → Python (`compile_engine`) → Rust
-  entry point for callers in other crates. The flat `build_aic_engine(...)`
-  function remains source-compatible through the 0.10 release for existing
-  consumers and is planned for removal in version 0.11.0. Both normalize into
-  one private build request and embed a Python interpreter only for the one-time
-  compile step.
+- `AicEngineBuilder` is the Rust → Python (`compile_engine`) → Rust entry point
+  for callers in other crates. It normalizes configuration into one private
+  build request and embeds a Python interpreter only for the one-time compile
+  step.
 - The returned `AicEngine` exposes GIL-free inherent methods
   (`prefill_latency_ms`, `decode_latency_ms`) for the pure-Rust hot path, plus
   `#[pymethods]` wrappers and an FPM-aggregate `estimate_forward_pass_time_ms`
@@ -46,8 +48,11 @@ aiconfigurator-core = { version = "0.11.0", features = ["embed-python"] }
 
 Applications that embed Python in an existing host may initialize the
 interpreter themselves instead. In either case, the matching
-`aiconfigurator-core` Python wheel and its bundled data must be available to the
-embedded interpreter.
+`aiconfigurator_core` Python package and its bundled data must be available to
+the embedded interpreter. Standard deployments should install the upper
+`aiconfigurator` distribution, which supplies that package: bundled in 0.10 and
+through a pinned core-wheel dependency in split-package releases. Core-only
+consumers may install `aiconfigurator-core` directly.
 
 ```rust,no_run
 use aiconfigurator_core::{AicEngineBuilder, BackendKind};
@@ -109,10 +114,17 @@ so the wire JSON stays the flat object Python emits.
 - MLA attention (context + generation) and DeepSeek-family models, including MTP
   speculative decoding (`nextn`).
 - Context parallelism: dense GQA/MoE (seq-split token-major ops + zigzag
-  `ContextAttention`) and MLA prefill (zigzag `ContextMLA`).
+  `ContextAttention`), MLA prefill (zigzag `ContextMLA`), and the DSV4-Flash
+  CSA CP slice (issue #1498): the CP attention composition, seq-split-aware
+  mHC ops, and the reuse-aware CSA `top_last` loader (approved `reuse.yaml`
+  donors serve the CP rows on both engines).
 - MoE attention-DP token scaling (SGLang all-gathers DP-sharded tokens before
   the MoE) and DSA generation boundary-utilization extrapolation, both matched
   to Python.
+- Large-EP MoE: `MoeAllToAll` (cross-node all-to-all comm) and `MoeExpertCompute` (grouped
+  expert compute) over the unified `moe_a2a_perf` / `moe_expert_compute_perf` tables, with
+  the legacy on-disk layouts (deepep normal/low-latency, trtllm alltoall,
+  sglang/trtllm wideep) served through per-layout adapters.
 - Shared-layer perf-data sources: sibling / cross-version rows are resolved in
   Python (`sdk/engine.py::_compute_perf_db_sources`) and carried on the spec as
   `perf_db_sources`, so the Rust core inherits the same silicon rows Python
@@ -122,7 +134,8 @@ so the wire JSON stays the flat object Python emits.
 - AIC-style Hugging Face model config JSON files.
 - AIC perf `.parquet` files (`gemm_perf`, `context_attention_perf`,
   `generation_attention_perf`, `moe_perf`, `mla_context_module_perf`,
-  `mla_generation_module_perf`, `dsa_*_module_perf`, communication tables, …),
+  `mla_generation_module_perf`, `dsa_*_module_perf`, `moe_a2a_perf`,
+  `moe_expert_compute_perf`, communication tables, …),
   with explicit Git LFS pointer detection for data that has not been pulled.
 - A PyO3 hot-path pyclass (`AicEngine`) plus a minimal C ABI so Python tests can
   opt into the Rust estimator without changing the default Python SDK path.
@@ -138,11 +151,17 @@ code should not be "cleaned up" in ways that diverge from the pinned reference.
 
 ## Known limits
 
-- Full context-parallel modeling for DSA (DeepSeek-V3.2) and dsv4
-  (DeepSeek-V4-Flash) is blocked on missing sparse mqa/topk/dsa perf tables; the
-  dense and MLA CP paths are complete.
-- Request-level FPM v2 fields and further WideEP accuracy work are left for later
-  PRs.
+- Context-parallel modeling for DSA (DeepSeek-V3.2) remains blocked on
+  missing sparse mqa/topk perf tables; the dense and MLA CP paths are
+  complete. The DSV4-Flash CSA CP slice is supported (issue #1498: adjudicated
+  and parity-anchored on `b200_sxm/sglang` 0.5.12/0.5.14), with the remaining
+  qualification that sparse-table coverage beyond the shipped
+  CSA/top_last/mHC grids (other systems/versions, or rows absent from the
+  approved reuse donors) still surfaces as symmetric
+  `PerfDataNotAvailableError` on both engines.
+- Request-level FPM v2 fields are left for later PRs. The legacy wideEP MoE
+  surface (`wideep_moe` op and table, deepep dispatch flavors) was retired in
+  favor of the large-EP `MoeAllToAll`/`MoeExpertCompute` path above.
 - Unit and integration tests use fixture perf files so most can run without the
   large AIC perf databases. CI runs the workspace both without Python embedding
   and with all features; embedding-only tests such as `embedded_round_trip` and

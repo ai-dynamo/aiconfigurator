@@ -4,7 +4,7 @@
 //! Compile-time contract tests from an external crate's point of view.
 
 use aiconfigurator_core::{
-    build_aic_engine, AicEngine, AicEngineBuilder, AicError, BackendKind, ForwardPassPerfModel,
+    AicEngine, AicEngineBuilder, AicError, BackendKind, ForwardPassPerfModel,
     ForwardPassPerfOptions, KvCacheEstimateRequest,
 };
 
@@ -33,31 +33,6 @@ pub fn build_engine(builder: AicEngineBuilder) -> Result<AicEngine, AicError> {
     builder.build()
 }
 
-/// Keep the flat compatibility adapter source-compatible through 0.10. The
-/// function is compiled but not called because it embeds Python and needs
-/// installed model/system data.
-pub fn build_engine_compatibility_adapter() -> Result<AicEngine, AicError> {
-    build_aic_engine(
-        "Qwen/Qwen3-32B",
-        "h200_sxm",
-        "vllm",
-        Some("0.10.2"),
-        2,
-        1,
-        1,
-        None,
-        None,
-        Some("bfloat16"),
-        Some("bfloat16"),
-        Some("bfloat16"),
-        Some("bfloat16"),
-        Some("bfloat16"),
-        0,
-        Some(16),
-        Some("/tmp/systems"),
-    )
-}
-
 /// Compile the forward-pass model's public constructor and telemetry type.
 pub fn regression_model() -> Result<ForwardPassPerfModel, AicError> {
     ForwardPassPerfModel::from_regression(ForwardPassPerfOptions::default())
@@ -81,7 +56,22 @@ mod tests {
         assert_eq!(ENGINE_CONFIG_SCHEMA_VERSION, 1);
         // v5: MlaModuleOp gained native_num_heads (#1458).
         // v6: Kda op variant appended (Kimi-K3; renumbered at the merge).
-        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 6);
+        // v7: MoEDispatchOp gained attn_ar_modeled.
+        // v8: GemmOp gained below_grid_sol.
+        // v9: FpmForward whole-model variant appended (renumbered at each
+        // merge from concurrent claims of v5/v7/v8).
+        // v10: MhcModuleOp gained seq_split (issue #1498; renumbered at the
+        // rebase from a concurrent claim of v7).
+        // v11: wideEP MoE variants removed, MoeAllToAll/MoeExpertCompute
+        // appended after FpmForward; MoeExpertComputeOp gained enable_eplb
+        // (AIC-1601).
+        // v12: DsaModuleOp gained attn_projection_quant_modes (PR-6 weight
+        // physics) — a positional bincode op-layout change.
+        // v13: the engine owns shared-layer source resolution — EngineConfig
+        // dropped the Python-resolved perf_db_sources map (a bincode
+        // config-layout change) for enable_shared_layer + strict_provenance
+        // (deprecation-cleanup PR).
+        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 13);
         assert_eq!(FPM_VERSION, 1);
         assert_eq!(ForwardPassMetrics::default().version, FPM_VERSION);
     }

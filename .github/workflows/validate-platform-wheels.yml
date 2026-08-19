@@ -4,6 +4,7 @@
 name: Validate platform wheels
 
 on:
+  workflow_call:
   pull_request:
     types:
       - opened
@@ -12,7 +13,6 @@ on:
     paths:
       - ".github/actions/build-platform-wheel/**"
       - ".github/workflows/build-platform-wheels-copied-pr.yml"
-      - ".github/workflows/build-platform-wheels.yml"
       - ".github/workflows/validate-platform-wheels.yml"
       - "docker/Dockerfile"
       - "LICENSE"

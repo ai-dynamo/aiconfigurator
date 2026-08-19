@@ -35,10 +35,10 @@ fn prefix_correction(full_s: u32, prefix: u32) -> f64 {
     (f * f - p * p) / (f * f)
 }
 
-/// User-facing SILICON queries accept only `flashinfer` and `fa3`, matching
-/// Python's `get_silicon` closures. The perf-database layer separately
-/// resolves those aliases to Blackwell's measured `trtllm_mla` key and lets
-/// low-level EMPIRICAL callers request an exact measured kernel source.
+/// User-facing SILICON queries accept only `flashinfer` and `fa3`. The
+/// perf-database layer separately resolves those aliases to Blackwell's
+/// measured `trtllm_mla` key and lets low-level EMPIRICAL callers request an
+/// exact measured kernel source.
 fn check_attn_backend(attn_backend: &str) -> Result<(), AicError> {
     if attn_backend != "flashinfer" && attn_backend != "fa3" {
         return Err(AicError::InvalidEngineConfig(format!(
@@ -377,15 +377,9 @@ mod tests {
 
     /// EMPIRICAL accepts an exact measured kernel source and resolves the
     /// supported user-facing aliases to Blackwell's `trtllm_mla`-only table.
-    /// Unknown or empty values must not borrow that slice. Oracles:
-    ///
-    /// ```text
-    /// db = perf_database.get_database_view("b200_sxm", "sglang", "0.5.10",
-    ///     allow_missing_data=True, database_mode="EMPIRICAL", shared_layer=False)
-    /// float(WideEPContextMLA._query_wideep_context_mla_table(db, b, s,
-    ///     prefix, tp_size, KVCacheQuantMode.fp8, FMHAQuantMode.fp8_block,
-    ///     "trtllm_mla", DatabaseMode.EMPIRICAL))   # + generation variant
-    /// ```
+    /// Unknown or empty values must not borrow that slice. The numeric
+    /// oracles were captured before the Python query stack retired and remain
+    /// pinned here at the engine-owned query boundary.
     #[test]
     fn empirical_resolves_user_backends_and_exact_kernel_sources() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

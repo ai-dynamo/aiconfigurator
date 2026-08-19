@@ -460,10 +460,34 @@ class TestEncoderMemoryInSummary:
     def model_config(self):
         return config.ModelConfig()
 
-    def test_text_only_model_has_empty_encoder_memory(self, model_config):
+    @staticmethod
+    def _stub_engine_step(monkeypatch):
+        """Stub the compiled-engine bridge so run_static needs no perf data.
+
+        The step boundary moved from per-op ``op._engine_query()`` (formerly stubbed
+        with MagicMocks) to the rust bridge functions after the Python step
+        path was removed; these tests are about the encoder MEMORY plumbing,
+        so the step values are fixed dummies.
+        """
+        from aiconfigurator.sdk.backends import base_backend as base_backend_module
+
+        monkeypatch.setattr(base_backend_module, "should_use_rust_engine_step", lambda *args, **kwargs: True)
+        monkeypatch.setattr(
+            base_backend_module,
+            "estimate_static_latency_breakdown_with_rust",
+            lambda *args, **kwargs: (
+                {"context_attention": 1.0},
+                {"generation_attention": 1.0},
+                {"context_attention": 0.0},
+                {"generation_attention": 0.0},
+                {"context_attention": "silicon"},
+                {"generation_attention": "silicon"},
+            ),
+        )
+
+    def test_text_only_model_has_empty_encoder_memory(self, model_config, monkeypatch):
         """Text-only model: encoder_memory should be empty dict."""
         from types import SimpleNamespace
-        from unittest.mock import MagicMock
 
         from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 
@@ -477,21 +501,19 @@ class TestEncoderMemoryInSummary:
                 "misc": {"nccl_mem": {1: 500 * 1024 * 1024, 8: 1024 * 1024 * 1024}, "other_mem": 200 * 1024 * 1024},
             },
         )
-
-        # Stub out all op queries so run_static doesn't need real perf data
-        for op in model.context_ops + model.generation_ops:
-            op.query = MagicMock(return_value=MagicMock(__float__=lambda s: 1.0, energy=0.0, source="silicon"))
+        self._stub_engine_step(monkeypatch)
 
         rc = RuntimeConfig(batch_size=1, isl=512, osl=64, num_images_per_request=0)
         backend = TRTLLMBackend()
         summary = backend.run_static(model, database, rc, mode="static")
         assert summary.get_encoder_memory() == {}
 
-    def test_vl_model_without_image_dimensions_skips_encoder_ops(self, model_config):
+    def test_vl_model_without_image_dimensions_skips_encoder_ops(self, model_config, monkeypatch):
         """VL model with default zero image dimensions should run as text-only."""
         from types import SimpleNamespace
         from unittest.mock import MagicMock
 
+        from aiconfigurator.sdk.backends import base_backend as base_backend_module
         from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 
         model = get_model("Qwen/Qwen3-VL-32B-Instruct", model_config, "trtllm")
@@ -504,11 +526,13 @@ class TestEncoderMemoryInSummary:
                 "misc": {"nccl_mem": {1: 500 * 1024 * 1024, 8: 1024 * 1024 * 1024}, "other_mem": 200 * 1024 * 1024},
             },
         )
-
-        for op in model.context_ops + model.generation_ops:
-            op.query = MagicMock(return_value=MagicMock(__float__=lambda s: 1.0, energy=0.0, source="silicon"))
-        for op in model.encoder_ops:
-            op.query = MagicMock(side_effect=AssertionError("encoder op should be skipped without image dimensions"))
+        self._stub_engine_step(monkeypatch)
+        # The encoder work boundary is `_run_encoder_phase_with_rust` (the
+        # retired per-op `op.query` no longer exists, so stubbing it would
+        # assert nothing). Raising here catches a regression where run_static
+        # evaluates encoder work despite zero image dimensions.
+        encoder_phase = MagicMock(side_effect=AssertionError("encoder phase must be skipped without image dimensions"))
+        monkeypatch.setattr(base_backend_module.BaseBackend, "_run_encoder_phase_with_rust", encoder_phase)
 
         rc = RuntimeConfig(batch_size=1, isl=512, osl=64)
         backend = TRTLLMBackend()
@@ -516,13 +540,11 @@ class TestEncoderMemoryInSummary:
 
         assert summary.get_encoder_latency_dict() == {}
         assert summary.get_encoder_memory() == {}
-        for op in model.encoder_ops:
-            op.query.assert_not_called()
+        encoder_phase.assert_not_called()
 
-    def test_vl_model_with_images_has_encoder_memory(self, model_config):
+    def test_vl_model_with_images_has_encoder_memory(self, model_config, monkeypatch):
         """VL model with num_images>0: encoder_memory must contain weights/activations/kvcache."""
         from types import SimpleNamespace
-        from unittest.mock import MagicMock
 
         from aiconfigurator.sdk.backends.trtllm_backend import TRTLLMBackend
 
@@ -536,12 +558,19 @@ class TestEncoderMemoryInSummary:
                 "misc": {"nccl_mem": {1: 500 * 1024 * 1024, 8: 1024 * 1024 * 1024}, "other_mem": 200 * 1024 * 1024},
             },
         )
-
-        for op in model.context_ops + model.generation_ops + model.encoder_ops:
-            op.query = MagicMock(return_value=MagicMock(__float__=lambda s: 1.0, energy=0.0, source="silicon"))
+        self._stub_engine_step(monkeypatch)
 
         rc = RuntimeConfig(batch_size=1, isl=512, osl=64, image_height=448, image_width=448, num_images_per_request=1)
         backend = TRTLLMBackend()
+        monkeypatch.setattr(
+            backend,
+            "_run_encoder_phase_with_rust",
+            lambda *args, **kwargs: (
+                {"encoder_attention": 1.0},
+                {"encoder_attention": 0.0},
+                {"encoder_attention": "silicon"},
+            ),
+        )
         summary = backend.run_static(model, database, rc, mode="static")
 
         enc_mem = summary.get_encoder_memory()
@@ -550,3 +579,31 @@ class TestEncoderMemoryInSummary:
         assert enc_mem["kvcache"] == 0.0
         assert enc_mem["weights"] > 0.0
         assert enc_mem["activations"] > 0.0
+
+
+class TestSmartResizeTokenResolution:
+    """_encoder_pre_merge_per_visual mirrors the upstream VL processor's
+    smart_resize: raw H/W round to the *nearest* multiple of
+    patch_size x spatial_merge_size (plain floor under-counted tokens for
+    non-aligned inputs)."""
+
+    def test_non_aligned_dims_round_to_nearest_factor(self):
+        from aiconfigurator.sdk.backends.base_backend import BaseBackend
+
+        enc_cfg = common.VisionEncoderConfig(
+            depth=27,
+            hidden_size=1152,
+            num_heads=16,
+            intermediate_size=4304,
+            patch_size=16,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            out_hidden_size=5120,
+        )
+        # 500 rounds to 512 (nearest multiple of 32; floor gave 480):
+        # post-merge 16^2, pre-merge (512/16)^2.
+        rc = RuntimeConfig(isl=1, osl=1, image_height=500, image_width=500, num_images_per_request=1)
+        assert BaseBackend._encoder_pre_merge_per_visual(rc, enc_cfg) == (256, 1024)
+        # Aligned dims are untouched.
+        rc_aligned = RuntimeConfig(isl=1, osl=1, image_height=448, image_width=448, num_images_per_request=1)
+        assert BaseBackend._encoder_pre_merge_per_visual(rc_aligned, enc_cfg) == (196, 784)
