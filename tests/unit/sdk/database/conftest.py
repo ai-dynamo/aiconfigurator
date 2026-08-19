@@ -371,33 +371,37 @@ def _build_comprehensive_test_data():
 _comprehensive_db_singleton: PerfDatabase | None = None
 
 
-def _singleton_survived_eviction(db: PerfDatabase) -> bool:
-    """Whether the singleton's engine-backed state is still the build-time one.
-
-    ``clear_all_op_caches()`` (and the other documented eviction levers)
-    advance ``engine._PROBE_CACHE_GENERATION`` and clear the engine-handle
-    LRU. The singleton's synthetic tables exist only in this conftest's
-    module-level router — its tmp data dir holds just the system yaml — so
-    any post-eviction re-fetch through the engine collapses the tables to
-    the near-empty on-disk state and poisons every later test on the worker
-    (order-dependent TestSupportedQuantModes / TestUpdateSupportMatrix
-    failures; see AIC-1777). The probe-spec memo stored on the database
-    carries the generation it was resolved under — a mismatch means a lever
-    fired since the build and the singleton must be rebuilt.
-    """
-    from aiconfigurator_core.sdk import engine as _engine
-
-    memo = db.__dict__.get("_table_view_probe_spec")
-    return memo is not None and memo[0] == _engine._PROBE_CACHE_GENERATION
+# Generation of ``engine._PROBE_CACHE_GENERATION`` the singleton was built
+# under. Recorded explicitly at build time: this database never reaches the
+# real ``fetch_table_view`` (the module router answers its fetches from
+# ``_COMPREHENSIVE_OVERRIDES``), so the engine-side probe-spec memo a
+# database normally carries is never written for it and cannot be used as
+# the eviction signal.
+_comprehensive_db_generation: int | None = None
 
 
 def _get_comprehensive_db_singleton() -> PerfDatabase:
-    """Build (or rebuild after engine-cache eviction) the shared singleton."""
-    global _comprehensive_db_singleton
-    if _comprehensive_db_singleton is not None:
-        if _singleton_survived_eviction(_comprehensive_db_singleton):
-            return _comprehensive_db_singleton
-        _comprehensive_db_singleton = None
+    """Build (or rebuild after an eviction lever fired) the shared singleton.
+
+    ``clear_all_op_caches()`` and the other documented eviction levers wipe
+    the per-op class caches and advance ``engine._PROBE_CACHE_GENERATION``.
+    Tests that fire a lever while a scoped stub fetch is active (e.g. the
+    router-survival test in ``test_data_loaders.py``) leave the shared class
+    caches re-populated from the stub under this singleton's cache key, so
+    whichever test on the xdist worker touches the singleton next reads
+    stub-shaped tables and fails order-dependently (AIC-1777:
+    TestSupportedQuantModes / TestUpdateSupportMatrix). Rebuilding whenever
+    the generation moved since the build cures that: the rebuild happens at
+    the NEXT fixture request, which in those orders is outside the stub
+    window, and steady-state accesses (no lever fired) keep the documented
+    same-object singleton contract.
+    """
+    global _comprehensive_db_singleton, _comprehensive_db_generation
+    from aiconfigurator_core.sdk import engine as _engine
+
+    if _comprehensive_db_singleton is not None and _comprehensive_db_generation == _engine._PROBE_CACHE_GENERATION:
+        return _comprehensive_db_singleton
+    _comprehensive_db_singleton = None
 
     cached = _build_comprehensive_test_data()
     system_spec = cached["system_spec"]
@@ -447,6 +451,7 @@ def _get_comprehensive_db_singleton() -> PerfDatabase:
     try:
         _comprehensive_db_singleton = PerfDatabase("test_system", "trtllm", "v1", tmp_dir)
         _warm_lazy_op_caches(_comprehensive_db_singleton)
+        _comprehensive_db_generation = _engine._PROBE_CACHE_GENERATION
     finally:
         yaml_patch.stop()
 
