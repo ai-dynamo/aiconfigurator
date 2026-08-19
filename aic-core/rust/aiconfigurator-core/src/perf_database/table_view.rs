@@ -415,7 +415,11 @@ pub fn view_generation_attention(sources: &[PerfSource]) -> Result<Option<ViewNo
             n.to_string(),
             b.to_string(),
         ];
-        root.insert_first_wins(&path, &full_seq.to_string(), classic_leaf(latency, ctx.power()?));
+        root.insert_first_wins(
+            &path,
+            &full_seq.to_string(),
+            classic_leaf(latency, ctx.power()?),
+        );
         Ok(())
     })?;
     Ok(found.map(|_| root))
@@ -446,7 +450,9 @@ pub fn view_encoder_attention(sources: &[PerfSource]) -> Result<Option<ViewNode>
 /// level a constant "AUTO", and `*_eager` rows (kernel_source OR backend
 /// suffix) are dropped — EXCEPT on b60, detected by "b60" in any source path.
 pub fn view_custom_allreduce(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicError> {
-    let is_b60 = sources.iter().any(|s| s.0.to_string_lossy().contains("b60"));
+    let is_b60 = sources
+        .iter()
+        .any(|s| s.0.to_string_lossy().contains("b60"));
     let mut root = ViewNode::branch();
     let found = fold_sources(sources, |ctx| {
         let r = ctx.reader;
@@ -455,7 +461,11 @@ pub fn view_custom_allreduce(sources: &[PerfSource]) -> Result<Option<ViewNode>,
             .str_optional(r.col_optional("kernel_source"))?
             .unwrap_or("")
             .to_string();
-        let backend = ctx.row.str_optional(r.col_optional("backend"))?.unwrap_or("").to_string();
+        let backend = ctx
+            .row
+            .str_optional(r.col_optional("backend"))?
+            .unwrap_or("")
+            .to_string();
         if (kernel_source.ends_with("_eager") || backend.ends_with("_eager")) && !is_b60 {
             return Ok(());
         }
@@ -463,7 +473,11 @@ pub fn view_custom_allreduce(sources: &[PerfSource]) -> Result<Option<ViewNode>,
         let message_size = ctx.row.u64(r.col("message_size")?)?;
         let latency = ctx.row.f64(r.col("latency")?)?;
         let path = ["half".to_string(), tp_size.to_string(), "AUTO".to_string()];
-        root.insert_first_wins(&path, &message_size.to_string(), classic_leaf(latency, ctx.power()?));
+        root.insert_first_wins(
+            &path,
+            &message_size.to_string(),
+            classic_leaf(latency, ctx.power()?),
+        );
         Ok(())
     })?;
     Ok(found.map(|_| root))
@@ -481,7 +495,11 @@ pub fn view_nccl(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicError> {
         let op_name = str_cell_or_empty(ctx, "op_name")?;
         let latency = ctx.row.f64(r.col("latency")?)?;
         let path = [dtype, op_name, num_gpus.to_string()];
-        root.insert_first_wins(&path, &message_size.to_string(), classic_leaf(latency, ctx.power()?));
+        root.insert_first_wins(
+            &path,
+            &message_size.to_string(),
+            classic_leaf(latency, ctx.power()?),
+        );
         Ok(())
     })?;
     Ok(found.map(|_| root))
@@ -520,7 +538,11 @@ pub fn view_generation_mla(sources: &[PerfSource]) -> Result<Option<ViewNode>, A
         let latency = ctx.row.f64(r.col("latency")?)?;
         let full_seq = s + step;
         let path = [kv_dtype, num_heads.to_string(), b.to_string()];
-        root.insert_first_wins(&path, &full_seq.to_string(), classic_leaf(latency, ctx.power()?));
+        root.insert_first_wins(
+            &path,
+            &full_seq.to_string(),
+            classic_leaf(latency, ctx.power()?),
+        );
         Ok(())
     })?;
     Ok(found.map(|_| root))
@@ -538,7 +560,11 @@ pub fn view_mla_bmm(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicError
         let op_name = str_cell_or_empty(ctx, "op_name")?;
         let latency = ctx.row.f64(r.col("latency")?)?;
         let path = [quant, op_name, num_heads.to_string()];
-        root.insert_first_wins(&path, &num_tokens.to_string(), classic_leaf(latency, ctx.power()?));
+        root.insert_first_wins(
+            &path,
+            &num_tokens.to_string(),
+            classic_leaf(latency, ctx.power()?),
+        );
         Ok(())
     })?;
     Ok(found.map(|_| root))
@@ -558,7 +584,13 @@ pub fn view_wideep_context_mla(sources: &[PerfSource]) -> Result<Option<ViewNode
         let s = ctx.row.u32(r.col("isl")?)?;
         let num_heads = ctx.row.u32(r.col("num_heads")?)?;
         let latency = ctx.row.f64(r.col("latency")?)?;
-        let path = [kernel_source, quant, kv_dtype, num_heads.to_string(), s.to_string()];
+        let path = [
+            kernel_source,
+            quant,
+            kv_dtype,
+            num_heads.to_string(),
+            s.to_string(),
+        ];
         root.insert_first_wins(&path, &b.to_string(), classic_leaf(latency, ctx.power()?));
         Ok(())
     })?;
@@ -579,8 +611,17 @@ pub fn view_wideep_generation_mla(sources: &[PerfSource]) -> Result<Option<ViewN
         let num_heads = ctx.row.u32(r.col("num_heads")?)?;
         let latency = ctx.row.f64(r.col("latency")?)?;
         let full_seq = s + step;
-        let path = [kernel_source, kv_dtype, num_heads.to_string(), b.to_string()];
-        root.insert_first_wins(&path, &full_seq.to_string(), classic_leaf(latency, ctx.power()?));
+        let path = [
+            kernel_source,
+            kv_dtype,
+            num_heads.to_string(),
+            b.to_string(),
+        ];
+        root.insert_first_wins(
+            &path,
+            &full_seq.to_string(),
+            classic_leaf(latency, ctx.power()?),
+        );
         Ok(())
     })?;
     Ok(found.map(|_| root))
@@ -705,7 +746,13 @@ pub fn view_generation_mla_module(sources: &[PerfSource]) -> Result<Option<ViewN
         let power = first_power.power(ctx)?;
         let kv_dtype = ctx.row.str_owned(r.col("kv_cache_dtype")?)?;
         let gemm = ctx.row.str_owned(r.col("gemm_type")?)?;
-        let path = [kv_dtype, gemm, native.to_string(), num_heads.to_string(), b.to_string()];
+        let path = [
+            kv_dtype,
+            gemm,
+            native.to_string(),
+            num_heads.to_string(),
+            b.to_string(),
+        ];
         root.insert_first_wins(&path, &s.to_string(), classic_leaf(latency, power));
         Ok(())
     })?;
@@ -814,7 +861,14 @@ fn view_gdn_like(
 pub fn view_gdn(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicError> {
     view_gdn_like(
         sources,
-        &["d_model", "num_k_heads", "head_k_dim", "num_v_heads", "head_v_dim", "d_conv"],
+        &[
+            "d_model",
+            "num_k_heads",
+            "head_k_dim",
+            "num_v_heads",
+            "head_v_dim",
+            "d_conv",
+        ],
         &["context"],
         true,
     )
@@ -825,7 +879,14 @@ pub fn view_gdn(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicError> {
 pub fn view_kda(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicError> {
     view_gdn_like(
         sources,
-        &["d_model", "num_k_heads", "head_k_dim", "num_v_heads", "head_v_dim", "d_conv"],
+        &[
+            "d_model",
+            "num_k_heads",
+            "head_k_dim",
+            "num_v_heads",
+            "head_v_dim",
+            "d_conv",
+        ],
         &["context", "verify"],
         false,
     )
@@ -870,7 +931,11 @@ pub fn view_moe(sources: &[PerfSource]) -> Result<Option<(ViewNode, ViewNode)>, 
             moe_tp.to_string(),
             moe_ep.to_string(),
         ];
-        target.insert_first_wins(&path, &num_tokens.to_string(), classic_leaf(latency, ctx.power()?));
+        target.insert_first_wins(
+            &path,
+            &num_tokens.to_string(),
+            classic_leaf(latency, ctx.power()?),
+        );
         Ok(())
     })?;
     Ok(found.map(|_| (default, low_latency)))
@@ -903,7 +968,11 @@ pub fn view_wideep_moe(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicEr
             moe_tp.to_string(),
             moe_ep.to_string(),
         ];
-        root.insert_first_wins(&path, &num_tokens.to_string(), classic_leaf(latency, ctx.power()?));
+        root.insert_first_wins(
+            &path,
+            &num_tokens.to_string(),
+            classic_leaf(latency, ctx.power()?),
+        );
         Ok(())
     })?;
     Ok(found.map(|_| root))
@@ -922,14 +991,19 @@ pub fn view_wideep_deepep_ll(sources: &[PerfSource]) -> Result<Option<ViewNode>,
         let num_token = ctx.row.u32(r.col("num_token")?)?;
         let num_topk = ctx.row.u32(r.col("num_topk")?)?;
         let num_experts = ctx.row.u32(r.col("num_experts")?)?;
-        let lat = ctx.row.f64(r.col("combine_avg_t_us")?)? + ctx.row.f64(r.col("dispatch_avg_t_us")?)?;
+        let lat =
+            ctx.row.f64(r.col("combine_avg_t_us")?)? + ctx.row.f64(r.col("dispatch_avg_t_us")?)?;
         let path = [
             node_num.to_string(),
             hidden.to_string(),
             num_topk.to_string(),
             num_experts.to_string(),
         ];
-        root.insert_first_wins(&path, &num_token.to_string(), classic_leaf(lat, ctx.power()?));
+        root.insert_first_wins(
+            &path,
+            &num_token.to_string(),
+            classic_leaf(lat, ctx.power()?),
+        );
         Ok(())
     })?;
     Ok(found.map(|_| root))
@@ -959,7 +1033,11 @@ pub fn view_wideep_deepep_normal(sources: &[PerfSource]) -> Result<Option<ViewNo
             num_experts.to_string(),
             dispatch_sms.to_string(),
         ];
-        root.insert_first_wins(&path, &num_token.to_string(), classic_leaf(lat, ctx.power()?));
+        root.insert_first_wins(
+            &path,
+            &num_token.to_string(),
+            classic_leaf(lat, ctx.power()?),
+        );
         Ok(())
     })?;
     Ok(found.map(|_| root))
@@ -1000,7 +1078,11 @@ pub fn view_wideep_moe_compute(sources: &[PerfSource]) -> Result<Option<ViewNode
             moe_tp.to_string(),
             moe_ep.to_string(),
         ];
-        root.insert_first_wins(&path, &num_tokens.to_string(), classic_leaf(latency, ctx.power()?));
+        root.insert_first_wins(
+            &path,
+            &num_tokens.to_string(),
+            classic_leaf(latency, ctx.power()?),
+        );
         Ok(())
     })?;
     Ok(found.map(|_| root))
@@ -1046,7 +1128,11 @@ pub fn view_trtllm_alltoall(sources: &[PerfSource]) -> Result<Option<ViewNode>, 
             num_experts.to_string(),
             moe_ep.to_string(),
         ];
-        root.insert_first_wins(&path, &num_tokens.to_string(), classic_leaf(latency, ctx.power()?));
+        root.insert_first_wins(
+            &path,
+            &num_tokens.to_string(),
+            classic_leaf(latency, ctx.power()?),
+        );
         Ok(())
     })?;
     Ok(found.map(|_| root))
@@ -1137,13 +1223,12 @@ fn row_power_lenient(ctx: &RowCtx<'_>) -> Result<f64, AicError> {
 /// Storage-agnostic like Python's `float(raw)`: an INT64 latency cell is a
 /// value, not a "null latency" corruption report.
 fn require_latency(ctx: &RowCtx<'_>, table: &str) -> Result<f64, AicError> {
-    let lat = num_optional(ctx.row, ctx.reader.col_optional("latency"))?
-        .ok_or_else(|| {
-            AicError::PerfDatabase(format!(
-                "null latency cell in a {table} row: latency is schema-required and must be \
+    let lat = num_optional(ctx.row, ctx.reader.col_optional("latency"))?.ok_or_else(|| {
+        AicError::PerfDatabase(format!(
+            "null latency cell in a {table} row: latency is schema-required and must be \
                  finite; refusing to load corrupt perf data"
-            ))
-        })?;
+        ))
+    })?;
     if !lat.is_finite() {
         return Err(AicError::PerfDatabase(format!(
             "non-finite latency cell in a {table} row: latency is schema-required and must be \
@@ -1174,7 +1259,10 @@ pub fn view_moe_a2a(
             legacy_normal,
             "deepep_ht",
             &[
-                ("dispatch", &["dispatch_transmit_us", "dispatch_notify_us"][..]),
+                (
+                    "dispatch",
+                    &["dispatch_transmit_us", "dispatch_notify_us"][..],
+                ),
                 ("combine", &["combine_transmit_us", "combine_notify_us"][..]),
             ][..],
         ),
@@ -1232,14 +1320,16 @@ pub fn view_moe_a2a(
             "kernel_source",
             crate::perf_database::moe_a2a::LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE,
         )?;
-        let Some(comm_backend) = crate::perf_database::moe_a2a::legacy_trtllm_backend(&kernel_source)
+        let Some(comm_backend) =
+            crate::perf_database::moe_a2a::legacy_trtllm_backend(&kernel_source)
         else {
             return Ok(());
         };
         // Null op_name reads as "" (unmapped) and skips the row, like the
         // Python adapter's map .get('') miss.
         let op_name = str_cell_or_empty(ctx, "op_name")?;
-        let Some((phase, fixed_dtype)) = crate::perf_database::moe_a2a::legacy_trtllm_phase_dtype(&op_name)
+        let Some((phase, fixed_dtype)) =
+            crate::perf_database::moe_a2a::legacy_trtllm_phase_dtype(&op_name)
         else {
             return Ok(());
         };
@@ -1305,7 +1395,11 @@ pub fn view_moe_a2a(
         Ok(())
     })?;
 
-    Ok(if new_found.is_some() || legacy_loaded { Some(root) } else { None })
+    Ok(if new_found.is_some() || legacy_loaded {
+        Some(root)
+    } else {
+        None
+    })
 }
 
 /// `operations/moe_comm.py::load_moe_expert_compute_data` — the unified
@@ -1323,7 +1417,10 @@ pub fn view_moe_expert_compute(
     let mut root = ViewNode::branch();
     let mut legacy_loaded = false;
 
-    for (legacy_sources, inference_phase) in [(legacy_context, "context"), (legacy_generation, "generation")] {
+    for (legacy_sources, inference_phase) in [
+        (legacy_context, "context"),
+        (legacy_generation, "generation"),
+    ] {
         let found = fold_sources(legacy_sources, |ctx| {
             let r = ctx.reader;
             let latency = ctx.row.f64(r.col("latency")?)?;
@@ -1408,7 +1505,11 @@ pub fn view_moe_expert_compute(
         Ok(())
     })?;
 
-    Ok(if new_found.is_some() || legacy_loaded { Some(root) } else { None })
+    Ok(if new_found.is_some() || legacy_loaded {
+        Some(root)
+    } else {
+        None
+    })
 }
 
 /// Per-source accumulator reproducing the DSA loaders' two-rule merge:
@@ -1506,7 +1607,8 @@ fn view_dsa_module(
                 }
                 // int(step): negative values stayed negative prefix keys.
                 let prefix = step.map(|v| v as i64).unwrap_or(0);
-                for backend in crate::perf_database::dsa::dsa_kernel_source_buckets(&ks, &kv_dtype) {
+                for backend in crate::perf_database::dsa::dsa_kernel_source_buckets(&ks, &kv_dtype)
+                {
                     source_values.put(
                         vec![
                             fmha.clone(),
@@ -1524,7 +1626,8 @@ fn view_dsa_module(
                 }
             } else {
                 let s = row.u32(r.col("isl")?)? + row.u32(r.col("step")?)?;
-                for backend in crate::perf_database::dsa::dsa_kernel_source_buckets(&ks, &kv_dtype) {
+                for backend in crate::perf_database::dsa::dsa_kernel_source_buckets(&ks, &kv_dtype)
+                {
                     source_values.put(
                         vec![
                             kv_dtype.clone(),
@@ -1560,13 +1663,19 @@ fn view_dsa_module(
 
 /// `operations/dsa.py::load_context_dsa_module_data` —
 /// `[mla_dtype][kv_cache_dtype][gemm_type][architecture][dsa_backend][num_heads][prefix][s][b]`.
-pub fn view_context_dsa_module(sources: &[PerfSource], skip: bool) -> Result<Option<ViewNode>, AicError> {
+pub fn view_context_dsa_module(
+    sources: &[PerfSource],
+    skip: bool,
+) -> Result<Option<ViewNode>, AicError> {
     view_dsa_module(sources, true, skip)
 }
 
 /// `operations/dsa.py::load_generation_dsa_module_data` —
 /// `[kv_cache_dtype][gemm_type][architecture][dsa_backend][num_heads][b][isl+step]`.
-pub fn view_generation_dsa_module(sources: &[PerfSource], skip: bool) -> Result<Option<ViewNode>, AicError> {
+pub fn view_generation_dsa_module(
+    sources: &[PerfSource],
+    skip: bool,
+) -> Result<Option<ViewNode>, AicError> {
     view_dsa_module(sources, false, skip)
 }
 
@@ -1617,8 +1726,10 @@ fn validate_view_dsv4_head_semantics(
     // (dsv4.rs::validate_dsv4_local_head_semantics) — one home for the #1429
     // pattern; only the tp-presence preconditions above are view-specific
     // (they carry the path label Python's loader printed).
-    let mut observed: std::collections::BTreeMap<(String, String), std::collections::BTreeSet<(u32, u32)>> =
-        std::collections::BTreeMap::new();
+    let mut observed: std::collections::BTreeMap<
+        (String, String),
+        std::collections::BTreeSet<(u32, u32)>,
+    > = std::collections::BTreeMap::new();
     for (heads, tp, model, version) in rows {
         let tp = tp.map(|v| v.max(1)).unwrap_or(1);
         observed
@@ -1632,7 +1743,10 @@ fn validate_view_dsv4_head_semantics(
 /// Shared body of the two DSV4 attention-kind loaders. Malformed rows are
 /// SKIPPED (the Python loaders' try/except-continue), matching the appended
 /// duplicate-header tolerance.
-fn view_dsv4_kind_module(sources: &[PerfSource], context: bool) -> Result<Option<ViewNode>, AicError> {
+fn view_dsv4_kind_module(
+    sources: &[PerfSource],
+    context: bool,
+) -> Result<Option<ViewNode>, AicError> {
     // Two passes like Python: the semantics validator scans the full row set
     // first, then the fold runs. Collect the decoded fields once.
     struct Decoded {
@@ -1682,7 +1796,11 @@ fn view_dsv4_kind_module(sources: &[PerfSource], context: bool) -> Result<Option
             } else {
                 missing_tp_rows += 1;
             }
-            let model = ctx.row.str_optional(r.col_optional("model"))?.unwrap_or("").to_string();
+            let model = ctx
+                .row
+                .str_optional(r.col_optional("model"))?
+                .unwrap_or("")
+                .to_string();
             let version = ctx
                 .row
                 .str_optional(r.col_optional("version"))?
@@ -1723,7 +1841,9 @@ fn view_dsv4_kind_module(sources: &[PerfSource], context: bool) -> Result<Option
             (s_raw, prefix)
         } else {
             // int(row["isl"]) + int(row["step"]): missing/null/NaN step -> skip.
-            let Some(step) = py_cell("step")? else { return Ok(()) };
+            let Some(step) = py_cell("step")? else {
+                return Ok(());
+            };
             (s_raw.saturating_add(step), 0)
         };
         // max(1, int(row.get("tp_size", 1) or 1)) inside the try: an absent
@@ -1812,7 +1932,9 @@ pub fn view_context_dsv4_kind_module(sources: &[PerfSource]) -> Result<Option<Vi
 
 /// `operations/dsv4.py::load_generation_dsv4_kind_module_data` —
 /// `[kv][gemm][native][local][compress_ratio][b][isl+step]`.
-pub fn view_generation_dsv4_kind_module(sources: &[PerfSource]) -> Result<Option<ViewNode>, AicError> {
+pub fn view_generation_dsv4_kind_module(
+    sources: &[PerfSource],
+) -> Result<Option<ViewNode>, AicError> {
     view_dsv4_kind_module(sources, false)
 }
 
@@ -1899,12 +2021,14 @@ pub fn view_dsv4_megamoe_module(data_root: &std::path::Path) -> Result<Option<Vi
         let num_max = int_cell_or_falsy_default(ctx, "num_max_tokens_per_rank", 0)?;
         let effective_num_max =
             int_cell_or_falsy_default(ctx, "effective_num_max_tokens_per_rank", num_max)?;
-        let global_tokens = int_cell_or_falsy_default(
-            ctx,
-            "global_num_tokens",
-            num_tokens as i64 * moe_ep as i64,
-        )?;
-        let phase = ctx.row.str_optional(r.col_optional("phase"))?.unwrap_or("").trim().to_string();
+        let global_tokens =
+            int_cell_or_falsy_default(ctx, "global_num_tokens", num_tokens as i64 * moe_ep as i64)?;
+        let phase = ctx
+            .row
+            .str_optional(r.col_optional("phase"))?
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if phase.is_empty() {
             return Err(AicError::PerfDatabase(format!(
                 "DSv4 MegaMoE unified perf file requires a phase column: {}",
@@ -1935,11 +2059,17 @@ pub fn view_dsv4_megamoe_module(data_root: &std::path::Path) -> Result<Option<Vi
             ),
             ("used_cuda_graph", ViewValue::Bool(true)),
             ("kernel_dtype", ViewValue::Str(kernel_dtype.clone())),
-            ("routed_scaling_factor", ViewValue::F64(routed_scaling_factor)),
+            (
+                "routed_scaling_factor",
+                ViewValue::F64(routed_scaling_factor),
+            ),
             ("includes_routed_scale", ViewValue::Bool(true)),
             ("includes_gate_topk", ViewValue::Bool(false)),
             ("buffer_policy", ViewValue::Str(buffer_policy)),
-            ("includes_buffer_init", ViewValue::Bool(includes_buffer_init)),
+            (
+                "includes_buffer_init",
+                ViewValue::Bool(includes_buffer_init),
+            ),
             ("phase", ViewValue::Str(phase.clone())),
         ]);
         let path = [
@@ -1986,7 +2116,9 @@ pub fn view_dsv4_sparse_kernel(sources: &[PerfSource]) -> Result<Option<ViewNode
             // negative key (a collector-bug sentinel like step=-1 dropped
             // only itself, filed under -1, never the whole family). This
             // subsumes the loader's duplicate-header/blank batch_size guard.
-            let Some(idx) = r.col_optional(col) else { return Ok(()) };
+            let Some(idx) = r.col_optional(col) else {
+                return Ok(());
+            };
             let Some(value) = py_int_optional(ctx.row, idx)? else {
                 return Ok(());
             };
@@ -2029,7 +2161,9 @@ pub fn view_dsv4_csa_topk_calib(sources: &[PerfSource]) -> Result<Option<ViewNod
             // `_coerce` = int(float(cell)); a null / NaN / non-numeric cell
             // is a bad key that skips the row (this subsumes the loader's
             // duplicate-header guard on the batch_size cell).
-            let Some(idx) = r.col_optional(col) else { return Ok(()) };
+            let Some(idx) = r.col_optional(col) else {
+                return Ok(());
+            };
             let Some(value) = py_int_optional(ctx.row, idx)? else {
                 return Ok(());
             };
@@ -2037,7 +2171,9 @@ pub fn view_dsv4_csa_topk_calib(sources: &[PerfSource]) -> Result<Option<ViewNod
         }
         // score_mode stays a string key; `_is_bad_key` skipped blank and
         // NaN/inf SENTINEL strings.
-        let Some(mode_col) = r.col_optional("score_mode") else { return Ok(()) };
+        let Some(mode_col) = r.col_optional("score_mode") else {
+            return Ok(());
+        };
         let Some(mode) = ctx.row.str_optional(Some(mode_col))? else {
             return Ok(());
         };
@@ -2123,21 +2259,51 @@ pub const TABLE_VIEW_ATTRIBUTES: &[(&str, &[&str])] = &[
     ("_gemm_data", &["gemm_perf.parquet"]),
     ("_compute_scale_data", &["computescale_perf.parquet"]),
     ("_scale_matrix_data", &["scale_matrix_perf.parquet"]),
-    ("_context_attention_data", &["context_attention_perf.parquet"]),
-    ("_generation_attention_data", &["generation_attention_perf.parquet"]),
-    ("_encoder_attention_data", &["encoder_attention_perf.parquet"]),
+    (
+        "_context_attention_data",
+        &["context_attention_perf.parquet"],
+    ),
+    (
+        "_generation_attention_data",
+        &["generation_attention_perf.parquet"],
+    ),
+    (
+        "_encoder_attention_data",
+        &["encoder_attention_perf.parquet"],
+    ),
     ("_context_mla_data", &["context_mla_perf.parquet"]),
     ("_generation_mla_data", &["generation_mla_perf.parquet"]),
     ("_mla_bmm_data", &["mla_bmm_perf.parquet"]),
-    ("_context_mla_module_data", &["mla_context_module_perf.parquet"]),
-    ("_generation_mla_module_data", &["mla_generation_module_perf.parquet"]),
-    ("_wideep_context_mla_data", &["wideep_context_mla_perf.parquet"]),
-    ("_wideep_generation_mla_data", &["wideep_generation_mla_perf.parquet"]),
+    (
+        "_context_mla_module_data",
+        &["mla_context_module_perf.parquet"],
+    ),
+    (
+        "_generation_mla_module_data",
+        &["mla_generation_module_perf.parquet"],
+    ),
+    (
+        "_wideep_context_mla_data",
+        &["wideep_context_mla_perf.parquet"],
+    ),
+    (
+        "_wideep_generation_mla_data",
+        &["wideep_generation_mla_perf.parquet"],
+    ),
     ("_moe_data", &["moe_perf.parquet"]),
     ("_moe_low_latency_data", &["moe_perf.parquet"]),
-    ("_wideep_context_moe_data", &["wideep_context_moe_perf.parquet"]),
-    ("_wideep_generation_moe_data", &["wideep_generation_moe_perf.parquet"]),
-    ("_wideep_deepep_normal_data", &["wideep_deepep_normal_perf.parquet"]),
+    (
+        "_wideep_context_moe_data",
+        &["wideep_context_moe_perf.parquet"],
+    ),
+    (
+        "_wideep_generation_moe_data",
+        &["wideep_generation_moe_perf.parquet"],
+    ),
+    (
+        "_wideep_deepep_normal_data",
+        &["wideep_deepep_normal_perf.parquet"],
+    ),
     ("_wideep_deepep_ll_data", &["wideep_deepep_ll_perf.parquet"]),
     ("_wideep_moe_compute_data", &["wideep_moe_perf.parquet"]),
     ("_trtllm_alltoall_data", &["trtllm_alltoall_perf.parquet"]),
@@ -2162,10 +2328,22 @@ pub const TABLE_VIEW_ATTRIBUTES: &[(&str, &[&str])] = &[
     ("_custom_allreduce_data", &["custom_allreduce_perf.parquet"]),
     ("_nccl_data", &["nccl_perf.parquet"]),
     ("_oneccl_data", &["oneccl_perf.parquet"]),
-    ("_context_dsa_module_data", &["dsa_context_module_perf.parquet"]),
-    ("_context_dsa_module_skip_data", &["dsa_context_module_perf.parquet"]),
-    ("_generation_dsa_module_data", &["dsa_generation_module_perf.parquet"]),
-    ("_generation_dsa_module_skip_data", &["dsa_generation_module_perf.parquet"]),
+    (
+        "_context_dsa_module_data",
+        &["dsa_context_module_perf.parquet"],
+    ),
+    (
+        "_context_dsa_module_skip_data",
+        &["dsa_context_module_perf.parquet"],
+    ),
+    (
+        "_generation_dsa_module_data",
+        &["dsa_generation_module_perf.parquet"],
+    ),
+    (
+        "_generation_dsa_module_skip_data",
+        &["dsa_generation_module_perf.parquet"],
+    ),
     ("_mhc_module_data", &["mhc_module_perf.parquet"]),
     (
         "_context_deepseek_v4_attention_module_data",
@@ -2185,10 +2363,22 @@ pub const TABLE_VIEW_ATTRIBUTES: &[(&str, &[&str])] = &[
         "_dsv4_sparse_kernel_data.paged_mqa_logits",
         &["dsv4_paged_mqa_logits_module_perf.parquet"],
     ),
-    ("_dsv4_sparse_kernel_data.hca_attn", &["dsv4_hca_attn_module_perf.parquet"]),
-    ("_dsv4_sparse_kernel_data.csa_attn", &["dsv4_csa_attn_module_perf.parquet"]),
-    ("_dsv4_csa_topk_calib_data", &["dsv4_csa_topk_calib_perf.parquet"]),
-    ("_dsv4_megamoe_module_data", &["dsv4_megamoe_module_perf.parquet"]),
+    (
+        "_dsv4_sparse_kernel_data.hca_attn",
+        &["dsv4_hca_attn_module_perf.parquet"],
+    ),
+    (
+        "_dsv4_sparse_kernel_data.csa_attn",
+        &["dsv4_csa_attn_module_perf.parquet"],
+    ),
+    (
+        "_dsv4_csa_topk_calib_data",
+        &["dsv4_csa_topk_calib_perf.parquet"],
+    ),
+    (
+        "_dsv4_megamoe_module_data",
+        &["dsv4_megamoe_module_perf.parquet"],
+    ),
     ("_mamba2_data", &["mamba2_perf.parquet"]),
     ("_gdn_data", &["gdn_perf.parquet"]),
     ("_kda_data", &["kda_perf.parquet"]),
@@ -2201,7 +2391,11 @@ pub const TABLE_VIEW_ATTRIBUTES: &[(&str, &[&str])] = &[
 /// sparse sub-tables are addressed as
 /// `"_dsv4_sparse_kernel_data.<paged_mqa_logits|hca_attn|csa_attn>"`.
 pub fn table_view_json(tables: &PerfTables, attribute: &str) -> Result<Option<String>, AicError> {
-    let src = |basename: &str| tables.source_resolver.sources_for(basename, &tables.data_root);
+    let src = |basename: &str| {
+        tables
+            .source_resolver
+            .sources_for(basename, &tables.data_root)
+    };
     let comm_src = |root: Option<&std::path::Path>, basename: &str| -> Vec<PerfSource> {
         match root {
             // _build_op_sources refused an EXISTING primary whose version dir
@@ -2218,25 +2412,45 @@ pub fn table_view_json(tables: &PerfTables, attribute: &str) -> Result<Option<St
         "_gemm_data" => view_gemm(&src("gemm_perf.parquet")?)?,
         "_compute_scale_data" => view_gemm_scale(&src("computescale_perf.parquet")?)?,
         "_scale_matrix_data" => view_gemm_scale(&src("scale_matrix_perf.parquet")?)?,
-        "_context_attention_data" => view_context_attention(&src("context_attention_perf.parquet")?)?,
-        "_generation_attention_data" => view_generation_attention(&src("generation_attention_perf.parquet")?)?,
-        "_encoder_attention_data" => view_encoder_attention(&src("encoder_attention_perf.parquet")?)?,
+        "_context_attention_data" => {
+            view_context_attention(&src("context_attention_perf.parquet")?)?
+        }
+        "_generation_attention_data" => {
+            view_generation_attention(&src("generation_attention_perf.parquet")?)?
+        }
+        "_encoder_attention_data" => {
+            view_encoder_attention(&src("encoder_attention_perf.parquet")?)?
+        }
         "_context_mla_data" => view_context_mla(&src("context_mla_perf.parquet")?)?,
         "_generation_mla_data" => view_generation_mla(&src("generation_mla_perf.parquet")?)?,
         "_mla_bmm_data" => view_mla_bmm(&src("mla_bmm_perf.parquet")?)?,
-        "_context_mla_module_data" => view_context_mla_module(&src("mla_context_module_perf.parquet")?)?,
-        "_generation_mla_module_data" => view_generation_mla_module(&src("mla_generation_module_perf.parquet")?)?,
-        "_wideep_context_mla_data" => view_wideep_context_mla(&src("wideep_context_mla_perf.parquet")?)?,
-        "_wideep_generation_mla_data" => view_wideep_generation_mla(&src("wideep_generation_mla_perf.parquet")?)?,
+        "_context_mla_module_data" => {
+            view_context_mla_module(&src("mla_context_module_perf.parquet")?)?
+        }
+        "_generation_mla_module_data" => {
+            view_generation_mla_module(&src("mla_generation_module_perf.parquet")?)?
+        }
+        "_wideep_context_mla_data" => {
+            view_wideep_context_mla(&src("wideep_context_mla_perf.parquet")?)?
+        }
+        "_wideep_generation_mla_data" => {
+            view_wideep_generation_mla(&src("wideep_generation_mla_perf.parquet")?)?
+        }
         // Each arm folds moe_perf.parquet (the largest shipped table) and
         // discards the twin — accepted: the fold runs once per (database,
         // attribute) behind MoE.load_data's class cache, not per query. If
         // this ever matters, cache the (default, low_latency) pair here.
         "_moe_data" => view_moe(&src("moe_perf.parquet")?)?.map(|(default, _)| default),
-        "_moe_low_latency_data" => view_moe(&src("moe_perf.parquet")?)?.map(|(_, low_latency)| low_latency),
+        "_moe_low_latency_data" => {
+            view_moe(&src("moe_perf.parquet")?)?.map(|(_, low_latency)| low_latency)
+        }
         "_wideep_context_moe_data" => view_wideep_moe(&src("wideep_context_moe_perf.parquet")?)?,
-        "_wideep_generation_moe_data" => view_wideep_moe(&src("wideep_generation_moe_perf.parquet")?)?,
-        "_wideep_deepep_normal_data" => view_wideep_deepep_normal(&src("wideep_deepep_normal_perf.parquet")?)?,
+        "_wideep_generation_moe_data" => {
+            view_wideep_moe(&src("wideep_generation_moe_perf.parquet")?)?
+        }
+        "_wideep_deepep_normal_data" => {
+            view_wideep_deepep_normal(&src("wideep_deepep_normal_perf.parquet")?)?
+        }
         "_wideep_deepep_ll_data" => view_wideep_deepep_ll(&src("wideep_deepep_ll_perf.parquet")?)?,
         "_wideep_moe_compute_data" => view_wideep_moe_compute(&src("wideep_moe_perf.parquet")?)?,
         "_trtllm_alltoall_data" => view_trtllm_alltoall(&src("trtllm_alltoall_perf.parquet")?)?,
@@ -2253,10 +2467,20 @@ pub fn table_view_json(tables: &PerfTables, attribute: &str) -> Result<Option<St
             &src("wideep_moe_perf.parquet")?,
         )?,
         "_custom_allreduce_data" => view_custom_allreduce(&src("custom_allreduce_perf.parquet")?)?,
-        "_nccl_data" => view_nccl(&comm_src(tables.communication.nccl_root(), "nccl_perf.parquet"))?,
-        "_oneccl_data" => view_nccl(&comm_src(tables.communication.oneccl_root(), "oneccl_perf.parquet"))?,
-        "_context_dsa_module_data" => view_context_dsa_module(&src("dsa_context_module_perf.parquet")?, false)?,
-        "_context_dsa_module_skip_data" => view_context_dsa_module(&src("dsa_context_module_perf.parquet")?, true)?,
+        "_nccl_data" => view_nccl(&comm_src(
+            tables.communication.nccl_root(),
+            "nccl_perf.parquet",
+        ))?,
+        "_oneccl_data" => view_nccl(&comm_src(
+            tables.communication.oneccl_root(),
+            "oneccl_perf.parquet",
+        ))?,
+        "_context_dsa_module_data" => {
+            view_context_dsa_module(&src("dsa_context_module_perf.parquet")?, false)?
+        }
+        "_context_dsa_module_skip_data" => {
+            view_context_dsa_module(&src("dsa_context_module_perf.parquet")?, true)?
+        }
         "_generation_dsa_module_data" => {
             view_generation_dsa_module(&src("dsa_generation_module_perf.parquet")?, false)?
         }
@@ -2275,9 +2499,15 @@ pub fn table_view_json(tables: &PerfTables, attribute: &str) -> Result<Option<St
         "_dsv4_sparse_kernel_data.paged_mqa_logits" => {
             view_dsv4_sparse_kernel(&src("dsv4_paged_mqa_logits_module_perf.parquet")?)?
         }
-        "_dsv4_sparse_kernel_data.hca_attn" => view_dsv4_sparse_kernel(&src("dsv4_hca_attn_module_perf.parquet")?)?,
-        "_dsv4_sparse_kernel_data.csa_attn" => view_dsv4_sparse_kernel(&src("dsv4_csa_attn_module_perf.parquet")?)?,
-        "_dsv4_csa_topk_calib_data" => view_dsv4_csa_topk_calib(&src("dsv4_csa_topk_calib_perf.parquet")?)?,
+        "_dsv4_sparse_kernel_data.hca_attn" => {
+            view_dsv4_sparse_kernel(&src("dsv4_hca_attn_module_perf.parquet")?)?
+        }
+        "_dsv4_sparse_kernel_data.csa_attn" => {
+            view_dsv4_sparse_kernel(&src("dsv4_csa_attn_module_perf.parquet")?)?
+        }
+        "_dsv4_csa_topk_calib_data" => {
+            view_dsv4_csa_topk_calib(&src("dsv4_csa_topk_calib_perf.parquet")?)?
+        }
         "_dsv4_megamoe_module_data" => view_dsv4_megamoe_module(&tables.data_root)?,
         "_mamba2_data" => view_mamba2(&src("mamba2_perf.parquet")?)?,
         "_gdn_data" => view_gdn(&src("gdn_perf.parquet")?)?,

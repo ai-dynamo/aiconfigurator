@@ -282,7 +282,8 @@ fn check_strict_provenance_coverage(
             return Ok(());
         }
     };
-    let covered: BTreeSet<String> = match meta.get(serde_yaml::Value::String("tables".to_string())) {
+    let covered: BTreeSet<String> = match meta.get(serde_yaml::Value::String("tables".to_string()))
+    {
         Some(serde_yaml::Value::Mapping(tables)) => tables
             .keys()
             .filter_map(|key| match key {
@@ -369,9 +370,7 @@ fn parse_reuse_yaml(path: &Path) -> Result<Vec<ReuseEntry>, AicError> {
         let missing: Vec<&str> = REUSE_ENTRY_REQUIRED_KEYS
             .iter()
             .copied()
-            .filter(|key| {
-                !entry_map.contains_key(serde_yaml::Value::String((*key).to_string()))
-            })
+            .filter(|key| !entry_map.contains_key(serde_yaml::Value::String((*key).to_string())))
             .collect();
         if !missing.is_empty() {
             return Err(perf_err(format!(
@@ -511,7 +510,10 @@ pub(crate) fn resolve_op_data_path(
             }
         }
     }
-    system_data_root.join(backend).join(version).join(op_filename)
+    system_data_root
+        .join(backend)
+        .join(version)
+        .join(op_filename)
 }
 
 /// Yield `(version, version_path)` for a backend across BOTH tree layouts.
@@ -712,11 +714,11 @@ fn manifest_entries_for(
         if op_file != op_file_basename {
             continue;
         }
-        let kernel_source = match entry_map.get(serde_yaml::Value::String("kernel_source".to_string()))
-        {
-            Some(serde_yaml::Value::String(s)) if !s.is_empty() => Some(s.clone()),
-            _ => None, // falsy kernel_source is skipped at consumption
-        };
+        let kernel_source =
+            match entry_map.get(serde_yaml::Value::String("kernel_source".to_string())) {
+                Some(serde_yaml::Value::String(s)) if !s.is_empty() => Some(s.clone()),
+                _ => None, // falsy kernel_source is skipped at consumption
+            };
         let tier = match entry_map.get(serde_yaml::Value::String("tier".to_string())) {
             Some(serde_yaml::Value::String(s)) => Some(s.clone()),
             _ => None,
@@ -923,8 +925,16 @@ pub fn resolve_one(
         if !donor_path.is_file() {
             continue;
         }
-        let donor_dir = donor_path.parent().map(Path::to_path_buf).unwrap_or_default();
-        if version_dir_unusable_for_request(&donor_dir, &ctx.system_data_root, ctx.strict, &mut warnings)? {
+        let donor_dir = donor_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        if version_dir_unusable_for_request(
+            &donor_dir,
+            &ctx.system_data_root,
+            ctx.strict,
+            &mut warnings,
+        )? {
             continue;
         }
         if op_file_family_from_path(&donor_path, &ctx.system_data_root).is_some() {
@@ -986,8 +996,16 @@ pub fn resolve_one(
             if !sibling_path.is_file() {
                 continue;
             }
-            let sibling_dir = sibling_path.parent().map(Path::to_path_buf).unwrap_or_default();
-            if version_dir_unusable_for_request(&sibling_dir, &ctx.system_data_root, ctx.strict, &mut warnings)? {
+            let sibling_dir = sibling_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
+            if version_dir_unusable_for_request(
+                &sibling_dir,
+                &ctx.system_data_root,
+                ctx.strict,
+                &mut warnings,
+            )? {
                 continue;
             }
             records.push((sibling_version, sibling_path, "fallback", None));
@@ -998,8 +1016,11 @@ pub fn resolve_one(
     let mut per_framework_filter: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut per_framework_fallback: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for entry in manifest_entries_for(&ctx.systems_root, op_file_basename)? {
-        let frameworks_lower: BTreeSet<String> =
-            entry.frameworks.iter().map(|fw| fw.to_lowercase()).collect();
+        let frameworks_lower: BTreeSet<String> = entry
+            .frameworks
+            .iter()
+            .map(|fw| fw.to_lowercase())
+            .collect();
         if !frameworks_lower.contains(&backend_lower) {
             continue; // Active backend isn't listed as a consumer of this kernel_source.
         }
@@ -1062,8 +1083,16 @@ pub fn resolve_one(
             if !sibling_path.is_file() {
                 continue;
             }
-            let sibling_dir = sibling_path.parent().map(Path::to_path_buf).unwrap_or_default();
-            if version_dir_unusable_for_request(&sibling_dir, &ctx.system_data_root, ctx.strict, &mut warnings)? {
+            let sibling_dir = sibling_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
+            if version_dir_unusable_for_request(
+                &sibling_dir,
+                &ctx.system_data_root,
+                ctx.strict,
+                &mut warnings,
+            )? {
                 continue;
             }
             if !fallback_only.is_disjoint(&ks_filter) {
@@ -1131,7 +1160,11 @@ impl SourceResolver {
     /// legacy `<data>/<backend>/<version>` dir used for the Fixed-map
     /// default-primary fallback (identical to the retired
     /// `resolve_op_sources`).
-    pub fn sources_for(&self, basename: &str, data_root: &Path) -> Result<Vec<PerfSource>, AicError> {
+    pub fn sources_for(
+        &self,
+        basename: &str,
+        data_root: &Path,
+    ) -> Result<Vec<PerfSource>, AicError> {
         match &self.kind {
             ResolverKind::Fixed(map) => Ok(match map.get(basename) {
                 Some(sources) if !sources.is_empty() => sources.clone(),
@@ -1227,7 +1260,10 @@ mod tests {
         let root = tmp.path();
         let data = root.join("data");
         for v in ["1.0.0", "1.2.0", "0.9.0", "0.5.0"] {
-            write(&data.join(format!("gemm/trtllm/{v}/gemm_perf.parquet")), "stub");
+            write(
+                &data.join(format!("gemm/trtllm/{v}/gemm_perf.parquet")),
+                "stub",
+            );
         }
         write(&data.join("gemm/vllm/0.5.0/gemm_perf.parquet"), "stub");
         write(
@@ -1241,11 +1277,26 @@ mod tests {
         let report = resolve_one(&ctx(root, "trtllm", "1.0.0"), "gemm_perf.parquet", None).unwrap();
         assert_eq!(
             channels(&report),
-            ["primary", "declared_reuse", "fallback", "fallback", "cross_backend"]
+            [
+                "primary",
+                "declared_reuse",
+                "fallback",
+                "fallback",
+                "cross_backend"
+            ]
         );
-        assert_eq!(versions(&report), ["1.0.0", "1.2.0", "0.9.0", "0.5.0", "0.5.0"]);
+        assert_eq!(
+            versions(&report),
+            ["1.0.0", "1.2.0", "0.9.0", "0.5.0", "0.5.0"]
+        );
         let last = report.records.last().unwrap();
-        let ks: Vec<&str> = last.ks_filter.as_ref().unwrap().iter().map(String::as_str).collect();
+        let ks: Vec<&str> = last
+            .ks_filter
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(String::as_str)
+            .collect();
         assert_eq!(ks, ["shared_kernel"]);
         assert!(report.records[..4].iter().all(|r| r.ks_filter.is_none()));
         assert!(report.records.iter().all(|r| r.exists));
@@ -1261,7 +1312,10 @@ mod tests {
         let root = tmp.path();
         let data = root.join("data");
         write(&data.join("trtllm/1.0.0/gemm_perf.parquet"), "stub");
-        write(&data.join("trtllm/1.0.0/INCOMPLETE.txt"), "partial collection\n");
+        write(
+            &data.join("trtllm/1.0.0/INCOMPLETE.txt"),
+            "partial collection\n",
+        );
         write(&data.join("gemm/trtllm/0.9.0/gemm_perf.parquet"), "stub");
         let report = resolve_one(&ctx(root, "trtllm", "1.0.0"), "gemm_perf.parquet", None).unwrap();
         assert_eq!(channels(&report), ["fallback"]);
@@ -1301,13 +1355,19 @@ mod tests {
         let root = tmp.path();
         let data = root.join("data");
         for v in ["1.2.0rc5", "1.2.0", "nightly-build", "1.2.0rc4"] {
-            write(&data.join(format!("gemm/trtllm/{v}/gemm_perf.parquet")), "stub");
+            write(
+                &data.join(format!("gemm/trtllm/{v}/gemm_perf.parquet")),
+                "stub",
+            );
         }
         let report =
             resolve_one(&ctx(root, "trtllm", "1.2.0rc5"), "gemm_perf.parquet", None).unwrap();
         // 1.2.0 > 1.2.0rc5 (never implicit); nightly-build unparseable (warned).
         assert_eq!(versions(&report), ["1.2.0rc5", "1.2.0rc4"]);
-        assert!(report.warnings.iter().any(|w| w.kind == "unparseable_sibling"));
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| w.kind == "unparseable_sibling"));
     }
 
     #[test]
@@ -1328,7 +1388,8 @@ mod tests {
         c.strict = true;
         let err = resolve_one(&c, "gemm_perf.parquet", None).unwrap_err();
         assert!(
-            err.to_string().contains("missing required key(s): from_version, reason, approved_by"),
+            err.to_string()
+                .contains("missing required key(s): from_version, reason, approved_by"),
             "{err}"
         );
         // non-strict: warn and keep resolving with zero declared donors.
@@ -1345,7 +1406,10 @@ mod tests {
     fn strict_primary_missing_sidecar_fails_closed() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        write(&root.join("data/gemm/trtllm/1.0.0/gemm_perf.parquet"), "stub");
+        write(
+            &root.join("data/gemm/trtllm/1.0.0/gemm_perf.parquet"),
+            "stub",
+        );
         let mut c = ctx(root, "trtllm", "1.0.0");
         c.strict = true;
 
@@ -1387,7 +1451,10 @@ mod tests {
             "schema_version: 1\nreuse:\n  - table: wideep_moe_perf\n    from_version: '0.9.0'\n    reason: r\n    approved_by: a\n",
         );
         write(&donor.join("wideep_moe_perf.parquet"), "stub");
-        write(&donor.join("collection_meta.yaml"), "schema_version: 1\ntables: {}\n");
+        write(
+            &donor.join("collection_meta.yaml"),
+            "schema_version: 1\ntables: {}\n",
+        );
         let mut c = ctx(root, "trtllm", "1.0.0");
         c.strict = true;
 
@@ -1420,8 +1487,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let data = root.join("data");
-        write(&data.join("comm/trtllm/1.0.0/custom_allreduce_perf.parquet"), "stub");
-        write(&data.join("comm/trtllm/0.9.0/custom_allreduce_perf.parquet"), "stub");
+        write(
+            &data.join("comm/trtllm/1.0.0/custom_allreduce_perf.parquet"),
+            "stub",
+        );
+        write(
+            &data.join("comm/trtllm/0.9.0/custom_allreduce_perf.parquet"),
+            "stub",
+        );
         let report = resolve_one(
             &ctx(root, "trtllm", "1.0.0"),
             "custom_allreduce_perf.parquet",
@@ -1466,10 +1539,16 @@ mod tests {
         );
         let resolver = SourceResolver::fixed(map);
         // present-but-empty = deliberate veto
-        assert!(resolver.sources_for("vetoed.parquet", &data_root).unwrap().is_empty());
+        assert!(resolver
+            .sources_for("vetoed.parquet", &data_root)
+            .unwrap()
+            .is_empty());
         // explicit list passes through
         assert_eq!(
-            resolver.sources_for("explicit.parquet", &data_root).unwrap()[0].0,
+            resolver
+                .sources_for("explicit.parquet", &data_root)
+                .unwrap()[0]
+                .0,
             PathBuf::from("/x/explicit.parquet")
         );
         // absent = default primary (legacy path when no family dir has it)

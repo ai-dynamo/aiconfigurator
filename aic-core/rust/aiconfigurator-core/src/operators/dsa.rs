@@ -121,12 +121,14 @@ impl DsaModuleOp {
         let v = dims.v_head_dim as f64;
         let idx = (dims.index_head_dim * dims.index_n_heads) as f64;
         let local_heads = f64::from(self.num_heads);
-        let quants = self.attn_projection_quant_modes.unwrap_or(DsaProjectionQuants {
-            q: self.gemm_quant_mode,
-            kv: self.gemm_quant_mode,
-            o: self.gemm_quant_mode,
-            indexer: self.gemm_quant_mode,
-        });
+        let quants = self
+            .attn_projection_quant_modes
+            .unwrap_or(DsaProjectionQuants {
+                q: self.gemm_quant_mode,
+                kv: self.gemm_quant_mode,
+                o: self.gemm_quant_mode,
+                indexer: self.gemm_quant_mode,
+            });
         let q_params = h * q_lora + q_lora * local_heads * qk;
         let kv_params = h * (kv_lora + dims.qk_rope_head_dim as f64)
             + kv_lora * local_heads * (dims.qk_nope_head_dim as f64 + v);
@@ -196,7 +198,7 @@ impl DsaModuleOp {
         {
             self.full_frac
         } else {
-            self.effective_full_frac(db.dsa.has_context_skip_rows())
+            self.effective_full_frac(db.dsa.has_context_skip_rows()?)
         };
         // CP (round-robin sequence split) prefill takes the sparse-delta
         // composition path (Python `ContextDSAModule.query` -> `_query_cp`
@@ -427,7 +429,7 @@ impl DsaModuleOp {
         {
             self.full_frac
         } else {
-            self.effective_full_frac(db.dsa.has_generation_skip_rows())
+            self.effective_full_frac(db.dsa.has_generation_skip_rows()?)
         };
         // `dsa_backend="trtllm"` mirrors Python's generation default
         // (`_query_generation_dsa_module_table(dsa_backend="trtllm")`).
@@ -1326,8 +1328,11 @@ mod tests {
     #[test]
     fn missing_skip_indexer_variant_degrades_amortization_to_all_full() {
         let db = sglang_db("h200_sxm", "0.5.10", DatabaseMode::Silicon);
-        assert!(!db.dsa.has_context_skip_rows(), "h200/0.5.10 ships full rows only");
-        assert!(!db.dsa.has_generation_skip_rows());
+        assert!(
+            !db.dsa.has_context_skip_rows().expect("probe"),
+            "h200/0.5.10 ships full rows only"
+        );
+        assert!(!db.dsa.has_generation_skip_rows().expect("probe"));
 
         let glm52 = glm52_op(KvCacheQuantMode::Bfloat16, GLM52_FULL_FRAC);
         let all_full = glm52_op(KvCacheQuantMode::Bfloat16, 1.0);
@@ -1366,8 +1371,11 @@ mod tests {
     #[test]
     fn present_skip_indexer_variant_keeps_mixed_amortization() {
         let db = sglang_db("gb200", "0.5.14", DatabaseMode::Silicon);
-        assert!(db.dsa.has_context_skip_rows(), "gb200 ships both variants");
-        assert!(db.dsa.has_generation_skip_rows());
+        assert!(
+            db.dsa.has_context_skip_rows().expect("probe"),
+            "gb200 ships both variants"
+        );
+        assert!(db.dsa.has_generation_skip_rows().expect("probe"));
 
         let glm52 = glm52_op(KvCacheQuantMode::Bfloat16, GLM52_FULL_FRAC);
         let all_full = glm52_op(KvCacheQuantMode::Bfloat16, 1.0);
@@ -1420,7 +1428,10 @@ mod tests {
     #[test]
     fn sol_mode_keeps_configured_amortization_on_full_only_table() {
         let db = sglang_db("h200_sxm", "0.5.10", DatabaseMode::Sol);
-        assert!(!db.dsa.has_context_skip_rows(), "anchor must be full-only");
+        assert!(
+            !db.dsa.has_context_skip_rows().expect("probe"),
+            "anchor must be full-only"
+        );
 
         let glm52 = glm52_op(KvCacheQuantMode::Bfloat16, GLM52_FULL_FRAC);
         let all_full = glm52_op(KvCacheQuantMode::Bfloat16, 1.0);

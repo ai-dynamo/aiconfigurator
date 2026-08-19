@@ -1107,11 +1107,15 @@ mod tests {
     /// ```
     #[test]
     fn moe_nvfp4_wo_ladder_matches_python_oracle() {
-        let root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("src/aiconfigurator_core/systems");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
         let db = PerfDatabase::load(&root, "h200_sxm", "vllm", "0.19.0")
             .expect("h200/vllm/0.19.0 db loads")
-            .with_mode(crate::common::enums::DatabaseMode::Hybrid, TransferPolicy::ALL);
+            .with_mode(
+                crate::common::enums::DatabaseMode::Hybrid,
+                TransferPolicy::ALL,
+            );
 
         let op = MoeOp {
             name: "moe-nvfp4wo-ladder".into(),
@@ -1130,8 +1134,15 @@ mod tests {
             enable_eplb: false,
             is_context: false,
         };
-        let r = op.query(&db, 96).expect("nvfp4_wo resolves via XPROFILE ladder");
-        assert_oracle(&r, 8.439357376098632, Source::Empirical, "nvfp4_wo_ladder_t96");
+        let r = op
+            .query(&db, 96)
+            .expect("nvfp4_wo resolves via XPROFILE ladder");
+        assert_oracle(
+            &r,
+            8.439357376098632,
+            Source::Empirical,
+            "nvfp4_wo_ladder_t96",
+        );
     }
 
     #[test]

@@ -236,12 +236,18 @@ impl Dsv4Table {
     /// a fixed source map is the test-only path). Each DSV4 file falls back to its
     /// primary `data_root/<basename>` when the resolver names no override. No I/O.
     pub fn with_sources(data_root: PathBuf, resolver: &SourceResolver) -> Result<Self, AicError> {
-        let csa_context_sources = resolver.sources_for("dsv4_csa_context_module_perf.parquet", &data_root)?;
-        let hca_context_sources = resolver.sources_for("dsv4_hca_context_module_perf.parquet", &data_root)?;
-        let csa_generation_sources = resolver.sources_for("dsv4_csa_generation_module_perf.parquet", &data_root)?;
-        let hca_generation_sources = resolver.sources_for("dsv4_hca_generation_module_perf.parquet", &data_root)?;
-        let topk_calib_sources = resolver.sources_for("dsv4_csa_topk_calib_perf.parquet", &data_root)?;
-        let paged_mqa_sources = resolver.sources_for("dsv4_paged_mqa_logits_module_perf.parquet", &data_root)?;
+        let csa_context_sources =
+            resolver.sources_for("dsv4_csa_context_module_perf.parquet", &data_root)?;
+        let hca_context_sources =
+            resolver.sources_for("dsv4_hca_context_module_perf.parquet", &data_root)?;
+        let csa_generation_sources =
+            resolver.sources_for("dsv4_csa_generation_module_perf.parquet", &data_root)?;
+        let hca_generation_sources =
+            resolver.sources_for("dsv4_hca_generation_module_perf.parquet", &data_root)?;
+        let topk_calib_sources =
+            resolver.sources_for("dsv4_csa_topk_calib_perf.parquet", &data_root)?;
+        let paged_mqa_sources =
+            resolver.sources_for("dsv4_paged_mqa_logits_module_perf.parquet", &data_root)?;
         Ok(Self {
             csa_context_sources,
             hca_context_sources,

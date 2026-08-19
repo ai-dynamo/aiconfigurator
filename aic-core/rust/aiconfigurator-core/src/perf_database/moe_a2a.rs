@@ -114,9 +114,9 @@ impl MoeA2aTable {
     /// from `perf_db_sources` (Python-supplied). Each perf file falls back to
     /// its primary `data_root/<basename>` when absent from the map. No I/O.
     pub fn with_sources(data_root: PathBuf, resolver: &SourceResolver) -> Result<Self, AicError> {
-        let moe_a2a_sources =
-            resolver.sources_for("moe_a2a_perf.parquet", &data_root)?;
-        let legacy_normal_sources = resolver.sources_for("wideep_deepep_normal_perf.parquet", &data_root)?;
+        let moe_a2a_sources = resolver.sources_for("moe_a2a_perf.parquet", &data_root)?;
+        let legacy_normal_sources =
+            resolver.sources_for("wideep_deepep_normal_perf.parquet", &data_root)?;
         let legacy_ll_sources =
             resolver.sources_for("wideep_deepep_ll_perf.parquet", &data_root)?;
         let legacy_trtllm_alltoall_sources =
@@ -544,7 +544,9 @@ pub(crate) fn legacy_trtllm_backend(kernel_source: &str) -> Option<&'static str>
 /// low-precision combine kernel gets its own `"fp4"` dtype key (an nvfp4
 /// run's STANDARD combine still keys as `"nvfp4"`). An unmapped op_name skips
 /// the row. Shared with the table view.
-pub(crate) fn legacy_trtllm_phase_dtype(op_name: &str) -> Option<(&'static str, Option<&'static str>)> {
+pub(crate) fn legacy_trtllm_phase_dtype(
+    op_name: &str,
+) -> Option<(&'static str, Option<&'static str>)> {
     match op_name {
         "alltoall_prepare" => Some(("prepare", None)),
         "alltoall_dispatch" => Some(("dispatch", None)),
