@@ -48,6 +48,26 @@ REPOS = {
     "nvidia/MiniMax-M3-NVFP4": "m3",
     "openai/gpt-oss-120b": "gptoss",
     "openai/gpt-oss-20b": "gptoss",
+    # special-attention architectures from the collector support matrix, each
+    # in the identities that exist upstream (default / fp8 / nvfp4)
+    "deepseek-ai/DeepSeek-V3.2": "generic",
+    "nvidia/DeepSeek-V3.1-NVFP4": "generic",
+    "zai-org/GLM-5.1": "generic",
+    "zai-org/GLM-5.1-FP8": "generic",
+    "nvidia/GLM-5.1-NVFP4": "generic",
+    "moonshotai/Kimi-K2.5": "generic",
+    "nvidia/Kimi-K2.5-NVFP4": "generic",
+    "google/gemma-4-26B-A4B": "generic",
+    "XiaomiMiMo/MiMo-V2-Flash": "generic",
+    "MiniMaxAI/MiniMax-M2.7": "generic",
+    "nvidia/MiniMax-M2.7-NVFP4": "generic",
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "generic",
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4": "generic",
+    "Qwen/Qwen3.5-9B": "generic",
+    "Qwen/Qwen3.5-35B-A3B": "generic",
+    "Qwen/Qwen3-30B-A3B": "generic",
+    "Qwen/Qwen3-30B-A3B-FP8": "generic",
+    "nvidia/Qwen3-235B-A22B-NVFP4": "generic",
 }
 
 _LAYER_REF_RE = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|\*|$)")
@@ -64,7 +84,13 @@ def _slice_layer_lists(cfg: dict, n_layers: int, sel: list[int], edits: list[str
 
 
 def _remap_quant_layer_entries(cfg: dict, sel: list[int], edits: list[str]) -> None:
-    """Filter/renumber per-layer quantization entries to the selected layers."""
+    """Filter/renumber per-layer quantization entries to the selected layers.
+
+    Layer references appear in several shapes across quantizers:
+      * quantized_layers: {"layers.N.ffn.experts": {...}}          (modelopt dsv4)
+      * ignore / modules_to_not_convert / ignored_layers / exclude_modules
+      * config_groups.<g>.targets: ["backbone.layers.N.mixer...."] (nemotron)
+    """
     qc = cfg.get("quantization_config")
     if not isinstance(qc, dict):
         return
@@ -82,22 +108,28 @@ def _remap_quant_layer_entries(cfg: dict, sel: list[int], edits: list[str]) -> N
         edits.append(f"quantized_layers: {len(ql)} -> {len(kept)} entries, renumbered")
         qc["quantized_layers"] = kept
 
-    for field in ("ignore", "modules_to_not_convert", "ignored_layers", "exclude_modules"):
-        entries = qc.get(field)
+    containers = [(qc, f) for f in
+                  ("ignore", "modules_to_not_convert", "ignored_layers", "exclude_modules")]
+    for grp in (qc.get("config_groups") or {}).values():
+        if isinstance(grp, dict):
+            containers.append((grp, "targets"))
+
+    for container, field in containers:
+        entries = container.get(field)
         if not isinstance(entries, list):
             continue
         kept, dropped = [], 0
         for e in entries:
             m = re.search(r"^(.*?\blayers\.)(\d+)(.*)$", e) if isinstance(e, str) else None
             if m is None:
-                kept.append(e)  # no layer index (lm_head, wildcards like *.attn.*)
+                kept.append(e)  # no layer index (lm_head, wildcards, module classes)
             elif int(m.group(2)) in new_index:
                 kept.append(f"{m.group(1)}{new_index[int(m.group(2))]}{m.group(3)}")
             else:
                 dropped += 1
         if dropped or kept != entries:
             edits.append(f"{field}: renumbered, dropped {dropped} out-of-range entries")
-        qc[field] = kept
+        container[field] = kept
 
 
 def _check_no_stale_layer_refs(cfg: dict, max_layer: int) -> list[str]:
@@ -252,11 +284,111 @@ def apply_gptoss(cfg: dict, var: dict, edits: list[str]) -> None:
     cfg["num_hidden_layers"] = len(var["sel"])
 
 
+
+_PERIOD_FIELDS = ("full_attention_interval", "attention_interval",
+                  "linear_attention_interval", "moe_layer_interval")
+
+
+def _min_depth_for_periods(tc: dict) -> int:
+    """Minimum layer count that keeps a period-derived architecture faithful.
+
+    Some models derive layer kinds from a PERIOD rather than a per-layer list
+    (Qwen3.5: full attention where (i+1) %% full_attention_interval == 0).
+    Rescaling the period to fit a 2-layer cut produces a configuration that
+    does not exist upstream (interval=1 means every layer is full attention)
+    and still trips capacity asserts (mamba_cache_per_req > 0). Keep the real
+    period and cut to a whole number of periods instead: a dummy must be a
+    SHORTENED model, never a MODIFIED one.
+    """
+    periods = [int(tc[f]) for f in _PERIOD_FIELDS
+               if isinstance(tc.get(f), int) and tc[f] > 1]
+    if not periods:
+        return 0
+    import math
+    step = math.lcm(*periods) if len(periods) > 1 else periods[0]
+    return step * 2  # two full periods: exercises both kinds with real spacing
+
+
+def _layer_axis(cfg: dict) -> tuple[str | None, list]:
+    """Find the per-layer type list (name, values) if the model interleaves."""
+    tc = cfg.get("text_config", cfg)
+    n = tc.get("num_hidden_layers")
+    for key in ("layer_types", "attn_type_list", "hybrid_layer_pattern",
+                "indexer_types", "mlp_layer_types", "moe_layer_freq"):
+        v = tc.get(key)
+        if isinstance(v, list) and n and len(v) == n and len(set(map(str, v))) > 1:
+            return key, v
+    pat = tc.get("hybrid_override_pattern")
+    if isinstance(pat, str) and n and len(pat) == n:
+        return "hybrid_override_pattern", list(pat)
+    return None, []
+
+
+def variants_generic(cfg: dict) -> list[dict]:
+    """Depth-cut variants for any architecture: one per layer kind on the
+    detected interleave axis (plus a mixed pair), or a single 2-layer variant
+    for homogeneous models. MoE models skip the leading dense block."""
+    tc = cfg.get("text_config", cfg)
+    n = tc["num_hidden_layers"]
+    skip = int(tc.get("first_k_dense_replace") or 0)
+    min_depth = _min_depth_for_periods(tc)
+    if min_depth and min_depth <= n:
+        # period-derived architecture: keep the real period, take whole periods
+        return [{"name": f"depth{min_depth}", "sel": list(range(min_depth))}]
+    axis, values = _layer_axis(cfg)
+    if not axis:
+        sel = list(range(skip, min(skip + 2, n))) or list(range(min(2, n)))
+        return [{"name": "rep", "sel": sel}]
+    kinds: list[str] = []
+    for i, v in enumerate(values):
+        if i >= skip and str(v) not in kinds:
+            kinds.append(str(v))
+    out = []
+    for k in kinds[:4]:
+        sel = [i for i, v in enumerate(values) if str(v) == k and i >= skip][:2]
+        if sel:
+            safe = "".join(ch if ch.isalnum() else "_" for ch in k)[:20]
+            out.append({"name": f"{axis}_{safe}"[:40], "sel": sel})
+    # A variant holding only ONE layer kind is often structurally illegal:
+    # hybrid-SWA models assert "at least one SWA layer", mamba/GDN hybrids
+    # divide by the attention-layer count, vllm's kv grouping needs every
+    # kv-spec kind. So the FULL-COVERAGE variant (one layer of every kind)
+    # comes first and single-kind variants are kept only as extras.
+    cover: list[int] = []
+    for k in kinds:
+        idx = [i for i, v in enumerate(values) if str(v) == k and i >= skip]
+        if idx:
+            cover.append(idx[0])
+    if len(cover) > 1:
+        out.insert(0, {"name": "all_kinds", "sel": sorted(cover)})
+    return out
+
+
+def apply_generic(cfg: dict, var: dict, edits: list[str]) -> None:
+    tc = cfg.get("text_config", cfg)
+    n = tc["num_hidden_layers"]
+    sel = var["sel"]
+    pat = tc.get("hybrid_override_pattern")
+    if isinstance(pat, str) and len(pat) == n:
+        tc["hybrid_override_pattern"] = "".join(pat[i] for i in sel)
+        edits.append(f"hybrid_override_pattern -> {tc['hybrid_override_pattern']}")
+    _slice_layer_lists(tc, n, sel, edits)
+    tc["num_hidden_layers"] = len(sel)
+    if tc.get("first_k_dense_replace"):
+        tc["first_k_dense_replace"] = 0
+        edits.append("first_k_dense_replace -> 0")
+    for k in ("num_nextn_predict_layers", "num_mtp_modules"):
+        if tc.get(k):
+            tc[k] = 0
+            edits.append(f"{k} -> 0")
+
+
 ADAPTERS = {
     "dsv4": (variants_dsv4, apply_dsv4),
     "glm": (variants_glm, apply_glm),
     "m3": (variants_m3, apply_m3),
     "gptoss": (variants_gptoss, apply_gptoss),
+    "generic": (variants_generic, apply_generic),
 }
 
 
@@ -292,6 +424,17 @@ def main() -> int:
             out_dir = args.out / family / tag
             out_dir.mkdir(parents=True, exist_ok=True)
             (out_dir / "config.json").write_text(json.dumps(cfg, indent=2))
+            # modelopt/NVFP4 repos carry the authoritative quant description in
+            # a SEPARATE hf_quant_config.json; without it the framework loads
+            # the checkpoint as unquantized (looked like a silent-downgrade bug
+            # until the missing file was found). Remap its layer refs too.
+            hq_src = args.configs / (repo.replace("/", "_") + "_hfquant.json")
+            if hq_src.exists():
+                hq = json.loads(hq_src.read_text())
+                _remap_quant_layer_entries({"quantization_config": hq.get("quantization", hq)},
+                                           var["sel"], edits)
+                (out_dir / "hf_quant_config.json").write_text(json.dumps(hq, indent=2))
+                edits.append("hf_quant_config.json copied + layer refs remapped")
             entry = {
                 "variant": tag,
                 "repo": repo,

@@ -78,15 +78,23 @@ def enumerate_runs(targets: dict, full: bool, backends: list[str]) -> list[dict]
         versions = be["versions"] if full else [be["versions"][-1]]
         for fam_name, fam in targets["families"].items():
             variants = fam.get("dummy_variants") or []
-            if not variants:
+            if not variants and not any(c.get("variants") for c in fam["checkpoints"]):
                 continue  # adapter pending (kimi_k3)
             override = (fam.get("variant_overrides") or {}).get(backend)
-            use_variants = variants if full else [override or variants[0]]
             for ck in fam["checkpoints"]:
                 pairing = targets["kv_pairing"][ck["profile"]]
                 repo_tag = ck["repo"].split("/")[-1]
+                # per-checkpoint variants win (architectures in a mixed family
+                # each have their own layer kinds); else the family list
+                ck_variants = ck.get("variants") or variants
+                use_variants = ck_variants if full else [override or ck_variants[0]]
                 for variant in use_variants:
-                    vdir = ROOT / "dummy_models" / fam_name / f"{repo_tag}__{variant}"
+                    # dummy dirs are keyed by ADAPTER family (generic adapters
+                    # emit under dummy_models/generic/), not by targets family
+                    for _famdir in (fam.get("dummy_dir") or fam_name, "generic"):
+                        vdir = ROOT / "dummy_models" / _famdir / f"{repo_tag}__{variant}"
+                        if vdir.exists():
+                            break
                     if not vdir.exists():
                         runs.append({"skip": f"no dummy dir {vdir.name}", "repo": ck["repo"], "variant": variant})
                         continue
@@ -100,7 +108,7 @@ def enumerate_runs(targets: dict, full: bool, backends: list[str]) -> list[dict]
                                 "kv_cli": pairing["cli"], "kvcache_quant_mode": pairing["kvcache"],
                                 "variant": variant, "backend": backend, "version": version,
                                 "image": be["images"][version], "tp": topo["tp"],
-                                "model_dir": f"{WORK}/dummy_models/{fam_name}/{repo_tag}__{variant}",
+                                "model_dir": f"{WORK}/{vdir.relative_to(ROOT)}",
                                 "aic_registered": ck.get("aic_registered", False),
                                 "render_overrides": (fam.get("render_overrides") or {}).get(backend) or {},
                             })
@@ -175,7 +183,9 @@ def emit_queues(runs: list[dict], n_gpus: int, gpu_offset: int, plan_name: str) 
                 f"echo 'skip [{run['id']}] (done)' || {{ "
                 f"echo '### [{run['id']}] {run['backend']} {run['repo']} {run['variant']} "
                 f"{run['version']} tp{run['tp']}' && timeout 1500 docker run --rm "
-                f"--gpus '\"device={g}\"' --shm-size 16g -e HF_HUB_OFFLINE=1 -v {ROOT}:{WORK} ")
+                f"--gpus '\"device={g}\"' --shm-size 16g -e HF_HUB_OFFLINE=1 "
+                f"-v {ROOT}:{WORK} -v {ROOT}/jitcache:/root/.cache "
+                f"-e TRITON_CACHE_DIR=/root/.cache/triton -e DG_JIT_CACHE_DIR=/root/.cache/deep_gemm ")
         if run["backend"] == "sglang":
             cli = render_sglang_cli(run["model_dir"], run["tp"], run["version"])
             run["engine_cli"] = cli

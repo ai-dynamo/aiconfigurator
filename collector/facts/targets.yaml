@@ -1,127 +1,292 @@
-# aic-probe-targets/v1 — Step-1 target matrix for the facts archive.
-#
-# Sources of truth:
-#   * checkpoint list: aiconfigurator src/aiconfigurator/model_configs/ + the
-#     checkpoints Tianhao listed (some not yet AIC-registered — recorded, not skipped)
-#   * kv pairing: aiconfigurator sdk/task_v1_compat.py _PROFILE_TO_QUANT
-#     (bf16+bf16, fp8+fp8, nvfp4 -> fp8 KV; nvfp4-KV out of scope for now)
-#
-# evidence starts at "unprobed"; the archive generator promotes it.
-
 schema: aic-probe-targets/v1
-
-kv_pairing:  # profile -> (aic kvcache_quant_mode, engine CLI value)
-  bfloat16: {kvcache: bfloat16, cli: null}       # null -> framework auto (== bf16; assumption itself probed)
-  fp8: {kvcache: fp8, cli: fp8_e4m3}
-  fp8_static: {kvcache: fp8, cli: fp8_e4m3}
-  nvfp4: {kvcache: fp8, cli: fp8_e4m3}
-  mxfp4: {kvcache: bfloat16, cli: null}          # w4a16_mxfp4 profile keeps bf16 KV
-
+kv_pairing:
+  bfloat16:
+    kvcache: bfloat16
+    cli: null
+  fp8:
+    kvcache: fp8
+    cli: fp8_e4m3
+  fp8_static:
+    kvcache: fp8
+    cli: fp8_e4m3
+  nvfp4:
+    kvcache: fp8
+    cli: fp8_e4m3
+  mxfp4:
+    kvcache: bfloat16
+    cli: null
 backends:
-  sglang: {versions: ["0.5.14", "0.5.16"], images: {"0.5.14": "lmsysorg/sglang:v0.5.14", "0.5.16": "lmsysorg/sglang:v0.5.16"}}
-  vllm: {versions: ["0.24.0"], images: {"0.24.0": "vllm-probe:0.24.0-fix"}}
-  # local commit: onnx pinned 1.19.1 + probe-side cutlass shims (see README).
-  # v1 uses probe-default engine args; generator fidelity (extra_engine_args
-  # yaml -> LlmArgs) is a pending increment — recorded in provenance.
-  trtllm: {versions: ["1.3.0rc20"], images: {"1.3.0rc20": "trtllm-probe:1.3.0rc20-onnxfix"}}
-
+  sglang:
+    versions:
+    - 0.5.14
+    - 0.5.16
+    images:
+      0.5.14: lmsysorg/sglang:v0.5.14
+      0.5.16: lmsysorg/sglang:v0.5.16
+  vllm:
+    versions:
+    - 0.24.0
+    images:
+      0.24.0: vllm-probe:0.24.0-fix
+  trtllm:
+    versions:
+    - 1.3.0rc20
+    images:
+      1.3.0rc20: trtllm-probe:1.3.0rc20-onnxfix
 families:
   dsv4:
     architecture: DeepseekV4ForCausalLM
     checkpoints:
-      - repo: deepseek-ai/DeepSeek-V4-Pro-0813
-        profile: fp8            # native fp8-block + expert_dtype fp4 ("W4A8")
-        aic_registered: deepseek-ai--DeepSeek-V4-Pro
-        known: "SM90: loads silently, Fp8MoEMethod over fp4-packed int8 experts, first MoE forward crashes (both sglang versions)"
-      - repo: deepseek-ai/DeepSeek-V4-Flash-0731
-        profile: fp8
-        aic_registered: deepseek-ai--DeepSeek-V4-Flash
-        known: "same W4A8 crash class as Pro"
-      - repo: nvidia/DeepSeek-V4-Pro-NVFP4
-        profile: nvfp4
-        aic_registered: false   # sgl-project FP8 repacks are registered instead
-      - repo: nvidia/DeepSeek-V4-Flash-NVFP4
-        profile: nvfp4
-        aic_registered: false
-        known: "SM90: MoE dispatches to Marlin (bf16 dequant), NOT fp4 tensor cores"
-    dummy_variants: [csa, hca, full, interleave_pair, dspark, hash, rep_mix]
-    # vllm's DSV4 kv grouping asserts a full-MLA group exists (kv_cache_utils
-    # ~:1628); rep_mix keeps one layer of every kv-spec kind. NOTE: Pro has no
-    # full-MLA layers at all -> no rep_mix; whether REAL Pro loads on vllm 0.24
-    # is an open framework question, recorded not assumed.
-    variant_overrides: {vllm: rep_mix}
-    render_overrides: {vllm: {tokens_per_block: null}}  # sglang auto-picks page 256 for DSV4; hand-set 64 trips the kv-group page-size invariant
-
+    - repo: deepseek-ai/DeepSeek-V4-Pro-0813
+      profile: fp8
+      aic_registered: deepseek-ai--DeepSeek-V4-Pro
+      known: 'SM90: loads silently, Fp8MoEMethod over fp4-packed int8 experts, first MoE forward crashes
+        (both sglang versions)'
+    - repo: deepseek-ai/DeepSeek-V4-Flash-0731
+      profile: fp8
+      aic_registered: deepseek-ai--DeepSeek-V4-Flash
+      known: same W4A8 crash class as Pro
+    - repo: nvidia/DeepSeek-V4-Pro-NVFP4
+      profile: nvfp4
+      aic_registered: false
+    - repo: nvidia/DeepSeek-V4-Flash-NVFP4
+      profile: nvfp4
+      aic_registered: false
+      known: 'SM90: MoE dispatches to Marlin (bf16 dequant), NOT fp4 tensor cores'
+    dummy_variants:
+    - csa
+    - hca
+    - full
+    - interleave_pair
+    - dspark
+    - hash
+    - rep_mix
+    variant_overrides:
+      vllm: rep_mix
+    render_overrides:
+      vllm:
+        tokens_per_block: null
   glm:
     architecture: GlmMoeDsaForCausalLM
     checkpoints:
-      - repo: zai-org/GLM-5.2
-        profile: bfloat16
-        aic_registered: zai-org--GLM-5.2
-        known: "SM90 auto: KV bf16, dsa prefill=flashmla_sparse decode=fa3; dense FA3 branch below index_topk=2048"
-      - repo: zai-org/GLM-5.2-FP8
-        profile: fp8
-        aic_registered: zai-org--GLM-5.2-FP8
-        known: "explicit fp8_e4m3 KV honored on SM90 -> flashmla_kv both phases; decode includes online K-cache quantize"
-      - repo: nvidia/GLM-5.2-NVFP4
-        profile: nvfp4
-        aic_registered: nvidia--GLM-5.2-NVFP4
-    dummy_variants: [full_indexer_moe, shared_indexer_moe]
-
+    - repo: zai-org/GLM-5.2
+      profile: bfloat16
+      aic_registered: zai-org--GLM-5.2
+      known: 'SM90 auto: KV bf16, dsa prefill=flashmla_sparse decode=fa3; dense FA3 branch below index_topk=2048'
+    - repo: zai-org/GLM-5.2-FP8
+      profile: fp8
+      aic_registered: zai-org--GLM-5.2-FP8
+      known: explicit fp8_e4m3 KV honored on SM90 -> flashmla_kv both phases; decode includes online K-cache
+        quantize
+    - repo: nvidia/GLM-5.2-NVFP4
+      profile: nvfp4
+      aic_registered: nvidia--GLM-5.2-NVFP4
+    dummy_variants:
+    - full_indexer_moe
+    - shared_indexer_moe
   m3:
-    architecture: MiniMaxM3SparseForConditionalGeneration   # VL wrapper; text arch MiniMaxM3SparseForCausalLM
+    architecture: MiniMaxM3SparseForConditionalGeneration
     checkpoints:
-      - repo: MiniMaxAI/MiniMax-M3
-        profile: bfloat16
-        aic_registered: MiniMaxAI--MiniMax-M3
-      - repo: MiniMaxAI/MiniMax-M3-MXFP8
-        profile: fp8            # mxfp8 w8a8: pair with fp8 KV per fp8-family rule — CONFIRM with owner
-        aic_registered: false
-      - repo: nvidia/MiniMax-M3-NVFP4
-        profile: nvfp4
-        aic_registered: false
-    dummy_variants: [moe_sparse_attn, dense_full_attn_head]
-    render_overrides: {vllm: {tokens_per_block: null}}  # hand-set 64 broke hybrid linear attn ("No common block size"); let framework default
-    notes: "custom code (auto_map) — .py files fetched into variant dirs"
-
+    - repo: MiniMaxAI/MiniMax-M3
+      profile: bfloat16
+      aic_registered: MiniMaxAI--MiniMax-M3
+    - repo: MiniMaxAI/MiniMax-M3-MXFP8
+      profile: fp8
+      aic_registered: false
+    - repo: nvidia/MiniMax-M3-NVFP4
+      profile: nvfp4
+      aic_registered: false
+    dummy_variants:
+    - moe_sparse_attn
+    - dense_full_attn_head
+    render_overrides:
+      vllm:
+        tokens_per_block: null
+    notes: custom code (auto_map) — .py files fetched into variant dirs
   gptoss:
     architecture: GptOssForCausalLM
     checkpoints:
-      - repo: openai/gpt-oss-120b
-        profile: mxfp4          # native mxfp4 experts, bf16 attention
-        aic_registered: openai--gpt-oss-120b
-      - repo: openai/gpt-oss-20b
-        profile: mxfp4
-        aic_registered: openai--gpt-oss-20b
-    # interleave_pair first: sglang's SWA KV allocator asserts unless both
-    # layer types are present (homogeneous sliding variant crashes alloc)
-    dummy_variants: [interleave_pair, sliding_attention, full_attention]
-
+    - repo: openai/gpt-oss-120b
+      profile: mxfp4
+      aic_registered: openai--gpt-oss-120b
+    - repo: openai/gpt-oss-20b
+      profile: mxfp4
+      aic_registered: openai--gpt-oss-20b
+    dummy_variants:
+    - interleave_pair
+    - sliding_attention
+    - full_attention
   kimi_k3:
-    architecture: KimiK3ForConditionalGeneration   # VL wrapper; text arch KimiLinearForCausalLM
+    architecture: KimiK3ForConditionalGeneration
     checkpoints:
-      - repo: moonshotai/Kimi-K3
-        profile: bfloat16
-        aic_registered: false   # this checkout registers Kimi-K2.5, not K3
-      - repo: nvidia/Kimi-K3-NVFP4
-        profile: nvfp4
-        aic_registered: false
-    dummy_variants: []          # dummy_adapter: todo (hybrid linear-attention layer pattern, custom code)
+    - repo: moonshotai/Kimi-K3
+      profile: bfloat16
+      aic_registered: false
+    - repo: nvidia/Kimi-K3-NVFP4
+      profile: nvfp4
+      aic_registered: false
+    dummy_variants: []
     status: config_fetched_adapter_pending
-
+  special_attn:
+    architecture: various (support-matrix special-attention set)
+    checkpoints:
+    - repo: MiniMaxAI/MiniMax-M2.7
+      profile: fp8
+      aic_registered: true
+      variants:
+      - rep
+      quant_source:
+        config_quant_method: fp8
+        hf_quant_algo: null
+    - repo: Qwen/Qwen3-30B-A3B
+      profile: bfloat16
+      aic_registered: true
+      variants:
+      - rep
+      quant_source:
+        config_quant_method: null
+        hf_quant_algo: null
+    - repo: Qwen/Qwen3-30B-A3B-FP8
+      profile: fp8
+      aic_registered: true
+      variants:
+      - rep
+      quant_source:
+        config_quant_method: fp8
+        hf_quant_algo: null
+    - repo: Qwen/Qwen3.5-35B-A3B
+      profile: bfloat16
+      aic_registered: true
+      variants:
+      - depth8
+      quant_source:
+        config_quant_method: null
+        hf_quant_algo: null
+    - repo: Qwen/Qwen3.5-9B
+      profile: bfloat16
+      aic_registered: true
+      variants:
+      - depth8
+      quant_source:
+        config_quant_method: null
+        hf_quant_algo: null
+    - repo: XiaomiMiMo/MiMo-V2-Flash
+      profile: fp8
+      aic_registered: true
+      variants:
+      - all_kinds
+      - hybrid_layer_pattern_0
+      - hybrid_layer_pattern_1
+      quant_source:
+        config_quant_method: fp8
+        hf_quant_algo: null
+    - repo: deepseek-ai/DeepSeek-V3.2
+      profile: fp8
+      aic_registered: true
+      variants:
+      - rep
+      quant_source:
+        config_quant_method: fp8
+        hf_quant_algo: null
+    - repo: google/gemma-4-26B-A4B
+      profile: bfloat16
+      aic_registered: true
+      variants:
+      - all_kinds
+      - layer_types_full_attention
+      - layer_types_sliding_attention
+      quant_source:
+        config_quant_method: null
+        hf_quant_algo: null
+    - repo: moonshotai/Kimi-K2.5
+      profile: fp8
+      aic_registered: true
+      variants:
+      - rep
+      quant_source:
+        config_quant_method: compressed-tensors
+        hf_quant_algo: null
+    - repo: nvidia/DeepSeek-V3.1-NVFP4
+      profile: nvfp4
+      aic_registered: true
+      variants:
+      - rep
+      quant_source:
+        config_quant_method: null
+        hf_quant_algo: NVFP4
+    - repo: nvidia/GLM-5.1-NVFP4
+      profile: nvfp4
+      aic_registered: true
+      variants:
+      - mlp_layer_types_sparse
+      quant_source:
+        config_quant_method: modelopt
+        hf_quant_algo: NVFP4
+    - repo: nvidia/Kimi-K2.5-NVFP4
+      profile: nvfp4
+      aic_registered: true
+      variants:
+      - rep
+      quant_source:
+        config_quant_method: modelopt
+        hf_quant_algo: NVFP4
+    - repo: nvidia/MiniMax-M2.7-NVFP4
+      profile: nvfp4
+      aic_registered: true
+      variants:
+      - rep
+      quant_source:
+        config_quant_method: modelopt
+        hf_quant_algo: NVFP4
+    - repo: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      profile: bfloat16
+      aic_registered: true
+      variants:
+      - all_kinds
+      - hybrid_override_pattern_E
+      - hybrid_override_pattern_M
+      - hybrid_override_pattern__
+      quant_source:
+        config_quant_method: null
+        hf_quant_algo: null
+    - repo: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+      profile: nvfp4
+      aic_registered: true
+      variants:
+      - all_kinds
+      - hybrid_override_pattern_E
+      - hybrid_override_pattern_M
+      - hybrid_override_pattern__
+      quant_source:
+        config_quant_method: modelopt
+        hf_quant_algo: MIXED_PRECISION
+    - repo: nvidia/Qwen3-235B-A22B-NVFP4
+      profile: nvfp4
+      aic_registered: true
+      variants:
+      - rep
+      quant_source:
+        config_quant_method: null
+        hf_quant_algo: NVFP4
+    - repo: zai-org/GLM-5.1
+      profile: bfloat16
+      aic_registered: true
+      variants:
+      - rep
+      quant_source:
+        config_quant_method: null
+        hf_quant_algo: null
+    - repo: zai-org/GLM-5.1-FP8
+      profile: fp8
+      aic_registered: true
+      variants:
+      - rep
+      quant_source:
+        config_quant_method: fp8
+        hf_quant_algo: null
+    dummy_variants: []
 topologies:
-  # Topology is a first-class facts key: ALWAYS record it, even when two
-  # topologies agree — "same kernels" is itself a fact that a later version
-  # bump can invalidate. (Superseded an earlier "prove-it-irrelevant, then
-  # drop" policy: Kimi-K3 TEP8 is known to select different kernels, so
-  # per-family generalization from GLM/DSV4 was unsound.)
-  sm90: [{tp: 1, ep: 1}, {tp: 8, ep: 1}, {tp: 8, ep: 8}]
-  sm100: [{tp: 1, ep: 1}, {tp: 8, ep: 1}, {tp: 8, ep: 8}]   # needs Blackwell host
-  sm103: [{tp: 1, ep: 1}, {tp: 8, ep: 1}, {tp: 8, ep: 8}]   # needs Blackwell host
-  sm89: [{tp: 1, ep: 1}]
-  sm120: [{tp: 1, ep: 1}]
-  # Multi-rank runs go through inject/sitecustomize.py (per-rank facts shards).
-  # Measured so far (sm90, world=2, bench path): triton family (GLM-5.2-FP8)
-  # same main kernel, activation-variant + reduce-template + shard-shape
-  # differences; marlin family (DSV4-NVFP4, explicit runner) identical kernel
-  # set. world=8 in progress. flashinfer_trtllm family cannot run on sm90.
+- tp: 1
+  ep: 1
+  evidence: real
+  status: implemented
