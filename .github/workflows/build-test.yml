@@ -164,14 +164,23 @@ jobs:
           fi
 
           # Scope test_validate_database (e2e sanity check) to the diff:
-          # "all" when the sanity tooling / DB loader changed, otherwise the
-          # changed perf-data paths (empty -> sentinel combo only). Consumed
-          # via AIC_SANITY_TARGETS in tests/e2e/tools/test_sanity_check.py.
-          sanity_all_regex='^(tools/sanity_check/|tests/e2e/tools/test_sanity_check\.py|aic-core/src/aiconfigurator_core/sdk/perf_database\.py)'
+          # "all" when a dependency of the sanity notebook changed (loader,
+          # engine/operations, Rust perf-database, global source manifest,
+          # the tooling itself), otherwise the changed perf-data paths
+          # (empty -> sentinel combo only). Consumed via AIC_SANITY_TARGETS
+          # in tests/e2e/tools/test_sanity_check.py. The trigger regex lives
+          # in tools/sanity_check/sanity_full_matrix_triggers.txt (single
+          # source of truth, pinned by selector tests inside the container).
+          sanity_all_regex="$(cat tools/sanity_check/sanity_full_matrix_triggers.txt)"
+          changed_systems="$(printf '%s\n' "${changed_files}" | grep -E '^aic-core/src/aiconfigurator_core/systems/' || true)"
           if printf '%s\n' "${changed_files}" | grep -Eq "${sanity_all_regex}"; then
             sanity_targets="all"
+          elif [ "$(printf '%s\n' "${changed_systems}" | grep -c .)" -gt 200 ]; then
+            # Campaign-scale data PR: passing thousands of paths would blow
+            # env-var size limits, and the full matrix is appropriate anyway.
+            sanity_targets="all"
           else
-            sanity_targets="$(printf '%s\n' "${changed_files}" | grep -E '^aic-core/src/aiconfigurator_core/systems/' || true)"
+            sanity_targets="${changed_systems}"
           fi
           {
             echo "sanity_targets<<AIC_SANITY_EOF"

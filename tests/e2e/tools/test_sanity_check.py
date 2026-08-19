@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import re
 import subprocess as sp
 import sys
 
@@ -38,26 +39,24 @@ def _combos_from_changed_paths(changed_paths, supported):
         rest = parts[parts.index("systems") + 1 :]
         if not rest:
             continue
-        if rest[0] != "data":
+        if rest[0] == "data":
+            if len(rest) < 2:
+                continue
+            system = rest[1]
+        elif rest[0].endswith(".yaml"):
             # systems/<system>.yaml spec edits feed SOL math for every
             # backend of that system.
             system = rest[0].removesuffix(".yaml")
-            if rest[0].endswith(".yaml") and system in supported:
-                combos.update((system, backend) for backend in supported[system])
+        else:
             continue
-        if len(rest) < 2:
-            continue
-        system = rest[1]
         backends = supported.get(system)
         if not backends:
             continue
-        backend = next((p for p in rest[2:] if p in backends), None)
-        if backend is not None:
-            combos.add((system, backend))
-        else:
-            # Shared data with no backend path component (e.g. comm/nccl)
-            # feeds every backend of the system.
-            combos.update((system, b) for b in backends)
+        # Any data change expands to every supported backend of the system:
+        # backend-specific rows can feed other backends through manifest-gated
+        # cross-backend fill (shared-tier kernel sources, e.g. gdn_perf.parquet
+        # collected under sglang is consumed by trtllm/vllm too).
+        combos.update((system, backend) for backend in backends)
     return combos
 
 
@@ -123,3 +122,92 @@ def test_validate_database(system, backend, version, fail_ok):
         pytest.xfail(error_message)
 
     assert success, error_message
+
+
+# ---------------------------------------------------------------------------
+# Focused selector tests: pin the diff-scoping classification so a coverage
+# regression in the selector is caught by the selector suite itself.
+# ---------------------------------------------------------------------------
+
+_TRIGGERS_FILE = os.path.join(SANITY_CHECK_DIR, "sanity_full_matrix_triggers.txt")
+
+_FAKE_SUPPORTED = {
+    "gb200": {"sglang": {}, "trtllm": {}, "vllm": {}},
+    "h200_sxm": {"sglang": {}, "trtllm": {}, "vllm": {}},
+    "l40s": {"sglang": {}, "trtllm": {}, "vllm": {}},
+}
+
+
+def test_selector_cross_backend_donor_expands_to_all_system_backends():
+    # gdn_perf.parquet is collected under sglang but consumed by trtllm/vllm
+    # via manifest-gated cross-backend fill (shared-tier kernel sources); the
+    # selector must not narrow to the collecting backend.
+    combos = _combos_from_changed_paths(
+        ["aic-core/src/aiconfigurator_core/systems/data/gb200/linear_attention/sglang/0.5.14/gdn_perf.parquet"],
+        _FAKE_SUPPORTED,
+    )
+    assert combos == {("gb200", "sglang"), ("gb200", "trtllm"), ("gb200", "vllm")}
+
+
+def test_selector_system_yaml_expands_to_all_system_backends():
+    combos = _combos_from_changed_paths(["aic-core/src/aiconfigurator_core/systems/l40s.yaml"], _FAKE_SUPPORTED)
+    assert combos == {("l40s", backend) for backend in _FAKE_SUPPORTED["l40s"]}
+
+
+def test_selector_ignores_unrelated_and_unknown_paths():
+    combos = _combos_from_changed_paths(
+        [
+            "src/aiconfigurator/cli/main.py",
+            "README.md",
+            "aic-core/src/aiconfigurator_core/systems/support_matrix/foo.yaml",
+            "aic-core/src/aiconfigurator_core/systems/data/unknown_system/gemm/trtllm/1.0/gemm_perf.parquet",
+        ],
+        _FAKE_SUPPORTED,
+    )
+    assert combos == set()
+
+
+def test_selected_combos_empty_env_is_sentinel_only(monkeypatch):
+    monkeypatch.setenv("AIC_SANITY_TARGETS", "")
+    assert _selected_combos(_FAKE_SUPPORTED) == {SENTINEL_COMBO}
+
+
+def test_selected_combos_unset_and_all_run_full_matrix(monkeypatch):
+    full = {(system, backend) for system, backends in _FAKE_SUPPORTED.items() for backend in backends}
+    monkeypatch.delenv("AIC_SANITY_TARGETS", raising=False)
+    assert _selected_combos(_FAKE_SUPPORTED) == full
+    monkeypatch.setenv("AIC_SANITY_TARGETS", "all")
+    assert _selected_combos(_FAKE_SUPPORTED) == full
+
+
+FULL_MATRIX_TRIGGER_PATHS = [
+    # global source manifest: governs cross-backend/cross-system fill routing
+    "aic-core/src/aiconfigurator_core/systems/op_kernel_source_manifest.yaml",
+    # compiled Rust perf-database loader/interpolator
+    "aic-core/rust/aiconfigurator-core/src/perf_database/interpolation.rs",
+    # Python loader facade + engine/operation loading used by the notebook
+    "aic-core/src/aiconfigurator_core/sdk/perf_database.py",
+    "aic-core/src/aiconfigurator_core/sdk/engine.py",
+    "aic-core/src/aiconfigurator_core/sdk/operations/base.py",
+    # the sanity tooling and this selector itself
+    "tools/sanity_check/create_charts.py",
+    "tools/sanity_check/sanity_full_matrix_triggers.txt",
+    "tests/e2e/tools/test_sanity_check.py",
+]
+DIFF_SCOPED_PATHS = [
+    "aic-core/src/aiconfigurator_core/systems/data/gb200/gemm/trtllm/1.3.0rc23/gemm_perf.parquet",
+    "aic-core/src/aiconfigurator_core/systems/gb200.yaml",
+    "src/aiconfigurator/cli/main.py",
+]
+
+
+def test_full_matrix_trigger_regex_classification():
+    # The workflow reads the same triggers file (single source of truth), so
+    # this pin runs inside the CI container even though .github/ is not
+    # shipped into the image.
+    with open(_TRIGGERS_FILE) as f:
+        pattern = re.compile(f.read().strip())
+    for path in FULL_MATRIX_TRIGGER_PATHS:
+        assert pattern.search(path), f"expected full-matrix trigger: {path}"
+    for path in DIFF_SCOPED_PATHS:
+        assert not pattern.search(path), f"must stay diff-scoped: {path}"
