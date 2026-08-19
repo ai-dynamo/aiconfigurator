@@ -53,6 +53,18 @@ frameworks:
     # Qwen3_5MoeForCausalLM / Qwen3_5ForCausalLM); it cannot collect at the
     # 0.5.14 default above. Both tags below resolve to the same multi-arch
     # index digest (verified on Docker Hub 2026-08-17).
+    #
+    # SCOPE (known gap, accepted 2026-08-19): a model pin gates the run only
+    # when the run carries that model's identity (--model-path /
+    # --model-architecture). An UNFILTERED run on the default container still
+    # plans every model's cases, including pinned models' cases below their
+    # pinned version, with backend pins uncited at the running version.
+    # Operational invariant relied on instead: all collection runs pass
+    # AIC_MODEL_FILTER (campaign practice), and as of 2026-08-19 the
+    # auto-collector project has NO active pipeline schedules (both defined
+    # schedules are inactive and variable-less — verified via the GitLab
+    # API). Anyone enabling an unfiltered scheduled run must first make this
+    # pin case-scoped or exclude pinned-model cases below their floor.
     models:
       "Qwen/Qwen3.8-2.4T-A95B":
         version: "0.5.17"
