@@ -1875,3 +1875,63 @@ class TestWideEPAttentionExclusions:
         assert by_name["generation_proj_gemm"]._quant_mode == common.GEMMQuantMode.nvfp4
         # fused q_a+kv_a downscale: BF16 iff both groups excluded.
         assert by_name["context_downscale_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+
+
+class TestDSV4NVFP4QuantResolution:
+    """AIC-1749: quant resolution for the nvidia/DeepSeek-V4-*-NVFP4 exports.
+
+    Their ModelOpt sidecars name the expert stack as bare module paths
+    (``layers.N.ffn.experts`` — no trailing tensor segment), which the
+    routing-expert classifier used to miss, flooding ``gemm_algos`` with
+    nvfp4 and driving every sweep into the phantom
+    ``ModuleKey { gemm_quant: "nvfp4" }`` lookup. The checkpoints were also
+    absent from ``DEEPSEEK_V4_HF_MODELS``, so ``get_model`` bypassed the
+    packaged configs and re-downloaded the HF ``quantization_config`` (whose
+    blanket ``Linear`` config-group target re-created the same phantom).
+    """
+
+    @pytest.mark.parametrize(
+        ("target", "expected"),
+        [
+            # The DSV4 sidecar shape: bare module path, no trailing segment.
+            ("layers.0.ffn.experts", True),
+            # Tensor under the expert stack (the historical shape).
+            ("model.layers.3.mlp.experts.7.down_proj", True),
+            ("routing_expert_gemm", True),
+            # Shared experts are dense-path, never routed.
+            ("layers.0.ffn.shared_experts", False),
+            ("layers.0.ffn.shared_experts.0.up_proj", False),
+            ("layers.0.self_attn.q_proj", False),
+            # Suffix precision: "experts" embedded in a longer leaf name is
+            # not the expert module.
+            ("layers.0.ffn.experts_gate", False),
+        ],
+    )
+    def test_routing_expert_target_classification(self, target: str, expected: bool):
+        from aiconfigurator_core.sdk.models.helpers import _is_routing_expert_target
+
+        assert _is_routing_expert_target(target) is expected
+
+    def test_nvfp4_exports_are_registered_for_offline_configs(self):
+        for hf_id in ("nvidia/DeepSeek-V4-Flash-NVFP4", "nvidia/DeepSeek-V4-Pro-NVFP4"):
+            assert hf_id in common.DEEPSEEK_V4_HF_MODELS
+            assert hf_id in common.DefaultHFModels
+            # Derived roster: they join the daily support matrix (the AIC-1743
+            # §3 coverage gap) unless explicitly retired.
+            assert hf_id in common.SupportMatrixHFModels
+
+    @pytest.mark.parametrize("hf_id", ["nvidia/DeepSeek-V4-Flash-NVFP4", "nvidia/DeepSeek-V4-Pro-NVFP4"])
+    def test_nvfp4_export_resolves_offline_without_phantom_gemm_quant(self, hf_id: str):
+        """The packaged sidecar quantizes ONLY the routed experts, so gemm must
+        stay bfloat16 (the pre-fix phantom was gemm=nvfp4, a key no collector
+        can emit). MoE currently resolves w4a8_mxfp4_mxfp8 via the DeepSeek-V4
+        ``expert_dtype == "fp4"`` override — whether these ModelOpt NVFP4
+        artifacts should instead sweep with their own nvfp4 MoE rows is the
+        open module-key decision tracked on AIC-1749/AIC-1750; this pin
+        documents the current behavior, not that decision.
+        """
+        model_config = config.ModelConfig(tp_size=1, pp_size=1, attention_dp_size=8, moe_tp_size=1, moe_ep_size=8)
+        model = models.get_model(hf_id, model_config, backend_name="vllm")
+        assert model.config.gemm_quant_mode == common.GEMMQuantMode.bfloat16
+        assert model.config.moe_quant_mode == common.MoEQuantMode.w4a8_mxfp4_mxfp8
+        assert model.config.kvcache_quant_mode == common.KVCacheQuantMode.fp8

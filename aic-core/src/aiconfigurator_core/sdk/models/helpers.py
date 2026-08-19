@@ -460,7 +460,10 @@ def _is_routing_expert_target(target: object) -> bool:
     target_name = str(target).lower()
     if "shared_expert" in target_name:
         return False
-    return ".experts." in target_name or "routing_expert" in target_name
+    # ModelOpt targets name either a tensor under the expert stack
+    # (".experts.<i>...") or the expert module itself (bare ".experts", the
+    # DeepSeek-V4 NVFP4 sidecar shape — AIC-1749); both are routed experts.
+    return ".experts." in target_name or target_name.endswith(".experts") or "routing_expert" in target_name
 
 
 def _collect_mixed_precision_layer_algos(raw_config: dict) -> tuple[set[str], set[str]]:

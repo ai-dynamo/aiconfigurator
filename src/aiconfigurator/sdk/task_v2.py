@@ -167,6 +167,9 @@ _GPTOSS_BLACKWELL_MODELS = frozenset({"openai/gpt-oss-120b", "openai/gpt-oss-20b
 _DEEPSEEK_V4_NATIVE_FP4_TO_FP8_MODEL = {
     "deepseek-ai/DeepSeek-V4-Flash": "sgl-project/DeepSeek-V4-Flash-FP8",
     "deepseek-ai/DeepSeek-V4-Pro": "sgl-project/DeepSeek-V4-Pro-FP8",
+    # The ModelOpt NVFP4 exports carry the same FP4 routed-expert weights.
+    "nvidia/DeepSeek-V4-Flash-NVFP4": "sgl-project/DeepSeek-V4-Flash-FP8",
+    "nvidia/DeepSeek-V4-Pro-NVFP4": "sgl-project/DeepSeek-V4-Pro-FP8",
 }
 
 

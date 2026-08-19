@@ -321,6 +321,10 @@ DEEPSEEK_V4_HF_MODELS = frozenset(
         "deepseek-ai/DeepSeek-V4-Pro",
         "sgl-project/DeepSeek-V4-Flash-FP8",
         "sgl-project/DeepSeek-V4-Pro-FP8",
+        # ModelOpt NVFP4 exports (the Dynamo B200 recipe checkpoints); configs
+        # + hf_quant_config sidecars are packaged in model_configs/ (AIC-1749).
+        "nvidia/DeepSeek-V4-Flash-NVFP4",
+        "nvidia/DeepSeek-V4-Pro-NVFP4",
     }
 )
 
