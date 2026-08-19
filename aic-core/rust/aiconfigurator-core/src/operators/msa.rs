@@ -84,7 +84,10 @@ impl MsaModuleOp {
             DatabaseMode::Silicon => self
                 .silicon_context(db, batch_size, s, prefix)
                 .map(|latency| PerformanceResult::new(latency * self.scale_factor, Source::Silicon)),
-            DatabaseMode::Hybrid | DatabaseMode::Empirical => {
+            // EMPIRICAL is SOL+empirical for every op (README/CLI contract;
+            // same split as operators/dsa.rs): it must NOT consult silicon.
+            DatabaseMode::Empirical => self.xop_context(db, batch_size, s, prefix, sol),
+            DatabaseMode::Hybrid => {
                 match self.silicon_context(db, batch_size, s, prefix) {
                     Ok(latency) => Ok(PerformanceResult::new(
                         latency * self.scale_factor,
@@ -152,7 +155,9 @@ impl MsaModuleOp {
             DatabaseMode::Silicon => self
                 .silicon_generation(db, batch_size, s)
                 .map(|latency| PerformanceResult::new(latency * self.scale_factor, Source::Silicon)),
-            DatabaseMode::Hybrid | DatabaseMode::Empirical => {
+            // See query_context: EMPIRICAL never consults silicon.
+            DatabaseMode::Empirical => self.xop_generation(db, batch_size, s, sol),
+            DatabaseMode::Hybrid => {
                 match self.silicon_generation(db, batch_size, s) {
                     Ok(latency) => Ok(PerformanceResult::new(
                         latency * self.scale_factor,
@@ -717,10 +722,11 @@ mod tests {
 
     /// With MSA data present, SILICON answers from the table and HYBRID
     /// prefers it over the DSA XOP transfer (source stays Silicon, no xop
-    /// provenance is recorded).
+    /// provenance is recorded). EMPIRICAL deliberately absent: it never
+    /// consults silicon (see msa_empirical_mode_never_reads_silicon).
     #[test]
     fn msa_silicon_table_hit_prefers_silicon_over_xop() {
-        for mode in [DatabaseMode::Silicon, DatabaseMode::Hybrid, DatabaseMode::Empirical] {
+        for mode in [DatabaseMode::Silicon, DatabaseMode::Hybrid] {
             let mut db = db("vllm", "0.19.0");
             db.database_mode = mode;
             inject_msa_grids(&db);
@@ -803,5 +809,55 @@ mod tests {
             op.query_context(&silicon, 1, 1024, 0),
             Err(AicError::PerfDatabase(_))
         ));
+    }
+
+    /// Mode/source contract (review 4969690316 P1): EMPIRICAL is SOL+empirical
+    /// for every op and must NEVER consult silicon — with silicon grids
+    /// injected, SILICON and HYBRID return Source::Silicon while EMPIRICAL
+    /// still routes to the XOP transfer (Source::Empirical, xop provenance),
+    /// for both context and generation.
+    #[test]
+    fn msa_empirical_mode_never_reads_silicon() {
+        let op = msa_op();
+
+        let mut silicon = db("vllm", "0.19.0");
+        silicon.database_mode = DatabaseMode::Silicon;
+        inject_msa_grids(&silicon);
+        assert_eq!(
+            op.query_context(&silicon, 1, 1024, 0).expect("silicon ctx").source,
+            Source::Silicon
+        );
+        assert_eq!(
+            op.query_generation(&silicon, 1, 4097).expect("silicon gen").source,
+            Source::Silicon
+        );
+
+        let hybrid = db("vllm", "0.19.0"); // Hybrid by default in `db()`
+        inject_msa_grids(&hybrid);
+        assert_eq!(
+            op.query_context(&hybrid, 1, 1024, 0).expect("hybrid ctx").source,
+            Source::Silicon
+        );
+
+        let mut empirical = db("vllm", "0.19.0");
+        empirical.database_mode = DatabaseMode::Empirical;
+        inject_msa_grids(&empirical);
+        empirical.reset_provenance();
+        let ctx = op.query_context(&empirical, 1, 1024, 0).expect("empirical ctx");
+        assert_eq!(ctx.source, Source::Empirical);
+        assert_eq!(
+            empirical.worst_provenance(),
+            crate::operators::util_empirical::ProvenanceTier::XOp
+        );
+        empirical.reset_provenance();
+        let generation = op.query_generation(&empirical, 8, 1025).expect("empirical gen");
+        assert_eq!(generation.source, Source::Empirical);
+        assert_eq!(
+            empirical.worst_provenance(),
+            crate::operators::util_empirical::ProvenanceTier::XOp
+        );
+        // The empirical value must be the XOP transfer, not the injected
+        // silicon point (silicon ctx at this coordinate is exactly 10.0).
+        assert!((f64::from(ctx.latency_ms) - 10.0).abs() > 1e-6);
     }
 }

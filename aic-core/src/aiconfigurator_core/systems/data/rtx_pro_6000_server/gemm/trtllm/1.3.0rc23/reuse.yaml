@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+reuse:
+- table: gemm_perf
+  from_version: 1.3.0rc20
+  reason: "Dynamo 1.3.0 runtime pins trtllm 1.3.0rc23 (msa-family manifest); these kernel families are rc-stable and reuse the rc20 rtx tables. The msa family itself has no rtx table yet (collection blocked on pool availability) and deliberately carries NO reuse entry - MSA queries take the documented HYBRID xop fallback."
+  approved_by: tianhaox
