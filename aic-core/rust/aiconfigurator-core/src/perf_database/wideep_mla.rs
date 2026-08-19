@@ -47,7 +47,7 @@ use super::attention::generation_attn_mode;
 use super::gemm::quant_tc_flops;
 use super::interpolation::Grid3;
 use super::perf_interp::{self, Node, OpInterpConfig};
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::{FmhaQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
@@ -104,35 +104,35 @@ impl WideEpMlaTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
-        Self::with_sources(data_root, system_spec, &PerfDbSources::default())
+        Self::with_sources(
+            data_root,
+            system_spec,
+            &SourceResolver::fixed(PerfDbSources::default()),
+        )
+        .expect("fixed-map resolution is infallible")
     }
 
-    /// Construct with shared-layer (sibling/cross-version) sources resolved from
-    /// `perf_db_sources` (Python-supplied). Each WideEP MLA file falls back to
-    /// its primary `data_root/<basename>` when absent from the map. No I/O.
+    /// Construct with shared-layer (sibling/cross-version) sources supplied by the
+    /// engine's `SourceResolver` (live resolution owns the shared-layer walk;
+    /// a fixed source map is the test-only path). Each WideEP MLA file falls back to
+    /// its primary `data_root/<basename>` when the resolver names no override. No I/O.
     pub fn with_sources(
         data_root: PathBuf,
         system_spec: SystemSpec,
-        perf_db_sources: &PerfDbSources,
-    ) -> Self {
-        let context_sources = resolve_op_sources(
-            perf_db_sources,
-            "wideep_context_mla_perf.parquet",
-            &data_root,
-        );
-        let generation_sources = resolve_op_sources(
-            perf_db_sources,
-            "wideep_generation_mla_perf.parquet",
-            &data_root,
-        );
-        Self {
+        resolver: &SourceResolver,
+    ) -> Result<Self, AicError> {
+        let context_sources =
+            resolver.sources_for("wideep_context_mla_perf.parquet", &data_root)?;
+        let generation_sources =
+            resolver.sources_for("wideep_generation_mla_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             system_spec,
             context_sources,
             generation_sources,
             context: OnceLock::new(),
             generation: OnceLock::new(),
-        }
+        })
     }
 
     /// Raw context WideEP MLA latency. Caller is responsible for applying

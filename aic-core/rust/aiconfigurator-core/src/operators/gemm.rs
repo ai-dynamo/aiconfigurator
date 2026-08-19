@@ -159,8 +159,7 @@ impl GemmOp {
             source = Source::Estimated;
         }
 
-        let mut result =
-            PerformanceResult::with_energy(latency.max(latency_floor), energy, source);
+        let mut result = PerformanceResult::with_energy(latency.max(latency_floor), energy, source);
         if let Some(components) = sol {
             result = result.with_sol(components);
         }
@@ -233,7 +232,7 @@ fn query_gemm_table(
 /// (`operations/gemm.py`); consumed ONLY by the cross-profile relation of
 /// the quant-transfer ladder, and only as the ratio `e(query)/e(ref)`.
 /// Derivation method + LOO evidence documented on the Python table.
-const GEMM_QUANT_UTIL_LEVEL: &[(f64, f64, f64)] = &[
+pub(crate) const GEMM_QUANT_UTIL_LEVEL: &[(f64, f64, f64)] = &[
     (2.0, 1.0, 0.70),    // w16a16 / bfloat16              [data 0.55-0.79]
     (1.0, 1.0, 0.55),    // w8a16 / int8_wo                [inferred]
     (0.5625, 1.0, 0.45), // w4a16+scales / nvfp4_wo (Marlin FP4) [copies inferred (0.5,1)]
@@ -447,9 +446,12 @@ fn query_compute_scale_table(
         // Python `_query_compute_scale_table::get_sol`:
         // `sol_mem = 2 m k / bw * 1000` (read + write of the activation);
         // triple is `(sol_mem, 0, sol_mem)` — pure memory bound.
-        DatabaseMode::Sol | DatabaseMode::SolFull => Ok(PerformanceResult::sol(
-            SolComponents::new(0.0, 2.0 * m as f64 * k as f64 / db.system_spec.gpu.mem_bw * 1000.0),
-        )),
+        DatabaseMode::Sol | DatabaseMode::SolFull => {
+            Ok(PerformanceResult::sol(SolComponents::new(
+                0.0,
+                2.0 * m as f64 * k as f64 / db.system_spec.gpu.mem_bw * 1000.0,
+            )))
+        }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             compute_scale_empirical(db, quant, m, k)?,
             Source::Empirical,
@@ -510,9 +512,12 @@ fn query_scale_matrix_table(
     match db.database_mode {
         // Python `_query_scale_matrix_table::get_sol`:
         // `sol_mem = 3 m k / bw * 1000`; triple `(sol_mem, 0, sol_mem)`.
-        DatabaseMode::Sol | DatabaseMode::SolFull => Ok(PerformanceResult::sol(
-            SolComponents::new(0.0, 3.0 * m as f64 * k as f64 / db.system_spec.gpu.mem_bw * 1000.0),
-        )),
+        DatabaseMode::Sol | DatabaseMode::SolFull => {
+            Ok(PerformanceResult::sol(SolComponents::new(
+                0.0,
+                3.0 * m as f64 * k as f64 / db.system_spec.gpu.mem_bw * 1000.0,
+            )))
+        }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             scale_matrix_empirical(db, quant, m, k)?,
             Source::Empirical,
@@ -721,6 +726,24 @@ mod tests {
                 "empirical fallback carries no energy"
             );
         }
+    }
+
+    #[test]
+    fn w4a16_nvfp4_uses_xprofile_only_in_hybrid() {
+        let systems_root = PathBuf::from(REPO_ROOT_HINT)
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
+        let mut db = PerfDatabase::load(&systems_root, "h200_sxm", "trtllm", "1.3.0rc20")
+            .expect("database must load");
+
+        let silicon = query_gemm_table(&db, GemmQuantMode::W4a16Nvfp4, 8192, 1536, 32);
+        assert!(matches!(silicon, Err(AicError::PerfDatabase(_))));
+
+        db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
+        let hybrid = query_gemm_table(&db, GemmQuantMode::W4a16Nvfp4, 8192, 1536, 32)
+            .expect("XPROFILE transfer should make W4A16-NVFP4 HYBRID-estimable");
+        assert_eq!(hybrid.source, Source::Empirical);
+        assert!(hybrid.latency_ms.is_finite() && hybrid.latency_ms > 0.0);
     }
 
     /// HYBRID on a quant with NO collected table under a policy WITHOUT

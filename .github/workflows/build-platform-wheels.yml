@@ -127,4 +127,7 @@ jobs:
           ARTIFACTORY_PYPI_REPO_NAME: ${{ secrets.ARTIFACTORY_PYPI_REPO_NAME }}
           ARTIFACTORY_SUBPATH: post-merge/${{ github.sha }}/${{ github.run_id }}/${{ github.run_attempt }}
         shell: bash
-        run: python tools/finalize_wheels_in_artifactory.py
+        # The self-hosted runner has no `python` alias and this job adds no
+        # interpreter setup (sparse checkout only); the script is pure stdlib,
+        # so the distro python3 is sufficient.
+        run: python3 tools/finalize_wheels_in_artifactory.py

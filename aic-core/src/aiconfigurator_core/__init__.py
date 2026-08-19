@@ -21,7 +21,7 @@ fallback, and diagnostics.
 KV-cache capacity estimation is not exported here: it is computed in Python
 (``aiconfigurator_core.sdk.memory``), and the Rust
 ``aiconfigurator_core::memory::estimate_kv_cache`` is a Rust-only forwarder for
-embedded callers (e.g. the Dynamo Mocker), like ``build_aic_engine``.
+embedded callers (e.g. the Dynamo Mocker).
 """
 
 from ._aiconfigurator_core import (
@@ -29,6 +29,14 @@ from ._aiconfigurator_core import (
     RustForwardPassPerfModel,
     _build_smoke,
     engine_spec_bincode_from_json,
+    engine_spec_schema_version,
+    gemm_quant_util_levels,
+    moe_quant_util_levels,
+    op_from_spec_json,
+    ops_json_from_ops,
+    resolve_op_sources_report_json,
+    table_view_attributes,
+    weights_ops_json,
 )
 
 __all__ = [
@@ -36,4 +44,12 @@ __all__ = [
     "RustForwardPassPerfModel",
     "_build_smoke",
     "engine_spec_bincode_from_json",
+    "engine_spec_schema_version",
+    "gemm_quant_util_levels",
+    "moe_quant_util_levels",
+    "op_from_spec_json",
+    "ops_json_from_ops",
+    "resolve_op_sources_report_json",
+    "table_view_attributes",
+    "weights_ops_json",
 ]

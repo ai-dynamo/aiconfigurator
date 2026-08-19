@@ -427,8 +427,10 @@ def _normalize_mixed_precision_layer_algo(value: object) -> str | None:
         "fp8": "fp8",
         "e4m3": "fp8",
         "e5m2": "fp8",
+        "mxfp8": "mxfp8",
         "nvfp4": "nvfp4",
         "fp4": "nvfp4",
+        "w4a16_nvfp4": "w4a16_nvfp4",
     }
     return aliases.get(algo, algo)
 
@@ -461,7 +463,7 @@ def _is_routing_expert_target(target: object) -> bool:
     target_name = str(target).lower()
     if "shared_expert" in target_name:
         return False
-    return ".experts." in target_name or "routing_expert" in target_name
+    return ".experts." in target_name or target_name.endswith(".experts") or "routing_expert" in target_name
 
 
 def _collect_mixed_precision_layer_algos(raw_config: dict) -> tuple[set[str], set[str]]:
@@ -516,15 +518,37 @@ def _infer_mixed_precision_quant_modes(raw_config: dict, quant_dynamic: bool | N
     gemm_algos, moe_algos = _collect_mixed_precision_layer_algos(raw_config)
     overrides: dict[str, object] = {}
 
-    if "fp8" in gemm_algos:
+    # Some expert-only requants retain the base checkpoint's non-expert lane
+    # in the mixed-precision header. Prefer that explicit base description to
+    # broad config-group targets such as ``Linear``: the latter are filtered
+    # by ``ignore`` at runtime and must not reclassify attention/shared GEMMs.
+    quant_cfg = raw_config.get("quantization_config")
+    base_quant_method = str(quant_cfg.get("quant_method", "")).lower() if isinstance(quant_cfg, dict) else ""
+    weight_block_size = quant_cfg.get("weight_block_size") if isinstance(quant_cfg, dict) else None
+    if base_quant_method == "fp8" and weight_block_size:
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8_block
+    elif base_quant_method == "fp8":
+        overrides["gemm_quant_mode"] = (
+            common.GEMMQuantMode.fp8 if quant_dynamic is True else common.GEMMQuantMode.fp8_static
+        )
+    elif "fp8" in gemm_algos:
         if quant_dynamic is not True:
             overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8_static
         else:
             overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8
+    elif "mxfp8" in gemm_algos:
+        # The SDK has no distinct MXFP8 GEMM mode yet. Model MXFP8 as the
+        # dynamic FP8 compute lane, which has the same byte width and tensor-
+        # core family, while preserving any routed-expert NVFP4 override.
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8
+    elif "w4a16_nvfp4" in gemm_algos:
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.w4a16_nvfp4
     elif "nvfp4" in gemm_algos:
         overrides["gemm_quant_mode"] = common.GEMMQuantMode.nvfp4
 
-    if "nvfp4" in moe_algos:
+    if "w4a16_nvfp4" in moe_algos:
+        overrides["moe_quant_mode"] = common.MoEQuantMode.w4a16_nvfp4
+    elif "nvfp4" in moe_algos:
         overrides["moe_quant_mode"] = common.MoEQuantMode.nvfp4
     elif "fp8" in moe_algos:
         overrides["moe_quant_mode"] = common.MoEQuantMode.fp8
@@ -585,7 +609,11 @@ def _infer_quant_modes_from_raw_config(raw_config: dict, architecture: str | Non
 
     # DeepSeek-V4 native checkpoints use MXFP4 routed-expert weights with MXFP8
     # activations, while non-expert weights remain FP8 block quantized.
-    if architecture == "DeepseekV4ForCausalLM" and str(raw_config.get("expert_dtype", "")).lower() == "fp4":
+    if (
+        architecture == "DeepseekV4ForCausalLM"
+        and str(raw_config.get("expert_dtype", "")).lower() == "fp4"
+        and overrides.get("moe_quant_mode") != common.MoEQuantMode.nvfp4
+    ):
         overrides["moe_quant_mode"] = common.MoEQuantMode.w4a8_mxfp4_mxfp8
 
     # KVCache quant mode
@@ -685,13 +713,19 @@ def _is_dsv4_fp4_expert_model(model_path: str) -> bool:
 
     Checks ``expert_dtype == "fp4"`` in the HF config rather than hardcoded
     paths, so third-party requant artifacts (e.g. RedHatAI NVFP4-FP8) are
-    recognized. FP8-only requants (sgl-project) have no ``expert_dtype`` and
-    return False.
+    recognized. Checkpoints with explicit NVFP4 routed-expert metadata are not
+    native MXFP4 checkpoints even when the base config retains
+    ``expert_dtype == "fp4"``. FP8-only requants (sgl-project) have no
+    ``expert_dtype`` and return False.
     """
     info = _get_model_info(model_path)
     if info.get("architecture") != "DeepseekV4ForCausalLM":
         return False
-    return str(info.get("raw_config", {}).get("expert_dtype") or "").lower() == "fp4"
+    raw_config = info.get("raw_config", {})
+    if str(raw_config.get("expert_dtype") or "").lower() != "fp4":
+        return False
+    _gemm_algos, moe_algos = _collect_mixed_precision_layer_algos(raw_config)
+    return "nvfp4" not in moe_algos
 
 
 def resolve_dsv4_moe_arch_mode(

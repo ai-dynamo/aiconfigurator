@@ -35,7 +35,6 @@ with a local closed-form SOL (the per-call facade is a tombstone).
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
 from aiconfigurator_core.sdk import common
@@ -80,8 +79,6 @@ class EngineReference:
     def __init__(self, database: Any) -> None:
         self._database = database
         self._engine = EngineHandle.for_database(database)
-        # `build_ops_json` only reads `architecture` off the model.
-        self._model_stub = SimpleNamespace(architecture="")
 
     def _eval(
         self,
@@ -94,12 +91,7 @@ class EngineReference:
         x: int | None = None,
         database_mode: DatabaseMode,
     ):
-        ops_json = build_ops_json(
-            [op],
-            model=self._model_stub,
-            backend=self._database.backend,
-            database=self._database,
-        )
+        ops_json = build_ops_json([op])
         if database_mode == DatabaseMode.SOL_FULL:
             entries = self._engine.evaluate_ops_sol_json(
                 ops_json, is_context=is_context, batch_size=batch_size, s=s, prefix=prefix, x=x

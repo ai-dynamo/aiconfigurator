@@ -8,7 +8,7 @@ comprehensive fixture (``query_moe`` / ``query_mla_bmm`` / ``query_mem_op`` /
 ``query_p2p`` interpolation, util grids, overflow/underflow holds, the
 cross-shape/quant/profile transfer ladder, typed-miss error surfaces) retired
 to the compiled engine with #1357 PR-5. Their behaviour is anchored by
-``tests/cross_package/test_query_shim_baseline.py`` (pinned pre-deletion
+the retired shim-migration baseline (pinned pre-deletion
 cases on real databases) and the frozen parity goldens. What remains testable
 from Python is the policy/provenance surface below.
 """

@@ -488,6 +488,7 @@ class DeepSeekV32Model(BaseModel):
                 True,
                 quant_mode=moe_quant_mode,
                 attn_cp_size=self.config.cp_size,
+                backend=self._backend_name,
             ),
             ops.MoE(
                 "context_moe",
@@ -514,6 +515,7 @@ class DeepSeekV32Model(BaseModel):
                 False,
                 quant_mode=moe_quant_mode,
                 attn_cp_size=self.config.cp_size,
+                backend=self._backend_name,
             ),
         ]
         if self._is_large_ep:
@@ -615,6 +617,7 @@ class DeepSeekV32Model(BaseModel):
                     quant_mode=moe_quant_mode,
                     attn_cp_size=self.config.cp_size,
                     is_context=False,  # decode: MoEDispatch picks the decode-CP comm path
+                    backend=self._backend_name,
                 ),
                 ops.MoE(
                     "generation_moe",
@@ -642,6 +645,7 @@ class DeepSeekV32Model(BaseModel):
                     quant_mode=moe_quant_mode,
                     attn_cp_size=self.config.cp_size,
                     is_context=False,  # decode: MoEDispatch picks the decode-CP comm path
+                    backend=self._backend_name,
                 ),
             ]
             self.generation_ops.append(

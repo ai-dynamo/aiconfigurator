@@ -132,6 +132,7 @@ class TRTLLMBackend(BaseBackend):
         # whether the decode-share correction applies to a budget-based footprint
         # needs its own analysis (compare the AIC-1110 suppression on the
         # KV-capacity path, which treats the budget as already draft-inclusive).
+        # Tracked in AIC-1755.
         return {
             "num_tokens": agg_extra["max_num_tokens"],
             "max_seq_len": agg_extra["max_seq_len"],

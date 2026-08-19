@@ -12,9 +12,9 @@
 //! stride quadrature and the `(nextn + 1)` decode-batch multiplier around it.
 //!
 //! The `Engine` is pure-Rust internals; its PyO3 bindings (`run_static`,
-//! `predict_*_latency`, `mixed_step_latency`, `decode_step_latency`,
-//! `build_aic_engine`) live in [`crate::py`]. The agg sweep is orchestrated in
-//! Python — there is no Rust `run_agg`.
+//! `predict_*_latency`, `mixed_step_latency`, `decode_step_latency`) and the
+//! embedded [`crate::AicEngineBuilder`] live in [`crate::py`]. The agg sweep is
+//! orchestrated in Python — there is no Rust `run_agg`.
 
 use std::sync::Arc;
 
@@ -233,7 +233,7 @@ impl Engine {
     /// Build an `Engine` from a spec and a pre-loaded database.
     ///
     /// Extracts the op lists and the `nextn` scalar from `spec.engine`. The
-    /// caller (`build_aic_engine` / `from_spec_bytes`) is responsible for
+    /// caller (`AicEngineBuilder` / `from_spec_bytes`) is responsible for
     /// having loaded the matching `PerfDatabase` from `spec.engine`'s identity.
     pub fn build(spec: EngineSpec, db: Arc<PerfDatabase>) -> Result<Engine, AicError> {
         let nextn = spec
@@ -330,12 +330,20 @@ impl Engine {
         // engines would lazily re-parse the same parquet files on its first
         // query (~0.5s per engine on data-rich systems). Mode/policy, memo
         // caches, and the provenance accumulator stay per-engine.
-        let db = PerfDatabase::load_with_sources_shared(
+        let db = PerfDatabase::load_resolved_shared(
             systems_root,
             &spec.engine.system_name,
             spec.engine.backend.as_str(),
             version,
-            &spec.engine.perf_db_sources,
+            // Shared-layer inheritance: explicit override when the spec
+            // carries one (Python's `shared_layer=` kwarg), else derived
+            // from the query mode exactly like Python `_shared_layer_enabled`
+            // (SILICON/HYBRID = on).
+            spec.engine.enable_shared_layer.unwrap_or(matches!(
+                spec.engine.database_mode,
+                DatabaseMode::Silicon | DatabaseMode::Hybrid
+            )),
+            spec.engine.strict_provenance,
             // Estimate-only systems (a spec yaml with no collected data) may
             // back a SOL view: every SOL answer is analytic from the system
             // spec, so tolerate a missing perf-data directory under SOL and
@@ -1471,7 +1479,8 @@ mod tests {
                 kv_cache_dtype: None,
             },
             speculative: nextn.map(|n| crate::SpeculativeConfig { nextn: Some(n) }),
-            perf_db_sources: Default::default(),
+            enable_shared_layer: None,
+            strict_provenance: false,
             database_mode: Default::default(),
             transfer_policy: None,
             extra: BTreeMap::new(),
@@ -1651,10 +1660,17 @@ mod tests {
     /// prefill], generation = [FpmForward decode], empty sol_ops (grid-exact
     /// queries never call SOL).
     fn build_fpm_engine(tmp: &std::path::Path, nextn: Option<u32>) -> Result<Engine, AicError> {
-        use crate::perf_database::fpm_forward::tests::{default_identity, default_rows, write_pair};
+        use crate::perf_database::fpm_forward::tests::{
+            default_identity, default_rows, write_pair,
+        };
         write_pair(tmp, &default_rows());
         let mut db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
-        db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(tmp.to_path_buf(), "b200_sxm", "vllm", "0.25.1"));
+        db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(
+            tmp.to_path_buf(),
+            "b200_sxm",
+            "vllm",
+            "0.25.1",
+        ));
         let fpm_op = |phase: FpmPhase| {
             Op::FpmForward(FpmForwardOp {
                 name: format!("fpm_forward_{}", phase.as_str()),
@@ -1712,7 +1728,9 @@ mod tests {
         // gen: batch 8; osl=0 clamps to 1 -> isl' = 2048, one step at
         // s = 2049 -> kv = 8*2049 = 16392: lerp between (8,4096)->7.0 and
         // (8,65536)->9.0, minus baseline (8, kv_floor=8) -> 6.0.
-        let ms = engine.mixed_step_latency(2048, 8, 2048, 0, 0, 1.0, 1.0).unwrap();
+        let ms = engine
+            .mixed_step_latency(2048, 8, 2048, 0, 0, 1.0, 1.0)
+            .unwrap();
         let pre = 20.0 + (40.0 - 20.0) * (2056.0 - 2048.0) / (4096.0 - 2048.0);
         let w = (16392.0 - 4096.0) / (65536.0 - 4096.0);
         let decode = 7.0 + (9.0 - 7.0) * w;
@@ -1729,7 +1747,12 @@ mod tests {
         use crate::perf_database::fpm_forward::tests::{default_identity, write_pair};
         write_pair(tmp, rows);
         let mut db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
-        db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(tmp.to_path_buf(), "b200_sxm", "vllm", "0.25.1"));
+        db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(
+            tmp.to_path_buf(),
+            "b200_sxm",
+            "vllm",
+            "0.25.1",
+        ));
         let fpm_op = |phase: FpmPhase| {
             Op::FpmForward(FpmForwardOp {
                 name: format!("fpm_forward_{}", phase.as_str()),
@@ -1780,11 +1803,23 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let engine = build_fpm_engine_with_rows(tmp.path(), &cliff_rows()).unwrap();
         // In-graph: pure prefill step, totals (1, 2048, 0) -> exact 47.0.
-        let graph = engine.mixed_step_breakdown(2048, 0, 2048, 0, 0, 1.0, 1.0).unwrap();
-        assert!((graph[1] - 47.0).abs() < 1e-9, "graph-side prefill {}", graph[1]);
+        let graph = engine
+            .mixed_step_breakdown(2048, 0, 2048, 0, 0, 1.0, 1.0)
+            .unwrap();
+        assert!(
+            (graph[1] - 47.0).abs() < 1e-9,
+            "graph-side prefill {}",
+            graph[1]
+        );
         // Crossing: 8 decode riders push the total to 2056 -> eager plateau.
-        let eager = engine.mixed_step_breakdown(2048, 8, 2048, 0, 0, 1.0, 1.0).unwrap();
-        assert!((eager[1] - 99.0).abs() < 1e-9, "eager-side prefill {}", eager[1]);
+        let eager = engine
+            .mixed_step_breakdown(2048, 8, 2048, 0, 0, 1.0, 1.0)
+            .unwrap();
+        assert!(
+            (eager[1] - 99.0).abs() < 1e-9,
+            "eager-side prefill {}",
+            eager[1]
+        );
         assert!(eager[1] > graph[1] * 2.0 - 1e-9);
     }
 
@@ -1796,7 +1831,9 @@ mod tests {
         let engine = build_fpm_engine_with_rows(tmp.path(), &cliff_rows()).unwrap();
         // ctx=1024 of isl=2048: chunk 1 -> (1, 1032, 0) = 10.0,
         // chunk 2 -> (1, 1032, 1024) = 14.0; average 12.0.
-        let parts = engine.mixed_step_breakdown(1024, 8, 2048, 0, 0, 1.0, 1.0).unwrap();
+        let parts = engine
+            .mixed_step_breakdown(1024, 8, 2048, 0, 0, 1.0, 1.0)
+            .unwrap();
         assert!((parts[1] - 12.0).abs() < 1e-9, "chunk average {}", parts[1]);
     }
 
@@ -1811,7 +1848,9 @@ mod tests {
         let ms = engine.decode_step_latency(8, 511, 0, 1.0).unwrap();
         assert!((ms - 7.0).abs() < 1e-12, "got {ms}");
         // mixed with ctx_tokens=0 must agree with the genonly convention
-        let mixed = engine.mixed_step_latency(0, 8, 511, 0, 0, 1.0, 1.0).unwrap();
+        let mixed = engine
+            .mixed_step_latency(0, 8, 511, 0, 0, 1.0, 1.0)
+            .unwrap();
         assert!((mixed - 7.0).abs() < 1e-12, "got {mixed}");
         assert_eq!(engine.decode_step_latency(0, 511, 0, 1.0).unwrap(), 0.0);
     }
@@ -1920,7 +1959,8 @@ mod tests {
         let spec = EngineSpec::new(fixture_engine_config(None), vec![hidden], generation_ops());
         let err = Engine::build(spec, Arc::new(db)).unwrap_err();
         assert!(
-            err.to_string().contains("exactly one FpmForward op per phase"),
+            err.to_string()
+                .contains("exactly one FpmForward op per phase"),
             "{err}"
         );
     }
@@ -2014,7 +2054,11 @@ mod tests {
         let math = 2.0 * m * n * k / tc_flops * 1000.0;
         let mem = quant.mapping().memory * (m * n + m * k + n * k) / spec.gpu.mem_bw * 1000.0;
         let gemm = &sol[1];
-        assert!((gemm.2 - math).abs() < 1e-12, "sol_math {} != {math}", gemm.2);
+        assert!(
+            (gemm.2 - math).abs() < 1e-12,
+            "sol_math {} != {math}",
+            gemm.2
+        );
         assert!((gemm.3 - mem).abs() < 1e-12, "sol_mem {} != {mem}", gemm.3);
     }
 
@@ -2049,8 +2093,7 @@ mod tests {
         assert_eq!(sol.len(), 1);
 
         let dims = dsa_dims(&op.architecture);
-        let flops =
-            dsa_context_sol_flops(spec, op.gemm_quant_mode, op.fmha_quant_mode).unwrap();
+        let flops = dsa_context_sol_flops(spec, op.gemm_quant_mode, op.fmha_quant_mode).unwrap();
         let leaf = |skip: bool| {
             dsa_context_sol(
                 spec,
@@ -2072,9 +2115,18 @@ mod tests {
         let expected_mem = w * full.mem_ms + (1.0 - w) * skip.mem_ms;
         let expected_time = w * full.time_ms() + (1.0 - w) * skip.time_ms();
         let (_, sol_time, sol_math, sol_mem) = &sol[0];
-        assert!((sol_time - expected_time).abs() < 1e-12, "{sol_time} vs {expected_time}");
-        assert!((sol_math - expected_math).abs() < 1e-12, "{sol_math} vs {expected_math}");
-        assert!((sol_mem - expected_mem).abs() < 1e-12, "{sol_mem} vs {expected_mem}");
+        assert!(
+            (sol_time - expected_time).abs() < 1e-12,
+            "{sol_time} vs {expected_time}"
+        );
+        assert!(
+            (sol_math - expected_math).abs() < 1e-12,
+            "{sol_math} vs {expected_math}"
+        );
+        assert!(
+            (sol_mem - expected_mem).abs() < 1e-12,
+            "{sol_mem} vs {expected_mem}"
+        );
         // The skip leaf must actually differ from the full leaf, or this
         // test would pass vacuously on a broken blend.
         assert!(skip.time_ms() < full.time_ms());

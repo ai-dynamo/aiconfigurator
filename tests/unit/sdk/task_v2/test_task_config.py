@@ -1823,6 +1823,31 @@ def test_validate_moe_quant_transfer_reachable_in_hybrid():
             make("HYBRID", disabled).validate()
 
 
+def test_validate_w4a16_nvfp4_moe_xprofile_reachable_in_hybrid():
+    """The scale-aware W4A16 NVFP4 MoE profile is intentionally data-less.
+    HYBRID admits it only through the calibrated XPROFILE relation."""
+
+    def make(mode, policy=None):
+        return Task(
+            serving_mode="agg",
+            model_path="nvidia/Qwen3.6-35B-A3B-NVFP4",
+            system_name="b200_sxm",
+            backend_name="vllm",
+            backend_version="0.22.0",
+            database_mode=mode,
+            transfer_policy=policy,
+        )
+
+    with pytest.raises(ValueError, match="Unsupported moe quant mode 'w4a16_nvfp4'"):
+        make("SILICON").validate()
+    make("HYBRID").validate()
+    make("HYBRID", "xprofile").validate()
+
+    for disabled in ("off", "conservative", "balanced", "xquant"):
+        with pytest.raises(ValueError, match="Unsupported moe quant mode 'w4a16_nvfp4'"):
+            make("HYBRID", disabled).validate()
+
+
 def test_validate_gemm_quant_transfer_reachable_in_hybrid():
     """GEMM has the same transfer ladder as MoE (shared quant-transfer
     primitive): int4_wo GEMM (profile (0.5, 1), bf16 compute pipeline) has no
@@ -2118,3 +2143,34 @@ def test_nvfp4_preserved_on_blackwell():
     )
     assert t.gemm_quant_mode == common.GEMMQuantMode.nvfp4
     assert t.moe_quant_mode == common.MoEQuantMode.nvfp4
+
+
+def test_engine_step_backend_is_validated_at_task_construction():
+    """Every programmatic entry point funnels through Task construction, so
+    the retired "python" token (and any typo) fails closed HERE — including
+    paths like the AFD session that never reach the step routing gate."""
+    import pytest
+
+    from aiconfigurator.sdk.task_v2 import Task
+
+    def _task(**kwargs):
+        return Task(
+            serving_mode="agg",
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            backend_name="trtllm",
+            backend_version="dummy",
+            total_gpus=8,
+            **kwargs,
+        )
+
+    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'python'"):
+        _task(engine_step_backend="python")
+    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'auto'"):
+        _task(engine_step_backend="auto")
+    for falsey_value in ("", 0, False):
+        with pytest.raises(ValueError, match="unknown engine_step_backend"):
+            _task(engine_step_backend=falsey_value)
+    assert _task(engine_step_backend="rust").engine_step_backend == "rust"
+    assert _task(engine_step_backend="RUST").engine_step_backend == "rust"
+    assert _task(engine_step_backend=None).engine_step_backend is None

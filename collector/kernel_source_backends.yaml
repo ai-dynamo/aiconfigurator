@@ -112,6 +112,8 @@ mappings:
   - {framework: sglang, kernel_source: sglang_dsa_indexer_flashmla_sparse, backend: flashmla, source: "PR#1342 collect_mla_module.py (indexer path, FlashMLA sparse)"}
   - {framework: sglang, kernel_source: sglang_dsa_skip_indexer_trtllm, backend: trtllm_mla, source: "PR#1342 collect_mla_module.py (GLM-5.2 reuse layer, trtllm-gen)"}
   - {framework: sglang, kernel_source: sglang_dsa_skip_indexer_flashmla_sparse, backend: flashmla, source: "PR#1342 collect_mla_module.py (GLM-5.2 reuse layer, FlashMLA sparse)"}
+  - {framework: sglang, kernel_source: sglang_dsa_skip_indexer_fa3, backend: fa3, source: "PR#1342 collect_mla_module.py (GLM-5.2 reuse layer, fa3 sub-backend; first observed in the SM90 probe collection, pipelines 62700025/62872230)"}
+  - {framework: sglang, kernel_source: sglang_dsa_skip_indexer_flashmla_kv, backend: flashmla, source: "PR#1342 collect_mla_module.py (GLM-5.2 reuse layer, FlashMLA dense-kv; first observed in the SM90 probe collection, pipelines 62700025/62872230)"}
   - {framework: sglang, kernel_source: flash_mla_sparse_fwd, backend: flashmla, source: "PR#1342 glm5_dsa_sparse_modules.py"}
   - {framework: sglang, kernel_source: deep_gemm.fp8_mqa_logits, backend: deepgemm, source: "PR#1342 glm5_dsa_sparse_modules.py (DeepGEMM mqa logits)"}
   - {framework: sglang, kernel_source: fast_topk_transform_fused, backend: sgl_kernel, source: "PR#1342 glm5 topk jit kernel"}

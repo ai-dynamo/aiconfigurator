@@ -25,6 +25,7 @@ CORE_SDK_LEAF_MODULES = [
     "config",
     "config_builders",
     "engine",
+    "engine_table_view",
     "errors",
     "inference_summary",
     "memory",
@@ -157,7 +158,8 @@ def test_operations_baseline_exports_survive() -> None:
     window — never a side effect.
     """
     baseline = {
-        "Mamba2",  # deprecated composite, kept exported for the compat window
+        # (Mamba2 removed deliberately: the deprecated composite's window
+        #  closed with the deprecation-cleanup PR.)
         "FPMForwardOp",
         "Mamba2Kernel",
         "GDNKernel",

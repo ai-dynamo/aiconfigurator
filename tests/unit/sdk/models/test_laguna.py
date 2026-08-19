@@ -201,8 +201,10 @@ def test_laguna_attention_gate_uses_memory_bound_projection(laguna_model_path):
     global_gate = next(op for op in model.context_ops if op._name == "context_global_attention_gate_proj")
     swa_gate = next(op for op in model.context_ops if op._name == "context_swa_attention_gate_proj")
 
-    assert (global_gate._dim_in, global_gate._dim_out) == (model._hidden_size, 6)
-    assert (swa_gate._dim_in, swa_gate._dim_out) == (model._hidden_size, 9)
+    global_gate_spec = json.loads(global_gate._spec_json())["Elementwise"]
+    swa_gate_spec = json.loads(swa_gate._spec_json())["Elementwise"]
+    assert global_gate_spec["bytes_per_token"] == (model._hidden_size + 6) * 2
+    assert swa_gate_spec["bytes_per_token"] == (model._hidden_size + 9) * 2
     assert not any("attention_gate_gemm" in op._name for op in [*model.context_ops, *model.generation_ops])
 
 

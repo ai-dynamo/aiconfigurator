@@ -56,6 +56,7 @@ class DeepSeekV4Model(BaseModel):
 
     def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, backend_name: str = "") -> None:
         super().__init__(*args)
+        self._backend_name = backend_name
 
         if not isinstance(self.extra_params, common.DeepSeekV4Config):
             raise TypeError("DeepSeekV4Model requires DeepSeekV4Config extra_params")
@@ -149,6 +150,7 @@ class DeepSeekV4Model(BaseModel):
                     fmha_quant_mode,
                     gemm_quant_mode,
                     cp_size=(cp if is_context else 1),
+                    architecture=self.architecture,
                 )
                 for ratio, count in ratio_counts.items()
                 if count > 0
@@ -187,6 +189,7 @@ class DeepSeekV4Model(BaseModel):
                     True,
                     quant_mode=moe_quant_mode,
                     attn_cp_size=attn_cp,
+                    backend=self._backend_name,
                 ),
                 ops.MoE(
                     f"{phase}_moe",
@@ -213,6 +216,7 @@ class DeepSeekV4Model(BaseModel):
                     False,
                     quant_mode=moe_quant_mode,
                     attn_cp_size=attn_cp,
+                    backend=self._backend_name,
                 ),
             ]
 
@@ -229,6 +233,7 @@ class DeepSeekV4Model(BaseModel):
                     deepseek_v4_cfg.hc_sinkhorn_iters,
                     common.GEMMQuantMode.bfloat16,
                     seq_split=cp,
+                    architecture=self.architecture,
                 ),
                 ops.ElementWise("context_attn_norm", self._num_layers, h, h, 0.8, seq_split=cp),
                 *_attention_ops(is_context=True, scale_factor=1.0),
@@ -241,6 +246,7 @@ class DeepSeekV4Model(BaseModel):
                     deepseek_v4_cfg.hc_sinkhorn_iters,
                     common.GEMMQuantMode.bfloat16,
                     seq_split=cp,
+                    architecture=self.architecture,
                 ),
                 ops.ElementWise("context_ffn_norm", self._num_layers, h, h, 0.8, seq_split=cp),
                 ops.GEMM(
@@ -293,6 +299,7 @@ class DeepSeekV4Model(BaseModel):
                     deepseek_v4_cfg.hc_mult,
                     deepseek_v4_cfg.hc_sinkhorn_iters,
                     common.GEMMQuantMode.bfloat16,
+                    architecture=self.architecture,
                 ),
                 ops.ElementWise("generation_attn_norm", self._num_layers * self._mtp_scale_factor, h, h, 0.8),
                 *_attention_ops(is_context=False, scale_factor=self._mtp_scale_factor),
@@ -304,6 +311,7 @@ class DeepSeekV4Model(BaseModel):
                     deepseek_v4_cfg.hc_mult,
                     deepseek_v4_cfg.hc_sinkhorn_iters,
                     common.GEMMQuantMode.bfloat16,
+                    architecture=self.architecture,
                 ),
                 ops.ElementWise("generation_ffn_norm", self._num_layers * self._mtp_scale_factor, h, h, 0.8),
             ]

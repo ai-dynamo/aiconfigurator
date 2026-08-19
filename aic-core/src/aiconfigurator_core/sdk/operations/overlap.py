@@ -23,9 +23,10 @@ empty defaults that suffice.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
-from aiconfigurator_core.sdk.operations.base import Operation
+import aiconfigurator_core._aiconfigurator_core as _core
+from aiconfigurator_core.sdk.operations.base import OpShellKit
 
 if TYPE_CHECKING:
     pass
@@ -79,7 +80,7 @@ def _has_leaves(op) -> bool:
     return not composite
 
 
-class FallbackOp(Operation):
+class FallbackOp(_core.FallbackOp, OpShellKit):
     """
     Try a primary operation first; if it raises PerfDataNotAvailableError,
     fall back to a sequence of fallback operations (summed).
@@ -102,23 +103,19 @@ class FallbackOp(Operation):
     Weights = primary weights when defined, otherwise the fallback sum
     """
 
-    _CP_AWARE: ClassVar[bool] = True  # wrapper: inner ops carry their own seq_split
+    @property
+    def _seq_split(self) -> int:
+        """CP shard factor. Wrappers store it for API uniformity
+        only (inner ops carry their own). The Rust op carries no
+        ``seq_split`` field (nothing crosses the wire), so the value lives in
+        the shell instance ``__dict__`` — written by the models' CP wiring
+        (``apply_cp_to_context_ops``) and read by the shim x-division.
+        Survives pickle via the default object state (``__dict__``)."""
+        return self.__dict__.get("_py_seq_split", 1)
 
-    def __init__(self, name: str, primary: Operation, fallback: list[Operation], *, seq_split: int = 1) -> None:
-        """
-        Args:
-            name: Operation name for latency breakdown reporting.
-            primary: Single operation to try first.
-            fallback: List of operations to sum if primary fails.
-            seq_split: Carried for API uniformity. The wrapper delegates to
-                inner ops which carry their own ``seq_split``; this one is
-                stored on the base class for completeness but not used here.
-        """
-        super().__init__(name, 1.0, seq_split=seq_split)  # scale_factor handled by inner ops
-        self._primary = primary
-        self._fallback = fallback
-
-    _ENGINE_QUERY_SHAPE = "module"
+    @_seq_split.setter
+    def _seq_split(self, value: int) -> None:
+        self.__dict__["_py_seq_split"] = int(value)
 
     def _engine_query_plan(self, kwargs: dict):
         """Composites carry no phase of their own. A phase-marked descendant
@@ -148,16 +145,8 @@ class FallbackOp(Operation):
         # token-shaped path first); kept as a safe default.
         return True if inferred is None else inferred
 
-    def get_weights(self, **kwargs):
-        # Use primary weights if available, otherwise sum fallback weights.
-        # In practice both should be equivalent since they model the same block.
-        primary_w = self._primary.get_weights(**kwargs)
-        if primary_w > 0:
-            return primary_w
-        return sum(op.get_weights(**kwargs) for op in self._fallback)
 
-
-class OverlapOp(Operation):
+class OverlapOp(_core.OverlapOp, OpShellKit):
     """
     Two groups of operations that execute in parallel (overlap).
 
@@ -170,23 +159,19 @@ class OverlapOp(Operation):
     Weights = sum(all ops in both groups)
     """
 
-    _CP_AWARE: ClassVar[bool] = True  # wrapper: inner ops carry their own seq_split
+    @property
+    def _seq_split(self) -> int:
+        """CP shard factor. Wrappers store it for API uniformity
+        only (inner ops carry their own). The Rust op carries no
+        ``seq_split`` field (nothing crosses the wire), so the value lives in
+        the shell instance ``__dict__`` — written by the models' CP wiring
+        (``apply_cp_to_context_ops``) and read by the shim x-division.
+        Survives pickle via the default object state (``__dict__``)."""
+        return self.__dict__.get("_py_seq_split", 1)
 
-    def __init__(self, name: str, group_a: list, group_b: list, *, seq_split: int = 1) -> None:
-        """
-        Args:
-            name: Operation name for latency breakdown reporting.
-            group_a: List of Operation objects for the first parallel group
-                     (e.g., routed expert path on main stream).
-            group_b: List of Operation objects for the second parallel group
-                     (e.g., shared expert path on aux stream).
-            seq_split: Carried for API uniformity. Inner ops carry their own.
-        """
-        super().__init__(name, 1.0, seq_split=seq_split)  # scale_factor handled by inner ops
-        self._group_a = group_a
-        self._group_b = group_b
-
-    _ENGINE_QUERY_SHAPE = "module"
+    @_seq_split.setter
+    def _seq_split(self, value: int) -> None:
+        self.__dict__["_py_seq_split"] = int(value)
 
     def _engine_query_plan(self, kwargs: dict):
         """Composites carry no phase of their own. A phase-marked descendant
@@ -215,9 +200,3 @@ class OverlapOp(Operation):
         # Unreachable when inferred is None (the plan override takes the
         # token-shaped path first); kept as a safe default.
         return True if inferred is None else inferred
-
-    def get_weights(self, **kwargs):
-        weights = 0.0
-        for op in self._group_a + self._group_b:
-            weights += op.get_weights(**kwargs)
-        return weights

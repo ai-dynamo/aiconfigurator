@@ -57,6 +57,19 @@ fn default_quant_mode() -> GemmQuantMode {
 }
 
 impl MhcModuleOp {
+    /// Python `DeepSeekV4MHCModule` weights × scale_factor: two parameter
+    /// sets per decoder block (attention mHC and FFN mHC),
+    /// `2 * (mix_hc * hc_dim + mix_hc + 3) * quant.memory` with
+    /// `mix_hc = (2 + hc_mult) * hc_mult` and `hc_dim = hc_mult * hidden`.
+    pub fn weight_bytes(&self) -> f64 {
+        let hc_mult = f64::from(self.hc_mult);
+        let mix_hc = (2.0 + hc_mult) * hc_mult;
+        let hc_dim = hc_mult * f64::from(self.hidden_size);
+        2.0 * (mix_hc * hc_dim + mix_hc + 3.0)
+            * self.quant_mode.mapping().memory
+            * self.scale_factor
+    }
+
     pub fn new(
         name: impl Into<String>,
         op: impl Into<String>,

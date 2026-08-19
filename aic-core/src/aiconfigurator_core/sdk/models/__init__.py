@@ -120,6 +120,13 @@ def get_model(
     architecture = model_info["architecture"]
     model_family = _architecture_to_model_family(architecture)
 
+    # Preserve caller intent before checkpoint defaults fill unset modes.
+    # Model-specific mixed-precision splitters use this provenance rather than
+    # trying to infer explicitness by comparing enum values after mutation.
+    gemm_explicit = getattr(model_config, "_gemm_quant_mode_is_explicit", None)
+    model_info["gemm_quant_mode_is_explicit"] = (
+        model_config.gemm_quant_mode is not None if gemm_explicit is None else gemm_explicit
+    )
     _apply_model_quant_defaults(model_config, raw_config, architecture, backend_name)
     if check_is_moe(model_path, model_info=model_info):
         model_config.resolve_moe_parallelism()

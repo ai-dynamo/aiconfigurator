@@ -9,7 +9,7 @@ retired to the compiled engine with #1357 PR-5: ``FallbackOp.query`` is now a
 deprecation shim that converts the whole composite (children included) and
 evaluates it in Rust, so there is no Python seam where the per-child queries
 happen. That behaviour is anchored by the frozen parity goldens and
-tests/cross_package/test_query_shim_baseline.py. What stays Python-owned —
+the frozen parity goldens. What stays Python-owned —
 weight accounting and the query-shim planning (phase routing, beam-width
 validation) — is tested here.
 """
@@ -36,18 +36,27 @@ class TestFallbackOp:
     """Test cases for FallbackOp class."""
 
     def test_get_weights_from_primary(self):
-        """get_weights uses primary weights when available."""
-        primary = _make_mock_op(1.0, 1.0, weights=500.0)
-        fallback = _make_mock_op(1.0, 1.0, weights=300.0)
+        """get_weights uses primary weights when available.
+
+        Weights route through the engine (PR-6), so the children must be
+        real spec-expressible ops: bf16 GEMM weighs n*k*2 bytes."""
+        from aiconfigurator.sdk import common
+        from aiconfigurator.sdk.operations import GEMM
+
+        primary = GEMM("p", 1.0, 50, 5, common.GEMMQuantMode.bfloat16)  # 500 B
+        fallback = GEMM("f", 1.0, 30, 5, common.GEMMQuantMode.bfloat16)  # 300 B
 
         op = FallbackOp("test", primary=primary, fallback=[fallback])
         assert op.get_weights() == 500.0
 
     def test_get_weights_from_fallback(self):
         """get_weights sums fallback weights when primary has none."""
-        primary = _make_mock_op(1.0, 1.0, weights=0.0)
-        fallback_1 = _make_mock_op(1.0, 1.0, weights=100.0)
-        fallback_2 = _make_mock_op(1.0, 1.0, weights=200.0)
+        from aiconfigurator.sdk import common
+        from aiconfigurator.sdk.operations import GEMM
+
+        primary = GEMM("p", 1.0, 0, 5, common.GEMMQuantMode.bfloat16)  # 0 B
+        fallback_1 = GEMM("f1", 1.0, 10, 5, common.GEMMQuantMode.bfloat16)  # 100 B
+        fallback_2 = GEMM("f2", 1.0, 20, 5, common.GEMMQuantMode.bfloat16)  # 200 B
 
         op = FallbackOp("test", primary=primary, fallback=[fallback_1, fallback_2])
         assert op.get_weights() == 300.0
@@ -88,7 +97,7 @@ class TestMLAModule:
 
     def test_context_instance_evaluates_context_phase(self, seam):
         op = _mla_module(is_context=True)
-        result = op.query(object(), batch_size=4, s=4000, prefix=0)
+        result = op._engine_query(object(), batch_size=4, s=4000, prefix=0)
 
         assert seam["op"] is op
         assert seam["eval_kwargs"]["is_context"] is True
@@ -99,7 +108,7 @@ class TestMLAModule:
 
     def test_generation_instance_evaluates_generation_phase(self, seam):
         op = _mla_module(is_context=False)
-        result = op.query(object(), batch_size=4, s=4000, beam_width=1)
+        result = op._engine_query(object(), batch_size=4, s=4000, beam_width=1)
 
         assert seam["op"] is op
         assert seam["eval_kwargs"]["is_context"] is False
@@ -112,4 +121,4 @@ class TestMLAModule:
         mock_db = MagicMock()
         op = _mla_module(is_context=False)
         with pytest.raises(ValueError, match="beam_width=1"):
-            op.query(mock_db, batch_size=4, s=4000, beam_width=2)
+            op._engine_query(mock_db, batch_size=4, s=4000, beam_width=2)

@@ -57,6 +57,7 @@ class LagunaModel(BaseModel):
             model_info["context"],
             model_config,
             model_info["extra_params"],
+            backend_name=backend_name,
         )
         model.set_laguna_config(model_info["extra_params"])
         return model
@@ -69,6 +70,7 @@ class LagunaModel(BaseModel):
         dense_mlp_quant_mode: common.GEMMQuantMode,
         shared_expert_quant_mode: common.GEMMQuantMode,
         *args,
+        backend_name: str,
     ) -> None:
         super().__init__(*args)
         assert (
@@ -84,6 +86,7 @@ class LagunaModel(BaseModel):
         self._moe_inter_size = moe_inter_size
         self._dense_mlp_quant_mode = dense_mlp_quant_mode
         self._shared_expert_quant_mode = shared_expert_quant_mode
+        self._backend_name = backend_name
         self._mtp_scale_factor = mtp_scale_factor(self._nextn, self._num_layers)
         self._laguna_config: common.LagunaConfig | None = None
         # Match existing hybrid MoE families until Laguna-specific routing imbalance is calibrated.
@@ -264,6 +267,7 @@ class LagunaModel(BaseModel):
                 True,
                 quant_mode=moe_q,
                 is_context=is_context,
+                backend=self._backend_name,
             ),
             ops.MoE(
                 f"{prefix}_moe",
@@ -291,6 +295,7 @@ class LagunaModel(BaseModel):
                 False,
                 quant_mode=moe_q,
                 is_context=is_context,
+                backend=self._backend_name,
             ),
         ]
 

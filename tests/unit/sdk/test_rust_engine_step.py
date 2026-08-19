@@ -22,9 +22,6 @@ def test_should_use_rust_engine_step_supports_runtime_config_and_env(monkeypatch
 
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig())
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="rust"))
-    # The retired escape hatch is a deprecation no-op: the config value is
-    # ignored and the env's "rust" wins the re-resolution.
-    assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"))
 
 
 def test_engine_step_backend_defaults_to_rust(monkeypatch) -> None:
@@ -34,43 +31,24 @@ def test_engine_step_backend_defaults_to_rust(monkeypatch) -> None:
     database = _real_database()
 
     assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(), database)
-    assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
     # Unknown values fail closed instead of silently picking an engine.
     with pytest.raises(ValueError, match="engine_step_backend"):
         rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="auto"), database)
 
 
-def test_python_backend_value_warns_once_and_noops(monkeypatch, caplog) -> None:
-    """The one-release deprecation contract: ``"python"`` is accepted, warns
-    exactly once per process, and routes to the compiled engine anyway."""
+def test_python_backend_value_is_removed(monkeypatch) -> None:
+    """The deprecated ``"python"`` no-op completed its one-release window
+    (deprecation-cleanup PR): the value now fails closed like any other
+    unknown backend, from both the config and the environment."""
     monkeypatch.delenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", raising=False)
-    rust_engine_step._python_step_fallback_reset()
     database = _real_database()
 
-    with caplog.at_level("WARNING", logger="aiconfigurator_core.sdk.rust_engine_step"):
-        assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
-        assert rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
-    deprecations = [r for r in caplog.records if "deprecated" in r.message]
-    assert len(deprecations) == 1
-    # A no-op is not a python-step use: telemetry must not count it.
-    assert "explicit_python" not in rust_engine_step.python_step_fallback_counts()
-    # "No-op" means AS IF UNSET — the non-PerfDatabase delegation still
-    # applies (an early True would upgrade the retired escape hatch into an
-    # explicit-rust request and bypass the synthetic-database delegation).
-    assert not rust_engine_step.should_use_rust_engine_step(
-        RuntimeConfig(engine_step_backend="python"),
-        SimpleNamespace(system="mock", backend="vllm", version="1.0.0"),
-    )
+    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'python'"):
+        rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), database)
 
-
-def test_invalid_env_behind_deprecated_python_config_is_named_in_the_error(monkeypatch) -> None:
-    """Config ``"python"`` re-resolves to the env; when THAT value is invalid,
-    the error must name the re-resolved value actually being rejected, not
-    the config's retired ``"python"``."""
-    monkeypatch.setenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", "auto")
-    rust_engine_step._python_step_fallback_reset()
-    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'auto'"):
-        rust_engine_step.should_use_rust_engine_step(RuntimeConfig(engine_step_backend="python"), _real_database())
+    monkeypatch.setenv("AICONFIGURATOR_ENGINE_STEP_BACKEND", "python")
+    with pytest.raises(ValueError, match=r"unknown engine_step_backend 'python'"):
+        rust_engine_step.should_use_rust_engine_step(RuntimeConfig(), database)
 
 
 def _real_database():
@@ -646,6 +624,30 @@ def test_engine_config_json_preserves_moe_specific_quant_mode() -> None:
     assert config["moe_dtype"] == "w4a16_mxfp4"
 
 
+def test_engine_config_json_preserves_w4a16_nvfp4_weight_and_moe_profiles() -> None:
+    model = SimpleNamespace(
+        model_path="Test/W4A16Nvfp4",
+        architecture="Qwen3ForCausalLM",
+        config=ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=None,
+            moe_ep_size=None,
+            gemm_quant_mode=common.GEMMQuantMode.w4a16_nvfp4,
+            moe_quant_mode=common.MoEQuantMode.w4a16_nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+        ),
+    )
+    database = SimpleNamespace(system="test_sxm", backend="vllm", version="1.0.0")
+
+    config = json.loads(rust_engine_step._engine_config_json(model, database))
+
+    assert config["weight_dtype"] == "w4a16_nvfp4"
+    assert config["moe_dtype"] == "w4a16_nvfp4"
+
+
 def test_configure_data_roots_passes_systems_path_through(tmp_path, monkeypatch) -> None:
     """Rust reads parquet directly, so the wrapper just hands its
     ``AICONFIGURATOR_SYSTEMS_PATH`` through unchanged to the Rust crate."""
@@ -926,41 +928,38 @@ def test_sparse_cp_ops_emit_cp_fields_in_spec():
     _query_cp compositions), so the specs carry cp_size (+ window_size for
     dsv4 HCA) instead of refusing compilation. Both engines compute when the
     sparse tables exist and fail loud identically when they don't -- logical
-    parity does not wait for data."""
+    parity does not wait for data. Since the pyo3 op unification the op
+    serializes ITSELF (`_spec_json`); the pin now reads the real wire."""
+    from aiconfigurator.sdk import common
+    from aiconfigurator.sdk.operations import ContextDeepSeekV4AttentionModule
 
-    class _Dsv4Op:
-        _name = "context_attention"
-        _scale_factor = 1.0
-        _compress_ratio = 4
-        _num_heads = 64
-        _native_heads = 64
-        _tp_size = 1
-        _cp_size = 2
-        _window_size = 2048
-        # Structural dims the emitter forwards for the Rust-side SOL
-        # (real ops always carry these via _BaseDeepSeekV4AttentionModule).
-        _hidden_size = 7168
-        _q_lora_rank = 1536
-        _o_lora_rank = 1024
-        _head_dim = 512
-        _rope_head_dim = 64
-        _index_n_heads = 64
-        _index_head_dim = 128
-        _index_topk = 1024
-        _o_groups = 16
-        from aiconfigurator.sdk import common
-
-        _kvcache_quant_mode = common.KVCacheQuantMode.fp8
-        _kv_cache_dtype = None
-        _fmha_quant_mode = common.FMHAQuantMode.bfloat16
-        _gemm_quant_mode = common.GEMMQuantMode.fp8_block
-
-    # exercised via the dict builder directly to avoid registry wiring
-    from aiconfigurator.sdk.engine import _dsv4_module
-
-    spec = _dsv4_module(_Dsv4Op(), architecture="DeepseekV4ForCausalLM")
+    op = ContextDeepSeekV4AttentionModule(
+        "context_attention",
+        1.0,
+        64,  # num_heads (per-rank)
+        64,  # native_heads
+        1,  # tp_size
+        7168,  # hidden_size
+        1536,  # q_lora_rank
+        1024,  # o_lora_rank
+        512,  # head_dim
+        64,  # rope_head_dim
+        64,  # index_n_heads
+        128,  # index_head_dim
+        1024,  # index_topk
+        2048,  # window_size
+        4,  # compress_ratio -> Csa
+        16,  # o_groups (rank-local)
+        common.KVCacheQuantMode.fp8,
+        common.FMHAQuantMode.bfloat16,
+        common.GEMMQuantMode.fp8_block,
+        architecture="DeepseekV4ForCausalLM",
+        cp_size=2,
+    )
+    spec = json.loads(op._spec_json())["Dsv4Context"]
     assert spec["cp_size"] == 2
     assert spec["window_size"] == 2048
+    assert spec["attn_kind"] == "Csa"
 
 
 def test_engine_config_json_identity_disambiguates_collapsed_quant_modes():
@@ -1092,24 +1091,20 @@ def test_op_conversion_error_raises_typed_and_memoized(monkeypatch):
 
 
 def test_wideep_mla_spec_emits_per_rank_heads_not_tp():
-    """The WideEP MLA table axis is per-rank heads; the Python query converts
-    ``num_heads = 128 // tp_size`` (mla.py). The spec emitter must apply the
-    same conversion — emitting raw tp_size makes Rust query the wrong table
-    slice (tp=8 would read the heads=8 extrapolation instead of heads=16)."""
+    """The WideEP MLA table axis is per-rank heads; the retired Python query
+    converted ``num_heads = 128 // tp_size`` (mla.py). The Rust constructor
+    must apply the same conversion — emitting raw tp_size makes the engine
+    query the wrong table slice (tp=8 would read the heads=8 extrapolation
+    instead of heads=16)."""
     from aiconfigurator.sdk import common
-    from aiconfigurator.sdk.engine import _wideep_context_mla, _wideep_generation_mla
+    from aiconfigurator.sdk.operations import WideEPContextMLA, WideEPGenerationMLA
 
-    class _WideEpOp:
-        _name = "context_attention"
-        _scale_factor = 1.0
-        _tp_size = 8
-        _cp_size = 1
-        _kvcache_quant_mode = common.KVCacheQuantMode.fp8
-        _fmha_quant_mode = common.FMHAQuantMode.fp8_block
-        _attn_backend = "flashinfer"
-
-    ctx_spec = _wideep_context_mla(_WideEpOp())
-    gen_spec = _wideep_generation_mla(_WideEpOp())
+    ctx = WideEPContextMLA("context_attention", 1.0, 8, common.KVCacheQuantMode.fp8, common.FMHAQuantMode.fp8_block)
+    gen = WideEPGenerationMLA(
+        "generation_attention", 1.0, 8, common.KVCacheQuantMode.fp8, common.FMHAQuantMode.fp8_block
+    )
+    ctx_spec = json.loads(ctx._spec_json())["WideEpContextMla"]
+    gen_spec = json.loads(gen._spec_json())["WideEpGenerationMla"]
     assert ctx_spec["num_heads"] == 16  # 128 // 8, NOT tp_size=8
     assert gen_spec["num_heads"] == 16
 
@@ -1127,7 +1122,6 @@ def test_large_ep_opspec_key_sets_match_the_rust_structs():
     field sets exactly — source of truth:
     ``rust/aiconfigurator-core/src/operators/moe_a2a.rs::MoeAllToAllOp`` and
     ``rust/aiconfigurator-core/src/operators/moe_expert_compute.rs::MoeExpertComputeOp``."""
-    from aiconfigurator.sdk.engine import _to_opspec
     from aiconfigurator.sdk.operations import MoEAllToAll, MoEExpertCompute
 
     a2a = MoEAllToAll(
@@ -1144,7 +1138,7 @@ def test_large_ep_opspec_key_sets_match_the_rust_structs():
         sms=20,
         attention_tp_size=1,
     )
-    a2a_spec = _to_opspec(a2a, backend="sglang", architecture="DeepseekV3ForCausalLM", database=None)
+    a2a_spec = json.loads(a2a._spec_json())
     assert set(a2a_spec) == {"MoeAllToAll"}
     # rust `MoeAllToAllOp` fields (operators/moe_a2a.rs), verbatim.
     assert frozenset(a2a_spec["MoeAllToAll"]) == frozenset(
@@ -1181,7 +1175,7 @@ def test_large_ep_opspec_key_sets_match_the_rust_structs():
         is_gated=True,
         enable_eplb=True,
     )
-    ep_spec = _to_opspec(ep, backend="sglang", architecture="DeepseekV3ForCausalLM", database=None)
+    ep_spec = json.loads(ep._spec_json())
     assert set(ep_spec) == {"MoeExpertCompute"}
     # rust `MoeExpertComputeOp` fields (operators/moe_expert_compute.rs), verbatim.
     assert frozenset(ep_spec["MoeExpertCompute"]) == frozenset(
@@ -1236,7 +1230,7 @@ def _h200_sglang_wideep_paths() -> list[str]:
 )
 def test_large_ep_op_graph_compiles_natively(caplog):
     """AIC-1601 (PR 2.5): the large-EP ops (MoEAllToAll / MoEExpertCompute) now have
-    ``_to_opspec`` branches and Rust mirrors, so a large-EP model compiles
+    Rust op constructors and wire mirrors, so a large-EP model compiles
     into the Rust engine natively — the documented Python-step fallback this
     test used to pin is retired. A rust-routed static run must answer with
     the scalar engine-step keys and match the Python step on the same
@@ -1324,17 +1318,11 @@ def test_large_ep_op_graph_compiles_natively(caplog):
         rust_generation = sum(generation_latency.values())
         assert rust_context > 0.0 and rust_generation > 0.0
 
-        # (4) Parity with the Python step on the same config at rel <= 0.01
-        # (the PR 2.5 bar; the per-op oracles hold 1e-9, so this graph-level
-        # comparison has plenty of headroom).
-        python_runtime_config = RuntimeConfig(
-            batch_size=1, beam_width=1, isl=1024, osl=32, engine_step_backend="python"
-        )
-        python_summary = backend.run_static(model, database, python_runtime_config, mode="static", stride=32)
-        python_context = sum(python_summary.get_context_latency_dict().values())
-        python_generation = sum(python_summary.get_generation_latency_dict().values())
-        assert rust_context == pytest.approx(python_context, rel=0.01)
-        assert rust_generation == pytest.approx(python_generation, rel=0.01)
+        # (Step 4 of the original test — "parity with the Python step" via
+        # engine_step_backend="python" — retired with the value: since the
+        # PR-3 no-op it had become a vacuous rust-vs-rust self-comparison,
+        # and the value itself is gone after the deprecation window. The
+        # per-op oracle parity for this graph lives in parity_tests/.)
     finally:
         rust_engine_step._engine_handle_cache_clear()
 
