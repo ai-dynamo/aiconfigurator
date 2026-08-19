@@ -135,7 +135,7 @@ class RuntimeSettingsV1(_StrictModel):
     max_seq_len: int | None = Field(default=None, gt=0)
     prefill_max_seq_len: int | None = Field(default=None, gt=0)
     decode_max_seq_len: int | None = Field(default=None, gt=0)
-    engine_step_backend: Literal["python", "rust"] | None = None
+    engine_step_backend: Literal["rust"] | None = None
 
 
 class SourceProvenanceV1(_StrictModel):
@@ -237,7 +237,7 @@ class AdapterOverrides(_StrictModel):
     max_seq_len: int | None = Field(default=None, gt=0)
     prefill_max_seq_len: int | None = Field(default=None, gt=0)
     decode_max_seq_len: int | None = Field(default=None, gt=0)
-    engine_step_backend: Literal["python", "rust"] | None = None
+    engine_step_backend: Literal["rust"] | None = None
 
 
 class AdaptationDiagnostic(_StrictModel):

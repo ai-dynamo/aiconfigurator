@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use super::axis_curve::AxisCurve;
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
@@ -65,20 +65,22 @@ impl TrtllmAlltoallTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf) -> Self {
-        Self::with_sources(data_root, &PerfDbSources::default())
+        Self::with_sources(data_root, &SourceResolver::fixed(PerfDbSources::default()))
+            .expect("fixed-map resolution is infallible")
     }
 
-    /// Construct with shared-layer (sibling/cross-version) sources resolved from
-    /// `perf_db_sources` (Python-supplied). The perf file falls back to its
-    /// primary `data_root/<basename>` when absent from the map. No I/O.
-    pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
+    /// Construct with shared-layer (sibling/cross-version) sources supplied by the
+    /// engine's `SourceResolver` (live resolution owns the shared-layer walk;
+    /// a fixed source map is the test-only path). The perf file falls back to its
+    /// primary `data_root/<basename>` when the resolver names no override. No I/O.
+    pub fn with_sources(data_root: PathBuf, resolver: &SourceResolver) -> Result<Self, AicError> {
         let alltoall_sources =
-            resolve_op_sources(perf_db_sources, "trtllm_alltoall_perf.parquet", &data_root);
-        Self {
+            resolver.sources_for("trtllm_alltoall_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             alltoall_sources,
             trtllm_alltoall: OnceLock::new(),
-        }
+        })
     }
 
     /// TRT-LLM alltoall latency for one phase op. Mirrors Python
@@ -276,6 +278,16 @@ fn token_axis_curve(points: &std::collections::BTreeMap<u32, f64>) -> AxisCurve 
 /// - duplicates resolve FIRST-wins (Python `load_trtllm_alltoall_data`
 ///   guards with the standard skip-on-key-conflict idiom since #1423 —
 ///   shared-layer contract, design §6.1).
+/// LOAD-time `num_nodes` fallback when a legacy file carries no such column:
+/// `max(1, moe_ep_size // 4)` — 4 GPUs per node (GB200 NVL4), the retired
+/// loaders' shared rule (`load_trtllm_alltoall_data` /
+/// `_adapt_legacy_trtllm_alltoall`). Shared with moe_a2a's legacy adapter and
+/// the table view; the QUERY-time default above is a distinct Python rule
+/// that merely coincides numerically.
+pub(crate) fn legacy_num_nodes_fallback(moe_ep_size: u32) -> u32 {
+    (moe_ep_size / 4).max(1)
+}
+
 fn load_alltoall_parquet(sources: &[PerfSource]) -> Result<AlltoallGrids, AicError> {
     let mut by_keys: BTreeMap<AlltoallKey, BTreeMap<u32, f64>> = BTreeMap::new();
     let mut any_source = false;
@@ -311,7 +323,7 @@ fn load_alltoall_parquet(sources: &[PerfSource]) -> Result<AlltoallGrids, AicErr
                 quant: row.str_owned(moe_dtype_col)?,
                 num_nodes: row
                     .u32_optional(num_nodes_col)?
-                    .unwrap_or_else(|| (moe_ep_size / 4).max(1)),
+                    .unwrap_or_else(|| legacy_num_nodes_fallback(moe_ep_size)),
                 hidden_size: row.u32(hidden_size_col)?,
                 topk: row.u32(topk_col)?,
                 num_experts: row.u32(num_experts_col)?,

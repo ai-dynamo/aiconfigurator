@@ -54,6 +54,23 @@ pub struct DsaModuleOp {
     /// keeps the pure-full path — the skip table is never touched.
     #[serde(default = "default_full_frac")]
     pub full_frac: f64,
+    /// Per-projection-group weight quant modes (Python
+    /// `dsa_block_weights_bytes`'s `projection_quant_modes`): a checkpoint
+    /// fact — e.g. DeepSeek-V3.2-NVFP4 keeps q/kv/indexer in BF16 but
+    /// quantizes o_proj. `None` (pre-field specs) falls back to
+    /// `gemm_quant_mode` for all four groups, exactly like the Python op's
+    /// default. Weight-estimation only; the latency path never reads it.
+    #[serde(default)]
+    pub attn_projection_quant_modes: Option<DsaProjectionQuants>,
+}
+
+/// The four DSA projection groups' quant modes (weight bytes only).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DsaProjectionQuants {
+    pub q: GemmQuantMode,
+    pub kv: GemmQuantMode,
+    pub o: GemmQuantMode,
+    pub indexer: GemmQuantMode,
 }
 
 fn default_cp_size() -> u32 {
@@ -86,7 +103,40 @@ impl DsaModuleOp {
             index_topk,
             cp_size: 1,
             full_frac: 1.0,
+            attn_projection_quant_modes: None,
         }
+    }
+
+    /// Python `operations/dsa.py::dsa_block_weights_bytes` × scale_factor:
+    /// per-layer per-rank DSA block weight bytes. q_a / kv_a(+mqa, incl. the
+    /// indexer K projection) and the indexer projections are replicated
+    /// across TP; q_b, the absorbed kv_b and o_proj shard by heads
+    /// (`num_heads` is already rank-local).
+    pub fn weight_bytes(&self) -> f64 {
+        let dims = crate::perf_database::dsa::dsa_dims(&self.architecture);
+        let h = dims.hidden_size as f64;
+        let q_lora = dims.q_lora_rank as f64;
+        let kv_lora = dims.kv_lora_rank as f64;
+        let qk = (dims.qk_nope_head_dim + dims.qk_rope_head_dim) as f64;
+        let v = dims.v_head_dim as f64;
+        let idx = (dims.index_head_dim * dims.index_n_heads) as f64;
+        let local_heads = f64::from(self.num_heads);
+        let quants = self.attn_projection_quant_modes.unwrap_or(DsaProjectionQuants {
+            q: self.gemm_quant_mode,
+            kv: self.gemm_quant_mode,
+            o: self.gemm_quant_mode,
+            indexer: self.gemm_quant_mode,
+        });
+        let q_params = h * q_lora + q_lora * local_heads * qk;
+        let kv_params = h * (kv_lora + dims.qk_rope_head_dim as f64)
+            + kv_lora * local_heads * (dims.qk_nope_head_dim as f64 + v);
+        let o_params = local_heads * v * h;
+        let indexer_params = q_lora * idx + h * dims.index_n_heads as f64;
+        let bytes = q_params * quants.q.mapping().memory
+            + kv_params * quants.kv.mapping().memory
+            + o_params * quants.o.mapping().memory
+            + indexer_params * quants.indexer.mapping().memory;
+        bytes * self.scale_factor
     }
 
     pub fn query_context(
@@ -1009,6 +1059,7 @@ mod tests {
             index_topk: 2048,
             cp_size,
             full_frac: 1.0,
+            attn_projection_quant_modes: None,
         }
     }
 

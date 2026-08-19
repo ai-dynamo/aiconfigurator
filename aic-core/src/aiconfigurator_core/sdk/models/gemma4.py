@@ -58,12 +58,16 @@ class Gemma4MixModel(BaseModel):
             model_info["vocab"],
             model_info["context"],
             model_config,
+            backend_name=backend_name,
         )
         model.set_gemma4_config(model_info["extra_params"])
         return model
 
-    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args) -> None:
+    def __init__(self, topk: int, num_experts: int, moe_inter_size: int, *args, backend_name: str = "") -> None:
         super().__init__(*args)
+        # Framework backend, threaded to MoEDispatch (its comm flavor is a
+        # constructor field since the pyo3 op unification).
+        self._backend_name = backend_name
         # Gemma 4 family includes both MoE variants (e.g. gemma-4-26B-A4B-it,
         # topk=8/num_experts=128) and dense variants (e.g. gemma-4-31B-it,
         # gemma-4-E2B-it, gemma-4-E4B-it: topk=0/num_experts=None). For dense
@@ -203,6 +207,7 @@ class Gemma4MixModel(BaseModel):
                 attn_dp,
                 True,
                 quant_mode=moe_q,
+                backend=self._backend_name,
             ),
             ops.MoE(
                 f"{prefix}_moe",
@@ -228,6 +233,7 @@ class Gemma4MixModel(BaseModel):
                 attn_dp,
                 False,
                 quant_mode=moe_q,
+                backend=self._backend_name,
             ),
         ]
 

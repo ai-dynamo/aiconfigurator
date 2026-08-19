@@ -7,8 +7,9 @@ The CSA topk-calib loader historically read the version-pinned primary path
 only — it predated the ``reuse.yaml`` machinery, so every CSA CP config on a
 reuse-dependent version raised ``PerfDataNotAvailableError`` while the DELTA
 consumer happily used the approved donor. The fix projects the standard
-``_build_op_sources`` + ``load_dsv4_sparse_op_data`` resolution; the pins
-below freeze that behavior on the shipped b200_sxm/sglang data:
+source resolution (now the engine's ``SourceResolver``, read back through
+the ``_dsv4_csa_topk_calib_data`` table view); the pins below freeze that
+behavior on the shipped b200_sxm/sglang data:
 ``sparse_attention/sglang/0.5.12/reuse.yaml`` declares
 ``dsv4_csa_topk_calib_perf from_version 0.5.14 (approved_by yimingl)``, so
 0.5.12 must serve the donor's grid verbatim. If any of these move (reuse.yaml
@@ -22,14 +23,10 @@ builds its calib from the same source chain (parity goldens); generic
 strict-provenance source gating is pinned in test_strict_mode.py.
 """
 
-import os
-
 import pytest
 
 from aiconfigurator.sdk.perf_database import get_database
-from aiconfigurator_core.sdk.common import PerfDataFilename
-from aiconfigurator_core.sdk.operations.base import resolve_op_data_path
-from aiconfigurator_core.sdk.operations.dsv4 import _TOPK_CALIB_KEYS, load_dsv4_sparse_op_data
+from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
 
 pytestmark = pytest.mark.unit
 
@@ -37,13 +34,10 @@ _FLASH_NATIVE_HEADS = 64
 
 
 def _load_topk_calib_rows(db):
-    """The same source projection the engine consumes: shared-layer + reuse
-    resolution via ``_build_op_sources``, parsed by the generic sparse-op
-    loader under the calib key order."""
-    system_data_root = os.path.join(db.systems_root, db.system_spec["data_dir"])
-    primary = resolve_op_data_path(system_data_root, db.backend, db.version, PerfDataFilename.dsv4_csa_topk_calib.value)
-    sources = db._build_op_sources(PerfDataFilename.dsv4_csa_topk_calib, primary, system_data_root)
-    return load_dsv4_sparse_op_data(sources, _TOPK_CALIB_KEYS)
+    """The engine's own source projection (shared-layer + reuse resolution
+    inside ``SourceResolver``), read back as the loader-shaped nested dict
+    keyed [native][step][isl][bs][score_mode]."""
+    return fetch_table_view(db, "_dsv4_csa_topk_calib_data")
 
 
 def test_csa_cp_top_last_loads_via_approved_reuse_donor():

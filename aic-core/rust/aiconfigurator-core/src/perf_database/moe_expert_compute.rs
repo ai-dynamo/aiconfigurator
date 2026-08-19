@@ -85,7 +85,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use super::axis_curve::AxisCurve;
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::MoeQuantMode;
 use crate::common::error::AicError;
 use crate::common::system_spec::{quant_tc_flops, SystemSpec};
@@ -207,7 +207,8 @@ impl MoeExpertComputeTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, spec: SystemSpec) -> Self {
-        Self::with_sources(data_root, spec, &PerfDbSources::default())
+        Self::with_sources(data_root, spec, &SourceResolver::fixed(PerfDbSources::default()))
+            .expect("fixed-map resolution is infallible")
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources resolved
@@ -216,26 +217,14 @@ impl MoeExpertComputeTable {
     pub fn with_sources(
         data_root: PathBuf,
         spec: SystemSpec,
-        perf_db_sources: &PerfDbSources,
-    ) -> Self {
-        let moe_ep_sources = resolve_op_sources(
-            perf_db_sources,
-            "moe_expert_compute_perf.parquet",
-            &data_root,
-        );
-        let legacy_context_sources = resolve_op_sources(
-            perf_db_sources,
-            "wideep_context_moe_perf.parquet",
-            &data_root,
-        );
-        let legacy_generation_sources = resolve_op_sources(
-            perf_db_sources,
-            "wideep_generation_moe_perf.parquet",
-            &data_root,
-        );
+        resolver: &SourceResolver,
+    ) -> Result<Self, AicError> {
+        let moe_ep_sources = resolver.sources_for("moe_expert_compute_perf.parquet", &data_root)?;
+        let legacy_context_sources = resolver.sources_for("wideep_context_moe_perf.parquet", &data_root)?;
+        let legacy_generation_sources = resolver.sources_for("wideep_generation_moe_perf.parquet", &data_root)?;
         let legacy_trtllm_wideep_sources =
-            resolve_op_sources(perf_db_sources, "wideep_moe_perf.parquet", &data_root);
-        Self {
+            resolver.sources_for("wideep_moe_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             spec,
             moe_ep_sources,
@@ -243,7 +232,7 @@ impl MoeExpertComputeTable {
             legacy_generation_sources,
             legacy_trtllm_wideep_sources,
             grids: OnceLock::new(),
-        }
+        })
     }
 
     /// Unified EP MoE expert-compute latency (ms).
@@ -443,13 +432,13 @@ impl MoeExpertComputeTable {
 /// `kernel_source` every legacy sglang wideep row is pinned to
 /// (`_adapt_legacy_sglang_wideep_moe`; spec §4.2 — the legacy column spells
 /// it `deepepmoe` and is never read).
-const SGLANG_ADAPTED_KERNEL_SOURCE: &str = "deepep_moe";
+pub(crate) const SGLANG_ADAPTED_KERNEL_SOURCE: &str = "deepep_moe";
 
 /// `kernel_source` Python assumes when the legacy trtllm wideep file has no
 /// such COLUMN (`row.get("kernel_source", "moe_torch_flow")`). A column that
 /// exists with a NULL cell is a different case — see
 /// [`adapt_legacy_trtllm_wideep_moe`].
-const LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE: &str = "moe_torch_flow";
+pub(crate) const LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE: &str = "moe_torch_flow";
 
 /// `num_gemms` in the roofline SOL follows `is_gated` (3 gated / 2
 /// non-gated), mirroring the Python SOL and the legacy oracle
@@ -2052,7 +2041,11 @@ mod tests {
             "wideep_generation_moe_perf.parquet",
             "wideep_moe_perf.parquet",
         ] {
-            for source in resolve_op_sources(&PerfDbSources::default(), basename, data_root) {
+            for source in crate::perf_database::resolve_op_sources(
+                &PerfDbSources::default(),
+                basename,
+                data_root,
+            ) {
                 let path = source.path();
                 if !path.exists() {
                     continue;

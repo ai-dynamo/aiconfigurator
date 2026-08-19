@@ -27,7 +27,6 @@ lever for long-running webapps.
 
 from __future__ import annotations
 
-import csv
 import logging
 import os
 from collections import defaultdict
@@ -41,24 +40,6 @@ if TYPE_CHECKING:
     from aiconfigurator_core.sdk.perf_database import PerfDatabase
 
 logger = logging.getLogger(__name__)
-
-
-def _read_perf_rows(perf_file: str) -> list[dict[str, object]]:
-    if perf_file.lower().endswith(".parquet"):
-        try:
-            import pyarrow.parquet as pq
-        except ImportError as exc:
-            raise RuntimeError(
-                "Loading parquet perf data requires the 'pyarrow' package. "
-                "Install aiconfigurator with its declared runtime dependencies."
-            ) from exc
-        return [
-            {key: "" if value is None else value for key, value in row.items()}
-            for row in pq.read_table(perf_file).to_pylist()
-        ]
-
-    with open(perf_file, encoding="utf-8", newline="") as f:
-        return [{key: "" if value is None else value for key, value in row.items()} for row in csv.DictReader(f)]
 
 
 def _resolve_perf_data_path(perf_file: str) -> str:
@@ -166,114 +147,61 @@ def resolve_op_data_path(system_data_root: str, backend: str, version: str, op_f
     return legacy
 
 
-def _read_filtered_rows(file_or_sources):
-    """Read perf rows from one or more sources. Used by every ``load_*_data``
-    in this package.
+# The op base class IS the compiled engine's: every engine-backed op family
+# is a Rust ``#[pyclass]`` (``aiconfigurator_core._aiconfigurator_core``,
+# see ``rust/aiconfigurator-core/src/py_ops.rs``) holding the typed ``Op``
+# value — construction-time schema has a single owner. The Python family
+# classes in this package are thin SHELLS subclassing those Rust classes,
+# keeping only the class-level data-plane surface (``OpShellKit``).
+from aiconfigurator_core._aiconfigurator_core import Operation
 
-    Accepts:
-      - A single path string: yields all rows. Returns ``None`` if the file is
-        missing, an empty list if it exists but has no rows. Preserves the
-        legacy distinction the per-op ``load_*`` functions rely on.
-      - An iterable of ``(path, kernel_source_filter)`` tuples: yields rows
-        from each source in order; missing files are skipped; rows are
-        filtered by ``kernel_source`` when a filter is provided. Returns
-        ``None`` only if **every** path is missing.
-
-    The order of the returned list mirrors the order of the input sources, so
-    when the per-row loaders skip on key conflict, the earliest source wins on
-    every coordinate — same first-wins semantic the shared-layer loader needs
-    without a separate merge step.
-
-    Lives here (not in ``perf_database``) so the per-op-module loaders can
-    import it without a circular dependency on ``perf_database`` at module
-    load time.
-    """
-    if isinstance(file_or_sources, str):
-        path = _resolve_perf_data_path(file_or_sources)
-        if not os.path.exists(path):
-            return None
-        return _read_perf_rows(path)
-
-    rows: list[dict] = []
-    any_exists = False
-    for path, ks_filter in file_or_sources:
-        path = _resolve_perf_data_path(path)
-        if not os.path.exists(path):
-            continue
-        any_exists = True
-        for row in _read_perf_rows(path):
-            if ks_filter is None or row.get("kernel_source") in ks_filter:
-                rows.append(row)
-    return rows if any_exists else None
+# Compatibility data attributes referenced through ``Operation`` by tests and
+# the helpers below (the Rust type is a heap type, so class attributes attach
+# normally). ``_load_data_call_count`` is the SHARED load-instrumentation
+# registry; ``_data_cache`` is the legacy fallback slot for shells that never
+# declared their own.
+Operation._data_cache = {}
+Operation._load_data_call_count = defaultdict(int)
 
 
-class Operation:
-    """
-    Base operation class.
+class OpShellKit:
+    """The class-level kit every op SHELL mixes in next to its Rust base.
 
-    Note: query() returns PerformanceResult (float-like) instead of plain float.
-    The class behaves as a float for backward compatibility while carrying
-    energy data and a provenance ``source`` tag; see ``PerformanceResult``.
+    Two halves:
+
+    - the DATA-PLANE surface: class-level ``_data_cache`` + ``load_data`` /
+      ``clear_cache`` / ``supported_quant_modes`` / ``_record_load`` — the
+      engine-table-view binding conventions (see the package README);
+    - the ``_engine_query`` kwarg mapping: how the Python-side ORCHESTRATION
+      callers (the ``_sum_latency`` fallback loop, the AFD comm ops, the
+      pareto A/F probe) express legacy phase kwargs as one engine
+      evaluation. Declared per shell via ``_ENGINE_QUERY_SHAPE``.
     """
 
-    # Subclasses that own CSV data override this. Keyed by (system_path, db_mode).
-    _data_cache: ClassVar[dict] = {}
+    # The call-shape label ``_ENGINE_QUERY_SHAPE`` ("tokens" / "context" /
+    # "generation" / "module") is a Rust ``#[classattr]`` on each family class
+    # (base ``Operation`` carries ``None``) so composite phase inference sees
+    # it on Rust-wrapped children too; shells do not redeclare it.
 
-    # Test/observability counter. Each subclass's load_data() calls
-    # Operation._record_load(cls) after a successful parse (NOT on cache hit).
-    _load_data_call_count: ClassVar[dict[type, int]] = defaultdict(int)
-
-    # Context-parallel opt-in. Subclasses set True after auditing how they
-    # respond to ``seq_split``. Constructing an op with ``seq_split > 1`` on a
-    # class that has NOT opted in raises -- protects against a new op silently
-    # mis-modeling CP. Token-major ops (GEMM/Embedding/ElementWise/NCCL/AR/P2P)
-    # divide their per-rank token count ``x`` by ``self._seq_split`` in query().
-    _CP_AWARE: ClassVar[bool] = False
-
-    def __init__(self, name: str, scale_factor: float, *, seq_split: int = 1) -> None:
-        if seq_split > 1 and not self._CP_AWARE:
-            raise NotImplementedError(
-                f"{type(self).__name__} has not been audited for context parallelism "
-                f"(seq_split={seq_split}). Set ``_CP_AWARE = True`` on the class after "
-                f"verifying query() divides its token-count input by self._seq_split "
-                f"(or is handled CP-style-specifically at the model construction site)."
-            )
-        self._name = name
-        self._scale_factor = scale_factor
-        # Sequence-axis shard factor (= cp_size under context parallelism). Token-
-        # major ops divide ``x`` by this in query(); default 1 means no shard.
-        self._seq_split: int = seq_split
-
-    # How the deprecated ``query()`` shim maps this op's legacy kwargs onto
-    # the engine's op-list evaluation shape. Subclasses declare one of:
-    #   "tokens"     — token-major: query(x=<num tokens>)  (GEMM, MoE, comm, ...)
-    #   "context"    — batch-major prefill: query(batch_size=, s=, prefix=)
-    #   "generation" — batch-major decode:  query(batch_size=, s=)
+    # How ``_engine_query`` maps this op's legacy kwargs onto the engine's
+    # op-list evaluation shape. Subclasses declare one of:
+    #   "tokens"     — token-major: x=<num tokens>  (GEMM, MoE, comm, ...)
+    #   "context"    — batch-major prefill: batch_size=, s=, prefix=
+    #   "generation" — batch-major decode:  batch_size=, s=
     #   "module"     — phase carried by the instance (``_is_context`` /
-    #                  ``_phase``) or the ``is_context=`` query kwarg
-    # ``None`` (default) = no shim: query() raises NotImplementedError.
+    #                  ``_phase``) or the ``is_context=`` kwarg
+    # ``None`` (default) = not reachable through the kwarg mapping.
     _ENGINE_QUERY_SHAPE: ClassVar[str | None] = None
 
-    def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        """DEPRECATED (#1357): per-call query shim, removed next release.
-
-        Returns the compiled engine's op-level estimate for this op (scaled by
-        ``scale_factor``) as a ``PerformanceResult`` — the same value the
-        engine charges in a model run. Routed through the op-list FFI; the
-        Python per-call math is gone. Long-term callers use
-        ``EngineHandle.evaluate_ops_json`` (op-list) or the phase/run surface.
-        """
-        import warnings
-
-        from aiconfigurator_core.sdk.engine import QUERY_SHIM_DEPRECATION
-
-        warnings.warn(f"{type(self).__name__}.query: {QUERY_SHIM_DEPRECATION}", DeprecationWarning, stacklevel=2)
-        return self._engine_query(database, **kwargs)
-
     def _engine_query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
-        """The shim body without the deprecation warning — internal callers
-        (the ``_sum_latency`` fallback loop, the AFD comm ops' orchestration)
-        route here so warnings fire only on the public deprecated surface."""
+        """Evaluate this op through the compiled engine's single-op plumbing.
+
+        The permanent internal surface behind the Python-side ORCHESTRATION
+        callers (the ``_sum_latency`` fallback loop, the AFD comm ops, the
+        pareto A/F balance probe). The public deprecated ``query()`` wrapper
+        that used to front this was removed after its one-release window;
+        external callers use ``EngineHandle.evaluate_ops_json`` (op-list) or
+        the phase/run surface."""
         from aiconfigurator_core.sdk.engine import _evaluate_single_op
 
         op, eval_kwargs = self._engine_query_plan(kwargs)
@@ -347,9 +275,6 @@ class Operation:
             return False
         raise ValueError(f"{type(self).__name__}.query cannot infer the evaluation phase; pass is_context=True/False.")
 
-    def get_weights(self, **kwargs):
-        raise NotImplementedError
-
     @classmethod
     def load_data(cls, database: PerfDatabase) -> None:
         """Idempotent. Subclasses with CSV data override; default no-op for
@@ -394,10 +319,44 @@ class Operation:
         Operation._load_data_call_count[cls] += 1
 
 
-def _all_operation_subclasses(root: type = Operation) -> set[type]:
-    """Recursively collect every Operation subclass currently imported."""
+class PythonOperation(OpShellKit):
+    """Base for the PYTHON-side orchestration ops (the AFD comm ops,
+    ``FPMForwardOp``) — the only op classes that are not Rust-backed: their
+    state includes things the engine wire cannot carry (a Python config
+    object, a retired callable slot) or their surface is pinned by the
+    public-SDK import contract. Carries the retired base class's
+    construction contract (audit gate + ``_name``/``_scale_factor``/
+    ``_seq_split``) without any engine identity."""
+
+    # Context-parallel opt-in (the retired audit gate): constructing with
+    # ``seq_split > 1`` on a class that has NOT opted in raises.
+    _CP_AWARE: ClassVar[bool] = False
+
+    def __init__(self, name: str, scale_factor: float, *, seq_split: int = 1) -> None:
+        if seq_split > 1 and not self._CP_AWARE:
+            raise NotImplementedError(
+                f"{type(self).__name__} has not been audited for context parallelism "
+                f"(seq_split={seq_split}). Set ``_CP_AWARE = True`` on the class after "
+                f"verifying its token-count treatment (or handle CP at the model "
+                f"construction site)."
+            )
+        self._name = name
+        self._scale_factor = scale_factor
+        self._seq_split: int = seq_split
+
+    def get_weights(self, **kwargs):
+        raise NotImplementedError(f"{type(self).__name__} must define get_weights")
+
+
+def _all_operation_subclasses(root: type | None = None) -> set[type]:
+    """Recursively collect every op subclass currently imported: everything
+    under the Rust ``Operation`` base (the shells AND the raw Rust family
+    classes) plus the Python orchestration ops under ``PythonOperation``.
+    Callers guard with ``getattr`` — the raw Rust classes carry none of the
+    shell kit."""
+    roots = [root] if root is not None else [Operation, PythonOperation]
     seen: set[type] = set()
-    stack: list[type] = [root]
+    stack: list[type] = list(roots)
     while stack:
         cls = stack.pop()
         for sub in cls.__subclasses__():
@@ -430,7 +389,9 @@ def clear_all_op_caches() -> None:
     ``database.clear_runtime_caches()`` if callers also want to invalidate
     interpolated/extrapolated query results."""
     for cls in _all_operation_subclasses():
-        cls.clear_cache()
+        clear = getattr(cls, "clear_cache", None)
+        if callable(clear):
+            clear()
     # Import lazily to avoid a base <-> util_empirical module cycle at import
     # time. This is part of the same eviction contract as the per-op caches.
     from aiconfigurator_core.sdk.operations import util_empirical
@@ -465,4 +426,6 @@ def warm_all_op_data(database: PerfDatabase) -> None:
     paths trigger the lazy load on the ops they actually need, which is
     the whole point of lazy per-op data ownership."""
     for cls in _all_operation_subclasses():
-        cls.load_data(database)
+        load = getattr(cls, "load_data", None)
+        if callable(load):
+            load(database)

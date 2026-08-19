@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 
 mod py;
+mod py_ops;
 
 // Modular core. `common/` holds shared foundation types (enums, error,
 // system_spec) with no AIC-domain knowledge. Top-level files (`config`,

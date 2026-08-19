@@ -233,7 +233,7 @@ fn query_gemm_table(
 /// (`operations/gemm.py`); consumed ONLY by the cross-profile relation of
 /// the quant-transfer ladder, and only as the ratio `e(query)/e(ref)`.
 /// Derivation method + LOO evidence documented on the Python table.
-const GEMM_QUANT_UTIL_LEVEL: &[(f64, f64, f64)] = &[
+pub(crate) const GEMM_QUANT_UTIL_LEVEL: &[(f64, f64, f64)] = &[
     (2.0, 1.0, 0.70),    // w16a16 / bfloat16              [data 0.55-0.79]
     (1.0, 1.0, 0.55),    // w8a16 / int8_wo                [inferred]
     (0.5625, 1.0, 0.45), // w4a16+scales / nvfp4_wo (Marlin FP4) [copies inferred (0.5,1)]

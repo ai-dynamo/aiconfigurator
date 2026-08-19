@@ -394,6 +394,7 @@ mod tests {
             index_topk: 2048,
             cp_size: 1,
             full_frac: 1.0,
+            attn_projection_quant_modes: None,
         }
     }
 
@@ -758,7 +759,8 @@ mod tests {
                 kv_cache_dtype: Some(DataType::Fp8),
             },
             speculative: Some(SpeculativeConfig { nextn: Some(1) }),
-            perf_db_sources: Default::default(),
+            enable_shared_layer: None,
+            strict_provenance: false,
             database_mode: Default::default(),
             transfer_policy: None,
             extra: BTreeMap::new(),
@@ -981,6 +983,28 @@ mod tests {
                 assert_eq!(expected, ENGINE_SPEC_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
+        }
+    }
+
+    /// v11 -> v12 regression (PR-6): `DsaModuleOp` gained
+    /// `attn_projection_quant_modes`, a positional bincode layout change. A
+    /// pre-PR v11 producer's DSA payload must be rejected by the VERSION GATE
+    /// (before any op decoding) as `UnsupportedSchemaVersion` — never reach
+    /// the op-payload stage where the missing Option tag would surface as an
+    /// opaque "unexpected end of file".
+    #[test]
+    fn from_bincode_rejects_v11_dsa_producer_at_the_version_gate() {
+        let spec = EngineSpec::new(sample_engine_config(), vec![OpSpec::DsaContext(dsa_module())], vec![]);
+        let mut bytes = spec.to_bincode().expect("to_bincode");
+        bytes[..4].copy_from_slice(&11u32.to_le_bytes()); // a v11 producer's stamp
+
+        match EngineSpec::from_bincode(&bytes) {
+            Err(AicError::UnsupportedSchemaVersion { kind, got, expected }) => {
+                assert_eq!(kind, "EngineSpec");
+                assert_eq!(got, 11);
+                assert_eq!(expected, ENGINE_SPEC_SCHEMA_VERSION);
+            }
+            other => panic!("expected UnsupportedSchemaVersion for a v11 DSA payload, got {other:?}"),
         }
     }
 

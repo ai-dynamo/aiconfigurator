@@ -246,7 +246,6 @@ def test_estimate_only_database_can_load_without_perf_files(perf_database):
     (#1552 review finding 8 — perf_database/mod.rs load_with_sources_opts), so
     the estimate-only capability survives the query-stack retirement.
     """
-    import warnings
 
     from aiconfigurator.sdk import common
 
@@ -255,9 +254,13 @@ def test_estimate_only_database_can_load_without_perf_files(perf_database):
     assert db is not None
     db.set_default_database_mode(common.DatabaseMode.SOL)
     assert db.get_default_database_mode() == common.DatabaseMode.SOL
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        sol_ms = float(db.query_mem_op(1 << 20, database_mode=common.DatabaseMode.SOL))
+    from aiconfigurator_core.sdk.engine import _evaluate_single_op
+    from aiconfigurator_core.sdk.operations.elementwise import ElementWise
+
+    # The retired query_mem_op shim's exact twin, evaluated under the
+    # database's live SOL mode through the single-op plumbing.
+    mem_twin = ElementWise("mem_op_query", 1.0, -(-(1 << 20) // 2), 0)
+    sol_ms = float(_evaluate_single_op(db, mem_twin, is_context=True, batch_size=1, s=1, x=1))
     # bytes / mem_bw * 1000 — pure system-spec arithmetic, no table involved.
     expected = (1 << 20) / db.system_spec["gpu"]["mem_bw"] * 1000
     assert sol_ms == pytest.approx(expected, rel=1e-9)
