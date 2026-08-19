@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import atexit
 import os
+import shutil
 import tempfile
 from collections import defaultdict
 from unittest.mock import patch
@@ -401,6 +403,12 @@ def _get_comprehensive_db_singleton() -> PerfDatabase:
     system_spec = cached["system_spec"]
 
     tmp_dir = tempfile.mkdtemp()
+    # Superseded singleton dirs must survive until process exit: deepcopied
+    # databases (mutable_comprehensive_perf_db) keep referencing the old
+    # systems path, and a post-eviction engine re-fetch through such a copy
+    # would turn "empty tables" into a missing-directory error if the dir
+    # were removed eagerly on rebuild. Clean them all up at exit instead.
+    atexit.register(shutil.rmtree, tmp_dir, ignore_errors=True)
     yaml_file = os.path.join(tmp_dir, "test_system.yaml")
     with open(yaml_file, "w") as f:
         yaml.dump(system_spec, f)
