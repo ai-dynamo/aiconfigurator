@@ -183,11 +183,17 @@ def test_selected_combos_unset_and_all_run_full_matrix(monkeypatch):
 FULL_MATRIX_TRIGGER_PATHS = [
     # global source manifest: governs cross-backend/cross-system fill routing
     "aic-core/src/aiconfigurator_core/systems/op_kernel_source_manifest.yaml",
-    # compiled Rust perf-database loader/interpolator
+    # compiled Rust database, engine, operator, and Python-binding paths
     "aic-core/rust/aiconfigurator-core/src/perf_database/interpolation.rs",
-    # Python loader facade + engine/operation loading used by the notebook
+    "aic-core/rust/aiconfigurator-core/src/engine/runtime.rs",
+    "aic-core/rust/aiconfigurator-core/src/operators/attention.rs",
+    "aic-core/rust/aiconfigurator-core/src/common/system_spec.rs",
+    "aic-core/rust/aiconfigurator-core/src/py.rs",
+    # Python loader facade + shared SDK types used by the notebook
     "aic-core/src/aiconfigurator_core/sdk/perf_database.py",
     "aic-core/src/aiconfigurator_core/sdk/engine.py",
+    "aic-core/src/aiconfigurator_core/sdk/common.py",
+    "aic-core/src/aiconfigurator_core/sdk/system_spec.py",
     "aic-core/src/aiconfigurator_core/sdk/operations/base.py",
     # the sanity tooling and this selector itself
     "tools/sanity_check/create_charts.py",
