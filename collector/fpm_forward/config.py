@@ -186,10 +186,6 @@ class FPMCollectionOptions:
     attention_backend: str
     enable_wideep: str
     enable_eplb: str
-    # When "true" (default), a structural ValueError from the AIC memory
-    # estimator rejects the topology outright: the modeling consumer would
-    # fail on the same math, so its silicon data is dead on arrival.
-    strict_admission: str
     weight_quantizations: tuple[str, ...]
     kv_cache_dtypes: tuple[str, ...]
     tp_sizes: tuple[int, ...] | None = None
@@ -260,7 +256,6 @@ class FPMCollectionOptions:
             attention_backend=(getattr(args, "fpm_attention_backend", None) or "auto").strip(),
             enable_wideep=(getattr(args, "fpm_enable_wideep", None) or "false").strip(),
             enable_eplb=(getattr(args, "fpm_enable_eplb", None) or "false").strip(),
-            strict_admission=(getattr(args, "fpm_strict_admission", None) or "true").strip(),
             weight_quantizations=tuple(
                 dict.fromkeys(value.lower() for value in (getattr(args, "fpm_weight_quantizations", None) or ()))
             ),
@@ -293,7 +288,6 @@ class FPMCollectionOptions:
             "attention_backend": self.attention_backend,
             "enable_wideep": self.enable_wideep,
             "enable_eplb": self.enable_eplb,
-            "strict_admission": self.strict_admission,
             "weight_quantizations": list(self.weight_quantizations),
             "kv_cache_dtypes": list(self.kv_cache_dtypes),
             "tp_sizes": list(self.tp_sizes) if self.tp_sizes is not None else None,
@@ -366,13 +360,6 @@ def add_fpm_arguments(parser: argparse.ArgumentParser) -> None:
         choices=("true", "false"),
         default=None,
         help="Expert-parallel load balancing on or off (boolean identity column; defaults to false).",
-    )
-    group.add_argument(
-        "--fpm-strict-admission",
-        choices=("true", "false"),
-        default=None,
-        help="Reject topologies AIC's structural validation declares invalid (default true; "
-        "false forces runtime verification for them).",
     )
     group.add_argument(
         "--fpm-weight-quantizations",
@@ -540,7 +527,6 @@ def reject_fpm_arguments_without_fpm(args: argparse.Namespace) -> None:
         "fpm_attention_backend",
         "fpm_enable_wideep",
         "fpm_enable_eplb",
-        "fpm_strict_admission",
         "fpm_warmup_iterations",
         "fpm_max_prefill_isl",
         "fpm_max_prefill_batch_size",

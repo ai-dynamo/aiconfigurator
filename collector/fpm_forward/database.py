@@ -264,6 +264,55 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def validate_formal_database_commit(
+    parquet_path: Path,
+    metadata_path: Path,
+    plan: FPMCollectionPlan,
+) -> dict[str, Any]:
+    """Validate the committed formal database pair referenced by a checkpoint."""
+
+    if not parquet_path.is_file() or not metadata_path.is_file():
+        raise ValueError(
+            "completed FPM database checkpoint references missing output: "
+            f"parquet={parquet_path}, metadata={metadata_path}"
+        )
+    payload = json.loads(metadata_path.read_text())
+    if not isinstance(payload, dict):
+        raise TypeError(f"FPM database commit record must be a mapping: {metadata_path}")
+    expected = {
+        "schema_name": "aic_fpm_forward_perf",
+        "schema_version": 6,
+        "system": plan.system,
+        "backend": plan.backend,
+    }
+    mismatches = {
+        key: {"actual": payload.get(key), "expected": value}
+        for key, value in expected.items()
+        if payload.get(key) != value
+    }
+    if mismatches:
+        raise ValueError(f"FPM database commit record does not match the frozen plan: {mismatches}")
+    if payload.get("parquet_sha256") != _sha256(parquet_path):
+        raise ValueError(f"FPM database does not match its commit record: {parquet_path}")
+
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as error:
+        raise RuntimeError("validating fpm_forward_perf.parquet requires pyarrow") from error
+    parquet = pq.ParquetFile(parquet_path)
+    required = {*_ROW_KEY, *_RUN_IDENTITY_FIELDS}
+    missing = sorted(required - set(parquet.schema_arrow.names))
+    if missing:
+        raise ValueError(f"committed FPM database is missing schema-v6 columns: {missing}")
+    row_count = payload.get("row_count")
+    if not isinstance(row_count, int) or row_count < 1 or parquet.metadata.num_rows != row_count:
+        raise ValueError(
+            "FPM database row count does not match its commit record: "
+            f"parquet={parquet.metadata.num_rows}, metadata={row_count!r}"
+        )
+    return payload
+
+
 def _curated_systems_root() -> Path:
     """The data tree the SDK's default systems path actually reads.
 

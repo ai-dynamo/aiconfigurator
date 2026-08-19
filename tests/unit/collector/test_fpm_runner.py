@@ -2333,6 +2333,65 @@ def test_resume_survives_pruned_raw_artifacts_of_passed_cell(monkeypatch, tmp_pa
     assert record["status"] == "passed"
     assert record["attempt_id"] == "attempt-1"
     assert any("Skipping metadata refresh" in message for message in caplog.messages)
+    manifest = json.loads((artifact_root / plan.sha256[:16] / "smoke" / "run-manifest.json").read_text())
+    assert manifest["schema_version"] == 2
+    assert manifest["run_total_s"] == 0
+    assert manifest["attempts"] == []
+    assert manifest["cells"] == {}
+
+
+def test_completed_formal_database_is_terminal_after_commit_validation(monkeypatch, tmp_path):
+    cell = _cell()
+    plan = _plan(cell)
+    artifact_root = tmp_path / "artifacts"
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    parquet = tmp_path / "db" / "fpm_forward_perf.parquet"
+    metadata = tmp_path / "db" / "fpm_forward_perf.metadata.json"
+    (checkpoint_dir / "fpm_forward.json").write_text(
+        json.dumps(
+            {
+                "schema": fpm_runner.CHECKPOINT_SCHEMA,
+                "plan_sha256": plan.sha256,
+                "cells": {cell.cell_id: {"status": "passed", "attempt_id": "attempt-1"}},
+                "database": {
+                    "status": "passed",
+                    "parquet": str(parquet),
+                    "metadata": str(metadata),
+                    "plan_cells": 1,
+                    "missing_cells": [],
+                },
+            }
+        )
+    )
+    validated = []
+
+    def validate(parquet_path, metadata_path, plan_arg):
+        validated.append((parquet_path, metadata_path, plan_arg.sha256))
+        return {"schema_version": 6}
+
+    def forbid_republication(*_args, **_kwargs):
+        raise AssertionError("a validated completed database must not be reaggregated or republished")
+
+    monkeypatch.setattr("collector.fpm_forward.database.validate_formal_database_commit", validate)
+    monkeypatch.setattr("collector.fpm_forward.database.aggregate_cell", forbid_republication)
+    monkeypatch.setattr("collector.fpm_forward.database.write_formal_database", forbid_republication)
+
+    errors = run_collection(
+        plan,
+        generator_overrides={},
+        checkpoint_dir=str(checkpoint_dir),
+        artifact_root=str(artifact_root),
+        resume=True,
+        retry_failed=False,
+        smoke=False,
+        database_root=str(tmp_path / "db"),
+    )
+
+    assert errors == []
+    assert validated == [(parquet, metadata, plan.sha256)]
+    manifest = json.loads((artifact_root / plan.sha256[:16] / "run-manifest.json").read_text())
+    assert manifest["attempts"] == []
 
 
 def test_user_extra_env_reaches_the_render_request_alongside_collector_identities():
@@ -2591,9 +2650,63 @@ def test_run_manifest_records_collector_phases_and_engine_interface(monkeypatch,
 
     manifest = json.loads((artifact_root / plan.sha256[:16] / "smoke" / "run-manifest.json").read_text())
     assert manifest["schema_name"] == "aic_fpm_run_manifest"
+    assert manifest["schema_version"] == 2
     assert manifest["run_total_s"] > 0
+    assert len(manifest["attempts"]) == 1
     entry = manifest["cells"][cell.cell_id]
+    assert entry["attempt_id"]
+    assert entry["started_at"]
+    assert entry["completed_at"]
+    assert entry["status"] == "passed"
     phases = entry["collector_phase_seconds"]
     assert set(phases) == {"render_s", "schedule_s", "stage_s", "execute_wall_s", "collect_s"}
     assert entry["engine_phase_seconds"]["kvwarm_warmup_s"] is None
     assert "pending dynamo-fpm" in entry["engine_phase_seconds"]["note"]
+
+
+def test_failed_attempt_persists_partial_phase_timing_in_manifest(monkeypatch, tmp_path):
+    cell = _cell()
+    plan = _plan(cell)
+
+    def render_cell(*args, **_kwargs):
+        cell_dir = args[2]
+        (cell_dir / "k8s_deploy.yaml").write_text("apiVersion: v1\nkind: Pod\nmetadata:\n  name: cell\n")
+        (cell_dir / "run.sh").write_text("#!/bin/sh\n")
+        (cell_dir / "fpm_env.sh").write_text("#!/bin/sh\n")
+
+    class FakeResource:
+        def __init__(self, _manifest, _cell_dir):
+            pass
+
+        def cleanup(self):
+            pass
+
+        def apply(self):
+            pass
+
+        def wait_ready(self, _expected_nodes):
+            raise RuntimeError("scheduler rejected the pod")
+
+    monkeypatch.setattr(fpm_runner, "_render_cell", render_cell)
+    monkeypatch.setattr(fpm_runner, "KubernetesCellRunner", FakeResource)
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    artifact_root = tmp_path / "artifacts"
+
+    errors = run_collection(
+        plan,
+        generator_overrides={},
+        checkpoint_dir=str(checkpoint_dir),
+        artifact_root=str(artifact_root),
+        resume=False,
+        retry_failed=False,
+        smoke=True,
+    )
+
+    assert [error["classification"] for error in errors] == ["campaign_cell_failed"]
+    manifest = json.loads((artifact_root / plan.sha256[:16] / "smoke" / "run-manifest.json").read_text())
+    attempt = manifest["attempts"][0]
+    assert attempt["status"] == "failed"
+    assert attempt["collector_phase_seconds"].keys() == {"render_s"}
+    checkpoint = json.loads((checkpoint_dir / "fpm_forward_smoke.json").read_text())
+    assert checkpoint["cells"][cell.cell_id]["collector_phase_seconds"].keys() == {"render_s"}

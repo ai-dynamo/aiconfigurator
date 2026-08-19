@@ -15,7 +15,11 @@ import pytest
 from aiconfigurator.sdk.utils import HuggingFaceDownloadError
 from collector.fpm_forward.capabilities import resolve_model_capability
 from collector.fpm_forward.config import FPMCollectionOptions, PrefillSamplingProfile, add_fpm_arguments
-from collector.fpm_forward.database import aggregate_cell, write_formal_database
+from collector.fpm_forward.database import (
+    aggregate_cell,
+    validate_formal_database_commit,
+    write_formal_database,
+)
 from collector.fpm_forward.memory_admission import filter_memory_infeasible_topologies
 from collector.fpm_forward.model_capability import load_model_config
 from collector.fpm_forward.planner import (
@@ -75,7 +79,6 @@ def _args(**overrides):
         "fpm_attention_backend": None,
         "fpm_enable_wideep": None,
         "fpm_enable_eplb": None,
-        "fpm_strict_admission": None,
         "fpm_weight_quantizations": None,
         "fpm_kv_cache_dtypes": None,
         "fpm_model_config": None,
@@ -306,7 +309,7 @@ def test_glm_memory_admission_uses_configured_max_new_tokens_and_warns_on_drops(
 
 
 def test_glm_memory_admission_fails_after_warning_when_every_topology_is_impossible(caplog):
-    with pytest.raises(ValueError, match="rejected every structurally valid FPM topology"):
+    with pytest.raises(ValueError, match="rejected every FPM topology"):
         build_collection_plan(
             backend="vllm",
             model_path="nvidia/GLM-5.2-NVFP4",
@@ -1140,6 +1143,27 @@ def test_formal_database_first_publisher_wins_on_rerun_overlap(tmp_path):
 
     assert skipped == (rows[0]["cell_id"],)
     assert parquet2.read_bytes() == sealed
+
+
+def test_formal_database_commit_validation_accepts_sealed_schema_v6_pair(tmp_path):
+    plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
+    rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+    parquet, metadata, _skipped = write_formal_database(plan, rows, systems_root=tmp_path / "systems")
+
+    commit = validate_formal_database_commit(parquet, metadata, plan)
+
+    assert commit["schema_version"] == 6
+    assert commit["row_count"] == len(rows)
+
+
+def test_formal_database_commit_validation_rejects_digest_drift(tmp_path):
+    plan, cell, cell_dir = _synthetic_plan_and_cell(tmp_path)
+    rows = aggregate_cell(plan, cell, cell_dir, expected_attempt_id="attempt")
+    parquet, metadata, _skipped = write_formal_database(plan, rows, systems_root=tmp_path / "systems")
+    parquet.write_bytes(parquet.read_bytes() + b"drift")
+
+    with pytest.raises(ValueError, match="does not match its commit record"):
+        validate_formal_database_commit(parquet, metadata, plan)
 
 
 def _synthetic_decode_cell(
@@ -2032,10 +2056,10 @@ def test_unplumbed_backend_identity_fails_closed():
             )
 
 
-def test_strict_admission_rejects_aic_structural_invalidity_by_default(monkeypatch):
-    """A structural ValueError from the AIC estimator means the modeling
-    consumer would fail on the same math - the topology is dropped up front
-    (default --fpm-strict-admission true)."""
+def test_aic_structural_validation_failure_stays_runnable(monkeypatch):
+    """Model-layer validation is observable evidence, not permission for the
+    Collector to predict a skip; the live runtime must still receive every
+    topology unless a concrete memory estimate exceeds capacity."""
 
     def structurally_invalid(*_args, **_kwargs):
         raise ValueError(
@@ -2047,23 +2071,21 @@ def test_strict_admission_rejects_aic_structural_invalidity_by_default(monkeypat
         "collector.fpm_forward.memory_admission.KVCacheEstimator.from_request",
         structurally_invalid,
     )
-    with pytest.raises(ValueError, match="rejected every structurally valid FPM topology"):
-        build_collection_plan(
-            backend="vllm",
-            model_path="nvidia/GLM-5.2-NVFP4",
-            model_architecture="GlmMoeDsaForCausalLM",
-            system="b200_sxm",
-            selected_ops={"dsa_context_module", "dsa_generation_module"},
-            options=FPMCollectionOptions.from_args(_args()),
-        )
+    plan = build_collection_plan(
+        backend="vllm",
+        model_path="nvidia/GLM-5.2-NVFP4",
+        model_architecture="GlmMoeDsaForCausalLM",
+        system="b200_sxm",
+        selected_ops={"dsa_context_module", "dsa_generation_module"},
+        options=FPMCollectionOptions.from_args(_args()),
+    )
+
+    assert len(plan.topologies) == 3
+    assert {decision.disposition for decision in plan.topology_memory_admission} == {"unknown"}
+    assert all("ValueError" in decision.estimates[0].reason for decision in plan.topology_memory_admission)
 
 
-def test_strict_admission_selective_rejection_keeps_valid_topologies(monkeypatch, caplog):
-    """Structural invalidity is per-topology: only the invalid shapes drop,
-    the rest stay collectable, and the drop log attributes the structural
-    cause instead of blaming memory capacity."""
-
-    import logging
+def test_structural_estimator_failure_does_not_drop_selected_topologies(monkeypatch):
     from types import SimpleNamespace
 
     def selective(*_args, **kwargs):
@@ -2075,49 +2097,22 @@ def test_strict_admission_selective_rejection_keeps_valid_topologies(monkeypatch
         "collector.fpm_forward.memory_admission.KVCacheEstimator.from_request",
         selective,
     )
-    with caplog.at_level(logging.WARNING, logger="collector.fpm_forward.memory_admission"):
-        plan = build_collection_plan(
-            backend="vllm",
-            model_path="nvidia/GLM-5.2-NVFP4",
-            model_architecture="GlmMoeDsaForCausalLM",
-            system="b200_sxm",
-            selected_ops={"dsa_context_module", "dsa_generation_module"},
-            options=FPMCollectionOptions.from_args(_args()),
-        )
-
-    assert plan.topologies
-    assert all(topology.moe_tp == 1 for topology in plan.topologies)
-    assert {decision.disposition for decision in plan.topology_memory_admission} == {"admitted", "rejected"}
-    rejected = [d for d in plan.topology_memory_admission if d.disposition == "rejected"]
-    assert all("structural validation" in d.reason for d in rejected)
-    assert "AIC structural validation predicts the configuration is invalid" in caplog.text
-    assert "exceeds GPU capacity" not in caplog.text
-
-
-def test_strict_admission_false_keeps_predicted_invalid_for_runtime_verification(monkeypatch):
-    def structurally_invalid(*_args, **_kwargs):
-        raise ValueError("Invalid quantized MoE configuration: 192 % 128 != 0")
-
-    monkeypatch.setattr(
-        "collector.fpm_forward.memory_admission.KVCacheEstimator.from_request",
-        structurally_invalid,
-    )
     plan = build_collection_plan(
         backend="vllm",
         model_path="nvidia/GLM-5.2-NVFP4",
         model_architecture="GlmMoeDsaForCausalLM",
         system="b200_sxm",
         selected_ops={"dsa_context_module", "dsa_generation_module"},
-        options=FPMCollectionOptions.from_args(_args(fpm_strict_admission="false")),
+        options=FPMCollectionOptions.from_args(_args()),
     )
 
     assert len(plan.topologies) == 3
-    decisions = plan.topology_memory_admission
-    assert {decision.disposition for decision in decisions} == {"unknown"}
-    assert all("predicts this configuration is invalid" in decision.reason for decision in decisions)
+    by_moe_tp = {decision.topology.moe_tp: decision.disposition for decision in plan.topology_memory_admission}
+    assert by_moe_tp[1] == "admitted"
+    assert by_moe_tp[4] == "unknown"
 
 
-def test_missing_perf_data_stays_runnable_under_strict_admission(monkeypatch):
+def test_missing_perf_data_stays_runnable_under_memory_admission(monkeypatch):
     """Coverage gaps are not structural invalidity: collection may be exactly
     what fills them, so strict admission must not reject them."""
 

@@ -449,7 +449,6 @@ def build_collection_plan(
         capability=capability,
         topologies=candidate_topologies,
         max_new_tokens=options.prefill_sampling.max_total_prefill_tokens,
-        strict_admission=options.strict_admission == "true",
     )
     policies = _backend_policies(options, collector_config, backend=backend)
     weight_quantization = capability.dtype.gemm_quant_mode

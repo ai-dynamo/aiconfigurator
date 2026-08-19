@@ -1396,6 +1396,33 @@ def _sigterm_as_interrupt():
         signal.signal(signal.SIGTERM, previous)
 
 
+def _run_manifest_attempt(cell: FPMCell, entry: dict[str, Any]) -> dict[str, Any]:
+    """Project one current-invocation checkpoint record into timing evidence."""
+
+    return {
+        "cell_id": cell.cell_id,
+        "attempt_id": entry.get("attempt_id"),
+        "started_at": entry.get("started_at"),
+        "completed_at": entry.get("completed_at"),
+        "status": entry.get("status"),
+        "topology": cell.topology.to_dict(),
+        "workload_kind": cell.workload_kind,
+        "cell_total_s": float(entry.get("duration_seconds") or 0.0),
+        "collector_phase_seconds": entry.get("collector_phase_seconds") or {},
+        "engine_timing": {
+            "benchmark_elapsed_seconds": entry.get("benchmark_elapsed_seconds"),
+            "measured_iteration_seconds": entry.get("measured_iteration_seconds"),
+        },
+        "engine_phase_seconds": {
+            "engine_launch_s": None,
+            "kvwarm_warmup_s": None,
+            "seeding_s": None,
+            "inference_s": entry.get("measured_iteration_seconds"),
+            "note": "pending dynamo-fpm phase instrumentation; interface per R16 §3",
+        },
+    }
+
+
 def run_collection(
     plan: FPMCollectionPlan,
     *,
@@ -1439,6 +1466,7 @@ def _run_collection_impl(
     database_root: str | None = None,
     publish_partial: bool = False,
 ) -> list[dict[str, object]]:
+    run_started_at = _utc_now()
     root = Path(artifact_root).expanduser().resolve() / plan.sha256[:16]
     if smoke:
         root /= "smoke"
@@ -1448,9 +1476,34 @@ def _run_collection_impl(
     checkpoint_path = Path(checkpoint_dir).expanduser().resolve() / checkpoint_name
     checkpoint = _load_checkpoint(checkpoint_path, plan, resume)
     errors: list[dict[str, object]] = []
+    run_attempts: list[dict[str, Any]] = []
     runtime_exec = Path(__file__).resolve().parent / "runtime" / "fpm_exec.sh"
     runtime_preflight = Path(__file__).resolve().parent / "runtime" / "preflight.py"
     target_cells = plan.cells[: (cell_limit or (1 if smoke else len(plan.cells)))]
+
+    formal_database_terminal = False
+    database_entry = checkpoint.get("database")
+    if (
+        resume
+        and not smoke
+        and isinstance(database_entry, dict)
+        and database_entry.get("status") == "passed"
+        and database_entry.get("plan_cells") == len(plan.cells)
+        and database_entry.get("missing_cells") == []
+    ):
+        try:
+            from .database import validate_formal_database_commit
+
+            validate_formal_database_commit(
+                Path(str(database_entry.get("parquet", ""))).expanduser(),
+                Path(str(database_entry.get("metadata", ""))).expanduser(),
+                plan,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError) as error:
+            logger.warning("Completed FPM database checkpoint failed validation; rebuilding: %s", error)
+        else:
+            formal_database_terminal = True
+            logger.info("Validated completed FPM database; resume has no publication work")
 
     checkpoint_changed = False
     # Recovery costs zero cluster time, so it runs on every resume: it only
@@ -1666,50 +1719,34 @@ def _run_collection_impl(
                             "classification": "resource_cleanup_failed",
                         }
                     )
-            checkpoint["cells"][cell.cell_id]["completed_at"] = _utc_now()
-            checkpoint["cells"][cell.cell_id]["duration_seconds"] = round(time.monotonic() - cell_started, 3)
+            record = checkpoint["cells"][cell.cell_id]
+            record["collector_phase_seconds"] = dict(phase_marks)
+            record["completed_at"] = _utc_now()
+            record["duration_seconds"] = round(time.monotonic() - cell_started, 3)
+            run_attempts.append(_run_manifest_attempt(cell, record))
             _atomic_json(checkpoint_path, checkpoint)
     # R16 §3 run manifest: the machine-readable timing map for the speed-up
     # campaign. Collector-observable segments land now; engine-internal
     # phases (kvwarm/seeding splits) are declared interface fields sourced
     # from the engine artifact once dynamo-fpm phase instrumentation exists.
-    manifest_cells: dict[str, Any] = {}
-    run_total = 0.0
-    for cell in target_cells:
-        entry = checkpoint["cells"].get(cell.cell_id)
-        if not isinstance(entry, dict):
-            continue
-        duration = float(entry.get("duration_seconds") or 0.0)
-        run_total += duration
-        manifest_cells[cell.cell_id] = {
-            "status": entry.get("status"),
-            "topology": cell.topology.to_dict(),
-            "workload_kind": cell.workload_kind,
-            "cell_total_s": duration,
-            "collector_phase_seconds": entry.get("collector_phase_seconds"),
-            "engine_timing": {
-                "benchmark_elapsed_seconds": entry.get("benchmark_elapsed_seconds"),
-                "measured_iteration_seconds": entry.get("measured_iteration_seconds"),
-            },
-            "engine_phase_seconds": {
-                "engine_launch_s": None,
-                "kvwarm_warmup_s": None,
-                "seeding_s": None,
-                "inference_s": entry.get("measured_iteration_seconds"),
-                "note": "pending dynamo-fpm phase instrumentation; interface per R16 §3",
-            },
-        }
+    manifest_cells = {attempt["cell_id"]: attempt for attempt in run_attempts}
+    run_total = sum(float(attempt["cell_total_s"]) for attempt in run_attempts)
     _atomic_json(
         root / "run-manifest.json",
         {
             "schema_name": "aic_fpm_run_manifest",
-            "schema_version": 1,
+            "schema_version": 2,
             "plan_sha256": plan.sha256,
             "smoke": smoke,
+            "run_started_at": run_started_at,
+            "run_completed_at": _utc_now(),
             "run_total_s": round(run_total, 3),
+            "attempts": run_attempts,
             "cells": manifest_cells,
         },
     )
+    if formal_database_terminal:
+        return errors
     all_passed = all(checkpoint["cells"].get(cell.cell_id, {}).get("status") == "passed" for cell in target_cells)
     # Formal publication eligibility must agree with completion: a deliberate
     # partial run (cell_limit below the frozen plan) can pass every targeted

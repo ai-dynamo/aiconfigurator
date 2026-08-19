@@ -10,16 +10,6 @@ import math
 from dataclasses import dataclass
 
 from aiconfigurator.sdk.memory import KVCacheEstimator
-
-# Messages that identify AIC's deterministic structural validators (math the
-# modeling consumer re-runs identically). Only these justify rejecting a
-# topology without silicon evidence; every other ValueError (unknown model,
-# template bootstrap, estimator gaps) stays runnable. Extend the tuple as new
-# validators appear.
-# FIXME(structural-marker): message matching is a stopgap. The durable fix is
-# typed exceptions in aic-core (a structural-validation error hierarchy) so
-# this classification survives upstream wording changes; retire the tuple then.
-_STRUCTURAL_VALIDATION_MARKERS = ("Invalid quantized MoE configuration",)
 from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
 
 from .capabilities import ModelCapabilityProfile
@@ -123,17 +113,9 @@ def _estimate_dtype(
             reason=f"AIC memory estimate unavailable: {type(error).__name__}: {error}",
         )
     except ValueError as error:
-        if any(marker in str(error) for marker in _STRUCTURAL_VALIDATION_MARKERS):
-            # Deterministic structural validation: the modeling consumer runs
-            # the same math and would fail identically, so silicon data for
-            # this configuration is dead on arrival.
-            return DTypeMemoryEstimate(
-                kv_cache_dtype=kv_cache_dtype,
-                disposition="predicted_invalid",
-                estimated_non_kv_bytes=None,
-                gpu_capacity_bytes=None,
-                reason=f"AIC structural validation rejects this configuration: {error}",
-            )
+        # A model-layer validator cannot turn into a Collector skip. The live
+        # runtime is authoritative for structural feasibility; only a concrete
+        # size-vs-capacity estimate below may filter generation-time work.
         return DTypeMemoryEstimate(
             kv_cache_dtype=kv_cache_dtype,
             disposition="unknown",
@@ -186,7 +168,6 @@ def filter_memory_infeasible_topologies(
     capability: ModelCapabilityProfile,
     topologies: tuple[ParallelTopology, ...],
     max_new_tokens: int,
-    strict_admission: bool = True,
 ) -> tuple[tuple[ParallelTopology, ...], tuple[TopologyMemoryDecision, ...]]:
     """Drop topologies that cannot fit the configured max-new-token envelope.
 
@@ -201,7 +182,6 @@ def filter_memory_infeasible_topologies(
 
     decisions = []
     admitted = []
-    rejected_structural = []
     rejected_capacity = []
     for topology in topologies:
         estimates = tuple(
@@ -221,19 +201,9 @@ def filter_memory_infeasible_topologies(
             disposition = "admitted"
             reason = "at least one requested KV dtype fits the configured max-new-token envelope"
             admitted.append(topology)
-        elif strict_admission and "predicted_invalid" in dispositions and "unknown" not in dispositions:
-            disposition = "rejected"
-            reason = (
-                "AIC structural validation rejects every requested KV dtype for this topology; "
-                "the modeling consumer would fail on the same math, so its data is unusable. "
-                "Rerun with --fpm-strict-admission false to force runtime verification"
-            )
-            rejected_structural.append((topology, estimates))
-        elif "unknown" in dispositions or "predicted_invalid" in dispositions:
+        elif "unknown" in dispositions:
             disposition = "unknown"
             reason = "AIC could not prove the topology is impossible; runtime verification is required"
-            if "predicted_invalid" in dispositions:
-                reason += " (WARNING: AIC structural validation predicts this configuration is invalid)"
             admitted.append(topology)
         else:
             disposition = "rejected"
@@ -249,26 +219,6 @@ def filter_memory_infeasible_topologies(
             )
         )
 
-    # Attribute the two drop causes separately: a structural rejection is AIC
-    # declaring the configuration impossible, not a memory-capacity fact, and
-    # folding it into the capacity warning misleads whoever reads the log.
-    if rejected_structural:
-        details = []
-        for topology, estimates in rejected_structural:
-            invalid = next(
-                (estimate for estimate in estimates if estimate.disposition == "predicted_invalid"),
-                estimates[0],
-            )
-            details.append(f"{topology.to_dict()}={invalid.reason}")
-        logger.warning(
-            "fpm_forward: dropped %d/%d topologies (AIC structural validation predicts the "
-            "configuration is invalid, system=%s; --fpm-strict-admission false forces runtime "
-            "verification): %s",
-            len(rejected_structural),
-            len(topologies),
-            system,
-            "; ".join(details),
-        )
     if rejected_capacity:
         details = []
         for topology, estimates in rejected_capacity:
@@ -297,7 +247,7 @@ def filter_memory_infeasible_topologies(
         )
     if not admitted:
         raise ValueError(
-            "AIC max-new-token memory admission rejected every structurally valid FPM topology; "
+            "AIC max-new-token memory admission rejected every FPM topology; "
             f"model={model_path!r}, system={system!r}, max_new_tokens={max_new_tokens}"
         )
     return tuple(admitted), tuple(decisions)
