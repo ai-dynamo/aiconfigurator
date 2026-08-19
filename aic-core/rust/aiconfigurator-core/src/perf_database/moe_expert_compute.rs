@@ -207,8 +207,12 @@ impl MoeExpertComputeTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, spec: SystemSpec) -> Self {
-        Self::with_sources(data_root, spec, &SourceResolver::fixed(PerfDbSources::default()))
-            .expect("fixed-map resolution is infallible")
+        Self::with_sources(
+            data_root,
+            spec,
+            &SourceResolver::fixed(PerfDbSources::default()),
+        )
+        .expect("fixed-map resolution is infallible")
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources resolved
@@ -220,8 +224,10 @@ impl MoeExpertComputeTable {
         resolver: &SourceResolver,
     ) -> Result<Self, AicError> {
         let moe_ep_sources = resolver.sources_for("moe_expert_compute_perf.parquet", &data_root)?;
-        let legacy_context_sources = resolver.sources_for("wideep_context_moe_perf.parquet", &data_root)?;
-        let legacy_generation_sources = resolver.sources_for("wideep_generation_moe_perf.parquet", &data_root)?;
+        let legacy_context_sources =
+            resolver.sources_for("wideep_context_moe_perf.parquet", &data_root)?;
+        let legacy_generation_sources =
+            resolver.sources_for("wideep_generation_moe_perf.parquet", &data_root)?;
         let legacy_trtllm_wideep_sources =
             resolver.sources_for("wideep_moe_perf.parquet", &data_root)?;
         Ok(Self {

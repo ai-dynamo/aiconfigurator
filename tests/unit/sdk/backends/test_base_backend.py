@@ -161,6 +161,72 @@ class TestMTPActivationMemoryScaling:
         assert spec == pytest.approx(base, rel=1e-9)
 
 
+class TestAFDPartitionActivationScaling:
+    """``get_partition_memory_usage`` must honor the AFD ``num_tokens`` contract.
+
+    ``InferenceSession._estimate_{a,f}_memory_dict`` passes ``num_tokens=0`` for
+    ``phase == "prefill"`` -- the sentinel that makes ``_get_memory_usage`` derive
+    the count from ``(isl - prefix) * batch_size``, a prefill-only footprint --
+    and ``num_tokens=batch_size`` (one token per request) for decode.
+    """
+
+    MODEL = "openai/gpt-oss-120b"
+
+    @classmethod
+    def _model(cls, *, nextn: int):
+        from aiconfigurator.sdk.models import get_model
+
+        model = get_model(cls.MODEL, ModelConfig(tp_size=1, moe_tp_size=1, moe_ep_size=1), "vllm")
+        model.config.nextn = nextn
+        return model
+
+    @staticmethod
+    def _database():
+        return SimpleNamespace(
+            backend="vllm",
+            version="test-version",
+            system="b200_sxm",
+            system_spec={
+                "gpu": {"mem_capacity": 180 * (1 << 30)},
+                "misc": {"nccl_mem": {1: 0, 2: 0, 4: 0, 8: 0}, "other_mem": 0},
+            },
+        )
+
+    def _partition_activations(self, *, nextn: int, num_tokens: int) -> float:
+        from aiconfigurator.sdk.backends.factory import get_backend
+
+        return get_backend("vllm").get_partition_memory_usage(
+            self._model(nextn=nextn),
+            self._database(),
+            partition_ops=[],
+            batch_size=4,
+            beam_width=1,
+            isl=65_536,
+            osl=400,
+            num_tokens=num_tokens,
+            max_seq_len=65_536,
+        )["activations"]
+
+    def test_prefill_partition_does_not_scale(self):
+        """AFD prefill workers size activations from the derived context tokens.
+
+        Pins the measured shape (gpt-oss-120b, ISL 65,536, batch 4, TP1): the
+        context footprint is 44.0 GiB, which the full ``(nextn+1)`` multiplier
+        turned into 176.0 GiB -- a 4x over-count that shrinks the A/F worker KV
+        budget and over-prunes AFD batch sizes.
+        """
+        base = self._partition_activations(nextn=0, num_tokens=0)
+        spec = self._partition_activations(nextn=3, num_tokens=0)
+        assert base == pytest.approx(44.0, abs=0.1)
+        assert spec == pytest.approx(base, rel=1e-9)
+
+    def test_decode_partition_keeps_full_multiplier(self):
+        """AFD decode workers pass ``num_tokens=batch_size``: every token is verified."""
+        base = self._partition_activations(nextn=0, num_tokens=4)
+        spec = self._partition_activations(nextn=3, num_tokens=4)
+        assert spec / base == pytest.approx(4.0, rel=1e-6)
+
+
 @pytest.mark.parametrize("mode", ["static", "static_ctx", "static_gen"])
 @pytest.mark.parametrize("latency_correction_scale", [1.0, 1.25])
 def test_run_static_latency_only_matches_run_static_latency(
@@ -268,6 +334,132 @@ def test_run_static_can_route_to_rust_engine_step_backend(
     assert summary.get_generation_energy_wms_dict() == {"generation_qkv_gemm": 12.0, "generation_attention": 5.0}
     assert summary.get_context_source_dict() == {"context_qkv_gemm": "silicon", "context_attention": "empirical"}
     assert summary.get_generation_source_dict() == {"generation_qkv_gemm": "silicon", "generation_attention": "mixed"}
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_share"),
+    [
+        # "static" and "static_ctx" both size activations from the DERIVED
+        # context token count ((isl - prefix) * batch_size), so no share of that
+        # footprint verifies nextn+1 draft tokens.
+        ("static", 0),
+        ("static_ctx", 0),
+        # Decode-only step (num_tokens = batch_size * beam_width): every token is
+        # verified, so the full (nextn+1) multiplier stays (no decode-share cap).
+        ("static_gen", None),
+    ],
+)
+def test_run_static_declares_mtp_decode_share_per_mode(
+    backend: BaseBackend,
+    model,
+    database,
+    monkeypatch,
+    mode: str,
+    expected_share: int | None,
+) -> None:
+    """Each static mode must declare its decode-token share to ``_get_memory_usage``.
+
+    The latency side is stubbed at the engine bridge (the compiled engine is the
+    only static engine-step executor); memory sizing stays a Python
+    ``_get_memory_usage`` call, which is the surface under test here.
+    """
+    from aiconfigurator.sdk.backends import base_backend as base_backend_module
+
+    def _fake_rust_breakdown(model_arg, database_arg, runtime_config_arg, mode_arg, stride_arg, scale_arg):
+        ctx = {"context_attention": 1.0}
+        gen = {"generation_attention": 1.0}
+        if mode_arg == "static_ctx":
+            gen = {}
+        elif mode_arg == "static_gen":
+            ctx = {}
+        return (ctx, gen, dict(ctx), dict(gen), dict.fromkeys(ctx, "silicon"), dict.fromkeys(gen, "silicon"))
+
+    monkeypatch.setattr(
+        base_backend_module,
+        "estimate_static_latency_breakdown_with_rust",
+        _fake_rust_breakdown,
+    )
+
+    captured: dict = {}
+
+    def _record(*args, **kwargs):
+        captured.update(kwargs)
+        return {"total": 1.0}
+
+    monkeypatch.setattr(backend, "_get_memory_usage", _record)
+
+    backend.run_static(
+        model,
+        database,
+        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, prefix=2, engine_step_backend="rust"),
+        mode=mode,
+        stride=2,
+    )
+
+    assert captured.get("mtp_scaled_tokens") == expected_share
+
+
+def test_run_agg_declares_mtp_decode_share_at_call_site(
+    backend: BaseBackend,
+    model,
+    database,
+    monkeypatch,
+) -> None:
+    """run_agg must pass the decode-request share of ``num_tokens`` as
+    ``mtp_scaled_tokens`` to ``_get_memory_usage``.
+
+    The run_agg counterpart of test_run_static_declares_mtp_decode_share_per_mode
+    above: pins the CALL SITE for a mixed step (b > 1: only the num_gen_requests
+    decode requests verify nextn+1 draft tokens; the context share is processed
+    once). The b == 1 context-only step and its separate decode peak are pinned
+    by test_run_agg_b1_uses_scheduled_activation_peak below.
+    """
+    memory_calls: list[dict] = []
+
+    def _record(*args, **kwargs):
+        memory_calls.append(kwargs)
+        return {"total": 1.0}
+
+    monkeypatch.setattr(backend, "_get_memory_usage", _record)
+    monkeypatch.setattr(
+        backend,
+        "run_mixed",
+        lambda *args, **kwargs: StepEstimate(latency_ms=1.0, energy_wms=1.0),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_genonly_step_latency",
+        lambda *args, **kwargs: (1.0, 1.0, {}, {}),
+    )
+
+    backend.run_agg(
+        model,
+        database,
+        RuntimeConfig(batch_size=4, beam_width=1, isl=8, osl=5, prefix=2, engine_step_backend="rust"),
+        ctx_tokens=8,
+    )
+
+    assert len(memory_calls) == 1
+    assert memory_calls[0].get("mtp_scaled_tokens") == 3
+
+
+def test_trtllm_budget_path_ignores_the_decode_share() -> None:
+    """TRT-LLM's agg override intentionally drops ``mtp_scaled_tokens``.
+
+    Its ``num_tokens`` is ``BuildConfig.max_num_tokens`` (a per-iteration budget),
+    not the agg-derived mixed-step count, so the decode-share correction is not
+    forwarded and the legacy full ``(nextn+1)`` multiplier is retained on that
+    path pending its own analysis (tracked in AIC-1755).
+    """
+    from aiconfigurator.sdk.backends.factory import get_backend
+
+    agg_extra = {"max_num_tokens": 8192, "max_seq_len": 4096, "free_gpu_memory_fraction": 0.9}
+    kwargs = get_backend("trtllm")._memory_usage_kwargs_for_agg(
+        num_tokens=65_539,
+        agg_extra=agg_extra,
+        mtp_scaled_tokens=3,
+    )
+    assert kwargs == {"num_tokens": 8192, "max_seq_len": 4096}
 
 
 def test_run_agg_with_osl_one_does_not_divide_by_zero(

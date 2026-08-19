@@ -42,6 +42,9 @@ class ModelConfig:
     tp_size: int = 1
     pp_size: int = 1
     gemm_quant_mode: common.GEMMQuantMode | None = None
+    # Internal provenance carried through dataclasses.replace() during sweeps.
+    # None preserves the legacy direct-caller rule (non-None mode is explicit).
+    _gemm_quant_mode_is_explicit: bool | None = field(default=None, repr=False, compare=False, kw_only=True)
     moe_quant_mode: common.MoEQuantMode | None = None
     kvcache_quant_mode: common.KVCacheQuantMode | None = None
     fmha_quant_mode: common.FMHAQuantMode | None = None

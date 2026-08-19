@@ -8,6 +8,9 @@ model_paths:
   - Qwen/Qwen3.5-35B-A3B
   - Qwen/Qwen3.5-122B-A10B
   - Qwen/Qwen3.5-397B-A17B
+  - nvidia/Qwen3.5-122B-A10B-NVFP4
+  - nvidia/Qwen3.5-397B-A17B-NVFP4
+  - nvidia/Qwen3.6-35B-A3B-NVFP4
 include_base: true
 base_ops:
   - attention_context
@@ -20,6 +23,8 @@ model_case_values:
   attention:
     - id: qwen35_35b_attention
       model_path: Qwen/Qwen3.5-35B-A3B
+      model_aliases:
+        - nvidia/Qwen3.6-35B-A3B-NVFP4
       num_attention_heads: 16
       num_key_value_heads: 2
       head_dim: 256
@@ -28,6 +33,8 @@ model_case_values:
       tensor_parallel_sizes: [1, 2, 4, 8, 16]
     - id: qwen35_122b_attention
       model_path: Qwen/Qwen3.5-122B-A10B
+      model_aliases:
+        - nvidia/Qwen3.5-122B-A10B-NVFP4
       num_attention_heads: 32
       num_key_value_heads: 2
       head_dim: 256
@@ -36,6 +43,8 @@ model_case_values:
       tensor_parallel_sizes: [1, 2, 4, 8, 16, 32]
     - id: qwen35_397b_attention
       model_path: Qwen/Qwen3.5-397B-A17B
+      model_aliases:
+        - nvidia/Qwen3.5-397B-A17B-NVFP4
       num_attention_heads: 32
       num_key_value_heads: 2
       head_dim: 256
@@ -70,20 +79,67 @@ model_case_values:
       sglang_moe_backends:
         bfloat16: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
         fp8_block: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
+    - model_path: nvidia/Qwen3.6-35B-A3B-NVFP4
+      hidden_size: 2048
+      inter_size: 512
+      topk: 8
+      num_experts: 256
+      sglang_moe_routing_method_type: RenormalizeNaive
+      framework_quantization:
+        sglang:
+          allowed_modes: [w4a16_nvfp4]
+        trtllm:
+          allowed_modes: [w4a16_nvfp4]
+        vllm:
+          allowed_modes: [w4a16_nvfp4]
+    - model_path: nvidia/Qwen3.5-122B-A10B-NVFP4
+      hidden_size: 3072
+      inter_size: 1024
+      topk: 8
+      num_experts: 256
+      sglang_moe_routing_method_type: RenormalizeNaive
+      framework_quantization:
+        sglang:
+          allowed_modes: [nvfp4]
+        trtllm:
+          allowed_modes: [nvfp4]
+        vllm:
+          allowed_modes: [nvfp4]
+    - model_path: nvidia/Qwen3.5-397B-A17B-NVFP4
+      hidden_size: 4096
+      inter_size: 1024
+      topk: 10
+      num_experts: 512
+      sglang_moe_routing_method_type: RenormalizeNaive
+      framework_quantization:
+        sglang:
+          allowed_modes: [nvfp4]
+        trtllm:
+          allowed_modes: [nvfp4]
+        vllm:
+          allowed_modes: [nvfp4]
   gemm:
     # Exact widths below the base feature grid (min 32): scalar shared-expert
     # gate (hidden -> 1) and GDN in_proj_ba (2 * num_v_heads / tp).
     - model_path: Qwen/Qwen3.5-35B-A3B
+      model_aliases:
+        - nvidia/Qwen3.6-35B-A3B-NVFP4
       output_feature_sizes: [1, 4, 8, 16]
       input_feature_sizes: [2048]
     - model_path: Qwen/Qwen3.5-122B-A10B
+      model_aliases:
+        - nvidia/Qwen3.5-122B-A10B-NVFP4
       output_feature_sizes: [1, 8, 16]
       input_feature_sizes: [3072]
     - model_path: Qwen/Qwen3.5-397B-A17B
+      model_aliases:
+        - nvidia/Qwen3.5-397B-A17B-NVFP4
       output_feature_sizes: [1, 8, 16]
       input_feature_sizes: [4096]
   gdn:
     - model_path: Qwen/Qwen3.5-35B-A3B
+      model_aliases:
+        - nvidia/Qwen3.6-35B-A3B-NVFP4
       d_model: 2048
       d_conv: 4
       num_k_heads: 16
@@ -93,6 +149,8 @@ model_case_values:
       tensor_parallel_sizes: [1, 2, 4, 8, 16]
     # 122B/397B attention declares TP32, but num_k_heads=16 cannot shard 32 ways — no TP32 GDN geometry.
     - model_path: Qwen/Qwen3.5-122B-A10B
+      model_aliases:
+        - nvidia/Qwen3.5-122B-A10B-NVFP4
       d_model: 3072
       d_conv: 4
       num_k_heads: 16
@@ -101,6 +159,8 @@ model_case_values:
       head_v_dim: 128
       tensor_parallel_sizes: [1, 2, 4, 8, 16]
     - model_path: Qwen/Qwen3.5-397B-A17B
+      model_aliases:
+        - nvidia/Qwen3.5-397B-A17B-NVFP4
       d_model: 4096
       d_conv: 4
       num_k_heads: 16

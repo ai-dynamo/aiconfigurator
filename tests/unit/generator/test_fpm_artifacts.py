@@ -1132,6 +1132,31 @@ def test_fpm_multinode_dump_config_override_requires_rank_placeholder():
         _render(params)
 
 
+@pytest.mark.parametrize(
+    "output_path",
+    [
+        pytest.param("/results/custom-config.json", id="glob-mismatch"),
+        pytest.param("/tmp/resolved-config-node0.json", id="outside-results"),
+    ],
+)
+def test_fpm_single_node_dump_config_override_must_be_discoverable(output_path):
+    params = _params()
+    params["params"]["agg"]["extra_cli_args"].extend(["--dump-config-to", output_path])
+
+    with pytest.raises(ValueError, match="resolved-config"):
+        _render(params)
+
+
+def test_fpm_multinode_dump_config_override_must_match_discovery_glob():
+    params = _multinode_params()
+    params["params"]["agg"]["extra_cli_args"].extend(
+        ["--dump-config-to", "/results/custom-config-node{node_rank}.json"]
+    )
+
+    with pytest.raises(ValueError, match="basename must match"):
+        _render(params)
+
+
 def test_fpm_multinode_rejects_name_too_long_for_lws_revision_labels():
     params = _params()
     params["K8sConfig"]["name_prefix"] = "f" * 51
