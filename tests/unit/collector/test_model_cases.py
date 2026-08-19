@@ -765,13 +765,16 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
         and case.inter_size == 5120
         for case in moe_cases
     )
-    assert any(
-        case.model_name == "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
-        and case.hidden_size == 2688
-        and case.inter_size == 1856
-        and case.topk == 6
-        and case.num_experts == 128
-        for case in moe_cases
+    # Every Lightning case, not just one: the documented +114 contribution,
+    # each carrying the exact checkpoint geometry (an `any(...)` pin would
+    # pass with 113 wrong-dimension siblings).
+    lightning_cases = [
+        case for case in moe_cases if case.model_name == "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
+    ]
+    assert len(lightning_cases) == 114
+    assert all(
+        case.hidden_size == 2688 and case.inter_size == 1856 and case.topk == 6 and case.num_experts == 128
+        for case in lightning_cases
     )
     # Step-3.7-Flash: assert both physical artifact identities, the shape, and
     # the routing contract. MoE loads the model config by model_name, so the
