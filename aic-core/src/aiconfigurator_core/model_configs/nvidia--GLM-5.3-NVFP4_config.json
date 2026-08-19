@@ -98,6 +98,10 @@
         "full",
         "shared",
         "shared",
+        "shared",
+        "full",
+        "shared",
+        "shared",
         "shared"
     ],
     "initializer_range": 0.02,
