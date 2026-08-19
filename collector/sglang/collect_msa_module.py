@@ -56,6 +56,7 @@ Usage (inside the pinned lmsysorg/sglang:v0.5.16 image):
 """
 
 import argparse
+import functools
 import gc
 import json
 import os
@@ -227,6 +228,7 @@ def _filter_shapes_from_env(shapes, *, is_prefill: bool):
     return filtered
 
 
+@functools.cache
 def _model_max_position_embeddings(model_id: str) -> int:
     """Max context (RoPE table size) from the bundled config — the same value
     SGLang uses for the M3 rotary cache (get_rope max_position,
@@ -309,22 +311,93 @@ def _generation_shapes(max_pos: int | None):
     return shapes
 
 
+_MEMORY_BUDGET_SAFETY_FACTOR = 0.9
+# The M3 KV pool page on the SM90/SM100 serving paths (fa3/fa4 + page 128,
+# arg_groups/overrides.py:502-529@v0.5.16); page-128 rounding upper-bounds
+# any smaller resolved page. Used for plan-time footprint estimates only —
+# the worker re-validates against the real resolved page and pool.
+_PLAN_PAGE_SIZE = 128
+_M3_HEAD_DIM = 128
+_M3_INDEX_HEADS = 4
+_M3_INDEX_DIM = 128
+_M3_NATIVE_GQA_RATIO = 16  # 64 q / 4 kv heads (bundled config)
+
+
+def _estimated_kv_bytes_per_token(num_heads: int, kv_cache_dtype: str) -> int:
+    """Upper-bound bytes/token of the M3 pools at this per-GPU head count:
+    main paged K+V (kv-head sharded; fp8 stores 1 B/elem, else bf16) plus the
+    index-K side cache (always model dtype, kv_cache_configurator.py:1246
+    index_dtype=model_dtype @v0.5.16)."""
+    kv_heads = max(1, num_heads // _M3_NATIVE_GQA_RATIO)
+    main_elem = 1 if kv_cache_dtype == "fp8" else 2
+    main = 2 * kv_heads * _M3_HEAD_DIM * main_elem
+    index_heads = min(_M3_INDEX_HEADS, num_heads)
+    index = index_heads * _M3_INDEX_DIM * 2
+    return main + index
+
+
+def _plan_memory_filter(shapes, *, num_heads: int, kv_cache_dtype: str, is_prefill: bool):
+    """Generation-time memory-feasibility filter (the ONE sanctioned
+    in-collector filter, layer_permissions.md): drop shapes whose estimated
+    KV-pool footprint exceeds the live device budget, with a counted log.
+    Getters run on the GPU node (collect.py); when no CUDA device is visible
+    (unit tests / head-node planning) the filter is a no-op and the worker's
+    execute-or-raise capacity check is the backstop."""
+    if not torch.cuda.is_available():
+        return shapes
+    total = torch.cuda.get_device_properties(0).total_memory
+    budget = int(total * _MEMORY_BUDGET_SAFETY_FACTOR)
+    per_token = _estimated_kv_bytes_per_token(num_heads, kv_cache_dtype)
+    kept = [
+        (b, s, p)
+        for (b, s, p) in shapes
+        if required_kv_alloc_tokens(b, s, p, _PLAN_PAGE_SIZE, is_prefill=is_prefill) * per_token <= budget
+    ]
+    dropped = len(shapes) - len(kept)
+    if dropped:
+        print(
+            f"[MSA] plan: dropped {dropped}/{len(shapes)} shapes "
+            f"(memory budget, device={total / 2**30:.0f}GB, heads={num_heads}, kv={kv_cache_dtype})"
+        )
+    return kept
+
+
+def _inner_manifest(mode: str, *, batch_size: int, num_heads: int, kv_dtype: str, model_path: str):
+    """The EXACT (b, s, prefix) list one case executes, resolved at plan time
+    (review 4969690316 Standards-2): sweep budgets + env pins + the
+    generation-time memory filter. Attached to the case tuple so task IDs,
+    resume checkpoints, and failure records bind the retained shapes — the
+    worker executes exactly this manifest or raises per shape."""
+    max_pos = _model_max_position_embeddings(model_path)
+    if mode == "context":
+        shapes = [(batch_size, s, p) for (s, p) in _context_shapes(batch_size, max_pos)]
+        shapes = _filter_shapes_from_env(shapes, is_prefill=True)
+    else:
+        shapes = [(b, kv, 0) for (b, kv) in _generation_shapes(max_pos)]
+        shapes = _filter_shapes_from_env(shapes, is_prefill=False)
+    shapes = _plan_memory_filter(shapes, num_heads=num_heads, kv_cache_dtype=kv_dtype, is_prefill=(mode == "context"))
+    return tuple(tuple(shape) for shape in shapes)
+
+
 def _build_module_test_cases(mode: str):
     """One case per (model, precision, target TP shard[, context batch]).
 
     Case tuple layout keeps the trtllm collector's positional prefix
     [seq_len, batch_size, num_heads, kv_cache_dtype, compute_dtype,
-     gemm_type, model_path] and appends target_tp_size. Like the sibling
-    collect_mla_module.py, each case is a subprocess that sweeps its whole
-    (batch, seq[, prefix]) grid internally — an SGLang ModelRunner load
-    costs tens of seconds, so one subprocess per shape point is infeasible.
-    seq_len is a 0 placeholder; context uses batch_size to shard the
-    prefix x seq sweep across GPU workers, generation uses one task per
-    (precision, heads) with batch_size 0.
+     gemm_type, model_path], then target_tp_size, then the case's exact
+    inner-shape manifest (see _inner_manifest). Like the sibling
+    collect_mla_module.py, each case is a subprocess that sweeps its
+    manifest internally — an SGLang ModelRunner load costs tens of seconds,
+    so one subprocess per shape point is infeasible. seq_len is a 0
+    placeholder; context uses batch_size to shard the prefix x seq sweep
+    across GPU workers, generation uses one task per (precision, heads)
+    with batch_size 0. A case whose manifest resolves empty is not queued;
+    the drop is logged (population contract: no silent zero-case groups).
     """
     model_specs = get_mla_module_model_specs(attention_type="msa", backend="sglang")
     sweep = get_mla_module_sweep_spec("sglang")
     cases = []
+    empty_groups = 0
     for model_spec in model_specs:
         for compute_dtype, kv_dtype, gemm_type in _get_precision_combos(mode):
             for target_tp in sweep.module_tp_sizes:
@@ -335,6 +408,16 @@ def _build_module_test_cases(mode: str):
                     continue
                 batch_sizes = sweep.context_batch_sizes if mode == "context" else [0]
                 for batch_size in batch_sizes:
+                    manifest = _inner_manifest(
+                        mode,
+                        batch_size=batch_size,
+                        num_heads=num_heads,
+                        kv_dtype=kv_dtype,
+                        model_path=model_spec.model_path,
+                    )
+                    if not manifest:
+                        empty_groups += 1
+                        continue
                     cases.append(
                         [
                             0,
@@ -345,8 +428,11 @@ def _build_module_test_cases(mode: str):
                             gemm_type,
                             model_spec.model_path,
                             target_tp,
+                            manifest,
                         ]
                     )
+    if empty_groups:
+        print(f"[MSA] plan: {empty_groups} case group(s) resolved to an empty manifest and were not queued")
     return cases
 
 
@@ -1074,6 +1160,7 @@ def run_msa_module(
     batch_size_filter: int | None = None,
     target_tp_size: int = 1,
     quick_shape: tuple | None = None,
+    inner_manifest=(),
 ):
     """Run the MSA module benchmark sweep — called inside a subprocess.
 
@@ -1097,25 +1184,24 @@ def run_msa_module(
     if kv_cache_dtype not in SGLANG_KV_DTYPE:
         raise ValueError(f"unsupported kv_cache_dtype {kv_cache_dtype!r}")
 
-    max_pos = _model_max_position_embeddings(model_path)
     phase = "context" if is_prefill else "generation"
 
     if quick_shape is not None:
         b, s, prefix = quick_shape
         shapes = [(b, s, prefix)] if is_prefill else [(b, s, 0)]
-    elif is_prefill:
-        if not batch_size_filter or batch_size_filter <= 0:
-            raise ValueError("context collection shards by batch_size; got none")
-        shapes = [(batch_size_filter, s, p) for (s, p) in _context_shapes(batch_size_filter, max_pos)]
-        shapes = _filter_shapes_from_env(shapes, is_prefill=True)
     else:
-        shapes = [(b, kv, 0) for (b, kv) in _generation_shapes(max_pos)]
-        shapes = _filter_shapes_from_env(shapes, is_prefill=False)
+        # The worker NEVER re-derives the grid: the plan-time manifest
+        # (_inner_manifest, attached to the case tuple) is the contract —
+        # task IDs, resume checkpoints, and failure records bind exactly
+        # these shapes, and each is executed or raises (review 4969690316
+        # Standards-2).
+        shapes = [tuple(shape) for shape in inner_manifest]
 
     if not shapes:
         raise RuntimeError(
-            f"MSA module {phase} has no runnable shapes; model={model_path}, "
-            f"heads={num_heads}, batch_filter={batch_size_filter}"
+            f"MSA module {phase} has no shapes: empty-manifest cases are never "
+            f"queued, so an empty manifest here is a plumbing bug; model={model_path}, "
+            f"heads={num_heads}, batch_filter={batch_size_filter} (ad-hoc runs: --quick)"
         )
 
     # Pre-load allocation-feasibility bound. 128 is the M3 serving page on
@@ -1160,15 +1246,6 @@ def run_msa_module(
         # chunk size (serving forms one extend batch per chunk).
         page_size = kv_pool_page_size(model_runner)
         capacity = kv_pool_capacity_tokens(model_runner)
-        if capacity is not None:
-            before = len(shapes)
-            shapes = [
-                (b, s, p)
-                for (b, s, p) in shapes
-                if required_kv_alloc_tokens(b, s, p, page_size, is_prefill=is_prefill) <= capacity
-            ]
-            if before - len(shapes):
-                print(f"[MSA] dropped {before - len(shapes)} shapes beyond KV pool capacity={capacity} tokens")
         # The requested chunked_prefill_size is sized to the max queued shape
         # at load; SGLang may still clamp it per memory tier. Shapes above the
         # resolved chunk would multi-chunk in serving, so a single-chunk
@@ -1187,6 +1264,14 @@ def run_msa_module(
             label = f"b={b}, s={s}, prefix={p}" if is_prefill else f"b={b}, kv={s}"
             print(f"[{i + 1}/{len(shapes)}] {phase} {label}, heads={num_heads}")
             try:
+                if capacity is not None and (
+                    required_kv_alloc_tokens(b, s, p, page_size, is_prefill=is_prefill) > capacity
+                ):
+                    raise RuntimeError(
+                        f"planned shape needs {required_kv_alloc_tokens(b, s, p, page_size, is_prefill=is_prefill)} "
+                        f"KV tokens > real pool capacity {capacity} (page {page_size}): the plan-time "
+                        f"memory estimate was optimistic for this device"
+                    )
                 if is_prefill and runtime_chunk is not None and b * s > runtime_chunk:
                     raise RuntimeError(
                         f"bs*seq={b * s} exceeds resolved chunked_prefill_size={runtime_chunk}: "
@@ -1286,6 +1371,7 @@ def _run_msa_subprocess(
     output_path: str | None,
     batch_size_filter: int | None,
     target_tp_size: int,
+    inner_manifest=(),
 ):
     """Run one MSA sweep in a subprocess with CUDA_VISIBLE_DEVICES isolation
     (same pattern as collect_mla_module._run_mla_subprocess: SGLang's
@@ -1301,7 +1387,7 @@ def _run_msa_subprocess(
         f"from collect_msa_module import run_msa_module\n"
         f'run_msa_module({num_heads}, "{model_path}", "{kv_cache_dtype}", '
         f'"{compute_dtype}", "{gemm_type}", {is_prefill}, 0, {output_repr}, '
-        f"{batch_repr}, {target_tp_size})\n"
+        f"{batch_repr}, {target_tp_size}, None, {inner_manifest!r})\n"
     )
 
     proc = subprocess.Popen(
@@ -1345,6 +1431,7 @@ def run_msa_module_worker(
     gemm_type: str,
     model_path: str,
     target_tp_size: int = 1,
+    inner_manifest=(),
     *,
     perf_filename: str,
     device: str = "cuda:0",
@@ -1352,8 +1439,9 @@ def run_msa_module_worker(
     """Worker-compatible positional wrapper used by collector/collect.py.
 
     Positional prefix matches the trtllm MSA worker; seq_len is a 0
-    placeholder (the subprocess sweeps its grid — see
-    _build_module_test_cases). Context cases shard by batch_size.
+    placeholder. ``inner_manifest`` is the case's exact (b, s, prefix) list
+    resolved at plan time (_inner_manifest) — the subprocess executes
+    exactly it or raises per shape; it never re-derives the grid.
     """
     device_str = str(device) if not isinstance(device, str) else device
     gpu_id = int(device_str.split(":")[-1]) if ":" in device_str else 0
@@ -1382,6 +1470,7 @@ def run_msa_module_worker(
         output_path=output_path,
         batch_size_filter=batch_size_filter,
         target_tp_size=target_tp_size,
+        inner_manifest=tuple(tuple(shape) for shape in inner_manifest),
     )
 
 
@@ -1436,6 +1525,15 @@ def main():
     else:
         batch_filter = None
 
+    # Full sweeps resolve the same plan-time manifest the registry getter
+    # attaches to cases, so a CLI reproduction runs the exact planned shapes.
+    manifest = _inner_manifest(
+        args.mode,
+        batch_size=batch_filter or 0,
+        num_heads=args.num_heads,
+        kv_dtype=args.kv_cache_dtype,
+        model_path=args.model,
+    )
     run_msa_module(
         num_heads=args.num_heads,
         model_path=args.model,
@@ -1447,6 +1545,7 @@ def main():
         output_path=args.output_path,
         batch_size_filter=batch_filter,
         target_tp_size=target_tp,
+        inner_manifest=manifest,
     )
 
 
