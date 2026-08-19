@@ -130,8 +130,12 @@ class RuntimeSettingsV1(_StrictModel):
     enable_encoder_dp: bool = True
     systems_paths: str | None = None
     free_gpu_memory_fraction: float | None = Field(default=None, gt=0, le=1)
+    prefill_free_gpu_memory_fraction: float | None = Field(default=None, gt=0, le=1)
+    decode_free_gpu_memory_fraction: float | None = Field(default=None, gt=0, le=1)
     max_seq_len: int | None = Field(default=None, gt=0)
-    engine_step_backend: Literal["python", "rust"] | None = None
+    prefill_max_seq_len: int | None = Field(default=None, gt=0)
+    decode_max_seq_len: int | None = Field(default=None, gt=0)
+    engine_step_backend: Literal["rust"] | None = None
 
 
 class SourceProvenanceV1(_StrictModel):
@@ -154,6 +158,40 @@ class EstimateRequestV1(_StrictModel):
     topology: TopologyV1
     runtime: RuntimeSettingsV1 = Field(default_factory=RuntimeSettingsV1)
     provenance: SourceProvenanceV1
+
+    @model_validator(mode="after")
+    def _validate_runtime_sequence_limits(self) -> EstimateRequestV1:
+        decode_tokens = self.workload.isl + self.workload.osl
+        if self.topology.kind == "agg":
+            if self.runtime.max_seq_len is not None and self.runtime.max_seq_len < decode_tokens:
+                raise ValueError(
+                    f"runtime.max_seq_len ({self.runtime.max_seq_len}) must be at least "
+                    f"workload.isl + workload.osl ({decode_tokens}) for aggregated topology"
+                )
+            return self
+
+        prefill_limit = self.runtime.prefill_max_seq_len
+        prefill_field = "prefill_max_seq_len"
+        if prefill_limit is None:
+            prefill_limit = self.runtime.max_seq_len
+            prefill_field = "max_seq_len"
+        if prefill_limit is not None and prefill_limit < self.workload.isl:
+            raise ValueError(
+                f"runtime.{prefill_field} ({prefill_limit}) must be at least "
+                f"workload.isl ({self.workload.isl}) for prefill"
+            )
+
+        decode_limit = self.runtime.decode_max_seq_len
+        decode_field = "decode_max_seq_len"
+        if decode_limit is None:
+            decode_limit = self.runtime.max_seq_len
+            decode_field = "max_seq_len"
+        if decode_limit is not None and decode_limit < decode_tokens:
+            raise ValueError(
+                f"runtime.{decode_field} ({decode_limit}) must be at least "
+                f"workload.isl + workload.osl ({decode_tokens}) for decode"
+            )
+        return self
 
     @classmethod
     def schema_path(cls) -> Path:
@@ -189,11 +227,17 @@ class AdapterOverrides(_StrictModel):
     fmha_quant_mode: str | None = None
     moe_quant_mode: str | None = None
     comm_quant_mode: str | None = None
+    batch_size: int | None = Field(default=None, gt=0)
     prefill_batch_size: int | None = Field(default=None, gt=0)
+    decode_batch_size: int | None = Field(default=None, gt=0)
     systems_paths: str | None = None
     free_gpu_memory_fraction: float | None = Field(default=None, gt=0, le=1)
+    prefill_free_gpu_memory_fraction: float | None = Field(default=None, gt=0, le=1)
+    decode_free_gpu_memory_fraction: float | None = Field(default=None, gt=0, le=1)
     max_seq_len: int | None = Field(default=None, gt=0)
-    engine_step_backend: Literal["python", "rust"] | None = None
+    prefill_max_seq_len: int | None = Field(default=None, gt=0)
+    decode_max_seq_len: int | None = Field(default=None, gt=0)
+    engine_step_backend: Literal["rust"] | None = None
 
 
 class AdaptationDiagnostic(_StrictModel):

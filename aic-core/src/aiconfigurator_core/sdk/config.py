@@ -16,6 +16,9 @@ class ModelConfig:
     tp_size: int = 1
     pp_size: int = 1
     gemm_quant_mode: common.GEMMQuantMode | None = None
+    # Internal provenance carried through dataclasses.replace() during sweeps.
+    # None preserves the legacy direct-caller rule (non-None mode is explicit).
+    _gemm_quant_mode_is_explicit: bool | None = field(default=None, repr=False, compare=False, kw_only=True)
     moe_quant_mode: common.MoEQuantMode | None = None
     kvcache_quant_mode: common.KVCacheQuantMode | None = None
     fmha_quant_mode: common.FMHAQuantMode | None = None
@@ -165,8 +168,9 @@ class RuntimeConfig:
     seq_imbalance_correction_scale: float = 1.0
     # Separate correction scale for generation/decoding stage (do NOT reuse ctx scale).
     gen_seq_imbalance_correction_scale: float = 1.0
-    # Optional experimental static-latency backend. "python" preserves existing behavior;
-    # "rust" routes static step estimates through the Rust FPM estimator.
+    # Engine-step executor selector. "rust" (the compiled engine) is the only
+    # accepted value; None defaults to it. The deprecated "python" no-op was
+    # removed after its one-release window (deprecation-cleanup PR).
     engine_step_backend: str | None = None
     image_height: int = 0
     image_width: int = 0

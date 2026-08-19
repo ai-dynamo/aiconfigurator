@@ -14,8 +14,7 @@ pytestmark = pytest.mark.unit
 # Retired with #1357 PR-5: the NCCL / custom-allreduce / GEMM query edge-case
 # math this file pinned on the synthetic fixture (single-GPU zero, silicon
 # interpolation, tp scaling, extrapolation) moved to the compiled engine and
-# is anchored by tests/cross_package/test_query_shim_baseline.py and the
-# frozen parity goldens.
+# is anchored by the frozen parity goldens.
 
 
 class TestInitializationEdgeCases:
@@ -71,39 +70,13 @@ class TestInitializationEdgeCases:
         dummy_context_data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][0][128][0][8][16][1] = 0.15
         dummy_context_data[common.FMHAQuantMode.bfloat16][common.KVCacheQuantMode.bfloat16][0][128][0][8][32][1] = 0.25
 
+        # Op load_data binds engine table views (PR-6): stub the single
+        # fetch choke point by attribute name. Everything but the context
+        # attention table fetches as None ("no source files").
         monkeypatch.setattr(
-            "aiconfigurator.sdk.operations.attention.load_context_attention_data",
-            lambda path: dummy_context_data,
+            "aiconfigurator_core.sdk.engine_table_view.fetch_table_view",
+            lambda database, attribute: dummy_context_data if attribute == "_context_attention_data" else None,
         )
-
-        # Patch other loaders to return empty defaultdicts. Each loader
-        # lives in the op module that owns the data, so the patch target
-        # is ``aiconfigurator.sdk.operations.<module>.<loader>``.
-        for loader, module, depth in [
-            ("load_gemm_data", "gemm", 4),  # quant_mode -> m -> n -> k -> value
-            ("load_generation_attention_data", "attention", 5),  # kv_cache -> num_kv -> n -> b -> s -> value
-            ("load_custom_allreduce_data", "communication", 4),  # quant -> tp -> strategy -> size -> value
-            ("load_nccl_data", "communication", 4),  # quant -> op -> num_gpus -> size -> value
-            # quant -> workload -> topk -> experts -> hidden -> inter -> tp -> ep -> tokens -> value
-            ("load_moe_data", "moe", 9),
-            ("load_context_mla_data", "mla", 5),  # quant -> kv_cache -> tp -> s -> b -> value
-            ("load_generation_mla_data", "mla", 4),  # kv_cache -> tp -> b -> s -> value
-            ("load_mla_bmm_data", "mla", 4),  # quant -> pre/post -> heads -> tokens -> value
-        ]:
-            # Create nested defaultdict with appropriate depth
-            def create_nested_defaultdict(depth):
-                if depth == 1:
-                    return defaultdict(float)
-                return defaultdict(lambda: create_nested_defaultdict(depth - 1))
-
-            if loader == "load_moe_data":
-                loader_func = lambda path, d=depth: (
-                    create_nested_defaultdict(d),
-                    create_nested_defaultdict(d),
-                )
-            else:
-                loader_func = lambda path, d=depth: create_nested_defaultdict(d)
-            monkeypatch.setattr(f"aiconfigurator.sdk.operations.{module}.{loader}", loader_func)
 
         # Initialize database, then trigger the lazy load explicitly so
         # extrapolation runs while loader patches are still active.

@@ -15,7 +15,7 @@ pytestmark = pytest.mark.unit
 # in HYBRID, programming errors propagate, SILICON re-raises with the HYBRID
 # hint) retired to the compiled engine with #1357 PR-5; its behaviour is
 # anchored by the frozen parity goldens and
-# tests/cross_package/test_query_shim_baseline.py.
+# the frozen parity goldens.
 
 
 def test_perf_data_cause_detection_accepts_direct_error() -> None:

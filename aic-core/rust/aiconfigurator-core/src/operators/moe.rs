@@ -52,11 +52,12 @@ use std::sync::Arc;
 /// `(memory, compute)` profile. Mirrors `_MOE_QUANT_UTIL_LEVEL`
 /// (`operations/moe.py:87-97`); consumed ONLY by the cross-profile tier,
 /// and only as the ratio `e(query)/e(ref)`.
-const MOE_QUANT_UTIL_LEVEL: &[(f64, f64, f64)] = &[
+pub(crate) const MOE_QUANT_UTIL_LEVEL: &[(f64, f64, f64)] = &[
     (2.0, 1.0, 0.53),    // w16a16 / bfloat16              [data]
     (1.0, 1.0, 0.45),    // w8a16                          [inferred]
     (0.5625, 1.0, 0.07), // w4a16+scales / nvfp4_wo (Marlin FP4) [copies measured (0.5,1)]
     (0.5, 1.0, 0.07),    // w4a16 (int4_wo, mxfp4)         [data]
+    (0.5625, 1.0, 0.07), // w4a16 / scale-aware nvfp4      [inferred]
     (1.0, 2.0, 0.40),    // w8a8 / fp8(_block)             [data]
     (0.5, 2.0, 0.15),    // w4a8 (w4afp8, mxfp4_mxfp8)     [data]
     (1.0, 4.0, 0.30),    // w8a4                           [inferred]
@@ -91,6 +92,7 @@ const ALL_MOE_QUANTS: &[MoeQuantMode] = &[
     MoeQuantMode::W4a8Mxfp4Mxfp8,
     MoeQuantMode::W4a8Mxfp4Mxfp8Trtllm,
     MoeQuantMode::W4a16Mxfp4Cutlass,
+    MoeQuantMode::W4a16Nvfp4,
 ];
 
 fn moe_quant_from_name(name: &str) -> Option<MoeQuantMode> {
@@ -225,6 +227,20 @@ pub struct MoeOp {
 }
 
 impl MoeOp {
+    /// Python `MoE` weights × scale_factor: 3 GEMMs gated (gate/up/down),
+    /// 2 non-gated, with Python's float floor-division chain preserved
+    /// (`// moe_ep_size // moe_tp_size` — two SEQUENTIAL floors).
+    pub fn weight_bytes(&self) -> f64 {
+        let num_gemms = if self.is_gated { 3.0 } else { 2.0 };
+        let raw = f64::from(self.hidden_size)
+            * f64::from(self.inter_size)
+            * f64::from(self.num_experts)
+            * self.quant_mode.mapping().memory
+            * num_gemms;
+        let per_ep = (raw / f64::from(self.moe_ep_size)).floor();
+        (per_ep / f64::from(self.moe_tp_size)).floor() * self.scale_factor
+    }
+
     pub fn new(
         name: impl Into<String>,
         hidden_size: u32,
@@ -1093,11 +1109,15 @@ mod tests {
     /// ```
     #[test]
     fn moe_nvfp4_wo_ladder_matches_python_oracle() {
-        let root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("src/aiconfigurator_core/systems");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
         let db = PerfDatabase::load(&root, "h200_sxm", "vllm", "0.19.0")
             .expect("h200/vllm/0.19.0 db loads")
-            .with_mode(crate::common::enums::DatabaseMode::Hybrid, TransferPolicy::ALL);
+            .with_mode(
+                crate::common::enums::DatabaseMode::Hybrid,
+                TransferPolicy::ALL,
+            );
 
         let op = MoeOp {
             name: "moe-nvfp4wo-ladder".into(),
@@ -1116,8 +1136,15 @@ mod tests {
             enable_eplb: false,
             is_context: false,
         };
-        let r = op.query(&db, 96).expect("nvfp4_wo resolves via XPROFILE ladder");
-        assert_oracle(&r, 8.439357376098632, Source::Empirical, "nvfp4_wo_ladder_t96");
+        let r = op
+            .query(&db, 96)
+            .expect("nvfp4_wo resolves via XPROFILE ladder");
+        assert_oracle(
+            &r,
+            8.439357376098632,
+            Source::Empirical,
+            "nvfp4_wo_ladder_t96",
+        );
     }
 
     #[test]

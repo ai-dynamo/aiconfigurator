@@ -17,15 +17,11 @@ class _Model:
         self.generation_ops = generation_ops or []
 
 
-class _NamedOp(operations.Operation):
-    def __init__(self, name: str) -> None:
-        super().__init__(name, 1.0)
-
-    def query(self, database, **kwargs):
-        raise NotImplementedError
-
-    def get_weights(self, **kwargs):
-        return 0.0
+def _named_op(name: str):
+    """Minimal engine-backed leaf: the partitioner classifies ops by NAME
+    only, and Rust composites require engine-backed children — a trivial
+    ElementWise carries the name without any other behavior."""
+    return operations.ElementWise(name, 1.0, 1, 1)
 
 
 def _names(op_list):
@@ -35,17 +31,17 @@ def _names(op_list):
 def test_build_afd_ops_partition_dense_generation_path():
     model = _Model(
         generation_ops=[
-            _NamedOp("generation_embedding"),
-            _NamedOp("generation_add_norm_1"),
-            _NamedOp("generation_qkv_gemm"),
-            _NamedOp("generation_attention"),
-            _NamedOp("generation_proj_gemm"),
+            _named_op("generation_embedding"),
+            _named_op("generation_add_norm_1"),
+            _named_op("generation_qkv_gemm"),
+            _named_op("generation_attention"),
+            _named_op("generation_proj_gemm"),
             operations.CustomAllReduce("generation_ar_1", 1, 4096, 4),
-            _NamedOp("generation_add_norm_2"),
-            _NamedOp("generation_ffn1_gemm"),
-            _NamedOp("generation_act"),
-            _NamedOp("generation_ffn2_gemm"),
-            _NamedOp("generation_logits_gemm"),
+            _named_op("generation_add_norm_2"),
+            _named_op("generation_ffn1_gemm"),
+            _named_op("generation_act"),
+            _named_op("generation_ffn2_gemm"),
+            _named_op("generation_logits_gemm"),
             operations.P2P("generation_p2p", 1, 4096, 2),
         ]
     )
@@ -73,22 +69,22 @@ def test_build_afd_ops_partition_dense_generation_path():
 
 def test_build_afd_ops_partition_moe_overlap_stays_atomic_on_f_worker():
     routed_ops = [
-        _NamedOp("generation_router_gemm"),
-        _NamedOp("generation_moe_pre_dispatch"),
-        _NamedOp("generation_moe"),
-        _NamedOp("generation_moe_post_dispatch"),
+        _named_op("generation_router_gemm"),
+        _named_op("generation_moe_pre_dispatch"),
+        _named_op("generation_moe"),
+        _named_op("generation_moe_post_dispatch"),
     ]
     shared_ops = [
-        _NamedOp("generation_shared_gate_up_gemm"),
-        _NamedOp("generation_shared_act_gate"),
-        _NamedOp("generation_shared_ffn2_gemm"),
+        _named_op("generation_shared_gate_up_gemm"),
+        _named_op("generation_shared_act_gate"),
+        _named_op("generation_shared_ffn2_gemm"),
     ]
     overlap = operations.OverlapOp("generation_moe_dispatch_overlap", group_a=routed_ops, group_b=shared_ops)
     model = _Model(
         generation_ops=[
-            _NamedOp("generation_add_norm_2"),
+            _named_op("generation_add_norm_2"),
             overlap,
-            _NamedOp("generation_moe_reduce_add"),
+            _named_op("generation_moe_reduce_add"),
         ]
     )
 
@@ -103,8 +99,8 @@ def test_build_afd_ops_partition_moe_overlap_stays_atomic_on_f_worker():
 def test_build_afd_ops_partition_attention_overlap_stays_atomic_on_a_worker():
     overlap = operations.OverlapOp(
         "generation_bmm_rope_overlap",
-        group_a=[_NamedOp("generation_bmm_pre")],
-        group_b=[_NamedOp("generation_rope_kvcache")],
+        group_a=[_named_op("generation_bmm_pre")],
+        group_b=[_named_op("generation_rope_kvcache")],
     )
     model = _Model(generation_ops=[overlap])
 
@@ -117,8 +113,8 @@ def test_build_afd_ops_partition_attention_overlap_stays_atomic_on_a_worker():
 def test_build_afd_ops_partition_rejects_overlap_spanning_boundary():
     overlap = operations.OverlapOp(
         "generation_future_overlap",
-        group_a=[_NamedOp("generation_attention")],
-        group_b=[_NamedOp("generation_moe")],
+        group_a=[_named_op("generation_attention")],
+        group_b=[_named_op("generation_moe")],
     )
     model = _Model(generation_ops=[overlap])
 
@@ -129,14 +125,14 @@ def test_build_afd_ops_partition_rejects_overlap_spanning_boundary():
 def test_build_afd_ops_partition_context_path():
     model = _Model(
         context_ops=[
-            _NamedOp("context_embedding"),
-            _NamedOp("context_qkv_gemm"),
-            _NamedOp("context_attention"),
-            _NamedOp("context_proj_gemm"),
-            _NamedOp("context_add_norm_2"),
-            _NamedOp("context_gate_ffn1_gemm"),
-            _NamedOp("context_act_gate"),
-            _NamedOp("context_ffn2_gemm"),
+            _named_op("context_embedding"),
+            _named_op("context_qkv_gemm"),
+            _named_op("context_attention"),
+            _named_op("context_proj_gemm"),
+            _named_op("context_add_norm_2"),
+            _named_op("context_gate_ffn1_gemm"),
+            _named_op("context_act_gate"),
+            _named_op("context_ffn2_gemm"),
             operations.P2P("context_p2p", 1, 4096, 2),
         ]
     )
@@ -163,9 +159,9 @@ def test_build_afd_ops_partition_context_path():
 def test_build_afd_ops_partition_boundary_placement_can_be_overridden():
     model = _Model(
         generation_ops=[
-            _NamedOp("generation_add_norm_2"),
-            _NamedOp("generation_logits_gemm"),
-            _NamedOp("generation_moe_reduce_add"),
+            _named_op("generation_add_norm_2"),
+            _named_op("generation_logits_gemm"),
+            _named_op("generation_moe_reduce_add"),
         ]
     )
 
@@ -187,8 +183,8 @@ def test_build_afd_ops_partition_boundary_placement_can_be_overridden():
 def test_build_afd_ops_partition_skips_model_internal_dispatch_ops():
     model = _Model(
         generation_ops=[
-            _NamedOp("generation_moe_pre_dispatch"),
-            _NamedOp("generation_moe_post_dispatch"),
+            _named_op("generation_moe_pre_dispatch"),
+            _named_op("generation_moe_post_dispatch"),
         ]
     )
 
@@ -200,35 +196,35 @@ def test_build_afd_ops_partition_skips_model_internal_dispatch_ops():
 
 
 def test_build_afd_ops_partition_rejects_unknown_ops_by_default():
-    model = _Model(generation_ops=[_NamedOp("generation_unknown_kernel")])
+    model = _Model(generation_ops=[_named_op("generation_unknown_kernel")])
 
     with pytest.raises(AFDPartitionError, match="Cannot classify op"):
         build_afd_ops_partition(model, phase="generation")
 
 
 def test_build_afd_ops_partition_rejects_unclassifiable_mamba_ops_by_default():
-    model = _Model(generation_ops=[_NamedOp("generation_mamba_in_proj_gemm")])
+    model = _Model(generation_ops=[_named_op("generation_mamba_in_proj_gemm")])
 
     with pytest.raises(AFDPartitionError, match="cannot safely classify Mamba"):
         build_afd_ops_partition(model, phase="generation")
 
 
 def test_build_afd_ops_partition_rejects_unclassifiable_gdn_ops_by_default():
-    model = _Model(generation_ops=[_NamedOp("generation_gdn_chunk_gated_delta_rule")])
+    model = _Model(generation_ops=[_named_op("generation_gdn_chunk_gated_delta_rule")])
 
     with pytest.raises(AFDPartitionError, match="cannot safely classify GDN"):
         build_afd_ops_partition(model, phase="generation")
 
 
 def test_build_afd_ops_partition_rejects_unclassifiable_ops_even_when_unknown_allowed():
-    model = _Model(generation_ops=[_NamedOp("generation_mamba_ssm_kernel")])
+    model = _Model(generation_ops=[_named_op("generation_mamba_ssm_kernel")])
 
     with pytest.raises(AFDPartitionError, match="not covered by the current attention/FFN partition rules"):
         build_afd_ops_partition(model, phase="generation", allow_unknown_ops=True, unknown_side="ffn")
 
 
 def test_build_afd_ops_partition_can_allow_unknown_ops():
-    model = _Model(generation_ops=[_NamedOp("generation_future_kernel")])
+    model = _Model(generation_ops=[_named_op("generation_future_kernel")])
 
     partition = build_afd_ops_partition(model, phase="generation", allow_unknown_ops=True, unknown_side="ffn")
 
@@ -266,7 +262,7 @@ def test_build_afd_ops_partition_hf_style_ffn_proj_gemm_lands_on_ffn(ffn_proj_na
     A-pool latency. This pins that the guard plus the explicit FFN
     markers route them to F.
     """
-    model = _Model(generation_ops=[_NamedOp(ffn_proj_name)])
+    model = _Model(generation_ops=[_named_op(ffn_proj_name)])
 
     partition = build_afd_ops_partition(model, phase="generation")
 
@@ -285,10 +281,10 @@ def test_build_afd_ops_partition_canonical_attn_proj_gemm_still_attn():
     """
     model = _Model(
         generation_ops=[
-            _NamedOp("generation_attention"),
-            _NamedOp("generation_proj_gemm"),
-            _NamedOp("generation_global_proj_gemm"),
-            _NamedOp("generation_swa_proj_gemm"),
+            _named_op("generation_attention"),
+            _named_op("generation_proj_gemm"),
+            _named_op("generation_global_proj_gemm"),
+            _named_op("generation_swa_proj_gemm"),
         ]
     )
 
@@ -317,7 +313,7 @@ def test_build_afd_ops_partition_overlap_no_inner_uses_unified_order():
     # An OverlapOp with no inner ops, named to hit both attn ("attention")
     # and ffn ("moe") substrings. Attn precedes ffn in the unified order.
     overlap_no_inner = operations.OverlapOp("generation_moe_attention_overlap", group_a=[], group_b=[])
-    standalone = _NamedOp("generation_moe_attention_overlap")
+    standalone = _named_op("generation_moe_attention_overlap")
     model = _Model(generation_ops=[overlap_no_inner, standalone])
 
     partition = build_afd_ops_partition(model, phase="generation")
@@ -347,8 +343,8 @@ def test_build_afd_ops_partition_inner_overlap_uses_unified_order():
     """
     overlap = operations.OverlapOp(
         "generation_hf_ffn_overlap",
-        group_a=[_NamedOp("generation_gate_proj_gemm"), _NamedOp("generation_up_proj_gemm")],
-        group_b=[_NamedOp("generation_down_proj_gemm")],
+        group_a=[_named_op("generation_gate_proj_gemm"), _named_op("generation_up_proj_gemm")],
+        group_b=[_named_op("generation_down_proj_gemm")],
     )
     model = _Model(generation_ops=[overlap])
 

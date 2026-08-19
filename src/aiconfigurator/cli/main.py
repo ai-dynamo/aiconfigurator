@@ -30,6 +30,7 @@ from aiconfigurator.sdk.errors import (
     NoFeasibleConfigError,
     is_expected_cli_error,
 )
+from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import normalize_speculative_decoding
 from aiconfigurator.sdk.task_v2 import Task, _lookup_num_gpus_per_node, _warn_large_ep_flag
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
@@ -146,11 +147,11 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
     )
     common_parser.add_argument(
         "--engine-step-backend",
-        choices=["python", "rust"],
+        choices=["rust"],
         default=None,
         help="Engine-step latency backend. The compiled Rust engine is the only step "
-        "executor; 'python' is DEPRECATED and now a no-op (it warns once and runs on "
-        "the compiled engine anyway — accepted for one release cycle, then removed).",
+        "executor ('rust'); the deprecated 'python' no-op was removed after its "
+        "one-release window.",
     )
     common_parser.add_argument(
         "--forward-model",
@@ -220,6 +221,16 @@ def _positive_float(value: str) -> float:
     if not (math.isfinite(f) and f > 0):
         raise argparse.ArgumentTypeError(f"must be a positive finite number, got {value!r}")
     return f
+
+
+def _memory_fraction(value: str) -> float:
+    """Argparse type for finite GPU memory fractions in ``(0, 1]``."""
+    import math
+
+    fraction = float(value)
+    if not (math.isfinite(fraction) and 0 < fraction <= 1):
+        raise argparse.ArgumentTypeError(f"must be a finite number in (0, 1], got {value!r}")
+    return fraction
 
 
 def _validate_model_path(model_path: str) -> str:
@@ -806,6 +817,30 @@ def _add_estimate_mode_arguments(parser):
         type=str,
         default=None,
         help="System name for disagg decode workers. Defaults to --system if omitted.",
+    )
+    parser.add_argument(
+        "--prefill-free-gpu-memory-fraction",
+        type=_memory_fraction,
+        default=None,
+        help="Prefill worker KV-cache memory fraction (disagg). Overrides --free-gpu-memory-fraction for prefill.",
+    )
+    parser.add_argument(
+        "--decode-free-gpu-memory-fraction",
+        type=_memory_fraction,
+        default=None,
+        help="Decode worker KV-cache memory fraction (disagg). Overrides --free-gpu-memory-fraction for decode.",
+    )
+    parser.add_argument(
+        "--prefill-max-seq-len",
+        type=int,
+        default=None,
+        help="Prefill worker maximum sequence length (disagg). Overrides --max-seq-len for prefill.",
+    )
+    parser.add_argument(
+        "--decode-max-seq-len",
+        type=int,
+        default=None,
+        help="Decode worker maximum sequence length (disagg). Overrides --max-seq-len for decode.",
     )
     parser.add_argument(
         "--backend",
@@ -1547,8 +1582,8 @@ def build_default_tasks(
         moe_backend: Explicit SGLang MoE backend override ('deepep_moe' is
             deprecated and ignored; 'megamoe' is a real kernel selection).
         engine_step_backend: Engine-step latency backend. The compiled Rust
-            engine is the only step executor; "python" is a deprecated no-op
-            (warns once, runs on the compiled engine anyway).
+            engine is the only step executor; "rust" is the only accepted
+            value (the deprecated "python" no-op was removed).
         forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None
             keeps the default. Both evaluate on the compiled engine ("fpm"
             through its native FpmForward operation).
@@ -1561,6 +1596,8 @@ def build_default_tasks(
     Returns:
         Task objects keyed by serving mode and, when requested, backend.
     """
+    engine_step_backend = validate_engine_step_backend(engine_step_backend)
+
     # Deprecated large-EP knobs: warn once, then ignore (the flag is NOT
     # forwarded to the tasks; an explicit moe_backend value still passes
     # through unchanged — 'deepep_moe' is inert in modeling, 'megamoe' real).
@@ -2436,6 +2473,27 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
 
     if estimate_mode not in ("agg", "disagg"):
         raise SystemExit("--enable-epd supports --estimate-mode agg or disagg only.")
+    if any(
+        fraction is not None
+        for fraction in (
+            args.prefill_free_gpu_memory_fraction,
+            args.decode_free_gpu_memory_fraction,
+        )
+    ):
+        raise SystemExit(
+            "--prefill-free-gpu-memory-fraction and --decode-free-gpu-memory-fraction "
+            "are not supported with --enable-epd; use --free-gpu-memory-fraction."
+        )
+    if any(
+        max_seq_len is not None
+        for max_seq_len in (
+            args.prefill_max_seq_len,
+            args.decode_max_seq_len,
+        )
+    ):
+        raise SystemExit(
+            "--prefill-max-seq-len and --decode-max-seq-len are not supported with --enable-epd; use --max-seq-len."
+        )
     workload = dict(
         enable_epd=True,
         backend_version=args.backend_version,
@@ -2639,6 +2697,10 @@ def _run_estimate_mode(args):
             decode_moe_ep_size=args.decode_moe_ep_size,
             decode_batch_size=args.decode_batch_size,
             decode_num_workers=args.decode_num_workers,
+            prefill_free_gpu_memory_fraction=args.prefill_free_gpu_memory_fraction,
+            decode_free_gpu_memory_fraction=args.decode_free_gpu_memory_fraction,
+            prefill_max_seq_len=args.prefill_max_seq_len,
+            decode_max_seq_len=args.decode_max_seq_len,
         )
     elif estimate_mode == "afd":
         # gpus_per_node and f_tp_size are intentionally derived from the

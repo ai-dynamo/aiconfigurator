@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The scan must derive a reproducible latency metric for every perf table.
+"""The manifest scan must derive a reproducible latency metric for every perf table.
 
 Two properties are covered:
 
@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools" / "perf_database"))
-from check_kernel_source import (
+from generate_perf_data_reuse_manifest import (
     _build_shape_key,
     _compose_latency,
     _resolve_latency_columns,

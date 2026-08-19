@@ -6,8 +6,28 @@ architecture: MiniMaxM3ForCausalLM
 model_path: MiniMaxAI/MiniMax-M3
 model_paths:
   - MiniMaxAI/MiniMax-M3
+  - nvidia/MiniMax-M3-NVFP4
 include_base: true
 description: >
   MiniMax-M3 model-centric collection plan. Base-op coverage only for now:
   the MSA attention module has no collector op yet, so MSA-dependent support
   stays HYBRID/estimated until that op and its model shapes are authored.
+
+model_case_values:
+  moe:
+    - model_path: nvidia/MiniMax-M3-NVFP4
+      hidden_size: 6144
+      inter_size: 3072
+      topk: 4
+      num_experts: 128
+      framework_quantization:
+        sglang:
+          allowed_modes: [nvfp4]
+        trtllm:
+          allowed_modes: [nvfp4]
+        vllm:
+          allowed_modes: [nvfp4]
+
+all_frameworks_op_cases:
+  moe:
+    cases: all

@@ -14,14 +14,13 @@ deliberately-absent sglang keys and reroute decode onto the wrong kernel
 
 This test builds the manifest THROUGH the generator (render_manifest), so it
 fails if the ABSENCE_LOAD_BEARING exclusion in
-tools/perf_database/check_kernel_source.py is ever removed: the entries
+tools/perf_database/generate_perf_data_reuse_manifest.py is ever removed: the entries
 would come back as multi-framework `shared`, the vllm donor below would fill
 the 12-head Triton generation key, and the loaded-table assertion would
-break. Rust needs no twin — it consumes Python's serialized source chain
-(engine.py `_compute_perf_db_sources`), so keeping the donor rows out of the
-LOADED table is exactly what protects the engine's fused-decode reroute
-(the per-call ``_query_kda_table`` observation retired with #1357 PR-5; the
-reroute itself is anchored by the parity goldens).
+break. The Rust source resolver reads this manifest directly, so keeping the
+donor rows out of the loaded table is exactly what protects the engine's
+fused-decode reroute (the per-call ``_query_kda_table`` observation retired
+with #1357 PR-5; the reroute itself is anchored by the parity goldens).
 """
 
 from __future__ import annotations
@@ -34,7 +33,6 @@ import pytest
 
 from aiconfigurator.sdk.perf_database import (
     PerfDatabase,
-    _load_op_kernel_source_manifest_entries,
 )
 from aiconfigurator_core.sdk.operations.mamba import KDAKernel
 
@@ -53,9 +51,9 @@ _DONOR_LATENCY = 0.015
 
 
 def _generator():
-    name = "check_kernel_source_under_test"
+    name = "generate_perf_data_reuse_manifest_under_test"
     spec = importlib.util.spec_from_file_location(
-        name, _REPO_ROOT / "tools" / "perf_database" / "check_kernel_source.py"
+        name, _REPO_ROOT / "tools" / "perf_database" / "generate_perf_data_reuse_manifest.py"
     )
     module = importlib.util.module_from_spec(spec)
     # Registered so the module's @dataclass processing can resolve itself.
@@ -72,11 +70,26 @@ def _kda_rows(framework: str, kernel_source: str, latency: float) -> list[str]:
 
 
 def _write_kda_csv(path: Path, chunks: list[list[str]]) -> None:
+    """Write the CSV-shaped rows as a real parquet file: the engine table
+    view (which now backs ``KDAKernel.load_data``) reads parquet only —
+    the legacy ``.txt`` fallback retired with the Python parsers (PR-6)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as f:
-        f.write(_KDA_HEADER)
-        for chunk in chunks:
-            f.writelines(chunk)
+    header = _KDA_HEADER.strip().split(",")
+    rows = [line.strip().split(",") for chunk in chunks for line in chunk]
+    string_cols = {"framework", "version", "device", "op_name", "kernel_source", "phase", "model_name"}
+    columns = {}
+    for i, name in enumerate(header):
+        values = [row[i] for row in rows]
+        if name in string_cols:
+            columns[name] = values
+        elif name == "latency":
+            columns[name] = [float(v) for v in values]
+        else:
+            columns[name] = [int(v) for v in values]
+    pq.write_table(pa.table(columns), path)
 
 
 def _summary(op_file: str, kernel_source: str, tier: str, frameworks: list[str]) -> dict:
@@ -130,12 +143,12 @@ def test_vllm_donor_cannot_defeat_the_fused_decode_reroute(tmp_path, monkeypatch
     # sglang owns ONLY the fused generation row for the 12-head shard — the
     # Triton generation key is deliberately absent (fused dispatch truth).
     _write_kda_csv(
-        systems_root / "data" / "h100_sxm" / "sglang" / "1.0" / "kda_perf.txt",
+        systems_root / "data" / "h100_sxm" / "sglang" / "1.0" / "kda_perf.parquet",
         [_kda_rows("SGLang", "kda_fused_decode", _FUSED_LATENCY)],
     )
     # The vllm sibling carries genuine Triton-pair rows for the SAME shard.
     _write_kda_csv(
-        systems_root / "data" / "h100_sxm" / "vllm" / "1.0" / "kda_perf.txt",
+        systems_root / "data" / "h100_sxm" / "vllm" / "1.0" / "kda_perf.parquet",
         [
             _kda_rows("VLLM", "causal_conv1d_update", _DONOR_LATENCY),
             _kda_rows("VLLM", "fused_recurrent_kda_packed_decode", _DONOR_LATENCY),
@@ -143,15 +156,15 @@ def test_vllm_donor_cannot_defeat_the_fused_decode_reroute(tmp_path, monkeypatch
     )
 
     # Manifest built THROUGH the generator: the exclusion must demote the
-    # absence-load-bearing pairs to a loader-inert tier even though both
+    # absence-load-bearing pairs to a resolver-inert tier even though both
     # backends genuinely produce rows under those kernel_sources.
     summaries = [
         _summary("kda_perf.parquet", "kda_fused_decode", "shared", ["sglang"]),
         _summary("kda_perf.parquet", "causal_conv1d_update", "shared", ["sglang", "vllm"]),
         _summary("kda_perf.parquet", "fused_recurrent_kda_packed_decode", "shared", ["sglang", "vllm"]),
     ]
-    (systems_root / "op_kernel_source_manifest.yaml").write_text(gen.render_manifest(summaries))
-    _load_op_kernel_source_manifest_entries.cache_clear()
+    (systems_root / "perf_data_reuse_manifest.yaml").write_text(gen.render_manifest(summaries))
+    # (manifest parsing moved into the engine resolver — no Python cache to clear)
     KDAKernel.clear_cache()
 
     db = PerfDatabase("h100_sxm", "sglang", "1.0", str(systems_root), database_mode="SILICON")
@@ -172,5 +185,5 @@ def test_vllm_donor_cannot_defeat_the_fused_decode_reroute(tmp_path, monkeypatch
         )
 
     # And the exclusion is visible in the generated manifest itself.
-    manifest_text = (systems_root / "op_kernel_source_manifest.yaml").read_text()
+    manifest_text = (systems_root / "perf_data_reuse_manifest.yaml").read_text()
     assert manifest_text.count("tier: absence_load_bearing") == 2

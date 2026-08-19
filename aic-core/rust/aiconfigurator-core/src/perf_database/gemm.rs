@@ -25,12 +25,12 @@ use super::interpolation::Grid3;
 use super::perf_interp::{
     self, LeafValue, Node, OpInterpConfig, Resolver, SiteIndex, ValueTransform,
 };
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::GemmQuantMode;
 use crate::common::error::AicError;
-use crate::operators::base::SolComponents;
 use crate::common::system_spec::SystemSpec;
 use crate::config::{PerfDbSources, PerfSource};
+use crate::operators::base::SolComponents;
 use crate::perf_database::parquet_loader::PerfReader;
 
 const GEMM_QUERY_CACHE_CAPACITY: usize = 32_768;
@@ -187,23 +187,28 @@ impl GemmTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
-        Self::with_sources(data_root, system_spec, &PerfDbSources::default())
+        Self::with_sources(
+            data_root,
+            system_spec,
+            &SourceResolver::fixed(PerfDbSources::default()),
+        )
+        .expect("fixed-map resolution is infallible")
     }
 
-    /// Construct with shared-layer (sibling/cross-version) sources resolved from
-    /// `perf_db_sources` (Python-supplied). Each GEMM-family file falls back to
-    /// its primary `data_root/<basename>` when absent from the map. No I/O.
+    /// Construct with shared-layer (sibling/cross-version) sources supplied by the
+    /// engine's `SourceResolver` (live resolution owns the shared-layer walk;
+    /// a fixed source map is the test-only path). Each GEMM-family file falls back to
+    /// its primary `data_root/<basename>` when the resolver names no override. No I/O.
     pub fn with_sources(
         data_root: PathBuf,
         system_spec: SystemSpec,
-        perf_db_sources: &PerfDbSources,
-    ) -> Self {
-        let gemm_sources = resolve_op_sources(perf_db_sources, "gemm_perf.parquet", &data_root);
+        resolver: &SourceResolver,
+    ) -> Result<Self, AicError> {
+        let gemm_sources = resolver.sources_for("gemm_perf.parquet", &data_root)?;
         let compute_scale_sources =
-            resolve_op_sources(perf_db_sources, "computescale_perf.parquet", &data_root);
-        let scale_matrix_sources =
-            resolve_op_sources(perf_db_sources, "scale_matrix_perf.parquet", &data_root);
-        Self {
+            resolver.sources_for("computescale_perf.parquet", &data_root)?;
+        let scale_matrix_sources = resolver.sources_for("scale_matrix_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             system_spec,
             gemm_sources,
@@ -213,7 +218,7 @@ impl GemmTable {
             compute_scale: OnceLock::new(),
             scale_matrix: OnceLock::new(),
             query_cache: OnceLock::new(),
-        }
+        })
     }
 
     /// Query the GEMM measured value (`{latency ms, power W, energy W·ms}`)
@@ -562,6 +567,7 @@ pub(crate) fn gemm_quant_by_name(name: &str) -> Option<GemmQuantMode> {
         "fp8_ootb" => Fp8Ootb,
         "nvfp4" => Nvfp4,
         "nvfp4_wo" => Nvfp4Wo,
+        "w4a16_nvfp4" => W4a16Nvfp4,
         _ => return None,
     })
 }
@@ -892,8 +898,9 @@ mod tests {
     /// admitted. Mirrors Python `_read_filtered_rows` + `load_gemm_data`.
     #[test]
     fn shared_layer_merges_siblings_with_kernel_source_filter_and_first_wins() {
-        // trtllm 1.3.0rc10 primary + 1.2.0rc5 sibling — the real shape Python's
-        // `_compute_perf_db_sources` emits for this backend.
+        // trtllm 1.3.0rc10 primary + 1.2.0rc5 sibling — the real shape the
+        // retired Python `_compute_perf_db_sources` emitted for this backend
+        // (the live resolver derives the same walk).
         let primary = b200_gemm_parquet("trtllm", "1.3.0rc10");
         let sibling = b200_gemm_parquet("trtllm", "1.2.0rc5");
 
@@ -971,6 +978,32 @@ mod tests {
             .latency;
         assert!(latency > 0.0, "interpolated latency must be positive");
         assert!(latency < 100.0, "shape this small shouldn't take 100ms");
+    }
+
+    #[test]
+    fn w4a16_nvfp4_does_not_alias_int4_table() {
+        use crate::perf_database::energy_test_fixtures::{energy_test_spec, write_parquet, Col};
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &tmp.path().join("gemm_perf.parquet"),
+            &[
+                Col::Str("gemm_dtype", vec!["int4_wo", "int4_wo"]),
+                Col::I64("m", vec![128, 256]),
+                Col::I64("n", vec![1024, 1024]),
+                Col::I64("k", vec![1024, 1024]),
+                Col::F64("latency", vec![1.0, 3.0]),
+            ],
+        );
+
+        let table = GemmTable::new(tmp.path().to_path_buf(), energy_test_spec());
+        assert!(table
+            .query(GemmQuantMode::Int4Wo, 1, 1024, 1024)
+            .is_ok());
+        assert!(table
+            .query(GemmQuantMode::W4a16Nvfp4, 1, 1024, 1024)
+            .is_err());
+        assert_eq!(query_cache_len(&table), 1);
     }
 
     #[test]

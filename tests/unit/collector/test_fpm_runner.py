@@ -71,6 +71,7 @@ metadata:
     app.kubernetes.io/name: cell
     aiconfigurator.nvidia.com/cell: cell
 spec:
+  replicas: 1
   leaderWorkerTemplate:
     size: 2
 """

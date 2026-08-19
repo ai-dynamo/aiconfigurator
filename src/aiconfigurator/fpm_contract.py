@@ -138,6 +138,26 @@ def fpm_resolved_config_name(node_rank: int) -> str:
     return FPM_RESOLVED_CONFIG_TEMPLATE.format(node_rank=node_rank)
 
 
+def fpm_validate_resolved_config_path(output_path: str) -> None:
+    """Reject resolved-config paths the collector's marker sweep cannot find.
+
+    A Generator override may retain the ``{node_rank}`` placeholder that
+    ``run.sh`` substitutes at runtime. The surrounding path and basename must
+    still remain inside the collector's recursive discovery surface.
+    """
+
+    path = PurePosixPath(output_path)
+    if not path.is_absolute() or any(part in (".", "..") for part in path.parts):
+        raise ValueError(f"resolved-config path must be absolute without '.' or '..' segments: {output_path!r}")
+    if PurePosixPath(FPM_RESULTS_DIR) not in path.parents:
+        raise ValueError(f"resolved-config path must live under {FPM_RESULTS_DIR}: {output_path!r}")
+    if not fnmatch.fnmatch(path.name, FPM_RESOLVED_CONFIG_GLOB):
+        raise ValueError(
+            f"resolved-config basename must match {FPM_RESOLVED_CONFIG_GLOB!r} "
+            f"so collector marker discovery can find it: {output_path!r}"
+        )
+
+
 def fpm_validate_benchmark_output_path(output_path: str) -> None:
     """Reject benchmark output paths the collector could never discover.
 
@@ -164,6 +184,8 @@ def fpm_validate_benchmark_output_path(output_path: str) -> None:
             f"benchmark output basename must match {FPM_BENCHMARK_RESULT_GLOB!r} "
             f"so collector discovery can find it: {output_path!r}"
         )
+    if path.stem.endswith("_merged"):
+        raise ValueError(f"benchmark output basename is reserved for merged artifacts: {output_path!r}")
 
 
 def fpm_benchmark_result_name(output_path: str, dp_rank: int) -> str:
@@ -214,9 +236,10 @@ def fpm_workload_node_count(workload: dict[str, Any]) -> int:
     """Return the pod count a generated FPM workload document schedules.
 
     This enumerates the only manifest-internal fields the collector may read:
+    ``spec.replicas`` (pinned to 1) and
     ``spec.leaderWorkerTemplate.size`` for a LeaderWorkerSet, and
-    ``spec.replicas`` (pinned to 1) times the clique ``spec.replicas`` sum for
-    a PodCliqueSet. Everything else inside the manifest is opaque to the
+    ``spec.replicas`` (also pinned to 1) plus the clique ``spec.replicas`` sum
+    for a PodCliqueSet. Everything else inside the manifest is opaque to the
     collector.
     """
 
@@ -224,7 +247,16 @@ def fpm_workload_node_count(workload: dict[str, Any]) -> int:
     if kind == "Pod":
         return 1
     if kind == "LeaderWorkerSet":
-        size = workload["spec"]["leaderWorkerTemplate"]["size"]
+        spec = workload.get("spec") or {}
+        if not isinstance(spec, dict):
+            raise ValueError("FPM LeaderWorkerSet spec must be a mapping")
+        replicas = spec.get("replicas")
+        if not isinstance(replicas, int) or isinstance(replicas, bool) or replicas != 1:
+            raise ValueError("FPM LeaderWorkerSet spec.replicas must be 1")
+        template = spec.get("leaderWorkerTemplate") or {}
+        if not isinstance(template, dict):
+            raise ValueError("FPM LeaderWorkerSet spec.leaderWorkerTemplate must be a mapping")
+        size = template.get("size")
         if not isinstance(size, int) or isinstance(size, bool) or size < 1:
             raise ValueError(f"FPM LeaderWorkerSet leaderWorkerTemplate.size must be a positive integer: {size!r}")
         return size

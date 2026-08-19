@@ -52,7 +52,7 @@ _TOOLS_DIR = Path(__file__).resolve().parent
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from check_kernel_source import _iter_data_files
+from perf_data_layout import iter_data_files
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ def scan(data_root: Path) -> tuple[dict[FactKey, set[str]], dict[str, list[str]]
     axes_by_op: dict[str, list[str]] = {}
     skipped_no_kernel_source: list[str] = []
 
-    for system, backend, version, path in _iter_data_files(data_root):
+    for system, backend, version, path in iter_data_files(data_root):
         header = _read_header(path)
         if "kernel_source" not in header:
             skipped_no_kernel_source.append(str(path))

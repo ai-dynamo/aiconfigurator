@@ -281,12 +281,12 @@ fn query_nccl_table(
         // (unknown collectives yield 0.0, not an error). The SOL_FULL
         // triple is `(sol_time, 0, sol_time)` — the bandwidth bound rides
         // in the mem slot.
-        DatabaseMode::Sol | DatabaseMode::SolFull => Ok(PerformanceResult::sol(
-            SolComponents::new(
+        DatabaseMode::Sol | DatabaseMode::SolFull => {
+            Ok(PerformanceResult::sol(SolComponents::new(
                 0.0,
                 nccl_sol_ms(&db.system_spec, dtype, num_gpus, operation, message_size),
-            ),
-        )),
+            )))
+        }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             nccl_empirical(db, dtype, num_gpus, operation, message_size)?,
             Source::Empirical,
