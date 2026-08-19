@@ -16,17 +16,71 @@ pytestmark = [pytest.mark.e2e, pytest.mark.build]
 
 SANITY_CHECK_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../tools/sanity_check"))
 
+# Always-validated combo: keeps one loader + query smoke path (strict
+# provenance, warm_all_op_data, bf16 coverage gate) alive on PRs that touch
+# no perf data at all.
+SENTINEL_COMBO = ("h200_sxm", "trtllm")
+
+# CI scopes this suite to the PR's diff via AIC_SANITY_TARGETS (build-test.yml):
+#   unset -> full matrix (local/manual runs keep the historical behavior)
+#   "all" -> full matrix (sanity-check tooling or the DB loader changed)
+#   ""    -> sentinel combo only (no perf data changed)
+#   newline-separated changed paths under .../systems/ -> sentinel + the
+#     (system, backend) combos those paths belong to
+
+
+def _combos_from_changed_paths(changed_paths, supported):
+    combos = set()
+    for path in changed_paths:
+        parts = [p for p in path.strip().split("/") if p]
+        if "systems" not in parts:
+            continue
+        rest = parts[parts.index("systems") + 1 :]
+        if not rest:
+            continue
+        if rest[0] != "data":
+            # systems/<system>.yaml spec edits feed SOL math for every
+            # backend of that system.
+            system = rest[0].removesuffix(".yaml")
+            if rest[0].endswith(".yaml") and system in supported:
+                combos.update((system, backend) for backend in supported[system])
+            continue
+        if len(rest) < 2:
+            continue
+        system = rest[1]
+        backends = supported.get(system)
+        if not backends:
+            continue
+        backend = next((p for p in rest[2:] if p in backends), None)
+        if backend is not None:
+            combos.add((system, backend))
+        else:
+            # Shared data with no backend path component (e.g. comm/nccl)
+            # feeds every backend of the system.
+            combos.update((system, b) for b in backends)
+    return combos
+
+
+def _selected_combos(supported):
+    targets = os.environ.get("AIC_SANITY_TARGETS")
+    if targets is None or targets.strip() == "all":
+        return {(system, backend) for system, backends in supported.items() for backend in backends}
+    combos = _combos_from_changed_paths(targets.splitlines(), supported)
+    combos.add(SENTINEL_COMBO)
+    return combos
+
 
 def _supported_system_backend_latest():
-    """(system, backend, latest_version) for each system+backend that AIC supports."""
+    """(system, backend, latest_version) for each selected system+backend combo."""
     supported = get_supported_databases()
     result = []
-    for system, backends in sorted(supported.items()):
+    for system, backend in sorted(_selected_combos(supported)):
+        if backend not in supported.get(system, {}):
+            continue
         fail_ok = system in ["b60"]  # xpu
-        for backend in sorted(backends.keys()):
-            version = get_latest_database_version(system, backend)
-            if version is not None:
-                result.append((system, backend, version, fail_ok))
+        version = get_latest_database_version(system, backend)
+        if version is not None:
+            result.append((system, backend, version, fail_ok))
     return result
 
 

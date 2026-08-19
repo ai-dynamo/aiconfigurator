@@ -11,6 +11,12 @@ on:
       - synchronize
   workflow_dispatch:
 
+concurrency:
+  # One in-flight run per PR: a superseded push cancels the previous run.
+  # Push events group by SHA so main/release runs never cancel each other.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   cargo-deny:
     name: Cargo Deny
@@ -49,6 +55,12 @@ jobs:
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: '3.13'
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            .
+            aic-core/rust/aiconfigurator-core
       - name: Test crate without Python embedding
         run: cargo test --workspace --no-default-features
       - name: Install the local wheel and upper compatibility package
@@ -117,7 +129,7 @@ jobs:
             workers: "-n 2"
           - name: e2e
             paths: tests/e2e
-            workers: "-n 2"
+            workers: "-n 4"
     steps:
       - name: Checkout repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -125,7 +137,7 @@ jobs:
           persist-credentials: false
           lfs: true
           fetch-depth: 0
-      - name: Detect generator golden changes
+      - name: Detect diff-scoped test selection
         id: generator-golden-changes
         shell: bash
         run: |
@@ -150,6 +162,22 @@ jobs:
           else
             echo "run_golden=false" >> "${GITHUB_OUTPUT}"
           fi
+
+          # Scope test_validate_database (e2e sanity check) to the diff:
+          # "all" when the sanity tooling / DB loader changed, otherwise the
+          # changed perf-data paths (empty -> sentinel combo only). Consumed
+          # via AIC_SANITY_TARGETS in tests/e2e/tools/test_sanity_check.py.
+          sanity_all_regex='^(tools/sanity_check/|tests/e2e/tools/test_sanity_check\.py|aic-core/src/aiconfigurator_core/sdk/perf_database\.py)'
+          if printf '%s\n' "${changed_files}" | grep -Eq "${sanity_all_regex}"; then
+            sanity_targets="all"
+          else
+            sanity_targets="$(printf '%s\n' "${changed_files}" | grep -E '^aic-core/src/aiconfigurator_core/systems/' || true)"
+          fi
+          {
+            echo "sanity_targets<<AIC_SANITY_EOF"
+            printf '%s\n' "${sanity_targets}"
+            echo "AIC_SANITY_EOF"
+          } >> "${GITHUB_OUTPUT}"
       - name: Git LFS Pull
         run: git lfs pull
       - name: Print runner resources
@@ -161,6 +189,11 @@ jobs:
           docker build -f docker/Dockerfile -t aiconfigurator:build --target build .
       - name: Run tests in container
         shell: bash
+        env:
+          # Env indirection (not ${{ }} inline in the script) so fork-PR
+          # filenames can never be shell-interpreted; docker -e forwards the
+          # value verbatim.
+          AIC_SANITY_TARGETS: ${{ steps.generator-golden-changes.outputs.sanity_targets }}
         run: |
           test_paths=(${{ matrix.suite.paths }})
           if [ "${{ matrix.suite.name }}" = "unit" ] && [ "${{ steps.generator-golden-changes.outputs.run_golden }}" = "true" ]; then
@@ -171,7 +204,7 @@ jobs:
           docker build -f docker/Dockerfile -t aiconfigurator:test --target test .
           # Fail-closed loader provenance checks (Collector V3 design §7.4); the
           # committed data tree is fully sidecar-covered post-PR3, so this must stay green.
-          docker run --name aic -e AIC_STRICT_PROVENANCE=1 aiconfigurator:test \
+          docker run --name aic -e AIC_STRICT_PROVENANCE=1 -e AIC_SANITY_TARGETS aiconfigurator:test \
             pytest \
             "${test_paths[@]}" \
             -m "unit or build" \
@@ -203,6 +236,14 @@ jobs:
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: '3.13'
+      - name: Cache Rust build artifacts
+        # Caches ~/.cargo registry + incremental target dirs, keyed on
+        # Cargo.lock + rustc version; correctness-neutral (stale keys miss).
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            .
+            aic-core/rust/aiconfigurator-core
       - name: Install AIC and test dependencies
         run: |
           python -m pip install uv
@@ -228,12 +269,15 @@ jobs:
           PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: cargo test --release --lib
       - name: Run Rust/Python engine-step parity suite
+        # -n 4 matches the 4-vCPU hosted runner; every case builds its own
+        # engines, so the suite is xdist-safe. The perf gate below must stay
+        # serial (it measures p50 timings).
         run: |
-          "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rx \
+          "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rx -n 4 \
             aic-core/rust/aiconfigurator-core/parity_tests/test_engine_step_parity.py
       - name: Run compile-engine (EngineHandle) parity suite
         # Parity for the compile_engine -> EngineHandle path: op-transfer bincode
         # round-trip fidelity plus integration parity vs the Python BaseBackend.
         run: |
-          "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rx \
+          "${GITHUB_WORKSPACE}/.venv/bin/pytest" -q -rx -n 4 \
             aic-core/rust/aiconfigurator-core/parity_tests/test_compile_engine_parity.py
