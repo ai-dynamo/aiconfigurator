@@ -426,9 +426,7 @@ def test_same_pin_mixing_with_stock_trtllm_ops_is_accepted():
     # request (a separate behavior from wideep/stock mixing).
     from collector.framework_manifest import require_collector_runtime
 
-    mixed = require_collector_runtime(
-        "trtllm", "1.3.0rc20", requested_ops={"gemm", "moe_ep"}, wideep_ops={"moe_ep"}
-    )
+    mixed = require_collector_runtime("trtllm", "1.3.0rc20", requested_ops={"gemm", "moe_ep"}, wideep_ops={"moe_ep"})
     stock = require_collector_runtime("trtllm", "1.3.0rc20", requested_ops={"gemm"}, wideep_ops={"moe_ep"})
     assert mixed.version == stock.version == "1.3.0rc20"
     assert mixed.images == stock.images
