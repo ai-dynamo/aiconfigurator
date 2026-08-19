@@ -160,7 +160,7 @@ def _podcliqueset(spec: object) -> dict:
     [
         pytest.param({"kind": "Pod"}, 1, id="pod-is-one-node"),
         pytest.param(
-            {"kind": "LeaderWorkerSet", "spec": {"leaderWorkerTemplate": {"size": 4}}},
+            {"kind": "LeaderWorkerSet", "spec": {"replicas": 1, "leaderWorkerTemplate": {"size": 4}}},
             4,
             id="lws-size",
         ),
@@ -227,6 +227,43 @@ def test_fpm_workload_node_count_rejects_non_mapping_clique_spec(clique):
 
 
 @pytest.mark.parametrize(
+    "replicas",
+    [
+        pytest.param(2, id="multiple"),
+        pytest.param(True, id="bool"),
+        pytest.param(0, id="zero"),
+        pytest.param(-1, id="negative"),
+        pytest.param("1", id="string"),
+        pytest.param(None, id="missing"),
+    ],
+)
+def test_fpm_workload_node_count_rejects_lws_replicas_other_than_one(replicas):
+    workload = {
+        "kind": "LeaderWorkerSet",
+        "spec": {"replicas": replicas, "leaderWorkerTemplate": {"size": 4}},
+    }
+
+    with pytest.raises(ValueError, match=r"LeaderWorkerSet spec\.replicas must be 1"):
+        fpm_workload_node_count(workload)
+
+
+@pytest.mark.parametrize(
+    ("spec", "match"),
+    [
+        pytest.param("invalid", "spec must be a mapping", id="non-mapping-spec"),
+        pytest.param(
+            {"replicas": 1, "leaderWorkerTemplate": "invalid"},
+            "leaderWorkerTemplate must be a mapping",
+            id="non-mapping-template",
+        ),
+    ],
+)
+def test_fpm_workload_node_count_rejects_malformed_lws_structure(spec, match):
+    with pytest.raises(ValueError, match=match):
+        fpm_workload_node_count({"kind": "LeaderWorkerSet", "spec": spec})
+
+
+@pytest.mark.parametrize(
     "size",
     [
         pytest.param(True, id="bool"),
@@ -237,7 +274,7 @@ def test_fpm_workload_node_count_rejects_non_mapping_clique_spec(clique):
     ],
 )
 def test_fpm_workload_node_count_rejects_non_strict_lws_size(size):
-    workload = {"kind": "LeaderWorkerSet", "spec": {"leaderWorkerTemplate": {"size": size}}}
+    workload = {"kind": "LeaderWorkerSet", "spec": {"replicas": 1, "leaderWorkerTemplate": {"size": size}}}
 
     with pytest.raises(ValueError, match=r"leaderWorkerTemplate\.size must be a positive integer"):
         fpm_workload_node_count(workload)

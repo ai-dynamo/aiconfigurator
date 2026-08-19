@@ -216,9 +216,10 @@ def fpm_workload_node_count(workload: dict[str, Any]) -> int:
     """Return the pod count a generated FPM workload document schedules.
 
     This enumerates the only manifest-internal fields the collector may read:
+    ``spec.replicas`` (pinned to 1) and
     ``spec.leaderWorkerTemplate.size`` for a LeaderWorkerSet, and
-    ``spec.replicas`` (pinned to 1) times the clique ``spec.replicas`` sum for
-    a PodCliqueSet. Everything else inside the manifest is opaque to the
+    ``spec.replicas`` (also pinned to 1) plus the clique ``spec.replicas`` sum
+    for a PodCliqueSet. Everything else inside the manifest is opaque to the
     collector.
     """
 
@@ -226,7 +227,16 @@ def fpm_workload_node_count(workload: dict[str, Any]) -> int:
     if kind == "Pod":
         return 1
     if kind == "LeaderWorkerSet":
-        size = workload["spec"]["leaderWorkerTemplate"]["size"]
+        spec = workload.get("spec") or {}
+        if not isinstance(spec, dict):
+            raise ValueError("FPM LeaderWorkerSet spec must be a mapping")
+        replicas = spec.get("replicas")
+        if not isinstance(replicas, int) or isinstance(replicas, bool) or replicas != 1:
+            raise ValueError("FPM LeaderWorkerSet spec.replicas must be 1")
+        template = spec.get("leaderWorkerTemplate") or {}
+        if not isinstance(template, dict):
+            raise ValueError("FPM LeaderWorkerSet spec.leaderWorkerTemplate must be a mapping")
+        size = template.get("size")
         if not isinstance(size, int) or isinstance(size, bool) or size < 1:
             raise ValueError(f"FPM LeaderWorkerSet leaderWorkerTemplate.size must be a positive integer: {size!r}")
         return size
