@@ -603,6 +603,7 @@ def test_fpm_resource_overlays_preserve_requests_mount_path_shm_and_labels():
     requests = container["resources"]["requests"]
     assert requests["memory"] == "448Gi"
     assert requests["ephemeral-storage"] == "30Gi"
+    assert container["resources"]["limits"]["memory"] == requests["memory"]
     assert container["resources"]["limits"]["nvidia.com/gpu"] == "4"
     assert {mount["mountPath"] for mount in container["volumeMounts"]} >= {
         "/model-cache",

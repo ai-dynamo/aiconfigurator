@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from aiconfigurator.sdk.memory import NaiveKVCacheEstimator
 from aiconfigurator.sdk.utils import (
     HuggingFaceDownloadError,
     _attach_hf_quant_config,
@@ -80,8 +81,31 @@ class ResolvedModelConfig:
         from disk or the network.
         """
 
-        raw_config = _attach_inferred_quant_fields(self.payload)
-        parsed = _parse_hf_config_json(raw_config)
+        raw_config = _attach_inferred_quant_fields(self.effective_payload)
+        try:
+            parsed = _parse_hf_config_json(raw_config)
+        except ValueError:
+            # Bootstrap templates intentionally admit real HF architectures
+            # that the native AIC parser does not know yet. Normalize their
+            # frozen config with the architecture-agnostic estimator so render
+            # stays offline and receives the same scalar shape as the native
+            # parser rather than re-resolving plan.model_path.
+            geometry = NaiveKVCacheEstimator.from_hf_config(
+                raw_config,
+                tp_size=1,
+                pp_size=1,
+            ).geometry
+            architectures = raw_config.get("architectures")
+            architecture = architectures[0] if isinstance(architectures, list) and architectures else ""
+            parsed = {
+                "architecture": architecture,
+                "layers": geometry.get("layers"),
+                "hidden_size": geometry.get("hidden"),
+                "inter_size": geometry.get("inter"),
+                "vocab": geometry.get("vocab"),
+                "num_experts": geometry.get("num_experts") or 0,
+                "moe_inter_size": geometry.get("moe_inter") or 0,
+            }
         parsed["raw_config"] = raw_config
         return parsed
 

@@ -20,7 +20,7 @@ import pytest
 import collector.fpm_forward.runner as fpm_runner
 from aiconfigurator.fpm_contract import FPM_CELL_LABEL
 from collector.fpm_forward.config import FPMCollectionOptions, PrefillSamplingProfile
-from collector.fpm_forward.model_capability import load_model_config
+from collector.fpm_forward.model_capability import ResolvedModelConfig, load_model_config
 from collector.fpm_forward.planner import BackendPolicy, FPMCell, build_collection_plan
 from collector.fpm_forward.runner import (
     REMOTE_EXIT_MARKER,
@@ -1841,6 +1841,82 @@ def test_render_uses_frozen_model_config_without_resolving_model_path(tmp_path, 
     request = json.loads((cell_dir / "generator-request.json").read_text())
     assert plan.capability.is_moe is True
     assert request["ModelConfig"]["is_moe"] is plan.capability.is_moe
+
+
+@pytest.mark.parametrize(
+    ("architecture", "config", "strategy", "topology", "is_moe"),
+    [
+        (
+            "PrivateDenseForCausalLM",
+            {
+                "architectures": ["PrivateDenseForCausalLM"],
+                "hidden_size": 3072,
+                "intermediate_size": 8192,
+                "num_hidden_layers": 32,
+                "num_attention_heads": 24,
+                "num_key_value_heads": 8,
+                "vocab_size": 200064,
+            },
+            "tp",
+            ParallelTopology(tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1, cp=1),
+            False,
+        ),
+        (
+            "PrivateMoeForCausalLM",
+            {
+                "architectures": ["PrivateMoeForCausalLM"],
+                "hidden_size": 4096,
+                "intermediate_size": 8192,
+                "moe_intermediate_size": 2048,
+                "num_hidden_layers": 4,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+                "vocab_size": 32000,
+                "n_routed_experts": 8,
+            },
+            "tep",
+            ParallelTopology(tp=4, pp=1, dp=1, moe_tp=1, moe_ep=4, cp=1),
+            True,
+        ),
+    ],
+)
+def test_bootstrap_unknown_architecture_renders_from_frozen_config(
+    tmp_path,
+    architecture,
+    config,
+    strategy,
+    topology,
+    is_moe,
+):
+    cell = FPMCell(
+        cell_id=f"bootstrap-{strategy}",
+        workload_kind="prefill",
+        topology=topology,
+        weight_quantization="fp8",
+        kv_cache_dtype="fp8",
+        backend_policy=BackendPolicy("baseline", {}, {}),
+        parallel_strategy=strategy,
+        gemm_quant_mode="fp8_static",
+        moe_quant_mode="fp8",
+        fmha_quant_mode="fp8",
+        comm_quant_mode="half",
+    )
+    plan = _plan(cell)
+    plan.model_path = "private-org/runtime-only-bootstrap"
+    plan.capability = SimpleNamespace(
+        architecture=architecture,
+        model_config=ResolvedModelConfig(config, source_kind="explicit", source_reference="test"),
+    )
+    cell_dir = tmp_path / strategy
+    cell_dir.mkdir()
+
+    _render_cell(plan, cell, cell_dir, {})
+
+    request = json.loads((cell_dir / "generator-request.json").read_text())
+    assert request["ModelConfig"]["is_moe"] is is_moe
+    assert (cell_dir / "k8s_deploy.yaml").is_file()
+    assert (cell_dir / "fpm_env.sh").is_file()
+    assert (cell_dir / "run.sh").is_file()
 
 
 def _expected_meta(data: bytes) -> dict:

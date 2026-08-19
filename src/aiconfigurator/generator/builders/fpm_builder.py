@@ -959,22 +959,6 @@ def _lower_resources(
     if "nvidia.com/gpu" not in limits:
         raise ValueError("FPM resource Pod requires a GPU limit")
 
-    # Guaranteed QoS by default: a GPU-only pod runs BestEffort, and FPM's
-    # launch-bound band then disperses +-8-18% across boots (host launch speed
-    # is decided by neighbour contention; R15 F-arm verdict: requests==limits
-    # brings the in-band spread to 3.3%). CPU/memory scale per GPU and remain
-    # overridable via worker_extra_pod_spec.mainContainer.resources. 14
-    # cores/GPU (not 16) keeps a whole 8-GPU-node pod schedulable on real
-    # fleets (127.9 allocatable cores on the H200 pool) with daemonset
-    # headroom; 64Gi/GPU matches the validated F-arm pod.
-    limits = lowered.setdefault("limits", limits)
-    requests = lowered.setdefault("requests", {})
-    if "cpu" not in limits and "cpu" not in requests:
-        limits["cpu"] = str(gpu_limit * 14)
-        requests["cpu"] = str(gpu_limit * 14)
-    if "memory" not in limits and "memory" not in requests:
-        limits["memory"] = f"{gpu_limit * 64}Gi"
-        requests["memory"] = f"{gpu_limit * 64}Gi"
     return lowered
 
 
@@ -985,13 +969,11 @@ def _merge_container_resources(
     expected_gpu_limit: int,
     efa_resource_name: str | None,
 ) -> dict[str, Any]:
-    if override is None:
-        return base
-    if not isinstance(override, dict):
+    if override is not None and not isinstance(override, dict):
         raise TypeError("worker_extra_pod_spec.mainContainer.resources must be a mapping")
 
     merged = copy.deepcopy(base)
-    for section_name, section_override in override.items():
+    for section_name, section_override in (override or {}).items():
         if section_name not in ("limits", "requests"):
             raise ValueError(f"Unsupported container resource section: {section_name}")
         if not isinstance(section_override, dict):
@@ -1015,6 +997,26 @@ def _merge_container_resources(
                     raise ValueError("worker_extra_pod_spec cannot override the Generator-resolved per-node EFA count")
                 value = str(expected_gpu_limit)
             section[name] = copy.deepcopy(value)
+    # Guaranteed QoS by default: a GPU-only pod runs BestEffort, and FPM's
+    # launch-bound band then disperses +-8-18% across boots (host launch speed
+    # is decided by neighbour contention; R15 F-arm verdict: requests==limits
+    # brings the in-band spread to 3.3%). Apply defaults and one-sided mirroring
+    # only after the user overlay is merged so a request-only override cannot
+    # accidentally leave a smaller inherited limit. Explicit two-sided values
+    # remain available when Burstable QoS is intentional.
+    limits = merged.setdefault("limits", {})
+    requests = merged.setdefault("requests", {})
+    defaults = {"cpu": str(expected_gpu_limit * 14), "memory": f"{expected_gpu_limit * 64}Gi"}
+    for resource_name, default in defaults.items():
+        limit = limits.get(resource_name)
+        request = requests.get(resource_name)
+        if limit is None and request is None:
+            limits[resource_name] = default
+            requests[resource_name] = default
+        elif limit is None:
+            limits[resource_name] = copy.deepcopy(request)
+        elif request is None:
+            requests[resource_name] = copy.deepcopy(limit)
     return merged
 
 
