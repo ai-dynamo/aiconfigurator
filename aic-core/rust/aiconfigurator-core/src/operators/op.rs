@@ -215,6 +215,66 @@ impl FallbackOp {
 }
 
 impl Op {
+    /// Constant per-op weight bytes (PR-6): the engine-side replacement for
+    /// Python's `Operation.get_weights` math. Structural, not data-driven —
+    /// computed from op fields alone, never from perf tables. Ops with no
+    /// resident weights (attention/MLA kernels — their weights live on the
+    /// adjacent GEMMs — comm ops, dispatch, elementwise, MSA, the mamba
+    /// KERNEL ops) are 0.0, exactly like their Python `_weights = 0.0`.
+    /// `FpmForward` carries its snapshot verbatim (Python returns
+    /// `_weight_bytes` WITHOUT the scale_factor multiply); every non-zero
+    /// family multiplies its own scale_factor inside its `weight_bytes`.
+    pub fn weight_bytes(&self) -> f64 {
+        match self {
+            Op::Gemm(o) => o.weights_bytes(),
+            Op::Embedding(o) => o.weights_bytes(),
+            Op::Moe(o) => o.weight_bytes(),
+            Op::EpMoe(o) => o.weight_bytes(),
+            Op::Dsv4MegaMoe(o) => o.weight_bytes(),
+            Op::Mhc(o) => o.weight_bytes(),
+            Op::DsaContext(o) | Op::DsaGeneration(o) => o.weight_bytes(),
+            Op::Dsv4Context(o) | Op::Dsv4Generation(o) => o.weight_bytes(),
+            Op::FpmForward(o) => o.weight_bytes,
+            // Python FallbackOp.get_weights: primary wins when positive,
+            // else the granular fallback chain sums.
+            Op::Fallback(o) => {
+                let primary = o.primary.weight_bytes();
+                if primary > 0.0 {
+                    primary
+                } else {
+                    o.fallback.iter().map(Op::weight_bytes).sum()
+                }
+            }
+            // Python OverlapOp.get_weights: both groups sum (unlike latency's max).
+            Op::Overlap(o) => {
+                o.group_a.iter().map(Op::weight_bytes).sum::<f64>()
+                    + o.group_b.iter().map(Op::weight_bytes).sum::<f64>()
+            }
+            Op::Elementwise(_)
+            | Op::ContextAttention(_)
+            | Op::GenerationAttention(_)
+            | Op::EncoderAttention(_)
+            | Op::ContextMla(_)
+            | Op::GenerationMla(_)
+            | Op::MlaModuleContext(_)
+            | Op::MlaModuleGeneration(_)
+            | Op::MlaBmm(_)
+            | Op::MoeDispatch(_)
+            | Op::CustomAllReduce(_)
+            | Op::Nccl(_)
+            | Op::P2P(_)
+            | Op::Vision(_)
+            | Op::MsaContext(_)
+            | Op::MsaGeneration(_)
+            | Op::Mamba2(_)
+            | Op::Gdn(_)
+            | Op::Kda(_)
+            | Op::WideEpContextMla(_)
+            | Op::WideEpGenerationMla(_)
+            | Op::MoeAllToAll(_) => 0.0,
+        }
+    }
+
     /// Stable op name (Python `op._name`). Used by session code to filter
     /// (e.g. context-attention exclusion in mix-step composition) and for
     /// debugging.
@@ -255,6 +315,66 @@ impl Op {
             Op::FpmForward(o) => &o.name,
             Op::EpMoe(o) => &o.name,
             Op::Kda(o) => &o.name,
+        }
+    }
+
+    /// Rename the op (Python's post-construction `op._name = ...` rewiring:
+    /// hybrid layer-type prefixes rename block ops after the shared builder
+    /// returns them). Every variant carries `name`.
+    pub fn set_name(&mut self, name: String) {
+        match self {
+            Op::Gemm(o) => o.name = name,
+            Op::Embedding(o) => o.name = name,
+            Op::Elementwise(o) => o.name = name,
+            Op::ContextAttention(o) => o.name = name,
+            Op::GenerationAttention(o) => o.name = name,
+            Op::EncoderAttention(o) => o.name = name,
+            Op::ContextMla(o) => o.name = name,
+            Op::GenerationMla(o) => o.name = name,
+            Op::MlaModuleContext(o) => o.name = name,
+            Op::MlaModuleGeneration(o) => o.name = name,
+            Op::MlaBmm(o) => o.name = name,
+            Op::Moe(o) => o.name = name,
+            Op::MoeDispatch(o) => o.name = name,
+            Op::CustomAllReduce(o) => o.name = name,
+            Op::Nccl(o) => o.name = name,
+            Op::P2P(o) => o.name = name,
+            Op::Vision(o) => o.name = name,
+            Op::DsaContext(o) => o.name = name,
+            Op::DsaGeneration(o) => o.name = name,
+            Op::MsaContext(o) => o.name = name,
+            Op::MsaGeneration(o) => o.name = name,
+            Op::Dsv4Context(o) => o.name = name,
+            Op::Dsv4Generation(o) => o.name = name,
+            Op::Mhc(o) => o.name = name,
+            Op::Mamba2(o) => o.name = name,
+            Op::Gdn(o) => o.name = name,
+            Op::WideEpContextMla(o) => o.name = name,
+            Op::WideEpGenerationMla(o) => o.name = name,
+            Op::FpmForward(o) => o.name = name,
+            Op::Overlap(o) => o.name = name,
+            Op::Fallback(o) => o.name = name,
+            Op::Dsv4MegaMoe(o) => o.name = name,
+            Op::Kda(o) => o.name = name,
+            Op::MoeAllToAll(o) => o.name = name,
+            Op::EpMoe(o) => o.name = name,
+        }
+    }
+
+    /// CP sequence-shard factor for the token-major families that carry one;
+    /// 1 for every other variant (their constructors' CP audit gate refuses
+    /// `seq_split > 1`, so 1 is exact, not a guess). Backs the Python-side
+    /// `Operation._seq_split` default read.
+    pub fn seq_split(&self) -> u32 {
+        match self {
+            Op::Gemm(o) => o.seq_split,
+            Op::Embedding(o) => o.seq_split,
+            Op::Elementwise(o) => o.seq_split,
+            Op::CustomAllReduce(o) => o.seq_split,
+            Op::Nccl(o) => o.seq_split,
+            Op::P2P(o) => o.seq_split,
+            Op::Mhc(o) => o.seq_split,
+            _ => 1,
         }
     }
 

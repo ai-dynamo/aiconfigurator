@@ -52,6 +52,16 @@ pub struct ModeledEpMoeOp {
 }
 
 impl ModeledEpMoeOp {
+    pub fn weight_bytes(&self) -> f64 {
+        let num_gemms = if self.is_gated { 3_u64 } else { 2_u64 };
+        let local_experts = u64::from(self.num_experts / self.moe_ep_size.max(1));
+        let bytes = u64::from(self.hidden_size)
+            * u64::from(self.inter_size)
+            * local_experts
+            * num_gemms;
+        bytes as f64 * self.quant_mode.mapping().memory * self.scale_factor
+    }
+
     pub fn modeled_coordinates(&self, num_tokens: u32) -> Result<(u32, u32), AicError> {
         if !matches!(self.inference_phase.as_str(), "context" | "generation") {
             return Err(AicError::InvalidEngineConfig(format!(
@@ -143,6 +153,14 @@ mod tests {
             op().modeled_coordinates(17).unwrap(),
             plain.modeled_coordinates(17).unwrap()
         );
+    }
+
+    #[test]
+    fn weights_count_only_local_experts() {
+        let mut modeled = op();
+        modeled.scale_factor = 2.0;
+        let expected = 7168.0 * 2048.0 * 16.0 * 3.0 * modeled.quant_mode.mapping().memory * 2.0;
+        assert_eq!(modeled.weight_bytes(), expected);
     }
 
     #[test]

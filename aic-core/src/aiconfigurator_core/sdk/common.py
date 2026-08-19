@@ -1138,6 +1138,9 @@ class PerfDataFilename(Enum):
     wideep_moe_compute = "wideep_moe_perf.parquet"
     # Large-EP MoE communication (SGLang / vLLM / TRT-LLM)
     moe_a2a = "moe_a2a_perf.parquet"
+    # Retained only for the legacy engine table-view adapter; active large-EP
+    # compute is modeled from the stock ``moe`` table.
+    moe_expert_compute = "moe_expert_compute_perf.parquet"
     # TensorRT-LLM AlltoAll (covers WideEP NVLinkTwoSided + CutlassFusedMoE NVLinkOneSided)
     trtllm_alltoall = "trtllm_alltoall_perf.parquet"
     compute_scale = "computescale_perf.parquet"
@@ -1163,8 +1166,9 @@ class PerfDataFilename(Enum):
     dsv4_hca_context_module = "dsv4_hca_context_module_perf.parquet"
     dsv4_csa_generation_module = "dsv4_csa_generation_module_perf.parquet"
     dsv4_hca_generation_module = "dsv4_hca_generation_module_perf.parquet"
-    # DeepSeek-V4 sparse-op family — all share one column schema and load
-    # through ``operations.dsv4.load_dsv4_sparse_op_data``:
+    # DeepSeek-V4 sparse-op family — all share one column schema, served by
+    # the engine table view (``_dsv4_sparse_kernel_data.*`` /
+    # ``_dsv4_csa_topk_calib_data``):
     #   csa_attn / hca_attn / paged_mqa_logits : FMLA & indexer kernel latency,
     #     keyed ``num_heads -> tp -> past_kv -> isl -> bs`` (kernel-level Δ data,
     #     queried by ``_lookup_sparse_kernel``).

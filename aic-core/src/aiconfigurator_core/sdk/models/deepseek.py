@@ -701,6 +701,7 @@ class DeepSeekModel(BaseModel):
                         True,
                         quant_mode=moe_quant_mode,
                         attn_cp_size=cp,
+                        backend=self._backend_name,
                     )
                 ]
             )
@@ -739,6 +740,7 @@ class DeepSeekModel(BaseModel):
                         False,
                         quant_mode=moe_quant_mode,
                         attn_cp_size=cp,
+                        backend=self._backend_name,
                     )
                 ]
             )
@@ -935,6 +937,7 @@ class DeepSeekModel(BaseModel):
                     quant_mode=moe_quant_mode,
                     attn_cp_size=cp,
                     is_context=False,
+                    backend=self._backend_name,
                 ),
                 ops.MoE(
                     "generation_moe",
@@ -962,6 +965,7 @@ class DeepSeekModel(BaseModel):
                     quant_mode=moe_quant_mode,
                     attn_cp_size=cp,
                     is_context=False,
+                    backend=self._backend_name,
                 ),
             ]
 

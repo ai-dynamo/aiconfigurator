@@ -327,28 +327,28 @@
     "glm52-b200-sglang-0514-isl1024-osl2": {
       "agg": {
         "values": {
-          "agg_request": 194.3770274667802,
-          "agg_tpot": 65.89051778534922,
-          "agg_ttft": 128.48650968143096
+          "agg_request": 192.29190178318646,
+          "agg_tpot": 65.18369551972422,
+          "agg_ttft": 127.10820626346224
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 133.37,
-          "disagg_tpot": 8.252,
-          "disagg_ttft": 125.118
+          "disagg_request": 131.946,
+          "disagg_tpot": 8.363,
+          "disagg_ttft": 123.583
         }
       },
       "mixed": {
         "values": {
-          "mixed_step": 65.90014960181429
+          "mixed_step": 65.24439354712678
         }
       },
       "static": {
         "values": {
-          "static_ctx": 63.191,
-          "static_gen": 6.424,
-          "static_total": 69.61500000000001
+          "static_ctx": 62.416,
+          "static_gen": 6.544,
+          "static_total": 68.96
         }
       }
     },
@@ -2355,6 +2355,24 @@
       "OMP_NUM_THREADS": "1",
       "OPENBLAS_NUM_THREADS": "1",
       "RAYON_NUM_THREADS": "1"
+    }
+  },
+  "post_freeze_pins": {
+    "glm52-b200-sglang-0514-isl1024-osl2::agg": {
+      "engine": "rust",
+      "git_head": "1c5d7b282a8c9187ad507927683dd0bf0fbd249f"
+    },
+    "glm52-b200-sglang-0514-isl1024-osl2::disagg": {
+      "engine": "rust",
+      "git_head": "1c5d7b282a8c9187ad507927683dd0bf0fbd249f"
+    },
+    "glm52-b200-sglang-0514-isl1024-osl2::mixed": {
+      "engine": "rust",
+      "git_head": "1c5d7b282a8c9187ad507927683dd0bf0fbd249f"
+    },
+    "glm52-b200-sglang-0514-isl1024-osl2::static": {
+      "engine": "rust",
+      "git_head": "1c5d7b282a8c9187ad507927683dd0bf0fbd249f"
     }
   }
 }

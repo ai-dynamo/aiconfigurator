@@ -284,22 +284,23 @@ def _normalize_tuning_iterations(iterations: dict[str, Any] | list[Any]) -> list
     return iterations
 
 
-_PYTHON_BACKEND_DEPRECATION_WARNED = False
+def validate_engine_step_backend(value: Any) -> str | None:
+    """Normalize + validate an ``engine_step_backend`` request.
 
-
-def _warn_python_backend_deprecated(requested: str) -> None:
-    """Warn once per process that ``engine_step_backend="python"`` is a no-op."""
-    global _PYTHON_BACKEND_DEPRECATION_WARNED
-    with _PYTHON_STEP_FALLBACK_LOCK:
-        first = not _PYTHON_BACKEND_DEPRECATION_WARNED
-        _PYTHON_BACKEND_DEPRECATION_WARNED = True
-    if first:
-        logger.warning(
-            "engine_step_backend=%r is deprecated and now a no-op: the Python engine-step "
-            "path was removed and the compiled Rust engine is the only step executor. "
-            "The value is accepted for one release cycle, then dropped.",
-            requested,
+    Returns the lowered token (``"rust"``) or ``None`` when nothing was
+    requested; any other value raises. Shared by the step routing gate AND
+    the task/config entry points (``Task.__post_init__``) so a programmatic
+    caller cannot smuggle the retired ``"python"`` token (or any typo) into
+    a path — like the AFD session — that never reaches the routing gate.
+    """
+    requested = None if value is None else str(value).lower()
+    if requested is not None and requested != "rust":
+        raise ValueError(
+            f"unknown engine_step_backend {requested!r}: the compiled Rust engine is the only "
+            "engine-step executor ('rust' is the only accepted value; the deprecated 'python' "
+            "no-op was removed after its one-release window)."
         )
+    return requested
 
 
 def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = None) -> bool:
@@ -309,38 +310,19 @@ def should_use_rust_engine_step(runtime_config: RuntimeConfig, database: Any = N
     when ``"rust"`` is explicitly requested), a non-``PerfDatabase`` object —
     the compiled engine re-loads perf data from disk by identity, which a
     synthetic database does not have. Callers own what ``False`` means: the
-    AFD orchestration keeps its per-call ``op.query()`` loop, while the
+    AFD orchestration keeps its per-call twin-op loop, while the
     engine-step surfaces in ``base_backend`` raise (there is no Python step
     left to delegate to).
 
-    ``engine_step_backend="python"`` (config or env) is a deprecated no-op:
-    it warns once and then behaves exactly as if the value were UNSET —
-    including the non-``PerfDatabase`` delegation below (an early ``return
-    True`` here would silently upgrade the retired escape hatch into an
-    explicit-rust request and bypass the synthetic-database delegation).
-    Retained one release cycle. Any other unknown value raises — silently
-    computing on an engine the caller did not ask for would be worse than
-    failing.
+    ``"rust"`` is the only accepted value. The deprecated ``"python"``
+    no-op completed its one-release cycle and was dropped with the
+    deprecation-cleanup PR; any other value raises — silently computing on
+    an engine the caller did not ask for would be worse than failing.
     """
-    backend = getattr(runtime_config, "engine_step_backend", None) or os.environ.get(ENGINE_STEP_BACKEND_ENV)
-    requested = str(backend).lower() if backend else None
-    if requested == "python":
-        _warn_python_backend_deprecated(requested)
-        # The no-op contract: ignore the retired value entirely and
-        # re-resolve the remaining signal (a config-level "python" no longer
-        # shadows the env), then proceed as if it were never set.
-        env_value = os.environ.get(ENGINE_STEP_BACKEND_ENV)
-        requested = str(env_value).lower() if env_value else None
-        if requested == "python":
-            requested = None
-    if requested is not None and requested != "rust":
-        # `requested`, not `backend`: after the deprecated-"python" re-resolve
-        # above, the value being rejected may come from the environment while
-        # `backend` still holds the config's retired "python".
-        raise ValueError(
-            f"unknown engine_step_backend {requested!r}: the compiled Rust engine is the only "
-            "engine-step executor ('rust' is the only live value; 'python' is a deprecated no-op)."
-        )
+    backend = getattr(runtime_config, "engine_step_backend", None)
+    if backend is None:
+        backend = os.environ.get(ENGINE_STEP_BACKEND_ENV)
+    requested = validate_engine_step_backend(backend)
     if requested is None:
         # Deferred import: perf_database is heavy and this module must stay
         # light to import (engine.py imports it at top level).
@@ -984,13 +966,14 @@ def _engine_config_json(model: Any, database: Any) -> str:
                         "moe_comm_backend": getattr(model_config, "moe_comm_backend", None),
                         "num_gpus_per_node": getattr(model_config, "num_gpus_per_node", None),
                     },
-                    # Data-resolution policy. `build_engine_spec_json` bakes the
-                    # database's policy-dependent `perf_db_sources` into the
-                    # compiled handle, so two views of the same on-disk identity
-                    # that differ only in shared-layer or strict-provenance
-                    # policy must not share a cached handle — a warmed
-                    # primary-only handle would otherwise answer (or fail) for
-                    # the reuse-carrying view depending on call order.
+                    # Data-resolution policy. `build_engine_spec_json` bakes
+                    # these flags into the compiled handle and the engine
+                    # resolves per-op sources from them (schema v13), so two
+                    # views of the same on-disk identity that differ only in
+                    # shared-layer or strict-provenance policy must not share
+                    # a cached handle — a warmed primary-only handle would
+                    # otherwise answer (or fail) for the reuse-carrying view
+                    # depending on call order.
                     "database_policy": {
                         "enable_shared_layer": bool(getattr(database, "enable_shared_layer", False)),
                         "strict_provenance": bool(getattr(database, "strict_provenance", False)),

@@ -91,11 +91,9 @@ def test_verify_kda_spec_serialization_keeps_phase_and_draft_tokens(database):
     draft_tokens."""
     import json
 
-    from aiconfigurator_core.sdk.engine import _PROBE_MODEL_STUB, build_ops_json
+    from aiconfigurator_core.sdk.engine import build_ops_json
 
-    spec = json.loads(
-        build_ops_json([_verify_kda()], model=_PROBE_MODEL_STUB, backend=database.backend, database=database)
-    )[0]
+    spec = json.loads(build_ops_json([_verify_kda()]))[0]
     (_, payload) = next(iter(spec.items()))
     assert payload["phase"] == "verify"
     assert payload["draft_tokens"] == 3

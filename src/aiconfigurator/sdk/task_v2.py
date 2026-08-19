@@ -56,6 +56,7 @@ from aiconfigurator.sdk.perf_database import (
     is_hopper_system,
     load_system_spec,
 )
+from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import (
     SpeculativeDecodingProfile,
     normalize_speculative_decoding,
@@ -816,6 +817,9 @@ class Task:
     # =====================================================================
 
     def __post_init__(self) -> None:
+        # Canonicalize at construction so downstream config and routing see
+        # exactly one spelling for the only supported engine-step backend.
+        self.engine_step_backend = validate_engine_step_backend(self.engine_step_backend)
         # Deprecation surface first, on the raw constructor values (both the
         # Task(...) and from_yaml paths land here): a truthy legacy flag or an
         # explicit user moe_backend="deepep_moe" warns once per key per

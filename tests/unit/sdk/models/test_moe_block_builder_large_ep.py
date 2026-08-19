@@ -72,10 +72,10 @@ def test_modeled_coordinates_use_balanced_ep_local_token_semantics():
 
 
 def test_modeled_op_serializes_as_estimated_ep_moe():
-    from aiconfigurator_core.sdk.engine import _to_opspec
+    import json
 
     modeled = next(op for op in _build() if isinstance(op, ops.ModeledEPMoE))
-    payload = _to_opspec(modeled, backend="vllm", architecture="DEEPSEEK", database=None)
+    payload = json.loads(modeled._spec_json())
 
     assert payload["EpMoe"]["scale_factor"] == 61
     assert payload["EpMoe"]["attention_dp_size"] == 8

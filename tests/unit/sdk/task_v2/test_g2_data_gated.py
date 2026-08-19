@@ -30,7 +30,6 @@ registered into the package to make this pass.
 from __future__ import annotations
 
 import json
-import math
 import os
 
 import pyarrow as pa
@@ -263,7 +262,7 @@ def _built_model(t: Task, model_path: str, backend: str, parallel):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_candidate_graph_builds_and_large_ep_ops_query_finitely(synth_systems, synth_model_path, backend):
+def test_candidate_graph_builds_and_large_ep_ops_serialize(synth_systems, synth_model_path, backend):
     t = _synth_task(synth_model_path, backend)
     model = _built_model(t, synth_model_path, backend, (1, 1, 8, 1, 8, 1))
 
@@ -278,13 +277,12 @@ def test_candidate_graph_builds_and_large_ep_ops_query_finitely(synth_systems, s
     ]
     assert sorted(type(op).__name__ for op in large_ops) == ["MoEAllToAll"] * 4 + ["ModeledEPMoE"] * 2
 
-    # Communication queries the synthetic A2A table. Compute exposes the
+    # Engine-backed communication ops serialize natively. Compute exposes the
     # explicit reusable-stock mapping without requiring a fake compute table.
-    database = get_database(SYNTH_SYSTEM, backend, SYNTH_VERSION)
     for op in large_ops:
         if isinstance(op, MoEAllToAll):
-            latency = float(op.query(database, x=128))
-            assert math.isfinite(latency) and latency > 0.0, op._name
+            payload = json.loads(op._spec_json())["MoeAllToAll"]
+            assert payload["comm_backend"] in {"deepep_ht", "deepep_ll"}
         else:
             assert op.modeled_coordinates(128)["workload_distribution"] == "balanced"
 

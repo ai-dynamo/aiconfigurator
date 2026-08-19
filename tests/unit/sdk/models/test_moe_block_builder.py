@@ -50,15 +50,16 @@ def _shared_slice(op_list):
 def _assert_ops_equivalent(built, legacy):
     """Same op classes in order, same names, same constructor-derived state.
 
-    ``__dict__`` equality covers name, scale_factor, seq_split and every
-    constructor-relevant attribute (hidden/topk/num_experts/moe_tp/moe_ep/
-    quant/distribution/adp/attn_cp_size/...), so any kwarg the legacy site
-    passed and the builder dropped (or vice versa) fails here.
+    The engine wire form (``_spec_json``) carries every constructor-derived
+    field (hidden/topk/num_experts/moe_tp/moe_ep/quant/distribution/adp/
+    attn_cp_size/seq_split/...), so any kwarg the legacy site passed and the
+    builder dropped (or vice versa) fails here. Classes compare by NAME:
+    composite getters re-wrap children as the Rust base classes.
     """
     assert [op._name for op in built] == [op._name for op in legacy]
     for got, want in zip(built, legacy, strict=True):
-        assert type(got) is type(want), got._name
-        assert got.__dict__ == want.__dict__, got._name
+        assert type(got).__name__ == type(want).__name__, got._name
+        assert got._spec_json() == want._spec_json(), got._name
 
 
 def _shape_for(model_path):

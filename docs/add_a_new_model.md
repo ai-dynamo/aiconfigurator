@@ -25,11 +25,9 @@ Evaluation flows through the engine surfaces in
 converts to a wire `OpSpec` (`_to_opspec`), and per-op values come back from
 `EngineHandle.evaluate_ops_json` / `evaluate_ops_sol_json` (op-list FFI) or
 the compiled per-phase/whole-run entry points (`run_static`,
-`InferenceSession`). The legacy per-call surface
-(`Operation.query()` / `PerfDatabase.query_*`) still exists for one release
-as a DEPRECATION SHIM routed through the same engine
-(`sdk/engine.py::_evaluate_single_op`) — do not build new code on it, and do
-not extend it to new ops.
+`InferenceSession`). (The legacy per-call surface
+(`Operation.query()` / `PerfDatabase.query_*`) was removed after its
+one-release deprecation window — there is no per-call Python query API.)
 
 ### 3. Collect Data for the Operation
 

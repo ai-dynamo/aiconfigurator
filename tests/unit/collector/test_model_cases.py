@@ -425,10 +425,13 @@ def test_sglang_registry_marks_unvalidated_dsa_and_moe_platforms_explicitly():
     sm100 = build_collection_case_plan(backend="sglang", full=True, sm_version=100)
     entries = {entry.op: entry for entry in REGISTRY}
 
+    # SM90 unparked by the h100/h200 probe collections (2026-08-14..15,
+    # pipelines 62700025 + 62872230): 67,532 context + 4,896 generation
+    # skip rows, fa3/flashmla buckets clean.
     for op in ("dsa_context_module_skip_indexer", "dsa_generation_module_skip_indexer"):
         assert op in sm90.selected_ops
         assert op in sm100.selected_ops
-        assert entries[op].unverified_sms == (90, 120)
+        assert entries[op].unverified_sms == (120,)
 
     # SM103 unparked by the B300 hardware probe (2026-07-13, pipeline
     # 57716023): sampled dsa cases ran clean across all three kernel buckets.

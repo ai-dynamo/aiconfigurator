@@ -15,13 +15,12 @@ and whitelists).
 1. **A class** (subclass of `Operation`) — the typed parameter bag model
    builders construct (`GEMM(name, scale, n, k, quant_mode)`), plus
    `get_weights()` (the memory model) and `supported_quant_modes()`.
-2. **A loader** (`load_<name>_data`) that parses parquet into a nested-dict
-   perf table, plus the class-level cache and `load_data` classmethod. The
-   loaded tables are the RAW collected data plane — consumed by
-   enumeration (notebook charts, `create_charts`), the support matrix, and
-   tests. No load-time SOL clamp or grid pre-expansion: the engine clamps
-   and interpolates its own load.
-3. **Optionally, a shim shape** for the deprecation window (see below).
+2. **A view binding** — the class-level cache and `load_data` classmethod
+   that bind the ENGINE's table view (`fetch_table_view`) to the
+   `PerfDatabase._<family>_data` attributes. The bound tables are the RAW
+   collected data plane — consumed by enumeration (notebook charts,
+   `create_charts`), the support matrix, and tests. No Python parsing: the
+   engine folds the parquet itself (and clamps/interpolates its own load).
 
 Performance evaluation happens through the engine surfaces:
 
@@ -32,10 +31,11 @@ Performance evaluation happens through the engine surfaces:
 - **per-phase**: `run_static_per_op` and friends;
 - **whole runs**: `run_static` / `InferenceSession`.
 
-`PerfDatabase.query_*` and `Operation.query()` still exist as one-release
-DEPRECATION SHIMS routed through `sdk/engine.py::_evaluate_single_op` —
-this surface is FROZEN (new ops do not add to it) and is removed by the
-deprecation-cleanup PR.
+(The deprecated `PerfDatabase.query_*` / `Operation.query()` shims were
+removed after their one-release window. `sdk/engine.py::_evaluate_single_op`
+remains as the INTERNAL single-op plumbing behind the Python-side
+orchestration surfaces — the AFD comm ops and the `_sum_latency` fallback
+loop — not a public per-call query API.)
 
 ## Adding a new op — the single-oracle flow
 
@@ -65,15 +65,14 @@ deprecation-cleanup PR.
    `aic-core/rust/aiconfigurator-core/parity_tests/pin_goldens.py`
    (append-only) once a config class reaches the op; golden diffs carry the
    review for any later modeling change.
-5. **Deprecation-window shims are NOT extended**: do not add a
-   `PerfDatabase.query_*` method or expect `Operation.query()` to serve a
-   new op. If the new op must be reachable through the *existing* window
-   surface (rare), give the class an `_ENGINE_QUERY_SHAPE`
-   (`"tokens"` / `"context"` / `"generation"` / `"module"`), and an
-   override-aware `_engine_query_plan` only when legacy kwargs need
-   mapping. `query()` bodies are limited to the orchestration whitelist
-   (the AFD comm ops, the deprecated `Mamba2` composite) — bodies that
-   compose ENGINE-evaluated twin ops, never math.
+5. **No per-call query surface**: do not add a `PerfDatabase.query_*`
+   method or a public `Operation.query()` — that window closed. If the op
+   must be reachable through the internal `_engine_query` kwarg mapping
+   (the orchestration/fallback plumbing), give the class an
+   `_ENGINE_QUERY_SHAPE` (`"tokens"` / `"context"` / `"generation"` /
+   `"module"`). `query()` bodies are limited to the orchestration
+   whitelist (the AFD comm ops) — bodies that compose ENGINE-evaluated
+   twin ops, never math.
 6. **Data collection** is unchanged: define the collector op, register the
    family in `collector/op_backend_catalog.yaml`, and ship parquet under
    `systems/data/<system>/<family>/<backend>/<version>/` (Rust reads
@@ -95,7 +94,7 @@ Use `if "_my_op_data" not in database.__dict__:` rather than
 sometimes pre-set the attribute to inject custom data; `hasattr`
 would silently overwrite the override. (Note: injected synthetic tables
 are visible to ENUMERATION consumers only — the engine loads its own
-tables from disk, and the deprecated query shims raise `TypeError` for
+tables from disk, and the probe plumbing raises `TypeError` for
 non-`PerfDatabase` databases for exactly that reason.)
 
 ### Cache atomicity for ops with multiple slots
@@ -129,4 +128,6 @@ that is not a known backend dir).
 | `sdk/perf_interp/` | `perf_database/*.rs` + `operators/util_empirical.rs` |
 | `util_empirical` estimation math | `operators/util_empirical.rs` (the provenance pipeline and `quant_profile` remain here) |
 | load-time SOL clamps | the engine's own load (`perf_database/gemm.rs` etc.) |
-| per-call facade math | engine-routed shims (window-only) over `_evaluate_single_op` |
+| per-call facade math + the one-release shims | removed; `EngineHandle.evaluate_ops_json` / `evaluate_ops_sol_json` |
+| `load_*_data` parquet parsers | `perf_database/table_view.rs` (the engine table view) |
+| shared-layer source resolution (`_build_op_sources`) | `perf_database/source_resolution.rs` |

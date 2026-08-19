@@ -4,7 +4,8 @@
 """Generate the Python oracle for the Rust large-EP MoE OPERATORS.
 
 Unlike ``gen_moe_a2a_oracle.py`` / ``gen_moe_expert_compute_oracle.py`` — which sample the
-raw ``PerfDatabase.query_moe_a2a`` / ``query_moe_expert_compute`` table
+raw table walks of the retired ``PerfDatabase.query_moe_a2a`` /
+``query_moe_expert_compute`` shims (now recomputed via the single-op plumbing)
 lookups — this generator drives
 the PYTHON OP OBJECTS (``MoEAllToAll(...).query(db, x=...)`` and
 ``MoEExpertCompute(...).query(db, x=...)``). What is under test is therefore the op
@@ -196,7 +197,7 @@ def build_a2a_samples(db, system, backend, version, data_root):
                 sms=sms,
                 attention_tp_size=attention_tp_size,
             )
-            result = op.query(db, x=x)
+            result = op._engine_query(db, x=x)
             samples.append(
                 {
                     "op": "moe_a2a",
@@ -366,7 +367,7 @@ def build_ep_samples(db, system, backend, version, data_root):
                 is_gated=True,
                 enable_eplb=overrides["enable_eplb"],
             )
-            result = op.query(db, x=x)
+            result = op._engine_query(db, x=x)
             samples.append(
                 {
                     "op": "moe_expert_compute",

@@ -63,7 +63,9 @@ def _op(op_list, name):
 
 
 def _dispatches(op_list):
-    return [op for op in op_list if isinstance(op, ops.MoEDispatch)]
+    # Composite getters (``overlap._group_a``) re-wrap children as the Rust
+    # base classes, so match by class name instead of the Python shell type.
+    return [op for op in op_list if type(op).__name__ == "MoEDispatch"]
 
 
 class TestHybridMoEBlocksViaBuilder:

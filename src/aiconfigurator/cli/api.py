@@ -34,6 +34,7 @@ from aiconfigurator.sdk.models import (
     resolve_dsv4_moe_arch,
     resolve_nvfp4_for_system,
 )
+from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import (
     SpeculativeDecodingProfile,
 )
@@ -252,7 +253,7 @@ def cli_default(
         generator_config: Path to a unified generator YAML config file.
         generator_dynamo_version: Override Dynamo version used by the generator.
         engine_step_backend: Engine-step backend; "rust" (the compiled engine,
-            default and only executor) or the deprecated no-op "python".
+            default and only executor) is the only accepted value.
         forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None keeps the default.
 
     Returns:
@@ -476,7 +477,7 @@ def cli_recommend(
         top_n: Number of top configurations to return per mode. Default is 5.
         save_dir: Directory to save results. If None, results are not saved.
         engine_step_backend: Engine-step backend; "rust" (the compiled engine,
-            default and only executor) or the deprecated no-op "python".
+            default and only executor) is the only accepted value.
         forward_model: Forward-pass modeling mode ("op_level" or "fpm").
             None keeps the default.
 
@@ -1091,7 +1092,7 @@ def cli_estimate(
             Controls how many KV blocks TRT-LLM pre-allocates per sequence. Defaults
             to ``isl + osl`` when ``None``.
         engine_step_backend: Engine-step backend; "rust" (the compiled engine,
-            default and only executor) or the deprecated no-op "python".
+            default and only executor) is the only accepted value.
         prefix: (common) Prefix cache length (subset of ``isl`` already cached).
             Applied to agg, disagg, and all static modes. Default 0.
         nextn: (common) MTP draft length, or ``"auto"`` to use the checkpoint's
@@ -1154,6 +1155,10 @@ def cli_estimate(
         get_systems_paths,
         set_systems_paths,
     )
+
+    # Validate at the public boundary because some AFD-only paths return
+    # without constructing a Task.
+    engine_step_backend = validate_engine_step_backend(engine_step_backend)
 
     # Resolve nextn="auto" against the checkpoint before mode dispatch so every
     # estimate path (agg/disagg/static/afd) sees a plain int.

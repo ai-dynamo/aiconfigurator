@@ -630,6 +630,7 @@ class TestGemma4MixModelBuilder:
             262144,  # context_length
             model_config,
             None,  # extra_params (we use set_gemma4_config instead)
+            backend_name="trtllm",
         )
         model.set_gemma4_config(cfg)
         return model
@@ -665,6 +666,7 @@ class TestGemma4MixModelBuilder:
             262144,
             TestGemma4MixModelBuilder._make_model_config(),  # tp=1, moe_tp=1, moe_ep=1
             None,
+            backend_name="trtllm",
         )
         model.set_gemma4_config(cfg)
         return model
@@ -784,6 +786,7 @@ class TestGemma4MixModelBuilder:
             262144,
             self._make_model_config(),
             None,
+            backend_name="trtllm",
         )
         with pytest.raises(ValueError, match="requires a Gemma4MixConfig"):
             model.set_gemma4_config(common.HybridMoEConfig(attn_layer_pattern=(0, 1), moe_layer_freq=(1, 1)))
@@ -807,6 +810,7 @@ class TestGemma4MixModelBuilder:
             262144,
             self._make_model_config(),
             None,
+            backend_name="trtllm",
         )
         bad_cfg = common.Gemma4MixConfig(
             layer_types=("sliding_attention",) * 5,  # only 5, but num_layers=30
@@ -896,6 +900,7 @@ class TestGemma4MixModelBuilder:
                 262144,
                 bad_config,
                 None,
+                backend_name="trtllm",
             )
 
 
@@ -943,6 +948,7 @@ class TestHybridMoEModelBuilder:
             152576,
             262144,
             self._make_model_config(),
+            backend_name="trtllm",
         )
         model.set_hybrid_config(hybrid_cfg)
 
@@ -978,6 +984,7 @@ class TestHybridMoEModelBuilder:
             202048,
             10485760,
             self._make_model_config(),
+            backend_name="trtllm",
         )
         model.set_hybrid_config(hybrid_cfg)
 
@@ -1014,6 +1021,7 @@ class TestHybridMoEModelBuilder:
             202048,
             1048576,
             self._make_model_config(),
+            backend_name="trtllm",
         )
         model.set_hybrid_config(hybrid_cfg)
 

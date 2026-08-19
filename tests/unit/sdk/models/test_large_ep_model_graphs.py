@@ -45,6 +45,7 @@ pytestmark = pytest.mark.unit
 
 DSR1 = "deepseek-ai/DeepSeek-R1"
 DSV32 = "deepseek-ai/DeepSeek-V3.2-Exp"
+KIMIK25 = "nvidia/Kimi-K2.5-NVFP4"
 QWEN3 = "Qwen/Qwen3-235B-A22B"
 
 SGLANG_COMM = {"context": "deepep_ht", "generation": "deepep_ll"}
@@ -93,9 +94,9 @@ def _deepseek_sglang(tp_size=1, attention_dp_size=32, **extra):
     )
 
 
-def _deepseek_trtllm(**extra):
+def _deepseek_trtllm(model_path=DSR1, **extra):
     return _build(
-        DSR1,
+        model_path,
         "trtllm",
         tp_size=1,
         moe_tp_size=1,
@@ -256,7 +257,6 @@ class TestDeepSeekSglangLargeEP:
         model = _deepseek_sglang(enable_eplb=True)
         assert not hasattr(model.context_ops[-2], "_enable_eplb")
         assert not hasattr(model.generation_ops[-2], "_enable_eplb")
-        assert model.generation_ops[-2]._inference_phase == "generation"
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +335,21 @@ class TestDeepSeekTrtllmLargeEP:
             "generation_shared_act_gate",
             "generation_shared_ffn2_gemm",
         ]
+
+    @pytest.mark.parametrize(
+        ("model_path", "q_width", "kv_width", "o_width"),
+        [
+            (DSR1, 128 * 192, 128 * 256, 128 * 128),
+            (KIMIK25, 64 * 192, 64 * 256, 64 * 128),
+        ],
+    )
+    def test_mla_projection_widths_follow_checkpoint_head_count(self, model_path, q_width, kv_width, o_width):
+        model = _deepseek_trtllm(model_path=model_path)
+        assert _op(model.context_ops, "context_q_b_proj_gemm")._n == q_width
+        assert _op(model.context_ops, "context_kv_b_proj_gemm")._n == kv_width
+        assert _op(model.context_ops, "context_proj_gemm")._k == o_width
+        assert _op(model.generation_ops, "generation_q_b_proj_gemm")._n == q_width
+        assert _op(model.generation_ops, "generation_proj_gemm")._k == o_width
 
     def test_legacy_pdl_factor_scales_the_whole_decode_stack(self):
         model = _deepseek_trtllm()
@@ -546,6 +561,32 @@ class TestDeepSeekV32LargeEP:
         for name in ("generation_add_norm_1", "generation_attention", "generation_add_norm_2"):
             assert _op(model.generation_ops, name)._scale_factor == DS_LAYERS * PDL_FACTOR, name
 
+    def test_trtllm_nvfp4_preserves_per_projection_dsa_weight_dtypes(self):
+        model = _build(
+            "nvidia/DeepSeek-V3.2-NVFP4",
+            "trtllm",
+            tp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=16,
+            attention_dp_size=16,
+            gemm_quant_mode=common.GEMMQuantMode.nvfp4,
+            moe_quant_mode=common.MoEQuantMode.nvfp4,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            moe_comm_backend=dict(TRTLLM_COMM),
+            num_gpus_per_node=GB200_GPUS_PER_NODE,
+        )
+        context = _op(model.context_ops, "context_attention")
+        generation = _op(model.generation_ops, "generation_attention")
+        # q/kv/indexer are BF16 while o_proj is NVFP4: 13.15 GiB over 61 layers.
+        assert context.get_weights() / (1 << 30) == pytest.approx(13.15, abs=0.1)
+        # Same per-layer weight physics on both phases; get_weights() folds in
+        # the phase scale (generation carries the 0.9 PDL factor), so compare
+        # scale-normalized values.
+        assert generation.get_weights() / generation._scale_factor == pytest.approx(
+            context.get_weights() / context._scale_factor
+        )
+
     def test_trtllm_validation_applies(self):
         with pytest.raises(ValueError, match="must equal"):
             _v32_trtllm(enable_eplb=False, wideep_num_slots=288)
@@ -582,7 +623,8 @@ class TestGLMSharedExpertQuantMode:
         model = self._build("trtllm", TRTLLM_COMM)
         gate_up = _op(model.context_ops, "context_shared_gate_up_gemm")
         assert gate_up._quant_mode is common.GEMMQuantMode.bfloat16
-        assert gate_up._weights == self.LEGACY_BF16_GATE_UP_WEIGHTS
+        # Engine-computed weights (PR-6): normalize out the layer scale.
+        assert gate_up.get_weights() / gate_up._scale_factor == self.LEGACY_BF16_GATE_UP_WEIGHTS
         assert _op(model.context_ops, "context_shared_ffn2_gemm")._quant_mode is common.GEMMQuantMode.bfloat16
         # The routed experts stay on the model-wide MoE mode.
         assert _op(model.context_ops, "context_moe")._quant_mode is common.MoEQuantMode.nvfp4
@@ -591,7 +633,7 @@ class TestGLMSharedExpertQuantMode:
         model = self._build("sglang", SGLANG_COMM)
         gate_up = _op(model.context_ops, "context_gate_ffn1_gemm")
         assert gate_up._quant_mode is common.GEMMQuantMode.nvfp4
-        assert gate_up._weights == self.LEGACY_NVFP4_GATE_UP_WEIGHTS
+        assert gate_up.get_weights() / gate_up._scale_factor == self.LEGACY_NVFP4_GATE_UP_WEIGHTS
 
 
 # ---------------------------------------------------------------------------
@@ -658,7 +700,25 @@ class TestMOEModelLargeEP:
         model = _moe_sglang_large_ep(enable_eplb=True)
         assert not hasattr(model.context_ops[8], "_enable_eplb")
         assert not hasattr(model.generation_ops[8], "_enable_eplb")
-        assert model.generation_ops[8]._inference_phase == "generation"
+
+    def test_trtllm_eplb_does_not_enter_the_local_compute_model(self):
+        model = _build(
+            QWEN3,
+            "trtllm",
+            tp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=8,
+            gemm_quant_mode=common.GEMMQuantMode.bfloat16,
+            moe_quant_mode=common.MoEQuantMode.bfloat16,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            enable_eplb=True,
+            moe_comm_backend=dict(TRTLLM_COMM),
+            num_gpus_per_node=GB200_GPUS_PER_NODE,
+        )
+        assert not hasattr(_op(model.context_ops, "context_moe"), "_workload_distribution")
+        assert not hasattr(_op(model.generation_ops, "generation_moe"), "_workload_distribution")
 
     def test_deepep_backend_alone_no_longer_switches_the_graph(self):
         # moe_backend=deepep_moe without moe_comm_backend is the FUSED graph
@@ -770,7 +830,7 @@ class TestFusedGraphsUnchanged:
         )
         assert _names(model.context_ops) == self.DS_CONTEXT
         assert _names(model.generation_ops) == self.DS_GENERATION
-        assert isinstance(model.context_ops[9], ops.MoE)
+        assert model.context_ops[9]._workload_distribution == "power_law_1.01"
         overlap = model.generation_ops[4]
         assert _names(overlap._group_a) == [
             "generation_router_gemm",
@@ -846,7 +906,7 @@ class TestFusedGraphsUnchanged:
             "generation_embedding_ar",
             "generation_p2p",
         ]
-        assert isinstance(model.context_ops[8], ops.MoE)
+        assert model.context_ops[8]._workload_distribution == "power_law_1.2"
 
 
 # ---------------------------------------------------------------------------
@@ -879,6 +939,61 @@ class TestAttentionOpKeys:
             "generation_attention",
         )
 
+    def test_deprecated_enable_wideep_keyword_alias_is_preserved(self):
+        with pytest.warns(DeprecationWarning, match="enable_wideep"):
+            old_keyword = attention_op_keys("DEEPSEEK", "sglang", enable_wideep=True)
+        assert old_keyword == attention_op_keys("DEEPSEEK", "sglang", is_large_ep=True)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestVllmLargeEPKeepsVocabTPCollectives:
+    """Expert parallelism does not remove vLLM's vocabulary-TP or pipeline
+    semantics: the replicated-embedding / no-collective transcription from the
+    deleted SGLangEPMOEModel is sglang-scoped, and the vLLM large-EP graph
+    keeps the sharded embedding plus all four collectives."""
+
+    def test_qwen3_vllm_graph(self):
+        model = _build(
+            QWEN3,
+            "vllm",
+            tp_size=2,
+            pp_size=2,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=4,
+            gemm_quant_mode=common.GEMMQuantMode.fp8,
+            moe_quant_mode=common.MoEQuantMode.fp8,
+            moe_comm_backend=dict(SGLANG_COMM),
+            num_gpus_per_node=H200_GPUS_PER_NODE,
+        )
+        ctx, gen = _names(model.context_ops), _names(model.generation_ops)
+        assert "context_embedding_ar" in ctx
+        assert "generation_embedding_ar" in gen
+        assert "context_p2p" in ctx
+        assert "generation_p2p" in gen
+        emb = next(op for op in model.context_ops if op._name == "context_embedding")
+        # 151936-row vocab stays TP-sharded over tp=2, not replicated.
+        assert emb._row_size == 151936 // 2
+
+    def test_sglang_contrast_stays_transcribed(self):
+        model = _build(
+            QWEN3,
+            "sglang",
+            tp_size=2,
+            pp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=8,
+            attention_dp_size=4,
+            gemm_quant_mode=common.GEMMQuantMode.fp8,
+            moe_quant_mode=common.MoEQuantMode.fp8,
+            moe_comm_backend=dict(SGLANG_COMM),
+            num_gpus_per_node=H200_GPUS_PER_NODE,
+        )
+        ctx, gen = _names(model.context_ops), _names(model.generation_ops)
+        assert "context_embedding_ar" not in ctx
+        assert "generation_embedding_ar" not in gen
+        emb = next(op for op in model.context_ops if op._name == "context_embedding")
+        assert emb._row_size == 151936  # replicated

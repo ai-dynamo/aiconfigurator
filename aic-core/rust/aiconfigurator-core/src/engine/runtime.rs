@@ -330,12 +330,20 @@ impl Engine {
         // engines would lazily re-parse the same parquet files on its first
         // query (~0.5s per engine on data-rich systems). Mode/policy, memo
         // caches, and the provenance accumulator stay per-engine.
-        let db = PerfDatabase::load_with_sources_shared(
+        let db = PerfDatabase::load_resolved_shared(
             systems_root,
             &spec.engine.system_name,
             spec.engine.backend.as_str(),
             version,
-            &spec.engine.perf_db_sources,
+            // Shared-layer inheritance: explicit override when the spec
+            // carries one (Python's `shared_layer=` kwarg), else derived
+            // from the query mode exactly like Python `_shared_layer_enabled`
+            // (SILICON/HYBRID = on).
+            spec.engine.enable_shared_layer.unwrap_or(matches!(
+                spec.engine.database_mode,
+                DatabaseMode::Silicon | DatabaseMode::Hybrid
+            )),
+            spec.engine.strict_provenance,
             // Estimate-only systems (a spec yaml with no collected data) may
             // back a SOL view: every SOL answer is analytic from the system
             // spec, so tolerate a missing perf-data directory under SOL and
@@ -1471,7 +1479,8 @@ mod tests {
                 kv_cache_dtype: None,
             },
             speculative: nextn.map(|n| crate::SpeculativeConfig { nextn: Some(n) }),
-            perf_db_sources: Default::default(),
+            enable_shared_layer: None,
+            strict_provenance: false,
             database_mode: Default::default(),
             transfer_policy: None,
             extra: BTreeMap::new(),

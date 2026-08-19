@@ -109,6 +109,19 @@ pub struct MoeExpertComputeOp {
 }
 
 impl MoeExpertComputeOp {
+    /// Python `MoEExpertCompute` weights × scale_factor: EP-only family
+    /// (no moe_tp divisor), priced by `num_experts` — NOT `num_slots` — a
+    /// parity-pinned known deviation (AIC-1674). Single float floor.
+    pub fn weight_bytes(&self) -> f64 {
+        let num_gemms = if self.is_gated { 3.0 } else { 2.0 };
+        let raw = f64::from(self.hidden_size)
+            * f64::from(self.inter_size)
+            * f64::from(self.num_experts)
+            * self.quant_mode.mapping().memory
+            * num_gemms;
+        (raw / f64::from(self.moe_ep_size)).floor() * self.scale_factor
+    }
+
     /// Query the expert compute at the PER-ATTENTION-DP-RANK token count
     /// `num_tokens` (Python `query`'s `x`).
     ///

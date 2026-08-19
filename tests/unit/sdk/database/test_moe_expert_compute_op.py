@@ -41,10 +41,10 @@ def test_modeled_coordinates_globalize_then_shard_tokens():
 
 
 def test_engine_payload_carries_modeled_stock_moe_coordinates():
-    from aiconfigurator_core.sdk.engine import _to_opspec
+    import json
 
     op = _make_op(scale_factor=2.0)
-    payload = _to_opspec(op, backend="trtllm", architecture="", database=None)
+    payload = json.loads(op._spec_json())
 
     assert payload["EpMoe"]["attention_dp_size"] == 4
     assert payload["EpMoe"]["moe_ep_size"] == 2

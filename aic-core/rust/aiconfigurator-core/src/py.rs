@@ -650,6 +650,25 @@ impl AicEngine {
         })
         .map_err(aic_to_py)
     }
+
+    /// Engine-side table view (PR-6): the raw collected data plane for one
+    /// retired Python loader, in that loader's exact nested-dict shape.
+    ///
+    /// ``attribute`` is the PerfDatabase attribute the loader used to fill
+    /// (``"_gemm_data"``, ...; the DSV4 sparse sub-tables address as
+    /// ``"_dsv4_sparse_kernel_data.<sub>"``). Returns ``None`` exactly when
+    /// the Python loader returned ``None`` (every source file missing);
+    /// otherwise an insertion-ordered JSON object whose string keys the
+    /// Python side rehydrates into enum/int/tuple keys per family. Views are
+    /// folded fresh from the parquet sources on every call — they are the
+    /// diagnostic/enumeration surface, not the query path, and deliberately
+    /// bypass the query grids' load-time normalizations (SOL clamping etc.).
+    fn table_view_json(&self, py: Python<'_>, attribute: &str) -> PyResult<Option<String>> {
+        py.allow_threads(|| {
+            crate::perf_database::table_view::table_view_json(self.inner.database(), attribute)
+        })
+        .map_err(aic_to_py)
+    }
 }
 
 /// Convert a JSON-encoded [`EngineSpec`] into bincode bytes (Python → Rust
@@ -665,6 +684,125 @@ fn engine_spec_bincode_from_json(spec_json: &str) -> PyResult<Vec<u8>> {
     let spec: crate::engine::spec::EngineSpec = serde_json::from_str(spec_json)
         .map_err(|e| PyValueError::new_err(format!("engine spec JSON decode: {e}")))?;
     spec.to_bincode().map_err(aic_to_py)
+}
+
+/// Constant per-op weight bytes for a JSON op list (PR-6): the batch FFI
+/// behind Python's `Operation.get_weights`. Weights are structural (computed
+/// from op fields alone, never from perf tables), so this is a module-level
+/// function — no engine handle, no database. Input is the same
+/// externally-tagged `Vec<Op>` JSON `evaluate_ops_json` takes (built by
+/// `engine.build_ops_json`); output is one f64 per op, in order.
+#[pyfunction]
+fn weights_ops_json(ops_json: &str) -> PyResult<Vec<f64>> {
+    let ops: Vec<crate::operators::Op> = serde_json::from_str(ops_json)
+        .map_err(|e| PyValueError::new_err(format!("ops JSON decode: {e}")))?;
+    Ok(ops.iter().map(crate::operators::Op::weight_bytes).collect())
+}
+
+/// The GEMM per-quant achieved-util LEVEL table, `(memory, compute, level)`
+/// rows (PR-6): the single source behind Python's former
+/// `_GEMM_QUANT_UTIL_LEVEL` mirror — Python rebuilds its dict from this, so
+/// the two sides can never drift again (#1524-class sync pain).
+#[pyfunction]
+fn gemm_quant_util_levels() -> Vec<(f64, f64, f64)> {
+    crate::operators::gemm::GEMM_QUANT_UTIL_LEVEL.to_vec()
+}
+
+/// The MoE per-quant achieved-util LEVEL table — see `gemm_quant_util_levels`.
+#[pyfunction]
+fn moe_quant_util_levels() -> Vec<(f64, f64, f64)> {
+    crate::operators::moe::MOE_QUANT_UTIL_LEVEL.to_vec()
+}
+
+/// The table-view attribute registry, `(attribute, [source basenames])` rows
+/// (PR-6): the single source behind the Python side's `VIEW_KEY_LAYERS` /
+/// baseline-codec attribute inventories — a completeness test set-compares
+/// them against this export so the four formerly hand-synced sites can never
+/// drift silently again (same pattern as `gemm_quant_util_levels`).
+#[pyfunction]
+fn table_view_attributes() -> Vec<(String, Vec<String>)> {
+    crate::perf_database::table_view::TABLE_VIEW_ATTRIBUTES
+        .iter()
+        .map(|(attribute, basenames)| {
+            (
+                attribute.to_string(),
+                basenames.iter().map(|b| b.to_string()).collect(),
+            )
+        })
+        .collect()
+}
+
+/// Shared-layer source resolution report for ONE op-file basename (the
+/// deprecation-cleanup PR: the engine owns resolution,
+/// `perf_database/source_resolution.rs`). Returns JSON
+/// `{"records": [{version, path, channel, exists, ks_filter}...],
+///   "warnings": [{kind, args}...]}` — the Python `PerfDatabase` rebuilds its
+/// `data_provenance` diagnostics from `records` and re-emits `warnings`
+/// through its established logging registries. Resolution is a pure function
+/// of the tree, so this report always matches what the engine's own load
+/// resolved. `primary_path` preserves the retired Python resolver's
+/// caller-supplied-primary contract; `None` resolves it internally. Strict
+/// failures (malformed sidecar metadata with `strict=true`) raise
+/// `ValueError` with the resolver's message, mirroring the retired Python
+/// `_parse_reuse_yaml` / `_version_dir_state` errors.
+#[pyfunction]
+#[pyo3(signature = (systems_root, system_data_root, backend, version, op_file_basename, primary_path=None, enable_shared_layer=true, strict=false))]
+#[allow(clippy::too_many_arguments)]
+fn resolve_op_sources_report_json(
+    py: Python<'_>,
+    systems_root: &str,
+    system_data_root: &str,
+    backend: &str,
+    version: &str,
+    op_file_basename: &str,
+    primary_path: Option<&str>,
+    enable_shared_layer: bool,
+    strict: bool,
+) -> PyResult<String> {
+    let ctx = crate::perf_database::ResolveCtx {
+        systems_root: PathBuf::from(systems_root),
+        system_data_root: PathBuf::from(system_data_root),
+        backend: backend.to_string(),
+        version: version.to_string(),
+        enable_shared_layer,
+        strict,
+    };
+    let report = py
+        .allow_threads(|| {
+            crate::perf_database::resolve_one(
+                &ctx,
+                op_file_basename,
+                primary_path.map(std::path::Path::new),
+            )
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    serde_json::to_string(&report).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// The engine's spec schema version (single owner since the pyo3 op
+/// unification; Python reads it for diagnostics instead of declaring a twin).
+#[pyfunction]
+fn engine_spec_schema_version() -> u32 {
+    crate::ENGINE_SPEC_SCHEMA_VERSION
+}
+
+/// Serialize a sequence of engine-backed op objects to the externally-tagged
+/// OpSpec JSON array `AicEngine.evaluate_ops_json` consumes. Refuses retired
+/// tombstone ops (recursively) — the single gate on the one surface where
+/// ops leave Python as a spec (the compile path assembles its spec JSON
+/// through this same array).
+#[pyfunction]
+fn ops_json_from_ops(ops: &Bound<'_, PyAny>) -> PyResult<String> {
+    let ops = crate::py_ops::ops_from_sequence(ops)?;
+    crate::py_ops::reject_retired_ops(&ops).map_err(PyValueError::new_err)?;
+    serde_json::to_string(&ops).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Deserialize one externally-tagged opspec JSON document into an
+/// engine-backed op object (the FPMForwardOp adapter's bridge).
+#[pyfunction]
+fn op_from_spec_json(py: Python<'_>, spec_json: &str) -> PyResult<Py<PyAny>> {
+    crate::py_ops::op_from_spec_json(py, spec_json)
 }
 
 /// Internal request shared by every Rust -> Python -> Rust construction path.
@@ -1247,8 +1385,17 @@ impl PyForwardPassPerfModel {
 fn _aiconfigurator_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_build_smoke, m)?)?;
     m.add_function(wrap_pyfunction!(engine_spec_bincode_from_json, m)?)?;
+    m.add_function(wrap_pyfunction!(weights_ops_json, m)?)?;
+    m.add_function(wrap_pyfunction!(gemm_quant_util_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(moe_quant_util_levels, m)?)?;
+    m.add_function(wrap_pyfunction!(table_view_attributes, m)?)?;
+    m.add_function(wrap_pyfunction!(resolve_op_sources_report_json, m)?)?;
+    m.add_function(wrap_pyfunction!(ops_json_from_ops, m)?)?;
+    m.add_function(wrap_pyfunction!(engine_spec_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(op_from_spec_json, m)?)?;
     m.add_class::<AicEngine>()?;
     m.add_class::<PyForwardPassPerfModel>()?;
+    crate::py_ops::register(m)?;
     Ok(())
 }
 
@@ -1366,7 +1513,8 @@ mod tests {
                 kv_cache_dtype: None,
             },
             speculative: None,
-            perf_db_sources: Default::default(),
+            enable_shared_layer: None,
+            strict_provenance: false,
             database_mode: Default::default(),
             transfer_policy: None,
             extra: BTreeMap::new(),

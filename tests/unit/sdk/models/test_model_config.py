@@ -7,6 +7,7 @@ Unit tests for model configuration functionality.
 Tests model validation, default models, and model-specific configurations.
 """
 
+import json
 from collections import Counter
 from typing import ClassVar
 from unittest.mock import patch
@@ -546,12 +547,14 @@ class TestHFModelSupport:
         generation_down = next(op for op in generation_overlap._group_b if op._name == "generation_shared_ffn2_gemm")
 
         assert context_gate._n == 2 * local_inter_size
-        assert context_act._dim_in == 2 * local_inter_size
-        assert context_act._dim_out == local_inter_size
+        # ElementWise folds dims to bytes_per_token = (dim_in + dim_out) * 2
+        # on the wire; dim_in = 2*local_inter, dim_out = local_inter.
+        ctx_act_spec = json.loads(context_act._spec_json())["Elementwise"]
+        assert ctx_act_spec["bytes_per_token"] == 3 * local_inter_size * 2
         assert context_down._k == local_inter_size
         assert generation_gate._n == 2 * local_inter_size
-        assert generation_act._dim_in == 2 * local_inter_size
-        assert generation_act._dim_out == local_inter_size
+        gen_act_spec = json.loads(generation_act._spec_json())["Elementwise"]
+        assert gen_act_spec["bytes_per_token"] == 3 * local_inter_size * 2
         assert generation_down._k == local_inter_size
 
     def test_deepseek_v4_sglang_megamoe_backend_uses_megamoe_module(self):
@@ -627,7 +630,7 @@ class TestHFModelSupport:
             workload_distribution="uniform",
         )
 
-        result = op.query(database, x=16)
+        result = op._engine_query(database, x=16)
 
         # The engine owns scale-factor application now; the shim returns the
         # engine's value untouched.
@@ -661,7 +664,7 @@ class TestHFModelSupport:
         )
 
         with pytest.raises(ValueError, match="Blackwell"):
-            op.query(get_database("h200_sxm", "sglang", "0.5.6.post2"), x=16)
+            op._engine_query(get_database("h200_sxm", "sglang", "0.5.6.post2"), x=16)
 
     def test_deepseek_v32_kvcache_bytes_include_indexer_cache(self):
         model_config = config.ModelConfig(

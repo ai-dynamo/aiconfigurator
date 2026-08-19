@@ -39,7 +39,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use super::gemm::quant_tc_flops;
 use super::perf_interp::{self, LeafValue, Node, OpInterpConfig};
-use super::{kernel_source_ok, resolve_op_sources};
+use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
@@ -70,12 +70,11 @@ pub struct DsaTable {
     /// Engine-ready per-`DsaKey` generation tables with the Python v2 axis
     /// order `[num_heads][batch][seq = isl + step]`, built once at load.
     generation_nodes: OnceLock<Result<NodeCache, AicError>>,
-    /// Shared-layer source map retained for the lazily-resolved CP sparse
+    /// Source resolver retained for the lazily-resolved CP sparse
     /// sub-kernel files (`<prefix>_{mqa_logits,topk,dsa_attn}_module_perf.parquet`,
-    /// prefix = glm5 / dsv32 by architecture). Python reads these primary-only
-    /// (`_load_glm5_sparse` -> `pd.read_parquet(data_dir/<fn>)`); the default
-    /// (empty-map) resolution here is exactly that single primary file.
-    perf_db_sources: PerfDbSources,
+    /// prefix = glm5 / dsv32 by architecture) — their basenames depend on the
+    /// queried architecture, so resolution happens at query time.
+    source_resolver: Arc<SourceResolver>,
     /// CP sparse sub-kernel tables keyed by (file_prefix, num_heads) — the
     /// Rust mirror of Python `ContextDSAModule._glm5_sparse_cache`.
     sparse: Mutex<BTreeMap<(String, u32), Arc<DsaSparseTables>>>,
@@ -187,6 +186,26 @@ const GLM_MOE_DSA_DIMS: DsaDims = DsaDims {
     index_n_heads: 32,
 };
 
+/// Configured-backend bucket(s) a DSA perf row supports — the single home
+/// for the serving rule (Python `_dsa_kernel_source_buckets`), shared by the
+/// query loader and the table view so a kernel rename lands once. BF16-KV
+/// rows back BOTH buckets (one real execution path per shape); FP8 rows
+/// bucket by the executed kernel, legacy names keep the substring rule.
+pub(crate) fn dsa_kernel_source_buckets(kernel_source: &str, kv_quant: &str) -> &'static [&'static str] {
+    if kv_quant == "bfloat16" {
+        return &["trtllm", "flashmla_kv"];
+    }
+    match kernel_source {
+        "sglang_dsa_indexer_trtllm" | "sglang_dsa_skip_indexer_trtllm" => &["trtllm"],
+        "sglang_dsa_indexer_flashmla_sparse" | "sglang_dsa_skip_indexer_flashmla_sparse" => {
+            &["flashmla_kv"]
+        }
+        "sglang_dsa_dense_mha_trtllm_ragged" => &["trtllm", "flashmla_kv"],
+        ks if ks.contains("trtllm") => &["trtllm"],
+        _ => &["flashmla_kv"],
+    }
+}
+
 pub(crate) fn dsa_dims(architecture: &str) -> &'static DsaDims {
     match architecture {
         "GlmMoeDsaForCausalLM" => &GLM_MOE_DSA_DIMS,
@@ -199,24 +218,21 @@ impl DsaTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf) -> Self {
-        Self::with_sources(data_root, &PerfDbSources::default())
+        Self::with_sources(data_root, &Arc::new(SourceResolver::fixed(PerfDbSources::default())))
+            .expect("fixed-map resolution is infallible")
     }
 
-    /// Construct with shared-layer (sibling/cross-version) sources resolved from
-    /// `perf_db_sources` (Python-supplied). Each DSA file falls back to its
-    /// primary `data_root/<basename>` when absent from the map. No I/O.
-    pub fn with_sources(data_root: PathBuf, perf_db_sources: &PerfDbSources) -> Self {
-        let context_sources = resolve_op_sources(
-            perf_db_sources,
-            "dsa_context_module_perf.parquet",
-            &data_root,
-        );
-        let generation_sources = resolve_op_sources(
-            perf_db_sources,
-            "dsa_generation_module_perf.parquet",
-            &data_root,
-        );
-        Self {
+    /// Construct with shared-layer (sibling/cross-version) sources supplied by the
+    /// engine's `SourceResolver` (live resolution owns the shared-layer walk;
+    /// a fixed source map is the test-only path). Each DSA file falls back to its
+    /// primary `data_root/<basename>` when the resolver names no override. No I/O.
+    pub fn with_sources(
+        data_root: PathBuf,
+        resolver: &Arc<SourceResolver>,
+    ) -> Result<Self, AicError> {
+        let context_sources = resolver.sources_for("dsa_context_module_perf.parquet", &data_root)?;
+        let generation_sources = resolver.sources_for("dsa_generation_module_perf.parquet", &data_root)?;
+        Ok(Self {
             data_root,
             context_sources,
             generation_sources,
@@ -228,9 +244,9 @@ impl DsaTable {
             generation_skip_nodes: OnceLock::new(),
             context_nodes: OnceLock::new(),
             generation_nodes: OnceLock::new(),
-            perf_db_sources: perf_db_sources.clone(),
+            source_resolver: Arc::clone(resolver),
             sparse: Mutex::new(BTreeMap::new()),
-        }
+        })
     }
 
     /// Load the DSA CP sparse sub-kernel tables (mqa / topk / dsa_attn) for
@@ -258,11 +274,8 @@ impl DsaTable {
         let mut tables = DsaSparseTables::default();
         // mqa logits: every row goes to `mqa`.
         load_sparse_parquet(
-            &resolve_op_sources(
-                &self.perf_db_sources,
-                &format!("{file_prefix}_mqa_logits_module_perf.parquet"),
-                &self.data_root,
-            ),
+            &self.source_resolver
+                .sources_for(&format!("{file_prefix}_mqa_logits_module_perf.parquet"), &self.data_root)?,
             num_heads,
             |_| SparseKind::Mqa,
             &mut tables,
@@ -270,11 +283,8 @@ impl DsaTable {
         // topk: split by `score_mode` — "flat" -> topk_flat, else topk_last
         // (Python: `"topk_flat" if str(r.get("score_mode","")) == "flat" else "topk_last"`).
         load_sparse_parquet(
-            &resolve_op_sources(
-                &self.perf_db_sources,
-                &format!("{file_prefix}_topk_module_perf.parquet"),
-                &self.data_root,
-            ),
+            &self.source_resolver
+                .sources_for(&format!("{file_prefix}_topk_module_perf.parquet"), &self.data_root)?,
             num_heads,
             |score_mode| {
                 if score_mode == Some("flat") {
@@ -287,11 +297,8 @@ impl DsaTable {
         )?;
         // dsa_attn: optional, not used by the CP delta.
         load_sparse_parquet(
-            &resolve_op_sources(
-                &self.perf_db_sources,
-                &format!("{file_prefix}_dsa_attn_module_perf.parquet"),
-                &self.data_root,
-            ),
+            &self.source_resolver
+                .sources_for(&format!("{file_prefix}_dsa_attn_module_perf.parquet"), &self.data_root)?,
             num_heads,
             |_| SparseKind::DsaAttn,
             &mut tables,
@@ -1020,18 +1027,7 @@ fn load_dsa_parquet(
             // backs both. Legacy (pre-0.5.14) names keep the old substring
             // rule.
             let ks_name = row.str_optional(ks_col)?.unwrap_or("").to_string();
-            let buckets: &[&str] = if key.kv_quant == "bfloat16" {
-                &["trtllm", "flashmla_kv"]
-            } else {
-                match ks_name.as_str() {
-                    "sglang_dsa_indexer_trtllm" | "sglang_dsa_skip_indexer_trtllm" => &["trtllm"],
-                    "sglang_dsa_indexer_flashmla_sparse"
-                    | "sglang_dsa_skip_indexer_flashmla_sparse" => &["flashmla_kv"],
-                    "sglang_dsa_dense_mha_trtllm_ragged" => &["trtllm", "flashmla_kv"],
-                    _ if ks_name.contains("trtllm") => &["trtllm"],
-                    _ => &["flashmla_kv"],
-                }
-            };
+            let buckets = dsa_kernel_source_buckets(&ks_name, &key.kv_quant);
             let (step, isl) = if collapse_isl_step_to_seq {
                 // Generation: canonical coordinate is s = isl + step (see fn
                 // doc); same-`s` rows overwrite in file order below.
