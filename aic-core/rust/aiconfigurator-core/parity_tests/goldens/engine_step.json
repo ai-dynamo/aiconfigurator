@@ -2400,56 +2400,56 @@
     "qwen38-max-gb300-sglang-0517-fp8-agg": {
       "agg": {
         "values": {
-          "agg_request": 331.10846508431933,
-          "agg_tpot": 74.40639664816165,
-          "agg_ttft": 256.7020684361577
+          "agg_request": 329.41682914132343,
+          "agg_tpot": 74.02625373962324,
+          "agg_ttft": 255.3905754017002
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 160.797,
-          "disagg_tpot": 14.867,
-          "disagg_ttft": 145.93
+          "disagg_request": 160.007,
+          "disagg_tpot": 14.824,
+          "disagg_ttft": 145.183
         }
       },
       "mixed": {
         "values": {
-          "mixed_step": 74.31600534266725
+          "mixed_step": 73.9382688457131
         }
       },
       "static": {
         "values": {
-          "static_ctx": 73.702,
+          "static_ctx": 73.325,
           "static_gen": 10.545,
-          "static_total": 84.247
+          "static_total": 83.87
         }
       }
     },
     "qwen38-max-gb300-sglang-0517-nvfp4-disagg": {
       "agg": {
         "values": {
-          "agg_request": 191.07403720932422,
-          "agg_tpot": 64.77086007095737,
-          "agg_ttft": 126.30317713836686
+          "agg_request": 188.19614776517244,
+          "agg_tpot": 63.79530432717709,
+          "agg_ttft": 124.40084343799533
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 137.764,
-          "disagg_tpot": 13.433,
-          "disagg_ttft": 124.331
+          "disagg_request": 135.995,
+          "disagg_tpot": 13.233,
+          "disagg_ttft": 122.762
         }
       },
       "mixed": {
         "values": {
-          "mixed_step": 64.70410190874065
+          "mixed_step": 63.76505819641267
         }
       },
       "static": {
         "values": {
-          "static_ctx": 62.794,
-          "static_gen": 7.151,
-          "static_total": 69.945
+          "static_ctx": 62.001,
+          "static_gen": 7.005,
+          "static_total": 69.006
         }
       }
     }
@@ -2596,35 +2596,35 @@
     },
     "qwen38-max-gb300-sglang-0517-fp8-agg::agg": {
       "engine": "rust",
-      "git_head": "25baf1a0b6dd5f23ebfdf17815ef8b236173f9c5"
+      "git_head": "4648eb5bebfa4981cd3e0889d9cb473ddf090534"
     },
     "qwen38-max-gb300-sglang-0517-fp8-agg::disagg": {
       "engine": "rust",
-      "git_head": "25baf1a0b6dd5f23ebfdf17815ef8b236173f9c5"
+      "git_head": "4648eb5bebfa4981cd3e0889d9cb473ddf090534"
     },
     "qwen38-max-gb300-sglang-0517-fp8-agg::mixed": {
       "engine": "rust",
-      "git_head": "25baf1a0b6dd5f23ebfdf17815ef8b236173f9c5"
+      "git_head": "4648eb5bebfa4981cd3e0889d9cb473ddf090534"
     },
     "qwen38-max-gb300-sglang-0517-fp8-agg::static": {
       "engine": "rust",
-      "git_head": "25baf1a0b6dd5f23ebfdf17815ef8b236173f9c5"
+      "git_head": "4648eb5bebfa4981cd3e0889d9cb473ddf090534"
     },
     "qwen38-max-gb300-sglang-0517-nvfp4-disagg::agg": {
       "engine": "rust",
-      "git_head": "25baf1a0b6dd5f23ebfdf17815ef8b236173f9c5"
+      "git_head": "4648eb5bebfa4981cd3e0889d9cb473ddf090534"
     },
     "qwen38-max-gb300-sglang-0517-nvfp4-disagg::disagg": {
       "engine": "rust",
-      "git_head": "25baf1a0b6dd5f23ebfdf17815ef8b236173f9c5"
+      "git_head": "4648eb5bebfa4981cd3e0889d9cb473ddf090534"
     },
     "qwen38-max-gb300-sglang-0517-nvfp4-disagg::mixed": {
       "engine": "rust",
-      "git_head": "25baf1a0b6dd5f23ebfdf17815ef8b236173f9c5"
+      "git_head": "4648eb5bebfa4981cd3e0889d9cb473ddf090534"
     },
     "qwen38-max-gb300-sglang-0517-nvfp4-disagg::static": {
       "engine": "rust",
-      "git_head": "25baf1a0b6dd5f23ebfdf17815ef8b236173f9c5"
+      "git_head": "4648eb5bebfa4981cd3e0889d9cb473ddf090534"
     }
   }
 }
