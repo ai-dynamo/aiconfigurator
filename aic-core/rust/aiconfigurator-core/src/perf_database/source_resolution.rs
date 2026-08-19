@@ -22,7 +22,7 @@
 //!   3. Same-backend siblings STRICTLY EARLIER than requested (design §6.2),
 //!      nearest first. No filter.
 //!   4. Cross-backend fill (design §6.4), kernel-identity gated by
-//!      `op_kernel_source_manifest.yaml`, newest-first per framework.
+//!      `perf_data_reuse_manifest.yaml`, newest-first per framework.
 //!
 //! Deliberate divergences from the retired Python resolver (both documented
 //! at their sites): no `.parquet -> .txt` candidate fallback (the engine
@@ -642,28 +642,28 @@ struct ManifestEntry {
 }
 
 /// Manifest entries for one op file from
-/// `<systems_root>/op_kernel_source_manifest.yaml`. Mirrors
-/// `_load_op_kernel_source_manifest_entries` (grouping by op_file with the
-/// `.txt -> .parquet` rename); absent manifest = zero entries. Structural
+/// `<systems_root>/perf_data_reuse_manifest.yaml`. Mirrors the retired Python
+/// loader (grouping by op_file with the `.txt -> .parquet` rename); absent
+/// manifest = zero entries. Structural
 /// violations that would crash the Python loader (a non-mapping group entry)
 /// error loudly here too.
 fn manifest_entries_for(
     systems_root: &Path,
     op_file_basename: &str,
 ) -> Result<Vec<ManifestEntry>, AicError> {
-    let manifest_path = systems_root.join("op_kernel_source_manifest.yaml");
+    let manifest_path = systems_root.join("perf_data_reuse_manifest.yaml");
     if !manifest_path.exists() {
         return Ok(Vec::new());
     }
     let text = std::fs::read_to_string(&manifest_path).map_err(|e| {
         perf_err(format!(
-            "{}: failed to read op_kernel_source_manifest.yaml: {e}",
+            "{}: failed to read perf_data_reuse_manifest.yaml: {e}",
             manifest_path.display()
         ))
     })?;
     let value: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|e| {
         perf_err(format!(
-            "{}: failed to parse op_kernel_source_manifest.yaml: {e}",
+            "{}: failed to parse perf_data_reuse_manifest.yaml: {e}",
             manifest_path.display()
         ))
     })?;
@@ -799,7 +799,7 @@ impl PartialOrd for NewestFirstKey {
 /// Load identity + policy for live source resolution.
 #[derive(Clone, Debug)]
 pub struct ResolveCtx {
-    /// `<systems_root>` (holds `op_kernel_source_manifest.yaml`).
+    /// `<systems_root>` (holds `perf_data_reuse_manifest.yaml`).
     pub systems_root: PathBuf,
     /// `<systems_root>/<data_dir>` for the system.
     pub system_data_root: PathBuf,
@@ -1271,7 +1271,7 @@ mod tests {
             "schema_version: 1\nreuse:\n  - table: gemm_perf\n    from_version: '1.2.0'\n    reason: r\n    approved_by: a\n",
         );
         write(
-            &root.join("op_kernel_source_manifest.yaml"),
+            &root.join("perf_data_reuse_manifest.yaml"),
             "groups:\n  - op_file: gemm_perf.parquet\n    kernel_source: shared_kernel\n    tier: shared\n    frameworks: [trtllm, vllm]\n",
         );
         let report = resolve_one(&ctx(root, "trtllm", "1.0.0"), "gemm_perf.parquet", None).unwrap();

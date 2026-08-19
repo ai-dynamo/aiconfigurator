@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools" / "perf_database"))
-from check_kernel_source import _scan_one_file
+from generate_perf_data_reuse_manifest import _scan_one_file
 
 pytestmark = pytest.mark.unit
 
