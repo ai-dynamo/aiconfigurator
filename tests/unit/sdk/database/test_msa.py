@@ -68,5 +68,5 @@ def test_rtx_trtllm_rc23_loads_and_m3_is_explicitly_rejected():
     db = get_database_view("rtx_pro_6000_server", "trtllm", "1.3.0rc23", database_mode="HYBRID")
     assert db is not None, "rc23 reuse markers must make the version root loadable"
     op = _ctx_msa()
-    with pytest.raises(Exception, match="(?i)empirical|no DSA util"):
+    with pytest.raises(Exception, match=r"(?i)empirical|no DSA util"):
         op._engine_query(db, batch_size=2, s=512, prefix=0)
