@@ -40,6 +40,10 @@ DSV4_RATIO_KIND = {4: "csa", 128: "hca", 0: "full"}
 _SPECIAL = {
     "deepseek-ai/DeepSeek-V4-Pro-0813": "dsv4",
     "deepseek-ai/DeepSeek-V4-Flash-0731": "dsv4",
+    "deepseek-ai/DeepSeek-V4-Pro": "dsv4",
+    "deepseek-ai/DeepSeek-V4-Flash": "dsv4",
+    "sgl-project/DeepSeek-V4-Pro-FP8": "dsv4",
+    "sgl-project/DeepSeek-V4-Flash-FP8": "dsv4",
     "nvidia/DeepSeek-V4-Pro-NVFP4": "dsv4",
     "nvidia/DeepSeek-V4-Flash-NVFP4": "dsv4",
     "zai-org/GLM-5.2": "glm",
