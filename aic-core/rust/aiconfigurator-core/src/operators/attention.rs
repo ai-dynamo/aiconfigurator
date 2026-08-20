@@ -706,14 +706,15 @@ fn ctx_headsize_ref_grid(
     );
     let mut chosen: Option<(String, u32)> = None;
     for lane in candidates {
-        let head_sizes = match db
-            .attention
-            .context_head_sizes(&lane, fmha_quant, kv_quant, n_kv_lookup)
-        {
-            Ok(sizes) => sizes,
-            Err(err) if err.is_missing_perf_data() => continue,
-            Err(err) => return Err(err),
-        };
+        let head_sizes =
+            match db
+                .attention
+                .context_head_sizes(&lane, fmha_quant, kv_quant, n_kv_lookup)
+            {
+                Ok(sizes) => sizes,
+                Err(err) if err.is_missing_perf_data() => continue,
+                Err(err) => return Err(err),
+            };
         let Some(ref_hs) = ref_head_size(&head_sizes, target_hs) else {
             continue;
         };
@@ -977,7 +978,10 @@ fn gen_headsize_ref_grid(
     );
     let mut chosen: Option<(String, u32)> = None;
     for lane in candidates {
-        let head_sizes = match db.attention.generation_head_sizes(&lane, kv_quant, n_kv_lookup) {
+        let head_sizes = match db
+            .attention
+            .generation_head_sizes(&lane, kv_quant, n_kv_lookup)
+        {
             Ok(sizes) => sizes,
             Err(err) if err.is_missing_perf_data() => continue,
             Err(err) => return Err(err),
