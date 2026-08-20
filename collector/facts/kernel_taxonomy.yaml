@@ -23,7 +23,7 @@ rules:
   - {backend: dsa_nsa, role: attention,
      match: "sparse_attn_fwd_kernel|_gqa_share_sparse|_flash_attn_fwd_with_block_score|_decode_score_kernel|_merge_topk_attn_out"}
   - {backend: trtllm_mha, role: attention,
-     match: "^fmha_v2_flash_attention|^kernel_mha$"}
+     match: "^fmha_v2_flash_attention|^kernel_mha$|masked_multihead_attention_kernel"}
   - {backend: triton, role: attention,
      match: "^_fwd_grouped_kernel_stage1|^_fwd_kernel(_stage2)?$"}
 
@@ -31,7 +31,9 @@ rules:
   - {backend: fla_triton, role: linear_attention,
      match: "gated_delta_rule|ChunkGatedDeltaRule|chunk_fwd_kernel_o|chunk_local_cumsum|recompute_w_u_fwd|fused_gdn_gating|fused_qkv_split_gdn|fused_qkvzba_split"}
   - {backend: trtllm_internal, role: linear_attention,
-     match: "FlatKernelTmaWarpSpecializedDeltaRule|kernel_cutlass_gdn_decode"}
+     match: "FlatKernelTmaWarpSpecializedDeltaRule|kernel_cutlass_gdn_decode|flashinfergdn_kernelsdelta_rule"}
+  - {backend: fla_triton, role: linear_attention,
+     match: "_fused_gdn_post_conv_kernel"}
   - {backend: causal_conv1d, role: linear_attention,
      match: "causal_conv1d"}
   - {backend: mamba_triton, role: linear_attention,
@@ -40,7 +42,7 @@ rules:
   # ---------------------------------------------------------------- gemm
   - {backend: deepgemm, role: gemm,
      match: "^deep_gemm::sm90_fp8_gemm|^deep_gemm::fp8_gemm|^deep_gemm::transpose"}
-  - {backend: deepgemm, role: dsa_indexer,
+  - {backend: dsa_nsa, role: dsa_indexer,
      match: "^deep_gemm::sm90_fp8_paged_mqa_logits"}
   - {backend: cutlass, role: gemm,
      match: "cutlass_3x_gemm_sm90_fp8|fp8_blockscale_gemm|^fused_a_gemm_kernel"}
@@ -65,7 +67,7 @@ rules:
   - {backend: vllm_kernel, role: moe_infra,
      match: "^vllm::moe::"}
   - {backend: trtllm_internal, role: moe_infra,
-     match: "cutlass_kernels::(expandInputRows|finalizeMoeRouting|doActivation|blockExpertPrefixSum|computeStrides|fusedBuildExpertMaps)"}
+     match: "cutlass_kernels::(expandInputRows|finalizeMoeRouting|doActivation|blockExpertPrefixSum|mergeExpertPrefixSum|globalExpertPrefixSum|computeStrides|fusedBuildExpertMaps)"}
   - {backend: triton, role: routing,
      match: "_router_triton_kernel|_gemma4_routing|deepseek_v3_topk|customMoeRouting|topkGating|cooperative_topk|_topk_forward|_topk_index_kernel|router_gemm_kernel|_bitmatrix_metadata|_sum_bitmatrix_rows"}
   - {backend: torch, role: routing,
@@ -81,7 +83,7 @@ rules:
 
   # ---------------------------------------------------------------- kvcache
   - {backend: framework_native, role: kvcache,
-     match: "reshape_and_cache|concat_and_cache|set_mla_kv_buffer|concat_and_cast_mha_k|applyBiasRopeUpdateKVCache|applyMLARopeAppendPagedKV|indexerKCacheScatter|write_req_to_token_pool|create_flashinfer_kv_indices|alloc_extend_kernel|_convert_req_index_to_global|convertReqIndexToGlobal|ConcatMLAQKernel"}
+     match: "reshape_and_cache|concat_and_cache|set_mla_kv_buffer|concat_and_cast_mha_k|applyBiasRopeUpdateKVCache|applyMLARopeAppendPagedKV|applyMLARopeAndAssignQKV|indexerKCacheScatter|write_req_to_token_pool|create_flashinfer_kv_indices|alloc_extend_kernel|_convert_req_index_to_global|convertReqIndexToGlobal|ConcatMLAQKernel"}
 
   # ------------------------------------------------------------ norm / rope
   - {backend: framework_native, role: norm_rope,

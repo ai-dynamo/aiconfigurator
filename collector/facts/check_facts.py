@@ -60,6 +60,22 @@ def load_records() -> list[dict]:
     return [json.loads(line) for line in path.open()]
 
 
+def load_repo_arch_map() -> dict[str, str]:
+    """checkpoint repo -> HF architecture, from the collector's own case
+    declarations (authoritative; runtime model_class can differ, e.g. trtllm
+    maps DeepSeek-V3.2 onto its DeepseekV3ForCausalLM class)."""
+    out: dict[str, str] = {}
+    for f in (REPO / "collector" / "cases" / "models").glob("*_cases.yaml"):
+        d = yaml.safe_load(f.read_text())
+        arch = d.get("architecture")
+        if not arch:
+            continue
+        for repo in [d.get("model_path")] + list(d.get("model_paths") or []):
+            if repo:
+                out[repo] = arch
+    return out
+
+
 def load_kernel_source_map() -> dict[tuple[str | None, str], str]:
     """(framework, kernel_source label) -> canonical backend."""
     data = yaml.safe_load((REPO / "collector" / "kernel_source_backends.yaml").read_text())
@@ -87,25 +103,83 @@ def record_backends(rec: dict) -> tuple[set[str], bool]:
     return observed, unclassified
 
 
+def check_smoke(parquet: Path, shard: Path | None, framework: str) -> None:
+    """Instrumented-collector conformance: the kernel_source each smoke case
+    CLAIMS must be a backend the serving probe OBSERVED for the same
+    (checkpoint repo, kv dtype) identity. Optionally cross-check against the
+    injector shard (kernels the collector process itself executed)."""
+    import pandas as pd
+    ks_map = load_kernel_source_map()
+    records = load_records()
+    by_repo_kv: dict[tuple, set[str]] = {}
+    norm = {"auto": "bfloat16", "fp8": "fp8_e4m3"}
+    for rec in records:
+        if rec["runtime"]["backend"] != framework:
+            continue
+        kv = str((rec.get("resolved") or {}).get("kv_cache_dtype")
+                 or rec["target"].get("kvcache_quant_mode")).lower()
+        obs, _ = record_backends(rec)
+        by_repo_kv.setdefault((rec["target"]["repo"], norm.get(kv, kv)), set()).update(obs)
+
+    df = pd.read_parquet(parquet)
+    verdicts: Counter = Counter()
+    for (model, kv, ks), n in df.groupby(["model", "kv_cache_dtype", "kernel_source"]).size().items():
+        claimed = ks_map.get((framework, ks))
+        if claimed is None:
+            verdicts["unmapped-kernel-source"] += 1
+            print(f"[unmapped-kernel-source] {ks} ({model} kv={kv}) — add to kernel_source_backends.yaml")
+            continue
+        observed = by_repo_kv.get((model, norm.get(str(kv).lower(), str(kv).lower())))
+        if observed is None:
+            verdicts["unprobed"] += 1
+            print(f"[unprobed] {model} kv={kv} claims {ks} -> {claimed}")
+            continue
+        ok = claimed in observed or bool(BACKEND_EQUIV.get(claimed, set()) & observed)
+        verdicts["confirmed" if ok else "contradicted"] += 1
+        print(f"[{'confirmed' if ok else 'contradicted'}] {model} kv={kv} rows={n} "
+              f"claims {ks} -> {claimed}; probe observed {sorted(observed)}")
+    if shard and shard.exists():
+        data = json.loads(shard.read_text())
+        from make_records import normalize_kernel
+        kerns = {n for call in (data.get("attn_calls") or []) + (data.get("moe_calls") or [])
+                 for k in call.get("kernels", []) if k and (n := normalize_kernel(k))}
+        labels, unmatched = label_kernels(sorted(kerns))
+        print(f"shard: collector process executed backends {sorted(labels)}"
+              + (f"; unclassified {sorted(unmatched)[:5]}" if unmatched else ""))
+    print("smoke conformance:", dict(verdicts))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--facts", type=Path, default=REPO / "collector" / "op_backend_facts.yaml")
     ap.add_argument("--ignore-version", action="store_true",
                     help="match rows across framework versions (probe vs facts version skew)")
+    ap.add_argument("--smoke", type=Path, help="collector smoke perf parquet to check instead")
+    ap.add_argument("--smoke-shard", type=Path, help="injector rank shard from the smoke run")
+    ap.add_argument("--framework", default="sglang")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
+
+    if args.smoke:
+        check_smoke(args.smoke, args.smoke_shard, args.framework)
+        return
 
     facts = yaml.safe_load(args.facts.read_text())
     records = load_records()
     ks_map = load_kernel_source_map()
     producible = taxonomy_backends()
 
-    # index records by (framework, version, architecture-ish, kv dtype)
+    repo_arch = load_repo_arch_map()
+
+    # index records by (framework, version, architecture-ish, kv dtype);
+    # architecture comes from the collector's case declarations for the repo
+    # (falls back to the runtime model_class for repos outside the cases)
     idx: dict[tuple, list[dict]] = {}
     for rec in records:
         if rec.get("outcome", {}).get("status") not in (None, "ok"):
             continue
-        arch = ((rec.get("identity") or {}).get("model_class") or "").lower()
+        arch = (repo_arch.get(rec["target"].get("repo") or "")
+                or (rec.get("identity") or {}).get("model_class") or "").lower()
         kv = (rec.get("resolved") or {}).get("kv_cache_dtype") or rec["target"].get("kvcache_quant_mode")
         key = (rec["runtime"]["backend"], rec["runtime"]["version"], arch, str(kv).lower())
         idx.setdefault(key, []).append(rec)
