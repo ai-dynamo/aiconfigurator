@@ -378,6 +378,10 @@ families:
       - layers_block_type_attention
       - layers_block_type_mamba
       - layers_block_type_moe
+      known:
+        trtllm_rc23: "worker aborts on a cudaError check (exit 139) loading the
+          all_kinds dummy, twice reproduced 2026-08-20/21; sglang+vllm probes of
+          the same dummy complete. Parked as known_bad pending a debugger pass."
     - repo: nvidia/Nemotron-H-56B-Base-8K
       profile: bfloat16
       variants:
