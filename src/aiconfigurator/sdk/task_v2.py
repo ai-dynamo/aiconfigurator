@@ -2003,11 +2003,11 @@ class Task:
             nextn=self.nextn,
             enable_encoder_dp=self.enable_encoder_dp,
             enable_eplb=self._role_attr(role, "enable_eplb"),
-            # attention_backend / wideep_num_slots are shared across roles (Task has no
-            # per-role variant) and fed to ModelConfig so get_model selects the MLA
-            # attention perf tables (fa3 vs flashinfer) and the EPLB slot count.
-            # workload_distribution remains non-configurable in v2 and ModelConfig's
-            # default matches v1's.
+            # moe_backend / attention_backend / wideep_num_slots are shared across roles
+            # (Task has no per-role variant) and fed to ModelConfig so get_model selects the
+            # right MoE kernel (deepep_moe / megamoe), MLA attention perf tables (fa3 vs
+            # flashinfer), and EPLB slot count. workload_distribution remains non-configurable
+            # in v2 and ModelConfig's default matches v1's.
             #
             # moe_backend="deepep_moe" is NOT forwarded: it used to select both the
             # sglang wideEP model classes and the wideep MoE compute tables for the
@@ -2015,8 +2015,11 @@ class Task:
             # would make a fused tuple price itself off the large-EP tables. MegaMoE
             # is a real DeepSeek-V4 kernel selection and passes through.
             moe_backend=self.moe_backend if self.moe_backend != "deepep_moe" else None,
-            # None means "unspecified" -> fall back to flashinfer (matches v1 and ModelConfig's default).
-            attention_backend=self.attention_backend or "flashinfer",
+            # None means "unspecified" and MUST stay None: the WideEP MLA ops apply
+            # their own "flashinfer" default, while dense attention (AIC-1715) reads
+            # this field as the kernel-LANE override — materializing a lane name here
+            # would silently pin every model to the flashinfer lane.
+            attention_backend=self.attention_backend,
             wideep_num_slots=self.wideep_num_slots,
             forward_model=self.forward_model or "op_level",
             moe_comm_backend=(self._resolve_moe_comm_backend(role, parallel) if parallel is not None else None),
@@ -2104,8 +2107,12 @@ class Task:
             UnsupportedWideepConfigError specifically for wideep_* ops
             (lets callers distinguish from generic ``ValueError``).
         """
-        if self.attention_backend is not None and self.attention_backend not in ("flashinfer", "fa3"):
-            raise ValueError(f"attention_backend must be 'flashinfer' or 'fa3', got {self.attention_backend!r}.")
+        valid_attention_backends = ("flashinfer", "fa3", "triton", "trtllm_mha", "fla", "default")
+        if self.attention_backend is not None and self.attention_backend not in valid_attention_backends:
+            raise ValueError(
+                f"attention_backend must be one of {', '.join(repr(b) for b in valid_attention_backends)}, "
+                f"got {self.attention_backend!r}."
+            )
         if self.wideep_num_slots is not None and self.wideep_num_slots <= 0:
             raise ValueError(f"wideep_num_slots must be a positive integer, got {self.wideep_num_slots!r}.")
         self._check_encoder_knobs_require_epd()

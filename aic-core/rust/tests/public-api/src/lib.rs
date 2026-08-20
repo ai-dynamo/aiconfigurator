@@ -71,7 +71,10 @@ mod tests {
         // dropped the Python-resolved perf_db_sources map (a bincode
         // config-layout change) for enable_shared_layer + strict_provenance
         // (deprecation-cleanup PR).
-        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 13);
+        // v14: Context/GenerationAttentionOp gained lane_order (AIC-1715/1716;
+        //     renumbered from its own branch's concurrent v8/v9/v10/v12 claims
+        //     at merge with #1503/#1461/issue #1498/PR-6).
+        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 14);
         assert_eq!(FPM_VERSION, 1);
         assert_eq!(ForwardPassMetrics::default().version, FPM_VERSION);
     }

@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Framework-DEFAULT attention kernel per (backend, version, sm). Used as the
+# lane-precedence head when no attention_backend override is set. Citations
+# per collector-rule discipline; re-verify on version bumps.
+sglang:
+  "0.5.14":
+    # collector/cases/models/Qwen3_5MoeForConditionalGeneration_cases.yaml
+    # sglang_backends: {90: fa3, 100: triton, 103: triton, 120: flashinfer}
+    # FIXME(lane-map): verify against sglang 0.5.14 attention-backend default dispatch on version bump
+    90: fa3
+    100: triton
+    103: triton
+    120: flashinfer
+vllm:
+  "0.24.0":
+    90: default
+    100: default
+    103: default
