@@ -43,6 +43,30 @@ def _apply_inclusive_tpot(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def get_inclusive_tpot(
+    ttft: float,
+    tpot: float,
+    osl: int,
+) -> float:
+    """Compute inclusive TPOT from TTFT, TPOT, and OSL.
+
+    Inclusive TPOT spreads TTFT cost across all output tokens:
+        inclusive_tpot = (ttft + tpot * (osl - 1)) / osl
+
+    This matches the end-to-end per-token latency reported by GuideLLM and other
+    benchmarking tools, making predicted values directly comparable to measurements.
+
+    Args:
+        ttft: Time to first token (ms).
+        tpot: Time per output token (ms).
+        osl: Output sequence length.
+
+    Returns:
+        Inclusive TPOT in ms.
+    """
+    return (ttft + tpot * (osl - 1)) / osl
+
+
 def _check_power_data_available(best_configs: dict[str, pd.DataFrame], threshold: float = 0.9) -> bool:
     """
     Check if power data is available and meaningful across configurations.
