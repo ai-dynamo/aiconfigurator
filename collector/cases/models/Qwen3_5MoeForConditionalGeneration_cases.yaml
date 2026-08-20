@@ -119,7 +119,6 @@ model_case_values:
     # and tested FP4 MoE backend"), same base_ops/moe.yaml:97-105 citation
     # style/source as the other nvfp4-gated MoE models.
     - model_path: nvidia/Qwen3.5-397B-A17B-NVFP4
-      frameworks: [sglang]
       hidden_size: 4096
       inter_size: 1024
       topk: 10
@@ -129,6 +128,10 @@ model_case_values:
         nvfp4: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
       framework_quantization:
         sglang:
+          allowed_modes: [nvfp4]
+        trtllm:
+          allowed_modes: [nvfp4]
+        vllm:
           allowed_modes: [nvfp4]
   gemm:
     # Exact widths below the base feature grid (min 32): scalar shared-expert

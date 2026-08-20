@@ -498,6 +498,26 @@ def test_dsv4_moe_quantization_policy_prunes_unrelated_modes():
             assert allowed == expected, (backend, model_path)
 
 
+def test_qwen35_397b_nvfp4_moe_row_is_nvfp4_only_on_every_backend():
+    # AIC-1715/1716 rebase-4 review (Blocker 2): the row briefly carried
+    # ``frameworks: [sglang]``, which made ``_model_moe_backend_quantization``
+    # skip the row entirely for trtllm/vllm (case_generator.py `continue` on
+    # a framework mismatch) instead of narrowing it — an EMPTY
+    # ``model_quantization`` inverts the gate rather than tightening it:
+    # trtllm has no ``requires_model_quantization_config`` floor, so it fell
+    # back to allow-everything (would have queued cases under every trtllm
+    # MoE quant mode, not just nvfp4); vllm's nvfp4 spec DOES require a
+    # model-quantization entry, so it lost its legitimate nvfp4 cases
+    # instead. A per-backend, explicitly-named-backend assertion (never
+    # ``backend=None``, which both counter helpers above are blind to) is
+    # the only shape that would have caught this.
+    model_path = "nvidia/Qwen3.5-397B-A17B-NVFP4"
+    for backend in ("sglang", "trtllm", "vllm"):
+        available_modes = {spec.name for spec in get_moe_quantization_specs(backend)}
+        allowed = {mode for mode in available_modes if moe_model_allows_quantization(backend, model_path, mode)}
+        assert allowed == {"nvfp4"}, (backend, model_path, allowed)
+
+
 def test_kimi_moe_quantization_is_artifact_specific():
     expected_by_artifact = {
         "moonshotai/Kimi-K2-Instruct": {"fp8_block"},
@@ -823,12 +843,18 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # +114 for the nvidia/MiniMax-M3-NVFP4 row (same 6144/3072, 128x4
     # geometry; quant-distinct artifact — NVFP4 routed experts — so it is a
     # separate row, never merged with the BF16 parent).
-    # AIC-1715/1716 rebase: nvidia/Qwen3.5-397B-A17B-NVFP4's moe row is now
-    # sglang-only (frameworks: [sglang], citing the InferenceX serving pin)
-    # instead of main's prior generic sglang/trtllm/vllm declaration; the
-    # sglang-only row's own count (117, pinned separately below) happens to
-    # match what the generic 3-framework declaration contributed here, so
-    # the total is unchanged at 6720 (confirmed against a live run).
+    # AIC-1715/1716 rebase-4 review (Blocker 2): nvidia/Qwen3.5-397B-A17B-NVFP4's
+    # moe row briefly carried frameworks: [sglang] (citing the InferenceX
+    # serving pin), which does not change this total at all -- not
+    # "coincidentally", but by construction: get_common_moe_test_cases counts
+    # unique (hidden_size, inter_size, topk, num_experts, ...) geometry
+    # tuples and never consults model_case_values.moe.frameworks, so a row's
+    # framework restriction is invisible to this counter regardless of its
+    # value. The frameworks: [sglang] key has since been dropped (it was
+    # inverting the trtllm/vllm QUANTIZATION gate elsewhere -- see
+    # test_qwen35_397b_nvfp4_moe_row_is_nvfp4_only_on_every_backend, the
+    # actual regression); the row's own count (117, pinned separately below)
+    # is unaffected either way, so the total stays 6720.
     assert len(moe_cases) == 6720
 
     assert any(
