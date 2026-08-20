@@ -25,6 +25,13 @@ configurations and runs anywhere via the CLI.
 
 Let's get started.
 
+> [!WARNING]
+> AIConfigurator 0.12.0 is the compatibility release for moving CLI and
+> Sweeper workflows to AISimulate. Legacy entry points are planned for removal
+> in AIConfigurator 0.13.0. Follow the
+> [AISimulate migration guide](docs/aisimulate_migration.md) for replacement
+> commands, API guidance, and the temporary compatibility behavior.
+
 ## Build and Install
 
 ### Install from PyPI
