@@ -422,3 +422,22 @@ topologies:
   ep: 1
   evidence: real
   status: implemented
+- tp: 8
+  ep: 1
+  evidence: real
+  status: implemented
+  route: "launch_server + inject/sitecustomize (probe_sglang stage2 is
+    single-process by design and cannot host tp>1)"
+  verdicts:
+  - "Kimi-K2.5 (compressed-tensors W4-packed -> marlin): TEP8 == DEP8 kernel
+    family (sglang::fused_marlin_moe + device::marlin_moe::Marlin, same
+    align/reduce/activation set; only shape-tuning template args differ).
+    facts/tepdep/k25_fp8_{tep8,dep8}.rank0.json, 2026-08-21."
+- tp: 8
+  ep: 8
+  evidence: real
+  status: implemented
+  route: "same as tp8, --ep-size 8"
+policy: "topology is ALWAYS recorded even when kernels match (owner: Kimi-K3
+  TEP8 is known to fork kernels; K3 itself is unregistered at current pins,
+  so the K3 verification is parked until a supporting framework pin exists)."
