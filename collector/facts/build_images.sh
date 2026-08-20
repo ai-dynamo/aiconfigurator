@@ -16,7 +16,7 @@ docker exec "$cid" bash -lc '
   for stub in $(python3 - <<PY
 import glob, tilelang, os
 root = os.path.dirname(tilelang.__file__)
-print("\n".join(glob.glob(root + "/**/libcudart.so*", recursive=True)))
+print("\n".join(glob.glob(root + "/**/libcudart*", recursive=True)))
 PY
   ); do ln -sf "$real" "$stub"; done
   python3 -c "import flashinfer.comm" # must import cleanly now

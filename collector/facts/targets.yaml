@@ -53,6 +53,8 @@ families:
       aic_registered: deepseek-ai--DeepSeek-V4-Pro
       known: 'SM90: loads silently, Fp8MoEMethod over fp4-packed int8 experts, first MoE forward crashes
         (both sglang versions)'
+      variant_overrides:
+        vllm: interleave_pair  # Pro: no non-dspark full layer
     - repo: deepseek-ai/DeepSeek-V4-Flash-0731
       profile: fp8
       aic_registered: deepseek-ai--DeepSeek-V4-Flash
@@ -60,6 +62,8 @@ families:
     - repo: nvidia/DeepSeek-V4-Pro-NVFP4
       profile: nvfp4
       aic_registered: false
+      variant_overrides:
+        vllm: interleave_pair  # Pro: no non-dspark full layer
     - repo: nvidia/DeepSeek-V4-Flash-NVFP4
       profile: nvfp4
       aic_registered: false
@@ -284,10 +288,20 @@ families:
       profile: fp8
       variants:
       - rep
+      variant_overrides:
+        vllm: rep_mix
+      render_overrides:
+        vllm:
+          tokens_per_block: null
     - repo: deepseek-ai/DeepSeek-V4-Pro
       profile: fp8
       variants:
       - rep
+      variant_overrides:
+        vllm: interleave_pair  # Pro has no non-dspark full-MLA layer -> no rep_mix
+      render_overrides:
+        vllm:
+          tokens_per_block: null
     - repo: google/gemma-4-26B-A4B
       profile: bfloat16
       variants:
@@ -404,10 +418,20 @@ families:
       profile: fp8
       variants:
       - rep
+      variant_overrides:
+        vllm: rep_mix
+      render_overrides:
+        vllm:
+          tokens_per_block: null
     - repo: sgl-project/DeepSeek-V4-Pro-FP8
       profile: fp8
       variants:
       - rep
+      variant_overrides:
+        vllm: interleave_pair  # Pro has no non-dspark full-MLA layer -> no rep_mix
+      render_overrides:
+        vllm:
+          tokens_per_block: null
     - repo: zai-org/GLM-5
       profile: bfloat16
       variants:

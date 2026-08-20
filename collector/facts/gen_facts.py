@@ -87,11 +87,15 @@ def enumerate_runs(targets: dict, full: bool, backends: list[str]) -> list[dict]
                 # per-checkpoint variants win (architectures in a mixed family
                 # each have their own layer kinds); else the family list
                 ck_variants = ck.get("variants") or variants
-                use_variants = ck_variants if full else [override or ck_variants[0]]
+                ck_override = (ck.get("variant_overrides") or {}).get(backend) or override
+                use_variants = ck_variants if full else [ck_override or ck_variants[0]]
                 for variant in use_variants:
-                    # dummy dirs are keyed by ADAPTER family (generic adapters
-                    # emit under dummy_models/generic/), not by targets family
-                    for _famdir in (fam.get("dummy_dir") or fam_name, "generic"):
+                    # dummy dirs are keyed by ADAPTER family (a roster repo may
+                    # still use a special adapter) — search every adapter dir,
+                    # preferring the targets family, then generic, then the rest
+                    _adapter_dirs = [fam.get("dummy_dir") or fam_name, "generic"] + \
+                        sorted(d.name for d in (ROOT / "dummy_models").iterdir() if d.is_dir())
+                    for _famdir in dict.fromkeys(_adapter_dirs):
                         vdir = ROOT / "dummy_models" / _famdir / f"{repo_tag}__{variant}"
                         if vdir.exists():
                             break
@@ -110,7 +114,8 @@ def enumerate_runs(targets: dict, full: bool, backends: list[str]) -> list[dict]
                                 "image": be["images"][version], "tp": topo["tp"],
                                 "model_dir": f"{WORK}/{vdir.relative_to(ROOT)}",
                                 "aic_registered": ck.get("aic_registered", False),
-                                "render_overrides": (fam.get("render_overrides") or {}).get(backend) or {},
+                                "render_overrides": ((ck.get("render_overrides") or {}).get(backend)
+                                                     or (fam.get("render_overrides") or {}).get(backend) or {}),
                             })
     return runs
 
@@ -267,11 +272,9 @@ def check_coverage(targets: dict) -> None:
         mentioned.update(re.findall(rf"\b({org}/[\w.\-]+)", f.read_text()))
     covered = {ck["repo"] for fam in targets["families"].values() for ck in fam["checkpoints"]}
     inaccessible = set()
-    for inacc in (ROOT / "configs" / "inaccessible.json",
-                  Path(__file__).parent / "configs" / "inaccessible.json"):
-        if inacc.exists():
-            inaccessible = set(json.loads(inacc.read_text()))
-            break
+    inacc = ROOT / "configs" / "inaccessible.json"
+    if inacc.exists():
+        inaccessible = set(json.loads(inacc.read_text()))
     missing = sorted(mentioned - covered - inaccessible)
     print(f"collector mentions {len(mentioned)} repos; targets cover {len(covered)}; "
           f"gated/inaccessible {len(mentioned & inaccessible)}")

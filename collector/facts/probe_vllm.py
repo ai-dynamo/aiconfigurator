@@ -203,15 +203,24 @@ def main() -> None:
             try:  # attention boundaries: scan the LOADED model for attention-ish
                 # module classes (Attention/MLA/Mixer/linear-attn) — generic across
                 # model families, no hardcoded module-path list to maintain
+                import torch.nn as _nn
                 wrapped = set()
                 for _n, m in model.named_modules():
                     t = type(m)
-                    if t in wrapped or "forward" not in vars(t):
+                    if t in wrapped:
                         continue
                     if any(k in t.__name__ for k in ("Attention", "Attn", "MLA", "Mixer", "SSM", "Compressor", "Indexer")):
-                        wrap_span(t, "forward",
+                        # forward may be inherited (DSV4 classes) — wrap the
+                        # class in the MRO that actually defines it; the span
+                        # label reads the runtime type, so sharing a base is fine
+                        holder = next((c for c in t.__mro__
+                                       if "forward" in vars(c) and c is not _nn.Module), None)
+                        if holder is None or holder in wrapped:
+                            continue
+                        wrap_span(holder, "forward",
                                   lambda s: f"AIC::attn::{type(getattr(s, 'impl', s)).__name__}")
                         wrapped.add(t)
+                        wrapped.add(holder)
                 rec["attn_classes_wrapped"] = sorted(t.__name__ for t in wrapped)
                 if not wrapped:
                     rec["errors"]["attn_hook"] = "no attention-ish module classes found in model"
