@@ -692,11 +692,23 @@ fn ctx_headsize_ref_grid(
     target_hs: u32,
     window_size: u32,
 ) -> Result<Option<(std::sync::Arc<UtilGrid>, u32)>, AicError> {
-    let mut chosen: Option<(&String, u32)> = None;
-    for lane in lane_order {
+    // Named `lane_order` first, then (AIC-1715/1716 follow-up, mirrors
+    // `perf_database::attention::lane_slice`) every OTHER lane this table
+    // actually carries: the resolved order's leftover tier is computed
+    // against the lane-blind table-view FFI, so a collected `kernel_source`
+    // outside the resolver's static vocabulary is otherwise unreachable here
+    // even though `AttentionTable::context_lanes` has it.
+    let fallback_lanes = db.attention.context_lanes().unwrap_or_default();
+    let candidates = lane_order.iter().cloned().chain(
+        fallback_lanes
+            .into_iter()
+            .filter(|lane| !lane_order.contains(lane)),
+    );
+    let mut chosen: Option<(String, u32)> = None;
+    for lane in candidates {
         let head_sizes = match db
             .attention
-            .context_head_sizes(lane, fmha_quant, kv_quant, n_kv_lookup)
+            .context_head_sizes(&lane, fmha_quant, kv_quant, n_kv_lookup)
         {
             Ok(sizes) => sizes,
             Err(err) if err.is_missing_perf_data() => continue,
@@ -706,7 +718,7 @@ fn ctx_headsize_ref_grid(
             continue;
         };
         if db.attention.context_has_slice(
-            lane,
+            &lane,
             fmha_quant,
             kv_quant,
             n_kv_lookup,
@@ -736,7 +748,7 @@ fn ctx_headsize_ref_grid(
     );
     let grid = db.util_grids.get_or_try_build(&key, || {
         match db.attention.context_points(
-            std::slice::from_ref(ref_lane),
+            std::slice::from_ref(&ref_lane),
             fmha_quant,
             kv_quant,
             n_kv_lookup,
@@ -955,9 +967,17 @@ fn gen_headsize_ref_grid(
     target_hs: u32,
     window_size: u32,
 ) -> Result<Option<(std::sync::Arc<UtilGrid>, u32)>, AicError> {
-    let mut chosen: Option<(&String, u32)> = None;
-    for lane in lane_order {
-        let head_sizes = match db.attention.generation_head_sizes(lane, kv_quant, n_kv_lookup) {
+    // See `ctx_headsize_ref_grid`: named `lane_order` first, then every OTHER
+    // real lane this table carries (AIC-1715/1716 follow-up).
+    let fallback_lanes = db.attention.generation_lanes().unwrap_or_default();
+    let candidates = lane_order.iter().cloned().chain(
+        fallback_lanes
+            .into_iter()
+            .filter(|lane| !lane_order.contains(lane)),
+    );
+    let mut chosen: Option<(String, u32)> = None;
+    for lane in candidates {
+        let head_sizes = match db.attention.generation_head_sizes(&lane, kv_quant, n_kv_lookup) {
             Ok(sizes) => sizes,
             Err(err) if err.is_missing_perf_data() => continue,
             Err(err) => return Err(err),
@@ -967,7 +987,7 @@ fn gen_headsize_ref_grid(
         };
         if db
             .attention
-            .generation_has_slice(lane, kv_quant, n_kv_lookup, ref_hs, window_size)?
+            .generation_has_slice(&lane, kv_quant, n_kv_lookup, ref_hs, window_size)?
         {
             chosen = Some((lane, ref_hs));
             break;
@@ -988,7 +1008,7 @@ fn gen_headsize_ref_grid(
     );
     let grid = db.util_grids.get_or_try_build(&key, || {
         match db.attention.generation_points(
-            std::slice::from_ref(ref_lane),
+            std::slice::from_ref(&ref_lane),
             kv_quant,
             n_kv_lookup,
             ref_hs,

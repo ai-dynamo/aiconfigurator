@@ -170,11 +170,31 @@ def resolved_lane_order_for_op(database, table_attr: str, override: str | None =
     ``"_generation_attention_data"``. With no resolvable database (or any
     resolution failure) the always-valid ``["default"]`` is returned — the
     engine spec must never carry an empty lane list.
+
+    Table-aware extension (donor/leftover-lane density ranking) fires ONLY
+    when there is genuine positive intent — an explicit *override*, or a
+    REAL (non-``"default"``) framework-default map entry for this exact
+    (backend, floor-matched version, sm_version) — i.e. ``resolve_lane_order``
+    produced a non-empty pinned head (``LaneOrder.pinned_count > 0``). Every
+    backend/version this branch's own ``attention_lane_defaults.yaml`` entries
+    cover (sglang 0.5.14, vllm 0.24.0 non-Blackwell) satisfies this. Backends
+    with NO map entry, or whose map entry IS ``"default"`` (e.g. vllm 0.24.0
+    on Blackwell), have pinned_count == 0 — density-ranking would then be
+    reordering the ENTIRE known+leftover lane vocabulary blind, for models
+    this branch never collected lane-keyed data for or validated against;
+    that regressed unrelated models (a ~1-2% static-parity drift on one
+    llama4 case, a hard EmpiricalNotImplementedError on a vllm-0.19 hybrid
+    xshape case) when tried. Those stay on the plain ``["default"]`` the
+    pyo3 constructor already carries, relying only on the Rust-side
+    `lane_slice` fallback (any other table lane, BTreeMap order) — unchanged
+    from this op's behavior before AIC-1715/1716.
     """
     if database is None:
         return ["default"]
     try:
         order = resolve_lane_order(database, override)
+        if getattr(order, "pinned_count", 0) == 0:
+            return ["default"]
         op_cls = ContextAttention if table_attr.startswith("_context") else GenerationAttention
         depth = _CONTEXT_SLICE_DEPTH if table_attr.startswith("_context") else _GENERATION_SLICE_DEPTH
         op_cls.load_data(database)
