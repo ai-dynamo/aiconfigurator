@@ -437,6 +437,14 @@ impl PyGemm {
         Ok(slf.as_super().gemm()?.scale_num_tokens)
     }
 
+    /// Width-channel mutator (speculation.materialize): the materializer
+    /// multiplies token-linear ops' divisor by the verify width in place.
+    #[setter(_scale_num_tokens)]
+    fn set_scale_num_tokens(mut slf: PyRefMut<'_, Self>, value: u32) -> PyResult<()> {
+        slf.as_super().gemm_mut()?.scale_num_tokens = value;
+        Ok(())
+    }
+
     #[getter(_low_precision_input)]
     fn low_precision_input(slf: PyRef<'_, Self>) -> PyResult<bool> {
         Ok(slf.as_super().gemm()?.low_precision_input)
@@ -603,6 +611,13 @@ impl PyElementWise {
     #[getter(_scale_num_tokens)]
     fn scale_num_tokens(slf: PyRef<'_, Self>) -> PyResult<u32> {
         Ok(slf.as_super().elementwise()?.scale_num_tokens)
+    }
+
+    /// Width-channel mutator (speculation.materialize) — see the GEMM twin.
+    #[setter(_scale_num_tokens)]
+    fn set_scale_num_tokens(mut slf: PyRefMut<'_, Self>, value: u32) -> PyResult<()> {
+        slf.as_super().elementwise_mut()?.scale_num_tokens = value;
+        Ok(())
     }
 
     #[getter(_seq_split)]
@@ -1133,6 +1148,8 @@ impl PyGenerationAttention {
             head_size,
             window_size,
             kv_cache_dtype: kv_quant(kv_cache_dtype)?,
+            scale_num_tokens: 1,
+            verify_query_tokens: 0,
         });
         Ok((PyGenerationAttention, PyOperation { inner }))
     }
@@ -1182,6 +1199,31 @@ impl PyGenerationAttention {
             "KVCacheQuantMode",
             &enum_token(&slf.as_super().generation_attention()?.kv_cache_dtype),
         )
+    }
+
+    /// Speculative width channel (speculation.materialize): batch divisor
+    /// for sequence-basis pricing. See `GenerationAttentionOp` field docs.
+    #[getter(_scale_num_tokens)]
+    fn scale_num_tokens(slf: PyRef<'_, Self>) -> PyResult<u32> {
+        Ok(slf.as_super().generation_attention()?.scale_num_tokens)
+    }
+
+    #[setter(_scale_num_tokens)]
+    fn set_scale_num_tokens(mut slf: PyRefMut<'_, Self>, value: u32) -> PyResult<()> {
+        slf.as_super().generation_attention_mut()?.scale_num_tokens = value;
+        Ok(())
+    }
+
+    /// Real per-request query width behind the fold (roofline-guard input).
+    #[getter(_verify_query_tokens)]
+    fn verify_query_tokens(slf: PyRef<'_, Self>) -> PyResult<u32> {
+        Ok(slf.as_super().generation_attention()?.verify_query_tokens)
+    }
+
+    #[setter(_verify_query_tokens)]
+    fn set_verify_query_tokens(mut slf: PyRefMut<'_, Self>, value: u32) -> PyResult<()> {
+        slf.as_super().generation_attention_mut()?.verify_query_tokens = value;
+        Ok(())
     }
 }
 
@@ -2008,6 +2050,13 @@ impl PyMoEDispatch {
     #[getter(_scale_num_tokens)]
     fn scale_num_tokens(slf: PyRef<'_, Self>) -> PyResult<u32> {
         Ok(slf.as_super().moe_dispatch()?.scale_num_tokens)
+    }
+
+    /// Width-channel mutator (speculation.materialize) — see the GEMM twin.
+    #[setter(_scale_num_tokens)]
+    fn set_scale_num_tokens(mut slf: PyRefMut<'_, Self>, value: u32) -> PyResult<()> {
+        slf.as_super().moe_dispatch_mut()?.scale_num_tokens = value;
+        Ok(())
     }
 
     #[getter(_attn_ar_modeled)]

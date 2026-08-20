@@ -59,7 +59,11 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 //   `enable_shared_layer` / `strict_provenance` policy flags; the engine
 //   re-derives every table's source list from the perf-data tree
 //   (`perf_database/source_resolution.rs`).
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 13;
+// - 14: `GenerationAttentionOp` gained `scale_num_tokens` (speculative
+//   verify-width batch divisor, sequence-basis pricing) and
+//   `verify_query_tokens` (roofline-guard width) — a bincode op-layout
+//   change (same class as v5/v7/v8/v10/v12).
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 14;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].

@@ -236,6 +236,8 @@ mod tests {
             head_size: 128,
             window_size: 4096,
             kv_cache_dtype: KvCacheQuantMode::Int8,
+            scale_num_tokens: 1,
+            verify_query_tokens: 0,
         }
     }
 
