@@ -25,6 +25,14 @@ frameworks:
         version: "0.5.16"
         images:
           default: "lmsysorg/sglang@sha256:4b8a7542e00a4d82801d1276108438b024137c9a07f33215d03b04003e500f2b"
+      # MiniMax-M3 (minimax_m3.py + minimax_sparse_ops) landed in the official
+      # v0.5.16 release; the stock 0.5.14 default has no M3. Pin the official
+      # tag for the msa family only (NOT the kimi-k3 branch build above, which
+      # is a different container).
+      msa:
+        version: "0.5.16"
+        images:
+          default: "lmsysorg/sglang:v0.5.16@sha256:7b6a35df9839fd593a94a1eaee82d7777f472225d9f3ad1f8a2e0cb2bd1785d0"
   trtllm:
     source_repo: "https://github.com/NVIDIA/TensorRT-LLM.git"
     default:
@@ -54,6 +62,15 @@ frameworks:
       # (H20) at bring-up; the rc20 serving citations in collect_mla_module
       # are re-audited on this bump per layer_permissions.md.
       sparse_attention:
+        version: "1.3.0rc23"
+        images:
+          default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc23@sha256:316b840a08a8174fc3f6b5716828bdfe1daaf629ee1ac2a8b7a22526d141a007"
+      # MiniMax-M3: the true-sparse fmha_sm100 backend (implementation="msa",
+      # SM100/103-only) landed in rc23; rc20 has only the Triton reference
+      # path (measured identical-or-worse on SM90 at rc23, so the existing
+      # existing SM90 msa data stays at rc20). Pin the msa family to rc23 for the
+      # Blackwell collection.
+      msa:
         version: "1.3.0rc23"
         images:
           default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc23@sha256:316b840a08a8174fc3f6b5716828bdfe1daaf629ee1ac2a8b7a22526d141a007"

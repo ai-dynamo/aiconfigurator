@@ -55,3 +55,120 @@ def test_msa_sol_scales_with_workload():
     with_prefix = float(op._engine_query(db, batch_size=8, s=2048, prefix=2048))
     assert 0 < small < large  # scales with new-token count
     assert with_prefix > large  # cached prefix adds indexer work beyond index_topk
+
+
+def test_rtx_trtllm_rc23_loads_and_m3_is_explicitly_rejected():
+    """Dynamo 1.3 pins trtllm 1.3.0rc23; rtx ships rc20-reuse markers so the
+    exact-version gate passes (review 4969690316 Spec-3) and every reused
+    family serves, while M3 MSA — no rtx table, no DSA xop donor on trtllm —
+    fails with a typed empirical error (an explicitly rejected cell), never
+    a silent fallback or a version-gate exit."""
+    from aiconfigurator.sdk.perf_database import get_database_view
+    from aiconfigurator_core.sdk.errors import EmpiricalNotImplementedError
+
+    db = get_database_view("rtx_pro_6000_server", "trtllm", "1.3.0rc23", database_mode="HYBRID")
+    assert db is not None, "rc23 reuse markers must make the version root loadable"
+    op = _ctx_msa()
+    # The EXACT typed contract (review 4972622548 item 3): the miss crosses
+    # the engine FFI as EmpiricalNotImplementedError — never a version-gate
+    # exit, never a silent fallback, never an untyped error.
+    with pytest.raises(EmpiricalNotImplementedError, match=r"(?i)no DSA util|empirical"):
+        op._engine_query(db, batch_size=2, s=512, prefix=0)
+
+
+@pytest.mark.parametrize(
+    ("system", "backend", "version"),
+    [
+        # Withdrawn tables (SGLang v0.5.16 has no CC-8.9 branch) AND no DSA
+        # xop donor on this cell — nothing to transfer from.
+        ("l40s", "sglang", "0.5.16"),
+        # fp8_block tier failed classified on SM120 (DeepGEMM layout.hpp:59)
+        # AND no DSA xop donor — the NVFP4 checkpoint's lane is rejected.
+        ("rtx_pro_6000_server", "vllm", "0.24.0"),
+    ],
+)
+def test_rejected_msa_cells_raise_typed_errors(system, backend, version):
+    """The support matrix's R cells (review 4980441676): a cell with no own
+    table and no DSA donor must fail TYPED in both modes — SILICON with
+    PerfDataNotAvailableError, HYBRID with EmpiricalNotImplementedError —
+    for context and generation alike; never a silent fallback or a value."""
+    from aiconfigurator.sdk.operations.msa import ContextMSAModule, GenerationMSAModule
+    from aiconfigurator.sdk.perf_database import get_database_view
+    from aiconfigurator_core.sdk.errors import (
+        EmpiricalNotImplementedError,
+        PerfDataNotAvailableError,
+    )
+
+    def op(cls):
+        return cls(
+            "msa",
+            1.0,
+            num_heads=8,
+            num_kv_heads=1,
+            hidden_size=4096,
+            head_dim=128,
+            v_head_dim=128,
+            index_n_heads=4,
+            index_head_dim=128,
+            index_topk=16,
+            block_size=128,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+        )
+
+    cases = [
+        (ContextMSAModule, {"batch_size": 2, "s": 512, "prefix": 0}),
+        (GenerationMSAModule, {"batch_size": 2, "s": 512}),
+    ]
+    silicon = get_database_view(system, backend, version, database_mode="SILICON")
+    hybrid = get_database_view(system, backend, version, database_mode="HYBRID")
+    for cls, kwargs in cases:
+        with pytest.raises(PerfDataNotAvailableError):
+            op(cls)._engine_query(silicon, **kwargs)
+        with pytest.raises(EmpiricalNotImplementedError, match=r"(?i)no DSA util"):
+            op(cls)._engine_query(hybrid, **kwargs)
+
+
+def test_nvfp4_checkpoint_lane_resolution_per_backend():
+    """End-to-end lookup for the NVFP4 checkpoint's MSA lane (review
+    4969690316 Spec-2): the SDK prices its MXFP8 projections as
+    gemm=fp8_block. trtllm/vllm b200 tables carry that gemm tier — SILICON
+    must resolve; the sglang tables are bf16-gemm-only by declaration (the
+    checkpoint's quantized flow is unsupported in SGLang serving), so
+    SILICON must miss and HYBRID takes the documented empirical transfer."""
+    from aiconfigurator.sdk.operations.msa import ContextMSAModule
+    from aiconfigurator.sdk.perf_database import get_database_view
+
+    def op():
+        return ContextMSAModule(
+            "msa",
+            1.0,
+            num_heads=8,
+            num_kv_heads=1,
+            hidden_size=4096,
+            head_dim=128,
+            v_head_dim=128,
+            index_n_heads=4,
+            index_head_dim=128,
+            index_topk=16,
+            block_size=128,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+        )
+
+    for backend, version in (("trtllm", "1.3.0rc23"), ("vllm", "0.24.0")):
+        db = get_database_view("b200_sxm", backend, version, database_mode="SILICON")
+        assert db is not None, f"b200 {backend} data missing"
+        latency = float(op()._engine_query(db, batch_size=2, s=512, prefix=0))
+        assert latency > 0, f"{backend} fp8_block gemm lane must resolve in SILICON"
+
+    sg_silicon = get_database_view("b200_sxm", "sglang", "0.5.16", database_mode="SILICON")
+    assert sg_silicon is not None
+    with pytest.raises(Exception, match=r"(?i)silicon|missing|not supported"):
+        op()._engine_query(sg_silicon, batch_size=2, s=512, prefix=0)
+
+    sg_hybrid = get_database_view("b200_sxm", "sglang", "0.5.16", database_mode="HYBRID")
+    latency = float(op()._engine_query(sg_hybrid, batch_size=2, s=512, prefix=0))
+    assert latency > 0, "sglang HYBRID must fall back to the empirical transfer for the fp8_block lane"
