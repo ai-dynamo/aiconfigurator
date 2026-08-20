@@ -1651,12 +1651,15 @@ def test_default_config_wideep_mla_spec_survives_the_real_bincode_decode():
     """A DEFAULT `ModelConfig` must produce a spec Rust can decode.
 
     `ModelConfig.attention_backend` is None ("no lane override", AIC-1715) while
-    the Rust twin types `attn_backend` as a non-optional `String`, so emitting
-    the raw value serialises `null` and `engine_spec_bincode_from_json` aborts
-    the sweep with a ValueError that no caller converts to
-    `RustEngineUnsupportedError`. sglang WideEP DeepSeek is exactly the config
-    that routes to the compiled engine, so this must round-trip through the REAL
-    extension — a monkeypatched stub is structurally blind to payload types.
+    `PyWideEPContextMLA`/`PyWideEPGenerationMLA` type `attn_backend` as a
+    non-optional `&str` (pyo3 raises a `TypeError` at construction on `None` —
+    even louder than the retired dict-builder's `null`-serializes-then-bincode-
+    aborts failure mode). Model-building code (`DeepSeekModel._build_*_ops`)
+    pre-bakes the default (`config.attention_backend or "flashinfer"`) at the
+    construction call site for exactly this reason. sglang WideEP DeepSeek is
+    exactly the config that routes to the compiled engine, so this must
+    round-trip through the REAL extension — a monkeypatched stub is
+    structurally blind to payload types.
     """
     import aiconfigurator_core
     from aiconfigurator.sdk import common, engine
@@ -1675,12 +1678,13 @@ def test_default_config_wideep_mla_spec_survives_the_real_bincode_decode():
     )
     assert cfg.attention_backend is None, "the regression under test needs the no-override default"
 
-    # Mirrors DeepSeekModel._build_*_ops: the op receives config.attention_backend verbatim.
-    ctx = WideEPContextMLA(
-        "context_attention", 61, 8, cfg.kvcache_quant_mode, cfg.fmha_quant_mode, cfg.attention_backend
-    )
+    # Mirrors DeepSeekModel._build_*_ops: pre-bake the same default the
+    # constructor's own pyo3 signature carries (`or "flashinfer"`), since
+    # `config.attention_backend` is None here by construction.
+    attn_backend = cfg.attention_backend or "flashinfer"
+    ctx = WideEPContextMLA("context_attention", 61, 8, cfg.kvcache_quant_mode, cfg.fmha_quant_mode, attn_backend)
     gen = WideEPGenerationMLA(
-        "generation_attention", 61, 8, cfg.kvcache_quant_mode, cfg.fmha_quant_mode, cfg.attention_backend
+        "generation_attention", 61, 8, cfg.kvcache_quant_mode, cfg.fmha_quant_mode, attn_backend
     )
     model = SimpleNamespace(config=cfg, architecture="DeepseekV3ForCausalLM", context_ops=[ctx], generation_ops=[gen])
 
