@@ -1738,6 +1738,13 @@ def _run_static_estimate(
 
     resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
     resolve_nvfp4_for_system(model_config, system_name, model_path)
+    resolve_model_config_moe_comm(
+        model_config,
+        model_path=model_path,
+        system_name=system_name,
+        backend_name=backend_name,
+        database=database,
+    )
 
     runtime_config = RuntimeConfig(
         batch_size=batch_size,
