@@ -795,12 +795,18 @@ impl AicEngine {
     /// error) when the table has no data at all, matching the tolerant
     /// `unwrap_or_default()` the XSHAPE reference-grid fallback uses for
     /// the same underlying accessor.
-    fn attention_lane_density(&self, py: Python<'_>, attribute: &str) -> PyResult<Vec<(String, u32, u32)>> {
+    fn attention_lane_density(
+        &self,
+        py: Python<'_>,
+        attribute: &str,
+    ) -> PyResult<Vec<(String, u32, u32)>> {
         py.allow_threads(|| {
             let db = self.inner.database();
             match attribute {
                 "_context_attention_data" => Ok(db.attention.context_lanes().unwrap_or_default()),
-                "_generation_attention_data" => Ok(db.attention.generation_lanes().unwrap_or_default()),
+                "_generation_attention_data" => {
+                    Ok(db.attention.generation_lanes().unwrap_or_default())
+                }
                 other => Err(PyValueError::new_err(format!(
                     "attention_lane_density: unknown attribute {other:?}"
                 ))),
