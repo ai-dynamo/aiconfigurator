@@ -822,18 +822,41 @@ fn query_generation_attention_table(
         }
         DatabaseMode::Empirical => Ok(PerformanceResult::new(
             generation_attention_empirical(
-                db, lane_order, b, s, n, n_kv, head_size, window_size, kv_quant,
+                db,
+                lane_order,
+                b,
+                s,
+                n,
+                n_kv,
+                head_size,
+                window_size,
+                kv_quant,
             )?,
             Source::Empirical,
         )),
         DatabaseMode::Hybrid => {
             match db.attention.query_generation(
-                lane_order, b, s, n, n_kv, head_size, window_size, kv_quant,
+                lane_order,
+                b,
+                s,
+                n,
+                n_kv,
+                head_size,
+                window_size,
+                kv_quant,
             ) {
                 Ok(value) => Ok(silicon(value)),
                 Err(err) if err.is_missing_perf_data() => Ok(PerformanceResult::new(
                     generation_attention_empirical(
-                        db, lane_order, b, s, n, n_kv, head_size, window_size, kv_quant,
+                        db,
+                        lane_order,
+                        b,
+                        s,
+                        n,
+                        n_kv,
+                        head_size,
+                        window_size,
+                        kv_quant,
                     )?,
                     Source::Empirical,
                 )),
@@ -1240,7 +1263,13 @@ mod tests {
     #[test]
     fn generation_attention_smoke() {
         let db = b200_vllm_db();
-        let op = with_vllm_lanes_gen(GenerationAttentionOp::new("gen", 64, 4, 128, KvCacheQuantMode::Fp8));
+        let op = with_vllm_lanes_gen(GenerationAttentionOp::new(
+            "gen",
+            64,
+            4,
+            128,
+            KvCacheQuantMode::Fp8,
+        ));
         // b=32 isl+step=2 n=64 n_kv=4. The query averages 5 interp samples
         // over s ∈ [1, 2] (s_samples = [1,1,1,1,2]) on the raw grid,
         // matching Python's `_query_generation_attention_table`; s=1 sits
@@ -1569,7 +1598,15 @@ mod tests {
             "got {ctx:?}"
         );
         let gen = query_generation_attention_table(
-            &db, &vllm_lanes(), 16, 4096, 48, 8, 192, 0, KvCacheQuantMode::Fp8,
+            &db,
+            &vllm_lanes(),
+            16,
+            4096,
+            48,
+            8,
+            192,
+            0,
+            KvCacheQuantMode::Fp8,
         );
         assert!(
             matches!(gen, Err(AicError::EmpiricalNotImplemented(_))),
@@ -1796,11 +1833,25 @@ mod tests {
     /// end to end, so a future resolver regression here fails THOSE first —
     /// re-verify this literal in lockstep if either ever needs a refresh.
     fn sglang_default_lanes() -> Vec<String> {
-        lane_vec(&["triton", "trtllm_mha", "flashinfer", "fa3", "fla", "default"])
+        lane_vec(&[
+            "triton",
+            "trtllm_mha",
+            "flashinfer",
+            "fa3",
+            "fla",
+            "default",
+        ])
     }
 
     fn sglang_flashinfer_lanes() -> Vec<String> {
-        lane_vec(&["flashinfer", "triton", "trtllm_mha", "fa3", "fla", "default"])
+        lane_vec(&[
+            "flashinfer",
+            "triton",
+            "trtllm_mha",
+            "fa3",
+            "fla",
+            "default",
+        ])
     }
 
     /// The lane walk owns the EMPIRICAL util carrier too, not just the silicon
@@ -1879,7 +1930,13 @@ mod tests {
             (sglang_default_lanes(), 8, 4096, 128, 0.028808000683784484),
             (sglang_default_lanes(), 16, 2048, 128, 0.027752000093460082),
             (sglang_flashinfer_lanes(), 8, 4096, 128, 0.0370959997177124),
-            (sglang_flashinfer_lanes(), 16, 2048, 128, 0.03883999884128571),
+            (
+                sglang_flashinfer_lanes(),
+                16,
+                2048,
+                128,
+                0.03883999884128571,
+            ),
             (sglang_default_lanes(), 8, 4096, 80, 0.018005000427365303),
             (sglang_flashinfer_lanes(), 8, 4096, 80, 0.02318499982357025),
         ];
@@ -1935,7 +1992,13 @@ mod tests {
         let default_ms = gen.query(&db, 8, 4096, 1.0).expect("query").latency_ms;
         gen.lane_order = sglang_flashinfer_lanes();
         let flashinfer_ms = gen.query(&db, 8, 4096, 1.0).expect("query").latency_ms;
-        assert!((default_ms - 0.028358187839476155).abs() < 1e-9, "got {default_ms}");
-        assert!((flashinfer_ms - 0.03659885138535173).abs() < 1e-9, "got {flashinfer_ms}");
+        assert!(
+            (default_ms - 0.028358187839476155).abs() < 1e-9,
+            "got {default_ms}"
+        );
+        assert!(
+            (flashinfer_ms - 0.03659885138535173).abs() < 1e-9,
+            "got {flashinfer_ms}"
+        );
     }
 }
