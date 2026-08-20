@@ -35,6 +35,17 @@ backends:
       1.3.0rc23: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc23
 families:
   dsv4:
+    known_sm90:
+      sglang_0516: "ue8m0-scale fp8 DSV4 checkpoints fail at trace on SM90 tp1:
+        auto->triton MoE runner asserts 'Hidden size mismatch' (w13 requantized
+        to deepgemm ue8m0 layout at load; triton reads it transposed); explicit
+        deep_gemm runner asserts SM100-only packed-fp4 branch
+        (layout.hpp:57 'kPackedFP4 and arch_major == 10').
+        DEEPGEMM_SCALE_UE8M0 = DEEPGEMM_BLACKWELL in sglang — the ue8m0 requant
+        path assumes Blackwell. Probe-verified 2026-08-20 (bisect A-I:
+        generator CLI, mixed-chunk, page size, jitcache mount all excluded)."
+      trtllm_rc23: "DSV4 rejected at load: 'Missing COMPRESS pool metadata for
+        compress ratio 4' — CSA compression unsupported on this path."
     architecture: DeepseekV4ForCausalLM
     checkpoints:
     - repo: deepseek-ai/DeepSeek-V4-Pro-0813
@@ -295,6 +306,11 @@ families:
       profile: fp8
       variants:
       - rep
+      known:
+        support: "KimiK3ForConditionalGeneration unregistered in sglang 0.5.16,
+          vllm 0.24.0, trtllm 1.3.0rc23 (probe-verified 2026-08-20); K3 facts
+          need a newer framework pin. Topology fork (TEP8 vs DEP8) reported by
+          owner as real on K3 — verify once a supporting pin exists."
     - repo: nvidia/DeepSeek-V3.1-NVFP4
       profile: nvfp4
       variants:
@@ -312,9 +328,12 @@ families:
       variants:
       - rep
     - repo: nvidia/Kimi-K3-NVFP4
-      profile: bfloat16
+      profile: nvfp4  # quant_method=modelopt_mixed, num_bits=4 group=16 on experts
       variants:
       - rep
+      known:
+        support: "same as moonshotai/Kimi-K3: architecture unregistered at all
+          three pinned framework versions (probe-verified 2026-08-20)."
     - repo: nvidia/Llama-3.1-70B-Instruct-FP8
       profile: fp8
       variants:
