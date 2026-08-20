@@ -1683,9 +1683,7 @@ def test_default_config_wideep_mla_spec_survives_the_real_bincode_decode():
     # `config.attention_backend` is None here by construction.
     attn_backend = cfg.attention_backend or "flashinfer"
     ctx = WideEPContextMLA("context_attention", 61, 8, cfg.kvcache_quant_mode, cfg.fmha_quant_mode, attn_backend)
-    gen = WideEPGenerationMLA(
-        "generation_attention", 61, 8, cfg.kvcache_quant_mode, cfg.fmha_quant_mode, attn_backend
-    )
+    gen = WideEPGenerationMLA("generation_attention", 61, 8, cfg.kvcache_quant_mode, cfg.fmha_quant_mode, attn_backend)
     model = SimpleNamespace(config=cfg, architecture="DeepseekV3ForCausalLM", context_ops=[ctx], generation_ops=[gen])
 
     spec_json = engine.build_engine_spec_json(

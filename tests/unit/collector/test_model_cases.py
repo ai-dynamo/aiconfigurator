@@ -831,10 +831,10 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # separate row, never merged with the BF16 parent).
     # AIC-1715/1716 rebase: nvidia/Qwen3.5-397B-A17B-NVFP4's moe row is now
     # sglang-only (frameworks: [sglang], citing the InferenceX serving pin)
-    # instead of main's prior generic sglang/trtllm/vllm declaration, so the
-    # net delta vs the pre-rebase 6720 baseline is not a simple +117; the
-    # exact figure is re-verified against a live run in the rebase's gate
-    # pass (tests/unit/collector, "collector data checks").
+    # instead of main's prior generic sglang/trtllm/vllm declaration; the
+    # sglang-only row's own count (117, pinned separately below) happens to
+    # match what the generic 3-framework declaration contributed here, so
+    # the total is unchanged at 6720 (confirmed against a live run).
     assert len(moe_cases) == 6720
 
     assert any(
