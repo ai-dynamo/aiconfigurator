@@ -118,16 +118,62 @@ fn lane_slice<'a, K: Ord, V>(
     lane_order: &[String],
     key: &K,
 ) -> Option<&'a V> {
-    if let Some(v) = lane_order
-        .iter()
-        .find_map(|lane| by_lane.get(lane).and_then(|slices| slices.get(key)))
-    {
-        return Some(v);
+    for (rank, lane) in lane_order.iter().enumerate() {
+        if let Some(v) = by_lane.get(lane).and_then(|slices| slices.get(key)) {
+            if rank > 0 {
+                // Donor substitution: the primary (rank-0) lane missed this
+                // exact key and a lower-priority named lane served it
+                // instead. Silent under the old Python stack; surfaced here
+                // now that Rust owns the query.
+                log::debug!(
+                    "attention lane donor substitution: {:?} missing this key, served by {lane:?} (position {rank} of {lane_order:?})",
+                    lane_order[0]
+                );
+            }
+            return Some(v);
+        }
     }
+    for (lane, slices) in by_lane.iter() {
+        if lane_order.iter().any(|tried| tried == lane) {
+            continue;
+        }
+        if let Some(v) = slices.get(key) {
+            log::debug!(
+                "attention lane donor substitution: no lane in {lane_order:?} had this key, fell back to table lane {lane:?}"
+            );
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Lane names in `by_lane` that a miss on `lane_order` would have fallen
+/// back through (see [`lane_slice`]) — i.e. every table lane NOT already
+/// named in `lane_order`. Backs the miss-diagnostic errors below so they
+/// report every lane actually consulted, not just the resolver's named list.
+fn fallback_lanes<'a, K, V>(by_lane: &'a BTreeMap<String, BTreeMap<K, V>>, lane_order: &[String]) -> Vec<&'a str> {
     by_lane
-        .iter()
-        .filter(|(lane, _)| !lane_order.iter().any(|tried| tried == *lane))
-        .find_map(|(_, slices)| slices.get(key))
+        .keys()
+        .filter(|lane| !lane_order.iter().any(|tried| tried == *lane))
+        .map(String::as_str)
+        .collect()
+}
+
+/// `(slice_count, row_count)` for one lane's slice map: the number of
+/// distinct keys (`ContextKey`/`GenerationKey` — one per `[fmha][kv][kv_n]
+/// [head][window]` combination) and the total measured `(n, s, b)` leaf
+/// points summed across all of them. Backs
+/// [`AttentionTable::context_lanes`] / [`AttentionTable::generation_lanes`];
+/// see their doc comments for why this exists (AIC-1715/1716 follow-up —
+/// donor-lane density ranking needs the QUERY table, not the lane-blind
+/// enumeration view).
+fn lane_density<K>(slices: &BTreeMap<K, Node>) -> (u32, u32) {
+    let slice_count = slices.len() as u32;
+    let row_count: u32 = slices
+        .values()
+        .map(|node| perf_interp::node_points(node).len() as u32)
+        .sum();
+    (slice_count, row_count)
 }
 
 /// Lane key for one parquet row (see [`DEFAULT_LANE`]).
@@ -232,7 +278,7 @@ impl AttentionTable {
             window_size,
         };
         let node = lane_slice(&grids.by_lane, lane_order, &key)
-            .ok_or_else(|| missing_key(&self.data_root, lane_order, &key))?;
+            .ok_or_else(|| missing_key(&self.data_root, lane_order, &grids.by_lane, &key))?;
         // Python `perf_interp.context_attention_config`: Grid resolver,
         // sqrt-space blend on the seq axis only (~seq^2 curvature; heads and
         // batch are ~linear). Past the staircase frontier (large seq x large
@@ -292,7 +338,7 @@ impl AttentionTable {
             window_size,
         };
         let node = lane_slice(&grids.by_lane, lane_order, &key)
-            .ok_or_else(|| missing_gen_key(&self.data_root, lane_order, &key))?;
+            .ok_or_else(|| missing_gen_key(&self.data_root, lane_order, &grids.by_lane, &key))?;
         // Python `perf_interp.generation_attention_config`: Grid resolver, RAW
         // blend everywhere (~linear in seq), axes [num_heads][batch][seq_len].
         // The ±10% 5-sample seq averaging is op-level smoothing (decode s
@@ -398,10 +444,10 @@ impl AttentionTable {
             window_size,
         };
         let node = lane_slice(&grids.by_lane, lane_order, &key)
-            .ok_or_else(|| missing_key(&self.data_root, lane_order, &key))?;
+            .ok_or_else(|| missing_key(&self.data_root, lane_order, &grids.by_lane, &key))?;
         let points = perf_interp::node_points(node);
         if points.is_empty() {
-            return Err(missing_key(&self.data_root, lane_order, &key));
+            return Err(missing_key(&self.data_root, lane_order, &grids.by_lane, &key));
         }
         Ok(points)
     }
@@ -470,14 +516,38 @@ impl AttentionTable {
         Ok(sizes)
     }
 
-    /// Every lane this table actually carries (sorted — `by_lane` is a
-    /// `BTreeMap`). AIC-1715/1716 follow-up: the XSHAPE reference-grid walk
-    /// (`operators::attention::ctx_headsize_ref_grid`) tries the resolved
-    /// `lane_order` first, then falls back to every OTHER real lane here —
-    /// see `lane_slice`'s doc comment for why the resolved order alone
-    /// cannot see a collected `kernel_source` outside its static vocabulary.
-    pub fn context_lanes(&self) -> Result<Vec<String>, AicError> {
-        Ok(self.load_context()?.by_lane.keys().cloned().collect())
+    /// Every lane this table actually carries, with its `(slice_count,
+    /// row_count)` density (sorted by lane name — `by_lane` is a
+    /// `BTreeMap`). A "slice" is one distinct `ContextKey` (the
+    /// `[fmha][kv][kv_n][head][window]` combination a lane serves in full);
+    /// `row_count` sums the measured `(n, s, b)` leaf points across every
+    /// slice in the lane — mirrors Python's (now-retired) loader-side
+    /// density count exactly (see `operations/attention.py::_lane_density`,
+    /// which this method now backs).
+    ///
+    /// Two uses:
+    /// - `operators::attention::ctx_headsize_ref_grid`'s XSHAPE
+    ///   reference-grid walk tries the resolved `lane_order` first, then
+    ///   falls back to every OTHER real lane here (density unused there —
+    ///   see `lane_slice`'s doc comment for why the resolved order alone
+    ///   cannot see a collected `kernel_source` outside its static
+    ///   vocabulary).
+    /// - The `attention_lane_density` pyo3 accessor (`py.rs`) exposes this
+    ///   to Python so `lane_walk_order`'s donor/leftover tiers can rank by
+    ///   REAL measured coverage instead of the lane-blind
+    ///   `engine_table_view.py` enumeration view (AIC-1715/1716 follow-up;
+    ///   that view folds attention tables exactly like the pre-lane loader,
+    ///   for charts/support-matrix, and was never lane-aware).
+    pub fn context_lanes(&self) -> Result<Vec<(String, u32, u32)>, AicError> {
+        Ok(self
+            .load_context()?
+            .by_lane
+            .iter()
+            .map(|(lane, slices)| {
+                let (slice_count, row_count) = lane_density(slices);
+                (lane.clone(), slice_count, row_count)
+            })
+            .collect())
     }
 
     /// Collected `(num_heads, batch, seq) -> latency` points of one
@@ -503,10 +573,10 @@ impl AttentionTable {
             window_size,
         };
         let node = lane_slice(&grids.by_lane, lane_order, &key)
-            .ok_or_else(|| missing_gen_key(&self.data_root, lane_order, &key))?;
+            .ok_or_else(|| missing_gen_key(&self.data_root, lane_order, &grids.by_lane, &key))?;
         let points = perf_interp::node_points(node);
         if points.is_empty() {
-            return Err(missing_gen_key(&self.data_root, lane_order, &key));
+            return Err(missing_gen_key(&self.data_root, lane_order, &grids.by_lane, &key));
         }
         Ok(points)
     }
@@ -567,8 +637,16 @@ impl AttentionTable {
     }
 
     /// Decode twin of [`AttentionTable::context_lanes`].
-    pub fn generation_lanes(&self) -> Result<Vec<String>, AicError> {
-        Ok(self.load_generation()?.by_lane.keys().cloned().collect())
+    pub fn generation_lanes(&self) -> Result<Vec<(String, u32, u32)>, AicError> {
+        Ok(self
+            .load_generation()?
+            .by_lane
+            .iter()
+            .map(|(lane, slices)| {
+                let (slice_count, row_count) = lane_density(slices);
+                (lane.clone(), slice_count, row_count)
+            })
+            .collect())
     }
 
     /// Collected `(num_heads, seq, batch) -> latency` points of one encoder
@@ -1192,16 +1270,28 @@ fn load_encoder_parquet(
     Ok(by_keys)
 }
 
-fn missing_key(data_root: &Path, lane_order: &[String], key: &ContextKey) -> AicError {
+fn missing_key(
+    data_root: &Path,
+    lane_order: &[String],
+    by_lane: &BTreeMap<String, BTreeMap<ContextKey, Node>>,
+    key: &ContextKey,
+) -> AicError {
     AicError::PerfDatabase(format!(
-        "context attention data missing for {key:?} in lanes {lane_order:?} at {}",
+        "context attention data missing for {key:?}: tried lane_order {lane_order:?}, then fell back through table lanes {:?} at {}",
+        fallback_lanes(by_lane, lane_order),
         data_root.display()
     ))
 }
 
-fn missing_gen_key(data_root: &Path, lane_order: &[String], key: &GenerationKey) -> AicError {
+fn missing_gen_key(
+    data_root: &Path,
+    lane_order: &[String],
+    by_lane: &BTreeMap<String, BTreeMap<GenerationKey, Node>>,
+    key: &GenerationKey,
+) -> AicError {
     AicError::PerfDatabase(format!(
-        "generation attention data missing for {key:?} in lanes {lane_order:?} at {}",
+        "generation attention data missing for {key:?}: tried lane_order {lane_order:?}, then fell back through table lanes {:?} at {}",
+        fallback_lanes(by_lane, lane_order),
         data_root.display()
     ))
 }

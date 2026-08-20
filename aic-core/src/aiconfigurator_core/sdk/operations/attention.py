@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import functools
 import logging
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar
 
 import aiconfigurator_core._aiconfigurator_core as _core
@@ -58,62 +57,18 @@ def resolve_lane_order(database, override: str | None = None) -> tuple[str, ...]
     return _lane_order_cached(database.backend, database.version, sm_version, override, database.systems_root)
 
 
-# Depth of a measured "slice" below the lane key — the unit a lane serves in
-# full. Context adds the fmha level: [fmha][kv][kv_n][head][window]; generation
-# is [kv][kv_n][head][window].
-_CONTEXT_SLICE_DEPTH = 5
-_GENERATION_SLICE_DEPTH = 4
+def lane_walk_order(density: dict[str, tuple[int, int]], lane_order: tuple[str, ...]) -> tuple[str, ...]:
+    """The concrete walk order given each lane's ``(slice_count, row_count)``
+    density: pinned lanes, then donors by density.
 
-# Memo attribute for :func:`_lane_density`. Stashed on the (long-lived, class
-# cached) table object because a per-call recount walks every measured row.
-_LANE_DENSITY_ATTR = "_aic_lane_density"
-
-
-def _lane_density(table, slice_depth: int) -> dict[str, tuple[int, int]]:
-    """``{lane: (slice_count, row_count)}`` for *table*, memoized on the table.
-
-    Both numbers matter: vllm's context table carries ``…trtllmprefill`` and
-    ``…trtllmdecode`` with an identical 72-slice footprint, and only the row
-    count (44 664 vs 3 684) identifies the prefill lane as the substantive one.
-    The memo is keyed on ``(slice_depth, len(table))`` so a re-bound or
-    differently-shaped table recomputes; value mutation in place (``_correct_sol``
-    clamps latencies, never the key structure) cannot invalidate it.
-    """
-    stamp = (slice_depth, len(table))
-    cached = getattr(table, _LANE_DENSITY_ATTR, None)
-    if cached is not None and cached[0] == stamp:
-        return cached[1]
-
-    density: dict[str, tuple[int, int]] = {}
-    for lane in table:
-        if not isinstance(lane, str):
-            continue
-        nodes = [table[lane]]
-        for _ in range(slice_depth):
-            nxt = []
-            for node in nodes:
-                if not isinstance(node, Mapping):
-                    nxt = []
-                    break
-                nxt.extend(node.values())
-            nodes = nxt
-        slice_count = len(nodes)
-        rows = 0
-        for node in nodes:  # one slice = [n][s|b][b|s] -> measured points
-            for lvl1 in node.values() if isinstance(node, Mapping) else ():
-                for lvl2 in lvl1.values() if isinstance(lvl1, Mapping) else ():
-                    rows += len(lvl2) if isinstance(lvl2, Mapping) else 1
-        density[lane] = (slice_count, rows)
-
-    try:
-        setattr(table, _LANE_DENSITY_ATTR, (stamp, density))
-    except (AttributeError, TypeError):  # plain dict fixtures cannot hold attrs
-        pass
-    return density
-
-
-def lane_walk_order(table, lane_order: tuple[str, ...], slice_depth: int) -> tuple[str, ...]:
-    """The concrete walk order for *table*: pinned lanes, then donors by density.
+    ``density`` is ``{kernel_source: (slice_count, row_count)}`` for the
+    REAL query-path table — fetched from the compiled engine via
+    ``engine_table_view.fetch_attention_lane_density``
+    (``perf_database/attention.rs::AttentionTable::context_lanes``/
+    ``generation_lanes``), never the lane-blind Python enumeration view
+    (``engine_table_view.fetch_table_view`` / ``table_view.rs``), which
+    folds every kernel_source into one first-wins table for
+    charts/support-matrix and cannot answer a density question at all.
 
     Three tiers, in order:
 
@@ -135,14 +90,14 @@ def lane_walk_order(table, lane_order: tuple[str, ...], slice_depth: int) -> tup
        sglang also ``flash_attention``) and those backends have no ``"default"``
        lane at all, so without this tier none of their rows would be reachable.
 
-    The ranking is a pure function of the table, so it is stable for a data set
-    and identical at spec-build time — the ENGINE SPEC carries this extended
-    order and the Rust twin replays it verbatim rather than re-deriving it.
+    The ranking is a pure function of ``density``, so it is stable for a data
+    set and identical at spec-build time — the ENGINE SPEC carries this
+    extended order and the Rust twin replays it verbatim rather than
+    re-deriving it.
     """
-    if not table:
+    if not density:
         return tuple(lane_order)
     pinned, donors = split_attention_lane_tiers(lane_order)
-    density = _lane_density(table, slice_depth)
 
     def _rank(lane: str) -> tuple[int, int, str]:
         slices, rows = density.get(lane, (0, 0))
@@ -179,26 +134,23 @@ def resolved_lane_order_for_op(database, table_attr: str, override: str | None =
     backend/version this branch's own ``attention_lane_defaults.yaml`` entries
     cover (sglang 0.5.14, vllm 0.24.0 non-Blackwell) satisfies this. Backends
     with NO map entry, or whose map entry IS ``"default"`` (e.g. vllm 0.24.0
-    on Blackwell), have pinned_count == 0 — density-ranking would then be
-    reordering the ENTIRE known+leftover lane vocabulary blind, for models
-    this branch never collected lane-keyed data for or validated against;
-    that regressed unrelated models (a ~1-2% static-parity drift on one
-    llama4 case, a hard EmpiricalNotImplementedError on a vllm-0.19 hybrid
-    xshape case) when tried. Those stay on the plain ``["default"]`` the
-    pyo3 constructor already carries, relying only on the Rust-side
-    `lane_slice` fallback (any other table lane, BTreeMap order) — unchanged
-    from this op's behavior before AIC-1715/1716.
+    on Blackwell) still get the density-ranked walk — ``lane_walk_order``
+    only needs the REAL per-lane density (now sourced straight from the
+    compiled engine, not the lane-blind enumeration view) to rank donors
+    correctly; there is no "unvalidated" case left to guard against once the
+    ranking itself is correct. See git history for the retired
+    ``pinned_count == 0`` short-circuit this replaced — that gate was a
+    workaround for a since-fixed bug in the density source, not a
+    deliberate scope limit.
     """
     if database is None:
         return ["default"]
     try:
         order = resolve_lane_order(database, override)
-        if getattr(order, "pinned_count", 0) == 0:
-            return ["default"]
-        op_cls = ContextAttention if table_attr.startswith("_context") else GenerationAttention
-        depth = _CONTEXT_SLICE_DEPTH if table_attr.startswith("_context") else _GENERATION_SLICE_DEPTH
-        op_cls.load_data(database)
-        return list(lane_walk_order(getattr(database, table_attr, None), order, depth))
+        from aiconfigurator_core.sdk.engine_table_view import fetch_attention_lane_density
+
+        density = fetch_attention_lane_density(database, table_attr)
+        return list(lane_walk_order(density, order))
     except Exception:
         logger.debug("attention lane order unresolvable for %s; serializing the default-only order", table_attr)
         return ["default"]

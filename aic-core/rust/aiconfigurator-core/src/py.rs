@@ -668,6 +668,32 @@ impl AicEngine {
         })
         .map_err(aic_to_py)
     }
+
+    /// Per-lane `(lane, slice_count, row_count)` density for one attention
+    /// QUERY table (AIC-1715/1716 follow-up). `attribute` is
+    /// `"_context_attention_data"` or `"_generation_attention_data"`.
+    ///
+    /// Unlike `table_view_json` (which folds the lane-blind enumeration
+    /// view kept for charts/support-matrix), this reads
+    /// `AttentionTable::context_lanes`/`generation_lanes` directly off the
+    /// QUERY-path `by_lane` structure — the real collected `kernel_source`
+    /// lanes, with the measured coverage `operations/attention.py::
+    /// lane_walk_order`'s donor/leftover tiers rank by. Empty (never an
+    /// error) when the table has no data at all, matching the tolerant
+    /// `unwrap_or_default()` the XSHAPE reference-grid fallback uses for
+    /// the same underlying accessor.
+    fn attention_lane_density(&self, py: Python<'_>, attribute: &str) -> PyResult<Vec<(String, u32, u32)>> {
+        py.allow_threads(|| {
+            let db = self.inner.database();
+            match attribute {
+                "_context_attention_data" => Ok(db.attention.context_lanes().unwrap_or_default()),
+                "_generation_attention_data" => Ok(db.attention.generation_lanes().unwrap_or_default()),
+                other => Err(PyValueError::new_err(format!(
+                    "attention_lane_density: unknown attribute {other:?}"
+                ))),
+            }
+        })
+    }
 }
 
 /// Convert a JSON-encoded [`EngineSpec`] into bincode bytes (Python → Rust
