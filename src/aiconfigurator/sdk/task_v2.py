@@ -40,7 +40,6 @@ from typing import Any, Literal
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.models import (
-    _get_model_info,
     _infer_quant_modes_from_raw_config,
     attention_op_keys,
     check_is_moe,
@@ -48,8 +47,7 @@ from aiconfigurator.sdk.models import (
     resolve_dsv4_moe_arch_mode,
     resolve_kimi_k3_moe_arch_mode,
 )
-from aiconfigurator.sdk.models.blocks.moe import LARGE_EP_READY_FAMILIES, MoEBlockShape
-from aiconfigurator.sdk.operations.moe_comm import MOE_A2A_BACKENDS, nodes_for
+from aiconfigurator.sdk.moe_comm_resolver import compute_large_ep_coverage, resolve_moe_comm_backend
 from aiconfigurator.sdk.perf_database import (
     get_latest_database_version,
     is_blackwell_system,
@@ -1286,54 +1284,25 @@ class Task:
         return coverage
 
     def _compute_large_ep_coverage(self, role: str) -> dict[str, dict[str, set[int]]]:
-        if not self._is_moe or self._model_family not in LARGE_EP_READY_FAMILIES:
+        if not self._is_moe:
             return {}
         model_path = self._role_attr(role, "model_path")
         backend_name = self._role_attr(role, "backend_name")
         system_name = self._role_attr(role, "system_name")
         if not model_path:
             return {}
-        try:
-            shape = MoEBlockShape.from_model_info(_get_model_info(model_path))
-        except Exception as exc:  # not a MoE checkpoint / unparsable config
-            logger.debug("large-EP coverage: no MoE shape for %s: %s", model_path, exc)
-            return {}
-
-        spec = load_system_spec(system_name)
-        gpus_per_node = int(spec.get("node", {}).get("num_gpus_per_node", 0) or 0)
-        sm_version = spec.get("gpu", {}).get("sm_version")
-        sm_version = int(sm_version) if sm_version is not None else None
         database = self._try_load_role_database(role)
-        # The probes are a PerfDatabase contract; a database object without them
-        # (a lightweight double injected by a caller) carries no coverage
-        # information, which is the same answer as an absent table.
-        a2a_probe = getattr(database, "moe_a2a_coverage", None)
-        coverage: dict[str, dict[str, set[int]]] = {}
-        if gpus_per_node and a2a_probe is not None:
-            a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts)
-            for phase in ("context", "generation"):
-                per_backend: dict[str, set[int]] = {}
-                for name, backend_spec in MOE_A2A_BACKENDS.items():
-                    if backend_name not in backend_spec.frameworks or phase not in backend_spec.inference_phases:
-                        continue
-                    eps = {
-                        ep
-                        for ep, node_num in a2a.get(name, ())
-                        if node_num == nodes_for(ep, gpus_per_node)
-                        and backend_spec.feasible(
-                            topk=shape.topk,
-                            num_experts=shape.num_experts,
-                            moe_tp_size=1,
-                            moe_ep_size=ep,
-                            sm_version=sm_version,
-                        )
-                    }
-                    if eps:
-                        per_backend[name] = eps
-                if per_backend:
-                    coverage[phase] = per_backend
+        result = compute_large_ep_coverage(
+            model_path=model_path,
+            model_family=self._model_family,
+            system_name=system_name,
+            backend_name=backend_name,
+            database=database,
+        )
+        coverage = result.phases
 
-        if not coverage:
+        if not coverage and result.shape is not None:
+            shape = result.shape
             log_key = (model_path, system_name, backend_name, self._role_attr(role, "backend_version"))
             if log_key not in _LARGE_EP_EMPTY_COVERAGE_LOGGED:
                 _LARGE_EP_EMPTY_COVERAGE_LOGGED.add(log_key)
@@ -1384,16 +1353,18 @@ class Task:
         coverage = self._large_ep_coverage(role)
         if not coverage:
             return None
-        resolved: dict[str, str] = {}
-        for phase in ("context", "generation"):
-            for name, eps in coverage.get(phase, {}).items():
-                if moe_ep in eps:
-                    resolved[phase] = name
-                    break
         required = set(self._role_phases(role)) | set(self._required_large_ep_phases(role))
-        missing = required - set(resolved)
-        if missing:
-            if missing == {"context"}:
+        resolved = resolve_moe_comm_backend(
+            coverage=coverage,
+            backend_name=self._role_attr(role, "backend_name"),
+            parallel=tuple(parallel_tuple),
+            required_phases=tuple(required),
+        )
+        if resolved is None:
+            covered_phases = {
+                phase for phase, per_backend in coverage.items() if any(moe_ep in eps for eps in per_backend.values())
+            }
+            if required - covered_phases == {"context"}:
                 self._warn_context_coverage_gap(role, moe_ep)
             return None
         return resolved

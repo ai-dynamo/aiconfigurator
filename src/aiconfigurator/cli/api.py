@@ -34,6 +34,7 @@ from aiconfigurator.sdk.models import (
     resolve_dsv4_moe_arch,
     resolve_nvfp4_for_system,
 )
+from aiconfigurator.sdk.moe_comm_resolver import resolve_model_config_moe_comm
 from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import (
     SpeculativeDecodingProfile,
@@ -1701,15 +1702,23 @@ def _run_static_estimate(
     _apply_nextn(model_config, nextn)
     # static / static_ctx run context attention; static_gen is generation-only
     # and legitimately keeps fp8 FMHA. Resolve fmha against the perf data accordingly.
+    database = load_database(system_name)
     resolve_context_fmha_by_data(
         model_config,
         model_path,
-        load_database(system_name),
+        database,
         backend_name,
         is_context_role=static_mode != "static_gen",
     )
     resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
     resolve_nvfp4_for_system(model_config, system_name, model_path)
+    resolve_model_config_moe_comm(
+        model_config,
+        model_path=model_path,
+        system_name=system_name,
+        backend_name=backend_name,
+        database=database,
+    )
 
     runtime_config = RuntimeConfig(
         batch_size=batch_size,
@@ -1723,7 +1732,6 @@ def _run_static_estimate(
     )
 
     model = get_model(model_path, model_config, backend_name)
-    database = load_database(system_name)
     backend = get_backend(backend_name)
     session = InferenceSession(model, database, backend)
     summary = session.run_static(
