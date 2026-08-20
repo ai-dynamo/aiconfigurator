@@ -23,8 +23,13 @@ if _OUT:
         state: dict = {"moe_calls": [], "attn_calls": [], "identity": {}}
 
         def _dump(rank: int) -> None:
-            with open(f"{_OUT}.rank{rank}.json", "w") as f:
+            # atomic replace: concurrent dumpers (e.g. dp/ep attn workers that
+            # share a tp_rank) must never interleave writes in one file
+            import os
+            tmp = f"{_OUT}.rank{rank}.json.{os.getpid()}.tmp"
+            with open(tmp, "w") as f:
                 json.dump(state, f, indent=1, default=str)
+            os.replace(tmp, f"{_OUT}.rank{rank}.json")
 
         def _norm(name: str) -> str:
             return name.split("(")[0][:90]
