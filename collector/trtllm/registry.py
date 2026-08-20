@@ -133,4 +133,30 @@ REGISTRY: list[OpEntry] = [
         run_func="run_mla_module_worker",
         perf_filename=PerfFile.DSA_GENERATION_MODULE,
     ),
+    OpEntry(
+        op="msa_context_module",
+        module="collector.trtllm.collect_msa_module",
+        get_func="get_msa_context_module_test_cases",
+        run_func="run_msa_module_worker",
+        perf_filename=PerfFile.MSA_CONTEXT_MODULE,
+        # MiniMax-M3 MSA modules: hardware-validated on SM90 (h100/h200,
+        # rc23 Triton reference path) and SM100/103 (b200/b300/gb200/gb300,
+        # rc23 implementation="msa" fmha_sm100 path — see collect_msa_module).
+        # SM120 runs the Triton path; its table is pending (collection-pool
+        # availability) and lands in a follow-up — until then M3-on-SM120
+        # trtllm estimates fail with a typed EmpiricalNotImplemented (no MSA
+        # table and no DSA xop donor on that system/backend): an explicitly
+        # rejected cell, not a silent fallback. SM121 has never run on
+        # hardware and stays marked.
+        unverified_sms=(121,),
+    ),
+    OpEntry(
+        op="msa_generation_module",
+        module="collector.trtllm.collect_msa_module",
+        get_func="get_msa_generation_module_test_cases",
+        run_func="run_msa_module_worker",
+        perf_filename=PerfFile.MSA_GENERATION_MODULE,
+        # See msa_context_module marker rationale.
+        unverified_sms=(121,),
+    ),
 ]

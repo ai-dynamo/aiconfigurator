@@ -23,4 +23,7 @@ tables:
     # SM100/103-only (arg_groups/overrides.py:479-504 @ c6ad1f26), so SM89
     # stays on auto and resolves to the Triton default — the collected
     # sglang_fused_moe_triton kernel_source is the serving-true lane.
+    # 2026-08-09: appended 3078 MiniMax-M3 MoE shape rows (6144/3072, 128x4,
+    # bf16, sglang_fused_moe_triton; model-filtered internal collection CI
+    # run, zero failures).
     status: complete

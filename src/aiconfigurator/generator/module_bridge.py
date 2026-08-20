@@ -14,6 +14,18 @@ from .aggregators import collect_generator_params
 from .rendering import apply_defaults
 
 
+def _msa_sparse_implementation(task_config) -> str | None:
+    """Optimized-path wrapper over utils.msa_sparse_implementation (the
+    single decision point shared with the naive generator entry point)."""
+    from .utils import msa_sparse_implementation
+
+    return msa_sparse_implementation(
+        getattr(task_config, "primary_backend_name", None) or "",
+        task_config.primary_model_path,
+        task_config.primary_system_name,
+    )
+
+
 def _deep_merge(target: dict, extra: dict | None) -> dict:
     """
     Recursively merge the contents of the 'extra' dictionary into 'target',
@@ -183,6 +195,7 @@ def task_config_to_generator_config(
         "is_moe": task_config.is_moe,
         "nextn": task_config.nextn,
         "nextn_accepted": task_config.nextn_accepted if task_config.nextn else None,
+        "msa_sparse_implementation": _msa_sparse_implementation(task_config),
     }
     model_cfg = {k: v for k, v in model_cfg.items() if v is not None}
     model_cfg = _deep_merge(model_cfg, overrides.get("ModelConfig"))
