@@ -25,7 +25,7 @@ import yaml
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.config import ModelConfig
-from aiconfigurator.sdk.moe_comm_resolver import resolve_model_config_moe_comm
+from aiconfigurator.sdk.moe_comm_resolver import a2a_covers_parallel, resolve_model_config_moe_comm
 from aiconfigurator.sdk.perf_database import (
     PerfDataNotAvailableError,
     databases_cache,
@@ -270,6 +270,17 @@ def test_sglang_node1_deepep_coverage_represents_multi_node_ep(synth_systems_nod
     assert t.build_model_config(role="agg", parallel=point).moe_comm_backend == both
 
 
+@pytest.mark.parametrize("noncanonical_pair", [{(4, 1)}, {(16, 1)}, {(32, 2)}])
+def test_sglang_node1_fallback_requires_legacy_canonical_coordinate(noncanonical_pair):
+    assert not a2a_covers_parallel(
+        noncanonical_pair,
+        framework="sglang",
+        comm_backend="deepep_ht",
+        moe_ep_size=32,
+        expected_nodes=8,
+    )
+
+
 def test_exact_resolver_accepts_sglang_node1_deepep_substitution():
     database = SimpleNamespace(
         system="synthetic",
@@ -345,7 +356,7 @@ def test_exact_config_allows_intra_node_fused_but_requires_deepep_cross_node(
 ):
     t = _synth_task()
     monkeypatch.setattr(t, "_num_gpus_per_node", lambda _role: gpus_per_node)
-    monkeypatch.setattr(t, "_resolve_moe_comm_backend", lambda _role, _parallel: None)
+    monkeypatch.setattr(t, "_large_ep_coverage", lambda _role: {})
     database = SimpleNamespace(
         system=SYNTH_SYSTEM,
         version=SYNTH_VERSION,
@@ -431,6 +442,23 @@ def test_build_model_config_sets_backend_and_node_width(synth_systems):
     fused = t.build_model_config(role="agg", parallel=_tuple(dp=4, moe_ep=4))
     assert fused.moe_comm_backend is None
     assert fused.num_gpus_per_node == 8  # always injected; only large EP reads it
+
+
+def test_build_model_config_reuses_task_coverage_snapshot(synth_systems, monkeypatch):
+    t = _synth_task()
+    expected = t._large_ep_coverage("agg")
+    database = t._try_load_role_database("agg")
+
+    def unexpected_probe(*_args, **_kwargs):
+        raise AssertionError("build_model_config must reuse the Task coverage cache")
+
+    monkeypatch.setattr(database, "moe_a2a_coverage", unexpected_probe)
+    monkeypatch.setattr(database, "moe_expert_compute_coverage", unexpected_probe)
+
+    point = _tuple(dp=16, moe_ep=16)
+    model_config = t.build_model_config(role="agg", parallel=point)
+    assert expected
+    assert model_config.moe_comm_backend == {"context": "deepep_ht", "generation": "deepep_ll"}
 
 
 # ---------------------------------------------------------------------------

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Set
 from typing import Any
 
 from aiconfigurator.sdk import common
@@ -20,6 +21,9 @@ from aiconfigurator.sdk.operations.moe_comm import MOE_A2A_BACKENDS, nodes_for
 from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
 _DEEPEP_NODE1_FALLBACK_BACKENDS = frozenset(("deepep_ht", "deepep_ll"))
+_LEGACY_DEEPEP_NODE1_COORDINATE = (8, 1)
+
+LargeEpCoverage = Mapping[str, Mapping[str, Set[int]]]
 
 
 def a2a_covers_parallel(
@@ -33,10 +37,11 @@ def a2a_covers_parallel(
     """Whether A2A data can serve a target EP/node scale.
 
     SGLang DeepEP preserves the marked node-1 substitution introduced by
-    PR #1314: prefer an exact scale, otherwise let any node-1 row for the
-    already shape-filtered coverage probe represent a multi-node request.
-    The operator marks that substitution as estimated. Other frameworks and
-    communication backends remain exact-scale only.
+    PR #1314: prefer an exact scale, otherwise let the canonical legacy
+    ``(ep=8, node_num=1)`` row for the already shape-filtered coverage probe
+    represent a multi-node request. The Rust legacy adapter uses the same
+    coordinate and marks that substitution as estimated. Other frameworks
+    and communication backends remain exact-scale only.
     """
     if (moe_ep_size, expected_nodes) in pairs:
         return True
@@ -44,8 +49,28 @@ def a2a_covers_parallel(
         framework == "sglang"
         and comm_backend in _DEEPEP_NODE1_FALLBACK_BACKENDS
         and expected_nodes > 1
-        and any(node_num == 1 for _ep_size, node_num in pairs)
+        and _LEGACY_DEEPEP_NODE1_COORDINATE in pairs
     )
+
+
+def select_moe_comm_backend(
+    coverage: LargeEpCoverage,
+    *,
+    backend_name: str,
+    attention_dp_size: int,
+    moe_ep_size: int,
+) -> dict[str, str]:
+    """Select one communication backend for every covered phase at one EP."""
+    if backend_name == "trtllm" and attention_dp_size <= 1:
+        return {}
+
+    resolved: dict[str, str] = {}
+    for phase, per_backend in coverage.items():
+        for comm_backend, eps in per_backend.items():
+            if moe_ep_size in eps:
+                resolved[phase] = comm_backend
+                break
+    return resolved
 
 
 def resolve_model_config_moe_comm(
@@ -57,6 +82,7 @@ def resolve_model_config_moe_comm(
     required_phases: tuple[str, ...],
     fmha_quant_mode_explicit: bool = False,
     kvcache_quant_mode_explicit: bool = False,
+    coverage_snapshot: LargeEpCoverage | None = None,
 ) -> dict[str, str] | None:
     """Resolve DeepEP data, requiring it when EP spans physical nodes."""
     if not check_is_moe(model_path):
@@ -77,16 +103,18 @@ def resolve_model_config_moe_comm(
     model_config.num_gpus_per_node = gpus_per_node
 
     cross_node = moe_ep_size > gpus_per_node
-    if not cross_node:
+    if not cross_node and coverage_snapshot is None:
         # Exact CLI estimates historically keep intra-node EP on the fused
-        # path. Task may already have resolved an explicitly covered tuple;
-        # preserve that decision without re-resolving it here.
-        return model_config.moe_comm_backend
+        # path. Task supplies its cached coverage snapshot and can still
+        # resolve an explicitly covered intra-node tuple.
+        return None
     if moe_tp_size != 1:
-        raise ValueError(
-            "Cross-node EP requires pure expert parallelism "
-            f"(moe_tp_size=1); got moe_tp_size={moe_tp_size}, moe_ep_size={moe_ep_size}."
-        )
+        if cross_node:
+            raise ValueError(
+                "Cross-node EP requires pure expert parallelism "
+                f"(moe_tp_size=1); got moe_tp_size={moe_tp_size}, moe_ep_size={moe_ep_size}."
+            )
+        return None
 
     info = _get_model_info(model_path)
     _apply_model_quant_defaults(
@@ -106,8 +134,18 @@ def resolve_model_config_moe_comm(
     sm_version = int(sm_version) if sm_version is not None else None
     expected_nodes = nodes_for(moe_ep_size, gpus_per_node)
 
-    resolved: dict[str, str] = {}
-    if family in LARGE_EP_READY_FAMILIES and database is not None:
+    resolved: dict[str, str]
+    if coverage_snapshot is not None:
+        resolved = select_moe_comm_backend(
+            coverage_snapshot,
+            backend_name=backend_name,
+            attention_dp_size=int(model_config.attention_dp_size or 1),
+            moe_ep_size=moe_ep_size,
+        )
+    else:
+        coverage: dict[str, dict[str, set[int]]] = {}
+        resolved = {}
+    if coverage_snapshot is None and family in LARGE_EP_READY_FAMILIES and database is not None:
         a2a_probe = getattr(database, "moe_a2a_coverage", None)
         compute_probe = getattr(database, "moe_expert_compute_coverage", None)
         a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts) if a2a_probe is not None else {}
@@ -149,8 +187,14 @@ def resolve_model_config_moe_comm(
                         sm_version=sm_version,
                     )
                 ):
-                    resolved[phase] = comm_backend
+                    coverage.setdefault(phase, {}).setdefault(comm_backend, set()).add(moe_ep_size)
                     break
+        resolved = select_moe_comm_backend(
+            coverage,
+            backend_name=backend_name,
+            attention_dp_size=int(model_config.attention_dp_size or 1),
+            moe_ep_size=moe_ep_size,
+        )
 
     missing = set(required_phases) - set(resolved)
     if missing:

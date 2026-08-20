@@ -49,7 +49,11 @@ from aiconfigurator.sdk.models import (
     resolve_kimi_k3_moe_arch_mode,
 )
 from aiconfigurator.sdk.models.blocks.moe import LARGE_EP_READY_FAMILIES, MoEBlockShape
-from aiconfigurator.sdk.moe_comm_resolver import a2a_covers_parallel, resolve_model_config_moe_comm
+from aiconfigurator.sdk.moe_comm_resolver import (
+    a2a_covers_parallel,
+    resolve_model_config_moe_comm,
+    select_moe_comm_backend,
+)
 from aiconfigurator.sdk.operations.moe_comm import MOE_A2A_BACKENDS, nodes_for
 from aiconfigurator.sdk.perf_database import (
     get_latest_database_version,
@@ -1419,13 +1423,13 @@ class Task:
         coverage = self._large_ep_coverage(role)
         if not coverage:
             return None
-        resolved: dict[str, str] = {}
-        for phase in ("context", "generation"):
-            for name, eps in coverage.get(phase, {}).items():
-                if moe_ep in eps:
-                    resolved[phase] = name
-                    break
         required = set(self._role_phases(role)) | set(self._required_large_ep_phases(role))
+        resolved = select_moe_comm_backend(
+            coverage,
+            backend_name=self._role_attr(role, "backend_name"),
+            attention_dp_size=_dp,
+            moe_ep_size=moe_ep,
+        )
         missing = required - set(resolved)
         if missing:
             if missing == {"context"}:
@@ -2040,7 +2044,7 @@ class Task:
             attention_backend=self.attention_backend or "flashinfer",
             wideep_num_slots=self.wideep_num_slots,
             forward_model=self.forward_model or "op_level",
-            moe_comm_backend=(self._resolve_moe_comm_backend(role, parallel) if parallel is not None else None),
+            moe_comm_backend=None,
             # Hardware fact, injected alongside the comm backend: the large-EP
             # ops take the comm node span at construction and would otherwise
             # have no channel to it (models.helpers.large_ep_gpus_per_node).
@@ -2057,6 +2061,7 @@ class Task:
                 required_phases=required_phases,
                 fmha_quant_mode_explicit=self._fmha_explicit.get(role, False),
                 kvcache_quant_mode_explicit=self._kvcache_explicit.get(role, False),
+                coverage_snapshot=self._large_ep_coverage(role),
             )
         return model_config
 

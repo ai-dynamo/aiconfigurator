@@ -103,6 +103,9 @@ fn resolve_context_key(grids: &WideEpContextMlaGrids, requested: ContextKey) -> 
     if grids.by_keys.contains_key(&requested) {
         return requested;
     }
+    if !matches!(requested.kernel_source.as_str(), "flashinfer" | "fa3") {
+        return requested;
+    }
     let fallback = ContextKey {
         kernel_source: "trtllm_mla".to_string(),
         ..requested.clone()
@@ -119,6 +122,9 @@ fn resolve_generation_key(
     requested: GenerationKey,
 ) -> GenerationKey {
     if grids.by_keys.contains_key(&requested) {
+        return requested;
+    }
+    if !matches!(requested.kernel_source.as_str(), "flashinfer" | "fa3") {
         return requested;
     }
     let fallback = GenerationKey {
@@ -713,6 +719,107 @@ mod tests {
             .join("../..")
             .join(format!("src/aiconfigurator_core/systems/{name}.yaml"));
         SystemSpec::load(&systems_yaml).unwrap_or_else(|_| panic!("{name}.yaml must parse"))
+    }
+
+    fn context_key(kernel_source: &str) -> ContextKey {
+        ContextKey {
+            kernel_source: kernel_source.to_string(),
+            fmha_quant: "fp8_block".to_string(),
+            kv_quant: "fp8".to_string(),
+        }
+    }
+
+    fn generation_key(kernel_source: &str) -> GenerationKey {
+        GenerationKey {
+            kernel_source: kernel_source.to_string(),
+            kv_quant: "fp8".to_string(),
+        }
+    }
+
+    #[test]
+    fn wideep_mla_supported_attention_backends_use_trtllm_compatibility_slice() {
+        let context = WideEpContextMlaGrids {
+            by_keys: BTreeMap::from([(context_key("trtllm_mla"), Node::branch())]),
+        };
+        let generation = WideEpGenerationMlaGrids {
+            by_keys: BTreeMap::from([(generation_key("trtllm_mla"), Node::branch())]),
+        };
+
+        for source in ["flashinfer", "fa3"] {
+            assert_eq!(
+                resolve_context_key(&context, context_key(source)),
+                context_key("trtllm_mla")
+            );
+            assert_eq!(
+                resolve_generation_key(&generation, generation_key(source)),
+                generation_key("trtllm_mla")
+            );
+        }
+    }
+
+    #[test]
+    fn wideep_mla_exact_slice_precedes_compatibility_fallback() {
+        let context = WideEpContextMlaGrids {
+            by_keys: BTreeMap::from([
+                (context_key("flashinfer"), Node::branch()),
+                (context_key("trtllm_mla"), Node::branch()),
+            ]),
+        };
+        let generation = WideEpGenerationMlaGrids {
+            by_keys: BTreeMap::from([
+                (generation_key("flashinfer"), Node::branch()),
+                (generation_key("trtllm_mla"), Node::branch()),
+            ]),
+        };
+
+        assert_eq!(
+            resolve_context_key(&context, context_key("flashinfer")),
+            context_key("flashinfer")
+        );
+        assert_eq!(
+            resolve_generation_key(&generation, generation_key("flashinfer")),
+            generation_key("flashinfer")
+        );
+    }
+
+    #[test]
+    fn wideep_mla_missing_compatibility_slice_preserves_requested_key() {
+        let context = WideEpContextMlaGrids {
+            by_keys: BTreeMap::new(),
+        };
+        let generation = WideEpGenerationMlaGrids {
+            by_keys: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            resolve_context_key(&context, context_key("flashinfer")),
+            context_key("flashinfer")
+        );
+        assert_eq!(
+            resolve_generation_key(&generation, generation_key("flashinfer")),
+            generation_key("flashinfer")
+        );
+    }
+
+    #[test]
+    fn wideep_mla_invalid_or_empty_source_never_uses_compatibility_slice() {
+        let context = WideEpContextMlaGrids {
+            by_keys: BTreeMap::from([(context_key("trtllm_mla"), Node::branch())]),
+        };
+        let generation = WideEpGenerationMlaGrids {
+            by_keys: BTreeMap::from([(generation_key("trtllm_mla"), Node::branch())]),
+        };
+
+        for source in ["torch", ""] {
+            assert_eq!(
+                resolve_context_key(&context, context_key(source)),
+                context_key(source)
+            );
+            assert_eq!(
+                resolve_generation_key(&generation, generation_key(source)),
+                generation_key(source)
+            );
+        }
     }
 
     #[test]
