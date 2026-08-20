@@ -13,7 +13,10 @@
 //! ```
 //!
 //! is validated (sidecar schema/sha256/row_count, per-row workload checks,
-//! duplicate physical row keys) and grouped into cells keyed by
+//! duplicate physical row keys), healed of
+//! `kv_seed_regime == "fake_fallback"` values (fabricated-KV measurements
+//! replaced in memory by in-station extrapolation; see
+//! [`FPM_KV_SEED_FAKE_FALLBACK`]), and grouped into cells keyed by
 //! `(model_path, 15 identity columns)`. Each
 //! cell holds one nested table per phase — prefill
 //! `[batch][total_prefill][total_kv]`, decode `[batch][total_kv]` — plus the
@@ -52,6 +55,31 @@ pub const FPM_FORWARD_PARTITION_POLICY: &str = "balanced_v1";
 /// The only measurement policy the collector publishes; pinned in the
 /// sidecar gate (a pair measured under a different regime is structural).
 pub const FPM_FORWARD_MEASUREMENT_POLICY: &str = "dynamo_native_single_sample_v1";
+/// `kv_seed_regime` marker for rows whose KV state the collector could not
+/// reach through the real kvwarm chain and fabricated instead. Such rows
+/// are measurements of the wrong regime (observed 2-3.7x inflated on 4-GPU
+/// shapes, LOW on 2-GPU — bidirectional poison at the per-batch top rungs).
+/// At load their `latency_ms` is overwritten in memory by a linear
+/// extrapolation from the same station's (same cell, same batch rung) last
+/// two [`FPM_KV_SEED_REAL_KV`] rows; the row, its coordinates, the grid,
+/// and the domain gate are untouched, and the parquet on disk always keeps
+/// the original measurement + marker (audit chain). Rows with any other
+/// marker — `real_kv`, `skip:*`, prefill `n/a`, re-aggregated `legacy`,
+/// null, or a missing column (pre-column pairs) — are never modified.
+pub const FPM_KV_SEED_FAKE_FALLBACK: &str = "fake_fallback";
+/// `kv_seed_regime` marker for decode rows measured against a KV state
+/// reached through the real kvwarm chain. These are the ONLY rows that may
+/// anchor the fake-fallback replacement extrapolation (pinned by the R17
+/// acceptance baseline `tools_extrap_ab.py`, which defines the anchor set
+/// as exactly `real_kv`).
+pub const FPM_KV_SEED_REAL_KV: &str = "real_kv";
+/// Escape hatch: set to `1` to keep the ORIGINAL fake-fallback latencies
+/// (no replacement) — for A/B and audit runs. Read once per table handle,
+/// at construction. Set it at process launch: the shared-tables memo in
+/// `PerfDatabase` caches loaded databases by identity only, so flipping
+/// this env var mid-process while an earlier load of the same identity is
+/// still alive will NOT reload under the new semantics.
+pub const FPM_FAKE_FALLBACK_RAW_ENV: &str = "AIC_FPM_FAKE_FALLBACK_RAW";
 
 /// Identity columns that select a cell, in row-column order (`model_path` is
 /// handled separately; `weight_quantization` is deliberately excluded).
@@ -115,13 +143,32 @@ pub struct FpmForwardCell {
     pub decode_curve_bounds: BTreeMap<u32, (u32, u32)>,
 }
 
+/// One loaded parquet/sidecar pair: the grouped cells plus the
+/// fake-fallback healing tallies (the crate has no logging facade, so the
+/// counters ARE the warning surface, exposed via table accessors).
+struct LoadedPair {
+    cells: Vec<FpmForwardCell>,
+    /// Fake-fallback rows whose latency was replaced by in-station
+    /// extrapolation.
+    replaced_fake_fallback: u64,
+    /// Fake-fallback rows KEPT with their original (untrusted) latency
+    /// because their station had fewer than two `real_kv` anchors (or the
+    /// extrapolated value was not finite/positive) — the proposal's
+    /// keep-and-warn case, or every fake row when the raw escape hatch is
+    /// on.
+    kept_fake_fallback: u64,
+}
+
 pub struct FpmForwardTable {
     parquet_path: PathBuf,
     system: String,
     backend: String,
     version: String,
+    /// Replacement of fake-fallback values (default true); false = the
+    /// [`FPM_FAKE_FALLBACK_RAW_ENV`] escape hatch.
+    replace_fake_fallback: bool,
     /// `Ok(None)` = parquet absent ("not collected"); errors are structural.
-    cells: OnceLock<Result<Option<Vec<FpmForwardCell>>, AicError>>,
+    cells: OnceLock<Result<Option<LoadedPair>, AicError>>,
 }
 
 fn structural(msg: String) -> AicError {
@@ -139,11 +186,25 @@ impl FpmForwardTable {
     /// identity, enforced against every row (a misplaced pair — e.g. an h200
     /// parquet copied into a b200 tree — must fail loudly, not merge).
     pub fn new(data_root: PathBuf, system: &str, backend: &str, version: &str) -> Self {
+        let raw = std::env::var(FPM_FAKE_FALLBACK_RAW_ENV).is_ok_and(|v| v == "1");
+        Self::new_with_replacement(data_root, system, backend, version, !raw)
+    }
+
+    /// Explicit-replacement constructor: lets tests pin both semantics
+    /// without racing on process-global env vars.
+    pub(crate) fn new_with_replacement(
+        data_root: PathBuf,
+        system: &str,
+        backend: &str,
+        version: &str,
+        replace_fake_fallback: bool,
+    ) -> Self {
         Self {
             parquet_path: data_root.join(FPM_FORWARD_BASENAME),
             system: system.to_string(),
             backend: backend.to_string(),
             version: version.to_string(),
+            replace_fake_fallback,
             cells: OnceLock::new(),
         }
     }
@@ -152,26 +213,47 @@ impl FpmForwardTable {
         &self.parquet_path
     }
 
-    /// The loaded cells. Errors when the parquet is absent (with the exact
-    /// path, mirroring `LoadedOpData.raise_if_not_loaded`) or when the pair
-    /// is structurally invalid.
-    pub fn cells(&self) -> Result<&[FpmForwardCell], AicError> {
+    fn loaded(&self) -> Result<&LoadedPair, AicError> {
         let loaded = self.cells.get_or_init(|| {
             load_pair(
                 &self.parquet_path,
                 &self.system,
                 &self.backend,
                 &self.version,
+                self.replace_fake_fallback,
             )
         });
         match loaded {
-            Ok(Some(cells)) => Ok(cells),
+            Ok(Some(pair)) => Ok(pair),
             Ok(None) => Err(AicError::PerfDatabase(format!(
                 "File does not exist at {}. No fpm_forward data collected for this backend/version.",
                 self.parquet_path.display()
             ))),
             Err(err) => Err(clone_err(err)),
         }
+    }
+
+    /// The loaded cells. Errors when the parquet is absent (with the exact
+    /// path, mirroring `LoadedOpData.raise_if_not_loaded`) or when the pair
+    /// is structurally invalid.
+    pub fn cells(&self) -> Result<&[FpmForwardCell], AicError> {
+        Ok(&self.loaded()?.cells)
+    }
+
+    /// How many fake-fallback rows this pair healed by in-station
+    /// extrapolation (0 for pairs predating the column, and 0 under the raw
+    /// escape hatch). Exposed for tests and load-report plumbing.
+    pub fn replaced_fake_fallback_rows(&self) -> Result<u64, AicError> {
+        Ok(self.loaded()?.replaced_fake_fallback)
+    }
+
+    /// How many fake-fallback rows KEPT their original untrusted latency —
+    /// the <2-anchor keep-and-warn tally (every fake row when the raw
+    /// escape hatch is on). A non-zero value under default semantics is the
+    /// warning the proposal requires; callers surfacing load reports should
+    /// print it.
+    pub fn kept_fake_fallback_rows(&self) -> Result<u64, AicError> {
+        Ok(self.loaded()?.kept_fake_fallback)
     }
 
     /// Cell selection, mirroring Python `FPMForwardOp._select_cell` exactly:
@@ -358,6 +440,11 @@ struct FpmRow {
     total_prefill_tokens: u32,
     total_kv_read_tokens: u32,
     latency_ms: f64,
+    /// `kv_seed_regime == "fake_fallback"`: latency is a fabricated-seed
+    /// measurement, healed by the replacement pass.
+    fake_fallback: bool,
+    /// `kv_seed_regime == "real_kv"`: eligible as a replacement anchor.
+    real_kv_anchor: bool,
 }
 
 impl FpmRow {
@@ -378,7 +465,8 @@ fn load_pair(
     system: &str,
     backend: &str,
     version: &str,
-) -> Result<Option<Vec<FpmForwardCell>>, AicError> {
+    replace_fake_fallback: bool,
+) -> Result<Option<LoadedPair>, AicError> {
     if !parquet_path.exists() {
         return Ok(None);
     }
@@ -430,6 +518,9 @@ fn load_pair(
         int_idx.insert(name, reader.col(name)?);
     }
     let latency_col = reader.col("latency_ms")?;
+    // KV-seed provenance column (additive; absent in pairs that predate it).
+    // Resolved once here; per-row reads treat null the same as absence.
+    let kv_seed_col = reader.col_optional("kv_seed_regime");
 
     // Python checks the sidecar row_count against the FULL row list before any
     // per-row validation (`load_fpm_forward_data`: read_table -> row_count ->
@@ -606,6 +697,14 @@ fn load_pair(
             partition_policy,
         ];
 
+        // Seed provenance: fake-fallback rows stay in the row set (their
+        // coordinates, the grid, and the domain gate are untouched); only
+        // their latency value is healed by the replacement pass below, after
+        // the duplicate/collision checks.
+        let kv_seed_regime = row.str_optional(kv_seed_col)?.unwrap_or("");
+        let fake_fallback = kv_seed_regime == FPM_KV_SEED_FAKE_FALLBACK;
+        let real_kv_anchor = kv_seed_regime == FPM_KV_SEED_REAL_KV;
+
         rows.push(FpmRow {
             cell_id: get_str("cell_id")?,
             model_path: get_str("model_path")?,
@@ -616,6 +715,8 @@ fn load_pair(
             total_prefill_tokens,
             total_kv_read_tokens,
             latency_ms,
+            fake_fallback,
+            real_kv_anchor,
         });
     }
 
@@ -654,6 +755,68 @@ fn load_pair(
                 row.total_prefill_tokens,
                 row.total_kv_read_tokens
             )));
+        }
+    }
+
+    // ---- fake-fallback healing (R17) ----
+    // For every decode row marked `fake_fallback`, linearly extrapolate from
+    // the same station's (same cell key, same batch rung) last two `real_kv`
+    // rows — sorted by kv, the top two — to the fake row's kv coordinate,
+    // and overwrite its latency in memory. Rows, coordinates, the grid, and
+    // the domain gate are untouched; the parquet keeps the original
+    // measurement + marker (audit chain). Same-node A/B (5,524 votes):
+    // serving fake values scored top-band MAPE tep4 29.8% / tp4 42.6% /
+    // tp2 11.9%; the healed values score 2.34% / 0.34% / 2.71%.
+    // A station with fewer than two anchors (or a non-finite/non-positive
+    // extrapolation, or a fake marker on a non-decode row) keeps its
+    // original value and is tallied in `kept_fake_fallback` — the
+    // keep-and-warn case; zero occurrences across all measured shapes.
+    let mut replaced_fake_fallback: u64 = 0;
+    let mut kept_fake_fallback: u64 = 0;
+    if !replace_fake_fallback {
+        kept_fake_fallback = rows.iter().filter(|r| r.fake_fallback).count() as u64;
+    } else if rows.iter().any(|r| r.fake_fallback) {
+        // (cell key, batch rung) -> real_kv anchors as (kv, latency).
+        let mut anchors: BTreeMap<(Vec<String>, u32), Vec<(u32, f64)>> = BTreeMap::new();
+        for row in &rows {
+            if row.workload_kind == "decode" && row.real_kv_anchor {
+                anchors
+                    .entry((row.cell_key(), row.batch_size))
+                    .or_default()
+                    .push((row.total_kv_read_tokens, row.latency_ms));
+            }
+        }
+        for list in anchors.values_mut() {
+            // Distinct kvs guaranteed: the coordinate-collision check above
+            // already rejected same-(cell, phase, batch, kv) row pairs.
+            list.sort_unstable_by_key(|&(kv, _)| kv);
+        }
+        for row in &mut rows {
+            if !row.fake_fallback {
+                continue;
+            }
+            let mut healed = None;
+            if row.workload_kind == "decode" {
+                if let Some(list) = anchors.get(&(row.cell_key(), row.batch_size)) {
+                    if list.len() >= 2 {
+                        let (k1, l1) = list[list.len() - 2];
+                        let (k2, l2) = list[list.len() - 1];
+                        let slope = (l2 - l1) / (f64::from(k2) - f64::from(k1));
+                        let value =
+                            l2 + (f64::from(row.total_kv_read_tokens) - f64::from(k2)) * slope;
+                        if value.is_finite() && value > 0.0 {
+                            healed = Some(value);
+                        }
+                    }
+                }
+            }
+            match healed {
+                Some(value) => {
+                    row.latency_ms = value;
+                    replaced_fake_fallback += 1;
+                }
+                None => kept_fake_fallback += 1,
+            }
         }
     }
 
@@ -737,7 +900,11 @@ fn load_pair(
             Ok(cell)
         })
         .collect::<Result<Vec<_>, AicError>>()?;
-    Ok(Some(cells))
+    Ok(Some(LoadedPair {
+        cells,
+        replaced_fake_fallback,
+        kept_fake_fallback,
+    }))
 }
 
 /// Piecewise-linear evaluation of one decode KV curve (detection-only; the
@@ -922,6 +1089,10 @@ pub(crate) mod tests {
         pub cell_id: Option<&'static str>,
         pub system: &'static str,
         pub backend: &'static str,
+        /// KV-seed provenance. `None` writes a null (or, when no row in the
+        /// fixture sets it, omits the column entirely — the pre-column
+        /// legacy layout).
+        pub kv_seed_regime: Option<&'static str>,
     }
 
     impl Default for RowSpec {
@@ -943,6 +1114,7 @@ pub(crate) mod tests {
                 cell_id: None,
                 system: "b200_sxm",
                 backend: "vllm",
+                kv_seed_regime: None,
             }
         }
     }
@@ -1000,6 +1172,9 @@ pub(crate) mod tests {
         use parquet::schema::parser::parse_message_type;
 
         let parquet_path = dir.join(FPM_FORWARD_BASENAME);
+        // The provenance column is written only when a fixture row sets it,
+        // so default fixtures exercise the pre-column legacy layout.
+        let has_kv_seed = rows.iter().any(|r| r.kv_seed_regime.is_some());
         let schema = "message schema {
             REQUIRED BINARY cell_id (UTF8);
             REQUIRED BINARY model_path (UTF8);
@@ -1029,7 +1204,15 @@ pub(crate) mod tests {
             REQUIRED BINARY partition_policy (UTF8);
             REQUIRED DOUBLE latency_ms;
         }";
-        let schema = Arc::new(parse_message_type(schema).expect("schema must parse"));
+        let schema = if has_kv_seed {
+            schema.replace(
+                "REQUIRED DOUBLE latency_ms;",
+                "REQUIRED DOUBLE latency_ms;\n            OPTIONAL BINARY kv_seed_regime (UTF8);",
+            )
+        } else {
+            schema.to_string()
+        };
+        let schema = Arc::new(parse_message_type(&schema).expect("schema must parse"));
         let file = std::fs::File::create(&parquet_path).expect("create parquet");
         let mut writer =
             SerializedFileWriter::new(file, schema, Arc::new(WriterProperties::builder().build()))
@@ -1145,6 +1328,25 @@ pub(crate) mod tests {
                 .expect("write");
             col.close().expect("close");
         }
+        if has_kv_seed {
+            // OPTIONAL column: dense values for Some rows, def level 0 = null.
+            let mut values: Vec<ByteArray> = Vec::new();
+            let def_levels: Vec<i16> = rows
+                .iter()
+                .map(|r| match r.kv_seed_regime {
+                    Some(v) => {
+                        values.push(ByteArray::from(v));
+                        1
+                    }
+                    None => 0,
+                })
+                .collect();
+            let mut col = rg.next_column().expect("next col").expect("str col");
+            col.typed::<ByteArrayType>()
+                .write_batch(&values, Some(&def_levels), None)
+                .expect("write");
+            col.close().expect("close");
+        }
         rg.close().expect("close row group");
         writer.close().expect("close writer");
 
@@ -1182,8 +1384,20 @@ pub(crate) mod tests {
         parquet_path
     }
 
+    /// Replacement semantics pinned explicitly so tests never race on the
+    /// process-global [`FPM_FAKE_FALLBACK_RAW_ENV`].
     fn loaded_table(dir: &Path) -> FpmForwardTable {
-        FpmForwardTable::new(dir.to_path_buf(), "b200_sxm", "vllm", "0.25.1")
+        FpmForwardTable::new_with_replacement(dir.to_path_buf(), "b200_sxm", "vllm", "0.25.1", true)
+    }
+
+    fn loaded_table_raw(dir: &Path) -> FpmForwardTable {
+        FpmForwardTable::new_with_replacement(
+            dir.to_path_buf(),
+            "b200_sxm",
+            "vllm",
+            "0.25.1",
+            false,
+        )
     }
 
     #[test]
@@ -1385,6 +1599,228 @@ pub(crate) mod tests {
         });
         let err = loaded_table(tmp.path()).cells().unwrap_err();
         assert!(err.to_string().contains("row_count mismatch"), "{err}");
+    }
+
+    /// The R17 tp2 b=128 acceptance ladder: three `real_kv` rungs (healing
+    /// must anchor on the LAST two) and the `fake_fallback` top rung whose
+    /// on-disk value (33.24 ms) sits below the real curve.
+    fn acceptance_ladder() -> Vec<RowSpec> {
+        let mk = |kv: u32, lat: f64, seed: &'static str| RowSpec {
+            workload_kind: "decode",
+            batch_size: 128,
+            total_prefill_tokens: 0,
+            total_kv_read_tokens: kv,
+            latency_ms: lat,
+            kv_seed_regime: Some(seed),
+            ..RowSpec::default()
+        };
+        vec![
+            mk(32768, 39.0, FPM_KV_SEED_REAL_KV),
+            mk(65536, 39.938360, FPM_KV_SEED_REAL_KV),
+            mk(131072, 41.511948, FPM_KV_SEED_REAL_KV),
+            mk(258018, 33.235794, FPM_KV_SEED_FAKE_FALLBACK),
+        ]
+    }
+
+    /// `l2 + (kv - k2) * (l2 - l1) / (k2 - k1)` with the exact f64
+    /// expression the loader uses.
+    fn acceptance_healed_value() -> f64 {
+        let (k1, l1) = (65536.0_f64, 39.938360_f64);
+        let (k2, l2) = (131072.0_f64, 41.511948_f64);
+        l2 + (258018.0 - k2) * ((l2 - l1) / (k2 - k1))
+    }
+
+    /// The fake top rung's value is healed by extrapolation from the LAST
+    /// TWO real anchors (not the first two), the row itself stays (domain
+    /// unchanged), real anchors stay bit-for-bit, and the tally reports it.
+    #[test]
+    fn fake_fallback_values_are_replaced_by_in_station_extrapolation() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_pair(tmp.path(), &acceptance_ladder());
+        let table = loaded_table(tmp.path());
+        let cells = table.cells().expect("must load");
+        assert_eq!(cells.len(), 1);
+        // Row kept: the domain still reaches the fake rung's coordinate.
+        assert_eq!(cells[0].decode_domain, Some([(128, 128), (32768, 258018)]));
+        let curves = decode_curves(&cells[0].decode);
+        let healed = curves[&128][&258018];
+        assert_eq!(healed, acceptance_healed_value());
+        assert!((healed - 44.56).abs() < 0.01, "healed={healed}");
+        assert_eq!(curves[&128][&131072], 41.511948);
+        assert_eq!(curves[&128][&65536], 39.938360);
+        assert_eq!(curves[&128][&32768], 39.0);
+        assert_eq!(table.replaced_fake_fallback_rows().unwrap(), 1);
+        assert_eq!(table.kept_fake_fallback_rows().unwrap(), 0);
+    }
+
+    /// The R17 wrong-row regression case (tp2, b=128, kv=131200, same-node
+    /// truth 41.69 ms): the query between the last real rung and the healed
+    /// top rung answers on the healed line — ≈41.5, not the fake-line
+    /// answer, not a miss.
+    #[test]
+    fn acceptance_query_lands_on_the_healed_segment() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_pair(tmp.path(), &acceptance_ladder());
+        let table = loaded_table(tmp.path());
+        let cells = table.cells().expect("must load");
+        let curves = decode_curves(&cells[0].decode);
+        let value = decode_curve_value(&curves[&128], 131200.0);
+        let healed = acceptance_healed_value();
+        let w = (131200.0 - 131072.0) / (258018.0 - 131072.0);
+        let expected = 41.511948 + w * (healed - 41.511948);
+        assert!((value - expected).abs() < 1e-9, "value={value}");
+        assert!((value - 41.5).abs() < 0.05, "value={value}");
+    }
+
+    /// Only `fake_fallback` is healed: the rest of the six-state vocabulary
+    /// (`real_kv` / `skip:<reason>` / prefill `n/a` / re-aggregated
+    /// `legacy` / null) keeps its written value bit-for-bit.
+    #[test]
+    fn non_fake_markers_are_never_touched() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let mut rows = default_rows();
+        rows[0].kv_seed_regime = Some("n/a"); // prefill row
+        rows[5].kv_seed_regime = Some("skip:moe_tp_balanced_by_construction");
+        rows[6].kv_seed_regime = Some(FPM_KV_SEED_REAL_KV);
+        // rows[7] stays None -> written as a null in the present column.
+        rows[8].kv_seed_regime = Some("legacy");
+        write_pair(tmp.path(), &rows);
+        let table = loaded_table(tmp.path());
+        let cells = table.cells().expect("must load");
+        let curves = decode_curves(&cells[0].decode);
+        assert_eq!(curves[&8][&8], 6.0);
+        assert_eq!(curves[&8][&4096], 7.0);
+        assert_eq!(curves[&8][&65536], 9.0);
+        assert_eq!(curves[&16][&65536], 12.0);
+        assert_eq!(table.replaced_fake_fallback_rows().unwrap(), 0);
+        assert_eq!(table.kept_fake_fallback_rows().unwrap(), 0);
+    }
+
+    /// Pairs predating the column (none of the default fixtures write it)
+    /// load identically under both semantics and tally nothing.
+    #[test]
+    fn legacy_pair_without_the_column_is_bitwise_unchanged() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_pair(tmp.path(), &default_rows());
+        let replaced = loaded_table(tmp.path());
+        let raw = loaded_table_raw(tmp.path());
+        let a = replaced.cells().expect("must load");
+        let b = raw.cells().expect("must load");
+        assert_eq!(a.len(), b.len());
+        for (ca, cb) in a.iter().zip(b.iter()) {
+            assert_eq!(decode_curves(&ca.decode), decode_curves(&cb.decode));
+            assert_eq!(ca.decode_domain, cb.decode_domain);
+            assert_eq!(ca.prefill_domain, cb.prefill_domain);
+        }
+        assert_eq!(replaced.replaced_fake_fallback_rows().unwrap(), 0);
+        assert_eq!(replaced.kept_fake_fallback_rows().unwrap(), 0);
+    }
+
+    /// The raw escape hatch serves the original fake values and tallies
+    /// them as kept.
+    #[test]
+    fn raw_escape_hatch_keeps_original_values() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_pair(tmp.path(), &acceptance_ladder());
+        let table = loaded_table_raw(tmp.path());
+        let cells = table.cells().expect("must load");
+        let curves = decode_curves(&cells[0].decode);
+        assert_eq!(curves[&128][&258018], 33.235794);
+        assert_eq!(table.replaced_fake_fallback_rows().unwrap(), 0);
+        assert_eq!(table.kept_fake_fallback_rows().unwrap(), 1);
+    }
+
+    /// A station with fewer than two `real_kv` anchors keeps its original
+    /// value (the keep-and-warn tally), while healthy stations in the same
+    /// pair heal normally.
+    #[test]
+    fn under_two_anchors_keeps_the_value_and_tallies_the_warning() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let mk = |batch: u32, kv: u32, lat: f64, seed: &'static str| RowSpec {
+            workload_kind: "decode",
+            batch_size: batch,
+            total_prefill_tokens: 0,
+            total_kv_read_tokens: kv,
+            latency_ms: lat,
+            kv_seed_regime: Some(seed),
+            ..RowSpec::default()
+        };
+        let rows = vec![
+            // b=32: one real anchor only -> keep the original value.
+            mk(32, 4096, 10.0, FPM_KV_SEED_REAL_KV),
+            mk(32, 8192, 5.0, FPM_KV_SEED_FAKE_FALLBACK),
+            // b=64: two anchors -> heals.
+            mk(64, 4096, 20.0, FPM_KV_SEED_REAL_KV),
+            mk(64, 8192, 22.0, FPM_KV_SEED_REAL_KV),
+            mk(64, 16384, 9.0, FPM_KV_SEED_FAKE_FALLBACK),
+        ];
+        write_pair(tmp.path(), &rows);
+        let table = loaded_table(tmp.path());
+        let cells = table.cells().expect("must load");
+        let curves = decode_curves(&cells[0].decode);
+        assert_eq!(curves[&32][&8192], 5.0);
+        let healed = 22.0 + (16384.0 - 8192.0) * ((22.0 - 20.0) / (8192.0 - 4096.0));
+        assert_eq!(curves[&64][&16384], healed);
+        assert_eq!(table.replaced_fake_fallback_rows().unwrap(), 1);
+        assert_eq!(table.kept_fake_fallback_rows().unwrap(), 1);
+    }
+
+    /// Opt-in replay against a real collected pair (skipped in CI): point
+    /// `AIC_FPM_R17_PAIR_DIR` at a directory holding an R17-style
+    /// `fpm_forward_perf.parquet` + sidecar (h200_sxm / vllm / 0.25.1) and
+    /// run `cargo test -- --ignored r17_pair_replay`. On the full database
+    /// this verifies (a) every fake row heals, none kept, (b) every healed
+    /// value equals the two-anchor extrapolation recomputed from the raw
+    /// view, and (c) every other value is bit-for-bit unchanged.
+    #[test]
+    #[ignore = "requires a locally provisioned R17 pair (AIC_FPM_R17_PAIR_DIR)"]
+    fn r17_pair_replay_heals_every_fake_row() {
+        let dir = PathBuf::from(
+            std::env::var("AIC_FPM_R17_PAIR_DIR")
+                .expect("set AIC_FPM_R17_PAIR_DIR to the directory holding the R17 pair"),
+        );
+        let raw =
+            FpmForwardTable::new_with_replacement(dir.clone(), "h200_sxm", "vllm", "0.25.1", false);
+        let healed = FpmForwardTable::new_with_replacement(dir, "h200_sxm", "vllm", "0.25.1", true);
+        let raw_cells = raw.cells().expect("raw load");
+        let healed_cells = healed.cells().expect("healed load");
+        assert_eq!(healed.kept_fake_fallback_rows().unwrap(), 0);
+        let total_fakes = raw.kept_fake_fallback_rows().unwrap();
+        assert!(total_fakes > 0);
+        assert_eq!(healed.replaced_fake_fallback_rows().unwrap(), total_fakes);
+        let mut checked = 0u64;
+        for (rc, hc) in raw_cells.iter().zip(healed_cells.iter()) {
+            assert_eq!(rc.match_identity, hc.match_identity);
+            let rcurves = decode_curves(&rc.decode);
+            let hcurves = decode_curves(&hc.decode);
+            assert_eq!(rcurves.len(), hcurves.len());
+            for (batch, rcurve) in &rcurves {
+                let hcurve = &hcurves[batch];
+                assert_eq!(rcurve.len(), hcurve.len());
+                // Anchors = the points that did NOT change (R17 decode rows
+                // are exactly real_kv | fake_fallback); BTreeMap iteration
+                // keeps them kv-sorted.
+                let anchors: Vec<(u32, f64)> = rcurve
+                    .iter()
+                    .filter(|(kv, v)| hcurve[kv] == **v)
+                    .map(|(&kv, &v)| (kv, v))
+                    .collect();
+                for (&kv, &rv) in rcurve {
+                    let hv = hcurve[&kv];
+                    if hv == rv {
+                        continue;
+                    }
+                    checked += 1;
+                    assert!(anchors.len() >= 2, "batch {batch}: <2 anchors");
+                    let (k1, l1) = anchors[anchors.len() - 2];
+                    let (k2, l2) = anchors[anchors.len() - 1];
+                    let slope = (l2 - l1) / (f64::from(k2) - f64::from(k1));
+                    let expect = l2 + (f64::from(kv) - f64::from(k2)) * slope;
+                    assert_eq!(hv, expect, "batch {batch} kv {kv}");
+                }
+            }
+        }
+        assert_eq!(checked, total_fakes);
     }
 
     /// system/backend are in the physical row key but NOT the cell key: a
