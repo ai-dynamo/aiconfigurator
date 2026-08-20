@@ -718,6 +718,7 @@ class Task:
     # system / backend / MoE quant mode only, never on the candidate lists, so
     # it survives post-construction edits to those.
     _large_ep_coverage_cache: dict = field(default_factory=dict, repr=False, init=False)
+    _large_ep_query_profile_cache: dict = field(default_factory=dict, repr=False, init=False)
 
     # =====================================================================
     # Construction
@@ -1407,6 +1408,21 @@ class Task:
                 self._warn_context_coverage_gap(role, moe_ep)
             return None
         return resolved
+
+    def _resolve_moe_comm_query_profile(self, role: str, parallel_tuple) -> dict | None:
+        """Measured A2A query keys for one resolved deployment tuple."""
+        resolved = self._resolve_moe_comm_backend(role, parallel_tuple)
+        if resolved is None:
+            return None
+        result = self._large_ep_query_profile_cache.get(role)
+        if result is None:
+            self._large_ep_coverage(role)
+            result = self._large_ep_query_profile_cache[role]
+        return resolve_moe_comm_query_profiles(
+            coverage=result,
+            resolved_backends=resolved,
+            moe_ep_size=tuple(parallel_tuple)[4],
+        )
 
     def _warn_context_coverage_gap(self, role: str, moe_ep: int) -> None:
         """One-shot warning: the role's own phase is covered but context is not."""

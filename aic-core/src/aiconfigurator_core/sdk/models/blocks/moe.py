@@ -555,13 +555,18 @@ def _large_ep_block_ops(
 
     spec = MOE_A2A_BACKENDS[comm_backend]
     node_num = nodes_for(cfg.moe_ep_size * cfg.moe_tp_size, gpus_per_node)  # A5
+    query_profile = (getattr(cfg, "moe_comm_query_profile", None) or {}).get(inference_phase)
+    query_ep_size, query_node_num = query_profile or (cfg.moe_ep_size, node_num)
     a2a_kwargs = {
         "comm_backend": comm_backend,
         "hidden_size": shape.hidden_size,
         "topk": shape.topk,
         "num_experts": shape.num_experts,
-        "moe_ep_size": cfg.moe_ep_size,
-        "node_num": node_num,
+        # Query geometry may deliberately point at an approved measured donor
+        # profile.  The modeled expert compute below still uses the deployed
+        # cfg.moe_ep_size; only measured communication is proxied.
+        "moe_ep_size": query_ep_size,
+        "node_num": query_node_num,
         "sms": cfg.sms if comm_backend == "deepep_ht" else 0,
         "attention_tp_size": cfg.tp_size if is_deepep and is_context else 1,
     }

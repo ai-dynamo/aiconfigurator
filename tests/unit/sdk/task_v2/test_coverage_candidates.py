@@ -23,6 +23,7 @@ import pyarrow.parquet as pq
 import pytest
 import yaml
 
+from aiconfigurator.cli.api import cli_estimate
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.config import ModelConfig
 from aiconfigurator.sdk.moe_comm_resolver import a2a_covers_parallel, resolve_model_config_moe_comm
@@ -33,6 +34,7 @@ from aiconfigurator.sdk.perf_database import (
     set_systems_paths,
 )
 from aiconfigurator.sdk.task_v2 import Task
+from aiconfigurator_core.sdk.models import get_model
 
 pytestmark = pytest.mark.unit
 
@@ -404,6 +406,7 @@ def test_build_model_config_sets_backend_and_node_width(synth_systems):
     t = _synth_task()
     mc = t.build_model_config(role="agg", parallel=_tuple(dp=8, moe_ep=8))
     assert mc.moe_comm_backend == {"context": "deepep_ht", "generation": "deepep_ll"}
+    assert mc.moe_comm_query_profile == {"context": (8, 1), "generation": (8, 1)}
     assert mc.num_gpus_per_node == 8
     fused = t.build_model_config(role="agg", parallel=_tuple(dp=4, moe_ep=4))
     assert fused.moe_comm_backend is None
@@ -553,6 +556,68 @@ def test_uncovered_model_keeps_fused_defaults_and_logs_once(caplog):
 
 
 # ---------------------------------------------------------------------------
+# (c) shipped vllm single-node profile -> explicit unscaled cross-node proxy
+# ---------------------------------------------------------------------------
+
+
+def test_shipped_vllm_ep4_profile_drives_ep32_static_generation():
+    """The imported GB200/vLLM profile is measured only at EP4/node1.
+
+    EP32 is deliberately admitted by the dataset-specific proxy policy, and
+    the emitted communication ops query that unchanged donor geometry.  The
+    final static-gen call proves the profile survives candidate resolution,
+    model construction, Rust engine compilation, and silicon lookup.
+    """
+    parallel = _tuple(dp=32, moe_ep=32)
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-R1",
+        system_name="gb200",
+        backend_name="vllm",
+        backend_version="0.24.0",
+        total_gpus=32,
+    )
+    assert t._resolve_moe_comm_backend("agg", parallel) == {
+        "context": "deepep_ht",
+        "generation": "deepep_ll",
+    }
+    base = t.build_model_config(role="agg", parallel=parallel)
+    assert base.moe_comm_query_profile == {"context": (4, 1), "generation": (4, 1)}
+
+    model_config = replace(
+        base,
+        tp_size=1,
+        pp_size=1,
+        attention_dp_size=32,
+        moe_tp_size=1,
+        moe_ep_size=32,
+        cp_size=1,
+    )
+    model = get_model("deepseek-ai/DeepSeek-R1", model_config, "vllm")
+    generation_a2a = [op for op in model.generation_ops if type(op).__name__ == "MoEAllToAll"]
+    assert generation_a2a
+    assert {(op._moe_ep_size, op._node_num) for op in generation_a2a} == {(4, 1)}
+
+    result = cli_estimate(
+        "deepseek-ai/DeepSeek-R1",
+        "gb200",
+        mode="static_gen",
+        backend_name="vllm",
+        backend_version="0.24.0",
+        isl=8,
+        osl=2,
+        batch_size=1,
+        tp_size=1,
+        attention_dp_size=32,
+        moe_tp_size=1,
+        moe_ep_size=32,
+        engine_step_backend="rust",
+    )
+    assert result.tpot > 0
+    assert result.raw["parallel"] == "tp1pp1dp32etp1ep32"
+
+
+# ---------------------------------------------------------------------------
 # (c) shipped trtllm data -> nvlink_two_sided on both phases
 # ---------------------------------------------------------------------------
 
@@ -574,6 +639,7 @@ def test_shipped_trtllm_nvfp4_resolves_nvlink_two_sided_both_phases():
     assert t._resolve_moe_comm_backend("agg", _tuple(dp=8, moe_ep=8)) == both
     assert t._resolve_moe_comm_backend("agg", _tuple(dp=64, moe_ep=64)) == both
     mc = t.build_model_config(role="agg", parallel=_tuple(dp=8, moe_ep=8))
+    assert mc.moe_comm_query_profile == {"context": (8, 2), "generation": (8, 2)}
     assert mc.num_gpus_per_node == 4  # GB200 NVL4 — not the 8-GPU HGX default
 
 
