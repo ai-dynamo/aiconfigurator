@@ -47,7 +47,11 @@ from aiconfigurator.sdk.models import (
     resolve_dsv4_moe_arch_mode,
     resolve_kimi_k3_moe_arch_mode,
 )
-from aiconfigurator.sdk.moe_comm_resolver import compute_large_ep_coverage, resolve_moe_comm_backend
+from aiconfigurator.sdk.moe_comm_resolver import (
+    compute_large_ep_coverage,
+    resolve_moe_comm_backend,
+    resolve_moe_comm_query_profiles,
+)
 from aiconfigurator.sdk.perf_database import (
     get_latest_database_version,
     is_blackwell_system,
@@ -710,6 +714,7 @@ class Task:
     # system / backend / MoE quant mode only, never on the candidate lists, so
     # it survives post-construction edits to those.
     _large_ep_coverage_cache: dict = field(default_factory=dict, repr=False, init=False)
+    _large_ep_query_profile_cache: dict = field(default_factory=dict, repr=False, init=False)
 
     # =====================================================================
     # Construction
@@ -1256,9 +1261,10 @@ class Task:
         """``{phase: {comm_backend: {ep_size, ...}}}`` explorable with large EP.
 
         An EP size is explorable for a phase when its comm backend carries
-        dispatch+combine rows for the model shape at
-        ``(ep, nodes_for(ep, gpus_per_node))`` (topology check against THIS
-        system) and the backend's registry feasibility rules admit the config.
+        dispatch+combine rows for the model shape at the exact deployed
+        topology, or when that dataset identity has an explicit measured-donor
+        policy (see ``UNSCALED_SINGLE_NODE_PROXY_DATASETS``). The backend's
+        registry feasibility rules must still admit the deployed config.
         Local expert compute is no longer a coverage axis: it is explicitly
         modeled from reusable stock ``moe_perf`` under uniform-balance and
         EP-local geometry assumptions. BOTH phases are probed for every role: a
@@ -1300,6 +1306,7 @@ class Task:
             database=database,
         )
         coverage = result.phases
+        self._large_ep_query_profile_cache[role] = result
 
         if not coverage and result.shape is not None:
             shape = result.shape
@@ -1368,6 +1375,21 @@ class Task:
                 self._warn_context_coverage_gap(role, moe_ep)
             return None
         return resolved
+
+    def _resolve_moe_comm_query_profile(self, role: str, parallel_tuple) -> dict | None:
+        """Measured A2A query keys for one resolved deployment tuple."""
+        resolved = self._resolve_moe_comm_backend(role, parallel_tuple)
+        if resolved is None:
+            return None
+        result = self._large_ep_query_profile_cache.get(role)
+        if result is None:
+            self._large_ep_coverage(role)
+            result = self._large_ep_query_profile_cache[role]
+        return resolve_moe_comm_query_profiles(
+            coverage=result,
+            resolved_backends=resolved,
+            moe_ep_size=tuple(parallel_tuple)[4],
+        )
 
     def _warn_context_coverage_gap(self, role: str, moe_ep: int) -> None:
         """One-shot warning: the role's own phase is covered but context is not."""
@@ -1944,6 +1966,9 @@ class Task:
             attention_backend=self.attention_backend or "flashinfer",
             wideep_num_slots=self.wideep_num_slots,
             moe_comm_backend=(self._resolve_moe_comm_backend(role, parallel) if parallel is not None else None),
+            moe_comm_query_profile=(
+                self._resolve_moe_comm_query_profile(role, parallel) if parallel is not None else None
+            ),
             # Hardware fact, injected alongside the comm backend: the large-EP
             # ops take the comm node span at construction and would otherwise
             # have no channel to it (models.helpers.large_ep_gpus_per_node).

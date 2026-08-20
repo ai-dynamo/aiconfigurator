@@ -961,9 +961,12 @@ def _engine_config_json(model: Any, database: Any) -> str:
                         # Large EP: the per-phase comm backend selects a whole
                         # different MoE graph (MoEAllToAll/ModeledEPMoE vs the
                         # fused dispatch/MoE pair) and the node width prices its
-                        # cross-node all-to-all — two configs differing only in
-                        # these must not share one cached handle.
+                        # cross-node all-to-all. A proxy query profile changes
+                        # the measured ep/node keys without changing deployed
+                        # expert geometry. Configs differing in any of these
+                        # must not share one cached handle.
                         "moe_comm_backend": getattr(model_config, "moe_comm_backend", None),
+                        "moe_comm_query_profile": getattr(model_config, "moe_comm_query_profile", None),
                         "num_gpus_per_node": getattr(model_config, "num_gpus_per_node", None),
                     },
                     # Data-resolution policy. `build_engine_spec_json` bakes

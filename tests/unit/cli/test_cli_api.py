@@ -34,6 +34,7 @@ class TestCLIEstimateUnit:
                 "context": "nvlink_two_sided",
                 "generation": "nvlink_two_sided",
             }
+            model_config.moe_comm_query_profile = {"context": (4, 1), "generation": (4, 1)}
             model_config.num_gpus_per_node = 4
 
         def fake_get_model(_model_path, model_config, _backend_name):
@@ -99,6 +100,7 @@ class TestCLIEstimateUnit:
 
         assert captured["built_config"] is captured["resolver_config"]
         assert captured["built_config"].moe_comm_backend["generation"] == "nvlink_two_sided"
+        assert captured["built_config"].moe_comm_query_profile["generation"] == (4, 1)
         assert captured["resolver_kwargs"] == {
             "model_path": "deepseek-ai/DeepSeek-R1",
             "system_name": "gb200",
