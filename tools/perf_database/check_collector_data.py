@@ -99,7 +99,7 @@ COLLECTION_META_YAML = "collection_meta.yaml"
 LEGACY_MARKERS = ("SHARED_LAYER_REUSE.txt", "INCOMPLETE.txt")
 COMM_FAMILY = "comm"
 
-RULES = ("R1", "R2", "R3", "R4", "R5", "R6")
+RULES = ("R1", "R2", "R3", "R4", "R5", "R6", "R7")
 RULE_TITLES = {
     "R1": "sidecar coverage",
     "R2": "reuse validity",
@@ -107,6 +107,7 @@ RULE_TITLES = {
     "R4": "family placement",
     "R5": "identity (manifest v2 resolution)",
     "R6": "no legacy markers",
+    "R7": "attested case plan",
 }
 
 
@@ -298,8 +299,49 @@ def check_r6_no_legacy_markers(data_root: Path) -> list[str]:
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# R7: attested case plan
+# --------------------------------------------------------------------------
+
+# provenance.case_plan_hash of an EMPTY attempted-case set. A sidecar entry
+# carrying this hash while its parquet holds rows attests a plan that was
+# never observed -- collect.py refuses to finalize such a table
+# (zero-checkpoint-evidence guard), so an entry like this can only come from
+# out-of-band sidecar authoring that skipped the checkpoint (the rc23 moe
+# sidecars shipped this way once; review finding on PR #1486).
+EMPTY_CASE_PLAN_HASH = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+def check_r7_attested_case_plan(data_root: Path, version_dirs: list[tuple[str, str, str, str, Path]]) -> list[str]:
+    failures: list[str] = []
+    for _system, _family, _backend, _version, version_dir in version_dirs:
+        meta_path = version_dir / COLLECTION_META_YAML
+        if not meta_path.is_file():
+            continue  # R1 owns missing sidecars
+        try:
+            meta = _load_collection_meta_yaml(str(meta_path))
+        except ValueError:
+            continue  # R1 owns malformed sidecars
+        tables = meta.get("tables")
+        if not isinstance(tables, dict):
+            continue
+        rel_dir = version_dir.relative_to(data_root)
+        for table, entry in tables.items():
+            if not isinstance(entry, dict):
+                continue
+            rows = entry.get("rows")
+            plan_hash = entry.get("case_plan_hash")
+            if isinstance(rows, int) and rows > 0 and plan_hash == EMPTY_CASE_PLAN_HASH:
+                failures.append(
+                    f"{rel_dir}/{COLLECTION_META_YAML}: table '{table}' has {rows} rows but case_plan_hash "
+                    "attests an EMPTY attempted-case set (sha256 of nothing) -- regenerate the hash from the "
+                    "campaign checkpoint's done+failed case ids"
+                )
+    return failures
+
+
 def run_checks(data_root: Path, catalog_path: Path) -> dict[str, list[str]]:
-    """Run all six rules and return {rule: [failure messages]} (empty list = pass).
+    """Run all rules and return {rule: [failure messages]} (empty list = pass).
 
     Pure function of (data_root, catalog_path); never raises on data
     problems -- every problem becomes a failure message so the caller can
@@ -319,6 +361,7 @@ def run_checks(data_root: Path, catalog_path: Path) -> dict[str, list[str]]:
         "R4": check_r4_family_placement(data_root, version_dirs, family_map),
         "R5": check_r5_identity(catalog_path),
         "R6": check_r6_no_legacy_markers(data_root),
+        "R7": check_r7_attested_case_plan(data_root, version_dirs),
     }
 
 

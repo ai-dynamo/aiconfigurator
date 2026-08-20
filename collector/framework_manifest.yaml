@@ -40,6 +40,34 @@ frameworks:
       images:
         default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20@sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88"
     families:
+      # trtllm FP4 (w4a8_mxfp4_mxfp8) MoE rows show non-monotonic
+      # num_tokens segments (4096->8192, 12288->16384 dips) on all four
+      # Blackwell systems. An rc23 re-collection reproduced the dips
+      # (2026-08-08; exact consumer-key join vs rc20: median ratio
+      # 1.003-1.013, median |per-row delta| 2.4-2.9%, ~25% of rows >5% —
+      # benchmark run-to-run spread, not a systematic shift), so the dips
+      # are REAL, reproducible kernel behavior (per-bucket tactic/tile-wave
+      # quantization), not a campaign artifact. Evidence: GitLab
+      # aic-auto-collector (project 205688) pipelines 61692150-61692160
+      # (moe re-collection, 2026-08-08); DSV4 attention campaigns ran as
+      # pipelines 61771569-61838704 on feat/sbatch-partition-override. The DSV4 moe shapes stay collected on this
+      # runtime for version coherence with the DSV4 attention family; the
+      # remaining moe shapes reuse rc20 via the declared reuse.yaml channel.
+      moe:
+        version: "1.3.0rc23"
+        images:
+          default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc23@sha256:316b840a08a8174fc3f6b5716828bdfe1daaf629ee1ac2a8b7a22526d141a007"
+      # DeepSeek-V4 attention modules require trtllm>=1.3.0rc21 (the model
+      # class and sparse/deepseek_v4 backend first ship there; see
+      # collector/trtllm/collect_dsv4_attn.py __compat__). The catalog family
+      # also carries the DSA modules (dsa_*_module), so trtllm DSA collection
+      # moves to this runtime with it — DSA on rc23 smoke-verified on SM90
+      # (H20) at bring-up; the rc20 serving citations in collect_mla_module
+      # are re-audited on this bump per layer_permissions.md.
+      sparse_attention:
+        version: "1.3.0rc23"
+        images:
+          default: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc23@sha256:316b840a08a8174fc3f6b5716828bdfe1daaf629ee1ac2a8b7a22526d141a007"
       # MiniMax-M3: the true-sparse fmha_sm100 backend (implementation="msa",
       # SM100/103-only) landed in rc23; rc20 has only the Triton reference
       # path (measured identical-or-worse on SM90 at rc23, so the existing

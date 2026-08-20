@@ -2372,6 +2372,26 @@ _DSV4_MODULE_PAST_KV_LIST = _as_int_list(
     field_name="dsv4.module_past_kv_lengths",
 )
 _DSV4_MODULE_TP_SIZES = _as_int_list(_DSV4_CONFIG["module_tp_sizes"], field_name="dsv4.module_tp_sizes")
+
+
+def _dsv4_module_budgets() -> dict:
+    """Declared universal sweep budgets for the DSV4 module collectors.
+
+    Declared at the BASE-OP layer (cases/base_ops/dsv4_attention.yaml —
+    op budgets are op-level facts, not model properties; case_authoring.md).
+    Unresolvable declarations fail loudly: missing or malformed budget
+    fields raise instead of defaulting.
+    """
+    budgets = _required_base_common_case_values("dsv4_module_budgets")
+    return {
+        "max_seq_len": int(budgets["max_seq_len"]),
+        "max_context_query_tokens": int(budgets["max_context_query_tokens"]),
+        "max_generation_kv_tokens": int(budgets["max_generation_kv_tokens"]),
+        "decode_batch_ladder": tuple((int(floor), int(max_bs)) for floor, max_bs in budgets["decode_batch_ladder"]),
+    }
+
+
+_DSV4_MODULE_BUDGETS = _dsv4_module_budgets()
 _DSV4_SPARSE_BS_LIST = _as_int_list(_DSV4_CONFIG["sparse_batch_sizes"], field_name="dsv4.sparse_batch_sizes")
 _DSV4_SPARSE_ISL_LIST = _as_int_list(
     _DSV4_CONFIG["sparse_input_lengths"],

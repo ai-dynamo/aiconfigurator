@@ -134,6 +134,55 @@ REGISTRY: list[OpEntry] = [
         perf_filename=PerfFile.DSA_GENERATION_MODULE,
     ),
     OpEntry(
+        op="mhc_module",
+        module="collector.trtllm.collect_mhc_module",
+        get_func="get_mhc_module_test_cases",
+        run_func="run_mhc_module_worker",
+        perf_filename=PerfFile.MHC_MODULE,
+    ),
+    # DeepSeek-V4 CSA/HCA attention modules. Requires trtllm>=1.3.0rc21
+    # (module __compat__); the framework itself rejects pre-Blackwell GPUs
+    # (mla.py forward_*_sparse_mla "DeepSeek-V4 is not supported on
+    # pre-blackwell GPUs" @1.3.0rc23) — those platforms fail into the
+    # classified log per observe-don't-predict.
+    # SM120 probe (RTX PRO 6000, 1.3.0rc23, campaign 2026-08-07): 100% of
+    # cases fail from case 0 (~5.4s/case classified errors with SIGABRT
+    # worker resets), matching the DeepGEMM sparse-attention "Unsupported
+    # architecture" family limit already documented for DSA in
+    # collect_mla_module.py — park SM120 until a framework fix ships.
+    OpEntry(
+        op="dsv4_csa_context_module",
+        module="collector.trtllm.collect_dsv4_attn",
+        get_func="get_dsv4_csa_context_test_cases",
+        run_func="run_dsv4_attn_worker",
+        perf_filename=PerfFile.DSV4_CSA_CONTEXT_MODULE,
+        unverified_sms=(120,),
+    ),
+    OpEntry(
+        op="dsv4_hca_context_module",
+        module="collector.trtllm.collect_dsv4_attn",
+        get_func="get_dsv4_hca_context_test_cases",
+        run_func="run_dsv4_attn_worker",
+        perf_filename=PerfFile.DSV4_HCA_CONTEXT_MODULE,
+        unverified_sms=(120,),
+    ),
+    OpEntry(
+        op="dsv4_csa_generation_module",
+        module="collector.trtllm.collect_dsv4_attn",
+        get_func="get_dsv4_csa_generation_test_cases",
+        run_func="run_dsv4_attn_worker",
+        perf_filename=PerfFile.DSV4_CSA_GENERATION_MODULE,
+        unverified_sms=(120,),
+    ),
+    OpEntry(
+        op="dsv4_hca_generation_module",
+        module="collector.trtllm.collect_dsv4_attn",
+        get_func="get_dsv4_hca_generation_test_cases",
+        run_func="run_dsv4_attn_worker",
+        perf_filename=PerfFile.DSV4_HCA_GENERATION_MODULE,
+        unverified_sms=(120,),
+    ),
+    OpEntry(
         op="msa_context_module",
         module="collector.trtllm.collect_msa_module",
         get_func="get_msa_context_module_test_cases",
