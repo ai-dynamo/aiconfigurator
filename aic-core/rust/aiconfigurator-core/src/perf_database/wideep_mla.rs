@@ -99,6 +99,39 @@ pub struct GenerationKey {
     pub kv_quant: String,
 }
 
+fn resolve_context_key(grids: &WideEpContextMlaGrids, requested: ContextKey) -> ContextKey {
+    if grids.by_keys.contains_key(&requested) {
+        return requested;
+    }
+    let fallback = ContextKey {
+        kernel_source: "trtllm_mla".to_string(),
+        ..requested.clone()
+    };
+    if grids.by_keys.contains_key(&fallback) {
+        fallback
+    } else {
+        requested
+    }
+}
+
+fn resolve_generation_key(
+    grids: &WideEpGenerationMlaGrids,
+    requested: GenerationKey,
+) -> GenerationKey {
+    if grids.by_keys.contains_key(&requested) {
+        return requested;
+    }
+    let fallback = GenerationKey {
+        kernel_source: "trtllm_mla".to_string(),
+        ..requested.clone()
+    };
+    if grids.by_keys.contains_key(&fallback) {
+        fallback
+    } else {
+        requested
+    }
+}
+
 impl WideEpMlaTable {
     /// Construct an empty table for the given data directory. No I/O. Each
     /// perf file is sourced solely from `data_root/<basename>` with no
@@ -155,11 +188,14 @@ impl WideEpMlaTable {
         let main_flops = quant_tc_flops(&self.system_spec, fmha_quant.mapping())?;
         let bf16_flops = quant_tc_flops(&self.system_spec, FmhaQuantMode::Bfloat16.mapping())?;
         let grids = self.load_context()?;
-        let key = ContextKey {
-            kernel_source: kernel_source.to_string(),
-            fmha_quant: fmha_quant.name().to_string(),
-            kv_quant: kv_quant.name().to_string(),
-        };
+        let key = resolve_context_key(
+            grids,
+            ContextKey {
+                kernel_source: kernel_source.to_string(),
+                fmha_quant: fmha_quant.name().to_string(),
+                kv_quant: kv_quant.name().to_string(),
+            },
+        );
         let node = grids
             .by_keys
             .get(&key)
@@ -215,10 +251,13 @@ impl WideEpMlaTable {
         let main_flops = quant_tc_flops(&self.system_spec, fmha_quant.mapping())?;
         let bf16_flops = quant_tc_flops(&self.system_spec, FmhaQuantMode::Bfloat16.mapping())?;
         let grids = self.load_generation()?;
-        let key = GenerationKey {
-            kernel_source: kernel_source.to_string(),
-            kv_quant: kv_quant.name().to_string(),
-        };
+        let key = resolve_generation_key(
+            grids,
+            GenerationKey {
+                kernel_source: kernel_source.to_string(),
+                kv_quant: kv_quant.name().to_string(),
+            },
+        );
         let node = grids
             .by_keys
             .get(&key)
@@ -265,11 +304,14 @@ impl WideEpMlaTable {
         fmha_quant: FmhaQuantMode,
     ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
         let grids = self.load_context()?;
-        let key = ContextKey {
-            kernel_source: kernel_source.to_string(),
-            fmha_quant: fmha_quant.name().to_string(),
-            kv_quant: kv_quant.name().to_string(),
-        };
+        let key = resolve_context_key(
+            grids,
+            ContextKey {
+                kernel_source: kernel_source.to_string(),
+                fmha_quant: fmha_quant.name().to_string(),
+                kv_quant: kv_quant.name().to_string(),
+            },
+        );
         let node = grids
             .by_keys
             .get(&key)
@@ -285,10 +327,13 @@ impl WideEpMlaTable {
         kv_quant: KvCacheQuantMode,
     ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
         let grids = self.load_generation()?;
-        let key = GenerationKey {
-            kernel_source: kernel_source.to_string(),
-            kv_quant: kv_quant.name().to_string(),
-        };
+        let key = resolve_generation_key(
+            grids,
+            GenerationKey {
+                kernel_source: kernel_source.to_string(),
+                kv_quant: kv_quant.name().to_string(),
+            },
+        );
         let node = grids
             .by_keys
             .get(&key)

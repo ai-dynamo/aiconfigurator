@@ -175,31 +175,66 @@ impl MoeAllToAllOp {
                 )))
             }
         }
-        let latency = self.silicon_latency(db, tokens).map_err(|err| {
-            if db.database_mode == DatabaseMode::Hybrid && err.is_missing_perf_data() {
-                // moe_comm.py:639-643 — HYBRID's empirical fallback for this
-                // family is itself the typed not-implemented raise.
-                AicError::EmpiricalNotImplemented(format!(
-                    "HYBRID empirical fallback is not available for moe_a2a {}/{}: silicon data \
-                     required (estimation tier is a planned follow-up). Silicon miss: {err}",
-                    self.comm_backend, self.phase
-                ))
-            } else {
-                err
-            }
-        })?;
-        // Python: `PerformanceResult(float(result) * scale, source=...)` — no
-        // clamp (nothing is subtracted on this path).
-        Ok(PerformanceResult::new(latency, Source::Silicon).scaled(self.scale_factor))
-    }
-
-    fn silicon_latency(&self, db: &PerfDatabase, tokens: u32) -> Result<f64, AicError> {
-        db.moe_a2a.query(
+        let exact_shape = db.moe_a2a.has_shape(
             &self.comm_backend,
             &self.phase,
             &self.comm_dtype,
             self.moe_ep_size,
             self.node_num,
+            self.hidden_size,
+            self.topk,
+            self.num_experts,
+        )?;
+        let use_node1_fallback = db.backend == "sglang"
+            && matches!(self.comm_backend.as_str(), "deepep_ht" | "deepep_ll")
+            && self.node_num > 1
+            && !exact_shape;
+        let (lookup_ep_size, lookup_node_num, source) = if use_node1_fallback {
+            // Legacy DeepEP tables have no EP axis. Their unified adapter
+            // stores node-1 rows at EP=8; PR #1314 intentionally lets those
+            // same-shape measurements represent an unmeasured multi-node
+            // scale and marks the optimistic result as estimated.
+            (
+                crate::perf_database::moe_a2a::legacy_deepep_ep_size(1),
+                1,
+                Source::Estimated,
+            )
+        } else {
+            (self.moe_ep_size, self.node_num, Source::Silicon)
+        };
+        let latency = self
+            .silicon_latency_at(db, tokens, lookup_ep_size, lookup_node_num)
+            .map_err(|err| {
+                if db.database_mode == DatabaseMode::Hybrid && err.is_missing_perf_data() {
+                    // moe_comm.py:639-643 — HYBRID's empirical fallback for this
+                    // family is itself the typed not-implemented raise.
+                    AicError::EmpiricalNotImplemented(format!(
+                    "HYBRID empirical fallback is not available for moe_a2a {}/{}: silicon data \
+                     required (estimation tier is a planned follow-up). Silicon miss: {err}",
+                    self.comm_backend, self.phase
+                ))
+                } else {
+                    err
+                }
+            })?;
+        // Python: `PerformanceResult(float(result) * scale, source=...)` — no
+        // clamp (nothing is subtracted on this path).
+        Ok(PerformanceResult::new(latency, source).scaled(self.scale_factor))
+    }
+
+    fn silicon_latency_at(
+        &self,
+        db: &PerfDatabase,
+        tokens: u32,
+        ep_size: u32,
+        node_num: u32,
+    ) -> Result<f64, AicError> {
+        db.moe_a2a.query(
+            &self.comm_backend,
+            &self.phase,
+            &self.comm_dtype,
+            ep_size,
+            node_num,
             self.hidden_size,
             self.topk,
             self.num_experts,
@@ -242,6 +277,9 @@ mod tests {
     struct A2aRow {
         comm_backend: &'static str,
         phase: &'static str,
+        ep_size: i64,
+        node_num: i64,
+        sms: i64,
         num_tokens: i64,
         /// MICROseconds — the new-schema collector unit the loader /1000s.
         latency_us: f64,
@@ -256,6 +294,29 @@ mod tests {
         A2aRow {
             comm_backend,
             phase,
+            ep_size: 16,
+            node_num: 2,
+            sms: 0,
+            num_tokens,
+            latency_us,
+        }
+    }
+
+    fn a2a_row_at(
+        comm_backend: &'static str,
+        phase: &'static str,
+        ep_size: i64,
+        node_num: i64,
+        sms: i64,
+        num_tokens: i64,
+        latency_us: f64,
+    ) -> A2aRow {
+        A2aRow {
+            comm_backend,
+            phase,
+            ep_size,
+            node_num,
+            sms,
             num_tokens,
             latency_us,
         }
@@ -301,12 +362,15 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         write_column::<ByteArrayType>(&mut rg, &vec![ByteArray::from("default"); n]);
-        write_column::<Int64Type>(&mut rg, &vec![16_i64; n]);
-        write_column::<Int64Type>(&mut rg, &vec![2_i64; n]);
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.ep_size).collect::<Vec<_>>());
+        write_column::<Int64Type>(
+            &mut rg,
+            &rows.iter().map(|r| r.node_num).collect::<Vec<_>>(),
+        );
         write_column::<Int64Type>(&mut rg, &vec![7168_i64; n]);
         write_column::<Int64Type>(&mut rg, &vec![8_i64; n]);
         write_column::<Int64Type>(&mut rg, &vec![256_i64; n]);
-        write_column::<Int64Type>(&mut rg, &vec![0_i64; n]);
+        write_column::<Int64Type>(&mut rg, &rows.iter().map(|r| r.sms).collect::<Vec<_>>());
         write_column::<Int64Type>(
             &mut rg,
             &rows.iter().map(|r| r.num_tokens).collect::<Vec<_>>(),
@@ -341,6 +405,11 @@ mod tests {
                 // an LL (generation) backend carrying the same token points.
                 a2a_row("deepep_ll", "dispatch", 63, 63000.0),
                 a2a_row("deepep_ll", "dispatch", 64, 64000.0),
+                // Legacy node-1 DeepEP substitute (the unified adapter stores
+                // these rows at EP=8 regardless of the requested target EP).
+                a2a_row_at("deepep_ht", "dispatch", 8, 1, 20, 64, 1280.0),
+                a2a_row_at("deepep_ht", "combine", 8, 1, 20, 64, 2560.0),
+                a2a_row_at("deepep_ll", "dispatch", 8, 1, 0, 64, 12800.0),
             ],
         );
         let mut db = PerfDatabase::load(&systems_root(), "h200_sxm", "sglang", "0.5.6.post2")
@@ -463,6 +532,18 @@ mod tests {
         let got = scaled.query(&db, 64).expect("combine");
         assert!((got.latency_ms - 6.400 * 61.0).abs() < 1e-12, "got {got:?}");
         assert_eq!(got.source, Source::Silicon);
+    }
+
+    #[test]
+    fn sglang_deepep_node1_substitutes_for_missing_multi_node_scale_as_estimated() {
+        let (_tmp, db) = synthetic_db(DatabaseMode::Silicon);
+        let mut fallback = op("dispatch", "deepep_ht", 1);
+        fallback.moe_ep_size = 128;
+        fallback.node_num = 32;
+        fallback.sms = 20;
+        let got = fallback.query(&db, 64).expect("node-1 fallback");
+        assert!((got.latency_ms - 1.280).abs() < 1e-12, "got {got:?}");
+        assert_eq!(got.source, Source::Estimated);
     }
 
     // -----------------------------------------------------------------

@@ -49,6 +49,7 @@ from aiconfigurator.sdk.models import (
     resolve_kimi_k3_moe_arch_mode,
 )
 from aiconfigurator.sdk.models.blocks.moe import LARGE_EP_READY_FAMILIES, MoEBlockShape
+from aiconfigurator.sdk.moe_comm_resolver import a2a_covers_parallel, resolve_model_config_moe_comm
 from aiconfigurator.sdk.operations.moe_comm import MOE_A2A_BACKENDS, nodes_for
 from aiconfigurator.sdk.perf_database import (
     get_latest_database_version,
@@ -712,6 +713,7 @@ class Task:
     # Which fmha_quant_mode values came from an explicit field (per role) --
     # handed from _resolve_quant_modes to _apply_fmha_data_fallback.
     _fmha_explicit: dict = field(default_factory=dict, repr=False, init=False)
+    _kvcache_explicit: dict = field(default_factory=dict, repr=False, init=False)
     # role -> large-EP coverage (see _large_ep_coverage). Depends on the model /
     # system / backend / MoE quant mode only, never on the candidate lists, so
     # it survives post-construction edits to those.
@@ -1090,12 +1092,15 @@ class Task:
         # data-driven fallback below must NOT fire on an EXPLICIT fp8 -- explicit
         # values are the user's contract and validate fails fast on them.
         fmha_explicit: dict[str, bool] = {}
+        kvcache_explicit: dict[str, bool] = {}
         for role in roles:
             for key in _QUANT_ENUM_TABLES:
                 explicit = self._role_attr(role, key)
                 from_hf = base.get(key)
                 if key == "fmha_quant_mode":
                     fmha_explicit[role] = explicit is not None
+                elif key == "kvcache_quant_mode":
+                    kvcache_explicit[role] = explicit is not None
                 # Native DeepSeek-V4 on sglang uses arch-specific MoE kernels; the
                 # shared helper (also called on the cli estimate path) returns the
                 # dedicated perf-DB quant mode. Acts at the HF-base layer so an
@@ -1123,6 +1128,7 @@ class Task:
                 self._set_role_attr(role, key, resolved)
 
         self._fmha_explicit = fmha_explicit
+        self._kvcache_explicit = kvcache_explicit
 
     def _apply_fmha_data_fallback(self) -> None:
         """Data-driven FMHA resolution (second half of quant resolution).
@@ -1263,11 +1269,12 @@ class Task:
         """``{phase: {comm_backend: {ep_size, ...}}}`` explorable with large EP.
 
         Per spec section 4.5, an EP size is explorable for a phase when its
-        comm backend carries dispatch+combine rows for the model shape at
-        ``(ep, nodes_for(ep, gpus_per_node))`` (topology check against THIS
-        system), the backend's registry feasibility rules admit the config,
-        and the EP expert-compute table covers the shape under the role's MoE
-        quant mode for that phase. BOTH phases are probed for every role: a
+        comm backend carries dispatch+combine rows for the model shape at the
+        requested EP/node scale, or SGLang DeepEP carries the marked node-1
+        substitute retained from PR #1314. The backend's registry feasibility
+        rules must admit the config, and the EP expert-compute table must cover
+        the shape under the role's MoE quant mode for that phase. BOTH phases
+        are probed for every role: a
         disagg worker only runs one of them, but its model object holds the
         whole graph and the memory model sizes weights off the context ops, so
         the phase the role does not run must be emitted in the same regime (the
@@ -1278,9 +1285,10 @@ class Task:
         backends cover the same EP); the caller picks the first one covering
         the tuple's EP.
 
-        Never raises on missing DATA: an absent model shape, system spec,
-        database or table yields ``{}`` -- the fused path then serves every
-        tuple. A caller BUG still raises: a str-typed ``moe_quant_mode`` is a
+        Missing data yields ``{}``; :meth:`build_model_config` permits the
+        fused path for intra-node tuples but rejects cross-node EP because
+        silently pricing it as fused omits A2A latency. A caller BUG still
+        raises: a str-typed ``moe_quant_mode`` is a
         ``TypeError``, not empty coverage (it would silently miss every
         enum-keyed compute row and disable large-EP exploration).
         """
@@ -1338,8 +1346,14 @@ class Task:
                         continue
                     eps = {
                         ep
-                        for ep, node_num in a2a.get(name, ())
-                        if node_num == nodes_for(ep, gpus_per_node)
+                        for ep in compute
+                        if a2a_covers_parallel(
+                            a2a.get(name, set()),
+                            framework=backend_name,
+                            comm_backend=name,
+                            moe_ep_size=ep,
+                            expected_nodes=nodes_for(ep, gpus_per_node),
+                        )
                         and backend_spec.feasible(
                             topk=shape.topk,
                             num_experts=shape.num_experts,
@@ -1347,7 +1361,7 @@ class Task:
                             moe_ep_size=ep,
                             sm_version=sm_version,
                         )
-                    } & compute
+                    }
                     if eps:
                         per_backend[name] = eps
                 if per_backend:
@@ -1994,7 +2008,14 @@ class Task:
         the model classes build the large-EP graph for the tuples the data
         covers and the fused one for the rest.
         """
+        num_gpus_per_node = self._num_gpus_per_node(role)
         model_config = config.ModelConfig(
+            tp_size=parallel[0] if parallel is not None else 1,
+            pp_size=parallel[1] if parallel is not None else 1,
+            attention_dp_size=parallel[2] if parallel is not None else 1,
+            moe_tp_size=parallel[3] if parallel is not None else 1,
+            moe_ep_size=parallel[4] if parallel is not None else 1,
+            cp_size=parallel[5] if parallel is not None else 1,
             gemm_quant_mode=self._role_attr(role, "gemm_quant_mode"),
             moe_quant_mode=self._role_attr(role, "moe_quant_mode"),
             kvcache_quant_mode=self._role_attr(role, "kvcache_quant_mode"),
@@ -2023,9 +2044,20 @@ class Task:
             # Hardware fact, injected alongside the comm backend: the large-EP
             # ops take the comm node span at construction and would otherwise
             # have no channel to it (models.helpers.large_ep_gpus_per_node).
-            num_gpus_per_node=self._num_gpus_per_node(role),
+            num_gpus_per_node=num_gpus_per_node,
         )
         model_config._gemm_quant_mode_is_explicit = self._gemm_quant_mode_explicit_by_role.get(role, False)
+        if parallel is not None:
+            required_phases = tuple(dict.fromkeys((*self._role_phases(role), *self._required_large_ep_phases(role))))
+            resolve_model_config_moe_comm(
+                model_config,
+                model_path=self._role_attr(role, "model_path"),
+                backend_name=self._role_attr(role, "backend_name"),
+                database=self._try_load_role_database(role),
+                required_phases=required_phases,
+                fmha_quant_mode_explicit=self._fmha_explicit.get(role, False),
+                kvcache_quant_mode_explicit=self._kvcache_explicit.get(role, False),
+            )
         return model_config
 
     def _model_config_factory(self, role: Literal["agg", "prefill", "decode"]):

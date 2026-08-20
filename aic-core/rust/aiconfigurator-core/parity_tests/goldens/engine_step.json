@@ -49,11 +49,7 @@
         }
       },
       "static": {
-        "values": {
-          "static_ctx": 115.752,
-          "static_gen": 43.269,
-          "static_total": 159.021
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "deepseek-v3-b200-vllm-019-isl1024-osl2": {
@@ -147,11 +143,7 @@
         }
       },
       "static": {
-        "values": {
-          "static_ctx": 115.752,
-          "static_gen": 43.269,
-          "static_total": 159.021
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "deepseek-v32-b200-sglang-0510-isl1024-osl2": {
@@ -562,11 +554,7 @@
         }
       },
       "static": {
-        "values": {
-          "static_ctx": 154.876,
-          "static_gen": 13.727,
-          "static_total": 168.603
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "kimi-k25-h100-vllm-019-isl1024-osl2": {
