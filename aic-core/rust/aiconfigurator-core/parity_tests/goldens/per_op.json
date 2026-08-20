@@ -1157,8 +1157,8 @@
           "source": "empirical"
         },
         "context_attention": {
-          "energy_wms": 886.6545396484373,
-          "latency_ms": 2.8845644815625002,
+          "energy_wms": 0.0,
+          "latency_ms": 3.10181890470398,
           "source": "mixed"
         },
         "context_embedding": {
@@ -1189,7 +1189,7 @@
         "context_p2p": {
           "energy_wms": 0.0,
           "latency_ms": 0.0,
-          "source": "empirical"
+          "source": "silicon"
         },
         "context_proj_gemm": {
           "energy_wms": 94.83422521636963,
@@ -1219,8 +1219,8 @@
           "source": "empirical"
         },
         "generation_attention": {
-          "energy_wms": 197.84298345517104,
-          "latency_ms": 0.3931245535016061,
+          "energy_wms": 0.0,
+          "latency_ms": 0.5174666896229609,
           "source": "silicon"
         },
         "generation_embedding": {
@@ -1256,7 +1256,7 @@
         "generation_p2p": {
           "energy_wms": 0.0,
           "latency_ms": 0.0,
-          "source": "empirical"
+          "source": "silicon"
         },
         "generation_proj_gemm": {
           "energy_wms": 91.77636432531736,
@@ -1288,6 +1288,12 @@
       "OMP_NUM_THREADS": "1",
       "OPENBLAS_NUM_THREADS": "1",
       "RAYON_NUM_THREADS": "1"
+    }
+  },
+  "post_freeze_pins": {
+    "qwen3-30b-a3b-b200-vllm-022-power": {
+      "engine": "rust",
+      "git_head": "9019e19c30b425b4d30f4fa1740fa3e29da32c7b"
     }
   }
 }
