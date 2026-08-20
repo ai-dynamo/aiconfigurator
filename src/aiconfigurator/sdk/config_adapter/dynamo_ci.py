@@ -141,7 +141,7 @@ def _worker(
     config: Mapping[str, Any],
     resources: Mapping[str, Any],
     concurrency: int,
-    prefill_batch_override: int | None,
+    batch_override: int | None,
     assumptions: list[str],
 ) -> WorkerSettingsV1:
     nodes = _positive_int(resources.get(f"{role}_nodes"), f"resources.{role}_nodes")
@@ -196,9 +196,12 @@ def _worker(
     moe_tp = width_without_pp // moe_ep
 
     if role == "prefill":
-        batch_size = prefill_batch_override or 1
-        if prefill_batch_override is None:
+        batch_size = batch_override or 1
+        if batch_override is None:
             assumptions.append("dynamo-ci disaggregated prefill batch defaults to 1.")
+    elif batch_override is not None:
+        batch_size = batch_override
+        assumptions.append(f"dynamo-ci {role} batch size is explicitly overridden to {batch_size}.")
     else:
         denominator = replicas * attention_dp
         if concurrency % denominator:
@@ -255,33 +258,44 @@ def _quantization(
 
 def _shared_runtime(
     roles: Mapping[str, Mapping[str, Any]], overrides: AdapterOverrides
-) -> tuple[float | None, int | None]:
-    if overrides.free_gpu_memory_fraction is not None:
-        fraction = overrides.free_gpu_memory_fraction
-    else:
-        fractions = {
-            float(value)
-            for config in roles.values()
-            if (value := _flag(config, "mem-fraction-static", "gpu-memory-utilization")) is not None
-        }
-        if len(fractions) > 1:
-            raise ValueError(
-                "prefill and decode use different memory fractions; provide free_gpu_memory_fraction override"
-            )
-        fraction = next(iter(fractions), None)
+) -> tuple[float | None, float | None, float | None, int | None, int | None, int | None]:
+    fraction = overrides.free_gpu_memory_fraction
+    prefill_fraction = overrides.prefill_free_gpu_memory_fraction
+    decode_fraction = overrides.decode_free_gpu_memory_fraction
+    if fraction is None:
+        prefill_value = _flag(roles["prefill"], "mem-fraction-static", "gpu-memory-utilization")
+        decode_value = _flag(roles["decode"], "mem-fraction-static", "gpu-memory-utilization")
+        if prefill_fraction is None:
+            prefill_fraction = float(prefill_value) if prefill_value is not None else None
+        if decode_fraction is None:
+            decode_fraction = float(decode_value) if decode_value is not None else None
 
     if overrides.max_seq_len is not None:
         max_seq_len = overrides.max_seq_len
+        prefill_max_seq_len = overrides.prefill_max_seq_len
+        decode_max_seq_len = overrides.decode_max_seq_len
     else:
-        lengths = {
-            _positive_int(value, "context length")
-            for config in roles.values()
-            if (value := _flag(config, "context-length", "max-model-len", "max-seq-len")) is not None
-        }
-        if len(lengths) > 1:
-            raise ValueError(f"prefill and decode use different context lengths: {sorted(lengths)}")
-        max_seq_len = next(iter(lengths), None)
-    return fraction, max_seq_len
+        max_seq_len = None
+        prefill_value = _flag(roles["prefill"], "context-length", "max-model-len", "max-seq-len")
+        decode_value = _flag(roles["decode"], "context-length", "max-model-len", "max-seq-len")
+        prefill_max_seq_len = (
+            overrides.prefill_max_seq_len
+            if overrides.prefill_max_seq_len is not None
+            else (_positive_int(prefill_value, "prefill context length") if prefill_value is not None else None)
+        )
+        decode_max_seq_len = (
+            overrides.decode_max_seq_len
+            if overrides.decode_max_seq_len is not None
+            else (_positive_int(decode_value, "decode context length") if decode_value is not None else None)
+        )
+    return (
+        fraction,
+        prefill_fraction,
+        decode_fraction,
+        max_seq_len,
+        prefill_max_seq_len,
+        decode_max_seq_len,
+    )
 
 
 def _speculation(roles: Mapping[str, Mapping[str, Any]], overrides: AdapterOverrides) -> int | str:
@@ -354,7 +368,14 @@ def _request(
         backend_version = container
 
     gemm, moe, kvcache = _quantization(document, roles)
-    fraction, max_seq_len = _shared_runtime(roles, overrides)
+    (
+        fraction,
+        prefill_fraction,
+        decode_fraction,
+        max_seq_len,
+        prefill_max_seq_len,
+        decode_max_seq_len,
+    ) = _shared_runtime(roles, overrides)
     nextn = _speculation(roles, overrides)
     topology = DisaggregatedTopologyV1(
         prefill=_worker(
@@ -362,7 +383,7 @@ def _request(
             config=roles["prefill"],
             resources=resources,
             concurrency=concurrency,
-            prefill_batch_override=overrides.prefill_batch_size,
+            batch_override=overrides.prefill_batch_size,
             assumptions=assumptions,
         ),
         decode=_worker(
@@ -370,7 +391,7 @@ def _request(
             config=roles["decode"],
             resources=resources,
             concurrency=concurrency,
-            prefill_batch_override=None,
+            batch_override=overrides.decode_batch_size,
             assumptions=assumptions,
         ),
     )
@@ -398,7 +419,11 @@ def _request(
         runtime=RuntimeSettingsV1(
             systems_paths=overrides.systems_paths,
             free_gpu_memory_fraction=fraction,
+            prefill_free_gpu_memory_fraction=prefill_fraction,
+            decode_free_gpu_memory_fraction=decode_fraction,
             max_seq_len=max_seq_len,
+            prefill_max_seq_len=prefill_max_seq_len,
+            decode_max_seq_len=decode_max_seq_len,
             engine_step_backend=overrides.engine_step_backend,
         ),
         provenance=SourceProvenanceV1(

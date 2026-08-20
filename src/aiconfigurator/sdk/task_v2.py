@@ -167,6 +167,9 @@ _GPTOSS_BLACKWELL_MODELS = frozenset({"openai/gpt-oss-120b", "openai/gpt-oss-20b
 _DEEPSEEK_V4_NATIVE_FP4_TO_FP8_MODEL = {
     "deepseek-ai/DeepSeek-V4-Flash": "sgl-project/DeepSeek-V4-Flash-FP8",
     "deepseek-ai/DeepSeek-V4-Pro": "sgl-project/DeepSeek-V4-Pro-FP8",
+    # The ModelOpt NVFP4 exports carry the same FP4 routed-expert weights.
+    "nvidia/DeepSeek-V4-Flash-NVFP4": "sgl-project/DeepSeek-V4-Flash-FP8",
+    "nvidia/DeepSeek-V4-Pro-NVFP4": "sgl-project/DeepSeek-V4-Pro-FP8",
 }
 
 
@@ -1049,6 +1052,20 @@ class Task:
         Priority (highest wins): explicit field > HF base > bfloat16 fallback.
         """
         roles = ["agg"] if self.serving_mode in ("agg", "afd") else ["prefill", "decode"]
+        # Preserve caller provenance before filling HF/fallback values. A
+        # Task-built ModelConfig otherwise carries a non-None inferred GEMM
+        # mode and get_model() mistakes it for a user override, disabling
+        # checkpoint-specific mixed-precision splits.
+        self._gemm_quant_mode_explicit_by_role = {
+            role: self._role_attr(role, "gemm_quant_mode") is not None for role in roles
+        }
+        if self.serving_mode == "afd" and self.afd_combined_with_pd:
+            # AFD's internal static-prefill view inherits the agg quant mode
+            # later in _resolve_search_space(). Preserve either an explicit
+            # prefill override or the explicitness of that inherited agg mode.
+            self._gemm_quant_mode_explicit_by_role["prefill"] = (
+                self.prefill_gemm_quant_mode is not None or self._gemm_quant_mode_explicit_by_role["agg"]
+            )
         base = _infer_quant_modes_from_raw_config(self._raw_config)
 
         # GPT-OSS on Blackwell (trtllm): default MoE to w4a8_mxfp4_mxfp8 for higher
@@ -1931,7 +1948,7 @@ class Task:
         the model classes build the large-EP graph for the tuples the data
         covers and the fused one for the rest.
         """
-        return config.ModelConfig(
+        model_config = config.ModelConfig(
             gemm_quant_mode=self._role_attr(role, "gemm_quant_mode"),
             moe_quant_mode=self._role_attr(role, "moe_quant_mode"),
             kvcache_quant_mode=self._role_attr(role, "kvcache_quant_mode"),
@@ -1961,6 +1978,8 @@ class Task:
             # have no channel to it (models.helpers.large_ep_gpus_per_node).
             num_gpus_per_node=self._num_gpus_per_node(role),
         )
+        model_config._gemm_quant_mode_is_explicit = self._gemm_quant_mode_explicit_by_role.get(role, False)
+        return model_config
 
     def _model_config_factory(self, role: Literal["agg", "prefill", "decode"]):
         """Per-tuple ModelConfig builder handed to ``sweep_*`` (see

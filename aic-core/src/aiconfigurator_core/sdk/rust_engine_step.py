@@ -1037,9 +1037,17 @@ def _quant_to_dtype(value: Any) -> str | None:
         return "fp8_block"
     if name == "nvfp4":
         return "nvfp4"
+    if name == "w4a16_nvfp4":
+        return "w4a16_nvfp4"
     if name in {"int8", "int8_wo", "sq"}:
         return "int8"
-    if name in {"int4", "int4_wo", "w4afp8", "w4a16_mxfp4", "w4a8_mxfp4_mxfp8"}:
+    if name in {
+        "int4",
+        "int4_wo",
+        "w4afp8",
+        "w4a16_mxfp4",
+        "w4a8_mxfp4_mxfp8",
+    }:
         return "int4"
     return None
 

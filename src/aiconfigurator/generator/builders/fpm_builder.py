@@ -23,9 +23,11 @@ from aiconfigurator.fpm_contract import (
     FPM_ENV_FILENAME,
     FPM_MANIFEST_FILENAME,
     FPM_NATIVE_BENCHMARK_RESULT_SCHEMA_VERSION,
+    FPM_RESOLVED_CONFIG_TEMPLATE,
     FPM_RESULTS_DIR,
     FPM_RUN_SCRIPT_FILENAME,
     fpm_validate_benchmark_output_path,
+    fpm_validate_resolved_config_path,
 )
 
 from .dgd_model import DGD, ComputeDomainDoc, DGDService, MainContainer, _dump_k8s_yaml
@@ -186,9 +188,9 @@ def _ensure_dump_config_path(args: list[str], node_count: int) -> None:
         raise ValueError(f"FPM accepts at most one {flag} option")
 
     default = (
-        f"{FPM_RESULTS_DIR}/resolved-config-node{{node_rank}}.json"
+        f"{FPM_RESULTS_DIR}/{FPM_RESOLVED_CONFIG_TEMPLATE}"
         if node_count > 1
-        else f"{FPM_RESULTS_DIR}/resolved-config-node0.json"
+        else f"{FPM_RESULTS_DIR}/{FPM_RESOLVED_CONFIG_TEMPLATE.format(node_rank=0)}"
     )
     if not occurrences:
         value = default
@@ -199,6 +201,7 @@ def _ensure_dump_config_path(args: list[str], node_count: int) -> None:
     value = args[index].split("=", 1)[1] if joined else args[index]
     if node_count > 1 and "{node_rank}" not in value:
         raise ValueError(f"Multinode FPM {flag} must contain the {{node_rank}} placeholder")
+    fpm_validate_resolved_config_path(value)
     if node_count == 1:
         value = value.replace("{node_rank}", "0")
     else:

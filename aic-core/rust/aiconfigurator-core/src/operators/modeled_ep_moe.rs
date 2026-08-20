@@ -55,10 +55,8 @@ impl ModeledEpMoeOp {
     pub fn weight_bytes(&self) -> f64 {
         let num_gemms = if self.is_gated { 3_u64 } else { 2_u64 };
         let local_experts = u64::from(self.num_experts / self.moe_ep_size.max(1));
-        let bytes = u64::from(self.hidden_size)
-            * u64::from(self.inter_size)
-            * local_experts
-            * num_gemms;
+        let bytes =
+            u64::from(self.hidden_size) * u64::from(self.inter_size) * local_experts * num_gemms;
         bytes as f64 * self.quant_mode.mapping().memory * self.scale_factor
     }
 

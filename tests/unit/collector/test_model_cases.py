@@ -40,6 +40,19 @@ def _load_mla_adapter(module_path: str, globals_dict: dict):
     return namespace["_build_mla_test_cases"]
 
 
+def _load_gdn_getter(module_path: str):
+    from collector.case_generator import get_common_gdn_test_cases
+
+    source_path = REPO_ROOT / module_path
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "get_gdn_test_cases"
+    )
+    namespace = {"get_common_gdn_test_cases": get_common_gdn_test_cases}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
+    return namespace["get_gdn_test_cases"]
+
+
 def test_model_case_plan_merges_required_base_and_framework_specific_ops():
     plan = build_collection_case_plan(backend="sglang", model_path="deepseek-ai/DeepSeek-V3")
 
@@ -201,6 +214,114 @@ def test_added_model_moe_profiles_resolve_targeted_aliases(monkeypatch):
         } == {expected}
 
 
+@pytest.mark.parametrize(
+    ("model_path", "quant_mode"),
+    [
+        ("nvidia/Qwen3.6-35B-A3B-NVFP4", "w4a16_nvfp4"),
+        ("nvidia/Qwen3.5-397B-A17B-NVFP4", "nvfp4"),
+        ("nvidia/Qwen3.5-122B-A10B-NVFP4", "nvfp4"),
+        ("nvidia/Gemma-4-26B-A4B-NVFP4", "bfloat16"),
+        ("nvidia/Kimi-K2.6-NVFP4", "nvfp4"),
+        ("nvidia/Kimi-K2.7-Code-NVFP4", "nvfp4"),
+        ("nvidia/DeepSeek-V4-Flash-NVFP4", "nvfp4"),
+        ("nvidia/DeepSeek-V4-Pro-NVFP4", "nvfp4"),
+        ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4", "nvfp4"),
+        ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4", "nvfp4"),
+        ("nvidia/MiniMax-M3-NVFP4", "nvfp4"),
+    ],
+)
+def test_nvfp4_quant_artifacts_have_exact_moe_profiles_and_lanes(monkeypatch, model_path, quant_mode):
+    from collector.case_generator import get_common_moe_test_cases
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+    cases = get_common_moe_test_cases()
+
+    assert cases
+    assert {case.model_name for case in cases} == {model_path}
+    for backend in ("sglang", "trtllm", "vllm"):
+        assert moe_model_allows_quantization(backend, model_path, quant_mode)
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "nvidia/Qwen3.6-27B-NVFP4",
+        "nvidia/Gemma-4-31B-IT-NVFP4",
+    ],
+)
+def test_nvfp4_dense_artifacts_have_targeted_attention_profiles(monkeypatch, model_path):
+    from collector.case_generator import get_attention_context_shape_sweeps
+
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+
+    assert get_attention_context_shape_sweeps("sglang")
+
+
+@pytest.mark.parametrize(
+    ("model_path", "d_model", "global_k_heads", "global_v_heads", "tp_sizes"),
+    [
+        ("Qwen/Qwen3.5-27B", 5120, 16, 48, (1, 2, 4, 8)),
+        ("Qwen/Qwen3.5-35B-A3B", 2048, 16, 32, (1, 2, 4, 8, 16)),
+    ],
+)
+def test_qwen35_gdn_getters_expand_tp_local_physical_keys(
+    monkeypatch, model_path, d_model, global_k_heads, global_v_heads, tp_sizes
+):
+    monkeypatch.setenv("COLLECTOR_MODEL_PATH", model_path)
+    expected = {
+        (phase, d_model, 4, global_k_heads // tp, 128, global_v_heads // tp, 128)
+        for phase in ("context", "generation")
+        for tp in tp_sizes
+    }
+
+    for module_path in ("collector/sglang/collect_gdn.py", "collector/vllm/collect_gdn.py"):
+        cases = _load_gdn_getter(module_path)()
+        assert {(case[0], case[1], case[2], case[3], case[4], case[5], case[6]) for case in cases} == expected
+
+
+def test_gdn_tp_declarations_fail_loud_and_dedupe_on_loader_key(monkeypatch):
+    from collector import case_generator
+
+    invalid = {
+        "model_path": "example/invalid",
+        "d_model": 2048,
+        "d_conv": 4,
+        "num_k_heads": 16,
+        "head_k_dim": 128,
+        "num_v_heads": 32,
+        "head_v_dim": 128,
+        "tensor_parallel_sizes": [3],
+    }
+    monkeypatch.setattr(case_generator, "_model_case_values", lambda op_name: [invalid])
+    with pytest.raises(ValueError, match="both global head counts to be divisible"):
+        case_generator.get_common_gdn_test_cases()
+
+    def profile(model_path, d_model, num_k_heads, num_v_heads, tp):
+        return {
+            "model_path": model_path,
+            "d_model": d_model,
+            "d_conv": 4,
+            "num_k_heads": num_k_heads,
+            "head_k_dim": 128,
+            "num_v_heads": num_v_heads,
+            "head_v_dim": 128,
+            "tensor_parallel_sizes": [tp],
+        }
+
+    profiles = [
+        profile("example/first", 2048, 16, 32, 4),
+        profile("example/duplicate", 2048, 4, 8, 1),
+        profile("example/distinct-d-model", 4096, 4, 8, 1),
+    ]
+    monkeypatch.setattr(case_generator, "_model_case_values", lambda op_name: profiles)
+    cases = case_generator.get_common_gdn_test_cases()
+
+    assert len(cases) == 4
+    assert {(case.phase, case.d_model, case.num_k_heads, case.num_v_heads, case.model_name) for case in cases} == {
+        (phase, 2048, 4, 8, "example/first") for phase in ("context", "generation")
+    } | {(phase, 4096, 4, 8, "example/distinct-d-model") for phase in ("context", "generation")}
+
+
 def test_mimo_attention_profile_matches_aic_full_attention_window(monkeypatch):
     from collector.case_generator import get_attention_context_shape_sweeps
 
@@ -334,24 +455,38 @@ def test_moe_model_quantization_policy_is_yaml_backed():
 
 
 def test_dsv4_moe_quantization_policy_prunes_unrelated_modes():
+    # AIC-1749: nvidia/DeepSeek-V4-{Flash,Pro}-NVFP4 are a real ModelOpt NVFP4
+    # export. Every backend that serves NVFP4 MoE declares exactly [nvfp4] on
+    # those rows (positive one-true-mode declarations, review follow-up), so
+    # assert the singleton set per backend explicitly rather than omitting the
+    # artifact (omission would look identical to "not yet declared").
     expected_by_backend = {
         "sglang": {
             "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
             "deepseek-ai/DeepSeek-V4-Pro": {"w4a8_mxfp4_mxfp8"},
             "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
+            # One true mode everywhere: the NVFP4 artifacts declare nvfp4 on
+            # every backend that serves NVFP4 MoE (review follow-up on
+            # PR #1548 — positive declarations, nothing excluded).
+            "nvidia/DeepSeek-V4-Flash-NVFP4": {"nvfp4"},
+            "nvidia/DeepSeek-V4-Pro-NVFP4": {"nvfp4"},
         },
         "trtllm": {
             "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
             "deepseek-ai/DeepSeek-V4-Pro": {"w4a8_mxfp4_mxfp8"},
             "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
+            "nvidia/DeepSeek-V4-Flash-NVFP4": {"nvfp4"},
+            "nvidia/DeepSeek-V4-Pro-NVFP4": {"nvfp4"},
         },
         "vllm": {
             "deepseek-ai/DeepSeek-V4-Flash": {"w4a8_mxfp4_mxfp8"},
             "deepseek-ai/DeepSeek-V4-Pro": {"w4a8_mxfp4_mxfp8"},
             "sgl-project/DeepSeek-V4-Flash-FP8": {"fp8_block"},
             "sgl-project/DeepSeek-V4-Pro-FP8": {"fp8_block"},
+            "nvidia/DeepSeek-V4-Flash-NVFP4": {"nvfp4"},
+            "nvidia/DeepSeek-V4-Pro-NVFP4": {"nvfp4"},
         },
     }
 
@@ -663,10 +798,36 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # +117 per new GLM model path: GLM-5.1 (BF16/FP8/NVFP4) and GLM-5.2
     # (BF16/FP8) share GLM-5's MoE dims. nvidia/GLM-5.1-NVFP4 is also
     # registered in moe.yaml base_ops.
-    # +114 for Kimi-K3's LatentMoE row (3584/3072, 896x16, w4a16_mxfp4).
+    # +114 for Kimi-K3's LatentMoE row (3584/3072, 896x16, w4a16_mxfp4),
+    # plus exact quant-sensitive rows for the current NVIDIA NVFP4 artifacts.
     # +198 from Step-3.7-Flash: 99 cases for each physical BF16/FP8 artifact.
     # +117 for the vLLM Nemotron Super FP8 latent-MoE row (1024/2688, 512x22).
-    assert len(moe_cases) == 5340
+    # +114 for nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4, the nvfp4
+    # checkpoint release of the 30B/A3B shape (AIC-1743/AIC-1748); same
+    # topk=6/e128/h2688/i1856 geometry as Nano-BF16, hence the identical
+    # per-model case count (114).
+    # +231 for AIC-1749's DeepSeek-V4 NVFP4 rows: +117 nvidia/DeepSeek-V4-Flash-NVFP4
+    # (matches deepseek-ai/DeepSeek-V4-Flash's 4096/2048 count) and +114
+    # nvidia/DeepSeek-V4-Pro-NVFP4 (matches deepseek-ai/DeepSeek-V4-Pro's
+    # 7168/3072 count) -- every backend declares exactly [nvfp4] for both
+    # new rows.
+    assert len(moe_cases) == 6606
+    assert any(
+        case.model_name == "nvidia/DeepSeek-V4-Flash-NVFP4"
+        and case.hidden_size == 4096
+        and case.inter_size == 2048
+        and case.topk == 6
+        and case.num_experts == 256
+        for case in moe_cases
+    )
+    assert any(
+        case.model_name == "nvidia/DeepSeek-V4-Pro-NVFP4"
+        and case.hidden_size == 7168
+        and case.inter_size == 3072
+        and case.topk == 6
+        and case.num_experts == 384
+        for case in moe_cases
+    )
     assert any(
         case.model_name == "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
         and case.hidden_size == 1024
@@ -679,6 +840,42 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
         and case.inter_size == 5120
         for case in moe_cases
     )
+    # Every Lightning case, not just one: the documented +114 contribution,
+    # each carrying the exact checkpoint geometry (an `any(...)` pin would
+    # pass with 113 wrong-dimension siblings).
+    lightning_cases = [
+        case for case in moe_cases if case.model_name == "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
+    ]
+    assert len(lightning_cases) == 114
+    assert all(
+        case.hidden_size == 2688 and case.inter_size == 1856 and case.topk == 6 and case.num_experts == 128
+        for case in lightning_cases
+    )
+    # Step-3.7-Flash: assert both physical artifact identities, the shape, and
+    # the routing contract. MoE loads the model config by model_name, so the
+    # BF16 artifact must not alias to the FP8 representative.
+    step_cases = [case for case in moe_cases if "Step-3.7-Flash" in case.model_name]
+    assert {case.model_name for case in step_cases} == {
+        "stepfun-ai/Step-3.7-Flash",
+        "stepfun-ai/Step-3.7-Flash-FP8",
+    }
+    assert sum(case.model_name == "stepfun-ai/Step-3.7-Flash" for case in step_cases) == 99
+    assert sum(case.model_name == "stepfun-ai/Step-3.7-Flash-FP8" for case in step_cases) == 99
+    assert all(
+        case.hidden_size == 4096 and case.inter_size == 1280 and case.topk == 8 and case.num_experts == 288
+        for case in step_cases
+    )
+    # Sigmoid gate + correction bias before top-k, renormalized and scaled by
+    # 3.0. The defaults (softmax, no bias, no scaling) would benchmark a
+    # different MoE invocation from the one that is actually served.
+    assert all(
+        case.sglang_moe_scoring_func == "sigmoid"
+        and case.sglang_moe_has_correction_bias
+        and case.sglang_moe_renormalize
+        and case.sglang_moe_routed_scaling_factor == 3.0
+        for case in step_cases
+    )
+
     # Kimi-K3 declares the native 96-head MLA profile (DeepSeek geometry),
     # expanding the MLA spec grids.
     assert len(get_context_mla_case_specs()) == 330
@@ -1035,6 +1232,8 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("moonshotai/Kimi-K2-Instruct", "DeepseekV3ForCausalLM", 64),
         ("moonshotai/Kimi-K2.5", "KimiK25ForConditionalGeneration", 64),
         ("nvidia/Kimi-K2.5-NVFP4", "KimiK25ForConditionalGeneration", 64),
+        ("nvidia/Kimi-K2.6-NVFP4", "KimiK25ForConditionalGeneration", 64),
+        ("nvidia/Kimi-K2.7-Code-NVFP4", "KimiK25ForConditionalGeneration", 64),
     }
     assert {spec.model_path for spec in wideep_specs} == {
         "deepseek-ai/DeepSeek-R1",

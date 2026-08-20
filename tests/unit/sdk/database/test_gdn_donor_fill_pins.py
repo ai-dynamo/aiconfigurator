@@ -3,7 +3,7 @@
 
 """Loaded-table pins for the GDN cross-backend donor fill.
 
-The op_kernel_source_manifest regen (f869f616d) made three gdn_perf
+The perf_data_reuse_manifest regen (f869f616d) made three gdn_perf
 kernel_sources cross-backend inheritable (`causal_conv1d_fn`,
 `chunk_gated_delta_rule`, `fused_recurrent_gated_delta_rule_packed_decode`).
 

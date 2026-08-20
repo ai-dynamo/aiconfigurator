@@ -347,7 +347,14 @@ impl PerfDatabase {
         version: &str,
         perf_db_sources: &PerfDbSources,
     ) -> Result<Self, AicError> {
-        Self::load_with_sources_opts(systems_root, system, backend, version, perf_db_sources, false)
+        Self::load_with_sources_opts(
+            systems_root,
+            system,
+            backend,
+            version,
+            perf_db_sources,
+            false,
+        )
     }
 
     /// [`PerfDatabase::load_with_sources`] with an estimate-only escape hatch:
@@ -619,8 +626,7 @@ impl PerfDatabase {
         if let Some(tables) = memo.lock().unwrap().get(&key).and_then(Weak::upgrade) {
             return Ok(Self::from_tables(tables));
         }
-        let db =
-            Self::load_with_resolver(systems_root, system, backend, version, resolver, false)?;
+        let db = Self::load_with_resolver(systems_root, system, backend, version, resolver, false)?;
         let mut map = memo.lock().unwrap();
         map.retain(|_, weak| weak.strong_count() > 0);
         map.insert(key, Arc::downgrade(&db.tables));
@@ -990,7 +996,12 @@ mod tests {
         // Table-backed lookups still miss lazily per family.
         assert!(tolerant
             .gemm
-            .query(crate::common::enums::GemmQuantMode::Bfloat16, 64, 4096, 4096)
+            .query(
+                crate::common::enums::GemmQuantMode::Bfloat16,
+                64,
+                4096,
+                4096
+            )
             .is_err());
     }
 

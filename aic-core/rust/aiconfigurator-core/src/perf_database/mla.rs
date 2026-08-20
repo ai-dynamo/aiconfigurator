@@ -173,8 +173,12 @@ impl MlaTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
-        Self::with_sources(data_root, system_spec, &SourceResolver::fixed(PerfDbSources::default()))
-            .expect("fixed-map resolution is infallible")
+        Self::with_sources(
+            data_root,
+            system_spec,
+            &SourceResolver::fixed(PerfDbSources::default()),
+        )
+        .expect("fixed-map resolution is infallible")
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources supplied by the
@@ -186,14 +190,14 @@ impl MlaTable {
         system_spec: SystemSpec,
         resolver: &SourceResolver,
     ) -> Result<Self, AicError> {
-        let context_mla_sources =
-            resolver.sources_for("context_mla_perf.parquet", &data_root)?;
+        let context_mla_sources = resolver.sources_for("context_mla_perf.parquet", &data_root)?;
         let generation_mla_sources =
             resolver.sources_for("generation_mla_perf.parquet", &data_root)?;
-        let mla_bmm_sources =
-            resolver.sources_for("mla_bmm_perf.parquet", &data_root)?;
-        let mla_context_module_sources = resolver.sources_for("mla_context_module_perf.parquet", &data_root)?;
-        let mla_generation_module_sources = resolver.sources_for("mla_generation_module_perf.parquet", &data_root)?;
+        let mla_bmm_sources = resolver.sources_for("mla_bmm_perf.parquet", &data_root)?;
+        let mla_context_module_sources =
+            resolver.sources_for("mla_context_module_perf.parquet", &data_root)?;
+        let mla_generation_module_sources =
+            resolver.sources_for("mla_generation_module_perf.parquet", &data_root)?;
         Ok(Self {
             data_root,
             system_spec,

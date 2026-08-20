@@ -102,8 +102,12 @@ impl AttentionTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
-        Self::with_sources(data_root, system_spec, &SourceResolver::fixed(PerfDbSources::default()))
-            .expect("fixed-map resolution is infallible")
+        Self::with_sources(
+            data_root,
+            system_spec,
+            &SourceResolver::fixed(PerfDbSources::default()),
+        )
+        .expect("fixed-map resolution is infallible")
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources supplied by the
@@ -116,7 +120,8 @@ impl AttentionTable {
         resolver: &SourceResolver,
     ) -> Result<Self, AicError> {
         let context_sources = resolver.sources_for("context_attention_perf.parquet", &data_root)?;
-        let generation_sources = resolver.sources_for("generation_attention_perf.parquet", &data_root)?;
+        let generation_sources =
+            resolver.sources_for("generation_attention_perf.parquet", &data_root)?;
         let encoder_sources = resolver.sources_for("encoder_attention_perf.parquet", &data_root)?;
         Ok(Self {
             data_root,
