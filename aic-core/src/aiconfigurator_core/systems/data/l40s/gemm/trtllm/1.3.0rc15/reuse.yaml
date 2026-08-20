@@ -4,6 +4,8 @@
 schema_version: 1
 reuse:
 - table: gemm_perf
-  from_version: 1.0.0
-  reason: 'self-overlap: dir holds native data for this table; declaration covers missing-shape forward-fill only; mechanically derived from legacy SHARED_LAYER_REUSE.txt (newest-first effective donor); NOT kernel-identity-reviewed'
-  approved_by: yimingl
+  from_version: 1.3.0rc20
+  reason: 'pre-rc20 prune (2026-08-21): superseded rows removed per data-hygiene triage; reuse is an accepted
+    approximation (design §9 rev 2026-08-19). Old versions carried known inflated-segment rows (collector
+    cache race).'
+  approved_by: tianhaox
