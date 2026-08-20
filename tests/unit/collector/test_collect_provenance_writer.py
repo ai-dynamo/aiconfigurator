@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import sys
+import types
 from pathlib import Path
 
 import pyarrow as pa
@@ -78,6 +79,21 @@ def _provenance_ctx(collections: list[dict]) -> dict:
     }
 
 
+def _xpu_provenance_ctx(collections: list[dict]) -> dict:
+    runtime = CollectorRuntime(
+        framework="vllm_xpu",
+        version="0.26.0",
+        images={"default": "vllm/vllm-openai-xpu:v0.26.0@sha256:" + "5" * 64},
+        data_backend="vllm",
+    )
+    return {
+        "framework": runtime.framework,
+        "installed_version": "0.26.0+xpu",
+        "runtime": runtime,
+        "collections": collections,
+    }
+
+
 def _write_checkpoint(checkpoint_dir: Path, *, done: list[str], failed: list[str]) -> Path:
     path = checkpoint_dir / BACKEND / f"{FULL_NAME}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,6 +106,35 @@ def _write_checkpoint(checkpoint_dir: Path, *, done: list[str], failed: list[str
                 "run_func": "run",
                 "framework_version": "0.5.14",
                 "sm_version": 100,
+                "updated_at": "2026-07-20T00:00:00",
+                "done": sorted(done),
+                "failed": sorted(failed),
+            }
+        )
+    )
+    return path
+
+
+def _write_checkpoint_for(
+    checkpoint_dir: Path,
+    *,
+    backend: str,
+    full_name: str,
+    version: str,
+    done: list[str],
+    failed: list[str],
+) -> Path:
+    path = checkpoint_dir / backend / f"{full_name}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema": collect_mod.RESUME_SCHEMA_VERSION,
+                "backend": backend,
+                "module": full_name,
+                "run_func": "run",
+                "framework_version": version,
+                "sm_version": None,
                 "updated_at": "2026-07-20T00:00:00",
                 "done": sorted(done),
                 "failed": sorted(failed),
@@ -132,6 +177,69 @@ def test_writes_sidecar_with_rows_case_plan_hash_status_and_collector_ref(tmp_pa
     assert table["status"] == provenance.STATUS_COMPLETE
     assert table["collector_ref"] == collect_mod._git_collector_ref(collect_mod._REPO_ROOT)
     assert table["collector_hash"].startswith("sha256:")
+
+
+def test_xpu_collection_finalize_hashes_active_registry_module(tmp_path):
+    output_root = tmp_path / "out"
+    parquet_path = output_root / "gemm_perf.parquet"
+    _write_parquet(parquet_path, [{"op": "matmul", "latency": 1.0}])
+
+    checkpoint_dir = tmp_path / "checkpoint"
+    _write_checkpoint_for(
+        checkpoint_dir,
+        backend="vllm",
+        full_name="vllm.gemm",
+        version="0.26.0+xpu",
+        done=["xpu-case-a"],
+        failed=[],
+    )
+
+    collect_mod._write_collector_provenance(
+        output_root,
+        [parquet_path],
+        _xpu_provenance_ctx(
+            [
+                {
+                    "name": "vllm",
+                    "type": "gemm",
+                    "module": "collector.vllm.collect_gemm_xpu",
+                    "perf_filename": "gemm_perf.txt",
+                }
+            ]
+        ),
+        run_errors=[],
+        backend="vllm",
+        checkpoint_dir=str(checkpoint_dir),
+    )
+
+    doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
+    table = doc["tables"]["gemm_perf"]
+    closures = provenance.load_closures(collect_mod._REPO_ROOT / "collector" / "hash_closures.yaml")
+    assert table["collector_hash"] == provenance.collector_hash(
+        "collector.vllm.collect_gemm_xpu", collect_mod._REPO_ROOT, closures
+    )
+    assert table["case_plan_hash"] == provenance.case_plan_hash(["xpu-case-a"])
+    assert doc["runtime"]["framework"] == "vllm_xpu"
+    assert doc["runtime"]["version"] == "0.26.0"
+    assert doc["runtime"]["image"] == "vllm/vllm-openai-xpu:v0.26.0"
+    assert doc["runtime"]["image_digest"].startswith("sha256:")
+
+
+def test_collect_vllm_xpu_unknown_op_fails_before_collection_build(monkeypatch):
+    monkeypatch.setattr(collect_mod, "_cuda_available", lambda: False)
+    monkeypatch.setattr(collect_mod, "_xpu_available", lambda: True)
+    monkeypatch.setitem(sys.modules, "vllm", types.ModuleType("vllm"))
+    version_module = types.ModuleType("vllm.version")
+    version_module.__version__ = "0.26.0+xpu"
+    monkeypatch.setitem(sys.modules, "vllm.version", version_module)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("build_collections should not run before the requested-op gate")
+
+    monkeypatch.setattr("collector.version_resolver.build_collections", fail_if_called)
+
+    with pytest.raises(KeyError, match=r"vllm_xpu registry has no op\(s\): \['not_a_real_op'\]"):
+        collect_mod.collect_vllm(num_processes=1, ops=["not_a_real_op"])
 
 
 def test_status_partial_when_checkpoint_has_unresolved_failures(tmp_path):

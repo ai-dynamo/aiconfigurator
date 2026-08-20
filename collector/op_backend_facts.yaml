@@ -257,6 +257,8 @@ ops:
       - {framework: "vllm", version: "0.19.0", system: "rtx_pro_6000_server", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["flashinfer"], kernel_sources: ["vllm_flashinfer"]}
       - {framework: "vllm", version: "0.20.0", system: "b60", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["flash_attn"], kernel_sources: ["vllm_flash_attn"]}
       - {framework: "vllm", version: "0.20.0", system: "b60", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["flash_attn"], kernel_sources: ["vllm_flash_attn"]}
+      - {framework: "vllm", version: "0.26.0", system: "b60", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["flash_attn"], kernel_sources: ["vllm_flash_attn"]}
+      - {framework: "vllm", version: "0.26.0", system: "b60", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["flash_attn"], kernel_sources: ["vllm_flash_attn"]}
       - {framework: "vllm", version: "0.22.0", system: "b200_sxm", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["flashinfer"], kernel_sources: ["vllm_flashinfer"]}
       - {framework: "vllm", version: "0.22.0", system: "b200_sxm", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["flashinfer", "triton"], kernel_sources: ["vllm_flashinfer", "vllm_triton_attn"]}
       - {framework: "vllm", version: "0.22.0", system: "gb200", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["flashinfer"], kernel_sources: ["vllm_flashinfer"]}
@@ -444,6 +446,7 @@ ops:
       - {framework: "vllm", version: "0.19.0", system: "h200_sxm", op_name: "all_reduce", allreduce_dtype: "bfloat16", backends: ["custom_allreduce"], kernel_sources: ["vLLM_custom_eager", "vLLM_custom_graph"]}
       - {framework: "vllm", version: "0.19.0", system: "rtx_pro_6000_server", op_name: "all_reduce", allreduce_dtype: "bfloat16", backends: ["custom_allreduce"], kernel_sources: ["vLLM_custom_eager", "vLLM_custom_graph"]}
       - {framework: "vllm", version: "0.20.0", system: "b60", op_name: "all_reduce", allreduce_dtype: "bfloat16", backends: ["custom_allreduce"], kernel_sources: ["vLLM_custom_eager"]}
+      - {framework: "vllm", version: "0.26.0", system: "b60", op_name: "all_reduce", allreduce_dtype: "bfloat16", backends: ["custom_allreduce"], kernel_sources: ["vLLM_custom_eager"]}
       - {framework: "vllm", version: "0.22.0", system: "l40s", op_name: "all_reduce", allreduce_dtype: "bfloat16", backends: ["custom_allreduce"], kernel_sources: ["vLLM_custom_eager", "vLLM_custom_graph"]}
       - {framework: "vllm", version: "0.24.0", system: "b200_sxm", op_name: "all_reduce", allreduce_dtype: "bfloat16", backends: ["custom_allreduce"], kernel_sources: ["vLLM_custom_eager", "vLLM_custom_graph"]}
       - {framework: "vllm", version: "0.24.0", system: "b300_sxm", op_name: "all_reduce", allreduce_dtype: "bfloat16", backends: ["custom_allreduce"], kernel_sources: ["vLLM_custom_eager", "vLLM_custom_graph"]}
@@ -1841,6 +1844,8 @@ ops:
       - {framework: "vllm", version: "0.19.0", system: "rtx_pro_6000_server", op_name: "gemm", gemm_dtype: "nvfp4", backends: ["unverified"], kernel_sources: ["vllm_default"]}
       - {framework: "vllm", version: "0.20.0", system: "b60", op_name: "gemm", gemm_dtype: "bfloat16", backends: ["unverified"], kernel_sources: ["vllm_default"]}
       - {framework: "vllm", version: "0.20.0", system: "b60", op_name: "gemm", gemm_dtype: "fp8", backends: ["unverified"], kernel_sources: ["vllm_default"]}
+      - {framework: "vllm", version: "0.26.0", system: "b60", op_name: "gemm", gemm_dtype: "bfloat16", backends: ["unverified"], kernel_sources: ["vllm_default"]}
+      - {framework: "vllm", version: "0.26.0", system: "b60", op_name: "gemm", gemm_dtype: "fp8", backends: ["unverified"], kernel_sources: ["vllm_default"]}
       - {framework: "vllm", version: "0.22.0", system: "b200_sxm", op_name: "gemm", gemm_dtype: "bfloat16", backends: ["unverified"], kernel_sources: ["vllm_default"]}
       - {framework: "vllm", version: "0.22.0", system: "b200_sxm", op_name: "gemm", gemm_dtype: "fp8_block", backends: ["unverified"], kernel_sources: ["vllm_default"]}
       - {framework: "vllm", version: "0.22.0", system: "b200_sxm", op_name: "gemm", gemm_dtype: "nvfp4", backends: ["unverified"], kernel_sources: ["vllm_default"]}
@@ -2011,6 +2016,8 @@ ops:
       - {framework: "vllm", version: "0.19.0", system: "rtx_pro_6000_server", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["flashinfer"], kernel_sources: ["vllm_flashinfer"]}
       - {framework: "vllm", version: "0.20.0", system: "b60", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["flash_attn"], kernel_sources: ["vllm_flash_attn"]}
       - {framework: "vllm", version: "0.20.0", system: "b60", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["flash_attn"], kernel_sources: ["vllm_flash_attn"]}
+      - {framework: "vllm", version: "0.26.0", system: "b60", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["flash_attn"], kernel_sources: ["vllm_flash_attn"]}
+      - {framework: "vllm", version: "0.26.0", system: "b60", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["flash_attn"], kernel_sources: ["vllm_flash_attn"]}
       - {framework: "vllm", version: "0.22.0", system: "b200_sxm", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["flashinfer"], kernel_sources: ["vllm_flashinfer"]}
       - {framework: "vllm", version: "0.22.0", system: "b200_sxm", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["flashinfer", "triton"], kernel_sources: ["vllm_flashinfer", "vllm_triton_attn"]}
       - {framework: "vllm", version: "0.22.0", system: "gb200", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["flashinfer"], kernel_sources: ["vllm_flashinfer"]}
@@ -3102,6 +3109,9 @@ ops:
       - {framework: "vllm", version: "0.19.0", system: "rtx_pro_6000_server", op_name: "moe", moe_dtype: "int4_wo", backends: ["marlin"], kernel_sources: ["vllm_marlin_int4_moe"]}
       - {framework: "vllm", version: "0.20.0", system: "b60", op_name: "moe", moe_dtype: "bfloat16", backends: ["unverified"], kernel_sources: ["vllm_xpu_moe"]}
       - {framework: "vllm", version: "0.20.0", system: "b60", op_name: "moe", moe_dtype: "w4a16_mxfp4", backends: ["unverified"], kernel_sources: ["vllm_xpu_moe_mxfp4"]}
+      - {framework: "vllm", version: "0.26.0", system: "b60", op_name: "moe", moe_dtype: "bfloat16", backends: ["unverified"], kernel_sources: ["vllm_xpu_moe"]}
+      - {framework: "vllm", version: "0.26.0", system: "b60", op_name: "moe", moe_dtype: "fp8", backends: ["unverified"], kernel_sources: ["vllm_xpu_moe"]}
+      - {framework: "vllm", version: "0.26.0", system: "b60", op_name: "moe", moe_dtype: "w4a16_mxfp4", backends: ["unverified"], kernel_sources: ["vllm_xpu_moe_mxfp4"]}
       - {framework: "vllm", version: "0.22.0", system: "b200_sxm", op_name: "moe", moe_dtype: "bfloat16", backends: ["triton_fused_moe"], kernel_sources: ["vllm_fused_moe"]}
       - {framework: "vllm", version: "0.22.0", system: "b200_sxm", op_name: "moe", moe_dtype: "fp8", backends: ["triton_fused_moe"], kernel_sources: ["vllm_fused_moe"]}
       - {framework: "vllm", version: "0.22.0", system: "b200_sxm", op_name: "moe", moe_dtype: "fp8_block", backends: ["triton_fused_moe"], kernel_sources: ["vllm_fused_moe"]}

@@ -82,6 +82,15 @@ def test_hash_closures_yaml_covers_every_registry_module():
     assert missing == set()
 
 
+def test_provenance_modules_include_active_vllm_xpu_registry():
+    modules = provenance.enumerate_provenance_modules()
+    assert {
+        "collector.vllm.collect_attn_xpu",
+        "collector.vllm.collect_gemm_xpu",
+        "collector.vllm.collect_moe_xpu",
+    } <= modules
+
+
 def test_hash_closures_yaml_has_no_stale_entries():
     # Entries for modules no registry or standalone declaration references
     # anymore would be silently wrong — keep the file exact.
@@ -146,6 +155,19 @@ def test_collector_hash_missing_closure_file_raises(tmp_path):
     (tmp_path / "collector" / "cases" / "base_ops" / "gemm.yaml").unlink()
     with pytest.raises(FileNotFoundError):
         provenance.collector_hash("collector.sglang.collect_gemm", tmp_path, FAKE_CLOSURES)
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "collector.vllm.collect_attn_xpu",
+        "collector.vllm.collect_gemm_xpu",
+        "collector.vllm.collect_moe_xpu",
+    ],
+)
+def test_real_xpu_registry_modules_are_hashable(module):
+    closures = provenance.load_closures(HASH_CLOSURES_PATH)
+    assert provenance.collector_hash(module, REPO_ROOT, closures).startswith("sha256:")
 
 
 def test_collector_hash_stable_across_repo_relocation(tmp_path_factory):

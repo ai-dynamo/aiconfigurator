@@ -1264,10 +1264,13 @@ def collect_vllm(
     """Collect performance data for vLLM"""
     from collector.version_resolver import build_collections
 
+    is_xpu_backend = False
     if _cuda_available():
         from collector.vllm.registry import REGISTRY
     elif _xpu_available():
         from collector.vllm.registry import REGISTRY_XPU as REGISTRY
+
+        is_xpu_backend = True
     else:
         raise RuntimeError("No supported hardware detected. Neither CUDA nor XPU is available.")
 
@@ -1283,7 +1286,10 @@ def collect_vllm(
 
     requested_ops = set(ops if ops is not None else (case_plan.ops if case_plan is not None else []))
     wideep_ops = {entry.op for entry in _wideep_registry_for_backend("vllm")}
-    runtime = require_collector_runtime("vllm", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
+    if is_xpu_backend:
+        runtime = require_collector_runtime("vllm_xpu", version, requested_ops=requested_ops, wideep_ops=set())
+    else:
+        runtime = require_collector_runtime("vllm", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
 
     registry = _registry_with_requested_wideep(REGISTRY, "vllm", ops, case_plan)
     collections = build_collections(registry, "vllm", version, ops, logger=logger)
