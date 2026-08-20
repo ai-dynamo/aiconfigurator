@@ -63,7 +63,10 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 //   verify-width batch divisor, sequence-basis pricing) and
 //   `verify_query_tokens` (roofline-guard width) — a bincode op-layout
 //   change (same class as v5/v7/v8/v10/v12).
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 14;
+// - 15: `FpmForwardOp` gained `verify_width` (speculative verify width for
+//   the equivalent-AR decode mapping; 1 = plain AR) — a bincode op-layout
+//   change.
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 15;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].

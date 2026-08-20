@@ -625,6 +625,8 @@ mod tests {
                 "1".into(),
             ],
             weight_bytes: 1.5e10,
+            // Non-default on purpose: the round-trip must preserve the field.
+            verify_width: 8,
             sol_ops: vec![
                 OpSpec::Gemm(gemm()),
                 OpSpec::ContextAttention(context_attention()),

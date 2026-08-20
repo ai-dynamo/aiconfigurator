@@ -67,6 +67,8 @@ mod tests {
         // (AIC-1601).
         // v12: DsaModuleOp gained attn_projection_quant_modes (PR-6 weight
         // physics) — a positional bincode op-layout change.
+        // v15: FpmForwardOp gained verify_width (equivalent-AR decode
+        // mapping for speculative verify) — bincode op-layout change.
         // v14: GenerationAttentionOp gained scale_num_tokens +
         // verify_query_tokens (speculative width channel, sequence-basis
         // pricing + roofline guard) — bincode op-layout change.
@@ -74,7 +76,7 @@ mod tests {
         // dropped the Python-resolved perf_db_sources map (a bincode
         // config-layout change) for enable_shared_layer + strict_provenance
         // (deprecation-cleanup PR).
-        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 14);
+        assert_eq!(ENGINE_SPEC_SCHEMA_VERSION, 15);
         assert_eq!(FPM_VERSION, 1);
         assert_eq!(ForwardPassMetrics::default().version, FPM_VERSION);
     }
