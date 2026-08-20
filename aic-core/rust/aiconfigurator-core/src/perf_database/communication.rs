@@ -83,8 +83,13 @@ impl CommunicationTable {
         nccl_root: Option<PathBuf>,
         oneccl_root: Option<PathBuf>,
     ) -> Self {
-        Self::with_sources(data_root, nccl_root, oneccl_root, &SourceResolver::fixed(PerfDbSources::default()))
-            .expect("fixed-map resolution is infallible")
+        Self::with_sources(
+            data_root,
+            nccl_root,
+            oneccl_root,
+            &SourceResolver::fixed(PerfDbSources::default()),
+        )
+        .expect("fixed-map resolution is infallible")
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources resolved from

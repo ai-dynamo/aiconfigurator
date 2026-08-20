@@ -39,8 +39,8 @@ use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
-use crate::operators::base::SolComponents;
 use crate::config::{PerfDbSources, PerfSource};
+use crate::operators::base::SolComponents;
 use crate::perf_database::parquet_loader::PerfReader;
 
 /// Axes for context-type MLA tables (op-level and module-level).
@@ -173,8 +173,12 @@ impl MlaTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
-        Self::with_sources(data_root, system_spec, &SourceResolver::fixed(PerfDbSources::default()))
-            .expect("fixed-map resolution is infallible")
+        Self::with_sources(
+            data_root,
+            system_spec,
+            &SourceResolver::fixed(PerfDbSources::default()),
+        )
+        .expect("fixed-map resolution is infallible")
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources supplied by the
@@ -186,14 +190,14 @@ impl MlaTable {
         system_spec: SystemSpec,
         resolver: &SourceResolver,
     ) -> Result<Self, AicError> {
-        let context_mla_sources =
-            resolver.sources_for("context_mla_perf.parquet", &data_root)?;
+        let context_mla_sources = resolver.sources_for("context_mla_perf.parquet", &data_root)?;
         let generation_mla_sources =
             resolver.sources_for("generation_mla_perf.parquet", &data_root)?;
-        let mla_bmm_sources =
-            resolver.sources_for("mla_bmm_perf.parquet", &data_root)?;
-        let mla_context_module_sources = resolver.sources_for("mla_context_module_perf.parquet", &data_root)?;
-        let mla_generation_module_sources = resolver.sources_for("mla_generation_module_perf.parquet", &data_root)?;
+        let mla_bmm_sources = resolver.sources_for("mla_bmm_perf.parquet", &data_root)?;
+        let mla_context_module_sources =
+            resolver.sources_for("mla_context_module_perf.parquet", &data_root)?;
+        let mla_generation_module_sources =
+            resolver.sources_for("mla_generation_module_perf.parquet", &data_root)?;
         Ok(Self {
             data_root,
             system_spec,
@@ -1554,8 +1558,8 @@ mod tests {
 
         // db.query_context_mla_module(b, s, prefix=0, num_heads=128, bf16^3)
         let ctx_mod_cases: &[(u32, u32, f64)] = &[
-            (2, 4096, 2.6503),             // exact hit
-            (2, 5000, 3.532393382077576),  // seq interior (sqrt blend)
+            (2, 4096, 2.6503),              // exact hit
+            (2, 5000, 3.532393382077576),   // seq interior (sqrt blend)
             (2, 100000, 705.5935422351143), // beyond seq range (tapered util-hold)
         ];
         for &(b, s, expected) in ctx_mod_cases {

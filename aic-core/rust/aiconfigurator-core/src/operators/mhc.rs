@@ -65,7 +65,9 @@ impl MhcModuleOp {
         let hc_mult = f64::from(self.hc_mult);
         let mix_hc = (2.0 + hc_mult) * hc_mult;
         let hc_dim = hc_mult * f64::from(self.hidden_size);
-        2.0 * (mix_hc * hc_dim + mix_hc + 3.0) * self.quant_mode.mapping().memory * self.scale_factor
+        2.0 * (mix_hc * hc_dim + mix_hc + 3.0)
+            * self.quant_mode.mapping().memory
+            * self.scale_factor
     }
 
     pub fn new(

@@ -994,17 +994,27 @@ mod tests {
     /// opaque "unexpected end of file".
     #[test]
     fn from_bincode_rejects_v11_dsa_producer_at_the_version_gate() {
-        let spec = EngineSpec::new(sample_engine_config(), vec![OpSpec::DsaContext(dsa_module())], vec![]);
+        let spec = EngineSpec::new(
+            sample_engine_config(),
+            vec![OpSpec::DsaContext(dsa_module())],
+            vec![],
+        );
         let mut bytes = spec.to_bincode().expect("to_bincode");
         bytes[..4].copy_from_slice(&11u32.to_le_bytes()); // a v11 producer's stamp
 
         match EngineSpec::from_bincode(&bytes) {
-            Err(AicError::UnsupportedSchemaVersion { kind, got, expected }) => {
+            Err(AicError::UnsupportedSchemaVersion {
+                kind,
+                got,
+                expected,
+            }) => {
                 assert_eq!(kind, "EngineSpec");
                 assert_eq!(got, 11);
                 assert_eq!(expected, ENGINE_SPEC_SCHEMA_VERSION);
             }
-            other => panic!("expected UnsupportedSchemaVersion for a v11 DSA payload, got {other:?}"),
+            other => {
+                panic!("expected UnsupportedSchemaVersion for a v11 DSA payload, got {other:?}")
+            }
         }
     }
 

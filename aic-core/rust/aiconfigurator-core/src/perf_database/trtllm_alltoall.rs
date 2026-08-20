@@ -74,8 +74,7 @@ impl TrtllmAlltoallTable {
     /// a fixed source map is the test-only path). The perf file falls back to its
     /// primary `data_root/<basename>` when the resolver names no override. No I/O.
     pub fn with_sources(data_root: PathBuf, resolver: &SourceResolver) -> Result<Self, AicError> {
-        let alltoall_sources =
-            resolver.sources_for("trtllm_alltoall_perf.parquet", &data_root)?;
+        let alltoall_sources = resolver.sources_for("trtllm_alltoall_perf.parquet", &data_root)?;
         Ok(Self {
             data_root,
             alltoall_sources,

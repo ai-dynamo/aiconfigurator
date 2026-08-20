@@ -43,8 +43,8 @@ use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::{FmhaQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
-use crate::operators::base::SolComponents;
 use crate::config::{PerfDbSources, PerfSource};
+use crate::operators::base::SolComponents;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct AttentionTable {
@@ -102,8 +102,12 @@ impl AttentionTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
-        Self::with_sources(data_root, system_spec, &SourceResolver::fixed(PerfDbSources::default()))
-            .expect("fixed-map resolution is infallible")
+        Self::with_sources(
+            data_root,
+            system_spec,
+            &SourceResolver::fixed(PerfDbSources::default()),
+        )
+        .expect("fixed-map resolution is infallible")
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources supplied by the
@@ -116,7 +120,8 @@ impl AttentionTable {
         resolver: &SourceResolver,
     ) -> Result<Self, AicError> {
         let context_sources = resolver.sources_for("context_attention_perf.parquet", &data_root)?;
-        let generation_sources = resolver.sources_for("generation_attention_perf.parquet", &data_root)?;
+        let generation_sources =
+            resolver.sources_for("generation_attention_perf.parquet", &data_root)?;
         let encoder_sources = resolver.sources_for("encoder_attention_perf.parquet", &data_root)?;
         Ok(Self {
             data_root,
@@ -783,7 +788,16 @@ pub(crate) fn context_attention_sol_with_prefix_ms(
     attn_flops: f64,
 ) -> f64 {
     context_attention_sol_with_prefix(
-        spec, b, s, prefix, n, n_kv, head_size, window_size, kv_quant, attn_flops,
+        spec,
+        b,
+        s,
+        prefix,
+        n,
+        n_kv,
+        head_size,
+        window_size,
+        kv_quant,
+        attn_flops,
     )
     .time_ms()
 }
@@ -1241,8 +1255,8 @@ mod tests {
     fn encoder_attention_query_matches_python_v2_engine() {
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let cases: &[(u32, u32, f64)] = &[
-            (1, 1024, 0.03258133431275686), // exact hit
-            (2, 1400, 0.0779337721462867),  // seq interp (sqrt blend)
+            (1, 1024, 0.03258133431275686),  // exact hit
+            (2, 1400, 0.0779337721462867),   // seq interp (sqrt blend)
             (64, 65536, 10944.346873534367), // batch beyond staircase (tapered util-hold)
         ];
         for &(b, s, expected) in cases {

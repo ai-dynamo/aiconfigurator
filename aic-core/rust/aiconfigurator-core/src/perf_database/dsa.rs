@@ -43,8 +43,8 @@ use super::{kernel_source_ok, SourceResolver};
 use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
 use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
-use crate::operators::base::SolComponents;
 use crate::config::{PerfDbSources, PerfSource};
+use crate::operators::base::SolComponents;
 use crate::perf_database::parquet_loader::PerfReader;
 
 pub struct DsaTable {
@@ -191,7 +191,10 @@ const GLM_MOE_DSA_DIMS: DsaDims = DsaDims {
 /// query loader and the table view so a kernel rename lands once. BF16-KV
 /// rows back BOTH buckets (one real execution path per shape); FP8 rows
 /// bucket by the executed kernel, legacy names keep the substring rule.
-pub(crate) fn dsa_kernel_source_buckets(kernel_source: &str, kv_quant: &str) -> &'static [&'static str] {
+pub(crate) fn dsa_kernel_source_buckets(
+    kernel_source: &str,
+    kv_quant: &str,
+) -> &'static [&'static str] {
     if kv_quant == "bfloat16" {
         return &["trtllm", "flashmla_kv"];
     }
@@ -218,8 +221,11 @@ impl DsaTable {
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf) -> Self {
-        Self::with_sources(data_root, &Arc::new(SourceResolver::fixed(PerfDbSources::default())))
-            .expect("fixed-map resolution is infallible")
+        Self::with_sources(
+            data_root,
+            &Arc::new(SourceResolver::fixed(PerfDbSources::default())),
+        )
+        .expect("fixed-map resolution is infallible")
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources supplied by the
@@ -230,8 +236,10 @@ impl DsaTable {
         data_root: PathBuf,
         resolver: &Arc<SourceResolver>,
     ) -> Result<Self, AicError> {
-        let context_sources = resolver.sources_for("dsa_context_module_perf.parquet", &data_root)?;
-        let generation_sources = resolver.sources_for("dsa_generation_module_perf.parquet", &data_root)?;
+        let context_sources =
+            resolver.sources_for("dsa_context_module_perf.parquet", &data_root)?;
+        let generation_sources =
+            resolver.sources_for("dsa_generation_module_perf.parquet", &data_root)?;
         Ok(Self {
             data_root,
             context_sources,
@@ -274,8 +282,10 @@ impl DsaTable {
         let mut tables = DsaSparseTables::default();
         // mqa logits: every row goes to `mqa`.
         load_sparse_parquet(
-            &self.source_resolver
-                .sources_for(&format!("{file_prefix}_mqa_logits_module_perf.parquet"), &self.data_root)?,
+            &self.source_resolver.sources_for(
+                &format!("{file_prefix}_mqa_logits_module_perf.parquet"),
+                &self.data_root,
+            )?,
             num_heads,
             |_| SparseKind::Mqa,
             &mut tables,
@@ -283,8 +293,10 @@ impl DsaTable {
         // topk: split by `score_mode` — "flat" -> topk_flat, else topk_last
         // (Python: `"topk_flat" if str(r.get("score_mode","")) == "flat" else "topk_last"`).
         load_sparse_parquet(
-            &self.source_resolver
-                .sources_for(&format!("{file_prefix}_topk_module_perf.parquet"), &self.data_root)?,
+            &self.source_resolver.sources_for(
+                &format!("{file_prefix}_topk_module_perf.parquet"),
+                &self.data_root,
+            )?,
             num_heads,
             |score_mode| {
                 if score_mode == Some("flat") {
@@ -297,8 +309,10 @@ impl DsaTable {
         )?;
         // dsa_attn: optional, not used by the CP delta.
         load_sparse_parquet(
-            &self.source_resolver
-                .sources_for(&format!("{file_prefix}_dsa_attn_module_perf.parquet"), &self.data_root)?,
+            &self.source_resolver.sources_for(
+                &format!("{file_prefix}_dsa_attn_module_perf.parquet"),
+                &self.data_root,
+            )?,
             num_heads,
             |_| SparseKind::DsaAttn,
             &mut tables,
@@ -533,6 +547,31 @@ impl DsaTable {
                     format!("{key:?} (dsa_backend={dsa_backend})"),
                 )
             })
+    }
+
+    /// Whether the GLM-5.2 skip-indexer (reuse-layer) rows are present in the
+    /// context file. `Ok(false)` exactly for the loader's no-rows outcome
+    /// (a parquet that carries only `dsa_context_module` rows — the sglang
+    /// collector produces the skip split from 0.5.14 on, and not on every
+    /// system), so `DsaModuleOp::query_context` can degrade the shared-index
+    /// amortization to all-full instead of failing. Every OTHER load failure
+    /// (parquet/schema/row-conversion) propagates: a malformed skip row must
+    /// never silently select all-full while skip data exists.
+    pub fn has_context_skip_rows(&self) -> Result<bool, AicError> {
+        match self.load_context_skip() {
+            Ok(grids) => Ok(!grids.by_keys.is_empty()),
+            Err(AicError::PerfDatabase(msg)) if msg.contains(NO_DSA_ROWS_PREFIX) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Generation-side twin of [`Self::has_context_skip_rows`].
+    pub fn has_generation_skip_rows(&self) -> Result<bool, AicError> {
+        match self.load_generation_skip() {
+            Ok(grids) => Ok(!grids.by_keys.is_empty()),
+            Err(AicError::PerfDatabase(msg)) if msg.contains(NO_DSA_ROWS_PREFIX) => Ok(false),
+            Err(err) => Err(err),
+        }
     }
 
     fn load_context(&self) -> Result<&DsaGrids, AicError> {
@@ -964,6 +1003,14 @@ pub(crate) fn dsa_generation_sol_ms(
 /// `step = 0, isl = s` in the shared `DsaHeadGrid` shape. Context keeps the
 /// raw `(step, isl)` coordinate (`load_context_dsa_module_data` keys on it
 /// exactly).
+/// Message prefix of the loader's "no rows" outcome. The probes below match
+/// on it to tell genuine absence (degrade the amortization) apart from real
+/// load failures (parquet/schema/row-conversion errors), which must stay
+/// loud: a malformed skip row must never silently select all-full while
+/// skip data exists.
+const NO_DSA_ROWS_PREFIX: &str = "no DSA module rows loaded";
+
+// pub(crate): the MSA tables reuse this loader verbatim (perf_database/msa.rs).
 pub(crate) fn load_dsa_parquet(
     sources: &[PerfSource],
     collapse_isl_step_to_seq: bool,
@@ -1072,7 +1119,7 @@ pub(crate) fn load_dsa_parquet(
     }
     if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
-            "no DSA module rows loaded from {} source(s) (first: {})",
+            "{NO_DSA_ROWS_PREFIX} from {} source(s) (first: {})",
             sources.len(),
             sources
                 .first()
@@ -1830,6 +1877,84 @@ mod tests {
         // The skip row (9.0) still never blends in.
         assert_eq!(q("trtllm"), 5.0);
         assert_eq!(q("flashmla_kv"), 5.0);
+    }
+
+    /// PR #1540 review follow-up: the skip probe reports `Ok(false)` ONLY for
+    /// the loader's genuine no-rows outcome; every other load failure (here a
+    /// row-conversion error confined to a skip-tagged row) must propagate so
+    /// a malformed skip table can never silently select all-full amortization
+    /// while skip data exists. The full variant stays loadable either way
+    /// (its row filter skips the malformed skip row before parsing).
+    #[test]
+    fn skip_probe_reports_absence_but_propagates_load_errors() {
+        // Absence: full-only table -> Ok(false).
+        let absent = tempfile::tempdir().expect("tmpdir");
+        write_dsa_module_parquet(
+            &absent.path().join("dsa_context_module_perf.parquet"),
+            &[("dsa_context_module", "default", 1.0)],
+        );
+        let table = DsaTable::new(absent.path().to_path_buf());
+        assert!(!table
+            .has_context_skip_rows()
+            .expect("full-only is absence, not an error"));
+
+        // Presence: both variants -> Ok(true).
+        let present = tempfile::tempdir().expect("tmpdir");
+        write_dsa_module_parquet(
+            &present.path().join("dsa_context_module_perf.parquet"),
+            &[
+                ("dsa_context_module", "default", 1.0),
+                ("dsa_context_module_skip_indexer", "default", 0.5),
+            ],
+        );
+        let table = DsaTable::new(present.path().to_path_buf());
+        assert!(table
+            .has_context_skip_rows()
+            .expect("both variants present"));
+
+        // Corruption confined to a skip row (isl = -1 fails the u32
+        // conversion only in the skip load): the probe must ERROR, not
+        // report absence.
+        let corrupt = tempfile::tempdir().expect("tmpdir");
+        write_dsa_module_parquet_rows(
+            &corrupt.path().join("dsa_context_module_perf.parquet"),
+            &[
+                ("dsa_context_module", "default", "bfloat16", 1024, 1.0),
+                (
+                    "dsa_context_module_skip_indexer",
+                    "default",
+                    "bfloat16",
+                    -1,
+                    0.5,
+                ),
+            ],
+        );
+        let table = DsaTable::new(corrupt.path().to_path_buf());
+        let err = table
+            .has_context_skip_rows()
+            .expect_err("a malformed skip row must propagate, not read as absence");
+        assert!(
+            !err.to_string().contains(NO_DSA_ROWS_PREFIX),
+            "the propagated error must not be the absence outcome: {err}"
+        );
+        // The FULL variant of the same file still loads and answers.
+        let spec = b200_sxm_spec();
+        table
+            .query_context(
+                &spec,
+                1,
+                1024,
+                128,
+                KvCacheQuantMode::Bfloat16,
+                FmhaQuantMode::Bfloat16,
+                GemmQuantMode::Bfloat16,
+                "DeepseekV32ForCausalLM",
+                0,
+                INDEX_TOPK,
+                "trtllm",
+                false,
+            )
+            .expect("full-variant query must survive a malformed skip row");
     }
 
     /// FP8-KV rows bucket by executed-kernel name (the serving FP8-KV
