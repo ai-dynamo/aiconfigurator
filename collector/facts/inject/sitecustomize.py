@@ -89,6 +89,18 @@ if _OUT:
                         MoeRunner.run, "moe_calls",
                         lambda s: getattr(getattr(s, "fused_func", None), "__qualname__", "?"))
                     MoeRunner.run._aic = True
+                # quant methods that bypass MoeRunner (compressed-tensors ->
+                # marlin, flashinfer trtllm, ...) are all reached through the
+                # FusedMoE module — wrap it too, labeled by quant method class
+                try:
+                    from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
+                    if not getattr(FusedMoE.forward, "_aic", False):
+                        FusedMoE.forward = _capture(
+                            FusedMoE.forward, "moe_calls",
+                            lambda s: f"FusedMoE[{type(getattr(s, 'quant_method', None)).__name__}]")
+                        FusedMoE.forward._aic = True
+                except Exception:
+                    pass
                 ab_cls = type(self.attn_backend)
                 for meth in ("forward_extend", "forward_decode"):
                     fn = getattr(ab_cls, meth, None)
