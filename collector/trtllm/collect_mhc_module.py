@@ -39,12 +39,15 @@ OWNER DECISION (tianhaox, 2026-08-19, PR #1486 review item 3): the
 Blackwell fused_hc collection is DEFERRED; the shipped mhc_module_perf
 tables measure the unfused pre+post path on every SM, and the rows'
 kernel_source labels (trtllm_mhc_pre_* / trtllm_mhc_post_mapping) make the
-measured variant explicit. Bound on the modeling error: on b200, mHC is
-9-14% of the DSV4 per-layer cost (attn+moe+mhc at 128/4k/16k tokens,
-shipped rc23 tables), so even a free fused_hc would move layer cost by at
-most that share; realistic fused speedups put the error at a few percent,
-in the conservative (cost-overestimating) direction. Follow-up: a
-coordinated fused_hc table + SDK consumer switch for SM100/103.
+measured variant explicit. Error characterization: on b200, mHC is 9-14%
+of the DSV4 per-layer cost (attn+moe+mhc at 128/4k/16k tokens, shipped
+rc23 tables) — that figure is mHC's SHARE of layer cost, i.e. the ceiling
+of the approximation if fused_hc were free, NOT a measured Blackwell
+fused/unfused delta (which is unmeasured; owner-accepted). Direction is
+conservative (cost-overestimating). Governed standards exception:
+collector/evidence_exceptions.yaml standards_exceptions (expires
+2026-10-31); retirement = the coordinated fused_hc table + SDK consumer
+switch for SM100/103.
 """
 
 from __future__ import annotations

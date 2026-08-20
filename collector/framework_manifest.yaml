@@ -34,10 +34,12 @@ frameworks:
     families:
       # trtllm FP4 (w4a8_mxfp4_mxfp8) MoE rows show non-monotonic
       # num_tokens segments (4096->8192, 12288->16384 dips) on all four
-      # Blackwell systems. An rc23 re-collection reproduced rc20 within 2%
-      # point-for-point (2026-08-08), so the dips are REAL, reproducible
-      # kernel behavior (per-bucket tactic/tile-wave quantization), not a
-      # campaign artifact. The DSV4 moe shapes stay collected on this
+      # Blackwell systems. An rc23 re-collection reproduced the dips
+      # (2026-08-08; exact consumer-key join vs rc20: median ratio
+      # 1.003-1.013, median |per-row delta| 2.4-2.9%, ~25% of rows >5% —
+      # benchmark run-to-run spread, not a systematic shift), so the dips
+      # are REAL, reproducible kernel behavior (per-bucket tactic/tile-wave
+      # quantization), not a campaign artifact. The DSV4 moe shapes stay collected on this
       # runtime for version coherence with the DSV4 attention family; the
       # remaining moe shapes reuse rc20 via the declared reuse.yaml channel.
       moe:

@@ -1,53 +1,103 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Evidence-gate exceptions (Collector V3 design §9 "Exceptions"): scoped,
-# approved, expiring waivers against resolver-emitted requirements. The
-# enforcing CI gate is a tracked deliverable; until it lands these entries
-# are consumed by human review against `evidence_check.py` output.
+# Two registries in one file:
+#   evidence_exceptions  — waivers against resolver-emitted evidence
+#                          requirements (design §9 "Exceptions").
+#   standards_exceptions — owner-approved, expiring exceptions to collector
+#                          RULES (mechanism defined in
+#                          .claude/rules/collector/layer_permissions.md
+#                          §"Governed exceptions").
+# Both are human-reviewed against `evidence_check.py` output until the
+# enforcing CI gate lands; every entry carries a self-contained
+# machine-readable scope, an approver, and an expiry.
 
-schema_version: 1
-exceptions:
+schema_version: 2
 
-# --- PR #1486: shared-file manifest fan-out ------------------------------
-# The changed-op manifest flags every family whose hash closure includes a
-# shared file. This PR's shared-file edits are: (a) the derive_table_status
-# semantics change (metadata-only; alters no case expansion and no kernel
-# invocation), (b) the DSV4 budget relocation into the base-op layer (DSV4
-# plan hashes verified bit-identical to the shipped sidecars; no other
-# family reads those fields), (c) comment-level edits to
-# kernel_source_backends.yaml, and (d) collect.py checkpoint/finalize
-# mechanics. None alter another family's case plan or invoked kernels; the
-# full collector unit corpus (3,696 tests) is green on the merged tree.
+evidence_exceptions:
+
+# --- PR #1486: shared-file manifest fan-out (33 pairs) --------------------
+# Scope = exactly the resolver-listed pairs whose ONLY change reasons are
+# shared-file edits (derive_table_status semantics change — metadata-only;
+# the DSV4 budget relocation — DSV4 plan hashes verified bit-identical;
+# comment-level kernel_source_backends edits; collect.py checkpoint/finalize
+# mechanics). None alter these families' case plans or invoked kernels; the
+# full unit corpus is green on the merged tree. trtllm/moe and
+# trtllm/sparse_attention are intentionally NOT in these lists — their
+# duties are accounted separately below.
 - scope:
     reasons: [collector_code, case_plan]
-    frameworks: [sglang, vllm, trtllm, wideep_sglang, wideep_trtllm]
-    note: >-
-      Applies to every (framework, family) pair whose ONLY change reasons
-      are the shared-file edits above — i.e. all manifest entries except
-      trtllm/sparse_attention and trtllm/moe, whose fresh rc23 silicon is
-      shipped in this PR.
-  requirement_waived: [before_after_diff, collect_new_cases_only]
-  reason: shared-file no-op fan-out; plan-preserving refactors (see note)
+    pairs:
+      sglang: [attention, encoder_attention, gemm, kda, linear_attention, mhc, mla, mla_bmm, moe, quantize, sparse_attention]
+      trtllm: [attention, encoder_attention, gemm, linear_attention, mhc, mla, mla_bmm, quantize]
+      vllm: [attention, encoder_attention, gemm, kda, linear_attention, mhc, mla, mla_bmm, moe, quantize, sparse_attention]
+      wideep_sglang: [comm, moe]
+      wideep_trtllm: [moe]
+  requirements_waived: [before_after_diff, collect_new_cases_only]
+  reason: shared-file no-op fan-out; plan-preserving refactors (see scope note)
   approved_by: tianhaox
   expires: 2026-10-31
 
-# --- PR #1486: Blackwell mHC fused_hc serving-path parity ----------------
-# Owner decision (tianhaox, 2026-08-19/20): the fused_hc collection on
-# SM100/103 is REJECTED for now. The shipped mhc_module_perf tables measure
-# the unfused pre_mapping + post_mapping path on every SM (kernel_source
-# labels record this); rc23 Blackwell serving defaults to fused_hc, so
-# default Blackwell mHC predictions carry a bounded, conservative
-# (cost-overestimating) approximation — measured share: mHC is 9-14% of the
-# DSV4 per-layer cost on b200 (attn+moe+mhc at 128/4k/16k tokens). No
-# Blackwell fused/unfused A/B is attached; the owner accepts the unbounded
-# fraction of that share explicitly. Follow-up (fused table + SDK consumer
-# switch) is tracked in PR #1486.
+# --- PR #1486: trtllm/moe duties on systems where rc23 is not enabled -----
+# The rc23 moe pin is manifest-global, but this PR creates rc23 moe data /
+# reuse dirs only on the four Blackwell systems. On the systems below no
+# trtllm/1.3.0rc23 directory exists, the loader cannot enumerate rc23, and
+# there is nothing to diff, reuse or collect — the requirement is
+# inapplicable until rc23 is enabled there. Blackwell duties are satisfied
+# by evidence (see the PR accounting comment): before/after = the exact
+# consumer-key join of the rc23 recollection vs rc20 (medians 2.4-2.9%),
+# new-cases = the DSV4 shapes collected fresh, pin = data + owner-signed
+# reuse declaration.
 - scope:
-    rule: serving-dispatch parity (layer_permissions.md) for mhc on SM100/103
+    reasons: [pin_version, collector_code, case_plan]
+    pairs:
+      trtllm: [moe]
+    systems: [a100_sxm, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
+  requirements_waived: [recollect_or_declared_reuse, before_after_diff, collect_new_cases_only]
+  reason: rc23 not enabled on these systems (no rc23 dirs; requirement inapplicable)
+  approved_by: tianhaox
+  expires: 2026-10-31
+
+# --- PR #1486: trtllm/sparse_attention duties on non-Blackwell systems ----
+# The sparse_attention family carries the DSA tables on h100/h200; this PR
+# ships no rc23 sparse_attention dirs there (DSV4 is framework-rejected
+# pre-Blackwell; DSA rc23 collection is future work), so rc23 is not
+# enumerable on those systems and the duties are inapplicable. On the four
+# Blackwell systems the duties are satisfied by the shipped fresh silicon:
+# the four DSV4 tables are 100% new-case collections (collect_new_cases_only
+# by construction; before_after_diff inapplicable — no prior version of
+# these tables exists; pin satisfied by fresh data with checkpoint-derived
+# provenance).
+- scope:
+    reasons: [pin_version, collector_code, case_plan]
+    pairs:
+      trtllm: [sparse_attention]
+    systems: [h100_sxm, h200_sxm]
+  requirements_waived: [recollect_or_declared_reuse, before_after_diff, collect_new_cases_only]
+  reason: rc23 sparse_attention not enabled on these systems (no rc23 dirs)
+  approved_by: tianhaox
+  expires: 2026-10-31
+
+standards_exceptions:
+
+# --- PR #1486: Blackwell mHC fused_hc serving-dispatch parity -------------
+# Owner decision (tianhaox, 2026-08-19/20): the fused_hc collection on
+# SM100/103 is REJECTED for now. Default rc23 Blackwell mHC predictions
+# resolve to standalone pre_mapping/post_mapping rows (kernel_source labels
+# record the measured variant) while rc23 serving defaults to fused_hc on
+# SM100/103 — a deliberate, temporary deviation from the serving-dispatch
+# parity rule. Direction of the error is conservative (the unfused
+# decomposition over-charges the mHC boundary). Magnitude ceiling: mHC is
+# 9-14% of the DSV4 per-layer cost on b200 (attn+moe+mhc at 128/4k/16k
+# tokens) — that figure is mHC's SHARE of layer cost, i.e. the upper bound
+# if fused were free; the actual Blackwell fused/unfused delta is
+# unmeasured and the owner accepts that explicitly.
+- rule: serving-dispatch parity (layer_permissions.md) — mhc fused path on SM100/103
+  scope:
     tables: [mhc_module_perf]
+    backend: trtllm
+    versions: ["1.3.0rc23"]
     systems: [b200_sxm, b300_sxm, gb200, gb300]
-  requirement_waived: [fused-path collection / consumer-visible fused identity]
-  reason: owner-rejected follow-up; approximation documented in the collector docstring and PR
+  retirement: "https://github.com/ai-dynamo/aiconfigurator/issues/1580 — collect fused_hc on SM100/103 + SDK consumer switch"
   approved_by: tianhaox
   expires: 2026-10-31

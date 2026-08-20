@@ -326,3 +326,105 @@ def test_generation_metadata_constructor_args_match_serving(monkeypatch):
     assert kw["enable_context_mla_with_cached_kv"] is False
     assert kw["runtime_features"].cache_reuse is False
     assert metadata.prepared
+
+
+def test_budget_file_is_in_the_hash_closure_and_moves_both_hashes(tmp_path, monkeypatch):
+    """S3 (PR #1486 review): an edit to the base-op budget declaration must
+    change (a) the module's collector_hash — the file is in its hash closure —
+    and (b) the generated case plan itself (a cap change re-shapes the
+    population, so the checkpoint-derived case_plan_hash re-attests)."""
+    import shutil
+
+    from collector import provenance
+
+    closures = provenance.load_closures(REPO_ROOT / "collector" / "hash_closures.yaml")
+    entry = closures["collector.trtllm.collect_dsv4_attn"]
+    assert "collector/cases/base_ops/dsv4_attention.yaml" in entry
+
+    # (a) content change -> collector_hash change (copy the repo surface the
+    # hash walks, mutate only the budget file)
+    needed = {"collector/trtllm/collect_dsv4_attn.py", "collector/cases/base_ops/dsv4_attention.yaml"}
+    needed |= set(provenance.SHARED_CORE)
+    needed |= {f for f in entry if f != "__model_cases__"}
+    needed |= {str(pth.relative_to(REPO_ROOT)) for pth in (REPO_ROOT / "collector" / "cases" / "models").glob("*.yaml")}
+    for rel in needed:
+        src = REPO_ROOT / rel
+        if not src.is_file():
+            continue
+        dst = tmp_path / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(src, dst)
+    h_before = provenance.collector_hash("collector.trtllm.collect_dsv4_attn", tmp_path, closures)
+    budget = tmp_path / "collector/cases/base_ops/dsv4_attention.yaml"
+    budget.write_text(budget.read_text().replace("max_seq_len: 65536", "max_seq_len: 32768"))
+    h_after = provenance.collector_hash("collector.trtllm.collect_dsv4_attn", tmp_path, closures)
+    assert h_before != h_after
+
+    # (b) cap change -> different generated population (plan re-attests)
+    module = _load_module_with_torch_stub(monkeypatch)
+    baseline = {c["id"] for c in module.get_dsv4_csa_context_test_cases()}
+    monkeypatch.setattr(module, "MAX_SEQ_LEN", 32768)
+    shrunk = {c["id"] for c in module.get_dsv4_csa_context_test_cases()}
+    # not a strict subset: the dynamic prefix endpoint (MAX_SEQ_LEN - sl)
+    # moves with the cap, so the shrunk plan both drops and renames cases
+    assert shrunk != baseline
+    assert len(shrunk) < len(baseline)
+
+
+def _serving_oracle(bs, seq_len, prefix, is_context):
+    """Independent re-derivation of the rc23 serving population for one
+    uniform dummy batch, written ONLY from the pinned serving sources (never
+    from the collector's own code), so a collector drift FAILS against it:
+
+    - context: chunk slicing/positions model_engine.py:3941-3947; past-seen
+      prefix accounting :3960-3998; mixed-batch assignment :4735-4777.
+    - decode: the dummy request registers token_num beam tokens and
+      resource_manager.py:988-995 sets req.prompt_len = token_num - 1;
+      past_seen = max_beam_num_tokens - 1 (:4308); position = past_seen
+      (:4315); cached = past_seen - compressed(=0) (:4332-4335); seq_lens
+      appends 1 per decode request.
+    """
+    if is_context:
+        return {
+            "seq_lens": [seq_len] * bs,
+            "num_cached": [prefix] * bs,
+            "prompt_lens": [seq_len] * bs,
+            "num_contexts": bs,
+            "first_position": prefix,
+            "cache_reuse": prefix > 0,
+        }
+    token_num = seq_len + 1  # what the collector registers per decode request
+    past_seen = token_num - 1  # model_engine.py:4308
+    return {
+        "seq_lens": [1] * bs,
+        "num_cached": [past_seen] * bs,
+        "prompt_lens": [token_num - 1] * bs,  # resource_manager.py:988-995
+        "num_contexts": 0,
+        "first_position": past_seen,  # model_engine.py:4315
+        "cache_reuse": False,
+    }
+
+
+def test_constructor_args_match_the_serving_oracle(monkeypatch):
+    """S4 (PR #1486 review): compare captured constructor arguments against
+    the upstream-derived oracle for one context-with-prefix case and one
+    ordinary decode case — the test fails when the collector diverges from
+    the pinned serving semantics, not merely when its own values change."""
+    module = _load_module_with_torch_stub(monkeypatch)
+    for bs, sl, prefix, is_ctx in ((2, 64, 128, True), (4, 512, 0, False)):
+        manager, metadata, _ = _run_create(
+            module, monkeypatch, batch_size=bs, seq_len=sl, is_context=is_ctx, prefix_len=prefix
+        )
+        oracle = _serving_oracle(bs, sl, prefix, is_ctx)
+        kw = metadata.kwargs
+        assert kw["seq_lens"].data == oracle["seq_lens"]
+        assert kw["kv_cache_params"].num_cached_tokens_per_seq == oracle["num_cached"]
+        assert kw["prompt_lens"] == oracle["prompt_lens"]
+        assert kw["num_contexts"] == oracle["num_contexts"]
+        assert kw["runtime_features"].cache_reuse is oracle["cache_reuse"]
+        # capacity-bound contract: max_num_tokens must bound this batch
+        assert kw["max_num_tokens"] >= sum(oracle["seq_lens"])
+        if not is_ctx:
+            # position == past_seen (the runner builds the tensor from the
+            # single-sourced geometry helper)
+            assert module.generation_request_geometry(sl)["position"] == oracle["first_position"]

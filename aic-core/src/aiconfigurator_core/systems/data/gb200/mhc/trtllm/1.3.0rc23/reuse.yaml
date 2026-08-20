@@ -12,4 +12,9 @@ reuse:
     measured pre_mapping/post_mapping paths are source-identical between rc20
     and rc23 (verified diff of _torch/modules/mhc: every change sits in the
     fused_hc tactic space, which these rows do not measure).
+  # Consumer-visible deviation disclosure (layer_permissions.md
+  # "Governed exceptions" rule 4): these rows measure the standalone
+  # pre/post mHC path; default rc23 serving on this SM100/103 system
+  # selects fused_hc — governed standards exception in
+  # collector/evidence_exceptions.yaml (expires 2026-10-31).
   approved_by: tianhaox

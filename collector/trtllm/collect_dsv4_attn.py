@@ -88,10 +88,13 @@ except ModuleNotFoundError:
 
 ATTN_KIND_TO_COMPRESS_RATIO = {"csa": 4, "hca": 128}
 
-# Universal sweep budgets are DECLARED in
-# cases/models/DeepseekV4ForCausalLM_cases.yaml (module_budgets) and enforced
-# at generation time with counted drops — the declaration layer owns them
-# (case_authoring.md), the collector only reads the declared values.
+# Universal sweep budgets are DECLARED at the base-op layer
+# (cases/base_ops/dsv4_attention.yaml, in this module's hash closure) and
+# enforced at generation time with counted drops. These are generator
+# constraints — "the op's universal math (identities, budgets)" belongs to
+# the base-op/generator layer (case_authoring.md §"Legitimate shape
+# narrowing", row 2) — NOT memory-feasibility filters; the collector only
+# reads the declared values.
 MAX_SEQ_LEN = _DSV4_MODULE_BUDGETS["max_seq_len"]
 MAX_CONTEXT_QUERY_TOKENS = _DSV4_MODULE_BUDGETS["max_context_query_tokens"]
 MAX_GENERATION_KV_TOKENS = _DSV4_MODULE_BUDGETS["max_generation_kv_tokens"]
@@ -455,10 +458,18 @@ def create_dsv4_kv_cache_and_metadata(
     - manager construction  -> pyexecutor/_util.py:1843-1867 (is_mla branch)
     - Metadata construction -> pyexecutor/model_engine.py:2475-2489
       (_set_up_attn_metadata)
-    - per-batch field population -> model_engine.py:3257-3271
-      (prompt_lens/num_contexts/KVCacheParams/prepare), context requests
-      :3960-3998 (begin_compute = past-seen prefix), ordinary decode
-      requests :4308-4337 (past_seen/position/cached/prompt_len)
+    - mixed-batch metadata assignment -> model_engine.py:4735-4777
+      (seq_lens :4735-4739; request_ids/prompt_lens/num_contexts
+      :4759-4761; KVCacheParams(use_cache=True, num_cached_tokens_per_seq)
+      :4772-4775)
+    - context per-request population -> begin_compute/prompt slicing
+      :3941-3945, position_ids.extend(range(begin_compute, ...)) :3946-3947,
+      past-seen prefix accounting :3960-3998
+    - ordinary decode per-request population -> :4308-4337
+      (past_seen/position/cached/prompt_len)
+    - decode dummy-request prompt_len proof -> resource_manager.py:988-995
+      (is_gen: req.prompt_len = token_num - 1; py_prompt_len = prompt_len),
+      consumed at model_engine.py:4336
     """
     from tensorrt_llm._torch.attention_backend.interface import (
         AttentionRuntimeFeatures,
@@ -588,33 +599,49 @@ def create_dsv4_kv_cache_and_metadata(
         # (model_engine.py:2475-2489 @1.3.0rc23); per-batch fields mirror the
         # _prepare_tp_inputs population sites cited per field below.
         attn_metadata = attention_cls.Metadata(
-            # max_num_requests=batch_size / max_num_tokens: engine capacity
-            # bounds (model_engine.py:2476-2477); sized to this one batch.
+            # max_num_requests/max_num_tokens are CAPACITY BOUNDS
+            # (model_engine.py:2476-2477 passes engine-lifetime capacity).
+            # This collector prepares exactly one batch, so the tight bound
+            # (= this batch's request/token counts) satisfies the same
+            # buffer-sizing contract; the parity test asserts
+            # max_num_tokens >= sum(seq_lens).
             max_num_requests=batch_size,
             max_num_tokens=total_tokens,
             kv_cache_manager=kv_cache_manager,
             mapping=mapping,
             # seq_lens: per-request current-step token counts — context
-            # appends the fresh chunk length, decode appends 1
-            # (model_engine.py context :3960-3998 / decode :4308-4341).
+            # appends the fresh chunk length, decode appends 1; assigned as a
+            # tensor at model_engine.py:4735-4739.
             seq_lens=torch.tensor([seq_len_q] * batch_size, dtype=torch.int32),
+            # position_ids: interface dataclass default None
+            # (attention_backend/interface.py:100) — serving never assigns it
+            # on this metadata; positions travel as a model input (the tensor
+            # built in the runner below, mirroring model_engine.py
+            # :3946-3947 / :4315).
             position_ids=None,
-            # num_contexts: count of context-phase requests in the batch
-            # (ordinary decode batches carry 0, model_engine.py:3259-3263).
+            # num_contexts = scheduled context-request count
+            # (model_engine.py:4761); ordinary decode batches carry 0.
             num_contexts=batch_size if is_context else 0,
             # num_cached_tokens_per_seq: context = begin_compute prefix
             # (:3973-3976); decode = past_seen - compressed (:4333-4335,
-            # compressed offset 0 for these single-layer dummy weights).
+            # compressed offset 0 for these single-layer dummy weights);
+            # wrapped into KVCacheParams(use_cache=True, ...) exactly as
+            # model_engine.py:4772-4775 does.
             kv_cache_params=KVCacheParams(
                 use_cache=True,
                 num_cached_tokens_per_seq=[kv_cache_len] * batch_size,
             ),
+            # cross: interface default None (interface.py:135) — cross
+            # metadata exists only for encoder-decoder attention.
             cross=None,
             request_ids=request_ids,
-            # prompt_lens: context = chunk-local fresh length (:3960-3972,
-            # the SM100 cached-KV walker consumes chunk-local semantics);
-            # decode = py_prompt_len ~ past KV for these dummy requests
-            # (:4336).
+            # prompt_lens: context = chunk-local fresh length (:3941-3945
+            # prompt slicing; the SM100 cached-KV walker consumes chunk-local
+            # semantics); decode = py_prompt_len, which for is_gen dummy
+            # requests IS the past-KV length: add_dummy_requests sets
+            # req.prompt_len = token_num - 1 (resource_manager.py:988-995)
+            # and we register token_num = seq_len + 1, so py_prompt_len ==
+            # seq_len == kv_cache_len, appended at model_engine.py:4336.
             prompt_lens=[seq_len_q if is_context else kv_cache_len] * batch_size,
             # cached-KV context flag: is_mla AND cache_reuse|chunked_prefill
             # (model_engine.py:2419-2422) — true here exactly for
@@ -627,6 +654,9 @@ def create_dsv4_kv_cache_and_metadata(
             # all_rank_num_tokens stays None: attention-DP only
             # (model_engine.py:3280-3283); single-process collection.
             all_rank_num_tokens=None,
+            # workspace: optional attention-kernel scratch
+            # (attention_backend/trtllm.py:77, lazily grown at :306); an
+            # empty tensor is the pre-warmup serving state.
             workspace=torch.tensor([], device=device, dtype=torch.int8),
             # sparse_metadata_params: same to_sparse_metadata_params call
             # serving makes (model_engine.py:2442-2446).
