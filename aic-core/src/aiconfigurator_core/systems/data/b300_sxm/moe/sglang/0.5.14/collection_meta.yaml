@@ -12,4 +12,8 @@ tables:
     # 896x16, sglang_flashinfer_trtllm_moe with mxfp8 activations — the
     # Blackwell serving-truth precision; the earlier w4a16 label kept bf16
     # activations), collected on 8x B300; zero failures, keys disjoint.
+    # 2026-08-09: appended 6156 MiniMax-M3 MoE shape rows (6144/3072, 128x4):
+    # 3078 bf16 sglang_fused_moe_triton + 3078 nvidia/MiniMax-M3-NVFP4 nvfp4
+    # sglang_flashinfer_trtllm_moe; model-filtered internal collection CI
+    # runs, zero failures.
     status: complete

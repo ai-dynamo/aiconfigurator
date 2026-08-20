@@ -426,6 +426,9 @@ def _normalize_mixed_precision_layer_algo(value: object) -> str | None:
         "fp8": "fp8",
         "e4m3": "fp8",
         "e5m2": "fp8",
+        # Kept distinct from "fp8": MXFP8 is 32-element block-scaled FP8, so
+        # it must land on the fp8_block SDK modes, not the per-tensor
+        # fp8_static/fp8 pair the "fp8" branch resolves to.
         "mxfp8": "mxfp8",
         "nvfp4": "nvfp4",
         "fp4": "nvfp4",
@@ -451,6 +454,15 @@ def _infer_mixed_precision_group_algo(group: dict) -> str | None:
     if not isinstance(num_bits, int):
         return None
     if num_bits == 8 and "float" in weight_type:
+        # An 8-bit float group carrying 32-element block scales is MXFP8
+        # (OCP MX block size), not per-tensor FP8 — without this check the
+        # num_bits fallback would route such groups onto the fp8_static/fp8
+        # per-tensor modes. Real ModelOpt MXFP8 exports seen so far
+        # (nvidia/MiniMax-M3-NVFP4) declare the algo string per layer in
+        # quantized_layers instead of config_groups, so this branch is a
+        # guard for config_groups-style exports.
+        if weights.get("group_size") == 32:
+            return "mxfp8"
         return "fp8"
     if num_bits == 4 and "float" in weight_type:
         return "nvfp4"
@@ -530,25 +542,39 @@ def _infer_mixed_precision_quant_modes(raw_config: dict, quant_dynamic: bool | N
         overrides["gemm_quant_mode"] = (
             common.GEMMQuantMode.fp8 if quant_dynamic is True else common.GEMMQuantMode.fp8_static
         )
+    # MXFP8 -> fp8_block approximation (owner decision 2026-08-09): MXFP8 is
+    # 32-element block-scaled FP8, i.e. the same 1 B/elem weights and the same
+    # FP8 tensor-core throughput class as fp8_block; only the scale
+    # granularity differs (32 vs 128), which is an accepted approximation.
+    # Precedent: DeepSeek-V4's MXFP8-activation attention projections are
+    # priced under gemm=fp8_block in the dsv4 module tables, and the shipped
+    # MiniMax-M3 MSA tables carry the fp8_block gemm tier this lane resolves
+    # to (a plain-fp8 mapping would miss that silicon). Checked before plain
+    # fp8 so a checkpoint mixing per-tensor-FP8 and MXFP8 dense layers keeps
+    # the conservative block-scaled lane. First seen on
+    # nvidia/MiniMax-M3-NVFP4 (attention/dense-MLP/shared-expert projections
+    # MXFP8, routed experts NVFP4).
+    elif "mxfp8" in gemm_algos:
+        overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8_block
     elif "fp8" in gemm_algos:
         if quant_dynamic is not True:
             overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8_static
         else:
             overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8
-    elif "mxfp8" in gemm_algos:
-        # The SDK has no distinct MXFP8 GEMM mode yet. Model MXFP8 as the
-        # dynamic FP8 compute lane, which has the same byte width and tensor-
-        # core family, while preserving any routed-expert NVFP4 override.
-        overrides["gemm_quant_mode"] = common.GEMMQuantMode.fp8
     elif "w4a16_nvfp4" in gemm_algos:
         overrides["gemm_quant_mode"] = common.GEMMQuantMode.w4a16_nvfp4
     elif "nvfp4" in gemm_algos:
         overrides["gemm_quant_mode"] = common.GEMMQuantMode.nvfp4
 
+    # nvfp4-class stays first: routed experts are the artifact's headline
+    # dtype when mixed with fp8-class expert layers. mxfp8 takes the same
+    # fp8_block approximation as the GEMM side, ahead of per-tensor fp8.
     if "w4a16_nvfp4" in moe_algos:
         overrides["moe_quant_mode"] = common.MoEQuantMode.w4a16_nvfp4
     elif "nvfp4" in moe_algos:
         overrides["moe_quant_mode"] = common.MoEQuantMode.nvfp4
+    elif "mxfp8" in moe_algos:
+        overrides["moe_quant_mode"] = common.MoEQuantMode.fp8_block
     elif "fp8" in moe_algos:
         overrides["moe_quant_mode"] = common.MoEQuantMode.fp8
 

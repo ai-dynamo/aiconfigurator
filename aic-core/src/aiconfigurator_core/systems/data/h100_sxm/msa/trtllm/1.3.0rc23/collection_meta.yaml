@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# rc23 triton reference path on SM90; the fmha_sm100 implementation is
+# SM100/103-only, so kernel_source = default (triton fallback) is the
+# serving-true lane on this system.
+# msa tables accepted complete: all 856 ValueError failures are the
+# serving-unreachable num_heads=128 shard class ("num_index_heads (4) must
+# be divisible by num_kv_heads (8)") plus 62 genuine giant-shape OOM-family
+# failures (55 torch CUDA OOM + 6 kv-cache-manager CuOOMError + 1
+# cudaErrorMemoryAllocation during graph capture) on the 80GB card.
+# Collected on 8x H100 via internal collection CI, 2026-08-09.
+# 2026-08-13: generation rows re-keyed step -> step - 1 (PR #1507 review
+# 4911044624): the collector cached kv-1 tokens so each measurement's true
+# total decode length is one below the previously persisted coordinate
+# (loader key s = isl + step). The measurements themselves are valid; only
+# the key was shifted to the measured coordinate. New collections use the
+# corrected construction (kv cached tokens, current token at position kv).
+schema_version: 1
+provenance: collected
+runtime:
+  framework: trtllm
+  version: 1.3.0rc23
+tables:
+  msa_context_module_perf:
+    collected_at: '2026-08-09'
+    rows: 3382
+    status: complete
+  msa_generation_module_perf:
+    collected_at: '2026-08-09'
+    rows: 2548
+    status: complete

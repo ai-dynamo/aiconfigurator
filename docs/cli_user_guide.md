@@ -734,11 +734,11 @@ With DP greater than one, DP rank 0 uses the configured benchmark output path an
 
 Every execution starts a new engine and reloads the model. `run.sh` refuses to overwrite any expected benchmark output, so each run must use new paths. With the default `/results` `emptyDir`, results remain only for the lifetime of the Pod. FPM V1 does not keep the engine or GPU-resident model alive between executions. Selecting any other deployment target preserves the existing generator output and behavior.
 
-The current vLLM template matrix tops out at `0.20.1`. You may pass reference `0.24.0`-only flags through `extra_cli_args`, but the generator has not yet validated those flags against a `0.24.0` runtime image.
+The current vLLM versioned template tops out at `0.20.1`; newer vLLM versions (e.g. `0.24.0` from the Dynamo `1.3.0` entry) fall back to it, and all flags emitted by that template have been validated against the `0.24.0` runtime image. You may pass `0.24.0`-only flags through `extra_cli_args`.
 
 **Generator Dynamo version** (applies to Dynamo deployments only)
 - Use `--generator-dynamo-version 0.7.1` to select the Dynamo release. This affects both the generated backend config version and the default K8s image tag.
-- If `--generator-dynamo-version` is not provided, the default is the first entry in `backend_version_matrix.yaml` (currently `1.2.0`).
+- If `--generator-dynamo-version` is not provided, the default is the first entry in `backend_version_matrix.yaml` (currently `1.3.0`).
 - If `--generated-config-version` is provided, it overrides the generated backend version, but the default K8s image tag still follows the selected Dynamo version mapping.
 
 Use `--generator-config path/to/file.yaml` to provide ServiceConfig/K8sConfig/DynConfig/WorkerConfig/Workers.<role> sections, or add inline overrides via `--generator-set KEY=VALUE`. Examples:

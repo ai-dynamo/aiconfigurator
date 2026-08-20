@@ -12,4 +12,8 @@ tables:
     # w4a16_mxfp4 + 3078 w4a8_mxfp4_mxfp8 (3584/3072, 896x16,
     # sglang_flashinfer_trtllm_moe, TP 1-32 x EP 1-128 x 3 distributions),
     # zero failures, keys disjoint from prior rows.
+    # 2026-08-09: appended 6156 MiniMax-M3 MoE shape rows (6144/3072, 128x4):
+    # 3078 bf16 sglang_fused_moe_triton + 3078 nvidia/MiniMax-M3-NVFP4 nvfp4
+    # sglang_flashinfer_trtllm_moe; model-filtered internal collection CI
+    # runs, zero failures.
     status: complete
