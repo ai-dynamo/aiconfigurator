@@ -470,6 +470,16 @@ impl AttentionTable {
         Ok(sizes)
     }
 
+    /// Every lane this table actually carries (sorted — `by_lane` is a
+    /// `BTreeMap`). AIC-1715/1716 follow-up: the XSHAPE reference-grid walk
+    /// (`operators::attention::ctx_headsize_ref_grid`) tries the resolved
+    /// `lane_order` first, then falls back to every OTHER real lane here —
+    /// see `lane_slice`'s doc comment for why the resolved order alone
+    /// cannot see a collected `kernel_source` outside its static vocabulary.
+    pub fn context_lanes(&self) -> Result<Vec<String>, AicError> {
+        Ok(self.load_context()?.by_lane.keys().cloned().collect())
+    }
+
     /// Collected `(num_heads, batch, seq) -> latency` points of one
     /// generation slice. Python calibrates from
     /// `_raw_generation_attention_data`, which in v2 is an alias of the
@@ -554,6 +564,11 @@ impl AttentionTable {
             )));
         }
         Ok(sizes)
+    }
+
+    /// Decode twin of [`AttentionTable::context_lanes`].
+    pub fn generation_lanes(&self) -> Result<Vec<String>, AicError> {
+        Ok(self.load_generation()?.by_lane.keys().cloned().collect())
     }
 
     /// Collected `(num_heads, seq, batch) -> latency` points of one encoder
