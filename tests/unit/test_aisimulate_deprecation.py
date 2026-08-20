@@ -39,7 +39,7 @@ def _stub_cli(monkeypatch) -> None:
     "mode",
     ["default", "estimate", "recommend", "exp", "generate", "support"],
 )
-def test_each_legacy_cli_mode_warns_with_replacement(monkeypatch, mode) -> None:
+def test_each_legacy_cli_mode_warns_without_renaming_the_command(monkeypatch, mode) -> None:
     _stub_cli(monkeypatch)
 
     with warnings.catch_warnings(record=True) as captured:
@@ -50,9 +50,11 @@ def test_each_legacy_cli_mode_warns_with_replacement(monkeypatch, mode) -> None:
     warning = captured[0]
     assert warning.category is DeprecationWarning
     assert f"`aiconfigurator cli {mode}`" in str(warning.message)
-    assert f"`aisimulate cli {mode} ...`" in str(warning.message)
+    assert f"`aiconfigurator cli {mode} ...`" in str(warning.message)
+    assert "`aisimulate cli" not in str(warning.message)
     assert "AIConfigurator 0.13.0" in str(warning.message)
-    assert "0.12 compatibility window" in str(warning.message)
+    assert "deprecated AIConfigurator distribution" in str(warning.message)
+    assert "preserves the established command name" in str(warning.message)
     assert warning.filename == __file__
 
 

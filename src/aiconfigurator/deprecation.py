@@ -21,19 +21,19 @@ _R = TypeVar("_R")
 
 
 def warn_legacy_cli(mode: str | None) -> None:
-    """Warn once when a legacy AIC CLI mode is selected."""
+    """Warn once when the CLI is run from the legacy AIC distribution."""
 
     command = "aiconfigurator cli" + (f" {mode}" if mode else "")
-    replacement = "aisimulate cli" + (f" {mode}" if mode else "")
     key = f"cli:{mode or '<root>'}"
     if key in _warned_entry_points:
         return
     _warned_entry_points.add(key)
     message = (
-        f"`{command}` is deprecated and will be removed in AIConfigurator "
-        f"0.13.0. Install `aisimulate==0.12.0` and run `{replacement} ...`. "
-        "During the 0.12 compatibility window, both commands execute the "
-        f"same implementation. Migration guide: {_MIGRATION_GUIDE}"
+        f"`{command}` is running from the deprecated AIConfigurator "
+        "distribution, which is planned for removal in AIConfigurator 0.13.0. "
+        f"Install `aisimulate==0.12.0` and keep running `{command} ...`; "
+        "AISimulate preserves the established command name and arguments. "
+        f"Migration guide: {_MIGRATION_GUIDE}"
     )
     warnings.warn(message, DeprecationWarning, stacklevel=4)
     logger.warning("%s", message)
