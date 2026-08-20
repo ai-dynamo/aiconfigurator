@@ -4,8 +4,15 @@
 """Qwen3.5 carries the ``attention_backend`` lane override into its attention ops.
 
 AIC-1715: ``ModelConfig.attention_backend`` is the user-facing knob that heads the
-attention lane precedence order. Qwen3.5 is the first dense model plumbed for it,
-so both the context and the generation attention ops must receive it.
+attention lane precedence order. Since the pyo3 op unification, models are built
+WITHOUT a database handle (pure shape graphs); ops no longer store the override
+directly (``ContextAttention``/``GenerationAttention`` have no Python
+``__init__``). The knob rides ``model.config.attention_backend`` — read
+generically for every model family, not per-op — until
+``engine.py::_resolve_attention_lane_orders`` resolves it (with a database) at
+spec-build time and sets each op's ``_lane_order``. This file checks both
+halves: the knob survives model construction, and resolution heads the walk
+with it.
 """
 
 import pytest
@@ -67,19 +74,42 @@ def _attention_ops(model):
 
 
 def test_attention_backend_reaches_both_attention_ops():
-    """The knob flows into context AND generation attention (not just one side)."""
-    ctx_ops, gen_ops = _attention_ops(_build_model("trtllm_mha"))
+    """The knob survives model construction and heads BOTH ops' resolved lane
+    order once ``build_engine_spec_json`` resolves it against a real database
+    (context AND generation, not just one side) — the modern equivalent of the
+    retired per-op ``_attention_backend`` attribute check. A database is
+    required: resolution reads backend/version/sm_version/systems_root off it
+    (``database=None`` always yields the always-valid ``["default"]``, override
+    or not — see the no-override twin below)."""
+    from aiconfigurator.sdk.perf_database import get_database
+    from aiconfigurator_core.sdk.engine import _resolve_attention_lane_orders
 
-    assert all(op._attention_backend == "trtllm_mha" for op in ctx_ops)
-    assert all(op._attention_backend == "trtllm_mha" for op in gen_ops)
+    model = _build_model("trtllm_mha")
+    assert model.config.attention_backend == "trtllm_mha"
+    ctx_ops, gen_ops = _attention_ops(model)
+
+    database = get_database("b200_sxm", "sglang", "0.5.14")
+    _resolve_attention_lane_orders(ctx_ops, database, model.config.attention_backend)
+    _resolve_attention_lane_orders(gen_ops, database, model.config.attention_backend)
+
+    assert all(op._lane_order[0] == "trtllm_mha" for op in ctx_ops)
+    assert all(op._lane_order[0] == "trtllm_mha" for op in gen_ops)
 
 
 def test_attention_backend_defaults_to_no_override():
-    """Unset knob means no override: the framework-default lane heads the order."""
-    ctx_ops, gen_ops = _attention_ops(_build_model(None))
+    """Unset knob means no override: the framework-default lane heads the order
+    (a ``None`` database still resolves the always-valid ``["default"]``)."""
+    from aiconfigurator_core.sdk.engine import _resolve_attention_lane_orders
 
-    assert all(op._attention_backend is None for op in ctx_ops)
-    assert all(op._attention_backend is None for op in gen_ops)
+    model = _build_model(None)
+    assert model.config.attention_backend is None
+    ctx_ops, gen_ops = _attention_ops(model)
+
+    _resolve_attention_lane_orders(ctx_ops, None, model.config.attention_backend)
+    _resolve_attention_lane_orders(gen_ops, None, model.config.attention_backend)
+
+    assert all(op._lane_order == ["default"] for op in ctx_ops)
+    assert all(op._lane_order == ["default"] for op in gen_ops)
 
 
 def test_model_config_attention_backend_defaults_to_none():

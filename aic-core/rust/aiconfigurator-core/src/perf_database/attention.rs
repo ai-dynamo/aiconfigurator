@@ -98,19 +98,36 @@ struct EncoderGrids {
 /// full — interpolation happens strictly inside that lane's node and a
 /// cross-lane point merge WITHIN a slice is intentionally not performed.
 ///
-/// `lane_order` is the COMPLETE walk order resolved python-side
-/// (`attention.lane_walk_order`, serialized on the op spec); it is replayed
-/// VERBATIM here — no re-deriving, no extending, no sorting. Lanes absent from
-/// the table are skipped; an exhausted list is a miss, exactly as the
-/// pre-lane code behaved when the single collapsed table lacked the slice.
+/// `lane_order` is the walk order resolved python-side
+/// (`attention.lane_walk_order`, serialized on the op spec) and is tried
+/// FIRST, in order — pinned lanes and density-ranked donors take precedence
+/// exactly as resolved. Lanes absent from the table are skipped.
+///
+/// AIC-1715/1716 follow-up: `lane_order`'s donor/leftover tiers are computed
+/// against the ENUMERATION table view (`engine_table_view.py`,
+/// `perf_database/table_view.rs`), a lane-blind fold kept for
+/// charts/support-matrix; it cannot see this QUERY table's real
+/// `kernel_source` values, so a collected lane outside the resolver's static
+/// vocabulary (trtllm ships e.g. `torch_flow*`, vllm `vllm_*`) never appears
+/// in `lane_order`. Once every given lane has been tried, fall back to any
+/// OTHER lane still present in `by_lane` — BTreeMap iteration is sorted-key
+/// order, so this fallback is deterministic. A future table-view lane axis
+/// would let Python compute this instead and could retire the fallback.
 fn lane_slice<'a, K: Ord, V>(
     by_lane: &'a BTreeMap<String, BTreeMap<K, V>>,
     lane_order: &[String],
     key: &K,
 ) -> Option<&'a V> {
-    lane_order
+    if let Some(v) = lane_order
         .iter()
         .find_map(|lane| by_lane.get(lane).and_then(|slices| slices.get(key)))
+    {
+        return Some(v);
+    }
+    by_lane
+        .iter()
+        .filter(|(lane, _)| !lane_order.iter().any(|tried| tried == *lane))
+        .find_map(|(_, slices)| slices.get(key))
 }
 
 /// Lane key for one parquet row (see [`DEFAULT_LANE`]).
@@ -1504,12 +1521,16 @@ mod tests {
             .map(|v| v.latency)
     }
 
-    /// The three lane-walk rules, on a synthetic table so the assertions are
-    /// about the walk and nothing else (mirrors Python `_lane_data_slice`):
-    /// the head lane serves a slice it owns; a slice it LACKS falls through to
-    /// the donor at whole-slice granularity; and an exhausted `lane_order` is
-    /// a typed miss — Rust replays the serialized order VERBATIM and never
-    /// re-derives or extends it with the table's other lanes.
+    /// The lane-walk rules, on a synthetic table so the assertions are about
+    /// the walk and nothing else (mirrors Python `_lane_data_slice`): the head
+    /// lane serves a slice it owns; a slice it LACKS falls through to the
+    /// donor at whole-slice granularity; a NAMED `lane_order` is tried first,
+    /// in order; and once it is exhausted, `lane_slice` falls back to any
+    /// OTHER lane still in the table (AIC-1715/1716 follow-up — the resolved
+    /// order's leftover tier is computed against a lane-blind Python view, see
+    /// `lane_slice`'s doc comment) — never a re-sort of the given order, only
+    /// a last-resort scan in `by_lane`'s BTreeMap (sorted-key) order. Only
+    /// when NO lane anywhere in the table carries the slice is it a true miss.
     #[test]
     fn context_lane_walk_serves_head_lane_then_donor_then_misses() {
         let table = in_memory_two_lane_context_table();
@@ -1525,16 +1546,20 @@ mod tests {
         // Reversing the order flips which lane serves the shared slice.
         assert_eq!(two_lane_query(&table, &lanes(&["donor", "head"]), 256).unwrap(), 4.0);
 
-        // Walk exhausted: neither lane in the order exists in the table, and
-        // the present lanes are NOT consulted.
-        let miss = two_lane_query(&table, &lanes(&["fa3", "default"]), 256);
-        assert!(matches!(miss, Err(AicError::PerfDatabase(_))), "got {miss:?}");
-        // Every lane present but none carrying the slice is the same miss.
+        // Named-lane walk exhausted (neither "fa3" nor "default" exists in
+        // this table): falls back to any other lane still present. Both
+        // "donor" and "head" carry hs=256; BTreeMap order ("donor" < "head")
+        // picks "donor" — not a miss.
+        let fallback = two_lane_query(&table, &lanes(&["fa3", "default"]), 256);
+        assert_eq!(fallback.unwrap(), 4.0, "fallback must scan the table's OTHER lanes, not just miss");
+        // No lane anywhere in the table carries hs=999 — a genuine miss the
+        // fallback cannot paper over.
         let miss = two_lane_query(&table, &order, 999);
         assert!(matches!(miss, Err(AicError::PerfDatabase(_))), "got {miss:?}");
-        // An empty order can serve nothing.
-        let miss = two_lane_query(&table, &[], 128);
-        assert!(matches!(miss, Err(AicError::PerfDatabase(_))), "got {miss:?}");
+        // An empty order still falls back to every table lane: "donor" lacks
+        // hs=128 (head-lane-only slice, see above) but "head" carries it.
+        let fallback = two_lane_query(&table, &[], 128);
+        assert_eq!(fallback.unwrap(), 1.0, "empty order must still fall back to the table's own lanes");
     }
 
     /// The loader KEEPS every `kernel_source` as its own lane instead of

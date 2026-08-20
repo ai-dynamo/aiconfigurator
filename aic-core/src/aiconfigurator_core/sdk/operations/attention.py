@@ -154,6 +154,36 @@ def lane_walk_order(table, lane_order: tuple[str, ...], slice_depth: int) -> tup
     return pinned + tuple(known) + tail + tuple(leftovers)
 
 
+def resolved_lane_order_for_op(database, table_attr: str, override: str | None = None) -> list[str]:
+    """Kernel-lane precedence for an attention op, RESOLVED python-side.
+
+    Since the pyo3 op unification, ``ContextAttention``/``GenerationAttention``
+    are constructed by the model layer WITHOUT a database handle (models are
+    pure shape graphs; the database is only bound later, when
+    ``engine.py::build_engine_spec_json`` walks a built model's op lists
+    against a specific database — same place ``_wideep_moe`` pre-bakes its
+    kernel_source). This is called from there, once the database is
+    available, to set each attention op's ``_lane_order`` before
+    serialization; it is NOT reachable from the op's own ``__init__``.
+
+    ``table_attr`` is ``"_context_attention_data"`` or
+    ``"_generation_attention_data"``. With no resolvable database (or any
+    resolution failure) the always-valid ``["default"]`` is returned — the
+    engine spec must never carry an empty lane list.
+    """
+    if database is None:
+        return ["default"]
+    try:
+        order = resolve_lane_order(database, override)
+        op_cls = ContextAttention if table_attr.startswith("_context") else GenerationAttention
+        depth = _CONTEXT_SLICE_DEPTH if table_attr.startswith("_context") else _GENERATION_SLICE_DEPTH
+        op_cls.load_data(database)
+        return list(lane_walk_order(getattr(database, table_attr, None), order, depth))
+    except Exception:
+        logger.debug("attention lane order unresolvable for %s; serializing the default-only order", table_attr)
+        return ["default"]
+
+
 # Extrapolation target grids — lifted verbatim from the legacy blocks in
 # ``PerfDatabase.__init__`` so behavior stays bit-identical.
 
