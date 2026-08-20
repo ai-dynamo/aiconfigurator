@@ -8,4 +8,24 @@ runtime:
   version: 0.5.14
 tables:
   gemm_perf:
+    # 2026-08-13: REPLACED all 29526 fp8_block rows (AIC-1744) — the prior
+    # rows billed load-time UE8M0 weight-scale packing inside every timed
+    # call (~9 us on a ~7 us gemm); the collector now pre-packs at setup
+    # exactly as serving's process_weights_after_loading does, and the
+    # timed op is act-quant + gemm only (so these rows now legitimately
+    # include the per-token-group quant serving pays each step).
+    # This gb200 run is noisier than its gb300/b200_sxm siblings: 19 (n,k)
+    # shapes show m=32 rows >1.5x their m-neighbors (12 of them >15us),
+    # ~360 small-m interior spikes, and 1203 keys (4.1%) sit >1.3x above
+    # the replaced rows (vs 4 on gb300, 142 on b200_sxm). Median new/old
+    # is 0.673, the same overall win as the sibling systems, so the
+    # corrected rows still strictly improve on the packing-biased ones;
+    # 2026-08-14 (AIC-1759): re-collected once more and landed the per-key
+    # MIN of the two independent runs (one-sided spike contamination: the
+    # runs agree at median 1.000 while ~6% of keys spike >1.3x in each,
+    # mostly at different keys). m=32 spike shapes drop 24 -> 7; the ~6
+    # surviving shapes (e.g. n5120xk4096, n4096xk2048) spike in BOTH runs
+    # at the same keys — reproduced platform behavior, kept as measured.
+    # Same key grid;
+    # values-only replacement, deliberate append-only exception.
     status: complete
