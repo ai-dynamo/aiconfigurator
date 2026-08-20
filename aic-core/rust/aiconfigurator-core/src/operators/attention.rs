@@ -182,15 +182,16 @@ pub struct ContextAttentionOp {
     /// lanes, density-ranked donor tiers, `"default"`, and the table's own
     /// leftover lanes — and it is REPLAYED VERBATIM here: no re-deriving, no
     /// extending, no sorting. Appended at the struct TAIL because bincode
-    /// payloads are positional (ENGINE_SPEC_SCHEMA_VERSION 12).
+    /// payloads are positional (current ENGINE_SPEC_SCHEMA_VERSION 14).
     #[serde(default = "default_lane_order")]
     pub lane_order: Vec<String>,
 }
 
 /// Lane precedence for ops built without an explicit order (Rust-side
-/// constructors and pre-v8 hand-written JSON). Mirrors the Python fallback in
-/// `_attention_lane_order` for an unresolvable database: the always-valid
-/// `("default",)`.
+/// constructors and hand-written JSON fixtures predating the `lane_order`
+/// field — introduced at schema v8, current ENGINE_SPEC_SCHEMA_VERSION 14).
+/// Mirrors the Python fallback in `_attention_lane_order` for an
+/// unresolvable database: the always-valid `("default",)`.
 pub(crate) fn default_lane_order() -> Vec<String> {
     vec![crate::perf_database::attention::DEFAULT_LANE.to_string()]
 }
@@ -314,7 +315,7 @@ pub struct GenerationAttentionOp {
     pub kv_cache_dtype: KvCacheQuantMode,
     /// Kernel-source lane precedence; see
     /// [`ContextAttentionOp::lane_order`] (appended at the struct TAIL —
-    /// bincode payloads are positional, ENGINE_SPEC_SCHEMA_VERSION 12).
+    /// bincode payloads are positional, current ENGINE_SPEC_SCHEMA_VERSION 14).
     #[serde(default = "default_lane_order")]
     pub lane_order: Vec<String>,
 }
@@ -702,6 +703,7 @@ fn ctx_headsize_ref_grid(
     let candidates = lane_order.iter().cloned().chain(
         fallback_lanes
             .into_iter()
+            .map(|(lane, _slices, _rows)| lane)
             .filter(|lane| !lane_order.contains(lane)),
     );
     let mut chosen: Option<(String, u32)> = None;
@@ -974,6 +976,7 @@ fn gen_headsize_ref_grid(
     let candidates = lane_order.iter().cloned().chain(
         fallback_lanes
             .into_iter()
+            .map(|(lane, _slices, _rows)| lane)
             .filter(|lane| !lane_order.contains(lane)),
     );
     let mut chosen: Option<(String, u32)> = None;
@@ -1125,6 +1128,17 @@ fn encoder_attention_empirical(
 /// raw vLLM lanes follow in measured-density order. Shared by the hand-built op
 /// fixtures in the `fpm`, `engine::runtime` and `py` test modules, which all
 /// run against that data root.
+///
+/// Rebase-4 review (AIC-1715/1716, Blocker 1 item e): re-verified byte-exact
+/// against live `resolved_lane_order_for_op(get_database("b200_sxm", "vllm",
+/// "0.19.0"), "_context_attention_data" / "_generation_attention_data")`
+/// after the donor/leftover density fix (both tables agree on this order),
+/// so this constant needed no change — the bug was in the density SOURCE
+/// (`operations/attention.py`'s wiring), not in this already-correct
+/// resolved order. As a hand-maintained literal it cannot self-detect a
+/// FUTURE resolver regression the way a golden-diff would; re-verify the
+/// same way on any change to `attention_lane_defaults.yaml`,
+/// `lane_walk_order`'s ranking, or this data root's parquet.
 #[cfg(test)]
 pub(crate) fn b200_vllm_lane_order() -> Vec<String> {
     [
@@ -1684,6 +1698,15 @@ mod tests {
     /// Walk order Python serializes on b200_sxm/sglang/0.5.14 without and
     /// with an `attention_backend="flashinfer"` override — see the twins in
     /// `perf_database::attention::tests`.
+    ///
+    /// Rebase-4 review (AIC-1715/1716, Blocker 1 item e): re-verified
+    /// byte-exact against live `resolved_lane_order_for_op` (both this and
+    /// `sglang_flashinfer_lanes` below, context AND generation tables) after
+    /// the donor/leftover density fix; no change needed. The
+    /// `qwen35-27b-b200-sglang-0514-lanes-default`/`-lanes-trtllm-mha`
+    /// parity goldens exercise this exact (system, backend, version) pair
+    /// end to end, so a future resolver regression here fails THOSE first —
+    /// re-verify this literal in lockstep if either ever needs a refresh.
     fn sglang_default_lanes() -> Vec<String> {
         lane_vec(&["triton", "trtllm_mha", "flashinfer", "fa3", "fla", "default"])
     }

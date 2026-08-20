@@ -118,7 +118,6 @@ OPERATIONS_DEF_INVENTORY = {
             # per-op-value-in-Rust-only rule.
             "_lane_order_cached",
             "resolve_lane_order",
-            "_lane_density",
             "lane_walk_order",
             "lane_walk_order._rank",
             # Same rationale: called from engine.py::_resolve_attention_lane_orders
