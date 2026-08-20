@@ -503,7 +503,11 @@ def test_sidecar_carries_the_design_5_table_fields(tmp_path):
     assert table["status"] == provenance.STATUS_COMPLETE
 
 
-def test_sidecar_status_is_partial_when_cases_failed(tmp_path):
+def test_sidecar_status_stays_complete_when_cases_failed(tmp_path):
+    # Recorded per-case failures are DATA, not a demotion (owner decision
+    # 2026-08-08, failure_handling.md / design doc §5): derive_table_status
+    # demotes only on a ModuleCollectionFailure, and a module-level death
+    # never reaches this writer (dying runs do not finalize a sidecar).
     from collector import provenance
 
     parquet_path = _fabricate_parquet(tmp_path, 1)
@@ -515,7 +519,7 @@ def test_sidecar_status_is_partial_when_cases_failed(tmp_path):
         failure_count=2,
     )
     table = yaml.safe_load(meta_path.read_text())["tables"]["moe_a2a_perf"]
-    assert table["status"] == provenance.STATUS_PARTIAL
+    assert table["status"] == provenance.STATUS_COMPLETE
 
 
 def test_sidecar_refuses_an_empty_case_plan(tmp_path):

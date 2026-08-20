@@ -169,8 +169,14 @@ def create_vllm_config(
     head_dim: int | None = None,
     num_heads: int | None = None,
     num_kv_heads: int | None = None,
+    hf_overrides: dict | None = None,
 ) -> VllmConfig:
-    """Create a VllmConfig for testing with reasonable defaults."""
+    """Create a VllmConfig for testing with reasonable defaults.
+
+    ``hf_overrides`` is forwarded verbatim to ``ModelConfig`` — the same
+    mechanism as vLLM's ``--hf-overrides`` serving flag, applied to the HF
+    config before architecture resolution (config/model.py:496-541 @0.24.0).
+    """
 
     model_config = ModelConfig(
         model=model_name,
@@ -179,6 +185,7 @@ def create_vllm_config(
         dtype=dtype,
         seed=0,
         max_model_len=max_model_len,
+        hf_overrides=hf_overrides or {},
     )
 
     cache_config = CacheConfig(

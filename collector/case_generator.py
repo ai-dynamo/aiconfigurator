@@ -721,6 +721,12 @@ class MLAModuleSweepSpec:
     generation_large_sequence_max_batch_size: int
     generation_large_cache_tokens: int
     context_prefix_lengths: list[int]
+    # Optional MSA-specific decode budget: MSA decode coverage needs the
+    # large batch x long-kv corner (raised for the shipped MSA tables),
+    # while the shared generation.max_tokens stays the MLA/DSA collectors'
+    # memory contract (their guard tests pin it). None -> fall back to
+    # generation_max_tokens.
+    generation_msa_max_tokens: int | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -735,7 +741,7 @@ class MLAModulePrecisionSpec:
     attention_types: tuple[str, ...] = ("mla", "dsa")
 
 
-_MLA_MODULE_ATTENTION_TYPES = ("mla", "dsa")
+_MLA_MODULE_ATTENTION_TYPES = ("mla", "dsa", "msa")
 
 
 def get_mla_module_model_specs(
@@ -790,7 +796,7 @@ def get_mla_module_model_specs(
         canonical_specs = {}
         collapsed: dict[tuple, list[str]] = {}
         for spec in specs:
-            key = (spec.attention_type, spec.architecture if spec.attention_type == "dsa" else None)
+            key = (spec.attention_type, spec.architecture if spec.attention_type in ("dsa", "msa") else None)
             if key in canonical_specs:
                 collapsed.setdefault(key, []).append(spec.model_path)
             else:
@@ -974,6 +980,7 @@ def get_mla_module_sweep_spec(backend: str | None = None) -> MLAModuleSweepSpec:
         context_large_sequence_min=_optional_int(context.get("large_sequence_min")),
         context_large_sequence_max_batch_size=_optional_int(context.get("large_sequence_max_batch_size")),
         generation_max_tokens=int(generation["max_tokens"]),
+        generation_msa_max_tokens=_optional_int(generation.get("msa_max_tokens")),
         generation_large_sequence_min=_optional_int(generation.get("large_sequence_min")),
         generation_large_sequence_max_batch_size=_optional_int(generation.get("large_sequence_max_batch_size")),
         generation_large_cache_tokens=_optional_int(generation.get("large_cache_tokens")),
@@ -2365,6 +2372,26 @@ _DSV4_MODULE_PAST_KV_LIST = _as_int_list(
     field_name="dsv4.module_past_kv_lengths",
 )
 _DSV4_MODULE_TP_SIZES = _as_int_list(_DSV4_CONFIG["module_tp_sizes"], field_name="dsv4.module_tp_sizes")
+
+
+def _dsv4_module_budgets() -> dict:
+    """Declared universal sweep budgets for the DSV4 module collectors.
+
+    Declared at the BASE-OP layer (cases/base_ops/dsv4_attention.yaml —
+    op budgets are op-level facts, not model properties; case_authoring.md).
+    Unresolvable declarations fail loudly: missing or malformed budget
+    fields raise instead of defaulting.
+    """
+    budgets = _required_base_common_case_values("dsv4_module_budgets")
+    return {
+        "max_seq_len": int(budgets["max_seq_len"]),
+        "max_context_query_tokens": int(budgets["max_context_query_tokens"]),
+        "max_generation_kv_tokens": int(budgets["max_generation_kv_tokens"]),
+        "decode_batch_ladder": tuple((int(floor), int(max_bs)) for floor, max_bs in budgets["decode_batch_ladder"]),
+    }
+
+
+_DSV4_MODULE_BUDGETS = _dsv4_module_budgets()
 _DSV4_SPARSE_BS_LIST = _as_int_list(_DSV4_CONFIG["sparse_batch_sizes"], field_name="dsv4.sparse_batch_sizes")
 _DSV4_SPARSE_ISL_LIST = _as_int_list(
     _DSV4_CONFIG["sparse_input_lengths"],

@@ -179,6 +179,28 @@ Rules:
    policy. Do not edit them as a side effect of a fix task; propose changes
    instead.
 
+## Governed exceptions
+
+A rule in this file may be temporarily excepted ONLY through an entry in the
+`standards_exceptions` registry (`collector/evidence_exceptions.yaml`), and
+only when the entry carries ALL of:
+
+1. **A self-contained machine-readable scope** — the rule excepted, plus the
+   exact tables/backend/versions/systems the exception covers. Prose-only
+   scoping is invalid.
+2. **The standards owner's `approved_by` sign-off.** These rule files are
+   human-owned policy; only their owner can except them.
+3. **An `expires` date and a linked retirement work item.** An exception is
+   a debt with a due date, not a policy change; on expiry the exception is
+   renewed by the owner or the deviation is fixed.
+4. **Consumer-visible provenance** — the deviation must be discoverable from
+   the shipped data's own declaration layer (e.g. the `reuse.yaml` reason or
+   sidecar for the affected tables), never only from this registry.
+
+An exception documents and bounds a deviation; it does not weaken the rule.
+Reviews treat an in-scope, unexpired entry as compliant and everything
+outside its scope as an ordinary violation.
+
 ## Meta rules
 
 1. **Default action for a failing case is NO CHANGE.** Confirm it is recorded

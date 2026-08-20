@@ -183,6 +183,14 @@ families:
   - family: kda
     op_files: [kda_perf]
 
+  # MiniMax-M3 MSA gets its own family (not sparse_attention) so its sglang
+  # runtime can pin to the official v0.5.16 image (first release with M3)
+  # while the DSA/DSV4 collectors stay on the stock 0.5.14 pin.
+  - family: msa
+    op_files:
+      - msa_context_module_perf
+      - msa_generation_module_perf
+
   - family: mhc
     op_files: [mhc_module_perf]
 

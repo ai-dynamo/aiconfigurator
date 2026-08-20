@@ -999,9 +999,10 @@ def write_moe_a2a_sidecar(
 ) -> Path:
     """Write ``collection_meta.yaml`` for the finalized ``moe_a2a_perf`` table.
 
-    ``status`` follows ``provenance.derive_table_status``: this module is its
-    own executor, so its unresolved-failure count is the classified failures
-    recorded during the run. ``module_name`` selects whose hash closure is
+    ``status`` follows ``provenance.derive_table_status``: recorded per-case
+    failures are observability-only (complete stays complete); only a
+    ModuleCollectionFailure demotes, and a module-level death never reaches
+    this writer because dying runs do not finalize a sidecar. ``module_name`` selects whose hash closure is
     attested — the trtllm alltoall writer produces the same table and shares
     this finalizer.
     """

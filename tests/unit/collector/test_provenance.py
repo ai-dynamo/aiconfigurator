@@ -196,11 +196,14 @@ def test_case_plan_hash_empty_set_is_stable():
     ("unresolved_failed_count", "had_module_failure", "expected"),
     [
         (0, False, provenance.STATUS_COMPLETE),
-        (1, False, provenance.STATUS_PARTIAL),
+        # Owner decision 2026-08-08 (PR #1486): recorded per-case failures
+        # are DATA (failure_handling.md) and no longer demote a table —
+        # only a module-level collection failure does.
+        (1, False, provenance.STATUS_COMPLETE),
         (0, True, provenance.STATUS_PARTIAL),
         (3, True, provenance.STATUS_PARTIAL),
     ],
-    ids=["all-passed", "unresolved-failures", "module-collection-failure", "both"],
+    ids=["all-passed", "recorded-failures-are-data", "module-collection-failure", "both"],
 )
 def test_derive_table_status(unresolved_failed_count, had_module_failure, expected):
     assert (

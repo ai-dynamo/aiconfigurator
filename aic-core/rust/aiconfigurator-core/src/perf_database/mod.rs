@@ -197,6 +197,7 @@ pub mod mla;
 pub mod moe;
 pub mod moe_a2a;
 mod moe_index;
+pub mod msa;
 pub mod parquet_loader;
 pub mod perf_interp;
 pub mod source_resolution;
@@ -216,6 +217,7 @@ pub use mhc::MhcTable;
 pub use mla::MlaTable;
 pub use moe::MoeTable;
 pub use moe_a2a::MoeA2aTable;
+pub use msa::MsaTable;
 pub use source_resolution::{resolve_one, ResolveCtx, ResolveReport, SourceResolver};
 pub use state_space::StateSpaceTable;
 pub use trtllm_alltoall::TrtllmAlltoallTable;
@@ -238,6 +240,7 @@ pub struct PerfTables {
     pub moe_a2a: MoeA2aTable,
     pub communication: CommunicationTable,
     pub dsa: DsaTable,
+    pub msa: MsaTable,
     pub dsv4: Dsv4Table,
     pub dsv4_megamoe: Dsv4MegaMoeTable,
     pub mhc: MhcTable,
@@ -518,6 +521,7 @@ impl PerfDatabase {
                     .map(|PerfSource(path, _)| path)
                     .unwrap_or_else(|| data_root.join("dsv4_megamoe_module_perf.parquet")),
             ),
+            msa: MsaTable::with_sources(data_root.clone(), &resolver)?,
             mhc: MhcTable::with_sources(data_root.clone(), &resolver)?,
             trtllm_alltoall: TrtllmAlltoallTable::with_sources(data_root.clone(), &resolver)?,
             wideep_mla: WideEpMlaTable::with_sources(data_root.clone(), spec.clone(), &resolver)?,

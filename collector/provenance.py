@@ -167,10 +167,23 @@ def case_plan_hash(case_ids: list[str]) -> str:
 
 
 def derive_table_status(*, unresolved_failed_count: int, had_module_failure: bool) -> str:
-    """complete unless the table's checkpoint holds unresolved failures or a
-    ModuleCollectionFailure was recorded for one of its producing ops.
+    """complete unless a ModuleCollectionFailure was recorded for one of the
+    table's producing ops.
+
+    Owner decision (tianhaox, 2026-08-08, PR #1486): recorded per-case
+    failures do NOT demote a table. failure_handling.md's core doctrine is
+    that a classified failure is DATA — deterministic framework limits (OOM
+    at sweep extremes, kernel grid caps) land in the failure log by design,
+    and demoting the table for them made every honest campaign
+    unpublishable. The anti-false-success guarantees are unaffected and live
+    elsewhere: a run that dies mid-way never finalizes (parquet without a
+    matching ``tables`` entry fails the coverage gate / strict loader), and
+    an op that produced zero rows still demotes via ``had_module_failure``.
+    ``unresolved_failed_count`` is retained for observability at call sites
+    (logged, recorded in error summaries) but no longer affects status.
     """
-    if unresolved_failed_count > 0 or had_module_failure:
+    del unresolved_failed_count  # observability-only; see docstring
+    if had_module_failure:
         return STATUS_PARTIAL
     return STATUS_COMPLETE
 
