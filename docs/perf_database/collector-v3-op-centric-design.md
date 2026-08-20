@@ -102,8 +102,9 @@ Example: `data/h200_sxm/attention/trtllm/1.3.0rc10/context_attention_perf.parque
   deprecated, warning logged), so tools and the GitLab auto-collect pipeline do
   not have to cut over the same day.
 - Path-aware consumers to sweep in the same PR: loader discovery,
-  `tools/perf_database/check_kernel_source.py`, `tools/perf_database/parquet_diff.py`,
-  `tools/support_matrix/*`, chart tooling, collector finalize output paths.
+  `tools/perf_database/generate_perf_data_reuse_manifest.py`,
+  `tools/perf_database/parquet_diff.py`, `tools/support_matrix/*`, chart
+  tooling, collector finalize output paths.
   The GitLab auto-collect pipeline is updated in lockstep; in-flight data PRs
   rebase after the move.
 - Note: `src/aiconfigurator/systems` is a symlink into aic-core since #1322.
@@ -310,7 +311,7 @@ upgrade shrinks to the families that actually changed.
 Cross-framework reuse is legitimate only when it is not really cross-framework
 at the kernel level — e.g. trtllm and sglang both dispatching the same cuBLAS
 GEMM or the same flashinfer attention kernel. The gate is the existing
-`op_kernel_source_manifest.yaml`: rows are admitted from a sibling backend only
+`perf_data_reuse_manifest.yaml`: rows are admitted from a sibling backend only
 when their `kernel_source` is in a `shared`/`shared_fallback` tier whitelisting
 the active backend, and only to fill shapes the same-backend chain (channels
 1–2) could not. Example: a `gemm_perf` shape missing from all sglang versions
@@ -331,7 +332,7 @@ The loader's source ordering (§7) in one list:
 3. Never a version newer than requested — unless an explicit `reuse.yaml`
    declaration says so.
 4. Cross-backend fill only for kernel sources whitelisted by
-   `op_kernel_source_manifest.yaml`, and only after channels 1–2.
+   `perf_data_reuse_manifest.yaml`, and only after channels 1–2.
 5. The `comm` family is excluded from sibling-version reuse entirely — NCCL
    curves are topology-bound, so shape-filling across versions is wrong there
    (current NCCL/oneCCL behavior, now stated as policy).
@@ -412,8 +413,8 @@ requirements out.
 
 ### CI audit (fail-closed surface)
 
-One audit tool (sibling of `check_kernel_source.py`), run on every PR touching
-`data/`, `collector/`, or the manifest. Hard failures:
+One audit tool (sibling of `generate_perf_data_reuse_manifest.py`), run on
+every PR touching `data/`, `collector/`, or the manifest. Hard failures:
 
 - a parquet table without a matching provenance entry;
 - a `reuse.yaml` pointing at nonexistent data or violating §6 rules;

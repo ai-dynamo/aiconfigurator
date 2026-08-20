@@ -37,6 +37,7 @@ from .schema import (
 
 DocumentInput = str | Path | Mapping[str, Any] | Sequence[Mapping[str, Any]]
 _ENV_PATTERN = re.compile(r"\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))")
+_DYNAMO_PLACEHOLDER_PATTERN = re.compile(r"\$\((?P<name>[A-Za-z_][A-Za-z0-9_]*)\)")
 _BACKEND_MODULE_PATTERN = re.compile(r"(?:python\d*\s+-m\s+)?dynamo\.(vllm|sglang|trtllm)\b")
 _SYSTEM_MARKERS = {
     "H100": "h100_sxm",
@@ -97,26 +98,57 @@ def _documents(value: DocumentInput | None) -> list[Mapping[str, Any]]:
     return documents
 
 
-def _env(entries: Any) -> dict[str, str]:
+def _env(entries: Any, config_map_data: Mapping[str, Mapping[str, str]] | None = None) -> dict[str, str]:
     result: dict[str, str] = {}
     if not isinstance(entries, list):
         return result
     for entry in entries:
-        if not isinstance(entry, Mapping) or "value" not in entry:
+        if not isinstance(entry, Mapping):
             continue
         name = entry.get("name")
         value = entry.get("value")
         if isinstance(name, str) and isinstance(value, (str, int, float, bool)):
             result[name] = str(value)
+            continue
+        value_from = entry.get("valueFrom")
+        if not isinstance(name, str) or not isinstance(value_from, Mapping) or config_map_data is None:
+            continue
+        reference = value_from.get("configMapKeyRef")
+        if not isinstance(reference, Mapping):
+            continue
+        config_map_name = reference.get("name")
+        key = reference.get("key")
+        if isinstance(config_map_name, str) and isinstance(key, str):
+            literal = config_map_data.get(config_map_name, {}).get(key)
+            if literal is not None:
+                result[name] = literal
     return result
+
+
+def _pod_spec(service: Mapping[str, Any]) -> Mapping[str, Any]:
+    pod_template = service.get("podTemplate", {})
+    if isinstance(pod_template, Mapping) and pod_template:
+        spec = pod_template.get("spec", {})
+        if isinstance(spec, Mapping):
+            return spec
+    extra = service.get("extraPodSpec", {})
+    return extra if isinstance(extra, Mapping) else {}
 
 
 def _container(service: Mapping[str, Any]) -> Mapping[str, Any]:
     extra = service.get("extraPodSpec", {})
-    if not isinstance(extra, Mapping):
+    if isinstance(extra, Mapping):
+        main = extra.get("mainContainer", {})
+        if isinstance(main, Mapping) and main:
+            return main
+    containers = _pod_spec(service).get("containers", [])
+    if not isinstance(containers, list):
         return {}
-    main = extra.get("mainContainer", {})
-    return main if isinstance(main, Mapping) else {}
+    candidates = [item for item in containers if isinstance(item, Mapping)]
+    for candidate in candidates:
+        if candidate.get("name") == "main":
+            return candidate
+    return candidates[0] if len(candidates) == 1 else {}
 
 
 def _command(container: Mapping[str, Any]) -> str:
@@ -130,7 +162,24 @@ def _command(container: Mapping[str, Any]) -> str:
     return " ".join(values).replace("\\\n", " ")
 
 
+def _engine_command(command: str) -> str:
+    """Select a literal engine invocation from an optional shell wrapper."""
+    matches = list(_BACKEND_MODULE_PATTERN.finditer(command))
+    if not matches:
+        return command
+    invocation = command[matches[-1].start() :].strip()
+    if re.search(r"(?:^|\s)(?:&&|\|\||[;|<>])(?:\s|$)", invocation):
+        raise ValueError("engine invocation contains unsupported shell control operators")
+    return invocation
+
+
 def _expand_literal(command: str, env: Mapping[str, str]) -> str:
+    def replace_placeholder(match: re.Match[str]) -> str:
+        name = match.group("name")
+        if name not in env:
+            raise ValueError(f"command depends on unresolved ConfigMap placeholder {name!r}")
+        return env[name]
+
     def replace(match: re.Match[str]) -> str:
         name = match.group("braced") or match.group("plain")
         if name not in env:
@@ -140,7 +189,8 @@ def _expand_literal(command: str, env: Mapping[str, str]) -> str:
             raise ValueError(f"environment variable {name!r} is shell-derived, not literal")
         return value
 
-    expanded = _ENV_PATTERN.sub(replace, command)
+    expanded = _DYNAMO_PLACEHOLDER_PATTERN.sub(replace_placeholder, command)
+    expanded = _ENV_PATTERN.sub(replace, expanded)
     if "$" in expanded:
         raise ValueError("command contains an unsupported shell parameter expansion")
     return expanded
@@ -198,10 +248,27 @@ def _config_maps(documents: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, 
     return result
 
 
-def _mounted_config(service: Mapping[str, Any], config_maps: Mapping[str, Any]) -> Mapping[str, Any]:
+def _config_map_data(documents: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, str]]:
+    result: dict[str, dict[str, str]] = {}
+    for document in documents:
+        if document.get("kind") != "ConfigMap":
+            continue
+        metadata = document.get("metadata", {})
+        name = metadata.get("name") if isinstance(metadata, Mapping) else None
+        data = document.get("data", {})
+        if not isinstance(name, str) or not isinstance(data, Mapping):
+            continue
+        result[name] = {str(key): value for key, value in data.items() if isinstance(value, str)}
+    return result
+
+
+def _mounted_config(
+    service: Mapping[str, Any],
+    config_maps: Mapping[str, Any],
+    env: Mapping[str, str],
+) -> Mapping[str, Any]:
     main = _container(service)
-    extra = service.get("extraPodSpec", {})
-    volumes = extra.get("volumes", []) if isinstance(extra, Mapping) else []
+    volumes = _pod_spec(service).get("volumes", [])
     config_volumes: dict[str, tuple[str, Mapping[str, str] | None]] = {}
     if isinstance(volumes, list):
         for volume in volumes:
@@ -224,14 +291,15 @@ def _mounted_config(service: Mapping[str, Any], config_maps: Mapping[str, Any]) 
                         projected_paths[key] = path
             config_volumes[volume_name] = (config_map_name, projected_paths or None)
 
-    env = _env(main.get("env", []))
     engine_path: Any = env.get("ENGINE_ARGS", "")
     try:
-        flags = _flags(_expand_literal(_command(main), env))
+        flags = _flags(_expand_literal(_engine_command(_command(main)), env))
     except ValueError:
-        flags = _flags(_command(main))
-    if flags.get("extra-engine-args") not in (None, True):
-        engine_path = flags["extra-engine-args"]
+        flags = _flags(_engine_command(_command(main)))
+    for flag_name in ("extra-engine-args", "config"):
+        if flags.get(flag_name) not in (None, True):
+            engine_path = flags[flag_name]
+            break
     engine_path = str(engine_path)
     candidates: list[Mapping[str, Any]] = []
     mounts = main.get("volumeMounts", [])
@@ -275,12 +343,12 @@ def _normalize_backend(value: Any) -> str | None:
 
 
 def _role(name: str, service: Mapping[str, Any], flags: Mapping[str, Any]) -> str:
-    subcomponent = str(service.get("subComponentType", "")).lower()
+    subcomponent = str(service.get("subComponentType", service.get("name", ""))).lower()
     mode = str(flags.get("disaggregation-mode", "")).lower()
     text = f"{name} {subcomponent} {mode}".lower()
     if any(marker in text for marker in ("encode", "epd", "afd", "attentionworker", "ffnworker")):
         raise ValueError(f"unsupported special topology in service {name!r}")
-    role_text = f"{subcomponent} {mode}"
+    role_text = f"{name} {subcomponent} {mode}".lower()
     if "prefill" in role_text:
         return "prefill"
     if "decode" in role_text:
@@ -288,37 +356,60 @@ def _role(name: str, service: Mapping[str, Any], flags: Mapping[str, Any]) -> st
     return "worker"
 
 
-def _service_records(dgd: Mapping[str, Any], config_maps: Mapping[str, Any]) -> list[_Service]:
+def _service_records(
+    dgd: Mapping[str, Any],
+    config_maps: Mapping[str, Any],
+    config_map_data: Mapping[str, Mapping[str, str]],
+) -> list[_Service]:
     spec = dgd.get("spec", {})
     services = spec.get("services", {}) if isinstance(spec, Mapping) else {}
-    if not isinstance(services, Mapping):
-        raise TypeError("DynamoGraphDeployment spec.services must be an object")
+    if services:
+        if not isinstance(services, Mapping):
+            raise TypeError("DynamoGraphDeployment spec.services must be an object")
+        service_items = services.items()
+    else:
+        components = spec.get("components", []) if isinstance(spec, Mapping) else []
+        if not isinstance(components, list):
+            raise TypeError("DynamoGraphDeployment spec.components must be a list")
+        service_items = (
+            (str(component.get("name", f"component-{index}")), component)
+            for index, component in enumerate(components)
+            if isinstance(component, Mapping)
+        )
+    spec_env = _env(spec.get("env", []), config_map_data) if isinstance(spec, Mapping) else {}
     records: list[_Service] = []
-    for name, raw in services.items():
+    for name, raw in service_items:
         if not isinstance(name, str) or not isinstance(raw, Mapping):
             continue
-        component = str(raw.get("componentType", "")).lower()
-        if component == "main":
-            raise ValueError("componentType: main is not supported by adapter v1")
-        if component != "worker":
+        component = str(raw.get("componentType", raw.get("type", ""))).lower()
+        if component not in {"worker", "prefill", "decode", "main"}:
             continue
         main = _container(raw)
-        env = {**_env(raw.get("envs", [])), **_env(main.get("env", []))}
-        command = _expand_literal(_command(main), env)
+        env = {
+            **spec_env,
+            **_env(raw.get("envs", []), config_map_data),
+            **_env(main.get("env", []), config_map_data),
+        }
+        command = _expand_literal(_engine_command(_command(main)), env)
+        if component == "main" and _BACKEND_MODULE_PATTERN.search(command) is None:
+            raise ValueError("componentType: main requires an explicit Dynamo backend worker command")
         flags = _flags(command)
+        role = _role(name, raw, flags)
+        if component == "main" and role == "worker":
+            raise ValueError("componentType: main requires an explicit prefill or decode role")
         records.append(
             _Service(
                 name=name,
-                role=_role(name, raw, flags),
+                role=role,
                 config=raw,
                 env=env,
                 flags=flags,
-                engine_config=_mounted_config(raw, config_maps),
+                engine_config=_mounted_config(raw, config_maps, env),
             )
         )
     if not records:
         raise ValueError("DynamoGraphDeployment has no worker services")
-    if len(records) == 1 and records[0].role == "worker":
+    if len(records) == 1:
         records[0] = _Service(**{**records[0].__dict__, "role": "agg"})
     elif any(record.role == "worker" for record in records):
         raise ValueError("multiple workers require explicit prefill/decode roles")
@@ -414,6 +505,9 @@ def _system(config: Mapping[str, Any]) -> str | None:
 
     def visit(value: Any, parent_key: str = "") -> None:
         if isinstance(value, Mapping):
+            selector_key = value.get("key")
+            if isinstance(selector_key, str) and "product" in selector_key.lower():
+                visit(value.get("values", []), selector_key)
             for key, nested in value.items():
                 visit(nested, str(key))
         elif isinstance(value, list):
@@ -433,8 +527,8 @@ def _system(config: Mapping[str, Any]) -> str | None:
 
 
 def _model(service: _Service) -> str | None:
-    config_model = service.engine_config.get("model") or service.engine_config.get("model_path")
-    return _coalesce(
+    config_model = _config_value(service, "model") or _config_value(service, "model_path")
+    model = _coalesce(
         "model identity",
         (
             ("--model", _flag(service, "model", "model-path")),
@@ -442,10 +536,23 @@ def _model(service: _Service) -> str | None:
             ("engine ConfigMap", config_model),
         ),
     )
+    served_model = _coalesce(
+        "served model identity",
+        (
+            ("--served-model-name", _flag(service, "served-model-name")),
+            ("SERVED_MODEL_NAME", service.env.get("SERVED_MODEL_NAME")),
+        ),
+    )
+    if isinstance(model, str) and model.startswith("/") and isinstance(served_model, str):
+        return served_model
+    return model or served_model
 
 
 def _config_value(service: _Service, name: str) -> Any:
-    return service.engine_config.get(name)
+    for candidate in (name, name.replace("_", "-"), name.replace("-", "_")):
+        if candidate in service.engine_config:
+            return service.engine_config[candidate]
+    return None
 
 
 def _worker_settings(
@@ -453,7 +560,7 @@ def _worker_settings(
     *,
     backend: str,
     concurrency: int,
-    prefill_batch_override: int | None,
+    batch_override: int | None,
     assumptions: list[str],
 ) -> WorkerSettingsV1:
     replicas = _as_int(service.config.get("replicas", 1), f"{service.name}.replicas")
@@ -537,12 +644,16 @@ def _worker_settings(
             ("engine ConfigMap", _config_value(service, "max_batch_size")),
         ),
     )
+    max_batch_value = _as_int(max_batch, f"{service.name} max batch size") if max_batch is not None else None
     if service.role == "prefill":
-        raw_batch = prefill_batch_override if prefill_batch_override is not None else max_batch
+        raw_batch = batch_override if batch_override is not None else max_batch
         if raw_batch is None:
             raw_batch = 1
             assumptions.append(f"{service.name} prefill batch size defaults to 1.")
         batch = _as_int(raw_batch, f"{service.name} prefill batch size")
+    elif batch_override is not None:
+        batch = _as_int(batch_override, f"{service.name} batch size override")
+        assumptions.append(f"{service.name} active batch size is explicitly overridden to {batch}.")
     else:
         denominator = replicas * attention_dp
         if concurrency % denominator:
@@ -551,8 +662,14 @@ def _worker_settings(
                 f"{service.name} replicas * attention DP ({denominator})"
             )
         batch = concurrency // denominator
-        if max_batch is not None and batch > _as_int(max_batch, f"{service.name} max batch size"):
-            raise ValueError(f"active batch size {batch} exceeds {service.name} max batch size {max_batch}")
+    if max_batch_value is not None and batch > max_batch_value:
+        if batch_override is not None:
+            raise ValueError(f"active batch size {batch} exceeds {service.name} max batch size {max_batch_value}")
+        assumptions.append(
+            f"{service.name} active batch size is capped at its declared max batch size "
+            f"{max_batch_value}; workload concurrency {concurrency} remains unchanged."
+        )
+        batch = max_batch_value
     return WorkerSettingsV1(
         replicas=replicas,
         gpus_per_replica=gpus,
@@ -723,11 +840,22 @@ def _discover_points(documents: Sequence[Mapping[str, Any]], overrides: AdapterO
 def _runtime_value(services: Sequence[_Service], flag_names: tuple[str, ...], config_path: tuple[str, ...]) -> Any:
     values: list[tuple[str, Any]] = []
     for service in services:
-        value = _flag(service, *flag_names)
+        command_value = _flag(service, *flag_names)
         config_value: Any = service.engine_config
         for part in config_path:
             config_value = config_value.get(part) if isinstance(config_value, Mapping) else None
-        values.extend(((f"{service.name} command", value), (f"{service.name} ConfigMap", config_value)))
+        if service.flags.get("extra-engine-args") not in (None, True) and config_value is not None:
+            # Dynamo TRT-LLM constructs engine arguments from CLI values, then
+            # applies --extra-engine-args on top. Match that effective-value
+            # precedence instead of treating the two declarations as a conflict.
+            values.append((f"{service.name} ConfigMap", config_value))
+        else:
+            values.extend(
+                (
+                    (f"{service.name} command", command_value),
+                    (f"{service.name} ConfigMap", config_value),
+                )
+            )
     return _coalesce(flag_names[0], values)
 
 
@@ -766,7 +894,9 @@ def _request_for_point(
         raise ValueError(f"heterogeneous hardware is not supported: {sorted(explicit_systems)}")
     system = overrides.system_name or next(iter(explicit_systems), None)
     if not system:
-        raise ValueError("GPU system is missing; provide an explicit system_name override")
+        raise ValueError(
+            "GPU model is not declared in a machine-readable deployment field; provide an explicit system_name override"
+        )
 
     assumptions: list[str] = []
     by_role = {service.role: service for service in services}
@@ -776,7 +906,7 @@ def _request_for_point(
                 by_role["agg"],
                 backend=backend,
                 concurrency=concurrency,
-                prefill_batch_override=None,
+                batch_override=overrides.batch_size,
                 assumptions=assumptions,
             )
         )
@@ -788,14 +918,14 @@ def _request_for_point(
                 by_role["prefill"],
                 backend=backend,
                 concurrency=concurrency,
-                prefill_batch_override=overrides.prefill_batch_size,
+                batch_override=overrides.prefill_batch_size,
                 assumptions=assumptions,
             ),
             decode=_worker_settings(
                 by_role["decode"],
                 backend=backend,
                 concurrency=concurrency,
-                prefill_batch_override=None,
+                batch_override=overrides.decode_batch_size,
                 assumptions=assumptions,
             ),
         )
@@ -865,21 +995,57 @@ def _request_for_point(
     nextn = overrides.nextn if overrides.nextn is not None else (source_nextn if source_nextn is not None else 0)
 
     free_fraction = overrides.free_gpu_memory_fraction
+    prefill_free_fraction = overrides.prefill_free_gpu_memory_fraction
+    decode_free_fraction = overrides.decode_free_gpu_memory_fraction
+    fraction_flags = ("free-gpu-memory-fraction", "gpu-memory-utilization", "mem-fraction-static")
+    fraction_config_path = ("kv_cache_config", "free_gpu_memory_fraction")
     if free_fraction is None:
-        raw_fraction = _runtime_value(
-            services,
-            ("free-gpu-memory-fraction", "gpu-memory-utilization", "mem-fraction-static"),
-            ("kv_cache_config", "free_gpu_memory_fraction"),
-        )
-        free_fraction = _as_float(raw_fraction, "free GPU memory fraction") if raw_fraction is not None else None
+        if topology.kind == "disagg":
+            prefill_service = next(service for service in services if service.role == "prefill")
+            decode_service = next(service for service in services if service.role == "decode")
+            if prefill_free_fraction is None:
+                raw_prefill_fraction = _runtime_value([prefill_service], fraction_flags, fraction_config_path)
+                prefill_free_fraction = (
+                    _as_float(raw_prefill_fraction, "prefill free GPU memory fraction")
+                    if raw_prefill_fraction is not None
+                    else None
+                )
+            if decode_free_fraction is None:
+                raw_decode_fraction = _runtime_value([decode_service], fraction_flags, fraction_config_path)
+                decode_free_fraction = (
+                    _as_float(raw_decode_fraction, "decode free GPU memory fraction")
+                    if raw_decode_fraction is not None
+                    else None
+                )
+        else:
+            raw_fraction = _runtime_value(services, fraction_flags, fraction_config_path)
+            free_fraction = _as_float(raw_fraction, "free GPU memory fraction") if raw_fraction is not None else None
     max_seq_len = overrides.max_seq_len
+    prefill_max_seq_len = overrides.prefill_max_seq_len
+    decode_max_seq_len = overrides.decode_max_seq_len
     if max_seq_len is None:
-        raw_max_seq = _runtime_value(
-            services,
-            ("max-model-len", "max-seq-len", "context-length"),
-            ("max_seq_len",),
-        )
-        max_seq_len = _as_int(raw_max_seq, "max sequence length") if raw_max_seq is not None else None
+        max_seq_flags = ("max-model-len", "max-seq-len", "context-length")
+        max_seq_config_path = ("max_seq_len",)
+        if topology.kind == "disagg":
+            prefill_service = next(service for service in services if service.role == "prefill")
+            decode_service = next(service for service in services if service.role == "decode")
+            if prefill_max_seq_len is None:
+                raw_prefill_max_seq = _runtime_value([prefill_service], max_seq_flags, max_seq_config_path)
+                prefill_max_seq_len = (
+                    _as_int(raw_prefill_max_seq, "prefill max sequence length")
+                    if raw_prefill_max_seq is not None
+                    else None
+                )
+            if decode_max_seq_len is None:
+                raw_decode_max_seq = _runtime_value([decode_service], max_seq_flags, max_seq_config_path)
+                decode_max_seq_len = (
+                    _as_int(raw_decode_max_seq, "decode max sequence length")
+                    if raw_decode_max_seq is not None
+                    else None
+                )
+        else:
+            raw_max_seq = _runtime_value(services, max_seq_flags, max_seq_config_path)
+            max_seq_len = _as_int(raw_max_seq, "max sequence length") if raw_max_seq is not None else None
 
     metadata = dgd.get("metadata", {})
     deployment_name = metadata.get("name") if isinstance(metadata, Mapping) else None
@@ -903,7 +1069,11 @@ def _request_for_point(
         runtime=RuntimeSettingsV1(
             systems_paths=overrides.systems_paths,
             free_gpu_memory_fraction=free_fraction,
+            prefill_free_gpu_memory_fraction=prefill_free_fraction,
+            decode_free_gpu_memory_fraction=decode_free_fraction,
             max_seq_len=max_seq_len,
+            prefill_max_seq_len=prefill_max_seq_len,
+            decode_max_seq_len=decode_max_seq_len,
             engine_step_backend=overrides.engine_step_backend,
         ),
         provenance=SourceProvenanceV1(
@@ -947,7 +1117,7 @@ def adapt_dynamo(source: DynamoRecipeSource, overrides: AdapterOverrides) -> Ada
             raise ValueError(f"expected exactly one DynamoGraphDeployment, found {len(dgds)}")
         dgd = dgds[0]
         config_maps = _config_maps(deployment_documents)
-        services = _service_records(dgd, config_maps)
+        services = _service_records(dgd, config_maps, _config_map_data(deployment_documents))
         spec = dgd.get("spec", {})
         declared_backend = _normalize_backend(spec.get("backendFramework") if isinstance(spec, Mapping) else None)
         command_backends: set[str] = set()
