@@ -553,6 +553,16 @@ def _add_default_mode_arguments(parser):
         help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell. "
         "'deepep_moe' is deprecated and ignored (large-EP is explored automatically from data coverage).",
     )
+    parser.add_argument(
+        "--attention-backend",
+        type=str,
+        choices=["fa3", "triton", "trtllm_mha", "flashinfer", "fla", "default"],
+        default=None,
+        help="Attention kernel backend the deployment serves with (mirrors sglang --attention-backend). "
+        "Selects the matching perf-table lane; unset uses the framework default for the target system. "
+        "Currently consumed by Qwen3.5 (dense attention) and DeepSeek WideEP MLA; other models ignore "
+        "this override.",
+    )
 
 
 def _add_recommend_mode_arguments(parser):
@@ -727,6 +737,16 @@ def _add_recommend_mode_arguments(parser):
         help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell. "
         "'deepep_moe' is deprecated and ignored (large-EP is explored automatically from data coverage).",
     )
+    parser.add_argument(
+        "--attention-backend",
+        type=str,
+        choices=["fa3", "triton", "trtllm_mha", "flashinfer", "fla", "default"],
+        default=None,
+        help="Attention kernel backend the deployment serves with (mirrors sglang --attention-backend). "
+        "Selects the matching perf-table lane; unset uses the framework default for the target system. "
+        "Currently consumed by Qwen3.5 (dense attention) and DeepSeek WideEP MLA; other models ignore "
+        "this override.",
+    )
 
 
 def _add_experiments_mode_arguments(parser):
@@ -744,6 +764,16 @@ def _add_experiments_mode_arguments(parser):
             "Report TPOT as (ttft + tpot * (osl - 1)) / osl, spreading TTFT cost across all output tokens. "
             "Affects terminal output and saved CSV only; SLA filtering always uses inter-token latency."
         ),
+    )
+    parser.add_argument(
+        "--attention-backend",
+        type=str,
+        choices=["fa3", "triton", "trtllm_mha", "flashinfer", "fla", "default"],
+        default=None,
+        help="Attention kernel backend the deployment serves with (mirrors sglang --attention-backend). "
+        "Selects the matching perf-table lane; unset uses the framework default for the target system. "
+        "Currently consumed by Qwen3.5 (dense attention) and DeepSeek WideEP MLA; other models ignore "
+        "this override.",
     )
 
 
@@ -1276,6 +1306,16 @@ def _add_estimate_mode_arguments(parser):
         "Controls how many KV blocks TRT-LLM pre-allocates per sequence. "
         "Set this to match your actual deployment to get an accurate KV cache capacity warning.",
     )
+    parser.add_argument(
+        "--attention-backend",
+        type=str,
+        choices=["fa3", "triton", "trtllm_mha", "flashinfer", "fla", "default"],
+        default=None,
+        help="Attention kernel backend the deployment serves with (mirrors sglang --attention-backend). "
+        "Selects the matching perf-table lane; unset uses the framework default for the target system. "
+        "Currently consumed by Qwen3.5 (dense attention) and DeepSeek WideEP MLA; other models ignore "
+        "this override.",
+    )
 
 
 def _add_support_mode_arguments(parser):
@@ -1545,6 +1585,7 @@ def build_default_tasks(
     max_seq_len: int | None = None,
     enable_wideep: bool = False,
     moe_backend: str | None = None,
+    attention_backend: str | None = None,
     engine_step_backend: str | None = None,
     forward_model: str | None = None,
     serving_mode: str = "auto",
@@ -1731,6 +1772,7 @@ def build_default_tasks(
         "transfer_policy": transfer_policy,
         "free_gpu_memory_fraction": free_gpu_memory_fraction,
         "max_seq_len": max_seq_len,
+        "attention_backend": attention_backend,
         "engine_step_backend": engine_step_backend,
     }
     if forward_model is not None:
@@ -1863,6 +1905,7 @@ def build_experiment_tasks(
     config: dict[str, Any] | None = None,
     engine_step_backend: str | None = None,
     forward_model: str | None = None,
+    attention_backend: str | None = None,
 ) -> dict[str, Task]:
     """Build task configs from YAML file or config dict.
 
@@ -1973,6 +2016,8 @@ def build_experiment_tasks(
             overrides["engine_step_backend"] = engine_step_backend
         if forward_model is not None and "forward_model" not in exp_config:
             overrides["forward_model"] = forward_model
+        if attention_backend is not None and "attention_backend" not in exp_config:
+            overrides["attention_backend"] = attention_backend
 
         try:
             task_config = {**exp_config, "database_mode": database_mode}
@@ -2674,6 +2719,7 @@ def _run_estimate_mode(args):
         max_seq_len=args.max_seq_len,
         engine_step_backend=args.engine_step_backend,
         forward_model=args.forward_model,
+        attention_backend=getattr(args, "attention_backend", None),
         prefix=args.prefix,
         nextn=args.nextn,
         nextn_accepted=args.nextn_accepted,
@@ -2975,6 +3021,7 @@ def _run_recommend(args) -> None:
             max_seq_len=args.max_seq_len,
             enable_wideep=getattr(args, "enable_wideep", False),
             moe_backend=getattr(args, "moe_backend", None),
+            attention_backend=getattr(args, "attention_backend", None),
             top_n=args.top_n,
             save_dir=args.save_dir,
             engine_step_backend=args.engine_step_backend,
@@ -3144,6 +3191,7 @@ def main(args):
             afd_candidate_overflow=getattr(args, "afd_candidate_overflow", "error"),
             enable_wideep=getattr(args, "enable_wideep", False),
             moe_backend=getattr(args, "moe_backend", None),
+            attention_backend=getattr(args, "attention_backend", None),
         )
     elif args.mode == "exp":
         try:
@@ -3152,6 +3200,8 @@ def main(args):
                 build_kwargs["engine_step_backend"] = args.engine_step_backend
             if args.forward_model is not None:
                 build_kwargs["forward_model"] = args.forward_model
+            if getattr(args, "attention_backend", None) is not None:
+                build_kwargs["attention_backend"] = args.attention_backend
             tasks = build_experiment_tasks(**build_kwargs)
         except (ValueError, TypeError) as exc:
             logger.exception("Failed to build experiment task configs")

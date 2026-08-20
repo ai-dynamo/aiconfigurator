@@ -105,12 +105,27 @@ model_case_values:
           allowed_modes: [nvfp4]
         vllm:
           allowed_modes: [nvfp4]
+    # NVFP4 artifact (experts-only ModelOpt recipe; kv fp8). Serving pin:
+    # sglang launched with --quantization modelopt_fp4 --moe-runner-backend
+    # flashinfer_trtllm (InferenceX runs 28131757535 / 28719981652,
+    # sglang v0.5.14-cu130 image); re-verify against sglang 0.5.14 moe
+    # runner dispatch on version bumps.
+    # SM100/103 resolve to flashinfer_trtllm even without the explicit
+    # --moe-runner-backend flag: ModelOptNvFp4FusedMoEMethod.create_moe_runner
+    # (modelopt_quant.py:2311-2323) leaves MARLIN only for capability in
+    # [8.0, 10.0) and defaults everything else -- SM100 (10,0) and SM103
+    # (10,3) both fail that upper-bound check -- to FLASHINFER_TRTLLM
+    # (modelopt_quant.py:2317-2323, "TRTLLM is currently the most performant
+    # and tested FP4 MoE backend"), same base_ops/moe.yaml:97-105 citation
+    # style/source as the other nvfp4-gated MoE models.
     - model_path: nvidia/Qwen3.5-397B-A17B-NVFP4
       hidden_size: 4096
       inter_size: 1024
       topk: 10
       num_experts: 512
       sglang_moe_routing_method_type: RenormalizeNaive
+      sglang_moe_backends:
+        nvfp4: {100: flashinfer_trtllm, 103: flashinfer_trtllm}
       framework_quantization:
         sglang:
           allowed_modes: [nvfp4]

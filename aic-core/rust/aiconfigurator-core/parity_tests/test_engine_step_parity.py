@@ -81,6 +81,12 @@ class EngineStepParityCase:
     afd_a_tp_size: int = 1
     afd_a_batch_size: int = 128
     afd_f_moe_ep_size: int = 1
+    # Attention kernel-lane override (`ModelConfig.attention_backend`,
+    # AIC-1715/1716). `None` = no override, i.e. the framework-default lane
+    # heads the precedence order. The op carries the RESOLVED walk order into
+    # the spec, so this is the knob that makes Rust and Python have to agree on
+    # which kernel's measurements answer a query.
+    attention_backend: str | None = None
 
 
 SMOKE_CASES = [
@@ -621,6 +627,31 @@ SMOKE_CASES = [
         ),
         id="kimi-k3-b300-sglang-0516-dspark-nextn7",
     ),
+    # Attention kernel-lane coverage (AIC-1715/1716). b200_sxm/sglang/0.5.14
+    # collects three lanes for the dense attention ops (trtllm_mha, triton,
+    # flashinfer) and 0.5.14 is the first version with a framework-default map
+    # entry, so Qwen3.5-27B's full-attention layers walk a REAL multi-lane
+    # table: the no-override case heads on the map lane (triton) and gap-fills
+    # from trtllm_mha, the override case pins trtllm_mha first. Python resolves
+    # the walk order and Rust replays it verbatim off the op spec, so a drift
+    # in either the resolver or the replay shows up here as a latency split.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3.5-27B",
+            backend_name="sglang",
+            backend_version="0.5.14",
+        ),
+        id="qwen35-27b-b200-sglang-0514-lanes-default",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3.5-27B",
+            backend_name="sglang",
+            backend_version="0.5.14",
+            attention_backend="trtllm_mha",
+        ),
+        id="qwen35-27b-b200-sglang-0514-lanes-trtllm-mha",
+    ),
 ]
 
 PARITY_RTOL = 0.01
@@ -831,6 +862,7 @@ def _static_metrics(
         "database_mode": case.database_mode,
         "transfer_policy": case.transfer_policy,
         "moe_quant_mode": case.moe_quant_mode,
+        "attention_backend": case.attention_backend,
     }
     ctx_result = _MemoizedCall(lambda: _quiet_call(cli_estimate, mode="static_ctx", **kwargs))
     gen_result = _MemoizedCall(lambda: _quiet_call(cli_estimate, mode="static_gen", **kwargs))
@@ -883,6 +915,7 @@ def _agg_metrics(case: EngineStepParityCase) -> dict[str, float | _ErrorSentinel
             database_mode=case.database_mode,
             transfer_policy=case.transfer_policy,
             moe_quant_mode=case.moe_quant_mode,
+            attention_backend=case.attention_backend,
         )
 
     # Errors propagate from a single call site — capture once, surface
@@ -927,6 +960,7 @@ def _disagg_metrics(case: EngineStepParityCase) -> dict[str, float | _ErrorSenti
             database_mode=case.database_mode,
             transfer_policy=case.transfer_policy,
             moe_quant_mode=case.moe_quant_mode,
+            attention_backend=case.attention_backend,
         )
 
     err: _ErrorSentinel | None = None
@@ -1048,6 +1082,7 @@ def _case_model_config(case: EngineStepParityCase) -> config.ModelConfig:
         cp_size=case.cp_size,
         moe_quant_mode=(common.MoEQuantMode[case.moe_quant_mode] if case.moe_quant_mode else None),
         nextn=case.nextn,
+        attention_backend=case.attention_backend,
     )
 
 
