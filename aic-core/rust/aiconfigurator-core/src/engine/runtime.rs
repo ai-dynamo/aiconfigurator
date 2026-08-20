@@ -859,6 +859,23 @@ impl Engine {
     /// component stays the pass-baseline marginal. Correct only when the
     /// deployed engine configuration (especially the CUDA-graph capture
     /// surface) matches the collection — the cliffs live in the data.
+    ///
+    /// KNOWN LIMITATION (measured, Qwen3-8B x H100 x vLLM): the agg
+    /// caller's mean-field schedule prices EVERY round as a mixed step. Below
+    /// the workpoint where at least one full request prefill arrives per
+    /// round (c < osl / tokens_per_round, e.g. c < ~54 at osl 261 / width 8)
+    /// that assumption breaks — one request's prefill is indivisible, the
+    /// real p50 round is a pure-decode graph step, and the whole-pass
+    /// prefill floor overprices the round by +12..34% (all four measured
+    /// arms; validated against static-batch pure-decode measurement at
+    /// +-5%). The fix direction is a workpoint-aware caller (static_gen
+    /// pricing + amortized whole prefill passes below the threshold), which
+    /// is an agg-scheduling change, not a per-step pricing change here.
+    /// Second-order term: the equivalent-AR row over-prices the real
+    /// wide-verify kernel by up to ~14% in the mid-token x mid-KV pocket
+    /// (256-512 step tokens, short mapped chains); it converges at larger
+    /// token counts or longer chains. Closing it needs w>1-shaped rows in
+    /// the collection — a data-side follow-up.
     fn fpm_mixed_step_components(
         &self,
         prefill_op: &FpmForwardOp,
