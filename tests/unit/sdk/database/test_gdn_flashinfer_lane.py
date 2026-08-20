@@ -7,187 +7,199 @@
 Task 2 (collector) added ``flashinfer_gated_delta_rule_decode`` as a SIBLING
 decode row alongside the existing fla/triton fp32-state lane
 (``fused_sigmoid_gating_delta_rule_update``) on SM100+ sglang. This module
-covers the modeling side: ``GDNKernel._query_gdn_table`` (mamba.py) must
+covers the modeling side: on SM100+ sglang, the compiled engine must
 (a) prefer the FlashInfer lane's own rows over the fla lane when both cover
-a shape on SM100+ sglang, degrading to the fla lane exactly as before when
-the FlashInfer lane is absent, and (b) size the recurrent state at 2 bytes
-(bf16) for the FlashInfer lane vs. 4 bytes (fp32) for fla lanes in
-``get_sol``.
+a shape, degrading to the fla lane exactly as before when the FlashInfer
+lane is absent, and (b) size the recurrent state at 2 bytes (bf16) for the
+FlashInfer lane vs. 4 bytes (fp32) for fla lanes in the SOL formula.
 
-Fixture style follows ``test_gdn_kernel_alias.py`` (#1503's own-physical-lane
-precedence tests) and ``test_gdn_donor_fill_pins.py`` (direct
-``GDNKernel._query_gdn_table`` calls against a real system spec).
-"""
+Rebase note (post pyo3 op-unification, #1552/#1555/#1566): the Python
+per-call query stack (``GDNKernel._query_gdn_table``, ``PerfDatabase.query_gdn``)
+is retired — lane selection AND the SOL byte-count formula now live solely in
+the Rust engine (``operators/mamba.rs::GdnOp``,
+``perf_database/state_space.rs::StateSpaceTable::query_gdn``; see
+``.claude/rules/rust-core/parity.md`` Rule 2 — Python may not own `_query_*`/
+`get_sol` estimation math). This module now exercises that engine through the
+sanctioned ``Operation._engine_query`` shim (see ``test_msa.py``,
+``test_deepseek_v4_module.py`` for the same pattern) against REAL on-disk
+tables — ``PerfDatabase._gdn_data`` is a raw loaded-table cache the engine
+never reads for a query, so a synthetic injected table (the pre-rebase
+version of this file) is invisible to it and no longer proves anything about
+query-time behavior.
+
+The Rust unit tests in ``operators/mamba.rs`` and
+``perf_database/state_space.rs`` (``sglang_sm100_gdn_prefers_flashinfer_decode_lane_when_present``,
+``sglang_sm100_gdn_falls_back_to_fla_lane_when_flashinfer_absent``,
+``sglang_sm90_gdn_never_selects_flashinfer_lane_even_if_present``,
+``gdn_flashinfer_lane_sol_matches_python_bs128_census_anchor``) cover the
+same claims with synthetic in-memory tables (including the strict "SM90
+ignores a present flashinfer row" edge case real data cannot exercise, since
+serving never collects that combination) — this file is the Python-level,
+real-data-grounded companion, not a duplicate.
+
+Fixture style follows ``test_gdn_donor_fill_pins.py`` (direct ``get_database``
++ ``GDNKernel.load_data`` for raw-table pins) and ``test_msa.py``
+(``op._engine_query`` for query-time behavior)."""
 
 import pytest
 
-from aiconfigurator.sdk import common
-from aiconfigurator.sdk.perf_database import LoadedOpData, get_database
+from aiconfigurator.sdk.perf_database import get_database
 from aiconfigurator_core.sdk.operations.mamba import GDNKernel
 
 pytestmark = pytest.mark.unit
 
-# Same shape convention as test_gdn_kernel_alias.py: (d_model, num_k_heads,
+# Arbitrary synthetic shape for the pure-SOL formula tests below (no data
+# lookup involved — see ``database_mode="SOL"``), same convention as
+# ``test_gdn_kernel_alias.py``'s successor: (d_model, num_k_heads,
 # head_k_dim, num_v_heads, head_v_dim, d_conv).
 MODEL_KEY = (2048, 16, 128, 32, 128, 4)
-MODEL_SHAPE = {
-    "d_model": 2048,
-    "num_k_heads": 16,
-    "head_k_dim": 128,
-    "num_v_heads": 32,
-    "head_v_dim": 128,
-    "d_conv": 4,
-}
 
 
-def _generation_table(latency):
-    return {1: {"latency": latency, "power": 0.0, "energy": 0.0}}
-
-
-def _query_gdn_generation(db, kernel_source, batch, model_key, d_model=None):
-    d, n_k, k_dim, n_v, v_dim, d_conv = model_key
-    return float(
-        GDNKernel._query_gdn_table(
-            db,
-            phase="generation",
-            kernel_source=kernel_source,
-            batch_size=batch,
-            seq_len=None,
-            d_model=d if d_model is None else d_model,
-            num_k_heads=n_k,
-            head_k_dim=k_dim,
-            num_v_heads=n_v,
-            head_v_dim=v_dim,
-            d_conv=d_conv,
-        )
+def _gdn_op(kernel_source, phase, model_key):
+    d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv = model_key
+    return GDNKernel(
+        "gdn", 1.0, kernel_source, phase, d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv
     )
 
 
-@pytest.fixture
-def sglang_sm100_gdn_db(stub_perf_db):
-    stub_perf_db.backend = "sglang"
-    stub_perf_db.system_spec["gpu"]["sm_version"] = 103
-    return stub_perf_db
+def _query_gdn_generation(db, kernel_source, model_key, batch, d_model=None):
+    """Query the GDN op's generation phase through the compiled engine
+    (``Operation._engine_query`` — the permanent internal single-op plumbing,
+    see ``test_msa.py``). Returns ``(latency_ms, source)``."""
+    key = model_key if d_model is None else (d_model, *model_key[1:])
+    op = _gdn_op(kernel_source, "generation", key)
+    result = op._engine_query(db, batch_size=batch, s=1)
+    return float(result), result.source
+
+
+def _query_gdn_context(db, kernel_source, model_key, batch, seq_len, d_model=None):
+    key = model_key if d_model is None else (d_model, *model_key[1:])
+    op = _gdn_op(kernel_source, "context", key)
+    result = op._engine_query(db, batch_size=batch, s=seq_len)
+    return float(result), result.source
 
 
 # ---------------------------------------------------------------------------
 # Precedence: SM100+ sglang decode prefers the FlashInfer lane when present.
+# Real on-disk tables (AIC-1745's gb300/gb200/b200_sxm sglang/0.5.14 rows):
+# both lanes cover the Qwen3.5-397B tp4 shard shape, with distinct measured
+# values, so a query resolving to the FlashInfer value (not the fla value)
+# is a genuine query-time proof, not a fixture artifact.
 # ---------------------------------------------------------------------------
 
 
-def test_query_gdn_sglang_sm100_prefers_flashinfer_decode_lane(sglang_sm100_gdn_db):
-    sglang_sm100_gdn_db._gdn_data = LoadedOpData(
-        {
-            "fused_sigmoid_gating_delta_rule_update": {"generation": {MODEL_KEY: _generation_table(4.0)}},
-            "flashinfer_gated_delta_rule_decode": {"generation": {MODEL_KEY: _generation_table(2.1)}},
-        },
-        common.PerfDataFilename.gdn,
-        "gdn_perf.txt",
+def test_query_gdn_sglang_sm100_prefers_flashinfer_decode_lane():
+    db = get_database("gb300", "sglang", "0.5.14")
+    assert db.system_spec["gpu"]["sm_version"] >= 100
+    model_key = (4096, 4, 128, 16, 128, 4)  # Qwen3.5-397B GDN tp4 shard
+
+    # Raw-table pin (test_gdn_donor_fill_pins.py convention): the fla lane's
+    # OWN row at this shape, read directly off the loaded table. A QUERY for
+    # this kernel_source is exactly what resolves to the FlashInfer value
+    # below instead — the raw table is the only way to see this number.
+    GDNKernel.load_data(db)
+    fla_raw = db._gdn_data["fused_sigmoid_gating_delta_rule_update"]["generation"][model_key][1]["latency"]
+    assert fla_raw == pytest.approx(0.004236159920692444, rel=1e-9)
+
+    # Own-lane query pin: the FlashInfer kernel_source resolves its own row.
+    fi_latency, fi_source = _query_gdn_generation(db, "flashinfer_gated_delta_rule_decode", model_key, batch=1)
+    assert fi_source == "silicon"
+    assert fi_latency == pytest.approx(0.0023209600150585173, rel=1e-9)
+    assert fi_latency < fla_raw  # bf16 (2-byte) state genuinely cheaper than fp32 (4-byte)
+
+    # The precedence claim: querying the FLA kernel_source on SM100+ sglang
+    # must resolve the FlashInfer lane's row, not its own raw value.
+    resolved_latency, resolved_source = _query_gdn_generation(
+        db, "fused_sigmoid_gating_delta_rule_update", model_key, batch=1
     )
-
-    result = sglang_sm100_gdn_db.query_gdn(
-        phase="generation",
-        kernel_source="fused_sigmoid_gating_delta_rule_update",
-        batch_size=1,
-        seq_len=None,
-        **MODEL_SHAPE,
-    )
-
-    # The FlashInfer lane's own row wins, not the fla lane's.
-    assert float(result) == pytest.approx(2.1)
-    assert result.source == "silicon"
+    assert resolved_source == "silicon"
+    assert resolved_latency == pytest.approx(fi_latency, rel=1e-9)
+    assert resolved_latency != pytest.approx(fla_raw, rel=1e-9)
 
 
-def test_query_gdn_sglang_sm90_keeps_fla_lane_first(sglang_sm100_gdn_db):
-    """Hopper unchanged: the fla lane wins even when a flashinfer row exists
-    (serving never runs the FlashInfer decode kernel on SM90, so the
-    modeling layer must not reach for it there even if one is present)."""
-    sglang_sm100_gdn_db.system_spec["gpu"]["sm_version"] = 90
-    sglang_sm100_gdn_db._gdn_data = LoadedOpData(
-        {
-            "fused_sigmoid_gating_delta_rule_update": {"generation": {MODEL_KEY: _generation_table(4.0)}},
-            "flashinfer_gated_delta_rule_decode": {"generation": {MODEL_KEY: _generation_table(2.1)}},
-        },
-        common.PerfDataFilename.gdn,
-        "gdn_perf.txt",
-    )
+def test_query_gdn_sglang_sm90_keeps_fla_lane_first():
+    """Hopper unchanged: serving never runs the FlashInfer decode kernel on
+    SM90, so real SM90 sglang tables carry no flashinfer_gated_delta_rule_decode
+    rows at all and the query resolves the fla lane directly (the strict
+    "even if a flashinfer row were present" edge is real-data-unreachable;
+    the Rust test ``sglang_sm90_gdn_never_selects_flashinfer_lane_even_if_present``
+    covers it with a synthetic table)."""
+    db = get_database("h200_sxm", "sglang", "0.5.14")
+    assert db.system_spec["gpu"]["sm_version"] < 100
+    model_key = (1024, 4, 128, 4, 128, 4)
 
-    result = sglang_sm100_gdn_db.query_gdn(
-        phase="generation",
-        kernel_source="fused_sigmoid_gating_delta_rule_update",
-        batch_size=1,
-        seq_len=None,
-        **MODEL_SHAPE,
-    )
+    GDNKernel.load_data(db)
+    assert "flashinfer_gated_delta_rule_decode" not in db._gdn_data  # genuinely absent on SM90
 
-    assert float(result) == pytest.approx(4.0)
-    assert result.source == "silicon"
+    latency, source = _query_gdn_generation(db, "fused_sigmoid_gating_delta_rule_update", model_key, batch=1)
+    assert source == "silicon"
+    assert latency > 0
 
 
-def test_query_gdn_sglang_sm100_falls_back_to_fla_when_flashinfer_lane_absent(sglang_sm100_gdn_db):
-    """Tables collected before AIC-1745's collector change (Task 2) carry no
+def test_query_gdn_sglang_sm100_falls_back_to_fla_when_flashinfer_lane_absent():
+    """Tables collected before AIC-1745's collector change carry no
     flashinfer_gated_delta_rule_decode rows: degrade to the fla lane exactly
-    as before, never a hard failure."""
-    sglang_sm100_gdn_db._gdn_data = LoadedOpData(
-        {"fused_sigmoid_gating_delta_rule_update": {"generation": {MODEL_KEY: _generation_table(4.0)}}},
-        common.PerfDataFilename.gdn,
-        "gdn_perf.txt",
-    )
+    as before, never a hard failure. b200_sxm/sglang/0.5.10 is real,
+    genuinely SM100+, and genuinely predates the collector change (unlike
+    0.5.14/0.5.16, which now carry the FlashInfer lane on every SM100+
+    system checked)."""
+    db = get_database("b200_sxm", "sglang", "0.5.10")
+    assert db.system_spec["gpu"]["sm_version"] >= 100
+    model_key = (1024, 4, 128, 4, 128, 4)
 
-    result = sglang_sm100_gdn_db.query_gdn(
-        phase="generation",
-        kernel_source="fused_sigmoid_gating_delta_rule_update",
-        batch_size=1,
-        seq_len=None,
-        **MODEL_SHAPE,
-    )
+    GDNKernel.load_data(db)
+    assert "flashinfer_gated_delta_rule_decode" not in db._gdn_data  # pre-AIC-1745 collector data
 
-    assert float(result) == pytest.approx(4.0)
-    assert result.source == "silicon"
+    latency, source = _query_gdn_generation(db, "fused_sigmoid_gating_delta_rule_update", model_key, batch=1)
+    assert source == "silicon"
+    assert latency > 0
 
 
-def test_query_gdn_vllm_decode_alias_unaffected_by_sglang_branch(stub_perf_db):
+def test_query_gdn_vllm_generation_unaffected_by_sglang_branch_even_at_sm100():
     """The new sglang elif is a sibling of the vllm-0.24.0 branch, not a
-    replacement: vllm's own decode alias still resolves independent of
-    sm_version (regression guard for the added elif's placement)."""
-    stub_perf_db.backend = "vllm"
-    stub_perf_db.version = "0.24.0"
-    stub_perf_db.system_spec["gpu"]["sm_version"] = 103
-    stub_perf_db._gdn_data = LoadedOpData(
-        {"fused_recurrent_gated_delta_rule_packed_decode": {"generation": {MODEL_KEY: _generation_table(3.5)}}},
-        common.PerfDataFilename.gdn,
-        "gdn_perf.txt",
-    )
+    replacement: vllm's own generation row still resolves independent of
+    sm_version (regression guard for the added elif's placement). gb300 is
+    sm_version=103 — AT the exact SM100+ threshold that gates the new sglang
+    branch — deliberately chosen so the only thing keeping the sglang elif
+    from firing is the ``backend == "sglang"`` check, not sm_version."""
+    db = get_database("gb300", "vllm", "0.24.0")
+    assert db.system_spec["gpu"]["sm_version"] >= 100
+    model_key = (1024, 2, 128, 2, 128, 4)
 
-    result = stub_perf_db.query_gdn(
-        phase="generation",
-        kernel_source="fused_sigmoid_gating_delta_rule_update",
-        batch_size=1,
-        seq_len=None,
-        **MODEL_SHAPE,
-    )
-
-    assert float(result) == pytest.approx(3.5)
-    assert result.source == "silicon"
+    latency, source = _query_gdn_generation(db, "fused_sigmoid_gating_delta_rule_update", model_key, batch=1)
+    assert source == "silicon"
+    assert latency == pytest.approx(0.004360319972038269, rel=1e-9)
 
 
 # ---------------------------------------------------------------------------
-# get_sol: per-lane state bytes (2 for flashinfer, 4 for fla).
+# get_sol: per-lane state bytes (2 for flashinfer, 4 for fla). Pure formula —
+# an off-key synthetic d_model (8192, same convention as the census anchors
+# below) keeps the query off every real collected row regardless of system,
+# guaranteeing the pure-SOL fallback path (real gb300/sglang/0.5.14 spec for
+# mem_bw etc., matching the census anchors' technique). MODEL_KEY's real
+# (num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv) DO collide with
+# real gb300 rows at its own d_model=2048 -- confirmed empirically -- so the
+# override is required, not optional.
 # ---------------------------------------------------------------------------
 
 
-def test_get_sol_flashinfer_lane_state_bytes_ratio_matches_closed_form(stub_perf_db):
-    """Pure-SOL fallback (no gdn_data loaded -> get_sol()[0] path): the
-    FlashInfer lane's bf16 (2-byte) state must be strictly cheaper than the
-    fla lane's fp32 (4-byte) state at the same shape, by exactly the
-    closed-form bytes ratio -- the q/k/v activation terms (2-byte bf16) are
-    identical for both lanes; only the state read+write terms differ.
-    """
-    d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv = MODEL_KEY
+def test_get_sol_flashinfer_lane_state_bytes_ratio_matches_closed_form():
+    """The FlashInfer lane's bf16 (2-byte) state must be strictly cheaper
+    than the fla lane's fp32 (4-byte) state at the same shape, by exactly
+    the closed-form bytes ratio -- the q/k/v activation terms (2-byte bf16)
+    are identical for both lanes; only the state read+write terms differ."""
+    db = get_database("gb300", "sglang", "0.5.14")
+    _, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv = MODEL_KEY
     batch = 4
 
-    sol_flashinfer = _query_gdn_generation(stub_perf_db, "flashinfer_gated_delta_rule_decode", batch, MODEL_KEY)
-    sol_fla = _query_gdn_generation(stub_perf_db, "fused_sigmoid_gating_delta_rule_update", batch, MODEL_KEY)
+    sol_flashinfer, src_fi = _query_gdn_generation(
+        db, "flashinfer_gated_delta_rule_decode", MODEL_KEY, batch, d_model=8192
+    )
+    sol_fla, src_fla = _query_gdn_generation(
+        db, "fused_sigmoid_gating_delta_rule_update", MODEL_KEY, batch, d_model=8192
+    )
+    assert src_fi == "sol"
+    assert src_fla == "sol"
 
     assert sol_flashinfer > 0
     assert sol_flashinfer < sol_fla
@@ -202,29 +214,17 @@ def test_get_sol_flashinfer_lane_state_bytes_ratio_matches_closed_form(stub_perf
     assert sol_flashinfer / sol_fla == pytest.approx(expected_ratio, rel=1e-9)
 
 
-def test_get_sol_context_scan_state_bytes_unchanged_by_flashinfer_lane(stub_perf_db):
+def test_get_sol_context_scan_state_bytes_unchanged_by_flashinfer_lane():
     """The FlashInfer lane is decode-only: chunk_gated_delta_rule (context)
     keeps its 4-byte fp32 state regardless, verified via the closed form
     (a regression guard that the decode-branch edit didn't leak into
     context)."""
-    d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv = MODEL_KEY
+    db = get_database("gb300", "sglang", "0.5.14")
+    _, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv = MODEL_KEY
     batch, seq = 4, 128
 
-    sol_context = float(
-        GDNKernel._query_gdn_table(
-            stub_perf_db,
-            phase="context",
-            kernel_source="chunk_gated_delta_rule",
-            batch_size=batch,
-            seq_len=seq,
-            d_model=d_model,
-            num_k_heads=num_k_heads,
-            head_k_dim=head_k_dim,
-            num_v_heads=num_v_heads,
-            head_v_dim=head_v_dim,
-            d_conv=d_conv,
-        )
-    )
+    sol_context, source = _query_gdn_context(db, "chunk_gated_delta_rule", MODEL_KEY, batch, seq, d_model=8192)
+    assert source == "sol"
 
     x = batch * seq
     chunk_size = 64
@@ -235,13 +235,17 @@ def test_get_sol_context_scan_state_bytes_unchanged_by_flashinfer_lane(stub_perf
         x * (2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 4 * batch + h_chunks_bytes
     )
     write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 4 * batch + h_chunks_bytes
-    expected_ms = (read_bytes + write_bytes) / stub_perf_db.system_spec["gpu"]["mem_bw"] * 1000
+    expected_ms = (read_bytes + write_bytes) / db.system_spec["gpu"]["mem_bw"] * 1000
 
     assert sol_context == pytest.approx(expected_ms, rel=1e-9)
 
 
 # ---------------------------------------------------------------------------
-# Step 3: census anchor -- Qwen3.5-397B dims, tp4 shard, bs=1, gb300 spec.
+# Census anchor -- Qwen3.5-397B dims, tp4 shard, real gb300 spec. The 8192
+# d_model below is a deliberate synthetic stand-in (397B's real value is
+# 4096): flashinfer decode silicon rows are keyed at d_model=4096 in the
+# packaged gb300/sglang/0.5.14 table, so the off-key d_model keeps the query
+# off those shipped rows and pins the pure-SOL closed form itself.
 # ---------------------------------------------------------------------------
 
 
@@ -250,16 +254,7 @@ def test_flashinfer_lane_sol_census_anchor_qwen35_397b_tp4_gb300():
     head_k_dim=128, num_v_heads=64, head_v_dim=128), sharded tp4 the way
     Qwen35Model._build_generation_ops does (``gdn_nk_per_tp = nk // tp``,
     ``gdn_nv_per_tp = nv // tp`` -- head COUNTS only, head dims unchanged),
-    bs=1, real gb300 spec. The 8192 used for d_model below is a deliberate
-    synthetic stand-in, not 397B's real value (4096): flashinfer decode
-    silicon rows are keyed at d_model=4096 in the packaged
-    gb300/sglang/0.5.14 table (landed by AIC-1745), so the off-key d_model
-    keeps this query off those shipped rows and pins the pure-SOL closed
-    form itself, independent of table contents -- unlike the
-    collector-blind-spot case
-    ``test_query_gdn_sglang_sm100_falls_back_to_fla_when_flashinfer_lane_absent``
-    above, where the lane is genuinely absent from the fixture.
-    """
+    bs=1, real gb300 spec."""
     db = get_database("gb300", "sglang", "0.5.14")
     assert db.system_spec["gpu"]["sm_version"] >= 100
 
@@ -268,29 +263,22 @@ def test_flashinfer_lane_sol_census_anchor_qwen35_397b_tp4_gb300():
     num_k_heads = num_k_heads_full // tp
     num_v_heads = num_v_heads_full // tp
     batch = 1
+    model_key = (8192, num_k_heads, head_k_dim, num_v_heads, head_v_dim, 4)
 
-    sol_flashinfer = _query_gdn_generation(
-        db,
-        "flashinfer_gated_delta_rule_decode",
-        batch,
-        (8192, num_k_heads, head_k_dim, num_v_heads, head_v_dim, 4),
-    )
-    sol_fla = _query_gdn_generation(
-        db,
-        "fused_sigmoid_gating_delta_rule_update",
-        batch,
-        (8192, num_k_heads, head_k_dim, num_v_heads, head_v_dim, 4),
-    )
+    sol_flashinfer, src_fi = _query_gdn_generation(db, "flashinfer_gated_delta_rule_decode", model_key, batch)
+    sol_fla, _ = _query_gdn_generation(db, "fused_sigmoid_gating_delta_rule_update", model_key, batch)
 
     # Unambiguous, parameter-free properties: the FlashInfer lane is
     # strictly cheaper than the fla lane at this exact shape, and both are
     # a pure-SOL fallback by construction: the off-key d_model=8192 above
     # keeps the query away from the real d_model=4096 silicon rows.
+    assert src_fi == "sol"
     assert 0 < sol_flashinfer < sol_fla
 
     # Closed-form pin at these exact dims/batch/mem_bw (self-consistent with
-    # get_sol's formula -- see test_get_sol_flashinfer_lane_state_bytes_ratio
-    # _matches_closed_form above for the same derivation technique).
+    # the SOL formula -- see
+    # test_get_sol_flashinfer_lane_state_bytes_ratio_matches_closed_form
+    # above for the same derivation technique).
     #
     # NOTE (flagged for human review, see task-3-report.md "concerns"): at
     # the plan's literal parameters (tp4-sharded head COUNTS, bs=1) this
@@ -316,7 +304,8 @@ def test_flashinfer_lane_sol_matches_census_at_bs128():
     """Census anchor (L3 audit, gb300): measured flashinfer GDN decode at bs=128 is
     ~20.9 us/layer; the bf16-state SOL must land at ~80% of that. Guards the
     state-bytes term at a batch size where the kernel is genuinely memory-bound
-    (bs=1 is launch-floor territory where SOL is far below measured).
+    (bs=1 is launch-floor territory where SOL is far below measured). Rust
+    twin: ``operators::mamba::tests::gdn_flashinfer_lane_sol_matches_python_bs128_census_anchor``.
     """
     db = get_database("gb300", "sglang", "0.5.14")
     assert db.system_spec["gpu"]["sm_version"] >= 100
@@ -326,15 +315,12 @@ def test_flashinfer_lane_sol_matches_census_at_bs128():
     num_k_heads = num_k_heads_full // tp
     num_v_heads = num_v_heads_full // tp
     batch = 128
+    # Off-key synthetic d_model (see the bs=1 census anchor above); keeps
+    # this query on the pure-SOL path regardless of table rows.
+    model_key = (8192, num_k_heads, head_k_dim, num_v_heads, head_v_dim, 4)
 
-    sol_flashinfer_ms = _query_gdn_generation(
-        db,
-        "flashinfer_gated_delta_rule_decode",
-        batch,
-        # Off-key synthetic d_model (see the bs=1 census anchor above);
-        # keeps this query on the pure-SOL path regardless of table rows.
-        (8192, num_k_heads, head_k_dim, num_v_heads, head_v_dim, 4),
-    )
+    sol_flashinfer_ms, source = _query_gdn_generation(db, "flashinfer_gated_delta_rule_decode", model_key, batch)
+    assert source == "sol"
 
     sol_us = sol_flashinfer_ms * 1000
     assert 12.0 <= sol_us <= 22.0
