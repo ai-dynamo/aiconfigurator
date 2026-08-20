@@ -8,4 +8,12 @@ runtime:
   version: 0.5.14
 tables:
   gemm_perf:
+    # 2026-08-13: REPLACED all 29526 fp8_block rows (AIC-1744) — the prior
+    # rows billed load-time UE8M0 weight-scale packing inside every timed
+    # call (~9 us on a ~7 us gemm); the collector now pre-packs at setup
+    # exactly as serving's process_weights_after_loading does, and the
+    # timed op is act-quant + gemm only (so these rows now legitimately
+    # include the per-token-group quant serving pays each step).
+    # Example m32 @ n5120xk4096: 20.3 -> 10.8 us. Same key grid;
+    # values-only replacement, deliberate append-only exception.
     status: complete

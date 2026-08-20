@@ -152,6 +152,19 @@ model_case_values:
       output_feature_sizes: [1, 8, 16]
       input_feature_sizes: [4096]
   gdn:
+    # Decode kernel_source dispatch (collect_gdn.py, not expressed as case
+    # shape axes below — kernel choice doesn't change GDN geometry):
+    #   sm 90        -> fused_recurrent_gated_delta_rule_packed_decode (fla/triton, fp32 state)
+    #   sm 100, 103  -> fused_recurrent_gated_delta_rule_packed_decode (fla/triton, fp32 state)
+    #                   + flashinfer_gated_delta_rule_decode (FlashInfer, bf16 state) -- SIBLING lane
+    # SM100+ sglang serving makes the FlashInfer bf16-state kernel the
+    # mandatory decode path once mamba_ssm_dtype defaults to bfloat16
+    # (server_args.py _handle_linear_attn_backend, :4884-4915 @0.5.14); SM90
+    # has no such auto-flip and keeps only the fla lane. collect_gdn.py
+    # collects the FlashInfer lane as an additional row alongside the fla
+    # row on SM100+ (both are kept; a later modeling task prefers the
+    # FlashInfer lane when present), gated at runtime on
+    # get_sm_version() >= 100 and flashinfer importability.
     - model_path: Qwen/Qwen3.5-35B-A3B
       model_aliases:
         - nvidia/Qwen3.6-35B-A3B-NVFP4

@@ -1530,13 +1530,20 @@ CP_CASES = [
 # adjudicated repro shape.
 #
 # Anchored on BOTH the `cp_static_ctx` surface (the adjudicated static repro,
-# 42.430756 ms) and the mixed surface. The mixed anchor additionally pins the
-# `run_mixed` pass-filter fix: Python's passes used to run the FULL op lists
-# and discard the non-consumed values, so the generation-MoE singleton
-# low-token miss in pass 3 (num_tokens=1, one measured point at 1024) raised
-# on the Python side only, while the rust mixed step never queries the ops it
-# does not consume. With the passes filtered to their consumed sets the case
-# computes bit-identically on both engines (46.0492671363915 ms).
+# 41.737710 ms) and the mixed surface. cp_static_ctx was re-pinned from
+# 42.430756 ms for AIC-1759's b200_sxm sglang/0.5.14 gemm_perf replacement:
+# systems/data/b200_sxm/gemm/sglang/0.5.12/reuse.yaml declares gemm_perf
+# from_version 0.5.14 as this case's own donor, so the deliberate GEMM data
+# update shifts this anchor too, independent of the dsv4-sparse-table reuse
+# the case otherwise pins (re-pinned via pin_goldens.py --refresh; mixed is
+# unaffected, still bit-identical on both engines at the value below). The
+# mixed anchor additionally pins the `run_mixed` pass-filter fix: Python's
+# passes used to run the FULL op lists and discard the non-consumed values,
+# so the generation-MoE singleton low-token miss in pass 3 (num_tokens=1,
+# one measured point at 1024) raised on the Python side only, while the
+# rust mixed step never queries the ops it does not consume. With the
+# passes filtered to their consumed sets the case computes bit-identically
+# on both engines (46.0492671363915 ms).
 DSV4_CP_CASES = [
     pytest.param(
         EngineStepParityCase(
@@ -1610,7 +1617,12 @@ class TestRustEngineHandleDatabasePolicyIdentity:
     computing for the primary-only off-view that must raise).
     """
 
-    ANCHOR_MS = 42.4307555484161  # the issue #1498 adjudicated static_ctx sum
+    # The issue #1498 adjudicated static_ctx sum for DSV4_CP_CASES[0] (same
+    # shape `TestRustEngineStepCpStaticCtxParity` pins as `cp_static_ctx`).
+    # Re-pinned from 42.4307555484161 for AIC-1759's b200_sxm sglang/0.5.14
+    # gemm_perf replacement -- see the DSV4_CP_CASES comment above for why a
+    # deliberate GEMM data update shifts this reuse-carrying case's anchor.
+    ANCHOR_MS = 41.73771024187921
 
     def _static_ctx_ms(self, model, view) -> float:
         rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=8192, osl=8, prefix=0, engine_step_backend="rust")
