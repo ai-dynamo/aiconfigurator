@@ -155,7 +155,9 @@ def msa_sparse_implementation(backend_name: str, model_path: str, system_name: s
         # does not bundle): leave the knob unset — serving falls back to its
         # own default rather than receiving a wrong prescription.
         return None
-    if architecture != "MiniMaxM3ForCausalLM":
+    # Both artifact forms of the same model: the BF16 bundle carries the
+    # text-backbone architecture, the NVFP4 bundle the raw hub VL wrapper.
+    if architecture not in ("MiniMaxM3ForCausalLM", "MiniMaxM3SparseForConditionalGeneration"):
         return None
     spec = load_system_spec(system_name)
     if int(spec.get("gpu", {}).get("sm_version", -1)) in (100, 103):

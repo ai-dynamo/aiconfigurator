@@ -1852,7 +1852,10 @@ class TestBundledModelConfigsOffline:
 
         cfg = sdk_utils.get_model_config_from_model_path("nvidia/MiniMax-M3-NVFP4")
         raw = cfg["raw_config"]
-        assert cfg["architecture"] == "MiniMaxM3ForCausalLM"
+        # The bundled NVFP4 config is the raw hub (VL-wrapper) form since
+        # upstream 90f7fc0f; the parser keeps the top-level architecture and
+        # unwraps the text fields.
+        assert cfg["architecture"] == "MiniMaxM3SparseForConditionalGeneration"
         assert raw["quant_algo"] == "mixed_precision"
         assert raw.get("kv_cache_quant_algo") is None
 

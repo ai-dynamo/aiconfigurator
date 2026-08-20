@@ -426,13 +426,12 @@ def _normalize_mixed_precision_layer_algo(value: object) -> str | None:
         "fp8": "fp8",
         "e4m3": "fp8",
         "e5m2": "fp8",
-        "mxfp8": "mxfp8",
-        "nvfp4": "nvfp4",
-        "fp4": "nvfp4",
         # Kept distinct from "fp8": MXFP8 is 32-element block-scaled FP8, so
         # it must land on the fp8_block SDK modes, not the per-tensor
         # fp8_static/fp8 pair the "fp8" branch resolves to.
         "mxfp8": "mxfp8",
+        "nvfp4": "nvfp4",
+        "fp4": "nvfp4",
         "w4a16_nvfp4": "w4a16_nvfp4",
     }
     return aliases.get(algo, algo)

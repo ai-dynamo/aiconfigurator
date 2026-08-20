@@ -88,6 +88,9 @@ class _FakeTask:
     ("backend", "model", "system", "expected"),
     [
         ("trtllm", "MiniMaxAI/MiniMax-M3", "b200_sxm", "msa"),
+        # The NVFP4 bundle carries the raw hub VL-wrapper architecture; the
+        # prescription must cover both artifact forms of the same model.
+        ("trtllm", "nvidia/MiniMax-M3-NVFP4", "b200_sxm", "msa"),
         ("trtllm", "MiniMaxAI/MiniMax-M3", "gb300", "msa"),
         ("trtllm", "MiniMaxAI/MiniMax-M3", "h200_sxm", None),  # SM90: Triton default
         ("trtllm", "MiniMaxAI/MiniMax-M3", "rtx_pro_6000_server", None),  # SM120

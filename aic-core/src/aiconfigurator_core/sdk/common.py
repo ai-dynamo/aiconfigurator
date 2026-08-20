@@ -622,8 +622,6 @@ DefaultHFModels = {
     "stepfun-ai/Step-3.7-Flash-FP8",
     "nvidia/Gemma-4-26B-A4B-NVFP4",
     "nvidia/Gemma-4-31B-IT-NVFP4",
-    # MiniMax M3
-    "nvidia/MiniMax-M3-NVFP4",
 }
 
 # Bundled model configs and the default support-matrix roster intentionally have
