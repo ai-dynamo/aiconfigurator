@@ -76,6 +76,60 @@ def test_rtx_trtllm_rc23_loads_and_m3_is_explicitly_rejected():
         op._engine_query(db, batch_size=2, s=512, prefix=0)
 
 
+@pytest.mark.parametrize(
+    ("system", "backend", "version"),
+    [
+        # Withdrawn tables (SGLang v0.5.16 has no CC-8.9 branch) AND no DSA
+        # xop donor on this cell — nothing to transfer from.
+        ("l40s", "sglang", "0.5.16"),
+        # fp8_block tier failed classified on SM120 (DeepGEMM layout.hpp:59)
+        # AND no DSA xop donor — the NVFP4 checkpoint's lane is rejected.
+        ("rtx_pro_6000_server", "vllm", "0.24.0"),
+    ],
+)
+def test_rejected_msa_cells_raise_typed_errors(system, backend, version):
+    """The support matrix's R cells (review 4980441676): a cell with no own
+    table and no DSA donor must fail TYPED in both modes — SILICON with
+    PerfDataNotAvailableError, HYBRID with EmpiricalNotImplementedError —
+    for context and generation alike; never a silent fallback or a value."""
+    from aiconfigurator.sdk.operations.msa import ContextMSAModule, GenerationMSAModule
+    from aiconfigurator.sdk.perf_database import get_database_view
+    from aiconfigurator_core.sdk.errors import (
+        EmpiricalNotImplementedError,
+        PerfDataNotAvailableError,
+    )
+
+    def op(cls):
+        return cls(
+            "msa",
+            1.0,
+            num_heads=8,
+            num_kv_heads=1,
+            hidden_size=4096,
+            head_dim=128,
+            v_head_dim=128,
+            index_n_heads=4,
+            index_head_dim=128,
+            index_topk=16,
+            block_size=128,
+            kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
+            fmha_quant_mode=common.FMHAQuantMode.bfloat16,
+            gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+        )
+
+    cases = [
+        (ContextMSAModule, {"batch_size": 2, "s": 512, "prefix": 0}),
+        (GenerationMSAModule, {"batch_size": 2, "s": 512}),
+    ]
+    silicon = get_database_view(system, backend, version, database_mode="SILICON")
+    hybrid = get_database_view(system, backend, version, database_mode="HYBRID")
+    for cls, kwargs in cases:
+        with pytest.raises(PerfDataNotAvailableError):
+            op(cls)._engine_query(silicon, **kwargs)
+        with pytest.raises(EmpiricalNotImplementedError, match=r"(?i)no DSA util"):
+            op(cls)._engine_query(hybrid, **kwargs)
+
+
 def test_nvfp4_checkpoint_lane_resolution_per_backend():
     """End-to-end lookup for the NVFP4 checkpoint's MSA lane (review
     4969690316 Spec-2): the SDK prices its MXFP8 projections as
