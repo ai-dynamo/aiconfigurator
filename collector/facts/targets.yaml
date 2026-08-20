@@ -134,6 +134,14 @@ families:
       profile: fp8
       variants:
       - rep
+      known:
+        sglang_0516_flaky: "trace NONDETERMINISTICALLY fails (~1/3 of runs) in
+          flashinfer cutlass-DSL fused_add_rmsnorm via tvm_ffi 'Mismatched
+          Tensor' — the same command text both passes and fails on the same
+          GPU (12 controlled reruns 2026-08-21); every generator flag excluded
+          by bisection; suspected timing-dependent tensor layout under
+          enable-mixed-chunk. Also hits MiniMax-M2.5. Probe retries once and
+          records warmup_retry; persistent failure is a record, not a block."
     - repo: MiniMaxAI/MiniMax-M2.5
       profile: fp8
       variants:
