@@ -458,7 +458,7 @@ def test_collector_ref_degrades_to_unknown_outside_a_repo(tmp_path, monkeypatch)
     assert a2a._git_collector_ref(tmp_path) == "unknown"
 
 
-def test_partial_and_complete_status_are_fail_closed(tmp_path):
+def test_classified_case_failures_do_not_demote_finalized_table(tmp_path):
     pyarrow = pytest.importorskip("pyarrow")
     del pyarrow
     rows = a2a.collect_with_adapter(
@@ -489,14 +489,14 @@ def test_partial_and_complete_status_are_fail_closed(tmp_path):
     import yaml
 
     assert yaml.safe_load(complete.read_text())["tables"]["moe_a2a_perf"]["status"] == "complete"
-    partial = a2a._write_sidecar(
+    with_failures = a2a._write_sidecar(
         tmp_path,
         runtime_meta=runtime,
         case_ids=["a"],
         parquet_path=parquet,
         failure_count=1,
     )
-    assert yaml.safe_load(partial.read_text())["tables"]["moe_a2a_perf"]["status"] == "partial"
+    assert yaml.safe_load(with_failures.read_text())["tables"]["moe_a2a_perf"]["status"] == "complete"
     with pytest.raises(a2a.VllmMoeA2ADeclarationError, match="empty"):
         a2a._write_sidecar(
             tmp_path,

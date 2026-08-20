@@ -18,8 +18,8 @@ The adapter mirrors vLLM commit ``d8c70f2``:
   ``all2all.py:1022-1083`` and ``all2all_utils.py:205-233``.
 
 Each queued case either returns two rows or a classified failure.  A failed
-write fails the run; an all-failed run is never finalized; a mixed run is
-attested ``partial``.
+write fails the run; an all-failed run is never finalized.  Classified
+per-case failures remain observable data and do not demote a finalized table.
 """
 
 from __future__ import annotations
