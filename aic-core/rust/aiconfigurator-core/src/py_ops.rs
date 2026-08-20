@@ -315,6 +315,13 @@ impl PyOperation {
         self.inner.set_name(value);
     }
 
+    /// Width-channel result scaling (speculation.materialize's non-integer
+    /// ratio fold, e.g. a 7-token draft in an 8-wide verify phase).
+    #[setter(_scale_factor)]
+    fn set_scale_factor(&mut self, value: f64) {
+        self.inner.set_scale_factor(value);
+    }
+
     #[getter(_scale_factor)]
     fn scale_factor(&self) -> PyResult<f64> {
         let json =
@@ -1125,7 +1132,7 @@ impl PyGenerationAttention {
     const _ENGINE_QUERY_SHAPE: &'static str = "generation";
 
     #[new]
-    #[pyo3(signature = (name, scale_factor, n, n_kv, kv_cache_dtype, window_size=0, head_size=128, use_qk_norm=false))]
+    #[pyo3(signature = (name, scale_factor, n, n_kv, kv_cache_dtype, window_size=0, head_size=128, use_qk_norm=false, *, scale_num_tokens=1, verify_query_tokens=0))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
@@ -1136,6 +1143,8 @@ impl PyGenerationAttention {
         window_size: u32,
         head_size: u32,
         use_qk_norm: bool,
+        scale_num_tokens: u32,
+        verify_query_tokens: u32,
     ) -> PyResult<(Self, PyOperation)> {
         // use_qk_norm is accepted for calling-shape compatibility; the decode
         // table never keyed on it (the retired serializer dropped it too).
@@ -1148,8 +1157,8 @@ impl PyGenerationAttention {
             head_size,
             window_size,
             kv_cache_dtype: kv_quant(kv_cache_dtype)?,
-            scale_num_tokens: 1,
-            verify_query_tokens: 0,
+            scale_num_tokens,
+            verify_query_tokens,
         });
         Ok((PyGenerationAttention, PyOperation { inner }))
     }
@@ -1169,7 +1178,10 @@ impl PyGenerationAttention {
             o.head_size,
         )
             .into_pyobject(py)?;
-        Ok((args, PyDict::new(py)))
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("scale_num_tokens", o.scale_num_tokens)?;
+        kwargs.set_item("verify_query_tokens", o.verify_query_tokens)?;
+        Ok((args, kwargs))
     }
 
     #[getter(_n)]

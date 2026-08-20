@@ -32,6 +32,7 @@ def build_model_config(
     comm_quant_mode: str | None = None,
     forward_model: str | None = None,
     enable_encoder_dp: bool = True,
+    speculation=None,
 ) -> ModelConfig:
     """Build a ModelConfig with optional quant mode overrides."""
     return ModelConfig(
@@ -47,6 +48,7 @@ def build_model_config(
         comm_quant_mode=CommQuantMode[comm_quant_mode] if comm_quant_mode else None,
         forward_model=forward_model or "op_level",
         enable_encoder_dp=enable_encoder_dp,
+        speculation=speculation,
     )
 
 
@@ -98,3 +100,48 @@ def apply_nextn(
 ) -> None:
     """Apply the MTP compute-side draft depth onto a ModelConfig."""
     model_config.nextn = normalize_nextn(nextn)
+
+
+def resolve_speculation(model_config: ModelConfig):
+    """Normalize (nextn, speculation) into a single resolved SpeculationConfig.
+
+    Exactly one speculative source is allowed:
+
+    * ``nextn > 0`` with no explicit scheme desugars to ``mtp`` at that depth
+      (legacy sugar, keeps every existing entry point valid).
+    * an explicit ``mtp`` scheme writes its depth back onto ``nextn`` so model
+      families keep building their draft scaling from ``_nextn``.
+    * a non-MTP scheme requires ``nextn == 0`` — mixing sources is an error,
+      never a silent precedence.
+
+    The resolved config is written back to ``model_config.speculation`` and
+    returned. Idempotent. Must run BEFORE ``get_model`` constructs the model.
+    """
+    from aiconfigurator_core.sdk.speculation.base import SpeculationConfig
+
+    spec = model_config.speculation
+    nextn = normalize_nextn(model_config.nextn)
+
+    if spec is None or spec.kind == "none":
+        spec = SpeculationConfig(kind="mtp", params={"depth": nextn}) if nextn > 0 else (spec or SpeculationConfig())
+    elif spec.kind == "mtp":
+        # Same contract as legacy nextn: integer draft length (1.9 must be
+        # rejected here exactly as normalize_nextn rejects it).
+        depth = validate_nextn(spec.params.get("depth", 0))
+        if depth < 1:
+            raise ValueError(f"speculation kind 'mtp' requires params['depth'] >= 1, got {depth}.")
+        if nextn and nextn != depth:
+            raise ValueError(
+                f"Conflicting speculative inputs: nextn={nextn} but speculation mtp depth={depth}. "
+                "Set only one (nextn is legacy sugar for the mtp scheme)."
+            )
+        model_config.nextn = depth
+    else:
+        if nextn > 0:
+            raise ValueError(
+                f"Conflicting speculative inputs: nextn={nextn} cannot be combined with "
+                f"speculation kind {spec.kind!r}. nextn is MTP-only sugar; set it to 0."
+            )
+
+    model_config.speculation = spec
+    return spec

@@ -71,6 +71,25 @@ class SpeculativeDecodingProfile:
         effective_accepted = float(normalized_accepted or 0.0) if normalized_nextn > 0 else 0.0
         return cls(effective_accepted)
 
+    @classmethod
+    def from_scheme(cls, scheme, accepted_tokens: float) -> SpeculativeDecodingProfile:
+        """Construct from a speculation-module scheme (cost side) plus an
+        acceptance assumption (workload side).
+
+        The bound is scheme-derived: a scheme drafting ``verify_width - 1``
+        tokens per round can accept at most that many. The progress fold is
+        delegated to the scheme (default ``1 + accepted``), so schemes with
+        non-linear folds stay correct without changes here.
+        """
+        accepted = float(accepted_tokens)
+        max_accepted = scheme.verify_width() - 1
+        if not math.isfinite(accepted) or not 0 <= accepted <= max_accepted:
+            raise ValueError(
+                f"accepted_tokens ({accepted_tokens}) must be within [0, verify_width-1="
+                f"{max_accepted}] for scheme {scheme.kind!r}."
+            )
+        return cls(scheme.expected_progress(accepted) - 1.0)
+
     @property
     def tokens_per_iteration(self) -> float:
         """Expected output-token progress made by one decode iteration."""
@@ -156,8 +175,94 @@ class SpeculativeDecodingProfile:
         return projected
 
 
+@dataclass(frozen=True)
+class SpeculativeBlockResolution:
+    """Outcome of normalizing a ``speculative:`` block.
+
+    ``method="mtp"`` desugars onto the (nextn, nextn_accepted) pair — the
+    legacy code paths stay authoritative and ``speculation_config`` is None.
+    Scheme-based methods carry a SpeculationConfig plus the validated
+    acceptance value for ``SpeculativeDecodingProfile.from_scheme``.
+    """
+
+    nextn: int | str
+    nextn_accepted: float | None
+    speculation_config: object | None = None
+    accepted_tokens: float | None = None
+
+
+def resolve_speculative_block(
+    speculative: dict | None,
+    *,
+    nextn: int | str = 0,
+    nextn_accepted: float | None = None,
+) -> SpeculativeBlockResolution:
+    """Normalize a ``speculative:`` mapping (single source of truth for the
+    task_v2 field and the programmatic API).
+
+    Raises on unknown keys/methods, on conflicts with the legacy nextn pair,
+    and on missing or out-of-range ``accepted_tokens`` — bad inputs fail at
+    construction time, never mid-sweep.
+    """
+    if not speculative:
+        return SpeculativeBlockResolution(nextn=nextn, nextn_accepted=nextn_accepted)
+    if not isinstance(speculative, dict):
+        raise TypeError("speculative must be a mapping (method/params/draft_model_path/accepted_tokens).")
+    from aiconfigurator.sdk.speculation import SpeculationConfig, build_spec_scheme
+
+    block = dict(speculative)
+    method = block.pop("method", None)
+    params = dict(block.pop("params", None) or {})
+    draft_model_path = block.pop("draft_model_path", None)
+    draft_config = block.pop("draft_config", None)
+    accepted = block.pop("accepted_tokens", None)
+    if block:
+        raise ValueError(f"Unknown speculative keys: {sorted(block)}.")
+    if not method:
+        raise ValueError("speculative.method is required.")
+    if method == "none":
+        return SpeculativeBlockResolution(nextn=nextn, nextn_accepted=nextn_accepted)
+    if method == "mtp":
+        depth = int(params.get("depth", 0))
+        if nextn not in (0, "auto") and nextn != depth:
+            raise ValueError(f"Conflicting speculative inputs: nextn={nextn} vs speculative mtp depth={depth}.")
+        return SpeculativeBlockResolution(
+            nextn=depth,
+            nextn_accepted=float(accepted) if accepted is not None else nextn_accepted,
+        )
+    if nextn not in (0,):
+        raise ValueError(
+            f"nextn ({nextn}) is MTP-only sugar and cannot be combined with speculative method {method!r}; set nextn=0."
+        )
+    if draft_config is None and draft_model_path:
+        from aiconfigurator.sdk.utils import get_model_config_from_model_path
+
+        draft_config = dict(get_model_config_from_model_path(draft_model_path).get("raw_config", {}))
+    spec_config = SpeculationConfig(
+        kind=method, params=params, draft_model_path=draft_model_path, draft_config=draft_config
+    )
+    scheme = build_spec_scheme(None, spec_config)  # raises on unknown kind / bad params
+    if accepted is None:
+        raise ValueError(
+            f"speculative.accepted_tokens is required for method {method!r} "
+            "(measured value; there is no built-in acceptance assumption)."
+        )
+    accepted = float(accepted)
+    max_accepted = scheme.verify_width() - 1
+    if not 0 <= accepted <= max_accepted:
+        raise ValueError(f"speculative.accepted_tokens ({accepted}) must be within [0, verify_width-1={max_accepted}].")
+    return SpeculativeBlockResolution(
+        nextn=nextn,
+        nextn_accepted=nextn_accepted,
+        speculation_config=spec_config,
+        accepted_tokens=accepted,
+    )
+
+
 __all__ = [
     "ProjectionRole",
+    "SpeculativeBlockResolution",
     "SpeculativeDecodingProfile",
     "normalize_speculative_decoding",
+    "resolve_speculative_block",
 ]

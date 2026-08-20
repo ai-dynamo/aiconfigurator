@@ -167,7 +167,18 @@ def get_model(
     else:
         model_config.cp_style = "none"
 
+    # Resolve the speculative scheme BEFORE construction (an explicit mtp
+    # scheme writes its depth back onto nextn, which model families read),
+    # attach it after, and gate unsupported (model, backend) combinations.
+    from aiconfigurator_core.sdk.config_builders import resolve_speculation
+    from aiconfigurator_core.sdk.speculation import build_spec_scheme
+    from aiconfigurator_core.sdk.speculation.materialize import materialize_spec_scheme
+
+    spec_config = resolve_speculation(model_config)
     model = cls.create(model_info, model_config, backend_name)
+    model.spec_scheme = build_spec_scheme(model_config, spec_config)
+    model.spec_scheme.validate(model, backend_name)
+    materialize_spec_scheme(model)
     if forward_model == "fpm":
         model = _apply_forward_model_fpm(model)
     return model
