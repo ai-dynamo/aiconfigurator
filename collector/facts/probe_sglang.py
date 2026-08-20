@@ -311,8 +311,18 @@ def main() -> None:
             from sglang.benchmark import one_batch as ob
 
             # warmup pass outside the profiler: lazy JIT loading / autotune noise
-            out = ret.extend(ob.prepare_synthetic_inputs_for_latency_test(2, 32))
-            torch.cuda.synchronize()
+            try:
+                out = ret.extend(ob.prepare_synthetic_inputs_for_latency_test(2, 32))
+                torch.cuda.synchronize()
+            except Exception:
+                # transient tvm_ffi 'Mismatched Tensor' seen when parallel runs
+                # race the shared flashinfer cutlass-DSL JIT cache — one retry
+                # after the cache settles distinguishes flake from real fact
+                rec["warmup_retry"] = traceback.format_exc().strip().splitlines()[-1][:200]
+                import time
+                time.sleep(5)
+                out = ret.extend(ob.prepare_synthetic_inputs_for_latency_test(2, 32))
+                torch.cuda.synchronize()
             ret.clear()
             try:  # source-line attribution for stacks needs the verbose kineto config
                 _exp = torch._C._profiler._ExperimentalConfig(verbose=True)
@@ -322,9 +332,21 @@ def main() -> None:
                             with_stack=True,
                             **({"experimental_config": _exp} if _exp else {}))
             reqs = ob.prepare_synthetic_inputs_for_latency_test(2, 32)
-            with profile(**_prof_kw) as p1:
-                out = ret.extend(reqs)
-                torch.cuda.synchronize()
+            try:
+                with profile(**_prof_kw) as p1:
+                    out = ret.extend(reqs)
+                    torch.cuda.synchronize()
+            except Exception:
+                # the verbose stack profiler breaks some tvm_ffi-dispatched
+                # kernels (flashinfer cutlass-DSL fused_add_rmsnorm rejects its
+                # tensors under with_stack=True — seen on MiniMax-M2/M2.5).
+                # Retry stackless: kernels still captured, py_paths lost.
+                rec["trace_stack_fallback"] = traceback.format_exc().strip().splitlines()[-1][:200]
+                _prof_kw = dict(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA])
+                reqs = ob.prepare_synthetic_inputs_for_latency_test(2, 32)
+                with profile(**_prof_kw) as p1:
+                    out = ret.extend(reqs)
+                    torch.cuda.synchronize()
             trace["prefill_kernels"] = kernel_table(p1)
             trace["prefill_api"] = api_kernel_map(p1)
             try:
