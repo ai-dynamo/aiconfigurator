@@ -47,7 +47,10 @@ frameworks:
       # 1.003-1.013, median |per-row delta| 2.4-2.9%, ~25% of rows >5% —
       # benchmark run-to-run spread, not a systematic shift), so the dips
       # are REAL, reproducible kernel behavior (per-bucket tactic/tile-wave
-      # quantization), not a campaign artifact. The DSV4 moe shapes stay collected on this
+      # quantization), not a campaign artifact. Evidence: GitLab
+      # aic-auto-collector (project 205688) pipelines 61692150-61692160
+      # (moe re-collection, 2026-08-08); DSV4 attention campaigns ran as
+      # pipelines 61771569-61838704 on feat/sbatch-partition-override. The DSV4 moe shapes stay collected on this
       # runtime for version coherence with the DSV4 attention family; the
       # remaining moe shapes reuse rc20 via the declared reuse.yaml channel.
       moe:

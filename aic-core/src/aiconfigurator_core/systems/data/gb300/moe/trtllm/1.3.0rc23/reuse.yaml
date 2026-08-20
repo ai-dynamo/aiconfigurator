@@ -16,5 +16,7 @@ reuse:
     a quarter of rows differ by more than 5 percent — consistent with moe
     benchmark run-to-run spread rather than a systematic kernel shift. The
     owner sign-off accepts that residual risk for the reused (non-DSV4)
-    shapes; a fresh rc23 moe collection retires this declaration.
+    shapes; a fresh rc23 moe collection retires this declaration. Evidence
+    campaign: GitLab aic-auto-collector (project 205688) pipelines
+    61692150-61692160, 2026-08-08.
   approved_by: tianhaox
