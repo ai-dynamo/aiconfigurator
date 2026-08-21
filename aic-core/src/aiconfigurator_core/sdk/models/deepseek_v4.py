@@ -98,6 +98,9 @@ class DeepSeekV4Model(BaseModel):
         moe_backend = self.config.moe_backend
         use_megamoe = moe_backend == "megamoe"
         if use_megamoe:
+            # No measured DeepSeek-V4 vLLM MegaMoE rows exist (vLLM shipping is
+            # Kimi-K3 on GB300 @ 0.27.0); admitting vllm here would defer the
+            # failure to query time. Kimi-K3 keeps its own vLLM admission.
             if backend_name != common.BackendName.sglang.value:
                 raise ValueError("DeepSeek-V4 MegaMoE modeling is only supported with the SGLang backend.")
             if moe_tp_size != 1:
@@ -161,6 +164,7 @@ class DeepSeekV4Model(BaseModel):
             # comm pattern (pre=all_gather, post=reduce_scatter) instead of all_reduce.
             # MoE expert compute is cp-invariant (A2A globalises tokens) -> no change.
             if use_megamoe:
+                pre_dispatch = "vllm" if backend_name == common.BackendName.vllm.value else "sglang_jit"
                 return [
                     ops.DeepSeekV4MegaMoEModule(
                         f"{phase}_megamoe",
@@ -174,6 +178,7 @@ class DeepSeekV4Model(BaseModel):
                         moe_quant_mode,
                         workload_distribution,
                         is_context=is_context,
+                        pre_dispatch=pre_dispatch,
                     )
                 ]
             return [

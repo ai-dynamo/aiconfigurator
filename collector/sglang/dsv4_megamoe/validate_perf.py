@@ -27,8 +27,11 @@ LOADER_KEY_FIELDS = [
     "num_tokens",
 ]
 
+DEFAULT_FRAMEWORK = "SGLang"
+
+# Framework is checked separately (see _framework_invariant): the same harness
+# collects the vLLM pre-dispatch lane, whose rows are labeled VLLM.
 ROW_INVARIANTS = [
-    ("framework", "SGLang", "every row framework must be SGLang"),
     ("op_name", "dsv4_megamoe_module", "every row op_name must be dsv4_megamoe_module"),
     ("kernel_source", "deepgemm_megamoe", "every row kernel_source must be deepgemm_megamoe"),
     ("used_cuda_graph", "true", "every row must use CUDA Graph"),
@@ -39,6 +42,10 @@ ROW_INVARIANTS = [
 POSITIVE_FLOAT_FIELDS = [
     ("latency", "every latency must be positive"),
 ]
+
+
+def _framework_invariant(framework: str) -> tuple[str, str, str]:
+    return ("framework", framework, f"every row framework must be {framework}")
 
 
 def _csv_ints(value: str) -> list[int]:
@@ -124,6 +131,7 @@ def validate_perf_file(
     target_version: str | None = None,
     allow_version_mismatch: bool = True,
     expect_single_perf_file: bool = False,
+    framework: str = DEFAULT_FRAMEWORK,
 ) -> tuple[str, list[str]]:
     rows = _read_rows(perf_path)
     expected = _expected_rows(
@@ -178,7 +186,8 @@ def validate_perf_file(
     for key, value in sorted(counts.items(), key=lambda item: (_safe_int(item[0][0]) or -1, item[0][1], item[0][2])):
         summary.append(f"count ep={key[0]} phase={key[1]} distribution={key[2]} rows={value}")
 
-    for field, expected_value, error in ROW_INVARIANTS:
+    summary.append(f"framework={framework}")
+    for field, expected_value, error in [_framework_invariant(framework), *ROW_INVARIANTS]:
         if any(row.get(field) != expected_value for row in rows):
             errors.append(error)
     for field, error in POSITIVE_FLOAT_FIELDS:
@@ -210,6 +219,11 @@ def _add_validate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--target-sglang-version", default="")
     parser.add_argument("--allow-version-mismatch", choices=["0", "1"], default="1")
     parser.add_argument("--expect-single-perf-file", action="store_true")
+    parser.add_argument(
+        "--framework",
+        default=DEFAULT_FRAMEWORK,
+        help="Expected framework label on every row (SGLang for the sglang lane, VLLM for the vLLM lane).",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -245,6 +259,7 @@ def main() -> None:
         target_version=args.target_sglang_version or None,
         allow_version_mismatch=args.allow_version_mismatch == "1",
         expect_single_perf_file=args.expect_single_perf_file,
+        framework=args.framework,
     )
     print(text, end="")
     if errors:

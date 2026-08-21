@@ -3,17 +3,28 @@
 
 """Cross-rank DeepSeek-V4 MegaMoE module collector.
 
-The collection boundary is the MegaMoE routed path:
+The collection boundary is the MegaMoE routed path, measured identically for
+both serving lanes (``--pre-dispatch`` selects the lane; ``--framework`` labels
+the rows):
 
     prepared hidden_states + prepared topk_ids/topk_weights
-      -> SGLang cached symmetric buffer lookup
-      -> SGLang/DeepGEMM pre-dispatch into the symmetric buffer
-      -> deep_gemm.fp8_fp4_mega_moe
+      -> serving cached symmetric buffer lookup (buffer_policy per lane)
+      -> serving pre-dispatch into the symmetric buffer
+         (sglang_jit: SGLang's deep_gemm JIT copy; vllm: vLLM's own triton
+         prepare_megamoe_inputs -- see make_pre_dispatch)
+      -> deep_gemm.fp8_fp4_mega_moe (lane-resolved deep_gemm module; vLLM
+         vendors its own as vllm.third_party.deep_gemm)
+      -> routed output scaling (when --include-routed-scale=1; the identity
+         factor 1.0 stays in the timed region -- vLLM folds
+         routed_scaling_factor into fused_grouped_topk)
 
 Gate, top-k selection, routing generation, source-rank assignment, validation,
 and distributed setup are outside the timed region.  The cold symmetric buffer
-allocation/rendezvous path is also outside per-module latency, matching SGLang's
-cached-buffer steady state.
+allocation/rendezvous path is also outside per-module latency, matching the
+cached-buffer steady state of both serving stacks.
+
+Entry points: this module (SGLang lane) and
+``collector/vllm/collect_k3_megamoe.py`` (vLLM Kimi-K3 lane wrapper).
 """
 
 from __future__ import annotations
@@ -50,6 +61,11 @@ except ImportError:
     from helper import benchmark_with_power, log_perf
 
 
+# SiTU sentinel clamp: the sglang kimi-k3 patched deep_gemm mega kernel selects
+# the SiTU activation path iff activation_clamp == this value. vLLM instead names
+# the activation explicitly (see activation_for_lane).
+_K3_SITU_SENTINEL_CLAMP = 0.03125
+
 DEFAULT_MODEL_CONFIGS = {
     "dsv4_flash": {
         "model": "deepseek-ai/DeepSeek-V4-Flash",
@@ -82,7 +98,7 @@ DEFAULT_MODEL_CONFIGS = {
         # Resolved as the default in main(); an explicit conflicting
         # --activation-clamp raises rather than silently collecting the
         # wrong kernel path under the kimi_k3 label.
-        "activation_clamp": 0.03125,
+        "activation_clamp": _K3_SITU_SENTINEL_CLAMP,
         "hidden_size": 3584,
         "inter_size": 3072,
         "routed_num_experts": 896,
@@ -110,8 +126,93 @@ DEFAULT_SAMPLED_POWER_LAW_SEED_COUNT = 10
 DEFAULT_MODULE_PERF = PerfFile.DSV4_MEGAMOE_MODULE.value
 DEFAULT_MOE_DTYPE = "w4a8_mxfp4_mxfp8"
 DEFAULT_KERNEL_DTYPE = "fp8_fp4"
-BUFFER_POLICY = "cached_sglang"
 _MEGA_MOE_BUFFER_CACHE = {}
+
+
+def buffer_policy_for_lane(pre_dispatch: str) -> str:
+    """The symmetric-buffer cache mirrors the serving lane's own cache.
+
+    ``cached_sglang``: SGLang's ``_get_mega_moe_symm_buffer`` shape-keyed
+    reuse. ``cached_vllm``: vLLM's ``KimiK3MegaMoEExperts.get_symm_buffer``
+    (keyed on the same shape tuple PLUS activation @ v0.27.0).
+    """
+    return "cached_vllm" if pre_dispatch == "vllm" else "cached_sglang"
+
+
+def _resolve_deep_gemm(pre_dispatch: str):
+    """Return the deep_gemm module for the serving lane being measured.
+
+    The frames are different packages with different owners:
+
+    - sglang lanes (``sglang_jit``/``copy``): the top-level ``deep_gemm`` PyPI
+      package ships inside SGLang's pinned image.
+    - ``vllm``: vLLM vendors DeepGEMM as ``vllm.third_party.deep_gemm`` (there
+      is NO site-packages install), resolved through the same helper serving
+      calls — ``vllm.utils.deep_gemm._import_deep_gemm`` @ v0.27.0
+      (vllm/models/kimi_k3/nvidia/model.py uses it). Verified in-container on
+      GB300: vendored module exposes utils.per_token_cast_to_fp4/fp8,
+      mega.SymmBuffer, and the fp8_fp4_mega_moe family.
+    """
+    if pre_dispatch == "vllm":
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        return _import_deep_gemm()
+    import deep_gemm
+
+    return deep_gemm
+
+
+def activation_for_lane(
+    *,
+    pre_dispatch: str,
+    activation_clamp: float | None,
+) -> tuple[str, float | None]:
+    """Return the (activation, activation_clamp) the target serving stack uses.
+
+    The two stacks select the K3 SiTU path through DIFFERENT kernel arguments,
+    so the collector must follow whichever lane it is measuring or it benchmarks
+    a kernel serving never runs (layer_permissions: framework truth, never a
+    guess):
+
+    - sglang (kimi-k3 branch): ``activation="swiglu"`` plus the sentinel
+      ``activation_clamp == 0.03125``; the patched deep_gemm mega kernel keys
+      the SiTU path off that clamp value
+      (srt/models/kimi_k3.py fp8_fp4_mega_moe(activation_clamp=
+      _K3_MEGA_SITU_SENTINEL_CLAMP)).
+    - vllm v0.27.0: ``activation="situ"`` as a first-class argument with
+      ``activation_clamp=None`` (vllm/models/kimi_k3/nvidia/model.py:741 passes
+      activation_clamp=None; KimiK3MegaMoEExperts forwards activation=
+      self.activation into fp8_fp4_mega_moe AND into
+      transform_weights_for_mega_moe). Verified in-container on
+      vllm/vllm-openai:v0.27.0 (GB300/SM103): fp8_fp4_mega_moe exposes
+      ``activation: str = 'swiglu'`` and ``activation_clamp: float | None``.
+
+    A non-K3 (dsv4) profile keeps swiglu on both lanes.
+    """
+    is_situ = activation_clamp == _K3_SITU_SENTINEL_CLAMP
+    if pre_dispatch == "vllm":
+        if is_situ:
+            return "situ", None
+        return "swiglu", activation_clamp
+    return "swiglu", activation_clamp
+
+
+def routed_scale_for_measurement(
+    *,
+    include_routed_scale: bool,
+    routed_scaling_factor: float,
+) -> tuple[str, float | None]:
+    """Return (includes_routed_scale column, factor to mul in the timed region).
+
+    The column is true iff the timed CUDA graph contains the post-scale mul,
+    including identity factor 1.0 (K3 default). validate_perf and the SDK
+    loader both require includes_routed_scale=true.
+    """
+    if not include_routed_scale:
+        return "false", None
+    if routed_scaling_factor <= 0:
+        raise ValueError("routed_scaling_factor must be positive")
+    return "true", float(routed_scaling_factor)
 
 
 @dataclass(frozen=True)
@@ -247,15 +348,21 @@ def get_cached_mega_moe_buffer(
     total_topk: int,
     hidden_size: int,
     inter_size: int,
+    activation: str = "swiglu",
+    dg=None,
 ):
     """Return the cached DeepGEMM MegaMoE symmetric buffer for this shape.
 
     This mirrors SGLang's `_get_mega_moe_symm_buffer`: buffer allocation and
     symmetric-memory rendezvous are one-time shape setup, while steady-state
-    forward reuses the cached buffer.
+    forward reuses the cached buffer. ``activation`` is part of the identity
+    because the buffer layout depends on it and both serving stacks key their
+    own caches on it (vllm KimiK3MegaMoEExperts.get_symm_buffer @ v0.27.0).
+    ``dg`` selects the lane's deep_gemm module (vLLM vendors its own).
     """
 
-    import deep_gemm
+    if dg is None:
+        dg = _resolve_deep_gemm("sglang_jit")
 
     key = (
         id(group),
@@ -264,11 +371,13 @@ def get_cached_mega_moe_buffer(
         total_topk,
         hidden_size,
         inter_size,
+        activation,
+        dg.__name__,
     )
     buffer = _MEGA_MOE_BUFFER_CACHE.get(key)
     created = False
     if buffer is None:
-        buffer = deep_gemm.get_symm_buffer_for_mega_moe(
+        buffer = dg.get_symm_buffer_for_mega_moe(
             group,
             total_num_experts,
             num_max_tokens_per_rank,
@@ -276,7 +385,7 @@ def get_cached_mega_moe_buffer(
             hidden_size,
             inter_size,
             use_fp8_dispatch=True,
-            activation="swiglu",
+            activation=activation,
         )
         _MEGA_MOE_BUFFER_CACHE[key] = buffer
         created = True
@@ -379,9 +488,11 @@ def case_num_max_tokens_per_rank(args: argparse.Namespace, case: MegaMoECase) ->
     raise ValueError(f"unsupported cap policy: {args.cap_policy}")
 
 
-def _cast_grouped_weights_to_fp4(bf16_weights: torch.Tensor):
-    import deep_gemm
-    from deep_gemm.utils import per_token_cast_to_fp4
+def _cast_grouped_weights_to_fp4(bf16_weights: torch.Tensor, dg):
+    import importlib
+
+    dg_utils = importlib.import_module(dg.__name__ + ".utils")
+    per_token_cast_to_fp4 = dg_utils.per_token_cast_to_fp4
 
     num_groups, n, k = bf16_weights.shape
     weight = torch.empty((num_groups, n, k // 2), device=bf16_weights.device, dtype=torch.int8)
@@ -392,7 +503,7 @@ def _cast_grouped_weights_to_fp4(bf16_weights: torch.Tensor):
             use_ue8m0=True,
             gran_k=32,
         )
-    scale = deep_gemm.transform_sf_into_required_layout(scale, n, k, (1, 32), num_groups)
+    scale = dg.transform_sf_into_required_layout(scale, n, k, (1, 32), num_groups)
     return weight, scale
 
 
@@ -403,15 +514,23 @@ def build_transformed_weights(
     inter_size: int,
     device: torch.device,
     seed: int,
+    activation: str = "swiglu",
+    dg=None,
 ):
-    import deep_gemm
+    if dg is None:
+        dg = _resolve_deep_gemm("sglang_jit")
 
     torch.manual_seed(seed)
     l1_bf16 = torch.randn((num_local_experts, inter_size * 2, hidden_size), dtype=torch.bfloat16, device=device)
     l2_bf16 = torch.randn((num_local_experts, hidden_size, inter_size), dtype=torch.bfloat16, device=device)
-    l1_fp4 = _cast_grouped_weights_to_fp4(l1_bf16)
-    l2_fp4 = _cast_grouped_weights_to_fp4(l2_bf16)
-    return deep_gemm.transform_weights_for_mega_moe(l1_fp4, l2_fp4)
+    l1_fp4 = _cast_grouped_weights_to_fp4(l1_bf16, dg)
+    l2_fp4 = _cast_grouped_weights_to_fp4(l2_bf16, dg)
+    # vLLM's KimiK3MegaMoEExperts.finalize_weights passes activation= into the
+    # weight transform (the SiTU layout differs from swiglu), so the collector
+    # must too. sglang's lane leaves the default swiglu.
+    if activation != "swiglu":
+        return dg.transform_weights_for_mega_moe(l1_fp4, l2_fp4, activation=activation)
+    return dg.transform_weights_for_mega_moe(l1_fp4, l2_fp4)
 
 
 def make_pre_dispatch(pre_dispatch: str):
@@ -429,9 +548,6 @@ def make_pre_dispatch(pre_dispatch: str):
             buffer.x_sf[:num_tokens].copy_(x_sf)
             buffer.topk_idx[:num_tokens].copy_(topk_ids)
             buffer.topk_weights[:num_tokens].copy_(topk_weights)
-            if num_tokens < buffer.topk_idx.shape[0]:
-                buffer.topk_idx[num_tokens:].fill_(-1)
-                buffer.topk_weights[num_tokens:].zero_()
 
         return copy_pre_dispatch
 
@@ -463,6 +579,31 @@ def make_pre_dispatch(pre_dispatch: str):
 
         return sglang_jit_pre_dispatch
 
+    if pre_dispatch == "vllm":
+        # vLLM stages MegaMoE inputs with its OWN triton kernel, not sglang's
+        # deep_gemm JIT copy -- hence the separate pre_dispatch label.
+        # Serving truth @ vllm v0.27.0 (verified in-container on GB300/SM103,
+        # image vllm/vllm-openai:v0.27.0@sha256:7441a057...86cf):
+        #   vllm/models/kimi_k3/nvidia/model.py:98   import
+        #   vllm/models/kimi_k3/nvidia/model.py:395  call site
+        # The helper writes the symmetric-buffer slices in place and takes the
+        # unpadded token slices, so the collector must slice to num_tokens the
+        # same way serving does.
+        from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
+
+        def vllm_pre_dispatch(hidden_states, topk_ids, topk_weights, buffer, num_tokens: int):
+            prepare_megamoe_inputs(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                buffer.x[:num_tokens],
+                buffer.x_sf[:num_tokens],
+                buffer.topk_idx[:num_tokens],
+                buffer.topk_weights[:num_tokens],
+            )
+
+        return vllm_pre_dispatch
+
     raise ValueError(f"unsupported pre_dispatch: {pre_dispatch}")
 
 
@@ -474,7 +615,7 @@ def run_case(
     model_config: dict[str, int | float | bool | str],
     transformed_weights,
 ) -> CaseRunResult | None:
-    import deep_gemm
+    dg = _resolve_deep_gemm(args.pre_dispatch)
 
     rank = dist_info.rank
     device = dist_info.device
@@ -488,6 +629,10 @@ def run_case(
     total_topk = routed_topk + num_fused_shared_experts
     routed_scaling_factor = float(
         args.routed_scaling_factor if args.routed_scaling_factor is not None else model_config["routed_scaling_factor"]
+    )
+    includes_routed_scale, timed_routed_scale = routed_scale_for_measurement(
+        include_routed_scale=bool(args.include_routed_scale),
+        routed_scaling_factor=routed_scaling_factor,
     )
     norm_topk_prob = bool(
         args.renormalize_topk_weights if args.renormalize_topk_weights is not None else model_config["norm_topk_prob"]
@@ -545,6 +690,10 @@ def run_case(
     )
     num_max_tokens_per_rank = case_num_max_tokens_per_rank(args, case)
 
+    kernel_activation, kernel_activation_clamp = activation_for_lane(
+        pre_dispatch=args.pre_dispatch,
+        activation_clamp=args.activation_clamp,
+    )
     buffer_kwargs = {
         "group": dist.group.WORLD if dist.is_initialized() else None,
         "total_num_experts": total_num_experts,
@@ -552,13 +701,24 @@ def run_case(
         "total_topk": total_topk,
         "hidden_size": hidden_size,
         "inter_size": inter_size,
+        "activation": kernel_activation,
+        "dg": dg,
     }
     buffer, buffer_created = get_cached_mega_moe_buffer(**buffer_kwargs)
     effective_num_max_tokens_per_rank = int(getattr(buffer, "num_max_tokens_per_rank", num_max_tokens_per_rank))
+    # Tail hygiene lives outside the timed region: serving leaves the unused
+    # tail of the cached symmetric buffer untouched per step, so the dispatch
+    # cells beyond num_tokens must be masked once per case, not re-filled
+    # inside every benchmarked iteration (an uninitialized tail would route
+    # garbage through the fused kernel's topk_idx participation check).
+    if case.tokens_per_rank < buffer.topk_idx.shape[0]:
+        buffer.topk_idx[case.tokens_per_rank :].fill_(-1)
+        buffer.topk_weights[case.tokens_per_rank :].zero_()
     pre_dispatch = make_pre_dispatch(args.pre_dispatch)
+    buffer_policy = buffer_policy_for_lane(args.pre_dispatch)
     output = torch.empty((case.tokens_per_rank, hidden_size), dtype=torch.bfloat16, device=device)
     print(
-        f"[dsv4-megamoe] rank={rank} buffer-ready policy={BUFFER_POLICY} "
+        f"[dsv4-megamoe] rank={rank} buffer-ready policy={buffer_policy} "
         f"created={str(buffer_created).lower()} pre_dispatch={args.pre_dispatch} "
         f"num_max_tokens_per_rank={num_max_tokens_per_rank} "
         f"effective_num_max_tokens_per_rank={effective_num_max_tokens_per_rank} "
@@ -570,18 +730,18 @@ def run_case(
         with torch.no_grad():
             buffer, _ = get_cached_mega_moe_buffer(**buffer_kwargs)
             pre_dispatch(hidden_states, local_topk_ids, local_topk_weights, buffer, case.tokens_per_rank)
-            deep_gemm.fp8_fp4_mega_moe(
+            dg.fp8_fp4_mega_moe(
                 output,
                 transformed_weights[0],
                 transformed_weights[1],
                 buffer,
                 recipe=(1, 1, 32),
-                activation="swiglu",
-                activation_clamp=args.activation_clamp,
+                activation=kernel_activation,
+                activation_clamp=kernel_activation_clamp,
                 fast_math=bool(args.fast_math),
             )
-            if args.include_routed_scale and routed_scaling_factor != 1.0:
-                output.mul_(routed_scaling_factor)
+            if timed_routed_scale is not None:
+                output.mul_(timed_routed_scale)
 
     _barrier()
     print(
@@ -635,9 +795,9 @@ def run_case(
         "num_max_tokens_per_rank": num_max_tokens_per_rank,
         "effective_num_max_tokens_per_rank": effective_num_max_tokens_per_rank,
         "routed_scaling_factor": routed_scaling_factor,
-        "includes_routed_scale": str(bool(args.include_routed_scale)).lower(),
+        "includes_routed_scale": includes_routed_scale,
         "includes_gate_topk": "false",
-        "buffer_policy": BUFFER_POLICY,
+        "buffer_policy": buffer_policy,
         "includes_buffer_init": "false",
         "used_cuda_graph": "true",
         "latency": f"{latency:.6f}",
@@ -654,8 +814,8 @@ def log_case_run_result(
 ) -> None:
     log_perf(
         item_list=[result.row],
-        framework="SGLang",
-        version=args.sglang_version,
+        framework=args.framework,
+        version=args.framework_version,
         device_name=torch.cuda.get_device_name(dist_info.device),
         op_name="dsv4_megamoe_module",
         kernel_source="deepgemm_megamoe",
@@ -705,7 +865,8 @@ def parse_args() -> argparse.Namespace:
             "case_tokens uses each case's local token count as the requested DeepGEMM cap"
         ),
     )
-    parser.add_argument("--pre-dispatch", choices=["sglang_jit", "copy"], default="sglang_jit")
+    parser.add_argument("--pre-dispatch", choices=["sglang_jit", "copy", "vllm"], default="sglang_jit")
+    parser.add_argument("--framework", default="SGLang", help="Persisted framework label for log_perf.")
     parser.add_argument(
         "--activation-clamp", type=float, default=None
     )  # None -> model-config default (10.0 unless declared)
@@ -714,12 +875,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-iterations", type=int, default=20)
     parser.add_argument("--output-path", default=os.getcwd())
     parser.add_argument("--perf-file", default=DEFAULT_MODULE_PERF)
-    parser.add_argument("--sglang-version", default=os.environ.get("SGLANG_VERSION", "unknown"))
+    parser.add_argument(
+        "--version",
+        dest="framework_version",
+        default=None,
+        help="Framework version persisted in the version column (e.g. 0.5.14 for SGLang, 0.27.0 for vLLM).",
+    )
+    # Legacy alias: this harness started SGLang-only and the flag named after it
+    # feeds the shared `version` perf column.
+    parser.add_argument("--sglang-version", dest="framework_version", default=None, help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.framework_version is None:
+        if args.framework == "VLLM":
+            # The vllm lane has no env fallback: rows must carry the measured
+            # release, never a guess (else packaging attests the wrong runtime).
+            raise SystemExit("--version is required for the vllm lane")
+        args.framework_version = os.environ.get("SGLANG_VERSION", "unknown")
     gpus_per_node = args.gpus_per_node or _default_gpus_per_node(args.system_name)
     dist_info = init_distributed(gpus_per_node)
     model_config = DEFAULT_MODEL_CONFIGS[args.model_config]
@@ -757,12 +932,19 @@ def main() -> None:
         f"inter={model_config['inter_size']}",
         flush=True,
     )
+    weight_activation, _ = activation_for_lane(
+        pre_dispatch=args.pre_dispatch,
+        activation_clamp=args.activation_clamp,
+    )
+    weight_dg = _resolve_deep_gemm(args.pre_dispatch)
     transformed_weights = build_transformed_weights(
         num_local_experts=num_local_experts,
         hidden_size=int(model_config["hidden_size"]),
         inter_size=int(model_config["inter_size"]),
         device=dist_info.device,
         seed=1234 + dist_info.rank,
+        activation=weight_activation,
+        dg=weight_dg,
     )
     print(f"[dsv4-megamoe] rank={dist_info.rank} transformed-weights-ready", flush=True)
 

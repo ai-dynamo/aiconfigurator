@@ -1048,9 +1048,21 @@ def finalize_perf_outputs(
 
 
 # Helper functions for MoE
-def balanced_logits(num_tokens, num_experts, topk):
+def _router_logits_from_selected_experts(selected_experts, num_experts):
+    """Build router logits without materializing a token x top-k x expert cube."""
     import torch
     import torch.nn.functional as F
+
+    selected = selected_experts.long()
+    expert_map = torch.zeros(
+        (selected.shape[0], num_experts),
+        dtype=torch.int32,
+    ).scatter_add_(1, selected, torch.ones_like(selected, dtype=torch.int32))
+    return F.softmax(expert_map.bfloat16(), dim=1)
+
+
+def balanced_logits(num_tokens, num_experts, topk):
+    import torch
 
     stride = math.ceil(num_experts / topk)
 
@@ -1062,9 +1074,12 @@ def balanced_logits(num_tokens, num_experts, topk):
     else:
         h_selected_experts = (token_indices * stride / num_tokens + topk_indices * stride) % num_experts
 
-    expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
-    router_logits = F.softmax(expert_map.bfloat16(), dim=1)
-    return router_logits
+    # Equivalent to `F.one_hot(..., num_experts).sum(1)` but without materializing
+    # the [num_tokens, topk, num_experts] one-hot cube: at 1M tokens x topk 16 x
+    # 896 experts that intermediate alone is 112GiB of int64 (it OOM-killed the
+    # EP=32 MegaMoE collection). scatter_add_ accumulates duplicates the same way
+    # the summed one-hot did, so the result is bit-identical.
+    return _router_logits_from_selected_experts(h_selected_experts, num_experts)
 
 
 def sample_power_law(size, alpha, xmin, xmax):
@@ -1634,17 +1649,13 @@ def power_law_logits_v3(
                 - 'rank0_num_tokens': number of tokens routed to rank0
                 - 'slots_per_rank': number of slots per EP rank
     """
-    import torch.nn.functional as F
-
     if use_eplb:
         # Use EPLB for load balanced distribution (with optional redundant experts)
         actual_num_slots = num_slots if num_slots is not None else num_experts
         num_tokens_per_slot, h_selected_slots = _generate_power_law_distribution_with_eplb(
             num_tokens, num_experts, topk, ep, alpha, num_slots=actual_num_slots
         )
-        # Convert to router logits via one-hot encoding and softmax
-        expert_map = F.one_hot(h_selected_slots.long(), num_classes=actual_num_slots).sum(1)
-        router_logits = F.softmax(expert_map.bfloat16(), dim=1)
+        router_logits = _router_logits_from_selected_experts(h_selected_slots, actual_num_slots)
 
         if return_rank0_info:
             # Filter tokens that have ANY topk selection in rank0
@@ -1674,9 +1685,7 @@ def power_law_logits_v3(
         num_tokens_per_expert, h_selected_experts = _generate_power_law_distribution(
             num_tokens, num_experts, topk, ep, alpha
         )
-        # Convert to router logits via one-hot encoding and softmax
-        expert_map = F.one_hot(h_selected_experts.long(), num_classes=num_experts).sum(1)
-        router_logits = F.softmax(expert_map.bfloat16(), dim=1)
+        router_logits = _router_logits_from_selected_experts(h_selected_experts, num_experts)
 
         if return_rank0_info:
             # For non-EPLB, slots = experts, rank0 owns experts [0, experts_per_rank)

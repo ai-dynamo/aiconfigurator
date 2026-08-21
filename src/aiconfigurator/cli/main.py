@@ -28,11 +28,17 @@ from aiconfigurator.sdk.config_builders import resolve_nextn_auto
 from aiconfigurator.sdk.errors import (
     ExperimentOutcome,
     NoFeasibleConfigError,
+    PerfDataNotAvailableError,
     is_expected_cli_error,
 )
+from aiconfigurator.sdk.operations.base import resolve_op_data_path
 from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import normalize_speculative_decoding
-from aiconfigurator.sdk.task_v2 import Task, _lookup_num_gpus_per_node, _warn_large_ep_flag
+from aiconfigurator.sdk.task_v2 import (
+    Task,
+    _lookup_num_gpus_per_node,
+    _warn_large_ep_flag,
+)
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
@@ -550,7 +556,8 @@ def _add_default_mode_arguments(parser):
         type=str,
         choices=["deepep_moe", "megamoe"],
         default=None,
-        help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell. "
+        help="Explicit MoE backend. Use 'megamoe' to model DeepSeek-V4 or Kimi-K3 MegaMoE on Blackwell "
+        "(SGLang on all supported systems; vLLM packaged on gb300 @ 0.27.0). "
         "'deepep_moe' is deprecated and ignored (large-EP is explored automatically from data coverage).",
     )
 
@@ -724,7 +731,8 @@ def _add_recommend_mode_arguments(parser):
         type=str,
         choices=["deepep_moe", "megamoe"],
         default=None,
-        help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell. "
+        help="Explicit MoE backend. Use 'megamoe' to model DeepSeek-V4 or Kimi-K3 MegaMoE on Blackwell "
+        "(SGLang on all supported systems; vLLM packaged on gb300 @ 0.27.0). "
         "'deepep_moe' is deprecated and ignored (large-EP is explored automatically from data coverage).",
     )
 
@@ -1194,6 +1202,15 @@ def _add_estimate_mode_arguments(parser):
         help="Communication quantization mode. Auto-inferred (default: half) if omitted.",
     )
     parser.add_argument(
+        "--moe-backend",
+        type=str,
+        choices=["deepep_moe", "megamoe"],
+        default=None,
+        help="Explicit MoE backend. Use 'megamoe' to model DeepSeek-V4 or Kimi-K3 MegaMoE on Blackwell "
+        "(SGLang on all supported systems; vLLM packaged on gb300 @ 0.27.0). "
+        "'deepep_moe' is deprecated and ignored (large-EP is explored automatically from data coverage).",
+    )
+    parser.add_argument(
         "--database-mode",
         choices=[mode.name for mode in common.DatabaseMode if mode != common.DatabaseMode.SOL_FULL],
         type=str,
@@ -1442,6 +1459,101 @@ def _database_mode_requires_declared_perf_database(database_mode: str | None) ->
     }
 
 
+def _megamoe_model_shape(model_path: str) -> tuple[int, int, int, int] | None:
+    """Return the MegaMoE lookup shape for a supported model family."""
+    model_info = get_model_config_from_model_path(model_path)
+    architecture = model_info["architecture"]
+    if architecture == "KimiK3ForConditionalGeneration":
+        kimi_config = model_info["extra_params"]
+        return (
+            int(kimi_config.routed_expert_hidden_size or model_info["hidden_size"]),
+            int(kimi_config.moe_inter_size),
+            int(kimi_config.topk),
+            int(kimi_config.num_experts),
+        )
+    if architecture == "DeepseekV4ForCausalLM":
+        return (
+            int(model_info["hidden_size"]),
+            int(model_info["moe_inter_size"]),
+            int(model_info["topk"]),
+            int(model_info["num_experts"]),
+        )
+    return None
+
+
+def _megamoe_perf_data_available(
+    backend_name: str,
+    system_name: str,
+    backend_version: str | None,
+    model_path: str,
+) -> bool:
+    """True when measured MegaMoE rows resolve for this model and database.
+
+    Probes the unified ``dsv4_megamoe_module`` table at the requested (or
+    latest declared) version for the backend, then verifies that both phases
+    contain the model's exact fused-module shape on the backend's serving
+    pre-dispatch lane. File presence alone is insufficient: for example,
+    GB300/SGLang 0.5.10 contains DeepSeek-V4 rows but no Kimi-K3 rows.
+
+    Lanes whose rows would arrive only through reuse donors are deliberately
+    not chased: the auto sweep should enumerate only lanes holding their own
+    measured MegaMoE rows.
+    """
+    resolved_version = backend_version or perf_database.get_latest_database_version(
+        system=system_name,
+        backend=backend_name,
+    )
+    if resolved_version is None:
+        return False
+    system_data_root = _get_system_data_root(system_name)
+    if system_data_root is None:
+        return False
+    resolved_path = resolve_op_data_path(
+        system_data_root,
+        backend_name,
+        resolved_version,
+        common.PerfDataFilename.dsv4_megamoe_module.value,
+    )
+    if not resolved_path or not os.path.isfile(resolved_path):
+        return False
+
+    model_shape = _megamoe_model_shape(model_path)
+    if model_shape is None:
+        return False
+
+    import pyarrow.parquet as pq
+
+    required_columns = {
+        "phase",
+        "pre_dispatch",
+        "hidden_size",
+        "inter_size",
+        "topk",
+        "num_experts",
+        "moe_ep_size",
+    }
+    schema_names = set(pq.read_schema(resolved_path).names)
+    if not required_columns <= schema_names:
+        return False
+    columns = sorted(required_columns | ({"moe_tp_size"} & schema_names))
+    expected_pre_dispatch = "vllm" if backend_name == common.BackendName.vllm.value else "sglang_jit"
+    matching_phases = {
+        row["phase"]
+        for row in pq.read_table(resolved_path, columns=columns).to_pylist()
+        if (
+            int(row["hidden_size"]),
+            int(row["inter_size"]),
+            int(row["topk"]),
+            int(row["num_experts"]),
+        )
+        == model_shape
+        and int(row.get("moe_tp_size", 1)) == 1
+        and int(row["moe_ep_size"]) > 1
+        and row["pre_dispatch"] == expected_pre_dispatch
+    }
+    return {"context", "generation"} <= matching_phases
+
+
 def _ensure_backend_version_available(
     system_name: str,
     backend_name: str,
@@ -1579,8 +1691,9 @@ def build_default_tasks(
         enable_wideep: DEPRECATED and ignored (warns once): large-EP is explored
             automatically from data coverage inside the single MoE task per
             serving mode. Restrict with *_moe_ep_candidates in an exp YAML.
-        moe_backend: Explicit SGLang MoE backend override ('deepep_moe' is
-            deprecated and ignored; 'megamoe' is a real kernel selection).
+        moe_backend: Explicit MoE backend override ('deepep_moe' is
+            deprecated and ignored; 'megamoe' is a real kernel selection —
+            DeepSeek-V4/Kimi-K3 on Blackwell, SGLang + vLLM).
         engine_step_backend: Engine-step latency backend. The compiled Rust
             engine is the only step executor; "rust" is the only accepted
             value (the deprecated "python" no-op was removed).
@@ -1621,7 +1734,31 @@ def build_default_tasks(
 
     backends_to_sweep = [b.value for b in common.BackendName] if backend == "auto" else [backend]
     if backend == "auto" and moe_backend == "megamoe":
-        backends_to_sweep = [common.BackendName.sglang.value]
+        # Join only lanes whose measured MegaMoE rows resolve at the requested
+        # (or latest declared) framework version on this system — a lane with
+        # no table there builds fine and then dies at query time with
+        # PerfDataNotAvailableError (e.g. Kimi-K3 on gb300/sglang @ latest
+        # 0.5.16, whose megamoe family stops at 0.5.10). SGLang carries rows
+        # on several Blackwell systems; vLLM joins only for models WITH
+        # measured vLLM MegaMoE rows (today: Kimi-K3 only — DeepSeek-V4 has
+        # SGLang rows but none on vLLM) AND only where those rows resolve
+        # (today: gb300 @ 0.27.0).
+        # Explicit --backend <name> --moe-backend megamoe still builds anywhere.
+        backends_to_sweep = []
+        if _megamoe_perf_data_available(common.BackendName.sglang.value, system, backend_version, model_path):
+            backends_to_sweep.append(common.BackendName.sglang.value)
+        else:
+            logger.warning(
+                "Skipping sglang MegaMoE sweep: no measured MegaMoE rows resolve for system=%s backend_version=%s.",
+                system,
+                backend_version or "latest",
+            )
+        from aiconfigurator.sdk.models.helpers import _is_kimi_k3_checkpoint
+
+        if _is_kimi_k3_checkpoint(model_path) and _megamoe_perf_data_available(
+            common.BackendName.vllm.value, system, backend_version, model_path
+        ):
+            backends_to_sweep.append(common.BackendName.vllm.value)
 
     if backend == "auto":
         supported = perf_database.get_supported_databases()
@@ -1700,6 +1837,19 @@ def build_default_tasks(
     def _disagg_backend_available(backend_name: str) -> bool:
         if decode_system == system or not _database_mode_requires_declared_perf_database(database_mode):
             return True
+        # The decode database needs its own measured MegaMoE rows; a decode
+        # system with framework data but no MegaMoE table would die at query.
+        if (
+            backend_name in (common.BackendName.sglang.value, common.BackendName.vllm.value)
+            and moe_backend == "megamoe"
+            and (not _megamoe_perf_data_available(backend_name, decode_system, backend_version, model_path))
+        ):
+            logger.warning(
+                "Skipping disagg for backend %s: no measured MegaMoE rows for decode system %s.",
+                backend_name,
+                decode_system,
+            )
+            return False
         supported = perf_database.get_supported_databases()
         decode_versions = supported.get(decode_system, {}).get(backend_name, [])
         if not decode_versions:
@@ -1746,12 +1896,12 @@ def build_default_tasks(
     if not enable_encoder_dp:
         global_kwargs["enable_encoder_dp"] = False
 
-    def _sglang_moe_backend_override(backend_name: str) -> str | None:
-        # An explicit --moe-backend applies to SGLang tasks only (matches the
-        # legacy behavior); the deprecated enable_wideep flag no longer spells
-        # deepep_moe here — large EP is coverage-driven inside the one task.
-        if backend_name != common.BackendName.sglang.value:
-            return None
+    def _moe_backend_override(backend_name: str) -> str | None:
+        # An explicit --moe-backend passes through for every backend (vLLM
+        # needs it for megamoe); Task-level validation rejects unsupported
+        # pairs. The deprecated enable_wideep flag no longer spells deepep_moe
+        # here — large EP is coverage-driven inside the one task (and Task's
+        # own _normalize_wideep_moe_backend keeps the compat mapping).
         return moe_backend
 
     def _make_agg(backend_name: str, moe_backend_value: str | None) -> Task:
@@ -1813,7 +1963,7 @@ def build_default_tasks(
             afd_feasible = True
 
     for backend_name in backends_to_sweep:
-        backend_moe = _sglang_moe_backend_override(backend_name)
+        backend_moe = _moe_backend_override(backend_name)
 
         if "agg" in modes_to_sweep:
             exp_name = f"agg_{backend_name}" if backend == "auto" else "agg"
@@ -2670,6 +2820,7 @@ def _run_estimate_mode(args):
         fmha_quant_mode=args.fmha_quant_mode,
         moe_quant_mode=args.moe_quant_mode,
         comm_quant_mode=args.comm_quant_mode,
+        moe_backend=args.moe_backend,
         free_gpu_memory_fraction=args.free_gpu_memory_fraction,
         max_seq_len=args.max_seq_len,
         engine_step_backend=args.engine_step_backend,
@@ -2729,7 +2880,17 @@ def _run_estimate_mode(args):
         else:
             sol_estimate_kwargs = dict(estimate_kwargs)
             sol_estimate_kwargs["database_mode"] = common.DatabaseMode.SOL.name
-            sol_result = cli_estimate(**sol_estimate_kwargs)
+            try:
+                sol_result = cli_estimate(**sol_estimate_kwargs)
+            except PerfDataNotAvailableError as exc:
+                # measured-only lanes (e.g. the MegaMoE fused module) have no SOL
+                # analytic form — degrade to the no-SOL time breakdown instead
+                # of failing the whole estimate.
+                logger.warning(
+                    "SOL detail comparison unavailable (%s); printing measured columns only.",
+                    exc,
+                )
+                sol_result = None
 
     print("\n" + "=" * 60)
     print(f"  Performance Estimate ({result.mode})")

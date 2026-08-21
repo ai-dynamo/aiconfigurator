@@ -1432,7 +1432,7 @@ ops:
       - {framework: "vllm", version: "0.24.0", system: "h100_sxm", op_name: "dsv4_hca_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["FLASHMLA_SPARSE_DSV4"]}
       - {framework: "vllm", version: "0.24.0", system: "h200_sxm", op_name: "dsv4_hca_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["FLASHMLA_SPARSE_DSV4"]}
   - op_file: dsv4_megamoe_module_perf
-    family: moe
+    family: megamoe
     axes: [op_name, phase, moe_dtype, kernel_dtype]
     facts:
       - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "dsv4_megamoe_module", phase: "context", moe_dtype: "w4a8_mxfp4_mxfp8", kernel_dtype: "fp8_fp4", backends: ["deepgemm"], kernel_sources: ["deepgemm_megamoe"]}
@@ -1441,6 +1441,8 @@ ops:
       - {framework: "sglang", version: "0.5.10", system: "gb300", op_name: "dsv4_megamoe_module", phase: "generation", moe_dtype: "w4a8_mxfp4_mxfp8", kernel_dtype: "fp8_fp4", backends: ["deepgemm"], kernel_sources: ["deepgemm_megamoe"]}
       - {framework: "sglang", version: "0.5.16", system: "b200_sxm", op_name: "dsv4_megamoe_module", phase: "context", moe_dtype: "w4a8_mxfp4_mxfp8", kernel_dtype: "fp8_fp4", backends: ["deepgemm"], kernel_sources: ["deepgemm_megamoe"]}
       - {framework: "sglang", version: "0.5.16", system: "b200_sxm", op_name: "dsv4_megamoe_module", phase: "generation", moe_dtype: "w4a8_mxfp4_mxfp8", kernel_dtype: "fp8_fp4", backends: ["deepgemm"], kernel_sources: ["deepgemm_megamoe"]}
+      - {framework: "vllm", version: "0.27.0", system: "gb300", op_name: "dsv4_megamoe_module", phase: "context", moe_dtype: "w4a8_mxfp4_mxfp8", kernel_dtype: "fp8_fp4", backends: ["deepgemm"], kernel_sources: ["deepgemm_megamoe"]}
+      - {framework: "vllm", version: "0.27.0", system: "gb300", op_name: "dsv4_megamoe_module", phase: "generation", moe_dtype: "w4a8_mxfp4_mxfp8", kernel_dtype: "fp8_fp4", backends: ["deepgemm"], kernel_sources: ["deepgemm_megamoe"]}
   - op_file: dsv4_paged_mqa_logits_module_perf
     family: sparse_attention
     axes: [op_name, architecture, kv_cache_dtype, mla_dtype, gemm_type]

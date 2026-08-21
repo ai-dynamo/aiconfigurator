@@ -1053,3 +1053,132 @@ def test_cli_main_estimate_value_error_exits_without_traceback(monkeypatch):
 
     # SystemExit carries the plain message (no traceback, exit code 1).
     assert "f_moe_ep_size (7) must be a positive divisor" in str(exc_info.value)
+
+
+def test_afd_megamoe_forces_ep_only_dims(monkeypatch):
+    """AFD + MegaMoE: the fused module is EP-only (K3 model construction
+    rejects moe_tp>1), so F must carry moe_tp=1/moe_ep=f_tp and the attention-
+    only A pool pins its irrelevant MoE dims to moe_tp=1 as well."""
+
+    captured = {}
+
+    class FakeDatabase:
+        system_spec: ClassVar[dict] = {
+            "node": {"num_gpus_per_node": 8},
+            "gpu": {"mem_capacity": 80 * (1 << 30)},
+        }
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            captured["a_model_config"] = kwargs["a_model_config"]
+            captured["f_model_config"] = kwargs["f_model_config"]
+
+        def run_afd(self, runtime_config, **kwargs):
+            summary = InferenceSummary(runtime_config)
+            summary.set_oom(False)
+            summary.set_result_dict(
+                {
+                    "phase": "decode",
+                    "ttft": 0.0,
+                    "tpot": 1.0,
+                    "request_latency": 9.0,
+                    "b_total": 1,
+                    "num_total_gpus": 16,
+                    "memory": 1.0,
+                    "seq/s": 1.0,
+                    "tokens/s": 9.0,
+                    "tokens/s/gpu": 0.5625,
+                    "tokens/s/user": 9.0,
+                    "power_w": 0.0,
+                }
+            )
+            return summary
+
+    monkeypatch.setattr("aiconfigurator.sdk.inference_session.AFDInferenceSession", FakeSession)
+    # Stub the nvfp4 remap, same as the neighboring AFD tests: the fake
+    # model_path has no HF config and would otherwise force a download.
+    monkeypatch.setattr("aiconfigurator.cli.api.resolve_nvfp4_for_system", lambda *a, **k: None)
+
+    api._run_afd_estimate(
+        model_path="test-model",
+        system_name="test-system",
+        backend_name="test-backend",
+        resolved_version="test-version",
+        isl=128,
+        osl=10,
+        tp_size=1,
+        a_tp_size=4,
+        n_a_nodes=1,
+        n_f_nodes=1,  # f_tp_size = 1 node * 8 gpus = 8
+        a_batch_size=1,
+        f_moe_ep_size=8,  # EP-only f pool: f_moe_tp = 8/8 = 1
+        num_microbatches=None,
+        pipeline_model="serial",
+        comm_overhead_factor=1.0,
+        afd_phase="decode",
+        afd_combined_with_pd=False,
+        afd_boundary_on_attn=True,
+        gemm_quant_mode=None,
+        kvcache_quant_mode=None,
+        fmha_quant_mode=None,
+        moe_quant_mode=None,
+        comm_quant_mode=None,
+        load_database=lambda _system_name: FakeDatabase(),
+        get_backend=lambda _backend_name: SimpleNamespace(name=SimpleNamespace(value="test-backend")),
+        get_model=lambda *_args, **_kwargs: None,
+        free_gpu_memory_fraction=None,
+        max_seq_len=None,
+        prefix=0,
+        nextn=0,
+        nextn_accepted=None,
+        moe_backend="megamoe",
+    )
+
+    a_cfg = captured["a_model_config"]
+    f_cfg = captured["f_model_config"]
+    assert f_cfg.moe_tp_size == 1
+    assert f_cfg.moe_ep_size == 8
+    assert f_cfg.moe_backend == "megamoe"
+    assert a_cfg.moe_tp_size == 1
+    assert a_cfg.moe_ep_size == 4  # product rule: a_tp(4) == moe_tp(1) * moe_ep(4)
+    assert a_cfg.moe_backend == "megamoe"
+
+
+def test_afd_megamoe_rejects_non_ep_only_f_pool():
+    with pytest.raises(ValueError, match="moe_backend='megamoe' is EP-only"):
+        api._run_afd_estimate(
+            model_path="test-model",
+            system_name="test-system",
+            backend_name="test-backend",
+            resolved_version="test-version",
+            isl=128,
+            osl=10,
+            tp_size=1,
+            a_tp_size=4,
+            n_a_nodes=1,
+            n_f_nodes=1,  # f_tp_size = 8
+            a_batch_size=1,
+            f_moe_ep_size=4,  # -> f_moe_tp = 2, invalid under megamoe
+            num_microbatches=None,
+            pipeline_model="serial",
+            comm_overhead_factor=1.0,
+            afd_phase="decode",
+            afd_combined_with_pd=False,
+            afd_boundary_on_attn=True,
+            gemm_quant_mode=None,
+            kvcache_quant_mode=None,
+            fmha_quant_mode=None,
+            moe_quant_mode=None,
+            comm_quant_mode=None,
+            load_database=lambda _system_name: SimpleNamespace(
+                system_spec={"node": {"num_gpus_per_node": 8}, "gpu": {"mem_capacity": 80 * (1 << 30)}}
+            ),
+            get_backend=lambda _backend_name: SimpleNamespace(name=SimpleNamespace(value="test-backend")),
+            get_model=lambda *_args, **_kwargs: None,
+            free_gpu_memory_fraction=None,
+            max_seq_len=None,
+            prefix=0,
+            nextn=0,
+            nextn_accepted=None,
+            moe_backend="megamoe",
+        )
