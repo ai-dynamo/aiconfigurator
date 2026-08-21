@@ -349,7 +349,10 @@ def compile_engine(
     # Apply MTP BEFORE get_model so the walked op lists carry the
     # (L+nextn)/L compute scale; accepted-token progress is applied above core.
     apply_nextn(model_config, nextn)
-    model = get_model(model_path, model_config, backend)
+    # system_name makes get_model apply the system-aware quant remaps — this
+    # embedded path (Rust build_aic_engine / Dynamo Mocker) previously ran
+    # none, silently keeping e.g. native-FP4 compute assumptions on Hopper.
+    model = get_model(model_path, model_config, backend, system_name=system)
 
     # The database supplies the shared-layer perf sources, the query mode and
     # the transfer policy stamped into the compiled `EngineConfig`. Load lazily
