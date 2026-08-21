@@ -30,30 +30,16 @@
     },
     "deepseek-r1-gb200-vllm-014-scan-coverage": {
       "agg": {
-        "values": {
-          "agg_request": 284.21747681444236,
-          "agg_tpot": 107.91410673620817,
-          "agg_ttft": 176.3033700782342
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "disagg": {
-        "values": {
-          "disagg_request": 224.487,
-          "disagg_tpot": 49.462,
-          "disagg_ttft": 175.025
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "mixed": {
-        "values": {
-          "mixed_step": 107.91410673620817
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "static": {
-        "values": {
-          "static_ctx": 88.396,
-          "static_gen": 66.845,
-          "static_total": 155.24099999999999
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "deepseek-v3-b200-vllm-019-isl1024-osl2": {
@@ -128,30 +114,16 @@
     },
     "deepseek-v3-gb200-vllm-014-scan-coverage": {
       "agg": {
-        "values": {
-          "agg_request": 284.21747681444236,
-          "agg_tpot": 107.91410673620817,
-          "agg_ttft": 176.3033700782342
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "disagg": {
-        "values": {
-          "disagg_request": 224.487,
-          "disagg_tpot": 49.462,
-          "disagg_ttft": 175.025
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "mixed": {
-        "values": {
-          "mixed_step": 107.91410673620817
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "static": {
-        "values": {
-          "static_ctx": 88.396,
-          "static_gen": 66.845,
-          "static_total": 155.24099999999999
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "deepseek-v32-b200-sglang-0510-isl1024-osl2": {
@@ -515,82 +487,44 @@
     },
     "kimi-k25-b300-vllm-019-scan-coverage": {
       "agg": {
-        "values": {
-          "agg_request": 251.58369192426386,
-          "agg_tpot": 92.55703149377122,
-          "agg_ttft": 159.02666043049263
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "disagg": {
-        "values": {
-          "disagg_request": 195.358,
-          "disagg_tpot": 12.084,
-          "disagg_ttft": 183.274
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "mixed": {
-        "values": {
-          "mixed_step": 92.55703149377122
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "static": {
-        "values": {
-          "static_ctx": 92.563,
-          "static_gen": 10.697,
-          "static_total": 103.26
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "kimi-k25-gb300-vllm-019-scan-coverage": {
       "agg": {
-        "values": {
-          "agg_request": 251.2455515089698,
-          "agg_tpot": 92.39790659245638,
-          "agg_ttft": 158.84764491651342
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "disagg": {
-        "values": {
-          "disagg_request": 194.967,
-          "disagg_tpot": 12.343,
-          "disagg_ttft": 182.624
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "mixed": {
-        "values": {
-          "mixed_step": 92.39790659245638
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "static": {
-        "values": {
-          "static_ctx": 92.235,
-          "static_gen": 11.256,
-          "static_total": 103.491
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "kimi-k25-h100-vllm-019-isl1024-osl2": {
       "agg": {
-        "values": {
-          "agg_request": 295.86414093294195,
-          "agg_tpot": 113.3948898507962,
-          "agg_ttft": 182.46925108214575
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "disagg": {
-        "error": "RuntimeError"
+        "error": "PerfDataNotAvailableError"
       },
       "mixed": {
-        "values": {
-          "mixed_step": 113.3948898507962
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "static": {
-        "values": {
-          "static_ctx": 113.288,
-          "static_gen": 11.015,
-          "static_total": 124.303
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "kimi-k25-h200-sglang-0510-isl1024-osl2": {
@@ -623,30 +557,16 @@
     },
     "kimi-k25-h200-vllm-014-scan-coverage": {
       "agg": {
-        "values": {
-          "agg_request": 287.1668583692072,
-          "agg_tpot": 109.30205099727398,
-          "agg_ttft": 177.86480737193324
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "disagg": {
-        "values": {
-          "disagg_request": 226.384,
-          "disagg_tpot": 10.559,
-          "disagg_ttft": 215.825
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "mixed": {
-        "values": {
-          "mixed_step": 109.30205099727398
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "static": {
-        "values": {
-          "static_ctx": 109.003,
-          "static_gen": 8.551,
-          "static_total": 117.554
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "kimi-k25-h200-vllm-019-isl1024-osl2": {
@@ -745,30 +665,16 @@
     },
     "llama31-405b-b300-sglang-0510-scan-coverage": {
       "agg": {
-        "values": {
-          "agg_request": 358.59534100942494,
-          "agg_tpot": 121.5577427150593,
-          "agg_ttft": 237.03759829436564
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "disagg": {
-        "values": {
-          "disagg_request": 251.226,
-          "disagg_tpot": 24.3,
-          "disagg_ttft": 226.926
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "mixed": {
-        "values": {
-          "mixed_step": 121.47201613084027
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "static": {
-        "values": {
-          "static_ctx": 114.609,
-          "static_gen": 22.163,
-          "static_total": 136.772
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "llama31-70b-b200-vllm-019-isl1024-osl2": {
@@ -1076,30 +982,16 @@
     },
     "minimax-m25-h100-vllm-019-isl1024-osl2": {
       "agg": {
-        "values": {
-          "agg_request": 141.24091739437904,
-          "agg_tpot": 40.2074905385313,
-          "agg_ttft": 101.03342685584772
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "disagg": {
-        "values": {
-          "disagg_request": 90.523,
-          "disagg_tpot": 14.567,
-          "disagg_ttft": 75.956
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "mixed": {
-        "values": {
-          "mixed_step": 40.2074905385313
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "static": {
-        "values": {
-          "static_ctx": 38.362,
-          "static_gen": 11.78,
-          "static_total": 50.142
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "minimax-m25-h200-vllm-019-isl1024-osl2": {
@@ -1536,30 +1428,16 @@
     },
     "qwen3-17b-h100-vllm-014-scan-coverage": {
       "agg": {
-        "values": {
-          "agg_request": 37.292138378805305,
-          "agg_tpot": 5.690418060614261,
-          "agg_ttft": 31.601720318191045
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "disagg": {
-        "values": {
-          "disagg_request": 11.789,
-          "disagg_tpot": 1.612,
-          "disagg_ttft": 10.177
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "mixed": {
-        "values": {
-          "mixed_step": 5.690418060614261
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "static": {
-        "values": {
-          "static_ctx": 5.14,
-          "static_gen": 1.46,
-          "static_total": 6.6
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "qwen3-235b-a22b-b200-sglang-0510-cp4": {
@@ -1820,58 +1698,30 @@
     },
     "qwen3-30b-a3b-gb300-sglang-059-scan-coverage": {
       "agg": {
-        "values": {
-          "agg_request": 37.69480301620486,
-          "agg_tpot": 12.77789932752707,
-          "agg_ttft": 24.916903688677785
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "disagg": {
-        "values": {
-          "disagg_request": 27.694,
-          "disagg_tpot": 3.54,
-          "disagg_ttft": 24.154
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "mixed": {
-        "values": {
-          "mixed_step": 12.707510188346427
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "static": {
-        "values": {
-          "static_ctx": 12.199,
-          "static_gen": 2.829,
-          "static_total": 15.028
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "qwen3-30b-a3b-h200-sglang-059-scan-coverage": {
       "agg": {
-        "values": {
-          "agg_request": 55.651620288959535,
-          "agg_tpot": 18.864956030155774,
-          "agg_ttft": 36.78666425880376
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "disagg": {
-        "values": {
-          "disagg_request": 41.07,
-          "disagg_tpot": 4.733,
-          "disagg_ttft": 36.337
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "mixed": {
-        "values": {
-          "mixed_step": 18.849023215072737
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "static": {
-        "values": {
-          "static_ctx": 18.352,
-          "static_gen": 3.442,
-          "static_total": 21.794
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "qwen3-30b-a3b-h200-vllm-019-afd": {
@@ -1913,32 +1763,32 @@
     "qwen3-32b-b200-trtllm-130rc15-power": {
       "agg": {
         "values": {
-          "agg_request": 61.93059455820067,
-          "agg_tpot": 20.99342188413582,
-          "agg_ttft": 40.93717267406485
+          "agg_request": 62.33865709728455,
+          "agg_tpot": 21.131748168571036,
+          "agg_ttft": 41.20690892871352
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 44.59,
-          "disagg_tpot": 4.524,
-          "disagg_ttft": 40.066
+          "disagg_request": 45.084,
+          "disagg_tpot": 5.097,
+          "disagg_ttft": 39.987
         }
       },
       "mixed": {
         "values": {
-          "mixed_step": 20.97694272966627
+          "mixed_step": 21.101654808286266
         }
       },
       "static": {
         "values": {
-          "static_ctx": 20.235,
+          "static_ctx": 20.195,
           "static_ctx_energy": 0.0,
           "static_ctx_power": 0.0,
-          "static_gen": 4.149,
+          "static_gen": 4.234,
           "static_gen_energy": 0.0,
           "static_gen_power": 0.0,
-          "static_total": 24.384
+          "static_total": 24.429000000000002
         }
       }
     },
@@ -2023,97 +1873,79 @@
     },
     "qwen3-32b-gb200-trtllm-130rc17-power": {
       "agg": {
-        "values": {
-          "agg_request": 62.77632985038181,
-          "agg_tpot": 21.28011181368875,
-          "agg_ttft": 41.496218036693065
-        }
+        "error": "ValueError"
       },
       "disagg": {
-        "values": {
-          "disagg_request": 44.609,
-          "disagg_tpot": 4.584,
-          "disagg_ttft": 40.025
-        }
+        "error": "ValueError"
       },
       "mixed": {
-        "values": {
-          "mixed_step": 21.278375761448583
-        }
+        "error": "RuntimeError"
       },
       "static": {
-        "values": {
-          "static_ctx": 20.214,
-          "static_ctx_energy": 0.0,
-          "static_ctx_power": 0.0,
-          "static_gen": 4.287,
-          "static_gen_energy": 0.0,
-          "static_gen_power": 0.0,
-          "static_total": 24.500999999999998
-        }
+        "error": "ValueError"
       }
     },
     "qwen3-32b-gb200-vllm-022-power": {
       "agg": {
         "values": {
-          "agg_request": 101.77354510260908,
-          "agg_tpot": 20.787550636521917,
-          "agg_ttft": 80.98599446608716
+          "agg_request": 100.93295100048879,
+          "agg_tpot": 20.39197694140648,
+          "agg_ttft": 80.5409740590823
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 43.6,
-          "disagg_tpot": 4.515,
-          "disagg_ttft": 39.085
+          "disagg_request": 42.957,
+          "disagg_tpot": 4.315,
+          "disagg_ttft": 38.642
         }
       },
       "mixed": {
         "values": {
-          "mixed_step": 20.787550636521917
+          "mixed_step": 20.39197694140648
         }
       },
       "static": {
         "values": {
-          "static_ctx": 19.74,
+          "static_ctx": 19.517,
           "static_ctx_energy": 0.0,
           "static_ctx_power": 0.0,
-          "static_gen": 4.227,
+          "static_gen": 4.021,
           "static_gen_energy": 0.0,
           "static_gen_power": 0.0,
-          "static_total": 23.967
+          "static_total": 23.538
         }
       }
     },
     "qwen3-32b-h200-vllm-022-power": {
       "agg": {
         "values": {
-          "agg_request": 115.79166072549353,
-          "agg_tpot": 27.38431092964401,
-          "agg_ttft": 88.40734979584951
+          "agg_request": 114.25174841158815,
+          "agg_tpot": 26.6596463113356,
+          "agg_ttft": 87.59210210025256
         }
       },
       "disagg": {
         "values": {
-          "disagg_request": 54.448,
-          "disagg_tpot": 5.591,
-          "disagg_ttft": 48.857
+          "disagg_request": 53.304,
+          "disagg_tpot": 5.516,
+          "disagg_ttft": 47.788
         }
       },
       "mixed": {
         "values": {
-          "mixed_step": 27.38431092964401
+          "mixed_step": 26.6596463113356
         }
       },
       "static": {
         "values": {
-          "static_ctx": 24.675,
+          "static_ctx": 24.135,
           "static_ctx_energy": 0.0,
           "static_ctx_power": 0.0,
-          "static_gen": 4.996,
+          "static_gen": 4.874,
           "static_gen_energy": 0.0,
           "static_gen_power": 0.0,
-          "static_total": 29.671
+          "static_total": 29.009
         }
       }
     },
@@ -2231,30 +2063,16 @@
     },
     "qwen35-27b-b300-trtllm-130rc10-scan-coverage": {
       "agg": {
-        "values": {
-          "agg_request": 57.10632162234366,
-          "agg_tpot": 19.35807512621819,
-          "agg_ttft": 37.74824649612547
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "disagg": {
-        "values": {
-          "disagg_request": 40.771,
-          "disagg_tpot": 3.831,
-          "disagg_ttft": 36.94
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "mixed": {
-        "values": {
-          "mixed_step": 19.34793003327631
-        }
+        "error": "PerfDataNotAvailableError"
       },
       "static": {
-        "values": {
-          "static_ctx": 18.657,
-          "static_gen": 3.464,
-          "static_total": 22.121
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "qwen35-397b-a17b-b200-sglang-0510-isl1024-osl2": {
@@ -2360,35 +2178,35 @@
   "post_freeze_pins": {
     "deepseek-r1-gb200-vllm-014-scan-coverage::agg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "deepseek-r1-gb200-vllm-014-scan-coverage::disagg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "deepseek-r1-gb200-vllm-014-scan-coverage::mixed": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "deepseek-r1-gb200-vllm-014-scan-coverage::static": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "deepseek-v3-gb200-vllm-014-scan-coverage::agg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "deepseek-v3-gb200-vllm-014-scan-coverage::disagg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "deepseek-v3-gb200-vllm-014-scan-coverage::mixed": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "deepseek-v3-gb200-vllm-014-scan-coverage::static": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "glm52-b200-sglang-0514-isl1024-osl2::agg": {
       "engine": "rust",
@@ -2408,99 +2226,99 @@
     },
     "kimi-k25-b300-vllm-019-scan-coverage::agg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "kimi-k25-b300-vllm-019-scan-coverage::disagg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "kimi-k25-b300-vllm-019-scan-coverage::mixed": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "kimi-k25-b300-vllm-019-scan-coverage::static": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "kimi-k25-gb300-vllm-019-scan-coverage::agg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "kimi-k25-gb300-vllm-019-scan-coverage::disagg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "kimi-k25-gb300-vllm-019-scan-coverage::mixed": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "kimi-k25-gb300-vllm-019-scan-coverage::static": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "kimi-k25-h100-vllm-019-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "kimi-k25-h100-vllm-019-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "kimi-k25-h100-vllm-019-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "kimi-k25-h100-vllm-019-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "kimi-k25-h200-vllm-014-scan-coverage::agg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "kimi-k25-h200-vllm-014-scan-coverage::disagg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "kimi-k25-h200-vllm-014-scan-coverage::mixed": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "kimi-k25-h200-vllm-014-scan-coverage::static": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "llama31-405b-b300-sglang-0510-scan-coverage::agg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "llama31-405b-b300-sglang-0510-scan-coverage::disagg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "llama31-405b-b300-sglang-0510-scan-coverage::mixed": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "llama31-405b-b300-sglang-0510-scan-coverage::static": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "minimax-m25-h100-vllm-019-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "minimax-m25-h100-vllm-019-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "minimax-m25-h100-vllm-019-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "minimax-m25-h100-vllm-019-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "minimax-m25-nvfp4-h200-vllm-019-hybrid-xprofile::agg": {
       "engine": "rust",
@@ -2536,19 +2354,19 @@
     },
     "qwen3-17b-h100-vllm-014-scan-coverage::agg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-17b-h100-vllm-014-scan-coverage::disagg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-17b-h100-vllm-014-scan-coverage::mixed": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-17b-h100-vllm-014-scan-coverage::static": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-30b-a3b-b200-vllm-022-power::agg": {
       "engine": "rust",
@@ -2568,35 +2386,35 @@
     },
     "qwen3-30b-a3b-gb300-sglang-059-scan-coverage::agg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-30b-a3b-gb300-sglang-059-scan-coverage::disagg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-30b-a3b-gb300-sglang-059-scan-coverage::mixed": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-30b-a3b-gb300-sglang-059-scan-coverage::static": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-30b-a3b-h200-sglang-059-scan-coverage::agg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-30b-a3b-h200-sglang-059-scan-coverage::disagg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-30b-a3b-h200-sglang-059-scan-coverage::mixed": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-30b-a3b-h200-sglang-059-scan-coverage::static": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-30b-a3b-h200-vllm-019-afd::afd": {
       "engine": "rust",
@@ -2604,19 +2422,19 @@
     },
     "qwen3-32b-b200-trtllm-130rc15-power::agg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-32b-b200-trtllm-130rc15-power::disagg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-32b-b200-trtllm-130rc15-power::mixed": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-32b-b200-trtllm-130rc15-power::static": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-32b-fp8-h200-vllm-019-tiebreak-agg::agg": {
       "engine": "rust",
@@ -2624,51 +2442,51 @@
     },
     "qwen3-32b-gb200-trtllm-130rc17-power::agg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-32b-gb200-trtllm-130rc17-power::disagg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-32b-gb200-trtllm-130rc17-power::mixed": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-32b-gb200-trtllm-130rc17-power::static": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-32b-gb200-vllm-022-power::agg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-32b-gb200-vllm-022-power::disagg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-32b-gb200-vllm-022-power::mixed": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-32b-gb200-vllm-022-power::static": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-32b-h200-vllm-022-power::agg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-32b-h200-vllm-022-power::disagg": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-32b-h200-vllm-022-power::mixed": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen3-32b-h200-vllm-022-power::static": {
       "engine": "rust",
-      "git_head": "bdc339771a3bad6bd5845c22ee1edc9d94d59f71"
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen35-27b-b200-vllm-019-isl1024-osl2::agg": {
       "engine": "rust",
@@ -2685,6 +2503,22 @@
     "qwen35-27b-b200-vllm-019-isl1024-osl2::static": {
       "engine": "rust",
       "git_head": "fa865867727212621e742810c30eeddf711a5648"
+    },
+    "qwen35-27b-b300-trtllm-130rc10-scan-coverage::agg": {
+      "engine": "rust",
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
+    },
+    "qwen35-27b-b300-trtllm-130rc10-scan-coverage::disagg": {
+      "engine": "rust",
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
+    },
+    "qwen35-27b-b300-trtllm-130rc10-scan-coverage::mixed": {
+      "engine": "rust",
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
+    },
+    "qwen35-27b-b300-trtllm-130rc10-scan-coverage::static": {
+      "engine": "rust",
+      "git_head": "9f6269759836f047e4e390304a7991c711dde540"
     },
     "qwen35-397b-a17b-b200-vllm-019-isl1024-osl2::agg": {
       "engine": "rust",
