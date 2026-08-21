@@ -58,6 +58,38 @@ use crate::perf_database::parquet_loader::PerfReader;
 const CONTEXT_AXES: &[&str] = &["num_heads", "seq_len", "batch"];
 /// Axes for the generation table (RAW Grid; seq is innermost).
 const GENERATION_AXES: &[&str] = &["num_heads", "batch", "seq_len"];
+const WIDEEP_MLA_ATTENTION_BACKENDS: &[&str] = &["flashinfer", "fa3"];
+const BLACKWELL_MLA_KERNEL_SOURCE: &str = "trtllm_mla";
+
+/// Resolve the user-facing attention backend to the measured table key.
+///
+/// Exact measured kernel sources remain valid for low-level callers. Only the
+/// supported user-facing aliases may borrow Blackwell's `trtllm_mla` slice;
+/// unknown or empty values must not silently select it.
+fn resolve_kernel_source(
+    requested: &str,
+    has_requested: bool,
+    has_blackwell_source: bool,
+) -> Result<&str, AicError> {
+    if requested.is_empty() {
+        return Err(AicError::InvalidEngineConfig(
+            "attention_backend must not be empty".to_string(),
+        ));
+    }
+    if has_requested {
+        return Ok(requested);
+    }
+    if WIDEEP_MLA_ATTENTION_BACKENDS.contains(&requested) {
+        return Ok(if has_blackwell_source {
+            BLACKWELL_MLA_KERNEL_SOURCE
+        } else {
+            requested
+        });
+    }
+    Err(AicError::InvalidEngineConfig(format!(
+        "attention_backend must be 'flashinfer', 'fa3', or match an available kernel_source; got {requested:?}."
+    )))
+}
 
 /// Owner for both WideEP MLA tables. Each side is lazily loaded on first
 /// query.
@@ -155,6 +187,17 @@ impl WideEpMlaTable {
         let main_flops = quant_tc_flops(&self.system_spec, fmha_quant.mapping())?;
         let bf16_flops = quant_tc_flops(&self.system_spec, FmhaQuantMode::Bfloat16.mapping())?;
         let grids = self.load_context()?;
+        let kernel_source = resolve_kernel_source(
+            kernel_source,
+            grids
+                .by_keys
+                .keys()
+                .any(|key| key.kernel_source == kernel_source),
+            grids
+                .by_keys
+                .keys()
+                .any(|key| key.kernel_source == BLACKWELL_MLA_KERNEL_SOURCE),
+        )?;
         let key = ContextKey {
             kernel_source: kernel_source.to_string(),
             fmha_quant: fmha_quant.name().to_string(),
@@ -215,6 +258,17 @@ impl WideEpMlaTable {
         let main_flops = quant_tc_flops(&self.system_spec, fmha_quant.mapping())?;
         let bf16_flops = quant_tc_flops(&self.system_spec, FmhaQuantMode::Bfloat16.mapping())?;
         let grids = self.load_generation()?;
+        let kernel_source = resolve_kernel_source(
+            kernel_source,
+            grids
+                .by_keys
+                .keys()
+                .any(|key| key.kernel_source == kernel_source),
+            grids
+                .by_keys
+                .keys()
+                .any(|key| key.kernel_source == BLACKWELL_MLA_KERNEL_SOURCE),
+        )?;
         let key = GenerationKey {
             kernel_source: kernel_source.to_string(),
             kv_quant: kv_quant.name().to_string(),
@@ -265,6 +319,17 @@ impl WideEpMlaTable {
         fmha_quant: FmhaQuantMode,
     ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
         let grids = self.load_context()?;
+        let kernel_source = resolve_kernel_source(
+            kernel_source,
+            grids
+                .by_keys
+                .keys()
+                .any(|key| key.kernel_source == kernel_source),
+            grids
+                .by_keys
+                .keys()
+                .any(|key| key.kernel_source == BLACKWELL_MLA_KERNEL_SOURCE),
+        )?;
         let key = ContextKey {
             kernel_source: kernel_source.to_string(),
             fmha_quant: fmha_quant.name().to_string(),
@@ -285,6 +350,17 @@ impl WideEpMlaTable {
         kv_quant: KvCacheQuantMode,
     ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
         let grids = self.load_generation()?;
+        let kernel_source = resolve_kernel_source(
+            kernel_source,
+            grids
+                .by_keys
+                .keys()
+                .any(|key| key.kernel_source == kernel_source),
+            grids
+                .by_keys
+                .keys()
+                .any(|key| key.kernel_source == BLACKWELL_MLA_KERNEL_SOURCE),
+        )?;
         let key = GenerationKey {
             kernel_source: kernel_source.to_string(),
             kv_quant: kv_quant.name().to_string(),
