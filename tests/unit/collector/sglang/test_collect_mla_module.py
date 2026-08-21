@@ -253,6 +253,7 @@ class TestDsaSkipIndexer:
         assert "register_forward_hook" not in decode
 
 
+@pytest.mark.unit
 class TestBuildModuleTestCases:
     def test_glm52_local_config_uses_transformers_v5_layer_type(self):
         mod = _import_module()
@@ -264,6 +265,45 @@ class TestBuildModuleTestCases:
         assert set(config["layer_types"]) == {"compressed_sparse_attention"}
         assert config["architectures"] == ["GlmMoeDsaForCausalLM"]
         assert config["index_topk_freq"] == 4
+
+    @pytest.mark.parametrize(
+        "model_path",
+        ["zai-org/GLM-5.3", "zai-org/GLM-5.3-FP8", "nvidia/GLM-5.3-NVFP4"],
+    )
+    def test_glm53_alias_configs_match_glm52_geometry(self, model_path):
+        mod = _import_module()
+        geometry_keys = (
+            "hidden_size",
+            "intermediate_size",
+            "moe_intermediate_size",
+            "num_experts_per_tok",
+            "n_routed_experts",
+            "n_shared_experts",
+            "scoring_func",
+            "routed_scaling_factor",
+            "norm_topk_prob",
+            "num_hidden_layers",
+            "indexer_types",
+            "index_n_heads",
+            "index_head_dim",
+            "index_topk",
+            "index_topk_freq",
+            "num_attention_heads",
+            "kv_lora_rank",
+            "q_lora_rank",
+            "qk_nope_head_dim",
+            "qk_rope_head_dim",
+            "v_head_dim",
+            "max_position_embeddings",
+        )
+
+        def geometry(path):
+            local_path = Path(mod._resolve_local_model_path(path))
+            config = json.loads((local_path / "config.json").read_text())
+            assert len(config["indexer_types"]) == config["num_hidden_layers"]
+            return {key: config[key] for key in geometry_keys}
+
+        assert geometry(model_path) == geometry("zai-org/GLM-5.2")
 
     def test_module_precision_respects_outer_sm_gate(self):
         mod = _import_module()
@@ -302,11 +342,11 @@ class TestBuildModuleTestCases:
         model_paths = {case[6] for case in cases}
         # #1378 canonicalization: one DSA collection per (architecture,
         # DSA-gemm-type) group on the longest-context checkpoint, reused for the
-        # consumer-equivalent rest. GLM-5/5.1/5.2 share identical DSA geometry
-        # (index_n_heads=32, index_head_dim=128, index_topk=2048, heads/dims/lora
-        # all equal) so GLM-5.2 (bf16) and GLM-5.2-FP8 (fp8_block) are canonical;
-        # GLM-5/5.1 and every NVFP4 checkpoint (which shares the bf16 DSA key)
-        # are reused, not collected.
+        # consumer-equivalent rest. GLM-5/5.1/5.2/5.3 share identical DSA geometry
+        # (index_n_heads=32, index_head_dim=128, index_topk=2048, heads/dims/lora,
+        # max_position_embeddings all equal for 5.2/5.3) so GLM-5.2 (bf16) and
+        # GLM-5.2-FP8 (fp8_block) are canonical by YAML iteration order; GLM-5/5.1
+        # and every NVFP4 checkpoint (which shares the bf16 DSA key) are reused.
         assert model_paths == {
             "deepseek-ai/DeepSeek-V3.2",
             "zai-org/GLM-5.2",
@@ -337,7 +377,7 @@ class TestBuildModuleTestCases:
         with patch.object(mod, "get_sm_version", return_value=90):
             cases = mod._build_module_test_cases("dsa", "context")
         model_paths = {case[6] for case in cases}
-        # bf16 canonical is the longest-context GLM (GLM-5.2); GLM-5/5.1 reuse it.
+        # bf16 canonical is GLM-5.2 (first in YAML among 5.2/5.3); GLM-5/5.1 reuse it.
         assert "zai-org/GLM-5.2" in model_paths
         assert "zai-org/GLM-5" not in model_paths
         assert not any("NVFP4" in model_path for model_path in model_paths)
@@ -378,9 +418,10 @@ class TestBuildModuleTestCases:
         with patch.object(mod, "get_sm_version", return_value=100):
             cases = mod.get_dsa_context_module_skip_indexer_test_cases()
         assert cases
-        # Only GLM-5.2 has index_topk_freq>1 (=4), so the skip-indexer op is
-        # collected on the GLM-5.2 canonicals (bf16 + fp8_block); GLM-5/5.1
-        # (freq=1) have no skip layers and NVFP4 reuses the bf16 key.
+        # GLM-5.2 and GLM-5.3 both have index_topk_freq=4; GLM-5/5.1 have freq=1
+        # (no skip layers). The skip-indexer op is collected on the GLM-5.2
+        # canonicals (bf16 + fp8_block) since 5.2 precedes 5.3 in YAML order;
+        # NVFP4 reuses the bf16 key.
         assert {case[6] for case in cases} == {"zai-org/GLM-5.2", "zai-org/GLM-5.2-FP8"}
 
     def test_glm_sparse_selector_preserves_targeted_artifact(self, monkeypatch):
