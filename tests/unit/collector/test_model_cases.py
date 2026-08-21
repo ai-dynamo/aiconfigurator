@@ -998,6 +998,7 @@ def test_kimi_mla_plan_includes_generation_bmm_helpers():
 def test_kimi_k3_vllm_plan_activates_mla_module_ops():
     vllm_plan = build_collection_case_plan(backend="vllm", model_path="moonshotai/Kimi-K3")
     assert {"mla_context_module", "mla_generation_module"} <= vllm_plan.selected_ops
+    assert {"mla_context", "mla_generation"}.isdisjoint(vllm_plan.selected_ops)
 
     # Framework scoping: sglang keeps the granular MLA lane.
     sglang_plan = build_collection_case_plan(backend="sglang", model_path="moonshotai/Kimi-K3")
