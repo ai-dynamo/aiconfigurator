@@ -375,23 +375,22 @@ _MAX_GPUS_PER_WORKER = 64
 
 
 def _build_recommend_tasks(base_tasks: dict, total_gpus: int) -> dict:
-    """Scale GPU candidates for recommend mode."""
-    import dataclasses
+    """Rebuild recommend tasks at a new GPU budget.
 
-    num_gpu_candidates = [1 << i for i in range(total_gpus.bit_length()) if (1 << i) <= total_gpus]
+    Resets all candidate fields (those ending in ``_candidates`` whose
+    dataclass default is None) to None, then replaces ``total_gpus``. This
+    causes Task's ``__post_init__`` → ``_resolve_agg_search`` /
+    ``_resolve_disagg_search`` to recompute every parallelism dimension at the
+    new budget, preserving all backend-specific and topology-specific caps
+    (e.g. deepep_moe intra-node EP limits, non-MoE pinned-to-1 dims)
+    without any manual extension logic.
+    """
+    import dataclasses
 
     rebuilt = {}
     for name, task in base_tasks.items():
-        overrides = {
-            "total_gpus": total_gpus,
-            "agg_num_gpu_candidates": num_gpu_candidates,
-        }
-        if task.serving_mode == "disagg":
-            overrides.update(
-                prefill_num_gpu_candidates=num_gpu_candidates,
-                decode_num_gpu_candidates=num_gpu_candidates,
-            )
-        rebuilt[name] = dataclasses.replace(task, **overrides)
+        reset = {f.name: None for f in dataclasses.fields(task) if f.name.endswith("_candidates") and f.default is None}
+        rebuilt[name] = dataclasses.replace(task, total_gpus=total_gpus, **reset)
     return rebuilt
 
 

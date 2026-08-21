@@ -557,6 +557,10 @@ class TestCLIRecommendUnit:
                 moe_backend: str | None = None
                 agg_pp_candidates: list = field(default_factory=lambda: [1])
                 agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_tp_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_dp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_tp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_ep_candidates: list = field(default_factory=lambda: [1])
 
             return {"agg": FakeTask()}
 
@@ -594,6 +598,10 @@ class TestCLIRecommendUnit:
                 moe_backend: str | None = None
                 agg_pp_candidates: list = field(default_factory=lambda: [1])
                 agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_tp_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_dp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_tp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_ep_candidates: list = field(default_factory=lambda: [1])
 
             return {"agg": FakeTask()}
 
@@ -628,6 +636,10 @@ class TestCLIRecommendUnit:
                 moe_backend: str | None = None
                 agg_pp_candidates: list = field(default_factory=lambda: [1])
                 agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_tp_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_dp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_tp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_ep_candidates: list = field(default_factory=lambda: [1])
 
             return {"agg": FakeTask()}
 
@@ -667,10 +679,22 @@ class TestCLIRecommendUnit:
                 moe_backend: str | None = None
                 agg_pp_candidates: list = field(default_factory=lambda: [1])
                 agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_tp_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_dp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_tp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_ep_candidates: list = field(default_factory=lambda: [1])
                 prefill_pp_candidates: list = field(default_factory=lambda: [1])
                 prefill_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                prefill_tp_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                prefill_dp_candidates: list = field(default_factory=lambda: [1])
+                prefill_moe_tp_candidates: list = field(default_factory=lambda: [1])
+                prefill_moe_ep_candidates: list = field(default_factory=lambda: [1])
                 decode_pp_candidates: list = field(default_factory=lambda: [1])
                 decode_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                decode_tp_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                decode_dp_candidates: list = field(default_factory=lambda: [1])
+                decode_moe_tp_candidates: list = field(default_factory=lambda: [1])
+                decode_moe_ep_candidates: list = field(default_factory=lambda: [1])
 
             return {"agg": FakeTask(), "disagg": FakeTask(serving_mode="disagg")}
 
@@ -743,6 +767,10 @@ class TestCLIRecommendUnit:
                 serving_mode: str = "agg"
                 agg_pp_candidates: list = field(default_factory=lambda: [1])
                 agg_num_gpu_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_tp_candidates: list = field(default_factory=lambda: [1, 2, 4, 8])
+                agg_dp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_tp_candidates: list = field(default_factory=lambda: [1])
+                agg_moe_ep_candidates: list = field(default_factory=lambda: [1])
 
             return {"agg": FakeTask()}
 
@@ -806,3 +834,96 @@ def test_disagg_estimate_honors_explicit_free_gpu_memory_fraction():
         cli_estimate(**common_kw, prefill_free_gpu_memory_fraction=0.001)
     with pytest.raises(RuntimeError, match="OOM"):
         cli_estimate(**common_kw, decode_max_seq_len=1_000_000)
+
+
+class TestBuildRecommendTasksScaling:
+    """Unit tests for _build_recommend_tasks GPU candidate scaling.
+
+    The function clears all *_candidates fields to None and sets total_gpus so
+    that Task.__post_init__ → _resolve_agg_search / _resolve_disagg_search
+    recompute all parallelism dimensions at the new budget, preserving
+    backend-specific and topology-specific caps automatically.
+    """
+
+    def _make_real_task(self, *, total_gpus: int = 8, backend: str = "vllm"):
+        """Build a real Task so candidate recomputation can be verified."""
+        from aiconfigurator.sdk.task_v2 import Task
+
+        return Task(
+            serving_mode="agg",
+            model_path="deepseek-ai/DeepSeek-V3",
+            system_name="h200_sxm",
+            backend_name=backend,
+            total_gpus=total_gpus,
+        )
+
+    def test_candidates_cleared_and_recomputed(self):
+        """Candidates are reset to None then recomputed by Task.__post_init__,
+        not inherited from the original task's stale values."""
+        import dataclasses
+
+        from aiconfigurator.cli.api import _build_recommend_tasks
+
+        task = self._make_real_task(total_gpus=8)
+        # Corrupt one candidate field to a sentinel — if it survives into the
+        # rebuilt task, the clearing mechanism is broken.
+        sentinel = [999]
+        task_with_sentinel = dataclasses.replace(task, agg_tp_candidates=sentinel)
+
+        escalated = _build_recommend_tasks({"agg": task_with_sentinel}, 64)
+        assert escalated["agg"].agg_tp_candidates != sentinel, (
+            "agg_tp_candidates must be recomputed by Task, not copied from the stale sentinel"
+        )
+
+    def test_budget_is_forwarded(self):
+        """total_gpus on the rebuilt task matches the requested budget."""
+        from aiconfigurator.cli.api import _build_recommend_tasks
+
+        task = self._make_real_task(total_gpus=8)
+        for budget in (16, 32, 64):
+            result = _build_recommend_tasks({"agg": task}, budget)
+            assert result["agg"].total_gpus == budget
+
+    def test_rebuilds_all_tasks(self):
+        """Every task in the dict is rebuilt at the new budget."""
+        from aiconfigurator.cli.api import _build_recommend_tasks
+
+        task = self._make_real_task(total_gpus=8)
+        tasks = {"agg": task, "disagg": task}
+        result = _build_recommend_tasks(tasks, 32)
+        assert set(result.keys()) == {"agg", "disagg"}
+        assert result["agg"].total_gpus == 32
+        assert result["disagg"].total_gpus == 32
+
+    def test_disagg_candidates_cleared_and_recomputed(self):
+        """Prefill and decode candidate fields are also reset for disagg tasks."""
+        import dataclasses
+
+        from aiconfigurator.cli.api import _build_recommend_tasks
+        from aiconfigurator.sdk.task_v2 import Task
+
+        task = Task(
+            serving_mode="disagg",
+            prefill_model_path="deepseek-ai/DeepSeek-V3",
+            prefill_system_name="h200_sxm",
+            prefill_backend_name="vllm",
+            decode_model_path="deepseek-ai/DeepSeek-V3",
+            decode_system_name="h200_sxm",
+            decode_backend_name="vllm",
+            total_gpus=8,
+        )
+        sentinel = [999]
+        task_with_sentinel = dataclasses.replace(
+            task,
+            prefill_tp_candidates=sentinel,
+            decode_tp_candidates=sentinel,
+        )
+
+        escalated = _build_recommend_tasks({"disagg": task_with_sentinel}, 64)
+        rebuilt = escalated["disagg"]
+        assert rebuilt.prefill_tp_candidates != sentinel, (
+            "prefill_tp_candidates must be recomputed, not copied from sentinel"
+        )
+        assert rebuilt.decode_tp_candidates != sentinel, (
+            "decode_tp_candidates must be recomputed, not copied from sentinel"
+        )
