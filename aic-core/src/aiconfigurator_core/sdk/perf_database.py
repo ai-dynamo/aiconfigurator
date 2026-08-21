@@ -108,6 +108,85 @@ def get_systems_paths() -> list[str]:
     return list(_SYSTEMS_PATHS)
 
 
+_QUERY_VERSIONS_BASENAME = "query_versions.yaml"
+
+
+@functools.cache
+def _load_query_versions(systems_paths: tuple[str, ...]) -> dict | None:
+    """Load the declared queryable-version list, or None when absent.
+
+    The file lives next to the ``<system>.yaml`` specs; the first search root
+    that carries one wins. Absence disables version mapping entirely (the
+    module behaves exactly as before the list existed).
+    """
+    for systems_root in systems_paths:
+        path = os.path.join(systems_root, _QUERY_VERSIONS_BASENAME)
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    doc = yaml.safe_load(f) or {}
+            except Exception as e:
+                logger.warning(f"failed to parse {path}: {e}; query-version mapping disabled")
+                return None
+            return doc
+    return None
+
+
+def get_query_versions(
+    system: str, backend: str, systems_paths: str | list[str] | None = None
+) -> list[str] | None:
+    """Declared queryable versions for (system, backend); None when unlisted.
+
+    Per-platform ``overrides`` win over the framework ``defaults``. The first
+    entry is the platform's primary/default version.
+    """
+    if systems_paths is None:
+        systems_paths = get_systems_paths()
+    elif isinstance(systems_paths, str):
+        systems_paths = [systems_paths]
+    doc = _load_query_versions(tuple(systems_paths))
+    if not doc:
+        return None
+    versions = (doc.get("overrides") or {}).get(system, {}).get(backend)
+    if versions is None:
+        versions = (doc.get("defaults") or {}).get(backend)
+    return [str(v) for v in versions] if versions else None
+
+
+def resolve_query_version(
+    system: str, backend: str, version: str, systems_paths: str | list[str] | None = None
+) -> str:
+    """Map a requested version onto the declared queryable set.
+
+    - listed version: returned unchanged;
+    - unlisted version whose directory is still declared on disk: returned
+      unchanged with a deprecation warning (transitional grace for pinned
+      tests and fixture data);
+    - unlisted version with no directory: soft-mapped to the platform's
+      primary (first list entry) with a warning — the request would otherwise
+      fail outright.
+    """
+    versions = get_query_versions(system, backend, systems_paths=systems_paths)
+    if not versions or version in versions:
+        return version
+    for _version_path, _data_dir in _iter_database_version_paths(
+        system, backend, version, systems_paths=systems_paths
+    ):
+        logger.warning(
+            f"{backend}/{version} on {system} is not a declared queryable version "
+            f"(declared: {versions}); serving it from its remaining data directory. "
+            f"It may be retired without notice — prefer {versions[0]}."
+        )
+        return version
+    primary = versions[0]
+    logger.warning(
+        f"{backend}/{version} on {system} is not a declared queryable version and has "
+        f"no data directory; mapping to the platform primary {backend}/{primary} "
+        f"(declared: {versions})."
+    )
+    return primary
+
+
 @functools.cache
 def _load_system_spec_from_paths(systems_paths: tuple[str, ...], system_name: str) -> dict:
     for systems_root in systems_paths:
@@ -940,6 +1019,8 @@ def get_database(
     if not version:
         logger.error(f"No database version available for {system=}, {backend=}")
         return None
+
+    version = resolve_query_version(system, backend, version, systems_paths=systems_paths)
 
     shared_flag = _shared_layer_enabled(database_mode) if shared_layer is None else bool(shared_layer)
     # Only pass the override kwarg when explicitly set: PerfDatabase derives the
