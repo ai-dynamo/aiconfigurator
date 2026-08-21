@@ -13,13 +13,13 @@ reuse:
   approved_by: yimingl
 - table: mla_context_module_perf
   from_version: 0.24.0
-  reason: 'pre-rc20 prune (2026-08-21): superseded rows removed per data-hygiene triage; reuse is an accepted
+  reason: 'pre-0.24 prune (2026-08-21): superseded rows removed per data-hygiene triage; reuse is an accepted
     approximation (design §9 rev 2026-08-19). Old versions carried known inflated-segment rows (collector
     cache race).'
   approved_by: tianhaox
 - table: mla_generation_module_perf
   from_version: 0.24.0
-  reason: 'pre-rc20 prune (2026-08-21): superseded rows removed per data-hygiene triage; reuse is an accepted
+  reason: 'pre-0.24 prune (2026-08-21): superseded rows removed per data-hygiene triage; reuse is an accepted
     approximation (design §9 rev 2026-08-19). Old versions carried known inflated-segment rows (collector
     cache race).'
   approved_by: tianhaox

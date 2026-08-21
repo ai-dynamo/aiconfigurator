@@ -5,7 +5,7 @@ schema_version: 1
 reuse:
 - table: mhc_module_perf
   from_version: 0.5.14
-  reason: 'pre-rc20 prune (2026-08-21): superseded rows removed per data-hygiene triage; reuse is an accepted
+  reason: 'pre-0.5.14 prune (2026-08-21): superseded rows removed per data-hygiene triage; reuse is an accepted
     approximation (design §9 rev 2026-08-19). Old versions carried known inflated-segment rows (collector
     cache race).'
   approved_by: tianhaox
