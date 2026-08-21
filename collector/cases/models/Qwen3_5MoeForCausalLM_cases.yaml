@@ -69,6 +69,86 @@ model_case_values:
       # allowed backend set on non-SM120 Blackwell is
       # {triton, trtllm_mha, fa4} (trtllm_mha passes) and on SM120
       # {triton, trtllm_mha, flashinfer} (flashinfer passes).
+      #
+      # vLLM has no schema field analogous to sglang_backends (see the moe
+      # section below for the general "vLLM is fully dynamic" rationale):
+      # collect_attn.py calls current_platform.get_attn_backend_cls(None,
+      # attn_selector_config, num_heads=...) with selected_backend=None --
+      # the framework's own auto-dispatch, no explicit override -- and
+      # records whatever it returns; there is nothing to declare in YAML.
+      # case_generator.py's attention profile builder has only
+      # `if backend == "sglang":`/`elif backend == "trtllm":` branches, no
+      # `elif backend == "vllm":`, so kernel_source is never predicted here
+      # for vllm cases either. The 397B row this task's plan cites as
+      # schema precedent does NOT actually carry a vllm_backends key
+      # (confirmed by reading Qwen3_5MoeForConditionalGeneration_cases.yaml
+      # in full) -- that precedent claim does not hold.
+      #
+      # Traced at v0.27.1 anyway for the record (AIC-1782 Task V2,
+      # 2026-08-21; tag v0.27.1, commit 6e448d0ea9bf3d88d898b65449ca6dc2aec170ac),
+      # head_dim=256, GQA 64q/4kv, no sink/sliding-window. Mechanism:
+      # get_attn_backend_cls (platforms/cuda.py:397-492) ->
+      # get_valid_backends (:359-394) -> _get_backend_priorities (:83-163,
+      # full body read): a function of ONLY use_mla, device_capability,
+      # num_heads, kv_cache_dtype, use_non_causal -- ZERO architecture-
+      # string or "hybrid model" input anywhere in the call chain, unlike
+      # sglang's attention_registry.py:396-414 hybrid-GDN compatibility
+      # guard; vLLM's dense-attention dispatch here is architecturally
+      # blind to this model's GDN layers. For use_mla=False,
+      # use_non_causal=False: major==10 (SM100/103) -> priority
+      # [FLASHINFER, FLASH_ATTN, TRITON_ATTN, FLEX_ATTENTION, TURBOQUANT]
+      # (:148-155), FLASHINFER wins (head_size 256 supported,
+      # v1/attention/backends/flashinfer.py:457-459) for both bf16 and fp8
+      # KV cache. major==9 (SM90) and major==12 (SM120) get the SAME
+      # priority list, [FLASH_ATTN, FLASHINFER, ...] (:157-163) -- but
+      # which candidate actually wins also depends on
+      # validate_configuration (v1/attention/backend.py:319-374) rejecting
+      # invalid candidates, and that is exactly where SM90 and SM120
+      # diverge on fp8 KV cache: FA3 (SM90, get_flash_attn_version
+      # major==9, v1/attention/backends/fa_utils.py:163-171) supports the
+      # fp8-KV combination (flash_attn_supports_kv_cache_dtype, :314-316)
+      # but FA2 (SM120, no explicit major==12 branch so it falls to the
+      # fa2 default, fa_utils.py:162-171) does not -- excluded via
+      # flash_attn.py:220-224 -- so on SM120 specifically FLASH_ATTN is
+      # valid only for bf16 KV cache; fp8 KV cache falls through to
+      # FLASHINFER. (An earlier draft of this trace claimed SM120 was
+      # uniformly FLASH_ATTN regardless of KV dtype -- wrong, caught by
+      # re-deriving the fp8-KV gate directly instead of assuming
+      # same-priority-list implies same outcome.)
+      #
+      # Net vllm map: {90: fa3 (both dtypes), 100/103: FLASHINFER (both
+      # dtypes), 120: fa2 bf16 / FLASHINFER fp8} -- a genuinely different
+      # shape from sglang's {90: fa3, 100/103: trtllm_mha, 120: flashinfer}
+      # above: same SM100/103-vs-rest split, but vLLM's OWN "flashinfer"
+      # label lands on the Blackwell-family tier (not SM120) -- the
+      # opposite polarity of sglang's "flashinfer" landing on SM120 -- and
+      # SM120 itself is dtype-split, which sglang's SM120 entry is not.
+      # 0.24.0 resolves identically for this shape (same priority-list
+      # content/ordering; the fp8-KV validity check was refactored between
+      # versions but the outcome is unchanged on all 4 SMs).
+      #
+      # BLOCKING GAP (not fixed here, out of Task V2's scope):
+      # collect_attn.py (:6) still declares __compat__ = "vllm==0.24.0" --
+      # Task V1 verified collect_{moe,gdn,gemm}.py only, never
+      # collect_attn.py/collect_attn_encoder.py. framework_manifest.yaml
+      # pins this model's vllm version to 0.27.1 (Task V1), so a real
+      # collection run cannot currently execute attention_context/
+      # attention_generation for this model on vllm at all
+      # (_check_compat("vllm==0.24.0", "0.27.1") is False) -- the trace
+      # above is accurate but presently uncollectable. Flagged for the
+      # reviewer / a follow-up collector task, not silently fixed here.
+      #
+      # attention_lane_defaults.yaml (aic-core/src/aiconfigurator_core/
+      # systems/, outside collector/'s module boundary) currently carries
+      # only a GLOBAL vllm."0.24.0" entry ({90/100/103: "default"} -- a
+      # placeholder meaning "no override, use whatever the collected
+      # data's own kernel_source says") and no vllm entry at all under
+      # `architectures:` for Qwen3_5MoeForCausalLM (that section only has
+      # the sglang."0.5.17" entry added for this architecture's own
+      # sglang divergence). No vllm 0.27.1 entry exists to diverge FROM
+      # yet, and per the blocking gap above there is no 0.27.1 vllm
+      # attention data to derive one from -- noting this for the landing
+      # task (Task V4) rather than adding an uncited entry.
       sglang_backends: {90: fa3, 100: trtllm_mha, 103: trtllm_mha, 120: flashinfer}
       tensor_parallel_sizes: [1, 2, 4, 8, 16, 32]
   moe:
@@ -116,7 +196,89 @@ model_case_values:
       # base_ops/moe.yaml:79-81 default ({default: triton} for both
       # bfloat16 and fp8_block already), so redeclaring it here would just
       # duplicate the base value -- omitted instead.
+      #
+      # vLLM has no schema field analogous to sglang_moe_backends:
+      # collect_moe.py (collector/vllm/collect_moe.py) constructs FusedMoE
+      # through vLLM's own quant-method classes with no explicit
+      # moe-runner-backend flag, then reads back whichever backend the
+      # framework itself selected (collect_moe.py:728-739) -- "prefer the
+      # framework's own dispatch path" (layer_permissions.md) -- so there
+      # is nothing to pin or declare here; kernel_source is recorded
+      # dynamically at collection time, never predicted in YAML. Traced at
+      # v0.27.1 anyway for the record (AIC-1782 Task V2, 2026-08-21), no
+      # explicit flags, this model's shape (silu-gated, dp_size=1):
+      #   bfloat16 (quant_config=None -> UnquantizedFusedMoEMethod):
+      #   select_unquantized_moe_backend (fused_moe/oracle/unquantized.py:
+      #   194-311) resolves TRITON on SM90 (unconditional
+      #   TritonExperts._supports_current_device, experts/triton_moe.py:
+      #   96-97; SM90 also demotes both FlashInfer candidates to the back
+      #   of the priority list, :77-79), FLASHINFER_TRTLLM on SM100/103
+      #   (TrtLlmBf16ExpertsMonolithic family-100 device gate,
+      #   experts/trtllm_bf16_moe.py:61-69/202-227), FLASHINFER_CUTLASS on
+      #   SM120 (family-120 device gate + a >=SM90 quant-scheme floor,
+      #   experts/flashinfer_cutlass_moe.py:129-140, platforms/interface.py:
+      #   149-165/433-454).
+      #   fp8_block (Fp8Config(is_checkpoint_fp8_serialized=True,
+      #   activation_scheme="dynamic", weight_block_size=[128,128]) --
+      #   matches this checkpoint's real quantization_config verbatim, see
+      #   Qwen--Qwen3.8-2.4T-A95B-FP8_config.json's own quantization_config
+      #   block): select_fp8_moe_backend (oracle/fp8.py:271-419), called
+      #   from Fp8MoEMethod.__init__ (fp8.py:517-522) with
+      #   weight_key=kFp8Static128BlockSym, activation_key=kFp8Dynamic128Sym,
+      #   allow_vllm_cutlass=False (removes the VLLM_CUTLASS candidates,
+      #   oracle/fp8.py:390-392), resolves TRITON on SM90 (this single-rank
+      #   TP collector; an exact-SM90 reorder at oracle/fp8.py:113-122 puts
+      #   TRITON first when ep_size<=1, else FLASHINFER_CUTLASS),
+      #   FLASHINFER_TRTLLM on SM100/103 (TrtLlmFp8ExpertsMonolithic,
+      #   family-100 device gate + an explicit (kFp8Static128BlockSym,
+      #   kFp8Dynamic128Sym) quant-scheme match, experts/trtllm_fp8_moe.py:
+      #   96-102/295-305 -- CONFIRMS the dynamo recipe README's
+      #   flashinfer_trtllm claim, but only at this SM family, not
+      #   universally), and the DEEPGEMM oracle label on SM120
+      #   (FLASHINFER_TRTLLM fails the family-100 gate; FLASHINFER_CUTLASS's
+      #   fp8-block quant-scheme gate is an exact SM90 match here,
+      #   flashinfer_cutlass_moe.py:158-165, so it fails too; falls to
+      #   TritonOrDeepGemmExperts, a FallbackExperts wrapping
+      #   DeepGemmExperts+TritonExperts, experts/triton_deep_gemm_moe.py:
+      #   24-38 -- the leaf kernel is chosen per-shape at runtime, exactly
+      #   what collect_moe.py:760-771 already introspects into
+      #   kernel_source).
+      #   No architecture-string or hybrid-GDN-specific MoE-backend
+      #   override exists anywhere in vLLM 0.27.1 for this model (grepped
+      #   model_executor/models/registry.py, qwen3_5.py, and the
+      #   verify_and_update_config config-patch hook, config.py:799-829 --
+      #   zero moe_backend/moe_runner/MoeRunnerBackend references in any of
+      #   them); dispatch is purely the generic device/quant-scheme oracle
+      #   above. The recipe's env vars VLLM_ALLREDUCE_USE_FLASHINFER
+      #   (all-reduce comm selection only, distributed/device_communicators/
+      #   cuda_communicator.py:61 -- its only usage site) and
+      #   VLLM_USE_V2_MODEL_RUNNER (worker execution-loop selection only)
+      #   are both unreferenced anywhere under fused_moe/ -- neither
+      #   influences MoE backend selection.
       sglang_moe_routing_method_type: RenormalizeNaive
+      # AIC-1782 Task V2 data-quality fix: this row had no framework_quantization
+      # block for vllm at all, so moe_model_allows_quantization defaulted
+      # OPEN for every vllm quantization_modes entry lacking its own
+      # allowed_model_paths restriction -- and moe_vllm's "fp8" (per-tensor,
+      # base_ops/moe.yaml:243-244) and "nvfp4" (:252-254) entries both lack
+      # one (unlike sglang, which has no bare "fp8" mode at all, and whose
+      # nvfp4 entry IS allowed_model_paths-restricted). Confirmed reachable:
+      # querying get_common_moe_test_cases(backend="vllm") +
+      # moe_model_allows_quantization before this fix showed 1134 planned
+      # rows each for moe_type="fp8" and moe_type="nvfp4" under THIS row's
+      # identity (Qwen/Qwen3.8-2.4T-A95B / -FP8 alias) at SM100+ -- neither
+      # is a real artifact this checkpoint has (it is bfloat16 natively and
+      # block-fp8, weight_block_size=[128,128], as its -FP8 alias; never
+      # per-tensor fp8 or nvfp4). Closed with an explicit allowlist rather
+      # than a new exclude field, matching every other model row's
+      # allowed_modes idiom in this file. trtllm has the identical axis-level
+      # gap (base_ops/moe.yaml's moe_trtllm fp8/nvfp4 entries are equally
+      # unrestricted) but is NOT closed here -- AIC-1782 is vLLM-scoped and
+      # no trtllm dispatch trace exists for this row to cite; flagged in the
+      # Task V2 report instead of fixed blind.
+      framework_quantization:
+        vllm:
+          allowed_modes: [bfloat16, fp8_block]
     # NVFP4 artifact (ModelOpt experts-only recipe: routed-expert linears
     # only, other components at source precision; collector-only id, no
     # separate model_path row needed for the bf16/fp8_block artifacts above
@@ -144,16 +306,53 @@ model_case_values:
       framework_quantization:
         sglang:
           allowed_modes: [nvfp4]
-        # trtllm/vllm are NOT verified for this artifact at any pinned
-        # version (2026-08-21) -- unlike the 397B NVFP4 row (#1519 rebase-4
-        # review Blocker 2), where trtllm/vllm nvfp4 support IS verified and
-        # restored to allowed_modes: [nvfp4], this checkpoint has no such
-        # verification on either backend. Gate closed (Nemotron precedent,
-        # e.g. NemotronHForCausalLM_cases.yaml's vLLM topk>10 rows) rather
-        # than left open by a dropped/absent framework_quantization entry.
-        # Tracked: AIC-1782 (vLLM support investigation for Qwen3.8-Max).
+        # trtllm is NOT investigated by AIC-1782 (vLLM-scoped) and stays
+        # gated closed (Nemotron precedent, e.g. NemotronHForCausalLM_cases
+        # .yaml's vLLM topk>10 rows) pending its own verification.
         trtllm:
           allowed_modes: []
+        # AIC-1782 Task V2 (2026-08-21) traced vLLM v0.27.1's NVFP4 MoE
+        # construction for this artifact and KEEPS the gate closed on two
+        # independent findings, either one decisive on its own:
+        # (1) No packaged HF config exists for this model_path anywhere in
+        #     the repo (unlike Qwen--Qwen3.8-2.4T-A95B[-FP8]_config.json for
+        #     the base/-FP8 ids). collect_moe.py's _load_model_moe_config
+        #     (collect_moe.py:100-104) raises FileNotFoundError when one is
+        #     missing; that root, src/aiconfigurator/model_configs (a
+        #     symlink to aic-core/src/aiconfigurator_core/model_configs), is
+        #     OUTSIDE collector/'s module boundary (layer_permissions.md) --
+        #     adding it is a separate, human-approved, cross-module commit,
+        #     same as the NemotronH Lightning row's precedent above.
+        #     get_moe_test_cases() reaches _load_model_moe_config via
+        #     _moe_execution_key() -> _resolve_moe_runtime_config()
+        #     (collect_moe.py:321 -> :251 -> :113) DURING CASE ENUMERATION,
+        #     before any per-case classified-failure handling applies --
+        #     opening this gate without that config would crash vLLM MoE
+        #     case generation for every model on the run, not just this row.
+        # (2) Independent of (1): collect_moe.py's "nvfp4" MoE construction
+        #     is hardcoded to CompressedTensorsConfig.from_config
+        #     (compressed-tensors nvfp4-pack-quantized format,
+        #     collect_moe.py:534-548) for every model -- there is no
+        #     model-specific branch to vLLM's separate native
+        #     ModelOptNvFp4Config class, auto-selected only when a
+        #     checkpoint's own quantization_config.quant_method ==
+        #     "modelopt_fp4" (quantization/__init__.py method_to_config,
+        #     :149 @0.27.1, vs "compressed-tensors" -> CompressedTensorsConfig
+        #     at :155). This artifact is described as a "ModelOpt
+        #     experts-only" recipe, so its real checkpoint plausibly uses
+        #     modelopt_fp4 -- a class vLLM would auto-select differently
+        #     from what this collector constructs. (Both classes route to
+        #     the same select_nvfp4_moe_backend oracle --
+        #     fused_moe/oracle/nvfp4.py:165-292 -- so the resolved KERNEL
+        #     would be identical either way: SM100/103 -> FLASHINFER_TRTLLM
+        #     family-100 device gate, trtllm_nvfp4_moe.py:201-209; SM90/120
+        #     -> FLASHINFER_CUTLASS, flashinfer_cutlass_moe.py:129-140 --
+        #     but the config-CLASS mismatch itself is unverified, and there
+        #     is no packaged config to check it against per (1) either.)
+        # Gate stays closed until both are resolved outside this task (a
+        # human-approved packaged-config commit, plus confirming the real
+        # quant_method string). Superseded the prior "Tracked: AIC-1782"
+        # framing now that the investigation has run.
         vllm:
           allowed_modes: []
   gemm:
@@ -171,6 +370,39 @@ model_case_values:
     # num_k_heads=16 cannot -- Qwen35Model raises ("both global head counts
     # to be divisible by tensor parallel size", qwen35.py:55-60) -- matching
     # the 397B/122B precedent (same num_k_heads=16).
+    #
+    # AIC-1782 Task V2: same "no case-schema map" situation as moe:/
+    # attention: above -- collect_gdn.py records kernel_source dynamically
+    # (context conv = literal "causal_conv1d_fn"; decode conv = literal
+    # "causal_conv1d_update"; decode scan = literal
+    # "fused_recurrent_gated_delta_rule_packed_decode", no SM/backend branch
+    # at the qwen_gdn_linear_attn.py decode call site, gated only by
+    # VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE default True, already verified
+    # unchanged in Task V1; context scan =
+    # f"chunk_gated_delta_rule_{prefill_backend}"). prefill_backend comes
+    # from _resolve_gdn_prefill_backend (vllm/model_executor/layers/mamba/
+    # gdn/qwen_gdn_linear_attn.py:85-133 @v0.27.1, full body read): requested
+    # defaults to "auto" (this collector sets no additional_config); head_k_dim
+    # read from vllm_config.model_config.hf_text_config.linear_key_head_dim,
+    # which this row is 128 for. SM90 (is_device_capability(90) exact,
+    # :119-120) -> flashinfer. SM100/103 (is_device_capability_family(100)
+    # AND head_k_dim==128 AND get_cuda_runtime_major()>=13, :121-127) ->
+    # flashinfer too (cutedsl is also eligible there but is opt-in only,
+    # never auto-selected, :131-132). SM120 -> neither condition fires ->
+    # triton (the FLA fallback).
+    #
+    # The SM100/103 cuda_runtime_major>=13 condition is IMAGE-VARIANT
+    # dependent, not a pure SM fact: framework_manifest.yaml pins TWO vllm
+    # v0.27.1 image variants for all three Max ids (Task V1) -- "default"
+    # and "-cu129". The vllm-0271 clone's docker/Dockerfile:25 declares
+    # `ARG CUDA_VERSION=13.0.3` as the unqualified/default build arg (the
+    # "-cu129" tag is a distinct override build targeting CUDA 12.9, major
+    # 12). So on SM100/103: the "default" image variant records
+    # chunk_gated_delta_rule_flashinfer; the "-cu129" variant records
+    # chunk_gated_delta_rule_triton for the exact same (model, SM) case --
+    # both are legitimate, framework-true outcomes for their respective
+    # pinned image, not a bug. Landing (Task V4) should expect and reconcile
+    # this split rather than treat one as anomalous.
     - model_path: Qwen/Qwen3.8-2.4T-A95B
       model_aliases:
         - Qwen/Qwen3.8-2.4T-A95B-FP8

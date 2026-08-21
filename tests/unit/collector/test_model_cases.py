@@ -1916,6 +1916,36 @@ def test_qwen38_max_nvfp4_moe_cases_are_declared_with_correct_shape_and_runner()
     assert not moe_model_allows_quantization("sglang", "Qwen/Qwen3.8-2.4T-A95B", "nvfp4")
 
 
+def test_qwen38_max_base_row_vllm_moe_gate_excludes_phantom_fp8_and_nvfp4():
+    # AIC-1782 Task V2 (2026-08-21) data-quality fix, per-backend-explicit
+    # guard (never backend=None, same discipline as the RadixArk test
+    # below): before this row declared its own framework_quantization.vllm
+    # block, moe_model_allows_quantization defaulted OPEN for every vllm
+    # quantization_modes entry lacking its own allowed_model_paths
+    # restriction -- and base_ops/moe.yaml's moe_vllm "fp8" (per-tensor)
+    # and "nvfp4" entries both lack one (unlike sglang, which has no bare
+    # "fp8" mode at all, and whose nvfp4 entry IS allowed_model_paths-
+    # restricted). This checkpoint is never per-tensor fp8 or nvfp4 (native
+    # bfloat16; block-fp8, weight_block_size=[128,128], as its -FP8 alias)
+    # -- confirmed reachable pre-fix via
+    # test_getter_deduplication.py::test_vllm_sm90_repository_moe_getter_
+    # excludes_unconsumable_dsv4_cases, which caught the phantom "fp8" rows
+    # by its own case-count assertion dropping from 2232 to 2190 (-42, one
+    # per already-legitimate bf16/fp8_block case) when this gate closed.
+    model_path = "Qwen/Qwen3.8-2.4T-A95B"
+    for moe_type in ("bfloat16", "fp8_block"):
+        assert moe_model_allows_quantization("vllm", model_path, moe_type), (model_path, moe_type)
+    for moe_type in ("fp8", "nvfp4"):
+        assert not moe_model_allows_quantization("vllm", model_path, moe_type), (model_path, moe_type)
+    # trtllm has the identical axis-level gap (moe_trtllm's fp8/nvfp4
+    # entries are equally allowed_model_paths-unrestricted) but is
+    # deliberately NOT closed here -- AIC-1782 is vLLM-scoped and no trtllm
+    # dispatch trace exists for this row to cite (see the case YAML
+    # comment and the Task V2 report). Documented, not silently fixed.
+    assert moe_model_allows_quantization("trtllm", model_path, "fp8")
+    assert moe_model_allows_quantization("trtllm", model_path, "nvfp4")
+
+
 def test_radixark_qwen38_max_nvfp4_row_is_nvfp4_only_on_sglang_and_empty_elsewhere():
     # AIC-1762 integration rebuild: this row briefly carried
     # ``frameworks: [sglang]``, the same inversion #1519's rebase-4 review
@@ -1927,13 +1957,24 @@ def test_radixark_qwen38_max_nvfp4_row_is_nvfp4_only_on_sglang_and_empty_elsewhe
     # nvfp4 spec has no ``requires_model_quantization_config`` floor; lost
     # legitimate cases on vllm, whose nvfp4 spec DOES require one).
     #
-    # Unlike the 397B row, this artifact's trtllm/vllm nvfp4 support is NOT
-    # verified at any pinned version (vLLM support tracked in AIC-1782), so
-    # the fix here is the Nemotron precedent
-    # (NemotronHForCausalLM_cases.yaml's ``allowed_modes: []`` idiom for an
-    # unverified/unservable backend) rather than #1519's ``[nvfp4]`` restore:
-    # ``frameworks:`` dropped, trtllm/vllm explicitly gated CLOSED via
-    # ``allowed_modes: []``.
+    # Unlike the 397B row, this artifact's trtllm/vllm nvfp4 support was NOT
+    # verified at any pinned version, so the fix here was the Nemotron
+    # precedent (NemotronHForCausalLM_cases.yaml's ``allowed_modes: []``
+    # idiom for an unverified/unservable backend) rather than #1519's
+    # ``[nvfp4]`` restore: ``frameworks:`` dropped, trtllm/vllm explicitly
+    # gated CLOSED via ``allowed_modes: []``.
+    #
+    # AIC-1782 Task V2 (2026-08-21) investigated the vllm side specifically
+    # and KEPT the gate closed: collect_moe.py's ``_load_model_moe_config``
+    # would raise ``FileNotFoundError`` for this model_path (no packaged HF
+    # config exists for it anywhere in the repo, unlike the base/-FP8 ids),
+    # and separately, the collector's nvfp4 construction is hardcoded to
+    # CompressedTensorsConfig regardless of whether this ModelOpt-described
+    # artifact's real checkpoint uses that format or vLLM's separate
+    # ``modelopt_fp4`` quant class. See the case YAML's own comment on this
+    # row, and tests/unit/collector/vllm/test_collector_import_surface.py::
+    # test_load_model_moe_config_raises_for_radixark_nvfp4_missing_config
+    # for the executable proof of the first blocker.
     model_path = "RadixArk/Qwen3.8-2.4T-A95B-NVFP4"
     for backend in ("trtllm", "vllm"):
         available_modes = {spec.name for spec in get_moe_quantization_specs(backend)}

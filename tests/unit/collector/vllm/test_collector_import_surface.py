@@ -33,6 +33,7 @@ verified surface every time.
 """
 
 import importlib.util
+import re
 import subprocess
 import sys
 import types
@@ -227,6 +228,35 @@ class TestCollectMoeImportSurface:
 
         with pytest.raises(ValueError, match=_SENTINEL_MATCH):
             module.run_moe_torch(*_SENTINEL_ARGS, **_SENTINEL_KWARGS)
+
+    def test_load_model_moe_config_raises_for_radixark_nvfp4_missing_config(self, monkeypatch):
+        """Executable proof for the RadixArk vllm nvfp4 gate decision
+        (AIC-1782 Task V2, case YAML comment on that row): no packaged HF
+        config exists for this model_path anywhere in the repo (unlike the
+        base/-FP8 ids, both of which have one under
+        src/aiconfigurator/model_configs/), so ``_load_model_moe_config``
+        raises before the row could ever be benchmarked. Opening the vllm
+        nvfp4 gate on this row without also adding that (cross-module,
+        human-approved) config would crash vLLM MoE case generation for
+        every model on the run, not just this one:
+        ``get_moe_test_cases()`` reaches this function via
+        ``_moe_execution_key() -> _resolve_moe_runtime_config()``
+        (collect_moe.py:321 -> :251 -> :113) DURING CASE ENUMERATION,
+        before any per-case classified-failure handling applies."""
+        _install_fake_vllm(monkeypatch, VLLM_0271_MOE_SURFACE)
+        module = _import_fresh(monkeypatch, _COLLECT_MOE_DOTTED, _COLLECT_MOE_PATH)
+        with pytest.raises(FileNotFoundError, match=re.escape("RadixArk/Qwen3.8-2.4T-A95B-NVFP4")):
+            module._load_model_moe_config("RadixArk/Qwen3.8-2.4T-A95B-NVFP4")
+
+    def test_load_model_moe_config_succeeds_for_base_and_fp8_qwen38_max_ids(self, monkeypatch):
+        """Companion: the base bf16 id and its packaged -FP8 alias id both
+        DO have a packaged config (proves the RadixArk gap above is a real,
+        specific absence, not a general fixture problem)."""
+        _install_fake_vllm(monkeypatch, VLLM_0271_MOE_SURFACE)
+        module = _import_fresh(monkeypatch, _COLLECT_MOE_DOTTED, _COLLECT_MOE_PATH)
+        for model_name in ("Qwen/Qwen3.8-2.4T-A95B", "Qwen/Qwen3.8-2.4T-A95B-FP8"):
+            config = module._load_model_moe_config(model_name)
+            assert config.get("model_type") == "qwen3_5_moe_text"
 
 
 # ---------------------------------------------------------------------------
