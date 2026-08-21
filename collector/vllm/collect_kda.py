@@ -178,6 +178,12 @@ def run_kda_context_benchmark(
 ):
     """Context (prefill): 3-way Q/K/V causal conv + prefill core kernel,
     dispatched like KimiK3DeltaAttention._forward on this SM."""
+    if any(seq_len <= 1 for seq_len in seq_len_list):
+        raise ValueError(
+            "vLLM KDA context collection requires seq_len > 1; "
+            "run_kda_torch routes seq_len=1 through the serving decode path"
+        )
+
     from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn
     from vllm.models.kimi_k3.nvidia.ops.third_party.kda import chunk_kda_with_fused_gate
     from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -246,25 +252,10 @@ def run_kda_context_benchmark(
                 # call, adding ~0.25ms host overhead per conv (a flat
                 # ~0.8ms/iter floor on GB300 that dominated the 0.1.dev19262
                 # re-collect, conv1d SOL ~15%). Build it per-shape and pass
-                # it through like collect_gdn.py does.
-                #
-                # seq_len=1 divergence (recorded, not rerouted here): vLLM
-                # 0.27.0 classifies an all-1-token batch as pure decodes —
-                # GDNAttentionMetadataBuilder calls split_decodes_and_prefills
-                # (m, decode_threshold=1) (vllm/v1/attention/backends/
-                # gdn_attn.py:213; all-decode return at
-                # v1/attention/backends/utils.py:600-604) and builds conv
-                # metadata only when num_prefills > 0 (gdn_attn.py:391-401),
-                # so serving never runs causal_conv1d_fn for a 1-token batch
-                # (it runs causal_conv1d_update + the packed recurrence).
-                # The point stays in the shared kda.yaml context grid because
-                # sglang routes 1-token EXTEND batches through this same
-                # prefill conv (its mamba backend's extend branch builds
-                # extend query_start_loc with no short-extend reclassification
-                # — sglang layers/attention/hybrid_linear_attn_backend.py), and
-                # the base-op grid schema cannot express framework-conditional
-                # pruning. The rows remain real kernel measurements on both
-                # backends; only their vllm serving-reachability differs.
+                # it through like collect_gdn.py does. The entry point routes
+                # seq_len=1 through the decode benchmark before reaching this
+                # function, matching KimiK3KDAMetadataBuilder's
+                # split_decodes_and_prefills(..., decode_threshold=1).
                 nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
                     torch.arange(0, nt + 1, seq_len, dtype=torch.int32),
                     device=device,
@@ -407,11 +398,19 @@ def run_kda_generation_benchmark(
     model_name,
     perf_filename,
     vllm_version,
+    row_phase="generation",
     device="cuda:0",
 ):
     """Generation (decode): the CUDA fused_kda_decode fast path (probed like
     serving) plus the packed conv-update + Triton recurrence fallback pair
-    (which is also the serving path under speculative decoding)."""
+    (which is also the serving path under speculative decoding).
+
+    ``row_phase`` remains ``context`` for one-token cells originating from the
+    shared context grid; the recorded kernels still follow vLLM's decode path.
+    """
+    if row_phase not in {"context", "generation"}:
+        raise ValueError(f"Unsupported KDA decode row phase: {row_phase}")
+
     import vllm._custom_ops as ops
     from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
     from vllm.models.kimi_k3.nvidia.kda import is_fused_kda_decode_supported
@@ -447,7 +446,7 @@ def run_kda_generation_benchmark(
             conv_out = torch.empty_like(x)
 
             common = {
-                "phase": "generation",
+                "phase": row_phase,
                 "batch_size": nb,
                 "seq_len": 1,
                 "num_tokens": nb,
@@ -556,10 +555,10 @@ def run_kda_generation_benchmark(
             _cleanup("generation")
 
     summary = f"ok={ok} error={err} skip=0"
-    print(f"KDA generation summary: {summary}")
+    print(f"KDA {row_phase} decode-path summary: {summary}")
     if err or ok == 0:
         raise RuntimeError(
-            f"vLLM KDA generation collection failed strict completeness: {summary}; "
+            f"vLLM KDA {row_phase} decode-path collection failed strict completeness: {summary}; "
             f"failed cells: {_format_failures(failures)}"
         )
 
@@ -744,7 +743,26 @@ def run_kda_torch(
         device=device,
     )
     if phase == "context":
-        run_kda_context_benchmark(batch_size_list=batch_size_list, seq_len_list=seq_len_list, **kwargs)
+        if seq_len_list is None:
+            raise ValueError("vLLM KDA context collection requires seq_len_list")
+        if any(seq_len < 1 for seq_len in seq_len_list):
+            raise ValueError(f"vLLM KDA context sequence lengths must be positive: {seq_len_list}")
+
+        # vLLM 0.27.0 classifies one-token non-spec batches as pure decodes
+        # (kda_metadata.py:274-278) and invokes causal_conv1d_update plus
+        # fused_recurrent_kda_packed_decode (kda.py:733-760). Keep the shared
+        # context grid identity, but dispatch that cell through the serving
+        # decode kernels instead of manufacturing prefill metadata.
+        if 1 in seq_len_list:
+            run_kda_generation_benchmark(batch_size_list=batch_size_list, row_phase="context", **kwargs)
+
+        prefill_seq_len_list = [seq_len for seq_len in seq_len_list if seq_len > 1]
+        if prefill_seq_len_list:
+            run_kda_context_benchmark(
+                batch_size_list=batch_size_list,
+                seq_len_list=prefill_seq_len_list,
+                **kwargs,
+            )
     elif phase == "generation":
         run_kda_generation_benchmark(batch_size_list=batch_size_list, **kwargs)
     elif phase == "verify":

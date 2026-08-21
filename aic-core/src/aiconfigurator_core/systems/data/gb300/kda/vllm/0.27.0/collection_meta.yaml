@@ -25,10 +25,17 @@ tables:
   # kda context rows) and times via repeat_n=10 CUDA-graph replay. The
   # former unverified nt*proj>=2**31 int32 guard is deleted (0.27.0
   # causal_conv1d is int64 end-to-end; formerly-vetoed cells pass with
-  # SOL-sane timings). The KDA plan is 1200 cases; the parquet has 1198
-  # rows, so this table is partial — the 08-19 rerun confirmed both
-  # unresolved cells as genuine kernel/capacity limits, recorded in the
-  # run checkpoint: (1) generation fused_recurrent_kda_packed_decode at
+  # SOL-sane timings). The KDA plan is 1200 rows; the parquet has 1142,
+  # so this table is partial. On 2026-08-21, review found that vLLM routes
+  # one-token non-spec batches through decode, while the collector had
+  # forced the shared context-grid seq_len=1 cells through prefill metadata.
+  # The 56 affected rows (4 head counts x 7 batch sizes x 2 prefill kernels)
+  # were removed rather than retained as serving data. The corrected collector
+  # dispatches those cells through causal_conv1d_update plus packed recurrence;
+  # they must be recollected against one complete closure before being added.
+  # The other two missing rows were confirmed by the 08-19 rerun as genuine
+  # kernel/capacity failures recorded in the run checkpoint: (1) generation
+  # fused_recurrent_kda_packed_decode at
   # (num_v_heads=96, batch_size=1024) still fails launch with "Triton
   # Error [CUDA]: invalid argument" on 0.27.0 with the grid closure
   # applied (strict completeness gate: ok=10 error=1) — kernel-side
@@ -49,5 +56,5 @@ tables:
     collector_hash: sha256:20bc4a950d53065a484c6d6cb03b6200b293fd6a53124a5c5d2c845216696651
     case_plan_hash: sha256:87acc3a26a0548865cedbf5dc7a2ff6574d94f677d6bc4b7faf66ab5b37328b1
     collected_at: '2026-08-19'
-    rows: 1198
+    rows: 1142
     status: partial

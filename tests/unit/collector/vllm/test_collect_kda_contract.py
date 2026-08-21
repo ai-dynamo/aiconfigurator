@@ -6,7 +6,9 @@
 # getters adapt the same generator).
 
 import ast
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -55,6 +57,56 @@ def test_kda_context_conv_passes_serve_parity_metadata():
             )
             return
     raise AssertionError("run_kda_context_benchmark not found / no causal_conv1d_fn call")
+
+
+def test_kda_context_seq_len_one_routes_through_decode_kernels(monkeypatch):
+    tree = ast.parse(SOURCE_PATH.read_text(encoding="utf-8"), filename=str(SOURCE_PATH))
+    run_entrypoint = next(
+        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "run_kda_torch"
+    )
+
+    calls = []
+
+    def record(kind):
+        return lambda **kwargs: calls.append((kind, kwargs))
+
+    namespace = {
+        "WORKER_RESTART": 23,
+        "run_kda_context_benchmark": record("context"),
+        "run_kda_generation_benchmark": record("decode"),
+        "run_kda_verify_benchmark": record("verify"),
+    }
+    module = ast.Module(body=[run_entrypoint], type_ignores=[])
+    exec(compile(module, str(SOURCE_PATH), "exec"), namespace)
+
+    vllm_module = ModuleType("vllm")
+    vllm_module.__path__ = []
+    version_module = ModuleType("vllm.version")
+    version_module.__version__ = "0.27.0"
+    monkeypatch.setitem(sys.modules, "vllm", vllm_module)
+    monkeypatch.setitem(sys.modules, "vllm.version", version_module)
+
+    kwargs = {
+        "phase": "context",
+        "d_model": 7168,
+        "d_conv": 4,
+        "num_k_heads": 12,
+        "head_k_dim": 128,
+        "num_v_heads": 12,
+        "head_v_dim": 128,
+        "batch_size_list": [1, 2],
+        "seq_len_list": [1, 2, 4],
+        "model_name": "moonshotai/Kimi-K3",
+        "perf_filename": "unused.txt",
+    }
+    assert namespace["run_kda_torch"](**kwargs) == 23
+    assert [(kind, call["seq_len_list"] if kind == "context" else call["row_phase"]) for kind, call in calls] == [
+        ("decode", "context"),
+        ("context", [2, 4]),
+    ]
+
+    with pytest.raises(ValueError, match="sequence lengths must be positive"):
+        namespace["run_kda_torch"](**{**kwargs, "seq_len_list": [0]})
 
 
 def test_kda_dispatch_mirrors_serving():
