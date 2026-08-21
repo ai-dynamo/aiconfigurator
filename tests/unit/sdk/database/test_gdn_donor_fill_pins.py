@@ -58,9 +58,14 @@ def test_h200_vllm_gdn_chunk_own_physical_lane_rows_are_pinned():
     phys = _gdn_context_lane(db, "chunk_gated_delta_rule_flashinfer", key)
     assert phys[16][4096]["latency"] == pytest.approx(1.3013623046875, rel=1e-9)
     assert phys[8][4096]["latency"] == pytest.approx(0.640457305908203, rel=1e-9)
-    # The logical lane really does cover the same coordinate with a DIFFERENT
-    # (donor) value — the precedence question the engine answers is live.
-    logical = _gdn_context_lane(db, "chunk_gated_delta_rule", key)
-    assert logical[16][4096]["latency"] != pytest.approx(1.3013623046875, rel=1e-9)
-    channels = {record["channel"] for record in db.data_provenance.get("gdn_perf.parquet", []) if record["exists"]}
-    assert "cross_backend" in channels
+    # Conscious act (pre-0.24 prune, 2026-08-21): the logical
+    # `chunk_gated_delta_rule` lane is GONE for vllm 0.24. The label was
+    # vllm's pre-0.24 collector name (superseded by chunk_gated_delta_rule_
+    # triton per kernel_source_backends.yaml); the only vllm rows carrying it
+    # lived in the pruned 0.19/0.22 tables, so the regenerated manifest
+    # dropped vllm from that kernel's frameworks list and the donor graft is
+    # no longer admitted. Measured impact: zero — vllm 0.24's own grid (738
+    # coords) is a strict superset of the donor coordinates (671) on every
+    # shipped system, so the donor lane never served a query the own lanes
+    # could not.
+    assert "chunk_gated_delta_rule" not in db._gdn_data
