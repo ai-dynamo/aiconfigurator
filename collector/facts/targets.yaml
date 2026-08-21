@@ -15,6 +15,9 @@ kv_pairing:
   mxfp4:
     kvcache: bfloat16
     cli: null
+  mxfp8:
+    kvcache: fp8
+    cli: fp8_e4m3
 backends:
   sglang:
     versions:
@@ -36,16 +39,14 @@ backends:
 families:
   dsv4:
     known_sm90:
-      sglang_0516: "ue8m0-scale fp8 DSV4 checkpoints fail at trace on SM90 tp1:
-        auto->triton MoE runner asserts 'Hidden size mismatch' (w13 requantized
-        to deepgemm ue8m0 layout at load; triton reads it transposed); explicit
-        deep_gemm runner asserts SM100-only packed-fp4 branch
-        (layout.hpp:57 'kPackedFP4 and arch_major == 10').
-        DEEPGEMM_SCALE_UE8M0 = DEEPGEMM_BLACKWELL in sglang — the ue8m0 requant
-        path assumes Blackwell. Probe-verified 2026-08-20 (bisect A-I:
-        generator CLI, mixed-chunk, page size, jitcache mount all excluded)."
-      trtllm_rc23: "DSV4 rejected at load: 'Missing COMPRESS pool metadata for
-        compress ratio 4' — CSA compression unsupported on this path."
+      sglang_0516: 'ue8m0-scale fp8 DSV4 checkpoints fail at trace on SM90 tp1: auto->triton MoE runner
+        asserts ''Hidden size mismatch'' (w13 requantized to deepgemm ue8m0 layout at load; triton reads
+        it transposed); explicit deep_gemm runner asserts SM100-only packed-fp4 branch (layout.hpp:57
+        ''kPackedFP4 and arch_major == 10''). DEEPGEMM_SCALE_UE8M0 = DEEPGEMM_BLACKWELL in sglang — the
+        ue8m0 requant path assumes Blackwell. Probe-verified 2026-08-20 (bisect A-I: generator CLI, mixed-chunk,
+        page size, jitcache mount all excluded).'
+      trtllm_rc23: 'DSV4 rejected at load: ''Missing COMPRESS pool metadata for compress ratio 4'' — CSA
+        compression unsupported on this path.'
     architecture: DeepseekV4ForCausalLM
     checkpoints:
     - repo: deepseek-ai/DeepSeek-V4-Pro-0813
@@ -54,7 +55,7 @@ families:
       known: 'SM90: loads silently, Fp8MoEMethod over fp4-packed int8 experts, first MoE forward crashes
         (both sglang versions)'
       variant_overrides:
-        vllm: interleave_pair  # Pro: no non-dspark full layer
+        vllm: interleave_pair
     - repo: deepseek-ai/DeepSeek-V4-Flash-0731
       profile: fp8
       aic_registered: deepseek-ai--DeepSeek-V4-Flash
@@ -63,7 +64,7 @@ families:
       profile: nvfp4
       aic_registered: false
       variant_overrides:
-        vllm: interleave_pair  # Pro: no non-dspark full layer
+        vllm: interleave_pair
     - repo: nvidia/DeepSeek-V4-Flash-NVFP4
       profile: nvfp4
       aic_registered: false
@@ -106,7 +107,7 @@ families:
       profile: bfloat16
       aic_registered: MiniMaxAI--MiniMax-M3
     - repo: MiniMaxAI/MiniMax-M3-MXFP8
-      profile: fp8
+      profile: mxfp8
       aic_registered: false
     - repo: nvidia/MiniMax-M3-NVFP4
       profile: nvfp4
@@ -133,322 +134,56 @@ families:
     - full_attention
   roster:
     architecture: full support-matrix roster (per-checkpoint, no arch dedup)
-    checkpoints:
-    - repo: MiniMaxAI/MiniMax-M2
-      profile: fp8
-      variants:
-      - rep
-      known:
-        sglang_0516_flaky: "trace NONDETERMINISTICALLY fails (~1/3 of runs) in
-          flashinfer cutlass-DSL fused_add_rmsnorm via tvm_ffi 'Mismatched
-          Tensor' — the same command text both passes and fails on the same
-          GPU (12 controlled reruns 2026-08-21); every generator flag excluded
-          by bisection; suspected timing-dependent tensor layout under
-          enable-mixed-chunk. Also hits MiniMax-M2.5. Probe retries once and
-          records warmup_retry; persistent failure is a record, not a block."
-    - repo: MiniMaxAI/MiniMax-M2.5
-      profile: fp8
-      variants:
-      - rep
-    - repo: MiniMaxAI/MiniMax-M2.7
-      profile: fp8
-      variants:
-      - rep
-    - repo: Qwen/Qwen1.5-MoE-A2.7B
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-0.6B
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-1.7B
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-235B-A22B
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-235B-A22B-FP8
-      profile: fp8
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-235B-A22B-Instruct-2507
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-30B-A3B
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-30B-A3B-FP8
-      profile: fp8
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-32B
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-32B-FP8
-      profile: fp8
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-8B
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-Coder-480B-A35B-Instruct
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-VL-235B-A22B-Instruct
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-VL-2B-Instruct
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-VL-30B-A3B-Instruct
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-VL-32B-Instruct
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-VL-32B-Thinking
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-VL-4B-Instruct
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: Qwen/Qwen3-VL-8B-Instruct
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: Qwen/Qwen3.5-0.8B
-      profile: bfloat16
-      variants:
-      - depth8
-    - repo: Qwen/Qwen3.5-122B-A10B
-      profile: bfloat16
-      variants:
-      - depth8
-    - repo: Qwen/Qwen3.5-27B
-      profile: bfloat16
-      variants:
-      - depth8
-    - repo: Qwen/Qwen3.5-2B
-      profile: bfloat16
-      variants:
-      - depth8
-    - repo: Qwen/Qwen3.5-35B-A3B
-      profile: bfloat16
-      variants:
-      - depth8
-    - repo: Qwen/Qwen3.5-397B-A17B
-      profile: bfloat16
-      variants:
-      - depth8
-    - repo: Qwen/Qwen3.5-4B
-      profile: bfloat16
-      variants:
-      - depth8
-    - repo: Qwen/Qwen3.5-9B
-      profile: bfloat16
-      variants:
-      - depth8
-    - repo: XiaomiMiMo/MiMo-7B-Base
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: XiaomiMiMo/MiMo-V2-Flash
-      profile: fp8
-      variants:
-      - all_kinds
-      - hybrid_layer_pattern_0
-      - hybrid_layer_pattern_1
-    - repo: deepseek-ai/DeepSeek-R1
-      profile: fp8
-      variants:
-      - rep
-    - repo: deepseek-ai/DeepSeek-V3
-      profile: fp8
-      variants:
-      - rep
-    - repo: deepseek-ai/DeepSeek-V3.2
-      profile: fp8
-      variants:
-      - rep
-    - repo: deepseek-ai/DeepSeek-V4-Flash
-      profile: fp8
-      variants:
-      - rep
-      variant_overrides:
-        vllm: rep_mix
-      render_overrides:
-        vllm:
-          tokens_per_block: null
-    - repo: deepseek-ai/DeepSeek-V4-Pro
-      profile: fp8
-      variants:
-      - rep
-      variant_overrides:
-        vllm: interleave_pair  # Pro has no non-dspark full-MLA layer -> no rep_mix
-      render_overrides:
-        vllm:
-          tokens_per_block: null
-    - repo: google/gemma-4-26B-A4B
-      profile: bfloat16
-      variants:
-      - all_kinds
-      - layer_types_full_attention
-      - layer_types_sliding_attention
-    - repo: mistralai/Mixtral-8x22B-v0.1
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: mistralai/Mixtral-8x7B-v0.1
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: moonshotai/Kimi-K2-Instruct
-      profile: fp8
-      variants:
-      - rep
-    - repo: moonshotai/Kimi-K2.5
-      profile: fp8
-      variants:
-      - rep
-    - repo: moonshotai/Kimi-K3
-      profile: fp8
-      variants:
-      - rep
-      known:
-        support: "KimiK3ForConditionalGeneration unregistered in sglang 0.5.16,
-          vllm 0.24.0, trtllm 1.3.0rc23 (probe-verified 2026-08-20); K3 facts
-          need a newer framework pin. Topology fork (TEP8 vs DEP8) reported by
-          owner as real on K3 — verify once a supporting pin exists."
-    - repo: nvidia/DeepSeek-V3.1-NVFP4
-      profile: nvfp4
-      variants:
-      - rep
-    - repo: nvidia/GLM-5-NVFP4
-      profile: nvfp4
-      variants:
-      - rep
-    - repo: nvidia/GLM-5.1-NVFP4
-      profile: nvfp4
-      variants:
-      - mlp_layer_types_sparse
-    - repo: nvidia/Kimi-K2.5-NVFP4
-      profile: nvfp4
-      variants:
-      - rep
-    - repo: nvidia/Kimi-K3-NVFP4
-      profile: nvfp4  # quant_method=modelopt_mixed, num_bits=4 group=16 on experts
-      variants:
-      - rep
-      known:
-        support: "same as moonshotai/Kimi-K3: architecture unregistered at all
-          three pinned framework versions (probe-verified 2026-08-20)."
-    - repo: nvidia/Llama-3.1-70B-Instruct-FP8
-      profile: fp8
-      variants:
-      - rep
-    - repo: nvidia/Llama-3_3-Nemotron-Super-49B-v1
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: nvidia/MiniMax-M2.5-NVFP4
-      profile: nvfp4
-      variants:
-      - rep
-    - repo: nvidia/MiniMax-M2.7-NVFP4
-      profile: nvfp4
-      variants:
-      - rep
-    - repo: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-      profile: bfloat16
-      variants:
-      - all_kinds
-      - hybrid_override_pattern_E
-      - hybrid_override_pattern_M
-      - hybrid_override_pattern__
-    - repo: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
-      profile: nvfp4
-      variants:
-      - all_kinds
-      - hybrid_override_pattern_E
-      - hybrid_override_pattern_M
-      - hybrid_override_pattern__
-    - repo: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16
-      profile: bfloat16
-      variants:
-      - all_kinds
-      - layers_block_type_attention
-      - layers_block_type_mamba
-      - layers_block_type_moe
-    - repo: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
-      profile: nvfp4
-      variants:
-      - all_kinds
-      - layers_block_type_attention
-      - layers_block_type_mamba
-      - layers_block_type_moe
-      known:
-        trtllm_rc23: "worker aborts on a cudaError check (exit 139) loading the
-          all_kinds dummy, twice reproduced 2026-08-20/21; sglang+vllm probes of
-          the same dummy complete. Parked as known_bad pending a debugger pass."
-    - repo: nvidia/Nemotron-H-56B-Base-8K
-      profile: bfloat16
-      variants:
-      - all_kinds
-      - hybrid_override_pattern_M
-      - hybrid_override_pattern__
-    - repo: nvidia/Qwen3-235B-A22B-NVFP4
-      profile: nvfp4
-      variants:
-      - rep
-    - repo: sgl-project/DeepSeek-V4-Flash-FP8
-      profile: fp8
-      variants:
-      - rep
-      variant_overrides:
-        vllm: rep_mix
-      render_overrides:
-        vllm:
-          tokens_per_block: null
-    - repo: sgl-project/DeepSeek-V4-Pro-FP8
-      profile: fp8
-      variants:
-      - rep
-      variant_overrides:
-        vllm: interleave_pair  # Pro has no non-dspark full-MLA layer -> no rep_mix
-      render_overrides:
-        vllm:
-          tokens_per_block: null
-    - repo: zai-org/GLM-5
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: zai-org/GLM-5-FP8
-      profile: fp8
-      variants:
-      - rep
-    - repo: zai-org/GLM-5.1
-      profile: bfloat16
-      variants:
-      - rep
-    - repo: zai-org/GLM-5.1-FP8
-      profile: fp8
-      variants:
-      - rep
-    dummy_variants: []
+    derive: true
+    extra_repos:
+    - moonshotai/Kimi-K3
+    - nvidia/Kimi-K3-NVFP4
+    checkpoint_overrides:
+      MiniMaxAI/MiniMax-M2:
+        known:
+          sglang_0516_flaky: trace NONDETERMINISTICALLY fails (~1/3 of runs) in flashinfer cutlass-DSL
+            fused_add_rmsnorm via tvm_ffi 'Mismatched Tensor' — the same command text both passes and
+            fails on the same GPU (12 controlled reruns 2026-08-21); every generator flag excluded by
+            bisection; suspected timing-dependent tensor layout under enable-mixed-chunk. Also hits MiniMax-M2.5.
+            Probe retries once and records warmup_retry; persistent failure is a record, not a block.
+      deepseek-ai/DeepSeek-V4-Flash:
+        variant_overrides:
+          vllm: rep_mix
+        render_overrides:
+          vllm:
+            tokens_per_block: null
+      deepseek-ai/DeepSeek-V4-Pro:
+        variant_overrides:
+          vllm: interleave_pair
+        render_overrides:
+          vllm:
+            tokens_per_block: null
+      moonshotai/Kimi-K3:
+        known:
+          support: KimiK3ForConditionalGeneration unregistered in sglang 0.5.16, vllm 0.24.0, trtllm 1.3.0rc23
+            (probe-verified 2026-08-20); K3 facts need a newer framework pin. Topology fork (TEP8 vs DEP8)
+            reported by owner as real on K3 — verify once a supporting pin exists.
+      nvidia/Kimi-K3-NVFP4:
+        known:
+          support: 'same as moonshotai/Kimi-K3: architecture unregistered at all three pinned framework
+            versions (probe-verified 2026-08-20).'
+      nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4:
+        known:
+          trtllm_rc23: worker aborts on a cudaError check (exit 139) loading the all_kinds dummy, twice
+            reproduced 2026-08-20/21; sglang+vllm probes of the same dummy complete. Parked as known_bad
+            pending a debugger pass.
+      sgl-project/DeepSeek-V4-Flash-FP8:
+        variant_overrides:
+          vllm: rep_mix
+        render_overrides:
+          vllm:
+            tokens_per_block: null
+      sgl-project/DeepSeek-V4-Pro-FP8:
+        variant_overrides:
+          vllm: interleave_pair
+        render_overrides:
+          vllm:
+            tokens_per_block: null
 topologies:
 - tp: 1
   ep: 1
@@ -458,18 +193,17 @@ topologies:
   ep: 1
   evidence: real
   status: implemented
-  route: "launch_server + inject/sitecustomize (probe_sglang stage2 is
-    single-process by design and cannot host tp>1)"
+  route: launch_server + inject/sitecustomize (probe_sglang stage2 is single-process by design and cannot
+    host tp>1)
   verdicts:
-  - "Kimi-K2.5 (compressed-tensors W4-packed -> marlin): TEP8 == DEP8 kernel
-    family (sglang::fused_marlin_moe + device::marlin_moe::Marlin, same
-    align/reduce/activation set; only shape-tuning template args differ).
-    facts/tepdep/k25_fp8_{tep8,dep8}.rank0.json, 2026-08-21."
+  - 'Kimi-K2.5 (compressed-tensors W4-packed -> marlin): TEP8 == DEP8 kernel family (sglang::fused_marlin_moe
+    + device::marlin_moe::Marlin, same align/reduce/activation set; only shape-tuning template args differ).
+    facts/tepdep/k25_fp8_{tep8,dep8}.rank0.json, 2026-08-21.'
 - tp: 8
   ep: 8
   evidence: real
   status: implemented
-  route: "same as tp8, --ep-size 8"
-policy: "topology is ALWAYS recorded even when kernels match (owner: Kimi-K3
-  TEP8 is known to fork kernels; K3 itself is unregistered at current pins,
-  so the K3 verification is parked until a supporting framework pin exists)."
+  route: same as tp8, --ep-size 8
+policy: 'topology is ALWAYS recorded even when kernels match (owner: Kimi-K3 TEP8 is known to fork kernels;
+  K3 itself is unregistered at current pins, so the K3 verification is parked until a supporting framework
+  pin exists).'
