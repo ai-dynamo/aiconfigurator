@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 
+from aiconfigurator.sdk.config import has_video_input
 from aiconfigurator.sdk.perf_database import get_database
 from aiconfigurator.sdk.task_v2 import Task
 
@@ -112,6 +113,22 @@ def task_config_to_generator_config(
         )
 
     overrides = copy.deepcopy(generator_overrides or {})
+
+    # The deployment generator has no video benchmark schema yet. Refuse to
+    # save a text-only artifact for a task whose estimate included video
+    # encoder work; callers may still estimate it normally without --save-dir.
+    _has_video_workload = has_video_input(
+        num_videos=getattr(task_config, "num_videos_per_request", 0),
+        video_height=getattr(task_config, "video_height", 0),
+        video_width=getattr(task_config, "video_width", 0),
+        video_frames=getattr(task_config, "video_frames", 0),
+        num_video_tokens=getattr(task_config, "num_video_tokens", 0),
+    )
+    if _has_video_workload:
+        raise NotImplementedError(
+            "Saved deployment artifacts do not support video workloads yet; "
+            "run without --save-dir or use an image workload."
+        )
 
     # Encoder parallelism is deployment-relevant only when the task models an
     # image workload (same gate as the BenchConfig seeding below); text-only

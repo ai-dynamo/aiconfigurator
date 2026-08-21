@@ -948,6 +948,37 @@ def test_cli_estimate_afd_combined_with_pd_false_skips_static(monkeypatch):
     assert static_calls == []
 
 
+def test_cli_estimate_afd_rejects_visual_encoder_workload():
+    with pytest.raises(NotImplementedError, match="AFD does not support image/video encoder workloads"):
+        api.cli_estimate(
+            **_afd_cli_estimate_kwargs(
+                video_height=448,
+                video_width=448,
+                video_frames=8,
+                num_videos=1,
+            ),
+        )
+
+
+def test_cli_estimate_afd_rejects_partial_video_workload():
+    with pytest.raises(NotImplementedError, match="AFD does not support image/video encoder workloads"):
+        api.cli_estimate(
+            **_afd_cli_estimate_kwargs(
+                video_frames=8,
+                num_videos=0,
+            ),
+        )
+
+
+def test_cli_estimate_afd_rejects_token_only_video_workload():
+    with pytest.raises(NotImplementedError, match="AFD does not support image/video encoder workloads"):
+        api.cli_estimate(
+            **_afd_cli_estimate_kwargs(
+                num_video_tokens=196,
+            ),
+        )
+
+
 def test_cli_estimate_afd_combined_with_pd_true_runs_static_combine(monkeypatch):
     """``combined_with_pd=True`` (the default) must invoke the static path.
 

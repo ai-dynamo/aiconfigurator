@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from aiconfigurator.sdk import config, sweep
+from aiconfigurator.sdk import common, config, sweep
 from aiconfigurator.sdk.errors import (
     InsufficientMemoryError,
     KVCacheCapacityError,
@@ -152,7 +152,30 @@ def test_sweep_agg_classifies_no_result_outcomes(monkeypatch, memory_states, exp
         )
 
 
-def test_sweep_agg_point_config_preserves_multimodal_fields(monkeypatch):
+@pytest.mark.parametrize(
+    "visual_kwargs",
+    [
+        {
+            "image_height": 1024,
+            "image_width": 1024,
+            "num_images_per_request": 2,
+            "num_image_tokens": 333,
+        },
+        {
+            "video_height": 720,
+            "video_width": 1280,
+            "video_frames": 16,
+            "num_videos_per_request": 3,
+            "num_video_tokens": 448,
+        },
+        {
+            "video_frames": 16,
+            "num_videos_per_request": 3,
+            "num_video_tokens": 448,
+        },
+    ],
+)
+def test_sweep_agg_point_config_preserves_multimodal_fields(monkeypatch, visual_kwargs):
     """Regression for NVBug 6401839: the agg per-batch RuntimeConfig must carry
     every multimodal field from the base runtime_config. The old field-by-field
     construction dropped image_height/width, num_images_per_request, and
@@ -169,8 +192,19 @@ def test_sweep_agg_point_config_preserves_multimodal_fields(monkeypatch):
         summary.get_per_ops_source.return_value = {}
         return summary
 
+    model = MagicMock()
+    model.encoder_config = common.VisionEncoderConfig(
+        depth=27,
+        hidden_size=1152,
+        num_heads=16,
+        intermediate_size=4304,
+        patch_size=16,
+        temporal_patch_size=2,
+        spatial_merge_size=2,
+        out_hidden_size=5120,
+    )
     monkeypatch.setattr(sweep, "get_backend", lambda _backend_name: MagicMock())
-    monkeypatch.setattr(sweep, "get_model", lambda **_kwargs: MagicMock())
+    monkeypatch.setattr(sweep, "get_model", lambda **_kwargs: model)
     monkeypatch.setattr(sweep, "predict_agg_worker", _record)
 
     base_rt = config.RuntimeConfig(
@@ -178,12 +212,9 @@ def test_sweep_agg_point_config_preserves_multimodal_fields(monkeypatch):
         osl=256,
         ttft=1e9,
         tpot=1e9,
-        image_height=1024,
-        image_width=1024,
-        num_images_per_request=2,
-        num_image_tokens=333,
         seq_imbalance_correction_scale=1.5,
         engine_step_backend="rust",
+        **visual_kwargs,
     )
 
     sweep.sweep_agg(
@@ -199,10 +230,8 @@ def test_sweep_agg_point_config_preserves_multimodal_fields(monkeypatch):
 
     assert captured, "expected at least one agg point to be evaluated"
     for point_rt in captured:
-        assert point_rt.image_height == 1024
-        assert point_rt.image_width == 1024
-        assert point_rt.num_images_per_request == 2
-        assert point_rt.num_image_tokens == 333
+        for field, value in visual_kwargs.items():
+            assert getattr(point_rt, field) == value
         # Non-multimodal fields must survive too (the deep-copy carries them all).
         assert point_rt.seq_imbalance_correction_scale == 1.5
         assert point_rt.engine_step_backend == "rust"
@@ -261,6 +290,55 @@ def test_sweep_agg_disables_gen_dedup_for_speculative_schedules(monkeypatch):
     assert (6, 1024) not in baseline
     assert (6, 1024) in speculative
     assert len(speculative) == len(set(speculative))
+
+
+def test_sweep_agg_uses_visual_effective_isl_for_context_budget(monkeypatch):
+    points: list[tuple[int, int]] = []
+
+    def _record(*, runtime_config, ctx_tokens, **_kwargs):
+        points.append((runtime_config.batch_size, ctx_tokens))
+        summary = MagicMock()
+        summary.check_oom.return_value = False
+        summary.check_kv_cache_oom.return_value = False
+        summary.get_result_dict.return_value = {"ttft": 1.0, "tpot": 1.0}
+        summary.get_per_ops_source.return_value = {}
+        return summary
+
+    monkeypatch.setattr(sweep, "predict_agg_worker", _record)
+    model = MagicMock()
+    model.encoder_config = common.VisionEncoderConfig(
+        depth=27,
+        hidden_size=1152,
+        num_heads=16,
+        intermediate_size=4304,
+        patch_size=16,
+        temporal_patch_size=2,
+        spatial_merge_size=2,
+        out_hidden_size=5120,
+    )
+    sweep._sweep_one_parallel_agg(
+        model=model,
+        backend=MagicMock(),
+        database=MagicMock(),
+        runtime_config=config.RuntimeConfig(
+            isl=256,
+            osl=16,
+            ttft=1e9,
+            tpot=1e9,
+            video_height=448,
+            video_width=448,
+            video_frames=8,
+            num_videos_per_request=1,
+        ),
+        top_k=0,
+        max_batch_size=1,
+        ctx_stride=512,
+        enable_chunked_prefill=False,
+        free_gpu_memory_fraction=None,
+        max_seq_len=None,
+    )
+
+    assert points == [(1, 1040)]  # 256 text + 784 post-merge video tokens
 
 
 # ---------------------------------------------------------------------------

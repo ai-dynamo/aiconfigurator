@@ -7,6 +7,32 @@ from typing import Union
 from aiconfigurator_core.sdk import common
 
 
+def has_video_input(
+    *,
+    num_videos: int = 0,
+    video_height: int = 0,
+    video_width: int = 0,
+    video_frames: int = 0,
+    num_video_tokens: int = 0,
+) -> bool:
+    """Return whether any video workload field was configured.
+
+    Unsupported boundaries use this partial-input-aware predicate so an
+    incomplete video request cannot silently degrade to a text-only request.
+    """
+    fields = {
+        "num_videos": num_videos,
+        "video_height": video_height,
+        "video_width": video_width,
+        "video_frames": video_frames,
+        "num_video_tokens": num_video_tokens,
+    }
+    for name, value in fields.items():
+        if value is not None and value < 0:
+            raise ValueError(f"{name} must be nonnegative, got {value}.")
+    return any((value or 0) > 0 for value in fields.values())
+
+
 @dataclass
 class ModelConfig:
     """
@@ -176,6 +202,11 @@ class RuntimeConfig:
     image_width: int = 0
     num_images_per_request: int = 1
     num_image_tokens: int = 0  # override: ViT output tokens per image; ignored when image_height/width are set
+    video_height: int = 0
+    video_width: int = 0
+    video_frames: int = 0
+    num_videos_per_request: int = 0
+    num_video_tokens: int = 0  # override: ViT output tokens per video; ignored when video dimensions are set
 
 
 @dataclass

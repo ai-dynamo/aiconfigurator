@@ -9,9 +9,54 @@ Tests CLI argument validation, choices, and default values.
 
 import pytest
 
+from aiconfigurator.cli import api
+from aiconfigurator.cli import main as cli_main
+from aiconfigurator.cli.api import EstimateResult
 from aiconfigurator.sdk import common
 
 pytestmark = pytest.mark.unit
+
+
+def test_token_only_video_estimate_summary_reports_workload(cli_args_factory, monkeypatch, capsys):
+    result = EstimateResult(
+        ttft=19.3,
+        tpot=0.0,
+        power_w=None,
+        isl=256,
+        osl=16,
+        batch_size=1,
+        ctx_tokens=256,
+        tp_size=8,
+        pp_size=1,
+        model_path="Qwen/Qwen3.5-27B",
+        system_name="h200_sxm",
+        backend_name="trtllm",
+        backend_version="test",
+        raw={"encoder_latency": 2.627, "encoder_memory": 0.884},
+        mode="static_ctx",
+    )
+    monkeypatch.setattr(api, "cli_estimate", lambda **_kwargs: result)
+    args = cli_args_factory(
+        mode="estimate",
+        model_path="Qwen/Qwen3.5-27B",
+        system="h200_sxm",
+        extra_args=[
+            "--estimate-mode",
+            "static_ctx",
+            "--video-frames",
+            "8",
+            "--num-videos",
+            "1",
+            "--num-video-tokens",
+            "196",
+        ],
+    )
+
+    cli_main._run_estimate_mode(args)
+
+    output = capsys.readouterr().out
+    assert "Videos:           1 x 8 frames x 196 tokens/video" in output
+    assert "Encoder parallel: DP (data-parallel)" in output
 
 
 class TestCLIArgumentParsing:
@@ -503,6 +548,42 @@ class TestCLIArgumentParsing:
         assert args.disable_encoder_dp is False
         args = cli_parser.parse_args(["estimate", *common_args, "--disable-encoder-dp"])
         assert args.disable_encoder_dp is True
+
+    @pytest.mark.parametrize(
+        ("mode", "extra_args"),
+        [
+            ("default", ["--total-gpus", "8"]),
+            ("recommend", ["--target-request-rate", "1.0"]),
+            ("estimate", []),
+        ],
+    )
+    def test_video_input_flags(self, cli_parser, mode, extra_args):
+        args = cli_parser.parse_args(
+            [
+                mode,
+                "--model-path",
+                "Qwen/Qwen3.5-27B",
+                "--system",
+                "h200_sxm",
+                *extra_args,
+                "--video-height",
+                "448",
+                "--video-width",
+                "336",
+                "--video-frames",
+                "8",
+                "--num-videos",
+                "2",
+                "--num-video-tokens",
+                "560",
+            ]
+        )
+
+        assert args.video_height == 448
+        assert args.video_width == 336
+        assert args.video_frames == 8
+        assert args.num_videos == 2
+        assert args.num_video_tokens == 560
 
     def test_recommend_mode_parses_request_rate(self, cli_parser):
         args = cli_parser.parse_args(

@@ -235,6 +235,21 @@ class TestParseHFConfig:
         layer_types = layer_types * 16  # 64 layers total (48 GDN + 16 GQA)
         config = {
             "architectures": ["Qwen3_5ForConditionalGeneration"],
+            "image_token_id": 248056,
+            "video_token_id": 248057,
+            "vision_config": {
+                "depth": 27,
+                "hidden_size": 1152,
+                "num_heads": 16,
+                "intermediate_size": 4304,
+                "patch_size": 16,
+                "temporal_patch_size": 2,
+                "spatial_merge_size": 2,
+                "out_hidden_size": 5120,
+                # Qwen3.5 ignores inherited deepstack metadata and keeps one merger.
+                "deepstack_visual_indexes": [8, 16, 24],
+                "in_channels": 4,
+            },
             "text_config": {
                 "num_hidden_layers": 64,
                 "num_attention_heads": 24,
@@ -279,6 +294,22 @@ class TestParseHFConfig:
         # For dense models moe_inter_size falls back to intermediate_size
         assert extra_params.moe_inter_size == 17408
         assert extra_params.shared_expert_inter_size == 0
+        assert extra_params.image_token_id == 248056
+        assert extra_params.video_token_id == 248057
+        assert extra_params.vision_config == common.VisionEncoderConfig(
+            depth=27,
+            hidden_size=1152,
+            num_heads=16,
+            intermediate_size=4304,
+            patch_size=16,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            out_hidden_size=5120,
+            projector_dims=((4608, 4608), (4608, 5120)),
+            projector_n_instances=1,
+            partial_rotary_factor=1.0,
+            in_channels=4,
+        )
 
     def test_parse_qwen35_moe_config(self):
         """Test parsing Qwen3.5-35B-A3B (MoE hybrid) config → Qwen35Config with MoE fields."""
@@ -287,6 +318,19 @@ class TestParseHFConfig:
         layer_types = layer_types * 10  # 40 layers total (30 GDN + 10 GQA)
         config = {
             "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+            "image_token_id": 248056,
+            "video_token_id": 248057,
+            "vision_config": {
+                "depth": 27,
+                "hidden_size": 1152,
+                "num_heads": 16,
+                "intermediate_size": 4304,
+                "patch_size": 16,
+                "temporal_patch_size": 2,
+                "spatial_merge_size": 2,
+                "out_hidden_size": 2048,
+                "deepstack_visual_indexes": [],
+            },
             "text_config": {
                 "num_hidden_layers": 40,
                 "num_attention_heads": 16,
@@ -327,6 +371,44 @@ class TestParseHFConfig:
         assert extra_params.num_experts == 256
         assert extra_params.moe_inter_size == 512
         assert extra_params.shared_expert_inter_size == 512
+        assert extra_params.vision_config is not None
+        assert extra_params.vision_config.out_hidden_size == 2048
+        assert extra_params.vision_config.projector_dims == ((4608, 4608), (4608, 2048))
+        assert extra_params.vision_config.projector_n_instances == 1
+
+    def test_parse_qwen35_rejects_vision_language_projection_mismatch(self):
+        config = {
+            "architectures": ["Qwen3_5ForConditionalGeneration"],
+            "vision_config": {
+                "depth": 27,
+                "hidden_size": 1152,
+                "num_heads": 16,
+                "intermediate_size": 4304,
+                "patch_size": 16,
+                "temporal_patch_size": 2,
+                "spatial_merge_size": 2,
+                "out_hidden_size": 4096,
+            },
+            "text_config": {
+                "num_hidden_layers": 4,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 1,
+                "hidden_size": 5120,
+                "intermediate_size": 1024,
+                "vocab_size": 1024,
+                "max_position_embeddings": 4096,
+                "head_dim": 128,
+                "layer_types": ["linear_attention"] * 3 + ["full_attention"],
+                "linear_num_key_heads": 4,
+                "linear_key_head_dim": 128,
+                "linear_num_value_heads": 4,
+                "linear_value_head_dim": 128,
+                "linear_conv_kernel_dim": 4,
+            },
+        }
+
+        with pytest.raises(ValueError, match="out_hidden_size must match"):
+            _parse_hf_config_json(config)
 
     def test_parse_qwen35_layer_types_length_mismatch_raises(self):
         """Test that mismatched layer_types length raises ValueError."""

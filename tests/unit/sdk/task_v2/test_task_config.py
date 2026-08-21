@@ -343,13 +343,82 @@ def test_from_yaml_disagg_rejects_legacy_shared_model_path():
 
 
 def test_build_runtime_config_carries_workload():
-    t = Task(isl=2048, osl=512, ttft=300.0, tpot=20.0)
+    t = Task(
+        isl=2048,
+        osl=512,
+        ttft=300.0,
+        tpot=20.0,
+        video_height=448,
+        video_width=448,
+        video_frames=8,
+        num_videos_per_request=2,
+        num_video_tokens=784,
+    )
     rt = t.build_runtime_config(batch_size=64)
     assert rt.isl == 2048
     assert rt.osl == 512
     assert rt.ttft == 300.0
     assert rt.tpot == 20.0
     assert rt.batch_size == 64
+    assert rt.video_height == 448
+    assert rt.video_width == 448
+    assert rt.video_frames == 8
+    assert rt.num_videos_per_request == 2
+    assert rt.num_video_tokens == 784
+
+
+def test_video_fields_preserve_existing_task_positional_constructor_contract():
+    task = Task("agg", 4000, 1000, 0, 0, 0, 1, False)
+
+    assert task.enable_encoder_dp is False
+    assert task.video_height == 0
+    assert task.video_width == 0
+    assert task.video_frames == 0
+    assert task.num_videos_per_request == 0
+    assert task.num_video_tokens == 0
+
+
+def test_afd_rejects_visual_encoder_workload():
+    task = Task(
+        serving_mode="afd",
+        model_path="Qwen/Qwen3.5-27B",
+        system_name="h200_sxm",
+        total_gpus=16,
+        video_height=448,
+        video_width=448,
+        video_frames=8,
+        num_videos_per_request=1,
+    )
+
+    with pytest.raises(NotImplementedError, match="AFD does not support image/video encoder workloads"):
+        task.validate()
+
+
+def test_afd_rejects_partial_video_workload():
+    task = Task(
+        serving_mode="afd",
+        model_path="Qwen/Qwen3.5-27B",
+        system_name="h200_sxm",
+        total_gpus=16,
+        video_frames=8,
+        num_videos_per_request=0,
+    )
+
+    with pytest.raises(NotImplementedError, match="AFD does not support image/video encoder workloads"):
+        task.validate()
+
+
+def test_afd_rejects_token_only_video_workload():
+    task = Task(
+        serving_mode="afd",
+        model_path="Qwen/Qwen3.5-27B",
+        system_name="h200_sxm",
+        total_gpus=16,
+        num_video_tokens=196,
+    )
+
+    with pytest.raises(NotImplementedError, match="AFD does not support image/video encoder workloads"):
+        task.validate()
 
 
 def test_build_model_config_agg_uses_resolved_quant():
@@ -404,6 +473,30 @@ def test_sweep_disagg_kwargs_shape():
     assert kwargs["rate_matching_prefill_degradation"] == 0.9
     assert kwargs["rate_matching_decode_degradation"] == 0.92
     assert kwargs["autoscale_ttft_correction_factor"] == 1.8
+
+
+def test_sweep_disagg_sizes_prefill_token_budget_with_visual_effective_isl():
+    t = Task(
+        serving_mode="disagg",
+        prefill_model_path="Qwen/Qwen3.5-27B",
+        prefill_system_name="b200_sxm",
+        prefill_backend_name="vllm",
+        decode_model_path="Qwen/Qwen3.5-27B",
+        decode_system_name="b200_sxm",
+        decode_backend_name="vllm",
+        total_gpus=32,
+        database_mode="SOL",
+        isl=256,
+        video_height=448,
+        video_width=448,
+        video_frames=8,
+        num_videos_per_request=1,
+        prefill_max_batch_size=4,
+    )
+
+    kwargs = t.sweep_disagg_kwargs(prefill_database=None, decode_database=None)
+
+    assert kwargs["prefill_max_num_tokens"] == 4 * 1040
 
 
 def test_sweep_disagg_require_same_tp_sglang_fused():

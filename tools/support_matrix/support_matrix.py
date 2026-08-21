@@ -62,6 +62,15 @@ _FP8_QUANT_MODE_NAMES = frozenset({"fp8", "fp8_static", "fp8_block", "w4afp8"})
 _NATIVE_FP4_QUANT_MODE_NAMES = frozenset({"nvfp4"})
 _FP8_SOFTWARE_FALLBACK_SYSTEMS = frozenset({"b60"})
 _DSV4_VLLM_NATIVE_W4A8_MIN_VERSION = Version("0.24.0")
+_ENCODER_ARCHITECTURES = frozenset(
+    {
+        "Qwen3VLForConditionalGeneration",
+        "Qwen3VLMoeForConditionalGeneration",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+    }
+)
+_ENCODER_CHECK_IMAGE_SIZE = 448
 
 
 def _combination_sort_key(combo: tuple[str, str, str, str]) -> tuple[tuple[int, str], str, str, str]:
@@ -93,6 +102,7 @@ class HardwareIncompatibility:
 def _support_matrix_row_command(
     *,
     model: str,
+    architecture: str | None = None,
     system: str,
     backend: str,
     version: str,
@@ -139,9 +149,26 @@ def _support_matrix_row_command(
         "--engine-step-backend",
         "rust",
     ]
+    if _has_modeled_encoder(model, architecture=architecture):
+        parts.extend(
+            [
+                "--image-height",
+                str(_ENCODER_CHECK_IMAGE_SIZE),
+                "--image-width",
+                str(_ENCODER_CHECK_IMAGE_SIZE),
+                "--num-images",
+                "1",
+            ]
+        )
     if transfer_policy:
         parts.extend(["--transfer-policy", transfer_policy])
     return " ".join(shlex.quote(str(part)) for part in parts)
+
+
+def _has_modeled_encoder(model: str, *, architecture: str | None = None) -> bool:
+    """Whether support-matrix execution must include a real visual workload."""
+    resolved_architecture = architecture or dict(_get_model_info(model))["architecture"]
+    return resolved_architecture in _ENCODER_ARCHITECTURES
 
 
 # Tiered constraints by model size (parameter count)
@@ -537,6 +564,7 @@ class SupportMatrix:
         version: str,
         constraints: TestConstraints,
         database_mode: str | None = None,
+        has_modeled_encoder: bool | None = None,
     ) -> Task:
         # ``database_mode`` is supplied per-pass by run_single_test's silicon-first /
         # hybrid-rescue two-pass ("SILICON" then "HYBRID"); the env is only a fallback
@@ -559,6 +587,16 @@ class SupportMatrix:
             # (e.g. AIC_SM_TRANSFERS="off" or "xshape,xquant"). None -> all kinds on.
             "transfer_policy": os.environ.get("AIC_SM_TRANSFERS") or None,
         }
+        if has_modeled_encoder is None:
+            has_modeled_encoder = _has_modeled_encoder(model)
+        if has_modeled_encoder:
+            # A text-only request never queries encoder_ops and would produce a
+            # false-positive matrix row for multimodal support.
+            common_kwargs.update(
+                image_height=_ENCODER_CHECK_IMAGE_SIZE,
+                image_width=_ENCODER_CHECK_IMAGE_SIZE,
+                num_images_per_request=1,
+            )
         if mode == "disagg":
             # v2 disagg forbids shared top-level worker fields; fan out to both roles.
             return Task(
@@ -592,6 +630,7 @@ class SupportMatrix:
         version: str,
         constraints: TestConstraints,
         database_mode: str | None = None,
+        has_modeled_encoder: bool | None = None,
     ) -> pd.DataFrame | None:
         task = SupportMatrix._create_task(
             mode=mode,
@@ -601,6 +640,7 @@ class SupportMatrix:
             version=version,
             constraints=constraints,
             database_mode=database_mode,
+            has_modeled_encoder=has_modeled_encoder,
         )
         pareto_df = task.run()
         if pareto_df is None:
@@ -642,6 +682,12 @@ class SupportMatrix:
             unsupported_modes = set(modes_to_test) - {"agg", "disagg"}
             if unsupported_modes:
                 raise ValueError(f"Unsupported support-matrix mode(s): {sorted(unsupported_modes)}")
+        # Model identity and architecture lookups are support-matrix
+        # infrastructure preflight. Keep them outside _attempt's catch-all so
+        # broken metadata aborts generation instead of becoming a FAIL row or
+        # triggering a misleading HYBRID retry.
+        architecture = dict(_get_model_info(model))["architecture"]
+        has_modeled_encoder = _has_modeled_encoder(model, architecture=architecture)
         constraints = _get_test_constraints(model)
         statuses: dict[str, str] = {}
         error_messages = {}
@@ -650,6 +696,7 @@ class SupportMatrix:
         commands = {
             mode: _support_matrix_row_command(
                 model=model,
+                architecture=architecture,
                 system=system,
                 backend=backend,
                 version=version,
@@ -705,6 +752,7 @@ class SupportMatrix:
                         version=version,
                         constraints=constraints,
                         database_mode=db_mode,
+                        has_modeled_encoder=has_modeled_encoder,
                     )
                 # pareto_frontier_df is non-empty iff pareto_df is, so we only check pareto_df.
                 if pareto_df is None or pareto_df.empty:
@@ -757,6 +805,7 @@ class SupportMatrix:
                     tier = h_tier if h_tier and h_tier != "silicon" else "empirical"
                     commands[mode] = _support_matrix_row_command(
                         model=model,
+                        architecture=architecture,
                         system=system,
                         backend=backend,
                         version=version,
@@ -1094,6 +1143,7 @@ class SupportMatrix:
                 huggingface_id, architecture, system, backend, version, mode, status, err_msg = row
                 command = _support_matrix_row_command(
                     model=huggingface_id,
+                    architecture=architecture,
                     system=system,
                     backend=backend,
                     version=version,

@@ -3,6 +3,8 @@
 
 """Qwen3.5 hybrid GDN + full-attention LM modeling contracts."""
 
+import json
+
 import pytest
 
 from aiconfigurator.sdk import common, models
@@ -12,7 +14,15 @@ from aiconfigurator.sdk.operations import CustomAllReduce, OverlapOp
 pytestmark = pytest.mark.unit
 
 
-def _model_config(tp_size=2, *, moe_tp_size=None, moe_ep_size=1, attention_dp_size=1, moe_backend=None):
+def _model_config(
+    tp_size=2,
+    *,
+    moe_tp_size=None,
+    moe_ep_size=1,
+    attention_dp_size=1,
+    moe_backend=None,
+    enable_encoder_dp=True,
+):
     return sdk_config.ModelConfig(
         tp_size=tp_size,
         pp_size=1,
@@ -20,6 +30,7 @@ def _model_config(tp_size=2, *, moe_tp_size=None, moe_ep_size=1, attention_dp_si
         moe_ep_size=moe_ep_size,
         attention_dp_size=attention_dp_size,
         moe_backend=moe_backend,
+        enable_encoder_dp=enable_encoder_dp,
         gemm_quant_mode=common.GEMMQuantMode.bfloat16,
         kvcache_quant_mode=common.KVCacheQuantMode.bfloat16,
     )
@@ -32,6 +43,78 @@ def _flatten_ops(phase_ops):
             yield from op._group_b
         else:
             yield op
+
+
+@pytest.mark.parametrize(
+    ("model_name", "expected_out_hidden", "is_moe"),
+    [
+        ("Qwen/Qwen3.5-27B", 5120, False),
+        ("Qwen/Qwen3.5-35B-A3B", 2048, True),
+        ("Qwen/Qwen3.5-122B-A10B", 3072, True),
+        ("Qwen/Qwen3.5-397B-A17B", 4096, True),
+    ],
+)
+def test_qwen35_dense_and_moe_variants_preserve_language_and_build_vision_encoder(
+    model_name, expected_out_hidden, is_moe
+):
+    model = models.get_model(model_name, _model_config(tp_size=2), "vllm")
+
+    assert isinstance(model.extra_params, common.Qwen35Config)
+    assert (model.extra_params.num_experts > 0) is is_moe
+    assert model.encoder_config is model.extra_params.vision_config
+    assert model.encoder_config.out_hidden_size == expected_out_hidden
+    assert model.encoder_config.projector_dims == ((4608, 4608), (4608, expected_out_hidden))
+    assert model.encoder_config.projector_n_instances == 1
+    assert model.encoder_config.deepstack_visual_indexes == ()
+    assert {"context_gdn_scan", "context_attention"} <= {op._name for op in model.context_ops}
+    assert {"generation_gdn_recurrence", "generation_attention"} <= {op._name for op in model.generation_ops}
+    assert {
+        "encoder_patch_embed_gemm",
+        "encoder_position_embed",
+        "encoder_attention",
+        "encoder_merger_norm",
+        "encoder_projector_fc1_gemm",
+        "encoder_rope_apply",
+    } <= {op._name for op in model.encoder_ops}
+    position_embed = next(op for op in model.encoder_ops if op._name == "encoder_position_embed")
+    position_spec = json.loads(position_embed._spec_json())["Elementwise"]
+    assert position_spec["bytes_per_token"] == 2 * (2 * 1152 + 1152)
+    merger_norm = next(op for op in model.encoder_ops if op._name == "encoder_merger_norm")
+    merger_spec = json.loads(merger_norm._spec_json())["Elementwise"]
+    assert merger_spec["bytes_per_token"] == 2 * (1152 + 1152)
+
+
+def test_qwen35_encoder_dp_replicates_vit_and_gathers_projected_tokens():
+    model = models.get_model(
+        "Qwen/Qwen3.5-27B",
+        _model_config(tp_size=4, enable_encoder_dp=True),
+        "vllm",
+    )
+    encoder_ops = {op._name: op for op in model.encoder_ops}
+
+    assert encoder_ops["encoder_attention"]._n == 16
+    assert encoder_ops["encoder_qkv_gemm"]._n == 3 * 1152
+    assert "encoder_dp_all_gather" in encoder_ops
+
+
+def test_qwen35_legacy_encoder_tp_shards_vit_and_projector():
+    model = models.get_model(
+        "Qwen/Qwen3.5-27B",
+        _model_config(tp_size=4, enable_encoder_dp=False),
+        "vllm",
+    )
+    encoder_ops = {op._name: op for op in model.encoder_ops}
+
+    assert encoder_ops["encoder_attention"]._n == 4
+    assert encoder_ops["encoder_qkv_gemm"]._n == 3 * 1152 // 4
+    assert encoder_ops["encoder_projector_fc0_gemm"]._n == 4608 // 4
+    assert encoder_ops["encoder_projector_fc1_gemm"]._k == 4608 // 4
+    assert "encoder_dp_all_gather" not in encoder_ops
+
+
+def test_bundled_qwen35_122b_is_not_added_to_default_support_matrix_roster():
+    assert "Qwen/Qwen3.5-122B-A10B" not in common.DefaultHFModels
+    assert "Qwen/Qwen3.5-122B-A10B" not in common.SupportMatrixHFModels
 
 
 @pytest.mark.parametrize(
