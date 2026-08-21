@@ -50,10 +50,13 @@ def test_kda_context_conv_passes_serve_parity_metadata():
             assert len(conv_calls) == 1, (
                 f"run_kda_context_benchmark must call causal_conv1d_fn at exactly one site, found {len(conv_calls)}"
             )
-            assert any(kw.arg == "metadata" for kw in conv_calls[0].keywords), (
-                "run_kda_context_benchmark's causal_conv1d_fn call must pass metadata= "
-                "(serve-parity GDNAttentionMetadata); the metadata=None branch adds a "
-                "numpy + D2H floor inside every timed call"
+            metadata_keywords = [kw for kw in conv_calls[0].keywords if kw.arg == "metadata"]
+            assert len(metadata_keywords) == 1
+            metadata_value = metadata_keywords[0].value
+            assert isinstance(metadata_value, ast.Name) and metadata_value.id == "conv_metadata", (
+                "run_kda_context_benchmark's causal_conv1d_fn call must receive the "
+                "serve-parity conv_metadata object; metadata=None adds a numpy + D2H "
+                "floor inside every timed call"
             )
             return
     raise AssertionError("run_kda_context_benchmark not found / no causal_conv1d_fn call")
@@ -105,6 +108,8 @@ def test_kda_context_seq_len_one_routes_through_decode_kernels(monkeypatch):
         ("context", [2, 4]),
     ]
 
+    with pytest.raises(ValueError, match="at least one sequence length"):
+        namespace["run_kda_torch"](**{**kwargs, "seq_len_list": []})
     with pytest.raises(ValueError, match="sequence lengths must be positive"):
         namespace["run_kda_torch"](**{**kwargs, "seq_len_list": [0]})
 
