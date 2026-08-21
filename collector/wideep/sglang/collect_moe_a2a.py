@@ -73,7 +73,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -94,8 +94,7 @@ MODULE_NAME = "collector.wideep.sglang.collect_moe_a2a"
 OP_NAME = "moe_a2a"
 TABLE_STEM = Path(PerfFile.MOE_A2A.value).stem
 
-#: Framework identity recorded in the perf rows (matches the sibling wideep
-#: sglang writer, ``collect_deepep_moe.py``).
+#: Framework identity recorded in the perf rows.
 FRAMEWORK = "SGLang"
 #: The manifest entry that pins the DeepEP-capable runtime for this collector.
 MANIFEST_FRAMEWORK = "sglang"
@@ -123,6 +122,9 @@ PHASE_COMBINE = "combine"
 
 #: Ported verbatim from ``deepep/test_internode.py:127``.
 HT_RDMA_BUFFER_SIZE = 128
+#: Group-limited routing: DeepSeek-style node-group top-k, ``min(nodes, 4)``
+#: (``deepep/test_internode.py:461-463``).
+HT_MAX_TOPK_GROUPS = 4
 
 #: LL warmup iterations before the profiled region, matching
 #: ``deepep/utils.py:bench``'s ``num_warmups`` default.
@@ -256,21 +258,11 @@ def init_distributed(identity: DistIdentity):
 
 @dataclass(frozen=True, order=True)
 class MoeA2AShape:
-    """One correlated MoE geometry: the tuple is declared together, never crossed.
-
-    ``num_expert_group``/``topk_group`` are the declared serving routing knobs
-    (``sglang_moe_num_expert_group``/``sglang_moe_topk_group`` on the model's
-    moe row). They ride along as non-identity metadata: the persisted comm key
-    stays ``(hidden_size, topk, num_experts)``, and :func:`get_moe_a2a_shapes`
-    raises when two declarations sharing that key disagree on routing, so the
-    workload is a well-defined function of the shape.
-    """
+    """One correlated MoE geometry: the tuple is declared together, never crossed."""
 
     hidden_size: int
     topk: int
     num_experts: int
-    num_expert_group: int = field(default=1, compare=False)
-    topk_group: int = field(default=1, compare=False)
 
 
 @dataclass(frozen=True)
@@ -312,38 +304,20 @@ def get_moe_a2a_shapes() -> list[MoeA2AShape]:
 
     recipes = get_common_moe_test_cases(backend="sglang")
     dropped_not_declared = 0
-    shapes: dict[tuple[int, int, int], MoeA2AShape] = {}
-    contributors: dict[tuple[int, int, int], str] = {}
+    shapes: set[MoeA2AShape] = set()
     for recipe in recipes:
         if not is_wideep_moe_model(recipe.model_name):
             dropped_not_declared += 1
             continue
-        shape = MoeA2AShape(
-            hidden_size=int(recipe.hidden_size),
-            topk=int(recipe.topk),
-            num_experts=int(recipe.num_experts),
-            num_expert_group=int(recipe.sglang_moe_num_expert_group or 1),
-            topk_group=int(recipe.sglang_moe_topk_group or 1),
-        )
-        key = (shape.hidden_size, shape.topk, shape.num_experts)
-        existing = shapes.get(key)
-        if existing is None:
-            shapes[key] = shape
-            contributors[key] = recipe.model_name
-        elif (existing.num_expert_group, existing.topk_group) != (shape.num_expert_group, shape.topk_group):
-            # The persisted comm key carries no routing column, so two models
-            # sharing a geometry but declaring different routing would write
-            # indistinguishable rows measured under different traffic
-            # patterns. That conflict is a human decision, never a merge.
-            raise MoeA2ADeclarationError(
-                f"moe_a2a: declared shape {key} (hidden_size, topk, num_experts) carries conflicting "
-                f"routing declarations: {contributors[key]!r} says (num_expert_group, topk_group)="
-                f"{(existing.num_expert_group, existing.topk_group)} but {recipe.model_name!r} says "
-                f"{(shape.num_expert_group, shape.topk_group)}. The moe_a2a workload derives its "
-                "routing from these fields and the persisted key cannot distinguish the two."
+        shapes.add(
+            MoeA2AShape(
+                hidden_size=int(recipe.hidden_size),
+                topk=int(recipe.topk),
+                num_experts=int(recipe.num_experts),
             )
+        )
 
-    ordered = sorted(shapes.values())
+    ordered = sorted(shapes)
     print(
         f"moe_a2a: {len(ordered)} declared shapes from {len(recipes)} moe recipes "
         f"(dropped: {dropped_not_declared} not declared wideep; "
@@ -352,22 +326,6 @@ def get_moe_a2a_shapes() -> list[MoeA2AShape]:
         flush=True,
     )
     return ordered
-
-
-def ht_num_topk_groups(shape: MoeA2AShape, num_nodes: int) -> int:
-    """Node-group budget for the HT routing construction, from the declaration.
-
-    Group-limited models (DeepSeek-style, ``num_expert_group > 1``) restrict
-    each token to ``topk_group`` expert groups in serving; with the groups laid
-    out across RDMA nodes that bounds the token's destination nodes, which is
-    exactly what ``deepep/test_internode.py`` emulates with its
-    ``min(num_nodes, 4)`` (4 = DeepSeek-V3's ``topk_group``). Models declaring
-    ``num_expert_group == 1`` (Kimi, GLM) route globally, so every node group
-    stays selectable and the masking below degenerates to plain top-k.
-    """
-    if shape.num_expert_group <= 1:
-        return num_nodes
-    return min(num_nodes, shape.topk_group)
 
 
 def get_moe_a2a_workload_grid() -> dict[str, list[int]]:
@@ -460,12 +418,10 @@ def case_plan_ids(cases: list[MoeA2ACase], *, ep_size: int, node_num: int) -> li
             "ep_size": ep_size,
             "hidden_size": case.shape.hidden_size,
             "node_num": node_num,
-            "num_expert_group": case.shape.num_expert_group,
             "num_experts": case.shape.num_experts,
             "num_tokens": case.num_tokens,
             "sms": case.sms,
             "topk": case.shape.topk,
-            "topk_group": case.shape.topk_group,
         }
         ids.append(f"{MODULE_NAME}:run_case:" + json.dumps(payload, sort_keys=True, separators=(",", ":")))
     return ids
@@ -691,8 +647,7 @@ def run_ht_case(
     """Measure one HT dispatch+combine case; returns per-phase timings in us.
 
     Ported from ``deepep/test_internode.py:test_main``. **Kept**: the routing
-    construction (node-group top-k, with the group budget now derived from the
-    shape's declared routing — :func:`ht_num_topk_groups`), the
+    construction (group-limited top-k over ``min(nodes, 4)`` node groups), the
     NVL/RDMA buffer sizes, the FP8 dispatch tuning sweep
     (nvl 4..44 step 4 x rdma 4..32 step 4), the rank-0 config broadcast, the
     combine tuning sweep (nvl 1..7 x rdma 8/12..32 step 4), and the
@@ -713,7 +668,7 @@ def run_ht_case(
     shape = case.shape
     num_ranks = identity.world_size
     num_nodes = identity.node_num
-    num_topk_groups = ht_num_topk_groups(shape, num_nodes)
+    num_topk_groups = min(num_nodes, HT_MAX_TOPK_GROUPS)
     nvl_buffer_size = _ht_nvl_buffer_size(num_ranks)
 
     torch.manual_seed(identity.rank)
@@ -1118,9 +1073,7 @@ def _emit_case_rows(
 
     The consumer's store nests ``phase`` directly under ``comm_backend``, so
     alphabetical phase emission keeps that level's insertion order ascending
-    too. ``helper.log_perf`` reports write failures by returning ``False``
-    (lock/open/fsync errors are caught inside it), so a discarded result could
-    finalize a partial parquet as ``complete`` — fail closed instead.
+    too.
     """
     for phase in (PHASE_COMBINE, PHASE_DISPATCH):
         timing = timings[phase]
@@ -1146,10 +1099,7 @@ def _emit_case_rows(
             perf_filename=perf_path,
             power_stats=_power_columns(),
         ):
-            raise MoeA2ABenchmarkError(
-                f"helper.log_perf failed to persist the measured {case.comm_backend}/{phase} row "
-                f"(case={case}); a measured-but-unpersisted case must fail classified, not finalize"
-            )
+            raise RuntimeError(f"log_perf refused to write {perf_path} for {phase}")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1180,18 +1130,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="container image the job was launched with (the launcher's ${CONTAINER_IMAGE}); must be a "
         "manifest wideep_sglang image variant — recorded in the sidecar runtime block",
     )
-    parser.add_argument(
-        "--allow-mnnvl",
-        action="store_true",
-        help="DIAGNOSTIC ONLY: allow MNNVL for the low-latency buffer; the run refuses to finalize "
-        "publishable data because the persisted rows carry no transport identity",
-    )
-    parser.add_argument(
-        "--disable-nvlink",
-        action="store_true",
-        help="DIAGNOSTIC ONLY: disable NVLink for the low-latency buffer; the run refuses to finalize "
-        "publishable data because the persisted rows carry no transport identity",
-    )
+    parser.add_argument("--allow-mnnvl", action="store_true", help="allow MNNVL for the low-latency buffer")
+    parser.add_argument("--disable-nvlink", action="store_true", help="disable NVLink for the low-latency buffer")
     parser.add_argument(
         "--plan-only",
         action="store_true",
@@ -1214,19 +1154,6 @@ def resolve_modes(raw: str) -> tuple[str, ...]:
     if not modes:
         raise MoeA2ADeclarationError("--modes selected no DeepEP kernel family")
     return modes
-
-
-def transport_is_default(*, allow_mnnvl: bool, disable_nvlink: bool) -> bool:
-    """Whether the LL ``deep_ep.Buffer`` transport matches the persisted rows' identity.
-
-    ``--allow-mnnvl``/``--disable-nvlink`` materially change the low-latency
-    buffer construction, but neither the row key, ``case_plan_ids`` nor the
-    sidecar records them — so data collected under an alternate transport
-    would overwrite or mix with default ``deepep_ll`` rows under an identical
-    provenance hash. Such runs are diagnostic: they may stage rows, but
-    :func:`main` refuses to finalize/attest them.
-    """
-    return not (allow_mnnvl or disable_nvlink)
 
 
 def require_supported_framework(framework: str) -> None:
@@ -1271,7 +1198,6 @@ def main(argv: list[str] | None = None) -> None:
         dict(os.environ), gpus_per_node=args.gpus_per_node, visible_device_count=torch.cuda.device_count()
     )
     runtime_meta = resolve_runtime_meta(get_version("sglang"), args.image_ref)
-    diagnostic_transport = not transport_is_default(allow_mnnvl=args.allow_mnnvl, disable_nvlink=args.disable_nvlink)
     group = init_distributed(identity)
     print(
         f"[moe_a2a] host={socket.gethostname()} rank={identity.rank}/{identity.world_size} "
@@ -1291,14 +1217,19 @@ def main(argv: list[str] | None = None) -> None:
 
     output_dir = Path(args.output_path)
     output_dir.mkdir(parents=True, exist_ok=True)
+    # F19: log_perf appends to the staging CSV and record_failure appends per-rank
+    # error sidecars, so a rerun into a directory holding a previous attempt's
+    # artifacts would finalize/attest stale rows under this run's provenance. No
+    # validated resume protocol exists for this standalone collector — the launcher
+    # derives a fresh per-Slurm-job --output-path — so the collector refuses to run
+    # into a dirty directory outright, before any benchmark or write.
     stale = stale_output_artifacts(output_dir, PerfFile.MOE_A2A.value)
     if stale:
         raise MoeA2ADeclarationError(
-            f"moe_a2a refuses to run into {output_dir}: it holds artifacts from a previous attempt "
-            f"({', '.join(stale)}). log_perf appends to the staging CSV, so rerunning here would "
-            "finalize stale rows under this run's attestation. Use a fresh --output-path (the "
-            "launcher derives one per Slurm job); no validated resume protocol exists for this "
-            "standalone collector."
+            f"moe_a2a refuses to run into {output_dir}: it holds artifacts from a previous "
+            f"attempt ({', '.join(stale)}). log_perf appends to the staging CSV and per-rank "
+            "error sidecars accumulate, so rerunning here would finalize stale rows under "
+            "this run's attestation. Use a fresh --output-path."
         )
     perf_path = str(output_dir / PerfFile.MOE_A2A.value)
     device_name = torch.cuda.get_device_name(torch.device("cuda", identity.local_rank))
@@ -1337,35 +1268,33 @@ def main(argv: list[str] | None = None) -> None:
                 )
 
             failed = 0
+            timings = None
             try:
                 if case.comm_backend == COMM_BACKEND_HT:
                     timings = run_ht_case(buffer=ht_buffer, group=group, case=case, identity=identity)
                 else:
                     timings = run_ll_case(buffer=ll_buffer, group=group, case=case, identity=identity)
-                # Persist inside the agreement scope: rank 0 emits after its
-                # last case collective, so a failed write degrades to an
-                # ordinary per-case failure that every rank agrees on below.
-                if identity.rank == 0:
-                    _emit_case_rows(
-                        timings=timings,
-                        case=case,
-                        identity=identity,
-                        perf_path=perf_path,
-                        version=runtime_meta["version"],
-                        device_name=device_name,
-                    )
             except Exception as error:
                 failed = 1
                 record_failure(output_dir, case, error, identity)
 
-            # Every rank must agree whether this case produced data (benchmark
-            # AND rank 0's persistence), or the next collective desyncs. See
-            # the module's known-limitation note.
+            # Every rank must agree whether this case produced data, or the
+            # next collective desyncs. See the module's known-limitation note.
             agreement = torch.tensor([failed], dtype=torch.int32, device="cuda")
             dist.all_reduce(agreement, op=dist.ReduceOp.MAX, group=group)
             if int(agreement.item()) != 0:
                 failure_count += 1
                 continue
+
+            if identity.rank == 0:
+                _emit_case_rows(
+                    timings=timings,
+                    case=case,
+                    identity=identity,
+                    perf_path=perf_path,
+                    version=runtime_meta["version"],
+                    device_name=device_name,
+                )
     finally:
         if ht_buffer is not None:
             ht_buffer.destroy()
@@ -1376,15 +1305,6 @@ def main(argv: list[str] | None = None) -> None:
             dist.destroy_process_group()
 
     if identity.rank == 0:
-        if diagnostic_transport:
-            print(
-                f"[moe_a2a] DIAGNOSTIC transport run (--allow-mnnvl={args.allow_mnnvl}, "
-                f"--disable-nvlink={args.disable_nvlink}): staged rows stay in {perf_path}; refusing to "
-                "finalize parquet or attest a sidecar because the persisted schema carries no transport "
-                "identity and the rows would mix with default deepep_ll data",
-                flush=True,
-            )
-            return
         converted = finalize_perf_files([perf_path])
         if not converted:
             raise MoeA2ABenchmarkError(

@@ -26,7 +26,7 @@ The retired ``TrtLLMWideEPMoE`` / ``TrtLLMWideEPMoEDispatch`` classes
 (ISSUE-13) were deleted in the deprecation cleanup (AIC-1357): no model
 constructed them and their query surfaces were engine-routed shims. Their
 data-plane views (``_wideep_moe_compute_data`` / ``_trtllm_alltoall_data``)
-are rehomed onto ``moe_comm.MoEExpertCompute`` / ``moe_comm.MoEAllToAll``.
+are rehomed onto ``ModeledEPMoE`` / ``moe_comm.MoEAllToAll``.
 
 Cache key matches every other migrated op:
 ``(systems_root, system, backend, version, enable_shared_layer)``. The
@@ -206,6 +206,28 @@ class MoE(_core.MoE, OpShellKit):
     # ------------------------------------------------------------------
     # Op contract
     # ------------------------------------------------------------------
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Modeled large-EP MoE
+# ───────────────────────────────────────────────────────────────────────
+
+
+class ModeledEPMoE(_core.ModeledEPMoE, OpShellKit):
+    """Large-EP local expert compute modeled from the stock ``moe_perf`` table."""
+
+    def modeled_coordinates(self, x: int) -> dict[str, int | str]:
+        global_tokens = int(x) * self._attention_dp_size
+        local_tokens = (global_tokens + self._moe_ep_size - 1) // self._moe_ep_size
+        return {
+            "global_tokens": global_tokens,
+            "num_tokens": local_tokens,
+            "topk": self._topk,
+            "num_experts": self._num_experts,
+            "moe_tp_size": 1,
+            "moe_ep_size": self._moe_ep_size,
+            "workload_distribution": "balanced",
+        }
 
 
 # ───────────────────────────────────────────────────────────────────────

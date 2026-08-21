@@ -202,11 +202,6 @@ collector.wideep.sglang.collect_deepep_ll:
   - collector/wideep/sglang/deepep/test_low_latency.py
   - collector/wideep/sglang/deepep/utils.py
   - __model_cases__
-collector.wideep.sglang.collect_deepep_moe:
-  # Uses case_generator.get_common_moe_test_cases / is_wideep_moe_model /
-  # moe_model_allows_quantization.
-  - collector/cases/base_ops/moe.yaml
-  - __model_cases__
 collector.wideep.sglang.collect_deepep_normal:
   # Same self-contained shape derivation and model_configs caveat as
   # collect_deepep_ll above. test_intranode.test_main runs the normal-mode
@@ -215,6 +210,7 @@ collector.wideep.sglang.collect_deepep_normal:
   - collector/wideep/sglang/deepep/test_intranode.py
   - collector/wideep/sglang/deepep/test_low_latency.py
   - collector/wideep/sglang/deepep/utils.py
+  - __model_cases__
 collector.wideep.sglang.collect_moe_a2a:
   # moe_a2a (standalone multi-node): the workload grid it reads plus the
   # declared model shapes it correlates against. The DeepEP benchmark
@@ -226,8 +222,19 @@ collector.wideep.sglang.collect_moe_a2a:
   - collector/cases/base_ops/moe.yaml
   - collector/network/slurm/submit_moe_a2a.sh
   - __model_cases__
-collector.wideep.trtllm.collect_moe_compute:
-  # moe_ep (trtllm): uses case_generator.get_common_moe_test_cases /
-  # is_wideep_moe_model.
+collector.wideep.vllm.collect_moe_a2a:
+  # moe_a2a (vllm serving adapter): declared workload/model geometry plus the
+  # immutable serving identity and shared row/sidecar lifecycle.
+  - collector/cases/base_ops/moe_a2a.yaml
   - collector/cases/base_ops/moe.yaml
+  - collector/wideep/backend_contracts.py
+  - collector/wideep/sglang/collect_moe_a2a.py
+  - __model_cases__
+collector.wideep.trtllm.collect_moe_a2a:
+  # moe_a2a (trtllm serving adapter): the factory-forced DeepEP paths use the
+  # same declared geometry and frozen identity/lifecycle contracts.
+  - collector/cases/base_ops/moe_a2a.yaml
+  - collector/cases/base_ops/moe.yaml
+  - collector/wideep/backend_contracts.py
+  - collector/wideep/sglang/collect_moe_a2a.py
   - __model_cases__

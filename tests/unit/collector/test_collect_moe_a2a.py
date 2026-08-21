@@ -71,75 +71,29 @@ def test_declared_shapes_come_from_the_wideep_model_rows(monkeypatch):
     assert shapes == sorted(shapes)
 
 
-def test_shapes_carry_the_declared_routing(monkeypatch):
-    # F16: the workload's routing is a declared fact riding on the shape —
-    # DeepSeek-V3-style rows declare group-limited routing (8 groups, top-4),
-    # Kimi/GLM rows declare global routing (1/1). The routing fields stay out
-    # of the shape's identity (compare=False), so the persisted key is
-    # unchanged.
-    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
-    routing = {
-        (shape.hidden_size, shape.topk, shape.num_experts): (shape.num_expert_group, shape.topk_group)
-        for shape in a2a.get_moe_a2a_shapes()
-    }
-    assert routing[(7168, 8, 256)] == (8, 4)  # DeepSeek-V3/R1
-    assert routing[(7168, 8, 384)] == (1, 1)  # Kimi-K2.5
-    assert routing[(3584, 16, 896)] == (1, 1)  # Kimi-K3
-
-
-def _fake_moe_recipe(model_name, hidden_size, topk, num_experts, *, num_expert_group=1, topk_group=1):
-    from types import SimpleNamespace
-
-    return SimpleNamespace(
-        model_name=model_name,
-        hidden_size=hidden_size,
-        topk=topk,
-        num_experts=num_experts,
-        sglang_moe_num_expert_group=num_expert_group,
-        sglang_moe_topk_group=topk_group,
-    )
-
-
-def test_conflicting_routing_declarations_raise(monkeypatch):
-    # Two models sharing a (hidden, topk, experts) key but disagreeing on
-    # routing would write indistinguishable rows measured under different
-    # traffic patterns — an unresolvable declaration, so it fails loudly.
-    import collector.case_generator as case_generator
-
-    monkeypatch.setattr(
-        case_generator,
-        "get_common_moe_test_cases",
-        lambda backend: [
-            _fake_moe_recipe("model-a", 7168, 8, 256, num_expert_group=8, topk_group=4),
-            _fake_moe_recipe("model-b", 7168, 8, 256, num_expert_group=1, topk_group=1),
-        ],
-    )
-    monkeypatch.setattr(case_generator, "is_wideep_moe_model", lambda name: True)
-    with pytest.raises(a2a.MoeA2ADeclarationError, match="conflicting routing"):
-        a2a.get_moe_a2a_shapes()
-
-
-def test_ht_topk_group_budget_derives_from_the_declaration():
-    grouped = a2a.MoeA2AShape(7168, 8, 256, num_expert_group=8, topk_group=4)
-    global_routing = a2a.MoeA2AShape(7168, 8, 384, num_expert_group=1, topk_group=1)
-    # DeepSeek-style: the deepep test's min(nodes, 4), with 4 now sourced
-    # from the declared topk_group instead of a hardcoded constant.
-    assert a2a.ht_num_topk_groups(grouped, num_nodes=2) == 2
-    assert a2a.ht_num_topk_groups(grouped, num_nodes=8) == 4
-    assert a2a.ht_num_topk_groups(grouped, num_nodes=18) == 4
-    # Global routing: every node group stays selectable, masking degenerates
-    # to plain top-k at any world.
-    assert a2a.ht_num_topk_groups(global_routing, num_nodes=8) == 8
-    assert a2a.ht_num_topk_groups(global_routing, num_nodes=18) == 18
-
-
-def test_case_plan_ids_carry_the_routing_identity():
-    shape = a2a.MoeA2AShape(7168, 8, 256, num_expert_group=8, topk_group=4)
+def test_case_plan_ids_carry_the_persisted_key(monkeypatch):
+    # After 2b046af3 the persisted comm key has no routing column: the shape
+    # is (hidden_size, topk, num_experts) only, and case_plan_ids encodes the
+    # world layout on top of that. This invariant replaces the retired
+    # num_expert_group / topk_group identity checks (routing fields, the
+    # ht_num_topk_groups helper, and the conflicting-routing detector were
+    # all removed from the sglang path when the collector was simplified).
+    shape = a2a.MoeA2AShape(7168, 8, 256)
     case = a2a.MoeA2ACase("deepep_ht", shape, num_tokens=1024, sms=20)
     [case_id] = a2a.case_plan_ids([case], ep_size=16, node_num=4)
     payload = json.loads(case_id.split(":run_case:", 1)[1])
-    assert payload["num_expert_group"] == 8
-    assert payload["topk_group"] == 4
+    assert payload == {
+        "comm_backend": "deepep_ht",
+        "ep_size": 16,
+        "hidden_size": 7168,
+        "node_num": 4,
+        "num_experts": 256,
+        "num_tokens": 1024,
+        "sms": 20,
+        "topk": 8,
+    }
+    assert "num_expert_group" not in payload
+    assert "topk_group" not in payload
 
 
 def test_shapes_stay_correlated_never_crossed(monkeypatch):
@@ -607,7 +561,10 @@ def test_runtime_meta_rejects_a_version_that_is_not_the_manifest_pin():
 def test_runtime_meta_records_the_launched_image_variant():
     # F17: the sidecar attests the image the launcher actually passed to
     # srun (the GB200 launcher runs the grace_blackwell variant, not
-    # `default`), including which manifest variant it is.
+    # `default`), including which manifest variant it is. Restored parity
+    # with the trtllm side (partial revert of 2b046af3) — the launcher
+    # submit_moe_a2a.sh:142 passes --image-ref and the sglang collector must
+    # accept and attest it, exactly like collect_trtllm_alltoall.py does.
     from collector.framework_manifest import get_collector_runtime
 
     pinned = get_collector_runtime("sglang", workload="wideep")
@@ -663,16 +620,12 @@ def test_stale_output_artifacts_fail_closed(tmp_path):
     assert "refuses to run into" in SOURCE_TEXT
 
 
-def test_alternate_ll_transports_refuse_to_finalize():
-    # F21: --allow-mnnvl / --disable-nvlink change the LL Buffer construction
-    # but no persisted identity records them, so such runs are diagnostic:
-    # staged rows only, no parquet, no sidecar.
-    assert a2a.transport_is_default(allow_mnnvl=False, disable_nvlink=False)
-    assert not a2a.transport_is_default(allow_mnnvl=True, disable_nvlink=False)
-    assert not a2a.transport_is_default(allow_mnnvl=False, disable_nvlink=True)
-    finalize_at = SOURCE_TEXT.index("finalize_perf_files([perf_path])")
-    guard_at = SOURCE_TEXT.index("if diagnostic_transport:")
-    assert guard_at < finalize_at, "the diagnostic-transport refusal must gate finalization"
+# The sglang-side "diagnostic transport" finalization guard
+# (transport_is_default + diagnostic_transport check that used to gate
+# finalize_perf_files on --allow-mnnvl / --disable-nvlink being off) was
+# deleted in 2b046af3 when the sglang collector was simplified. The trtllm
+# side (collector/network/slurm/collect_trtllm_alltoall.py) still owns that
+# behavior and is covered by test_collect_trtllm_alltoall.py.
 
 
 # ---------------------------------------------------------------------------

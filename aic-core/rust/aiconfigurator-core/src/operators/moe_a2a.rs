@@ -11,7 +11,8 @@
 //!   (moe_comm.py:661) — plain floor division, legacy fidelity with
 //!   `MoEDispatch`'s `num_tokens // self._scale_num_tokens`. There is NO
 //!   `max(1, ...)` guard: 0 tokens is a reachable query point.
-//! - comm ops see PER-RANK tokens: unlike [`super::moe_expert_compute::MoeExpertComputeOp`] this op
+//! - comm ops see PER-RANK tokens: unlike
+//!   [`super::modeled_ep_moe::ModeledEpMoeOp`] this op
 //!   NEVER multiplies by `attention_dp_size` (moe_comm.py:657, :473-474).
 //! - backend/phase validation against the `MOE_A2A_BACKENDS` registry
 //!   (`_validate_a2a_request`, moe_comm.py:419-424) — Python raises
@@ -45,9 +46,12 @@ use crate::perf_database::PerfDatabase;
 /// is a config `ValueError`, failed where the intent is expressed rather than
 /// surfacing later as a data miss. Pinned by
 /// `undeclared_phase_is_a_config_error_not_a_data_miss`.
-const MOE_A2A_BACKENDS: [(&str, &[&str]); 4] = [
+const MOE_A2A_BACKENDS: [(&str, &[&str]); 7] = [
     ("deepep_ht", &["dispatch", "combine"]),
     ("deepep_ll", &["dispatch", "combine"]),
+    ("deepep_v2", &["dispatch", "combine"]),
+    ("trtllm_deepep_ht", &["dispatch", "combine"]),
+    ("trtllm_deepep_ll", &["dispatch", "combine"]),
     ("nvlink_two_sided", &["prepare", "dispatch", "combine"]),
     ("nvlink_one_sided", &["dispatch", "combine"]),
 ];
@@ -660,9 +664,7 @@ mod tests {
         any_file
     }
 
-    /// The `"moe_a2a"` slice of the shared op-level oracle fixture (the same
-    /// file `moe_expert_compute.rs` reads for its `"moe_expert_compute"` slice — one generator run
-    /// produces both).
+    /// The `"moe_a2a"` slice of the op-level oracle fixture.
     fn oracle_samples(op_kind: &str) -> Vec<serde_json::Value> {
         let oracle: serde_json::Value =
             serde_json::from_str(include_str!("testdata/op_oracle.json"))

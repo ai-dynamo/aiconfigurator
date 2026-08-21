@@ -66,14 +66,6 @@ def test_wideep_runtime_stays_independent_from_default_framework_runtime():
 
 
 def test_deepep_ops_resolve_to_the_comm_family_runtime(monkeypatch):
-    # The `comm` family override retargets exactly the two DeepEP ops; moe_ep
-    # (the retired wideep_moe's successor) is family `moe` and stays on the
-    # DeepSeek-V4 runtime its 0.5.10 dataset was collected with, where DSv4
-    # module support is verified.
-    moe = resolve_op_runtime("wideep_sglang", "moe_ep")
-    assert (moe.family, moe.version) == ("moe", "0.5.10")
-    assert "deepseek-v4" in moe.image()
-
     for op, env_var in (("deepep_ll", "DEEPEP_LL_VERSION"), ("deepep_normal", "DEEPEP_NORMAL_VERSION")):
         monkeypatch.delenv(env_var, raising=False)
         runtime = resolve_op_runtime("wideep_sglang", op)
@@ -85,15 +77,6 @@ def test_deepep_ops_resolve_to_the_comm_family_runtime(monkeypatch):
         assert dataset_version_label(env_var, op) == runtime.version
         monkeypatch.setenv(env_var, "9.9.9")
         assert dataset_version_label(env_var, op) == "9.9.9"
-
-
-def test_deepep_and_wideep_moe_cannot_share_one_container():
-    with pytest.raises(RuntimeError) as excinfo:
-        require_collector_runtime("sglang", "0.5.12", requested_ops={"moe_ep", "deepep_ll"}, wideep_ops=WIDEEP_OPS)
-    message = str(excinfo.value)
-    assert "deepep_ll→0.5.12" in message
-    assert "moe_ep→0.5.10" in message
-    assert "run each version group in its own container" in message
 
 
 def test_wideep_entries_are_flattened_peer_frameworks():
@@ -125,6 +108,65 @@ frameworks:
     )
     with pytest.raises(ValueError, match="digest-pinned"):
         get_collector_runtime("sglang", path=manifest)
+
+
+def test_runtime_source_commit_and_abi_are_pinned_and_exposed(tmp_path):
+    digest = "@sha256:" + "0" * 64
+    source_commit = "1" * 40
+    manifest = tmp_path / "framework_manifest.yaml"
+    manifest.write_text(
+        f"""
+schema_version: 2
+frameworks:
+  vllm:
+    source_repo: "https://github.com/vllm-project/vllm.git"
+    default:
+      version: "0.26.1.dev587"
+      source_commit: "{source_commit}"
+      abi:
+        deep_ep: "d4f41e4e93"
+        nvshmem: "3.3.24"
+      images:
+        default: "vllm/vllm-openai:nightly{digest}"
+""",
+        encoding="utf-8",
+    )
+
+    runtime = get_collector_runtime("vllm", path=manifest)
+    assert runtime.source_commit == source_commit
+    assert runtime.abi == {"deep_ep": "d4f41e4e93", "nvshmem": "3.3.24"}
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("source_commit", "abc123", "full 40-character"),
+        ("abi", "not-a-map", "must map"),
+        ("abi", {}, "must map"),
+    ],
+)
+def test_runtime_source_and_abi_reject_unpinned_values(tmp_path, field, value, message):
+    digest = "@sha256:" + "0" * 64
+    runtime_extra = yaml.safe_dump({field: value}, default_flow_style=False).rstrip()
+    indented_extra = "\n".join(f"      {line}" for line in runtime_extra.splitlines())
+    manifest = tmp_path / "framework_manifest.yaml"
+    manifest.write_text(
+        f"""
+schema_version: 2
+frameworks:
+  vllm:
+    source_repo: "https://github.com/vllm-project/vllm.git"
+    default:
+{indented_extra}
+      version: "0.26.1.dev587"
+      images:
+        default: "vllm/vllm-openai:nightly{digest}"
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        get_collector_runtime("vllm", path=manifest)
 
 
 def test_wideep_entry_missing_base_framework_is_rejected(tmp_path):
@@ -192,7 +234,6 @@ WIDEEP_OPS = {entry.op for entry in WIDEEP_SGLANG_REGISTRY}
         # expectation is asserted on an explicit default-family op instead.
         ("0.5.14+cu130", {"gemm"}, "default", "0.5.14"),
         ("0.5.16", {"kda"}, "default", "0.5.16"),
-        ("0.5.10", {"moe_ep"}, "wideep", "0.5.10"),
     ],
 )
 def test_runtime_selection_accepts_only_the_matching_pin(installed_version, requested_ops, workload, version):
@@ -206,8 +247,6 @@ def test_runtime_selection_accepts_only_the_matching_pin(installed_version, requ
         ("0.5.13", {"gemm"}, r"stock collector requires exactly 0\.5\.14"),
         ("0.5.14rc1", {"gemm"}, r"stock collector requires exactly 0\.5\.14"),
         ("0.5.14.post1", {"gemm"}, r"stock collector requires exactly 0\.5\.14"),
-        ("0.5.14", {"moe_ep"}, r"WideEP collector requires exactly 0\.5\.10"),
-        ("0.5.14", {"gemm", "moe_ep"}, r"0\.5\.14 != 0\.5\.10.*separate containers"),
         # kda runs only on the kimi-k3 branch runtime (families.kda pin):
         # mixing it with a default-family op must fail closed.
         ("0.5.14", {"gemm", "kda"}, r"multiple runtime versions"),
@@ -241,14 +280,12 @@ def test_wideep_registry_entries_are_separate_from_stock_backend_registries():
     assert "moe_ep" not in trtllm_modules
     assert "wideep_mla_context" not in wideep_sglang_modules
     assert "wideep_mla_generation" not in wideep_sglang_modules
-    assert wideep_sglang_modules["moe_ep"].startswith("collector.wideep.sglang.")
-    assert wideep_trtllm_modules["moe_ep"].startswith("collector.wideep.trtllm.")
+    assert "moe_ep" not in wideep_sglang_modules
+    assert "moe_ep" not in wideep_trtllm_modules
 
 
-def test_deepep_collectors_live_under_wideep_namespace():
-    assert (COLLECTOR_ROOT / "wideep" / "sglang" / "collect_deepep_moe.py").exists()
+def test_deepep_comm_collectors_live_under_wideep_namespace():
     assert (COLLECTOR_ROOT / "wideep" / "sglang" / "deepep" / "extract_data.py").exists()
-    assert (COLLECTOR_ROOT / "wideep" / "trtllm" / "collect_moe_compute.py").exists()
 
     assert not (COLLECTOR_ROOT / "deep_collector").exists()
     assert not (COLLECTOR_ROOT / "sglang" / "collect_wideep_deepep_moe.py").exists()
@@ -421,8 +458,8 @@ frameworks:
         require_collector_runtime(
             "sglang",
             "0.5.14",
-            requested_ops={"gemm", "moe_ep"},
-            wideep_ops={"moe_ep"},
+            requested_ops={"gemm", "deepep_ll"},
+            wideep_ops={"deepep_ll"},
             path=tmp_path / "framework_manifest.yaml",
         )
     message = str(excinfo.value)

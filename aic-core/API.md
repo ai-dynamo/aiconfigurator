@@ -38,19 +38,17 @@ The large-EP MoE communication family is exposed as an explicit module path
 (it is not part of the facade):
 
 ```python
-from aiconfigurator_core.sdk.operations.moe_comm import MOE_A2A_BACKENDS, MoEAllToAll, MoEExpertCompute
+from aiconfigurator_core.sdk.operations import ModeledEPMoE
+from aiconfigurator_core.sdk.operations.moe_comm import MOE_A2A_BACKENDS, MoEAllToAll
 ```
 
 `MOE_A2A_BACKENDS` maps each supported MoE all-to-all comm backend to its
 `MoECommBackendSpec` (framework and phase applicability plus feasibility
-rules). `MoEAllToAll` and `MoEExpertCompute` are the operation classes over the
-unified `moe_a2a_perf` comm and `moe_expert_compute_perf` expert-compute tables. `PerfDatabase`
-(`aiconfigurator_core.sdk.perf_database`) forwards to them through
-`query_moe_a2a(...)` and `query_moe_expert_compute(...)` and adds the read-only
-coverage probes `moe_a2a_coverage(...)` and `moe_expert_compute_coverage(...)`. These
-queries serve measured silicon data only: SOL and empirical database modes
-raise `EmpiricalNotImplementedError`, with an estimation tier as a planned
-follow-up.
+rules). `MoEAllToAll` queries the measured `moe_a2a_perf` communication
+table. `ModeledEPMoE` maps one rank's balanced local assignments and expert
+shard onto the stock `moe_perf` table; it is explicitly reported as an
+estimate. `PerfDatabase` exposes measured A2A data through
+`query_moe_a2a(...)` and `moe_a2a_coverage(...)`.
 
 The MoE-block builder that consumes those ops is likewise an explicit module
 path:
@@ -73,19 +71,15 @@ non-MoE checkpoint.
 
 `build_moe_block_ops(prefix, shape, cfg, quant_mode, workload_distribution,
 *, scale_factor, backend_name, inference_phase, model_family="*",
-attn_cp_size=1, gpus_per_node=None, shared_gemm_quant_mode=None,
-dispatch_quant_mode=<forward>)` is the one
+attn_cp_size=1, gpus_per_node=8, shared_gemm_quant_mode=None)` is the one
 place MoE blocks are wired. It returns the block's op list for one inference
 phase — router GEMM, shared-expert GEMMs, and either the fused
 dispatch/compute/combine pipeline or, when `cfg.moe_comm_backend` names a
-comm backend for `inference_phase`, the large-EP `MoEAllToAll`/`MoEExpertCompute`
-emission. An omitted `gpus_per_node` resolves from `cfg.num_gpus_per_node`
-for large-EP configs and raises when that field is unset. `scale_factor` is
-deliberately model-owned (legacy model classes
+comm backend for `inference_phase`, the large-EP `MoEAllToAll`/`EPMoE`
+emission. `scale_factor` is deliberately model-owned (legacy model classes
 scale their MoE ops by their own layer count, not `shape.num_moe_layers`),
-`shared_gemm_quant_mode` overrides `cfg.gemm_quant_mode` for the
-shared-expert GEMMs only, and `dispatch_quant_mode` overrides the fused
-path's `MoEDispatch` quant mode only.
+and `shared_gemm_quant_mode` overrides `cfg.gemm_quant_mode` for the
+shared-expert GEMMs only.
 
 `register_moe_block(family="*", framework="*", system="*")` is the builder's
 specialization registry: family/framework/system-specific deviations register
@@ -121,7 +115,7 @@ node width would silently mis-price the cross-node all-to-all.
 
 Enumeration follows the coverage probes. A parallel tuple with `moe_tp == 1`
 and `moe_ep > 1` participates in the large-EP regime when
-`moe_a2a_coverage(...)` and `moe_expert_compute_coverage(...)` cover its EP size
+`moe_a2a_coverage(...)` and `moe_ep_compute_coverage(...)` cover its EP size
 — at this system's `nodes_for(ep, gpus_per_node)` topology and the run's MoE
 quant mode — for every phase the worker runs, plus the context phase for
 every role (a worker's weights are sized from its context ops). Coverage is
@@ -228,11 +222,8 @@ The supported root-level Rust surface is grouped as follows:
   `ENGINE_SPEC_SCHEMA_VERSION`, and `FPM_VERSION`.
 
 Advanced consumers may use `engine::{Engine, RuntimeConfig, StaticMode,
-StaticResult, PerOpValue}` and `engine::spec::{EngineSpec, OpSpec}` to load and
-execute a previously compiled specification directly. `PerOpValue` is the
-per-op result tuple `(name, latency_ms, energy_wms, source)` returned by the
-`*_per_op` / `evaluate_*` methods (the thin op-list evaluation FFI); per-op
-energy is 0.0 wherever the perf tables carry no power columns.
+StaticResult}` and `engine::spec::{EngineSpec, OpSpec}` to load and execute a
+previously compiled specification directly.
 
 ## Compatibility rules
 

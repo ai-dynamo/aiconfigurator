@@ -20,6 +20,94 @@ pytestmark = pytest.mark.unit
 class TestCLIEstimateUnit:
     """Unit tests for cli_estimate API internals."""
 
+    def test_static_estimate_resolves_coverage_gated_moe_comm_before_model_build(self, monkeypatch):
+        import aiconfigurator.cli.api as api
+        import aiconfigurator.sdk.inference_session as inference_session
+
+        captured = {}
+        database = object()
+
+        def fake_resolve(model_config, **kwargs):
+            captured["resolver_config"] = model_config
+            captured["resolver_kwargs"] = kwargs
+            model_config.moe_comm_backend = {
+                "context": "nvlink_two_sided",
+                "generation": "nvlink_two_sided",
+            }
+            model_config.moe_comm_query_profile = {"context": (4, 1), "generation": (4, 1)}
+            model_config.num_gpus_per_node = 4
+
+        def fake_get_model(_model_path, model_config, _backend_name):
+            captured["built_config"] = model_config
+            return object()
+
+        class FakeSummary:
+            def check_oom(self):
+                return False
+
+            def get_result_dict(self):
+                return {"ttft": 0.0, "tpot": 1.0, "power_w": 1.0}
+
+            def get_power_data_coverage(self):
+                return 1.0
+
+        class FakeSession:
+            def __init__(self, model, loaded_database, backend):
+                assert loaded_database is database
+
+            def run_static(self, **kwargs):
+                return FakeSummary()
+
+        monkeypatch.setattr(api, "_resolve_moe_parallelism", lambda *args, **kwargs: (1, 32))
+        monkeypatch.setattr(api, "resolve_context_fmha_by_data", lambda *args, **kwargs: None)
+        monkeypatch.setattr(api, "resolve_dsv4_moe_arch", lambda *args, **kwargs: None)
+        monkeypatch.setattr(api, "resolve_nvfp4_for_system", lambda *args, **kwargs: None)
+        monkeypatch.setattr(api, "resolve_model_config_moe_comm", fake_resolve)
+        monkeypatch.setattr(inference_session, "InferenceSession", FakeSession)
+
+        api._run_static_estimate(
+            static_mode="static_gen",
+            model_path="deepseek-ai/DeepSeek-R1",
+            system_name="gb200",
+            backend_name="trtllm",
+            resolved_version="test",
+            isl=8192,
+            osl=1024,
+            image_height=0,
+            image_width=0,
+            num_images=1,
+            enable_encoder_dp=True,
+            batch_size=10,
+            prefix=0,
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=32,
+            moe_tp_size=1,
+            moe_ep_size=32,
+            gemm_quant_mode=None,
+            kvcache_quant_mode=None,
+            fmha_quant_mode=None,
+            moe_quant_mode=None,
+            comm_quant_mode=None,
+            nextn=0,
+            nextn_accepted=None,
+            stride=32,
+            engine_step_backend="rust",
+            load_database=lambda _system: database,
+            get_backend=lambda _backend: object(),
+            get_model=fake_get_model,
+        )
+
+        assert captured["built_config"] is captured["resolver_config"]
+        assert captured["built_config"].moe_comm_backend["generation"] == "nvlink_two_sided"
+        assert captured["built_config"].moe_comm_query_profile["generation"] == (4, 1)
+        assert captured["resolver_kwargs"] == {
+            "model_path": "deepseek-ai/DeepSeek-R1",
+            "system_name": "gb200",
+            "backend_name": "trtllm",
+            "database": database,
+        }
+
     def test_systems_paths_are_scoped_to_call(self, tmp_path, monkeypatch):
         import aiconfigurator.cli.api as api
         import aiconfigurator.sdk.perf_database as perf_database

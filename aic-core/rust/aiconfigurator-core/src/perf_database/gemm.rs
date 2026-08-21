@@ -997,9 +997,7 @@ mod tests {
         );
 
         let table = GemmTable::new(tmp.path().to_path_buf(), energy_test_spec());
-        assert!(table
-            .query(GemmQuantMode::Int4Wo, 1, 1024, 1024)
-            .is_ok());
+        assert!(table.query(GemmQuantMode::Int4Wo, 1, 1024, 1024).is_ok());
         assert!(table
             .query(GemmQuantMode::W4a16Nvfp4, 1, 1024, 1024)
             .is_err());

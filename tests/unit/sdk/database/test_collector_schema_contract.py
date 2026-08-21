@@ -1,21 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Two-sided schema contract: collector-written headers -> the engine table
-view (D1).
+"""Two-sided schema contract for the retained ``moe_a2a`` table.
 
-The ``moe_a2a_perf`` and ``moe_expert_compute_perf`` tables are produced by
-collectors and consumed by the compiled engine (the Python parsers retired
-with the deprecation-cleanup PR; ``fetch_table_view`` serves the loader-shaped
-dicts). Each side pins the header independently; this module is the SDK-side
-half. The collector-side twins (which pin the same literals against the
-actual writers) are:
+The collector writes the table and the compiled engine consumes it through
+``fetch_table_view``. Each side pins the header independently; this module is
+the SDK-side half. The collector-side twins are:
 
 - ``tests/unit/collector/test_collect_moe_a2a.py::MOE_A2A_HEADER``
 - ``tests/unit/collector/test_collect_trtllm_alltoall.py::MOE_A2A_HEADER``
-- ``tests/unit/collector/sglang/test_collect_moe_ep.py::MOE_EP_HEADER``
-- ``tests/unit/collector/trtllm/test_collect_moe_ep.py::MOE_EP_HEADER``
-- ``tests/unit/collector/test_vllm_collect_moe_ep.py::MOE_EP_HEADER``
 
 This file MUST NOT import anything from ``collector`` (module-boundary rule:
 SDK tests do not reach into the collector). The twin literals are verified by
@@ -27,11 +20,8 @@ preserved), round-trips it through the ENGINE table view, and asserts the
 nested key plus the unit convention. The view's column readers look up the
 frozen header's column names directly, so a renamed or dropped column fails
 at the fold — a stronger pin than the retired loaders' ``row.get`` defaults.
-The two tables deliberately disagree on raw latency units — ``moe_a2a``
-records MICROSECONDS (the view divides by 1000), ``moe_ep`` records
-MILLISECONDS (stored raw) — and that sibling divergence is exactly what
-these tests keep visible (see "MoE table units and caveats" in
-``collector/README.md``).
+The ``moe_a2a`` writer records MICROSECONDS and the view converts them to
+milliseconds.
 """
 
 from pathlib import Path
@@ -40,7 +30,6 @@ import pandas as pd
 import pytest
 import yaml
 
-from aiconfigurator_core.sdk.common import MoEQuantMode
 from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
 from aiconfigurator_core.sdk.perf_database import PerfDatabase
 
@@ -62,26 +51,12 @@ MOE_A2A_HEADER = (
     "num_tokens,sms,transmit_us,notify_us,latency"
 )
 
-# Copied verbatim from the collector-side writer pins:
-# tests/unit/collector/sglang/test_collect_moe_ep.py::MOE_EP_HEADER, repeated
-# verbatim by tests/unit/collector/trtllm/test_collect_moe_ep.py and
-# tests/unit/collector/test_vllm_collect_moe_ep.py — all three moe_ep writers
-# emit this exact header.
-MOE_EXPERT_COMPUTE_HEADER = (
-    "framework,version,device,op_name,kernel_source,"
-    "moe_dtype,distribution,inference_phase,num_tokens,hidden_size,inter_size,"
-    "topk,num_experts,num_slots,moe_tp_size,moe_ep_size,latency"
-)
-
 # The collector twin files, with the literal each must pin. Paths are relative
 # to the repo root; existence itself is part of the contract (Tasks 2-5 landed
 # the writers and their pins).
 _TWIN_PINS = {
     "tests/unit/collector/test_collect_moe_a2a.py": ("MOE_A2A_HEADER", MOE_A2A_HEADER),
     "tests/unit/collector/test_collect_trtllm_alltoall.py": ("MOE_A2A_HEADER", MOE_A2A_HEADER),
-    "tests/unit/collector/sglang/test_collect_moe_ep.py": ("MOE_EP_HEADER", MOE_EXPERT_COMPUTE_HEADER),
-    "tests/unit/collector/trtllm/test_collect_moe_ep.py": ("MOE_EP_HEADER", MOE_EXPERT_COMPUTE_HEADER),
-    "tests/unit/collector/test_vllm_collect_moe_ep.py": ("MOE_EP_HEADER", MOE_EXPERT_COMPUTE_HEADER),
 }
 
 
@@ -153,44 +128,6 @@ def test_moe_a2a_header_row_loads_with_us_to_ms_conversion(tmp_path):
     leaf = data["deepep_ht"]["dispatch"]["default"][8][2][7168][8][256][24][4096]
     assert leaf["latency"] == pytest.approx(0.850)  # us -> ms at load
     assert leaf["power"] == 0.0  # no power column in the frozen header
-    assert leaf["energy"] == 0.0
-    assert set(leaf.keys()) == {"latency", "power", "energy"}
-
-
-def test_moe_ep_header_row_loads_with_ms_stored_raw(tmp_path):
-    # One 0.25 ms generation-phase EP MoE measurement — the moe_ep writer
-    # records MILLISECONDS, the opposite of its moe_a2a sibling above.
-    row = {
-        "framework": "SGLang",
-        "version": "0.5.10",
-        "device": "NVIDIA GB200",
-        "op_name": "moe_ep",
-        "kernel_source": "deepep_moe",
-        "moe_dtype": "fp8_block",
-        "distribution": "power_law_1.01",
-        "inference_phase": "generation",
-        "num_tokens": 128,
-        "hidden_size": 7168,
-        "inter_size": 2048,
-        "topk": 8,
-        "num_experts": 256,
-        "num_slots": 288,
-        "moe_tp_size": 1,
-        "moe_ep_size": 16,
-        "latency": 0.25,  # MILLISECONDS — the moe_ep writer convention
-    }
-    db = _view_db_over_row(tmp_path, MOE_EXPERT_COMPUTE_HEADER, row, "moe_expert_compute_perf.parquet")
-
-    data = fetch_table_view(db, "_moe_ep_data")
-
-    # 12-part nested key: [kernel_source][quant][distribution][inference_phase]
-    # [topk][num_experts][num_slots][hidden_size][inter_size][moe_tp_size]
-    # [moe_ep_size][num_tokens]; moe_dtype becomes a MoEQuantMode enum key.
-    leaf = data["deepep_moe"][MoEQuantMode.fp8_block]["power_law_1.01"]["generation"][8][256][288][7168][2048][1][16][
-        128
-    ]
-    assert leaf["latency"] == 0.25  # stored raw — no /1000
-    assert leaf["power"] == 0.0
     assert leaf["energy"] == 0.0
     assert set(leaf.keys()) == {"latency", "power", "energy"}
 

@@ -46,10 +46,8 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 //   `attn_ar_modeled`; renumbered at the rebase.
 // - 11 (AIC-1601): the wideEP MoE op variants (`WideEpMoe` /
 //   `WideEpMoeDispatch`) were removed mid-enum, shifting every later
-//   bincode enum index; large-EP is now modeled natively by the
-//   `MoeAllToAll` / `MoeExpertCompute` variants appended after
-//   `FpmForward`, and `MoeExpertComputeOp` carries the `enable_eplb`
-//   legacy-fidelity field.
+//   bincode enum index; large-EP is now modeled natively by measured
+//   `MoeAllToAll` plus stock-`moe_perf`-backed `EpMoe`.
 // - 12 (PR-6): `DsaModuleOp` gained `attn_projection_quant_modes` — a
 //   bincode op-layout change (same class as v5/v7/v8/v10; the
 //   `#[serde(default)]` only covers the JSON wire, bincode is positional).

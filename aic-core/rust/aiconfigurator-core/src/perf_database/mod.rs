@@ -196,7 +196,6 @@ pub mod mhc;
 pub mod mla;
 pub mod moe;
 pub mod moe_a2a;
-pub mod moe_expert_compute;
 mod moe_index;
 pub mod msa;
 pub mod parquet_loader;
@@ -218,7 +217,6 @@ pub use mhc::MhcTable;
 pub use mla::MlaTable;
 pub use moe::MoeTable;
 pub use moe_a2a::MoeA2aTable;
-pub use moe_expert_compute::MoeExpertComputeTable;
 pub use msa::MsaTable;
 pub use source_resolution::{resolve_one, ResolveCtx, ResolveReport, SourceResolver};
 pub use state_space::StateSpaceTable;
@@ -240,7 +238,6 @@ pub struct PerfTables {
     pub mla: MlaTable,
     pub moe: MoeTable,
     pub moe_a2a: MoeA2aTable,
-    pub moe_expert_compute: MoeExpertComputeTable,
     pub communication: CommunicationTable,
     pub dsa: DsaTable,
     pub msa: MsaTable,
@@ -504,11 +501,6 @@ impl PerfDatabase {
             mla: MlaTable::with_sources(data_root.clone(), spec.clone(), &resolver)?,
             moe: MoeTable::with_sources(data_root.clone(), &resolver)?,
             moe_a2a: MoeA2aTable::with_sources(data_root.clone(), &resolver)?,
-            moe_expert_compute: MoeExpertComputeTable::with_sources(
-                data_root.clone(),
-                spec.clone(),
-                &resolver,
-            )?,
             communication: CommunicationTable::with_sources(
                 data_root.clone(),
                 nccl_root,

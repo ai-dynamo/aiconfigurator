@@ -144,7 +144,7 @@ pub(crate) fn wrap_op(py: Python<'_>, op: Op) -> PyResult<Py<PyAny>> {
         Op::Moe(_) => wrap!(PyMoE),
         Op::MoeDispatch(_) => wrap!(PyMoEDispatch),
         Op::MoeAllToAll(_) => wrap!(PyMoEAllToAll),
-        Op::MoeExpertCompute(_) => wrap!(PyMoEExpertCompute),
+        Op::EpMoe(_) => wrap!(PyModeledEPMoE),
         Op::Dsv4MegaMoe(_) => wrap!(PyDeepSeekV4MegaMoEModule),
         Op::DsaContext(_) => wrap!(PyContextDSAModule),
         Op::DsaGeneration(_) => wrap!(PyGenerationDSAModule),
@@ -2168,33 +2168,31 @@ impl PyMoEAllToAll {
     }
 }
 
-/// Unified large-EP expert compute. `num_slots=None` collapses to
-/// `num_experts` at construction (the retired ctor's resolution); phase
-/// validation stays Python-side in the shell.
-#[pyclass(extends = PyOperation, subclass, name = "MoEExpertCompute", module = "aiconfigurator_core._aiconfigurator_core")]
-pub struct PyMoEExpertCompute;
+/// Large-EP local expert compute modeled from the stock MoE table.
+#[pyclass(extends = PyOperation, subclass, name = "ModeledEPMoE", module = "aiconfigurator_core._aiconfigurator_core")]
+pub struct PyModeledEPMoE;
 
 impl PyOperation {
-    fn moe_ep(&self) -> PyResult<&crate::operators::MoeExpertComputeOp> {
+    fn modeled_ep_moe(&self) -> PyResult<&crate::operators::ModeledEpMoeOp> {
         match &self.inner {
-            Op::MoeExpertCompute(o) => Ok(o),
-            _ => Err(PyTypeError::new_err("not a MoEExpertCompute op")),
+            Op::EpMoe(o) => Ok(o),
+            _ => Err(PyTypeError::new_err("not a ModeledEPMoE op")),
         }
     }
 }
 
 #[pymethods]
-impl PyMoEExpertCompute {
+impl PyModeledEPMoE {
     #[classattr]
     #[allow(non_upper_case_globals)]
-    const _CP_AWARE: bool = false;
+    const _CP_AWARE: bool = true;
 
     #[classattr]
     #[allow(non_upper_case_globals)]
     const _ENGINE_QUERY_SHAPE: &'static str = "tokens";
 
     #[new]
-    #[pyo3(signature = (name, scale_factor, *, hidden_size, inter_size, topk, num_experts, moe_ep_size, quant_mode, workload_distribution, attention_dp_size, inference_phase, num_slots=None, kernel_source=None, is_gated=true, enable_eplb=false))]
+    #[pyo3(signature = (name, scale_factor, *, hidden_size, inter_size, topk, num_experts, moe_ep_size, quant_mode, attention_dp_size, inference_phase, is_gated=true))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
@@ -2205,15 +2203,26 @@ impl PyMoEExpertCompute {
         num_experts: u32,
         moe_ep_size: u32,
         quant_mode: &Bound<'_, PyAny>,
-        workload_distribution: String,
         attention_dp_size: u32,
         inference_phase: String,
-        num_slots: Option<u32>,
-        kernel_source: Option<String>,
         is_gated: bool,
-        enable_eplb: bool,
     ) -> PyResult<(Self, PyOperation)> {
-        let inner = Op::MoeExpertCompute(crate::operators::MoeExpertComputeOp {
+        if moe_ep_size <= 1 {
+            return Err(PyValueError::new_err(format!(
+                "ModeledEPMoE requires moe_ep_size > 1, got {moe_ep_size}"
+            )));
+        }
+        if num_experts % moe_ep_size != 0 {
+            return Err(PyValueError::new_err(format!(
+                "num_experts ({num_experts}) must be divisible by moe_ep_size ({moe_ep_size})"
+            )));
+        }
+        if !matches!(inference_phase.as_str(), "context" | "generation") {
+            return Err(PyValueError::new_err(format!(
+                "invalid inference_phase {inference_phase:?}; expected context or generation"
+            )));
+        }
+        let inner = Op::EpMoe(crate::operators::ModeledEpMoeOp {
             name,
             scale_factor,
             hidden_size,
@@ -2222,22 +2231,22 @@ impl PyMoEExpertCompute {
             num_experts,
             moe_ep_size,
             quant_mode: moe_quant(quant_mode)?,
-            workload_distribution,
+            workload_distribution: "balanced".to_string(),
             attention_dp_size,
             inference_phase,
-            num_slots: Some(num_slots.unwrap_or(num_experts)),
-            kernel_source,
+            num_slots: None,
+            kernel_source: None,
             is_gated,
-            enable_eplb,
+            enable_eplb: false,
         });
-        Ok((PyMoEExpertCompute, PyOperation { inner }))
+        Ok((PyModeledEPMoE, PyOperation { inner }))
     }
 
     fn __getnewargs_ex__<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<(Bound<'py, PyTuple>, Bound<'py, PyDict>)> {
-        let o = slf.as_super().moe_ep()?;
+        let o = slf.as_super().modeled_ep_moe()?;
         let args = (o.name.clone(), o.scale_factor).into_pyobject(py)?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("hidden_size", o.hidden_size)?;
@@ -2246,44 +2255,35 @@ impl PyMoEExpertCompute {
         kwargs.set_item("num_experts", o.num_experts)?;
         kwargs.set_item("moe_ep_size", o.moe_ep_size)?;
         kwargs.set_item("quant_mode", enum_token(&o.quant_mode))?;
-        kwargs.set_item("workload_distribution", o.workload_distribution.clone())?;
         kwargs.set_item("attention_dp_size", o.attention_dp_size)?;
         kwargs.set_item("inference_phase", o.inference_phase.clone())?;
-        kwargs.set_item("num_slots", o.num_slots)?;
-        kwargs.set_item("kernel_source", o.kernel_source.clone())?;
         kwargs.set_item("is_gated", o.is_gated)?;
-        kwargs.set_item("enable_eplb", o.enable_eplb)?;
         Ok((args, kwargs))
     }
 
     #[getter(_hidden_size)]
     fn hidden_size(slf: PyRef<'_, Self>) -> PyResult<u32> {
-        Ok(slf.as_super().moe_ep()?.hidden_size)
+        Ok(slf.as_super().modeled_ep_moe()?.hidden_size)
     }
 
     #[getter(_inter_size)]
     fn inter_size(slf: PyRef<'_, Self>) -> PyResult<u32> {
-        Ok(slf.as_super().moe_ep()?.inter_size)
+        Ok(slf.as_super().modeled_ep_moe()?.inter_size)
     }
 
     #[getter(_topk)]
     fn topk(slf: PyRef<'_, Self>) -> PyResult<u32> {
-        Ok(slf.as_super().moe_ep()?.topk)
+        Ok(slf.as_super().modeled_ep_moe()?.topk)
     }
 
     #[getter(_num_experts)]
     fn num_experts(slf: PyRef<'_, Self>) -> PyResult<u32> {
-        Ok(slf.as_super().moe_ep()?.num_experts)
-    }
-
-    #[getter(_num_slots)]
-    fn num_slots(slf: PyRef<'_, Self>) -> PyResult<Option<u32>> {
-        Ok(slf.as_super().moe_ep()?.num_slots)
+        Ok(slf.as_super().modeled_ep_moe()?.num_experts)
     }
 
     #[getter(_moe_ep_size)]
     fn moe_ep_size(slf: PyRef<'_, Self>) -> PyResult<u32> {
-        Ok(slf.as_super().moe_ep()?.moe_ep_size)
+        Ok(slf.as_super().modeled_ep_moe()?.moe_ep_size)
     }
 
     #[getter(_quant_mode)]
@@ -2291,38 +2291,23 @@ impl PyMoEExpertCompute {
         py_enum_member(
             py,
             "MoEQuantMode",
-            &enum_token(&slf.as_super().moe_ep()?.quant_mode),
+            &enum_token(&slf.as_super().modeled_ep_moe()?.quant_mode),
         )
-    }
-
-    #[getter(_workload_distribution)]
-    fn workload_distribution(slf: PyRef<'_, Self>) -> PyResult<String> {
-        Ok(slf.as_super().moe_ep()?.workload_distribution.clone())
     }
 
     #[getter(_attention_dp_size)]
     fn attention_dp_size(slf: PyRef<'_, Self>) -> PyResult<u32> {
-        Ok(slf.as_super().moe_ep()?.attention_dp_size)
+        Ok(slf.as_super().modeled_ep_moe()?.attention_dp_size)
     }
 
     #[getter(_inference_phase)]
     fn inference_phase(slf: PyRef<'_, Self>) -> PyResult<String> {
-        Ok(slf.as_super().moe_ep()?.inference_phase.clone())
-    }
-
-    #[getter(_kernel_source)]
-    fn kernel_source(slf: PyRef<'_, Self>) -> PyResult<Option<String>> {
-        Ok(slf.as_super().moe_ep()?.kernel_source.clone())
+        Ok(slf.as_super().modeled_ep_moe()?.inference_phase.clone())
     }
 
     #[getter(_is_gated)]
     fn is_gated(slf: PyRef<'_, Self>) -> PyResult<bool> {
-        Ok(slf.as_super().moe_ep()?.is_gated)
-    }
-
-    #[getter(_enable_eplb)]
-    fn enable_eplb(slf: PyRef<'_, Self>) -> PyResult<bool> {
-        Ok(slf.as_super().moe_ep()?.enable_eplb)
+        Ok(slf.as_super().modeled_ep_moe()?.is_gated)
     }
 }
 
@@ -4095,7 +4080,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMoE>()?;
     m.add_class::<PyMoEDispatch>()?;
     m.add_class::<PyMoEAllToAll>()?;
-    m.add_class::<PyMoEExpertCompute>()?;
+    m.add_class::<PyModeledEPMoE>()?;
     m.add_class::<PyDeepSeekV4MegaMoEModule>()?;
     m.add_class::<PyDeepSeekV4MHCModule>()?;
     m.add_class::<PyContextDSAModule>()?;

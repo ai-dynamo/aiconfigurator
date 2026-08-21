@@ -17,13 +17,8 @@ per-backend adapters folded engine-side) as one nested dict keyed by
 [num_experts][sms][num_tokens]``. The class owns the view binding
 (class-level cache + ``load_data``).
 
-The module also owns the large-EP compute side of the same family:
-``MoEExpertCompute`` over the unified ``moe_expert_compute_perf.parquet``
-table (view attribute ``_moe_ep_data``, legacy sglang/trtllm wideep adapters
-folded engine-side), keyed by ``[kernel_source][quant][distribution]
-[inference_phase][topk][num_experts][num_slots][hidden_size][inter_size]
-[moe_tp_size][moe_ep_size][num_tokens]``. The Python parsers for both tables
-retired with the deprecation-cleanup PR.
+Large-EP expert compute is modeled from stock ``moe_perf`` by
+``operations.moe.ModeledEPMoE``; this module owns communication only.
 """
 
 from __future__ import annotations
@@ -92,6 +87,24 @@ MOE_A2A_BACKENDS: dict[str, MoECommBackendSpec] = {
     "deepep_ll": MoECommBackendSpec(
         name="deepep_ll",
         frameworks=("sglang", "vllm"),
+        inference_phases=("generation",),
+        comm_phases=("dispatch", "combine"),
+    ),
+    "deepep_v2": MoECommBackendSpec(
+        name="deepep_v2",
+        frameworks=("vllm",),
+        inference_phases=("context", "generation"),
+        comm_phases=("dispatch", "combine"),
+    ),
+    "trtllm_deepep_ht": MoECommBackendSpec(
+        name="trtllm_deepep_ht",
+        frameworks=("trtllm",),
+        inference_phases=("context",),
+        comm_phases=("dispatch", "combine"),
+    ),
+    "trtllm_deepep_ll": MoECommBackendSpec(
+        name="trtllm_deepep_ll",
+        frameworks=("trtllm",),
         inference_phases=("generation",),
         comm_phases=("dispatch", "combine"),
     ),
@@ -219,105 +232,6 @@ class MoEAllToAll(_core.MoEAllToAll, OpShellKit):
     def clear_cache(cls) -> None:
         cls._data_cache.clear()
         cls._trtllm_alltoall_data_cache.clear()
-
-    # ------------------------------------------------------------------
-    # Op contract
-    # ------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# EP MoE compute (moe_expert_compute_perf.parquet) — same family, compute side
-# ---------------------------------------------------------------------------
-
-
-_EP_PHASES = ("context", "generation")
-
-
-def _validate_ep_phase(inference_phase: str) -> None:
-    """Shared ctor/query validation: an unknown inference phase is a ValueError."""
-    if inference_phase not in _EP_PHASES:
-        raise ValueError(f"Invalid inference_phase '{inference_phase}'. Must be one of {list(_EP_PHASES)}")
-
-
-class MoEExpertCompute(_core.MoEExpertCompute, OpShellKit):
-    """Unified large-EP MoE expert-compute op (one inference phase per instance).
-
-    Owns ``_moe_ep_data`` — the unified compute table loaded by
-    the engine view (new-schema ``moe_expert_compute_perf.parquet`` plus the
-    legacy sglang wideep context/generation and trtllm wideep adapters).
-    Loaded on every inference backend ({"sglang", "vllm", "trtllm"} all have
-    legacy compute sources); ``None`` otherwise. ``query(x=...)`` scales
-    tokens by ``attention_dp_size`` (attention DP globalizes tokens through
-    the A2A dispatch — the same scaling as the legacy ``MoE`` /
-    ``TrtLLMWideEPMoE`` query paths) and always queries ``moe_tp_size=1``:
-    the large-EP family is EP-only. ``num_slots`` defaults to ``num_experts``
-    (no EPLB redundancy); ``kernel_source=None`` auto-resolves per backend at
-    query time inside the engine (`moe_expert_compute.rs`). ``enable_eplb=True`` is
-    legacy fidelity with the sglang MoE query: tokens become
-    ``int(tokens * 0.8)`` before the table lookup when the phase is context
-    AND the resolved kernel leg is sglang-adapted
-    (``_SGLANG_ADAPTED_KERNEL_SOURCES``) — never on the trtllm legs, whose
-    EPLB effect rides the ``_eplb`` distribution suffix instead.
-    """
-
-    _data_cache: ClassVar[dict] = {}
-    _wideep_compute_data_cache: ClassVar[dict] = {}
-
-    _SUPPORTED_BACKENDS: ClassVar[tuple[str, ...]] = ("sglang", "vllm", "trtllm")
-
-    def __init__(self, *args, **kwargs) -> None:
-        """Ctor-time spec guard on top of the Rust ``__new__`` — see
-        ``MoEAllToAll.__init__`` for the read-back and pickle-bypass
-        rationale."""
-        del args, kwargs
-        _validate_ep_phase(self._inference_phase)
-
-    # ------------------------------------------------------------------
-    # Data ownership
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def _cache_key(cls, database: PerfDatabase) -> tuple:
-        return _cache_key(database)
-
-    @classmethod
-    def load_data(cls, database: PerfDatabase) -> None:
-        """Idempotent. Fetches the engine's unified moe_ep table view (new
-        schema + legacy adapters, merged engine-side) on the three inference
-        backends; binds ``None`` otherwise.
-        """
-        from aiconfigurator_core.sdk.engine_table_view import load_view
-        from aiconfigurator_core.sdk.perf_database import PerfDataFilename
-
-        key = cls._cache_key(database)
-        if key not in cls._data_cache:
-            if database.backend in cls._SUPPORTED_BACKENDS:
-                cls._data_cache[key] = load_view(database, "_moe_ep_data", PerfDataFilename.moe_expert_compute)
-            else:
-                cls._data_cache[key] = None
-
-            cls._record_load()
-
-        # Rehomed from the deleted ``TrtLLMWideEPMoE`` (AIC-1357): the legacy
-        # trtllm wideep compute view stays loadable for charts / the support
-        # matrix even though no op family constructs against it anymore.
-        if key not in cls._wideep_compute_data_cache:
-            if database.backend == "trtllm":
-                cls._wideep_compute_data_cache[key] = load_view(
-                    database, "_wideep_moe_compute_data", PerfDataFilename.wideep_moe_compute
-                )
-            else:
-                cls._wideep_compute_data_cache[key] = None
-
-        if "_moe_ep_data" not in database.__dict__:
-            database._moe_ep_data = cls._data_cache[key]
-        if "_wideep_moe_compute_data" not in database.__dict__:
-            database._wideep_moe_compute_data = cls._wideep_compute_data_cache[key]
-
-    @classmethod
-    def clear_cache(cls) -> None:
-        cls._data_cache.clear()
-        cls._wideep_compute_data_cache.clear()
 
     # ------------------------------------------------------------------
     # Op contract

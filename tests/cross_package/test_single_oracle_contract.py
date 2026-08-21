@@ -232,6 +232,7 @@ OPERATIONS_DEF_INVENTORY = {
     ),
     "moe.py": frozenset(
         {
+            "ModeledEPMoE.modeled_coordinates",
             "MoE._cache_key",
             "MoE._seq_split",
             "MoE._seq_split.setter",
@@ -253,13 +254,8 @@ OPERATIONS_DEF_INVENTORY = {
             "MoEAllToAll.clear_cache",
             "MoEAllToAll.load_data",
             "MoECommBackendSpec.feasible",
-            "MoEExpertCompute.__init__",
-            "MoEExpertCompute._cache_key",
-            "MoEExpertCompute.clear_cache",
-            "MoEExpertCompute.load_data",
             "_cache_key",
             "_validate_a2a_request",
-            "_validate_ep_phase",
             "nodes_for",
         }
     ),

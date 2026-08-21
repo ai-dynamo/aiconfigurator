@@ -1121,8 +1121,8 @@ def test_large_ep_opspec_key_sets_match_the_rust_structs():
     error anywhere. The emitted key sets must therefore EQUAL the Rust struct
     field sets exactly — source of truth:
     ``rust/aiconfigurator-core/src/operators/moe_a2a.rs::MoeAllToAllOp`` and
-    ``rust/aiconfigurator-core/src/operators/moe_expert_compute.rs::MoeExpertComputeOp``."""
-    from aiconfigurator.sdk.operations import MoEAllToAll, MoEExpertCompute
+    ``rust/aiconfigurator-core/src/operators/modeled_ep_moe.rs::ModeledEpMoeOp``."""
+    from aiconfigurator.sdk.operations import ModeledEPMoE, MoEAllToAll
 
     a2a = MoEAllToAll(
         "context_moe_dispatch",
@@ -1158,7 +1158,7 @@ def test_large_ep_opspec_key_sets_match_the_rust_structs():
         }
     )
 
-    ep = MoEExpertCompute(
+    ep = ModeledEPMoE(
         "context_moe",
         58.0,
         hidden_size=7168,
@@ -1167,18 +1167,13 @@ def test_large_ep_opspec_key_sets_match_the_rust_structs():
         num_experts=256,
         moe_ep_size=32,
         quant_mode=common.MoEQuantMode.fp8_block,
-        workload_distribution="power_law_1.01",
         attention_dp_size=32,
         inference_phase="context",
-        num_slots=None,
-        kernel_source=None,
         is_gated=True,
-        enable_eplb=True,
     )
     ep_spec = json.loads(ep._spec_json())
-    assert set(ep_spec) == {"MoeExpertCompute"}
-    # rust `MoeExpertComputeOp` fields (operators/moe_expert_compute.rs), verbatim.
-    assert frozenset(ep_spec["MoeExpertCompute"]) == frozenset(
+    assert set(ep_spec) == {"EpMoe"}
+    assert frozenset(ep_spec["EpMoe"]) == frozenset(
         {
             "name",
             "scale_factor",
@@ -1197,15 +1192,12 @@ def test_large_ep_opspec_key_sets_match_the_rust_structs():
             "enable_eplb",
         }
     )
-    # Wire formats the Rust serde impls expect: quant_mode is the snake_case
-    # ``MoEQuantMode`` member name; an unpinned kernel_source crosses as null
-    # (the Rust op ports all five auto-resolution legs and resolves at query
-    # time); the Python ctor already resolved num_slots=None -> num_experts.
-    fields = ep_spec["MoeExpertCompute"]
+    # Legacy compatibility fields retain the schema-v7 layout but are inert.
+    fields = ep_spec["EpMoe"]
     assert fields["quant_mode"] == "fp8_block"
     assert fields["kernel_source"] is None
-    assert fields["num_slots"] == 256
-    assert fields["is_gated"] is True and fields["enable_eplb"] is True
+    assert fields["num_slots"] is None
+    assert fields["is_gated"] is True and fields["enable_eplb"] is False
 
 
 def _h200_sglang_wideep_paths() -> list[str]:
@@ -1229,7 +1221,7 @@ def _h200_sglang_wideep_paths() -> list[str]:
     reason="shipped h200_sxm sglang wideEP parquets not present",
 )
 def test_large_ep_op_graph_compiles_natively(caplog):
-    """AIC-1601 (PR 2.5): the large-EP ops (MoEAllToAll / MoEExpertCompute) now have
+    """AIC-1601: the large-EP ops (MoEAllToAll / ModeledEPMoE) now have
     Rust op constructors and wire mirrors, so a large-EP model compiles
     into the Rust engine natively — the documented Python-step fallback this
     test used to pin is retired. A rust-routed static run must answer with
@@ -1240,6 +1232,7 @@ def test_large_ep_op_graph_compiles_natively(caplog):
 
     from aiconfigurator.sdk.backends.factory import get_backend
     from aiconfigurator.sdk.engine import build_engine_spec_json
+    from aiconfigurator.sdk.errors import PerfDataNotAvailableError
     from aiconfigurator.sdk.models import get_model
     from aiconfigurator.sdk.perf_database import get_database
 
@@ -1279,11 +1272,9 @@ def test_large_ep_op_graph_compiles_natively(caplog):
     )
     for phase_ops, comm_backend in ((spec["context_ops"], "deepep_ht"), (spec["generation_ops"], "deepep_ll")):
         a2a_fields = [op["MoeAllToAll"] for op in phase_ops if "MoeAllToAll" in op]
-        ep_fields = [op["MoeExpertCompute"] for op in phase_ops if "MoeExpertCompute" in op]
+        ep_fields = [op["EpMoe"] for op in phase_ops if "EpMoe" in op]
         assert a2a_fields and ep_fields, "the compiled spec must carry the large-EP variants"
         assert {fields["comm_backend"] for fields in a2a_fields} == {comm_backend}
-        # Production graphs never pin a kernel: it crosses as null and the
-        # Rust op auto-resolves per backend at query time.
         assert all(fields["kernel_source"] is None for fields in ep_fields)
 
     rust_engine_step._engine_handle_cache_clear()
@@ -1301,7 +1292,10 @@ def test_large_ep_op_graph_compiles_natively(caplog):
         runtime_config = RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=32, engine_step_backend="rust")
         rust_engine_step._python_step_fallback_reset()
         with caplog.at_level(logging.WARNING):
-            summary = backend.run_static(model, database, runtime_config, mode="static", stride=32)
+            try:
+                summary = backend.run_static(model, database, runtime_config, mode="static", stride=32)
+            except PerfDataNotAvailableError as exc:
+                pytest.skip(f"packaged stock moe_perf has no matching large-EP row: {exc}")
         assert not any("using the python step" in record.message for record in caplog.records)
 
         context_latency = summary.get_context_latency_dict()

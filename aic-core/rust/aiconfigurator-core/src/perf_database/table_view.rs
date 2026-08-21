@@ -1061,11 +1061,7 @@ pub fn view_wideep_moe_compute(sources: &[PerfSource]) -> Result<Option<ViewNode
         let moe_ep = ctx.row.u32(r.col("moe_ep_size")?)?;
         let distribution = str_cell_or_empty(ctx, "distribution")?;
         let latency = ctx.row.f64(r.col("latency")?)?;
-        let kernel_source = str_col_or(
-            ctx,
-            "kernel_source",
-            crate::perf_database::moe_expert_compute::LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE,
-        )?;
+        let kernel_source = str_col_or(ctx, "kernel_source", "moe_torch_flow")?;
         let path = [
             kernel_source,
             quant,
@@ -1427,7 +1423,7 @@ pub fn view_moe_expert_compute(
             let power = row_power_lenient(ctx)?;
             let num_experts = ctx.row.u32(r.col("num_experts")?)?;
             let path = [
-                crate::perf_database::moe_expert_compute::SGLANG_ADAPTED_KERNEL_SOURCE.to_string(),
+                "deepep_moe".to_string(),
                 ctx.row.str_owned(r.col("moe_dtype")?)?,
                 str_cell_or_empty(ctx, "distribution")?,
                 inference_phase.to_string(),
@@ -1450,11 +1446,7 @@ pub fn view_moe_expert_compute(
         let r = ctx.reader;
         let latency = ctx.row.f64(r.col("latency")?)?;
         let power = row_power_lenient(ctx)?;
-        let kernel_source = str_col_or(
-            ctx,
-            "kernel_source",
-            crate::perf_database::moe_expert_compute::LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE,
-        )?;
+        let kernel_source = str_col_or(ctx, "kernel_source", "moe_torch_flow")?;
         for inference_phase in ["context", "generation"] {
             let path = [
                 kernel_source.clone(),

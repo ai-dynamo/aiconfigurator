@@ -283,6 +283,22 @@ def test_write_collection_meta_omits_absent_optional_runtime_fields(tmp_path):
     assert "image_digest" not in doc["runtime"]
 
 
+def test_write_collection_meta_preserves_pinned_source_and_abi(tmp_path):
+    runtime_meta = {
+        **RUNTIME_META,
+        "source_commit": "1" * 40,
+        "abi": {
+            "deep_ep": "d4f41e4e93",
+            "nvshmem": "3.3.24",
+            "nccl": ">=2.30.4",
+        },
+    }
+    meta_path = provenance.write_collection_meta(tmp_path, runtime_meta, TABLES)
+    runtime = yaml.safe_load(meta_path.read_text(encoding="utf-8"))["runtime"]
+    assert runtime["source_commit"] == "1" * 40
+    assert runtime["abi"] == runtime_meta["abi"]
+
+
 def test_write_collection_meta_deterministic_key_order(tmp_path):
     meta_path = provenance.write_collection_meta(tmp_path, RUNTIME_META, TABLES)
     text = meta_path.read_text(encoding="utf-8")

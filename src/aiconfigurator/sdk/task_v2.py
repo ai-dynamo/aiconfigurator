@@ -40,7 +40,6 @@ from typing import Any, Literal
 from aiconfigurator.sdk import common, config
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.models import (
-    _get_model_info,
     _infer_quant_modes_from_raw_config,
     attention_op_keys,
     check_is_moe,
@@ -48,8 +47,11 @@ from aiconfigurator.sdk.models import (
     resolve_dsv4_moe_arch_mode,
     resolve_kimi_k3_moe_arch_mode,
 )
-from aiconfigurator.sdk.models.blocks.moe import LARGE_EP_READY_FAMILIES, MoEBlockShape
-from aiconfigurator.sdk.operations.moe_comm import MOE_A2A_BACKENDS, nodes_for
+from aiconfigurator.sdk.moe_comm_resolver import (
+    compute_large_ep_coverage,
+    resolve_moe_comm_backend,
+    resolve_moe_comm_query_profiles,
+)
 from aiconfigurator.sdk.perf_database import (
     get_latest_database_version,
     is_blackwell_system,
@@ -532,10 +534,6 @@ class Task:
     free_gpu_memory_fraction: float | None = None
     max_seq_len: int | None = None
     engine_step_backend: str | None = None
-    # Forward-pass modeling mode: "op_level" (default) or "fpm" (whole-model
-    # forward op backed by collected fpm_forward data). Threaded into every
-    # ModelConfig this task builds; validated in models.get_model.
-    forward_model: str = "op_level"
 
     # ====== 2. Agg worker spec (serving_mode='agg') ======
     model_path: str = ""
@@ -716,6 +714,7 @@ class Task:
     # system / backend / MoE quant mode only, never on the candidate lists, so
     # it survives post-construction edits to those.
     _large_ep_coverage_cache: dict = field(default_factory=dict, repr=False, init=False)
+    _large_ep_query_profile_cache: dict = field(default_factory=dict, repr=False, init=False)
 
     # =====================================================================
     # Construction
@@ -1210,18 +1209,17 @@ class Task:
         a per-tuple gap is pruned by the sweep, not fatal here. Fused first, so
         the universally-reachable regime leads the diagnostics. Mapping lives in
         ``models.attention_op_keys``."""
-        # AFD partitions the aggregate model across its A/F topology and does
-        # not enumerate the standard agg TP/DP/EP candidate lists. It also
-        # never assigns the standard per-tuple MoE comm backend, so its
-        # attention surface is the fused aggregate one.
-        if self.serving_mode == "afd" and role == "agg":
-            return [attention_op_keys(self._model_family, self.backend_name, False)]
-
         regimes: set[bool] = set()
-        for tup in self.iter_parallel(role):
-            regimes.add(self._resolve_moe_comm_backend(role, tup) is not None)
-            if len(regimes) == 2:
-                break
+        # AFD has its own node-topology search rather than the standard
+        # agg parallel candidate lists. Its attention graph remains the fused
+        # graph; large-EP routing is resolved only for agg/disagg tuples.
+        if self.serving_mode == "afd":
+            regimes.add(False)
+        else:
+            for tup in self.iter_parallel(role):
+                regimes.add(self._resolve_moe_comm_backend(role, tup) is not None)
+                if len(regimes) == 2:
+                    break
         backend_name = self._role_attr(role, "backend_name")
         return [attention_op_keys(self._model_family, backend_name, large) for large in sorted(regimes or {False})]
 
@@ -1262,12 +1260,14 @@ class Task:
     def _large_ep_coverage(self, role: str) -> dict[str, dict[str, set[int]]]:
         """``{phase: {comm_backend: {ep_size, ...}}}`` explorable with large EP.
 
-        Per spec section 4.5, an EP size is explorable for a phase when its
-        comm backend carries dispatch+combine rows for the model shape at
-        ``(ep, nodes_for(ep, gpus_per_node))`` (topology check against THIS
-        system), the backend's registry feasibility rules admit the config,
-        and the EP expert-compute table covers the shape under the role's MoE
-        quant mode for that phase. BOTH phases are probed for every role: a
+        An EP size is explorable for a phase when its comm backend carries
+        dispatch+combine rows for the model shape at the exact deployed
+        topology, or when that dataset identity has an explicit measured-donor
+        policy (see ``UNSCALED_SINGLE_NODE_PROXY_DATASETS``). The backend's
+        registry feasibility rules must still admit the deployed config.
+        Local expert compute is no longer a coverage axis: it is explicitly
+        modeled from reusable stock ``moe_perf`` under uniform-balance and
+        EP-local geometry assumptions. BOTH phases are probed for every role: a
         disagg worker only runs one of them, but its model object holds the
         whole graph and the memory model sizes weights off the context ops, so
         the phase the role does not run must be emitted in the same regime (the
@@ -1279,10 +1279,8 @@ class Task:
         the tuple's EP.
 
         Never raises on missing DATA: an absent model shape, system spec,
-        database or table yields ``{}`` -- the fused path then serves every
-        tuple. A caller BUG still raises: a str-typed ``moe_quant_mode`` is a
-        ``TypeError``, not empty coverage (it would silently miss every
-        enum-keyed compute row and disable large-EP exploration).
+        database or A2A table yields ``{}`` -- the fused path then serves every
+        tuple.
         """
         cached = self._large_ep_coverage_cache.get(role)
         if cached is not None:
@@ -1292,75 +1290,33 @@ class Task:
         return coverage
 
     def _compute_large_ep_coverage(self, role: str) -> dict[str, dict[str, set[int]]]:
-        if not self._is_moe or self._model_family not in LARGE_EP_READY_FAMILIES:
+        if not self._is_moe:
             return {}
         model_path = self._role_attr(role, "model_path")
         backend_name = self._role_attr(role, "backend_name")
         system_name = self._role_attr(role, "system_name")
         if not model_path:
             return {}
-        try:
-            shape = MoEBlockShape.from_model_info(_get_model_info(model_path))
-        except Exception as exc:  # not a MoE checkpoint / unparsable config
-            logger.debug("large-EP coverage: no MoE shape for %s: %s", model_path, exc)
-            return {}
-
-        spec = load_system_spec(system_name)
-        gpus_per_node = int(spec.get("node", {}).get("num_gpus_per_node", 0) or 0)
-        sm_version = spec.get("gpu", {}).get("sm_version")
-        sm_version = int(sm_version) if sm_version is not None else None
         database = self._try_load_role_database(role)
-        # The probes are a PerfDatabase contract; a database object without them
-        # (a lightweight double injected by a caller) carries no coverage
-        # information, which is the same answer as an absent table.
-        a2a_probe = getattr(database, "moe_a2a_coverage", None)
-        compute_probe = getattr(database, "moe_expert_compute_coverage", None)
-        coverage: dict[str, dict[str, set[int]]] = {}
-        if gpus_per_node and a2a_probe is not None and compute_probe is not None:
-            a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts)
-            quant_mode = self._role_attr(role, "moe_quant_mode")
-            if quant_mode is not None and not isinstance(quant_mode, common.MoEQuantMode):
-                # The compute table is keyed by MoEQuantMode members; any
-                # other type (str, int, a sibling enum like
-                # GEMMQuantMode.bfloat16) would miss every key and silently
-                # report empty coverage, disabling large-EP exploration.
-                raise TypeError(
-                    f"moe_quant_mode must be a common.MoEQuantMode member, got "
-                    f"{type(quant_mode).__name__} {quant_mode!r} "
-                )
-            for phase in ("context", "generation"):
-                compute = compute_probe(
-                    shape.hidden_size, shape.moe_inter_size, shape.topk, shape.num_experts, quant_mode, phase
-                )
-                per_backend: dict[str, set[int]] = {}
-                for name, backend_spec in MOE_A2A_BACKENDS.items():
-                    if backend_name not in backend_spec.frameworks or phase not in backend_spec.inference_phases:
-                        continue
-                    eps = {
-                        ep
-                        for ep, node_num in a2a.get(name, ())
-                        if node_num == nodes_for(ep, gpus_per_node)
-                        and backend_spec.feasible(
-                            topk=shape.topk,
-                            num_experts=shape.num_experts,
-                            moe_tp_size=1,
-                            moe_ep_size=ep,
-                            sm_version=sm_version,
-                        )
-                    } & compute
-                    if eps:
-                        per_backend[name] = eps
-                if per_backend:
-                    coverage[phase] = per_backend
+        result = compute_large_ep_coverage(
+            model_path=model_path,
+            model_family=self._model_family,
+            system_name=system_name,
+            backend_name=backend_name,
+            database=database,
+        )
+        coverage = result.phases
+        self._large_ep_query_profile_cache[role] = result
 
-        if not coverage:
+        if not coverage and result.shape is not None:
+            shape = result.shape
             log_key = (model_path, system_name, backend_name, self._role_attr(role, "backend_version"))
             if log_key not in _LARGE_EP_EMPTY_COVERAGE_LOGGED:
                 _LARGE_EP_EMPTY_COVERAGE_LOGGED.add(log_key)
                 logger.info(
-                    "large-EP exploration is OFF for %s on %s/%s: no MoE all-to-all + EP-compute "
-                    "coverage for this model shape (hidden=%d, topk=%d, experts=%d) under "
-                    "moe_quant_mode=%s. Run the moe_a2a and moe_ep collectors for this "
+                    "large-EP exploration is OFF for %s on %s/%s: no MoE all-to-all "
+                    "coverage for this model shape (hidden=%d, topk=%d, experts=%d). "
+                    "Run the moe_a2a collector for this "
                     "model/system to enable it; the fused (small-EP) path is unaffected.",
                     model_path,
                     system_name,
@@ -1368,7 +1324,6 @@ class Task:
                     shape.hidden_size,
                     shape.topk,
                     shape.num_experts,
-                    getattr(self._role_attr(role, "moe_quant_mode"), "name", None),
                 )
         return coverage
 
@@ -1405,19 +1360,36 @@ class Task:
         coverage = self._large_ep_coverage(role)
         if not coverage:
             return None
-        resolved: dict[str, str] = {}
-        for phase in ("context", "generation"):
-            for name, eps in coverage.get(phase, {}).items():
-                if moe_ep in eps:
-                    resolved[phase] = name
-                    break
         required = set(self._role_phases(role)) | set(self._required_large_ep_phases(role))
-        missing = required - set(resolved)
-        if missing:
-            if missing == {"context"}:
+        resolved = resolve_moe_comm_backend(
+            coverage=coverage,
+            backend_name=self._role_attr(role, "backend_name"),
+            parallel=tuple(parallel_tuple),
+            required_phases=tuple(required),
+        )
+        if resolved is None:
+            covered_phases = {
+                phase for phase, per_backend in coverage.items() if any(moe_ep in eps for eps in per_backend.values())
+            }
+            if required - covered_phases == {"context"}:
                 self._warn_context_coverage_gap(role, moe_ep)
             return None
         return resolved
+
+    def _resolve_moe_comm_query_profile(self, role: str, parallel_tuple) -> dict | None:
+        """Measured A2A query keys for one resolved deployment tuple."""
+        resolved = self._resolve_moe_comm_backend(role, parallel_tuple)
+        if resolved is None:
+            return None
+        result = self._large_ep_query_profile_cache.get(role)
+        if result is None:
+            self._large_ep_coverage(role)
+            result = self._large_ep_query_profile_cache[role]
+        return resolve_moe_comm_query_profiles(
+            coverage=result,
+            resolved_backends=resolved,
+            moe_ep_size=tuple(parallel_tuple)[4],
+        )
 
     def _warn_context_coverage_gap(self, role: str, moe_ep: int) -> None:
         """One-shot warning: the role's own phase is covered but context is not."""
@@ -1434,8 +1406,8 @@ class Task:
             "large-EP coverage for %s on %s/%s is asymmetric: the %s phase is collected at "
             "moe_ep=%d but the context phase is not. Keeping those configs on the fused path -- "
             "a worker's weights are sized from its context ops, so a context-fused / "
-            "generation-large-EP graph would be mis-priced. Collect the missing context rows "
-            "(moe_a2a + moe_ep) to enable them.",
+            "generation-large-EP graph would be mis-priced. Collect the missing moe_a2a "
+            "context rows to enable them.",
             key[0],
             key[1],
             key[2],
@@ -1677,6 +1649,8 @@ class Task:
         # Large-EP ladder, offered when the perf data covers this model shape on
         # this system (no flag): the single task explores BOTH regimes, so the
         # lists are the union of the fused defaults and the multi-node ladder.
+        # vLLM has no shipped large-EP ladder to union in (its comm backends are
+        # registered but no data ships), so it keeps the fused lists.
         wide = None
         if self.backend_name == "trtllm":
             wide = {
@@ -1696,22 +1670,6 @@ class Task:
                 "moe_tp": [1],
                 "moe_ep": [8, 16, 32, 64],
             }
-        elif self.backend_name == "vllm":
-            # vLLM ships no static multi-node ladder (data-only enablement);
-            # derive it from the covered EP sizes so coverage that lands is
-            # actually explorable. Pure-EP tuples need num_gpu/dp/moe_ep
-            # candidates at each covered EP (tp=1 => dp == ep by the width
-            # identity tp*dp*cp == moe_tp*moe_ep).
-            eps = sorted(self._large_ep_eps("agg"))
-            if eps:
-                wide = {
-                    "num_gpu": eps,
-                    "tp": [1],
-                    "pp": [1],
-                    "dp": eps,
-                    "moe_tp": [1],
-                    "moe_ep": eps,
-                }
         if wide is not None and self._large_ep_eps("agg"):
             fused = {dim: sorted(set(values) | set(wide[dim])) for dim, values in fused.items()}
 
@@ -1742,17 +1700,6 @@ class Task:
         for role, src in fused_cfgs.items():
             if large_ep[role]:
                 src = {dim: sorted(set(values) | set(wide_cfgs[role][dim])) for dim, values in src.items()}
-                if self._role_attr(role, "backend_name") == "vllm":
-                    # Data-only vLLM enablement: the shared builder has no
-                    # vLLM wide branch, so derive the ladder from the covered
-                    # EP sizes (see _resolve_agg_search for the identity).
-                    eps = sorted(self._large_ep_eps(role))
-                    ladder = {
-                        "num_gpu_per_worker": eps,
-                        "dp_list": eps,
-                        "moe_ep_list": eps,
-                    }
-                    src = {dim: sorted(set(values) | set(ladder.get(dim, []))) for dim, values in src.items()}
             self._fill_role_search(role, src)
 
         # Replica defaults. Keyed on the resolved CANDIDATES, not on coverage:
@@ -2018,8 +1965,10 @@ class Task:
             # None means "unspecified" -> fall back to flashinfer (matches v1 and ModelConfig's default).
             attention_backend=self.attention_backend or "flashinfer",
             wideep_num_slots=self.wideep_num_slots,
-            forward_model=self.forward_model or "op_level",
             moe_comm_backend=(self._resolve_moe_comm_backend(role, parallel) if parallel is not None else None),
+            moe_comm_query_profile=(
+                self._resolve_moe_comm_query_profile(role, parallel) if parallel is not None else None
+            ),
             # Hardware fact, injected alongside the comm backend: the large-EP
             # ops take the comm node span at construction and would otherwise
             # have no channel to it (models.helpers.large_ep_gpus_per_node).
