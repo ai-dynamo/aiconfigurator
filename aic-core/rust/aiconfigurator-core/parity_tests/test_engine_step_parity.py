@@ -751,9 +751,13 @@ SMOKE_CASES = [
     # nvfp4 moe silicon to pin against; bfloat16 is the other collected lane
     # (the flashinfer_trtllm bf16 monolithic kernel). Parallelism: the bf16
     # checkpoint is ~4.9TB (2 bytes/param), over tp=16 that is ~306GB/GPU >
-    # gb300's 284GB -- the agg/disagg memory gate raises OOM -- and tp=32 has
-    # ZERO collected moe rows (the kernel family rejects local inter_size
-    # 2048/32 = 64 < 128), so the case goes tp=16 x pp=2 (~153GB/GPU): pp is
+    # gb300's 284GB -- the agg/disagg memory gate raises OOM -- and tp=32 is
+    # rejected by the GDN head-divisibility gate (num_k_heads=16 and
+    # num_v_heads=128 must both divide by tp; 16 % 32 != 0). (moe_tp=32 also
+    # has zero collected rows -- the kernel rejects local inter_size
+    # 2048/32 = 64 < 128 -- but the ep route at tp=32 maps to moe_tp=1 x
+    # moe_ep=32, which IS collected; the GDN gate is what actually blocks
+    # tp=32.) So the case goes tp=16 x pp=2 (~153GB/GPU): pp is
     # a modeled axis of the case struct (first SMOKE case to exercise pp>1),
     # and pp splits layers across stages without touching the per-stage MoE
     # width, so lookups stay on the collected tp<=16 grid and
