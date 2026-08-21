@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+runtime:
+  framework: vllm
+  version: 0.27.1
+  image: vllm/vllm-openai:v0.27.1
+  image_digest: sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967
+tables:
+  gdn_perf:
+    # 2026-08-22 (AIC-1782): Qwen3.8-Max GDN silicon rows (16 k-heads /
+    # 128 v-heads at head dims 128/128, shard ladder tp1..tp16) at vllm
+    # 0.27.1.
+    # Sparse version: only Qwen3.8-Max rows live at 0.27.1; every other
+    # shape at this version inherits 0.24.0 via shared-layer query-time
+    # fallback.
+    # Auto-collect child pipeline 63879009 (project 205688, job
+    # 406756719 -- a retry after a transient GitHub clone failure on
+    # the first job) with AIC_BACKEND_DOCKER_IMAGE=
+    # vllm/vllm-openai:v0.27.1 pinned explicitly (the pipeline's Blackwell
+    # image-suffix logic would otherwise request a nonexistent
+    # v0.27.1-cu130 tag), collector branch state
+    # yimingl/aic-1782-qwen38-max-vllm@d85bd1f5.
+    # Context runs both lanes at every point (560 rows each:
+    # causal_conv1d_fn + chunk_gated_delta_rule_flashinfer); generation
+    # runs causal_conv1d_update (54 rows) + fla fused_recurrent packed
+    # decode (52 rows). 2 raises recorded in this run's
+    # errors_vllm.gdn.json: the packed recurrent kernel launches grid-y =
+    # batch x num_v_heads (fla/ops/fused_recurrent.py:449 per the
+    # collector's guard message) and batch 512 x 128 v-heads / batch 1024
+    # x 64 v-heads = 65536 > the CUDA 65535 grid-y wall -- the
+    # largest-batch decode tail only (4 rows short of plan: 3 recurrent +
+    # 1 trailing conv), a framework launch-geometry limit, not a collector
+    # defect. Zero other failures; keys disjoint from every other version.
+    collector_ref: yimingl/aic-1782-qwen38-max-vllm@d85bd1f550ba527761aca33ad4fdb1545652dfc1
+    collector_hash: sha256:cc674e0588264d67c78275c6010bcefd6c16dddc5491b503c6a2049886defbb3
+    case_plan_hash: sha256:5c7717788dd8501f475117e1669c275bd801caa84278cd34582e4277886ded9a
+    collected_at: '2026-08-21'
+    rows: 1226
+    status: complete

@@ -22,7 +22,53 @@ trtllm-gen SITU mapping), the serving kernel class changes and this
 approximation must be retired.
 """
 
-__compat__ = "vllm==0.24.0"
+# Verified 2026-08-21 against vLLM v0.24.0 and v0.27.1 tags (source clones,
+# no runtime GPU available in this environment) for AIC-1782 Task V1.
+# Compatible unchanged for the bf16/fp8_block/nvfp4 target lanes -- and their
+# shared construction path, which every lane (including fp8/w4a16_mxfp4/
+# w4a8_mxfp4_mxfp8/int4_wo) goes through: FusedMoE's full constructor kwarg
+# list (every kwarg this collector passes still exists with the same
+# meaning; 0.27.1 only adds new optional/defaulted params); FusedMoE's
+# post-construction shape (.routed_experts, .moe_config.{tp_size,ep_size},
+# .router.routing_method_type, .quant_method -- traced through
+# layer.py/moe_runner.py/fused_moe_router.py at both versions); the
+# backend-selection attribute probe below (unquantized_backend/fp8_backend/
+# nvfp4_backend/mxfp4_backend/wna16_backend) -- still plain instance
+# attributes directly on the constructed quant_method object at 0.27.1, NOT
+# refactored into a singleton/registry the way sglang's MOE_RUNNER_BACKEND
+# moved to RuntimeContext/Flags between 0.5.14 and 0.5.17; .moe_kernel /
+# FallbackExperts._select_experts_impl (FallbackExperts' file is
+# byte-identical between the two tags); VllmConfig/set_current_vllm_config
+# (vllm.config was already a package at 0.24.0, with these two names
+# re-exported at both versions) and the bare SimpleNamespace shape for
+# vllm_config.model_config / .scheduler_config.max_num_batched_tokens /
+# .parallel_config.enable_expert_parallel; Fp8Config/CompressedTensorsConfig
+# constructors and CompressedTensorsConfig.from_config's nvfp4-pack-quantized
+# parsing path (from_config's body was read in full at both versions and is
+# textually identical -- the only diff in the whole file is new INT8/INT4
+# "Humming" weight-only schemes and an XPU branch, neither touching the
+# nvfp4 path). ModelOptFp8Config/Mxfp4Config/DeepseekV4FP8Config
+# constructors and vllm.models.deepseek_v4.quant_config's module path
+# (fp8/w4a16_mxfp4/w4a8_mxfp4_mxfp8 lanes) and Llama4MoE.custom_routing_
+# function / gemma4_fused_routing_kernel_triton (custom-routing lanes) and
+# CutlassExpertsMxfp4._supports_current_device (K3 situ-as-silu monkeypatch)
+# were checked at existence/shape depth only (lighter than the target-lane
+# trace above, per the plan's guard-or-verify allowance for non-target
+# lanes) -- no relocation or incompatibility found, so no fail-closed guard
+# is added for them.
+#
+# ONE incompatible surface found and fixed below:
+# vllm.model_executor.layers.fused_moe.layer.FusedMoE -- already a bare
+# module-level FACTORY FUNCTION (not a class) at 0.24.0, explicitly flagged
+# `# TODO: rename this` immediately above its def (layer.py:102-103
+# @0.24.0) -- 0.27.1 completed that rename to FusedMoEFactory (layer.py:99,
+# TODO comment removed; fused_moe/__init__.py exports FusedMoEFactory, not
+# FusedMoE, at 0.27.1 -- no back-compat alias exists at either the module or
+# package level). Cosmetic rename only: the returned object (a MoERunner)
+# and every kwarg this collector passes are unaffected -- fixed below with a
+# version-conditional import mirroring collect_gemm.py's (sglang round)
+# established try/except-import pattern.
+__compat__ = "vllm>=0.24.0,<=0.27.1,!=0.25.0,!=0.25.1,!=0.26.0,!=0.27.0"
 
 import contextlib
 import json
@@ -339,7 +385,18 @@ def run_moe_torch(
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.forward_context import get_forward_context, set_forward_context
     from vllm.model_executor.layers.fused_moe.experts.fallback import FallbackExperts
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+    # vLLM 0.27.1 renamed the module-level FusedMoE factory function to
+    # FusedMoEFactory (layer.py:99, completing the "# TODO: rename this"
+    # left above its 0.24.0 def at layer.py:102-103); no back-compat alias
+    # exists at either the module or package level. The returned object and
+    # every kwarg this collector passes are unaffected -- see the __compat__
+    # comment above. Try the new (>=0.27.1) name first since vllm's own
+    # fused_moe/__init__.py now exports FusedMoEFactory, not FusedMoE.
+    try:
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory as FusedMoE
+    except ImportError:
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
     from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
     )

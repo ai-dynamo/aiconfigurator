@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+runtime:
+  framework: vllm
+  version: 0.27.1
+  image: vllm/vllm-openai:v0.27.1
+  image_digest: sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967
+tables:
+  moe_perf:
+    # 2026-08-22 (AIC-1782): Qwen3.8-Max MoE silicon rows at vllm 0.27.1
+    # (hidden 8192 / inter 2048 / topk 10 / experts 512), base id
+    # Qwen/Qwen3.8-2.4T-A95B cases only (bfloat16 + fp8_block quant
+    # construction; the RadixArk NVFP4 artifact's vLLM gate is kept
+    # closed -- no packaged HF config, construction unverified; a24c3b92).
+    # Sparse version: only Qwen3.8-Max rows live at 0.27.1; every other
+    # shape at this version inherits 0.24.0 via shared-layer query-time
+    # fallback.
+    # Auto-collect child pipeline 63879009 (project 205688, job
+    # 406756719 -- a retry after a transient GitHub clone failure on
+    # the first job) with AIC_BACKEND_DOCKER_IMAGE=
+    # vllm/vllm-openai:v0.27.1 pinned explicitly (the pipeline's Blackwell
+    # image-suffix logic would otherwise request a nonexistent
+    # v0.27.1-cu130 tag), collector branch state
+    # yimingl/aic-1782-qwen38-max-vllm@d85bd1f5.
+    # Both dtypes dispatch the flashinfer trtllm-gen monolithic experts
+    # kernels (kernel_source
+    # vllm_unquantizedfusedmoe_flashinfer_trtllm_trtllmbf16expertsmonolithic
+    # / vllm_fp8moe_flashinfer_trtllm_trtllmfp8expertsmonolithic); per-dtype
+    # grid tp{1,2,4,8,16} x ep1 + tp1 x ep{2,4,8,...,256} x 3 distributions
+    # x 27 num_tokens = 1053 rows. tp32 was attempted and is structurally
+    # impossible for BOTH dtypes on this kernel family (local inter_size
+    # 2048/32 = 64 < 128: the bf16 monolithic kernel checks
+    # intermediate_size % 128 at launch, fp8_block create_weights checks
+    # block_n=128 divisibility); serving cannot run those shards either.
+    # The 6 tp32 boundary raises (3 distributions x 2 dtypes) are
+    # recorded in this run's errors_vllm.moe.json.
+    # KNOWN GAP (Grace systems only; both x86 systems complete): one
+    # bf16 tp16/ep1 27-point num_tokens task lost to
+    # torch.AcceleratorError 'CUDA error: an illegal memory access was
+    # encountered' inside the flashinfer trtllm-gen bf16 monolithic
+    # kernel -- on this system the 'power_law_1.2' distribution task
+    # (gb300 lost 'balanced'); the other two tp16/ep1 bf16 distribution tasks
+    # completed at the identical shard shape, so the fault is
+    # intermittent at this shape. Recorded in this run's
+    # errors_vllm.moe.json (classification 'unexpected'). Query-time
+    # coverage: the same-distribution tp8 neighbor and both
+    # sibling-distribution tp16 tasks landed. Framework-kernel
+    # suspect; serving-parity audit not yet performed. 2106 - 27 =
+    # 2079 rows (1026 bfloat16 + 1053 fp8_block). Keys disjoint from
+    # every other version.
+    collector_ref: yimingl/aic-1782-qwen38-max-vllm@d85bd1f550ba527761aca33ad4fdb1545652dfc1
+    collector_hash: sha256:8ac5ccc09086441e5bad021b69913467caec9fb96b9eb1c037ef88e9af544792
+    case_plan_hash: sha256:041763c460ae16c08cc913f7ff14c167b16d054577a8178f2ef05374691c1511
+    collected_at: '2026-08-21'
+    rows: 2079
+    status: complete

@@ -161,6 +161,51 @@ frameworks:
       # sha256:d61e062d" observation was the manifest list's arm64 entry,
       # not a new build. On aarch64 hosts (gb200/gb300) resolve the arm64
       # entry of the same tag and re-verify the version string before use.)
+    # Model-scoped runtime pin (AIC-1782 Task V1, the vLLM analogue of the
+    # sglang mechanism above — see frameworks.sglang.models for the full
+    # precedence semantics, identical here): when the run's model identity
+    # (--model-path / COLLECTOR_MODEL_PATH) exactly equals one of these
+    # keys, the pin overrides both the family pins above and the framework
+    # default for every op in the run. No model identity, or one matching
+    # no key, resolves exactly as before (family/default) — purely additive.
+    #
+    # Qwen3.8-Max (architecture Qwen3_5MoeForCausalLM) needs vLLM v0.27.1:
+    # vLLM's model registry only maps the bare "Qwen3_5MoeForCausalLM"
+    # architecture string to a loadable model class starting at v0.27.1
+    # (model_executor/models/registry.py:202 @0.27.1, verified via source
+    # clone of tags v0.24.0/v0.27.1 2026-08-21). The class itself
+    # (model_executor/models/qwen3_5.py:543 @0.24.0, :426 @0.27.1) already
+    # exists at 0.24.0, but is unreachable through standard architecture
+    # dispatch there — 0.24.0's registry.py only maps
+    # Qwen3_5MoeForConditionalGeneration (the VLM variant) and
+    # Qwen3_5MoeMTP (registry.py:641 @0.24.0), not the bare CausalLM key.
+    # Both image variants below resolve to the same multi-arch index digest
+    # per variant, live-verified on Docker Hub 2026-08-21 (registry API
+    # Docker-Content-Digest header, not the tag alone); v0.27.1-cu130 and
+    # v0.27.1-cu128 do NOT exist (404) — only default and cu129 ship for
+    # this tag, matching the variant keys the framework default above uses.
+    #
+    # SCOPE (same known gap as the sglang model pin, AIC-1762 Task 4b): a
+    # model pin gates the run only when the run carries that model's
+    # identity. See frameworks.sglang.models above for the operational
+    # invariant this relies on instead (AIC_MODEL_FILTER campaign practice;
+    # no active unfiltered scheduled pipelines as of 2026-08-19).
+    models:
+      "Qwen/Qwen3.8-2.4T-A95B":
+        version: "0.27.1"
+        images:
+          default: "vllm/vllm-openai:v0.27.1@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967"
+          cu129: "vllm/vllm-openai:v0.27.1-cu129@sha256:07913e94a58a4e61322c88f8d4647411b4dd394838b53abacaa32448d9d8de0a"
+      "Qwen/Qwen3.8-2.4T-A95B-FP8":
+        version: "0.27.1"
+        images:
+          default: "vllm/vllm-openai:v0.27.1@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967"
+          cu129: "vllm/vllm-openai:v0.27.1-cu129@sha256:07913e94a58a4e61322c88f8d4647411b4dd394838b53abacaa32448d9d8de0a"
+      "RadixArk/Qwen3.8-2.4T-A95B-NVFP4":
+        version: "0.27.1"
+        images:
+          default: "vllm/vllm-openai:v0.27.1@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967"
+          cu129: "vllm/vllm-openai:v0.27.1-cu129@sha256:07913e94a58a4e61322c88f8d4647411b4dd394838b53abacaa32448d9d8de0a"
   wideep_sglang:
     base_framework: sglang
     collector_dir: "collector/wideep/sglang"

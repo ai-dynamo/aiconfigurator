@@ -389,12 +389,24 @@ def test_vllm_sm90_repository_moe_getter_excludes_unconsumable_dsv4_cases(monkey
     # model_type kimi_linear), +99 Step-3.7-Flash executions after identical
     # physical invocations are deduplicated by their consumer key, +42
     # Nemotron Super FP8 cases, +39 for MiniMax-M3's MoE row (6144/3072,
-    # 128x4, bf16), and +126 Qwen3.8-Max cases / +3402 flat rows
-    # (bf16/fp8_block/fp8 vLLM modes on its 8192/2048/topk10/512-expert row;
-    # the NVFP4 sibling row is sglang-only via frameworks: [sglang], so it
-    # is absent here).
-    assert len(cases) == 2232
-    assert sum(len(case[1]) for case in cases) == 60264
+    # 128x4, bf16), and +84 Qwen3.8-Max cases / +2268 flat rows (bf16/
+    # fp8_block vLLM modes on its 8192/2048/topk10/512-expert row; the
+    # RadixArk/Qwen3.8-2.4T-A95B-NVFP4 sibling row is gated
+    # allowed_modes: [] for vllm, AIC-1782 Task V2, so it is absent here).
+    #
+    # AIC-1782 Task V2 (2026-08-21) data-quality fix: this was 2232/126
+    # cases (+3402 flat rows) before the base row's own vllm
+    # framework_quantization gate was added -- moe_model_allows_quantization
+    # defaulted OPEN for "fp8" (per-tensor), a mode this checkpoint's real
+    # artifacts never use (native bfloat16, block-fp8 as its -FP8 alias),
+    # because base_ops/moe.yaml's moe_vllm "fp8" quantization_modes entry
+    # has no allowed_model_paths restriction of its own. Closing the base
+    # row's gate to allowed_modes: [bfloat16, fp8_block] drops exactly the
+    # 42 phantom "fp8" cases (one per already-counted bf16/fp8_block case),
+    # re-derived by running this exact getter before and after the fix, not
+    # assumed.
+    assert len(cases) == 2190
+    assert sum(len(case[1]) for case in cases) == 59130
     # MiniMax-M3's declared MoE geometry must be present as its own rows —
     # a generator defect could drop it while unrelated cases preserve the
     # aggregate counts above. (case[:8] = moe_type, num_tokens, hidden,

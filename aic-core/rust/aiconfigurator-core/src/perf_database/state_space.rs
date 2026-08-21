@@ -36,10 +36,15 @@ pub struct StateSpaceTable {
     mamba2_sources: Vec<PerfSource>,
     gdn_sources: Vec<PerfSource>,
     kda_sources: Vec<PerfSource>,
-    vllm_024_gdn_aliases: bool,
+    /// vLLM versions whose collected tables persist per-system PHYSICAL
+    /// context-scan labels (`chunk_gated_delta_rule_{flashinfer,triton,cutedsl}`)
+    /// instead of the logical `chunk_gated_delta_rule`: 0.24.0 and 0.27.1
+    /// (see `query_gdn`'s alias branch). 0.22.0-era tables persist the
+    /// logical label directly and stay outside the gate.
+    vllm_gdn_physical_aliases: bool,
     /// SM100+ sglang serving auto-selects the FlashInfer bf16-state GDN
     /// decode kernel (see `query_gdn`'s alias branch below). Computed once
-    /// at construction, same convention as `vllm_024_gdn_aliases`.
+    /// at construction, same convention as `vllm_gdn_physical_aliases`.
     sglang_sm100_gdn_flashinfer_lane: bool,
     mamba2: OnceLock<Result<Mamba2Grids, AicError>>,
     gdn: OnceLock<Result<GdnGrids, AicError>>,
@@ -148,7 +153,7 @@ impl StateSpaceTable {
             mamba2_sources,
             gdn_sources,
             kda_sources,
-            vllm_024_gdn_aliases: backend == "vllm" && version == "0.24.0",
+            vllm_gdn_physical_aliases: backend == "vllm" && matches!(version, "0.24.0" | "0.27.1"),
             sglang_sm100_gdn_flashinfer_lane: backend == "sglang" && sm_version.unwrap_or(0) >= 100,
             mamba2: OnceLock::new(),
             gdn: OnceLock::new(),
@@ -270,13 +275,13 @@ impl StateSpaceTable {
         // physical-alias hit) only; any miss surfaces as `PerfDatabase` so
         // the operator degrades to SOL.
         //
-        // The framework's own persisted physical kernels (vLLM 0.24 names its
-        // context scan chunk_gated_delta_rule_*; SM100+ sglang decode prefers
-        // flashinfer_gated_delta_rule_decode) take precedence: after the
-        // shared-layer merge the logical lane can hold cross-backend donor
-        // rows, which only serve as gap fill when no own physical lane covers
-        // the shape. Ambiguous physical data fails closed.
-        let aliases: &[&str] = if self.vllm_024_gdn_aliases {
+        // The framework's own persisted physical kernels (vLLM 0.24/0.27.1
+        // name their context scan chunk_gated_delta_rule_*; SM100+ sglang
+        // decode prefers flashinfer_gated_delta_rule_decode) take precedence:
+        // after the shared-layer merge the logical lane can hold cross-backend
+        // donor rows, which only serve as gap fill when no own physical lane
+        // covers the shape. Ambiguous physical data fails closed.
+        let aliases: &[&str] = if self.vllm_gdn_physical_aliases {
             match (key.kernel_source.as_str(), key.phase.as_str()) {
                 ("chunk_gated_delta_rule", "context") => &[
                     "chunk_gated_delta_rule_flashinfer",
@@ -320,7 +325,7 @@ impl StateSpaceTable {
                 .map(|(alias_key, _)| alias_key.kernel_source.as_str())
                 .collect();
             return Err(AicError::PerfDatabase(format!(
-                "ambiguous vLLM 0.24.0 GDN physical kernels for {key:?}: {}",
+                "ambiguous vLLM GDN physical kernels for {key:?}: {}",
                 sources.join(", ")
             )));
         }
@@ -904,8 +909,11 @@ mod tests {
     }
 
     #[test]
-    fn gdn_physical_aliases_are_vllm_024_only() {
-        for (backend, version) in [("vllm", "0.23.0"), ("sglang", "0.24.0")] {
+    fn gdn_physical_aliases_are_version_gated() {
+        // 0.22.0-era vLLM tables persist the logical label directly and must
+        // never alias-walk physical rows (donor or otherwise); non-vLLM
+        // backends never enter this branch regardless of version string.
+        for (backend, version) in [("vllm", "0.22.0"), ("vllm", "0.23.0"), ("sglang", "0.24.0")] {
             let table = in_memory_gdn_table(
                 backend,
                 version,
@@ -913,6 +921,27 @@ mod tests {
             );
             assert!(query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).is_err());
         }
+    }
+
+    #[test]
+    fn vllm_0271_gdn_own_physical_lane_wins_over_logical_donor_lane() {
+        // AIC-1782 V5b regression: at vllm/0.27.1 the collector persists the
+        // executed chunk_gated_delta_rule_flashinfer label, while the logical
+        // chunk_gated_delta_rule lane holds cross-backend donor rows after the
+        // shared-layer merge (manifest tier:shared). The own physical lane
+        // must answer the context scan, not the donor.
+        let table = in_memory_gdn_table(
+            "vllm",
+            "0.27.1",
+            &[
+                ("chunk_gated_delta_rule", "context", 48, 1.0),
+                ("chunk_gated_delta_rule_flashinfer", "context", 48, 2.0),
+            ],
+        );
+        assert_eq!(
+            query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).unwrap(),
+            2.0
+        );
     }
 
     #[test]
@@ -929,7 +958,7 @@ mod tests {
         );
         match query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48) {
             Err(AicError::PerfDatabase(message)) => {
-                assert!(message.contains("ambiguous vLLM 0.24.0 GDN physical kernels"));
+                assert!(message.contains("ambiguous vLLM GDN physical kernels"));
                 assert!(message.contains("chunk_gated_delta_rule_flashinfer"));
                 assert!(message.contains("chunk_gated_delta_rule_triton"));
             }
