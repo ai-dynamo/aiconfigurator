@@ -256,6 +256,14 @@ def run_kda_context_benchmark(
                 # seq_len=1 through the decode benchmark before reaching this
                 # function, matching KimiK3KDAMetadataBuilder's
                 # split_decodes_and_prefills(..., decode_threshold=1).
+                # Pinned serving provenance at vLLM v0.27.0:
+                # - kda_metadata.py:261-279 derives num_spec_decodes and all
+                #   prefill/decode request and token counts.
+                # - kda_metadata.py:403-418 computes nums_dict, batch_ptr, and
+                #   token_chunk_offset_ptr from non_spec_query_start_loc_cpu
+                #   only when num_prefills > 0.
+                # - kda_metadata.py:466-485 constructs KimiK3KDAMetadata with
+                #   those fields and num_actual_tokens=m.num_actual_tokens.
                 nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
                     torch.arange(0, nt + 1, seq_len, dtype=torch.int32),
                     device=device,
@@ -745,6 +753,8 @@ def run_kda_torch(
     if phase == "context":
         if seq_len_list is None:
             raise ValueError("vLLM KDA context collection requires seq_len_list")
+        if not seq_len_list:
+            raise ValueError("vLLM KDA context collection requires at least one sequence length")
         if any(seq_len < 1 for seq_len in seq_len_list):
             raise ValueError(f"vLLM KDA context sequence lengths must be positive: {seq_len_list}")
 
