@@ -671,6 +671,13 @@ def _add_recommend_mode_arguments(parser):
         default=None,
         help="Optional end-to-end request latency target (ms). Enables request-latency optimization mode.",
     )
+    parser.add_argument(
+        "--inclusive-tpot",
+        action="store_true",
+        default=False,
+        help="Report TPOT as (ttft + tpot * (osl - 1)) / osl, spreading TTFT cost across all output tokens. "
+        "Affects terminal output and saved CSV only; SLA filtering always uses inter-token latency.",
+    )
     parser.add_argument("--prefix", type=int, default=0, help="Prefix cache length. Default to 0.")
     parser.add_argument(
         "--nextn",
@@ -1213,6 +1220,14 @@ def _add_estimate_mode_arguments(parser):
         "may fill missing data. A preset (off|conservative|balanced|aggressive) or a "
         "comma-separated list of kinds (xshape,xquant,xprofile,xop). "
         "Default: all kinds enabled. Ignored in SILICON mode.",
+    )
+    parser.add_argument(
+        "--inclusive-tpot",
+        action="store_true",
+        default=False,
+        help="Report TPOT as (ttft + tpot * (osl - 1)) / osl, spreading TTFT cost across all output tokens. "
+        "Useful for comparing with benchmarks that report inclusive TPOT (e.g. GuideLLM). "
+        "Affects terminal output only; internal calculations unchanged.",
     )
     parser.add_argument(
         "--detail",
@@ -2580,6 +2595,13 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
             **encoder_kwargs,
         )
     row = apply_row_power_coverage_gate(row)
+
+    # Apply inclusive TPOT transformation if requested
+    if getattr(args, "inclusive_tpot", False) and "tpot" in row and "ttft" in row:
+        from aiconfigurator.cli.report_and_save import get_inclusive_tpot
+
+        row["tpot"] = get_inclusive_tpot(row["ttft"], row["tpot"], args.osl)
+
     logger.info("EPD %s single-point estimate:", estimate_mode)
     keys = (
         "ttft",
@@ -2731,6 +2753,13 @@ def _run_estimate_mode(args):
             sol_estimate_kwargs["database_mode"] = common.DatabaseMode.SOL.name
             sol_result = cli_estimate(**sol_estimate_kwargs)
 
+    # Compute display TPOT (transformed if --inclusive-tpot is set)
+    from aiconfigurator.cli.report_and_save import get_inclusive_tpot
+
+    display_tpot = result.tpot
+    if getattr(args, "inclusive_tpot", False):
+        display_tpot = get_inclusive_tpot(result.ttft, result.tpot, result.osl)
+
     print("\n" + "=" * 60)
     print(f"  Performance Estimate ({result.mode})")
     print("=" * 60)
@@ -2798,7 +2827,7 @@ def _run_estimate_mode(args):
         # ttft is zero by construction; surface generation_latency instead.
         gen_lat = float(result.raw.get("generation_latency", 0.0) or 0.0)
         print(f"  Generation lat.:  {gen_lat:.3f} ms")
-        print(f"  TPOT:             {result.tpot:.3f} ms")
+        print(f"  TPOT:             {display_tpot:.3f} ms")
     elif result.mode == "static_ctx":
         print(f"  TTFT:             {result.ttft:.3f} ms")
     elif result.mode == "afd":
@@ -2842,11 +2871,11 @@ def _run_estimate_mode(args):
         if p_impl or d_impl:
             print(f"  Composition:      (p)={p_impl or 'unmodeled'}  (d)={d_impl or 'unmodeled'}")
         print(f"  TTFT:             {result.ttft:.3f} ms")
-        print(f"  TPOT:             {result.tpot:.3f} ms")
+        print(f"  TPOT:             {display_tpot:.3f} ms")
         print(f"  Request Latency:  {result.request_latency:.3f} ms")
     else:
         print(f"  TTFT:             {result.ttft:.3f} ms")
-        print(f"  TPOT:             {result.tpot:.3f} ms")
+        print(f"  TPOT:             {display_tpot:.3f} ms")
         print(f"  Request Latency:  {result.request_latency:.3f} ms")
     encoder_latency = float(result.raw.get("encoder_latency", 0.0) or 0.0)
     if encoder_latency > 0.0:
@@ -2979,6 +3008,7 @@ def _run_recommend(args) -> None:
             save_dir=args.save_dir,
             engine_step_backend=args.engine_step_backend,
             forward_model=args.forward_model,
+            inclusive_tpot=getattr(args, "inclusive_tpot", False),
         )
     except NoResultsError as exc:
         logger.debug("Recommend mode traceback", exc_info=True)
