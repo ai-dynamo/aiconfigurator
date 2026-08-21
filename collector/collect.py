@@ -101,6 +101,17 @@ STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before logging a stall
 # it as systemic (a fix-me warning; nothing is skipped).
 SYSTEMIC_GROUP_THRESHOLD = 5
 
+FPM_INPUT_ERRORS = (TypeError, ValueError, subprocess.CalledProcessError, FileNotFoundError, RuntimeError)
+
+
+def _resolve_fpm_cli_inputs(parser, resolver):
+    """Render expected FPM input-resolution failures through argparse."""
+
+    try:
+        return resolver()
+    except FPM_INPUT_ERRORS as error:
+        parser.error(str(error))
+
 
 @contextlib.contextmanager
 def _collector_model_path(model_path: str | None):
@@ -1450,6 +1461,12 @@ def _all_op_names() -> list[str]:
             if entry.op not in seen:
                 seen.add(entry.op)
                 ops.append(entry.op)
+    # Whole-forward FPM collection is an explicit campaign runner rather than
+    # a normal per-device OpEntry. Keep it in the existing --ops interface,
+    # but do not add it to backend registries consumed by collect_ops().
+    from collector.fpm_forward import FPM_FORWARD_OP
+
+    ops.append(FPM_FORWARD_OP)
     return ops
 
 
@@ -1723,7 +1740,28 @@ def main():
         action="store_true",
         help="Keep collector CSV staging files instead of finalizing *_perf.txt outputs to parquet.",
     )
+    from collector.fpm_forward import FPM_FORWARD_OP, add_fpm_arguments
+    from collector.fpm_forward.config import add_fpm_generator_arguments
+
+    add_fpm_arguments(parser)
+    # Registering these flags imports no Generator code (they live in
+    # collector.fpm_forward.config, already imported above), so they are added
+    # unconditionally: an argv pre-scan cannot reproduce argparse's own
+    # abbreviation semantics (--op=fpm_forward) and crashed when it disagreed.
+    # reject_fpm_arguments_without_fpm keeps them explicit-only.
+    add_fpm_generator_arguments(parser)
     args = parser.parse_args()
+    from collector.fpm_forward.config import reject_fpm_arguments_without_fpm
+
+    try:
+        reject_fpm_arguments_without_fpm(args)
+    except ValueError as error:
+        parser.error(str(error))
+    fpm_requested = FPM_FORWARD_OP in (args.ops or ())
+    if fpm_requested and set(args.ops or ()) != {FPM_FORWARD_OP}:
+        parser.error("fpm_forward must be collected alone; do not mix campaign and local op entries")
+    if fpm_requested and not (args.model_path or args.model_architecture or args.model_cases):
+        parser.error("fpm_forward requires --model-path, --model-architecture, or --model-cases")
     ops = args.ops
     case_plan = None
     logger_message = None
@@ -1753,7 +1791,7 @@ def main():
         if args.ops is None:
             ops = planned_ops
         else:
-            requested_ops = set(args.ops)
+            requested_ops = set(args.ops) - {FPM_FORWARD_OP}
             ops = [op for op in planned_ops if op in requested_ops]
             missing_ops = requested_ops - set(ops)
             if missing_ops:
@@ -1768,6 +1806,12 @@ def main():
                 "using base op cases only plus legacy model filtering."
             )
 
+        if args.plan_only and fpm_requested:
+            from collector.fpm_forward.entry import resolve_inputs
+
+            fpm_plan, _generator_overrides = _resolve_fpm_cli_inputs(parser, lambda: resolve_inputs(args, case_plan))
+            print(json.dumps(fpm_plan.to_dict(), indent=2, sort_keys=True))
+            return
         if args.plan_only:
             log_dict = case_plan.to_log_dict()
             log_dict["ops"] = ops
@@ -1824,6 +1868,16 @@ def main():
             f"Resume enabled: dir={Path(args.checkpoint_dir).expanduser()}"
             + (" (retrying previously failed tasks)" if args.resume_retry_failed else "")
         )
+
+    if fpm_requested:
+        from collector.fpm_forward.entry import resolve_run_inputs, run_resolved
+
+        resolved_inputs = _resolve_fpm_cli_inputs(parser, lambda: resolve_run_inputs(args, case_plan))
+        run_errors = run_resolved(args, resolved_inputs)
+        generate_collection_summary(run_errors, args.backend, "generator-resolved")
+        if run_errors:
+            raise SystemExit(1)
+        return
 
     _require_torch()
 
