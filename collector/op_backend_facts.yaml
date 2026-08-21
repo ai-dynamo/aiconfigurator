@@ -2227,6 +2227,14 @@ ops:
       - {framework: "vllm", version: "0.1.dev19262", system: "rtx_pro_6000_server", op_name: "kda", phase: "context", backends: ["flashkda", "triton"], kernel_sources: ["causal_conv1d_fn_qkv3", "flashkda_fwd"]}
       - {framework: "vllm", version: "0.1.dev19262", system: "rtx_pro_6000_server", op_name: "kda", phase: "generation", backends: ["fla_triton", "triton", "vllm_kernel"], kernel_sources: ["causal_conv1d_update", "fused_kda_decode", "fused_recurrent_kda_packed_decode"]}
       - {framework: "vllm", version: "0.1.dev19262", system: "rtx_pro_6000_server", op_name: "kda", phase: "verify", backends: ["fla_triton", "triton"], kernel_sources: ["causal_conv1d_update", "fused_recurrent_kda"]}
+      # 0.27.0 (Kimi-K3 upstream): generation drops fused_kda_decode — the
+      # 0.27.0 is_fused_kda_decode_supported predicate rejects the DS
+      # (dim-first) conv-state layout that VLLM_SSM_CONV_STATE_LAYOUT=DS
+      # selects in serving; collector dispatches via the same predicate as
+      # serving, so no fused_kda_decode rows under DS.
+      - {framework: "vllm", version: "0.27.0", system: "gb300", op_name: "kda", phase: "context", backends: ["flashkda", "triton"], kernel_sources: ["causal_conv1d_fn_qkv3", "flashkda_fwd"]}
+      - {framework: "vllm", version: "0.27.0", system: "gb300", op_name: "kda", phase: "generation", backends: ["fla_triton", "triton"], kernel_sources: ["causal_conv1d_update", "fused_recurrent_kda_packed_decode"]}
+      - {framework: "vllm", version: "0.27.0", system: "gb300", op_name: "kda", phase: "verify", backends: ["fla_triton", "triton"], kernel_sources: ["causal_conv1d_update", "fused_recurrent_kda"]}
   - op_file: mamba2_perf
     family: linear_attention
     axes: [op_name, phase]
