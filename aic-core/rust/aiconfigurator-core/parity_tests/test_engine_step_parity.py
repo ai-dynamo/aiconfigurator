@@ -722,14 +722,13 @@ SMOKE_CASES = [
     # agg/disagg memory gate here too) and the deployment reference (the
     # dynamo qwen3.8-2.4t-a95b-fp8 recipe deploys vllm at TP16); moe_ep=16
     # keeps tp*dp*cp == moe_tp*moe_ep. MoE prices from the collected
-    # flashinfer_trtllm fp8 monolithic lane and GDN decode from the collected
-    # fused_recurrent packed-decode rows (load-time label canonicalization);
-    # the GDN CONTEXT scan currently resolves the sglang 0.5.17
-    # chunk_gated_delta_rule donor rows instead of the collected vllm
+    # flashinfer_trtllm fp8 monolithic lane, GDN decode from the collected
+    # fused_recurrent packed-decode rows (load-time label canonicalization),
+    # and the GDN CONTEXT scan from the collected vllm
     # chunk_gated_delta_rule_flashinfer rows -- query_gdn's physical-lane
-    # alias walk is version-pinned to vllm 0.24.0 (state_space.rs), a known
-    # gap flagged in the AIC-1782 V5a report; widening that gate is a
-    # deliberate modeling change that re-pins these goldens.
+    # alias walk covers vllm 0.27.1 (state_space.rs, AIC-1782 V5b; the V5a
+    # smoke had caught it resolving the sglang 0.5.17 chunk_gated_delta_rule
+    # donor rows while the walk was still version-pinned to 0.24.0).
     # "agg-flavored" like its sglang twin: agg_batch_size well past the
     # trivial default.
     pytest.param(
