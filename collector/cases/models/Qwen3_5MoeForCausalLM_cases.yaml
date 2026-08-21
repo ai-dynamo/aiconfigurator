@@ -102,14 +102,16 @@ model_case_values:
       # KV cache. major==9 (SM90) and major==12 (SM120) get the SAME
       # priority list, [FLASH_ATTN, FLASHINFER, ...] (:157-163) -- but
       # which candidate actually wins also depends on
-      # validate_configuration (v1/attention/backend.py:319-374) rejecting
-      # invalid candidates, and that is exactly where SM90 and SM120
-      # diverge on fp8 KV cache: FA3 (SM90, get_flash_attn_version
-      # major==9, v1/attention/backends/fa_utils.py:163-171) supports the
-      # fp8-KV combination (flash_attn_supports_kv_cache_dtype, :314-316)
-      # but FA2 (SM120, no explicit major==12 branch so it falls to the
-      # fa2 default, fa_utils.py:162-171) does not -- excluded via
-      # flash_attn.py:220-224 -- so on SM120 specifically FLASH_ATTN is
+      # validate_configuration (v1/attention/backend.py:319-393, calling
+      # supports_combination at :380-392) rejecting invalid candidates, and
+      # that is exactly where SM90 and SM120 diverge on fp8 KV cache: FA3
+      # (SM90, get_flash_attn_version major==9, v1/attention/backends/
+      # fa_utils.py:163-171) supports the fp8-KV combination
+      # (flash_attn_supports_kv_cache_dtype, :314-316) but FA2 (SM120, no
+      # explicit major==12 branch so it falls to the fa2 default,
+      # fa_utils.py:162-171) does not -- excluded via flash_attn.py:219-229
+      # (the exact rejection message: "FP8 KV cache requires FA3 on SM90 or
+      # FA4 on SM100") -- so on SM120 specifically FLASH_ATTN is
       # valid only for bf16 KV cache; fp8 KV cache falls through to
       # FLASHINFER. (An earlier draft of this trace claimed SM120 was
       # uniformly FLASH_ATTN regardless of KV dtype -- wrong, caught by
@@ -216,8 +218,8 @@ model_case_values:
       #   (TrtLlmBf16ExpertsMonolithic family-100 device gate,
       #   experts/trtllm_bf16_moe.py:61-69/202-227), FLASHINFER_CUTLASS on
       #   SM120 (family-120 device gate + a >=SM90 quant-scheme floor,
-      #   experts/flashinfer_cutlass_moe.py:129-140, platforms/interface.py:
-      #   149-165/433-454).
+      #   experts/flashinfer_cutlass_moe.py:129-140,
+      #   platforms/interface.py:433-454 has_device_capability).
       #   fp8_block (Fp8Config(is_checkpoint_fp8_serialized=True,
       #   activation_scheme="dynamic", weight_block_size=[128,128]) --
       #   matches this checkpoint's real quantization_config verbatim, see
@@ -236,13 +238,22 @@ model_case_values:
       #   flashinfer_trtllm claim, but only at this SM family, not
       #   universally), and the DEEPGEMM oracle label on SM120
       #   (FLASHINFER_TRTLLM fails the family-100 gate; FLASHINFER_CUTLASS's
-      #   fp8-block quant-scheme gate is an exact SM90 match here,
-      #   flashinfer_cutlass_moe.py:158-165, so it fails too; falls to
+      #   fp8-block quant-scheme gate is an exact SM90 match here (the
+      #   (kFp8Static128BlockSym, kFp8Dynamic128Sym) branch guarded by
+      #   is_device_capability(90), NOT the (None,None)/has_device_capability
+      #   floor branch a few lines above it),
+      #   flashinfer_cutlass_moe.py:167-174, so it fails too; falls to
       #   TritonOrDeepGemmExperts, a FallbackExperts wrapping
       #   DeepGemmExperts+TritonExperts, experts/triton_deep_gemm_moe.py:
       #   24-38 -- the leaf kernel is chosen per-shape at runtime, exactly
       #   what collect_moe.py:760-771 already introspects into
       #   kernel_source).
+      #   Both oracle ranges cited above also gate on runtime library
+      #   availability, not device capability alone: has_flashinfer_trtllm_
+      #   fused_moe/has_flashinfer_cutlass_fused_moe (vllm/utils/flashinfer.py
+      #   :244/:263) and is_deep_gemm_supported (vllm/utils/deep_gemm.py:94)
+      #   -- an image missing these packages falls through to the next
+      #   priority candidate even on an SM that otherwise qualifies.
       #   No architecture-string or hybrid-GDN-specific MoE-backend
       #   override exists anywhere in vLLM 0.27.1 for this model (grepped
       #   model_executor/models/registry.py, qwen3_5.py, and the
@@ -403,6 +414,22 @@ model_case_values:
     # both are legitimate, framework-true outcomes for their respective
     # pinned image, not a bug. Landing (Task V4) should expect and reconcile
     # this split rather than treat one as anomalous.
+    #
+    # COLLECTION MUST USE THE DEFAULT (unsuffixed) v0.27.1 IMAGE VARIANT for
+    # this row, not "-cu129": every existing vLLM Blackwell
+    # collection_meta.yaml in this repo (0.24.0, gb200/gb300/b200_sxm/
+    # b300_sxm linear_attention + moe + mla_bmm) ran the unsuffixed
+    # vllm/vllm-openai:v0.24.0 image even where a -cu129-equivalent pin
+    # existed, and the default image is what SM100/103 deployment actually
+    # runs -> chunk_gated_delta_rule_flashinfer, matching the table above. A
+    # -cu129 run would collect the triton context-scan lane instead --
+    # framework-true for that image, but NOT comparable to the other three
+    # systems' rows, and Task V4's lane-truth validation expects exactly one
+    # lane per (system, SM). (Published v0.27.1 default-image release builds
+    # actually pin CUDA_VERSION=13.0.2, .buildkite/release-pipeline.yaml,
+    # not the Dockerfile's bare ARG default of 13.0.3 -- same major version,
+    # so get_cuda_runtime_major()>=13 and the flashinfer conclusion above are
+    # unaffected either way.)
     - model_path: Qwen/Qwen3.8-2.4T-A95B
       model_aliases:
         - Qwen/Qwen3.8-2.4T-A95B-FP8
