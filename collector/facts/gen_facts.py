@@ -70,6 +70,57 @@ def render_sglang_cli(model_dir_in_container: str, tp: int, version: str) -> str
     return " ".join(arts["cli_args_agg"].split())
 
 
+def derive_roster_checkpoints(fam: dict, targets: dict) -> list[dict]:
+    """Roster checkpoints DERIVED from the collector's own case declarations:
+    every org/repo its cases yamls mention, minus gated repos and repos owned
+    by other (special-adapter) families, plus probe-only extra_repos. Profile
+    comes from the checkpoint's quant metadata; variants from the dummy
+    manifest. targets.yaml holds only the overlay (checkpoint_overrides)."""
+    import re
+    sys.path.insert(0, str(Path(__file__).parent))
+    from derive_profile import derive_profile
+
+    cases = Path(AIC_SRC).parent / "collector" / "cases" / "models"
+    org = (r"(?:deepseek-ai|zai-org|moonshotai|nvidia|openai|meta-llama|"
+           r"mistralai|google|Qwen|XiaomiMiMo|MiniMaxAI|sgl-project)")
+    mentioned: set[str] = set()
+    for f in cases.glob("*_cases.yaml"):
+        mentioned.update(re.findall(rf"\b({org}/[\w.\-]+)", f.read_text()))
+    inaccessible: set[str] = set()
+    for inacc in (ROOT / "configs" / "inaccessible.json",
+                  Path(__file__).parent / "configs" / "inaccessible.json"):
+        if inacc.exists():
+            inaccessible = set(json.loads(inacc.read_text()))
+            break
+    owned_elsewhere = {ck["repo"] for fname, f in targets["families"].items()
+                      if not f.get("derive") for ck in f.get("checkpoints", [])}
+    repos = sorted((mentioned - inaccessible - owned_elsewhere)
+                   | set(fam.get("extra_repos") or []))
+    manifest = json.loads((ROOT / "dummy_models" / "variants_manifest.json").read_text())
+    variants_of: dict[str, list[str]] = {}
+    for v in manifest["variants"]:
+        variants_of.setdefault(v["repo"], []).append(v["variant"].split("__", 1)[1])
+    # representative-first ordering: index 0 is the default probe variant
+    _head = {"rep": 0, "all_kinds": 1, "rep_mix": 2, "interleave_pair": 3}
+    for vs in variants_of.values():
+        vs.sort(key=lambda n: (_head.get(n, 9), n))
+    overrides = fam.get("checkpoint_overrides") or {}
+    out = []
+    for repo in repos:
+        profile = derive_profile(repo, ROOT / "configs")
+        if profile == "MISSING":
+            raise SystemExit(f"derive_roster: no fetched config for {repo} — fetch it or add to inaccessible.json")
+        ck = {"repo": repo, "profile": profile, "variants": variants_of.get(repo, [])}
+        ov = dict(overrides.get(repo) or {})
+        if "profile" in ov:  # explicit pin wins, but derivation drift is loud
+            if ov["profile"] != profile:
+                print(f"derive_roster: {repo} profile pinned {ov['profile']} != derived {profile}")
+            ck["profile"] = ov.pop("profile")
+        ck.update(ov)
+        out.append(ck)
+    return out
+
+
 def enumerate_runs(targets: dict, full: bool, backends: list[str]) -> list[dict]:
     runs = []
     topos = [t for t in targets["topologies"] if t["evidence"] == "real" and (full or t["tp"] == 1)]
@@ -77,6 +128,8 @@ def enumerate_runs(targets: dict, full: bool, backends: list[str]) -> list[dict]
         be = targets["backends"][backend]
         versions = be["versions"] if full else [be["versions"][-1]]
         for fam_name, fam in targets["families"].items():
+            if fam.get("derive") and "checkpoints" not in fam:
+                fam["checkpoints"] = derive_roster_checkpoints(fam, targets)
             variants = fam.get("dummy_variants") or []
             if not variants and not any(c.get("variants") for c in fam["checkpoints"]):
                 continue  # adapter pending (kimi_k3)
@@ -270,6 +323,9 @@ def check_coverage(targets: dict) -> None:
     org = r"(?:deepseek-ai|zai-org|moonshotai|nvidia|openai|meta-llama|mistralai|google|Qwen|XiaomiMiMo|MiniMaxAI|sgl-project)"
     for f in cases.glob("*_cases.yaml"):
         mentioned.update(re.findall(rf"\b({org}/[\w.\-]+)", f.read_text()))
+    for fam in targets["families"].values():
+        if fam.get("derive") and "checkpoints" not in fam:
+            fam["checkpoints"] = derive_roster_checkpoints(fam, targets)
     covered = {ck["repo"] for fam in targets["families"].values() for ck in fam["checkpoints"]}
     inaccessible = set()
     inacc = ROOT / "configs" / "inaccessible.json"
