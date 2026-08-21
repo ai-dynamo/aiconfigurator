@@ -56,12 +56,13 @@ def test_kimi_k3_default_moe_path_stays_decomposed():
     assert DeepSeekV4MegaMoEModule not in kinds
 
 
-def test_kimi_k3_megamoe_rejects_moe_tp():
+@pytest.mark.parametrize("backend", ["sglang", "vllm"])
+def test_kimi_k3_megamoe_rejects_moe_tp(backend):
     with pytest.raises(ValueError, match="moe_tp_size=1"):
         models.get_model(
             "moonshotai/Kimi-K3",
             _model_config(tp=2, moe_tp=2, moe_ep=4, attn_dp=4, moe_backend="megamoe"),
-            "sglang",
+            backend,
         )
 
 
@@ -69,6 +70,8 @@ def test_kimi_k3_megamoe_vllm_uses_vllm_pre_dispatch():
     model = models.get_model("moonshotai/Kimi-K3", _model_config(moe_backend="megamoe"), "vllm")
     names = {op._name: op for op in model.generation_ops}
     assert "generation_moe" not in names
+    assert "generation_moe_pre_dispatch" not in names
+    assert "generation_moe_post_dispatch" not in names
     module = names["generation_megamoe"]
     assert isinstance(module, DeepSeekV4MegaMoEModule)
     assert module._pre_dispatch == "vllm"
@@ -116,6 +119,42 @@ def test_kimi_k3_megamoe_vllm_agg_answers_via_compiled_engine():
     assert sources is not None
     megamoe_sources = {ops[op] for ops in sources.values() for op in ops if op.endswith("_megamoe")}
     assert megamoe_sources == {"silicon"}, f"megamoe sources: {megamoe_sources}"
+
+
+def test_kimi_k3_auto_megamoe_generated_task_reaches_measured_vllm_rows():
+    """The auto lane gate must survive execution, not only task construction."""
+    from aiconfigurator.cli.main import build_default_tasks
+
+    tasks = build_default_tasks(
+        model_path="moonshotai/Kimi-K3",
+        total_gpus=16,
+        system="gb300",
+        backend="auto",
+        moe_backend="megamoe",
+        serving_mode="agg",
+    )
+    assert set(tasks) == {"agg_vllm"}
+
+    task = tasks["agg_vllm"]
+    task.agg_num_gpu_candidates = [16]
+    task.agg_tp_candidates = [1]
+    task.agg_pp_candidates = [1]
+    task.agg_dp_candidates = [16]
+    task.agg_moe_tp_candidates = [1]
+    task.agg_moe_ep_candidates = [16]
+    task.agg_cp_candidates = [1]
+    task.decode_max_batch_size = 8
+    result = task.run()
+
+    assert not result.empty
+    megamoe_sources = {
+        source
+        for breakdown in result["_per_ops_source"]
+        for ops in breakdown.values()
+        for op_name, source in ops.items()
+        if op_name.endswith("_megamoe")
+    }
+    assert megamoe_sources == {"silicon"}
 
 
 def test_kimi_k3_megamoe_sglang_gb300_latest_dies_at_measured_query():

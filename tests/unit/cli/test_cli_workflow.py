@@ -697,6 +697,15 @@ class TestBuildDefaultTaskConfigs:
             assert backend == "vllm"
             assert call.kwargs["moe_backend"] == "megamoe"
 
+    def test_megamoe_probe_rejects_a_table_with_only_another_models_rows(self):
+        """A family/version directory is not itself model-level support."""
+        from aiconfigurator.cli.main import _megamoe_perf_data_available
+
+        assert not _megamoe_perf_data_available("sglang", "gb300", "0.5.10", "moonshotai/Kimi-K3")
+        assert _megamoe_perf_data_available("sglang", "gb300", "0.5.10", "deepseek-ai/DeepSeek-V4-Pro")
+        assert _megamoe_perf_data_available("sglang", "b200_sxm", "0.5.16", "moonshotai/Kimi-K3")
+        assert _megamoe_perf_data_available("vllm", "gb300", "0.27.0", "moonshotai/Kimi-K3")
+
     @patch("aiconfigurator.cli.main._megamoe_perf_data_available", return_value=True)
     @patch("aiconfigurator.cli.main.Task")
     @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
