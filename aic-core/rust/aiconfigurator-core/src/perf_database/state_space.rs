@@ -37,6 +37,10 @@ pub struct StateSpaceTable {
     gdn_sources: Vec<PerfSource>,
     kda_sources: Vec<PerfSource>,
     vllm_024_gdn_aliases: bool,
+    /// SM100+ sglang serving auto-selects the FlashInfer bf16-state GDN
+    /// decode kernel (see `query_gdn`'s alias branch below). Computed once
+    /// at construction, same convention as `vllm_024_gdn_aliases`.
+    sglang_sm100_gdn_flashinfer_lane: bool,
     mamba2: OnceLock<Result<Mamba2Grids, AicError>>,
     gdn: OnceLock<Result<GdnGrids, AicError>>,
     kda: OnceLock<Result<KdaGrids, AicError>>,
@@ -115,6 +119,7 @@ impl StateSpaceTable {
             data_root,
             backend,
             version,
+            None,
             &SourceResolver::fixed(PerfDbSources::default()),
         )
         .expect("fixed-map resolution is infallible")
@@ -124,10 +129,15 @@ impl StateSpaceTable {
     /// engine's `SourceResolver` (live resolution owns the shared-layer walk;
     /// a fixed source map is the test-only path). Each state-space file falls back to
     /// its primary `data_root/<basename>` when the resolver names no override. No I/O.
+    ///
+    /// `sm_version` is the system spec's `gpu.sm_version` (absent on systems
+    /// that don't declare one) — needed to gate the SM100+ sglang GDN
+    /// flashinfer-lane branch in `query_gdn`.
     pub fn with_sources(
         data_root: PathBuf,
         backend: &str,
         version: &str,
+        sm_version: Option<u32>,
         resolver: &SourceResolver,
     ) -> Result<Self, AicError> {
         let mamba2_sources = resolver.sources_for("mamba2_perf.parquet", &data_root)?;
@@ -139,6 +149,7 @@ impl StateSpaceTable {
             gdn_sources,
             kda_sources,
             vllm_024_gdn_aliases: backend == "vllm" && version == "0.24.0",
+            sglang_sm100_gdn_flashinfer_lane: backend == "sglang" && sm_version.unwrap_or(0) >= 100,
             mamba2: OnceLock::new(),
             gdn: OnceLock::new(),
             kda: OnceLock::new(),
@@ -260,7 +271,8 @@ impl StateSpaceTable {
         // the operator degrades to SOL.
         //
         // The framework's own persisted physical kernels (vLLM 0.24 names its
-        // context scan chunk_gated_delta_rule_*) take precedence: after the
+        // context scan chunk_gated_delta_rule_*; SM100+ sglang decode prefers
+        // flashinfer_gated_delta_rule_decode) take precedence: after the
         // shared-layer merge the logical lane can hold cross-backend donor
         // rows, which only serve as gap fill when no own physical lane covers
         // the shape. Ambiguous physical data fails closed.
@@ -276,6 +288,21 @@ impl StateSpaceTable {
                 }
                 _ => &[],
             }
+        } else if self.sglang_sm100_gdn_flashinfer_lane
+            && key.phase == "generation"
+            && key.kernel_source == "fused_sigmoid_gating_delta_rule_update"
+        {
+            // SM100+ sglang serving auto-selects the FlashInfer bf16-state GDN
+            // decode kernel (server_args.py's _handle_linear_attn_backend,
+            // server_args.py:4884-4915 @ pinned v0.5.14 clone): prefer its own
+            // rows over the fla/triton fp32-state lane when they cover this
+            // shape. Tables collected before AIC-1745's collector change
+            // carry no flashinfer_gated_delta_rule_decode rows -- alias_matches
+            // stays empty below and this degrades to the fla lane exactly as
+            // before. SM90 is untouched (fla lane always wins there, matching
+            // serving's default). Python twin: GDNKernel._query_gdn_table's
+            // sibling `elif` (mamba.py).
+            &["flashinfer_gated_delta_rule_decode"]
         } else {
             &[]
         };
@@ -298,6 +325,17 @@ impl StateSpaceTable {
             )));
         }
         if let Some((_, node)) = alias_matches.first() {
+            // TRIPWIRE: `sol` still closes over the CALLER's original
+            // kernel_source (the operator's own `sol_latency_ms`/`kernel_source`
+            // field), never the winning alias -- a flashinfer-lane row served
+            // here still extrapolates beyond-range with the fla lane's 4-byte
+            // state formula, not the flashinfer lane's 2-byte one. Deliberate,
+            // not a bug: GDN decode SOL is linear/homogeneous in batch with no
+            // additive constant, so the state_bytes constant cancels exactly in
+            // perf_interp's util-hold ratio (sol_q / median(sol(cv_i)/lat(cv_i))
+            // -- verified algebraically, see AIC-1745 Task 3 (Python commit
+            // 87e7c03, mamba.py). Revisit if a future GDN-family SOL formula
+            // stops being linear in the query axis.
             return engine_query(node, phase, batch_size, seq_len, sol);
         }
         let node = match grids.by_keys.get(&key) {
@@ -923,6 +961,136 @@ mod tests {
             ],
         );
         assert!(query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).is_err());
+    }
+
+    /// Like `in_memory_gdn_table`, but threads an explicit `sm_version`
+    /// through `StateSpaceTable::with_sources` -- needed to exercise the
+    /// SM100+ sglang GDN flashinfer-lane branch below (`in_memory_gdn_table`'s
+    /// `StateSpaceTable::new` always passes `sm_version=None`, so it can't
+    /// reach that branch).
+    fn in_memory_gdn_table_with_sm(
+        backend: &str,
+        version: &str,
+        sm_version: Option<u32>,
+        rows: &[(&str, &str, u32, f64)],
+    ) -> StateSpaceTable {
+        let mut by_keys: BTreeMap<GdnKey, Node> = BTreeMap::new();
+        for &(kernel_source, phase, num_v_heads, latency) in rows {
+            let key = GdnKey {
+                kernel_source: kernel_source.to_string(),
+                phase: phase.to_string(),
+                d_model: 5120,
+                d_conv: 4,
+                num_k_heads: 16,
+                head_k_dim: 128,
+                num_v_heads,
+                head_v_dim: 128,
+            };
+            let node = by_keys.entry(key).or_insert_with(Node::branch);
+            let leaf = LeafValue::latency_only(latency);
+            if phase == "generation" {
+                insert_first_wins(node, &[1], leaf);
+            } else {
+                insert_first_wins(node, &[1, 1024], leaf);
+            }
+        }
+        let table = StateSpaceTable::with_sources(
+            PathBuf::from("test-data"),
+            backend,
+            version,
+            sm_version,
+            &SourceResolver::fixed(PerfDbSources::default()),
+        )
+        .expect("fixed-map resolution is infallible");
+        assert!(table.gdn.set(Ok(GdnGrids { by_keys })).is_ok());
+        table
+    }
+
+    #[test]
+    fn sglang_sm100_gdn_prefers_flashinfer_decode_lane_when_present() {
+        let table = in_memory_gdn_table_with_sm(
+            "sglang",
+            "0.5.14",
+            Some(103),
+            &[
+                (
+                    "fused_sigmoid_gating_delta_rule_update",
+                    "generation",
+                    48,
+                    4.0,
+                ),
+                ("flashinfer_gated_delta_rule_decode", "generation", 48, 2.1),
+            ],
+        );
+        assert_eq!(
+            query_gdn_test_shape(
+                &table,
+                "fused_sigmoid_gating_delta_rule_update",
+                "generation",
+                48
+            )
+            .unwrap(),
+            2.1
+        );
+    }
+
+    #[test]
+    fn sglang_sm100_gdn_falls_back_to_fla_lane_when_flashinfer_absent() {
+        // Tables collected before AIC-1745's collector change carry no
+        // flashinfer_gated_delta_rule_decode rows: degrade to the fla lane
+        // exactly as before, never a hard failure.
+        let table = in_memory_gdn_table_with_sm(
+            "sglang",
+            "0.5.14",
+            Some(103),
+            &[(
+                "fused_sigmoid_gating_delta_rule_update",
+                "generation",
+                48,
+                4.0,
+            )],
+        );
+        assert_eq!(
+            query_gdn_test_shape(
+                &table,
+                "fused_sigmoid_gating_delta_rule_update",
+                "generation",
+                48
+            )
+            .unwrap(),
+            4.0
+        );
+    }
+
+    #[test]
+    fn sglang_sm90_gdn_never_selects_flashinfer_lane_even_if_present() {
+        // Hopper unchanged: serving never runs the FlashInfer decode kernel on
+        // SM90, so the modeling layer must not reach for it there even when a
+        // flashinfer row exists (mirrors the Python twin test).
+        let table = in_memory_gdn_table_with_sm(
+            "sglang",
+            "0.5.10",
+            Some(90),
+            &[
+                (
+                    "fused_sigmoid_gating_delta_rule_update",
+                    "generation",
+                    48,
+                    4.0,
+                ),
+                ("flashinfer_gated_delta_rule_decode", "generation", 48, 2.1),
+            ],
+        );
+        assert_eq!(
+            query_gdn_test_shape(
+                &table,
+                "fused_sigmoid_gating_delta_rule_update",
+                "generation",
+                48
+            )
+            .unwrap(),
+            4.0
+        );
     }
 
     /// In-memory KDA table over one fixed model shape (d_model=4096, heads

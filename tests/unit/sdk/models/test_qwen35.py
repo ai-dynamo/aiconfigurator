@@ -72,9 +72,83 @@ def test_qwen35_tp4_gdn_uses_local_heads_without_resharding_projection_gemms(
     assert generation_ops["generation_gdn_out_proj_gemm"]._k == expected_out_proj_k
 
 
-def test_qwen35_rejects_tensor_parallel_size_that_cannot_shard_gdn_heads():
+@pytest.mark.parametrize(
+    (
+        "tp_size",
+        "expected_k_heads",
+        "expected_v_heads",
+        "expected_in_proj_n",
+        "expected_ba_n",
+        "expected_out_proj_k",
+        "expected_qkv_n",
+        "expected_logits_n",
+    ),
+    [
+        (1, 16, 128, 36864, 256, 16384, 34816, 248320),
+        (2, 8, 64, 18432, 128, 8192, 17408, 124160),
+        (4, 4, 32, 9216, 64, 4096, 8704, 62080),
+        (8, 2, 16, 4608, 32, 2048, 4608, 31040),
+        (16, 1, 8, 2304, 16, 1024, 2560, 15520),
+    ],
+)
+def test_qwen38max_gdn_ladder_and_gated_qkv_and_lm_head_widths(
+    tp_size,
+    expected_k_heads,
+    expected_v_heads,
+    expected_in_proj_n,
+    expected_ba_n,
+    expected_out_proj_k,
+    expected_qkv_n,
+    expected_logits_n,
+):
+    """Qwen3.8-Max (linear_num_key_heads=16, linear_num_value_heads=128,
+    num_heads=64, num_kv_heads=4, vocab=248320) across the full GDN TP
+    ladder: TP-local GDN kernel heads, qkvz/ba/out_proj GEMM widths, the
+    output-gate-doubled full-attention qkv GEMM width, and the lm_head
+    (logits) GEMM width -- all derived from the bundled config scalars via
+    the op-construction formulas in qwen35.py.
+    """
+    model = models.get_model("Qwen/Qwen3.8-2.4T-A95B", _model_config(tp_size=tp_size), "sglang")
+
+    context_ops = {op._name: op for op in model.context_ops}
+    generation_ops = {op._name: op for op in model.generation_ops}
+
+    for op_name in ("context_gdn_conv1d", "context_gdn_scan"):
+        assert context_ops[op_name]._num_k_heads == expected_k_heads
+        assert context_ops[op_name]._num_v_heads == expected_v_heads
+    for op_name in ("generation_gdn_conv1d", "generation_gdn_recurrence"):
+        assert generation_ops[op_name]._num_k_heads == expected_k_heads
+        assert generation_ops[op_name]._num_v_heads == expected_v_heads
+
+    assert context_ops["context_gdn_in_proj_gemm"]._n == expected_in_proj_n
+    assert context_ops["context_gdn_in_proj_ba_gemm"]._n == expected_ba_n
+    assert context_ops["context_gdn_out_proj_gemm"]._k == expected_out_proj_k
+    assert generation_ops["generation_gdn_in_proj_gemm"]._n == expected_in_proj_n
+    assert generation_ops["generation_gdn_in_proj_ba_gemm"]._n == expected_ba_n
+    assert generation_ops["generation_gdn_out_proj_gemm"]._k == expected_out_proj_k
+
+    # attn_output_gate=True doubles the query slice:
+    # qkv_out = 2*n_q_per_tp*head_size + n_kv_per_tp*head_size*2.
+    assert context_ops["context_qkv_gemm"]._n == expected_qkv_n
+    assert generation_ops["generation_qkv_gemm"]._n == expected_qkv_n
+
+    assert context_ops["context_logits_gemm"]._n == expected_logits_n
+    assert context_ops["context_logits_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+    assert generation_ops["generation_logits_gemm"]._n == expected_logits_n
+    assert generation_ops["generation_logits_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+
+
+@pytest.mark.parametrize(
+    ("model_name", "tp_size"),
+    [
+        ("Qwen/Qwen3.5-27B", 3),
+        # Qwen3.8-Max: 16 GDN K heads is not divisible by 32 (128 V heads would be).
+        ("Qwen/Qwen3.8-2.4T-A95B", 32),
+    ],
+)
+def test_qwen35_rejects_tensor_parallel_size_that_cannot_shard_gdn_heads(model_name, tp_size):
     with pytest.raises(ValueError, match="GDN head counts must both be divisible"):
-        models.get_model("Qwen/Qwen3.5-27B", _model_config(tp_size=3), "sglang")
+        models.get_model(model_name, _model_config(tp_size=tp_size), "sglang")
 
 
 def test_qwen35_rejects_megamoe_backend():
@@ -143,10 +217,11 @@ def test_qwen35_moe_prices_comm_through_dispatch_pair_for_all_topologies(model_c
         assert sum(op._scale_factor for op in allreduce_ops) == 41
 
 
-def test_qwen35_shared_expert_scalar_gate_uses_true_output_width():
+@pytest.mark.parametrize("model_name", ["Qwen/Qwen3.5-397B-A17B", "Qwen/Qwen3.8-2.4T-A95B"])
+def test_qwen35_shared_expert_scalar_gate_uses_true_output_width(model_name):
     """The runtime ReplicatedLinear scalar gate is hidden_size -> 1."""
     model = models.get_model(
-        "Qwen/Qwen3.5-397B-A17B",
+        model_name,
         _model_config(tp_size=8, moe_tp_size=1, moe_ep_size=8),
         "vllm",
     )
@@ -155,6 +230,31 @@ def test_qwen35_shared_expert_scalar_gate_uses_true_output_width():
         scalar_gates = [op for op in _flatten_ops(phase_ops) if op._name.endswith("_shared_expert_gate_gemm")]
         assert len(scalar_gates) == 2
         assert {op._n for op in scalar_gates} == {1}
+
+
+def test_qwen38max_router_and_moe_dims_match_config():
+    """Router GEMM (num_experts=512 clears the >=128 gate) and MoE op dims
+    are read straight off the bundled Qwen3.8-Max Qwen35Config: 512 experts,
+    top-10 routing, 2048 routed-expert inter size, 2048 shared-expert inter
+    size."""
+    model = models.get_model("Qwen/Qwen3.8-2.4T-A95B", _model_config(tp_size=1), "vllm")
+    cfg = model.extra_params
+    assert (cfg.num_experts, cfg.topk, cfg.moe_inter_size, cfg.shared_expert_inter_size) == (512, 10, 2048, 2048)
+
+    for phase_ops, prefixes in (
+        (model.context_ops, ("context_gdn", "context_full")),
+        (model.generation_ops, ("generation_gdn", "generation_full")),
+    ):
+        by_name = {op._name: op for op in _flatten_ops(phase_ops)}
+        for prefix in prefixes:
+            router = by_name[f"{prefix}_router_gemm"]
+            assert router._n == 512
+            assert router._quant_mode == common.GEMMQuantMode.bfloat16
+            moe = by_name[f"{prefix}_moe"]
+            assert (moe._inter_size, moe._topk, moe._num_experts) == (2048, 10, 512)
+            # shared_gate_up_gemm n = 2 * shared_expert_inter_size // tp; tp=1 here.
+            gate_up = by_name[f"{prefix}_shared_gate_up_gemm"]
+            assert gate_up._n == 2 * 2048
 
 
 def test_qwen35_sglang_standard_dispatcher_omits_nonexistent_pre_dispatch():
@@ -239,3 +339,31 @@ def test_qwen35_memory_charges_kv_on_full_layers_and_constant_gdn_state():
     per_token_bytes = 2 * model.get_kvcache_elements_per_token()
     assert model.get_kvcache_bytes_per_sequence(4096) == 4096 * per_token_bytes + expected_state
     assert model.get_kvcache_max_tokens(expected_state + 100 * per_token_bytes) == 100
+
+
+@pytest.mark.parametrize(
+    ("tp_size", "expected_elements_per_token", "expected_state_bytes"),
+    [
+        (1, 23 * 2 * 4 * 256, 69 * (128 * 128 * 128 * 4 + (2 * 16 * 128 + 128 * 128) * 3 * 2)),
+        (
+            8,
+            23 * 2 * 1 * 256,
+            69 * ((128 // 8) * 128 * 128 * 4 + (2 * 16 * 128 + 128 * 128) // 8 * 3 * 2),
+        ),
+    ],
+)
+def test_qwen38max_memory_charges_kv_on_full_layers_and_constant_gdn_state(
+    tp_size, expected_elements_per_token, expected_state_bytes
+):
+    """Qwen3.8-Max: 23 full-attention layers hold per-token KV (num_kv_heads=4,
+    ceil-sharded across tp); 69 GDN layers hold a constant per-request state
+    (fp32 SSM state + bf16 conv window, linear_conv_kernel_dim=4), TP-sharded.
+    tp=8 exercises ceil(4/8)=1, where per-token KV elements stop shrinking."""
+    model = models.get_model("Qwen/Qwen3.8-2.4T-A95B", _model_config(tp_size=tp_size), "vllm")
+
+    assert model.get_kvcache_elements_per_token() == expected_elements_per_token
+    assert model._gdn_state_bytes_per_request() == expected_state_bytes
+
+    per_token_bytes = 2 * expected_elements_per_token  # bf16 kvcache
+    assert model.get_kvcache_bytes_per_sequence(4096) == 4096 * per_token_bytes + expected_state_bytes
+    assert model.get_kvcache_max_tokens(expected_state_bytes + 100 * per_token_bytes) == 100

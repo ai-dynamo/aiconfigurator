@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+runtime:
+  framework: sglang
+  version: 0.5.17
+  image: lmsysorg/sglang:v0.5.17-cu130
+  image_digest: sha256:16aba8925507e631e1dc1e23d95d026533602591775f6a8db68b74ee99746155
+tables:
+  moe_perf:
+    # 2026-08-19 (AIC-1762): Qwen3.8-Max MoE silicon rows at sglang 0.5.17,
+    # device 'NVIDIA B300 SXM6 AC' (hidden 8192 / inter 2048 / topk 10 /
+    # experts 512). Sparse version: Qwen/Qwen3.8-2.4T-A95B (+ -FP8 sibling)
+    # and the collector-only RadixArk/Qwen3.8-2.4T-A95B-NVFP4 artifact only;
+    # every other shape at this version inherits from 0.5.14 via
+    # shared-layer query-time fallback. Two manual JET jobs on aws-pdx, both
+    # collector branch cdbfd10 (moe requires the server_args fix landed
+    # there -- see the gb300/gb200/b200_sxm moe_perf sidecars for the full
+    # incident story):
+    #   - JET job 63106699 (base id, bfloat16+fp8_block, kernel_source
+    #     sglang_fused_moe_triton): 5994 rows (3159 bfloat16 + 2835
+    #     fp8_block). fp8_block moe_tp_size=32 absent -- THE DOCUMENTED
+    #     BOUNDARY (128x128 weight-block quant cannot shard inter_size 2048
+    #     to 64-wide; serving cannot run that config either). bfloat16
+    #     carries the full 117-case x 27-token grid up to tp32.
+    #   - JET job 63304550 (RadixArk id, nvfp4, kernel_source
+    #     sglang_flashinfer_trtllm_moe): 3159 rows, full grid.
+    # Concatenated 9153 rows total; keys disjoint by construction (moe_dtype
+    # partitions bfloat16/fp8_block/nvfp4, verified zero duplicate keys
+    # across all non-latency columns before landing) and disjoint from
+    # every other version. collector_hash is a pure content hash of
+    # collect_moe.py + the shared core, so it does not need a JET
+    # attestation: it is identical to the gb300/gb200/b200_sxm moe_perf
+    # sidecars above (both JET jobs ran the same collector code at cdbfd10),
+    # re-verified via
+    # collector.provenance.collector_hash("collector.sglang.collect_moe",
+    # ...) against this checkout. case_plan_hash was not captured in the
+    # JET artifact handoff for these manual runs, and would genuinely
+    # differ between the two jobs anyway (different model filter ->
+    # different resolved case-id set: base id vs RadixArk id), so it is
+    # the only field omitted.
+    collector_ref: cdbfd10329a1cf73bf07677ab25614dccfce2379
+    collector_hash: sha256:7c92ba48f717cb849096921e8da59f11e5fca3468ec6907e9348fcbfbc5bb24e
+    collected_at: '2026-08-18'
+    rows: 9153
+    status: complete

@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+runtime:
+  framework: sglang
+  version: 0.5.17
+  image: lmsysorg/sglang:v0.5.17-cu130
+  image_digest: sha256:16aba8925507e631e1dc1e23d95d026533602591775f6a8db68b74ee99746155
+tables:
+  gdn_perf:
+    # 2026-08-19 (AIC-1762): Qwen3.8-Max GDN silicon rows (16k/128v ladder,
+    # both decode lanes) at sglang 0.5.17, device 'NVIDIA B300 SXM6 AC'.
+    # Sparse version: Qwen/Qwen3.8-2.4T-A95B cases only; every other op/shape
+    # at this version inherits from 0.5.14 via shared-layer query-time
+    # fallback. Manual JET job 63106699 on aws-pdx (base id: one script,
+    # `collect.py --ops moe gdn gemm`), mirrored
+    # lmsysorg/sglang:v0.5.17-cu130 amd64 image (shares the v0.5.17
+    # multi-arch digest above), collector branch cdbfd10. Same 5
+    # kernel_source lanes and row profile as the gb300/gb200/b200_sxm
+    # siblings (1209 rows; flashinfer_gated_delta_rule_decode ~0.5x the fla
+    # fp32-state lane at matched keys). collector_hash / case_plan_hash were
+    # not captured in the JET artifact handoff for this manual run.
+    collector_ref: cdbfd10329a1cf73bf07677ab25614dccfce2379
+    collected_at: '2026-08-18'
+    rows: 1209
+    status: complete

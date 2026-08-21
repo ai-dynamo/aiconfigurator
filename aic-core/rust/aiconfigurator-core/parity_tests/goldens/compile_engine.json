@@ -13,6 +13,24 @@
       "RAYON_NUM_THREADS": "1"
     }
   },
+  "post_freeze_pins": {
+    "qwen3-30b-a3b-b200-vllm-022-power::decode_step": {
+      "engine": "rust",
+      "git_head": "9019e19c30b425b4d30f4fa1740fa3e29da32c7b"
+    },
+    "qwen3-30b-a3b-b200-vllm-022-power::mixed_step": {
+      "engine": "rust",
+      "git_head": "9019e19c30b425b4d30f4fa1740fa3e29da32c7b"
+    },
+    "qwen3-30b-a3b-b200-vllm-022-power::static_ctx": {
+      "engine": "rust",
+      "git_head": "9019e19c30b425b4d30f4fa1740fa3e29da32c7b"
+    },
+    "qwen3-30b-a3b-b200-vllm-022-power::static_gen": {
+      "engine": "rust",
+      "git_head": "9019e19c30b425b4d30f4fa1740fa3e29da32c7b"
+    }
+  },
   "references": {
     "chunked_prefill::ctx300_gen7_isl1000_osl64_prefix100::mixed_step": 21.17940829999926,
     "chunked_prefill::ctx512_gen4_isl4096_osl128_prefix0::mixed_step": 24.469393866631147,
@@ -57,10 +75,10 @@
     "qwen3-30b-a3b-b200-vllm-019-isl1024-osl2::mixed_step": 15.380402975615636,
     "qwen3-30b-a3b-b200-vllm-019-isl1024-osl2::static_ctx": 14.949130156193013,
     "qwen3-30b-a3b-b200-vllm-019-isl1024-osl2::static_gen": 3.450425196498872,
-    "qwen3-30b-a3b-b200-vllm-022-power::decode_step": 3.314493163403432,
-    "qwen3-30b-a3b-b200-vllm-022-power::mixed_step": 15.364723323911948,
-    "qwen3-30b-a3b-b200-vllm-022-power::static_ctx": 14.939366024779778,
-    "qwen3-30b-a3b-b200-vllm-022-power::static_gen": 3.3144931673015763,
+    "qwen3-30b-a3b-b200-vllm-022-power::decode_step": 3.438817503427091,
+    "qwen3-30b-a3b-b200-vllm-022-power::mixed_step": 15.706302087077088,
+    "qwen3-30b-a3b-b200-vllm-022-power::static_ctx": 15.156620447921258,
+    "qwen3-30b-a3b-b200-vllm-022-power::static_gen": 3.438835303422931,
     "wideep_sglang::decode_step": 11.651700656031192,
     "wideep_sglang::mixed_step": 102.11955248944133,
     "wideep_sglang::static_ctx": 99.42331852569644,

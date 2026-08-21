@@ -110,6 +110,22 @@ OPERATIONS_DEF_INVENTORY = {
             "GenerationAttention.clear_cache",
             "GenerationAttention.load_data",
             "_cache_key",
+            # AIC-1715/1716: attention kernel-lane PRECEDENCE resolution — which
+            # kernel_source lane a query should prefer, not a per-op VALUE. Reads
+            # a YAML map (attention_lanes.resolve_attention_lane_order) and ranks
+            # a loaded table's own lanes by measured coverage; never computes a
+            # latency/energy/SOL number itself, so it stays outside the single
+            # per-op-value-in-Rust-only rule.
+            "_lane_order_cached",
+            "resolve_lane_order",
+            "lane_walk_order",
+            "lane_walk_order._rank",
+            # Same rationale: called from engine.py::_resolve_attention_lane_orders
+            # once a database is bound to a built model's op lists (models are
+            # constructed WITHOUT a database — pure shape graphs — since the
+            # pyo3 op unification); composes the two entries above, never
+            # computes a latency/energy/SOL number itself.
+            "resolved_lane_order_for_op",
         }
     ),
     "base.py": frozenset(

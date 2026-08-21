@@ -9,7 +9,48 @@ available. The module owns SGLang-specific kernel selection, quantization
 helpers, SM filters, and perf logging.
 """
 
-__compat__ = "sglang==0.5.14"
+# Verified 2026-08-17 against sglang v0.5.14 and v0.5.17 tags (source clones,
+# no runtime GPU available in this environment) for Task 4c/AIC-1762. Checked:
+# sgl_kernel.fp8_scaled_mm/sgl_per_token_quant_fp8 (byte-identical call shape,
+# moved wheel-internal path only); flashinfer fp4_quantize/mm_fp4 (sglang's
+# own call sites into flashinfer unchanged across its flashinfer_python pin
+# bump 0.6.12->0.6.15.post1; flashinfer's own source not directly verifiable,
+# not installed in this venv -- residual gap, pre-existing at 0.5.14 too);
+# deep_gemm_wrapper.{DEEPGEMM_SCALE_UE8M0,gemm_nt_f8f8bf16} and
+# SGLANG_JIT_DEEPGEMM_PRECOMPILE (byte-identical); fp8_utils.requant_weight_ue8m0
+# (unchanged path/signature; see _prepare_fp8_block_weights docstring for the
+# refreshed serving citation); DeepGEMM SM90-<110 fp8_block window / SM120
+# exclusion (configurer.py._compute_enable_deep_gemm byte-identical, still no
+# SM120 recipe -- not under-collecting); NVFP4 initialize_fp4_gemm_config
+# SM100/103->cute-dsl, SM80-89->marlin, else->cutlass dispatch (byte-identical,
+# see run_gemm() comment for the refreshed citation). ONE incompatible import
+# path found and fixed below: sglang.srt.layers.quantization.fp8_kernel
+# (holding sglang_per_token_group_quant_fp8) was relocated wholesale to
+# sglang.kernels.ops.quantization.fp8_kernel at 0.5.17 as part of a
+# kernel-reorg (no compat shim at the old path) -- fixed with the
+# version-conditional import below. CORRECTION (code review, 2026-08-18):
+# the SIGNATURE is unchanged (drops only an unused `enable_v2` kwarg), but
+# the INTERNALLY DISPATCHED KERNEL for this collector's exact call is NOT --
+# see the dated comment at the import site below for the precise, cited
+# difference. Measuring whatever 0.5.17 actually dispatches to under that
+# call shape IS framework truth for that version (the collector's mandate
+# per layer_permissions.md); the caveat is for data consumers: fp8_block
+# gemm rows collected at 0.5.14 and at 0.5.17 are NOT cross-version
+# comparable, because they time different kernels for the identical
+# (m, n, k) inputs. 0.5.15/0.5.16 stay excluded: never verified, and
+# version_resolver's __compat__ grammar (AND-of-comparators only, no OR) has
+# no way to express a true two-point set either -- this bounded range with
+# the two untested base releases carved out via != is the closest
+# expressible approximation, NOT an exact {0.5.14, 0.5.17} gate (CORRECTED
+# 2026-08-18, code review): `_check_compat`'s `!=` only excludes the literal
+# point version, so 0.5.15.post1/0.5.15rc1/0.5.16.post2-style variants of
+# the excluded releases still satisfy this specifier (see
+# tests/unit/collector/test_version_resolver.py's TestExactVersionSet for
+# the honest, probed semantics). This is an accepted, narrow gap: the
+# framework_manifest digest-pinned gate is the true version enforcement
+# upstream and only ever supplies exactly 0.5.14 or 0.5.17 in a sanctioned
+# run, so the leak is unreachable there.
+__compat__ = "sglang>=0.5.14,<=0.5.17,!=0.5.15,!=0.5.16"
 
 import os
 import random
@@ -40,7 +81,50 @@ from sglang.srt.layers.deep_gemm_wrapper import (
     DEEPGEMM_SCALE_UE8M0,
     gemm_nt_f8f8bf16,
 )
-from sglang.srt.layers.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
+
+# sglang 0.5.17 relocated this module from srt/layers/quantization/ to the new
+# top-level sglang.kernels.ops package; sglang_per_token_group_quant_fp8's own
+# SIGNATURE is otherwise unchanged (verified 2026-08-17, both v0.5.14 and
+# v0.5.17 tags: x, group_size, eps=1e-10, column_major_scales=False,
+# scale_tma_aligned=False, scale_ue8m0=False, fuse_silu_and_mul=False,
+# masked_m=None -- 0.5.17 additionally drops an unused enable_v2 kwarg this
+# collector never passes). Try the new (>=0.5.17) location first since sglang
+# fp8.py itself now imports from there.
+#
+# CORRECTED 2026-08-18 (code review): the signature match above does NOT mean
+# the invoked KERNEL is unchanged -- for this collector's exact call
+# (group_size=128, column_major_scales=True, scale_tma_aligned=True,
+# scale_ue8m0=DEEPGEMM_SCALE_UE8M0), the two pinned versions dispatch
+# differently:
+#   - v0.5.14: fp8_kernel.py:544-545 sets `enable_v2 = group_size in
+#     [16,32,64,128] or _is_musa` (True for group_size=128, independent of
+#     scale_ue8m0/dtype), so the `elif enable_v2:` branch always calls
+#     `sgl_per_token_group_quant_8bit_jit_v2` (fp8_kernel.py:567-568).
+#   - v0.5.17: the v1/v2 choice moved into
+#     `_run_per_token_group_quant_8bit_kernel`, guarded by
+#     `if scale_ue8m0 and x_s.dtype == torch.float32 and not _is_musa:`
+#     (fp8_kernel.py:546). On Blackwell (DEEPGEMM_SCALE_UE8M0=True,
+#     scale_ue8m0=True passed in), `create_per_token_group_quant_fp8_output_
+#     scale`'s column_major_scales+scale_tma_aligned+scale_ue8m0 branch
+#     returns an INT (not float32) scale tensor (fp8_kernel.py:472-476), so
+#     the guard's `x_s.dtype == torch.float32` is False -> falls through to
+#     `per_token_group_quant(...)` (fp8_kernel.py:589), never reaching the v2
+#     kernel. On Hopper (DEEPGEMM_SCALE_UE8M0=False, scale_ue8m0=False
+#     passed in), the guard's first conjunct alone is already False, same
+#     fallback. So at 0.5.17 this collector always times
+#     `per_token_group_quant`, never `sgl_per_token_group_quant_8bit_jit_v2`,
+#     for this exact call shape on either platform.
+# This is framework truth, not a bug: sglang 0.5.17 serving really does
+# dispatch this way for this call shape, and the collector's job is to
+# measure what serving actually invokes (layer_permissions.md). The
+# consequence is for DATA CONSUMERS: fp8_block gemm rows collected at 0.5.14
+# vs 0.5.17 are NOT cross-version comparable -- they time two different
+# kernels for the identical (m, n, k, dtype) inputs.
+try:
+    from sglang.kernels.ops.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
+except ImportError:
+    from sglang.srt.layers.quantization.fp8_kernel import sglang_per_token_group_quant_fp8
+from sglang.srt.layers.quantization.fp8_utils import requant_weight_ue8m0
 
 from collector.helper import benchmark_with_power, get_sm_version, log_perf
 
@@ -126,6 +210,34 @@ def scale_shape(shape, group_shape):
     return tuple(cdiv(shape[i], group_shape[i]) for i in range(len(group_shape)))
 
 
+def _prepare_fp8_block_weights(N, K, device, ue8m0):  # noqa: N803
+    """Build the fp8_block GEMM weight and its block scale, once, at setup.
+
+    When ``ue8m0`` is true (the DeepGEMM UE8M0 scale path,
+    ``DEEPGEMM_SCALE_UE8M0``), the weight/scale pair is requantized here via
+    ``requant_weight_ue8m0`` -- the same one-time, load-time repacking
+    SGLang serving performs in
+    ``Fp8LinearMethod.process_weights_after_loading_block_quant``
+    (sglang/srt/layers/quantization/fp8.py:538-563, pinned v0.5.14 clone;
+    re-verified 2026-08-17 at v0.5.17: same method now at fp8.py:648, which
+    calls the extracted helper ``requant_block_scale_ue8m0_for_deepgemm``
+    (fp8_utils.py:1538-1568) -- it still delegates to
+    ``requant_weight_ue8m0_inplace`` unchanged, so the semantics this
+    docstring describes hold at both pinned versions)
+    -- instead of leaving raw fp32 scales for ``deep_gemm::fp8_gemm_nt`` to
+    re-pack on every timed call. When ``ue8m0`` is falsy (Hopper), the
+    weight/scale are returned unpacked, matching serving's fp32-scale path.
+    """
+    fp8_info = torch.finfo(torch.float8_e4m3fn)
+    b_fp32 = (torch.rand(N, K, device=device) - 0.5) * 2 * fp8_info.max
+    b_fp8 = b_fp32.clamp(min=fp8_info.min, max=fp8_info.max).to(torch.float8_e4m3fn)
+    del b_fp32
+    scale_b = torch.randn(scale_shape(b_fp8.shape, (128, 128)), device=device, dtype=torch.float32)
+    if ue8m0:
+        b_fp8, scale_b = requant_weight_ue8m0(b_fp8, scale_b, [128, 128])
+    return b_fp8, scale_b
+
+
 def per_token_quant_int8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize fp32/fp16/bf16 tensor to int8 with per-token scaling"""
     # Calculate per-row (per-token) scaling factor
@@ -172,7 +284,10 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
         # source 49e384ce): "auto" resolves to flashinfer_cutedsl (mm_fp4
         # backend "cute-dsl") when is_sm100_supported() (major 10 -> SM100 and
         # SM103), marlin on SM80-89, and flashinfer_cutlass (mm_fp4 backend
-        # "cutlass") otherwise, which is the SM120 path.
+        # "cutlass") otherwise, which is the SM120 path. Re-verified 2026-08-17
+        # against the v0.5.14 and v0.5.17 tags directly: byte-identical body,
+        # now at fp4_utils.py:149-163 (v0.5.14 tag) / fp4_utils.py:145-159
+        # (v0.5.17) -- this dispatch mapping is unchanged.
         if sm_version in {100, 103}:
             fp4_backend = "cute-dsl"
         elif sm_version == 120:
@@ -226,12 +341,8 @@ def run_gemm(gemm_type, batch_size, N, K, *, perf_filename, device="cuda:0"):  #
             return gemm_op
 
         elif gemm_type == "fp8_block":
-            fp8_info = torch.finfo(torch.float8_e4m3fn)
             a_bf16 = torch.randn(M, K, dtype=dtype, device=device)
-            b_fp32 = (torch.rand(N, K, device=device) - 0.5) * 2 * fp8_info.max
-            b_fp8 = b_fp32.clamp(min=fp8_info.min, max=fp8_info.max).to(torch.float8_e4m3fn)
-            del b_fp32
-            scale_b = torch.randn(scale_shape(b_fp8.shape, (128, 128)), device=device, dtype=torch.float32)
+            b_fp8, scale_b = _prepare_fp8_block_weights(N, K, device, ue8m0=DEEPGEMM_SCALE_UE8M0)
             out = torch.empty((M, N), device=device, dtype=dtype)
 
             def gemm_op():

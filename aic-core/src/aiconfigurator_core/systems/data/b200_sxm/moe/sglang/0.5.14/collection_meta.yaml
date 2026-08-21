@@ -23,4 +23,10 @@ tables:
     # mxfp8 activations — the Blackwell serving default the SDK resolver
     # queries) collected on 8x B200 in the pinned stock 0.5.14 image;
     # zero failures, keys disjoint (dtype axis differs).
+    # 2026-08-16: appended 3159 nvfp4 rows at the Qwen3.5-397B shape
+    # (512 experts, 4096/1024, topk 10, sglang_flashinfer_trtllm_moe,
+    # TP 1-32 x EP 1-256 x 3 distributions x 27 token counts), AIC-1716 —
+    # same case plan as the gb300/gb200 2026-08-13 appends. Auto-collector
+    # pipeline 62894161 on the PR #1519 branch (lmsysorg/sglang:v0.5.14-cu130);
+    # zero failures, keys disjoint from prior rows.
     status: complete

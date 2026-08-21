@@ -9,6 +9,11 @@ runtime:
   image_digest: sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3
 tables:
   gdn_perf:
+    # 2026-08-14 (AIC-1759): appended 54 flashinfer_gated_delta_rule_decode
+    # rows — the SM100+ serving-mandated bf16-state decode lane, 0.51x the
+    # fla fp32 lane at matched keys (state-bytes ratio). First true-b300
+    # collection of this lane (manual JET job, aws-pdx, pipeline 62709074).
+    # Keys disjoint from prior rows.
     collector_ref: 5a1834df2865d291f84f5fc1fbf6f3c99b69afba
     collector_hash: sha256:e18b5b3a83ff649f4955a271b0d3b3680be2c43a5e07e68882b4e91a6991d075
     case_plan_hash: sha256:1e658e78c925cba9773688165ecec208c0c2c2f0b931268cc15a245fc878ac48

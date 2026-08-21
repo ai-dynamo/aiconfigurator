@@ -602,6 +602,9 @@ DefaultHFModels = {
     # Qwen 3.6 Models
     "nvidia/Qwen3.6-27B-NVFP4",
     "nvidia/Qwen3.6-35B-A3B-NVFP4",
+    # Qwen3.8-Max Models
+    "Qwen/Qwen3.8-2.4T-A95B",
+    "Qwen/Qwen3.8-2.4T-A95B-FP8",
     # MiMo Models
     "XiaomiMiMo/MiMo-V2-Flash",
     "XiaomiMiMo/MiMo-7B-Base",
@@ -724,6 +727,9 @@ ARCHITECTURE_TO_MODEL_FAMILY = {
     "Llama4ForConditionalGeneration": "HYBRIDMOE",
     "Qwen3_5ForConditionalGeneration": "QWEN35",
     "Qwen3_5MoeForConditionalGeneration": "QWEN35",
+    # Qwen3.8-Max: FLAT config (no text_config nesting) -- do NOT add to
+    # MULTIMODAL_TEXT_CONFIG_KEY below, unlike the two VLM classes above.
+    "Qwen3_5MoeForCausalLM": "QWEN35",
     "Gemma4ForConditionalGeneration": "GEMMA4MIX",
 }
 

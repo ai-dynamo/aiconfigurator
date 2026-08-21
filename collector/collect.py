@@ -1202,7 +1202,9 @@ def collect_sglang(
 
     requested_ops = _requested_ops(ops, case_plan)
     wideep_ops = {entry.op for entry in _wideep_registry_for_backend("sglang")}
-    runtime = require_collector_runtime("sglang", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
+    runtime = require_collector_runtime(
+        "sglang", version, requested_ops=requested_ops, wideep_ops=wideep_ops, model_path=model_path
+    )
 
     from collector.fullnode import SGLANG_FULLNODE_OPS, collect_sglang_fullnode_op
     from collector.sglang.registry import REGISTRY
@@ -1294,7 +1296,9 @@ def collect_vllm(
 
     requested_ops = set(ops if ops is not None else (case_plan.ops if case_plan is not None else []))
     wideep_ops = {entry.op for entry in _wideep_registry_for_backend("vllm")}
-    runtime = require_collector_runtime("vllm", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
+    runtime = require_collector_runtime(
+        "vllm", version, requested_ops=requested_ops, wideep_ops=wideep_ops, model_path=model_path
+    )
 
     registry = _registry_with_requested_wideep(REGISTRY, "vllm", ops, case_plan)
     collections = build_collections(registry, "vllm", version, ops, logger=logger)
@@ -1358,7 +1362,9 @@ def collect_trtllm(
 
     requested_ops = set(ops if ops is not None else (case_plan.ops if case_plan is not None else []))
     wideep_ops = {entry.op for entry in _wideep_registry_for_backend("trtllm")}
-    runtime = require_collector_runtime("trtllm", version, requested_ops=requested_ops, wideep_ops=wideep_ops)
+    runtime = require_collector_runtime(
+        "trtllm", version, requested_ops=requested_ops, wideep_ops=wideep_ops, model_path=model_path
+    )
 
     registry = _registry_with_requested_wideep(REGISTRY, "trtllm", ops, case_plan)
     collections = build_collections(registry, "trtllm", version, ops, logger=logger)

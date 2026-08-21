@@ -81,6 +81,12 @@ class EngineStepParityCase:
     afd_a_tp_size: int = 1
     afd_a_batch_size: int = 128
     afd_f_moe_ep_size: int = 1
+    # Attention kernel-lane override (`ModelConfig.attention_backend`,
+    # AIC-1715/1716). `None` = no override, i.e. the framework-default lane
+    # heads the precedence order. The op carries the RESOLVED walk order into
+    # the spec, so this is the knob that makes Rust and Python have to agree on
+    # which kernel's measurements answer a query.
+    attention_backend: str | None = None
 
 
 SMOKE_CASES = [
@@ -621,6 +627,87 @@ SMOKE_CASES = [
         ),
         id="kimi-k3-b300-sglang-0516-dspark-nextn7",
     ),
+    # Attention kernel-lane coverage (AIC-1715/1716). b200_sxm/sglang/0.5.14
+    # collects three lanes for the dense attention ops (trtllm_mha, triton,
+    # flashinfer) and 0.5.14 is the first version with a framework-default map
+    # entry, so Qwen3.5-27B's full-attention layers walk a REAL multi-lane
+    # table: the no-override case heads on the map lane (triton) and gap-fills
+    # from trtllm_mha, the override case pins trtllm_mha first. Python resolves
+    # the walk order and Rust replays it verbatim off the op spec, so a drift
+    # in either the resolver or the replay shows up here as a latency split.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3.5-27B",
+            backend_name="sglang",
+            backend_version="0.5.14",
+        ),
+        id="qwen35-27b-b200-sglang-0514-lanes-default",
+    ),
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3.5-27B",
+            backend_name="sglang",
+            backend_version="0.5.14",
+            attention_backend="trtllm_mha",
+        ),
+        id="qwen35-27b-b200-sglang-0514-lanes-trtllm-mha",
+    ),
+    # AIC-1762: Qwen3.8-Max (Qwen3.5-family hybrid GDN + full-attention,
+    # 2.4T-A95B) on gb300/sglang/0.5.17 -- the first end-to-end exercise of
+    # the sparse 0.5.17 data design (moe/gdn/gemm collected; attention/comm/
+    # quantize answer through shared-layer sibling inheritance from 0.5.14,
+    # perf_database.get_database docstring). nextn: resolve_nextn_auto reads
+    # num_nextn_predict_layers from the checkpoint's flat config (no
+    # text_config nesting, common.py:716-718) and finds it absent -> 0; both
+    # cases pin nextn=0 explicitly (the case struct's own field) rather than
+    # relying silently on the dataclass default, so the "no MTP" resolution
+    # is a reviewable decision, not an omission.
+    #
+    # fp8 lane (checkpoint-native fp8_block, auto-inferred from the bundled
+    # -FP8 config's weight_block_size -- utils.py:1213-1215): tp=8 (every
+    # other smoke case's default) OOMs -- the fp8_block checkpoint is
+    # ~2.4TB of weights (1 byte/param) over 8 GPUs. tp=16 (still GDN-head-
+    # divisible: 16 % 16 == 0, 128 % 16 == 0) is the smallest power-of-two
+    # width that fits; moe_ep bumped to 16 to keep tp*dp*cp == moe_tp*moe_ep.
+    # "agg-flavored": bumps agg_batch_size well past the trivial default (2)
+    # so the IFB batch dimension is genuinely exercised at this model's scale.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3.8-2.4T-A95B-FP8",
+            system_name="gb300",
+            backend_name="sglang",
+            backend_version="0.5.17",
+            tp_size=16,
+            moe_tp_size=1,
+            moe_ep_size=16,
+            agg_batch_size=32,
+            nextn=0,
+        ),
+        id="qwen38-max-gb300-sglang-0517-fp8-agg",
+    ),
+    # nvfp4 lane: the bf16 base checkpoint (no quantization_config) forced
+    # onto nvfp4 MoE via the explicit override -- same pattern as the
+    # existing xquant/xprofile HYBRID_CASES below (moe_quant_mode is the
+    # only quant knob the case struct exposes; gemm/attention/kv stay at
+    # their checkpoint-inferred default, bfloat16 here). nvfp4's 0.5625
+    # bytes/param (vs fp8_block's 1) is small enough that the default tp=8
+    # fits without adjustment. "disagg-flavored": bumps the disagg worker/
+    # batch knobs past their trivial defaults (1 prefill worker, 4-request
+    # decode batch) for a genuine disagg-shaped profile.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3.8-2.4T-A95B",
+            system_name="gb300",
+            backend_name="sglang",
+            backend_version="0.5.17",
+            moe_quant_mode="nvfp4",
+            disagg_prefill_num_workers=2,
+            disagg_decode_batch_size=8,
+            disagg_decode_num_workers=2,
+            nextn=0,
+        ),
+        id="qwen38-max-gb300-sglang-0517-nvfp4-disagg",
+    ),
 ]
 
 PARITY_RTOL = 0.01
@@ -831,6 +918,7 @@ def _static_metrics(
         "database_mode": case.database_mode,
         "transfer_policy": case.transfer_policy,
         "moe_quant_mode": case.moe_quant_mode,
+        "attention_backend": case.attention_backend,
     }
     ctx_result = _MemoizedCall(lambda: _quiet_call(cli_estimate, mode="static_ctx", **kwargs))
     gen_result = _MemoizedCall(lambda: _quiet_call(cli_estimate, mode="static_gen", **kwargs))
@@ -883,6 +971,7 @@ def _agg_metrics(case: EngineStepParityCase) -> dict[str, float | _ErrorSentinel
             database_mode=case.database_mode,
             transfer_policy=case.transfer_policy,
             moe_quant_mode=case.moe_quant_mode,
+            attention_backend=case.attention_backend,
         )
 
     # Errors propagate from a single call site — capture once, surface
@@ -927,6 +1016,7 @@ def _disagg_metrics(case: EngineStepParityCase) -> dict[str, float | _ErrorSenti
             database_mode=case.database_mode,
             transfer_policy=case.transfer_policy,
             moe_quant_mode=case.moe_quant_mode,
+            attention_backend=case.attention_backend,
         )
 
     err: _ErrorSentinel | None = None
@@ -1048,6 +1138,7 @@ def _case_model_config(case: EngineStepParityCase) -> config.ModelConfig:
         cp_size=case.cp_size,
         moe_quant_mode=(common.MoEQuantMode[case.moe_quant_mode] if case.moe_quant_mode else None),
         nextn=case.nextn,
+        attention_backend=case.attention_backend,
     )
 
 
@@ -1495,13 +1586,20 @@ CP_CASES = [
 # adjudicated repro shape.
 #
 # Anchored on BOTH the `cp_static_ctx` surface (the adjudicated static repro,
-# 42.430756 ms) and the mixed surface. The mixed anchor additionally pins the
-# `run_mixed` pass-filter fix: Python's passes used to run the FULL op lists
-# and discard the non-consumed values, so the generation-MoE singleton
-# low-token miss in pass 3 (num_tokens=1, one measured point at 1024) raised
-# on the Python side only, while the rust mixed step never queries the ops it
-# does not consume. With the passes filtered to their consumed sets the case
-# computes bit-identically on both engines (46.0492671363915 ms).
+# 41.737710 ms) and the mixed surface. cp_static_ctx was re-pinned from
+# 42.430756 ms for AIC-1759's b200_sxm sglang/0.5.14 gemm_perf replacement:
+# systems/data/b200_sxm/gemm/sglang/0.5.12/reuse.yaml declares gemm_perf
+# from_version 0.5.14 as this case's own donor, so the deliberate GEMM data
+# update shifts this anchor too, independent of the dsv4-sparse-table reuse
+# the case otherwise pins (re-pinned via pin_goldens.py --refresh; mixed is
+# unaffected, still bit-identical on both engines at the value below). The
+# mixed anchor additionally pins the `run_mixed` pass-filter fix: Python's
+# passes used to run the FULL op lists and discard the non-consumed values,
+# so the generation-MoE singleton low-token miss in pass 3 (num_tokens=1,
+# one measured point at 1024) raised on the Python side only, while the
+# rust mixed step never queries the ops it does not consume. With the
+# passes filtered to their consumed sets the case computes bit-identically
+# on both engines (46.0492671363915 ms).
 DSV4_CP_CASES = [
     pytest.param(
         EngineStepParityCase(
@@ -1575,7 +1673,12 @@ class TestRustEngineHandleDatabasePolicyIdentity:
     computing for the primary-only off-view that must raise).
     """
 
-    ANCHOR_MS = 42.4307555484161  # the issue #1498 adjudicated static_ctx sum
+    # The issue #1498 adjudicated static_ctx sum for DSV4_CP_CASES[0] (same
+    # shape `TestRustEngineStepCpStaticCtxParity` pins as `cp_static_ctx`).
+    # Re-pinned from 42.4307555484161 for AIC-1759's b200_sxm sglang/0.5.14
+    # gemm_perf replacement -- see the DSV4_CP_CASES comment above for why a
+    # deliberate GEMM data update shifts this reuse-carrying case's anchor.
+    ANCHOR_MS = 41.73771024187921
 
     def _static_ctx_ms(self, model, view) -> float:
         rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=8192, osl=8, prefix=0, engine_step_backend="rust")
