@@ -16,9 +16,14 @@ from dataclasses import dataclass
 import torch
 
 try:
-    from collector.helper import balanced_logits, power_law_logits_v3, sample_power_law
+    from collector.helper import (
+        _router_logits_from_selected_experts,
+        balanced_logits,
+        power_law_logits_v3,
+        sample_power_law,
+    )
 except ImportError:
-    from helper import balanced_logits, power_law_logits_v3, sample_power_law
+    from helper import _router_logits_from_selected_experts, balanced_logits, power_law_logits_v3, sample_power_law
 
 
 SAMPLED_POWER_LAW_DISTRIBUTION = "power_law_sampled_1.9"
@@ -172,8 +177,6 @@ def sampled_power_law_logits(num_tokens: int, num_experts: int, topk: int, ep: i
     without replacement, matching the discrete shape produced by a real router
     without adding latency correction factors.
     """
-    import torch.nn.functional as F
-
     if topk > num_experts:
         raise ValueError(f"topk={topk} cannot exceed num_experts={num_experts}")
     if num_tokens <= 0:
@@ -190,8 +193,7 @@ def sampled_power_law_logits(num_tokens: int, num_experts: int, topk: int, ep: i
         selected_batches.append(torch.multinomial(batch_weights, topk, replacement=False))
     selected_experts = torch.cat(selected_batches, dim=0).to(dtype=torch.int64, device="cpu")
     selected_experts = _swap_max_rank_to_rank0(selected_experts, num_experts=num_experts, ep=ep)
-    expert_map = F.one_hot(selected_experts, num_classes=num_experts).sum(1)
-    return F.softmax(expert_map.bfloat16(), dim=1)
+    return _router_logits_from_selected_experts(selected_experts, num_experts)
 
 
 def _validate_plan(

@@ -25,6 +25,7 @@ try:
         _sampled_power_law_xmax,
         build_routing_plan,
         parse_distribution,
+        sampled_power_law_logits,
     )
 finally:
     if _restore_mock:
@@ -103,6 +104,40 @@ def test_sampled_power_law_builds_valid_routing_plan():
     assert tuple(plan.local_topk_ids.shape) == (16, 6)
     assert torch.all(plan.local_topk_ids >= 0)
     assert torch.all(plan.local_topk_ids < 384)
+
+
+@pytest.mark.unit
+def test_sampled_power_law_logits_do_not_materialize_one_hot(monkeypatch):
+    import torch.nn.functional as functional
+
+    def fail_one_hot(*_args, **_kwargs):
+        raise AssertionError("sampled routing must not materialize a one-hot cube")
+
+    monkeypatch.setattr(functional, "one_hot", fail_one_hot)
+    torch.manual_seed(123)
+    logits = sampled_power_law_logits(128, 64, 4, 8, 1.9)
+
+    assert logits.shape == (128, 64)
+    assert logits.dtype == torch.bfloat16
+
+
+@pytest.mark.unit
+def test_sampled_power_law_scatter_is_bit_identical_to_legacy_one_hot():
+    import torch.nn.functional as functional
+
+    from collector.sglang import dsv4_megamoe_workload as workload
+
+    torch.manual_seed(123)
+    actual = sampled_power_law_logits(128, 64, 4, 8, 1.9)
+
+    torch.manual_seed(123)
+    expert_weights = workload.sample_power_law(64, 1.9, 1, workload._sampled_power_law_xmax(128))
+    expert_weights = expert_weights.to(dtype=torch.float64, device="cpu").clamp_min(1e-20)
+    selected_experts = torch.multinomial(expert_weights.expand(128, -1).contiguous(), 4, replacement=False)
+    selected_experts = workload._swap_max_rank_to_rank0(selected_experts, num_experts=64, ep=8)
+    expected = functional.softmax(functional.one_hot(selected_experts, num_classes=64).sum(1).bfloat16(), dim=1)
+
+    assert torch.equal(actual, expected)
 
 
 @pytest.mark.unit
