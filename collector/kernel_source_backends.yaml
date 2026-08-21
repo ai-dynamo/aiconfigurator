@@ -272,6 +272,7 @@ mappings:
   - {framework: vllm, kernel_source: vllm_unquantizedfusedmoe_triton_tritonexperts, backend: triton_fused_moe, source: "PR#1344 collect_moe.py (label encodes oracle backend + experts class)"}
   - {framework: vllm, kernel_source: vllm_unquantizedfusedmoe_flashinfer_cutlass_flashinferexperts, backend: flashinfer_cutlass, source: "PR#1344 collect_moe.py"}
   - {framework: vllm, kernel_source: vllm_unquantizedfusedmoe_flashinfer_trtllm_trtllmbf16experts, backend: flashinfer_trtllm_gen, source: "PR#1344 collect_moe.py"}
+  - {framework: vllm, kernel_source: vllm_unquantizedfusedmoe_flashinfer_trtllm_trtllmbf16expertsmonolithic, backend: flashinfer_trtllm_gen, source: "collector/vllm/collect_moe.py:772 (label = quant method + oracle backend enum + leaf experts class); leaf class TrtLlmBf16ExpertsMonolithic first appears at v0.27.1 — select_unquantized_moe_backend resolves FLASHINFER_TRTLLM on SM100/103 (experts/trtllm_bf16_moe.py:61-69,202-227@v0.27.1), traced in AIC-1782 Task V2 (cases/models/Qwen3_5MoeForCausalLM_cases.yaml MoE base-row comment); monolithic sibling of the trtllmbf16experts entry above"}
   - {framework: vllm, kernel_source: vllm_fp8moe_triton_tritonexperts, backend: triton_fused_moe, source: "PR#1344 collect_moe.py"}
   - {framework: vllm, kernel_source: vllm_fp8moe_flashinfer_cutlass_flashinferexperts, backend: flashinfer_cutlass, source: "PR#1344 collect_moe.py"}
   - {framework: vllm, kernel_source: vllm_fp8moe_flashinfer_trtllm_trtllmfp8expertsmodular, backend: flashinfer_trtllm_gen, source: "PR#1344 collect_moe.py"}

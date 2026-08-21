@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+runtime:
+  framework: vllm
+  version: 0.27.1
+  image: vllm/vllm-openai:v0.27.1
+  image_digest: sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967
+tables:
+  gemm_perf:
+    # 2026-08-22 (AIC-1782): Qwen3.8-Max GEMM silicon rows at vllm 0.27.1
+    # -- full base grid (bfloat16/fp8/fp8_block/nvfp4) plus the
+    # below-grid extras at k=8192 (n=1: scalar shared-expert gate; n=16:
+    # GDN in_proj_ba at tp16) needed for this model's shapes.
+    # Sparse version: only Qwen3.8-Max rows live at 0.27.1; every other
+    # shape at this version inherits 0.24.0 via shared-layer query-time
+    # fallback.
+    # Auto-collect child pipeline 63879009 (project 205688, job
+    # 406658099) with AIC_BACKEND_DOCKER_IMAGE=
+    # vllm/vllm-openai:v0.27.1 pinned explicitly (the pipeline's Blackwell
+    # image-suffix logic would otherwise request a nonexistent
+    # v0.27.1-cu130 tag), collector branch state
+    # yimingl/aic-1782-qwen38-max-vllm@d85bd1f5.
+    # 74 AssertionError raises recorded in this run's
+    # errors_vllm.gemm.json, all fp8_block at the n=1 extras: vLLM's
+    # cutlass_scaled_mm entry falls back to triton_scaled_mm for this
+    # shape (_custom_ops.py:799 @v0.27.1), which supports per-tensor /
+    # per-row scales only and asserts on the 128x128 block-scale shapes --
+    # the n=1 fp8_block lane cannot run on this stack, not a collector
+    # defect; the other three dtypes carry the full n=1 grid. fp8_block
+    # dispatch is shape-split between CutlassFp8BlockScaledMMKernel (4810
+    # rows) and DeepGemmFp8BlockScaledMMKernel (31006 rows); both labels
+    # are real runtime kernels. 143486 = 3 x 35890 + 35816. Zero other
+    # failures; keys disjoint from every other version.
+    collector_ref: yimingl/aic-1782-qwen38-max-vllm@d85bd1f550ba527761aca33ad4fdb1545652dfc1
+    collector_hash: sha256:986c43b7a34db368ee914c3c8c71a0ef92f34849f2a4e6c4adabef4da6db673f
+    case_plan_hash: sha256:eb1be4e40f12042d3a61504612913dc1424e0f3b11463820634e0cb7c4748b8c
+    collected_at: '2026-08-21'
+    rows: 143486
+    status: complete

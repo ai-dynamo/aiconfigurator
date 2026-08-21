@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+runtime:
+  framework: vllm
+  version: 0.27.1
+  image: vllm/vllm-openai:v0.27.1
+  image_digest: sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967
+tables:
+  gdn_perf:
+    # 2026-08-22 (AIC-1782): Qwen3.8-Max GDN silicon rows (16 k-heads /
+    # 128 v-heads at head dims 128/128, shard ladder tp1..tp16) at vllm
+    # 0.27.1.
+    # Sparse version: only Qwen3.8-Max rows live at 0.27.1; every other
+    # shape at this version inherits 0.24.0 via shared-layer query-time
+    # fallback.
+    # Manual JET pipeline 63873278 (dl/jet/ci downstream 63873324, job
+    # 406619569) on aws-pdx, same image mirrored as gitlab
+    # yimingl/aic-eval-tools/vllm:v0.27.1-amd64 (the runtime block above is
+    # the collected meta verbatim: canonical tag + the framework manifest's
+    # pinned default-variant digest), collector branch state
+    # yimingl/aic-1782-qwen38-max-vllm@d85bd1f5. The JET handoff carried
+    # the tables + collection meta only (no per-task error log); every
+    # claim below about failure evidence therefore cites the logged
+    # systems, and this table was verified key-for-key identical to
+    # b200_sxm's before landing.
+    # Context runs both lanes at every point (560 rows each:
+    # causal_conv1d_fn + chunk_gated_delta_rule_flashinfer); generation
+    # runs causal_conv1d_update (54 rows) + fla fused_recurrent packed
+    # decode (52 rows) -- 4 rows short of plan at the same two
+    # largest-batch decode points as the logged systems, where grid-y =
+    # batch x num_v_heads (65536) exceeds the CUDA 65535 wall; launch
+    # geometry is system-independent and the raise evidence lives in the
+    # b200_sxm/gb200/gb300 runs' errors_vllm.gdn.json. Keys disjoint from
+    # every other version.
+    collector_ref: yimingl/aic-1782-qwen38-max-vllm@d85bd1f550ba527761aca33ad4fdb1545652dfc1
+    collector_hash: sha256:cc674e0588264d67c78275c6010bcefd6c16dddc5491b503c6a2049886defbb3
+    case_plan_hash: sha256:5c7717788dd8501f475117e1669c275bd801caa84278cd34582e4277886ded9a
+    collected_at: '2026-08-21'
+    rows: 1226
+    status: complete
