@@ -6,40 +6,22 @@ runtime:
   framework: vllm
   version: 0.27.0
   image: vllm/vllm-openai:v0.27.0
-  # arm64 entry of the v0.27.0 multi-arch index (verified in-container on
-  # GB300/SM103: runtime reports vllm 0.27.0, torch 2.13.0+cu130; DeepGEMM is
-  # vendored as vllm.third_party.deep_gemm -- NO site-packages install).
+  # Arm64 entry of the v0.27.0 multi-arch image used on GB300/SM103.
   image_digest: sha256:7441a0579b7974fe00eec2c41a5710bcd0dc3dafc03edcdc5663158dd68286cf
 tables:
-  # Kimi-K3 MegaMoE module rows on the vLLM lane (pre_dispatch=vllm;
-  # buffer_policy=cached_vllm). 256 rows: EP=4/8/16/32 x (context 24 +
-  # generation 40) over 4 routing distributions, w4a8_mxfp4_mxfp8/fp8_fp4,
-  # collected 2026-08-13 on GB300 via the shared harness:
-  #   torchrun collector/vllm/collect_k3_megamoe.py --system-name gb300 \
-  #       --version 0.27.0 --output-path <staging>
-  # SiTU per lane: vLLM passes activation="situ" with activation_clamp=None
-  # (vllm/models/kimi_k3/nvidia/model.py:741 @ v0.27.0), sglang keys the same
-  # kernel off the activation_clamp==0.03125 sentinel -- mix-ups benchmark a
-  # kernel path serving never runs. Routed scaling: vLLM folds
-  # routed_scaling_factor into fused_grouped_topk, so the identity mul (K3
-  # factor 1.0) stays in the timed region to keep includes_routed_scale=true
-  # honest. validate_perf PASS per EP and for the merged table.
-  # collector_ref is the collection-time parent commit (the lane shipped with
-  # the rows); collector_hash covers the actual harness file bytes used.
+  # Recollected 2026-08-21 from the committed abbe8b6 collector closure.
+  # The 256 rows cover EP 4/8/16/32, context 24 + generation 40 per EP,
+  # balanced/power_law_1.01/power_law_1.2/power_law_sampled_1.9 routing,
+  # pre_dispatch=vllm, buffer_policy=cached_vllm, and the vendored vLLM
+  # deep_gemm.fp8_fp4_mega_moe kernel. Every EP run exited zero and passed
+  # validate_perf; the merged table has no duplicate loader keys.
+  # EP32 used eight 4-GPU hosts in nvidia.com/gb300-node=node2. A 32-rank
+  # transport smoke immediately before collection observed NET/IB on all
+  # hosts, P2P/MNNVL rings, GDR=1, and zero NET/Socket selections.
   dsv4_megamoe_module_perf:
-    collector_ref: 9b71d8d121f638b951fb0f0177a83c89373fb59c
-    # collector_hash is computed over the CLOSURE AS SHIPPED (which now includes
-    # the vLLM lane wrapper collector/vllm/collect_k3_megamoe.py). Honesty note:
-    # the 2026-08-13 collection ran from mid-development working-tree bytes and
-    # its recorded hash (sha256:f32c9ebe...) is not reproducible from any git
-    # state; the behavior-affecting deltas vs the collected closure are (a) the
-    # tail-mask hoist out of the timed region (rows carry a small PESSIMISTIC
-    # overhead, especially at small decode shapes — safe direction) and (b)
-    # non-timing changes only (lane arg gating, doc/comments). Both are covered
-    # in this PR's review thread. Refresh the rows+hash together on the next
-    # re-collection.
-    collector_hash: sha256:8995d04c90def9bf9e5cd511706b1bc5afa5afa4a226275f2ae5fa9fabd227fc
+    collector_ref: abbe8b6f504d50a07da4c6f5575f49eb4d0067a4
+    collector_hash: sha256:72800f900313fe9f50f4885390f974a62644027daa89f539593c1c6125d59781
     case_plan_hash: sha256:4ae27f93d317ac0f79562c627818dcf214221edf2508fbddc0197f803d4a3531
-    collected_at: '2026-08-13'
+    collected_at: '2026-08-21'
     rows: 256
     status: complete
