@@ -2407,9 +2407,9 @@
       },
       "disagg": {
         "values": {
-          "disagg_request": 160.007,
-          "disagg_tpot": 14.824,
-          "disagg_ttft": 145.183
+          "disagg_request": 159.257,
+          "disagg_tpot": 14.641,
+          "disagg_ttft": 144.616
         }
       },
       "mixed": {
@@ -2419,9 +2419,9 @@
       },
       "static": {
         "values": {
-          "static_ctx": 73.325,
-          "static_gen": 10.545,
-          "static_total": 83.87
+          "static_ctx": 73.038,
+          "static_gen": 10.238,
+          "static_total": 83.276
         }
       }
     },
@@ -2600,7 +2600,7 @@
     },
     "qwen38-max-gb300-sglang-0517-fp8-agg::disagg": {
       "engine": "rust",
-      "git_head": "4648eb5bebfa4981cd3e0889d9cb473ddf090534"
+      "git_head": "751f605b93ab34e894a8beb7d89b5c0b76cf7459"
     },
     "qwen38-max-gb300-sglang-0517-fp8-agg::mixed": {
       "engine": "rust",
@@ -2608,7 +2608,7 @@
     },
     "qwen38-max-gb300-sglang-0517-fp8-agg::static": {
       "engine": "rust",
-      "git_head": "4648eb5bebfa4981cd3e0889d9cb473ddf090534"
+      "git_head": "751f605b93ab34e894a8beb7d89b5c0b76cf7459"
     },
     "qwen38-max-gb300-sglang-0517-nvfp4-disagg::agg": {
       "engine": "rust",
