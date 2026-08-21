@@ -109,6 +109,8 @@ def main() -> None:
     ap.add_argument("--model", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--trust-remote-code", action="store_true")
+    ap.add_argument("--engine-yaml", default=None,
+                    help="generator-rendered extra_engine_args yaml (dynamo.trtllm contract)")
     args = ap.parse_args()
     rec: dict = {"model_path": args.model, "errors": {}}
 
@@ -138,7 +140,7 @@ def main() -> None:
         from tensorrt_llm import LLM
         from tensorrt_llm.llmapi import KvCacheConfig
 
-        llm = LLM(
+        kwargs = dict(
             model=args.model,
             load_format="dummy",
             trust_remote_code=args.trust_remote_code,
@@ -146,6 +148,44 @@ def main() -> None:
             max_batch_size=8,
             max_seq_len=4096,
         )
+        if args.engine_yaml:
+            import yaml as _yaml
+            eng = _yaml.safe_load(open(args.engine_yaml)) or {}
+            rec["engine_yaml"] = dict(eng)
+            probe_overrides = {}
+            # empty template slots render as None — dropping them mirrors
+            # dynamo.trtllm, which also skips unset keys
+            eng = {k: v for k, v in eng.items() if v is not None}
+            # backend: pytorch is llmapi's constructor CHOICE, not an arg
+            if eng.pop("backend", None) not in (None, "pytorch"):
+                probe_overrides["backend"] = "non-pytorch backend requested; probe uses llmapi pytorch LLM"
+            kvc = dict(eng.pop("kv_cache_config", {}) or {})
+            # identity probe: cap the pool (tiny dummies + fraction sizing OOMed
+            # sglang at 138GB; same hazard here) — keep dtype/block identity keys
+            if kvc.pop("free_gpu_memory_fraction", None) is not None:
+                probe_overrides["kv_cache_config.free_gpu_memory_fraction"] = "replaced by max_tokens=16384 cap"
+            kvc["max_tokens"] = 16384
+            kwargs["kv_cache_config"] = KvCacheConfig(**kvc)
+            # identity probe runs eager, matching the sglang probe
+            if eng.pop("cuda_graph_config", None) is not None:
+                probe_overrides["cuda_graph_config"] = "dropped: identity probe runs eager"
+            kwargs.update(eng)
+            rec["probe_overrides"] = probe_overrides
+        # unknown kwargs are drift facts (template ahead of / behind llmapi)
+        rec["engine_yaml_unknown_args"] = []
+        for _ in range(8):
+            try:
+                llm = LLM(**kwargs)
+                break
+            except TypeError as te:
+                import re as _re
+                m = _re.search(r"unexpected keyword argument '([^']+)'", str(te))
+                if not m or m.group(1) not in kwargs:
+                    raise
+                rec["engine_yaml_unknown_args"].append(m.group(1))
+                kwargs.pop(m.group(1))
+        else:
+            raise RuntimeError("LLM kwargs never converged")
         rec["llm_class"] = type(llm).__qualname__
         rec["executor_class"] = type(getattr(llm, "_executor", None)).__qualname__
 
