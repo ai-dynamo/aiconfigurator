@@ -70,6 +70,41 @@ def render_sglang_cli(model_dir_in_container: str, tp: int, version: str) -> str
     return " ".join(arts["cli_args_agg"].split())
 
 
+def render_trtllm_engine_yaml(run: dict) -> str:
+    """dynamo.trtllm path: the generator renders extra_engine_args yaml; the
+    probe feeds it to llmapi (same contract the deployment worker uses)."""
+    from aiconfigurator.generator.rendering.engine import render_backend_templates
+
+    model = run["model_dir"]
+    params = {
+        "ServiceConfig": {"model_path": model, "served_model_path": model,
+                          "served_model_name": "probe", "include_frontend": False},
+        "K8sConfig": {"name_prefix": "probe", "k8s_namespace": "default", "k8s_image": run["image"],
+                      "k8s_pvc_name": "x", "k8s_pvc_mount_path": WORK, "k8s_model_path_in_pvc": "m",
+                      "k8s_model_cache": "x", "k8s_hf_home": model, "extra_env": []},
+        "DynConfig": {"mode": "agg"},
+        "WorkerConfig": {"agg_workers": 1, "agg_gpus_per_worker": run["tp"],
+                         "prefill_workers": 0, "decode_workers": 0},
+        "NodeConfig": {"system_name": "h200_sxm", "num_gpus_per_node": 8},
+        "SlaConfig": {"isl": 1024, "osl": 256},
+        "ModelConfig": model_config_from_dummy(model),
+        "BenchConfig": {},
+        "params": {"agg": {"tensor_parallel_size": run["tp"], "pipeline_parallel_size": 1,
+                           "data_parallel_size": 1, "gpus_per_worker": run["tp"],
+                           "max_batch_size": 64, "max_num_tokens": 4096, "max_seq_len": 8192,
+                           "tokens_per_block": 64, "trust_remote_code": True,
+                           "extra_cli_args": []}},
+    }
+    if run.get("kvcache_quant_mode") == "fp8":
+        # module_bridge.py:140 — deployment passes kvcache_quant_mode through
+        params["params"]["agg"]["kv_cache_dtype"] = "fp8"
+    for k, v in (run.get("render_overrides") or {}).items():
+        params["params"]["agg"][k] = v
+    arts = render_backend_templates(params, "trtllm", version=run["version"])
+    key = next(k for k in arts if k.startswith("extra_engine_args"))
+    return arts[key]
+
+
 def derive_roster_checkpoints(fam: dict, targets: dict) -> list[dict]:
     """Roster checkpoints DERIVED from the collector's own case declarations:
     every org/repo its cases yamls mention, minus gated repos and repos owned
@@ -266,15 +301,20 @@ def emit_queues(runs: list[dict], n_gpus: int, gpu_offset: int, plan_name: str) 
             cmd = (head + f"--entrypoint python3 {run['image']} {WORK}/probe/probe_vllm.py "
                    f"--run-sh {WORK}/archive/run_sh/{run['id']}.sh --model-override {run['model_dir']} "
                    f"--trace --out {WORK}/archive/raw/{run['id']}.json 2>&1 | tail -1 ; }}")
-        else:  # trtllm: probe-default engine args (generator fidelity pending)
-            run["engine_args_fidelity"] = "probe-defaults"
+        else:  # trtllm: generator-rendered extra_engine_args (dynamo.trtllm contract)
+            eyml = ROOT / "archive" / "run_sh" / f"{run['id']}.engine.yaml"
+            eyml.write_text(render_trtllm_engine_yaml(run))
+            run["engine_args_fidelity"] = "generator-rendered"
+            run["render_artifact"] = str(eyml)
             # any checkpoint with custom code (auto_map) needs it; cheapest
             # correct rule is to always pass it for dummy probing
             trc = "--trust-remote-code "
             cmd = (head.replace("docker run --rm ",
                                 "docker run --rm -e TLLM_WORKER_USE_SINGLE_PROCESS=1 ")
                    + f"{run['image']} bash -lc 'python3 {WORK}/probe/probe_trtllm.py "
-                   f"--model {run['model_dir']} {trc}--out {WORK}/archive/raw/{run['id']}.json' "
+                   f"--model {run['model_dir']} {trc}"
+                   f"--engine-yaml {WORK}/archive/run_sh/{run['id']}.engine.yaml "
+                   f"--out {WORK}/archive/raw/{run['id']}.json' "
                    f"2>&1 | tail -1 ; }}")
         queues[g].append(cmd)
     for g, cmds in queues.items():
