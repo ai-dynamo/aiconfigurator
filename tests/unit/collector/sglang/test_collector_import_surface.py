@@ -34,7 +34,6 @@ the sglang surface specifically, per the actual incident.
 """
 
 import importlib.util
-import subprocess
 import sys
 import types
 from pathlib import Path
@@ -45,10 +44,6 @@ import pytest
 pytestmark = pytest.mark.unit
 REPO_ROOT = Path(__file__).resolve().parents[4]
 COLLECTOR_DIR = REPO_ROOT / "collector"
-
-# The commit immediately before the server_args fix -- "vs 0.5.14-shaped"
-# on prefix code proves the bug is 0.5.17-specific, not a general break.
-PRE_FIX_COMMIT = "f5b49140a581809b3031775883fc1c2e55132c96"
 
 
 # ---------------------------------------------------------------------------
@@ -107,19 +102,6 @@ def _import_fresh(monkeypatch, dotted_name: str, source_path: Path) -> types.Mod
     monkeypatch.setitem(sys.modules, dotted_name, module)
     spec.loader.exec_module(module)
     return module
-
-
-def _prefix_source_text(relative_path: str) -> str:
-    """The real file's content as of PRE_FIX_COMMIT (git-blob read, no
-    working-tree mutation)."""
-    result = subprocess.run(
-        ["git", "show", f"{PRE_FIX_COMMIT}:{relative_path}"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +184,48 @@ SGLANG_0517_MOE_SURFACE = {
 _COLLECT_MOE_PATH = COLLECTOR_DIR / "sglang" / "collect_moe.py"
 _COLLECT_MOE_DOTTED = "collector.sglang.collect_moe"
 
+# Verbatim pre-fix excerpt: collector/sglang/collect_moe.py lines 60-86 at
+# commit f5b49140a581809b3031775883fc1c2e55132c96 (the commit immediately
+# before the server_args fix), truncated right after the module-level
+# `_global_server_args` mock block whose bare attribute read (line 78
+# there) is the exact statement that crashed the first real-GPU 0.5.17 run.
+# "vs 0.5.14-shaped" on this exact pre-fix code proves the bug is
+# 0.5.17-specific, not a general break. Embedded as a string constant
+# instead of a `git show` read: that commit is a branch-head object that
+# squash-merge-only main and base-branch rebases leave unreachable on fresh
+# clones -- this test's `git show` hard-errored in CI with
+# CalledProcessError 128 after a base-branch rebase orphaned the pinned
+# commit.
+_PRE_FIX_MOE_SNIPPET = """\
+import gc
+import importlib
+import itertools
+import os
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
+from typing import TypedDict
+from unittest.mock import MagicMock
+
+import pkg_resources
+
+# Mock global server args before importing MOE modules (required by SGLang 0.5.5+)
+# The fused_moe_triton_config module now requires get_global_server_args() to be set
+import sglang.srt.server_args as _server_args_module
+import torch
+
+if _server_args_module._global_server_args is None:
+    _mock_server_args = MagicMock()
+    _mock_server_args.enable_deterministic_inference = False
+    _mock_server_args.enable_fused_moe_sum_all_reduce = (
+        False  # SGLang 0.5.14; prevents fused all-reduce in single-GPU benchmarks
+    )
+    _mock_server_args.kt_weight_path = None
+    _mock_server_args.flashinfer_mxfp4_moe_precision = "default"
+    _server_args_module._global_server_args = _mock_server_args
+"""
+
 
 class TestCollectMoeImportSurface:
     def test_imports_cleanly_against_0514_shaped_sglang(self, monkeypatch):
@@ -214,29 +238,27 @@ class TestCollectMoeImportSurface:
 
     def test_0517_shaped_fake_reproduces_the_real_bug_on_prefix_code(self, monkeypatch, tmp_path):
         """Proves red on a scratch revert, per the review's explicit ask:
-        exec the git blob from immediately before this fix (PRE_FIX_COMMIT)
+        exec the embedded verbatim pre-fix excerpt (_PRE_FIX_MOE_SNIPPET)
         against the exact same 0.5.17-shaped fake the tests above use, and
         confirm it fails with the exact real-world AttributeError -- not an
         assumption about what "should" happen."""
         scratch_file = tmp_path / "collect_moe.py"
-        scratch_file.write_text(_prefix_source_text("collector/sglang/collect_moe.py"))
+        scratch_file.write_text(_PRE_FIX_MOE_SNIPPET)
 
         _install_fake_sglang(monkeypatch, SGLANG_0517_MOE_SURFACE)
-        monkeypatch.syspath_prepend(str(COLLECTOR_DIR))  # bare case_generator/helper fallback imports
 
         with pytest.raises(AttributeError, match="_global_server_args"):
             _import_fresh(monkeypatch, _COLLECT_MOE_DOTTED, scratch_file)
 
     def test_prefix_code_was_fine_against_0514_shaped_sglang(self, monkeypatch, tmp_path):
-        """Companion to the test above: the prefix code was never broken in
+        """Companion to the test above: the pre-fix code was never broken in
         general, only against 0.5.17's shape -- confirms the bug (and this
         regression test) is version-specific, not a false alarm that would
         have failed either way."""
         scratch_file = tmp_path / "collect_moe.py"
-        scratch_file.write_text(_prefix_source_text("collector/sglang/collect_moe.py"))
+        scratch_file.write_text(_PRE_FIX_MOE_SNIPPET)
 
         _install_fake_sglang(monkeypatch, SGLANG_0514_MOE_SURFACE)
-        monkeypatch.syspath_prepend(str(COLLECTOR_DIR))
 
         _import_fresh(monkeypatch, _COLLECT_MOE_DOTTED, scratch_file)
 
