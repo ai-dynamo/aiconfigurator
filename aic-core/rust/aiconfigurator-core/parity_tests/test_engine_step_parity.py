@@ -708,6 +708,75 @@ SMOKE_CASES = [
         ),
         id="qwen38-max-gb300-sglang-0517-nvfp4-disagg",
     ),
+    # AIC-1782: the vllm/0.27.1 twin of the sglang 0.5.17 cases above -- the
+    # first end-to-end exercise of the sparse vllm/0.27.1 data design (moe/
+    # gdn/gemm collected on Blackwell; attention/comm/quantize answer through
+    # shared-layer sibling inheritance from 0.24.0). nextn: same resolution
+    # as the sglang pair -- resolve_nextn_auto (config_builders.py) finds no
+    # num_nextn_predict_layers in the checkpoint's flat config -> 0; pinned
+    # explicitly so the "no MTP" decision stays reviewable.
+    #
+    # fp8 lane (checkpoint-native fp8_block from the bundled -FP8 config's
+    # weight_block_size -- utils.py:1213-1215): tp=16 mirrors both the sglang
+    # case's footprint rationale (~2.4TB of fp8 weights; tp=8 OOMs on the
+    # agg/disagg memory gate here too) and the deployment reference (the
+    # dynamo qwen3.8-2.4t-a95b-fp8 recipe deploys vllm at TP16); moe_ep=16
+    # keeps tp*dp*cp == moe_tp*moe_ep. MoE prices from the collected
+    # flashinfer_trtllm fp8 monolithic lane and GDN decode from the collected
+    # fused_recurrent packed-decode rows (load-time label canonicalization);
+    # the GDN CONTEXT scan currently resolves the sglang 0.5.17
+    # chunk_gated_delta_rule donor rows instead of the collected vllm
+    # chunk_gated_delta_rule_flashinfer rows -- query_gdn's physical-lane
+    # alias walk is version-pinned to vllm 0.24.0 (state_space.rs), a known
+    # gap flagged in the AIC-1782 V5a report; widening that gate is a
+    # deliberate modeling change that re-pins these goldens.
+    # "agg-flavored" like its sglang twin: agg_batch_size well past the
+    # trivial default.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3.8-2.4T-A95B-FP8",
+            system_name="gb300",
+            backend_name="vllm",
+            backend_version="0.27.1",
+            tp_size=16,
+            moe_tp_size=1,
+            moe_ep_size=16,
+            agg_batch_size=32,
+            nextn=0,
+        ),
+        id="qwen38-max-gb300-vllm-0271-fp8-agg",
+    ),
+    # bfloat16 lane -- NOT nvfp4 like the sglang twin: the RadixArk NVFP4
+    # row's vllm quant gate is fail-closed (allowed_modes [], AIC-1782 Task
+    # V2) and only the base id was collected, so there is no vllm/0.27.1
+    # nvfp4 moe silicon to pin against; bfloat16 is the other collected lane
+    # (the flashinfer_trtllm bf16 monolithic kernel). Parallelism: the bf16
+    # checkpoint is ~4.9TB (2 bytes/param), over tp=16 that is ~306GB/GPU >
+    # gb300's 284GB -- the agg/disagg memory gate raises OOM -- and tp=32 has
+    # ZERO collected moe rows (the kernel family rejects local inter_size
+    # 2048/32 = 64 < 128), so the case goes tp=16 x pp=2 (~153GB/GPU): pp is
+    # a modeled axis of the case struct (first SMOKE case to exercise pp>1),
+    # and pp splits layers across stages without touching the per-stage MoE
+    # width, so lookups stay on the collected tp<=16 grid and
+    # tp*dp*cp == moe_tp*moe_ep still holds at 16. "disagg-flavored" like
+    # its sglang twin: same non-trivial prefill/decode worker+batch knobs.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3.8-2.4T-A95B",
+            system_name="gb300",
+            backend_name="vllm",
+            backend_version="0.27.1",
+            tp_size=16,
+            pp_size=2,
+            moe_tp_size=1,
+            moe_ep_size=16,
+            disagg_prefill_num_workers=2,
+            disagg_decode_batch_size=8,
+            disagg_decode_num_workers=2,
+            nextn=0,
+        ),
+        id="qwen38-max-gb300-vllm-0271-bf16-disagg",
+    ),
 ]
 
 PARITY_RTOL = 0.01
