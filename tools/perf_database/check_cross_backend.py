@@ -141,16 +141,6 @@ _LATENCY_COMPONENT_SETS = (
 # Derived output metrics that must never enter the shape key.
 _DERIVED_METRIC_SUFFIXES = ("_bandwidth_gbps",)
 
-# Implementation-variant columns, per op file: not shapes but alternative
-# implementations of the same measurement (e.g. custom_allreduce's
-# eager/graph modes, named `backend` by sglang/vllm and `implementation`
-# by trtllm). Folded into kernel_source at load so the per-shape min
-# reduction, suspect attribution, and kernel_choice_cost all apply to them —
-# and so cross-backend pairs join instead of dying with schema_mismatch.
-_VARIANT_COLUMNS = {
-    "custom_allreduce_perf.parquet": ("backend", "implementation"),
-}
-
 
 class _SchemaUnsupportedError(Exception):
     """No recognized latency column or component set in the table."""
@@ -287,10 +277,6 @@ def _load_op_table(path: Path, backend: str, version: str) -> tuple[OpTable | No
     latency, unit_col, latency_excluded = _resolve_latency(df)
     if "kernel_source" not in df.columns:
         df["kernel_source"] = "<unknown>"
-    for col in _VARIANT_COLUMNS.get(path.name, ()):
-        if col in df.columns:
-            df["kernel_source"] = df["kernel_source"].astype(str) + "/" + df[col].astype(str)
-            df = df.drop(columns=[col])
     # A missing label must not hide a corrupt row (NaN groups vanish from
     # value_counts by default).
     df["kernel_source"] = df["kernel_source"].fillna("<unknown>")
@@ -591,8 +577,7 @@ def _finding_key(a: dict) -> str:
             f"{a['sweep_col']}|{_sig(a['fixed_shape'])}|{at}"
         )
     # Group-level kinds: nonpositive_latency, below_sol, unreadable_table.
-    dtype = a.get("gemm_dtype") or a.get("moe_dtype", "")
-    return f"{kind}|{a['system']}|{a['op_file']}|{a['backend']}|{dtype}"
+    return f"{kind}|{a['system']}|{a['op_file']}|{a['backend']}|{a.get('gemm_dtype', '')}"
 
 
 # Group-level kinds whose finding aggregates a COUNT: the baseline must
@@ -763,128 +748,6 @@ def _check_gemm_sol(system: str, op_file: str, t: OpTable, spec: dict) -> tuple[
             }
         )
     return anomalies, efficiencies
-
-
-# ---------------------------------------------------------------------------
-# Engine-backed SOL bound (opt-in via --engine-sol).
-#
-# Unlike _check_gemm_sol, this asks the compiled Rust engine's roofline
-# (DatabaseMode.SOL_FULL) so the formulas live in exactly one place and every
-# op the engine models is coverable. The comparison is RAW parquet latency vs
-# the engine SOL for that row's own shape — never the SILICON-interpolated
-# value, which would smear a bad point across its neighbors and would be
-# masked by any future query-path correction.
-# ---------------------------------------------------------------------------
-
-# op_file -> SOL margin. gemm-style compute ops keep the tight 0.98; comm ops
-# should use 1.2 when added (collective formulas carry theoretical slack).
-_ENGINE_SOL_OPS = {
-    "moe_perf.parquet": 0.98,
-}
-
-
-def _engine_sol_check(system: str, op_file: str, tables: list[OpTable]) -> list[dict]:
-    """RAW row latency below the engine roofline for its own shape."""
-    margin = _ENGINE_SOL_OPS[op_file]
-    try:
-        from aiconfigurator_core.sdk.common import DatabaseMode, MoEQuantMode  # noqa: F401
-        from aiconfigurator_core.sdk.engine import EngineHandle, build_ops_json
-        from aiconfigurator_core.sdk.operations.moe import MoE
-        from aiconfigurator_core.sdk.perf_database import get_database
-    except ImportError as exc:
-        logger.info("engine SOL skipped (aiconfigurator_core not importable): %s", exc)
-        return []
-
-    findings: list[dict] = []
-    for t in tables:
-        try:
-            db = get_database(system, t.backend, t.version)
-            engine = EngineHandle.for_database(db)
-        except Exception as exc:
-            logger.warning("engine SOL: no database for %s/%s/%s: %s", system, t.backend, t.version, exc)
-            continue
-        # SOL is shape-pure (system spec + shape); cache per unique shape.
-        sol_cache: dict[tuple, float] = {}
-        by_dtype: dict[str, list[tuple[float, dict, float, float]]] = {}
-        for row in t.frame.itertuples():
-            # The engine roofline is distribution-blind (balanced routing:
-            # min(tokens*topk, num_experts) experts' weights all move).
-            # Skewed power_law routing legitimately touches fewer experts and
-            # can sit below that bound, so it is only a valid lower bound for
-            # balanced/uniform rows.
-            if str(getattr(row, "distribution", "balanced")) not in ("balanced", "uniform"):
-                continue
-            try:
-                quant = MoEQuantMode[str(row.moe_dtype)]
-            except KeyError:
-                continue
-            # Non-gated MoE runs 2 gemms instead of 3 — a third less weight
-            # traffic, so the gated roofline would over-bound it (verified on
-            # h100 trtllm bf16: every "violation" at 0.6-0.7x of the gated
-            # bound was a moe_torch_flow_nongated row that clears the 2-gemm
-            # bound).
-            is_gated = "nongated" not in str(row.kernel_source)
-            key = (
-                row.moe_dtype,
-                int(row.hidden_size),
-                int(row.inter_size),
-                int(row.topk),
-                int(row.num_experts),
-                int(row.moe_tp_size),
-                int(row.moe_ep_size),
-                int(row.num_tokens),
-                is_gated,
-            )
-            sol = sol_cache.get(key)
-            if sol is None:
-                op = MoE(
-                    "moe",
-                    1.0,
-                    key[1],
-                    key[2],
-                    key[3],
-                    key[4],
-                    key[5],
-                    key[6],
-                    quant,
-                    str(row.distribution),
-                    attention_dp_size=1,
-                    is_gated=is_gated,
-                )
-                try:
-                    (_, sol, _math, _mem) = engine.evaluate_ops_sol_json(
-                        build_ops_json([op]), is_context=True, batch_size=1, s=1, prefix=0, x=key[7]
-                    )[0]
-                except Exception as exc:
-                    logger.debug("engine SOL query failed for %s: %s", key, exc)
-                    sol = float("nan")
-                sol_cache[key] = sol
-            if math.isnan(sol):
-                continue
-            measured = float(row.latency) / t.noise_scale  # engine SOL is in ms
-            if sol and measured < sol * margin:
-                shape = {c: _jsonable(getattr(row, c)) for c in t.shape_cols}
-                by_dtype.setdefault(str(row.moe_dtype), []).append((measured / sol, shape, measured, float(sol)))
-        for dtype, hits in by_dtype.items():
-            hits.sort(key=lambda h: h[0])
-            worst = hits[0]
-            findings.append(
-                {
-                    "kind": "below_sol",
-                    "system": system,
-                    "op_file": op_file,
-                    "backend": t.backend,
-                    "version": t.version,
-                    "source": "engine",
-                    "moe_dtype": dtype,
-                    "points": len(hits),
-                    "worst_fraction_of_sol": float(worst[0]),
-                    "example_shape": worst[1],
-                    "example_latency": worst[2],
-                    "example_sol": worst[3],
-                }
-            )
-    return findings
 
 
 def load_kernel_map(path: Path) -> list[dict]:
@@ -1196,7 +1059,6 @@ def run_checks(
     noise_floor: float,
     spec_root: Path | None = None,
     fingerprint_factor: float | None = 2.0,
-    engine_sol: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     """Returns (anomalies, gaps) across the selected slice of the data tree."""
     # (system, op_file) -> backend -> [(version, path)]
@@ -1291,9 +1153,6 @@ def run_checks(
                     sol_anoms, sol_effs = _check_gemm_sol(system, op_file, t, spec)
                     anomalies.extend(sol_anoms)
                     gaps.extend(sol_effs)
-
-        if engine_sol and op_file in _ENGINE_SOL_OPS:
-            anomalies.extend(_engine_sol_check(system, op_file, loaded))
 
         if len(loaded) < 2:
             continue
@@ -1790,13 +1649,6 @@ def main() -> None:
         help="Systematic offsets require per-system medians within this factor of each other "
         "(a same-direction but wildly varying gap is not a configuration-level offset).",
     )
-    parser.add_argument(
-        "--engine-sol",
-        action="store_true",
-        help="Also check RAW row latencies against the compiled Rust engine's roofline "
-        "(DatabaseMode.SOL_FULL) for op files in the engine-SOL registry (currently moe). "
-        "Requires an importable aiconfigurator_core with its native module; skipped otherwise.",
-    )
     parser.add_argument("--max-report-rows", type=int, default=50, help="Row cap per markdown table.")
     parser.add_argument("--out-md", type=Path, default=None, help="Write the Markdown report.")
     parser.add_argument("--out-json", type=Path, default=None, help="Write all findings as JSON.")
@@ -1858,7 +1710,6 @@ def main() -> None:
         noise_floor=args.noise_floor,
         spec_root=args.systems_spec_root,
         fingerprint_factor=args.fingerprint_factor or None,
-        engine_sol=args.engine_sol,
     )
 
     kmap = load_kernel_map(args.kernel_map)
@@ -1899,8 +1750,7 @@ def main() -> None:
         print("  " + line.replace("**", ""))
     for a in sorted(v["below_sol"], key=lambda x: x["worst_fraction_of_sol"])[:5]:
         print(
-            f"  BELOW-SOL! {a['system']}/{a['op_file']}: {a['backend']}/{a['version']} "
-            f"{a.get('gemm_dtype') or a.get('moe_dtype', '')} — "
+            f"  BELOW-SOL! {a['system']}/{a['op_file']}: {a['backend']}/{a['version']} {a['gemm_dtype']} — "
             f"{a['points']} points, worst at {a['worst_fraction_of_sol']:.2f}x of physical bound "
             f"({_fmt_shape(a['example_shape'])}: {a['example_latency']:.4g} vs SOL {a['example_sol']:.4g})"
         )
