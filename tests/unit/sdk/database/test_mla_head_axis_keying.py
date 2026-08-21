@@ -22,6 +22,8 @@ import pytest
 from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator_core.sdk.perf_database import PerfDatabase
 
+pytestmark = pytest.mark.unit
+
 # Test-held copy of the model pin (single source: the Rust
 # ``perf_database/table_view.rs::MLA_MODULE_NATIVE_HEADS``).
 _MLA_MODULE_NATIVE_HEADS = {
