@@ -132,9 +132,7 @@ def _load_query_versions(systems_paths: tuple[str, ...]) -> dict | None:
     return None
 
 
-def get_query_versions(
-    system: str, backend: str, systems_paths: str | list[str] | None = None
-) -> list[str] | None:
+def get_query_versions(system: str, backend: str, systems_paths: str | list[str] | None = None) -> list[str] | None:
     """Declared queryable versions for (system, backend); None when unlisted.
 
     Per-platform ``overrides`` win over the framework ``defaults``. The first
@@ -153,9 +151,7 @@ def get_query_versions(
     return [str(v) for v in versions] if versions else None
 
 
-def resolve_query_version(
-    system: str, backend: str, version: str, systems_paths: str | list[str] | None = None
-) -> str:
+def resolve_query_version(system: str, backend: str, version: str, systems_paths: str | list[str] | None = None) -> str:
     """Map a requested version onto the declared queryable set.
 
     - listed version: returned unchanged;
@@ -169,9 +165,7 @@ def resolve_query_version(
     versions = get_query_versions(system, backend, systems_paths=systems_paths)
     if not versions or version in versions:
         return version
-    for _version_path, _data_dir in _iter_database_version_paths(
-        system, backend, version, systems_paths=systems_paths
-    ):
+    for _version_path, _data_dir in _iter_database_version_paths(system, backend, version, systems_paths=systems_paths):
         logger.warning(
             f"{backend}/{version} on {system} is not a declared queryable version "
             f"(declared: {versions}); serving it from its remaining data directory. "
