@@ -16,6 +16,7 @@ from collector.framework_manifest import (
 )
 from collector.sglang.registry import REGISTRY as SGLANG_REGISTRY
 from collector.trtllm.registry import REGISTRY as TRTLLM_REGISTRY
+from collector.version_resolver import _check_compat
 from collector.vllm.registry import REGISTRY as VLLM_REGISTRY
 from collector.wideep.sglang import dataset_version_label
 from collector.wideep.sglang.registry import REGISTRY as WIDEEP_SGLANG_REGISTRY
@@ -49,17 +50,47 @@ def test_active_cuda_vllm_collectors_are_exactly_pinned_to_manifest_version():
 
     # Each module pins the runtime that actually collects it: the manifest
     # default, or its family override (e.g. kda runs only on the vllm kimi-k3
-    # preview image, frameworks.vllm.families.kda).
+    # preview image, frameworks.vllm.families.kda). moe/gdn/gemm now carry a
+    # 2-version-set __compat__ (AIC-1782 Task V1, the same grammar-limited
+    # approximation as the sglang collectors -- see TestExactVersionSetVllm
+    # in test_version_resolver.py for the probed leak semantics), so the
+    # invariant checked here is semantic (the declared __compat__ accepts
+    # the version that actually resolves for this module) rather than a
+    # literal single-version string match -- the same check collect.py/
+    # fullnode.py perform at runtime via _check_compat. This still fully
+    # subsumes the old exact-equality behavior for every other vllm module
+    # (an `==X.Y.Z` pin only ever accepts that one version).
     module_versions: dict[str, set[str]] = {}
     for entry in VLLM_REGISTRY:
         module_versions.setdefault(entry.module, set()).add(resolve_op_runtime("vllm", entry.op).version)
 
     for module, versions in sorted(module_versions.items()):
         assert len(versions) == 1, (module, versions)
-        expected = f'__compat__ = "vllm=={next(iter(versions))}"'
+        resolved_version = next(iter(versions))
         source = (REPO_ROOT / f"{module.replace('.', '/')}.py").read_text(encoding="utf-8")
         declarations = [line.strip() for line in source.splitlines() if line.startswith("__compat__")]
-        assert declarations == [expected], module
+        assert len(declarations) == 1, module
+        declared = declarations[0].split("=", 1)[1].strip().strip('"')
+        assert _check_compat(declared, resolved_version), (module, declared, resolved_version)
+
+
+@pytest.mark.parametrize(
+    "module",
+    ["collector.vllm.collect_moe", "collector.vllm.collect_gdn", "collector.vllm.collect_gemm"],
+)
+def test_vllm_target_lane_collectors_declare_the_exact_bumped_compat_range(module):
+    # AIC-1782 Task V1: these three collectors were re-verified against vLLM
+    # v0.27.1 and bumped from the exact pin `vllm==0.24.0` to the widest
+    # range __compat__'s grammar allows for an accepted {0.24.0, 0.27.1}
+    # pair while still excluding the never-verified 0.25.0/0.25.1/0.26.0/
+    # 0.27.0 intermediate releases. This locks the literal string (the test
+    # above only checks it semantically accepts the resolved default
+    # version) so an accidental widening/narrowing of the range is caught
+    # even though 0.24.0 alone would still satisfy a looser or tighter one.
+    expected = '__compat__ = "vllm>=0.24.0,<=0.27.1,!=0.25.0,!=0.25.1,!=0.26.0,!=0.27.0"'
+    source = (REPO_ROOT / f"{module.replace('.', '/')}.py").read_text(encoding="utf-8")
+    declarations = [line.strip() for line in source.splitlines() if line.startswith("__compat__")]
+    assert declarations == [expected], module
 
 
 def test_wideep_runtime_stays_independent_from_default_framework_runtime():
@@ -296,6 +327,60 @@ def test_model_pin_mismatch_error_names_the_model_scoped_image():
     # model-scoped runtime/image instead of the framework default.
     assert "sglang stock collector requires exactly 0.5.17, found 0.5.14" in message
     assert "use lmsysorg/sglang:v0.5.17@sha256:" in message
+
+
+# --- Task V1 (AIC-1782): vLLM model-scoped runtime pins, same mechanism ---
+
+
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "Qwen/Qwen3.8-2.4T-A95B",
+        "Qwen/Qwen3.8-2.4T-A95B-FP8",
+        "RadixArk/Qwen3.8-2.4T-A95B-NVFP4",
+    ],
+)
+def test_model_pin_match_resolves_qwen38_max_to_vllm_0_27_1(model_path):
+    # Real manifest (no path= override): the checked-in frameworks.vllm.models
+    # entries added for Qwen3.8-Max (AIC-1782 Task V1), mirroring the sglang
+    # Task 4b mechanism above. vllm has no wideep_vllm framework key, so
+    # wideep_ops is empty here (unlike the sglang WIDEEP_OPS parametrization).
+    runtime = require_collector_runtime(
+        "vllm", "0.27.1", requested_ops={"gemm"}, wideep_ops=set(), model_path=model_path
+    )
+    assert runtime.version == "0.27.1"
+    assert runtime.image().startswith("vllm/vllm-openai:v0.27.1@sha256:")
+    assert runtime.image("cu129").startswith("vllm/vllm-openai:v0.27.1-cu129@sha256:")
+    # Not a family classification — see _model_pinned_runtime docstring.
+    assert runtime.family is None
+
+
+def test_vllm_model_pin_mismatch_error_names_the_model_scoped_image():
+    with pytest.raises(RuntimeError) as excinfo:
+        require_collector_runtime(
+            "vllm",
+            "0.24.0",
+            requested_ops={"gemm"},
+            wideep_ops=set(),
+            model_path="Qwen/Qwen3.8-2.4T-A95B",
+        )
+    message = str(excinfo.value)
+    # Same template as the sglang guard above, naming the vllm model-scoped
+    # runtime/image instead of the framework default.
+    assert "vllm stock collector requires exactly 0.27.1, found 0.24.0" in message
+    assert "use vllm/vllm-openai:v0.27.1@sha256:" in message
+
+
+def test_vllm_unknown_model_id_falls_back_to_default_resolution():
+    baseline = require_collector_runtime("vllm", "0.24.0", requested_ops={"gemm"}, wideep_ops=set())
+    unmatched = require_collector_runtime(
+        "vllm",
+        "0.24.0",
+        requested_ops={"gemm"},
+        wideep_ops=set(),
+        model_path="some-org/not-a-pinned-model",
+    )
+    assert unmatched == baseline
 
 
 def test_real_manifest_models_section_does_not_break_validate_resolution():

@@ -10,7 +10,53 @@ recurrent kernel. Both phases use the production packed-QKV convolution width.
 Input/output projection GEMMs remain covered by the GEMM collector.
 """
 
-__compat__ = "vllm==0.24.0"
+# Verified 2026-08-21 against vLLM v0.24.0 and v0.27.1 tags (source clones,
+# no runtime GPU available in this environment) for AIC-1782 Task V1.
+# Compatible unchanged: ChunkGatedDeltaRule.__init__ / _resolve_gdn_prefill_backend
+# (byte-identical body, incl. the flashinfer/cutedsl/triton selection logic;
+# the only diff is 0.24.0's extra nvidia-cutlass-dsl-libs-cu13 disk-hash gate
+# on the SM100+ flashinfer branch, an upstream-packaging workaround vLLM
+# itself removed by 0.27.1 -- qwen_gdn_linear_attn.py:91-211 @0.24.0 vs
+# :85-133 @0.27.1 -- this changes only which value `.gdn_prefill_backend` may
+# resolve to in a given environment, never this collector's code, and the
+# collector already reads that value dynamically for kernel_source);
+# .gdn_prefill_backend attribute; causal_conv1d_fn / causal_conv1d_update
+# (byte-identical signatures, path unmoved at mamba/ops/causal_conv1d.py;
+# 0.27.1 adds one new trailing optional `out=None` kwarg this collector does
+# not pass); compute_causal_conv1d_metadata (byte-identical body,
+# v1/attention/backends/utils.py:810-856 @0.24.0 -> :838-884 @0.27.1);
+# GDNAttentionMetadata (byte-identical dataclass, all 10 fields this
+# collector passes unchanged, v1/attention/backends/gdn_attn.py:42-79 both
+# versions); fused_recurrent_gated_delta_rule_packed_decode (byte-identical
+# signature and body, incl. the grid=(NV, B*HV) CUDA grid-y launch at the
+# same line, fused_recurrent.py:449 both versions);
+# VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE (unchanged, default True,
+# envs.py:115 @0.24.0 -> :124 @0.27.1); the Qwen3.5 mamba_ssm_dtype=float32
+# recurrent-state pin (unchanged, model_executor/models/config.py:608-625
+# @0.24.0 -> :804-821 @0.27.1). ONE incompatible import path found and fixed
+# below: vLLM 0.27.1 relocated the whole `vllm.model_executor.layers.fla`
+# package to the new top-level `vllm.third_party.flash_linear_attention`
+# package (qwen_gdn_linear_attn.py's own imports switched the same way at
+# 0.27.1); the only symbol this collector touches there,
+# fused_recurrent_gated_delta_rule_packed_decode, is byte-identical at the
+# new location. Fixed with a version-conditional import mirroring the sglang
+# collectors' established try/except pattern. The SM120 FIXME below (chunk.py
+# -> chunk_delta_h.py -> index.py IMA) has its citation paths updated for the
+# relocation (call chain re-verified present and unchanged at 0.27.1); the
+# underlying kernel-limit claim itself was NOT re-tested on hardware at
+# 0.27.1 (no GPU in this environment).
+# 0.25.0/0.25.1/0.26.0/0.27.0 stay excluded: never verified, and
+# version_resolver's __compat__ grammar (AND-of-comparators only, no OR) has
+# no way to express a true 2-point set either -- this bounded range with the
+# four untested point releases carved out via != is the closest expressible
+# approximation, NOT an exact {0.24.0, 0.27.1} gate: `_check_compat`'s `!=`
+# only excludes the literal point version, so e.g. 0.25.0.post1 or 0.26.0rc1
+# still satisfy this specifier (see
+# tests/unit/collector/test_version_resolver.py for the probed semantics).
+# This is an accepted, narrow gap: the framework_manifest digest-pinned gate
+# is the true version enforcement upstream and only ever supplies exactly
+# 0.24.0 or 0.27.1 in a sanctioned run, so the leak is unreachable there.
+__compat__ = "vllm>=0.24.0,<=0.27.1,!=0.25.0,!=0.25.1,!=0.26.0,!=0.27.0"
 
 import gc
 import os
@@ -18,7 +64,15 @@ from types import SimpleNamespace
 
 import torch
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fla.ops import fused_recurrent_gated_delta_rule_packed_decode
+
+try:
+    from vllm.third_party.flash_linear_attention.ops import (
+        fused_recurrent_gated_delta_rule_packed_decode,
+    )
+except ImportError:
+    from vllm.model_executor.layers.fla.ops import (
+        fused_recurrent_gated_delta_rule_packed_decode,
+    )
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import ChunkGatedDeltaRule
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
@@ -290,18 +344,28 @@ def run_gdn_context_benchmark(
 
             # FIXME(kernel-limit): on SM120, every GDN context group raises a
             # deterministic illegal memory access inside vLLM's chunked
-            # gated-delta-rule prefill kernel (fla/ops/chunk.py:61 ->
-            # chunk_delta_h.py:347 -> index.py:36 prepare_chunk_offsets
-            # @0.24.0) at its largest num_tokens sub-points (~1M total
-            # tokens; smaller sub-points record normally) — reproduced in
-            # isolation on a clean RTX PRO 6000 Blackwell GPU; all 8 Qwen3.5
+            # gated-delta-rule prefill kernel (chunk.py:61 ->
+            # chunk_delta_h.py:347 -> index.py:34 prepare_chunk_offsets
+            # @0.24.0, same relative call chain and byte-identical
+            # prepare_chunk_offsets body at chunk.py:61 ->
+            # chunk_delta_h.py:349 -> index.py:34 @0.27.1 -- relocated from
+            # vllm.model_executor.layers.fla.ops to
+            # vllm.third_party.flash_linear_attention.ops at 0.27.1,
+            # re-verified present at both versions, AIC-1782 Task V1) at its
+            # largest num_tokens sub-points (~1M total tokens;
+            # smaller sub-points record normally) — reproduced in isolation
+            # on a clean RTX PRO 6000 Blackwell GPU at 0.24.0; all 8 Qwen3.5
             # GDN model groups affected (SM90/SM100 pass). Same family on
             # SM89 (L40S): 6 of 8 context groups IMA (reproduced in
             # isolation on a clean GPU, rows through 1.05M tokens recorded
             # first); the two smallest-model groups (0.8B, 2B) instead hit
             # device-capacity OOM at their largest sub-points on 46 GB.
             # Generation passes apart from the grid-y limit below. Serving
-            # fails identically. Re-verify on the next vLLM bump.
+            # fails identically. NOT re-tested on hardware at 0.27.1 (no GPU
+            # in this environment) -- the cited kernel chain is confirmed
+            # present and source-unchanged, so the claim is not dangling, but
+            # the bug reproduction itself is unconfirmed at this version.
+            # Re-verify on the next vLLM bump or the first 0.27.1 GPU run.
             def run_gdn_scan(_q=q, _k=k, _v=v, _g=g, _beta=beta, _state=gdn_state):
                 chunk_gdn(
                     q=_q,

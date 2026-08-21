@@ -248,6 +248,83 @@ class TestExactVersionSet:
         assert _check_compat(self.COMPAT, runtime) is True
 
 
+@pytest.mark.unit
+class TestExactVersionSetVllm:
+    """vLLM analogue of ``TestExactVersionSet`` above (AIC-1782 Task V1):
+    ``collector/vllm/{collect_moe,collect_gdn,collect_gemm}.py``'s
+    ``vllm==0.24.0`` bumped to also accept 0.27.1 after re-verifying every
+    framework-facing surface against that tag, without silently admitting
+    the never-verified 0.25.0/0.25.1/0.26.0/0.27.0 releases in between (every
+    vLLM minor released between the two verified points). Same
+    AND-of-comparators-only grammar gap as the sglang class, now with FOUR
+    excluded intermediate releases instead of two -- the WHY (no OR in this
+    grammar, ``!=X`` excludes only the literal point version so pre/post
+    variants of an excluded release still leak through, post-release
+    asymmetry between a floor and a ceiling, why the gap is accepted rather
+    than closed via VersionRoute forks) is identical in kind to
+    ``TestExactVersionSet``'s docstring above and is not repeated here; only
+    the version numbers differ. The framework_manifest digest-pinned model
+    pin (frameworks.vllm.models, this same task) is the TRUE version
+    enforcement upstream for Qwen3.8-Max collection and only ever supplies
+    exactly ``0.27.1`` for a model-pinned run; this ``__compat__`` string is
+    defense-in-depth behind that gate, not the sole enforcement.
+    """
+
+    COMPAT = "vllm>=0.24.0,<=0.27.1,!=0.25.0,!=0.25.1,!=0.26.0,!=0.27.0"
+
+    @pytest.mark.parametrize(
+        "runtime,expected",
+        [
+            ("0.24.0", True),  # floor: accepted
+            ("0.27.1", True),  # ceiling: accepted
+            ("0.25.0", False),  # untested intermediate release, explicitly excluded
+            ("0.25.1", False),  # untested intermediate release, explicitly excluded
+            ("0.26.0", False),  # untested intermediate release, explicitly excluded
+            ("0.27.0", False),  # untested intermediate release, explicitly excluded
+            ("0.23.9", False),  # below floor
+            ("0.28.0", False),  # above ceiling
+        ],
+    )
+    def test_accepts_the_verified_pair_and_rejects_the_untested_intermediate_releases(self, runtime, expected):
+        assert _check_compat(self.COMPAT, runtime) == expected
+
+    @pytest.mark.parametrize(
+        "runtime,expected",
+        [
+            ("0.24.0.post1", True),  # floor: post-release still satisfies >=0.24.0
+            ("0.27.1.post1", False),  # ceiling: post-release now FAILS <=0.27.1 -- asymmetric
+        ],
+    )
+    def test_endpoint_post_release_asymmetry(self, runtime, expected):
+        """Same grammar, opposite outcome at each endpoint: >= is a floor
+        (post-releases of it still satisfy), <= is a ceiling (post-releases
+        of it no longer do). Not a bug to fix -- a documented consequence of
+        reusing plain comparators for a pinned-pair approximation."""
+        assert _check_compat(self.COMPAT, runtime) == expected
+
+    @pytest.mark.parametrize(
+        "runtime",
+        [
+            "0.25.0.post1",  # post-release of an excluded intermediate release
+            "0.25.0rc1",  # pre-release of an excluded intermediate release
+            "0.25.1.post1",  # post-release of another excluded intermediate release
+            "0.26.0rc1",  # pre-release of another excluded intermediate release
+            "0.27.0.post2",  # post-release of the last excluded intermediate release
+        ],
+    )
+    def test_excluded_version_variants_leak_through_the_specifier_alone(self, runtime):
+        """CODIFIES REALITY, does not assert a false invariant: `!=0.25.0`
+        (etc.) excludes only the exact literal Version, so any distinguishable
+        pre/post-release of an excluded release is NOT equal and satisfies
+        every clause here. This module's __compat__ therefore accepts these
+        five strings on its own. They are still blocked in any sanctioned
+        model-pinned run: the framework_manifest digest-pinned gate upstream
+        never supplies a pre/post-release string for vLLM Qwen3.8-Max
+        collection, only the exact ("0.24.0" | "0.27.1") pair -- see this
+        class's docstring."""
+        assert _check_compat(self.COMPAT, runtime) is True
+
+
 # ---------------------------------------------------------------------------
 # resolve_module
 # ---------------------------------------------------------------------------
