@@ -1916,6 +1916,35 @@ def test_qwen38_max_nvfp4_moe_cases_are_declared_with_correct_shape_and_runner()
     assert not moe_model_allows_quantization("sglang", "Qwen/Qwen3.8-2.4T-A95B", "nvfp4")
 
 
+def test_radixark_qwen38_max_nvfp4_row_is_nvfp4_only_on_sglang_and_empty_elsewhere():
+    # AIC-1762 integration rebuild: this row briefly carried
+    # ``frameworks: [sglang]``, the same inversion #1519's rebase-4 review
+    # (Blocker 2) fixed on the Qwen3.5-397B-A17B-NVFP4 row --
+    # ``_model_moe_backend_quantization`` (case_generator.py) skips the row
+    # entirely for trtllm/vllm (a framework mismatch ``continue``) instead of
+    # narrowing it, leaving an EMPTY ``model_quantization`` that inverts the
+    # gate rather than tightening it (allow-everything on trtllm, since its
+    # nvfp4 spec has no ``requires_model_quantization_config`` floor; lost
+    # legitimate cases on vllm, whose nvfp4 spec DOES require one).
+    #
+    # Unlike the 397B row, this artifact's trtllm/vllm nvfp4 support is NOT
+    # verified at any pinned version (vLLM support tracked in AIC-1782), so
+    # the fix here is the Nemotron precedent
+    # (NemotronHForCausalLM_cases.yaml's ``allowed_modes: []`` idiom for an
+    # unverified/unservable backend) rather than #1519's ``[nvfp4]`` restore:
+    # ``frameworks:`` dropped, trtllm/vllm explicitly gated CLOSED via
+    # ``allowed_modes: []``.
+    model_path = "RadixArk/Qwen3.8-2.4T-A95B-NVFP4"
+    for backend in ("trtllm", "vllm"):
+        available_modes = {spec.name for spec in get_moe_quantization_specs(backend)}
+        allowed = {mode for mode in available_modes if moe_model_allows_quantization(backend, model_path, mode)}
+        assert allowed == set(), (backend, model_path, allowed)
+
+    sglang_modes = {spec.name for spec in get_moe_quantization_specs("sglang")}
+    sglang_allowed = {mode for mode in sglang_modes if moe_model_allows_quantization("sglang", model_path, mode)}
+    assert sglang_allowed == {"nvfp4"}, (model_path, sglang_allowed)
+
+
 def test_nemotron_ultra_quant_artifact_keeps_moe_path_but_reuses_mamba_profile(monkeypatch):
     from collector.case_generator import get_common_mamba2_test_cases, get_common_moe_test_cases
 
