@@ -66,7 +66,7 @@ groups:
     tier: shared
     systems: [b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [trtllm]
-    total_raw_rows: 15056
+    total_raw_rows: 18753
     within_framework_dedup_rows: 0
   - op_file: context_attention_perf.parquet
     kernel_source: 'fa3'
@@ -80,7 +80,7 @@ groups:
     tier: shared
     systems: [a100_sxm, h100_sxm, h200_sxm]
     frameworks: [sglang]
-    total_raw_rows: 54983
+    total_raw_rows: 71864
     within_framework_dedup_rows: 0
   - op_file: context_attention_perf.parquet
     kernel_source: 'flashinfer'
@@ -94,8 +94,8 @@ groups:
     tier: shared
     systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [trtllm]
-    total_raw_rows: 679590
-    within_framework_dedup_rows: 151
+    total_raw_rows: 840086
+    within_framework_dedup_rows: 465
   - op_file: context_attention_perf.parquet
     kernel_source: 'torch_flow_flashinfer'
     tier: shared
@@ -148,9 +148,9 @@ groups:
   - op_file: context_attention_perf.parquet
     kernel_source: 'vllm_flashinfer'
     tier: shared
-    systems: [b200_sxm]
+    systems: [b200_sxm, gb200]
     frameworks: [vllm]
-    total_raw_rows: 21901
+    total_raw_rows: 43717
     within_framework_dedup_rows: 0
   - op_file: context_attention_perf.parquet
     kernel_source: 'vllm_flashinfer_fidecode'
@@ -192,14 +192,14 @@ groups:
     tier: shared_fallback
     systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [trtllm]
-    total_raw_rows: 22104
-    within_framework_dedup_rows: 0
+    total_raw_rows: 25256
+    within_framework_dedup_rows: 2
   - op_file: context_mla_perf.parquet
     kernel_source: 'flash_attention'
     tier: shared
     systems: [h100_sxm, h200_sxm]
     frameworks: [sglang]
-    total_raw_rows: 13876
+    total_raw_rows: 16956
     within_framework_dedup_rows: 1
   - op_file: context_mla_perf.parquet
     kernel_source: 'triton'
@@ -565,8 +565,8 @@ groups:
     tier: shared
     systems: [h100_sxm, h200_sxm]
     frameworks: [sglang]
-    total_raw_rows: 21670
-    within_framework_dedup_rows: 0
+    total_raw_rows: 27982
+    within_framework_dedup_rows: 1
   - op_file: encoder_attention_perf.parquet
     kernel_source: 'flash_attention_v4'
     tier: shared
@@ -579,8 +579,8 @@ groups:
     tier: shared
     systems: [b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [trtllm]
-    total_raw_rows: 67746
-    within_framework_dedup_rows: 1
+    total_raw_rows: 80375
+    within_framework_dedup_rows: 20
   - op_file: encoder_attention_perf.parquet
     kernel_source: 'triton'
     tier: shared
@@ -591,9 +591,9 @@ groups:
   - op_file: encoder_attention_perf.parquet
     kernel_source: 'vllm_vit_flash_attn'
     tier: shared
-    systems: [b200_sxm, h200_sxm]
+    systems: [b200_sxm, gb200, h200_sxm]
     frameworks: [vllm]
-    total_raw_rows: 12629
+    total_raw_rows: 18944
     within_framework_dedup_rows: 0
   - op_file: encoder_attention_perf.parquet
     kernel_source: 'vllm_vit_flash_attn_fa2'
@@ -621,15 +621,15 @@ groups:
     tier: shared
     systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [sglang, trtllm, vllm]
-    total_raw_rows: 73933
+    total_raw_rows: 76459
     within_framework_dedup_rows: 0
-    median_pct_divergence: 4.65
+    median_pct_divergence: 4.68
   - op_file: gdn_perf.parquet
     kernel_source: 'causal_conv1d_update'
     tier: shared
     systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [sglang, trtllm, vllm]
-    total_raw_rows: 7656
+    total_raw_rows: 8008
     within_framework_dedup_rows: 0
     median_pct_divergence: 11.23
   - op_file: gdn_perf.parquet
@@ -637,7 +637,7 @@ groups:
     tier: shared
     systems: [b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [sglang, trtllm]
-    total_raw_rows: 39479
+    total_raw_rows: 41173
     within_framework_dedup_rows: 0
     median_pct_divergence: 22.14
   - op_file: gdn_perf.parquet
@@ -659,9 +659,9 @@ groups:
     tier: shared
     systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [sglang, trtllm]
-    total_raw_rows: 946
+    total_raw_rows: 1204
     within_framework_dedup_rows: 0
-    median_pct_divergence: 18.97
+    median_pct_divergence: 11.12
   - op_file: gdn_perf.parquet
     kernel_source: 'fused_recurrent_gated_delta_rule_packed_decode'
     tier: shared
@@ -724,14 +724,14 @@ groups:
     tier: shared
     systems: [b200_sxm, b300_sxm, gb200, gb300]
     frameworks: [trtllm]
-    total_raw_rows: 175608
-    within_framework_dedup_rows: 9
+    total_raw_rows: 204897
+    within_framework_dedup_rows: 14
   - op_file: gemm_perf.parquet
     kernel_source: 'sglang'
     tier: shared
     systems: [a100_sxm, b200_sxm, gb200, h100_sxm, h200_sxm]
     frameworks: [sglang]
-    total_raw_rows: 459144
+    total_raw_rows: 560151
     within_framework_dedup_rows: 9
   - op_file: gemm_perf.parquet
     kernel_source: 'sglang_deepgemm_gemm_nt_f8f8bf16'
@@ -780,28 +780,28 @@ groups:
     tier: shared
     systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [trtllm]
-    total_raw_rows: 1118128
-    within_framework_dedup_rows: 373
+    total_raw_rows: 1346188
+    within_framework_dedup_rows: 902
   - op_file: gemm_perf.parquet
     kernel_source: 'trt_flow_/smooth_quant_gemm_L96/PLUGIN_V2_SmoothQuantGemm_0'
     tier: shared
-    systems: [a100_sxm]
+    systems: [a100_sxm, h200_sxm]
     frameworks: [trtllm]
-    total_raw_rows: 6048
+    total_raw_rows: 15288
     within_framework_dedup_rows: 0
   - op_file: gemm_perf.parquet
     kernel_source: 'trt_flow_/weight_only_quant_matmul_L257/PLUGIN_V2_WeightOnlyQuantMatmul_0'
     tier: shared
-    systems: [a100_sxm]
+    systems: [a100_sxm, h200_sxm]
     frameworks: [trtllm]
-    total_raw_rows: 12096
+    total_raw_rows: 30576
     within_framework_dedup_rows: 0
   - op_file: gemm_perf.parquet
     kernel_source: 'vllm_default'
     tier: shared
-    systems: [a100_sxm, b200_sxm, b60, h200_sxm]
+    systems: [a100_sxm, b200_sxm, b60, gb200, h200_sxm]
     frameworks: [vllm]
-    total_raw_rows: 262148
+    total_raw_rows: 376722
     within_framework_dedup_rows: 2
   - op_file: generation_attention_perf.parquet
     kernel_source: 'fa3'
@@ -815,7 +815,7 @@ groups:
     tier: shared
     systems: [a100_sxm, h100_sxm, h200_sxm]
     frameworks: [sglang]
-    total_raw_rows: 35651
+    total_raw_rows: 45837
     within_framework_dedup_rows: 0
   - op_file: generation_attention_perf.parquet
     kernel_source: 'flashinfer'
@@ -829,8 +829,8 @@ groups:
     tier: shared
     systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [trtllm]
-    total_raw_rows: 471006
-    within_framework_dedup_rows: 120
+    total_raw_rows: 565549
+    within_framework_dedup_rows: 420
   - op_file: generation_attention_perf.parquet
     kernel_source: 'torch_flow_flashinfer'
     tier: shared
@@ -883,9 +883,9 @@ groups:
   - op_file: generation_attention_perf.parquet
     kernel_source: 'vllm_flashinfer'
     tier: shared
-    systems: [b200_sxm]
+    systems: [b200_sxm, gb200]
     frameworks: [vllm]
-    total_raw_rows: 17043
+    total_raw_rows: 33951
     within_framework_dedup_rows: 0
   - op_file: generation_attention_perf.parquet
     kernel_source: 'vllm_flashinfer_fidecode'
@@ -913,15 +913,15 @@ groups:
     tier: shared_fallback
     systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [trtllm]
-    total_raw_rows: 39815
-    within_framework_dedup_rows: 4
+    total_raw_rows: 45607
+    within_framework_dedup_rows: 7
   - op_file: generation_mla_perf.parquet
     kernel_source: 'flash_attention'
     tier: shared
     systems: [h100_sxm, h200_sxm]
     frameworks: [sglang]
-    total_raw_rows: 22632
-    within_framework_dedup_rows: 3
+    total_raw_rows: 27280
+    within_framework_dedup_rows: 9
   - op_file: generation_mla_perf.parquet
     kernel_source: 'triton'
     tier: shared
@@ -1063,14 +1063,14 @@ groups:
     tier: shared
     systems: [b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [trtllm]
-    total_raw_rows: 5208
+    total_raw_rows: 6058
     within_framework_dedup_rows: 0
   - op_file: mamba2_perf.parquet
     kernel_source: 'causal_conv1d_update'
     tier: shared
     systems: [b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [trtllm]
-    total_raw_rows: 572
+    total_raw_rows: 660
     within_framework_dedup_rows: 0
   - op_file: mhc_module_perf.parquet
     kernel_source: 'sglang_mhc'
@@ -1147,9 +1147,9 @@ groups:
     tier: shared_fallback
     systems: [a100_sxm, b200_sxm, gb200, h100_sxm, h200_sxm, l40s]
     frameworks: [sglang, trtllm]
-    total_raw_rows: 6784
-    within_framework_dedup_rows: 1
-    median_pct_divergence: 1.74
+    total_raw_rows: 9752
+    within_framework_dedup_rows: 7
+    median_pct_divergence: 2.52
   - op_file: mla_bmm_perf.parquet
     kernel_source: 'sglang_sgl_kernel_bmm_fp8'
     tier: shared
@@ -1239,8 +1239,8 @@ groups:
     tier: shared_fallback
     systems: [b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, rtx_pro_6000_server]
     frameworks: [trtllm, vllm]
-    total_raw_rows: 90946
-    within_framework_dedup_rows: 11
+    total_raw_rows: 93874
+    within_framework_dedup_rows: 21
     median_pct_divergence: 45.03
   - op_file: mla_generation_module_perf.parquet
     kernel_source: 'FLASHINFER_MLA'
@@ -1275,44 +1275,44 @@ groups:
     tier: shared_fallback
     systems: [b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, rtx_pro_6000_server]
     frameworks: [trtllm, vllm]
-    total_raw_rows: 116286
-    within_framework_dedup_rows: 37
+    total_raw_rows: 120701
+    within_framework_dedup_rows: 69
     median_pct_divergence: 53.95
   - op_file: moe_perf.parquet
     kernel_source: 'deepgemm'
     tier: shared
     systems: [b200_sxm, b300_sxm, gb200, gb300]
     frameworks: [trtllm]
-    total_raw_rows: 169647
+    total_raw_rows: 170263
     within_framework_dedup_rows: 0
   - op_file: moe_perf.parquet
     kernel_source: 'moe_torch_flow'
     tier: shared
     systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s]
     frameworks: [trtllm]
-    total_raw_rows: 63305
-    within_framework_dedup_rows: 25
+    total_raw_rows: 130349
+    within_framework_dedup_rows: 26
   - op_file: moe_perf.parquet
     kernel_source: 'moe_torch_flow_cutlass'
     tier: shared
     systems: [b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [trtllm]
-    total_raw_rows: 1021645
-    within_framework_dedup_rows: 29
+    total_raw_rows: 1165981
+    within_framework_dedup_rows: 85
   - op_file: moe_perf.parquet
     kernel_source: 'moe_torch_flow_min_latency'
     tier: shared
     systems: [b200_sxm, gb200]
     frameworks: [trtllm]
-    total_raw_rows: 106695
-    within_framework_dedup_rows: 27
+    total_raw_rows: 122247
+    within_framework_dedup_rows: 53
   - op_file: moe_perf.parquet
     kernel_source: 'moe_torch_flow_nongated'
     tier: shared
     systems: [b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [trtllm]
-    total_raw_rows: 176856
-    within_framework_dedup_rows: 2
+    total_raw_rows: 193980
+    within_framework_dedup_rows: 12
   - op_file: moe_perf.parquet
     kernel_source: 'moe_torch_flow_triton_fp8_block'
     tier: shared
@@ -1353,8 +1353,8 @@ groups:
     tier: shared
     systems: [a100_sxm, b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [sglang]
-    total_raw_rows: 730794
-    within_framework_dedup_rows: 3
+    total_raw_rows: 800778
+    within_framework_dedup_rows: 4
   - op_file: moe_perf.parquet
     kernel_source: 'sglang_fused_moe_triton_situ_as_silu'
     tier: shared
@@ -1367,7 +1367,7 @@ groups:
     tier: shared
     systems: [a100_sxm, b200_sxm, gb200, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [sglang]
-    total_raw_rows: 85449
+    total_raw_rows: 104484
     within_framework_dedup_rows: 0
   - op_file: moe_perf.parquet
     kernel_source: 'sglang_marlin_moe_situ_as_silu'
@@ -1428,9 +1428,9 @@ groups:
   - op_file: moe_perf.parquet
     kernel_source: 'vllm_flashinfer_trtllm_moe_fp4'
     tier: shared
-    systems: [b200_sxm]
+    systems: [b200_sxm, gb200]
     frameworks: [vllm]
-    total_raw_rows: 10287
+    total_raw_rows: 20574
     within_framework_dedup_rows: 0
   - op_file: moe_perf.parquet
     kernel_source: 'vllm_fp8moe_flashinfer_cutlass_flashinferexperts'
@@ -1463,9 +1463,9 @@ groups:
   - op_file: moe_perf.parquet
     kernel_source: 'vllm_fused_moe'
     tier: shared
-    systems: [a100_sxm, b200_sxm, b60, h200_sxm]
+    systems: [a100_sxm, b200_sxm, b60, gb200, h200_sxm]
     frameworks: [vllm]
-    total_raw_rows: 80452
+    total_raw_rows: 116740
     within_framework_dedup_rows: 0
   - op_file: moe_perf.parquet
     kernel_source: 'vllm_gptossmxfp4moe_flashinfer_trtllm_mxfp4_bf16_trtllmmxfp4expertsmonolithic'
@@ -1491,9 +1491,9 @@ groups:
   - op_file: moe_perf.parquet
     kernel_source: 'vllm_marlin_int4_moe'
     tier: shared
-    systems: [b200_sxm, h200_sxm]
+    systems: [b200_sxm, gb200, h200_sxm]
     frameworks: [vllm]
-    total_raw_rows: 20412
+    total_raw_rows: 30618
     within_framework_dedup_rows: 0
   - op_file: moe_perf.parquet
     kernel_source: 'vllm_modeloptfp8moe_flashinfer_cutlass_flashinferexperts'
@@ -1668,8 +1668,8 @@ groups:
     tier: shared
     systems: [b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, l40s, rtx_pro_6000_server]
     frameworks: [trtllm]
-    total_raw_rows: 15093
-    within_framework_dedup_rows: 0
+    total_raw_rows: 18790
+    within_framework_dedup_rows: 1
   - op_file: trtllm_alltoall_perf.parquet
     kernel_source: 'NVLinkOneSided'
     tier: shared
