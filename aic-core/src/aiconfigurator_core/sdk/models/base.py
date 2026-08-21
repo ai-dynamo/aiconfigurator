@@ -34,6 +34,8 @@ from typing import ClassVar
 
 from aiconfigurator_core.sdk import config
 from aiconfigurator_core.sdk.config_builders import normalize_nextn
+from aiconfigurator_core.sdk.speculation.base import NullScheme
+from aiconfigurator_core.sdk.speculation.mtp import MTPScheme
 
 logger = logging.getLogger(__name__)
 
@@ -129,8 +131,30 @@ class BaseModel:
             f"num_heads {self._num_heads} should be divisible by tp_size {model_config.tp_size} "
         )
 
+        # GENERAL CONTRACT of `_nextn`: "tokens verified per request per
+        # decode step, minus one" — the engine's decode-batch multiplier is
+        # `(_nextn + 1)`. MTP is the SPECIAL case that additionally bakes its
+        # draft layers into the op lists at construction (via config.nextn /
+        # mtp_scale_factor); scheme-based speculation (dspark/eagle3/...)
+        # sets `_nextn = verify_width - 1` POST-construction instead
+        # (speculation.materialize), so op counts carry no MTP layer scaling.
+        # Consumers that mean "verify width" should read the property below;
+        # consumers that mean "MTP depth" must gate on the scheme type, not
+        # on `_nextn` alone.
         self._nextn = normalize_nextn(model_config.nextn)
         model_config.nextn = self._nextn
+
+        # Speculative scheme (cost side). get_model() replaces this with the
+        # resolved scheme after construction. The default must stay consistent
+        # with _nextn for directly-constructed models (tests, tools): nextn>0
+        # has always meant MTP semantics (verify width nextn+1).
+        self.spec_scheme = NullScheme() if self._nextn == 0 else MTPScheme(depth=self._nextn)
+
+    @property
+    def verify_width(self) -> int:
+        """Tokens verified per request per decode step (the engine's
+        decode-batch multiplier). 1 = plain autoregressive decode."""
+        return int(self._nextn) + 1
 
     @property
     def activation_hidden_size(self) -> int:

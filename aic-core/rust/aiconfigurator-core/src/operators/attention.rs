@@ -293,6 +293,29 @@ pub struct GenerationAttentionOp {
     pub head_size: u32,
     pub window_size: u32,
     pub kv_cache_dtype: KvCacheQuantMode,
+    /// Batch divisor for materialized speculative widths (the attention twin
+    /// of the gemm/elementwise `scale_num_tokens` channel). The engine widens
+    /// the decode batch by `(nextn + 1)`, but a block attention pass reads
+    /// each request's KV once for ALL its query tokens — so the op is priced
+    /// at `batch / scale_num_tokens` (the request batch, "sequence basis").
+    /// Default 1: every legacy spec and the MTP contract stay bit-identical.
+    #[serde(default = "crate::operators::gemm::default_seq_split")]
+    pub scale_num_tokens: u32,
+    /// Real query tokens per request behind the divided-out width (verify
+    /// width for target verify attention, drafted tokens for a block-drafting
+    /// scheme's own attention; 0/1 = plain decode). Drives the roofline
+    /// guard: the table row prices one query per request (math term ≈
+    /// 1/verify_query_tokens of the true QK+PV work), so the price is lifted
+    /// to `verify_query_tokens x SOL math` when even ideal-peak compute for
+    /// the full query block exceeds the (KV-read-anchored) table value. In
+    /// the memory-bound decode regime this never fires (arithmetic intensity
+    /// ≈ 2·n/(n_kv·kv_bytes)·w FLOP/byte — w would need to exceed ~75 on
+    /// H100 GQA-4 to cross the roofline); it exists to keep the short-s /
+    /// extreme-width corner honest without collected wide-query data. No
+    /// fitted constants anywhere on this channel: the sequence-basis floor
+    /// and the ideal-peak guard are both physical bounds.
+    #[serde(default)]
+    pub verify_query_tokens: u32,
 }
 
 impl GenerationAttentionOp {
@@ -311,6 +334,8 @@ impl GenerationAttentionOp {
             head_size,
             window_size: 0,
             kv_cache_dtype,
+            scale_num_tokens: 1,
+            verify_query_tokens: 0,
         }
     }
 
@@ -321,9 +346,17 @@ impl GenerationAttentionOp {
         kv_seq_tokens: u32,
         gen_seq_imbalance_correction_scale: f64,
     ) -> Result<PerformanceResult, AicError> {
+        // Sequence basis: fold the engine's speculative width multiplier out
+        // of the batch — one KV read per REQUEST, not per query token.
+        let width = self.scale_num_tokens.max(1);
+        let seq_batch = if width > 1 {
+            (batch_size / width).max(1)
+        } else {
+            batch_size
+        };
         let mut result = query_generation_attention_table(
             db,
-            batch_size,
+            seq_batch,
             kv_seq_tokens,
             self.n,
             self.n_kv,
@@ -331,6 +364,27 @@ impl GenerationAttentionOp {
             self.window_size,
             self.kv_cache_dtype,
         )?;
+        if self.verify_query_tokens > 1 {
+            // Roofline guard (see field doc): lift to the ideal-peak math
+            // term of the full query block when it exceeds the table value.
+            if let Ok(attn_flops) = generation_attn_flops(&db.system_spec, self.kv_cache_dtype) {
+                let sol = generation_attention_sol(
+                    &db.system_spec,
+                    self.n_kv,
+                    self.head_size,
+                    self.window_size,
+                    self.kv_cache_dtype,
+                    self.n as f64,
+                    seq_batch as f64,
+                    kv_seq_tokens as f64,
+                    attn_flops,
+                );
+                let block_math_ms = sol.math_ms * self.verify_query_tokens as f64;
+                if block_math_ms > result.latency_ms {
+                    result.latency_ms = block_math_ms;
+                }
+            }
+        }
         if gen_seq_imbalance_correction_scale != 1.0 {
             // Python `result * scale` scales latency AND energy.
             result = result.scaled(gen_seq_imbalance_correction_scale);
@@ -1579,5 +1633,37 @@ mod tests {
         assert_eq!(result.latency_ms, table.latency_ms + extras * 1.1);
         assert_eq!(result.energy_wms, table.energy_wms);
         assert_eq!(result.source, Source::Mixed);
+    }
+
+    /// Speculative width channel: `scale_num_tokens = w` folds the engine's
+    /// widened decode batch back to the request batch before the table
+    /// lookup (one KV read per request, "sequence basis").
+    #[test]
+    fn generation_attention_sequence_basis_folds_batch() {
+        let db = b200_vllm_db();
+        let mut op = GenerationAttentionOp::new("gen", 64, 4, 128, KvCacheQuantMode::Fp8);
+        let unfolded = op.query(&db, 64, 4096, 1.0).expect("plain query");
+        op.scale_num_tokens = 8;
+        let folded = op.query(&db, 512, 4096, 1.0).expect("folded query");
+        assert_eq!(folded.latency_ms, unfolded.latency_ms);
+        assert_eq!(folded.energy_wms, unfolded.energy_wms);
+    }
+
+    /// Roofline guard: an absurd `verify_query_tokens` forces the ideal-peak
+    /// math term of the query block over the table value, lifting the price.
+    /// Physical widths never reach the crossover — the guard is a fence.
+    #[test]
+    fn generation_attention_roofline_guard_lifts_on_compute_domination() {
+        let db = b200_vllm_db();
+        let mut op = GenerationAttentionOp::new("gen", 64, 4, 128, KvCacheQuantMode::Fp8);
+        op.scale_num_tokens = 8;
+        let base = op.query(&db, 512, 4096, 1.0).expect("base").latency_ms;
+        // A physical width never lifts (memory-bound decode regime).
+        op.verify_query_tokens = 8;
+        let physical = op.query(&db, 512, 4096, 1.0).expect("physical").latency_ms;
+        assert_eq!(physical, base);
+        op.verify_query_tokens = 100_000;
+        let lifted = op.query(&db, 512, 4096, 1.0).expect("lifted").latency_ms;
+        assert!(lifted > base, "guard must lift: {lifted} vs {base}");
     }
 }

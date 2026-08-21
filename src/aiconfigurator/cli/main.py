@@ -179,6 +179,32 @@ def _parse_nextn(value: str) -> int | str:
     return parsed
 
 
+def _speculative_block_from_args(args) -> dict | None:
+    """Assemble the Task ``speculative:`` block from --spec-* flags.
+
+    Returns None when --spec-method is absent; Task-level validation owns the
+    consistency rules (acceptance bound, nextn mutual exclusion, key checks).
+    """
+    method = getattr(args, "spec_method", None)
+    if not method:
+        for flag in ("spec_draft_model_path", "spec_num_draft_tokens", "spec_accepted_tokens"):
+            if getattr(args, flag, None) is not None:
+                raise SystemExit(f"--{flag.replace('_', '-')} requires --spec-method.")
+        return None
+    params: dict = {}
+    if getattr(args, "spec_num_draft_tokens", None) is not None:
+        # mtp reads params['depth'] (nextn sugar); draft schemes read
+        # params['num_draft_tokens'] — writing the wrong key would silently
+        # resolve mtp to depth 0 (AR).
+        params["depth" if method == "mtp" else "num_draft_tokens"] = args.spec_num_draft_tokens
+    block: dict = {"method": method, "params": params}
+    if getattr(args, "spec_draft_model_path", None):
+        block["draft_model_path"] = args.spec_draft_model_path
+    if getattr(args, "spec_accepted_tokens", None) is not None:
+        block["accepted_tokens"] = args.spec_accepted_tokens
+    return block
+
+
 def _resolve_and_validate_nextn(args) -> None:
     """Fail fast on inconsistent MTP input; resolve --nextn auto to the checkpoint depth.
 
@@ -286,7 +312,42 @@ def _parse_afd_max_candidates(value: str) -> int:
     return parsed
 
 
+def _add_speculative_scheme_arguments(parser):
+    """--spec-* flags shared by every mode whose handler builds a
+    speculative block (default / recommend / estimate)."""
+    parser.add_argument(
+        "--spec-method",
+        type=str,
+        default=None,
+        help="(common) Scheme-based speculative decoding method (e.g. 'dspark'); "
+        "'mtp' equals the --nextn pair. Requires --spec-accepted-tokens; "
+        "mutually exclusive with --nextn > 0 for non-MTP methods.",
+    )
+    parser.add_argument(
+        "--spec-draft-model-path",
+        type=str,
+        default=None,
+        help="(common) Draft checkpoint (HF repo or local path) whose config.json "
+        "carries the scheme parameters (e.g. dspark_block_size).",
+    )
+    parser.add_argument(
+        "--spec-num-draft-tokens",
+        type=int,
+        default=None,
+        help="(common) Drafted tokens per round override (defaults to the draft "
+        "config's scheme default, e.g. dspark_block_size).",
+    )
+    parser.add_argument(
+        "--spec-accepted-tokens",
+        type=float,
+        default=None,
+        help="(common) Measured average accepted draft tokens per round for the "
+        "--spec-method scheme; no built-in acceptance assumption.",
+    )
+
+
 def _add_default_mode_arguments(parser):
+    _add_speculative_scheme_arguments(parser)
     parser.add_argument(
         "--model-path",
         "--model",
@@ -556,6 +617,7 @@ def _add_default_mode_arguments(parser):
 
 
 def _add_recommend_mode_arguments(parser):
+    _add_speculative_scheme_arguments(parser)
     parser.add_argument(
         "--model-path",
         "--model",
@@ -1249,6 +1311,7 @@ def _add_estimate_mode_arguments(parser):
         "there is no built-in acceptance assumption — use a measured value from "
         "your deployment.",
     )
+    _add_speculative_scheme_arguments(parser)
     parser.add_argument(
         "--stride",
         type=int,
@@ -1540,6 +1603,7 @@ def build_default_tasks(
     prefix: int = 0,
     nextn: int | str = 0,
     nextn_accepted: float | None = None,
+    speculative: dict | None = None,
     enable_chunked_prefill: bool = False,
     free_gpu_memory_fraction: float | None = None,
     max_seq_len: int | None = None,
@@ -1738,6 +1802,8 @@ def build_default_tasks(
     if nextn == "auto" or (isinstance(nextn, int) and nextn > 0):
         global_kwargs["nextn"] = nextn
         global_kwargs["nextn_accepted"] = nextn_accepted
+    if speculative:
+        global_kwargs["speculative"] = speculative
 
     if image_height or image_width or (num_images and num_images != 1):
         global_kwargs["image_height"] = image_height
@@ -2677,6 +2743,7 @@ def _run_estimate_mode(args):
         prefix=args.prefix,
         nextn=args.nextn,
         nextn_accepted=args.nextn_accepted,
+        speculative=_speculative_block_from_args(args),
         stride=args.stride,
     )
 
@@ -2969,6 +3036,7 @@ def _run_recommend(args) -> None:
             prefix=args.prefix,
             nextn=args.nextn,
             nextn_accepted=args.nextn_accepted,
+            speculative=_speculative_block_from_args(args),
             strict_sla=getattr(args, "strict_sla", False),
             enable_chunked_prefill=args.enable_chunked_prefill,
             free_gpu_memory_fraction=args.free_gpu_memory_fraction,
@@ -3133,6 +3201,7 @@ def main(args):
             prefix=args.prefix,
             nextn=args.nextn,
             nextn_accepted=args.nextn_accepted,
+            speculative=_speculative_block_from_args(args),
             enable_chunked_prefill=args.enable_chunked_prefill,
             free_gpu_memory_fraction=args.free_gpu_memory_fraction,
             max_seq_len=args.max_seq_len,

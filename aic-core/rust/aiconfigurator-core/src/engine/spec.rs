@@ -236,6 +236,8 @@ mod tests {
             head_size: 128,
             window_size: 4096,
             kv_cache_dtype: KvCacheQuantMode::Int8,
+            scale_num_tokens: 1,
+            verify_query_tokens: 0,
         }
     }
 
@@ -623,6 +625,8 @@ mod tests {
                 "1".into(),
             ],
             weight_bytes: 1.5e10,
+            // Non-default on purpose: the round-trip must preserve the field.
+            verify_width: 8,
             sol_ops: vec![
                 OpSpec::Gemm(gemm()),
                 OpSpec::ContextAttention(context_attention()),

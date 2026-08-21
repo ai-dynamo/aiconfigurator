@@ -134,6 +134,10 @@ def _fpm_spec_dict(op: FPMForwardOp) -> dict:
             "model_path": op._model_path,
             "match_identity": list(op._match_identity),
             "weight_bytes": op._weight_bytes,
+            # Speculative verify width for the equivalent-AR decode mapping
+            # (1 = plain AR). Set by the fpm hybrid rewrite in models when a
+            # draft scheme is materialized.
+            "verify_width": int(getattr(op, "_verify_width", 1) or 1),
             "sol_ops": [json.loads(_as_engine_op(c)._spec_json()) for c in op._sol_ops],
         }
     }
