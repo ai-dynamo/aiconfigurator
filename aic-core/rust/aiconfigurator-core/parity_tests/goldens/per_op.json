@@ -1189,7 +1189,7 @@
         "context_p2p": {
           "energy_wms": 0.0,
           "latency_ms": 0.0,
-          "source": "empirical"
+          "source": "silicon"
         },
         "context_proj_gemm": {
           "energy_wms": 94.83422521636963,
@@ -1256,7 +1256,7 @@
         "generation_p2p": {
           "energy_wms": 0.0,
           "latency_ms": 0.0,
-          "source": "empirical"
+          "source": "silicon"
         },
         "generation_proj_gemm": {
           "energy_wms": 91.77636432531736,
@@ -1288,6 +1288,12 @@
       "OMP_NUM_THREADS": "1",
       "OPENBLAS_NUM_THREADS": "1",
       "RAYON_NUM_THREADS": "1"
+    }
+  },
+  "post_freeze_pins": {
+    "qwen3-30b-a3b-b200-vllm-022-power": {
+      "engine": "rust",
+      "git_head": "41137c3bd378d7ac377daa1236d706fdd1ec6fe4"
     }
   }
 }

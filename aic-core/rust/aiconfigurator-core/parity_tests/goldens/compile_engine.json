@@ -13,6 +13,24 @@
       "RAYON_NUM_THREADS": "1"
     }
   },
+  "post_freeze_pins": {
+    "qwen3-30b-a3b-b200-vllm-022-power::decode_step": {
+      "engine": "rust",
+      "git_head": "41137c3bd378d7ac377daa1236d706fdd1ec6fe4"
+    },
+    "qwen3-30b-a3b-b200-vllm-022-power::mixed_step": {
+      "engine": "rust",
+      "git_head": "41137c3bd378d7ac377daa1236d706fdd1ec6fe4"
+    },
+    "qwen3-30b-a3b-b200-vllm-022-power::static_ctx": {
+      "engine": "rust",
+      "git_head": "41137c3bd378d7ac377daa1236d706fdd1ec6fe4"
+    },
+    "qwen3-30b-a3b-b200-vllm-022-power::static_gen": {
+      "engine": "rust",
+      "git_head": "41137c3bd378d7ac377daa1236d706fdd1ec6fe4"
+    }
+  },
   "references": {
     "chunked_prefill::ctx300_gen7_isl1000_osl64_prefix100::mixed_step": 21.17940829999926,
     "chunked_prefill::ctx512_gen4_isl4096_osl128_prefix0::mixed_step": 24.469393866631147,
@@ -60,7 +78,7 @@
     "qwen3-30b-a3b-b200-vllm-022-power::decode_step": 3.314493163403432,
     "qwen3-30b-a3b-b200-vllm-022-power::mixed_step": 15.364723323911948,
     "qwen3-30b-a3b-b200-vllm-022-power::static_ctx": 14.939366024779778,
-    "qwen3-30b-a3b-b200-vllm-022-power::static_gen": 3.3144931673015763,
+    "qwen3-30b-a3b-b200-vllm-022-power::static_gen": 3.314493167301576,
     "wideep_sglang::decode_step": 11.651700656031192,
     "wideep_sglang::mixed_step": 102.11955248944133,
     "wideep_sglang::static_ctx": 99.42331852569644,
