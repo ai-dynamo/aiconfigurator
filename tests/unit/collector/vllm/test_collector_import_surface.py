@@ -34,7 +34,6 @@ verified surface every time.
 
 import importlib.util
 import re
-import subprocess
 import sys
 import types
 from pathlib import Path
@@ -45,10 +44,6 @@ import pytest
 pytestmark = pytest.mark.unit
 REPO_ROOT = Path(__file__).resolve().parents[4]
 COLLECTOR_DIR = REPO_ROOT / "collector"
-
-# HEAD at the start of AIC-1782 Task V1 -- "vs 0.24.0-shaped" on this exact
-# prefix code proves each fix is version-specific, not a general break.
-PRE_FIX_COMMIT = "86f07df2dd3df12179238e62f3480c7ac6ad83ee"
 
 
 # ---------------------------------------------------------------------------
@@ -128,19 +123,6 @@ def _import_fresh(monkeypatch, dotted_name: str, source_path: Path) -> types.Mod
     return module
 
 
-def _prefix_source_text(relative_path: str) -> str:
-    """The real file's content as of PRE_FIX_COMMIT (git-blob read, no
-    working-tree mutation)."""
-    result = subprocess.run(
-        ["git", "show", f"{PRE_FIX_COMMIT}:{relative_path}"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout
-
-
 # ---------------------------------------------------------------------------
 # collect_moe.py -- the one surface that actually moved (FusedMoE ->
 # FusedMoEFactory rename inside run_moe_torch())
@@ -187,6 +169,53 @@ _SENTINEL_KWARGS = dict(moe_tp_size=2, moe_ep_size=2, model_name="x", perf_filen
 _SENTINEL_ARGS = ("bfloat16", [1], 1, 1, 1, 1)
 _SENTINEL_MATCH = "does not combine logical TP and EP"
 
+# Verbatim pre-fix excerpt: collector/vllm/collect_moe.py lines 322-354 at
+# commit 86f07df2dd3df12179238e62f3480c7ac6ad83ee (HEAD at the start of
+# AIC-1782 Task V1, before run_moe_torch()'s unconditional FusedMoE import
+# gained its version-conditional FusedMoEFactory fallback), truncated right
+# after the TP/EP sentinel guard -- nothing past the guard is reachable in
+# these tests. "vs 0.24.0-shaped" on this exact pre-fix code proves the fix
+# is version-specific, not a general break. Embedded as a string constant
+# instead of a `git show` read: that commit is a branch-head object that
+# squash-merge-only main and base-branch rebases leave unreachable on fresh
+# clones, which turned the sibling sglang red-proof's `git show` into a hard
+# CalledProcessError in CI.
+_PRE_FIX_MOE_SNIPPET = '''\
+def run_moe_torch(
+    moe_type,
+    num_tokens_lists,
+    hidden_size,
+    inter_size,
+    topk,
+    num_experts,
+    moe_tp_size,
+    moe_ep_size,
+    model_name,
+    distributed="power_law",
+    power_law_alpha=0.0,
+    *,
+    perf_filename,
+    device="cuda:0",
+):
+    """Benchmark the vLLM 0.24.0 model-execution MoE path."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.forward_context import get_forward_context, set_forward_context
+    from vllm.model_executor.layers.fused_moe.experts.fallback import FallbackExperts
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+        CompressedTensorsConfig,
+    )
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptFp8Config
+    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    from collector.vllm.utils import setup_distributed
+
+    if moe_tp_size > 1 and moe_ep_size > 1:
+        raise ValueError("vLLM MoE collector does not combine logical TP and EP")
+'''
+
 
 class TestCollectMoeImportSurface:
     def test_imports_cleanly_against_0240_shaped_vllm(self, monkeypatch):
@@ -202,13 +231,13 @@ class TestCollectMoeImportSurface:
             module.run_moe_torch(*_SENTINEL_ARGS, **_SENTINEL_KWARGS)
 
     def test_0271_shaped_fake_reproduces_a_break_on_prefix_code(self, monkeypatch, tmp_path):
-        """Red-proof, per the sglang round's precedent: exec the git blob
-        from immediately before this bump (PRE_FIX_COMMIT, unconditional
+        """Red-proof, per the sglang round's precedent: exec the embedded
+        verbatim pre-fix excerpt (_PRE_FIX_MOE_SNIPPET, unconditional
         ``from vllm...import FusedMoE``) against the 0.27.1-shaped fake
         (which has no ``FusedMoE`` name) and confirm it fails on import,
         not an assumption about what "should" happen."""
         scratch_file = tmp_path / "collect_moe.py"
-        scratch_file.write_text(_prefix_source_text("collector/vllm/collect_moe.py"))
+        scratch_file.write_text(_PRE_FIX_MOE_SNIPPET)
 
         _install_fake_vllm(monkeypatch, VLLM_0271_MOE_SURFACE)
         module = _import_fresh(monkeypatch, _COLLECT_MOE_DOTTED, scratch_file)
@@ -217,11 +246,11 @@ class TestCollectMoeImportSurface:
             module.run_moe_torch(*_SENTINEL_ARGS, **_SENTINEL_KWARGS)
 
     def test_prefix_code_was_fine_against_0240_shaped_vllm(self, monkeypatch, tmp_path):
-        """Companion to the test above: the prefix code was never broken in
+        """Companion to the test above: the pre-fix code was never broken in
         general, only against 0.27.1's shape -- confirms the break (and this
         regression test) is version-specific."""
         scratch_file = tmp_path / "collect_moe.py"
-        scratch_file.write_text(_prefix_source_text("collector/vllm/collect_moe.py"))
+        scratch_file.write_text(_PRE_FIX_MOE_SNIPPET)
 
         _install_fake_vllm(monkeypatch, VLLM_0240_MOE_SURFACE)
         module = _import_fresh(monkeypatch, _COLLECT_MOE_DOTTED, scratch_file)
@@ -334,6 +363,35 @@ VLLM_0271_GDN_SURFACE = {
 _COLLECT_GDN_PATH = COLLECTOR_DIR / "vllm" / "collect_gdn.py"
 _COLLECT_GDN_DOTTED = "collector.vllm.collect_gdn"
 
+# Verbatim pre-fix excerpt: collector/vllm/collect_gdn.py lines 13-29 at
+# commit 86f07df2dd3df12179238e62f3480c7ac6ad83ee (HEAD at the start of
+# AIC-1782 Task V1, before the module-level fla import gained its
+# version-conditional third_party.flash_linear_attention fallback) -- the
+# complete module-level import block, i.e. the import surface under test;
+# the file below this point is the aic_debug env read and function
+# definitions, none reachable by these tests. Embedded as a string constant
+# instead of a `git show` read (see _PRE_FIX_MOE_SNIPPET above for why
+# history reads are banned here).
+_PRE_FIX_GDN_SNIPPET = """\
+__compat__ = "vllm==0.24.0"
+
+import gc
+import os
+from types import SimpleNamespace
+
+import torch
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fla.ops import fused_recurrent_gated_delta_rule_packed_decode
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import ChunkGatedDeltaRule
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
+from vllm.version import __version__ as vllm_version
+
+from collector.case_generator import get_common_gdn_test_cases
+from collector.helper import benchmark_with_power, get_sm_version, log_perf
+"""
+
 
 class TestCollectGdnImportSurface:
     def test_imports_cleanly_against_0240_shaped_vllm(self, monkeypatch):
@@ -345,12 +403,13 @@ class TestCollectGdnImportSurface:
         _import_fresh(monkeypatch, _COLLECT_GDN_DOTTED, _COLLECT_GDN_PATH)
 
     def test_0271_shaped_fake_reproduces_a_break_on_prefix_code(self, monkeypatch, tmp_path):
-        """Red-proof: the pre-fix code (unconditional import from the old
+        """Red-proof: the embedded verbatim pre-fix excerpt
+        (_PRE_FIX_GDN_SNIPPET, unconditional import from the old
         vllm.model_executor.layers.fla.ops location) must fail on import
         against the 0.27.1-shaped fake, which only has the new
         vllm.third_party.flash_linear_attention.ops path."""
         scratch_file = tmp_path / "collect_gdn.py"
-        scratch_file.write_text(_prefix_source_text("collector/vllm/collect_gdn.py"))
+        scratch_file.write_text(_PRE_FIX_GDN_SNIPPET)
 
         _install_fake_vllm(monkeypatch, VLLM_0271_GDN_SURFACE)
 
@@ -358,10 +417,10 @@ class TestCollectGdnImportSurface:
             _import_fresh(monkeypatch, _COLLECT_GDN_DOTTED, scratch_file)
 
     def test_prefix_code_was_fine_against_0240_shaped_vllm(self, monkeypatch, tmp_path):
-        """Companion to the test above: the prefix code was never broken in
+        """Companion to the test above: the pre-fix code was never broken in
         general, only against 0.27.1's shape."""
         scratch_file = tmp_path / "collect_gdn.py"
-        scratch_file.write_text(_prefix_source_text("collector/vllm/collect_gdn.py"))
+        scratch_file.write_text(_PRE_FIX_GDN_SNIPPET)
 
         _install_fake_vllm(monkeypatch, VLLM_0240_GDN_SURFACE)
         _import_fresh(monkeypatch, _COLLECT_GDN_DOTTED, scratch_file)

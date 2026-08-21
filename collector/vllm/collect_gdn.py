@@ -505,16 +505,19 @@ def run_gdn_generation_benchmark(
         gc.collect()
         torch.cuda.empty_cache()
 
-        # vLLM 0.24.0's packed recurrent kernel launches grid-y as
+        # vLLM's packed recurrent kernel launches grid-y as
         # batch_size * num_v_heads (`grid = (NV, B * HV)`,
-        # vllm/model_executor/layers/fla/ops/fused_recurrent.py:449 @0.24.0);
+        # fused_recurrent.py:449 at BOTH pinned versions -- under
+        # vllm/model_executor/layers/fla/ops/ @0.24.0 and under
+        # vllm/third_party/flash_linear_attention/ops/ @0.27.1);
         # CUDA limits grid-y to 65,535. Keep the valid convolution measurement
         # above, then surface the unsupported recurrent point to Collector V2
         # instead of silently dropping it.
         if batch_size * num_v_heads > 65_535:
             raise RuntimeError(
-                "vLLM 0.24.0 packed recurrent GDN exceeds CUDA grid-y limit "
-                "(fla/ops/fused_recurrent.py:449 launches grid-y = batch * num_v_heads): "
+                "vLLM packed recurrent GDN exceeds CUDA grid-y limit "
+                "(fused_recurrent.py:449 launches grid-y = batch * num_v_heads; "
+                "fla/ops/ @0.24.0, third_party/flash_linear_attention/ops/ @0.27.1): "
                 f"batch_size={batch_size}, num_v_heads={num_v_heads}, "
                 f"grid_y={batch_size * num_v_heads} > 65535"
             )
