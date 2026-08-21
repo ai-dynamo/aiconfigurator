@@ -333,9 +333,12 @@ The loader's source ordering (§7) in one list:
    declaration says so.
 4. Cross-backend fill only for kernel sources whitelisted by
    `perf_data_reuse_manifest.yaml`, and only after channels 1–2.
-5. The `comm` family is excluded from sibling-version reuse entirely — NCCL
-   curves are topology-bound, so shape-filling across versions is wrong there
-   (current NCCL/oneCCL behavior, now stated as policy).
+5. The `comm` family never uses declared (`reuse.yaml`) or cross-backend fill.
+   Framework-versioned namespaces (`comm/sglang`, `comm/trtllm`, and
+   `comm/vllm`) may fill from strictly earlier versions of the same storage
+   backend. Communication-library namespaces (`comm/nccl`, `comm/oneccl`) and
+   every unknown future backend remain primary-only until their version
+   semantics are explicitly validated.
 
 Guardrails:
 
@@ -348,6 +351,9 @@ Guardrails:
   operational definition of **unsupported silent fallback**.
 - **Scope limits:** all reuse runs only in SILICON/HYBRID modes; formula-only
   modes (EMPIRICAL, SOL) are untouched.
+- **Retention:** an older framework communication table can now be a live
+  donor (for example TRT-LLM rc20 falling back to rc10). Per-op pruning must
+  account for this same-backend chain before deleting old comm data.
 
 ## 7. Loader changes (`aic-core/src/aiconfigurator_core/sdk/perf_database.py`)
 
