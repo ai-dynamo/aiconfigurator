@@ -106,6 +106,16 @@ if _OUT:
                         FusedMoE.forward._aic = True
                 except Exception:
                     pass
+                # deepep route: DeepEPMoE overrides forward — wrap it too
+                try:
+                    from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE
+                    if "forward" in vars(DeepEPMoE) and not getattr(DeepEPMoE.forward, "_aic", False):
+                        DeepEPMoE.forward = _capture(
+                            DeepEPMoE.forward, "moe_calls",
+                            lambda s: f"DeepEPMoE[{type(getattr(s, 'quant_method', None)).__name__}]")
+                        DeepEPMoE.forward._aic = True
+                except Exception:
+                    pass
                 ab_cls = type(self.attn_backend)
                 for meth in ("forward_extend", "forward_decode"):
                     fn = getattr(ab_cls, meth, None)
