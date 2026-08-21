@@ -100,6 +100,11 @@ families:
     dummy_variants:
     - full_indexer_moe
     - shared_indexer_moe
+    known_sm90:
+      trtllm_fp8kv: 'trtllm rc23 SM90: native crash (frame#62 abort) when kv_cache_config.dtype=fp8 —
+        the exact config the generator renders for fp8 profiles; kv auto(bf16) loads fine (A/B verified
+        on GLM-5-FP8, facts/glm5fp8_kvauto.json, 2026-08-21). Deployment-blocking generator gap on this
+        platform.'
   m3:
     architecture: MiniMaxM3SparseForConditionalGeneration
     checkpoints:
@@ -146,6 +151,8 @@ families:
             fails on the same GPU (12 controlled reruns 2026-08-21); every generator flag excluded by
             bisection; suspected timing-dependent tensor layout under enable-mixed-chunk. Also hits MiniMax-M2.5.
             Probe retries once and records warmup_retry; persistent failure is a record, not a block.
+          trtllm_linear_assert: 'trtllm rc23: fp8 Linear.apply assertion (linear.py:1142) under the generator-rendered
+            engine args; probe-default args loaded fine — surfaced by the fidelity upgrade 2026-08-21.'
       deepseek-ai/DeepSeek-V4-Flash:
         variant_overrides:
           vllm: rep_mix
@@ -169,12 +176,11 @@ families:
             versions (probe-verified 2026-08-20).'
       nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4:
         known:
-          trtllm_rc23: "cudaError check abort during dummy load, root-caused 2026-08-21:
-            the all_kinds dummy keeps ONE real 512-expert MoE layer (width-true rule)
-            = 64B params = 120GiB bf16, over a single H20's 96GB; trtllm materializes
-            dummy weights in bf16 while sglang/vllm load in checkpoint precision and
-            fit. Capacity fact, not a bug — probing this checkpoint on trtllm needs
-            tp8 (15GiB/rank)."
+          trtllm_rc23: 'cudaError check abort during dummy load, root-caused 2026-08-21: the all_kinds
+            dummy keeps ONE real 512-expert MoE layer (width-true rule) = 64B params = 120GiB bf16, over
+            a single H20''s 96GB; trtllm materializes dummy weights in bf16 while sglang/vllm load in
+            checkpoint precision and fit. Capacity fact, not a bug — probing this checkpoint on trtllm
+            needs tp8 (15GiB/rank).'
       sgl-project/DeepSeek-V4-Flash-FP8:
         variant_overrides:
           vllm: rep_mix
@@ -187,6 +193,28 @@ families:
         render_overrides:
           vllm:
             tokens_per_block: null
+      zai-org/GLM-5-FP8:
+        known:
+          trtllm_fp8kv: 'trtllm rc23 SM90: native crash (frame#62 abort) when kv_cache_config.dtype=fp8
+            — the exact config the generator renders for fp8 profiles; kv auto(bf16) loads fine (A/B verified
+            on GLM-5-FP8, facts/glm5fp8_kvauto.json, 2026-08-21). Deployment-blocking generator gap on
+            this platform.'
+      zai-org/GLM-5.1-FP8:
+        known:
+          trtllm_fp8kv: 'trtllm rc23 SM90: native crash (frame#62 abort) when kv_cache_config.dtype=fp8
+            — the exact config the generator renders for fp8 profiles; kv auto(bf16) loads fine (A/B verified
+            on GLM-5-FP8, facts/glm5fp8_kvauto.json, 2026-08-21). Deployment-blocking generator gap on
+            this platform.'
+      deepseek-ai/DeepSeek-V3.2:
+        known:
+          trtllm_fp8kv: 'trtllm rc23 SM90: native crash (frame#62 abort) when kv_cache_config.dtype=fp8
+            — the exact config the generator renders for fp8 profiles; kv auto(bf16) loads fine (A/B verified
+            on GLM-5-FP8, facts/glm5fp8_kvauto.json, 2026-08-21). Deployment-blocking generator gap on
+            this platform.'
+      MiniMaxAI/MiniMax-M2.5:
+        known:
+          trtllm_linear_assert: 'trtllm rc23: fp8 Linear.apply assertion (linear.py:1142) under the generator-rendered
+            engine args; probe-default args loaded fine — surfaced by the fidelity upgrade 2026-08-21.'
 topologies:
 - tp: 1
   ep: 1
