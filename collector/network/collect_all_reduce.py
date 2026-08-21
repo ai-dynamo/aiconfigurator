@@ -87,6 +87,7 @@ def import_trtllm():
         from tensorrt_llm import Mapping
         from tensorrt_llm._torch.distributed import AllReduce, AllReduceFusionOp
         from tensorrt_llm._torch.distributed import AllReduceParams as TorchAllReduceParams
+        from tensorrt_llm._torch.distributed import ops as distributed_ops
         from tensorrt_llm._utils import OMPI_COMM_TYPE_HOST, mpi_comm
         from tensorrt_llm.functional import AllReduceStrategy
 
@@ -97,6 +98,7 @@ def import_trtllm():
             "AllReduce": AllReduce,
             "AllReduceFusionOp": AllReduceFusionOp,
             "TorchAllReduceParams": TorchAllReduceParams,
+            "distributed_ops": distributed_ops,
             "OMPI_COMM_TYPE_HOST": OMPI_COMM_TYPE_HOST,
             "mpi_comm": mpi_comm,
             "AllReduceStrategy": AllReduceStrategy,
@@ -105,6 +107,32 @@ def import_trtllm():
         print(f"Failed to import TensorRT-LLM modules: {e}")
         print("Please ensure TensorRT-LLM is installed and PYTHONPATH is set correctly")
         sys.exit(1)
+
+
+def _trtllm_mnnvl_kernel_source(allreduce, input_tensor, world_size, distributed_ops):
+    """Return the pinned TRT-LLM MNNVL implementation that will run."""
+    # TensorRT-LLM v1.3.0rc20
+    # tensorrt_llm/_torch/distributed/ops.py:769-786 constructs this object only
+    # when MNNVL is available; forward():871-876 returns its output before
+    # regular AUTO dispatch. The regular C++ AUTO selector does not expose its
+    # selected implementation, so a generic label would invent provenance.
+    if getattr(allreduce, "mnnvl_allreduce", None) is None:
+        raise RuntimeError(
+            "TensorRT-LLM AUTO did not expose an active MNNVL implementation; "
+            "the pinned API does not report which regular fallback ran, so "
+            "kernel_source cannot be recorded truthfully"
+        )
+
+    # TensorRT-LLM v1.3.0rc20
+    # tensorrt_llm/_torch/distributed/ops.py:32,575-590 and
+    # cpp/tensorrt_llm/thop/allreduceOp.cpp:1932-1942 use this exact
+    # aggregate-byte threshold to dispatch MNNVL one-shot or two-shot.
+    threshold = getattr(distributed_ops, "_MNNVL_ONE_SHOT_THRESHOLD_BYTES", None)
+    if not isinstance(threshold, int) or threshold <= 0:
+        raise RuntimeError("TensorRT-LLM does not expose the pinned MNNVL variant threshold")
+    aggregate_bytes = input_tensor.numel() * input_tensor.element_size() * world_size
+    variant = "oneshot" if aggregate_bytes <= threshold else "twoshot"
+    return f"TRTLLM_MNNVL_{variant}"
 
 
 def benchmark_trtllm_allreduce(
@@ -168,12 +196,24 @@ def benchmark_trtllm_allreduce(
         input_tensor = torch.ones(input_shape, dtype=torch_dtype, device="cuda")
 
         op_list = []
+        kernel_sources = set()
         for i in range(repeat_n):
             # dtype enables MNNVL for multi-node TP (issue #1416):
             # _torch/distributed/ops.py @v1.3.0rc20 builds `MNNVLAllReduce(mapping, dtype) if dtype else None`.
             allreduce = trtllm_mods["AllReduce"](mapping=mapping, dtype=torch_dtype).cuda()
+            kernel_sources.add(
+                _trtllm_mnnvl_kernel_source(
+                    allreduce,
+                    input_tensor,
+                    world_size,
+                    trtllm_mods["distributed_ops"],
+                )
+            )
             allreduce(input_tensor, all_reduce_params=all_reduce_params)  # dry run to init
             op_list.append(allreduce)
+        if len(kernel_sources) != 1:
+            raise RuntimeError(f"TensorRT-LLM selected inconsistent kernels across repeats: {kernel_sources}")
+        kernel_source = kernel_sources.pop()
 
         # Capture CUDA Graph
         g = torch.cuda.CUDAGraph()
@@ -261,7 +301,7 @@ def benchmark_trtllm_allreduce(
                 version=trtllm_version,
                 device_name=get_device_module().get_device_name(),
                 op_name="all_reduce",
-                kernel_source="TRTLLM",
+                kernel_source=kernel_source,
                 perf_filename=perf_filename,
                 power_stats=power_stats,
             )

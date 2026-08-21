@@ -10,6 +10,7 @@ Static (ast) checks because the collectors need tensorrt_llm + GPUs to import.
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +20,19 @@ pytestmark = pytest.mark.unit
 
 _COLLECTOR = REPO_ROOT / "collector" / "network" / "collect_all_reduce.py"
 _SLURM_WORKER = REPO_ROOT / "collector" / "network" / "slurm" / "collect_allreduce.py"
+_GB300_TRTLLM_DATA = (
+    REPO_ROOT
+    / "aic-core"
+    / "src"
+    / "aiconfigurator_core"
+    / "systems"
+    / "data"
+    / "gb300"
+    / "comm"
+    / "trtllm"
+    / "1.3.0rc20"
+    / "custom_allreduce_perf.parquet"
+)
 
 
 def _allreduce_calls(path: Path) -> list[ast.Call]:
@@ -43,6 +57,16 @@ def _has_dtype_kw(call: ast.Call) -> bool:
     return bool(dtypes) and not (isinstance(dtypes[0].value, ast.Constant) and dtypes[0].value.value is None)
 
 
+def _load_pure_function(path: Path, name: str):
+    """Compile one dependency-free function without importing the GPU collector."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+    module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+    namespace = {}
+    exec(compile(module, str(path), "exec"), namespace)
+    return namespace[name]
+
+
 def test_network_collector_passes_dtype_to_allreduce():
     calls = _allreduce_calls(_COLLECTOR)
     assert calls, f"no AllReduce construction found in {_COLLECTOR}"
@@ -61,3 +85,46 @@ def test_slurm_worker_passes_dtype_to_allreduce():
         "AllReduce(...) so the slurm worker enables MNNVL on multi-node "
         "TP sweeps (issue #1416)."
     )
+
+
+def test_trtllm_kernel_source_records_actual_mnnvl_variant():
+    kernel_source = _load_pure_function(_COLLECTOR, "_trtllm_mnnvl_kernel_source")
+    allreduce = SimpleNamespace(mnnvl_allreduce=object())
+    ops = SimpleNamespace(_MNNVL_ONE_SHOT_THRESHOLD_BYTES=1024)
+
+    one_shot_tensor = SimpleNamespace(numel=lambda: 64, element_size=lambda: 2)
+    assert kernel_source(allreduce, one_shot_tensor, 8, ops) == "TRTLLM_MNNVL_oneshot"
+
+    two_shot_tensor = SimpleNamespace(numel=lambda: 65, element_size=lambda: 2)
+    assert kernel_source(allreduce, two_shot_tensor, 8, ops) == "TRTLLM_MNNVL_twoshot"
+
+
+def test_trtllm_kernel_source_rejects_unobservable_fallback_or_api_drift():
+    kernel_source = _load_pure_function(_COLLECTOR, "_trtllm_mnnvl_kernel_source")
+    tensor = SimpleNamespace(numel=lambda: 64, element_size=lambda: 2)
+    ops = SimpleNamespace(_MNNVL_ONE_SHOT_THRESHOLD_BYTES=1024)
+
+    with pytest.raises(RuntimeError, match="regular fallback"):
+        kernel_source(SimpleNamespace(mnnvl_allreduce=None), tensor, 8, ops)
+    with pytest.raises(RuntimeError, match="variant threshold"):
+        kernel_source(SimpleNamespace(mnnvl_allreduce=object()), tensor, 8, SimpleNamespace())
+
+
+def test_gb300_trtllm_multinode_rows_record_mnnvl_variant():
+    import pyarrow.parquet as pq
+
+    rows = pq.read_table(
+        _GB300_TRTLLM_DATA,
+        columns=["num_gpus", "message_size", "kernel_source"],
+    ).to_pylist()
+    assert len(rows) == 92
+    assert len({(row["num_gpus"], row["message_size"]) for row in rows}) == len(rows)
+
+    for row in rows:
+        tp_size = row["num_gpus"]
+        if tp_size < 8:
+            assert row["kernel_source"] == "TRTLLM"
+            continue
+        aggregate_bytes = row["message_size"] * 2 * tp_size
+        variant = "oneshot" if aggregate_bytes <= 64 * 1024 * 8 * 2 else "twoshot"
+        assert row["kernel_source"] == f"TRTLLM_MNNVL_{variant}"

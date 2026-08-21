@@ -17,5 +17,10 @@ tables:
   # decode-dominant region — were previously over-reported by up to 6.2x.
   # 23 message sizes per TP size; message_size counts BF16 elements, so
   # the 128..536,870,912 range spans 256B..1GiB of payload.
+  # TP8/TP16 kernel_source values record TRTLLM_MNNVL_oneshot/twoshot.
+  # In v1.3.0rc20, tensorrt_llm/_torch/distributed/ops.py:871-876 makes an
+  # active MNNVL path terminal; cpp/tensorrt_llm/thop/allreduceOp.cpp:
+  # 1932-1942 selects the variant from aggregate bytes. Legacy TP2/TP4 rows
+  # retain TRTLLM because regular AUTO does not expose its runtime choice.
   custom_allreduce_perf:
     status: complete

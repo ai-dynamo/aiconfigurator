@@ -13,5 +13,12 @@ tables:
   # 4 GPUs per node, so serving-relevant TP sizes all span nodes and had
   # no measured data). 23 message sizes x {graph, eager}; message_size
   # counts BF16 elements, so the 128..536,870,912 range spans 256B..1GiB.
+  # kernel_source caveat: SGLang_CustomAllReduce_{eager,graph} records launch
+  # mode, not the per-call backend. SGLang v0.5.14 dispatches through
+  # python/sglang/srt/distributed/parallel_state.py:578-660;
+  # device_communicators/custom_all_reduce.py:260-274 rejects a cross-node
+  # non-fully-connected group before the PyNCCL fallback. This run did not
+  # instrument that decision, so TP8/TP16 cannot be retrospectively relabeled
+  # without fabricating provenance; recollection must record it.
   custom_allreduce_perf:
     status: complete

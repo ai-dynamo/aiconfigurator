@@ -23,5 +23,12 @@ tables:
   # (eager small-message cells jitter ±10-17% run-to-run on both builds, same
   # noise floor). TP2/TP4 rows are fresh 0.27.0 measurements (dev542 shipped
   # none; 0.24.0's differ by construction only in collection date).
+  # kernel_source caveat: vLLM_custom_{eager,graph} records collector launch
+  # mode, not the per-call backend. vLLM v0.27.0 dispatches through
+  # vllm/distributed/device_communicators/cuda_communicator.py:275-341;
+  # cross-node custom AR is rejected by custom_all_reduce.py:348-361 before
+  # SYMM_MEM/PyNCCL fallback. This run did not instrument that size-dependent
+  # choice, so TP8/TP16 cannot be relabeled retrospectively without fabricating
+  # provenance; recollection must record it.
   custom_allreduce_perf:
     status: complete

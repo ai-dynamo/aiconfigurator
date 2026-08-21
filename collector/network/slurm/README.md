@@ -39,6 +39,8 @@ python3 cvt_log_to_perf_txt.py
 
 Single-node scripts cover TP=2/4. On GB200/GB300 (4 GPUs per node) serving-relevant TP sizes span nodes; use the multi-node scripts so the TRT-LLM MNNVL path is exercised (issue #1416). `collect_allreduce.py` must construct `AllReduce(..., dtype=...)` — without dtype the collector silently measures the fallback kernel.
 
+The TP8/TP16 launchers are reviewed templates and have not been exercised as-is on a Slurm cluster; the published GB300 rows were collected through `torchrun`/`mpirun`. Before use, replace the rc20 image and repository-mount placeholders, and verify the site supports `--gpus-per-task=1 --gpu-bind=single:1`; the worker intentionally fails unless each task sees exactly one CUDA device.
+
 ## 2.1 Replace the "/path/to" in the script with actual path
 
 ## 2.2 Run the collector

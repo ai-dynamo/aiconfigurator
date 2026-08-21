@@ -159,13 +159,12 @@ fn custom_allreduce_sol_ms(spec: &SystemSpec, tp_size: u32, size: f64) -> f64 {
 }
 
 /// `SOL(query)/util` over the collected custom-allreduce size curve.
-/// Mirrors Python `_query_custom_allreduce_table.get_empirical`: SOL uses
-/// the real `tp_size`; when that tp was never measured the util grid comes
-/// from the node-capped slice, so the SOL ratio carries the multi-node
-/// bandwidth scaling. Only an *unmeasured* rank count borrows the
-/// node-boundary util slice regardless of the transfer policy — Python's
-/// documented compatibility exception (`xshape` provenance, TODO #1260).
-/// A measured cross-node slice reports plain `empirical` provenance.
+/// The Rust engine is the single implementation: SOL uses the real `tp_size`;
+/// when that tp was never measured the util grid comes from the node-capped
+/// slice, so the SOL ratio carries the multi-node bandwidth scaling. Only an
+/// *unmeasured* rank count borrows the node-boundary util slice (the `xshape`
+/// compatibility path, TODO #1260). A measured cross-node slice reports plain
+/// `empirical` provenance.
 fn custom_allreduce_empirical(
     db: &PerfDatabase,
     quant: CommQuantMode,

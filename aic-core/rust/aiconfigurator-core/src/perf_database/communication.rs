@@ -156,7 +156,8 @@ impl CommunicationTable {
     /// Resolve which measured TP slice backs a query for `tp_size`.
     ///
     /// Returns `tp_size` when the table has rows for that exact rank count,
-    /// otherwise the node-capped slice. Mirrors Python's `measured_tp_slice`.
+    /// otherwise the node-capped slice. This Rust engine method is the single
+    /// implementation; Python/SDK queries delegate to the engine.
     pub fn measured_tp_slice(&self, quant: CommQuantMode, tp_size: u32, per_node: u32) -> u32 {
         if tp_size <= per_node {
             return tp_size;
@@ -172,10 +173,8 @@ impl CommunicationTable {
         tp_size.min(per_node)
     }
 
-    /// Custom-allreduce latency at a RAW tp_size, mirroring the full Python
-    /// DB-level `_query_custom_allreduce_table.get_silicon`
-    /// (operations/communication.py) so every consumer inherits the same
-    /// semantics:
+    /// Custom-allreduce latency at a RAW tp_size. This is the engine-level
+    /// implementation used by every consumer:
     ///   1. `tp == 1` -> 0;
     ///   2. GB200 NVL72 (`num_gpus_per_node == 72`) with `tp > 4` -> reroute
     ///      to NCCL all_reduce at the RAW tp (custom AR is only collected up
@@ -200,8 +199,7 @@ impl CommunicationTable {
         // Prefer an exactly-measured rank-count slice over the node-capped one:
         // on NVL systems (4 GPUs per node) every serving-relevant TP spans
         // nodes, so capping a measured TP8/TP16 slice to TP4 would throw away
-        // real data in favour of a synthesized estimate. Mirrors Python's
-        // `measured_tp_slice` (operations/communication.py); see issues #1416
+        // real data in favour of a synthesized estimate. See issues #1416
         // (multi-node collection) and #1260 (overflow policy).
         let effective_tp = self.measured_tp_slice(quant, tp_size, per_node);
         let mut value = self.query_custom_allreduce(quant, effective_tp, message_size)?;
@@ -214,7 +212,7 @@ impl CommunicationTable {
             let f_tp = tp_size as f64;
             let f_eff = effective_tp as f64;
             let scale = (f_tp - 1.0) / f_tp * f_eff / (f_eff - 1.0).max(1.0) * base_bw / target_bw;
-            // Python scales latency AND energy by the beyond-node factor.
+            // Scale latency and energy by the same beyond-node factor.
             value.latency *= scale;
             value.energy *= scale;
         }

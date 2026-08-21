@@ -5,7 +5,7 @@
 # so TP>4 always spans nodes). Env template mirrors slurm_nccl_test_4node16gpu.sh;
 # adjust NCCL_IB_HCA / NCCL_SOCKET_IFNAME / container-image to the cluster.
 #SBATCH -N 4
-#SBATCH --gpus 16
+#SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=4
 #SBATCH -o log_slurm_py/trtllm-bench-16gpu.out
 #SBATCH -e log_slurm_py/trtllm-bench-16gpu.err
@@ -26,13 +26,13 @@ export NCCL_NVLS_ENABLE=1
 export NCCL_MNNVL_ENABLE=1
 export NCCL_CUMEM_ENABLE=1
 export NCCL_CUMEM_HOST_ENABLE=0
-export TRTLLM_DEEPSEEK_EAGER_FUSION_DISABLED=0
 
 # collect_allreduce.py reads SLURM_NTASKS / SLURM_NTASKS_PER_NODE / SLURM_LOCALID;
 # the per-task rank comes from RANK if set, else SLURM_PROCID (what srun exports).
 srun -l \
     --ntasks 16 --ntasks-per-node 4 \
-    --container-image=/path/to/trtllm_aarch64_release_v1.0.0rc2.sqsh \
-    --container-mounts=/dev:/dev,${HOME}:${HOME},/path/to/:/kimi \
+    --gpus-per-task=1 --gpu-bind=single:1 \
+    --container-image=/path/to/trtllm_aarch64_release_v1.3.0rc20.sqsh \
+    --container-mounts=/dev:/dev,/path/to/aiconfigurator:/workspace/aiconfigurator \
     --export=ALL \
-    --mpi=pmix python /path/to/collect_allreduce.py
+    --mpi=pmix python /workspace/aiconfigurator/collector/network/slurm/collect_allreduce.py

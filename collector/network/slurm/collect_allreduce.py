@@ -51,8 +51,18 @@ gpus_per_node = int(os.environ["SLURM_NTASKS_PER_NODE"])
 local_rank = int(os.environ["SLURM_LOCALID"])
 
 # print(world_size, rank, gpus_per_node, local_rank)
-torch.cuda.set_device(local_rank)
-cudart.cudaSetDevice(local_rank)
+# The launchers bind exactly one GPU to each task. CUDA renumbers that task's
+# visible allocation to device 0; SLURM_LOCALID remains topology metadata and
+# is not a CUDA ordinal in this process-local namespace.
+visible_device_count = torch.cuda.device_count()
+if visible_device_count != 1:
+    raise RuntimeError(
+        "The Slurm custom-allreduce worker requires exactly one visible GPU per task; "
+        f"found {visible_device_count} (CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r})"
+    )
+device_index = 0
+torch.cuda.set_device(device_index)
+cudart.cudaSetDevice(device_index)
 mapping = Mapping(world_size=world_size, rank=rank, gpus_per_node=gpus_per_node, tp_size=world_size)
 
 all_reduce_params = AllReduceParams(
