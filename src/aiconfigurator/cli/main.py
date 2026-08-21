@@ -1495,13 +1495,45 @@ def _resolve_version_for_matching(system_name: str, backend_name: str, backend_v
         return backend_version
 
 
-def _megamoe_perf_data_available(backend_name: str, system_name: str, backend_version: str | None) -> bool:
-    """True when measured MegaMoE rows resolve for (backend, system, version).
+def _megamoe_model_shape(model_path: str) -> tuple[int, int, int, int] | None:
+    """Return the MegaMoE lookup shape for a supported model family."""
+    model_info = get_model_config_from_model_path(model_path)
+    architecture = model_info["architecture"]
+    if architecture == "KimiK3ForConditionalGeneration":
+        kimi_config = model_info["extra_params"]
+        return (
+            int(kimi_config.routed_expert_hidden_size or model_info["hidden_size"]),
+            int(kimi_config.moe_inter_size),
+            int(kimi_config.topk),
+            int(kimi_config.num_experts),
+        )
+    if architecture == "DeepseekV4ForCausalLM":
+        return (
+            int(model_info["hidden_size"]),
+            int(model_info["moe_inter_size"]),
+            int(model_info["topk"]),
+            int(model_info["num_experts"]),
+        )
+    return None
+
+
+def _megamoe_perf_data_available(
+    backend_name: str,
+    system_name: str,
+    backend_version: str | None,
+    model_path: str,
+) -> bool:
+    """True when measured MegaMoE rows resolve for this model and database.
 
     Probes the unified ``dsv4_megamoe_module`` table at the requested (or
-    latest declared) version for the backend. Lanes whose rows would arrive
-    only through reuse donors are deliberately not chased: the auto sweep
-    should enumerate only lanes holding their own measured MegaMoE rows.
+    latest declared) version for the backend, then verifies that both phases
+    contain the model's exact fused-module shape on the backend's serving
+    pre-dispatch lane. File presence alone is insufficient: for example,
+    GB300/SGLang 0.5.10 contains DeepSeek-V4 rows but no Kimi-K3 rows.
+
+    Lanes whose rows would arrive only through reuse donors are deliberately
+    not chased: the auto sweep should enumerate only lanes holding their own
+    measured MegaMoE rows.
     """
     resolved_version = backend_version or perf_database.get_latest_database_version(
         system=system_name,
@@ -1518,7 +1550,44 @@ def _megamoe_perf_data_available(backend_name: str, system_name: str, backend_ve
         resolved_version,
         common.PerfDataFilename.dsv4_megamoe_module.value,
     )
-    return bool(resolved_path and os.path.isfile(resolved_path))
+    if not resolved_path or not os.path.isfile(resolved_path):
+        return False
+
+    model_shape = _megamoe_model_shape(model_path)
+    if model_shape is None:
+        return False
+
+    import pyarrow.parquet as pq
+
+    required_columns = {
+        "phase",
+        "pre_dispatch",
+        "hidden_size",
+        "inter_size",
+        "topk",
+        "num_experts",
+        "moe_ep_size",
+    }
+    schema_names = set(pq.read_schema(resolved_path).names)
+    if not required_columns <= schema_names:
+        return False
+    columns = sorted(required_columns | ({"moe_tp_size"} & schema_names))
+    expected_pre_dispatch = "vllm" if backend_name == common.BackendName.vllm.value else "sglang_jit"
+    matching_phases = {
+        row["phase"]
+        for row in pq.read_table(resolved_path, columns=columns).to_pylist()
+        if (
+            int(row["hidden_size"]),
+            int(row["inter_size"]),
+            int(row["topk"]),
+            int(row["num_experts"]),
+        )
+        == model_shape
+        and int(row.get("moe_tp_size", 1)) == 1
+        and int(row["moe_ep_size"]) > 1
+        and row["pre_dispatch"] == expected_pre_dispatch
+    }
+    return {"context", "generation"} <= matching_phases
 
 
 def _ensure_backend_version_available(
@@ -1744,7 +1813,7 @@ def build_default_tasks(
         # (today: gb300 @ 0.27.0).
         # Explicit --backend <name> --moe-backend megamoe still builds anywhere.
         backends_to_sweep = []
-        if _megamoe_perf_data_available(common.BackendName.sglang.value, system, backend_version):
+        if _megamoe_perf_data_available(common.BackendName.sglang.value, system, backend_version, model_path):
             backends_to_sweep.append(common.BackendName.sglang.value)
         else:
             logger.warning(
@@ -1755,7 +1824,7 @@ def build_default_tasks(
         from aiconfigurator.sdk.models.helpers import _is_kimi_k3_checkpoint
 
         if _is_kimi_k3_checkpoint(model_path) and _megamoe_perf_data_available(
-            common.BackendName.vllm.value, system, backend_version
+            common.BackendName.vllm.value, system, backend_version, model_path
         ):
             backends_to_sweep.append(common.BackendName.vllm.value)
 
@@ -1845,7 +1914,7 @@ def build_default_tasks(
         if (
             backend_name in (common.BackendName.sglang.value, common.BackendName.vllm.value)
             and moe_backend == "megamoe"
-            and (not _megamoe_perf_data_available(backend_name, decode_system, backend_version))
+            and (not _megamoe_perf_data_available(backend_name, decode_system, backend_version, model_path))
         ):
             logger.warning(
                 "Skipping disagg for backend %s: no measured MegaMoE rows for decode system %s.",
