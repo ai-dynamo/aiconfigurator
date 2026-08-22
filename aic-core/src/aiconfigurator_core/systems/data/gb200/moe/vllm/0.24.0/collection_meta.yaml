@@ -8,6 +8,14 @@ runtime:
   version: 0.24.0
 tables:
   moe_perf:
+    # 2026-08-19: appended 1,053 Nemotron-3.5-Lightning-30B-A3B-NVFP4 nvfp4
+    # rows (2688/1856, 128x6; kernel_source
+    # vllm_compressedtensorsw4a4nvfp4moe_flashinfer_trtllm_trtllmnvfp4expertsmonolithic).
+    # Collected on 4x GB200 (oberon) in stock vllm/vllm-openai:v0.24.0-cu129
+    # (aic-auto-collector pipeline 63531203, job 403831324; collector pinned
+    # to main 40c1e749 = the AIC-1748 case plan). Keys disjoint from the
+    # existing rows (only same-geometry plane is Nano-BF16's bfloat16).
+    # Zero failed tasks. AIC-1743/AIC-1748.
     # 2026-08-09: appended 2025 MiniMax-M3 MoE shape rows (6144/3072, 128x4):
     # 1053 bf16 vllm_unquantizedfusedmoe_flashinfer_cutlass_flashinferexperts
     # (zero failures) + 972 nvidia/MiniMax-M3-NVFP4 nvfp4
