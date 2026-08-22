@@ -543,7 +543,14 @@ def _build_wideep_sglang():
     references)."""
     from aiconfigurator.sdk import common
 
-    database = _quiet(perf_database.get_database, _WIDEEP_SGLANG_SYSTEM, "sglang", _WIDEEP_SGLANG_VERSION)
+    database = _quiet(
+        perf_database.get_database,
+        _WIDEEP_SGLANG_SYSTEM,
+        "sglang",
+        _WIDEEP_SGLANG_VERSION,
+        # sole wideep_mlp data coordinate (kept donor data, not a queryable slot)
+        allow_unlisted_version=True,
+    )
     if database is None:
         pytest.skip(f"no perf database for {_WIDEEP_SGLANG_SYSTEM}/sglang/{_WIDEEP_SGLANG_VERSION}")
     model_config = config.ModelConfig(
