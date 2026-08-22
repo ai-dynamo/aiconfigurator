@@ -786,6 +786,10 @@ class TrtllmLedger:
         return ledger
 
     @property
+    def manifest(self) -> TrtllmManifest:
+        return self._manifest
+
+    @property
     def pending_coordinates(self) -> tuple[TrtllmCoordinate, ...]:
         return tuple(
             coordinate for coordinate in self._manifest.coordinates if coordinate.point_id not in self._accepted

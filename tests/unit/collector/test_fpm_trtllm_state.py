@@ -707,6 +707,17 @@ def test_new_ledger_persists_the_manifest_and_reports_every_coordinate_pending(t
     assert json.loads((tmp_path / "ledger" / "manifest.json").read_text()) == manifest.to_dict()
 
 
+def test_ledger_exposes_its_frozen_manifest_without_a_mutable_copy(tmp_path):
+    manifest = _manifest()
+    ledger = TrtllmLedger.open(
+        tmp_path / "ledger",
+        manifest=manifest,
+        current_runtime_limits=_runtime_limits(),
+    )
+
+    assert ledger.manifest is manifest
+
+
 def test_new_ledger_durably_persists_the_manifest_before_open_returns(monkeypatch, tmp_path):
     events = []
     real_fsync = os.fsync
