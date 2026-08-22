@@ -2240,8 +2240,11 @@ class TestRustProvenanceCapture:
         case = EngineStepParityCase(
             model_path="MiniMaxAI/MiniMax-M3",
             database_mode="HYBRID",
-            # xop-borrow behavior coordinate (MSA borrows DSA util at 0.19-era data)
-            backend_version="0.19.0",
+            # xop-borrow coordinate on the current slot: sglang 0.5.14 ships
+            # no MSA module tables (they land at 0.5.16), so MSA borrows
+            # DSA's util — the xop tier this test pins.
+            backend_name="sglang",
+            backend_version="0.5.14",
         )
         with util_empirical.capture_provenance() as tags:
             metrics = _static_metrics(case)
@@ -2442,7 +2445,9 @@ class TestRustEngineStepFpmParity:
             forward_model="fpm",
         )
         model = get_model(_FPM_MODEL, cfg, "vllm")
-        database = _quiet_call(perf_database.get_database, "b200_sxm", "vllm", _FPM_VERSION, allow_unlisted_version=True)
+        database = _quiet_call(
+            perf_database.get_database, "b200_sxm", "vllm", _FPM_VERSION, allow_unlisted_version=True
+        )
         return model, get_backend("vllm"), database
 
     def _static(self, model, backend, database, mode, batch, isl, osl, prefix):

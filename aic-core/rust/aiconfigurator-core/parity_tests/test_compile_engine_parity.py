@@ -167,7 +167,14 @@ def _quiet(func, *args, **kwargs):
 
 
 def _build_python_model(case: EngineStepParityCase):
-    database = _quiet(perf_database.get_database, case.system_name, case.backend_name, case.backend_version)
+    database = _quiet(
+        perf_database.get_database,
+        case.system_name,
+        case.backend_name,
+        case.backend_version,
+        # parity cases are frozen data coordinates by design
+        allow_unlisted_version=True,
+    )
     if database is None:
         pytest.skip(f"no perf database for {case.system_name}/{case.backend_name}/{case.backend_version}")
     model_config = config.ModelConfig(
