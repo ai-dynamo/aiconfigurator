@@ -17,7 +17,7 @@ from aiconfigurator_core.sdk.config import RuntimeConfig
 from aiconfigurator_core.sdk.inference_summary import InferenceSummary
 from aiconfigurator_core.sdk.models import BaseModel
 from aiconfigurator_core.sdk.perf_database import PerfDatabase
-from aiconfigurator_core.sdk.performance_result import MoECommFallback
+from aiconfigurator_core.sdk.performance_result import MoECommFallback, merge_moe_comm_fallbacks
 from aiconfigurator_core.sdk.rust_engine_step import (
     estimate_decode_step_breakdown_with_rust,
     estimate_mixed_step_breakdown_with_rust,
@@ -445,7 +445,7 @@ class BaseBackend:
         memory = self._get_encoder_component_memory_for_runtime(model, runtime_config, batch_size)
         return raw_latency * latency_correction_scale, power_w, memory, power_coverage
 
-    # TODO: refactor this 6-tuple return into a NamedTuple (or @dataclass) for
+    # TODO: refactor this seven-tuple return into a NamedTuple (or @dataclass) for
     # readability; current call sites unpack positionally and the signature is
     # hard to scan.
     def _run_static_breakdown(
@@ -1531,7 +1531,10 @@ class BaseBackend:
         summary.set_per_ops_data(per_ops_data)
         summary.set_per_ops_source(per_ops_source)
         summary.set_moe_comm_fallbacks(
-            tuple(dict.fromkeys((*mix_step_estimate.moe_comm_fallbacks, *genonly_moe_comm_fallbacks)))
+            merge_moe_comm_fallbacks(
+                mix_step_estimate.moe_comm_fallbacks,
+                genonly_moe_comm_fallbacks if num_genonly_steps > 0 else (),
+            )
         )
         summary.set_step_estimates(
             {

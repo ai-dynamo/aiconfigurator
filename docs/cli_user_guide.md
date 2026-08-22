@@ -254,6 +254,16 @@ aiconfigurator cli estimate \
 
 `--detail` replaces the removed `--print-per-ops-latency` (the old flag still works as a deprecation alias).
 
+#### MoE communication topology provenance
+
+For SGLang DeepEP communication (`deepep_ht` or `deepep_ll`), AIConfigurator always uses silicon data collected at the exact requested EP size and node count when that topology is available. If a multi-node request has no exact all-to-all row but the same MoE shape has the canonical legacy EP8/node1 row, AIConfigurator may use that row as a substitute; all other frameworks, communication backends, single-node requests, and missing donor rows remain exact-topology only. A compatible MoE expert-compute row is still required at the requested EP size.
+
+A successfully executed EP8/node1 substitution keeps the generic per-op source as `estimated` and records separate requested-versus-measurement coordinates. The CLI emits a warning by default, for example `context/deepep_ht: requested EP32/node8; using EP8/node1 silicon data`. Add `--detail source` to show the same executed provenance alongside the per-op source table. Exact hits and failed substitute lookups do not produce a fallback record.
+
+The Python `cli_estimate` API exposes the ordered, de-duplicated records through `EstimateResult.moe_comm_fallbacks`. Each `MoECommFallback` identifies the inference phase, communication backend, requested EP size and node count, and measurement EP size and node count.
+
+`Task.run_single_agg`, `Task.run_single_disagg`, and aggregate/disaggregate sweep result rows retain the records in the hidden object column `_moe_comm_fallbacks`, including through rate matching, Pareto selection, and visible-column deduplication. Saved `best_config_topn.csv` and `pareto.csv` files omit this object column; for every selected configuration that used a substitution, the corresponding `topN/moe_comm_fallbacks.json` sidecar contains the records and the CLI logs a warning naming that file.
+
 ```bash
 aiconfigurator cli estimate \
   --model-path Qwen/Qwen3-32B --system h200_sxm \

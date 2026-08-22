@@ -247,10 +247,27 @@ def test_fold_per_op_accumulates_duplicate_names_and_merges_sources() -> None:
     assert scaled_energy == {"gemm": 30.0, "attention": 2.0}
 
 
+def test_fold_per_op_preserves_every_ordered_fallback_record() -> None:
+    entries = [
+        (
+            "moe_dispatch",
+            2.0,
+            0.0,
+            "estimated",
+            [_GENERATION_FALLBACK_PAYLOAD, _CONTEXT_FALLBACK_PAYLOAD, _GENERATION_FALLBACK_PAYLOAD],
+        ),
+        ("attention", 1.0, 0.0, "silicon", None),
+    ]
+
+    _, _, _, fallbacks = rust_engine_step._fold_per_op(entries)
+
+    assert fallbacks == (_CONTEXT_FALLBACK, _GENERATION_FALLBACK)
+
+
 def test_static_latency_breakdown_routes_through_engine_handle(monkeypatch) -> None:
     """The static helper maps ``RuntimeConfig`` onto
-    ``EngineHandle.run_static_per_op`` and folds the per-op entries into
-    real-name latency / energy / source dicts, applying
+    ``EngineHandle._run_static_per_op_with_metadata`` and folds the per-op
+    entries into real-name latency / energy / source dicts, applying
     ``latency_correction_scale`` per key to latency AND energy."""
     calls = []
 
@@ -1453,21 +1470,24 @@ def test_shipped_gb200_ep32_node8_reports_executed_fallback_to_api_and_cli(cli_p
         )
         assert all(len(entry) == 4 for entry in (*public_context, *public_generation))
         assert all(len(entry) == 5 for entry in (*metadata_context, *metadata_generation))
-        assert {entry[4][0] for entry in metadata_context if entry[4] is not None} == {"context"}
-        assert {entry[4][0] for entry in metadata_generation if entry[4] is not None} == {"generation"}
+        assert all(
+            entry[4] is None or isinstance(entry[4], list) for entry in (*metadata_context, *metadata_generation)
+        )
+        assert {payload[0] for entry in metadata_context for payload in entry[4] or []} == {"context"}
+        assert {payload[0] for entry in metadata_generation for payload in entry[4] or []} == {"generation"}
 
         public_shared, _, _ = handle.mixed_step_breakdown_per_op(1024, 1, 1024, 32)
         metadata_shared, metadata_context_attention, metadata_decode_attention = (
             handle._mixed_step_breakdown_per_op_with_metadata(1024, 1, 1024, 32)
         )
         assert all(len(entry) == 4 for entry in public_shared)
-        assert {entry[4][0] for entry in metadata_shared if entry[4] is not None} == {"context"}
+        assert {payload[0] for entry in metadata_shared for payload in entry[4] or []} == {"context"}
         assert not any(entry[4] is not None for entry in (*metadata_context_attention, *metadata_decode_attention))
 
         public_decode = handle.decode_step_per_op(1, 1024, 32)
         metadata_decode = handle._decode_step_per_op_with_metadata(1, 1024, 32)
         assert all(len(entry) == 4 for entry in public_decode)
-        assert {entry[4][0] for entry in metadata_decode if entry[4] is not None} == {"generation"}
+        assert {payload[0] for entry in metadata_decode for payload in entry[4] or []} == {"generation"}
 
         detail = format_estimate_detail_report(result, detail="source")
         assert "context/deepep_ht: requested EP32/node8; using EP8/node1 silicon data" in detail

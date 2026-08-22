@@ -834,6 +834,44 @@ def test_run_agg_preserves_executed_moe_fallbacks_from_mixed_and_decode_steps(
     assert summary.get_moe_comm_fallbacks() == (_CONTEXT_FALLBACK, _GENERATION_FALLBACK)
 
 
+def test_run_agg_omits_decode_fallback_when_decode_step_has_zero_weight(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    monkeypatch.setattr(
+        backend,
+        "run_mixed",
+        lambda *args, **kwargs: StepEstimate(
+            latency_ms=10.0,
+            energy_wms=100.0,
+            moe_comm_fallbacks=(_CONTEXT_FALLBACK,),
+        ),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_genonly_step_latency",
+        lambda *args, **kwargs: (
+            5.0,
+            50.0,
+            {"decode": 5.0},
+            {"decode": "estimated"},
+            (_GENERATION_FALLBACK,),
+        ),
+    )
+
+    summary = backend.run_agg(
+        model,
+        database,
+        RuntimeConfig(batch_size=1, beam_width=1, isl=8, osl=1, engine_step_backend="rust"),
+        ctx_tokens=8,
+    )
+
+    assert summary.get_moe_comm_fallbacks() == (_CONTEXT_FALLBACK,)
+    assert summary.get_per_ops_data()["scheduling"]["num_genonly_steps"] == 0.0
+
+
 @pytest.mark.parametrize(
     ("engine_step_backend", "error", "match"),
     [

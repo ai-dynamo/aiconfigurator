@@ -264,6 +264,7 @@ impl MoeAllToAllOp {
 mod tests {
     use super::*;
     use crate::common::enums::TransferPolicy;
+    use crate::operators::{FallbackOp, Op, OverlapOp, RuntimeContext};
     use crate::perf_database::MoeA2aTable;
     use parquet::data_type::{ByteArray, ByteArrayType, DoubleType, Int64Type};
     use parquet::file::properties::WriterProperties;
@@ -548,7 +549,7 @@ mod tests {
         let got = scaled.query(&db, 64).expect("combine");
         assert!((got.latency_ms - 6.400 * 61.0).abs() < 1e-12, "got {got:?}");
         assert_eq!(got.source, Source::Silicon);
-        assert_eq!(got.moe_comm_fallback, None);
+        assert!(got.moe_comm_fallbacks.is_empty());
     }
 
     #[test]
@@ -562,14 +563,14 @@ mod tests {
         assert!((got.latency_ms - 1.280).abs() < 1e-12, "got {got:?}");
         assert_eq!(got.source, Source::Estimated);
         assert_eq!(
-            got.moe_comm_fallback,
-            Some(MoeCommFallback {
+            got.moe_comm_fallbacks.iter().copied().collect::<Vec<_>>(),
+            vec![MoeCommFallback {
                 comm_backend: "deepep_ht",
                 requested_ep_size: 128,
                 requested_node_num: 32,
                 measurement_ep_size: 8,
                 measurement_node_num: 1,
-            })
+            }]
         );
     }
 
@@ -584,7 +585,7 @@ mod tests {
             .expect("exact requested topology");
         assert!((got.latency_ms - 0.640).abs() < 1e-12, "got {got:?}");
         assert_eq!(got.source, Source::Silicon);
-        assert_eq!(got.moe_comm_fallback, None);
+        assert!(got.moe_comm_fallbacks.is_empty());
     }
 
     #[test]
@@ -601,6 +602,66 @@ mod tests {
         assert!(
             matches!(result, Err(AicError::PerfDatabase(_))),
             "an unavailable donor must remain a typed data miss, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn overlap_and_fallback_composites_preserve_every_executed_a2a_substitution() {
+        let (_tmp, db) = synthetic_db(DatabaseMode::Silicon);
+        let mut context = op("dispatch", "deepep_ht", 1);
+        context.moe_ep_size = 128;
+        context.node_num = 32;
+        context.sms = 20;
+        let mut generation = op("dispatch", "deepep_ll", 1);
+        generation.moe_ep_size = 128;
+        generation.node_num = 32;
+
+        let overlap = Op::Overlap(OverlapOp::new(
+            "a2a_overlap",
+            vec![Op::MoeAllToAll(context.clone())],
+            vec![Op::MoeAllToAll(generation.clone())],
+        ));
+        let overlap_result = overlap
+            .query(
+                &db,
+                &RuntimeContext {
+                    num_tokens: 64,
+                    ..RuntimeContext::default()
+                },
+            )
+            .expect("overlap query");
+        assert_eq!(
+            overlap_result
+                .moe_comm_fallbacks
+                .iter()
+                .map(|fallback| fallback.comm_backend)
+                .collect::<Vec<_>>(),
+            vec!["deepep_ht", "deepep_ll"]
+        );
+
+        let mut missing_primary = context.clone();
+        missing_primary.hidden_size = 9999;
+        let fallback = Op::Fallback(FallbackOp::new(
+            "a2a_fallback",
+            Op::MoeAllToAll(missing_primary),
+            vec![Op::MoeAllToAll(context), Op::MoeAllToAll(generation)],
+        ));
+        let fallback_result = fallback
+            .query(
+                &db,
+                &RuntimeContext {
+                    num_tokens: 64,
+                    ..RuntimeContext::default()
+                },
+            )
+            .expect("fallback query");
+        assert_eq!(
+            fallback_result
+                .moe_comm_fallbacks
+                .iter()
+                .map(|record| record.comm_backend)
+                .collect::<Vec<_>>(),
+            vec!["deepep_ht", "deepep_ll"]
         );
     }
 

@@ -35,7 +35,7 @@ from aiconfigurator.sdk.models import (
     resolve_nvfp4_for_system,
 )
 from aiconfigurator.sdk.moe_comm_resolver import resolve_model_config_moe_comm
-from aiconfigurator.sdk.performance_result import MoECommFallback
+from aiconfigurator.sdk.performance_result import MoECommFallback, merge_moe_comm_fallbacks
 from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import (
     SpeculativeDecodingProfile,
@@ -2112,7 +2112,10 @@ def _combine_afd_static_estimate_results(
         mode="afd",
         per_ops_data=per_ops_data,
         per_ops_source=per_ops_source,
-        moe_comm_fallbacks=tuple(dict.fromkeys((*afd_result.moe_comm_fallbacks, *static_result.moe_comm_fallbacks))),
+        moe_comm_fallbacks=merge_moe_comm_fallbacks(
+            afd_result.moe_comm_fallbacks,
+            static_result.moe_comm_fallbacks,
+        ),
         kv_cache_warning=static_result.kv_cache_warning,
     )
 

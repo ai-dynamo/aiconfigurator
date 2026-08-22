@@ -38,6 +38,7 @@ from aiconfigurator.sdk.errors import (
     SolNotImplementedError,
     is_expected_cli_error,
 )
+from aiconfigurator.sdk.performance_result import MOE_COMM_FALLBACKS_COLUMN
 from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import normalize_speculative_decoding
 from aiconfigurator.sdk.task_v2 import Task, _lookup_num_gpus_per_node, _warn_large_ep_flag
@@ -2595,6 +2596,7 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
             **encoder_kwargs,
         )
     row = apply_row_power_coverage_gate(row)
+    _warn_moe_comm_fallbacks(row)
     logger.info("EPD %s single-point estimate:", estimate_mode)
     keys = (
         "ttft",
@@ -2625,7 +2627,8 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
 
 def _warn_moe_comm_fallbacks(result) -> None:
     """Warn when an estimate executed against substitute MoE topology data."""
-    for fallback in result.moe_comm_fallbacks:
+    fallbacks = result.get(MOE_COMM_FALLBACKS_COLUMN, ()) if isinstance(result, dict) else result.moe_comm_fallbacks
+    for fallback in fallbacks:
         logger.warning(
             "Estimated MoE communication latency used fallback silicon data: %s.",
             format_moe_comm_fallback(fallback),

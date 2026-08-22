@@ -23,13 +23,13 @@ from pathlib import Path
 from typing import Any
 
 from aiconfigurator_core.sdk.config import RuntimeConfig
-from aiconfigurator_core.sdk.performance_result import MoECommFallback
+from aiconfigurator_core.sdk.performance_result import MoECommFallback, merge_moe_comm_fallbacks
 
 logger = logging.getLogger(__name__)
 ENGINE_STEP_BACKEND_ENV = "AICONFIGURATOR_ENGINE_STEP_BACKEND"
 MoeCommFallbackPayload = tuple[str, str, int, int, int, int]
 PerOpValue = tuple[str, float, float, str]
-PerOpValueWithMetadata = tuple[str, float, float, str, MoeCommFallbackPayload | None]
+PerOpValueWithMetadata = tuple[str, float, float, str, list[MoeCommFallbackPayload] | None]
 
 
 # Python-step telemetry (#1357): count every remaining Python op.query() use
@@ -401,7 +401,7 @@ def _fold_per_op(
     """Fold the compiled engine's per-op tuples into the Python phase dicts.
 
     ``entries`` is the FFI's ``[(name, latency_ms, energy_wms, source,
-    moe_comm_fallback), ...]``
+    moe_comm_fallbacks), ...]``
     — already name-folded inside the engine, so this is an idempotent re-fold
     (it also keeps duck-typed handles in tests correct): duplicate names
     accumulate with ``+=`` and sources merge to ``"mixed"`` on mismatch —
@@ -419,7 +419,7 @@ def _fold_per_op(
     fallbacks: list[MoECommFallback] = []
     for entry in entries:
         name, latency_ms, energy_wms, src = entry[:4]
-        fallback_payload = entry[4] if len(entry) > 4 else None
+        fallback_payloads = entry[4] if len(entry) > 4 else None
         latency[name] = latency.get(name, 0.0) + latency_ms * scale
         energy[name] = energy.get(name, 0.0) + energy_wms * scale
         prior = source.get(name)
@@ -427,18 +427,24 @@ def _fold_per_op(
             source[name] = src
         elif prior != src:
             source[name] = "mixed"
-        if fallback_payload is not None:
-            fallback = MoECommFallback(
-                inference_phase=fallback_payload[0],
-                comm_backend=fallback_payload[1],
-                requested_ep_size=fallback_payload[2],
-                requested_node_num=fallback_payload[3],
-                measurement_ep_size=fallback_payload[4],
-                measurement_node_num=fallback_payload[5],
-            )
-            if fallback not in fallbacks:
-                fallbacks.append(fallback)
-    return latency, energy, source, tuple(fallbacks)
+        if fallback_payloads:
+            # The current private FFI returns a list so one composed op can
+            # report every substitution. Accept the original single payload
+            # shape as well for duck-typed callers compiled against the first
+            # provenance implementation.
+            payloads = [fallback_payloads] if isinstance(fallback_payloads[0], str) else fallback_payloads
+            for payload in payloads:
+                fallbacks.append(
+                    MoECommFallback(
+                        inference_phase=payload[0],
+                        comm_backend=payload[1],
+                        requested_ep_size=payload[2],
+                        requested_node_num=payload[3],
+                        measurement_ep_size=payload[4],
+                        measurement_node_num=payload[5],
+                    )
+                )
+    return latency, energy, source, merge_moe_comm_fallbacks(fallbacks)
 
 
 def estimate_static_latency_breakdown_with_rust(
@@ -459,11 +465,13 @@ def estimate_static_latency_breakdown_with_rust(
 ]:
     """Static (context / generation) per-op breakdown via the compiled engine.
 
-    Routes through ``EngineHandle.run_static_per_op`` (the "Python builds,
-    Rust executes" path). The engine performs the decode stride quadrature and
+    Routes through ``EngineHandle._run_static_per_op_with_metadata``, the
+    private same-call metadata counterpart to the "Python builds, Rust
+    executes" path. The public ``run_static_per_op`` method remains a list of
+    four-tuples. The engine performs the decode stride quadrature and
     the ``(nextn + 1)`` decode-batch scaling internally (mirroring
     the retired Python ``_run_generation_phase``) and returns every queried op's
-    ``(name, latency_ms, energy_wms, source, moe_comm_fallback)``; this side
+    ``(name, latency_ms, energy_wms, source, moe_comm_fallbacks)``; this side
     folds them into the
     same name-keyed dicts the Python phase runners produce — real op names,
     real energies, real provenance tags. Returns ``(context_latency,
@@ -501,7 +509,7 @@ def estimate_static_latency_breakdown_with_rust(
         generation_energy,
         context_source,
         generation_source,
-        tuple(dict.fromkeys((*context_fallbacks, *generation_fallbacks))),
+        merge_moe_comm_fallbacks(context_fallbacks, generation_fallbacks),
     )
 
 
@@ -618,7 +626,7 @@ def estimate_mixed_step_breakdown_with_rust(
         "component_energy_wms": component_energy_wms,
         "per_op_latency_ms": per_op_latency_ms,
         "per_op_source": per_op_source,
-        "moe_comm_fallbacks": tuple(dict.fromkeys((*shared_fallbacks, *ctx_fallbacks, *dec_fallbacks))),
+        "moe_comm_fallbacks": merge_moe_comm_fallbacks(shared_fallbacks, ctx_fallbacks, dec_fallbacks),
     }
 
 

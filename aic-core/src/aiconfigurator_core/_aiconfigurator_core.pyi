@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+_MoeCommFallbackPayload = tuple[str, str, int, int, int, int]
+_PerOpValueWithMetadata = tuple[str, float, float, str, list[_MoeCommFallbackPayload] | None]
+
 class AicEngine:
     @staticmethod
     def from_spec(bytes: bytes, systems_path: str | None = None) -> AicEngine: ...  # noqa: A002
@@ -74,8 +77,8 @@ class AicEngine:
         mode: str = "static",
         stride: int = 32,
     ) -> tuple[
-        list[tuple[str, float, float, str, tuple[str, str, int, int, int, int] | None]],
-        list[tuple[str, float, float, str, tuple[str, str, int, int, int, int] | None]],
+        list[_PerOpValueWithMetadata],
+        list[_PerOpValueWithMetadata],
     ]: ...
     def mixed_step_breakdown_per_op(
         self,
@@ -101,9 +104,9 @@ class AicEngine:
         seq_imbalance_correction_scale: float = 1.0,
         gen_seq_imbalance_correction_scale: float = 1.0,
     ) -> tuple[
-        list[tuple[str, float, float, str, tuple[str, str, int, int, int, int] | None]],
-        list[tuple[str, float, float, str, tuple[str, str, int, int, int, int] | None]],
-        list[tuple[str, float, float, str, tuple[str, str, int, int, int, int] | None]],
+        list[_PerOpValueWithMetadata],
+        list[_PerOpValueWithMetadata],
+        list[_PerOpValueWithMetadata],
     ]: ...
     def decode_step_per_op(
         self,
@@ -118,7 +121,7 @@ class AicEngine:
         isl: int,
         osl: int,
         gen_seq_imbalance_correction_scale: float = 1.0,
-    ) -> list[tuple[str, float, float, str, tuple[str, str, int, int, int, int] | None]]: ...
+    ) -> list[_PerOpValueWithMetadata]: ...
     def evaluate_context_ops(
         self,
         indices: list[int],

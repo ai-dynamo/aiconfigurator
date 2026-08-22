@@ -49,7 +49,7 @@ from aiconfigurator_core.sdk.operations.base import Operation
 
 PerOpValue = tuple[str, float, float, str]
 _MoeCommFallbackPayload = tuple[str, str, int, int, int, int]
-_PerOpValueWithMetadata = tuple[str, float, float, str, _MoeCommFallbackPayload | None]
+_PerOpValueWithMetadata = tuple[str, float, float, str, list[_MoeCommFallbackPayload] | None]
 
 # Reuse the exact quant-mode -> Rust ``DataType`` serde-string mappers the live
 # ctypes bridge uses, so the compiled ``EngineConfig`` decodes the same way.
@@ -779,7 +779,7 @@ class EngineHandle:
         mode: str = "static",
         stride: int = 32,
     ) -> tuple[list[_PerOpValueWithMetadata], list[_PerOpValueWithMetadata]]:
-        """Internal static per-op stream with executed fallback metadata."""
+        """Internal static per-op stream with ordered executed fallback records."""
         return self._engine._run_static_per_op_with_metadata(
             int(batch_size),
             int(beam_width),
@@ -833,7 +833,7 @@ class EngineHandle:
         list[_PerOpValueWithMetadata],
         list[_PerOpValueWithMetadata],
     ]:
-        """Internal mixed-step per-op stream with fallback metadata."""
+        """Internal mixed-step per-op stream with ordered executed fallback records."""
         return self._engine._mixed_step_breakdown_per_op_with_metadata(
             int(ctx_tokens),
             int(gen_tokens),
@@ -863,7 +863,7 @@ class EngineHandle:
         osl: int,
         gen_seq_imbalance_correction_scale: float = 1.0,
     ) -> list[_PerOpValueWithMetadata]:
-        """Internal decode per-op stream with executed fallback metadata."""
+        """Internal decode per-op stream with ordered executed fallback records."""
         return self._engine._decode_step_per_op_with_metadata(
             int(gen_tokens), int(isl), int(osl), float(gen_seq_imbalance_correction_scale)
         )

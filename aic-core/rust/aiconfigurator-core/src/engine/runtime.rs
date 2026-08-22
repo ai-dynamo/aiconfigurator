@@ -106,16 +106,23 @@ pub const DEFAULT_STATIC_STRIDE: u32 = 32;
 pub type MoeCommFallbackValue = (&'static str, &'static str, u32, u32, u32, u32);
 
 /// One evaluated op as it crosses the FFI: `(name, latency_ms, energy_wms,
-/// source, moe_comm_fallback)`. Entries are NAME-FOLDED before crossing — repeated names
+/// source, moe_comm_fallbacks)`. Entries are NAME-FOLDED before crossing — repeated names
 /// accumulate with `+=` and sources merge to `"mixed"` on mismatch, the
 /// exact accumulation semantics of Python's phase dicts (addition is
 /// commutative, so folding here instead of in Python changes nothing) —
 /// because streaming the raw ops × stride-steps tuples through pyo3
 /// measurably slowed the engine step on per-block puzzle nets (hundreds of
 /// String allocations + Python tuple constructions per call). `source` is
-/// the provenance tag (`silicon|empirical|sol|estimated|mixed`). A plain
-/// tuple so pyo3 converts to a list of five-tuples.
-pub type PerOpValue = (String, f64, f64, &'static str, Option<MoeCommFallbackValue>);
+/// the provenance tag (`silicon|empirical|sol|estimated|mixed`). The private
+/// fifth field is `None` or an ordered list of executed fallback records; the
+/// public bindings strip it and retain their four-tuple contract.
+pub type PerOpValue = (
+    String,
+    f64,
+    f64,
+    &'static str,
+    Option<Vec<MoeCommFallbackValue>>,
+);
 
 /// One SOL-decomposed per-op value: `(name, sol_time_ms, sol_math_ms,
 /// sol_mem_ms)`, mirroring Python's SOL_FULL triple `(sol_time, sol_math,
@@ -146,15 +153,20 @@ impl PerOpFold {
     fn add(&mut self, op: &Op, r: PerformanceResult) {
         let name = op.name();
         let source = r.source.as_str();
-        let fallback = r.moe_comm_fallback.map(|fallback| {
-            (
-                self.inference_phase,
-                fallback.comm_backend,
-                fallback.requested_ep_size,
-                fallback.requested_node_num,
-                fallback.measurement_ep_size,
-                fallback.measurement_node_num,
-            )
+        let fallbacks = (!r.moe_comm_fallbacks.is_empty()).then(|| {
+            r.moe_comm_fallbacks
+                .iter()
+                .map(|fallback| {
+                    (
+                        self.inference_phase,
+                        fallback.comm_backend,
+                        fallback.requested_ep_size,
+                        fallback.requested_node_num,
+                        fallback.measurement_ep_size,
+                        fallback.measurement_node_num,
+                    )
+                })
+                .collect::<Vec<_>>()
         });
         if let Some(entry) = self.entries.iter_mut().find(|e| e.0 == name) {
             entry.1 += r.latency_ms;
@@ -162,10 +174,13 @@ impl PerOpFold {
             if entry.3 != source {
                 entry.3 = "mixed";
             }
-            if entry.4.is_none() {
-                entry.4 = fallback;
-            } else if fallback.is_some() {
-                debug_assert_eq!(entry.4, fallback);
+            if let Some(fallbacks) = fallbacks {
+                let existing = entry.4.get_or_insert_with(Vec::new);
+                for fallback in fallbacks {
+                    if !existing.contains(&fallback) {
+                        existing.push(fallback);
+                    }
+                }
             }
             return;
         }
@@ -174,7 +189,7 @@ impl PerOpFold {
             r.latency_ms,
             r.energy_wms,
             source,
-            fallback,
+            fallbacks,
         ));
     }
 
@@ -935,7 +950,7 @@ impl Engine {
 
     /// [`Self::run_static`] with the per-op values kept instead of summed:
     /// `(context, generation)` lists of `(name, latency_ms, energy_wms,
-    /// source, moe_comm_fallback)`, NAME-FOLDED (see [`PerOpValue`]): each name crosses once,
+    /// source, moe_comm_fallbacks)`, NAME-FOLDED (see [`PerOpValue`]): each name crosses once,
     /// pre-accumulated with Python's phase-dict semantics. Generation values
     /// are per-step-folded, then weighted by the stride `repeat_count`.
     pub fn run_static_per_op(
@@ -972,7 +987,7 @@ impl Engine {
 
     /// [`Self::mixed_step_breakdown`] with the per-op values kept:
     /// `(shared_non_attention, context_attention, decode_attention)` lists of
-    /// `(name, latency_ms, energy_wms, source, moe_comm_fallback)`.
+    /// `(name, latency_ms, energy_wms, source, moe_comm_fallbacks)`.
     /// Context-attention entries arrive already divided by the
     /// `ceil(isl/ctx)` scale.
     #[allow(clippy::too_many_arguments)]
@@ -1566,9 +1581,31 @@ mod tests {
             );
             assert_eq!(
                 fold.into_values()[0].4,
-                Some((inference_phase, "deepep_ht", 32, 8, 8, 1))
+                Some(vec![(inference_phase, "deepep_ht", 32, 8, 8, 1)])
             );
         }
+
+        let mut repeated_name = PerOpFold::new("context");
+        repeated_name.add(
+            &op,
+            PerformanceResult::new(1.0, Source::Estimated).with_moe_comm_fallback(fallback),
+        );
+        repeated_name.add(
+            &op,
+            PerformanceResult::new(1.0, Source::Estimated).with_moe_comm_fallback(
+                MoeCommFallback {
+                    comm_backend: "deepep_ll",
+                    ..fallback
+                },
+            ),
+        );
+        assert_eq!(
+            repeated_name.into_values()[0].4,
+            Some(vec![
+                ("context", "deepep_ht", 32, 8, 8, 1),
+                ("context", "deepep_ll", 32, 8, 8, 1),
+            ])
+        );
 
         let mut exact = PerOpFold::new("context");
         exact.add(&op, PerformanceResult::new(1.0, Source::Silicon));

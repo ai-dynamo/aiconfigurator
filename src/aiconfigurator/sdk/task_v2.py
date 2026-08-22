@@ -61,6 +61,7 @@ from aiconfigurator.sdk.perf_database import (
     is_hopper_system,
     load_system_spec,
 )
+from aiconfigurator.sdk.performance_result import MOE_COMM_FALLBACKS_COLUMN, merge_moe_comm_fallbacks
 from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import (
     SpeculativeDecodingProfile,
@@ -3001,6 +3002,7 @@ class Task:
         if result is None:
             raise RuntimeError("run_single_agg produced no result; configuration may be invalid.")
         result["power_coverage"] = summary.get_power_data_coverage()
+        result[MOE_COMM_FALLBACKS_COLUMN] = merge_moe_comm_fallbacks(summary.get_moe_comm_fallbacks())
         if not self.enable_epd:
             return result
         result["(a)workers"] = 1
@@ -3140,6 +3142,8 @@ class Task:
         # --- Rate-match the pair ---
         p_dict = p_summary.get_summary_df().iloc[0].to_dict()
         d_dict = d_summary.get_summary_df().iloc[0].to_dict()
+        p_dict[MOE_COMM_FALLBACKS_COLUMN] = p_summary.get_moe_comm_fallbacks()
+        d_dict[MOE_COMM_FALLBACKS_COLUMN] = d_summary.get_moe_comm_fallbacks()
         row = _rate_match_dict(
             p_dict,
             prefill_num_workers,
