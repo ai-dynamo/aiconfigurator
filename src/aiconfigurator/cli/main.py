@@ -26,8 +26,10 @@ from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
 from aiconfigurator.sdk.config_builders import resolve_nextn_auto
 from aiconfigurator.sdk.errors import (
+    EmpiricalNotImplementedError,
     ExperimentOutcome,
     NoFeasibleConfigError,
+    PerfDataNotAvailableError,
     is_expected_cli_error,
 )
 from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
@@ -2723,13 +2725,17 @@ def _run_estimate_mode(args):
 
     result = cli_estimate(**estimate_kwargs)
     sol_result = None
+    sol_detail_error = None
     if needs_sol_detail:
         if args.database_mode == common.DatabaseMode.SOL.name:
             sol_result = result
         else:
             sol_estimate_kwargs = dict(estimate_kwargs)
             sol_estimate_kwargs["database_mode"] = common.DatabaseMode.SOL.name
-            sol_result = cli_estimate(**sol_estimate_kwargs)
+            try:
+                sol_result = cli_estimate(**sol_estimate_kwargs)
+            except (PerfDataNotAvailableError, EmpiricalNotImplementedError) as exc:
+                sol_detail_error = str(exc)
 
     print("\n" + "=" * 60)
     print(f"  Performance Estimate ({result.mode})")
@@ -2891,6 +2897,8 @@ def _run_estimate_mode(args):
             report = format_estimate_detail_report(result, sol_result, detail=detail_arg)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
+        if sol_detail_error is not None:
+            report = f"SOL comparison unavailable: {sol_detail_error}\n\n{report}"
         if report:
             print("\n" + "-" * 60)
             print(f"  Detailed Breakdown ({detail_arg})")
