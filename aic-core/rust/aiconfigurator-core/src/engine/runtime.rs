@@ -105,6 +105,11 @@ pub const DEFAULT_STATIC_STRIDE: u32 = 32;
 /// measurement_ep, measurement_nodes)`.
 pub type MoeCommFallbackValue = (&'static str, &'static str, u32, u32, u32, u32);
 
+/// Inline-first fallback metadata for one name-folded op. The first record
+/// lives inline; `additional` allocates only when a second distinct record is
+/// inserted.
+pub type MoeCommFallbackValues = (MoeCommFallbackValue, Vec<MoeCommFallbackValue>);
+
 /// One evaluated op as it crosses the FFI: `(name, latency_ms, energy_wms,
 /// source, moe_comm_fallbacks)`. Entries are NAME-FOLDED before crossing — repeated names
 /// accumulate with `+=` and sources merge to `"mixed"` on mismatch, the
@@ -114,14 +119,15 @@ pub type MoeCommFallbackValue = (&'static str, &'static str, u32, u32, u32, u32)
 /// measurably slowed the engine step on per-block puzzle nets (hundreds of
 /// String allocations + Python tuple constructions per call). `source` is
 /// the provenance tag (`silicon|empirical|sol|estimated|mixed`). The private
-/// fifth field is `None` or an ordered list of executed fallback records; the
-/// public bindings strip it and retain their four-tuple contract.
+/// fifth field is `None` or `(first_record, additional_records)` in
+/// deterministic encounter order; the public bindings strip it and retain
+/// their four-tuple contract.
 pub type PerOpValue = (
     String,
     f64,
     f64,
     &'static str,
-    Option<Vec<MoeCommFallbackValue>>,
+    Option<MoeCommFallbackValues>,
 );
 
 /// One SOL-decomposed per-op value: `(name, sol_time_ms, sol_math_ms,
@@ -142,6 +148,30 @@ struct PerOpFold {
     entries: Vec<PerOpValue>,
 }
 
+fn insert_per_op_fallback(
+    fallbacks: &mut Option<MoeCommFallbackValues>,
+    fallback: MoeCommFallbackValue,
+) {
+    match fallbacks {
+        None => *fallbacks = Some((fallback, Vec::new())),
+        Some((first, additional)) if *first == fallback || additional.contains(&fallback) => {}
+        Some((_first, additional)) => additional.push(fallback),
+    }
+}
+
+fn extend_per_op_fallbacks(
+    fallbacks: &mut Option<MoeCommFallbackValues>,
+    other: Option<MoeCommFallbackValues>,
+) {
+    let Some((first, additional)) = other else {
+        return;
+    };
+    insert_per_op_fallback(fallbacks, first);
+    for fallback in additional {
+        insert_per_op_fallback(fallbacks, fallback);
+    }
+}
+
 impl PerOpFold {
     fn new(inference_phase: &'static str) -> Self {
         Self {
@@ -153,35 +183,27 @@ impl PerOpFold {
     fn add(&mut self, op: &Op, r: PerformanceResult) {
         let name = op.name();
         let source = r.source.as_str();
-        let fallbacks = (!r.moe_comm_fallbacks.is_empty()).then(|| {
-            r.moe_comm_fallbacks
-                .iter()
-                .map(|fallback| {
-                    (
-                        self.inference_phase,
-                        fallback.comm_backend,
-                        fallback.requested_ep_size,
-                        fallback.requested_node_num,
-                        fallback.measurement_ep_size,
-                        fallback.measurement_node_num,
-                    )
-                })
-                .collect::<Vec<_>>()
-        });
+        let mut fallbacks = None;
+        for fallback in r.moe_comm_fallbacks.iter() {
+            insert_per_op_fallback(
+                &mut fallbacks,
+                (
+                    self.inference_phase,
+                    fallback.comm_backend,
+                    fallback.requested_ep_size,
+                    fallback.requested_node_num,
+                    fallback.measurement_ep_size,
+                    fallback.measurement_node_num,
+                ),
+            );
+        }
         if let Some(entry) = self.entries.iter_mut().find(|e| e.0 == name) {
             entry.1 += r.latency_ms;
             entry.2 += r.energy_wms;
             if entry.3 != source {
                 entry.3 = "mixed";
             }
-            if let Some(fallbacks) = fallbacks {
-                let existing = entry.4.get_or_insert_with(Vec::new);
-                for fallback in fallbacks {
-                    if !existing.contains(&fallback) {
-                        existing.push(fallback);
-                    }
-                }
-            }
+            extend_per_op_fallbacks(&mut entry.4, fallbacks);
             return;
         }
         self.entries.push((
@@ -1581,7 +1603,7 @@ mod tests {
             );
             assert_eq!(
                 fold.into_values()[0].4,
-                Some(vec![(inference_phase, "deepep_ht", 32, 8, 8, 1)])
+                Some(((inference_phase, "deepep_ht", 32, 8, 8, 1), vec![]))
             );
         }
 
@@ -1601,15 +1623,57 @@ mod tests {
         );
         assert_eq!(
             repeated_name.into_values()[0].4,
-            Some(vec![
+            Some((
                 ("context", "deepep_ht", 32, 8, 8, 1),
-                ("context", "deepep_ll", 32, 8, 8, 1),
-            ])
+                vec![("context", "deepep_ll", 32, 8, 8, 1)],
+            ))
         );
 
         let mut exact = PerOpFold::new("context");
         exact.add(&op, PerformanceResult::new(1.0, Source::Silicon));
         assert_eq!(exact.into_values()[0].4, None);
+    }
+
+    #[test]
+    fn per_op_fold_allocates_additional_storage_only_for_distinct_fallbacks_after_the_first() {
+        use crate::operators::base::{MoeCommFallback, Source};
+
+        let op = context_ops().remove(0);
+        let ht = MoeCommFallback {
+            comm_backend: "deepep_ht",
+            requested_ep_size: 32,
+            requested_node_num: 8,
+            measurement_ep_size: 8,
+            measurement_node_num: 1,
+        };
+        let ll = MoeCommFallback {
+            comm_backend: "deepep_ll",
+            ..ht
+        };
+
+        let mut empty = PerOpFold::new("context");
+        empty.add(&op, PerformanceResult::new(1.0, Source::Silicon));
+        assert!(empty.into_values().pop().unwrap().4.is_none());
+
+        let mut single = PerOpFold::new("context");
+        single.add(
+            &op,
+            PerformanceResult::new(1.0, Source::Estimated).with_moe_comm_fallback(ht),
+        );
+        let (first, additional) = single.into_values().pop().unwrap().4.unwrap();
+        assert_eq!(first, ("context", "deepep_ht", 32, 8, 8, 1));
+        assert_eq!(additional.capacity(), 0);
+
+        let mut multiple = PerOpFold::new("generation");
+        for fallback in [ht, ht, ll, ll] {
+            multiple.add(
+                &op,
+                PerformanceResult::new(1.0, Source::Estimated).with_moe_comm_fallback(fallback),
+            );
+        }
+        let (first, additional) = multiple.into_values().pop().unwrap().4.unwrap();
+        assert_eq!(first, ("generation", "deepep_ht", 32, 8, 8, 1));
+        assert_eq!(additional, vec![("generation", "deepep_ll", 32, 8, 8, 1)]);
     }
 
     #[test]

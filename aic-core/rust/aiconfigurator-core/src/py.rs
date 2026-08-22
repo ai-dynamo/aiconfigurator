@@ -486,7 +486,8 @@ impl AicEngine {
     }
 
     /// Internal metadata-bearing counterpart of `run_static_per_op`; each
-    /// fifth field is `None` or an ordered list of executed fallback records.
+    /// fifth field is `None` or `(first_record, additional_records)` in
+    /// deterministic encounter order.
     #[pyo3(signature = (
         batch_size,
         beam_width,
@@ -574,7 +575,8 @@ impl AicEngine {
     }
 
     /// Internal metadata-bearing counterpart of `mixed_step_breakdown_per_op`;
-    /// each fifth field is `None` or an ordered list of executed fallback records.
+    /// each fifth field is `None` or `(first_record, additional_records)` in
+    /// deterministic encounter order.
     #[pyo3(signature = (ctx_tokens, gen_tokens, isl, osl, prefix=0,
                         seq_imbalance_correction_scale=1.0,
                         gen_seq_imbalance_correction_scale=1.0))]
@@ -627,7 +629,8 @@ impl AicEngine {
     }
 
     /// Internal metadata-bearing counterpart of `decode_step_per_op`; each
-    /// fifth field is `None` or an ordered list of executed fallback records.
+    /// fifth field is `None` or `(first_record, additional_records)` in
+    /// deterministic encounter order.
     #[pyo3(signature = (gen_tokens, isl, osl, gen_seq_imbalance_correction_scale=1.0))]
     fn _decode_step_per_op_with_metadata(
         &self,

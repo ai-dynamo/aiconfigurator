@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 _MoeCommFallbackPayload = tuple[str, str, int, int, int, int]
-_PerOpValueWithMetadata = tuple[str, float, float, str, list[_MoeCommFallbackPayload] | None]
+_MoeCommFallbackMetadata = tuple[_MoeCommFallbackPayload, list[_MoeCommFallbackPayload]]
+_PerOpValueWithMetadata = tuple[str, float, float, str, _MoeCommFallbackMetadata | None]
 
 class AicEngine:
     @staticmethod

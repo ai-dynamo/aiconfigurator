@@ -264,6 +264,25 @@ def test_fold_per_op_preserves_every_ordered_fallback_record() -> None:
     assert fallbacks == (_CONTEXT_FALLBACK, _GENERATION_FALLBACK)
 
 
+def test_fold_per_op_reads_inline_first_fallback_metadata() -> None:
+    entries = [
+        (
+            "moe_dispatch",
+            2.0,
+            0.0,
+            "estimated",
+            (
+                _GENERATION_FALLBACK_PAYLOAD,
+                [_CONTEXT_FALLBACK_PAYLOAD, _GENERATION_FALLBACK_PAYLOAD],
+            ),
+        )
+    ]
+
+    _, _, _, fallbacks = rust_engine_step._fold_per_op(entries)
+
+    assert fallbacks == (_CONTEXT_FALLBACK, _GENERATION_FALLBACK)
+
+
 def test_static_latency_breakdown_routes_through_engine_handle(monkeypatch) -> None:
     """The static helper maps ``RuntimeConfig`` onto
     ``EngineHandle._run_static_per_op_with_metadata`` and folds the per-op
@@ -1454,6 +1473,19 @@ def test_shipped_gb200_ep32_node8_reports_executed_fallback_to_api_and_cli(cli_p
         database = get_database("gb200", "sglang", "0.5.16")
         handle = rust_engine_step._cached_engine_handle(model, database)
 
+        def _fallback_payloads(entries):
+            payloads = []
+            for entry in entries:
+                metadata = entry[4]
+                if metadata is None:
+                    continue
+                assert isinstance(metadata, tuple) and len(metadata) == 2
+                first, additional = metadata
+                assert isinstance(first, tuple) and isinstance(additional, list)
+                payloads.append(first)
+                payloads.extend(additional)
+            return payloads
+
         public_context, public_generation = handle.run_static_per_op(
             batch_size=1,
             isl=1024,
@@ -1470,24 +1502,21 @@ def test_shipped_gb200_ep32_node8_reports_executed_fallback_to_api_and_cli(cli_p
         )
         assert all(len(entry) == 4 for entry in (*public_context, *public_generation))
         assert all(len(entry) == 5 for entry in (*metadata_context, *metadata_generation))
-        assert all(
-            entry[4] is None or isinstance(entry[4], list) for entry in (*metadata_context, *metadata_generation)
-        )
-        assert {payload[0] for entry in metadata_context for payload in entry[4] or []} == {"context"}
-        assert {payload[0] for entry in metadata_generation for payload in entry[4] or []} == {"generation"}
+        assert {payload[0] for payload in _fallback_payloads(metadata_context)} == {"context"}
+        assert {payload[0] for payload in _fallback_payloads(metadata_generation)} == {"generation"}
 
         public_shared, _, _ = handle.mixed_step_breakdown_per_op(1024, 1, 1024, 32)
         metadata_shared, metadata_context_attention, metadata_decode_attention = (
             handle._mixed_step_breakdown_per_op_with_metadata(1024, 1, 1024, 32)
         )
         assert all(len(entry) == 4 for entry in public_shared)
-        assert {payload[0] for entry in metadata_shared for payload in entry[4] or []} == {"context"}
+        assert {payload[0] for payload in _fallback_payloads(metadata_shared)} == {"context"}
         assert not any(entry[4] is not None for entry in (*metadata_context_attention, *metadata_decode_attention))
 
         public_decode = handle.decode_step_per_op(1, 1024, 32)
         metadata_decode = handle._decode_step_per_op_with_metadata(1, 1024, 32)
         assert all(len(entry) == 4 for entry in public_decode)
-        assert {payload[0] for entry in metadata_decode for payload in entry[4] or []} == {"generation"}
+        assert {payload[0] for payload in _fallback_payloads(metadata_decode)} == {"generation"}
 
         detail = format_estimate_detail_report(result, detail="source")
         assert "context/deepep_ht: requested EP32/node8; using EP8/node1 silicon data" in detail

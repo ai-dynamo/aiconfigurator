@@ -28,8 +28,9 @@ from aiconfigurator_core.sdk.performance_result import MoECommFallback, merge_mo
 logger = logging.getLogger(__name__)
 ENGINE_STEP_BACKEND_ENV = "AICONFIGURATOR_ENGINE_STEP_BACKEND"
 MoeCommFallbackPayload = tuple[str, str, int, int, int, int]
+MoeCommFallbackMetadata = tuple[MoeCommFallbackPayload, list[MoeCommFallbackPayload]]
 PerOpValue = tuple[str, float, float, str]
-PerOpValueWithMetadata = tuple[str, float, float, str, list[MoeCommFallbackPayload] | None]
+PerOpValueWithMetadata = tuple[str, float, float, str, MoeCommFallbackMetadata | None]
 
 
 # Python-step telemetry (#1357): count every remaining Python op.query() use
@@ -410,8 +411,9 @@ def _fold_per_op(
     ``latency_correction_scale`` post-multiply, applied to latency AND energy
     per key exactly like the Python phase runners' downstream scaling. The
     three dicts share one key set (the power-coverage gate pairs latency and
-    energy by identical keys). Older duck-typed test handles may omit the
-    optional fifth tuple field.
+    energy by identical keys). The optional fifth field is ``None`` or an
+    inline-first ``(first_record, additional_records)`` pair. Older duck-typed
+    test handles may omit it or provide the earlier single-record/list shapes.
     """
     latency: dict[str, float] = {}
     energy: dict[str, float] = {}
@@ -428,23 +430,33 @@ def _fold_per_op(
         elif prior != src:
             source[name] = "mixed"
         if fallback_payloads:
-            # The current private FFI returns a list so one composed op can
-            # report every substitution. Accept the original single payload
-            # shape as well for duck-typed callers compiled against the first
-            # provenance implementation.
-            payloads = [fallback_payloads] if isinstance(fallback_payloads[0], str) else fallback_payloads
+            if isinstance(fallback_payloads[0], str):
+                fallbacks.append(_moe_comm_fallback_from_payload(fallback_payloads))
+                continue
+            if (
+                isinstance(fallback_payloads, tuple)
+                and len(fallback_payloads) == 2
+                and isinstance(fallback_payloads[1], list)
+            ):
+                first_payload, payloads = fallback_payloads
+                fallbacks.append(_moe_comm_fallback_from_payload(first_payload))
+            else:
+                # Compatibility for the earlier private list payload.
+                payloads = fallback_payloads
             for payload in payloads:
-                fallbacks.append(
-                    MoECommFallback(
-                        inference_phase=payload[0],
-                        comm_backend=payload[1],
-                        requested_ep_size=payload[2],
-                        requested_node_num=payload[3],
-                        measurement_ep_size=payload[4],
-                        measurement_node_num=payload[5],
-                    )
-                )
+                fallbacks.append(_moe_comm_fallback_from_payload(payload))
     return latency, energy, source, merge_moe_comm_fallbacks(fallbacks)
+
+
+def _moe_comm_fallback_from_payload(payload: MoeCommFallbackPayload) -> MoECommFallback:
+    return MoECommFallback(
+        inference_phase=payload[0],
+        comm_backend=payload[1],
+        requested_ep_size=payload[2],
+        requested_node_num=payload[3],
+        measurement_ep_size=payload[4],
+        measurement_node_num=payload[5],
+    )
 
 
 def estimate_static_latency_breakdown_with_rust(
