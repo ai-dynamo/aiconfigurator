@@ -5,6 +5,58 @@
 PerformanceResult class for backward-compatible latency+energy+source tracking.
 """
 
+from dataclasses import asdict, dataclass
+from typing import Any
+
+MOE_COMM_FALLBACKS_COLUMN = "_moe_comm_fallbacks"
+
+
+@dataclass(frozen=True)
+class MoECommFallback:
+    """Executed MoE communication topology substitution."""
+
+    inference_phase: str
+    comm_backend: str
+    requested_ep_size: int
+    requested_node_num: int
+    measurement_ep_size: int
+    measurement_node_num: int
+
+
+def merge_moe_comm_fallbacks(*groups: Any) -> tuple[MoECommFallback, ...]:
+    """Return canonical phase/backend-ordered fallback records without duplicates."""
+    merged: list[MoECommFallback] = []
+    for group in groups:
+        if isinstance(group, MoECommFallback):
+            records = (group,)
+        elif isinstance(group, (list, tuple)):
+            records = group
+        else:
+            continue
+        for record in records:
+            if isinstance(record, MoECommFallback) and record not in merged:
+                merged.append(record)
+    phase_order = {"context": 0, "generation": 1}
+    return tuple(
+        sorted(
+            merged,
+            key=lambda record: (
+                phase_order.get(record.inference_phase, 2),
+                record.inference_phase,
+                record.comm_backend,
+                record.requested_ep_size,
+                record.requested_node_num,
+                record.measurement_ep_size,
+                record.measurement_node_num,
+            ),
+        )
+    )
+
+
+def moe_comm_fallbacks_to_dicts(fallbacks: Any) -> list[dict[str, Any]]:
+    """Convert row/SDK fallback records into the stable JSON sidecar shape."""
+    return [asdict(record) for record in merge_moe_comm_fallbacks(fallbacks)]
+
 
 class PerformanceResult(float):
     """

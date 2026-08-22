@@ -49,11 +49,7 @@
         }
       },
       "static": {
-        "values": {
-          "static_ctx": 115.752,
-          "static_gen": 43.269,
-          "static_total": 159.021
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "deepseek-v3-b200-vllm-019-isl1024-osl2": {
@@ -147,11 +143,7 @@
         }
       },
       "static": {
-        "values": {
-          "static_ctx": 115.752,
-          "static_gen": 43.269,
-          "static_total": 159.021
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "deepseek-v32-b200-sglang-0510-isl1024-osl2": {
@@ -562,11 +554,7 @@
         }
       },
       "static": {
-        "values": {
-          "static_ctx": 154.876,
-          "static_gen": 13.727,
-          "static_total": 168.603
-        }
+        "error": "PerfDataNotAvailableError"
       }
     },
     "kimi-k25-h100-vllm-019-isl1024-osl2": {
@@ -2358,6 +2346,14 @@
     }
   },
   "post_freeze_pins": {
+    "deepseek-r1-gb200-vllm-014-scan-coverage::static": {
+      "engine": "rust",
+      "git_head": "36fb28faceac481554557c126d0d2e0c163f49e2"
+    },
+    "deepseek-v3-gb200-vllm-014-scan-coverage::static": {
+      "engine": "rust",
+      "git_head": "36fb28faceac481554557c126d0d2e0c163f49e2"
+    },
     "glm52-b200-sglang-0514-isl1024-osl2::agg": {
       "engine": "rust",
       "git_head": "1c5d7b282a8c9187ad507927683dd0bf0fbd249f"
@@ -2373,6 +2369,10 @@
     "glm52-b200-sglang-0514-isl1024-osl2::static": {
       "engine": "rust",
       "git_head": "1c5d7b282a8c9187ad507927683dd0bf0fbd249f"
+    },
+    "kimi-k25-gb300-vllm-019-scan-coverage::static": {
+      "engine": "rust",
+      "git_head": "36fb28faceac481554557c126d0d2e0c163f49e2"
     },
     "minimax-m3-b200-sglang-0514-hybrid-xop::agg": {
       "engine": "rust",

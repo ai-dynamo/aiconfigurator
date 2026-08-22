@@ -47,9 +47,14 @@ pub fn accept_kv_request(request: KvCacheEstimateRequest) -> KvCacheEstimateRequ
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aiconfigurator_core::engine::{Engine, PerOpValue, RuntimeConfig, StaticMode};
     use aiconfigurator_core::{
         ForwardPassMetrics, ENGINE_CONFIG_SCHEMA_VERSION, ENGINE_SPEC_SCHEMA_VERSION, FPM_VERSION,
     };
+
+    type PerOpResult = Result<Vec<PerOpValue>, AicError>;
+    type StaticPerOpResult = Result<(Vec<PerOpValue>, Vec<PerOpValue>), AicError>;
+    type MixedPerOpResult = Result<(Vec<PerOpValue>, Vec<PerOpValue>, Vec<PerOpValue>), AicError>;
 
     #[test]
     fn schema_constants_and_metric_defaults_are_public() {
@@ -84,5 +89,23 @@ mod tests {
     #[test]
     fn regression_constructor_is_environment_independent() {
         let _model = regression_model().expect("construct regression model");
+    }
+
+    #[test]
+    fn per_op_engine_interface_remains_four_field_tuples() {
+        let value: PerOpValue = ("op".to_string(), 1.0, 0.0, "silicon");
+        let (_name, _latency_ms, _energy_wms, _source): (String, f64, f64, &'static str) = value;
+
+        let _: fn(&Engine, &RuntimeConfig, StaticMode, u32) -> StaticPerOpResult =
+            Engine::run_static_per_op;
+        let _: fn(&Engine, u32, u32, u32, u32, u32, f64, f64) -> MixedPerOpResult =
+            Engine::mixed_step_breakdown_per_op;
+        let _: fn(&Engine, u32, u32, u32, f64) -> PerOpResult = Engine::decode_step_per_op;
+        let _: fn(&Engine, &[usize], u32, u32, u32, f64, Option<u32>) -> PerOpResult =
+            Engine::evaluate_context_ops;
+        let _: fn(&Engine, &[usize], u32, u32, f64, u32, Option<u32>) -> PerOpResult =
+            Engine::evaluate_generation_ops;
+        let _: fn(&Engine, &str, bool, u32, u32, u32, f64, Option<u32>) -> PerOpResult =
+            Engine::evaluate_ops_json;
     }
 }

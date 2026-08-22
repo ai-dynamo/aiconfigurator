@@ -46,6 +46,12 @@ pub enum AicError {
     /// converted into a fabricated `SOL / constant` value.
     #[error("empirical estimation not implemented: {0}")]
     EmpiricalNotImplemented(String),
+    /// The analytic SOL path cannot represent an operator required by the
+    /// requested estimate. Mirrors Python's `SolNotImplementedError` so an
+    /// optional SOL comparison can distinguish a coverage gap from an invalid
+    /// configuration or a programming error.
+    #[error("SOL estimation not implemented: {0}")]
+    SolNotImplemented(String),
     #[error("I/O error at {path}: {source}")]
     Io {
         path: PathBuf,

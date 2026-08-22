@@ -119,7 +119,7 @@ pub(crate) fn op_sol_latency_ms(
             }
             Err(other) => Err(other),
         },
-        other => Err(AicError::UnsupportedModel(format!(
+        other => Err(AicError::SolNotImplemented(format!(
             "forward_model='fpm' SOL roofline has no Rust implementation for op {}",
             other.name()
         ))),
@@ -797,5 +797,29 @@ mod tests {
             op_sol_latency_ms(&fb, &d, 64.0, 1.0, 1.0, 0.0).unwrap(),
             super::mem_op_sol_ms(&d.system_spec, 3000.0 * 64.0),
         );
+    }
+
+    #[test]
+    fn unsupported_fpm_sol_op_has_typed_error() {
+        let d = db();
+        let op = Op::Mamba2(crate::operators::Mamba2Op {
+            name: "mamba2".into(),
+            scale_factor: 1.0,
+            kernel_source: "causal_conv1d_fn".into(),
+            phase: "context".into(),
+            d_model: 4096,
+            d_state: 128,
+            d_conv: 4,
+            nheads: 128,
+            head_dim: 64,
+            n_groups: 8,
+            chunk_size: 256,
+        });
+
+        let err = op_sol_latency_ms(&op, &d, 64.0, 1.0, 1.0, 0.0).unwrap_err();
+        assert!(matches!(&err, AicError::SolNotImplemented(_)));
+        assert!(err
+            .to_string()
+            .contains("no Rust implementation for op mamba2"));
     }
 }
