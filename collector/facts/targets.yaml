@@ -1,0 +1,366 @@
+schema: aic-probe-targets/v1
+kv_pairing:
+  bfloat16:
+    kvcache: bfloat16
+    cli: null
+  fp8:
+    kvcache: fp8
+    cli: fp8_e4m3
+  fp8_static:
+    kvcache: fp8
+    cli: fp8_e4m3
+  nvfp4:
+    kvcache: fp8
+    cli: fp8_e4m3
+  mxfp4:
+    kvcache: bfloat16
+    cli: null
+  mxfp8:
+    kvcache: fp8
+    cli: fp8_e4m3
+backends:
+  sglang:
+    versions:
+    - 0.5.14
+    - 0.5.16
+    images:
+      0.5.14: lmsysorg/sglang:v0.5.14
+      0.5.16: lmsysorg/sglang:v0.5.16
+  vllm:
+    versions:
+    - 0.24.0
+    images:
+      0.24.0: vllm-probe:0.24.0-fix
+  trtllm:
+    versions:
+    - 1.3.0rc23
+    images:
+      1.3.0rc23: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc23
+families:
+  dsv4:
+    known_sm90:
+      sglang_0516: 'ue8m0-scale fp8 DSV4 on SM90 tp1: ALL FIVE MoE runners fail — auto->triton (w13 requantized
+        to ue8m0 deepgemm layout, ''Hidden size mismatch''), deep_gemm (SM100-only packed-fp4 branch),
+        cutlass (Fp8MoEMethod lacks ab_strides1), triton_kernel (arange power-of-2 assert), flashinfer_cutlass
+        (lacks .runner). cause=framework_bug: no working path exists. Evidence facts/bisect_dsv4_{A..I,runner_*}.json,
+        2026-08-20/22.'
+      trtllm_rc23: 'DSV4 rejected at load: ''Missing COMPRESS pool metadata for compress ratio 4'' — CSA
+        compression unsupported on this path.'
+      trtllm_tokens_per_block: DeepseekV4CacheManager requires tokens_per_block in [128,256]; the generator
+        renders 64 (FPM example value) — ILLEGAL FOR THIS ARCH ON ANY PLATFORM (needs_flags for the generator).
+        With 128 the load proceeds to the explicit pre-blackwell rejection -> final cause on SM90 is platform_floor.
+        Evidence facts/trt_ab_dsv4_tpb128.json, 2026-08-22.
+    architecture: DeepseekV4ForCausalLM
+    checkpoints:
+    - repo: deepseek-ai/DeepSeek-V4-Pro-0813
+      profile: fp8
+      aic_registered: deepseek-ai--DeepSeek-V4-Pro
+      known: 'SM90: loads silently, Fp8MoEMethod over fp4-packed int8 experts, first MoE forward crashes
+        (both sglang versions)'
+      variant_overrides:
+        vllm: interleave_pair
+    - repo: deepseek-ai/DeepSeek-V4-Flash-0731
+      profile: fp8
+      aic_registered: deepseek-ai--DeepSeek-V4-Flash
+      known: same W4A8 crash class as Pro
+    - repo: nvidia/DeepSeek-V4-Pro-NVFP4
+      profile: nvfp4
+      aic_registered: false
+      variant_overrides:
+        vllm: interleave_pair
+    - repo: nvidia/DeepSeek-V4-Flash-NVFP4
+      profile: nvfp4
+      aic_registered: false
+      known: 'SM90: MoE dispatches to Marlin (bf16 dequant), NOT fp4 tensor cores'
+    dummy_variants:
+    - csa
+    - hca
+    - full
+    - interleave_pair
+    - dspark
+    - hash
+    - rep_mix
+    variant_overrides:
+      vllm: rep_mix
+    render_overrides:
+      vllm:
+        tokens_per_block: null
+  glm:
+    architecture: GlmMoeDsaForCausalLM
+    checkpoints:
+    - repo: zai-org/GLM-5.2
+      profile: bfloat16
+      aic_registered: zai-org--GLM-5.2
+      known: 'SM90 auto: KV bf16, dsa prefill=flashmla_sparse decode=fa3; dense FA3 branch below index_topk=2048'
+    - repo: zai-org/GLM-5.2-FP8
+      profile: fp8
+      aic_registered: zai-org--GLM-5.2-FP8
+      known: explicit fp8_e4m3 KV honored on SM90 -> flashmla_kv both phases; decode includes online K-cache
+        quantize
+    - repo: nvidia/GLM-5.2-NVFP4
+      profile: nvfp4
+      aic_registered: nvidia--GLM-5.2-NVFP4
+    dummy_variants:
+    - full_indexer_moe
+    - shared_indexer_moe
+    known_sm90:
+      trtllm_fp8kv: 'trtllm rc23/SM90 UNIFIED root cause: fp8 KV cache in the MLA/DSA path crashes natively
+        in flash_mla (frame#62 abort). Door 1 = engine kv_cache_config.dtype:fp8 (generator renders for
+        fp8 profiles) -> config_gap, kv-auto A/B passes (GLM-5/5.1/5.2-FP8, DSV3.2, MiniMax-M2/M2.5 whose
+        ''Linear assert'' was the same trigger). Door 2 = checkpoint hf_quant kv_cache_quant_algo:FP8
+        (all NVFP4 artifacts) -> framework_bug, kv-auto STILL crashes (GLM-5/5.1-NVFP4, DSV3.2-NVFP4).
+        Evidence facts/trt_ab_kvauto_*.json, 2026-08-22.'
+  m3:
+    architecture: MiniMaxM3SparseForConditionalGeneration
+    checkpoints:
+    - repo: MiniMaxAI/MiniMax-M3
+      profile: bfloat16
+      aic_registered: MiniMaxAI--MiniMax-M3
+    - repo: MiniMaxAI/MiniMax-M3-MXFP8
+      profile: mxfp8
+      aic_registered: false
+    - repo: nvidia/MiniMax-M3-NVFP4
+      profile: nvfp4
+      aic_registered: false
+    dummy_variants:
+    - moe_sparse_attn
+    - dense_full_attn_head
+    render_overrides:
+      vllm:
+        tokens_per_block: null
+    notes: custom code (auto_map) — .py files fetched into variant dirs
+    known_sm90:
+      trtllm_sparse_config: 'MiniMax-M3 on trtllm REQUIRES llmapi sparse_attention_config (algorithm:
+        minimax_m3) to get MiniMaxM3KVCacheManagerV2 — the generator does not render it (needs_flags).
+        With it set, rc23/SM90 still fails deeper (MiniMaxM3SparseRuntimeBackend.forward missing cache
+        args — framework gap, recheck on rc24/Blackwell). Evidence facts/trt_ab_m3_sparse.json.'
+  gptoss:
+    architecture: GptOssForCausalLM
+    checkpoints:
+    - repo: openai/gpt-oss-120b
+      profile: mxfp4
+      aic_registered: openai--gpt-oss-120b
+    - repo: openai/gpt-oss-20b
+      profile: mxfp4
+      aic_registered: openai--gpt-oss-20b
+    dummy_variants:
+    - interleave_pair
+    - sliding_attention
+    - full_attention
+  roster:
+    architecture: full support-matrix roster (per-checkpoint, no arch dedup)
+    derive: true
+    extra_repos:
+    - moonshotai/Kimi-K3
+    - nvidia/Kimi-K3-NVFP4
+    - nvidia/DeepSeek-V3.2-NVFP4
+    checkpoint_overrides:
+      MiniMaxAI/MiniMax-M2:
+        known:
+          sglang_0516_flaky: trace NONDETERMINISTICALLY fails (~1/3 of runs) in flashinfer cutlass-DSL
+            fused_add_rmsnorm via tvm_ffi 'Mismatched Tensor' — the same command text both passes and
+            fails on the same GPU (12 controlled reruns 2026-08-21); every generator flag excluded by
+            bisection; suspected timing-dependent tensor layout under enable-mixed-chunk. Also hits MiniMax-M2.5.
+            Probe retries once and records warmup_retry; persistent failure is a record, not a block.
+          trtllm_linear_assert: 'trtllm rc23: fp8 Linear.apply assertion (linear.py:1142) under the generator-rendered
+            engine args; probe-default args loaded fine — surfaced by the fidelity upgrade 2026-08-21.'
+          sglang_workaround: 'flake root-caused to flashinfer cutlass-DSL fused_add_rmsnorm tvm_ffi nondeterminism:
+            SGLANG_IS_FLASHINFER_AVAILABLE=false passes 4/4 (facts/bisect_m2_noflashinfer_*.json, 2026-08-22).
+            Deterministic workaround exists; perf cost unmeasured.'
+          trtllm_fp8kv: 'trtllm rc23/SM90 UNIFIED root cause: fp8 KV cache in the MLA/DSA path crashes
+            natively in flash_mla (frame#62 abort). Door 1 = engine kv_cache_config.dtype:fp8 (generator
+            renders for fp8 profiles) -> config_gap, kv-auto A/B passes (GLM-5/5.1/5.2-FP8, DSV3.2, MiniMax-M2/M2.5
+            whose ''Linear assert'' was the same trigger). Door 2 = checkpoint hf_quant kv_cache_quant_algo:FP8
+            (all NVFP4 artifacts) -> framework_bug, kv-auto STILL crashes (GLM-5/5.1-NVFP4, DSV3.2-NVFP4).
+            Evidence facts/trt_ab_kvauto_*.json, 2026-08-22.'
+      deepseek-ai/DeepSeek-V4-Flash:
+        variant_overrides:
+          vllm: rep_mix
+        render_overrides:
+          vllm:
+            tokens_per_block: null
+      deepseek-ai/DeepSeek-V4-Pro:
+        variant_overrides:
+          vllm: interleave_pair
+        render_overrides:
+          vllm:
+            tokens_per_block: null
+      moonshotai/Kimi-K3:
+        known:
+          support: 'KimiK3ForConditionalGeneration lands in the LATEST releases: sglang v0.5.17, vllm
+            v0.27.1, trtllm 1.3.0rc24 (all probe-verified 2026-08-21); unregistered at the current pins
+            (sglang 0.5.16 / vllm 0.24 / trtllm rc23).'
+          topology_sm90: 'sglang 0.5.17 on SM90 (probed): tp1 and TEP8 and DEP8(a2a=none) all run Mxfp4MoEMethod
+            -> bf16-dequant triton fused_moe_kernel, IDENTICAL kernel sets (facts/tepdep/k3_{tep8,dep8}.rank0.json).
+            DEP8+deepep (the real DEP deployment route) CRASHES at warmup: ''AssertionError: forward_deepgemm_contiguous
+            is deprecated'' — the DeepEPMoE route for this quant recipe is broken at 0.5.17/SM90.'
+          topology_sm103: 'the owner-reported TEP8 kernel fork is SM-gated, from sglang''s own dispatch
+            log: ''K3 SP collective requires SM103, TP4/TP8, MegaMoE/DeepEP, and CustomAllReduceV2 with
+            multicast; using NCCL.'' — the special path never activates on SM90; verify on SM103 (Blackwell
+            Ultra) during the Blackwell replay.'
+          trtllm_rc24: rc24 registers KimiK3ForConditionalGeneration but the nvcr image lacks the 'fla'
+            (flash-linear-attention) package its model file imports — K3 is unserveable on the shipped
+            image (probe-verified 2026-08-21).
+          vllm_0271: 'vllm v0.27.1 probed OK: KimiK3DeltaAttention (+MTP model registered), Mxfp4MoEMethod
+            — same quant identity as sglang 0.5.17.'
+      nvidia/Kimi-K3-NVFP4:
+        known:
+          support: 'same as moonshotai/Kimi-K3: architecture unregistered at all three pinned framework
+            versions (probe-verified 2026-08-20).'
+      nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4:
+        known:
+          trtllm_rc23: 'cudaError check abort during dummy load, root-caused 2026-08-21: the all_kinds
+            dummy keeps ONE real 512-expert MoE layer (width-true rule) = 64B params = 120GiB bf16, over
+            a single H20''s 96GB; trtllm materializes dummy weights in bf16 while sglang/vllm load in
+            checkpoint precision and fit. Capacity fact, not a bug — probing this checkpoint on trtllm
+            needs tp8 (15GiB/rank).'
+      sgl-project/DeepSeek-V4-Flash-FP8:
+        variant_overrides:
+          vllm: rep_mix
+        render_overrides:
+          vllm:
+            tokens_per_block: null
+      sgl-project/DeepSeek-V4-Pro-FP8:
+        variant_overrides:
+          vllm: interleave_pair
+        render_overrides:
+          vllm:
+            tokens_per_block: null
+      zai-org/GLM-5-FP8:
+        known:
+          trtllm_fp8kv: 'trtllm rc23/SM90 UNIFIED root cause: fp8 KV cache in the MLA/DSA path crashes
+            natively in flash_mla (frame#62 abort). Door 1 = engine kv_cache_config.dtype:fp8 (generator
+            renders for fp8 profiles) -> config_gap, kv-auto A/B passes (GLM-5/5.1/5.2-FP8, DSV3.2, MiniMax-M2/M2.5
+            whose ''Linear assert'' was the same trigger). Door 2 = checkpoint hf_quant kv_cache_quant_algo:FP8
+            (all NVFP4 artifacts) -> framework_bug, kv-auto STILL crashes (GLM-5/5.1-NVFP4, DSV3.2-NVFP4).
+            Evidence facts/trt_ab_kvauto_*.json, 2026-08-22.'
+          vllm_fp8kv: 'vllm 0.24/SM90: head-576 MLA has NO attention backend with fp8 KV; kv-auto(bf16)
+            resolves DeepseekV2MLAAttention+SparseAttnIndexer and runs. Door 1 engine kv dtype (fp8 ckpts)
+            = config_gap, kv-auto A/B passes; door 2 ckpt hf_quant kv_cache_quant_algo:FP8 (NVFP4 artifacts)
+            = framework/platform gap, kv-auto still fails. Same two-door structure as trtllm. Evidence
+            facts/vllm_ab_kvauto_*.json, 2026-08-22.'
+      zai-org/GLM-5.1-FP8:
+        known:
+          trtllm_fp8kv: 'trtllm rc23/SM90 UNIFIED root cause: fp8 KV cache in the MLA/DSA path crashes
+            natively in flash_mla (frame#62 abort). Door 1 = engine kv_cache_config.dtype:fp8 (generator
+            renders for fp8 profiles) -> config_gap, kv-auto A/B passes (GLM-5/5.1/5.2-FP8, DSV3.2, MiniMax-M2/M2.5
+            whose ''Linear assert'' was the same trigger). Door 2 = checkpoint hf_quant kv_cache_quant_algo:FP8
+            (all NVFP4 artifacts) -> framework_bug, kv-auto STILL crashes (GLM-5/5.1-NVFP4, DSV3.2-NVFP4).
+            Evidence facts/trt_ab_kvauto_*.json, 2026-08-22.'
+      deepseek-ai/DeepSeek-V3.2:
+        known:
+          trtllm_fp8kv: 'trtllm rc23/SM90 UNIFIED root cause: fp8 KV cache in the MLA/DSA path crashes
+            natively in flash_mla (frame#62 abort). Door 1 = engine kv_cache_config.dtype:fp8 (generator
+            renders for fp8 profiles) -> config_gap, kv-auto A/B passes (GLM-5/5.1/5.2-FP8, DSV3.2, MiniMax-M2/M2.5
+            whose ''Linear assert'' was the same trigger). Door 2 = checkpoint hf_quant kv_cache_quant_algo:FP8
+            (all NVFP4 artifacts) -> framework_bug, kv-auto STILL crashes (GLM-5/5.1-NVFP4, DSV3.2-NVFP4).
+            Evidence facts/trt_ab_kvauto_*.json, 2026-08-22.'
+      MiniMaxAI/MiniMax-M2.5:
+        known:
+          trtllm_linear_assert: 'trtllm rc23: fp8 Linear.apply assertion (linear.py:1142) under the generator-rendered
+            engine args; probe-default args loaded fine — surfaced by the fidelity upgrade 2026-08-21.'
+          sglang_workaround: 'flake root-caused to flashinfer cutlass-DSL fused_add_rmsnorm tvm_ffi nondeterminism:
+            SGLANG_IS_FLASHINFER_AVAILABLE=false passes 4/4 (facts/bisect_m2_noflashinfer_*.json, 2026-08-22).
+            Deterministic workaround exists; perf cost unmeasured.'
+          trtllm_fp8kv: 'trtllm rc23/SM90 UNIFIED root cause: fp8 KV cache in the MLA/DSA path crashes
+            natively in flash_mla (frame#62 abort). Door 1 = engine kv_cache_config.dtype:fp8 (generator
+            renders for fp8 profiles) -> config_gap, kv-auto A/B passes (GLM-5/5.1/5.2-FP8, DSV3.2, MiniMax-M2/M2.5
+            whose ''Linear assert'' was the same trigger). Door 2 = checkpoint hf_quant kv_cache_quant_algo:FP8
+            (all NVFP4 artifacts) -> framework_bug, kv-auto STILL crashes (GLM-5/5.1-NVFP4, DSV3.2-NVFP4).
+            Evidence facts/trt_ab_kvauto_*.json, 2026-08-22.'
+      meta-llama/Llama-4-Maverick-17B-128E-Instruct:
+        variant_overrides:
+          sglang: depth4
+          vllm: depth4
+        render_overrides:
+          vllm:
+            tokens_per_block: null
+      meta-llama/Llama-4-Scout-17B-16E-Instruct:
+        render_overrides:
+          vllm:
+            tokens_per_block: null
+        known:
+          dummy_notes: layer-kind period is FRAMEWORK-HARDCODED (sglang llama4.py:217 use_rope=(layer_id+1)%4!=0)
+            with no config field -> _ARCH_IMPLICIT_PERIODS; aic-core config lacks vision_config -> merged
+            from unsloth mirror (vllm builds the vision tower and profiles it even for text-only probes).
+      nvidia/GLM-5-NVFP4:
+        known:
+          trtllm_ckpt_fp8kv: 'trtllm rc23/SM90 UNIFIED root cause: fp8 KV cache in the MLA/DSA path crashes
+            natively in flash_mla (frame#62 abort). Door 1 = engine kv_cache_config.dtype:fp8 (generator
+            renders for fp8 profiles) -> config_gap, kv-auto A/B passes (GLM-5/5.1/5.2-FP8, DSV3.2, MiniMax-M2/M2.5
+            whose ''Linear assert'' was the same trigger). Door 2 = checkpoint hf_quant kv_cache_quant_algo:FP8
+            (all NVFP4 artifacts) -> framework_bug, kv-auto STILL crashes (GLM-5/5.1-NVFP4, DSV3.2-NVFP4).
+            Evidence facts/trt_ab_kvauto_*.json, 2026-08-22.'
+          vllm_ckpt_fp8kv: 'vllm 0.24/SM90: head-576 MLA has NO attention backend with fp8 KV; kv-auto(bf16)
+            resolves DeepseekV2MLAAttention+SparseAttnIndexer and runs. Door 1 engine kv dtype (fp8 ckpts)
+            = config_gap, kv-auto A/B passes; door 2 ckpt hf_quant kv_cache_quant_algo:FP8 (NVFP4 artifacts)
+            = framework/platform gap, kv-auto still fails. Same two-door structure as trtllm. Evidence
+            facts/vllm_ab_kvauto_*.json, 2026-08-22.'
+      nvidia/GLM-5.1-NVFP4:
+        known:
+          trtllm_ckpt_fp8kv: 'trtllm rc23/SM90 UNIFIED root cause: fp8 KV cache in the MLA/DSA path crashes
+            natively in flash_mla (frame#62 abort). Door 1 = engine kv_cache_config.dtype:fp8 (generator
+            renders for fp8 profiles) -> config_gap, kv-auto A/B passes (GLM-5/5.1/5.2-FP8, DSV3.2, MiniMax-M2/M2.5
+            whose ''Linear assert'' was the same trigger). Door 2 = checkpoint hf_quant kv_cache_quant_algo:FP8
+            (all NVFP4 artifacts) -> framework_bug, kv-auto STILL crashes (GLM-5/5.1-NVFP4, DSV3.2-NVFP4).
+            Evidence facts/trt_ab_kvauto_*.json, 2026-08-22.'
+          vllm_ckpt_fp8kv: 'vllm 0.24/SM90: head-576 MLA has NO attention backend with fp8 KV; kv-auto(bf16)
+            resolves DeepseekV2MLAAttention+SparseAttnIndexer and runs. Door 1 engine kv dtype (fp8 ckpts)
+            = config_gap, kv-auto A/B passes; door 2 ckpt hf_quant kv_cache_quant_algo:FP8 (NVFP4 artifacts)
+            = framework/platform gap, kv-auto still fails. Same two-door structure as trtllm. Evidence
+            facts/vllm_ab_kvauto_*.json, 2026-08-22.'
+      nvidia/DeepSeek-V3.2-NVFP4:
+        known:
+          trtllm_ckpt_fp8kv: 'trtllm rc23/SM90 UNIFIED root cause: fp8 KV cache in the MLA/DSA path crashes
+            natively in flash_mla (frame#62 abort). Door 1 = engine kv_cache_config.dtype:fp8 (generator
+            renders for fp8 profiles) -> config_gap, kv-auto A/B passes (GLM-5/5.1/5.2-FP8, DSV3.2, MiniMax-M2/M2.5
+            whose ''Linear assert'' was the same trigger). Door 2 = checkpoint hf_quant kv_cache_quant_algo:FP8
+            (all NVFP4 artifacts) -> framework_bug, kv-auto STILL crashes (GLM-5/5.1-NVFP4, DSV3.2-NVFP4).
+            Evidence facts/trt_ab_kvauto_*.json, 2026-08-22.'
+          vllm_ckpt_fp8kv: 'vllm 0.24/SM90: head-576 MLA has NO attention backend with fp8 KV; kv-auto(bf16)
+            resolves DeepseekV2MLAAttention+SparseAttnIndexer and runs. Door 1 engine kv dtype (fp8 ckpts)
+            = config_gap, kv-auto A/B passes; door 2 ckpt hf_quant kv_cache_quant_algo:FP8 (NVFP4 artifacts)
+            = framework/platform gap, kv-auto still fails. Same two-door structure as trtllm. Evidence
+            facts/vllm_ab_kvauto_*.json, 2026-08-22.'
+      moonshotai/Kimi-K2.5:
+        known:
+          trtllm_quant_parser: rc23 quant_config_utils.py:43 crashes (NoneType) parsing the native compressed-tensors
+            W4 quantization_config — framework_bug; K2.5-NVFP4 sibling fails separately on NVFP4 MoE tactics
+            (platform_floor SM100).
+      zai-org/GLM-5.2-FP8:
+        known:
+          vllm_fp8kv: 'vllm 0.24/SM90: head-576 MLA has NO attention backend with fp8 KV; kv-auto(bf16)
+            resolves DeepseekV2MLAAttention+SparseAttnIndexer and runs. Door 1 engine kv dtype (fp8 ckpts)
+            = config_gap, kv-auto A/B passes; door 2 ckpt hf_quant kv_cache_quant_algo:FP8 (NVFP4 artifacts)
+            = framework/platform gap, kv-auto still fails. Same two-door structure as trtllm. Evidence
+            facts/vllm_ab_kvauto_*.json, 2026-08-22.'
+      nvidia/GLM-5.2-NVFP4:
+        known:
+          vllm_ckpt_fp8kv: 'vllm 0.24/SM90: head-576 MLA has NO attention backend with fp8 KV; kv-auto(bf16)
+            resolves DeepseekV2MLAAttention+SparseAttnIndexer and runs. Door 1 engine kv dtype (fp8 ckpts)
+            = config_gap, kv-auto A/B passes; door 2 ckpt hf_quant kv_cache_quant_algo:FP8 (NVFP4 artifacts)
+            = framework/platform gap, kv-auto still fails. Same two-door structure as trtllm. Evidence
+            facts/vllm_ab_kvauto_*.json, 2026-08-22.'
+topologies:
+- tp: 1
+  ep: 1
+  evidence: real
+  status: implemented
+- tp: 8
+  ep: 1
+  evidence: real
+  status: implemented
+  route: launch_server + inject/sitecustomize (probe_sglang stage2 is single-process by design and cannot
+    host tp>1)
+  verdicts:
+  - 'Kimi-K2.5 (compressed-tensors W4-packed -> marlin): TEP8 == DEP8 kernel family (sglang::fused_marlin_moe
+    + device::marlin_moe::Marlin, same align/reduce/activation set; only shape-tuning template args differ).
+    facts/tepdep/k25_fp8_{tep8,dep8}.rank0.json, 2026-08-21.'
+- tp: 8
+  ep: 8
+  evidence: real
+  status: implemented
+  route: same as tp8, --ep-size 8
+policy: 'topology is ALWAYS recorded even when kernels match (owner: Kimi-K3 TEP8 is known to fork kernels;
+  K3 itself is unregistered at current pins, so the K3 verification is parked until a supporting framework
+  pin exists).'
