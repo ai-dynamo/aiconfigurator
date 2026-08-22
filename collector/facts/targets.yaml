@@ -234,6 +234,11 @@ families:
             whose ''Linear assert'' was the same trigger). Door 2 = checkpoint hf_quant kv_cache_quant_algo:FP8
             (all NVFP4 artifacts) -> framework_bug, kv-auto STILL crashes (GLM-5/5.1-NVFP4, DSV3.2-NVFP4).
             Evidence facts/trt_ab_kvauto_*.json, 2026-08-22.'
+          vllm_fp8kv: 'vllm 0.24/SM90: head-576 MLA has NO attention backend with fp8 KV; kv-auto(bf16)
+            resolves DeepseekV2MLAAttention+SparseAttnIndexer and runs. Door 1 engine kv dtype (fp8 ckpts)
+            = config_gap, kv-auto A/B passes; door 2 ckpt hf_quant kv_cache_quant_algo:FP8 (NVFP4 artifacts)
+            = framework/platform gap, kv-auto still fails. Same two-door structure as trtllm. Evidence
+            facts/vllm_ab_kvauto_*.json, 2026-08-22.'
       zai-org/GLM-5.1-FP8:
         known:
           trtllm_fp8kv: 'trtllm rc23/SM90 UNIFIED root cause: fp8 KV cache in the MLA/DSA path crashes
@@ -286,6 +291,11 @@ families:
             whose ''Linear assert'' was the same trigger). Door 2 = checkpoint hf_quant kv_cache_quant_algo:FP8
             (all NVFP4 artifacts) -> framework_bug, kv-auto STILL crashes (GLM-5/5.1-NVFP4, DSV3.2-NVFP4).
             Evidence facts/trt_ab_kvauto_*.json, 2026-08-22.'
+          vllm_ckpt_fp8kv: 'vllm 0.24/SM90: head-576 MLA has NO attention backend with fp8 KV; kv-auto(bf16)
+            resolves DeepseekV2MLAAttention+SparseAttnIndexer and runs. Door 1 engine kv dtype (fp8 ckpts)
+            = config_gap, kv-auto A/B passes; door 2 ckpt hf_quant kv_cache_quant_algo:FP8 (NVFP4 artifacts)
+            = framework/platform gap, kv-auto still fails. Same two-door structure as trtllm. Evidence
+            facts/vllm_ab_kvauto_*.json, 2026-08-22.'
       nvidia/GLM-5.1-NVFP4:
         known:
           trtllm_ckpt_fp8kv: 'trtllm rc23/SM90 UNIFIED root cause: fp8 KV cache in the MLA/DSA path crashes
@@ -294,6 +304,11 @@ families:
             whose ''Linear assert'' was the same trigger). Door 2 = checkpoint hf_quant kv_cache_quant_algo:FP8
             (all NVFP4 artifacts) -> framework_bug, kv-auto STILL crashes (GLM-5/5.1-NVFP4, DSV3.2-NVFP4).
             Evidence facts/trt_ab_kvauto_*.json, 2026-08-22.'
+          vllm_ckpt_fp8kv: 'vllm 0.24/SM90: head-576 MLA has NO attention backend with fp8 KV; kv-auto(bf16)
+            resolves DeepseekV2MLAAttention+SparseAttnIndexer and runs. Door 1 engine kv dtype (fp8 ckpts)
+            = config_gap, kv-auto A/B passes; door 2 ckpt hf_quant kv_cache_quant_algo:FP8 (NVFP4 artifacts)
+            = framework/platform gap, kv-auto still fails. Same two-door structure as trtllm. Evidence
+            facts/vllm_ab_kvauto_*.json, 2026-08-22.'
       nvidia/DeepSeek-V3.2-NVFP4:
         known:
           trtllm_ckpt_fp8kv: 'trtllm rc23/SM90 UNIFIED root cause: fp8 KV cache in the MLA/DSA path crashes
@@ -302,11 +317,30 @@ families:
             whose ''Linear assert'' was the same trigger). Door 2 = checkpoint hf_quant kv_cache_quant_algo:FP8
             (all NVFP4 artifacts) -> framework_bug, kv-auto STILL crashes (GLM-5/5.1-NVFP4, DSV3.2-NVFP4).
             Evidence facts/trt_ab_kvauto_*.json, 2026-08-22.'
+          vllm_ckpt_fp8kv: 'vllm 0.24/SM90: head-576 MLA has NO attention backend with fp8 KV; kv-auto(bf16)
+            resolves DeepseekV2MLAAttention+SparseAttnIndexer and runs. Door 1 engine kv dtype (fp8 ckpts)
+            = config_gap, kv-auto A/B passes; door 2 ckpt hf_quant kv_cache_quant_algo:FP8 (NVFP4 artifacts)
+            = framework/platform gap, kv-auto still fails. Same two-door structure as trtllm. Evidence
+            facts/vllm_ab_kvauto_*.json, 2026-08-22.'
       moonshotai/Kimi-K2.5:
         known:
           trtllm_quant_parser: rc23 quant_config_utils.py:43 crashes (NoneType) parsing the native compressed-tensors
             W4 quantization_config — framework_bug; K2.5-NVFP4 sibling fails separately on NVFP4 MoE tactics
             (platform_floor SM100).
+      zai-org/GLM-5.2-FP8:
+        known:
+          vllm_fp8kv: 'vllm 0.24/SM90: head-576 MLA has NO attention backend with fp8 KV; kv-auto(bf16)
+            resolves DeepseekV2MLAAttention+SparseAttnIndexer and runs. Door 1 engine kv dtype (fp8 ckpts)
+            = config_gap, kv-auto A/B passes; door 2 ckpt hf_quant kv_cache_quant_algo:FP8 (NVFP4 artifacts)
+            = framework/platform gap, kv-auto still fails. Same two-door structure as trtllm. Evidence
+            facts/vllm_ab_kvauto_*.json, 2026-08-22.'
+      nvidia/GLM-5.2-NVFP4:
+        known:
+          vllm_ckpt_fp8kv: 'vllm 0.24/SM90: head-576 MLA has NO attention backend with fp8 KV; kv-auto(bf16)
+            resolves DeepseekV2MLAAttention+SparseAttnIndexer and runs. Door 1 engine kv dtype (fp8 ckpts)
+            = config_gap, kv-auto A/B passes; door 2 ckpt hf_quant kv_cache_quant_algo:FP8 (NVFP4 artifacts)
+            = framework/platform gap, kv-auto still fails. Same two-door structure as trtllm. Evidence
+            facts/vllm_ab_kvauto_*.json, 2026-08-22.'
 topologies:
 - tp: 1
   ep: 1
