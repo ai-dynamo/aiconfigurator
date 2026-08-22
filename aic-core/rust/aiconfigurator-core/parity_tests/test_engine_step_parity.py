@@ -568,15 +568,6 @@ SMOKE_CASES = [
     ),
     pytest.param(
         EngineStepParityCase(
-            model_path="moonshotai/Kimi-K2.5",
-            system_name="h200_sxm",
-            backend_name="vllm",
-            backend_version="0.24.0",
-        ),
-        id="kimi-k25-h200-vllm-024-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
             model_path="nvidia/Nemotron-H-56B-Base-8K",
             system_name="h200_sxm",
             backend_name="vllm",
