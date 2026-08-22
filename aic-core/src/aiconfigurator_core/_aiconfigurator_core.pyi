@@ -62,6 +62,21 @@ class AicEngine:
         list[tuple[str, float, float, str]],
         list[tuple[str, float, float, str]],
     ]: ...
+    def _run_static_per_op_with_metadata(
+        self,
+        batch_size: int,
+        beam_width: int,
+        isl: int,
+        osl: int,
+        prefix: int,
+        seq_imbalance_correction_scale: float,
+        gen_seq_imbalance_correction_scale: float,
+        mode: str = "static",
+        stride: int = 32,
+    ) -> tuple[
+        list[tuple[str, float, float, str, tuple[str, str, int, int, int, int] | None]],
+        list[tuple[str, float, float, str, tuple[str, str, int, int, int, int] | None]],
+    ]: ...
     def mixed_step_breakdown_per_op(
         self,
         ctx_tokens: int,
@@ -76,6 +91,20 @@ class AicEngine:
         list[tuple[str, float, float, str]],
         list[tuple[str, float, float, str]],
     ]: ...
+    def _mixed_step_breakdown_per_op_with_metadata(
+        self,
+        ctx_tokens: int,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        prefix: int = 0,
+        seq_imbalance_correction_scale: float = 1.0,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+    ) -> tuple[
+        list[tuple[str, float, float, str, tuple[str, str, int, int, int, int] | None]],
+        list[tuple[str, float, float, str, tuple[str, str, int, int, int, int] | None]],
+        list[tuple[str, float, float, str, tuple[str, str, int, int, int, int] | None]],
+    ]: ...
     def decode_step_per_op(
         self,
         gen_tokens: int,
@@ -83,6 +112,13 @@ class AicEngine:
         osl: int,
         gen_seq_imbalance_correction_scale: float = 1.0,
     ) -> list[tuple[str, float, float, str]]: ...
+    def _decode_step_per_op_with_metadata(
+        self,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+    ) -> list[tuple[str, float, float, str, tuple[str, str, int, int, int, int] | None]]: ...
     def evaluate_context_ops(
         self,
         indices: list[int],

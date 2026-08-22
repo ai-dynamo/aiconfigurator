@@ -100,8 +100,13 @@ pub struct StaticResult {
 /// `run_static` / `_run_generation_phase` (the `DEFAULT_STATIC_STRIDE`).
 pub const DEFAULT_STATIC_STRIDE: u32 = 32;
 
+/// Executed MoE communication fallback as it crosses the FFI:
+/// `(inference_phase, comm_backend, requested_ep, requested_nodes,
+/// measurement_ep, measurement_nodes)`.
+pub type MoeCommFallbackValue = (&'static str, &'static str, u32, u32, u32, u32);
+
 /// One evaluated op as it crosses the FFI: `(name, latency_ms, energy_wms,
-/// source)`. Entries are NAME-FOLDED before crossing — repeated names
+/// source, moe_comm_fallback)`. Entries are NAME-FOLDED before crossing — repeated names
 /// accumulate with `+=` and sources merge to `"mixed"` on mismatch, the
 /// exact accumulation semantics of Python's phase dicts (addition is
 /// commutative, so folding here instead of in Python changes nothing) —
@@ -109,8 +114,8 @@ pub const DEFAULT_STATIC_STRIDE: u32 = 32;
 /// measurably slowed the engine step on per-block puzzle nets (hundreds of
 /// String allocations + Python tuple constructions per call). `source` is
 /// the provenance tag (`silicon|empirical|sol|estimated|mixed`). A plain
-/// tuple so pyo3 converts to `list[tuple[str, float, float, str]]`.
-pub type PerOpValue = (String, f64, f64, &'static str);
+/// tuple so pyo3 converts to a list of five-tuples.
+pub type PerOpValue = (String, f64, f64, &'static str, Option<MoeCommFallbackValue>);
 
 /// One SOL-decomposed per-op value: `(name, sol_time_ms, sol_math_ms,
 /// sol_mem_ms)`, mirroring Python's SOL_FULL triple `(sol_time, sol_math,
@@ -125,25 +130,52 @@ pub type PerOpSolValue = (String, f64, f64, f64);
 /// order is preserved (mirrors Python dict insertion order). Linear scan on
 /// purpose: unique-name counts are a few dozen (per-block families repeat
 /// names), far below where a map would win.
-#[derive(Default)]
 struct PerOpFold {
+    inference_phase: &'static str,
     entries: Vec<PerOpValue>,
 }
 
 impl PerOpFold {
+    fn new(inference_phase: &'static str) -> Self {
+        Self {
+            inference_phase,
+            entries: Vec::new(),
+        }
+    }
+
     fn add(&mut self, op: &Op, r: PerformanceResult) {
         let name = op.name();
         let source = r.source.as_str();
+        let fallback = r.moe_comm_fallback.map(|fallback| {
+            (
+                self.inference_phase,
+                fallback.comm_backend,
+                fallback.requested_ep_size,
+                fallback.requested_node_num,
+                fallback.measurement_ep_size,
+                fallback.measurement_node_num,
+            )
+        });
         if let Some(entry) = self.entries.iter_mut().find(|e| e.0 == name) {
             entry.1 += r.latency_ms;
             entry.2 += r.energy_wms;
             if entry.3 != source {
                 entry.3 = "mixed";
             }
+            if entry.4.is_none() {
+                entry.4 = fallback;
+            } else if fallback.is_some() {
+                debug_assert_eq!(entry.4, fallback);
+            }
             return;
         }
-        self.entries
-            .push((name.to_string(), r.latency_ms, r.energy_wms, source));
+        self.entries.push((
+            name.to_string(),
+            r.latency_ms,
+            r.energy_wms,
+            source,
+            fallback,
+        ));
     }
 
     fn into_values(self) -> Vec<PerOpValue> {
@@ -903,7 +935,7 @@ impl Engine {
 
     /// [`Self::run_static`] with the per-op values kept instead of summed:
     /// `(context, generation)` lists of `(name, latency_ms, energy_wms,
-    /// source)`, NAME-FOLDED (see [`PerOpValue`]): each name crosses once,
+    /// source, moe_comm_fallback)`, NAME-FOLDED (see [`PerOpValue`]): each name crosses once,
     /// pre-accumulated with Python's phase-dict semantics. Generation values
     /// are per-step-folded, then weighted by the stride `repeat_count`.
     pub fn run_static_per_op(
@@ -912,7 +944,7 @@ impl Engine {
         mode: StaticMode,
         stride: u32,
     ) -> Result<(Vec<PerOpValue>, Vec<PerOpValue>), AicError> {
-        let mut context = PerOpFold::default();
+        let mut context = PerOpFold::new("context");
         if matches!(mode, StaticMode::Context | StaticMode::Both) {
             if runtime.prefix >= runtime.isl {
                 return Err(AicError::InvalidEngineConfig(format!(
@@ -931,7 +963,7 @@ impl Engine {
                 |op, r| context.add(op, r),
             )?;
         }
-        let mut generation = PerOpFold::default();
+        let mut generation = PerOpFold::new("generation");
         if matches!(mode, StaticMode::Generation | StaticMode::Both) {
             self.run_generation_phase_with(runtime, stride, |op, r| generation.add(op, r))?;
         }
@@ -940,8 +972,9 @@ impl Engine {
 
     /// [`Self::mixed_step_breakdown`] with the per-op values kept:
     /// `(shared_non_attention, context_attention, decode_attention)` lists of
-    /// `(name, latency_ms, energy_wms, source)`. Context-attention entries
-    /// arrive already divided by the `ceil(isl/ctx)` scale.
+    /// `(name, latency_ms, energy_wms, source, moe_comm_fallback)`.
+    /// Context-attention entries arrive already divided by the
+    /// `ceil(isl/ctx)` scale.
     #[allow(clippy::too_many_arguments)]
     pub fn mixed_step_breakdown_per_op(
         &self,
@@ -971,17 +1004,23 @@ impl Engine {
             )?;
             let mut shared: Vec<PerOpValue> = Vec::new();
             if ctx_tokens > 0 {
-                shared.push((prefill_op.name.clone(), prefill_ms, 0.0, "silicon"));
+                shared.push((prefill_op.name.clone(), prefill_ms, 0.0, "silicon", None));
             }
             let mut dec_attn: Vec<PerOpValue> = Vec::new();
             if gen_tokens > 0 {
-                dec_attn.push((decode_op.name.clone(), marginal_decode_ms, 0.0, "silicon"));
+                dec_attn.push((
+                    decode_op.name.clone(),
+                    marginal_decode_ms,
+                    0.0,
+                    "silicon",
+                    None,
+                ));
             }
             return Ok((shared, Vec::new(), dec_attn));
         }
-        let mut shared = PerOpFold::default();
-        let mut ctx_attn = PerOpFold::default();
-        let mut dec_attn = PerOpFold::default();
+        let mut shared = PerOpFold::new("context");
+        let mut ctx_attn = PerOpFold::new("context");
+        let mut dec_attn = PerOpFold::new("generation");
         self.mixed_step_breakdown_with(
             ctx_tokens,
             gen_tokens,
@@ -1021,7 +1060,7 @@ impl Engine {
         osl: u32,
         gen_seq_imbalance_correction_scale: f64,
     ) -> Result<Vec<PerOpValue>, AicError> {
-        let mut out = PerOpFold::default();
+        let mut out = PerOpFold::new("generation");
         if gen_tokens == 0 {
             return Ok(out.into_values());
         }
@@ -1054,7 +1093,7 @@ impl Engine {
         seq_imbalance_correction_scale: f64,
         x_override: Option<u32>,
     ) -> Result<Vec<PerOpValue>, AicError> {
-        let mut out = PerOpFold::default();
+        let mut out = PerOpFold::new("context");
         for &i in indices {
             let op = self.context_ops.get(i).ok_or_else(|| {
                 AicError::InvalidEngineConfig(format!(
@@ -1088,7 +1127,7 @@ impl Engine {
         prefix: u32,
         x_override: Option<u32>,
     ) -> Result<Vec<PerOpValue>, AicError> {
-        let mut out = PerOpFold::default();
+        let mut out = PerOpFold::new("generation");
         for &i in indices {
             let op = self.generation_ops.get(i).ok_or_else(|| {
                 AicError::InvalidEngineConfig(format!(
@@ -1129,7 +1168,7 @@ impl Engine {
         let ops: Vec<Op> = serde_json::from_str(ops_json).map_err(|e| {
             AicError::InvalidEngineConfig(format!("evaluate_ops_json: invalid op list JSON: {e}"))
         })?;
-        let mut out = PerOpFold::default();
+        let mut out = PerOpFold::new(if is_context { "context" } else { "generation" });
         for op in &ops {
             let r = if is_context {
                 query_context_op(
@@ -1505,6 +1544,35 @@ mod tests {
             osl,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn per_op_fold_attaches_the_inference_phase_only_to_executed_fallbacks() {
+        use crate::operators::base::{MoeCommFallback, Source};
+
+        let op = context_ops().remove(0);
+        let fallback = MoeCommFallback {
+            comm_backend: "deepep_ht",
+            requested_ep_size: 32,
+            requested_node_num: 8,
+            measurement_ep_size: 8,
+            measurement_node_num: 1,
+        };
+        for inference_phase in ["context", "generation"] {
+            let mut fold = PerOpFold::new(inference_phase);
+            fold.add(
+                &op,
+                PerformanceResult::new(1.0, Source::Estimated).with_moe_comm_fallback(fallback),
+            );
+            assert_eq!(
+                fold.into_values()[0].4,
+                Some((inference_phase, "deepep_ht", 32, 8, 8, 1))
+            );
+        }
+
+        let mut exact = PerOpFold::new("context");
+        exact.add(&op, PerformanceResult::new(1.0, Source::Silicon));
+        assert_eq!(exact.into_values()[0].4, None);
     }
 
     #[test]

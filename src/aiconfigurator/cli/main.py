@@ -13,7 +13,11 @@ import pandas as pd
 import yaml
 
 from aiconfigurator import __version__
-from aiconfigurator.cli.estimate_detail_report import detail_requests_time, format_estimate_detail_report
+from aiconfigurator.cli.estimate_detail_report import (
+    detail_requests_time,
+    format_estimate_detail_report,
+    format_moe_comm_fallback,
+)
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
 from aiconfigurator.cli.utils import merge_experiment_results_by_mode, process_experiment_result
 from aiconfigurator.generator.api import (
@@ -2619,6 +2623,15 @@ def _run_estimate_epd(args, estimate_mode: str) -> None:
         logger.info("  %-16s %s", key, f"{value:.3f}" if isinstance(value, float) else value)
 
 
+def _warn_moe_comm_fallbacks(result) -> None:
+    """Warn when an estimate executed against substitute MoE topology data."""
+    for fallback in result.moe_comm_fallbacks:
+        logger.warning(
+            "Estimated MoE communication latency used fallback silicon data: %s.",
+            format_moe_comm_fallback(fallback),
+        )
+
+
 def _run_estimate_mode(args):
     """Run the estimate mode to predict TTFT, TPOT, and power for a single config."""
     from aiconfigurator.cli.api import cli_estimate
@@ -2733,6 +2746,7 @@ def _run_estimate_mode(args):
         )
 
     result = cli_estimate(**estimate_kwargs)
+    _warn_moe_comm_fallbacks(result)
     sol_result = None
     sol_detail_error = None
     if needs_sol_detail:

@@ -15,6 +15,7 @@ from aiconfigurator.cli.api import EstimateResult, _combine_afd_static_estimate_
 from aiconfigurator.sdk.config import AFDConfig, RuntimeConfig
 from aiconfigurator.sdk.inference_session import AFDInferenceSession
 from aiconfigurator.sdk.inference_summary import InferenceSummary
+from aiconfigurator.sdk.performance_result import MoECommFallback
 
 pytestmark = pytest.mark.unit
 
@@ -109,7 +110,13 @@ def _build_afd_session_with_phase_metrics(
     )
 
 
-def _estimate_result(*, raw: dict, mode: str = "afd", summary=None) -> EstimateResult:
+def _estimate_result(
+    *,
+    raw: dict,
+    mode: str = "afd",
+    summary=None,
+    moe_comm_fallbacks: tuple[MoECommFallback, ...] = (),
+) -> EstimateResult:
     return EstimateResult(
         ttft=float(raw.get("ttft", 0.0) or 0.0),
         tpot=float(raw.get("tpot", 0.0) or 0.0),
@@ -127,6 +134,7 @@ def _estimate_result(*, raw: dict, mode: str = "afd", summary=None) -> EstimateR
         raw=raw,
         mode=mode,
         summary=summary,
+        moe_comm_fallbacks=moe_comm_fallbacks,
     )
 
 
@@ -221,6 +229,28 @@ def test_prefill_afd_uses_regular_decode_metrics():
     assert combined.num_total_gpus == 12
     assert combined.raw["(p)impl"] == "afd"
     assert combined.raw["(d)impl"] == "static_gen"
+
+
+def test_afd_static_combiner_preserves_and_deduplicates_executed_moe_fallbacks():
+    shared = MoECommFallback("context", "deepep_ht", 32, 8, 8, 1)
+    generation = MoECommFallback("generation", "deepep_ll", 32, 8, 8, 1)
+    afd_result = _estimate_result(
+        raw={"phase": "decode", "osl": 2, "tpot": 1.0, "num_total_gpus": 4},
+        moe_comm_fallbacks=(shared,),
+    )
+    static_result = _estimate_result(
+        mode="static_ctx",
+        raw={"ttft": 1.0, "seq/s": 1.0, "num_total_gpus": 4},
+        moe_comm_fallbacks=(shared, generation),
+    )
+
+    combined = _combine_afd_static_estimate_results(
+        afd_result=afd_result,
+        static_result=static_result,
+        afd_phase="decode",
+    )
+
+    assert combined.moe_comm_fallbacks == (shared, generation)
 
 
 def test_run_afd_estimate_passes_prefix_and_nextn(monkeypatch):

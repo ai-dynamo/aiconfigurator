@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::enums::DatabaseMode;
 use crate::common::error::AicError;
-use crate::operators::base::{PerformanceResult, Source};
+use crate::operators::base::{MoeCommFallback, PerformanceResult, Source};
 use crate::perf_database::PerfDatabase;
 
 /// The `MOE_A2A_BACKENDS` registry knowledge the operator layer needs:
@@ -219,7 +219,23 @@ impl MoeAllToAllOp {
             })?;
         // Python: `PerformanceResult(float(result) * scale, source=...)` — no
         // clamp (nothing is subtracted on this path).
-        Ok(PerformanceResult::new(latency, source).scaled(self.scale_factor))
+        let result = PerformanceResult::new(latency, source).scaled(self.scale_factor);
+        if use_node1_fallback {
+            let comm_backend = match self.comm_backend.as_str() {
+                "deepep_ht" => "deepep_ht",
+                "deepep_ll" => "deepep_ll",
+                _ => unreachable!("node-1 fallback is restricted to SGLang DeepEP"),
+            };
+            Ok(result.with_moe_comm_fallback(MoeCommFallback {
+                comm_backend,
+                requested_ep_size: self.moe_ep_size,
+                requested_node_num: self.node_num,
+                measurement_ep_size: lookup_ep_size,
+                measurement_node_num: lookup_node_num,
+            }))
+        } else {
+            Ok(result)
+        }
     }
 
     fn silicon_latency_at(
@@ -532,6 +548,7 @@ mod tests {
         let got = scaled.query(&db, 64).expect("combine");
         assert!((got.latency_ms - 6.400 * 61.0).abs() < 1e-12, "got {got:?}");
         assert_eq!(got.source, Source::Silicon);
+        assert_eq!(got.moe_comm_fallback, None);
     }
 
     #[test]
@@ -544,6 +561,47 @@ mod tests {
         let got = fallback.query(&db, 64).expect("node-1 fallback");
         assert!((got.latency_ms - 1.280).abs() < 1e-12, "got {got:?}");
         assert_eq!(got.source, Source::Estimated);
+        assert_eq!(
+            got.moe_comm_fallback,
+            Some(MoeCommFallback {
+                comm_backend: "deepep_ht",
+                requested_ep_size: 128,
+                requested_node_num: 32,
+                measurement_ep_size: 8,
+                measurement_node_num: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn exact_requested_topology_wins_over_available_node1_donor() {
+        let (_tmp, db) = synthetic_db(DatabaseMode::Silicon);
+        // `op` requests EP16/node2, and `synthetic_db` also contains the
+        // legacy EP8/node1 donor for this same shape. The exact 640us point
+        // must win over the donor's 1280us point.
+        let got = op("dispatch", "deepep_ht", 1)
+            .query(&db, 64)
+            .expect("exact requested topology");
+        assert!((got.latency_ms - 0.640).abs() < 1e-12, "got {got:?}");
+        assert_eq!(got.source, Source::Silicon);
+        assert_eq!(got.moe_comm_fallback, None);
+    }
+
+    #[test]
+    fn missing_node1_donor_remains_a_data_error() {
+        let (_tmp, db) = synthetic_db(DatabaseMode::Silicon);
+        let mut missing = op("dispatch", "deepep_ht", 1);
+        missing.moe_ep_size = 128;
+        missing.node_num = 32;
+        missing.hidden_size = 9999;
+        missing.sms = 20;
+
+        let result = missing.query(&db, 64);
+
+        assert!(
+            matches!(result, Err(AicError::PerfDatabase(_))),
+            "an unavailable donor must remain a typed data miss, got {result:?}"
+        );
     }
 
     // -----------------------------------------------------------------

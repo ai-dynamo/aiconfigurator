@@ -35,6 +35,7 @@ from aiconfigurator.sdk.models import (
     resolve_nvfp4_for_system,
 )
 from aiconfigurator.sdk.moe_comm_resolver import resolve_model_config_moe_comm
+from aiconfigurator.sdk.performance_result import MoECommFallback
 from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import (
     SpeculativeDecodingProfile,
@@ -822,6 +823,13 @@ class EstimateResult:
 
     kv_cache_warning: str | None = None
     """Warning message for non-fatal memory capacity issues."""
+
+    moe_comm_fallbacks: tuple[MoECommFallback, ...] = ()
+    """Executed MoE communication topology substitutions.
+
+    Populated only when the Rust operator successfully used a measured
+    topology in place of the requested topology.
+    """
 
     @property
     def request_latency(self) -> float:
@@ -1630,6 +1638,7 @@ def _run_agg_estimate(
         summary=summary,
         per_ops_data=summary.get_per_ops_data(),
         per_ops_source=summary.get_per_ops_source(),
+        moe_comm_fallbacks=summary.get_moe_comm_fallbacks(),
         kv_cache_warning=kv_warning,
     )
 
@@ -1789,6 +1798,7 @@ def _run_static_estimate(
         summary=summary,
         per_ops_data=None,
         per_ops_source=None,
+        moe_comm_fallbacks=summary.get_moe_comm_fallbacks(),
         kv_cache_warning=static_warning,
     )
 
@@ -1988,6 +1998,7 @@ def _run_disagg_estimate(
         mode="disagg",
         per_ops_data=summary.get_per_ops_data(),
         per_ops_source=summary.get_per_ops_source(),
+        moe_comm_fallbacks=summary.get_moe_comm_fallbacks(),
     )
 
 
@@ -2101,6 +2112,7 @@ def _combine_afd_static_estimate_results(
         mode="afd",
         per_ops_data=per_ops_data,
         per_ops_source=per_ops_source,
+        moe_comm_fallbacks=tuple(dict.fromkeys((*afd_result.moe_comm_fallbacks, *static_result.moe_comm_fallbacks))),
         kv_cache_warning=static_result.kv_cache_warning,
     )
 

@@ -9,9 +9,13 @@ import pytest
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.config import ModelConfig, RuntimeConfig
+from aiconfigurator.sdk.performance_result import MoECommFallback
 from aiconfigurator.sdk.step_estimate import MixedStepInput, StepEstimate
 
 pytestmark = pytest.mark.unit
+
+_CONTEXT_FALLBACK = MoECommFallback("context", "deepep_ht", 32, 8, 8, 1)
+_GENERATION_FALLBACK = MoECommFallback("generation", "deepep_ll", 32, 8, 8, 1)
 
 
 class _LatencyResult:
@@ -255,6 +259,7 @@ def test_run_static_latency_only_matches_run_static_latency(
             {name: latency * 10.0 for name, latency in gen.items()},
             dict.fromkeys(ctx, "silicon"),
             dict.fromkeys(gen, "silicon"),
+            (),
         )
 
     monkeypatch.setattr(base_backend_module, "estimate_static_latency_breakdown_with_rust", _fake_rust_breakdown)
@@ -298,7 +303,6 @@ def test_run_static_can_route_to_rust_engine_step_backend(
 
     def _fake_rust_breakdown(model_arg, database_arg, runtime_config_arg, mode_arg, stride_arg, scale_arg):
         calls.append((model_arg, database_arg, runtime_config_arg, mode_arg, stride_arg, scale_arg))
-        # 6-tuple: (ctx latency, gen latency, ctx energy, gen energy, ctx source, gen source)
         return (
             {"context_qkv_gemm": 4.0, "context_attention": 3.0},
             {"generation_qkv_gemm": 2.0, "generation_attention": 1.0},
@@ -306,6 +310,7 @@ def test_run_static_can_route_to_rust_engine_step_backend(
             {"generation_qkv_gemm": 12.0, "generation_attention": 5.0},
             {"context_qkv_gemm": "silicon", "context_attention": "empirical"},
             {"generation_qkv_gemm": "silicon", "generation_attention": "mixed"},
+            (_CONTEXT_FALLBACK,),
         )
 
     monkeypatch.setattr(
@@ -334,6 +339,7 @@ def test_run_static_can_route_to_rust_engine_step_backend(
     assert summary.get_generation_energy_wms_dict() == {"generation_qkv_gemm": 12.0, "generation_attention": 5.0}
     assert summary.get_context_source_dict() == {"context_qkv_gemm": "silicon", "context_attention": "empirical"}
     assert summary.get_generation_source_dict() == {"generation_qkv_gemm": "silicon", "generation_attention": "mixed"}
+    assert summary.get_moe_comm_fallbacks() == (_CONTEXT_FALLBACK,)
 
 
 @pytest.mark.parametrize(
@@ -372,7 +378,7 @@ def test_run_static_declares_mtp_decode_share_per_mode(
             gen = {}
         elif mode_arg == "static_gen":
             ctx = {}
-        return (ctx, gen, dict(ctx), dict(gen), dict.fromkeys(ctx, "silicon"), dict.fromkeys(gen, "silicon"))
+        return (ctx, gen, dict(ctx), dict(gen), dict.fromkeys(ctx, "silicon"), dict.fromkeys(gen, "silicon"), ())
 
     monkeypatch.setattr(
         base_backend_module,
@@ -429,7 +435,7 @@ def test_run_agg_declares_mtp_decode_share_at_call_site(
     monkeypatch.setattr(
         backend,
         "_get_genonly_step_latency",
-        lambda *args, **kwargs: (1.0, 1.0, {}, {}),
+        lambda *args, **kwargs: (1.0, 1.0, {}, {}, ()),
     )
 
     backend.run_agg(
@@ -477,7 +483,7 @@ def test_run_agg_with_osl_one_does_not_divide_by_zero(
     monkeypatch.setattr(
         backend,
         "_get_genonly_step_latency",
-        lambda *args, **kwargs: (0.0, 0.0, {}, {}),
+        lambda *args, **kwargs: (0.0, 0.0, {}, {}, ()),
     )
     monkeypatch.setattr(
         backend,
@@ -532,7 +538,7 @@ def test_run_agg_b1_uses_scheduled_activation_peak(
     monkeypatch.setattr(
         backend,
         "_get_genonly_step_latency",
-        lambda *args, **kwargs: (1.0, 1.0, {"decode": 1.0}, {"decode": "silicon"}),
+        lambda *args, **kwargs: (1.0, 1.0, {"decode": 1.0}, {"decode": "silicon"}, ()),
     )
 
     memory_calls: list[dict] = []
@@ -573,6 +579,7 @@ def test_run_mixed_returns_components_and_counts_speculative_query_tokens(
             "component_energy_wms": {"shared_non_attention": 50.0, "context_attention": 20.0, "decode_attention": 15.0},
             "per_op_latency_ms": {"context_mlp": 5.0},
             "per_op_source": {"context_mlp": "silicon"},
+            "moe_comm_fallbacks": (),
         }
 
     monkeypatch.setattr(base_backend_module, "estimate_mixed_step_breakdown_with_rust", _fake_mixed_breakdown)
@@ -629,6 +636,7 @@ def test_run_mixed_rust_path_returns_the_same_structured_contract(
             "context_attention (scaled)": "empirical",
             "generation_attention": "silicon",
         },
+        "moe_comm_fallbacks": (),
     }
     monkeypatch.setattr(
         base_backend_module,
@@ -673,6 +681,7 @@ def test_get_genonly_step_latency_rust_path_returns_decode_breakdown_verbatim(
         24.0,
         {"generation_attention": 2.0, "generation_mlp": 1.0},
         {"generation_attention": "silicon", "generation_mlp": "empirical"},
+        (),
     )
 
     def _fake_decode_breakdown(model_arg, database_arg, **kwargs):
@@ -724,7 +733,7 @@ def test_run_agg_applies_speculative_progress_in_scheduler(
     monkeypatch.setattr(
         backend,
         "_get_genonly_step_latency",
-        lambda *args, **kwargs: (5.0, 50.0, {"decode": 5.0}, {"decode": "silicon"}),
+        lambda *args, **kwargs: (5.0, 50.0, {"decode": 5.0}, {"decode": "silicon"}, ()),
     )
 
     summary = backend.run_agg(
@@ -764,7 +773,7 @@ def test_run_agg_records_progress_only_when_explicitly_supplied(
     monkeypatch.setattr(
         backend,
         "_get_genonly_step_latency",
-        lambda *args, **kwargs: (5.0, 50.0, {"decode": 5.0}, {"decode": "silicon"}),
+        lambda *args, **kwargs: (5.0, 50.0, {"decode": 5.0}, {"decode": "silicon"}, ()),
     )
 
     summary = backend.run_agg(
@@ -786,6 +795,43 @@ def test_run_agg_records_progress_only_when_explicitly_supplied(
     # The two calls schedule identically but carry different projection
     # eligibility; they must not have shared a cache entry.
     assert explicit is not summary
+
+
+def test_run_agg_preserves_executed_moe_fallbacks_from_mixed_and_decode_steps(
+    monkeypatch,
+    backend: BaseBackend,
+    model,
+    database,
+) -> None:
+    monkeypatch.setattr(
+        backend,
+        "run_mixed",
+        lambda *args, **kwargs: StepEstimate(
+            latency_ms=10.0,
+            energy_wms=100.0,
+            moe_comm_fallbacks=(_CONTEXT_FALLBACK,),
+        ),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_get_genonly_step_latency",
+        lambda *args, **kwargs: (
+            5.0,
+            50.0,
+            {"decode": 5.0},
+            {"decode": "estimated"},
+            (_CONTEXT_FALLBACK, _GENERATION_FALLBACK),
+        ),
+    )
+
+    summary = backend.run_agg(
+        model,
+        database,
+        RuntimeConfig(batch_size=2, beam_width=1, isl=8, osl=5, engine_step_backend="rust"),
+        ctx_tokens=8,
+    )
+
+    assert summary.get_moe_comm_fallbacks() == (_CONTEXT_FALLBACK, _GENERATION_FALLBACK)
 
 
 @pytest.mark.parametrize(
@@ -814,7 +860,7 @@ def test_run_agg_validates_backend_before_cache_hit(
     monkeypatch.setattr(
         backend,
         "_get_genonly_step_latency",
-        lambda *args, **kwargs: (5.0, 50.0, {"decode": 5.0}, {"decode": "silicon"}),
+        lambda *args, **kwargs: (5.0, 50.0, {"decode": 5.0}, {"decode": "silicon"}, ()),
     )
 
     cached = backend.run_agg(
@@ -900,6 +946,7 @@ def test_run_mixed_derives_effective_multimodal_isl_for_direct_calls(
             "component_energy_wms": {"shared_non_attention": 1.0},
             "per_op_latency_ms": {},
             "per_op_source": {},
+            "moe_comm_fallbacks": (),
         }
 
     monkeypatch.setattr(base_backend_module, "estimate_mixed_step_breakdown_with_rust", _fake_mixed_breakdown)
@@ -936,7 +983,7 @@ def test_run_agg_does_not_double_count_visual_tokens_in_run_mixed(
 
     def _genonly(model_arg, database_arg, runtime_config_arg, num_tokens, isl, osl):
         genonly_isl.append(isl)
-        return (1.0, 1.0, {}, {})
+        return (1.0, 1.0, {}, {}, ())
 
     monkeypatch.setattr(backend, "run_mixed", _run_mixed)
     monkeypatch.setattr(backend, "_get_genonly_step_latency", _genonly)
@@ -988,6 +1035,7 @@ def test_run_static_latency_only_zeroes_energy_with_paired_keys(
             {"generation_qkv_gemm": 12.0, "generation_attention": 5.0},
             {"context_qkv_gemm": "silicon", "context_attention": "empirical"},
             {"generation_qkv_gemm": "silicon", "generation_attention": "mixed"},
+            (),
         ),
     )
 
@@ -1006,6 +1054,7 @@ def test_run_static_latency_only_zeroes_energy_with_paired_keys(
         context_energy,
         generation_latency,
         generation_energy,
+        _,
         _,
         _,
     ) = backend._run_static_breakdown(model, database, runtime_config, mode="static", stride=2, include_energy=False)

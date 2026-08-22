@@ -40,6 +40,17 @@ use crate::engine::runtime::{
 };
 use crate::{BackendKind, DataType, EngineConfig, ENGINE_CONFIG_SCHEMA_VERSION};
 
+type PublicPerOpValue = (String, f64, f64, &'static str);
+
+fn strip_per_op_metadata(entries: Vec<PerOpValue>) -> Vec<PublicPerOpValue> {
+    entries
+        .into_iter()
+        .map(|(name, latency_ms, energy_wms, source, _fallback)| {
+            (name, latency_ms, energy_wms, source)
+        })
+        .collect()
+}
+
 /// Trivial smoke export: returns the engine-config schema version so callers
 /// can confirm the extension built and imported correctly.
 #[pyfunction]
@@ -452,6 +463,53 @@ impl AicEngine {
         gen_seq_imbalance_correction_scale: f64,
         mode: &str,
         stride: u32,
+    ) -> PyResult<(Vec<PublicPerOpValue>, Vec<PublicPerOpValue>)> {
+        let rt = RuntimeConfig {
+            batch_size,
+            beam_width,
+            isl,
+            osl,
+            prefix,
+            seq_imbalance_correction_scale,
+            gen_seq_imbalance_correction_scale,
+        };
+        let mode = parse_mode(mode)?;
+        self.inner.reset_provenance();
+        py.allow_threads(|| self.inner.run_static_per_op(&rt, mode, stride))
+            .map(|(context, generation)| {
+                (
+                    strip_per_op_metadata(context),
+                    strip_per_op_metadata(generation),
+                )
+            })
+            .map_err(aic_to_py)
+    }
+
+    /// Internal metadata-bearing counterpart of `run_static_per_op`.
+    #[pyo3(signature = (
+        batch_size,
+        beam_width,
+        isl,
+        osl,
+        prefix,
+        seq_imbalance_correction_scale,
+        gen_seq_imbalance_correction_scale,
+        mode="static",
+        stride=DEFAULT_STATIC_STRIDE,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn _run_static_per_op_with_metadata(
+        &self,
+        py: Python<'_>,
+        batch_size: u32,
+        beam_width: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+        mode: &str,
+        stride: u32,
     ) -> PyResult<(Vec<PerOpValue>, Vec<PerOpValue>)> {
         let rt = RuntimeConfig {
             batch_size,
@@ -478,6 +536,48 @@ impl AicEngine {
                         gen_seq_imbalance_correction_scale=1.0))]
     #[allow(clippy::too_many_arguments)]
     fn mixed_step_breakdown_per_op(
+        &self,
+        py: Python<'_>,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> PyResult<(
+        Vec<PublicPerOpValue>,
+        Vec<PublicPerOpValue>,
+        Vec<PublicPerOpValue>,
+    )> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner.mixed_step_breakdown_per_op(
+                ctx_tokens,
+                gen_tokens,
+                isl,
+                osl,
+                prefix,
+                seq_imbalance_correction_scale,
+                gen_seq_imbalance_correction_scale,
+            )
+        })
+        .map(|(shared, context_attention, decode_attention)| {
+            (
+                strip_per_op_metadata(shared),
+                strip_per_op_metadata(context_attention),
+                strip_per_op_metadata(decode_attention),
+            )
+        })
+        .map_err(aic_to_py)
+    }
+
+    /// Internal metadata-bearing counterpart of `mixed_step_breakdown_per_op`.
+    #[pyo3(signature = (ctx_tokens, gen_tokens, isl, osl, prefix=0,
+                        seq_imbalance_correction_scale=1.0,
+                        gen_seq_imbalance_correction_scale=1.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn _mixed_step_breakdown_per_op_with_metadata(
         &self,
         py: Python<'_>,
         ctx_tokens: u32,
@@ -514,6 +614,25 @@ impl AicEngine {
         isl: u32,
         osl: u32,
         gen_seq_imbalance_correction_scale: f64,
+    ) -> PyResult<Vec<PublicPerOpValue>> {
+        self.inner.reset_provenance();
+        py.allow_threads(|| {
+            self.inner
+                .decode_step_per_op(gen_tokens, isl, osl, gen_seq_imbalance_correction_scale)
+        })
+        .map(strip_per_op_metadata)
+        .map_err(aic_to_py)
+    }
+
+    /// Internal metadata-bearing counterpart of `decode_step_per_op`.
+    #[pyo3(signature = (gen_tokens, isl, osl, gen_seq_imbalance_correction_scale=1.0))]
+    fn _decode_step_per_op_with_metadata(
+        &self,
+        py: Python<'_>,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        gen_seq_imbalance_correction_scale: f64,
     ) -> PyResult<Vec<PerOpValue>> {
         self.inner.reset_provenance();
         py.allow_threads(|| {
@@ -543,7 +662,7 @@ impl AicEngine {
         prefix: u32,
         seq_imbalance_correction_scale: f64,
         x: Option<u32>,
-    ) -> PyResult<Vec<PerOpValue>> {
+    ) -> PyResult<Vec<PublicPerOpValue>> {
         self.inner.reset_provenance();
         py.allow_threads(|| {
             self.inner.evaluate_context_ops(
@@ -555,6 +674,7 @@ impl AicEngine {
                 x,
             )
         })
+        .map(strip_per_op_metadata)
         .map_err(aic_to_py)
     }
 
@@ -571,7 +691,7 @@ impl AicEngine {
         gen_seq_imbalance_correction_scale: f64,
         prefix: u32,
         x: Option<u32>,
-    ) -> PyResult<Vec<PerOpValue>> {
+    ) -> PyResult<Vec<PublicPerOpValue>> {
         self.inner.reset_provenance();
         py.allow_threads(|| {
             self.inner.evaluate_generation_ops(
@@ -583,6 +703,7 @@ impl AicEngine {
                 x,
             )
         })
+        .map(strip_per_op_metadata)
         .map_err(aic_to_py)
     }
 
@@ -605,7 +726,7 @@ impl AicEngine {
         prefix: u32,
         imbalance_correction_scale: f64,
         x: Option<u32>,
-    ) -> PyResult<Vec<PerOpValue>> {
+    ) -> PyResult<Vec<PublicPerOpValue>> {
         self.inner.reset_provenance();
         py.allow_threads(|| {
             self.inner.evaluate_ops_json(
@@ -618,6 +739,7 @@ impl AicEngine {
                 x,
             )
         })
+        .map(strip_per_op_metadata)
         .map_err(aic_to_py)
     }
 

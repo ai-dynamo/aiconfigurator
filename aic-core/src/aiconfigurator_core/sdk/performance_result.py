@@ -5,6 +5,20 @@
 PerformanceResult class for backward-compatible latency+energy+source tracking.
 """
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class MoECommFallback:
+    """Executed MoE communication topology substitution."""
+
+    inference_phase: str
+    comm_backend: str
+    requested_ep_size: int
+    requested_node_num: int
+    measurement_ep_size: int
+    measurement_node_num: int
+
 
 class PerformanceResult(float):
     """

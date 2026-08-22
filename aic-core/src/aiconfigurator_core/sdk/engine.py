@@ -47,6 +47,10 @@ from aiconfigurator_core.sdk.models import get_model
 from aiconfigurator_core.sdk.operations import FPMForwardOp
 from aiconfigurator_core.sdk.operations.base import Operation
 
+PerOpValue = tuple[str, float, float, str]
+_MoeCommFallbackPayload = tuple[str, str, int, int, int, int]
+_PerOpValueWithMetadata = tuple[str, float, float, str, _MoeCommFallbackPayload | None]
+
 # Reuse the exact quant-mode -> Rust ``DataType`` serde-string mappers the live
 # ctypes bridge uses, so the compiled ``EngineConfig`` decodes the same way.
 # The Python quant enum names (``int8_wo`` / ``int4_wo`` / ``sq`` / ``fp8_ootb``)
@@ -744,13 +748,39 @@ class EngineHandle:
         gen_seq_imbalance_correction_scale: float = 1.0,
         mode: str = "static",
         stride: int = 32,
-    ) -> tuple[list[tuple[str, float, float, str]], list[tuple[str, float, float, str]]]:
+    ) -> tuple[list[PerOpValue], list[PerOpValue]]:
         """``run_static`` with the per-op values kept: ``(context, generation)``
         lists of ``(name, latency_ms, energy_wms, source)``, name-folded (each
         name appears once, accumulated with Python's phase-dict semantics;
         generation values are per-step-folded, then weighted by
         ``repeat_count``)."""
         return self._engine.run_static_per_op(
+            int(batch_size),
+            int(beam_width),
+            int(isl),
+            int(osl),
+            int(prefix),
+            float(seq_imbalance_correction_scale),
+            float(gen_seq_imbalance_correction_scale),
+            mode,
+            int(stride),
+        )
+
+    def _run_static_per_op_with_metadata(
+        self,
+        *,
+        batch_size: int,
+        isl: int,
+        osl: int,
+        prefix: int = 0,
+        beam_width: int = 1,
+        seq_imbalance_correction_scale: float = 1.0,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+        mode: str = "static",
+        stride: int = 32,
+    ) -> tuple[list[_PerOpValueWithMetadata], list[_PerOpValueWithMetadata]]:
+        """Internal static per-op stream with executed fallback metadata."""
+        return self._engine._run_static_per_op_with_metadata(
             int(batch_size),
             int(beam_width),
             int(isl),
@@ -772,14 +802,39 @@ class EngineHandle:
         seq_imbalance_correction_scale: float = 1.0,
         gen_seq_imbalance_correction_scale: float = 1.0,
     ) -> tuple[
-        list[tuple[str, float, float, str]],
-        list[tuple[str, float, float, str]],
-        list[tuple[str, float, float, str]],
+        list[PerOpValue],
+        list[PerOpValue],
+        list[PerOpValue],
     ]:
         """``mixed_step_breakdown`` with the per-op values kept:
         ``(shared_non_attention, context_attention, decode_attention)`` lists;
         context-attention entries arrive already divided by ``ceil(isl/ctx)``."""
         return self._engine.mixed_step_breakdown_per_op(
+            int(ctx_tokens),
+            int(gen_tokens),
+            int(isl),
+            int(osl),
+            int(prefix),
+            float(seq_imbalance_correction_scale),
+            float(gen_seq_imbalance_correction_scale),
+        )
+
+    def _mixed_step_breakdown_per_op_with_metadata(
+        self,
+        ctx_tokens: int,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        prefix: int = 0,
+        seq_imbalance_correction_scale: float = 1.0,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+    ) -> tuple[
+        list[_PerOpValueWithMetadata],
+        list[_PerOpValueWithMetadata],
+        list[_PerOpValueWithMetadata],
+    ]:
+        """Internal mixed-step per-op stream with fallback metadata."""
+        return self._engine._mixed_step_breakdown_per_op_with_metadata(
             int(ctx_tokens),
             int(gen_tokens),
             int(isl),
@@ -795,9 +850,21 @@ class EngineHandle:
         isl: int,
         osl: int,
         gen_seq_imbalance_correction_scale: float = 1.0,
-    ) -> list[tuple[str, float, float, str]]:
+    ) -> list[PerOpValue]:
         """``decode_step_latency`` with the per-op values kept."""
         return self._engine.decode_step_per_op(
+            int(gen_tokens), int(isl), int(osl), float(gen_seq_imbalance_correction_scale)
+        )
+
+    def _decode_step_per_op_with_metadata(
+        self,
+        gen_tokens: int,
+        isl: int,
+        osl: int,
+        gen_seq_imbalance_correction_scale: float = 1.0,
+    ) -> list[_PerOpValueWithMetadata]:
+        """Internal decode per-op stream with executed fallback metadata."""
+        return self._engine._decode_step_per_op_with_metadata(
             int(gen_tokens), int(isl), int(osl), float(gen_seq_imbalance_correction_scale)
         )
 
@@ -810,7 +877,7 @@ class EngineHandle:
         prefix: int = 0,
         seq_imbalance_correction_scale: float = 1.0,
         x: int | None = None,
-    ) -> list[tuple[str, float, float, str]]:
+    ) -> list[PerOpValue]:
         """Thin op-list evaluation over the compiled CONTEXT op list: evaluate
         the ops at ``indices`` (positions in the spec's ``context_ops``, which
         mirror ``model.context_ops`` order) at the context-phase shape.
@@ -835,7 +902,7 @@ class EngineHandle:
         gen_seq_imbalance_correction_scale: float = 1.0,
         prefix: int = 0,
         x: int | None = None,
-    ) -> list[tuple[str, float, float, str]]:
+    ) -> list[PerOpValue]:
         """Thin op-list evaluation over the compiled GENERATION op list at the
         decode-step shape (see :meth:`evaluate_context_ops`). The base decode
         walk carries no prefix; ``prefix`` exists for orchestrations that
@@ -859,7 +926,7 @@ class EngineHandle:
         prefix: int = 0,
         imbalance_correction_scale: float = 1.0,
         x: int | None = None,
-    ) -> list[tuple[str, float, float, str]]:
+    ) -> list[PerOpValue]:
         """Evaluate an ad-hoc op list (JSON array of OpSpec objects) against
         this engine's database — serves op lists deliberately NOT in the
         compiled spec (the VL encoder phase); the caller keeps the shape math."""

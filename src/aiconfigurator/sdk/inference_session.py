@@ -435,6 +435,9 @@ class DisaggInferenceSession:
             disagg_summary.set_per_ops_data(per_ops_data)
         if per_ops_source:
             disagg_summary.set_per_ops_source(per_ops_source)
+        disagg_summary.set_moe_comm_fallbacks(
+            tuple(dict.fromkeys((*prefill_summary.get_moe_comm_fallbacks(), *decode_summary.get_moe_comm_fallbacks())))
+        )
 
         return disagg_summary
 

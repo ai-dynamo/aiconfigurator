@@ -80,6 +80,20 @@ impl SolComponents {
     }
 }
 
+/// Actual MoE communication topology substitution used by one query.
+///
+/// Attached only after the measurement lookup succeeds. The inference phase
+/// (context or generation) is supplied by the engine loop that evaluates the
+/// operator; this payload owns the remaining lookup provenance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MoeCommFallback {
+    pub comm_backend: &'static str,
+    pub requested_ep_size: u32,
+    pub requested_node_num: u32,
+    pub measurement_ep_size: u32,
+    pub measurement_node_num: u32,
+}
+
 /// Componentwise subtraction for optional SOL decompositions (the GEMM
 /// fp8_static overhead-table subtraction). Either side missing → `None`:
 /// an incomplete breakdown must not masquerade as a full one.
@@ -125,13 +139,15 @@ pub(crate) fn blend_sol(
 /// its components (the notebook re-oracle FFI reads them); `None` everywhere
 /// else. It rides along through `scaled`/`plus`/`clamp_non_negative` so op-
 /// level composition (scale factors, additive modules) stays consistent
-/// with the latency.
+/// with the latency. `moe_comm_fallback` identifies a successful substitute
+/// topology lookup and follows the same combinators while unambiguous.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PerformanceResult {
     pub latency_ms: f64,
     pub energy_wms: f64,
     pub source: Source,
     pub sol: Option<SolComponents>,
+    pub moe_comm_fallback: Option<MoeCommFallback>,
 }
 
 impl PerformanceResult {
@@ -141,6 +157,7 @@ impl PerformanceResult {
             energy_wms: 0.0,
             source,
             sol: None,
+            moe_comm_fallback: None,
         }
     }
 
@@ -150,6 +167,7 @@ impl PerformanceResult {
             energy_wms,
             source,
             sol: None,
+            moe_comm_fallback: None,
         }
     }
 
@@ -161,6 +179,7 @@ impl PerformanceResult {
             energy_wms: 0.0,
             source: Source::Sol,
             sol: Some(components),
+            moe_comm_fallback: None,
         }
     }
 
@@ -169,6 +188,12 @@ impl PerformanceResult {
     /// (pure-bandwidth comm bounds, composed module SOLs).
     pub fn with_sol(mut self, components: SolComponents) -> Self {
         self.sol = Some(components);
+        self
+    }
+
+    /// Attach an executed MoE communication topology substitution.
+    pub fn with_moe_comm_fallback(mut self, fallback: MoeCommFallback) -> Self {
+        self.moe_comm_fallback = Some(fallback);
         self
     }
 
@@ -194,6 +219,7 @@ impl PerformanceResult {
                 math_ms: c.math_ms * factor,
                 mem_ms: c.mem_ms * factor,
             }),
+            moe_comm_fallback: self.moe_comm_fallback,
         }
     }
 
@@ -202,10 +228,10 @@ impl PerformanceResult {
     /// AND energy both 0.0) is a source-neutral identity — the other
     /// side's tag survives, mirroring Python's zero-identity rule.
     pub fn plus(self, other: PerformanceResult) -> Self {
-        let (source, sol) = if self.latency_ms == 0.0 && self.energy_wms == 0.0 {
-            (other.source, other.sol)
+        let (source, sol, moe_comm_fallback) = if self.latency_ms == 0.0 && self.energy_wms == 0.0 {
+            (other.source, other.sol, other.moe_comm_fallback)
         } else if other.latency_ms == 0.0 && other.energy_wms == 0.0 {
-            (self.source, self.sol)
+            (self.source, self.sol, self.moe_comm_fallback)
         } else {
             // Components add only when BOTH sides carry them; a side
             // without a decomposition poisons the sum to `None` (an
@@ -217,13 +243,22 @@ impl PerformanceResult {
                 }),
                 _ => None,
             };
-            (self.source.combine(other.source), sol)
+            let moe_comm_fallback = match (self.moe_comm_fallback, other.moe_comm_fallback) {
+                (None, fallback) | (fallback, None) => fallback,
+                (Some(left), Some(right)) if left == right => Some(left),
+                // One scalar result cannot faithfully represent two distinct
+                // communication substitutions. Drop the ambiguous payload;
+                // per-op engine folding retains each operation separately.
+                (Some(_), Some(_)) => None,
+            };
+            (self.source.combine(other.source), sol, moe_comm_fallback)
         };
         Self {
             latency_ms: self.latency_ms + other.latency_ms,
             energy_wms: self.energy_wms + other.energy_wms,
             source,
             sol,
+            moe_comm_fallback,
         }
     }
 
@@ -239,6 +274,7 @@ impl PerformanceResult {
                 math_ms: c.math_ms.max(0.0),
                 mem_ms: c.mem_ms.max(0.0),
             }),
+            moe_comm_fallback: self.moe_comm_fallback,
         }
     }
 }
@@ -275,6 +311,38 @@ mod tests {
     fn performance_result_clamp_non_negative() {
         let r = PerformanceResult::silicon(-1.5).clamp_non_negative();
         assert_eq!(r.latency_ms, 0.0);
+    }
+
+    #[test]
+    fn moe_comm_fallback_rides_through_result_combinators_without_ambiguity() {
+        let ht = MoeCommFallback {
+            comm_backend: "deepep_ht",
+            requested_ep_size: 32,
+            requested_node_num: 8,
+            measurement_ep_size: 8,
+            measurement_node_num: 1,
+        };
+        let ll = MoeCommFallback {
+            comm_backend: "deepep_ll",
+            ..ht
+        };
+        let tagged = PerformanceResult::new(-2.0, Source::Estimated).with_moe_comm_fallback(ht);
+
+        assert_eq!(tagged.scaled(2.0).moe_comm_fallback, Some(ht));
+        assert_eq!(tagged.clamp_non_negative().moe_comm_fallback, Some(ht));
+        assert_eq!(
+            tagged
+                .plus(PerformanceResult::new(1.0, Source::Silicon))
+                .moe_comm_fallback,
+            Some(ht)
+        );
+        assert_eq!(tagged.plus(tagged).moe_comm_fallback, Some(ht));
+        assert_eq!(
+            tagged
+                .plus(PerformanceResult::new(1.0, Source::Estimated).with_moe_comm_fallback(ll))
+                .moe_comm_fallback,
+            None
+        );
     }
 
     #[test]

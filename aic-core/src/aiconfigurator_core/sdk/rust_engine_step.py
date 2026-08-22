@@ -23,9 +23,13 @@ from pathlib import Path
 from typing import Any
 
 from aiconfigurator_core.sdk.config import RuntimeConfig
+from aiconfigurator_core.sdk.performance_result import MoECommFallback
 
 logger = logging.getLogger(__name__)
 ENGINE_STEP_BACKEND_ENV = "AICONFIGURATOR_ENGINE_STEP_BACKEND"
+MoeCommFallbackPayload = tuple[str, str, int, int, int, int]
+PerOpValue = tuple[str, float, float, str]
+PerOpValueWithMetadata = tuple[str, float, float, str, MoeCommFallbackPayload | None]
 
 
 # Python-step telemetry (#1357): count every remaining Python op.query() use
@@ -393,10 +397,11 @@ def _reraise_engine_error(exc: ValueError) -> None:
 def _fold_per_op(
     entries: Any,
     scale: float = 1.0,
-) -> tuple[dict[str, float], dict[str, float], dict[str, str]]:
+) -> tuple[dict[str, float], dict[str, float], dict[str, str], tuple[MoECommFallback, ...]]:
     """Fold the compiled engine's per-op tuples into the Python phase dicts.
 
-    ``entries`` is the FFI's ``[(name, latency_ms, energy_wms, source), ...]``
+    ``entries`` is the FFI's ``[(name, latency_ms, energy_wms, source,
+    moe_comm_fallback), ...]``
     — already name-folded inside the engine, so this is an idempotent re-fold
     (it also keeps duck-typed handles in tests correct): duplicate names
     accumulate with ``+=`` and sources merge to ``"mixed"`` on mismatch —
@@ -405,12 +410,16 @@ def _fold_per_op(
     ``latency_correction_scale`` post-multiply, applied to latency AND energy
     per key exactly like the Python phase runners' downstream scaling. The
     three dicts share one key set (the power-coverage gate pairs latency and
-    energy by identical keys).
+    energy by identical keys). Older duck-typed test handles may omit the
+    optional fifth tuple field.
     """
     latency: dict[str, float] = {}
     energy: dict[str, float] = {}
     source: dict[str, str] = {}
-    for name, latency_ms, energy_wms, src in entries:
+    fallbacks: list[MoECommFallback] = []
+    for entry in entries:
+        name, latency_ms, energy_wms, src = entry[:4]
+        fallback_payload = entry[4] if len(entry) > 4 else None
         latency[name] = latency.get(name, 0.0) + latency_ms * scale
         energy[name] = energy.get(name, 0.0) + energy_wms * scale
         prior = source.get(name)
@@ -418,7 +427,18 @@ def _fold_per_op(
             source[name] = src
         elif prior != src:
             source[name] = "mixed"
-    return latency, energy, source
+        if fallback_payload is not None:
+            fallback = MoECommFallback(
+                inference_phase=fallback_payload[0],
+                comm_backend=fallback_payload[1],
+                requested_ep_size=fallback_payload[2],
+                requested_node_num=fallback_payload[3],
+                measurement_ep_size=fallback_payload[4],
+                measurement_node_num=fallback_payload[5],
+            )
+            if fallback not in fallbacks:
+                fallbacks.append(fallback)
+    return latency, energy, source, tuple(fallbacks)
 
 
 def estimate_static_latency_breakdown_with_rust(
@@ -435,6 +455,7 @@ def estimate_static_latency_breakdown_with_rust(
     dict[str, float],
     dict[str, str],
     dict[str, str],
+    tuple[MoECommFallback, ...],
 ]:
     """Static (context / generation) per-op breakdown via the compiled engine.
 
@@ -442,16 +463,17 @@ def estimate_static_latency_breakdown_with_rust(
     Rust executes" path). The engine performs the decode stride quadrature and
     the ``(nextn + 1)`` decode-batch scaling internally (mirroring
     the retired Python ``_run_generation_phase``) and returns every queried op's
-    ``(name, latency_ms, energy_wms, source)``; this side folds them into the
+    ``(name, latency_ms, energy_wms, source, moe_comm_fallback)``; this side
+    folds them into the
     same name-keyed dicts the Python phase runners produce — real op names,
     real energies, real provenance tags. Returns ``(context_latency,
     generation_latency, context_energy_wms, generation_energy_wms,
-    context_source, generation_source)``.
+    context_source, generation_source, moe_comm_fallbacks)``.
     """
     handle = _cached_engine_handle(model, database)
     engine_mode = mode if mode in {"static", "static_ctx", "static_gen"} else "static"
     try:
-        context_ops, generation_ops = handle.run_static_per_op(
+        context_ops, generation_ops = handle._run_static_per_op_with_metadata(
             batch_size=int(runtime_config.batch_size),
             isl=int(runtime_config.isl),
             osl=int(runtime_config.osl),
@@ -466,8 +488,12 @@ def estimate_static_latency_breakdown_with_rust(
         _reraise_engine_error(exc)
     _note_rust_provenance(handle)
 
-    context_latency, context_energy, context_source = _fold_per_op(context_ops, latency_correction_scale)
-    generation_latency, generation_energy, generation_source = _fold_per_op(generation_ops, latency_correction_scale)
+    context_latency, context_energy, context_source, context_fallbacks = _fold_per_op(
+        context_ops, latency_correction_scale
+    )
+    generation_latency, generation_energy, generation_source, generation_fallbacks = _fold_per_op(
+        generation_ops, latency_correction_scale
+    )
     return (
         context_latency,
         generation_latency,
@@ -475,6 +501,7 @@ def estimate_static_latency_breakdown_with_rust(
         generation_energy,
         context_source,
         generation_source,
+        tuple(dict.fromkeys((*context_fallbacks, *generation_fallbacks))),
     )
 
 
@@ -540,7 +567,7 @@ def estimate_mixed_step_breakdown_with_rust(
     """
     handle = _cached_engine_handle(model, database)
     try:
-        shared_ops, ctx_attn_ops, decode_attn_ops = handle.mixed_step_breakdown_per_op(
+        shared_ops, ctx_attn_ops, decode_attn_ops = handle._mixed_step_breakdown_per_op_with_metadata(
             int(ctx_tokens),
             int(gen_tokens),
             int(isl),
@@ -553,9 +580,9 @@ def estimate_mixed_step_breakdown_with_rust(
         _reraise_engine_error(exc)
     _note_rust_provenance(handle)
 
-    shared_latency, shared_energy, shared_source = _fold_per_op(shared_ops)
-    ctx_latency, ctx_energy, ctx_source = _fold_per_op(ctx_attn_ops)
-    dec_latency, dec_energy, dec_source = _fold_per_op(decode_attn_ops)
+    shared_latency, shared_energy, shared_source, shared_fallbacks = _fold_per_op(shared_ops)
+    ctx_latency, ctx_energy, ctx_source, ctx_fallbacks = _fold_per_op(ctx_attn_ops)
+    dec_latency, dec_energy, dec_source, dec_fallbacks = _fold_per_op(decode_attn_ops)
 
     # Pass 2/3 fold to (at most) the single filtered attention key; missing
     # passes report 0.0 under the Python branch's default "silicon" source
@@ -591,6 +618,7 @@ def estimate_mixed_step_breakdown_with_rust(
         "component_energy_wms": component_energy_wms,
         "per_op_latency_ms": per_op_latency_ms,
         "per_op_source": per_op_source,
+        "moe_comm_fallbacks": tuple(dict.fromkeys((*shared_fallbacks, *ctx_fallbacks, *dec_fallbacks))),
     }
 
 
@@ -633,24 +661,25 @@ def estimate_decode_step_breakdown_with_rust(
     isl: int,
     osl: int,
     gen_seq_imbalance_correction_scale: float = 1.0,
-) -> tuple[float, float, dict[str, float], dict[str, str]]:
+) -> tuple[float, float, dict[str, float], dict[str, str], tuple[MoECommFallback, ...]]:
     """``estimate_decode_step_latency_with_rust`` with the per-op values kept.
 
-    Returns ``(latency_ms, energy_wms, per_op_latency, per_op_source)`` —
+    Returns ``(latency_ms, energy_wms, per_op_latency, per_op_source,
+    moe_comm_fallbacks)`` —
     the exact shape ``base_backend._get_genonly_step_latency`` produces on the
     Python step, with real op names and per-op energies folded from the
     compiled engine's per-op results.
     """
     handle = _cached_engine_handle(model, database)
-    entries = handle.decode_step_per_op(
+    entries = handle._decode_step_per_op_with_metadata(
         int(gen_tokens),
         int(isl),
         int(osl),
         gen_seq_imbalance_correction_scale=_scale_or_one(gen_seq_imbalance_correction_scale),
     )
     _note_rust_provenance(handle)
-    latency, energy, source = _fold_per_op(entries)
-    return sum(latency.values()), sum(energy.values()), latency, source
+    latency, energy, source, fallbacks = _fold_per_op(entries)
+    return sum(latency.values()), sum(energy.values()), latency, source, fallbacks
 
 
 def evaluate_context_ops_with_rust(
@@ -663,7 +692,7 @@ def evaluate_context_ops_with_rust(
     prefix: int = 0,
     seq_imbalance_correction_scale: float = 1.0,
     x: int | None = None,
-) -> list[tuple[str, float, float, str]]:
+) -> list[PerOpValue]:
     """Evaluate an index-addressed sublist of the compiled context op list.
 
     The thin op-list evaluation FFI: Python-side orchestration (AFD A/F
@@ -698,7 +727,7 @@ def evaluate_generation_ops_with_rust(
     gen_seq_imbalance_correction_scale: float = 1.0,
     prefix: int = 0,
     x: int | None = None,
-) -> list[tuple[str, float, float, str]]:
+) -> list[PerOpValue]:
     """Evaluate an index-addressed sublist of the compiled generation op list
     at the decode-step shape (see ``evaluate_context_ops_with_rust``). The
     base decode walk carries no prefix; ``prefix`` exists for orchestrations
@@ -727,7 +756,7 @@ def evaluate_ops_json_with_rust(
     prefix: int = 0,
     imbalance_correction_scale: float = 1.0,
     x: int | None = None,
-) -> list[tuple[str, float, float, str]]:
+) -> list[PerOpValue]:
     """Evaluate an ad-hoc op list (JSON array of OpSpec objects) against the
     engine's database — serves op lists deliberately NOT in the compiled spec
     (the VL encoder phase). The caller keeps the shape math and passes the
