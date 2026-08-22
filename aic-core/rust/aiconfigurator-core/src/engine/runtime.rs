@@ -133,6 +133,14 @@ pub(crate) type PerOpValueWithMetadata = (
     Option<MoeCommFallbackValues>,
 );
 
+/// Per-op values for the shared, context-attention, and decode-attention
+/// buckets returned by the metadata-bearing mixed-step evaluation.
+pub(crate) type MixedStepPerOpValuesWithMetadata = (
+    Vec<PerOpValueWithMetadata>,
+    Vec<PerOpValueWithMetadata>,
+    Vec<PerOpValueWithMetadata>,
+);
+
 /// One SOL-decomposed per-op value: `(name, sol_time_ms, sol_math_ms,
 /// sol_mem_ms)`, mirroring Python's SOL_FULL triple `(sol_time, sol_math,
 /// sol_mem)` per query. `sol_time` is the op's SOL-mode latency (scale
@@ -1088,14 +1096,7 @@ impl Engine {
         prefix: u32,
         seq_imbalance_correction_scale: f64,
         gen_seq_imbalance_correction_scale: f64,
-    ) -> Result<
-        (
-            Vec<PerOpValueWithMetadata>,
-            Vec<PerOpValueWithMetadata>,
-            Vec<PerOpValueWithMetadata>,
-        ),
-        AicError,
-    > {
+    ) -> Result<MixedStepPerOpValuesWithMetadata, AicError> {
         self.mixed_step_breakdown_per_op_impl(
             ctx_tokens,
             gen_tokens,
@@ -1117,14 +1118,7 @@ impl Engine {
         prefix: u32,
         seq_imbalance_correction_scale: f64,
         gen_seq_imbalance_correction_scale: f64,
-    ) -> Result<
-        (
-            Vec<PerOpValueWithMetadata>,
-            Vec<PerOpValueWithMetadata>,
-            Vec<PerOpValueWithMetadata>,
-        ),
-        AicError,
-    > {
+    ) -> Result<MixedStepPerOpValuesWithMetadata, AicError> {
         // Whole-model FPM: never the name-filtered three-pass split (see
         // mixed_step_breakdown_with). Report the scalar path's component
         // mapping as per-op entries — the prefill component under the
