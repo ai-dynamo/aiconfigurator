@@ -137,8 +137,13 @@ def derive_roster_checkpoints(fam: dict, targets: dict) -> list[dict]:
         variants_of.setdefault(v["repo"], []).append(v["variant"].split("__", 1)[1])
     # representative-first ordering: index 0 is the default probe variant
     _head = {"rep": 0, "all_kinds": 1, "rep_mix": 2, "interleave_pair": 3}
+
+    def _rank(n: str):
+        if n.startswith("depth"):  # deeper = more faithful; depth8 before depth4
+            return (4, -int(n[5:]))
+        return (_head.get(n, 9), n)
     for vs in variants_of.values():
-        vs.sort(key=lambda n: (_head.get(n, 9), n))
+        vs.sort(key=_rank)
     overrides = fam.get("checkpoint_overrides") or {}
     out = []
     for repo in repos:
