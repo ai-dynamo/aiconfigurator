@@ -249,6 +249,36 @@ def test_qwen36_preserves_explicit_global_gemm_override(hf_id, ffn_name, gemm_mo
         assert by_name[name]._quant_mode == gemm_mode
 
 
+@pytest.mark.parametrize(
+    ("hf_id", "backend", "moe_mode"),
+    [
+        # vLLM has no weight-only NVFP4 MoE lane: the compressed-tensors
+        # dispatch quantizes activations at run time and serves the w4a4
+        # FP4-tensor-core kernels (collected kernel_source
+        # vllm_compressedtensorsw4a4nvfp4moe_*), so the W4A16_NVFP4 storage
+        # label resolves to the nvfp4 execution mode there (AIC-1748).
+        ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4", "vllm", common.MoEQuantMode.nvfp4),
+        ("nvidia/Qwen3.6-35B-A3B-NVFP4", "vllm", common.MoEQuantMode.nvfp4),
+        # trtllm/sglang keep the label mode: their dequant-to-BF16 weight-only
+        # MoE path is the real dispatch (the Qwen3.6 profile above).
+        ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4", "trtllm", common.MoEQuantMode.w4a16_nvfp4),
+        ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4", "sglang", common.MoEQuantMode.w4a16_nvfp4),
+        ("nvidia/Qwen3.6-35B-A3B-NVFP4", "trtllm", common.MoEQuantMode.w4a16_nvfp4),
+    ],
+)
+def test_w4a16_nvfp4_label_resolves_to_the_backend_execution_lane(hf_id, backend, moe_mode):
+    model_config = _model_config()
+    get_model(hf_id, model_config, backend_name=backend)
+    assert model_config.moe_quant_mode == moe_mode
+
+
+def test_explicit_w4a16_nvfp4_moe_mode_wins_over_the_vllm_remap():
+    model_config = _model_config()
+    model_config.moe_quant_mode = common.MoEQuantMode.w4a16_nvfp4
+    get_model("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4", model_config, backend_name="vllm")
+    assert model_config.moe_quant_mode == common.MoEQuantMode.w4a16_nvfp4
+
+
 def test_w4a16_nvfp4_uses_scale_aware_weight_only_profile():
     for mode in (common.GEMMQuantMode.w4a16_nvfp4, common.MoEQuantMode.w4a16_nvfp4):
         assert mode.value.memory == 9 / 16

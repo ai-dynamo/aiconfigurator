@@ -673,6 +673,7 @@ def _apply_model_quant_defaults(
     # Clone original model_config to track if any modifications were made
     original_config = dataclasses.replace(model_config)
     fmha_was_unset = model_config.fmha_quant_mode is None
+    moe_was_unset = model_config.moe_quant_mode is None
 
     inferred = _infer_quant_modes_from_raw_config(raw_config, architecture)
     applied: list[str] = []
@@ -719,6 +720,19 @@ def _apply_model_quant_defaults(
         # VLLM perf tables only include bfloat16 FMHA; fall back to bfloat16 for estimation.
         if backend_name == "vllm" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
             model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
+
+    # vLLM has no weight-only NVFP4 MoE lane: its compressed-tensors dispatch
+    # quantizes activations at run time and serves the FP4-tensor-core (w4a4)
+    # kernels for NVFP4-weight experts regardless of the ModelOpt storage
+    # label — ``W4A16_NVFP4`` describes the artifact, not the dispatch (the
+    # collected kernel_source is ``vllm_compressedtensorsw4a4nvfp4moe_*``, and
+    # no collector emits w4a16_nvfp4 MoE rows on any backend). Remap the
+    # label-inferred mode to the lane vLLM actually executes; trtllm/sglang
+    # keep the label mode (their weight-only dequant-to-BF16 MoE path is
+    # real, e.g. Qwen3.6). Applies only when the mode was inferred here — an
+    # explicit user mode wins (AIC-1748/AIC-1743).
+    if moe_was_unset and backend_name == "vllm" and model_config.moe_quant_mode == common.MoEQuantMode.w4a16_nvfp4:
+        model_config.moe_quant_mode = common.MoEQuantMode.nvfp4
 
     # Only log if model_config was modified
     if original_config != model_config:
