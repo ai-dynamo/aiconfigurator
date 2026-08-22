@@ -129,7 +129,7 @@ groups:
     tier: shared
     systems: [a100_sxm, b60, h200_sxm]
     frameworks: [vllm]
-    total_raw_rows: 78497
+    total_raw_rows: 71597
     within_framework_dedup_rows: 49
   - op_file: context_attention_perf.parquet
     kernel_source: 'vllm_flash_attn_fa2'
@@ -808,8 +808,8 @@ groups:
     tier: shared
     systems: [a100_sxm, b200_sxm, b60, gb200, h200_sxm]
     frameworks: [vllm]
-    total_raw_rows: 455556
-    within_framework_dedup_rows: 2
+    total_raw_rows: 440394
+    within_framework_dedup_rows: 0
   - op_file: generation_attention_perf.parquet
     kernel_source: 'fa3'
     tier: shared
@@ -864,7 +864,7 @@ groups:
     tier: shared
     systems: [a100_sxm, b60, h200_sxm]
     frameworks: [vllm]
-    total_raw_rows: 96970
+    total_raw_rows: 86100
     within_framework_dedup_rows: 72
   - op_file: generation_attention_perf.parquet
     kernel_source: 'vllm_flash_attn_fa2'
@@ -1246,7 +1246,7 @@ groups:
     tier: shared_fallback
     systems: [b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, rtx_pro_6000_server]
     frameworks: [trtllm, vllm]
-    total_raw_rows: 123456
+    total_raw_rows: 97752
     within_framework_dedup_rows: 27
     median_pct_divergence: 45.03
   - op_file: mla_generation_module_perf.parquet
@@ -1282,7 +1282,7 @@ groups:
     tier: shared_fallback
     systems: [b200_sxm, b300_sxm, gb200, gb300, h100_sxm, h200_sxm, rtx_pro_6000_server]
     frameworks: [trtllm, vllm]
-    total_raw_rows: 153084
+    total_raw_rows: 126588
     within_framework_dedup_rows: 79
     median_pct_divergence: 53.95
   - op_file: moe_perf.parquet
@@ -1470,9 +1470,9 @@ groups:
   - op_file: moe_perf.parquet
     kernel_source: 'vllm_fused_moe'
     tier: shared
-    systems: [a100_sxm, b200_sxm, b60, gb200, h200_sxm]
+    systems: [a100_sxm, b200_sxm, gb200, h200_sxm]
     frameworks: [vllm]
-    total_raw_rows: 163639
+    total_raw_rows: 162343
     within_framework_dedup_rows: 0
   - op_file: moe_perf.parquet
     kernel_source: 'vllm_gptossmxfp4moe_flashinfer_trtllm_mxfp4_bf16_trtllmmxfp4expertsmonolithic'

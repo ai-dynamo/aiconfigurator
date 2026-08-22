@@ -24,24 +24,20 @@ pytestmark = pytest.mark.unit
 @pytest.mark.parametrize(
     ("system", "b", "s", "num_heads", "gemm", "expected_ms"),
     [
-        # Re-minted after the shared-layer first-wins fix: these keys have no
-        # row in the trtllm primary and fill from cross-backend vLLM siblings;
-        # last-wins accidentally let the OLDEST framework version (0.19.0) win,
-        # first-wins restores the design's newest-first priority (0.24.0).
-        ("gb200", 8, 4097, 128, common.GEMMQuantMode.bfloat16, 0.1530000000000000),
-        ("gb200", 8, 3000, 128, common.GEMMQuantMode.bfloat16, 0.1528928710937500),
-        ("gb200", 64, 4096, 128, common.GEMMQuantMode.bfloat16, 0.2011936523437500),
-        # Re-minted after the shared-layer first-wins fix: the old pin
-        # (0.19048828125) captured a 1.2.0rc5 sibling row that silently
-        # overrode 1.3.0rc10's own row at this key (last-wins loader bug).
-        ("h200_sxm", 64, 4096, 16, common.GEMMQuantMode.fp8_block, 0.1146884765625000),
+        # Re-anchored to the current slot (1.3.0rc20) after the version-slot
+        # adoption: pins hold the primary rows' numbers, no longer sensitive
+        # to sibling/cross-backend donor churn on retired versions.
+        ("gb200", 8, 4097, 128, common.GEMMQuantMode.bfloat16, 0.0979000000000000),
+        ("gb200", 8, 3000, 128, common.GEMMQuantMode.bfloat16, 0.0961323730468750),
+        ("gb200", 64, 4096, 128, common.GEMMQuantMode.bfloat16, 0.1345935546875000),
+        ("h200_sxm", 64, 4096, 16, common.GEMMQuantMode.fp8_block, 0.1074888671875000),
     ],
 )
 def test_generation_mla_module_fp8_kv_exact_values(system, b, s, num_heads, gemm, expected_ms):
     from aiconfigurator_core.sdk.engine import _evaluate_single_op
     from aiconfigurator_core.sdk.operations.mla import MLAModule
 
-    db = get_database(system, "trtllm", "1.3.0rc10", allow_unlisted_version=True)
+    db = get_database(system, "trtllm", "1.3.0rc20")
     db.set_default_database_mode(common.DatabaseMode.SILICON)
     # The retired query_generation_mla_module shim's exact twin (bfloat16
     # FMHA is ignored by the decode table).
