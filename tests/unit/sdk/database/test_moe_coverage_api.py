@@ -332,7 +332,7 @@ def test_ep_probe_does_not_vivify_defaultdict_store(stub_perf_db):
     reason="shipped h200_sxm sglang 0.5.6.post2 DeepEP parquets not present",
 )
 def test_shipped_h200_sglang_a2a_coverage():
-    db = get_database("h200_sxm", "sglang", "0.5.6.post2")
+    db = get_database("h200_sxm", "sglang", "0.5.6.post2", allow_unlisted_version=True)
     assert db is not None
 
     coverage = db.moe_a2a_coverage(*_SHAPE)
@@ -350,7 +350,7 @@ def test_shipped_h200_sglang_a2a_coverage():
     reason="shipped gb200 trtllm 1.3.0rc10 alltoall parquet not present",
 )
 def test_shipped_gb200_trtllm_a2a_coverage():
-    db = get_database("gb200", "trtllm", "1.3.0rc10")
+    db = get_database("gb200", "trtllm", "1.3.0rc10", allow_unlisted_version=True)
     assert db is not None
 
     coverage = db.moe_a2a_coverage(*_SHAPE)
@@ -368,7 +368,7 @@ def test_shipped_gb200_trtllm_a2a_coverage():
     reason="shipped h200_sxm sglang 0.5.6.post2 wideep context moe parquet not present",
 )
 def test_shipped_h200_sglang_ep_compute_coverage():
-    db = get_database("h200_sxm", "sglang", "0.5.6.post2")
+    db = get_database("h200_sxm", "sglang", "0.5.6.post2", allow_unlisted_version=True)
     assert db is not None
 
     # deepep_moe fp8_block context data covers ep {2..256} at this shape.
@@ -381,7 +381,7 @@ def test_shipped_h200_sglang_ep_compute_coverage():
     reason="shipped gb200 trtllm 1.3.0rc10 wideep moe parquet not present",
 )
 def test_shipped_gb200_trtllm_ep_compute_coverage():
-    db = get_database("gb200", "trtllm", "1.3.0rc10")
+    db = get_database("gb200", "trtllm", "1.3.0rc10", allow_unlisted_version=True)
     assert db is not None
 
     # The legacy trtllm wideep table has no phase split; the adapter registers

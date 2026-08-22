@@ -108,6 +108,197 @@ def get_systems_paths() -> list[str]:
     return list(_SYSTEMS_PATHS)
 
 
+def _version_sort_tuple(version_str: str) -> tuple:
+    """Comparable tuple for version strings like '1.3.0rc10' / '0.5.6.post2' / 'v0.20_fix'."""
+    import re
+
+    version_str = str(version_str).lower()
+
+    def suffix_number(start: int) -> int:
+        suffix_match = re.search(r"(\d+)(?!.*\d)", version_str[start:])
+        return int(suffix_match.group(1)) if suffix_match else 0
+
+    def prerelease_parts() -> list[int]:
+        rc_match = re.search(r"rc(\d+)", version_str)
+        if rc_match:
+            return [0, int(rc_match.group(1))]
+        if "rc" in version_str:
+            return [0, 0]
+        return [1, 0]
+
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
+    if m:
+        parts = [int(m.group(1)), int(m.group(2)), int(m.group(3))]
+        parts.extend(prerelease_parts())
+        parts.append(suffix_number(m.end()))
+        return tuple(parts)
+    m = re.search(r"v?(\d+)\.(\d+)", version_str)
+    if m:
+        parts = [int(m.group(1)), int(m.group(2)), 0]
+        parts.extend(prerelease_parts())
+        parts.append(suffix_number(m.end()))
+        return tuple(parts)
+    return (0, 0, 0, 0, 0, 0)
+
+
+# ---------------------------------------------------------------------------
+# Queryable-version slots.
+#
+# Each (system, framework) exposes at most three queryable versions:
+#   current  — the newest maintainer-completed full upgrade (authored in
+#              systems/query_versions.yaml; per-system overrides win)
+#   previous — the current before it (authored alongside)
+#   next     — DERIVED: the highest declared version newer than current
+#              (single-op development drops for new models land here; their
+#              lower-version op data serves next queries via backward fill)
+#
+# The literal aliases "current" / "previous" / "next" are accepted wherever a
+# version is requested. Any other version is rejected loudly unless the
+# caller passes allow_unlisted_version=True (test fixtures pinning data
+# coordinates). Data directories outside the slots are NOT versions — they
+# are backward-fill / cross-backend sources only. When the slots file is
+# absent from the systems root (external/synthetic trees), the gate is off
+# and behavior is unchanged.
+# ---------------------------------------------------------------------------
+
+_QUERY_VERSIONS_BASENAME = "query_versions.yaml"
+_SLOT_ALIASES = ("current", "previous", "next")
+
+
+@functools.cache
+def _load_query_slots_doc(systems_paths: tuple[str, ...]) -> dict | None:
+    for systems_root in systems_paths:
+        path = os.path.join(systems_root, _QUERY_VERSIONS_BASENAME)
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    return yaml.safe_load(f) or {}
+            except Exception as e:
+                logger.warning(f"failed to parse {path}: {e}; version slots disabled")
+                return None
+    return None
+
+
+def get_version_slots(system: str, backend: str, systems_paths: str | list[str] | None = None) -> dict[str, str] | None:
+    """Resolved slots for (system, backend): {'current': v[, 'previous': v][, 'next': v]}.
+
+    None when the slots file is absent (gate off) or the combination has no
+    authored entry (e.g. a framework never maintained on that system).
+    """
+    if systems_paths is None:
+        systems_paths = get_systems_paths()
+    elif isinstance(systems_paths, str):
+        systems_paths = [systems_paths]
+    doc = _load_query_slots_doc(tuple(systems_paths))
+    if not doc:
+        return None
+    override_entry = (doc.get("overrides") or {}).get(system, {}).get(backend)
+    entry = override_entry if override_entry is not None else (doc.get("defaults") or {}).get(backend)
+    if not entry or not entry.get("current"):
+        return None
+    # Slots only govern systems that actually hold data for this backend:
+    # estimate-only spec yamls (no data tree) and synthetic test systems keep
+    # the ungated behavior even though the framework defaults exist.
+    has_any_version_dir = False
+    for systems_root in systems_paths:
+        system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
+        if not os.path.isfile(system_yaml_path):
+            continue
+        try:
+            with open(system_yaml_path) as f:
+                system_spec = yaml.safe_load(f) or {}
+            data_dir = os.path.join(systems_root, system_spec.get("data_dir", ""))
+            if any(True for _ in _iter_backend_version_dirs(data_dir, backend)):
+                has_any_version_dir = True
+                break
+        except Exception:
+            continue
+    if not has_any_version_dir:
+        return None
+    slots = {"current": str(entry["current"])}
+    if entry.get("previous"):
+        slots["previous"] = str(entry["previous"])
+    # next is derived FLEET-WIDE per framework: systematic upgrades and
+    # development drops land on typical hardware together, so the next version
+    # is one label across every defaults-governed system — a system without
+    # its own next-version data serves next queries through backward fill (exactly the
+    # rows the retired reuse markers used to graft). Override systems
+    # (frozen baselines like a100/b60) expose no next.
+    if override_entry is None:
+        nxt = _derive_fleet_next(tuple(systems_paths), backend, slots["current"])
+        if nxt is not None:
+            slots["next"] = nxt
+    return slots
+
+
+@functools.cache
+def _derive_fleet_next(systems_paths: tuple[str, ...], backend: str, current: str) -> str | None:
+    """Highest DATA-BACKED version strictly newer than `current`, across all
+    systems in the tree. Marker-only directories do not qualify — next means a
+    developer actually dropped measurements somewhere."""
+    current_key = _version_sort_tuple(current)
+    candidates: set[str] = set()
+    for systems_root in systems_paths:
+        try:
+            entries = os.listdir(systems_root)
+        except Exception:
+            continue
+        for entry in entries:
+            if not entry.endswith(".yaml"):
+                continue
+            try:
+                with open(os.path.join(systems_root, entry)) as f:
+                    system_spec = yaml.safe_load(f) or {}
+                data_dir = os.path.join(systems_root, system_spec.get("data_dir", ""))
+                if not os.path.isdir(data_dir):
+                    continue
+                for version, version_path in _iter_backend_version_dirs(data_dir, backend):
+                    if _version_sort_tuple(version) > current_key and _database_version_dir_has_perf_files(
+                        version_path
+                    ):
+                        candidates.add(version)
+            except Exception as e:
+                logger.warning("could not derive next slot from %s: %s", entry, e)
+    return max(candidates, key=_version_sort_tuple) if candidates else None
+
+
+def resolve_query_version(
+    system: str,
+    backend: str,
+    version: str,
+    systems_paths: str | list[str] | None = None,
+    allow_unlisted: bool = False,
+) -> str:
+    """Map a requested version (or slot alias) onto the queryable slots.
+
+    Raises ValueError for versions outside the slots unless allow_unlisted.
+    """
+    slots = get_version_slots(system, backend, systems_paths=systems_paths)
+    if slots is None:
+        if version in _SLOT_ALIASES:
+            raise ValueError(
+                f"no queryable versions defined for {backend} on {system}; cannot resolve alias {version!r}"
+            )
+        return version
+    if version in _SLOT_ALIASES:
+        resolved = slots.get(version)
+        if resolved is None:
+            raise ValueError(f"{backend} on {system} has no {version!r} version; available slots: {slots}")
+        return resolved
+    if version in slots.values() or allow_unlisted:
+        return version
+    # Transition escape for legacy test fixtures that pin data coordinates
+    # through user-level surfaces (Task/CLI) with no allow parameter. Not for
+    # production use; the fixture-discipline follow-up retires it.
+    if os.environ.get("AIC_ALLOW_UNLISTED_VERSIONS", "").lower() in ("1", "true", "yes"):
+        return version
+    raise ValueError(
+        f"{backend}/{version} is not a queryable version on {system}; "
+        f"available: {slots} (or pass allow_unlisted_version=True for "
+        f"fixture/data-coordinate access)"
+    )
+
+
 @functools.cache
 def _load_system_spec_from_paths(systems_paths: tuple[str, ...], system_name: str) -> dict:
     for systems_root in systems_paths:
@@ -284,7 +475,14 @@ def get_supported_databases(
     supported_dict = defaultdict(lambda: defaultdict(list))
     for system, backend_versions in supported_sets.items():
         for backend, versions in backend_versions.items():
-            supported_dict[system][backend] = sorted(versions)
+            # With version slots active, the queryable surface is the slot set
+            # (current / previous / derived next), not every declared directory —
+            # directories outside the slots are fill sources, not versions.
+            slots = get_version_slots(system, backend, systems_paths=systems_paths)
+            if slots is not None:
+                supported_dict[system][backend] = sorted(set(slots.values()), key=_version_sort_tuple)
+            else:
+                supported_dict[system][backend] = sorted(versions)
 
     return supported_dict
 
@@ -567,11 +765,19 @@ def get_latest_database_version(
     """
     import re
 
+    # Under version slots, "latest" means the maintained default (current) —
+    # next is opt-in via its alias, never the implicit default. The shortcut
+    # only fires when current is visible in the supported set, so tests that
+    # monkeypatch get_supported_databases keep their synthetic behavior.
+    slots = get_version_slots(system, backend, systems_paths=systems_paths)
+
     if systems_paths is None:
         supported_databases = get_supported_databases()
     else:
         supported_databases = get_supported_databases(systems_paths=systems_paths)
     database_versions = supported_databases.get(system, {}).get(backend, [])
+    if slots is not None and slots["current"] in database_versions:
+        return slots["current"]
     if not include_shared_layer_marker_versions:
         database_versions = [
             version
@@ -897,6 +1103,7 @@ def get_database(
     database_mode: str | None = None,
     shared_layer: bool | None = None,
     strict_provenance: bool | None = None,
+    allow_unlisted_version: bool = False,
 ) -> PerfDatabase | None:
     """
     Get the database for a given system, backend and version.
@@ -940,6 +1147,10 @@ def get_database(
     if not version:
         logger.error(f"No database version available for {system=}, {backend=}")
         return None
+
+    version = resolve_query_version(
+        system, backend, version, systems_paths=systems_paths, allow_unlisted=allow_unlisted_version
+    )
 
     shared_flag = _shared_layer_enabled(database_mode) if shared_layer is None else bool(shared_layer)
     # Only pass the override kwarg when explicitly set: PerfDatabase derives the
@@ -1132,6 +1343,7 @@ def get_database_view(
     transfer_policy=None,
     shared_layer: bool | None = None,
     strict_provenance: bool | None = None,
+    allow_unlisted_version: bool = False,
 ) -> PerfDatabase | None:
     """Return an isolated, lightweight query view over a cached database.
 
@@ -1156,6 +1368,7 @@ def get_database_view(
         "database_mode": mode.name,
         "shared_layer": shared_layer,
         "strict_provenance": strict_provenance,
+        "allow_unlisted_version": allow_unlisted_version,
     }
     if systems_paths is not None:
         database_kwargs["systems_paths"] = systems_paths

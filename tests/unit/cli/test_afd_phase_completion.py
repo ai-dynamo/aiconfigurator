@@ -82,7 +82,7 @@ def _build_afd_session_with_phase_metrics(
     monkeypatch.setattr(AFDInferenceSession, "_simulate_phase", fake_simulate_phase)
 
     class FakeDatabase:
-        version = "test-version"
+        version = "current"
         system = "test-system"
         system_spec: ClassVar[dict] = {"gpu": {"mem_capacity": 80 * (1 << 30)}}
 
@@ -123,7 +123,7 @@ def _estimate_result(*, raw: dict, mode: str = "afd", summary=None) -> EstimateR
         model_path="test-model",
         system_name="test-system",
         backend_name="test-backend",
-        backend_version="test-version",
+        backend_version="current",
         raw=raw,
         mode=mode,
         summary=summary,
@@ -269,7 +269,7 @@ def test_run_afd_estimate_passes_prefix_and_nextn(monkeypatch):
         model_path="test-model",
         system_name="test-system",
         backend_name="test-backend",
-        resolved_version="test-version",
+        resolved_version="current",
         isl=128,
         osl=10,
         tp_size=1,
@@ -903,7 +903,7 @@ def _install_estimate_perf_db_stubs(monkeypatch):
     monkeypatch.setattr(
         perf_database,
         "get_latest_database_version",
-        lambda system, backend, systems_paths=None: "test-version",
+        lambda system, backend, systems_paths=None: "current",
     )
     monkeypatch.setattr(
         perf_database,

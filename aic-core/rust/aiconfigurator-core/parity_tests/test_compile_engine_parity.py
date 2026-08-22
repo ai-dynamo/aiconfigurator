@@ -85,20 +85,20 @@ pytestmark = pytest.mark.integration
 #            hits the trtllm dispatch-flavor branch.
 _SUBSET_IDS_BY_BACKEND = {
     "vllm": [
-        "minimax-m25-b200-vllm-019-isl1024-osl2",
-        "kimi-k25-b200-vllm-019-isl1024-osl2",
-        "minimax-m25-b200-vllm-019-sampled-prefix",
-        "minimax-m27-b200-vllm-019-isl1024-osl2",
-        "qwen3-30b-a3b-b200-vllm-019-isl1024-osl2",
+        "minimax-m25-b200-vllm-024-isl1024-osl2",
+        "kimi-k25-b200-vllm-024-isl1024-osl2",
+        "minimax-m25-b200-vllm-024-sampled-prefix",
+        "minimax-m27-b200-vllm-024-isl1024-osl2",
+        "qwen3-30b-a3b-b200-vllm-024-isl1024-osl2",
         "qwen3-30b-a3b-b200-vllm-022-power",
     ],
     "sglang": [
-        "kimi-k25-b200-sglang-0510-isl1024-osl2",
-        "minimax-m25-b200-sglang-0510-isl1024-osl2",
+        "kimi-k25-b200-sglang-0514-isl1024-osl2",
+        "minimax-m25-b200-sglang-0514-isl1024-osl2",
     ],
     "trtllm": [
-        "gpt-oss-20b-b200-trtllm-130rc10-isl1024-osl2",
-        "nemotron-nas-b200-trtllm-130rc10-isl1024-osl2",
+        "gpt-oss-20b-b200-trtllm-130rc20-isl1024-osl2",
+        "nemotron-nas-b200-trtllm-130rc20-isl1024-osl2",
     ],
 }
 
@@ -167,7 +167,14 @@ def _quiet(func, *args, **kwargs):
 
 
 def _build_python_model(case: EngineStepParityCase):
-    database = _quiet(perf_database.get_database, case.system_name, case.backend_name, case.backend_version)
+    database = _quiet(
+        perf_database.get_database,
+        case.system_name,
+        case.backend_name,
+        case.backend_version,
+        # parity cases are frozen data coordinates by design
+        allow_unlisted_version=True,
+    )
     if database is None:
         pytest.skip(f"no perf database for {case.system_name}/{case.backend_name}/{case.backend_version}")
     model_config = config.ModelConfig(
@@ -292,7 +299,7 @@ def _assert_within(name: str, python_value: float, new_value: float, *, backend:
 
 # Chunked-prefill shapes: shared by the parametrized test and the golden
 # pin path (pin_goldens.py) so the fixture keys track the test matrix.
-_CHUNKED_PREFILL_CASE_ID = "minimax-m25-b200-vllm-019-isl1024-osl2"
+_CHUNKED_PREFILL_CASE_ID = "minimax-m25-b200-vllm-024-isl1024-osl2"
 _CHUNKED_PREFILL_SHAPES = [
     (512, 4, 4096, 128, 0),  # chunked prefill: ctx_tokens < isl
     (512, 4, 4096, 128, 256),  # chunked + cached prefix
@@ -452,7 +459,7 @@ class TestCompileEnginePerOpParity:
 
 
 # Shared by the imbalance tests and the golden pin path.
-_IMBALANCE_CASE_ID = "minimax-m25-b200-vllm-019-isl1024-osl2"
+_IMBALANCE_CASE_ID = "minimax-m25-b200-vllm-024-isl1024-osl2"
 _IMBALANCE_CTX_SCALE = 1.3
 _IMBALANCE_GEN_SCALE = 0.85
 
@@ -543,7 +550,14 @@ def _build_wideep_sglang():
     references)."""
     from aiconfigurator.sdk import common
 
-    database = _quiet(perf_database.get_database, _WIDEEP_SGLANG_SYSTEM, "sglang", _WIDEEP_SGLANG_VERSION)
+    database = _quiet(
+        perf_database.get_database,
+        _WIDEEP_SGLANG_SYSTEM,
+        "sglang",
+        _WIDEEP_SGLANG_VERSION,
+        # sole wideep_mlp data coordinate (kept donor data, not a queryable slot)
+        allow_unlisted_version=True,
+    )
     if database is None:
         pytest.skip(f"no perf database for {_WIDEEP_SGLANG_SYSTEM}/sglang/{_WIDEEP_SGLANG_VERSION}")
     model_config = config.ModelConfig(
@@ -618,9 +632,9 @@ def _build_wideep_trtllm():
     shared by the parity test (handle side) and the golden capture."""
     from aiconfigurator.sdk import common
 
-    database = _quiet(perf_database.get_database, "gb200", "trtllm", "1.3.0rc10")
+    database = _quiet(perf_database.get_database, "gb200", "trtllm", "1.3.0rc20")
     if database is None:
-        pytest.skip("no perf database for gb200/trtllm/1.3.0rc10")
+        pytest.skip("no perf database for gb200/trtllm/1.3.0rc20")
     model_config = config.ModelConfig(
         tp_size=1,
         attention_dp_size=8,
@@ -641,7 +655,7 @@ def _build_wideep_trtllm():
         model_path="deepseek-ai/DeepSeek-V3",
         system="gb200",
         backend="trtllm",
-        backend_version="1.3.0rc10",
+        backend_version="1.3.0rc20",
         kv_block_size=None,
         systems_path=None,
         nextn=0,

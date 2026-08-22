@@ -43,7 +43,7 @@ def test_shipped_sglang_skip_row_availability(system, version, expect_skip_rows)
     """Pins the shipped skip-row availability the engine degradation keys off."""
     from aiconfigurator_core.sdk.perf_database import get_database
 
-    db = get_database(system, "sglang", version)
+    db = get_database(system, "sglang", version, allow_unlisted_version=True)
     ContextDSAModule.load_data(db)
     GenerationDSAModule.load_data(db)
 
