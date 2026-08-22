@@ -452,6 +452,10 @@ def create_charts(
         system=system,
         backend=backend,
         version=backend_version,
+        # Charts are a RAW data-plane consumer (parity.md: enumeration, charts,
+        # support matrix read collected data directly) — they inspect data
+        # coordinates, not the user-facing queryable-version surface.
+        allow_unlisted_version=True,
     )
     if database is None:
         with open(output_md_file, "a") as f:

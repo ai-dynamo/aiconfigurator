@@ -101,7 +101,7 @@ def test_build_experiment_forwards_top_level_moe_backend():
                 "total_gpus": 32,
                 "system_name": "gb200",
                 "backend_name": "sglang",
-                "backend_version": "0.5.10",
+                "backend_version": "0.5.14",
                 "database_mode": "HYBRID",
                 "moe_backend": "megamoe",
             },
@@ -132,18 +132,18 @@ def test_build_experiment_preflight_uses_per_role_backend_version_for_flat_v2_di
                 "prefill_model_path": "Qwen/Qwen3-32B-FP8",
                 "prefill_system_name": "h200_sxm",
                 "prefill_backend_name": "sglang",
-                "prefill_backend_version": "0.5.10",
+                "prefill_backend_version": "0.5.14",
                 "decode_model_path": "Qwen/Qwen3-32B-FP8",
                 "decode_system_name": "h200_sxm",
                 "decode_backend_name": "sglang",
-                "decode_backend_version": "0.5.10",
+                "decode_backend_version": "0.5.14",
                 "total_gpus": 16,
             },
         }
     )
     # The preflight runs before Task construction, so the per-role version is validated
     # even if downstream construction differs; top-level-only code would have recorded nothing.
-    assert ("h200_sxm", "sglang", "0.5.10") in calls
+    assert ("h200_sxm", "sglang", "0.5.14") in calls
 
 
 def test_build_experiment_skips_backend_version_preflight_for_formula_modes(monkeypatch):

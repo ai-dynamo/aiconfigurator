@@ -6,12 +6,12 @@
 # Each (system, framework) exposes at most THREE queryable versions:
 #   current  — newest maintainer-completed full upgrade (authored here)
 #   previous — the current before it (authored here; move on every bump)
-#   dev      — NOT authored: derived at load time as the highest declared
+#   next     — NOT authored: derived at load time as the highest declared
 #              version newer than current. Single-op development drops for
-#              new models land there; ops the dev version lacks are served
+#              new models land there; ops the next version lacks are served
 #              by backward fill from current/older data (never forward).
 #
-# The literal aliases current / previous / dev are accepted anywhere a
+# The literal aliases current / previous / next are accepted anywhere a
 # version is requested. Any other version is rejected loudly (test fixtures
 # pinning raw data coordinates pass allow_unlisted_version=True).
 # Data directories outside the slots are backward-fill / cross-backend
@@ -23,8 +23,8 @@
 # were recollected vs ride backward fill. ~30 lines, touched every 2-3 months.
 schema_version: 1
 defaults:
-  trtllm: {current: "1.3.0rc20", previous: null}   # dev derives to 1.3.0rc23 today
-  sglang: {current: "0.5.14", previous: null}      # dev derives to 0.5.16 today
+  trtllm: {current: "1.3.0rc20", previous: null}   # next derives to 1.3.0rc23 today
+  sglang: {current: "0.5.14", previous: null}      # next derives to 0.5.16 today
   vllm: {current: "0.24.0", previous: null}
 overrides:
   a100_sxm:

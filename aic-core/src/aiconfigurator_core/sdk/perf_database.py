@@ -148,11 +148,11 @@ def _version_sort_tuple(version_str: str) -> tuple:
 #   current  — the newest maintainer-completed full upgrade (authored in
 #              systems/query_versions.yaml; per-system overrides win)
 #   previous — the current before it (authored alongside)
-#   dev      — DERIVED: the highest declared version newer than current
+#   next     — DERIVED: the highest declared version newer than current
 #              (single-op development drops for new models land here; their
-#              lower-version op data serves dev queries via backward fill)
+#              lower-version op data serves next queries via backward fill)
 #
-# The literal aliases "current" / "previous" / "dev" are accepted wherever a
+# The literal aliases "current" / "previous" / "next" are accepted wherever a
 # version is requested. Any other version is rejected loudly unless the
 # caller passes allow_unlisted_version=True (test fixtures pinning data
 # coordinates). Data directories outside the slots are NOT versions — they
@@ -162,7 +162,7 @@ def _version_sort_tuple(version_str: str) -> tuple:
 # ---------------------------------------------------------------------------
 
 _QUERY_VERSIONS_BASENAME = "query_versions.yaml"
-_SLOT_ALIASES = ("current", "previous", "dev")
+_SLOT_ALIASES = ("current", "previous", "next")
 
 
 @functools.cache
@@ -180,7 +180,7 @@ def _load_query_slots_doc(systems_paths: tuple[str, ...]) -> dict | None:
 
 
 def get_version_slots(system: str, backend: str, systems_paths: str | list[str] | None = None) -> dict[str, str] | None:
-    """Resolved slots for (system, backend): {'current': v[, 'previous': v][, 'dev': v]}.
+    """Resolved slots for (system, backend): {'current': v[, 'previous': v][, 'next': v]}.
 
     None when the slots file is absent (gate off) or the combination has no
     authored entry (e.g. a framework never maintained on that system).
@@ -218,23 +218,23 @@ def get_version_slots(system: str, backend: str, systems_paths: str | list[str] 
     slots = {"current": str(entry["current"])}
     if entry.get("previous"):
         slots["previous"] = str(entry["previous"])
-    # dev is derived FLEET-WIDE per framework: systematic upgrades and
-    # development drops land on typical hardware together, so the dev version
+    # next is derived FLEET-WIDE per framework: systematic upgrades and
+    # development drops land on typical hardware together, so the next version
     # is one label across every defaults-governed system — a system without
-    # its own dev data serves dev queries through backward fill (exactly the
+    # its own next-version data serves next queries through backward fill (exactly the
     # rows the retired reuse markers used to graft). Override systems
-    # (frozen baselines like a100/b60) expose no dev.
+    # (frozen baselines like a100/b60) expose no next.
     if override_entry is None:
-        dev = _derive_fleet_dev(tuple(systems_paths), backend, slots["current"])
-        if dev is not None:
-            slots["dev"] = dev
+        nxt = _derive_fleet_next(tuple(systems_paths), backend, slots["current"])
+        if nxt is not None:
+            slots["next"] = nxt
     return slots
 
 
 @functools.cache
-def _derive_fleet_dev(systems_paths: tuple[str, ...], backend: str, current: str) -> str | None:
+def _derive_fleet_next(systems_paths: tuple[str, ...], backend: str, current: str) -> str | None:
     """Highest DATA-BACKED version strictly newer than `current`, across all
-    systems in the tree. Marker-only directories do not qualify — dev means a
+    systems in the tree. Marker-only directories do not qualify — next means a
     developer actually dropped measurements somewhere."""
     current_key = _version_sort_tuple(current)
     candidates: set[str] = set()
@@ -258,7 +258,7 @@ def _derive_fleet_dev(systems_paths: tuple[str, ...], backend: str, current: str
                     ):
                         candidates.add(version)
             except Exception as e:
-                logger.warning("could not derive dev slot from %s: %s", entry, e)
+                logger.warning("could not derive next slot from %s: %s", entry, e)
     return max(candidates, key=_version_sort_tuple) if candidates else None
 
 
@@ -476,7 +476,7 @@ def get_supported_databases(
     for system, backend_versions in supported_sets.items():
         for backend, versions in backend_versions.items():
             # With version slots active, the queryable surface is the slot set
-            # (current / previous / derived dev), not every declared directory —
+            # (current / previous / derived next), not every declared directory —
             # directories outside the slots are fill sources, not versions.
             slots = get_version_slots(system, backend, systems_paths=systems_paths)
             if slots is not None:
@@ -766,7 +766,7 @@ def get_latest_database_version(
     import re
 
     # Under version slots, "latest" means the maintained default (current) —
-    # dev is opt-in via its alias, never the implicit default. The shortcut
+    # next is opt-in via its alias, never the implicit default. The shortcut
     # only fires when current is visible in the supported set, so tests that
     # monkeypatch get_supported_databases keep their synthetic behavior.
     slots = get_version_slots(system, backend, systems_paths=systems_paths)

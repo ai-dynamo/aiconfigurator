@@ -666,7 +666,7 @@ class TestBuildDefaultTaskConfigs:
             total_gpus=8,
             system="h100_sxm",
             backend="sglang",
-            backend_version="0.5.6.post2",
+            backend_version="0.5.14",
         )
 
         assert set(result) == {"agg", "disagg"}
@@ -704,7 +704,7 @@ class TestDeprecatedWideepCliFlags:
             total_gpus=8,
             system="h100_sxm",
             backend="sglang",
-            backend_version="0.5.6.post2",
+            backend_version="0.5.14",
             **kwargs,
         )
 
