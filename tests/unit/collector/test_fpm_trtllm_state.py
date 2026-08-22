@@ -12,7 +12,9 @@ import pytest
 
 from collector.fpm_forward.trtllm_state import (
     TRTLLM_COORDINATE_SYSTEM,
+    TRTLLM_DECODE_MAX_NEW_TOKENS,
     TRTLLM_MEASUREMENT_POLICY,
+    TRTLLM_PREFILL_MAX_NEW_TOKENS,
     TrtllmAcceptedMeasurement,
     TrtllmCoordinate,
     TrtllmLedger,
@@ -159,6 +161,13 @@ def test_manifest_build_has_stable_content_addressed_identity():
         ],
         "sha256": manifest.sha256,
     }
+
+
+def test_fixed_measurement_protocol_exposes_strict_completion_reservations():
+    assert type(TRTLLM_PREFILL_MAX_NEW_TOKENS) is int
+    assert TRTLLM_PREFILL_MAX_NEW_TOKENS == 1
+    assert type(TRTLLM_DECODE_MAX_NEW_TOKENS) is int
+    assert TRTLLM_DECODE_MAX_NEW_TOKENS == 2
 
 
 def test_manifest_identity_includes_order_and_detaches_the_input_sequence():
@@ -452,6 +461,27 @@ def test_manifest_rejects_prefill_that_exceeds_kv_blocks_after_per_request_round
         )
 
 
+def test_manifest_reserves_prefill_completion_token_at_a_kv_block_boundary():
+    coordinate = TrtllmCoordinate("prefill", 1, 8, 8)
+    limits = TrtllmRuntimeLimits(
+        max_seq_len=17,
+        max_num_requests=1,
+        max_batch_size=1,
+        max_num_tokens=8,
+        kv_cache_max_num_blocks=2,
+        kv_cache_tokens_per_block=8,
+        decode_cuda_graph_batch_sizes=(1,),
+    )
+
+    with pytest.raises(ValueError, match="KV-cache blocks"):
+        TrtllmManifest.build(
+            campaign_id="campaign",
+            timing_rank_count=8,
+            runtime_limits=limits,
+            coordinates=(coordinate,),
+        )
+
+
 @pytest.mark.parametrize(
     ("coordinate", "max_num_tokens"),
     [
@@ -487,7 +517,7 @@ def test_manifest_accepts_prefill_at_exact_scheduler_sequence_and_kv_block_bound
         max_num_requests=2,
         max_batch_size=2,
         max_num_tokens=16,
-        kv_cache_max_num_blocks=2,
+        kv_cache_max_num_blocks=4,
         kv_cache_tokens_per_block=8,
         decode_cuda_graph_batch_sizes=(1, 2),
     )
@@ -628,8 +658,29 @@ def test_manifest_counts_the_measured_decode_write_when_checking_kv_blocks():
         )
 
 
-def test_manifest_accepts_decode_at_exact_sequence_and_measured_kv_block_boundaries():
+def test_manifest_reserves_full_decode_completion_at_a_kv_block_boundary():
     coordinate = TrtllmCoordinate("decode", 1, 0, 7)
+    limits = TrtllmRuntimeLimits(
+        max_seq_len=9,
+        max_num_requests=1,
+        max_batch_size=1,
+        max_num_tokens=1,
+        kv_cache_max_num_blocks=1,
+        kv_cache_tokens_per_block=8,
+        decode_cuda_graph_batch_sizes=(1,),
+    )
+
+    with pytest.raises(ValueError, match="KV-cache blocks"):
+        TrtllmManifest.build(
+            campaign_id="campaign",
+            timing_rank_count=8,
+            runtime_limits=limits,
+            coordinates=(coordinate,),
+        )
+
+
+def test_manifest_accepts_decode_at_exact_sequence_and_reserved_kv_block_boundaries():
+    coordinate = TrtllmCoordinate("decode", 1, 0, 6)
     limits = TrtllmRuntimeLimits(
         max_seq_len=9,
         max_num_requests=1,
@@ -644,6 +695,45 @@ def test_manifest_accepts_decode_at_exact_sequence_and_measured_kv_block_boundar
         campaign_id="campaign",
         timing_rank_count=8,
         runtime_limits=limits,
+        coordinates=(coordinate,),
+    )
+
+    assert manifest.coordinates == (coordinate,)
+
+
+@pytest.mark.parametrize(
+    "coordinate",
+    [
+        TrtllmCoordinate("prefill", 128, 8_192, 2_311_328),
+        TrtllmCoordinate("decode", 9, 0, 2_319_263),
+        TrtllmCoordinate("decode", 128, 0, 2_318_245),
+    ],
+    ids=("prefill-b128", "decode-b9", "decode-b128"),
+)
+def test_manifest_rejects_old_kimi_endpoints_without_completion_reservation(coordinate):
+    with pytest.raises(ValueError, match="KV-cache blocks"):
+        TrtllmManifest.build(
+            campaign_id="kimi-k2.5-tep8",
+            timing_rank_count=8,
+            runtime_limits=_runtime_limits(),
+            coordinates=(coordinate,),
+        )
+
+
+@pytest.mark.parametrize(
+    "coordinate",
+    [
+        TrtllmCoordinate("prefill", 128, 8_192, 2_307_232),
+        TrtllmCoordinate("decode", 9, 0, 2_319_254),
+        TrtllmCoordinate("decode", 128, 0, 2_318_117),
+    ],
+    ids=("prefill-b128", "decode-b9", "decode-b128"),
+)
+def test_manifest_accepts_corrected_exact_capacity_kimi_endpoints(coordinate):
+    manifest = TrtllmManifest.build(
+        campaign_id="kimi-k2.5-tep8",
+        timing_rank_count=8,
+        runtime_limits=_runtime_limits(),
         coordinates=(coordinate,),
     )
 

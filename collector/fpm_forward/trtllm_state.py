@@ -13,10 +13,12 @@ import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 
 TRTLLM_COORDINATE_SYSTEM = "iteration_totals_balanced_v1"
 TRTLLM_MEASUREMENT_POLICY = "trtllm_gpu_forward_rank_max_single_sample_v1"
+TRTLLM_PREFILL_MAX_NEW_TOKENS: Final[int] = 1
+TRTLLM_DECODE_MAX_NEW_TOKENS: Final[int] = 2
 _TRTLLM_TIMING_SOURCE = "trtllm_iteration_stats"
 
 _MANIFEST_SCHEMA_NAME = "aic_trtllm_fpm_coordinate_manifest"
@@ -168,11 +170,16 @@ def _validate_runtime_feasibility(
             coordinate.batch_size,
             minimum_units=1,
         )
-        if any(context_length + 2 > runtime_limits.max_seq_len for context_length in context_lengths):
+        if any(
+            context_length + TRTLLM_DECODE_MAX_NEW_TOKENS > runtime_limits.max_seq_len
+            for context_length in context_lengths
+        ):
             raise ValueError(
                 f"coordinate exceeds the runtime limit for decode request sequence length: {coordinate.point_id}"
             )
-        required_blocks = sum(_ceil_div(context_length + 1, block_size) for context_length in context_lengths)
+        required_blocks = sum(
+            _ceil_div(context_length + TRTLLM_DECODE_MAX_NEW_TOKENS, block_size) for context_length in context_lengths
+        )
         if required_blocks > runtime_limits.kv_cache_max_num_blocks:
             raise ValueError(f"coordinate exceeds the runtime limit for KV-cache blocks: {coordinate.point_id}")
         return
@@ -206,11 +213,13 @@ def _validate_runtime_feasibility(
         kv_read_tokens + new_tokens
         for kv_read_tokens, new_tokens in zip(kv_read_lengths, new_token_lengths, strict=True)
     )
-    if any(prompt_length + 1 > runtime_limits.max_seq_len for prompt_length in prompt_lengths):
+    if any(
+        prompt_length + TRTLLM_PREFILL_MAX_NEW_TOKENS > runtime_limits.max_seq_len for prompt_length in prompt_lengths
+    ):
         raise ValueError(
             f"coordinate exceeds the runtime limit for prefill request sequence length: {coordinate.point_id}"
         )
-    required_blocks = sum(_ceil_div(length, block_size) for length in prompt_lengths)
+    required_blocks = sum(_ceil_div(length + TRTLLM_PREFILL_MAX_NEW_TOKENS, block_size) for length in prompt_lengths)
     if required_blocks > runtime_limits.kv_cache_max_num_blocks:
         raise ValueError(f"coordinate exceeds the runtime limit for KV-cache blocks: {coordinate.point_id}")
 
