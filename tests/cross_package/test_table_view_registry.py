@@ -63,7 +63,7 @@ def test_every_registry_attribute_dispatches_on_a_pinned_database() -> None:
     from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
     from aiconfigurator_core.sdk.perf_database import get_database
 
-    database = get_database("h200_sxm", "trtllm", "1.2.0rc5")
+    database = get_database("h200_sxm", "trtllm", "1.2.0rc5", allow_unlisted_version=True)
     assert database is not None
     for attribute in _exported():
         table = fetch_table_view(database, attribute)

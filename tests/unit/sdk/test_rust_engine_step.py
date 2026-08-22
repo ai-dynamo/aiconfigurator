@@ -1260,7 +1260,7 @@ def test_large_ep_op_graph_compiles_natively(caplog):
         num_gpus_per_node=8,
     )
     model = get_model("deepseek-ai/DeepSeek-R1", cfg, "sglang")
-    database = get_database("h200_sxm", "sglang", "0.5.6.post2")
+    database = get_database("h200_sxm", "sglang", "0.5.6.post2", allow_unlisted_version=True)
 
     # (1) The op graph compiles into an EngineSpec carrying the tagged
     # large-EP variants, with the per-phase comm backends the config set.

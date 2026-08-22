@@ -442,8 +442,12 @@ def test_perf_database_clear_runtime_caches_clears_lru_state(perf_database):
 
 def test_empirical_and_silicon_views_use_distinct_shared_layer_templates(perf_database):
     """Formula-only views must not inherit sibling SILICON rows."""
-    empirical = perf_database.get_database_view("b200_sxm", "trtllm", "1.3.0rc10", database_mode="EMPIRICAL")
-    silicon = perf_database.get_database_view("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+    empirical = perf_database.get_database_view(
+        "b200_sxm", "trtllm", "1.3.0rc10", database_mode="EMPIRICAL", allow_unlisted_version=True
+    )
+    silicon = perf_database.get_database_view(
+        "b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON", allow_unlisted_version=True
+    )
 
     assert empirical._root_database_template is not silicon._root_database_template
     assert empirical.enable_shared_layer is False
@@ -453,7 +457,9 @@ def test_empirical_and_silicon_views_use_distinct_shared_layer_templates(perf_da
 def test_database_view_configuration_is_isolated_and_same_key_is_reused(perf_database):
     from aiconfigurator.sdk import common
 
-    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+    template = perf_database.get_database(
+        "b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON", allow_unlisted_version=True
+    )
     template.set_default_database_mode(common.DatabaseMode.SILICON)
     template.set_transfer_policy(None)
     template.clear_runtime_caches()
@@ -465,6 +471,7 @@ def test_database_view_configuration_is_isolated_and_same_key_is_reused(perf_dat
             "b200_sxm",
             "trtllm",
             "1.3.0rc10",
+            allow_unlisted_version=True,
             database_mode="HYBRID",
             transfer_policy="off",
         )
@@ -472,6 +479,7 @@ def test_database_view_configuration_is_isolated_and_same_key_is_reused(perf_dat
             "b200_sxm",
             "trtllm",
             "1.3.0rc10",
+            allow_unlisted_version=True,
             database_mode="HYBRID",
             transfer_policy="off",
         )
@@ -479,6 +487,7 @@ def test_database_view_configuration_is_isolated_and_same_key_is_reused(perf_dat
             "b200_sxm",
             "trtllm",
             "1.3.0rc10",
+            allow_unlisted_version=True,
             database_mode="HYBRID",
             transfer_policy="aggressive",
         )
@@ -509,7 +518,9 @@ def test_configured_view_cache_normalizes_keys_and_separates_roots(perf_database
 
     from aiconfigurator.sdk import common
 
-    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+    template = perf_database.get_database(
+        "b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON", allow_unlisted_version=True
+    )
     template.clear_runtime_caches()
     other_template = copy.copy(template)
     other_template._is_query_view = False
@@ -537,7 +548,9 @@ def test_configured_view_cache_normalizes_keys_and_separates_roots(perf_database
 def test_clearing_template_runtime_caches_refreshes_configured_copy(perf_database):
     from aiconfigurator.sdk import common
 
-    template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+    template = perf_database.get_database(
+        "b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON", allow_unlisted_version=True
+    )
     template.clear_runtime_caches()
     old_marker = object()
     new_marker = object()
@@ -564,7 +577,9 @@ def test_clearing_template_runtime_caches_refreshes_configured_copy(perf_databas
 def test_configured_view_rejects_incompatible_shared_layer_template(perf_database):
     from aiconfigurator.sdk import common
 
-    silicon_template = perf_database.get_database("b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON")
+    silicon_template = perf_database.get_database(
+        "b200_sxm", "trtllm", "1.3.0rc10", database_mode="SILICON", allow_unlisted_version=True
+    )
 
     with pytest.raises(ValueError, match="use get_database_view"):
         perf_database._get_configured_database_view(silicon_template, common.DatabaseMode.EMPIRICAL)

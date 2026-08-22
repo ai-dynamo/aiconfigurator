@@ -41,7 +41,7 @@ def test_generation_mla_module_fp8_kv_exact_values(system, b, s, num_heads, gemm
     from aiconfigurator_core.sdk.engine import _evaluate_single_op
     from aiconfigurator_core.sdk.operations.mla import MLAModule
 
-    db = get_database(system, "trtllm", "1.3.0rc10")
+    db = get_database(system, "trtllm", "1.3.0rc10", allow_unlisted_version=True)
     db.set_default_database_mode(common.DatabaseMode.SILICON)
     # The retired query_generation_mla_module shim's exact twin (bfloat16
     # FMHA is ignored by the decode table).

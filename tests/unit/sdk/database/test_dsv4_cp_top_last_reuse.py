@@ -41,7 +41,7 @@ def _load_topk_calib_rows(db):
 
 
 def test_csa_cp_top_last_loads_via_approved_reuse_donor():
-    db = get_database("b200_sxm", "sglang", "0.5.12")
+    db = get_database("b200_sxm", "sglang", "0.5.12", allow_unlisted_version=True)
     rows = _load_topk_calib_rows(db)
     # The reuse-dependent version resolves the donor's rows — the pre-#1498
     # primary-only read returned nothing here and the CP composition raised.
@@ -58,7 +58,7 @@ def test_csa_cp_top_last_rows_pin_adjudicated_repro_values():
     # (DeepSeek-V4-Flash | tp1 ep8 cp8 | b=1 isl=8192): top_last 0.048698 —
     # now resolvable on the reuse-dependent 0.5.12. Keyed
     # [native][step][isl][bs][score_mode].
-    db = get_database("b200_sxm", "sglang", "0.5.12")
+    db = get_database("b200_sxm", "sglang", "0.5.12", allow_unlisted_version=True)
     rows = _load_topk_calib_rows(db)
     leaf = rows[_FLASH_NATIVE_HEADS][0][8192][1]
     assert leaf["v1_top_last"]["latency"] == pytest.approx(0.048698, rel=1e-9)
