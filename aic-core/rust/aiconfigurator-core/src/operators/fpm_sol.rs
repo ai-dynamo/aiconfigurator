@@ -28,6 +28,8 @@
 //!   prefix-aware), `:710-733` (generation `get_sol`), `:531` (CP chunk
 //!   ceil), `:535-548` (fused rope/kv-write/qk-norm extras × 1.1 on the SOL
 //!   mem-op `bytes / mem_bw * 1000`, `perf_database.py:2294`).
+//! - MLA: `operations/mla.py` context/generation/BMM/module `get_sol`
+//!   closures, via the shared analytic helpers in `perf_database::mla`.
 //! - MoE: `operations/moe.py:297-325` (`get_sol` with the activated-expert
 //!   clamp; `workload_distribution` deliberately unused).
 //! - MoE dispatch: `operations/moe.py:1083-1342` branch structure with the
@@ -52,8 +54,14 @@ use crate::common::error::AicError;
 use crate::common::system_spec::SystemSpec;
 use crate::operators::op::Op;
 use crate::operators::{
-    ContextAttentionOp, CustomAllReduceOp, ElementwiseOp, EmbeddingOp, GemmOp,
-    GenerationAttentionOp, MoEDispatchOp, MoeOp, NcclOp, P2POp,
+    ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, ElementwiseOp, EmbeddingOp, GemmOp,
+    GenerationAttentionOp, GenerationMlaOp, MlaBmmOp, MlaModuleOp, MoEDispatchOp, MoeOp, NcclOp,
+    P2POp,
+};
+use crate::perf_database::attention::generation_attn_flops;
+use crate::perf_database::gemm::quant_tc_flops as resolved_quant_tc_flops;
+use crate::perf_database::mla::{
+    context_mla_sol_prefix_ms, generation_mla_module_sol_ms, generation_mla_sol_ms, mla_bmm_sol_ms,
 };
 use crate::perf_database::PerfDatabase;
 
@@ -88,6 +96,11 @@ pub(crate) fn op_sol_latency_ms(
         Op::Elementwise(o) => Ok(elementwise_sol(o, spec, x)),
         Op::ContextAttention(o) => Ok(context_attention_sol(o, spec, batch, s, prefix)),
         Op::GenerationAttention(o) => Ok(generation_attention_sol(o, spec, batch, s)),
+        Op::ContextMla(o) => context_mla_op_sol(o, spec, batch, s, prefix),
+        Op::GenerationMla(o) => generation_mla_op_sol(o, spec, batch, s),
+        Op::MlaModuleContext(o) => context_mla_module_op_sol(o, spec, batch, s, prefix),
+        Op::MlaModuleGeneration(o) => generation_mla_module_op_sol(o, spec, batch, s),
+        Op::MlaBmm(o) => mla_bmm_op_sol(o, spec, x),
         Op::Moe(o) => Ok(moe_sol(o, spec, x)),
         Op::MoeDispatch(o) => moe_dispatch_sol(o, spec, x),
         Op::CustomAllReduce(o) => Ok(custom_allreduce_op_sol(o, spec, x)),
@@ -271,6 +284,119 @@ fn generation_attention_sol(op: &GenerationAttentionOp, spec: &SystemSpec, b: f6
     let sol_math = ops / flops * 1000.0 / compute;
     let sol_mem = mem / spec.gpu.mem_bw * 1000.0;
     sol_math.max(sol_mem) * op.scale_factor
+}
+
+/// ContextMLA.query under SOL: prefix-aware MLA, including the two CP zigzag
+/// chunks when context parallelism is enabled.
+fn context_mla_op_sol(
+    op: &ContextMlaOp,
+    spec: &SystemSpec,
+    b: f64,
+    s: f64,
+    prefix: f64,
+) -> Result<f64, AicError> {
+    let attn_flops = resolved_quant_tc_flops(spec, op.fmha_quant_mode.mapping())?;
+    let latency = if op.cp_size > 1 {
+        let chunk = ceil_div(s, 2.0 * op.cp_size as f64).max(1.0);
+        context_mla_sol_prefix_ms(
+            spec,
+            op.kv_cache_dtype,
+            op.num_heads as f64,
+            chunk,
+            prefix,
+            b,
+            attn_flops,
+        ) + context_mla_sol_prefix_ms(
+            spec,
+            op.kv_cache_dtype,
+            op.num_heads as f64,
+            chunk,
+            prefix + s - chunk,
+            b,
+            attn_flops,
+        )
+    } else {
+        context_mla_sol_prefix_ms(
+            spec,
+            op.kv_cache_dtype,
+            op.num_heads as f64,
+            s,
+            prefix,
+            b,
+            attn_flops,
+        )
+    };
+    Ok(latency * op.scale_factor)
+}
+
+/// GenerationMLA.query under SOL. Decode compute throughput follows the KV
+/// cache dtype, as in the shared attention helper.
+fn generation_mla_op_sol(
+    op: &GenerationMlaOp,
+    spec: &SystemSpec,
+    b: f64,
+    s: f64,
+) -> Result<f64, AicError> {
+    let attn_flops = generation_attn_flops(spec, op.kv_cache_dtype)?;
+    Ok(generation_mla_sol_ms(
+        spec,
+        op.kv_cache_dtype,
+        op.num_heads as f64,
+        b,
+        s,
+        attn_flops,
+    ) * op.scale_factor)
+}
+
+/// Context MLAModule.query under SOL reuses the prefix-aware context MLA
+/// formula; native_num_heads is a silicon table-selection key only.
+fn context_mla_module_op_sol(
+    op: &MlaModuleOp,
+    spec: &SystemSpec,
+    b: f64,
+    s: f64,
+    prefix: f64,
+) -> Result<f64, AicError> {
+    let attn_flops = resolved_quant_tc_flops(spec, op.fmha_quant_mode.mapping())?;
+    Ok(context_mla_sol_prefix_ms(
+        spec,
+        op.kv_cache_dtype,
+        op.num_heads as f64,
+        s,
+        prefix,
+        b,
+        attn_flops,
+    ) * op.scale_factor)
+}
+
+/// Generation MLAModule.query under SOL keeps attention and both BMM legs in
+/// one compute-vs-memory roofline before taking the maximum.
+fn generation_mla_module_op_sol(
+    op: &MlaModuleOp,
+    spec: &SystemSpec,
+    b: f64,
+    s: f64,
+) -> Result<f64, AicError> {
+    let attn_flops = generation_attn_flops(spec, op.kv_cache_dtype)?;
+    let bmm_flops = resolved_quant_tc_flops(spec, op.gemm_quant_mode.mapping())?;
+    Ok(generation_mla_module_sol_ms(
+        spec,
+        op.kv_cache_dtype,
+        op.gemm_quant_mode,
+        op.num_heads as f64,
+        b,
+        s,
+        attn_flops,
+        bmm_flops,
+    ) * op.scale_factor)
+}
+
+/// MLABmm.query under SOL. The FPM op-level call passes its x coordinate as
+/// the table's token count; the requested quant mode owns the roofline even
+/// when silicon lookup would fall back to bfloat16 data.
+fn mla_bmm_op_sol(op: &MlaBmmOp, spec: &SystemSpec, x: f64) -> Result<f64, AicError> {
+    let bmm_flops = resolved_quant_tc_flops(spec, op.quant_mode.mapping())?;
+    Ok(mla_bmm_sol_ms(spec, op.quant_mode, op.num_heads as f64, x, bmm_flops) * op.scale_factor)
 }
 
 /// moe.py:297-325: MoE SOL with the activated-expert clamp. The `//` sites
@@ -647,6 +773,132 @@ mod tests {
         let expected = (ops / s.gpu.bfloat16_tc_flops.unwrap() * 1000.0 / 2.0)
             .max(mem / s.gpu.mem_bw * 1000.0);
         approx(generation_attention_sol(&op, &s, b, sq), expected);
+    }
+
+    #[test]
+    fn kimi_mla_context_sol_preserves_prefix_cp_and_scale() {
+        let d = db();
+        let s = &d.system_spec;
+        let (b, seq, prefix) = (4.5, 682.6666666666666, 128.5);
+        let op = ContextMlaOp {
+            name: "context_attention".into(),
+            scale_factor: 61.0,
+            num_heads: 16,
+            kv_cache_dtype: KvCacheQuantMode::Fp8,
+            fmha_quant_mode: FmhaQuantMode::Fp8,
+            cp_size: 4,
+        };
+        let attn_flops =
+            resolved_quant_tc_flops(s, op.fmha_quant_mode.mapping()).expect("fp8 flops");
+        let chunk = ceil_div(seq, 2.0 * op.cp_size as f64).max(1.0);
+        let expected = (context_mla_sol_prefix_ms(
+            s,
+            op.kv_cache_dtype,
+            op.num_heads as f64,
+            chunk,
+            prefix,
+            b,
+            attn_flops,
+        ) + context_mla_sol_prefix_ms(
+            s,
+            op.kv_cache_dtype,
+            op.num_heads as f64,
+            chunk,
+            prefix + seq - chunk,
+            b,
+            attn_flops,
+        )) * op.scale_factor;
+        let got = op_sol_latency_ms(&Op::ContextMla(op), &d, 999.0, b, seq, prefix).unwrap();
+        approx(got, expected);
+
+        let module = MlaModuleOp {
+            name: "context_mla_module".into(),
+            scale_factor: 61.0,
+            num_heads: 8,
+            kv_cache_dtype: KvCacheQuantMode::Fp8,
+            fmha_quant_mode: FmhaQuantMode::Fp8,
+            gemm_quant_mode: GemmQuantMode::Bfloat16,
+            native_num_heads: Some(64),
+        };
+        let module_flops =
+            resolved_quant_tc_flops(s, module.fmha_quant_mode.mapping()).expect("fp8 flops");
+        let expected = context_mla_sol_prefix_ms(
+            s,
+            module.kv_cache_dtype,
+            module.num_heads as f64,
+            seq,
+            prefix,
+            b,
+            module_flops,
+        ) * module.scale_factor;
+        let got =
+            op_sol_latency_ms(&Op::MlaModuleContext(module), &d, 999.0, b, seq, prefix).unwrap();
+        approx(got, expected);
+    }
+
+    #[test]
+    fn kimi_mla_generation_sol_preserves_fused_and_requested_quant_semantics() {
+        let d = db();
+        let s = &d.system_spec;
+        let (x, b, seq) = (37.5, 12.5, 8441.75);
+        let gen = GenerationMlaOp {
+            name: "generation_attention".into(),
+            scale_factor: 61.0,
+            num_heads: 16,
+            kv_cache_dtype: KvCacheQuantMode::Fp8,
+        };
+        let attn_flops = generation_attn_flops(s, gen.kv_cache_dtype).expect("decode flops");
+        let expected = generation_mla_sol_ms(
+            s,
+            gen.kv_cache_dtype,
+            gen.num_heads as f64,
+            b,
+            seq,
+            attn_flops,
+        ) * gen.scale_factor;
+        let got = op_sol_latency_ms(&Op::GenerationMla(gen), &d, x, b, seq, 0.0).unwrap();
+        approx(got, expected);
+
+        let module = MlaModuleOp {
+            name: "generation_mla_module".into(),
+            scale_factor: 61.0,
+            num_heads: 8,
+            kv_cache_dtype: KvCacheQuantMode::Fp8,
+            fmha_quant_mode: FmhaQuantMode::Fp8,
+            gemm_quant_mode: GemmQuantMode::Bfloat16,
+            native_num_heads: Some(64),
+        };
+        let attn_flops = generation_attn_flops(s, module.kv_cache_dtype).expect("decode flops");
+        let bmm_flops =
+            resolved_quant_tc_flops(s, module.gemm_quant_mode.mapping()).expect("module bmm flops");
+        let expected = generation_mla_module_sol_ms(
+            s,
+            module.kv_cache_dtype,
+            module.gemm_quant_mode,
+            module.num_heads as f64,
+            b,
+            seq,
+            attn_flops,
+            bmm_flops,
+        ) * module.scale_factor;
+        let got = op_sol_latency_ms(&Op::MlaModuleGeneration(module), &d, x, b, seq, 0.0).unwrap();
+        approx(got, expected);
+
+        let bmm = MlaBmmOp {
+            name: "generation_bmm_pre".into(),
+            scale_factor: 61.0,
+            num_heads: 8,
+            quant_mode: GemmQuantMode::Nvfp4,
+            is_pre: true,
+        };
+        let bmm_flops =
+            resolved_quant_tc_flops(s, bmm.quant_mode.mapping()).expect("requested bmm flops");
+        let expected = mla_bmm_sol_ms(s, bmm.quant_mode, bmm.num_heads as f64, x, bmm_flops)
+            * bmm.scale_factor;
+        // Deliberately make batch != x: FPM's MLABmm SOL token coordinate is
+        // x, while the remaining MLA decode ops use batch.
+        let got = op_sol_latency_ms(&Op::MlaBmm(bmm), &d, x, 999.0, seq, 0.0).unwrap();
+        approx(got, expected);
     }
 
     /// Mirrors moe.py:297-325 with the float-floor association order.

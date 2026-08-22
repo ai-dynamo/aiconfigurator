@@ -918,6 +918,9 @@ pub(crate) mod tests {
         pub backend_version: &'static str,
         pub partition_policy: &'static str,
         pub tp: u32,
+        pub moe_tp: u32,
+        pub moe_ep: u32,
+        pub fmha_quant_mode: &'static str,
         /// Overrides the coordinate-derived cell_id (collision tests).
         pub cell_id: Option<&'static str>,
         pub system: &'static str,
@@ -940,6 +943,9 @@ pub(crate) mod tests {
                 backend_version: "0.25.1",
                 partition_policy: FPM_FORWARD_PARTITION_POLICY,
                 tp: 4,
+                moe_tp: 4,
+                moe_ep: 1,
+                fmha_quant_mode: "bfloat16",
                 cell_id: None,
                 system: "b200_sxm",
                 backend: "vllm",
@@ -1036,7 +1042,13 @@ pub(crate) mod tests {
                 .expect("writer");
         let mut rg = writer.next_row_group().expect("row group");
 
-        let identity = |r: &RowSpec| default_identity(r.tp);
+        let identity = |r: &RowSpec| {
+            let mut identity = default_identity(r.tp);
+            identity[2] = r.fmha_quant_mode.to_string();
+            identity[8] = r.moe_tp.to_string();
+            identity[9] = r.moe_ep.to_string();
+            identity
+        };
         let str_col = |f: &dyn Fn(&RowSpec) -> String| -> Vec<ByteArray> {
             rows.iter()
                 .map(|r| ByteArray::from(f(r).as_str()))

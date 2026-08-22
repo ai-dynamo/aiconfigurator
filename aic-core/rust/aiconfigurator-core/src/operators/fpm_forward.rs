@@ -273,8 +273,8 @@ impl FpmForwardOp {
         // SOL support is checked LAZILY, mirroring Python: exact hits and
         // in-curve lerps never invoke the roofline (Python's SOL view answers
         // every op family; `_oplevel_sol_fn` is only called on transfer/hold
-        // paths). A family the Rust SOL port does not cover yet (DSA / MSA /
-        // MLA modules — e.g. GLM-5.2's DSA attention) therefore only fails
+        // paths). A family the Rust SOL port does not cover yet (DSA / MSA —
+        // e.g. GLM-5.2's DSA attention) therefore only fails
         // the sol-dependent resolution paths, and the error names the op.
         let sol_failure: std::cell::RefCell<Option<AicError>> = std::cell::RefCell::new(None);
         let sol = |sol_coords: &[f64]| -> f64 {
@@ -477,7 +477,9 @@ pub(crate) fn sol_total(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perf_database::fpm_forward::tests::{default_identity, default_rows, write_pair};
+    use crate::perf_database::fpm_forward::tests::{
+        default_identity, default_rows, write_pair, write_pair_with, RowSpec,
+    };
 
     const SYSTEMS_ROOT: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -523,6 +525,55 @@ mod tests {
             prefix,
             ..Default::default()
         }
+    }
+
+    fn kimi_tep8_identity() -> Vec<String> {
+        vec![
+            "nvfp4", "nvfp4", "fp8", "half", "fp8", "8", "1", "1", "1", "8", "1", "auto", "auto",
+            "False", "False",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    }
+
+    fn write_kimi_tep8_pair(dir: &std::path::Path) {
+        let rows: Vec<RowSpec> = default_rows()
+            .into_iter()
+            .map(|row| RowSpec {
+                model_path: "nvidia/Kimi-K2.5-NVFP4",
+                backend: "trtllm",
+                backend_version: "1.3.0rc23",
+                system: "gb200",
+                tp: 8,
+                moe_tp: 1,
+                moe_ep: 8,
+                fmha_quant_mode: "fp8",
+                ..row
+            })
+            .collect();
+        write_pair_with(dir, &rows, |sidecar| {
+            sidecar.insert("system".into(), "gb200".into());
+            sidecar.insert("backend".into(), "trtllm".into());
+            sidecar.insert("backend_version".into(), "1.3.0rc23".into());
+        });
+    }
+
+    fn db_with_kimi_tep8_pair(dir: &std::path::Path) -> PerfDatabase {
+        let mut db = PerfDatabase::load(
+            std::path::Path::new(SYSTEMS_ROOT),
+            "gb200",
+            "trtllm",
+            "1.3.0rc23",
+        )
+        .expect("fixture db");
+        db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(
+            dir.to_path_buf(),
+            "gb200",
+            "trtllm",
+            "1.3.0rc23",
+        ));
+        db
     }
 
     #[test]
@@ -766,6 +817,101 @@ mod tests {
         assert!(err.to_string().contains("decode-only"), "{err}");
     }
 
+    #[test]
+    fn kimi_tep8_mla_sol_supports_cross_site_resolution() {
+        use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
+        use crate::operators::{ContextMlaOp, GenerationMlaOp, MlaBmmOp, MlaModuleOp};
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_kimi_tep8_pair(tmp.path());
+        let db = db_with_kimi_tep8_pair(tmp.path());
+        let cases = [
+            (
+                "context MLA",
+                FpmPhase::Prefill,
+                Op::ContextMla(ContextMlaOp {
+                    name: "context_attention".into(),
+                    scale_factor: 61.0,
+                    num_heads: 16,
+                    kv_cache_dtype: KvCacheQuantMode::Fp8,
+                    fmha_quant_mode: FmhaQuantMode::Fp8,
+                    cp_size: 1,
+                }),
+                vec![2.0, 2048.0, 2048.0],
+            ),
+            (
+                "context MLA module",
+                FpmPhase::Prefill,
+                Op::MlaModuleContext(MlaModuleOp {
+                    name: "context_mla_module".into(),
+                    scale_factor: 61.0,
+                    num_heads: 8,
+                    kv_cache_dtype: KvCacheQuantMode::Fp8,
+                    fmha_quant_mode: FmhaQuantMode::Fp8,
+                    gemm_quant_mode: GemmQuantMode::Bfloat16,
+                    native_num_heads: Some(64),
+                }),
+                vec![2.0, 2048.0, 2048.0],
+            ),
+            (
+                "generation MLA",
+                FpmPhase::Decode,
+                Op::GenerationMla(GenerationMlaOp {
+                    name: "generation_attention".into(),
+                    scale_factor: 61.0,
+                    num_heads: 16,
+                    kv_cache_dtype: KvCacheQuantMode::Fp8,
+                }),
+                vec![12.0, 6144.0],
+            ),
+            (
+                "generation MLA module",
+                FpmPhase::Decode,
+                Op::MlaModuleGeneration(MlaModuleOp {
+                    name: "generation_mla_module".into(),
+                    scale_factor: 61.0,
+                    num_heads: 8,
+                    kv_cache_dtype: KvCacheQuantMode::Fp8,
+                    fmha_quant_mode: FmhaQuantMode::Fp8,
+                    gemm_quant_mode: GemmQuantMode::Bfloat16,
+                    native_num_heads: Some(64),
+                }),
+                vec![12.0, 6144.0],
+            ),
+            (
+                "MLA BMM",
+                FpmPhase::Decode,
+                Op::MlaBmm(MlaBmmOp {
+                    name: "generation_bmm_pre".into(),
+                    scale_factor: 61.0,
+                    num_heads: 8,
+                    quant_mode: GemmQuantMode::Bfloat16,
+                    is_pre: true,
+                }),
+                vec![12.0, 6144.0],
+            ),
+        ];
+
+        for (label, phase, mla_op, coords) in cases {
+            let fpm = FpmForwardOp {
+                name: format!("fpm_forward_{}", phase.as_str()),
+                phase,
+                model_path: "nvidia/Kimi-K2.5-NVFP4".into(),
+                match_identity: kimi_tep8_identity(),
+                weight_bytes: 0.0,
+                sol_ops: vec![mla_op],
+            };
+            let result = fpm
+                .query_totals(&db, &coords)
+                .unwrap_or_else(|err| panic!("{label} cross-site query failed: {err}"));
+            assert!(
+                result.latency_ms.is_finite() && result.latency_ms > 0.0,
+                "{label} returned {}",
+                result.latency_ms
+            );
+        }
+    }
+
     /// SOL support is lazy (mirrors Python, whose SOL view answers every op
     /// family): an unported family (e.g. GLM-5.2's DSA modules) must NOT
     /// block exact hits or in-curve lerps — only sol-dependent resolution
@@ -776,13 +922,15 @@ mod tests {
         write_pair(tmp.path(), &default_rows());
         let db = db_with_pair(tmp.path());
         let mut o = op(FpmPhase::Decode);
-        o.sol_ops = vec![Op::MlaBmm(crate::operators::MlaBmmOp {
-            name: "mla_bmm_pre".into(),
-            scale_factor: 1.0,
-            num_heads: 128,
-            is_pre: true,
-            quant_mode: crate::common::enums::GemmQuantMode::Bfloat16,
-        })];
+        o.sol_ops = vec![Op::DsaGeneration(crate::operators::DsaModuleOp::new(
+            "generation_dsa_module",
+            128,
+            crate::common::enums::KvCacheQuantMode::Fp8,
+            crate::common::enums::FmhaQuantMode::Fp8,
+            crate::common::enums::GemmQuantMode::Bfloat16,
+            "Glm4MoeLiteForCausalLM",
+            2048,
+        ))];
         // Exact hit (8, 4096) -> 7.0: never invokes the roofline.
         let r = o.query(&db, &ctx(8, 512, 0)).unwrap();
         assert_eq!(r.latency_ms, 7.0);
