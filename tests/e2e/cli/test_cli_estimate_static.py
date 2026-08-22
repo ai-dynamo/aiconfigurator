@@ -14,12 +14,12 @@ CLI estimate detail report rollout:
 """
 
 import argparse
+import subprocess as sp
 
 import pytest
 
 from aiconfigurator.cli.api import EstimateResult, cli_estimate
 from aiconfigurator.cli.main import configure_parser as configure_cli_parser
-from aiconfigurator.cli.main import main as run_cli
 
 pytestmark = pytest.mark.e2e
 
@@ -172,47 +172,47 @@ def test_cli_detail_flag_parses():
 
 
 @pytest.mark.parametrize("detail", ["time", "all"])
-def test_cross_node_ep_detail_survives_unavailable_sol_comparison(cli_parser, capsys, detail):
-    args = cli_parser.parse_args(
-        [
-            "estimate",
-            "--model-path",
-            "deepseek-ai/DeepSeek-R1",
-            "--system",
-            "gb200",
-            "--backend",
-            "sglang",
-            "--perf-db-version",
-            "0.5.16",
-            "--estimate-mode",
-            "static",
-            "--isl",
-            "1024",
-            "--osl",
-            "2",
-            "--batch-size",
-            "1",
-            "--tp-size",
-            "1",
-            "--pp-size",
-            "1",
-            "--attention-dp-size",
-            "32",
-            "--moe-tp-size",
-            "1",
-            "--moe-ep-size",
-            "32",
-            "--detail",
-            detail,
-            "--no-color",
-            "--log-level",
-            "ERROR",
-        ]
-    )
+def test_cross_node_ep_detail_survives_unavailable_sol_comparison(detail):
+    command = [
+        "aiconfigurator",
+        "cli",
+        "estimate",
+        "--model-path",
+        "deepseek-ai/DeepSeek-R1",
+        "--system",
+        "gb200",
+        "--backend",
+        "sglang",
+        "--perf-db-version",
+        "0.5.16",
+        "--estimate-mode",
+        "static",
+        "--isl",
+        "1024",
+        "--osl",
+        "2",
+        "--batch-size",
+        "1",
+        "--tp-size",
+        "1",
+        "--pp-size",
+        "1",
+        "--attention-dp-size",
+        "32",
+        "--moe-tp-size",
+        "1",
+        "--moe-ep-size",
+        "32",
+        "--detail",
+        detail,
+        "--no-color",
+        "--log-level",
+        "ERROR",
+    ]
+    completed = sp.run(command, capture_output=True, text=True)
+    output = f"{completed.stdout}\n{completed.stderr}"
 
-    run_cli(args)
-
-    output = capsys.readouterr().out
+    assert completed.returncode == 0, output
     assert "Performance Estimate (static)" in output
     assert f"Detailed Breakdown ({detail})" in output
     assert "SOL comparison unavailable: Cross-node EP requires DeepEP A2A data" in output

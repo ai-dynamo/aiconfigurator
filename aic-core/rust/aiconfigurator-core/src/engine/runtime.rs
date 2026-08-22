@@ -167,7 +167,7 @@ impl PerOpSolFold {
             // contribution is exact, not a coverage gap.
             None if r.latency_ms == 0.0 && r.energy_wms == 0.0 => (0.0, 0.0),
             None => {
-                return Err(AicError::InvalidEngineConfig(format!(
+                return Err(AicError::SolNotImplemented(format!(
                     "evaluate_ops_sol_json: op '{}' has no SOL decomposition \
                      (family not exported yet — see PerformanceResult::sol)",
                     op.name()
@@ -2193,6 +2193,7 @@ mod tests {
         let err = engine
             .evaluate_ops_sol_json(&ops_json, true, 1, 128, 0, 1.0, None)
             .unwrap_err();
+        assert!(matches!(&err, AicError::SolNotImplemented(_)));
         assert!(
             err.to_string().contains("no SOL decomposition"),
             "unexpected error: {err}"

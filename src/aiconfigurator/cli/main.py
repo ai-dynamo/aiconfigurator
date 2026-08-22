@@ -28,8 +28,10 @@ from aiconfigurator.sdk.config_builders import resolve_nextn_auto
 from aiconfigurator.sdk.errors import (
     EmpiricalNotImplementedError,
     ExperimentOutcome,
+    MissingSystemFlopsError,
     NoFeasibleConfigError,
     PerfDataNotAvailableError,
+    SolNotImplementedError,
     is_expected_cli_error,
 )
 from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
@@ -38,6 +40,13 @@ from aiconfigurator.sdk.task_v2 import Task, _lookup_num_gpus_per_node, _warn_la
 from aiconfigurator.sdk.utils import ListFlowDumper, get_model_config_from_model_path
 
 logger = logging.getLogger(__name__)
+
+_SOL_DETAIL_UNAVAILABLE_ERRORS = (
+    PerfDataNotAvailableError,
+    EmpiricalNotImplementedError,
+    MissingSystemFlopsError,
+    SolNotImplementedError,
+)
 
 
 def _latest_support_matrix_version(
@@ -2734,7 +2743,7 @@ def _run_estimate_mode(args):
             sol_estimate_kwargs["database_mode"] = common.DatabaseMode.SOL.name
             try:
                 sol_result = cli_estimate(**sol_estimate_kwargs)
-            except (PerfDataNotAvailableError, EmpiricalNotImplementedError) as exc:
+            except _SOL_DETAIL_UNAVAILABLE_ERRORS as exc:
                 sol_detail_error = str(exc)
 
     print("\n" + "=" * 60)

@@ -58,6 +58,7 @@ fn _build_smoke() -> u32 {
 static PERF_DATA_NOT_AVAILABLE_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
 static EMPIRICAL_NOT_IMPLEMENTED_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
 static MISSING_SYSTEM_FLOPS_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+static SOL_NOT_IMPLEMENTED_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
 
 /// Resolve (and memoize) one sdk error class; `None` when the sdk is not
 /// importable, so the caller falls back to `PyValueError`.
@@ -92,6 +93,9 @@ fn sdk_error_type(
 /// * `AicError::MissingSystemFlops` raises
 ///   `aiconfigurator_core.sdk.errors.MissingSystemFlopsError` (strict per-dtype
 ///   `*_tc_flops` resolution — a `ValueError` subclass on the Python side);
+/// * `AicError::SolNotImplemented` raises
+///   `aiconfigurator_core.sdk.errors.SolNotImplementedError` (the analytic SOL
+///   path has no implementation for a required operator);
 /// * everything else stays `PyValueError`.
 ///
 /// The sdk import is lazy and failure-tolerant: in pure-Rust test contexts
@@ -107,6 +111,8 @@ fn aic_to_py(e: AicError) -> PyErr {
         ))
     } else if matches!(e, AicError::MissingSystemFlops(_)) {
         Some((&MISSING_SYSTEM_FLOPS_ERROR, "MissingSystemFlopsError"))
+    } else if matches!(e, AicError::SolNotImplemented(_)) {
+        Some((&SOL_NOT_IMPLEMENTED_ERROR, "SolNotImplementedError"))
     } else {
         None
     };
@@ -1690,6 +1696,14 @@ mod tests {
             check(
                 AicError::EmpiricalNotImplemented("no basis".to_string()),
                 "EmpiricalNotImplementedError",
+            );
+            check(
+                AicError::MissingSystemFlops("no fp4 throughput".to_string()),
+                "MissingSystemFlopsError",
+            );
+            check(
+                AicError::SolNotImplemented("no SOL decomposition".to_string()),
+                "SolNotImplementedError",
             );
 
             // Non-typed variants stay ValueError regardless of the sdk.

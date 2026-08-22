@@ -6,7 +6,12 @@ import pytest
 import aiconfigurator.cli.api as cli_api
 import aiconfigurator.cli.main as cli_main
 from aiconfigurator.cli.api import EstimateResult
-from aiconfigurator.sdk.errors import EmpiricalNotImplementedError, PerfDataNotAvailableError
+from aiconfigurator.sdk.errors import (
+    EmpiricalNotImplementedError,
+    MissingSystemFlopsError,
+    PerfDataNotAvailableError,
+    SolNotImplementedError,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -60,13 +65,21 @@ def _estimate_args(cli_parser, *, detail: str = "time"):
 
 
 @pytest.mark.parametrize("detail", ["time", "all"])
-@pytest.mark.parametrize("error_type", [PerfDataNotAvailableError, EmpiricalNotImplementedError])
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        PerfDataNotAvailableError,
+        EmpiricalNotImplementedError,
+        MissingSystemFlopsError,
+        SolNotImplementedError,
+    ],
+)
 def test_detail_reports_unavailable_sol_comparison_without_failing(
     cli_parser,
     monkeypatch,
     capsys,
     detail: str,
-    error_type: type[RuntimeError],
+    error_type: type[Exception],
 ) -> None:
     def estimate(**kwargs):
         if kwargs["database_mode"] == "SOL":
