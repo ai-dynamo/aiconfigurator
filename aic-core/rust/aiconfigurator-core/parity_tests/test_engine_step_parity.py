@@ -1017,7 +1017,14 @@ def _case_database(case: EngineStepParityCase):
     defaults, or a mode/policy-configured query view for HYBRID/EMPIRICAL
     cases (mirrors what `cli_estimate` builds internally)."""
     if case.database_mode == "SILICON" and case.transfer_policy is None:
-        return _quiet_call(perf_database.get_database, case.system_name, case.backend_name, case.backend_version)
+        return _quiet_call(
+            perf_database.get_database,
+            case.system_name,
+            case.backend_name,
+            case.backend_version,
+            # parity cases are frozen data coordinates by design
+            allow_unlisted_version=True,
+        )
     return _quiet_call(
         perf_database.get_database_view,
         case.system_name,
@@ -1028,6 +1035,7 @@ def _case_database(case: EngineStepParityCase):
         allow_missing_data=case.database_mode != "SILICON",
         database_mode=case.database_mode,
         transfer_policy=case.transfer_policy,
+        allow_unlisted_version=True,
     )
 
 
@@ -1586,6 +1594,7 @@ class TestRustEngineHandleDatabasePolicyIdentity:
             case.backend_name,
             case.backend_version,
             shared_layer=False,
+            allow_unlisted_version=True,
         )
         on = _quiet_call(
             perf_database.get_database_view,
@@ -1593,6 +1602,7 @@ class TestRustEngineHandleDatabasePolicyIdentity:
             case.backend_name,
             case.backend_version,
             shared_layer=True,
+            allow_unlisted_version=True,
         )
         if off is None or on is None:
             pytest.skip("no perf database for the DSV4 CP case identity")
@@ -2432,7 +2442,7 @@ class TestRustEngineStepFpmParity:
             forward_model="fpm",
         )
         model = get_model(_FPM_MODEL, cfg, "vllm")
-        database = _quiet_call(perf_database.get_database, "b200_sxm", "vllm", _FPM_VERSION)
+        database = _quiet_call(perf_database.get_database, "b200_sxm", "vllm", _FPM_VERSION, allow_unlisted_version=True)
         return model, get_backend("vllm"), database
 
     def _static(self, model, backend, database, mode, batch, isl, osl, prefix):

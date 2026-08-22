@@ -32,7 +32,7 @@ def _estimate_result(
         model_path="test-model",
         system_name="test-system",
         backend_name="test-backend",
-        backend_version="test-version",
+        backend_version="current",
         raw=raw,
         mode=mode,
         summary=summary,
