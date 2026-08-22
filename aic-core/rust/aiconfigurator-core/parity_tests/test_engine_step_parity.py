@@ -501,7 +501,7 @@ SMOKE_CASES = [
             backend_name="trtllm",
             backend_version="1.3.0rc20",
         ),
-        id="qwen3-8b-b200-trtllm-120rc5-scan-coverage",
+        id="qwen3-8b-b200-trtllm-130rc20-scan-coverage",
     ),
     pytest.param(
         EngineStepParityCase(
@@ -597,7 +597,7 @@ SMOKE_CASES = [
             backend_name="vllm",
             backend_version="0.24.0",
         ),
-        id="kimi-k3-b200-vllm-dev19262-nospec",
+        id="kimi-k3-b200-vllm-024-nospec",
     ),
     # DSPARK speculative case: nextn=7 -> verify width 8 (the fused CuTeDSL
     # verify kernel's collected draft-width cap), crossing the fused verify
@@ -634,12 +634,14 @@ POWER_CASES = [
     pytest.param(
         EngineStepParityCase(
             model_path="Qwen/Qwen3-30B-A3B",
-            backend_version="0.24.0",
+            # sole power-measured MoE coordinate (kept donor data): energy
+            # parity must exercise real power rows, which only 0.22 carries.
+            backend_version="0.22.0",
             tp_size=4,
             moe_ep_size=4,
             compare_energy=True,
         ),
-        id="qwen3-30b-a3b-b200-vllm-024-power",
+        id="qwen3-30b-a3b-b200-vllm-022-power",
     ),
     pytest.param(
         EngineStepParityCase(
@@ -2109,7 +2111,11 @@ class TestRustTypedErrorsAcrossFfi:
         # MissingSystemFlopsError before any data lookup — h200 has no
         # fp4_tc_flops — see the missing-dtype test below.)
         _prepare_rust_core(monkeypatch)
-        case = EngineStepParityCase(model_path="XiaomiMiMo/MiMo-V2-Flash")
+        case = EngineStepParityCase(
+            model_path="XiaomiMiMo/MiMo-V2-Flash",
+            # deliberate data-gap coordinate: 0.19.0 collected head_dim {128,256} only
+            backend_version="0.19.0",
+        )
         with pytest.raises(errors.PerfDataNotAvailableError) as excinfo:
             _rust_static_breakdown(case)
         assert perf_database.has_perf_data_not_available_cause(excinfo.value)
@@ -2221,7 +2227,12 @@ class TestRustProvenanceCapture:
         # tier. Python probes record {xop, xshape}; the rust path must land on
         # the same worst_provenance.
         _prepare_rust_core(monkeypatch)
-        case = EngineStepParityCase(model_path="MiniMaxAI/MiniMax-M3", database_mode="HYBRID")
+        case = EngineStepParityCase(
+            model_path="MiniMaxAI/MiniMax-M3",
+            database_mode="HYBRID",
+            # xop-borrow behavior coordinate (MSA borrows DSA util at 0.19-era data)
+            backend_version="0.19.0",
+        )
         with util_empirical.capture_provenance() as tags:
             metrics = _static_metrics(case)
         assert not isinstance(metrics["total_ms"], _ErrorSentinel), repr(metrics)

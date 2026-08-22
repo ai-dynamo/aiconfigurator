@@ -90,7 +90,7 @@ _SUBSET_IDS_BY_BACKEND = {
         "minimax-m25-b200-vllm-024-sampled-prefix",
         "minimax-m27-b200-vllm-024-isl1024-osl2",
         "qwen3-30b-a3b-b200-vllm-024-isl1024-osl2",
-        "qwen3-30b-a3b-b200-vllm-024-power",
+        "qwen3-30b-a3b-b200-vllm-022-power",
     ],
     "sglang": [
         "kimi-k25-b200-sglang-0514-isl1024-osl2",
@@ -105,7 +105,7 @@ _SUBSET_IDS_BY_BACKEND = {
 # Subset members on power-carrying database identities: their per-op goldens
 # must carry nonzero energy_wms, so the energy comparison branch is proven to
 # execute (see the anti-vacuous guard in TestCompileEnginePerOpParity).
-_POWER_SUBSET_IDS = {"qwen3-30b-a3b-b200-vllm-024-power"}
+_POWER_SUBSET_IDS = {"qwen3-30b-a3b-b200-vllm-022-power"}
 
 # Preserve the per-backend ordering (vllm, then sglang, then trtllm) so the
 # parametrize ids group readably and the determinism sweep covers vllm first.
