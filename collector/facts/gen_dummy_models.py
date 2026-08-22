@@ -75,6 +75,26 @@ def load_repos(configs_dir: Path) -> dict[str, str]:
             repos[repo] = _SPECIAL.get(repo, "generic")
     return repos
 
+# Explicit, recorded auto_map removals: the gated repo's custom code is
+# unobtainable, and the OFFICIAL sibling artifact (NVFP4 requant) ships
+# without auto_map — frameworks resolve model_type natively. Removing it is
+# a declared edit, never a silent fallback.
+# Explicit hf_quant stub completions: aic-core ships CONDENSED hf_quant stubs
+# (quant_algo only) that sglang's modelopt parser cannot load (it requires
+# exclude_modules). The completion copies the field from the NVFP4 sibling's
+# REAL hf_quant file — the exclusion set is architecture-structural
+# (conv1d/gate/latent_proj/embeddings/lm_head/mtp*), identical across the
+# family's quant artifacts. Recorded as an edit.
+_HFQUANT_COMPLETE_FROM_SIBLING = {
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8":
+        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+}
+
+_DROP_AUTO_MAP = {
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8":
+        "gated custom code; official NVFP4 sibling has no auto_map (native nemotron_h)",
+}
+
 _LAYER_REF_RE = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|\*|$)")
 
 
@@ -293,6 +313,15 @@ def apply_gptoss(cfg: dict, var: dict, edits: list[str]) -> None:
 _PERIOD_FIELDS = ("full_attention_interval", "attention_interval",
                   "linear_attention_interval", "moe_layer_interval")
 
+# Some frameworks hardcode a layer-kind period by layer_id with NO config
+# field to read it from. Declared here with the source citation; the dummy
+# must cut to a whole period (rule 5) even though the config can't say so.
+# sglang llama4.py:217 @0.5.16: use_rope = (layer_id + 1) % 4 != 0
+_ARCH_IMPLICIT_PERIODS = {
+    "Llama4ForConditionalGeneration": 4,
+    "Llama4ForCausalLM": 4,
+}
+
 
 def _min_depth_for_periods(tc: dict) -> int:
     """Minimum layer count that keeps a period-derived architecture faithful.
@@ -307,6 +336,9 @@ def _min_depth_for_periods(tc: dict) -> int:
     """
     periods = [int(tc[f]) for f in _PERIOD_FIELDS
                if isinstance(tc.get(f), int) and tc[f] > 1]
+    for arch in (tc.get("architectures") or []):
+        if arch in _ARCH_IMPLICIT_PERIODS:
+            periods.append(_ARCH_IMPLICIT_PERIODS[arch])
     if not periods:
         return 0
     import math
@@ -338,10 +370,18 @@ def variants_generic(cfg: dict) -> list[dict]:
         tc["num_hidden_layers"] = len(tc["layers_block_type"])  # Nemotron-Ultra schema
     n = tc["num_hidden_layers"]
     skip = int(tc.get("first_k_dense_replace") or 0)
+    if "architectures" not in tc and cfg.get("architectures"):
+        tc = {**tc, "architectures": cfg["architectures"]}
     min_depth = _min_depth_for_periods(tc)
     if min_depth and min_depth <= n:
-        # period-derived architecture: keep the real period, take whole periods
-        return [{"name": f"depth{min_depth}", "sel": list(range(min_depth))}]
+        # period-derived architecture: keep the real period, take whole periods.
+        # Also emit a one-period variant as the capacity fallback for very wide
+        # models (Llama-4-Maverick's 8 MoE layers x 128 experts exceed one GPU).
+        out = [{"name": f"depth{min_depth}", "sel": list(range(min_depth))}]
+        if min_depth % 2 == 0 and min_depth // 2 >= 2:
+            half = min_depth // 2
+            out.append({"name": f"depth{half}", "sel": list(range(half))})
+        return out
     axis, values = _layer_axis(cfg)
     if not axis:
         sel = list(range(skip, min(skip + 2, n))) or list(range(min(2, n)))
@@ -425,6 +465,8 @@ def main() -> int:
                     cfg[k] = 0
                     edits.append(f"{k} -> 0")
             _remap_quant_layer_entries(cfg, var["sel"], edits)
+            if repo in _DROP_AUTO_MAP and cfg.pop("auto_map", None) is not None:
+                edits.append(f"auto_map removed: {_DROP_AUTO_MAP[repo]}")
             new_n = cfg.get("num_hidden_layers") or cfg["text_config"]["num_hidden_layers"]
             stale = _check_no_stale_layer_refs(cfg, new_n)
             tag = f"{repo.split('/')[-1]}__{var['name']}"
@@ -438,6 +480,12 @@ def main() -> int:
             hq_src = args.configs / (repo.replace("/", "_") + "_hfquant.json")
             if hq_src.exists():
                 hq = json.loads(hq_src.read_text())
+                sib = _HFQUANT_COMPLETE_FROM_SIBLING.get(repo)
+                if sib and "exclude_modules" not in (hq.get("quantization") or {}):
+                    sib_hq = json.loads((args.configs / (sib.replace("/", "_") + "_hfquant.json")).read_text())
+                    hq.setdefault("quantization", {})["exclude_modules"] = \
+                        sib_hq["quantization"]["exclude_modules"]
+                    edits.append(f"hf_quant exclude_modules completed from sibling {sib}")
                 _remap_quant_layer_entries({"quantization_config": hq.get("quantization", hq)},
                                            var["sel"], edits)
                 (out_dir / "hf_quant_config.json").write_text(json.dumps(hq, indent=2))

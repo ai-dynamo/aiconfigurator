@@ -39,12 +39,11 @@ backends:
 families:
   dsv4:
     known_sm90:
-      sglang_0516: 'ue8m0-scale fp8 DSV4 checkpoints fail at trace on SM90 tp1: auto->triton MoE runner
-        asserts ''Hidden size mismatch'' (w13 requantized to deepgemm ue8m0 layout at load; triton reads
-        it transposed); explicit deep_gemm runner asserts SM100-only packed-fp4 branch (layout.hpp:57
-        ''kPackedFP4 and arch_major == 10''). DEEPGEMM_SCALE_UE8M0 = DEEPGEMM_BLACKWELL in sglang — the
-        ue8m0 requant path assumes Blackwell. Probe-verified 2026-08-20 (bisect A-I: generator CLI, mixed-chunk,
-        page size, jitcache mount all excluded).'
+      sglang_0516: 'ue8m0-scale fp8 DSV4 on SM90 tp1: ALL FIVE MoE runners fail — auto->triton (w13 requantized
+        to ue8m0 deepgemm layout, ''Hidden size mismatch''), deep_gemm (SM100-only packed-fp4 branch),
+        cutlass (Fp8MoEMethod lacks ab_strides1), triton_kernel (arange power-of-2 assert), flashinfer_cutlass
+        (lacks .runner). cause=framework_bug: no working path exists. Evidence facts/bisect_dsv4_{A..I,runner_*}.json,
+        2026-08-20/22.'
       trtllm_rc23: 'DSV4 rejected at load: ''Missing COMPRESS pool metadata for compress ratio 4'' — CSA
         compression unsupported on this path.'
     architecture: DeepseekV4ForCausalLM
@@ -143,6 +142,7 @@ families:
     extra_repos:
     - moonshotai/Kimi-K3
     - nvidia/Kimi-K3-NVFP4
+    - nvidia/DeepSeek-V3.2-NVFP4
     checkpoint_overrides:
       MiniMaxAI/MiniMax-M2:
         known:
@@ -153,6 +153,9 @@ families:
             Probe retries once and records warmup_retry; persistent failure is a record, not a block.
           trtllm_linear_assert: 'trtllm rc23: fp8 Linear.apply assertion (linear.py:1142) under the generator-rendered
             engine args; probe-default args loaded fine — surfaced by the fidelity upgrade 2026-08-21.'
+          sglang_workaround: 'flake root-caused to flashinfer cutlass-DSL fused_add_rmsnorm tvm_ffi nondeterminism:
+            SGLANG_IS_FLASHINFER_AVAILABLE=false passes 4/4 (facts/bisect_m2_noflashinfer_*.json, 2026-08-22).
+            Deterministic workaround exists; perf cost unmeasured.'
       deepseek-ai/DeepSeek-V4-Flash:
         variant_overrides:
           vllm: rep_mix
@@ -228,6 +231,24 @@ families:
         known:
           trtllm_linear_assert: 'trtllm rc23: fp8 Linear.apply assertion (linear.py:1142) under the generator-rendered
             engine args; probe-default args loaded fine — surfaced by the fidelity upgrade 2026-08-21.'
+          sglang_workaround: 'flake root-caused to flashinfer cutlass-DSL fused_add_rmsnorm tvm_ffi nondeterminism:
+            SGLANG_IS_FLASHINFER_AVAILABLE=false passes 4/4 (facts/bisect_m2_noflashinfer_*.json, 2026-08-22).
+            Deterministic workaround exists; perf cost unmeasured.'
+      meta-llama/Llama-4-Maverick-17B-128E-Instruct:
+        variant_overrides:
+          sglang: depth4
+          vllm: depth4
+        render_overrides:
+          vllm:
+            tokens_per_block: null
+      meta-llama/Llama-4-Scout-17B-16E-Instruct:
+        render_overrides:
+          vllm:
+            tokens_per_block: null
+        known:
+          dummy_notes: layer-kind period is FRAMEWORK-HARDCODED (sglang llama4.py:217 use_rope=(layer_id+1)%4!=0)
+            with no config field -> _ARCH_IMPLICIT_PERIODS; aic-core config lacks vision_config -> merged
+            from unsloth mirror (vllm builds the vision tower and profiles it even for text-only probes).
 topologies:
 - tp: 1
   ep: 1
