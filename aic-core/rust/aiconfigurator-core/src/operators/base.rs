@@ -125,7 +125,7 @@ impl MoeCommFallbacks {
         }
     }
 
-    fn extend(&mut self, other: Self) {
+    pub(crate) fn extend(&mut self, other: Self) {
         for fallback in other.iter().copied() {
             self.insert(fallback);
         }

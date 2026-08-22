@@ -27,10 +27,10 @@ from aiconfigurator_core.sdk.performance_result import MoECommFallback, merge_mo
 
 logger = logging.getLogger(__name__)
 ENGINE_STEP_BACKEND_ENV = "AICONFIGURATOR_ENGINE_STEP_BACKEND"
-MoeCommFallbackPayload = tuple[str, str, int, int, int, int]
-MoeCommFallbackMetadata = tuple[MoeCommFallbackPayload, list[MoeCommFallbackPayload]]
+_MoeCommFallbackPayload = tuple[str, str, int, int, int, int]
+_MoeCommFallbackMetadata = tuple[_MoeCommFallbackPayload, list[_MoeCommFallbackPayload]]
 PerOpValue = tuple[str, float, float, str]
-PerOpValueWithMetadata = tuple[str, float, float, str, MoeCommFallbackMetadata | None]
+_PerOpValueWithMetadata = tuple[str, float, float, str, _MoeCommFallbackMetadata | None]
 
 
 # Python-step telemetry (#1357): count every remaining Python op.query() use
@@ -448,7 +448,7 @@ def _fold_per_op(
     return latency, energy, source, merge_moe_comm_fallbacks(fallbacks)
 
 
-def _moe_comm_fallback_from_payload(payload: MoeCommFallbackPayload) -> MoECommFallback:
+def _moe_comm_fallback_from_payload(payload: _MoeCommFallbackPayload) -> MoECommFallback:
     return MoECommFallback(
         inference_phase=payload[0],
         comm_backend=payload[1],

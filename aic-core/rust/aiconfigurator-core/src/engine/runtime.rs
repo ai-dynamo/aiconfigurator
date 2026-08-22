@@ -100,29 +100,32 @@ pub struct StaticResult {
 /// `run_static` / `_run_generation_phase` (the `DEFAULT_STATIC_STRIDE`).
 pub const DEFAULT_STATIC_STRIDE: u32 = 32;
 
-/// Executed MoE communication fallback as it crosses the FFI:
+/// Executed MoE communication fallback as it crosses the private FFI:
 /// `(inference_phase, comm_backend, requested_ep, requested_nodes,
 /// measurement_ep, measurement_nodes)`.
-pub type MoeCommFallbackValue = (&'static str, &'static str, u32, u32, u32, u32);
+pub(crate) type MoeCommFallbackValue = (&'static str, &'static str, u32, u32, u32, u32);
 
 /// Inline-first fallback metadata for one name-folded op. The first record
 /// lives inline; `additional` allocates only when a second distinct record is
 /// inserted.
-pub type MoeCommFallbackValues = (MoeCommFallbackValue, Vec<MoeCommFallbackValue>);
+pub(crate) type MoeCommFallbackValues = (MoeCommFallbackValue, Vec<MoeCommFallbackValue>);
 
 /// One evaluated op as it crosses the FFI: `(name, latency_ms, energy_wms,
-/// source, moe_comm_fallbacks)`. Entries are NAME-FOLDED before crossing — repeated names
+/// source)`. Entries are NAME-FOLDED before crossing — repeated names
 /// accumulate with `+=` and sources merge to `"mixed"` on mismatch, the
 /// exact accumulation semantics of Python's phase dicts (addition is
 /// commutative, so folding here instead of in Python changes nothing) —
 /// because streaming the raw ops × stride-steps tuples through pyo3
 /// measurably slowed the engine step on per-block puzzle nets (hundreds of
 /// String allocations + Python tuple constructions per call). `source` is
-/// the provenance tag (`silicon|empirical|sol|estimated|mixed`). The private
-/// fifth field is `None` or `(first_record, additional_records)` in
-/// deterministic encounter order; the public bindings strip it and retain
-/// their four-tuple contract.
-pub type PerOpValue = (
+/// the provenance tag (`silicon|empirical|sol|estimated|mixed`).
+pub type PerOpValue = (String, f64, f64, &'static str);
+
+/// Internal per-op value used by the provenance-aware engine walk. The fifth
+/// field is `None` or `(first_record, additional_records)` in deterministic
+/// encounter order; public Rust and Python methods strip it and retain their
+/// documented four-tuple contract.
+pub(crate) type PerOpValueWithMetadata = (
     String,
     f64,
     f64,
@@ -145,7 +148,7 @@ pub type PerOpSolValue = (String, f64, f64, f64);
 /// names), far below where a map would win.
 struct PerOpFold {
     inference_phase: &'static str,
-    entries: Vec<PerOpValue>,
+    entries: Vec<PerOpValueWithMetadata>,
 }
 
 fn insert_per_op_fallback(
@@ -215,9 +218,18 @@ impl PerOpFold {
         ));
     }
 
-    fn into_values(self) -> Vec<PerOpValue> {
+    fn into_values(self) -> Vec<PerOpValueWithMetadata> {
         self.entries
     }
+}
+
+fn strip_per_op_metadata(entries: Vec<PerOpValueWithMetadata>) -> Vec<PerOpValue> {
+    entries
+        .into_iter()
+        .map(|(name, latency_ms, energy_wms, source, _fallbacks)| {
+            (name, latency_ms, energy_wms, source)
+        })
+        .collect()
 }
 
 /// Name-folding accumulator for [`PerOpSolValue`] streams (fold semantics of
@@ -577,6 +589,7 @@ impl Engine {
                         if entry.1.source != r.source {
                             entry.1.source = crate::operators::base::Source::Mixed;
                         }
+                        entry.1.moe_comm_fallbacks.extend(r.moe_comm_fallbacks);
                     } else {
                         step_fold.push((op, r));
                     }
@@ -972,7 +985,7 @@ impl Engine {
 
     /// [`Self::run_static`] with the per-op values kept instead of summed:
     /// `(context, generation)` lists of `(name, latency_ms, energy_wms,
-    /// source, moe_comm_fallbacks)`, NAME-FOLDED (see [`PerOpValue`]): each name crosses once,
+    /// source)`, NAME-FOLDED (see [`PerOpValue`]): each name crosses once,
     /// pre-accumulated with Python's phase-dict semantics. Generation values
     /// are per-step-folded, then weighted by the stride `repeat_count`.
     pub fn run_static_per_op(
@@ -981,6 +994,31 @@ impl Engine {
         mode: StaticMode,
         stride: u32,
     ) -> Result<(Vec<PerOpValue>, Vec<PerOpValue>), AicError> {
+        let (context, generation) = self.run_static_per_op_impl(runtime, mode, stride)?;
+        Ok((
+            strip_per_op_metadata(context),
+            strip_per_op_metadata(generation),
+        ))
+    }
+
+    /// Metadata-bearing counterpart used only by the private PyO3 provenance
+    /// endpoint. Evaluation stays in this single implementation so the value
+    /// and its fallback records always come from the same query.
+    pub(crate) fn run_static_per_op_with_metadata(
+        &self,
+        runtime: &RuntimeConfig,
+        mode: StaticMode,
+        stride: u32,
+    ) -> Result<(Vec<PerOpValueWithMetadata>, Vec<PerOpValueWithMetadata>), AicError> {
+        self.run_static_per_op_impl(runtime, mode, stride)
+    }
+
+    fn run_static_per_op_impl(
+        &self,
+        runtime: &RuntimeConfig,
+        mode: StaticMode,
+        stride: u32,
+    ) -> Result<(Vec<PerOpValueWithMetadata>, Vec<PerOpValueWithMetadata>), AicError> {
         let mut context = PerOpFold::new("context");
         if matches!(mode, StaticMode::Context | StaticMode::Both) {
             if runtime.prefix >= runtime.isl {
@@ -1009,9 +1047,8 @@ impl Engine {
 
     /// [`Self::mixed_step_breakdown`] with the per-op values kept:
     /// `(shared_non_attention, context_attention, decode_attention)` lists of
-    /// `(name, latency_ms, energy_wms, source, moe_comm_fallbacks)`.
-    /// Context-attention entries arrive already divided by the
-    /// `ceil(isl/ctx)` scale.
+    /// `(name, latency_ms, energy_wms, source)`. Context-attention entries
+    /// arrive already divided by the `ceil(isl/ctx)` scale.
     #[allow(clippy::too_many_arguments)]
     pub fn mixed_step_breakdown_per_op(
         &self,
@@ -1023,6 +1060,71 @@ impl Engine {
         seq_imbalance_correction_scale: f64,
         gen_seq_imbalance_correction_scale: f64,
     ) -> Result<(Vec<PerOpValue>, Vec<PerOpValue>, Vec<PerOpValue>), AicError> {
+        let (shared, context_attention, decode_attention) = self.mixed_step_breakdown_per_op_impl(
+            ctx_tokens,
+            gen_tokens,
+            isl,
+            osl,
+            prefix,
+            seq_imbalance_correction_scale,
+            gen_seq_imbalance_correction_scale,
+        )?;
+        Ok((
+            strip_per_op_metadata(shared),
+            strip_per_op_metadata(context_attention),
+            strip_per_op_metadata(decode_attention),
+        ))
+    }
+
+    /// Metadata-bearing counterpart used only by the private PyO3 provenance
+    /// endpoint. See [`Self::mixed_step_breakdown_per_op`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn mixed_step_breakdown_per_op_with_metadata(
+        &self,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> Result<
+        (
+            Vec<PerOpValueWithMetadata>,
+            Vec<PerOpValueWithMetadata>,
+            Vec<PerOpValueWithMetadata>,
+        ),
+        AicError,
+    > {
+        self.mixed_step_breakdown_per_op_impl(
+            ctx_tokens,
+            gen_tokens,
+            isl,
+            osl,
+            prefix,
+            seq_imbalance_correction_scale,
+            gen_seq_imbalance_correction_scale,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mixed_step_breakdown_per_op_impl(
+        &self,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> Result<
+        (
+            Vec<PerOpValueWithMetadata>,
+            Vec<PerOpValueWithMetadata>,
+            Vec<PerOpValueWithMetadata>,
+        ),
+        AicError,
+    > {
         // Whole-model FPM: never the name-filtered three-pass split (see
         // mixed_step_breakdown_with). Report the scalar path's component
         // mapping as per-op entries — the prefill component under the
@@ -1039,11 +1141,11 @@ impl Engine {
                 osl.max(1),
                 prefix,
             )?;
-            let mut shared: Vec<PerOpValue> = Vec::new();
+            let mut shared: Vec<PerOpValueWithMetadata> = Vec::new();
             if ctx_tokens > 0 {
                 shared.push((prefill_op.name.clone(), prefill_ms, 0.0, "silicon", None));
             }
-            let mut dec_attn: Vec<PerOpValue> = Vec::new();
+            let mut dec_attn: Vec<PerOpValueWithMetadata> = Vec::new();
             if gen_tokens > 0 {
                 dec_attn.push((
                     decode_op.name.clone(),
@@ -1097,6 +1199,29 @@ impl Engine {
         osl: u32,
         gen_seq_imbalance_correction_scale: f64,
     ) -> Result<Vec<PerOpValue>, AicError> {
+        self.decode_step_per_op_impl(gen_tokens, isl, osl, gen_seq_imbalance_correction_scale)
+            .map(strip_per_op_metadata)
+    }
+
+    /// Metadata-bearing counterpart used only by the private PyO3 provenance
+    /// endpoint. See [`Self::decode_step_per_op`].
+    pub(crate) fn decode_step_per_op_with_metadata(
+        &self,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> Result<Vec<PerOpValueWithMetadata>, AicError> {
+        self.decode_step_per_op_impl(gen_tokens, isl, osl, gen_seq_imbalance_correction_scale)
+    }
+
+    fn decode_step_per_op_impl(
+        &self,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> Result<Vec<PerOpValueWithMetadata>, AicError> {
         let mut out = PerOpFold::new("generation");
         if gen_tokens == 0 {
             return Ok(out.into_values());
@@ -1149,7 +1274,7 @@ impl Engine {
             )?;
             out.add(op, r);
         }
-        Ok(out.into_values())
+        Ok(strip_per_op_metadata(out.into_values()))
     }
 
     /// Evaluate an index-addressed sublist of the compiled GENERATION op list
@@ -1184,7 +1309,7 @@ impl Engine {
             )?;
             out.add(op, r);
         }
-        Ok(out.into_values())
+        Ok(strip_per_op_metadata(out.into_values()))
     }
 
     /// Evaluate an ad-hoc op list (a JSON array of `OpSpec` objects, the same
@@ -1231,7 +1356,7 @@ impl Engine {
             };
             out.add(op, r);
         }
-        Ok(out.into_values())
+        Ok(strip_per_op_metadata(out.into_values()))
     }
 
     /// [`Self::evaluate_ops_json`] under the SOL_FULL view: evaluate an
@@ -1461,7 +1586,9 @@ mod tests {
     use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
     use crate::engine::spec::EngineSpec;
     use crate::operators::op::Op;
-    use crate::operators::{ContextAttentionOp, ElementwiseOp, GemmOp, GenerationAttentionOp};
+    use crate::operators::{
+        ContextAttentionOp, ElementwiseOp, GemmOp, GenerationAttentionOp, MoeAllToAllOp,
+    };
     use crate::{BackendKind, EngineConfig, ParallelMapping, QuantizationConfig};
 
     fn systems_root() -> PathBuf {
@@ -1674,6 +1801,52 @@ mod tests {
         let (first, additional) = multiple.into_values().pop().unwrap().4.unwrap();
         assert_eq!(first, ("generation", "deepep_ht", 32, 8, 8, 1));
         assert_eq!(additional, vec![("generation", "deepep_ll", 32, 8, 8, 1)]);
+    }
+
+    #[test]
+    fn generation_step_preserves_distinct_same_name_deepep_fallbacks() {
+        let mut config = fixture_engine_config(None);
+        config.system_name = "gb200".to_string();
+        config.backend = BackendKind::Sglang;
+        config.backend_version = Some("0.5.16".to_string());
+
+        let a2a = |moe_ep_size, node_num| {
+            Op::MoeAllToAll(MoeAllToAllOp {
+                name: "generation_moe_dispatch".to_string(),
+                scale_factor: 1.0,
+                phase: "dispatch".to_string(),
+                comm_backend: "deepep_ll".to_string(),
+                comm_dtype: "default".to_string(),
+                hidden_size: 7168,
+                topk: 8,
+                num_experts: 256,
+                moe_ep_size,
+                node_num,
+                sms: 0,
+                attention_tp_size: 1,
+            })
+        };
+        let spec = EngineSpec::new(config, Vec::new(), vec![a2a(32, 8), a2a(64, 16)]);
+        let engine = Engine::from_spec_bytes(&spec.to_bincode().unwrap(), &systems_root())
+            .expect("shipped GB200 SGLang DeepEP data must load");
+        let runtime = RuntimeConfig {
+            batch_size: 1,
+            isl: 1024,
+            osl: 2,
+            ..Default::default()
+        };
+
+        let (_, generation) = engine
+            .run_static_per_op_with_metadata(&runtime, StaticMode::Generation, 32)
+            .unwrap();
+        assert_eq!(generation.len(), 1, "same-name ops must remain name-folded");
+        assert_eq!(
+            generation[0].4,
+            Some((
+                ("generation", "deepep_ll", 32, 8, 8, 1),
+                vec![("generation", "deepep_ll", 64, 16, 8, 1)],
+            ))
+        );
     }
 
     #[test]
