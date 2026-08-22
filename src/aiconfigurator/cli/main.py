@@ -380,8 +380,9 @@ def _add_default_mode_arguments(parser):
         type=str,
         default=None,
         help="[expert] Performance-database version used for the simulation/search "
-        "(search fidelity). Default: latest measured version; marker-only shared-layer versions "
-        "require an explicit value. Alias: --backend-version.",
+        "(search fidelity). Accepts a queryable slot version or the aliases "
+        "current / previous / next (see systems/query_versions.yaml). "
+        "Default: current. Alias: --backend-version.",
     )
     parser.add_argument(
         "--database-mode",
@@ -856,8 +857,9 @@ def _add_estimate_mode_arguments(parser):
         type=str,
         default=None,
         help="[expert] Performance-database version used for the simulation/search "
-        "(search fidelity). Default: latest measured version; marker-only shared-layer versions "
-        "require an explicit value. Alias: --backend-version.",
+        "(search fidelity). Accepts a queryable slot version or the aliases "
+        "current / previous / next (see systems/query_versions.yaml). "
+        "Default: current. Alias: --backend-version.",
     )
     parser.add_argument("--isl", type=int, default=1024, help="Input sequence length. Default: 1024.")
     parser.add_argument("--osl", type=int, default=1024, help="Output sequence length. Default: 1024.")
@@ -1494,12 +1496,11 @@ def _ensure_backend_version_available(
     if versions:
         logger.error("Available versions: %s", ", ".join(versions))
         logger.error(
-            "Fix: switch --backend-version to one of the available versions, "
-            "remove --backend-version to use latest, "
-            "or add a declared version directory with %s (legacy: %s) when this version "
-            "intentionally reuses shared-layer data.",
-            perf_database.REUSE_YAML_MARKER,
-            perf_database.SHARED_LAYER_REUSE_MARKER,
+            "Fix: switch --backend-version to one of the available slot versions "
+            "or the aliases current / previous / next, or remove "
+            "--backend-version to use current. Versions outside the slots "
+            "are data coordinates, not queryable versions "
+            "(see systems/query_versions.yaml).",
         )
     else:
         logger.error("Available versions: none")
