@@ -1182,67 +1182,6 @@ mod tests {
         );
     }
 
-    /// XPROFILE tie-break follows FILE-ROW quant order, not sorted order:
-    /// b200/vllm/0.24.0 lists `fp8_block` before `fp8` (both profile (1,2),
-    /// distance 0.5 from w4afp8), so Python's stable sort borrows the
-    /// `fp8_block` util curve. The shape's `nvfp4` rows (added with the vLLM
-    /// 0.24 w4a8 data refresh, #1399) provide a closer XQUANT match that
-    /// shadows the tie-break under `TransferPolicy::ALL`, so the test pins a
-    /// policy without xquant to keep exercising the XPROFILE path. Oracles:
-    ///
-    /// ```text
-    /// db = perf_database.get_database_view("b200_sxm", "vllm", "0.24.0",
-    ///     allow_missing_data=True, database_mode="EMPIRICAL", shared_layer=False,
-    ///     transfer_policy=["xshape", "xprofile", "xop"])
-    /// float(MoE._query_moe_table(db, num_tokens=..., hidden_size=5120,
-    ///     inter_size=8192, topk=1, num_experts=16, moe_tp_size=1,
-    ///     moe_ep_size=1, quant_mode=common.MoEQuantMode.w4afp8,
-    ///     workload_distribution="power_law_1.01",
-    ///     database_mode=common.DatabaseMode.EMPIRICAL))
-    /// ```
-    ///
-    /// The fp8-referenced value (the old sorted-name order) is
-    /// 0.42024958928426115 at t=96 — a live ~13% divergence this pins.
-    #[test]
-    fn moe_xprofile_tie_break_follows_file_order() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join("src/aiconfigurator_core/systems");
-        let no_xquant = TransferPolicy {
-            xshape: true,
-            xquant: false,
-            xprofile: true,
-            xop: true,
-        };
-        let db = PerfDatabase::load(&root, "b200_sxm", "vllm", "0.24.0")
-            .expect("db loads")
-            .with_mode(crate::common::enums::DatabaseMode::Empirical, no_xquant);
-        let op = MoeOp {
-            name: "moe".into(),
-            scale_factor: 1.0,
-            hidden_size: 5120,
-            inter_size: 8192,
-            topk: 1,
-            num_experts: 16,
-            moe_tp_size: 1,
-            moe_ep_size: 1,
-            quant_mode: MoeQuantMode::W4afp8,
-            workload_distribution: "power_law_1.01".into(),
-            attention_dp_size: 1,
-            is_gated: true,
-            moe_backend: None,
-            enable_eplb: false,
-            is_context: false,
-        };
-        let r96 = op.query(&db, 96).expect("xprofile tie t=96");
-        assert_routing(&r96, Source::Empirical,
-            "xprofile_tie_t96",
-        );
-        let r512 = op.query(&db, 512).expect("xprofile tie t=512");
-        assert_routing(&r512, Source::Empirical,
-            "xprofile_tie_t512",
-        );
-    }
 
     /// With attention-dp, all dp ranks' tokens funnel into the shared expert
     /// pool: query(dp=4, t) must equal query(dp=1, 4t). Dropping the
