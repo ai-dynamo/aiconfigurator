@@ -1519,47 +1519,59 @@ class TestRustEngineStepCpStaticCtxParity:
 class TestRustEngineHandleDatabasePolicyIdentity:
     """Handle-cache isolation across database-policy views (review finding).
 
-    `build_engine_spec_json` bakes the database's policy-dependent
-    `perf_db_sources` into the compiled handle, so a shared-layer-off view
-    and a shared-layer-on view of the SAME on-disk identity must not alias
-    one cached handle. The cache is cleared ONCE per ordering (not between
-    the two queries — that is the point): whichever view warms the cache
-    must not answer, or fail, for the other. Guards both directions on the
-    adjudicated DSV4 CP shape: the false FAILURE (off-warmed cache raising
-    for the reuse-carrying on-view) and the false SUCCESS (on-warmed cache
-    computing for the primary-only off-view that must raise).
+    A shared-layer-off view and a shared-layer-on view of the SAME on-disk
+    identity must not alias one cached handle. The cache is cleared ONCE per
+    ordering (not between the two queries — that is the point): whichever
+    view warms the cache must not answer, or fail, for the other.
+
+    Vehicle: the sglang large-EP config. Its wideEP tables live ONLY in
+    older sole-source dirs and reach the current slot through the shared
+    layer, so the asymmetry is structural: the primary-only off-view MUST
+    raise, the shared-on view MUST answer. No value pin — a cache-aliasing
+    bug manifests as the on-view raising (off-warmed) or the off-view
+    answering (on-warmed), both caught by the type of the outcome alone.
+    (The former vehicle, the #1498 DSV4-CP w4a8 shape, lost its only
+    silicon source when the sglang 0.5.10 moe grid retired.)
     """
 
-    ANCHOR_MS = 42.4307555484161  # the issue #1498 adjudicated static_ctx sum
-
     def _static_ctx_ms(self, model, view) -> float:
-        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=8192, osl=8, prefix=0, engine_step_backend="rust")
+        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=8, prefix=0, engine_step_backend="rust")
         ctx_latency, _gen, *_ = rust_engine_step.estimate_static_latency_breakdown_with_rust(
             model, view, rc, "static_ctx", 1, 1.0
         )
         return float(sum(ctx_latency.values()))
 
     def _build(self):
-        (case,) = DSV4_CP_CASES[0].values
-        model = _quiet_call(get_model, case.model_path, _case_model_config(case), case.backend_name)
+        cfg = config.ModelConfig(
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=32,
+            moe_tp_size=1,
+            moe_ep_size=32,
+            gemm_quant_mode=common.GEMMQuantMode.fp8_block,
+            moe_quant_mode=common.MoEQuantMode.fp8_block,
+            kvcache_quant_mode=common.KVCacheQuantMode.fp8,
+            fmha_quant_mode=common.FMHAQuantMode.fp8_block,
+            moe_comm_backend={"context": "deepep_ht", "generation": "deepep_ll"},
+            num_gpus_per_node=8,
+        )
+        model = _quiet_call(get_model, "deepseek-ai/DeepSeek-R1", cfg, "sglang")
         off = _quiet_call(
             perf_database.get_database_view,
-            case.system_name,
-            case.backend_name,
-            case.backend_version,
+            "h200_sxm",
+            "sglang",
+            "current",
             shared_layer=False,
-            allow_unlisted_version=True,
         )
         on = _quiet_call(
             perf_database.get_database_view,
-            case.system_name,
-            case.backend_name,
-            case.backend_version,
+            "h200_sxm",
+            "sglang",
+            "current",
             shared_layer=True,
-            allow_unlisted_version=True,
         )
         if off is None or on is None:
-            pytest.skip("no perf database for the DSV4 CP case identity")
+            pytest.skip("no perf database for the large-EP identity")
         return model, off, on
 
     def test_off_warmed_cache_does_not_fail_the_shared_on_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1567,12 +1579,14 @@ class TestRustEngineHandleDatabasePolicyIdentity:
         model, off, on = self._build()
         with pytest.raises(errors.PerfDataNotAvailableError):
             self._static_ctx_ms(model, off)
-        assert self._static_ctx_ms(model, on) == pytest.approx(self.ANCHOR_MS, rel=1e-9)
+        on_ms = self._static_ctx_ms(model, on)
+        assert on_ms > 0.0 and on_ms == on_ms  # answers, finite
 
     def test_on_warmed_cache_does_not_answer_for_the_shared_off_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _prepare_rust_core(monkeypatch)  # the ONLY cache clear in this ordering
         model, off, on = self._build()
-        assert self._static_ctx_ms(model, on) == pytest.approx(self.ANCHOR_MS, rel=1e-9)
+        on_ms = self._static_ctx_ms(model, on)
+        assert on_ms > 0.0 and on_ms == on_ms
         with pytest.raises(errors.PerfDataNotAvailableError):
             self._static_ctx_ms(model, off)
 
