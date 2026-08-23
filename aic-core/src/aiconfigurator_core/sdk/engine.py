@@ -193,6 +193,36 @@ def _strict_provenance_flag(database: Any) -> bool:
     return bool(getattr(database, "strict_provenance", False)) if database is not None else False
 
 
+def _literal_backend_version(
+    system: str,
+    backend: str,
+    backend_version: str | None,
+    systems_path: str | None,
+    database: Any,
+) -> str | None:
+    """Resolve the version the ``EngineSpec`` carries to a LITERAL directory name.
+
+    The Rust side reloads the perf database from this string
+    (``AicEngine.from_spec`` and the native ``AicEngineBuilder`` path used by
+    the Dynamo Mocker) and resolves no slot aliases — slot semantics
+    (``current`` / ``previous`` / ``next``) live in the python layer only.
+    Preference order: the loaded database's own version (the ground truth for
+    what the spec was compiled against), then an explicit alias resolution,
+    then the raw input as a last resort.
+    """
+    resolved = getattr(database, "version", None) if database is not None else None
+    if resolved:
+        return str(resolved)
+    if backend_version is None:
+        return None
+    try:
+        from aiconfigurator_core.sdk import perf_database
+
+        return perf_database.resolve_query_version(system, backend, backend_version, systems_paths=systems_path)
+    except Exception:
+        return backend_version
+
+
 def _engine_config_dict(
     *,
     model: Any,
@@ -228,7 +258,9 @@ def _engine_config_dict(
         "system_name": system,
         "systems_path": systems_path,
         "backend": backend,
-        "backend_version": backend_version,
+        # Always a literal version directory name, never a slot alias — the
+        # Rust side reloads the perf database from this string verbatim.
+        "backend_version": _literal_backend_version(system, backend, backend_version, systems_path, database),
         "kv_block_size": kv_block_size,
         # ParallelMapping (flattened)
         "tp_size": int(cfg.tp_size or 1),
