@@ -11,6 +11,7 @@ the analytical disagg point against measured silicon.
 import pandas as pd
 import pytest
 
+from aiconfigurator.sdk.performance_result import MOE_COMM_FALLBACKS_COLUMN, MoECommFallback
 from aiconfigurator.sdk.picking import (
     _RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
     _RATE_MATCHING_PREFILL_DEGRADATION_FACTOR,
@@ -143,3 +144,14 @@ def test_full_utilization_recovers_undegraded_rate() -> None:
     """Factors of 1.0 remove the degradation entirely (decode-bound -> 3.0)."""
     r = _run(prefill_degradation_factor=1.0, decode_degradation_factor=1.0)
     assert r["best_config_df"].iloc[0]["seq/s"] == pytest.approx(3.0)
+
+
+def test_autoscale_preserves_and_dedupes_role_fallback_provenance() -> None:
+    context = MoECommFallback("context", "deepep_ht", 32, 8, 8, 1)
+    generation = MoECommFallback("generation", "deepep_ll", 32, 8, 8, 1)
+    prefill_df = pd.DataFrame([_prefill_dict(**{MOE_COMM_FALLBACKS_COLUMN: (context,)})])
+    decode_df = pd.DataFrame([_decode_dict(**{MOE_COMM_FALLBACKS_COLUMN: (generation, context)})])
+
+    result = pick_autoscale(prefill_df, decode_df, target_ttft=1e9, target_tpot=1e9)
+
+    assert result["best_config_df"].iloc[0][MOE_COMM_FALLBACKS_COLUMN] == (context, generation)

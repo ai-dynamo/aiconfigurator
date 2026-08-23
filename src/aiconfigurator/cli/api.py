@@ -34,6 +34,8 @@ from aiconfigurator.sdk.models import (
     resolve_dsv4_moe_arch,
     resolve_nvfp4_for_system,
 )
+from aiconfigurator.sdk.moe_comm_resolver import resolve_model_config_moe_comm
+from aiconfigurator.sdk.performance_result import MoECommFallback, merge_moe_comm_fallbacks
 from aiconfigurator.sdk.rust_engine_step import validate_engine_step_backend
 from aiconfigurator.sdk.speculative import (
     SpeculativeDecodingProfile,
@@ -821,6 +823,13 @@ class EstimateResult:
 
     kv_cache_warning: str | None = None
     """Warning message for non-fatal memory capacity issues."""
+
+    moe_comm_fallbacks: tuple[MoECommFallback, ...] = ()
+    """Executed MoE communication topology substitutions.
+
+    Populated only when the Rust operator successfully used a measured
+    topology in place of the requested topology.
+    """
 
     @property
     def request_latency(self) -> float:
@@ -1629,6 +1638,7 @@ def _run_agg_estimate(
         summary=summary,
         per_ops_data=summary.get_per_ops_data(),
         per_ops_source=summary.get_per_ops_source(),
+        moe_comm_fallbacks=summary.get_moe_comm_fallbacks(),
         kv_cache_warning=kv_warning,
     )
 
@@ -1699,15 +1709,33 @@ def _run_static_estimate(
         enable_encoder_dp=enable_encoder_dp,
     )
     _apply_nextn(model_config, nextn)
+    database = load_database(system_name)
+
+    if check_is_moe(model_path):
+        required_phases = ("context",) if static_mode == "static_ctx" else ("context", "generation")
+        resolve_model_config_moe_comm(
+            model_config,
+            model_path=model_path,
+            backend_name=backend_name,
+            database=database,
+            required_phases=required_phases,
+            fmha_quant_mode_explicit=fmha_quant_mode is not None,
+            kvcache_quant_mode_explicit=kvcache_quant_mode is not None,
+        )
+
     # static / static_ctx run context attention; static_gen is generation-only
-    # and legitimately keeps fp8 FMHA. Resolve fmha against the perf data accordingly.
-    resolve_context_fmha_by_data(
-        model_config,
-        model_path,
-        load_database(system_name),
-        backend_name,
-        is_context_role=static_mode != "static_gen",
-    )
+    # and legitimately keeps fp8 FMHA. A resolved large-EP tuple already owns
+    # its WideEP MLA quant labels; the generic narrow-attention guard must not
+    # reinterpret those labels as an explicit user request.
+    if model_config.moe_comm_backend is None:
+        resolve_context_fmha_by_data(
+            model_config,
+            model_path,
+            database,
+            backend_name,
+            is_context_role=static_mode != "static_gen",
+        )
+
     resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
     resolve_nvfp4_for_system(model_config, system_name, model_path)
 
@@ -1723,7 +1751,6 @@ def _run_static_estimate(
     )
 
     model = get_model(model_path, model_config, backend_name)
-    database = load_database(system_name)
     backend = get_backend(backend_name)
     session = InferenceSession(model, database, backend)
     summary = session.run_static(
@@ -1771,6 +1798,7 @@ def _run_static_estimate(
         summary=summary,
         per_ops_data=None,
         per_ops_source=None,
+        moe_comm_fallbacks=summary.get_moe_comm_fallbacks(),
         kv_cache_warning=static_warning,
     )
 
@@ -1970,6 +1998,7 @@ def _run_disagg_estimate(
         mode="disagg",
         per_ops_data=summary.get_per_ops_data(),
         per_ops_source=summary.get_per_ops_source(),
+        moe_comm_fallbacks=summary.get_moe_comm_fallbacks(),
     )
 
 
@@ -2083,6 +2112,10 @@ def _combine_afd_static_estimate_results(
         mode="afd",
         per_ops_data=per_ops_data,
         per_ops_source=per_ops_source,
+        moe_comm_fallbacks=merge_moe_comm_fallbacks(
+            afd_result.moe_comm_fallbacks,
+            static_result.moe_comm_fallbacks,
+        ),
         kv_cache_warning=static_result.kv_cache_warning,
     )
 
