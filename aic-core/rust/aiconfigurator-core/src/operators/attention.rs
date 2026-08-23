@@ -1099,200 +1099,63 @@ mod tests {
         assert!((latency - expected).abs() < 1e-12);
     }
 
-    /// Regression pins re-minted from the rust engine at the vllm-0.24 re-anchor (the python query layer retired with #1357; the python-era oracles that seeded this test are in git history). Coordinates:
-    /// `ContextAttention._query_context_attention_table(db, b, s, prefix, n,
-    /// n_kv, kv, fmha, database_mode=EMPIRICAL, window_size=w, head_size=hs)`
-    /// on b200_sxm/vllm/0.24.0. Regenerate if the shipped attention tables or
-    /// the util-empirical math changes.
+    /// Structural wiring for the util-empirical estimator across the
+    /// attention regimes (own-shape, exact-site, prefix, cross-head XSHAPE,
+    /// windowed slice, uncollected window). The estimator MATH is pinned on
+    /// synthetic grids in `util_empirical`/`perf_interp`; end-to-end values
+    /// are pinned by the parity goldens. Here we assert the regime ROUTING:
+    /// every case resolves through the empirical layer, and the uncollected
+    /// head size records the XSHAPE tier while own-slice cases stay at the
+    /// Empirical tier.
     #[test]
-    fn context_attention_empirical_matches_python_oracles() {
+    fn context_attention_empirical_regime_routing() {
         let mut db = b200_vllm_db();
         db.database_mode = crate::common::enums::DatabaseMode::Empirical;
-        // (b, s, prefix, n, n_kv, hs, w, kv, expected)
-        let cases: &[(u32, u32, u32, u32, u32, u32, u32, KvCacheQuantMode, f64)] = &[
-            // own-shape off-grid query on the collected hs=128 slice
-            (
-                7,
-                3000,
-                0,
-                64,
-                1,
-                128,
-                0,
-                KvCacheQuantMode::Fp8,
-                0.8141674017344127,
-            ),
-            // exact collected hit: util reconstruction returns the measured value
-            (
-                8,
-                16384,
-                0,
-                64,
-                1,
-                128,
-                0,
-                KvCacheQuantMode::Fp8,
-                22.518948872884113,
-            ),
-            // prefix baked into the query SOL (util from the full-seq point)
-            (
-                4,
-                8192,
-                8192,
-                64,
-                1,
-                128,
-                0,
-                KvCacheQuantMode::Fp8,
-                8.413388252258299,
-            ),
-            // head_size=192 XSHAPE transfer (collected head sizes are {128, 256};
-            // ref=128, util_scale = ratio(vllm,192)/ratio(vllm,128) = 1.27)
-            (
-                4,
-                4096,
-                0,
-                48,
-                8,
-                192,
-                0,
-                KvCacheQuantMode::Fp8,
-                0.9292976124080148,
-            ),
-            // collected windowed slice (bfloat16 kv, w=8192) as its own carrier
-            (
-                2,
-                10000,
-                0,
-                32,
-                1,
-                128,
-                8192,
-                KvCacheQuantMode::Bfloat16,
-                2.203104142145887,
-            ),
-            // uncollected window (w=4096) -> window=0 slice as the util carrier
-            (
-                2,
-                10000,
-                0,
-                32,
-                1,
-                128,
-                4096,
-                KvCacheQuantMode::Bfloat16,
-                1.0957746474517327,
-            ),
+        // (b, s, prefix, n, n_kv, hs, w, kv, expected tier)
+        type Tier = crate::operators::util_empirical::ProvenanceTier;
+        let cases: &[(u32, u32, u32, u32, u32, u32, u32, KvCacheQuantMode, Tier)] = &[
+            (7, 3000, 0, 64, 1, 128, 0, KvCacheQuantMode::Fp8, Tier::Empirical),
+            (8, 16384, 0, 64, 1, 128, 0, KvCacheQuantMode::Fp8, Tier::Empirical),
+            (4, 8192, 8192, 64, 1, 128, 0, KvCacheQuantMode::Fp8, Tier::Empirical),
+            (4, 4096, 0, 48, 8, 192, 0, KvCacheQuantMode::Fp8, Tier::XShape),
+            (2, 10000, 0, 32, 1, 128, 8192, KvCacheQuantMode::Bfloat16, Tier::Empirical),
+            (2, 10000, 0, 32, 1, 128, 4096, KvCacheQuantMode::Bfloat16, Tier::Empirical),
         ];
-        for &(b, s, prefix, n, n_kv, hs, w, kv, expected) in cases {
-            let result = query_context_attention_table(
-                &db,
-                b,
-                s,
-                prefix,
-                n,
-                n_kv,
-                hs,
-                w,
-                kv,
-                FmhaQuantMode::Bfloat16,
-            )
-            .expect("empirical query");
-            let (latency, source) = (result.latency_ms, result.source);
-            assert!(
-                (latency - expected).abs() < 1e-9,
-                "(b={b}, s={s}, p={prefix}, n={n}, n_kv={n_kv}, hs={hs}, w={w}): \
-                 expected {expected}, got {latency}"
-            );
-            assert_eq!(source, Source::Empirical);
+        for &(b, s, p, n, nk, hs, w, kv, tier) in cases {
+            db.reset_provenance();
+            let result =
+                query_context_attention_table(&db, b, s, p, n, nk, hs, w, kv, FmhaQuantMode::Bfloat16)
+                    .expect("empirical query");
+            assert!(result.latency_ms.is_finite() && result.latency_ms > 0.0);
+            assert_eq!(result.source, Source::Empirical, "(b={b}, s={s}, hs={hs}, w={w})");
+            assert_eq!(db.worst_provenance(), tier, "(b={b}, s={s}, hs={hs}, w={w})");
         }
     }
 
-    /// Regression pins re-minted from the rust engine at the vllm-0.24 re-anchor (the python query layer retired with #1357; the python-era oracles that seeded this test are in git history). Coordinates:
-    /// `GenerationAttention._query_generation_attention_table(db, b, s, n,
-    /// n_kv, kv, database_mode=EMPIRICAL, window_size=w, head_size=hs)` on
-    /// b200_sxm/vllm/0.24.0.
+    /// Decode twin of the routing test above (same policy: routing + tier,
+    /// no version-bound value pins).
     #[test]
-    fn generation_attention_empirical_matches_python_oracles() {
+    fn generation_attention_empirical_regime_routing() {
         let mut db = b200_vllm_db();
         db.database_mode = crate::common::enums::DatabaseMode::Empirical;
-        // (b, s, n, n_kv, hs, w, kv, expected)
-        let cases: &[(u32, u32, u32, u32, u32, u32, KvCacheQuantMode, f64)] = &[
-            // own-shape off-grid query on the collected hs=128 slice
-            (
-                48,
-                7777,
-                64,
-                8,
-                128,
-                0,
-                KvCacheQuantMode::Fp8,
-                0.12259039946751225,
-            ),
-            // exact collected hit (isl=1 + step=1 -> stored s=2), calibrated
-            // from the RAW (SOL-clamped) table -- NOT the 5-sample silicon avg
-            (
-                32,
-                2,
-                64,
-                4,
-                128,
-                0,
-                KvCacheQuantMode::Fp8,
-                0.010944000134865442,
-            ),
-            // head_size=192 XSHAPE transfer (decode util_scale stays 1.0)
-            (
-                16,
-                4096,
-                48,
-                8,
-                192,
-                0,
-                KvCacheQuantMode::Fp8,
-                0.04618399962782861,
-            ),
-            // collected windowed slice (bfloat16 kv, w=8192) as its own carrier
-            (
-                8,
-                12000,
-                32,
-                1,
-                128,
-                8192,
-                KvCacheQuantMode::Bfloat16,
-                0.015057045374918697,
-            ),
-            // uncollected window (w=2048) -> window=0 slice as the util carrier
-            (
-                8,
-                12000,
-                32,
-                1,
-                128,
-                2048,
-                KvCacheQuantMode::Bfloat16,
-                0.0028775096757825305,
-            ),
+        type Tier = crate::operators::util_empirical::ProvenanceTier;
+        let cases: &[(u32, u32, u32, u32, u32, u32, KvCacheQuantMode, Tier)] = &[
+            (48, 7777, 64, 8, 128, 0, KvCacheQuantMode::Fp8, Tier::Empirical),
+            (32, 2, 64, 4, 128, 0, KvCacheQuantMode::Fp8, Tier::Empirical),
+            (16, 4096, 48, 8, 192, 0, KvCacheQuantMode::Fp8, Tier::XShape),
+            (8, 12000, 32, 1, 128, 8192, KvCacheQuantMode::Bfloat16, Tier::Empirical),
+            (8, 12000, 32, 1, 128, 2048, KvCacheQuantMode::Bfloat16, Tier::Empirical),
         ];
-        for &(b, s, n, n_kv, hs, w, kv, expected) in cases {
-            let result = query_generation_attention_table(&db, b, s, n, n_kv, hs, w, kv)
+        for &(b, s, n, nk, hs, w, kv, tier) in cases {
+            db.reset_provenance();
+            let result = query_generation_attention_table(&db, b, s, n, nk, hs, w, kv)
                 .expect("empirical query");
-            let (latency, source) = (result.latency_ms, result.source);
-            assert!(
-                (latency - expected).abs() < 1e-9,
-                "(b={b}, s={s}, n={n}, n_kv={n_kv}, hs={hs}, w={w}): \
-                 expected {expected}, got {latency}"
-            );
-            assert_eq!(source, Source::Empirical);
+            assert!(result.latency_ms.is_finite() && result.latency_ms > 0.0);
+            assert_eq!(result.source, Source::Empirical, "(b={b}, s={s}, hs={hs}, w={w})");
+            assert_eq!(db.worst_provenance(), tier, "(b={b}, s={s}, hs={hs}, w={w})");
         }
     }
 
-    /// Regression pins re-minted from the rust engine at the vllm-0.24 re-anchor (the python query layer retired with #1357; the python-era oracles that seeded this test are in git history). Coordinates:
-    /// `EncoderAttention._query_encoder_attention_table(db, 3, 900, 16, 64,
-    /// bfloat16, database_mode=...)` on b200_sxm/vllm/0.24.0. EMPIRICAL
-    /// estimates from the util grid; HYBRID resolves on silicon (the slice is
-    /// collected) and must NOT detour through the empirical layer.
     /// Mode ROUTING is the regression surface here: EMPIRICAL estimates from
     /// the util grid, HYBRID resolves the collected slice on silicon and must
     /// not detour through the empirical layer. Pinned relatively (the two

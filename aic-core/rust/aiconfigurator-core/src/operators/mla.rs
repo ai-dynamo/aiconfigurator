@@ -883,24 +883,15 @@ mod tests {
         );
     }
 
-    /// Oracle values generated from the Python reference on the same data:
-    /// `ContextMLA._query_context_mla_table(db, b, s, prefix, num_heads,
-    /// kv, fmha, database_mode=EMPIRICAL)` on gb200/trtllm/1.3.0rc10
-    /// (`get_database(..., shared_layer=False)`, matching this single-primary
-    /// loader). Regenerate if the shipped table or the util math changes.
+    /// Structural wiring for the granular context-MLA util-empirical path
+    /// (off-grid seq, native prefix, exact site). Math pinned on synthetic
+    /// grids in `util_empirical`/`perf_interp`; values in the goldens.
     #[test]
-    fn context_mla_empirical_matches_python_oracles() {
+    fn context_mla_empirical_regime_routing() {
         let mut db = gb200_trtllm_db();
         db.database_mode = DatabaseMode::Empirical;
-        let cases: &[(u32, u32, u32, u32, f64)] = &[
-            // off-grid seq
-            (4, 5000, 0, 128, 3.5591050930761825),
-            // prefix > 0: the query SOL carries prefix natively
-            (2, 3000, 1024, 16, 0.17932261401789712),
-            // exact collected hit: util reconstruction returns the measured value
-            (4, 4096, 0, 128, 2.4523092905680337),
-        ];
-        for &(b, s, prefix, n, expected) in cases {
+        let cases: &[(u32, u32, u32, u32)] = &[(4, 5000, 0, 128), (2, 3000, 1024, 16), (4, 4096, 0, 128)];
+        for &(b, s, prefix, n) in cases {
             let __r = query_context_mla_table(
                 &db,
                 b,
@@ -911,13 +902,8 @@ mod tests {
                 FmhaQuantMode::Bfloat16,
             )
             .expect("empirical query");
-            let (latency, source) = (__r.latency_ms, __r.source);
-            assert_close(
-                latency,
-                expected,
-                &format!("ctx_mla(b={b}, s={s}, pfx={prefix}, n={n})"),
-            );
-            assert_eq!(source, Source::Empirical);
+            assert!(__r.latency_ms.is_finite() && __r.latency_ms > 0.0);
+            assert_eq!(__r.source, Source::Empirical, "(b={b}, s={s}, pfx={prefix}, n={n})");
         }
     }
 
@@ -943,24 +929,16 @@ mod tests {
         );
     }
 
-    /// Python oracle: `GenerationMLA._query_generation_mla_table` in
-    /// EMPIRICAL mode on gb200/trtllm/1.3.0rc10 (shared_layer=False).
+    /// Decode twin of the granular routing test (structural only).
     #[test]
-    fn generation_mla_empirical_matches_python_oracles() {
+    fn generation_mla_empirical_regime_routing() {
         let mut db = gb200_trtllm_db();
         db.database_mode = DatabaseMode::Empirical;
-        let cases: &[(u32, u32, u32, f64)] = &[
-            // off-grid (b, s)
-            (7, 9000, 128, 0.02734810076798607),
-            // exact collected hit
-            (1, 4096, 128, 0.02057066683967908),
-        ];
-        for &(b, s, n, expected) in cases {
+        for &(b, s, n) in &[(7u32, 9000u32, 128u32), (1, 4096, 128)] {
             let __r = query_generation_mla_table(&db, b, s, n, KvCacheQuantMode::Bfloat16)
                 .expect("empirical query");
-            let (latency, source) = (__r.latency_ms, __r.source);
-            assert_close(latency, expected, &format!("gen_mla(b={b}, s={s}, n={n})"));
-            assert_eq!(source, Source::Empirical);
+            assert!(__r.latency_ms.is_finite() && __r.latency_ms > 0.0);
+            assert_eq!(__r.source, Source::Empirical, "(b={b}, s={s}, n={n})");
         }
 
         // HYBRID with a kv dtype that has no table (int8) -> terminal miss.
@@ -972,45 +950,29 @@ mod tests {
         );
     }
 
-    /// Python oracle: `MLABmm._query_mla_bmm_table` in EMPIRICAL mode on
-    /// gb200/trtllm/1.3.0rc10 (shared_layer=False). The fp8 cases exercise
-    /// the bfloat16 slice fallback (gb200's BMM table is bfloat16-only) with
-    /// the SOL still bound to the REQUESTED fp8 quant.
+    /// The fp8 cases exercise the bfloat16 slice fallback (gb200's BMM table
+    /// is bfloat16-only) with the SOL still bound to the REQUESTED fp8 quant.
     #[test]
-    fn mla_bmm_empirical_matches_python_oracles() {
+    fn mla_bmm_empirical_regime_routing() {
         let mut db = gb200_trtllm_db();
         db.database_mode = DatabaseMode::Empirical;
-        let cases: &[(u32, u32, GemmQuantMode, bool, f64)] = &[
-            // off-grid tokens on the requested bf16 slice
-            (
-                100,
-                128,
-                GemmQuantMode::Bfloat16,
-                true,
-                0.008883413307229573,
-            ),
-            // exact collected hit
-            (
-                256,
-                128,
-                GemmQuantMode::Bfloat16,
-                true,
-                0.010847999900579452,
-            ),
-            // fp8 requested -> bfloat16 fallback slice, fp8 SOL
-            (20000, 128, GemmQuantMode::Fp8, true, 0.5326748099591996),
-            // fallback on the post BMM at another head count
-            (777, 64, GemmQuantMode::Fp8, false, 0.010838556565365292),
+        // (tokens, heads, quant, is_pre): off-grid bf16, exact hit, fp8 ->
+        // bf16 fallback slice (fp8 SOL), fp8 fallback on the post BMM.
+        // Structural routing only — math on synthetic grids, values in goldens.
+        let cases: &[(u32, u32, GemmQuantMode, bool)] = &[
+            (100, 128, GemmQuantMode::Bfloat16, true),
+            (256, 128, GemmQuantMode::Bfloat16, true),
+            (20000, 128, GemmQuantMode::Fp8, true),
+            (777, 64, GemmQuantMode::Fp8, false),
         ];
-        for &(t, n, quant, is_pre, expected) in cases {
+        for &(t, n, quant, is_pre) in cases {
             let __r = query_mla_bmm_table(&db, t, n, quant, is_pre).expect("empirical query");
-            let (latency, source) = (__r.latency_ms, __r.source);
-            assert_close(
-                latency,
-                expected,
-                &format!("mla_bmm(t={t}, n={n}, {quant:?}, pre={is_pre})"),
+            assert!(__r.latency_ms.is_finite() && __r.latency_ms > 0.0);
+            assert_eq!(
+                __r.source,
+                Source::Empirical,
+                "mla_bmm(t={t}, n={n}, {quant:?}, pre={is_pre})"
             );
-            assert_eq!(source, Source::Empirical);
         }
 
         // HYBRID at a head count whose exact AND next-pow2 slices are both
@@ -1038,80 +1000,25 @@ mod tests {
         assert_close(lat7, lat8 * 7.0 / 8.0, "mla_bmm 7 -> 8-head slice reroute");
     }
 
-    /// Regression pins re-minted from the rust engine at the vllm-0.24 re-anchor (the python query layer retired with #1357; the python-era oracles that seeded this test are in git history).
-    /// EMPIRICAL mode, b200_sxm/vllm/0.24.0, single-primary loader.
+    /// Structural wiring for the MLA-module util-empirical estimator
+    /// (off-grid seq, prefix, exact hit, fp8 slice). Math pinned on synthetic
+    /// grids in `util_empirical`/`perf_interp`; values in the goldens.
     #[test]
-    fn context_mla_module_empirical_matches_python_oracles() {
+    fn context_mla_module_empirical_regime_routing() {
         let mut db = b200_vllm_db();
         db.database_mode = DatabaseMode::Empirical;
-        type Case = (
-            u32,
-            u32,
-            u32,
-            u32,
-            FmhaQuantMode,
-            KvCacheQuantMode,
-            GemmQuantMode,
-            f64,
-        );
+        type Case = (u32, u32, u32, u32, FmhaQuantMode, KvCacheQuantMode, GemmQuantMode);
         let cases: &[Case] = &[
-            // off-grid seq, bf16^3 slice
-            (
-                2,
-                5000,
-                0,
-                128,
-                FmhaQuantMode::Bfloat16,
-                KvCacheQuantMode::Bfloat16,
-                GemmQuantMode::Bfloat16,
-                3.6034676932991445,
-            ),
-            // prefix > 0
-            (
-                1,
-                2000,
-                2048,
-                16,
-                FmhaQuantMode::Bfloat16,
-                KvCacheQuantMode::Bfloat16,
-                GemmQuantMode::Bfloat16,
-                0.20511976936920295,
-            ),
-            // exact collected hit
-            (
-                1,
-                1,
-                0,
-                128,
-                FmhaQuantMode::Bfloat16,
-                KvCacheQuantMode::Bfloat16,
-                GemmQuantMode::Bfloat16,
-                0.0955,
-            ),
-            // fp8 fmha/kv with fp8_block gemm slice
-            (
-                2,
-                5000,
-                0,
-                128,
-                FmhaQuantMode::Fp8,
-                KvCacheQuantMode::Fp8,
-                GemmQuantMode::Fp8Block,
-                3.553519280764969,
-            ),
+            (2, 5000, 0, 128, FmhaQuantMode::Bfloat16, KvCacheQuantMode::Bfloat16, GemmQuantMode::Bfloat16),
+            (1, 2000, 2048, 16, FmhaQuantMode::Bfloat16, KvCacheQuantMode::Bfloat16, GemmQuantMode::Bfloat16),
+            (1, 1, 0, 128, FmhaQuantMode::Bfloat16, KvCacheQuantMode::Bfloat16, GemmQuantMode::Bfloat16),
+            (2, 5000, 0, 128, FmhaQuantMode::Fp8, KvCacheQuantMode::Fp8, GemmQuantMode::Fp8Block),
         ];
-        for &(b, s, prefix, n, fmha, kv, gemm, expected) in cases {
+        for &(b, s, prefix, n, fmha, kv, gemm) in cases {
             let __r = query_context_mla_module_table(&db, b, s, prefix, n, kv, fmha, gemm, None)
                 .expect("empirical query");
-            let (latency, source) = (__r.latency_ms, __r.source);
-            assert_close(
-                latency,
-                expected,
-                &format!(
-                    "ctx_mla_mod(b={b}, s={s}, pfx={prefix}, n={n}, {fmha:?}, {kv:?}, {gemm:?})"
-                ),
-            );
-            assert_eq!(source, Source::Empirical);
+            assert!(__r.latency_ms.is_finite() && __r.latency_ms > 0.0);
+            assert_eq!(__r.source, Source::Empirical, "(b={b}, s={s}, n={n})");
         }
 
         // HYBRID with a gemm quant slice that has no data (fp8) -> miss.
@@ -1133,51 +1040,22 @@ mod tests {
         );
     }
 
-    /// Regression pins re-minted from the rust engine at the vllm-0.24 re-anchor (the python query layer retired with #1357; the python-era oracles that seeded this test are in git history).
-    /// EMPIRICAL mode, b200_sxm/vllm/0.24.0, single-primary loader. The
-    /// fp8/fp8_block case exercises the module SOL's dependence on the gemm
-    /// quant (the BMM terms close over it).
+    /// Decode twin of the routing test above; the fp8/fp8_block case keeps
+    /// exercising the module SOL's gemm-quant dependence structurally.
     #[test]
-    fn generation_mla_module_empirical_matches_python_oracles() {
+    fn generation_mla_module_empirical_regime_routing() {
         let mut db = b200_vllm_db();
         db.database_mode = DatabaseMode::Empirical;
-        let cases: &[(u32, u32, u32, KvCacheQuantMode, GemmQuantMode, f64)] = &[
-            (
-                8,
-                3000,
-                128,
-                KvCacheQuantMode::Bfloat16,
-                GemmQuantMode::Bfloat16,
-                0.11163838072766873,
-            ),
-            // exact collected hit (s = isl + step)
-            (
-                1,
-                4097,
-                128,
-                KvCacheQuantMode::Bfloat16,
-                GemmQuantMode::Bfloat16,
-                0.1063,
-            ),
-            (
-                8,
-                3000,
-                16,
-                KvCacheQuantMode::Fp8,
-                GemmQuantMode::Fp8Block,
-                0.05223016364994479,
-            ),
+        let cases: &[(u32, u32, u32, KvCacheQuantMode, GemmQuantMode)] = &[
+            (8, 3000, 128, KvCacheQuantMode::Bfloat16, GemmQuantMode::Bfloat16),
+            (1, 4097, 128, KvCacheQuantMode::Bfloat16, GemmQuantMode::Bfloat16),
+            (8, 3000, 16, KvCacheQuantMode::Fp8, GemmQuantMode::Fp8Block),
         ];
-        for &(b, s, n, kv, gemm, expected) in cases {
+        for &(b, s, n, kv, gemm) in cases {
             let __r = query_generation_mla_module_table(&db, b, s, n, kv, gemm, None)
                 .expect("empirical query");
-            let (latency, source) = (__r.latency_ms, __r.source);
-            assert_close(
-                latency,
-                expected,
-                &format!("gen_mla_mod(b={b}, s={s}, n={n}, {kv:?}, {gemm:?})"),
-            );
-            assert_eq!(source, Source::Empirical);
+            assert!(__r.latency_ms.is_finite() && __r.latency_ms > 0.0);
+            assert_eq!(__r.source, Source::Empirical, "(b={b}, s={s}, n={n})");
         }
 
         // HYBRID with a gemm quant slice that has no data (fp8) -> miss.

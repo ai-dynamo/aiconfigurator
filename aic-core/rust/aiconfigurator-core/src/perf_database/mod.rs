@@ -220,7 +220,7 @@ pub use moe::MoeTable;
 pub use moe_a2a::MoeA2aTable;
 pub use moe_expert_compute::MoeExpertComputeTable;
 pub use msa::MsaTable;
-pub use source_resolution::{resolve_one, ResolveCtx, ResolveReport, SourceResolver};
+pub use source_resolution::{resolve_one, ResolveCtx, SourceResolver};
 pub use state_space::StateSpaceTable;
 pub use trtllm_alltoall::TrtllmAlltoallTable;
 pub use wideep_mla::WideEpMlaTable;

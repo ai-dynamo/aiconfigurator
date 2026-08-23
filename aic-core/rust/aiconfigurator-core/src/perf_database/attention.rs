@@ -1080,97 +1080,7 @@ mod tests {
         SystemSpec::load(&systems_yaml).expect("b200_sxm.yaml must parse")
     }
 
-    fn gb200_vllm_data_root() -> PathBuf {
-        PathBuf::from(REPO_ROOT_HINT)
-            .join("../..")
-            .join("src/aiconfigurator_core/systems/data/gb200/vllm/0.24.0")
-    }
 
-    fn gb200_spec() -> SystemSpec {
-        let systems_yaml = PathBuf::from(REPO_ROOT_HINT)
-            .join("../..")
-            .join("src/aiconfigurator_core/systems/gb200.yaml");
-        SystemSpec::load(&systems_yaml).expect("gb200.yaml must parse")
-    }
-
-    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails
-    #[test]
-    fn generation_query_ragged_corner_matches_python_v2_engine() {
-        // Ragged-corner regime: large batch x long kv, off-measured-grid —
-        // v2 resolves it on the RAW [n][b][s] grid (no densification), with
-        // the truncated corner handled by boundary-util hold, then 5-sample
-        // s-averaging at the wrapper level. Pin re-minted from the rust
-        // table query at the 0.24 re-anchor (python-era oracle in git
-        // history).
-        let table = AttentionTable::new(gb200_vllm_data_root(), gb200_spec());
-        let latency = table
-            .query_generation(256, 2561, 32, 8, 128, 0, KvCacheQuantMode::Bfloat16)
-            .expect("ragged-corner query must succeed")
-            .latency;
-        let expected = 0.36904243319189567;
-        assert!(
-            ((latency - expected) / expected).abs() < 1e-9,
-            "rust {latency} vs python {expected}"
-        );
-    }
-
-    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails
-    #[test]
-    fn generation_attention_query_matches_python_v2_engine() {
-        // batch=32 isl=1 n=64 n_kv=4 head_dim=128 kv=fp8 step=1 (stored
-        // sequence_tokens = isl + step = 2). The 5-sample averaging spans
-        // s ∈ [max(1,int(2*0.9)), max(..,int(2*1.1))] = [1, 2], i.e.
-        // s_samples = [1, 1, 1, 1, 2]; s=1 is below the collected range, so
-        // it resolves via boundary-util hold on the RAW grid. Pin re-minted
-        // from the rust table query at the 0.24 re-anchor.
-        let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
-        let latency = table
-            .query_generation(32, 2, 64, 4, 128, 0, KvCacheQuantMode::Fp8)
-            .expect("query must succeed")
-            .latency;
-        let expected = 0.011779225298748223;
-        assert!(
-            ((latency - expected) / expected).abs() < 1e-9,
-            "rust {latency} vs python {expected}"
-        );
-    }
-
-    /// Regression pins (rust engine; python-v2-era lineage in git history) on
-    /// the context slice n=64 n_kv=1 hs=128 kv=fp8 of b200_sxm/vllm/0.24.0:
-    /// an exact hit,
-    /// a seq interpolation (sqrt-space blend between s=10240 and s=12288),
-    /// and a batch past the staircase frontier (b=64 where s=16384 collects
-    /// only up to b=8 -> boundary-util hold). The two engines must agree
-    /// because they implement the same resolution chain.
-    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails
-    #[test]
-    fn context_attention_query_matches_python_v2_engine() {
-        let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
-        let cases: &[(u32, u32, f64)] = &[
-            (8, 16384, 22.518948872884113),  // exact hit
-            (8, 12000, 12.37772411099464),  // seq interp (sqrt blend)
-            (64, 16384, 198.92813803537112), // batch beyond staircase (tapered util-hold)
-        ];
-        for &(b, s, expected) in cases {
-            let got = table
-                .query_context(
-                    b,
-                    s,
-                    64,
-                    1,
-                    128,
-                    0,
-                    KvCacheQuantMode::Fp8,
-                    FmhaQuantMode::Bfloat16,
-                )
-                .unwrap()
-                .latency;
-            assert!(
-                ((got - expected) / expected).abs() < 1e-9,
-                "(b={b},s={s}): rust {got} vs python {expected}"
-            );
-        }
-    }
 
     #[test]
     fn context_attention_mha_normalizes_n_kv_to_zero() {
@@ -1229,33 +1139,6 @@ mod tests {
         ) {
             Err(AicError::PerfDatabase(_)) => {}
             other => panic!("expected PerfDatabase error, got {other:?}"),
-        }
-    }
-
-    /// Regression pins (rust engine; python-v2-era lineage in git history) on
-    /// the encoder slice n=16 hs=64 bfloat16 of b200_sxm/vllm/0.24.0:
-    /// an exact hit, a seq interpolation (sqrt-space
-    /// blend between s=1296 and s=1500), and a batch past the staircase
-    /// frontier (b=64 where s=65536 collects only up to b=2 -> boundary-util
-    /// hold).
-    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if this fails
-    #[test]
-    fn encoder_attention_query_matches_python_v2_engine() {
-        let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
-        let cases: &[(u32, u32, f64)] = &[
-            (1, 1024, 0.01933866615096728),  // exact hit
-            (2, 1400, 0.04358949357451032),   // seq interp (sqrt blend)
-            (64, 65536, 1257.901509037157), // batch beyond staircase (tapered util-hold)
-        ];
-        for &(b, s, expected) in cases {
-            let got = table
-                .query_encoder(b, s, 16, 64, FmhaQuantMode::Bfloat16)
-                .unwrap()
-                .latency;
-            assert!(
-                ((got - expected) / expected).abs() < 1e-9,
-                "(b={b},s={s}): rust {got} vs python {expected}"
-            );
         }
     }
 
@@ -1353,6 +1236,44 @@ mod tests {
             ((v.energy - 279.9038105676658) / 279.9038105676658).abs() < 1e-9,
             "energy {}",
             v.energy
+        );
+    }
+
+    /// Hand-derived synthetic pin for the decode 5-sample seq averaging —
+    /// the one piece of attention-wrapper math not covered by the shared
+    /// `perf_interp` synthetic suites. Grid: seq {50, 150} with latency
+    /// LINEAR in seq (0.5 -> 1.5). Query s=100: s_min=90, s_max=110,
+    /// samples [90, 95, 100, 105, 110]; each resolves by the raw linear
+    /// blend to s/100, so the average is exactly 1.0. No production data.
+    #[test]
+    fn generation_five_sample_averaging_matches_hand_derivation() {
+        use crate::perf_database::energy_test_fixtures::{
+            write_energy_systems_root, write_parquet, Col,
+        };
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let data = write_energy_systems_root(tmp.path());
+        write_parquet(
+            &data.join("generation_attention_perf.parquet"),
+            &[
+                Col::Str("kv_cache_dtype", vec!["bfloat16", "bfloat16"]),
+                Col::I64("batch_size", vec![1, 1]),
+                Col::I64("isl", vec![50, 150]),
+                Col::I64("num_heads", vec![8, 8]),
+                Col::I64("num_key_value_heads", vec![1, 1]),
+                Col::I64("head_dim", vec![128, 128]),
+                Col::I64("step", vec![0, 0]),
+                Col::F64("latency", vec![0.5, 1.5]),
+            ],
+        );
+        let spec = SystemSpec::load(&tmp.path().join("testsys.yaml")).expect("testsys spec");
+        let table = AttentionTable::new(data, spec);
+        let latency = table
+            .query_generation(1, 100, 8, 1, 128, 0, KvCacheQuantMode::Bfloat16)
+            .expect("query must succeed")
+            .latency;
+        assert!(
+            (latency - 1.0).abs() < 1e-9,
+            "5-sample average over a linear grid must be exactly 1.0, got {latency}"
         );
     }
 }

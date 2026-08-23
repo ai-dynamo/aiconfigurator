@@ -687,50 +687,23 @@ mod tests {
         );
     }
 
-    /// Regression pins re-minted from the rust engine at the vllm-0.24 re-anchor (the python query layer retired with #1357; the python-era oracles that seeded this test are in git history).
-    /// EMPIRICAL-mode `query_gemm_table` on b200_sxm/vllm/0.24.0. Re-mint
-    /// from the rust engine if the shipped GEMM table or the util-empirical
-    /// math changes.
+    /// Structural wiring for the GEMM util-empirical estimator (off-grid m,
+    /// off-site, exact site, small-shape corner). Math pinned on synthetic
+    /// grids in `util_empirical`/`perf_interp`; values in the goldens.
     #[test]
-    fn gemm_empirical_matches_python_oracles() {
+    fn gemm_empirical_regime_routing() {
         let mut db = b200_vllm_db();
         db.database_mode = crate::common::enums::DatabaseMode::Empirical;
         let cases = [
-            // off-grid m on a collected (n, k) site
-            (
-                3000u32,
-                65536u32,
-                16384u32,
-                GemmQuantMode::Bfloat16,
-                3.6079002932710407,
-            ),
-            // fully off-site query
-            (
-                777,
-                4000,
-                5000,
-                GemmQuantMode::Bfloat16,
-                0.023124830290836663,
-            ),
-            // exact collected hit: util reconstruction returns the measured value
-            (
-                32768,
-                65536,
-                16384,
-                GemmQuantMode::Nvfp4,
-                19.890548706054688,
-            ),
-            // small-shape corner
-            (1, 129, 130, GemmQuantMode::Fp8, 0.01886943112340755),
+            (3000u32, 65536u32, 16384u32, GemmQuantMode::Bfloat16),
+            (777, 4000, 5000, GemmQuantMode::Bfloat16),
+            (32768, 65536, 16384, GemmQuantMode::Nvfp4),
+            (1, 129, 130, GemmQuantMode::Fp8),
         ];
-        for (m, n, k, quant, expected) in cases {
+        for (m, n, k, quant) in cases {
             let result = query_gemm_table(&db, quant, m, n, k).expect("empirical query");
-            let latency = result.latency_ms;
-            assert!(
-                (latency - expected).abs() < 1e-9,
-                "({m}, {n}, {k}, {quant:?}): expected {expected}, got {latency}"
-            );
-            assert_eq!(result.source, Source::Empirical);
+            assert!(result.latency_ms.is_finite() && result.latency_ms > 0.0);
+            assert_eq!(result.source, Source::Empirical, "({m}, {n}, {k}, {quant:?})");
             assert_eq!(
                 result.energy_wms, 0.0,
                 "empirical fallback carries no energy"
@@ -777,36 +750,44 @@ mod tests {
         );
     }
 
-    /// Under the default (all-on) policy the same query resolves via the
-    /// xprofile borrow. Regression pin (rust engine, HYBRID; python-era
-    /// oracle in git history):
-    ///
-    /// ```text
-    /// db = perf_database.get_database_view("b200_sxm", "vllm", "0.24.0",
-    ///     allow_missing_data=True, database_mode=DatabaseMode.HYBRID,
-    ///     shared_layer=False)
-    /// float(GEMM._query_gemm_table(db, 64, 64, 64, GEMMQuantMode.int4_wo))
-    /// # -> 0.0007162468944802695, provenance {"xprofile"}
-    /// ```
-    ///
-    /// The b200/vllm file order is [nvfp4, bfloat16, fp8, fp8_block]; the
-    /// compute-first ordering must borrow bfloat16 (Δcompute=0), not the
-    /// file-order-first nvfp4.
+    /// Under the default (all-on) policy an uncollected quant resolves via
+    /// the xprofile borrow, and the donor selection is COMPUTE-FIRST, not
+    /// file-order-first. Synthetic discrimination vehicle (no production
+    /// data): fp8 rows come FIRST in file order with latencies 1000x the
+    /// bfloat16 rows. int4_wo (profile (0.5, 1), bf16 compute pipeline) must
+    /// borrow bfloat16 (delta-compute = 0) — a regression to file-order
+    /// selection would land three orders of magnitude higher.
     #[test]
     fn gemm_hybrid_missing_quant_borrows_xprofile_under_default_policy() {
-        let mut db = b200_vllm_db();
+        use crate::perf_database::energy_test_fixtures::{
+            write_energy_systems_root, write_parquet, Col,
+        };
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let data = write_energy_systems_root(tmp.path());
+        write_parquet(
+            &data.join("gemm_perf.parquet"),
+            &[
+                Col::Str("gemm_dtype", vec!["fp8", "fp8", "bfloat16", "bfloat16"]),
+                Col::I64("m", vec![64, 128, 64, 128]),
+                Col::I64("n", vec![64, 64, 64, 64]),
+                Col::I64("k", vec![64, 64, 64, 64]),
+                Col::F64("latency", vec![1000.0, 2000.0, 1.0, 2.0]),
+            ],
+        );
+        let mut db = PerfDatabase::load(tmp.path(), "testsys", "vllm", "1.0").expect("db");
         db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
         let result =
             query_gemm_table(&db, GemmQuantMode::Int4Wo, 64, 64, 64).expect("xprofile borrow");
-        let latency = result.latency_ms;
-        assert!(
-            (latency - 0.0007162468944802695).abs() < 1e-9,
-            "expected python oracle, got {latency}"
-        );
         assert_eq!(result.source, Source::Empirical);
         assert_eq!(
             db.worst_provenance(),
             util_empirical::ProvenanceTier::XProfile
+        );
+        assert!(
+            result.latency_ms < 100.0,
+            "compute-first must borrow the bfloat16 donor (~O(1) ms), got {} \
+             (file-order fp8 donor would be ~O(1000))",
+            result.latency_ms
         );
     }
 

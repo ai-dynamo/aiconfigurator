@@ -653,76 +653,58 @@ mod tests {
     // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if
     // this fails. `MoeTable::new` resolves to the single primary source with no
     // kernel_source filter, so no shared rows should join this curve.
-    #[test]
-    fn moe_query_matches_python_v2_engine() {
-        use crate::common::system_spec::SystemSpec;
-
-        let systems_yaml = PathBuf::from(REPO_ROOT_HINT)
-            .join("../..")
-            .join("src/aiconfigurator_core/systems/b200_sxm.yaml");
-        let spec = SystemSpec::load(&systems_yaml).expect("b200_sxm.yaml must parse");
-
-        // The MoE roofline exactly as the operator layer passes it
-        // (`operators/moe.rs::sol_latency_ms`, gated => num_gemms = 3),
-        // mirroring Python `MoE._query_moe_table.get_sol` incl. its integer
-        // floor divisions.
-        let quant = MoeQuantMode::Bfloat16;
-        let (h, inter, topk, ne, ep, tp) = (5120u64, 8192u64, 1u64, 16u64, 1u64, 1u64);
-        let sol = |t: f64| -> f64 {
-            let num_gemms = 3u64;
-            let total_tokens = t.round() as u64 * topk;
-            let ops = total_tokens * h * inter * num_gemms * 2 / ep / tp;
-            let mem_bytes_int = total_tokens / ep * h * 2
-                + total_tokens / ep * inter * num_gemms / tp
-                + h * inter * num_gemms / tp * std::cmp::min(ne / ep, total_tokens / ep);
-            let mem_bytes = (mem_bytes_int as f64) * quant.mapping().memory;
-            let tc_flops = spec.gpu.bfloat16_tc_flops.unwrap_or(1.0);
-            let sol_math = (ops as f64) / (tc_flops * quant.mapping().compute) * 1000.0;
-            let sol_mem = mem_bytes / spec.gpu.mem_bw * 1000.0;
-            sol_math.max(sol_mem)
-        };
-
-        let table = MoeTable::new(b200_vllm_data_root());
-        let cases: &[(u32, f64)] = &[
-            (384, 0.707481598854065),
-            (4096, 0.9657080651305716),
-            (7, 0.2885776182085593),
-        ];
-        for &(nt, expected) in cases {
-            let got = table
-                .query(nt, 5120, 8192, 1, 16, 1, 1, quant, "power_law_1.01", &sol)
-                .expect("query must succeed")
-                .latency;
-            assert!(
-                ((got - expected) / expected).abs() < 1e-9,
-                "nt={nt}: rust {got} vs python {expected}"
-            );
-        }
-    }
-
-    #[test]
-    fn moe_low_latency_grid_split_on_b200_trtllm() {
-        // b200 trtllm 1.2.0rc5 perf-DB carries `moe_torch_flow_min_latency`
-        // rows; they must land in the low_latency grid, not the default
-        // one. vLLM/SGLang DBs lack the column entirely → low_latency
-        // empty → `low_latency_available()` returns false.
-        let table = MoeTable::new(b200_trtllm_data_root());
-        let available = table
-            .low_latency_available()
-            .expect("moe_perf.parquet must load");
-        assert!(
-            available,
-            "expected b200/trtllm/1.2.0rc5 to carry moe_torch_flow_min_latency rows"
+   #[test]
+    fn moe_low_latency_grid_split_routes_by_kernel_source() {
+        // Synthetic vehicle (no data-version anchoring): rows labelled
+        // `moe_torch_flow_min_latency` must land in the low_latency grid; a
+        // table without such rows reports low_latency unavailable.
+        use crate::perf_database::energy_test_fixtures::{write_parquet, Col};
+        let with_min = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &with_min.path().join("moe_perf.parquet"),
+            &[
+                Col::Str("moe_dtype", vec!["bfloat16", "bfloat16"]),
+                Col::I64("num_tokens", vec![1024, 1024]),
+                Col::I64("hidden_size", vec![4096, 4096]),
+                Col::I64("inter_size", vec![2048, 2048]),
+                Col::I64("topk", vec![2, 2]),
+                Col::I64("num_experts", vec![8, 8]),
+                Col::I64("moe_tp_size", vec![1, 1]),
+                Col::I64("moe_ep_size", vec![1, 1]),
+                Col::Str("distribution", vec!["uniform", "uniform"]),
+                Col::Str(
+                    "kernel_source",
+                    vec!["moe_torch_flow", "moe_torch_flow_min_latency"],
+                ),
+                Col::F64("latency", vec![1.0, 0.5]),
+            ],
         );
-
-        let vllm = MoeTable::new(b200_vllm_data_root());
-        let vllm_available = vllm
+        let table = MoeTable::new(with_min.path().to_path_buf());
+        assert!(table
             .low_latency_available()
-            .expect("vllm moe_perf.parquet must load");
-        assert!(
-            !vllm_available,
-            "vLLM perf DB lacks kernel_source column → low_latency should be empty"
+            .expect("moe_perf.parquet must load"));
+
+        let without = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &without.path().join("moe_perf.parquet"),
+            &[
+                Col::Str("moe_dtype", vec!["bfloat16"]),
+                Col::I64("num_tokens", vec![1024]),
+                Col::I64("hidden_size", vec![4096]),
+                Col::I64("inter_size", vec![2048]),
+                Col::I64("topk", vec![2]),
+                Col::I64("num_experts", vec![8]),
+                Col::I64("moe_tp_size", vec![1]),
+                Col::I64("moe_ep_size", vec![1]),
+                Col::Str("distribution", vec!["uniform"]),
+                Col::Str("kernel_source", vec!["moe_torch_flow"]),
+                Col::F64("latency", vec![1.0]),
+            ],
         );
+        let plain = MoeTable::new(without.path().to_path_buf());
+        assert!(!plain
+            .low_latency_available()
+            .expect("moe_perf.parquet must load"));
     }
 
     /// ENERGY oracle on a synthetic power-carrying fixture. Python twin
