@@ -542,7 +542,7 @@ class TestImbalanceScaleParity:
 
 _WIDEEP_SGLANG_MODEL = "deepseek-ai/DeepSeek-V3"
 _WIDEEP_SGLANG_SYSTEM = "h200_sxm"
-_WIDEEP_SGLANG_VERSION = "0.5.6.post2"
+_WIDEEP_SGLANG_VERSION = "0.5.14"
 
 
 def _build_wideep_sglang():
@@ -556,8 +556,9 @@ def _build_wideep_sglang():
         _WIDEEP_SGLANG_SYSTEM,
         "sglang",
         _WIDEEP_SGLANG_VERSION,
-        # sole wideep_mlp data coordinate (kept donor data, not a queryable slot)
-        allow_unlisted_version=True,
+        # current slot: the wideEP tables backfill from their sole-source
+        # 0.5.6.post2/0.5.9/0.5.10/0.5.12 dirs while gemm/attention resolve
+        # on the primary — the production large-EP query shape.
     )
     if database is None:
         pytest.skip(f"no perf database for {_WIDEEP_SGLANG_SYSTEM}/sglang/{_WIDEEP_SGLANG_VERSION}")
@@ -604,8 +605,9 @@ class TestWideEpDeepEpParity:
     raw tp), the deepep MoE compute routing (Rust used to read `moe_perf`
     where Python reads the wideep context/generation tables), and the DeepEP
     dispatch flavor emission (the emitter used to map every sglang dispatch to
-    CustomAllReduce). Data lives on h200_sxm/sglang/0.5.6.post2 (the only
-    shipped version with the deepep dispatch parquets)."""
+    CustomAllReduce). Runs on the current slot; the deepep dispatch and
+    wideEP tables reach it through cross-version backfill from their
+    sole-source dirs."""
 
     def test_wideep_static_parity(self) -> None:
         _model, _backend, _database, spec_json = _build_wideep_sglang()
