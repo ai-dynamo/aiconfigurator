@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 **Status (2026-08-23): FULLY LANDED — this document is a record, not a
 plan. Phase 2 merged as PR-1 (#1454), PR-2 (#1496), PR-2.5 (#1508) and
-PR-3 (#1521, the PR that first carried this text); the Phase 3 sequel
+PR-3 (#1521, which authored the disposition below); the Phase 3 sequel
 ladder below closed out with PR-4 (#1547), PR-5 (#1552), PR-6 (#1555)
 and the deprecation-cleanup PR (#1566), and issue #1357 is closed.**
 Nothing here is scheduled work. What survives the plan is the two
@@ -24,8 +24,8 @@ you need to see what was promised versus what shipped.
 
 Phase 1.5 (#1200) made Python build the op list and Rust execute it, and
 deleted the **Rust** model layer (`models/`, `backends/`, `factory.rs`);
-#1201 added the capacity API. That left the symmetric duplication with
-the polarity flipped: the Python latency stack — `operations/*.py`
+then #1201 added the capacity API. That left the symmetric duplication
+with the polarity flipped: the Python latency stack — `operations/*.py`
 `query()` bodies, `perf_database.py`'s latency-query methods, and the
 op-walk in `backends/base_backend.py` — mirrored the Rust `operators/` +
 `perf_database/` + `engine/` code, so two engines computed the same step
@@ -35,8 +35,8 @@ duplicate; Phase 3 finished the job down to the data plane.
 PR-3 delivered the ENGINE-STEP-path retirement — see the disposition
 below. Its original scope ("delete the per-call query stack wholesale")
 was revised after FPM (#1384) landed a live consumer of that stack;
-#1461's Rust FPM port (Op::FpmForward + fpm_sol.rs) then let PR-3 delete
-the Python FPM walk too.
+then #1461's Rust FPM port (Op::FpmForward + fpm_sol.rs) let PR-3
+delete the Python FPM walk too.
 
 ## PR-3 disposition (2026-08-14) — what was deleted, what was kept, and why
 
