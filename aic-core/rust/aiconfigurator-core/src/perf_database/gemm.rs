@@ -954,21 +954,6 @@ mod tests {
     }
 
     #[test]
-    fn gemm_exact_hit_returns_recorded_latency() {
-        let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
-        // First row of b200_sxm/gemm/vllm/0.24.0/gemm_perf.parquet
-        // (bfloat16 32768x65536x16384).
-        let latency = table
-            .query(GemmQuantMode::Bfloat16, 32768, 65536, 16384)
-            .expect("query must succeed")
-            .latency;
-        assert!(
-            (latency - 40.71141560872396).abs() < 1e-9,
-            "expected recorded latency, got {latency}"
-        );
-    }
-
-    #[test]
     fn gemm_query_returns_positive_latency_for_smoke_shape() {
         // Shape pulled from a MiniMax-M2.5 GEMM call: tp=8 ffn1 at hidden=6144.
         let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());

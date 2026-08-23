@@ -1075,10 +1075,11 @@ mod tests {
         let result = op
             .query(&db, 32, 2, 1.0)
             .expect("gen attention query must succeed");
+        // Structural smoke only — the resolution-chain VALUE pin lives in
+        // `perf_database::attention::generation_attention_query_matches_python_v2_engine`.
         assert!(
-            // Tapered past-frontier hold; pin re-minted at the 0.24 re-anchor.
-            (result.latency_ms - 0.011779225298748223).abs() < 1e-9,
-            "expected 5-sample-averaged gen latency, got {}",
+            result.latency_ms.is_finite() && result.latency_ms > 0.0,
+            "expected positive 5-sample-averaged gen latency, got {}",
             result.latency_ms
         );
     }
@@ -1292,28 +1293,28 @@ mod tests {
     /// bfloat16, database_mode=...)` on b200_sxm/vllm/0.24.0. EMPIRICAL
     /// estimates from the util grid; HYBRID resolves on silicon (the slice is
     /// collected) and must NOT detour through the empirical layer.
+    /// Mode ROUTING is the regression surface here: EMPIRICAL estimates from
+    /// the util grid, HYBRID resolves the collected slice on silicon and must
+    /// not detour through the empirical layer. Pinned relatively (the two
+    /// paths yield different numbers on the same coordinate) — the encoder
+    /// resolution-chain value pin lives in the perf_database v2 test.
     #[test]
     fn encoder_attention_empirical_and_hybrid_match_python_oracles() {
         let mut db = b200_vllm_db();
         db.database_mode = crate::common::enums::DatabaseMode::Empirical;
-        let result = query_encoder_attention_table(&db, 3, 900, 16, 64, FmhaQuantMode::Bfloat16)
+        let empirical = query_encoder_attention_table(&db, 3, 900, 16, 64, FmhaQuantMode::Bfloat16)
             .expect("empirical query");
-        let (latency, source) = (result.latency_ms, result.source);
-        assert!(
-            (latency - 0.02150375827181834).abs() < 1e-9,
-            "got {latency}"
-        );
-        assert_eq!(source, Source::Empirical);
+        assert_eq!(empirical.source, Source::Empirical);
+        assert!(empirical.latency_ms.is_finite() && empirical.latency_ms > 0.0);
 
         db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
-        let result = query_encoder_attention_table(&db, 3, 900, 16, 64, FmhaQuantMode::Bfloat16)
+        let hybrid = query_encoder_attention_table(&db, 3, 900, 16, 64, FmhaQuantMode::Bfloat16)
             .expect("hybrid query");
-        let (latency, source) = (result.latency_ms, result.source);
+        assert_eq!(hybrid.source, Source::Silicon);
         assert!(
-            (latency - 0.025345554480708972).abs() < 1e-9,
-            "got {latency}"
+            (hybrid.latency_ms - empirical.latency_ms).abs() > 1e-12,
+            "hybrid must resolve on silicon, not replay the empirical estimate"
         );
-        assert_eq!(source, Source::Silicon);
     }
 
     /// HYBRID: an uncollected head_size (192) misses silicon and falls back
@@ -1322,6 +1323,41 @@ mod tests {
     /// rust engine at the 0.24 re-anchor (HYBRID mode).
     #[test]
     fn context_attention_hybrid_dispatch_matches_python() {
+        // Dispatch is pinned RELATIVELY across modes: the uncollected
+        // head_size falls back to exactly the EMPIRICAL (xshape) estimate,
+        // the collected slice resolves to exactly the SILICON value — no
+        // recorded constants to re-mint on data refreshes.
+        let mut emp_db = b200_vllm_db();
+        emp_db.database_mode = crate::common::enums::DatabaseMode::Empirical;
+        let empirical_192 = query_context_attention_table(
+            &emp_db,
+            4,
+            4096,
+            0,
+            48,
+            8,
+            192,
+            0,
+            KvCacheQuantMode::Fp8,
+            FmhaQuantMode::Bfloat16,
+        )
+        .expect("empirical query");
+
+        let sil_db = b200_vllm_db();
+        let silicon_hit = query_context_attention_table(
+            &sil_db,
+            8,
+            16384,
+            0,
+            64,
+            1,
+            128,
+            0,
+            KvCacheQuantMode::Fp8,
+            FmhaQuantMode::Bfloat16,
+        )
+        .expect("silicon query");
+
         let mut db = b200_vllm_db();
         db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
         let result = query_context_attention_table(
@@ -1337,9 +1373,11 @@ mod tests {
             FmhaQuantMode::Bfloat16,
         )
         .expect("hybrid query");
-        let (latency, source) = (result.latency_ms, result.source);
-        assert!((latency - 0.9292976124080148).abs() < 1e-9, "got {latency}");
-        assert_eq!(source, Source::Empirical);
+        assert!(
+            (result.latency_ms - empirical_192.latency_ms).abs() < 1e-12,
+            "hybrid on the uncollected head size must replay the xshape estimate"
+        );
+        assert_eq!(result.source, Source::Empirical);
 
         // Collected slice: silicon exact hit, untouched by the fallback.
         let result = query_context_attention_table(
@@ -1355,9 +1393,11 @@ mod tests {
             FmhaQuantMode::Bfloat16,
         )
         .expect("hybrid query");
-        let (latency, source) = (result.latency_ms, result.source);
-        assert!((latency - 22.518948872884113).abs() < 1e-9, "got {latency}");
-        assert_eq!(source, Source::Silicon);
+        assert!(
+            (result.latency_ms - silicon_hit.latency_ms).abs() < 1e-12,
+            "hybrid on a collected slice must resolve on silicon"
+        );
+        assert_eq!(result.source, Source::Silicon);
     }
 
     /// With XSHAPE disabled and no own-slice data (head_size=192), the

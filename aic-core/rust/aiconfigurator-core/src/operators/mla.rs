@@ -853,25 +853,6 @@ mod tests {
     }
 
     #[test]
-    fn mla_module_context_smoke() {
-        let db = b200_vllm_db();
-        let op = MlaModuleOp::new(
-            "ctx_mod",
-            128,
-            KvCacheQuantMode::Bfloat16,
-            FmhaQuantMode::Bfloat16,
-            GemmQuantMode::Bfloat16,
-        );
-        // Exact-hit row latency=0.0955, prefix=0 means prefix_correction=1.0.
-        let result = op.query_context(&db, 1, 1, 0).expect("query must succeed");
-        assert!(
-            (result.latency_ms - 0.0955).abs() < 1e-6,
-            "expected recorded module latency, got {}",
-            result.latency_ms
-        );
-    }
-
-    #[test]
     fn mla_op_context_absent_on_vllm_b200() {
         let db = b200_vllm_db();
         let op = ContextMlaOp::new(

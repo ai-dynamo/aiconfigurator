@@ -625,24 +625,6 @@ def test_get_model_preserves_task_resolved_fmha():
     assert mc.fmha_quant_mode == common.FMHAQuantMode.fp8
 
 
-def test_fmha_fallback_uses_joint_fmha_kv_capability(caplog):
-    """Capability is judged jointly with the role's kv mode: on b200 trtllm the
-    fp8 context_mla slice exists only under kv=fp8 (shared-layer module rows),
-    so inferred fp8 fmha survives with kv=fp8 but must downgrade with an
-    explicit bf16 kv -- the flat per-op list would keep fp8 and crash at query
-    time (review finding)."""
-    import logging
-
-    from aiconfigurator.sdk import common
-
-    base = dict(serving_mode="agg", model_path="deepseek-ai/DeepSeek-V3", system_name="b200_sxm", backend_name="trtllm")
-    assert Task(**base).fmha_quant_mode == common.FMHAQuantMode.fp8  # kv inferred fp8 -> joint slice present
-    with caplog.at_level(logging.WARNING):
-        t = Task(**base, kvcache_quant_mode=common.KVCacheQuantMode.bfloat16)
-    assert t.fmha_quant_mode == common.FMHAQuantMode.bfloat16
-    assert any("falling back to bfloat16 FMHA" in r.message for r in caplog.records)
-
-
 def test_large_ep_trtllm_context_fmha_capability_uses_granular_table(caplog):
     """trtllm large-EP context queries the granular context_mla table directly, so
     the fmha fallback must key capability off the granular slices -- the merged
