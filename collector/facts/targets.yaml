@@ -198,6 +198,9 @@ families:
           no flag bypasses it. trtllm rc23 DEFINITIVELY unservable but for a NON-quant reason: all three
           M3 artifacts die at the sparse-attention wiring wall before quant matters. Evidence: records
           + raws, 2026-08-24.'
+        sglang_marlin_ab: 'runner=marlin A/B''d 2026-08-24: SAME capability ValueError — the gate (loader.py:282)
+          checks the quant config''s declared min_capability=100 before model construction; runner choice
+          never enters. Declaration-locked, no flag escape. Evidence facts/bisect_m3mxfp8_marlin.json.'
     - repo: nvidia/MiniMax-M3-NVFP4
       profile: nvfp4
       aic_registered: false
