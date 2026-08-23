@@ -61,6 +61,7 @@ class EngineStepParityCase:
     database_mode: str = "SILICON"
     transfer_policy: str | None = None
     moe_quant_mode: str | None = None
+    kvcache_quant_mode: str | None = None
     # Speculative block size (DSPARK/MTP). nextn > 0 switches the model's
     # generation ops onto the verify tables — for Kimi-K3 that crosses the
     # fused CuTeDSL verify reroute and the donor-absence contract it depends
@@ -1038,6 +1039,7 @@ def _case_model_config(case: EngineStepParityCase) -> config.ModelConfig:
         moe_ep_size=case.moe_ep_size,
         cp_size=case.cp_size,
         moe_quant_mode=(common.MoEQuantMode[case.moe_quant_mode] if case.moe_quant_mode else None),
+        kvcache_quant_mode=(common.KVCacheQuantMode[case.kvcache_quant_mode] if case.kvcache_quant_mode else None),
         nextn=case.nextn,
     )
 
@@ -2115,10 +2117,12 @@ class TestRustTypedErrorsAcrossFfi:
         # fp4_tc_flops — see the missing-dtype test below.)
         _prepare_rust_core(monkeypatch)
         case = EngineStepParityCase(
-            # current-slot data-gap coordinate: head_dim=192 exists for fp8 KV
-            # only, and the model's default KV dtype is bfloat16. If a future
-            # collection adds bf16@192 this stops being a gap — re-anchor then.
+            # current-slot data-gap coordinate: head_dim=192 is collected for
+            # fp8 KV only. The model is an fp8 checkpoint (kv would infer fp8
+            # and HIT), so bf16 KV is pinned explicitly to hold the gap. If a
+            # future collection adds bf16@192, re-anchor to a new gap.
             model_path="XiaomiMiMo/MiMo-V2-Flash",
+            kvcache_quant_mode="bfloat16",
         )
         with pytest.raises(errors.PerfDataNotAvailableError) as excinfo:
             _rust_static_breakdown(case)

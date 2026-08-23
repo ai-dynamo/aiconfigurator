@@ -43,9 +43,7 @@ def test_power_columns_satisfy_energy_model_input_contract():
     problems = []
     for path in files:
         rel = path.relative_to(_DATA_ROOT)
-        table = pq.read_table(
-            path, columns=[c for c in _POWER_COLUMNS if c in pq.read_schema(path).names]
-        )
+        table = pq.read_table(path, columns=[c for c in _POWER_COLUMNS if c in pq.read_schema(path).names])
         frame = table.to_pandas()
         if "power" in frame:
             bad = frame["power"].isna() | (frame["power"] < 0)
@@ -55,6 +53,4 @@ def test_power_columns_satisfy_energy_model_input_contract():
             bad = frame["power_limit"].isna() | (frame["power_limit"] <= 0)
             if bad.any():
                 problems.append(f"{rel}: {int(bad.sum())} rows with NaN/non-positive power_limit")
-    assert not problems, "power data violates the energy-model input contract:\n" + "\n".join(
-        problems
-    )
+    assert not problems, "power data violates the energy-model input contract:\n" + "\n".join(problems)
