@@ -85,19 +85,19 @@ pytestmark = pytest.mark.integration
 #            hits the trtllm dispatch-flavor branch.
 _SUBSET_IDS_BY_BACKEND = {
     "vllm": [
-        "minimax-m25-b200-vllm-024-isl1024-osl2",
-        "kimi-k25-b200-vllm-024-isl1024-osl2",
-        "minimax-m25-b200-vllm-024-sampled-prefix",
-        "minimax-m27-b200-vllm-024-isl1024-osl2",
-        "qwen3-30b-a3b-b200-vllm-024-isl1024-osl2",
+        "minimax-m25-b200-vllm-isl1024-osl2",
+        "kimi-k25-b200-vllm-isl1024-osl2",
+        "minimax-m25-b200-vllm-sampled-prefix",
+        "minimax-m27-b200-vllm-isl1024-osl2",
+        "qwen3-30b-a3b-b200-vllm-isl1024-osl2",
     ],
     "sglang": [
-        "kimi-k25-b200-sglang-0514-isl1024-osl2",
-        "minimax-m25-b200-sglang-0514-isl1024-osl2",
+        "kimi-k25-b200-sglang-isl1024-osl2",
+        "minimax-m25-b200-sglang-isl1024-osl2",
     ],
     "trtllm": [
-        "gpt-oss-20b-b200-trtllm-130rc20-isl1024-osl2",
-        "nemotron-nas-b200-trtllm-130rc20-isl1024-osl2",
+        "gpt-oss-20b-b200-trtllm-isl1024-osl2",
+        "nemotron-nas-b200-trtllm-isl1024-osl2",
     ],
 }
 
@@ -300,7 +300,7 @@ def _assert_within(name: str, python_value: float, new_value: float, *, backend:
 
 # Chunked-prefill shapes: shared by the parametrized test and the golden
 # pin path (pin_goldens.py) so the fixture keys track the test matrix.
-_CHUNKED_PREFILL_CASE_ID = "minimax-m25-b200-vllm-024-isl1024-osl2"
+_CHUNKED_PREFILL_CASE_ID = "minimax-m25-b200-vllm-isl1024-osl2"
 _CHUNKED_PREFILL_SHAPES = [
     (512, 4, 4096, 128, 0),  # chunked prefill: ctx_tokens < isl
     (512, 4, 4096, 128, 256),  # chunked + cached prefix
@@ -460,7 +460,7 @@ class TestCompileEnginePerOpParity:
 
 
 # Shared by the imbalance tests and the golden pin path.
-_IMBALANCE_CASE_ID = "minimax-m25-b200-vllm-024-isl1024-osl2"
+_IMBALANCE_CASE_ID = "minimax-m25-b200-vllm-isl1024-osl2"
 _IMBALANCE_CTX_SCALE = 1.3
 _IMBALANCE_GEN_SCALE = 0.85
 
