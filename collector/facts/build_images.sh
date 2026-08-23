@@ -54,9 +54,16 @@ docker commit "$cid" "$VLLM_TAG"
 docker rm -f "$cid"
 
 # --- generator CLI venv (golden pipeline) ------------------------------------
-python3 -m venv venv_aic
-./venv_aic/bin/pip install -q "aiconfigurator-core==$CORE_WHEEL" \
-  jinja2 packaging 'numpy~=1.26.4' pandas plotext plotly prettytable pydantic pyarrow pyyaml tqdm matplotlib
+# The golden loop invokes the REAL `aiconfigurator cli generate` command.
+# The compiled core is built FROM THE CHECKOUT (the PyPI wheel lags upstream
+# ABI; the crate's abi3 floor is py3.11 -> use python3.12).
+PY312=${PY312:-/root/.local/bin/python3.12}
+export PATH="$HOME/.cargo/bin:$PATH"
+command -v cargo >/dev/null || curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+"$PY312" -m venv venv_aic
+./venv_aic/bin/pip install -q maturin jinja2 packaging numpy pandas plotext plotly prettytable pydantic pyarrow pyyaml tqdm matplotlib
+./venv_aic/bin/maturin build --release -m aic/aic-core/rust/aiconfigurator-core/Cargo.toml -o /tmp/aic_corewheel
+./venv_aic/bin/pip install -q /tmp/aic_corewheel/aiconfigurator_core-*.whl
 ./venv_aic/bin/pip install -q -e ./aic --no-deps
-ln -sf "$(pwd)/venv_aic/lib/python3.10/site-packages/aiconfigurator_core/_aiconfigurator_core.abi3.so" \
+ln -sf "$(pwd)/$(ls venv_aic/lib/python3.*/site-packages/aiconfigurator_core/_aiconfigurator_core*.so | head -1)" \
        aic/aic-core/src/aiconfigurator_core/_aiconfigurator_core.abi3.so

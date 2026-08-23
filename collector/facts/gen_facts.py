@@ -62,8 +62,12 @@ def render_golden(run: dict) -> Path | None:
            "--save-dir", str(gdir)]
     cmd += list(run.get("cli_extra_args") or [])
     cmd_txt = shlex.join(cmd)
+    import subprocess as _sp
+    gen_commit = _sp.run(["git", "-C", str(ROOT / "aic"), "rev-parse", "--short", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
     stamp = gdir / "command.txt"
-    if stamp.exists() and stamp.read_text().splitlines()[0] == cmd_txt:
+    # cache valid only for the SAME command rendered by the SAME generator code
+    if stamp.exists() and stamp.read_text().splitlines()[:2] == [cmd_txt, f"# generator={gen_commit}"]:
         sub = next((d for d in gdir.iterdir() if d.is_dir()), None)
         if sub is not None:
             return sub  # cached golden for the identical command
@@ -73,7 +77,7 @@ def render_golden(run: dict) -> Path | None:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(ROOT / "aic" / "aic-core" / "src")
     r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=900)
-    stamp.write_text(cmd_txt + f"\n# exit={r.returncode}\n")
+    stamp.write_text(cmd_txt + f"\n# generator={gen_commit}\n# exit={r.returncode}\n")
     (gdir / "render.log").write_text((r.stdout or "")[-8000:] + (r.stderr or "")[-8000:])
     if r.returncode != 0:
         run["golden_error"] = (r.stderr or r.stdout or "").strip().splitlines()[-1][:200] if (r.stderr or r.stdout) else "no output"
@@ -132,7 +136,10 @@ def derive_roster_checkpoints(fam: dict, targets: dict) -> list[dict]:
            r"mistralai|google|Qwen|XiaomiMiMo|MiniMaxAI|sgl-project)")
     mentioned: set[str] = set()
     for f in cases.glob("*_cases.yaml"):
-        mentioned.update(re.findall(rf"\b({org}/[\w.\-]+)", f.read_text()))
+        for m in re.findall(rf"\b({org}/[\w.\-]+)", f.read_text()):
+            # brace-expansion prose like org/Name-{A,B}-X truncates at '{'
+            if not m.endswith("-") and not m.endswith(".py"):
+                mentioned.add(m)
     inaccessible: set[str] = set()
     for inacc in (ROOT / "configs" / "inaccessible.json",
                   Path(__file__).parent / "configs" / "inaccessible.json"):
@@ -360,7 +367,9 @@ def check_coverage(targets: dict) -> None:
     mentioned: set[str] = set()
     org = r"(?:deepseek-ai|zai-org|moonshotai|nvidia|openai|meta-llama|mistralai|google|Qwen|XiaomiMiMo|MiniMaxAI|sgl-project)"
     for f in cases.glob("*_cases.yaml"):
-        mentioned.update(re.findall(rf"\b({org}/[\w.\-]+)", f.read_text()))
+        for m in re.findall(rf"\b({org}/[\w.\-]+)", f.read_text()):
+            if not m.endswith("-") and not m.endswith(".py"):
+                mentioned.add(m)
     for fam in targets["families"].values():
         if fam.get("derive") and "checkpoints" not in fam:
             fam["checkpoints"] = derive_roster_checkpoints(fam, targets)
