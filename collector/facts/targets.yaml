@@ -189,6 +189,15 @@ families:
           fact: MiniMax-M3 trtllm requires sparse_attention_config to get MiniMaxM3KVCacheManagerV2 (modeling_minimaxm3
             RuntimeError without it; facts/trt_ab_m3_sparse.json). Passthrough added to extra_engine_args
             template 2026-08-23.
+      known:
+        sm90_triple: 'Same checkpoint, three fates on SM90. vllm 0.24 RUNS but NOT at mxfp8 precision:
+          binds ModelOptMxFp8FusedMoE/LinearMethod yet executes marlin_moe_wna16::Marlin + marlin::Marlin
+          — weight-only dequant (W8A16 semantics); perf collected here is Marlin-dequant data, not mxfp8
+          tensor-core data (same class as NVFP4-on-SM90). sglang 0.5.16 DEFINITIVELY unservable: explicit
+          quant-method capability floor ''mxfp8 minimum capability 100, current 90'' — not runner-selectable,
+          no flag bypasses it. trtllm rc23 DEFINITIVELY unservable but for a NON-quant reason: all three
+          M3 artifacts die at the sparse-attention wiring wall before quant matters. Evidence: records
+          + raws, 2026-08-24.'
     - repo: nvidia/MiniMax-M3-NVFP4
       profile: nvfp4
       aic_registered: false
