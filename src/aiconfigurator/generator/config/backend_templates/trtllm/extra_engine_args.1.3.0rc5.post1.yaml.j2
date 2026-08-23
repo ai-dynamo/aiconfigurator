@@ -11,6 +11,17 @@ moe_config:
     {% endif %}
 {% endif %}
 
+
+{% if sparse_attention_config is defined %}
+# Required by sparse-attention models (e.g. MiniMax-M3 needs
+# algorithm: minimax_m3 to get MiniMaxM3KVCacheManagerV2); llmapi
+# SparseAttentionConfig fields pass through as-is.
+sparse_attention_config:
+{% for k, v in sparse_attention_config.items() %}
+    {{ k }}: {{ v }}
+{% endfor %}
+{% endif %}
+
 tensor_parallel_size: {{ tensor_parallel_size }}
 pipeline_parallel_size: {{ pipeline_parallel_size }}
 enable_attention_dp: {{ enable_attention_dp | default(false) }}
