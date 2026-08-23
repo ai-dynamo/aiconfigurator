@@ -1260,7 +1260,10 @@ def test_large_ep_op_graph_compiles_natively(caplog):
         num_gpus_per_node=8,
     )
     model = get_model("deepseek-ai/DeepSeek-R1", cfg, "sglang")
-    database = get_database("h200_sxm", "sglang", "0.5.6.post2", allow_unlisted_version=True)
+    # Current slot: the wideEP tables backfill from their 0.5.6.post2/0.5.9/
+    # 0.5.10/0.5.12 sole-source dirs while gemm/attention resolve on the
+    # primary — the production large-EP query shape.
+    database = get_database("h200_sxm", "sglang", "0.5.14")
 
     # (1) The op graph compiles into an EngineSpec carrying the tagged
     # large-EP variants, with the per-phase comm backends the config set.
@@ -1270,7 +1273,7 @@ def test_large_ep_op_graph_compiles_natively(caplog):
             model_path="deepseek-ai/DeepSeek-R1",
             system="h200_sxm",
             backend="sglang",
-            backend_version="0.5.6.post2",
+            backend_version="0.5.14",
             kv_block_size=None,
             systems_path=None,
             nextn=0,

@@ -39,7 +39,6 @@ ops:
     family: quantize
     axes: [op_name, quant_dtype]
     facts:
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "compute_scale", quant_dtype: "fp8", backends: ["sgl_kernel"], kernel_sources: ["sglang"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "compute_scale", quant_dtype: "fp8", backends: ["sgl_kernel"], kernel_sources: ["sglang"]}
       - {framework: "sglang", version: "0.5.14", system: "b300_sxm", op_name: "compute_scale", quant_dtype: "fp8", backends: ["sgl_kernel"], kernel_sources: ["sglang"]}
       - {framework: "sglang", version: "0.5.14", system: "gb200", op_name: "compute_scale", quant_dtype: "fp8", backends: ["sgl_kernel"], kernel_sources: ["sglang"]}
@@ -69,15 +68,6 @@ ops:
     axes: [op_name, attn_dtype, kv_cache_dtype]
     facts:
       - {framework: "sglang", version: "0.5.10", system: "a100_sxm", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["triton", "trtllm_mha"], kernel_sources: ["triton", "trtllm_mha"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["triton", "trtllm_mha"], kernel_sources: ["triton", "trtllm_mha"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "context_attention", attn_dtype: "fp8", kv_cache_dtype: "fp8", backends: ["triton", "trtllm_mha"], kernel_sources: ["triton", "trtllm_mha"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["trtllm_mha"], kernel_sources: ["trtllm_mha"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["trtllm_mha"], kernel_sources: ["trtllm_mha"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "context_attention", attn_dtype: "fp8", kv_cache_dtype: "fp8", backends: ["trtllm_mha"], kernel_sources: ["trtllm_mha"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "context_attention", attn_dtype: "fp8", kv_cache_dtype: "fp8", backends: ["fa3"], kernel_sources: ["flash_attention"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["flashinfer", "triton", "trtllm_mha"], kernel_sources: ["flashinfer", "triton", "trtllm_mha"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["flashinfer", "triton"], kernel_sources: ["flashinfer", "triton"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "context_attention", attn_dtype: "fp8", kv_cache_dtype: "fp8", backends: ["triton", "trtllm_mha"], kernel_sources: ["triton", "trtllm_mha"]}
@@ -102,12 +92,6 @@ ops:
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["flashinfer", "triton"], kernel_sources: ["flashinfer", "triton"]}
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["flashinfer", "triton"], kernel_sources: ["flashinfer", "triton"]}
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "context_attention", attn_dtype: "fp8", kv_cache_dtype: "fp8", backends: ["triton"], kernel_sources: ["triton"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "context_attention", attn_dtype: "fp8", kv_cache_dtype: "fp8", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "context_attention", attn_dtype: "fp8", kv_cache_dtype: "fp8", backends: ["fa3"], kernel_sources: ["flash_attention"]}
       - {framework: "trtllm", version: "1.0.0", system: "a100_sxm", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["trtllm_internal"], kernel_sources: ["torch_flow"]}
       - {framework: "trtllm", version: "1.3.0rc20", system: "b200_sxm", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["flashinfer", "trtllm_internal"], kernel_sources: ["torch_flow", "torch_flow_flashinfer"]}
       - {framework: "trtllm", version: "1.3.0rc20", system: "b200_sxm", op_name: "context_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["flashinfer", "trtllm_internal"], kernel_sources: ["torch_flow", "torch_flow_flashinfer"]}
@@ -158,14 +142,6 @@ ops:
     family: mla
     axes: [op_name, kv_cache_dtype, mla_dtype]
     facts:
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "mla_context", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["trtllm_mla"], kernel_sources: ["trtllm_mla"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "mla_context", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["trtllm_mla"], kernel_sources: ["trtllm_mla"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "mla_context", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["trtllm_mla"], kernel_sources: ["trtllm_mla"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "mla_context", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["trtllm_mla"], kernel_sources: ["trtllm_mla"]}
-      - {framework: "sglang", version: "0.5.10", system: "h100_sxm", op_name: "mla_context", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.10", system: "h100_sxm", op_name: "mla_context", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "mla_context", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "mla_context", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "mla_context", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["trtllm_mla"], kernel_sources: ["trtllm_mla"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "mla_context", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["trtllm_mla"], kernel_sources: ["trtllm_mla"]}
       - {framework: "sglang", version: "0.5.14", system: "b300_sxm", op_name: "mla_context", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["trtllm_mla"], kernel_sources: ["trtllm_mla"]}
@@ -180,10 +156,6 @@ ops:
       - {framework: "sglang", version: "0.5.14", system: "h200_sxm", op_name: "mla_context", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
       - {framework: "sglang", version: "0.5.14", system: "l40s", op_name: "mla_context", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["triton"], kernel_sources: ["triton"]}
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "mla_context", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["triton"], kernel_sources: ["triton"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "mla_context", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "mla_context", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "mla_context", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "mla_context", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
       - {framework: "trtllm", version: "1.0.0", system: "a100_sxm", op_name: "mla_context", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["trtllm_internal"], kernel_sources: ["default"]}
       - {framework: "trtllm", version: "1.0.0", system: "a100_sxm", op_name: "mla_context", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["trtllm_internal"], kernel_sources: ["default"]}
       - {framework: "trtllm", version: "1.0.0", system: "l40s", op_name: "mla_context", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["trtllm_internal"], kernel_sources: ["default"]}
@@ -283,30 +255,6 @@ ops:
     family: sparse_attention
     axes: [op_name, architecture, kv_cache_dtype, mla_dtype, gemm_type]
     facts:
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsa_context_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsa_context_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsa_context_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsa_context_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b300_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b300_sxm", op_name: "dsa_context_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "dsa_context_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb300", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb300", op_name: "dsa_context_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h100_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h100_sxm", op_name: "dsa_context_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "dsa_context_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "dsa_context_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "dsa_context_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "dsa_context_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla", "trtllm_ragged"], kernel_sources: ["sglang_dsa_dense_mha_trtllm_ragged", "sglang_dsa_indexer_flashmla_sparse"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["trtllm_mla", "trtllm_ragged"], kernel_sources: ["sglang_dsa_dense_mha_trtllm_ragged", "sglang_dsa_indexer_trtllm"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "dsa_context_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla", "trtllm_ragged"], kernel_sources: ["sglang_dsa_dense_mha_trtllm_ragged", "sglang_dsa_indexer_flashmla_sparse"]}
@@ -361,13 +309,6 @@ ops:
       - {framework: "sglang", version: "0.5.14", system: "h200_sxm", op_name: "dsa_context_module_skip_indexer", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["fa3", "flashmla"], kernel_sources: ["sglang_dsa_dense_mha_fa3", "sglang_dsa_skip_indexer_flashmla_sparse"]}
       - {framework: "sglang", version: "0.5.14", system: "h200_sxm", op_name: "dsa_context_module_skip_indexer", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["fa3", "flashmla"], kernel_sources: ["sglang_dsa_dense_mha_fa3", "sglang_dsa_skip_indexer_flashmla_kv"]}
       - {framework: "sglang", version: "0.5.14", system: "h200_sxm", op_name: "dsa_context_module_skip_indexer", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["fa3", "flashmla"], kernel_sources: ["sglang_dsa_dense_mha_fa3", "sglang_dsa_skip_indexer_flashmla_kv"]}
-      - {framework: "sglang", version: "0.5.9", system: "b300_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.9", system: "b300_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.9", system: "b300_sxm", op_name: "dsa_context_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.9", system: "h100_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.9", system: "h100_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.9", system: "h100_sxm", op_name: "dsa_context_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.9", system: "h100_sxm", op_name: "dsa_context_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
       - {framework: "trtllm", version: "1.3.0rc20", system: "b200_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["trtllm_internal"], kernel_sources: ["default"]}
       - {framework: "trtllm", version: "1.3.0rc20", system: "b200_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["trtllm_internal"], kernel_sources: ["default"]}
       - {framework: "trtllm", version: "1.3.0rc20", system: "b200_sxm", op_name: "dsa_context_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "nvfp4", backends: ["trtllm_internal"], kernel_sources: ["default"]}
@@ -492,31 +433,6 @@ ops:
     family: sparse_attention
     axes: [op_name, architecture, kv_cache_dtype, mla_dtype, gemm_type]
     facts:
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsa_generation_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsa_generation_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsa_generation_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsa_generation_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b300_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "b300_sxm", op_name: "dsa_generation_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "dsa_generation_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "dsa_generation_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb300", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb300", op_name: "dsa_generation_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h100_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h100_sxm", op_name: "dsa_generation_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "dsa_generation_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "dsa_generation_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "dsa_generation_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "dsa_generation_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["trtllm_mla"], kernel_sources: ["sglang_dsa_indexer_trtllm"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["trtllm_mla"], kernel_sources: ["sglang_dsa_indexer_trtllm"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "dsa_generation_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["trtllm_mla"], kernel_sources: ["sglang_dsa_indexer_trtllm"]}
@@ -571,13 +487,6 @@ ops:
       - {framework: "sglang", version: "0.5.14", system: "h200_sxm", op_name: "dsa_generation_module_skip_indexer", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["fa3"], kernel_sources: ["sglang_dsa_skip_indexer_fa3"]}
       - {framework: "sglang", version: "0.5.14", system: "h200_sxm", op_name: "dsa_generation_module_skip_indexer", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla"], kernel_sources: ["sglang_dsa_skip_indexer_flashmla_kv"]}
       - {framework: "sglang", version: "0.5.14", system: "h200_sxm", op_name: "dsa_generation_module_skip_indexer", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["sglang_dsa_skip_indexer_flashmla_kv"]}
-      - {framework: "sglang", version: "0.5.9", system: "b300_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.9", system: "b300_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.9", system: "b300_sxm", op_name: "dsa_generation_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.9", system: "h100_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.9", system: "h100_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.9", system: "h100_sxm", op_name: "dsa_generation_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
-      - {framework: "sglang", version: "0.5.9", system: "h100_sxm", op_name: "dsa_generation_module", architecture: "GlmMoeDsaForCausalLM", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["dsa_nsa"], kernel_sources: ["dsa_nsa"]}
       - {framework: "trtllm", version: "1.3.0rc20", system: "b200_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["trtllm_internal"], kernel_sources: ["default"]}
       - {framework: "trtllm", version: "1.3.0rc20", system: "b200_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["trtllm_internal"], kernel_sources: ["default"]}
       - {framework: "trtllm", version: "1.3.0rc20", system: "b200_sxm", op_name: "dsa_generation_module", architecture: "DeepseekV32ForCausalLM", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", gemm_type: "nvfp4", backends: ["trtllm_internal"], kernel_sources: ["default"]}
@@ -702,11 +611,6 @@ ops:
     family: sparse_attention
     axes: [op_name, architecture, kv_cache_dtype, mla_dtype, gemm_type]
     facts:
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsv4_csa_context_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsv4_flash_csa_context_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsv4_flash_csa_context_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "dsv4_flash_csa_context_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "dsv4_flash_csa_context_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "dsv4_csa_context_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "dsv4_csa_context_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
       - {framework: "sglang", version: "0.5.14", system: "b300_sxm", op_name: "dsv4_csa_context_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
@@ -733,11 +637,6 @@ ops:
     family: sparse_attention
     axes: [op_name, architecture, kv_cache_dtype, mla_dtype, gemm_type]
     facts:
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsv4_csa_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsv4_flash_csa_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsv4_flash_csa_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "dsv4_flash_csa_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "dsv4_flash_csa_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "dsv4_csa_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "dsv4_csa_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
       - {framework: "sglang", version: "0.5.14", system: "b300_sxm", op_name: "dsv4_csa_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
@@ -791,11 +690,6 @@ ops:
     family: sparse_attention
     axes: [op_name, architecture, kv_cache_dtype, mla_dtype, gemm_type]
     facts:
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsv4_flash_hca_context_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsv4_flash_hca_context_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsv4_hca_context_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "dsv4_flash_hca_context_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "dsv4_flash_hca_context_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "dsv4_hca_context_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "dsv4_hca_context_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
       - {framework: "sglang", version: "0.5.14", system: "b300_sxm", op_name: "dsv4_hca_context_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
@@ -824,11 +718,6 @@ ops:
     family: sparse_attention
     axes: [op_name, architecture, kv_cache_dtype, mla_dtype, gemm_type]
     facts:
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsv4_flash_hca_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsv4_flash_hca_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsv4_hca_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "dsv4_flash_hca_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "dsv4_flash_hca_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "dsv4_hca_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "dsv4_hca_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "fp8_block", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
       - {framework: "sglang", version: "0.5.14", system: "b300_sxm", op_name: "dsv4_hca_generation_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "bfloat16", gemm_type: "bfloat16", backends: ["flashmla"], kernel_sources: ["compressed_flashmla"]}
@@ -867,9 +756,6 @@ ops:
     family: sparse_attention
     axes: [op_name, architecture, kv_cache_dtype, mla_dtype, gemm_type]
     facts:
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsv4_flash_paged_mqa_logits_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "fp8_e4m3", gemm_type: "fp8_block", backends: ["deepgemm"], kernel_sources: ["deep_gemm.fp8_paged_mqa_logits"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "dsv4_paged_mqa_logits_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "fp8_e4m3", gemm_type: "fp8_block", backends: ["deepgemm"], kernel_sources: ["deep_gemm.fp8_paged_mqa_logits"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "dsv4_flash_paged_mqa_logits_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "fp8_e4m3", gemm_type: "fp8_block", backends: ["deepgemm"], kernel_sources: ["deep_gemm.fp8_paged_mqa_logits"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "dsv4_paged_mqa_logits_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "fp8_e4m3", gemm_type: "fp8_block", backends: ["deepgemm"], kernel_sources: ["deep_gemm.fp8_paged_mqa_logits"]}
       - {framework: "sglang", version: "0.5.14", system: "b300_sxm", op_name: "dsv4_paged_mqa_logits_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "fp8_e4m3", gemm_type: "fp8_block", backends: ["deepgemm"], kernel_sources: ["deep_gemm.fp8_paged_mqa_logits"]}
       - {framework: "sglang", version: "0.5.14", system: "gb200", op_name: "dsv4_paged_mqa_logits_module", architecture: "DeepseekV4ForCausalLM", kv_cache_dtype: "fp8_e4m3", mla_dtype: "fp8_e4m3", gemm_type: "fp8_block", backends: ["deepgemm"], kernel_sources: ["deep_gemm.fp8_paged_mqa_logits"]}
@@ -886,9 +772,6 @@ ops:
     family: encoder_attention
     axes: [op_name, attn_dtype]
     facts:
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "encoder_attention", attn_dtype: "bfloat16", backends: ["fa4"], kernel_sources: ["flash_attention_v4"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "encoder_attention", attn_dtype: "bfloat16", backends: ["fa4"], kernel_sources: ["flash_attention_v4"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "encoder_attention", attn_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention_v3"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "encoder_attention", attn_dtype: "bfloat16", backends: ["fa4"], kernel_sources: ["flash_attention_v4"]}
       - {framework: "sglang", version: "0.5.14", system: "b300_sxm", op_name: "encoder_attention", attn_dtype: "bfloat16", backends: ["triton"], kernel_sources: ["triton"]}
       - {framework: "sglang", version: "0.5.14", system: "gb200", op_name: "encoder_attention", attn_dtype: "bfloat16", backends: ["fa4"], kernel_sources: ["flash_attention_v4"]}
@@ -919,10 +802,6 @@ ops:
     facts:
       - {framework: "sglang", version: "0.5.10", system: "a100_sxm", op_name: "gdn", phase: "context", backends: ["unverified"], kernel_sources: ["causal_conv1d_fn"]}
       - {framework: "sglang", version: "0.5.10", system: "a100_sxm", op_name: "gdn", phase: "generation", backends: ["causal_conv1d", "fla_triton"], kernel_sources: ["causal_conv1d_update", "fused_recurrent_gated_delta_rule"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "gdn", phase: "context", backends: ["unverified"], kernel_sources: ["causal_conv1d_fn"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "gdn", phase: "generation", backends: ["causal_conv1d", "fla_triton"], kernel_sources: ["causal_conv1d_update", "fused_recurrent_gated_delta_rule"]}
-      - {framework: "sglang", version: "0.5.10", system: "h100_sxm", op_name: "gdn", phase: "context", backends: ["unverified"], kernel_sources: ["causal_conv1d_fn"]}
-      - {framework: "sglang", version: "0.5.10", system: "h100_sxm", op_name: "gdn", phase: "generation", backends: ["causal_conv1d", "fla_triton"], kernel_sources: ["causal_conv1d_update", "fused_recurrent_gated_delta_rule"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "gdn", phase: "context", backends: ["fla_triton", "unverified"], kernel_sources: ["causal_conv1d_fn", "chunk_gated_delta_rule"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "gdn", phase: "generation", backends: ["causal_conv1d", "fla_triton"], kernel_sources: ["causal_conv1d_update", "fused_recurrent_gated_delta_rule_packed_decode"]}
       - {framework: "sglang", version: "0.5.14", system: "b300_sxm", op_name: "gdn", phase: "context", backends: ["fla_triton", "unverified"], kernel_sources: ["causal_conv1d_fn", "chunk_gated_delta_rule"]}
@@ -976,17 +855,6 @@ ops:
     axes: [op_name, gemm_dtype]
     facts:
       - {framework: "sglang", version: "0.5.10", system: "a100_sxm", op_name: "gemm", gemm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["sglang"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "gemm", gemm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["sglang"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "gemm", gemm_dtype: "fp8", backends: ["cutlass"], kernel_sources: ["sglang"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "gemm", gemm_dtype: "fp8_block", backends: ["deepgemm"], kernel_sources: ["sglang"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "gemm", gemm_dtype: "nvfp4", backends: ["flashinfer_cutlass"], kernel_sources: ["sglang"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "gemm", gemm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["sglang"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "gemm", gemm_dtype: "fp8", backends: ["cutlass"], kernel_sources: ["sglang"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "gemm", gemm_dtype: "fp8_block", backends: ["deepgemm"], kernel_sources: ["sglang"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "gemm", gemm_dtype: "nvfp4", backends: ["flashinfer_cutlass"], kernel_sources: ["sglang"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "gemm", gemm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["sglang"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "gemm", gemm_dtype: "fp8", backends: ["cutlass"], kernel_sources: ["sglang"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "gemm", gemm_dtype: "fp8_block", backends: ["deepgemm"], kernel_sources: ["sglang"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "gemm", gemm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["sglang_torch_linear"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "gemm", gemm_dtype: "fp8", backends: ["cutlass"], kernel_sources: ["sglang_sgl_kernel_fp8_scaled_mm"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "gemm", gemm_dtype: "fp8_block", backends: ["deepgemm"], kernel_sources: ["sglang_deepgemm_gemm_nt_f8f8bf16"]}
@@ -1018,9 +886,6 @@ ops:
       - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "gemm", gemm_dtype: "fp8", backends: ["cutlass"], kernel_sources: ["sglang"]}
       - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "gemm", gemm_dtype: "fp8_block", backends: ["deepgemm"], kernel_sources: ["sglang"]}
       - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "gemm", gemm_dtype: "int8_wo", backends: ["sgl_kernel"], kernel_sources: ["sglang"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "gemm", gemm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["sglang"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "gemm", gemm_dtype: "fp8", backends: ["cutlass"], kernel_sources: ["sglang"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "gemm", gemm_dtype: "fp8_block", backends: ["deepgemm"], kernel_sources: ["sglang"]}
       - {framework: "trtllm", version: "1.0.0", system: "a100_sxm", op_name: "gemm", gemm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["torch_flow"]}
       - {framework: "trtllm", version: "1.0.0", system: "a100_sxm", op_name: "gemm", gemm_dtype: "int4_wo", backends: ["trt_plugin"], kernel_sources: ["trt_flow_/weight_only_quant_matmul_L257/PLUGIN_V2_WeightOnlyQuantMatmul_0"]}
       - {framework: "trtllm", version: "1.0.0", system: "a100_sxm", op_name: "gemm", gemm_dtype: "int8_wo", backends: ["trt_plugin"], kernel_sources: ["trt_flow_/weight_only_quant_matmul_L257/PLUGIN_V2_WeightOnlyQuantMatmul_0"]}
@@ -1091,12 +956,6 @@ ops:
     axes: [op_name, attn_dtype, kv_cache_dtype]
     facts:
       - {framework: "sglang", version: "0.5.10", system: "a100_sxm", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["trtllm_mha"], kernel_sources: ["trtllm_mha"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["trtllm_mha"], kernel_sources: ["trtllm_mha"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["trtllm_mha"], kernel_sources: ["trtllm_mha"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["trtllm_mha"], kernel_sources: ["trtllm_mha"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["fa3"], kernel_sources: ["flash_attention"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["flashinfer", "triton", "trtllm_mha"], kernel_sources: ["flashinfer", "triton", "trtllm_mha"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["flashinfer", "triton", "trtllm_mha"], kernel_sources: ["flashinfer", "triton", "trtllm_mha"]}
       - {framework: "sglang", version: "0.5.14", system: "b300_sxm", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["flashinfer", "triton", "trtllm_mha"], kernel_sources: ["flashinfer", "triton", "trtllm_mha"]}
@@ -1113,10 +972,6 @@ ops:
       - {framework: "sglang", version: "0.5.14", system: "l40s", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["flashinfer", "triton"], kernel_sources: ["flashinfer", "triton"]}
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["flashinfer", "triton"], kernel_sources: ["flashinfer", "triton"]}
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["flashinfer", "triton"], kernel_sources: ["flashinfer", "triton"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["fa3"], kernel_sources: ["flash_attention"]}
       - {framework: "trtllm", version: "1.0.0", system: "a100_sxm", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["trtllm_internal"], kernel_sources: ["torch_flow"]}
       - {framework: "trtllm", version: "1.3.0rc20", system: "b200_sxm", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "bfloat16", backends: ["flashinfer", "trtllm_internal"], kernel_sources: ["torch_flow", "torch_flow_flashinfer"]}
       - {framework: "trtllm", version: "1.3.0rc20", system: "b200_sxm", op_name: "generation_attention", attn_dtype: "bfloat16", kv_cache_dtype: "fp8", backends: ["flashinfer", "trtllm_internal"], kernel_sources: ["torch_flow", "torch_flow_flashinfer"]}
@@ -1159,14 +1014,6 @@ ops:
     family: mla
     axes: [op_name, kv_cache_dtype, mla_dtype]
     facts:
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "mla_generation", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["trtllm_mla"], kernel_sources: ["trtllm_mla"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "mla_generation", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["trtllm_mla"], kernel_sources: ["trtllm_mla"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "mla_generation", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["trtllm_mla"], kernel_sources: ["trtllm_mla"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "mla_generation", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["trtllm_mla"], kernel_sources: ["trtllm_mla"]}
-      - {framework: "sglang", version: "0.5.10", system: "h100_sxm", op_name: "mla_generation", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.10", system: "h100_sxm", op_name: "mla_generation", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "mla_generation", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "mla_generation", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "mla_generation", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["trtllm_mla"], kernel_sources: ["trtllm_mla"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "mla_generation", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["trtllm_mla"], kernel_sources: ["trtllm_mla"]}
       - {framework: "sglang", version: "0.5.14", system: "b300_sxm", op_name: "mla_generation", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["trtllm_mla"], kernel_sources: ["trtllm_mla"]}
@@ -1181,10 +1028,6 @@ ops:
       - {framework: "sglang", version: "0.5.14", system: "h200_sxm", op_name: "mla_generation", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
       - {framework: "sglang", version: "0.5.14", system: "l40s", op_name: "mla_generation", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["triton"], kernel_sources: ["triton"]}
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "mla_generation", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["triton"], kernel_sources: ["triton"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "mla_generation", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "mla_generation", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "mla_generation", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "mla_generation", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["fa3"], kernel_sources: ["flash_attention"]}
       - {framework: "trtllm", version: "1.0.0", system: "a100_sxm", op_name: "mla_generation", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["trtllm_internal"], kernel_sources: ["default"]}
       - {framework: "trtllm", version: "1.0.0", system: "a100_sxm", op_name: "mla_generation", kv_cache_dtype: "fp8", mla_dtype: "bfloat16", backends: ["trtllm_internal"], kernel_sources: ["default"]}
       - {framework: "trtllm", version: "1.0.0", system: "l40s", op_name: "mla_generation", kv_cache_dtype: "bfloat16", mla_dtype: "bfloat16", backends: ["trtllm_internal"], kernel_sources: ["default"]}
@@ -1309,10 +1152,6 @@ ops:
     family: mhc
     axes: [op_name, architecture]
     facts:
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "post", architecture: "DeepseekV4ForCausalLM", backends: ["sgl_kernel"], kernel_sources: ["sglang_mhc"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "pre", architecture: "DeepseekV4ForCausalLM", backends: ["sgl_kernel"], kernel_sources: ["sglang_mhc"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "post", architecture: "DeepseekV4ForCausalLM", backends: ["sgl_kernel"], kernel_sources: ["sglang_mhc"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "pre", architecture: "DeepseekV4ForCausalLM", backends: ["sgl_kernel"], kernel_sources: ["sglang_mhc"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "post", architecture: "DeepseekV4ForCausalLM", backends: ["tilelang"], kernel_sources: ["sglang_tilelang_mhc_post"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "pre", architecture: "DeepseekV4ForCausalLM", backends: ["tilelang"], kernel_sources: ["sglang_tilelang_mhc_pre"]}
       - {framework: "sglang", version: "0.5.14", system: "b300_sxm", op_name: "post", architecture: "DeepseekV4ForCausalLM", backends: ["tilelang"], kernel_sources: ["sglang_tilelang_mhc_post"]}
@@ -1363,18 +1202,6 @@ ops:
     facts:
       - {framework: "sglang", version: "0.5.10", system: "a100_sxm", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
       - {framework: "sglang", version: "0.5.10", system: "a100_sxm", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "mla_gen_post", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "mla_gen_pre", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "mla_gen_post", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "mla_gen_pre", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "mla_gen_post", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "mla_gen_pre", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["default"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["sglang_torch_bmm"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "mla_gen_post", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["sglang_sgl_kernel_bmm_fp8"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["sglang_torch_bmm"]}
@@ -1407,14 +1234,6 @@ ops:
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "mla_gen_post", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["sglang_sgl_kernel_bmm_fp8"]}
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["sglang_torch_bmm"]}
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "mla_gen_pre", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["sglang_sgl_kernel_bmm_fp8"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "mla_gen_post", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "mla_gen_pre", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "mla_gen_post", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "mla_gen_pre", bmm_dtype: "fp8", backends: ["cublas"], kernel_sources: ["default"]}
       - {framework: "trtllm", version: "1.0.0", system: "a100_sxm", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
       - {framework: "trtllm", version: "1.0.0", system: "a100_sxm", op_name: "mla_gen_pre", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
       - {framework: "trtllm", version: "1.0.0", system: "l40s", op_name: "mla_gen_post", bmm_dtype: "bfloat16", backends: ["cublas"], kernel_sources: ["default"]}
@@ -1643,16 +1462,6 @@ ops:
     facts:
       - {framework: "sglang", version: "0.5.10", system: "a100_sxm", op_name: "moe", moe_dtype: "bfloat16", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
       - {framework: "sglang", version: "0.5.10", system: "a100_sxm", op_name: "moe", moe_dtype: "int4_wo", backends: ["marlin"], kernel_sources: ["sglang_marlin_moe"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "moe", moe_dtype: "bfloat16", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "moe", moe_dtype: "fp8_block", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "moe", moe_dtype: "int4_wo", backends: ["marlin"], kernel_sources: ["sglang_marlin_moe"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "moe", moe_dtype: "nvfp4", backends: ["flashinfer_cutedsl"], kernel_sources: ["sglang_flashinfer_cutedsl_moe"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "moe", moe_dtype: "w4a16_mxfp4", backends: ["flashinfer_trtllm_gen"], kernel_sources: ["sglang_flashinfer_mxfp4_moe"]}
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "moe", moe_dtype: "w4a8_mxfp4_mxfp8", backends: ["flashinfer_trtllm_gen"], kernel_sources: ["sglang_flashinfer_mxfp4_moe"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "moe", moe_dtype: "bfloat16", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "moe", moe_dtype: "fp8_block", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "moe", moe_dtype: "int4_wo", backends: ["marlin"], kernel_sources: ["sglang_marlin_moe"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "moe", moe_dtype: "nvfp4", backends: ["flashinfer_cutedsl"], kernel_sources: ["sglang_flashinfer_cutedsl_moe"]}
       - {framework: "sglang", version: "0.5.10", system: "h100_sxm", op_name: "moe", moe_dtype: "bfloat16", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
       - {framework: "sglang", version: "0.5.10", system: "h100_sxm", op_name: "moe", moe_dtype: "fp8_block", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
       - {framework: "sglang", version: "0.5.10", system: "h100_sxm", op_name: "moe", moe_dtype: "int4_wo", backends: ["marlin"], kernel_sources: ["sglang_marlin_moe"]}
@@ -1699,10 +1508,6 @@ ops:
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "moe", moe_dtype: "int4_wo", backends: ["marlin"], kernel_sources: ["sglang_marlin_moe"]}
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "moe", moe_dtype: "nvfp4", backends: ["flashinfer_cutlass"], kernel_sources: ["sglang_flashinfer_cutlass_moe"]}
       - {framework: "sglang", version: "0.5.14", system: "rtx_pro_6000_server", op_name: "moe", moe_dtype: "w4a16_mxfp4", backends: ["marlin"], kernel_sources: ["sglang_marlin_moe", "sglang_marlin_moe_situ_as_silu"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "moe", moe_dtype: "bfloat16", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "moe", moe_dtype: "fp8_block", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "moe", moe_dtype: "bfloat16", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "moe", moe_dtype: "fp8_block", backends: ["triton_fused_moe"], kernel_sources: ["sglang_fused_moe_triton"]}
       - {framework: "trtllm", version: "1.0.0", system: "a100_sxm", op_name: "moe", moe_dtype: "bfloat16", backends: ["trtllm_internal"], kernel_sources: ["moe_torch_flow"]}
       - {framework: "trtllm", version: "1.0.0", system: "l40s", op_name: "moe", moe_dtype: "bfloat16", backends: ["cutlass", "trtllm_internal"], kernel_sources: ["moe_torch_flow", "moe_torch_flow_cutlass"]}
       - {framework: "trtllm", version: "1.0.0", system: "l40s", op_name: "moe", moe_dtype: "w4afp8", backends: ["trtllm_internal"], kernel_sources: ["moe_torch_flow"]}
@@ -1987,7 +1792,6 @@ ops:
     family: quantize
     axes: [op_name, quant_dtype]
     facts:
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "scale_matrix", quant_dtype: "fp8", backends: ["sgl_kernel"], kernel_sources: ["sglang"]}
       - {framework: "sglang", version: "0.5.14", system: "b200_sxm", op_name: "scale_matrix", quant_dtype: "fp8", backends: ["sgl_kernel"], kernel_sources: ["sglang"]}
       - {framework: "sglang", version: "0.5.14", system: "b300_sxm", op_name: "scale_matrix", quant_dtype: "fp8", backends: ["sgl_kernel"], kernel_sources: ["sglang"]}
       - {framework: "sglang", version: "0.5.14", system: "gb200", op_name: "scale_matrix", quant_dtype: "fp8", backends: ["sgl_kernel"], kernel_sources: ["sglang"]}

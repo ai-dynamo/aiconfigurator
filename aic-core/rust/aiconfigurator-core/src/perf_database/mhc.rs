@@ -298,7 +298,7 @@ mod tests {
         // count. Math on synthetic grids in perf_interp; values in goldens.
         let table = MhcTable::new(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../src/aiconfigurator_core/systems/data/b200_sxm/sglang/0.5.10"),
+                .join("../../src/aiconfigurator_core/systems/data/b200_sxm/sglang/0.5.14"),
         );
         for &(op, nt) in &[("pre", 3u32), ("post", 3), ("both", 3), ("pre", 8)] {
             let got = table

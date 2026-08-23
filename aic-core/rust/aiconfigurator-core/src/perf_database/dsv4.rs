@@ -1513,7 +1513,7 @@ mod tests {
 
     fn b200_sglang_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../src/aiconfigurator_core/systems/data/b200_sxm/sglang/0.5.10")
+            .join("../../src/aiconfigurator_core/systems/data/b200_sxm/sglang/0.5.14")
     }
 
     #[test]
@@ -1584,7 +1584,7 @@ mod tests {
     }
 
     /// Cross-language parity with the Python v2 engine on the real
-    /// b200_sxm/sglang/0.5.10 tables. Oracle values generated with
+    /// b200_sxm/sglang/0.5.14 tables (re-anchored; original oracles on 0.5.10).
     /// `PYTHONPATH=src AIC_DSV4_TOPK_CORRECTION=0 python3` via
     /// `PerfDatabase.query_{context,generation}_deepseek_v4_attention_module`
     /// (DatabaseMode.SILICON, shared layer off, DSV4-Pro dims with

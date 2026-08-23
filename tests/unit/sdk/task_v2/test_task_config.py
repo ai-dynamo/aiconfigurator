@@ -1688,15 +1688,16 @@ def test_validate_agg_requires_system_name():
 
 def test_validate_agg_fp8_static_on_sglang_is_data_driven():
     """fp8_static is no longer hard-gated to trtllm; support is decided by the
-    perf DB.  h200_sxm/sglang has fp8 GEMM data but no compute_scale/scale_matrix
-    overhead tables, so fp8_static is rejected by the DB-side check rather than a
-    backend allowlist."""
+    perf DB.  h100_sxm/sglang/0.5.6.post2 has fp8 GEMM data but no
+    compute_scale/scale_matrix overhead tables (0.5.14 collected them, so the
+    current slot stopped qualifying), so fp8_static is rejected by the DB-side
+    check rather than a backend allowlist."""
     t = Task(
         serving_mode="agg",
         model_path="deepseek-ai/DeepSeek-V3",
-        system_name="h200_sxm",
+        system_name="h100_sxm",
         backend_name="sglang",
-        backend_version="0.5.10",
+        backend_version="0.5.6.post2",
         gemm_quant_mode=common.GEMMQuantMode.fp8_static,
     )
     with pytest.raises(ValueError, match="Unsupported gemm quant mode 'fp8_static'"):
@@ -1741,14 +1742,14 @@ def test_validate_disagg_rejects_mismatched_prefill_decode_model_paths():
 
 def test_validate_disagg_fp8_static_is_data_driven_per_role():
     """Per-role fp8_static support is decided by the perf DB, not a trtllm
-    allowlist.  h200_sxm/sglang lacks the overhead tables, so the prefill role's
-    fp8_static is rejected by the DB-side check."""
+    allowlist.  h100_sxm/sglang/0.5.6.post2 lacks the overhead tables, so the
+    prefill role's fp8_static is rejected by the DB-side check."""
     t = Task(
         serving_mode="disagg",
         prefill_model_path="deepseek-ai/DeepSeek-V3",
-        prefill_system_name="h200_sxm",
+        prefill_system_name="h100_sxm",
         prefill_backend_name="sglang",
-        prefill_backend_version="0.5.10",
+        prefill_backend_version="0.5.6.post2",
         prefill_gemm_quant_mode=common.GEMMQuantMode.fp8_static,
         decode_model_path="deepseek-ai/DeepSeek-V3",
         decode_system_name="h200_sxm",

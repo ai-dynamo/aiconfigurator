@@ -28,22 +28,22 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.mark.parametrize(
-    ("system", "version", "expect_skip_rows"),
+    ("system", "backend", "version", "expect_skip_rows"),
     [
-        # 0.5.9-0.5.12-era tables have no skip rows anywhere (the AIC-1747
-        # probe collection covered 0.5.14 only) — this is the gap the
-        # degradation now exists for. Anchored to tables no in-flight data PR
-        # touches, matching the Rust twin's test anchors.
-        ("h200_sxm", "0.5.10", False),
-        ("b200_sxm", "0.5.14", True),
-        ("gb200", "0.5.14", True),
+        # The full-only gap the degradation exists for now lives on the vllm
+        # current slot (every sglang 0.5.14 table ships skip variants; the
+        # old no-skip sglang dirs were retired) — same vehicle as the Rust
+        # twin's anchors.
+        ("h200_sxm", "vllm", "0.24.0", False),
+        ("b200_sxm", "sglang", "0.5.14", True),
+        ("gb200", "sglang", "0.5.14", True),
     ],
 )
-def test_shipped_sglang_skip_row_availability(system, version, expect_skip_rows):
+def test_shipped_skip_row_availability(system, backend, version, expect_skip_rows):
     """Pins the shipped skip-row availability the engine degradation keys off."""
     from aiconfigurator_core.sdk.perf_database import get_database
 
-    db = get_database(system, "sglang", version, allow_unlisted_version=True)
+    db = get_database(system, backend, version)
     ContextDSAModule.load_data(db)
     GenerationDSAModule.load_data(db)
 

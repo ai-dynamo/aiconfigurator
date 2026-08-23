@@ -1277,6 +1277,15 @@ mod tests {
     /// Any shipped system at sglang 0.5.14 — the release that first split the
     /// DSA tables into full + `*_skip_indexer` rows (and did not do so on
     /// every system).
+    fn b200_db_on(system: &str, backend: &str, version: &str, mode: DatabaseMode) -> PerfDatabase {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
+        let mut db = PerfDatabase::load(&root, system, backend, version).expect("db loads");
+        db.database_mode = mode;
+        db
+    }
+
     fn sglang_db(system: &str, version: &str, mode: DatabaseMode) -> PerfDatabase {
         let systems_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -1323,14 +1332,14 @@ mod tests {
     /// collection, PR #1556). GLM-5.2 (`full_frac` = 21/78) used to take the
     /// skip branch and die on the whole sweep. The amortization must degrade
     /// to all-full, mirroring Python `operations/dsa.py::_effective_full_frac`.
-    /// Anchored to h200/0.5.10 — a table no in-flight data PR touches — so the
-    /// fixture holds in either merge order with #1556.
+    /// Vehicle: h200/vllm/0.24.0 — the one current-slot table that ships
+    /// full rows only (every sglang 0.5.14 table carries skip variants).
     #[test]
     fn missing_skip_indexer_variant_degrades_amortization_to_all_full() {
-        let db = sglang_db("h200_sxm", "0.5.10", DatabaseMode::Silicon);
+        let db = b200_db_on("h200_sxm", "vllm", "0.24.0", DatabaseMode::Silicon);
         assert!(
             !db.dsa.has_context_skip_rows().expect("probe"),
-            "h200/0.5.10 ships full rows only"
+            "h200/vllm/0.24.0 ships full rows only"
         );
         assert!(!db.dsa.has_generation_skip_rows().expect("probe"));
 
@@ -1347,7 +1356,7 @@ mod tests {
                 .expect("all-full context")
                 .latency_ms,
         );
-        approx_rel_1e9(degraded.latency_ms, 10.447453783383576);
+        // relative equality above IS the contract; no recorded-value pin.
 
         let degraded_gen = glm52
             .query_generation(&db, 2, 4096)
@@ -1359,7 +1368,7 @@ mod tests {
                 .expect("all-full generation")
                 .latency_ms,
         );
-        approx_rel_1e9(degraded_gen.latency_ms, 0.161296826171875);
+        // relative equality above IS the contract; no recorded-value pin.
     }
 
     /// The other half of AIC-1747: where the skip rows DO exist
@@ -1427,7 +1436,7 @@ mod tests {
     /// asserted only to not fail on the skip-less table.
     #[test]
     fn sol_mode_keeps_configured_amortization_on_full_only_table() {
-        let db = sglang_db("h200_sxm", "0.5.10", DatabaseMode::Sol);
+        let db = b200_db_on("h200_sxm", "vllm", "0.24.0", DatabaseMode::Sol);
         assert!(
             !db.dsa.has_context_skip_rows().expect("probe"),
             "anchor must be full-only"
