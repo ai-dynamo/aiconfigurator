@@ -179,6 +179,14 @@ def extract_sglang_cli_from_run_sh(run_sh: Path) -> str:
     return " ".join(out)
 
 
+def _cea(v):
+    """cli_extra_args entry: plain list, or {args: [...], fact: "<evidence>"} —
+    the fact field cites the probe evidence this generator input derives from."""
+    if not v:
+        return []
+    return list(v["args"]) if isinstance(v, dict) else list(v)
+
+
 def derive_roster_checkpoints(fam: dict, targets: dict) -> list[dict]:
     """Roster checkpoints DERIVED from the collector's own case declarations:
     every org/repo its cases yamls mention, minus gated repos and repos owned
@@ -286,8 +294,8 @@ def enumerate_runs(targets: dict, full: bool, backends: list[str]) -> list[dict]
                                 "render_overrides": ((ck.get("render_overrides") or {}).get(backend)
                                                      or (fam.get("render_overrides") or {}).get(backend) or {}),
                                 "cli_extra_args": (list(be.get("cli_extra_args") or [])
-                                                   + ((ck.get("cli_extra_args") or {}).get(backend)
-                                                      or (fam.get("cli_extra_args") or {}).get(backend) or [])),
+                                                   + _cea((ck.get("cli_extra_args") or {}).get(backend)
+                                                          or (fam.get("cli_extra_args") or {}).get(backend))),
                             })
     return runs
 
