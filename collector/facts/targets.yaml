@@ -209,6 +209,13 @@ families:
           fact: MiniMax-M3 trtllm requires sparse_attention_config to get MiniMaxM3KVCacheManagerV2 (modeling_minimaxm3
             RuntimeError without it; facts/trt_ab_m3_sparse.json). Passthrough added to extra_engine_args
             template 2026-08-23.
+      known:
+        sglang_silent_downgrade: 'SGLANG BUG (not ours), mechanism pinned: the artifact ships quant_method=''modelopt''
+          + quant_algo=''MIXED_PRECISION''; sglang 0.5.16''s mixed detector matches only the literal ''modelopt_mixed''
+          (modelopt_quant.py:622) and the generic modelopt fallback greps quant_algo for FP8/NVFP4/FP4
+          substrings (base_config.py:189-196) — MIXED_PRECISION matches neither -> silently Unquantized,
+          zero warnings. Our dummy carries the full real metadata and the SAME metadata binds ModelOptNvFp4FusedMoE
+          correctly on vllm. Worth reporting upstream; recheck on 0.5.17.'
     dummy_variants:
     - moe_sparse_attn
     - dense_full_attn_head
