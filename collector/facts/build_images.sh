@@ -11,16 +11,18 @@ t = yaml.safe_load(open('targets.yaml'))
 for be, cfg in t['backends'].items():
     for ver, img in cfg['images'].items():
         print(f"{be}|{ver}|{img}")
-print("core|wheel|" + t['tooling']['aiconfigurator_core_wheel'])
 print("vllmbase|img|" + t['tooling']['vllm_probe_base_image'])
 PY
 )
 
-VLLM_BASE=""; CORE_WHEEL=""
+VLLM_BASE=""
+# the checkout itself declares which compiled core it needs — read, don't pin
+CORE_WHEEL=$(python3 -c "
+import re
+print(re.search(r'aiconfigurator-core==([\w.]+)', open('aic/pyproject.toml').read()).group(1))")
 for pin in "${PINS[@]}"; do
   IFS='|' read -r be ver img <<< "$pin"
   case "$be" in
-    core)     CORE_WHEEL="$img" ;;
     vllmbase) VLLM_BASE="$img" ;;
     vllm)     ;;  # built below from VLLM_BASE
     *)        docker pull "$img" ;;

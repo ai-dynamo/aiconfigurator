@@ -518,5 +518,6 @@ platform:
   - h100_sxm
   - h200_sxm
 tooling:
-  aiconfigurator_core_wheel: 0.11.0
   vllm_probe_base_image: vllm/vllm-openai:v0.24.0
+  note: aiconfigurator-core wheel version is READ FROM aic/pyproject.toml (the checkout declares it);
+    only probe-specific pins live here.
