@@ -603,10 +603,13 @@ def test_deepseek_v32_v4_context_fmha_downgrade_is_data_driven():
 
 def test_get_model_preserves_task_resolved_fmha():
     """get_model()'s legacy FMHA guards fire only when fmha arrives unset: a
-    Task-resolved fp8 (data-backed -- b200 vLLM ships native fp8 dsa_context
-    slices) must survive model build.  Review regression: the guards in
-    _apply_model_quant_defaults used to re-downgrade on the value, silently
-    undoing the data-driven resolution at every sweep point."""
+    Task-carried fp8 must survive model build. Review regression: the guards
+    in _apply_model_quant_defaults used to re-downgrade on the value,
+    silently undoing the Task-level resolution at every sweep point. The
+    fp8 value is pinned explicitly — the guard treats task-resolved and
+    user-set identically (both arrive set), and no current-slot vllm data
+    resolves fp8 fmha for DSA models since the 0.19/0.22 retirement, so an
+    inference-based vehicle would bind this test to a data coordinate."""
     from aiconfigurator.sdk import common
     from aiconfigurator.sdk.models import get_model
 
@@ -615,6 +618,7 @@ def test_get_model_preserves_task_resolved_fmha():
         model_path="deepseek-ai/DeepSeek-V3.2",
         system_name="b200_sxm",
         backend_name="vllm",
+        fmha_quant_mode=common.FMHAQuantMode.fp8,
     )
     assert t.fmha_quant_mode == common.FMHAQuantMode.fp8
     mc = t.build_model_config(role="agg")
