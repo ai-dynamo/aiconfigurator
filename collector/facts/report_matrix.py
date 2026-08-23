@@ -51,6 +51,7 @@ SPECIAL = {
  ('nvidia/Kimi-K3-NVFP4','vllm'):   'pin未注册·0.27.1支持',
  ('nvidia/Kimi-K3-NVFP4','trtllm'): 'FP8_PB_WO枚举缺失(rc24同)',
  ('MiniMaxAI/MiniMax-M3-MXFP8','sglang'): '能力声明锁死(marlin也绕不过)',
+ ('nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4','trtllm'): 'init期IMA(实测33GB非容量)',
 }
 
 def failtag(repo, note):
@@ -128,7 +129,8 @@ for be, pf in plans.items():
         else:
             raw = ROOT / f"archive/raw/{r['id']}.json"
             if not raw.exists():
-                cell = {'st':'fail','tag':'容量(需tp8)','note':'capacity known_bad'}
+                tag = SPECIAL.get((repo, be)) or '容量(需tp8)'
+                cell = {'st':'fail','tag':tag,'note':'no raw written (crashed before dump)'}
             else:
                 f = json.loads(raw.read_text()); e = f.get('errors') or {}
                 rec = recs.get((repo, be))
