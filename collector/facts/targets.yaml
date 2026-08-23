@@ -1,23 +1,4 @@
 schema: aic-probe-targets/v1
-kv_pairing:
-  bfloat16:
-    kvcache: bfloat16
-    cli: null
-  fp8:
-    kvcache: fp8
-    cli: fp8_e4m3
-  fp8_static:
-    kvcache: fp8
-    cli: fp8_e4m3
-  nvfp4:
-    kvcache: fp8
-    cli: fp8_e4m3
-  mxfp4:
-    kvcache: bfloat16
-    cli: null
-  mxfp8:
-    kvcache: fp8
-    cli: fp8_e4m3
 backends:
   sglang:
     versions:
@@ -158,9 +139,6 @@ families:
     - rep_mix
     variant_overrides:
       vllm: rep_mix
-    render_overrides:
-      vllm:
-        tokens_per_block: null
   glm:
     architecture: GlmMoeDsaForCausalLM
     checkpoints:
@@ -225,9 +203,6 @@ families:
     dummy_variants:
     - moe_sparse_attn
     - dense_full_attn_head
-    render_overrides:
-      vllm:
-        tokens_per_block: null
     notes: custom code (auto_map) — .py files fetched into variant dirs
     known_sm90:
       trtllm_sparse_config: 'MiniMax-M3 on trtllm REQUIRES llmapi sparse_attention_config (algorithm:
@@ -276,9 +251,6 @@ families:
       deepseek-ai/DeepSeek-V4-Flash:
         variant_overrides:
           vllm: rep_mix
-        render_overrides:
-          vllm:
-            tokens_per_block: null
         cli_extra_args:
           sglang:
             args: *id001
@@ -296,9 +268,6 @@ families:
       deepseek-ai/DeepSeek-V4-Pro:
         variant_overrides:
           vllm: interleave_pair
-        render_overrides:
-          vllm:
-            tokens_per_block: null
         cli_extra_args:
           sglang:
             args: *id001
@@ -341,9 +310,6 @@ families:
       sgl-project/DeepSeek-V4-Flash-FP8:
         variant_overrides:
           vllm: rep_mix
-        render_overrides:
-          vllm:
-            tokens_per_block: null
         cli_extra_args:
           vllm:
             args:
@@ -358,9 +324,6 @@ families:
       sgl-project/DeepSeek-V4-Pro-FP8:
         variant_overrides:
           vllm: interleave_pair
-        render_overrides:
-          vllm:
-            tokens_per_block: null
         cli_extra_args:
           vllm:
             args:
@@ -418,13 +381,7 @@ families:
         variant_overrides:
           sglang: depth4
           vllm: depth4
-        render_overrides:
-          vllm:
-            tokens_per_block: null
       meta-llama/Llama-4-Scout-17B-16E-Instruct:
-        render_overrides:
-          vllm:
-            tokens_per_block: null
         known:
           dummy_notes: layer-kind period is FRAMEWORK-HARDCODED (sglang llama4.py:217 use_rope=(layer_id+1)%4!=0)
             with no config field -> _ARCH_IMPLICIT_PERIODS; aic-core config lacks vision_config -> merged

@@ -37,7 +37,6 @@ def main() -> None:
     ap.add_argument("--model", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--stage", type=int, default=2)
-    ap.add_argument("--tp", type=int, default=1)
     ap.add_argument("--override", default=None, help="json_model_override_args, e.g. '{\"expert_dtype\": \"fp8\"}'")
     ap.add_argument("--quantization", default=None, help="explicit ServerArgs.quantization (collector sets fp8 for dsv4)")
     ap.add_argument("--kv-dtype", default=None, help="explicit kv_cache_dtype (generator passes fp8_e4m3 for fp8 profiles)")
@@ -47,9 +46,13 @@ def main() -> None:
                     help="keep cuda-graph capture ON so a real decode forward executes (execution check, not just load)")
     ap.add_argument("--trace", action="store_true",
                     help="run one eager prefill + decode under torch.profiler; record kernel names and MoE dispatch")
+    ap.add_argument("--py-paths", action="store_true",
+                    help="capture Python call stacks per kernel (verbose kineto; "
+                    "slower and it has broken tvm_ffi kernels); kernels+spans "
+                    "are captured either way")
     args = ap.parse_args()
 
-    rec: dict = {"model_path": args.model, "tp": args.tp, "errors": {}}
+    rec: dict = {"model_path": args.model, "errors": {}}
     try:
         import torch
         rec["device_capability"] = "sm%d%d" % torch.cuda.get_device_capability()
@@ -95,7 +98,7 @@ def main() -> None:
             model_path=args.model,
             load_format="dummy",
             trust_remote_code=True,
-            tp_size=args.tp,
+            tp_size=1,  # stage2 is single-process; tp>1 goes launch_server+inject
             disable_radix_cache=True,
             max_running_requests=32,
             # identity probe: cap the KV pool so tiny dummy models don't let
@@ -334,8 +337,8 @@ def main() -> None:
             except Exception:
                 _exp = None
             _prof_kw = dict(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                            with_stack=True,
-                            **({"experimental_config": _exp} if _exp else {}))
+                            **({"with_stack": True, "experimental_config": _exp}
+                               if args.py_paths and _exp else {}))
             reqs = ob.prepare_synthetic_inputs_for_latency_test(2, 32)
             try:
                 with profile(**_prof_kw) as p1:

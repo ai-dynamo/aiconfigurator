@@ -110,6 +110,7 @@ def main() -> None:
     ap.add_argument("--model-override", default=None, help="swap --model to this dummy variant dir")
     ap.add_argument("--out", required=True)
     ap.add_argument("--trace", action="store_true")
+    ap.add_argument("--py-paths", action="store_true")
     args = ap.parse_args()
 
     rec: dict = {"run_sh": args.run_sh, "errors": {}}
@@ -128,7 +129,6 @@ def main() -> None:
         i = argv.index("--model")
         argv[i + 1] = args.model_override
     rec["engine_argv"] = argv
-    rec["sh_env"] = sh_env
 
     import vllm
 

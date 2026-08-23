@@ -32,77 +32,7 @@ WORK = "/work"  # container mount of ROOT
 SCRATCH_QUEUES = ROOT / "archive" / "queues"
 
 
-def model_config_from_dummy(model_dir_in_container: str) -> dict:
-    """Derive ModelConfig facts from the variant's config.json instead of
-    hardcoding (is_moe=True bit a review; dense targets would have gotten
-    MoE-branch parallelism args). nextn is reported as 0 because the dummy
-    generator zeroes MTP modules — a recorded decision, not an assumption."""
-    cfg_path = ROOT / model_dir_in_container.replace(WORK + "/", "") / "config.json"
-    cfg = json.loads(cfg_path.read_text())
-    tc = cfg.get("text_config", cfg)
-    experts = tc.get("n_routed_experts") or tc.get("num_local_experts") or 0
-    return {"is_moe": bool(experts and experts > 1), "prefix": 0, "nextn": 0}
 
-
-def render_sglang_cli(model_dir_in_container: str, tp: int, version: str) -> str:
-    """Render the generator's cli_args_agg for one config — the deployment-true
-    engine args are the probe input (zero translation drift)."""
-    from aiconfigurator.generator.rendering.engine import render_backend_templates
-
-    params = {
-        "ServiceConfig": {"model_path": model_dir_in_container, "served_model_path": model_dir_in_container,
-                          "served_model_name": "probe", "include_frontend": False},
-        "K8sConfig": {"name_prefix": "probe", "k8s_namespace": "default", "k8s_image": "unused",
-                      "k8s_pvc_name": "x", "k8s_pvc_mount_path": WORK, "k8s_model_path_in_pvc": "m",
-                      "k8s_model_cache": "x", "k8s_hf_home": model_dir_in_container, "extra_env": []},
-        "DynConfig": {"mode": "agg"},
-        "WorkerConfig": {"agg_workers": 1, "agg_gpus_per_worker": tp, "prefill_workers": 0, "decode_workers": 0},
-        "NodeConfig": {"system_name": "h200_sxm", "num_gpus_per_node": 8},
-        "SlaConfig": {"isl": 1024, "osl": 256},
-        "ModelConfig": model_config_from_dummy(model_dir_in_container),
-        "BenchConfig": {},
-        "params": {"agg": {"tensor_parallel_size": tp, "pipeline_parallel_size": 1, "data_parallel_size": 1,
-                           "gpus_per_worker": tp, "max_batch_size": 64, "max_num_tokens": 4096,
-                           "max_seq_len": 8192, "tokens_per_block": 64, "trust_remote_code": True,
-                           "extra_cli_args": []}},
-    }
-    arts = render_backend_templates(params, "sglang", version=version, deployment_target="dynamo-python")
-    return " ".join(arts["cli_args_agg"].split())
-
-
-def render_trtllm_engine_yaml(run: dict) -> str:
-    """dynamo.trtllm path: the generator renders extra_engine_args yaml; the
-    probe feeds it to llmapi (same contract the deployment worker uses)."""
-    from aiconfigurator.generator.rendering.engine import render_backend_templates
-
-    model = run["model_dir"]
-    params = {
-        "ServiceConfig": {"model_path": model, "served_model_path": model,
-                          "served_model_name": "probe", "include_frontend": False},
-        "K8sConfig": {"name_prefix": "probe", "k8s_namespace": "default", "k8s_image": run["image"],
-                      "k8s_pvc_name": "x", "k8s_pvc_mount_path": WORK, "k8s_model_path_in_pvc": "m",
-                      "k8s_model_cache": "x", "k8s_hf_home": model, "extra_env": []},
-        "DynConfig": {"mode": "agg"},
-        "WorkerConfig": {"agg_workers": 1, "agg_gpus_per_worker": run["tp"],
-                         "prefill_workers": 0, "decode_workers": 0},
-        "NodeConfig": {"system_name": "h200_sxm", "num_gpus_per_node": 8},
-        "SlaConfig": {"isl": 1024, "osl": 256},
-        "ModelConfig": model_config_from_dummy(model),
-        "BenchConfig": {},
-        "params": {"agg": {"tensor_parallel_size": run["tp"], "pipeline_parallel_size": 1,
-                           "data_parallel_size": 1, "gpus_per_worker": run["tp"],
-                           "max_batch_size": 64, "max_num_tokens": 4096, "max_seq_len": 8192,
-                           "tokens_per_block": 64, "trust_remote_code": True,
-                           "extra_cli_args": []}},
-    }
-    if run.get("kvcache_quant_mode") == "fp8":
-        # module_bridge.py:140 — deployment passes kvcache_quant_mode through
-        params["params"]["agg"]["kv_cache_dtype"] = "fp8"
-    for k, v in (run.get("render_overrides") or {}).items():
-        params["params"]["agg"][k] = v
-    arts = render_backend_templates(params, "trtllm", version=run["version"])
-    key = next(k for k in arts if k.startswith("extra_engine_args"))
-    return arts[key]
 
 
 GOLDEN_TARGET = {"sglang": "dynamo-python", "vllm": "fpm", "trtllm": "dynamo-python"}
@@ -257,7 +187,6 @@ def enumerate_runs(targets: dict, full: bool, backends: list[str]) -> list[dict]
                 continue  # adapter pending (kimi_k3)
             override = (fam.get("variant_overrides") or {}).get(backend)
             for ck in fam["checkpoints"]:
-                pairing = targets["kv_pairing"][ck["profile"]]
                 repo_tag = ck["repo"].split("/")[-1]
                 # per-checkpoint variants win (architectures in a mixed family
                 # each have their own layer kinds); else the family list
@@ -286,63 +215,16 @@ def enumerate_runs(targets: dict, full: bool, backends: list[str]) -> list[dict]
                             runs.append({
                                 "id": rid, "family": fam_name, "repo": ck["repo"], "profile": ck["profile"],
                                 "platform": plat["name"], "sm": plat["sm"], "system": plat["system"],
-                                "kv_cli": pairing["cli"], "kvcache_quant_mode": pairing["kvcache"],
                                 "variant": variant, "backend": backend, "version": version,
                                 "image": be["images"][version], "tp": topo["tp"],
                                 "model_dir": f"{WORK}/{vdir.relative_to(ROOT)}",
                                 "aic_registered": ck.get("aic_registered", False),
-                                "render_overrides": ((ck.get("render_overrides") or {}).get(backend)
-                                                     or (fam.get("render_overrides") or {}).get(backend) or {}),
                                 "cli_extra_args": (list(be.get("cli_extra_args") or [])
                                                    + _cea((ck.get("cli_extra_args") or {}).get(backend)
                                                           or (fam.get("cli_extra_args") or {}).get(backend))),
                             })
     return runs
 
-
-def render_vllm_run_sh(run: dict) -> str:
-    """FPM path: generator renders the full run.sh; kv pairing enters via CLI."""
-    from aiconfigurator.generator.rendering.engine import render_backend_templates
-
-    model = run["model_dir"]
-    extra = ["--benchmark-mode", "agg"]
-    if run["kv_cli"]:
-        extra += ["--kv-cache-dtype", run["kv_cli"]]
-    params = {
-        "ServiceConfig": {"model_path": model, "served_model_path": model,
-                          "served_model_name": "probe", "include_frontend": False},
-        "K8sConfig": {"name_prefix": "probe", "k8s_namespace": "default",
-                      "k8s_image": run["image"], "k8s_pvc_name": "x", "k8s_pvc_mount_path": WORK,
-                      "k8s_model_path_in_pvc": "m", "k8s_model_cache": "x", "k8s_hf_home": model,
-                      "extra_env": []},
-        "DynConfig": {"mode": "agg"},
-        "WorkerConfig": {"agg_workers": 1, "agg_gpus_per_worker": run["tp"],
-                         "prefill_workers": 0, "decode_workers": 0},
-        "NodeConfig": {"system_name": "h200_sxm", "num_gpus_per_node": 8},
-        "SlaConfig": {"isl": 1024, "osl": 256},
-        "ModelConfig": model_config_from_dummy(model),
-        "BenchConfig": {},
-        "params": {"agg": {"tensor_parallel_size": run["tp"], "pipeline_parallel_size": 1,
-                           "data_parallel_size": 1, "gpus_per_worker": run["tp"],
-                           "max_batch_size": 64, "max_num_tokens": 4096, "max_seq_len": 8192,
-                           "tokens_per_block": 64, "trust_remote_code": True,
-                           "extra_cli_args": extra}},
-    }
-    for k, v in (run.get("render_overrides") or {}).items():
-        if v is None:
-            params["params"]["agg"].pop(k, None)  # omit -> framework default
-        else:
-            params["params"]["agg"][k] = v
-    arts = render_backend_templates(params, "vllm", version=run["version"], deployment_target="fpm")
-    # FPM V1 has preconditions (agg mode, no router/planner, single worker);
-    # when they do not hold the generator SILENTLY falls back to the default
-    # dynamo target, which emits run_0.sh instead of run.sh. Accept either —
-    # both carry the engine command — and record which one we got.
-    for key in ("run.sh", "run_0.sh"):
-        if key in arts:
-            run["render_artifact"] = key
-            return arts[key]
-    raise KeyError(f"no run script in rendered artifacts: {list(arts)}")
 
 
 def _generator_src_commit() -> dict:
@@ -388,9 +270,8 @@ def emit_queues(runs: list[dict], n_gpus: int, gpu_offset: int, plan_name: str) 
             run["engine_cli"] = cli
             run["engine_args_fidelity"] = "cli-golden"
             run["golden_dir"] = str(art)
-            kv = f"--kv-dtype {run['kv_cli']} " if run["kv_cli"] else ""
             cmd = (head + f"{run['image']} python3 {WORK}/probe/probe_sglang.py "
-                   f"--model {run['model_dir']} --engine-cli {shlex.quote(cli)} {kv}--trace "
+                   f"--model {run['model_dir']} --engine-cli {shlex.quote(cli)} --trace "
                    f"--out {WORK}/archive/raw/{run['id']}.json 2>&1 | tail -1 ; }}")
         elif run["backend"] == "vllm":  # golden fpm run.sh, consumed verbatim
             art = render_golden(run)
