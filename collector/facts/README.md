@@ -30,6 +30,8 @@ Rejections and crashes are structured facts, not failures (e.g. "native DSV4
 W4A8 on SM90: sglang binds Fp8MoEMethod over fp4-packed weights and crashes at
 first MoE forward; vLLM routes it to fused_marlin_moe and runs").
 
+Rule 6 (2026-08-23, from the DSV4 false positive): when a framework probes WEIGHT-FILE properties — not just config — the dummy must carry that signal. sglang picks DSV4 expert layout from the safetensors header dtype; weightless dummies fell to an env default and misclassified converted-FP8 checkpoints. gen_dummy_models now writes a tiny `dtype_probe.safetensors` mirroring the real checkpoint's routed-expert key+dtype.
+
 ## Components
 
 | File | Role |

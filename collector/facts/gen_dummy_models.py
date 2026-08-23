@@ -95,6 +95,29 @@ _DROP_AUTO_MAP = {
         "gated custom code; official NVFP4 sibling has no auto_map (native nemotron_h)",
 }
 
+# Rule-3 extension: when a framework probes WEIGHT-FILE properties (sglang
+# reads the safetensors header dtype of one routed-expert tensor to pick the
+# DSV4 expert layout — configs/deepseek_v4.py try_detect_fp4_experts), the
+# dummy must carry that signal. We write a tiny single-tensor safetensors
+# whose key+dtype mirror the REAL checkpoint header (fetched once into
+# configs/dsv4_expert_dtypes.json). Without it the probe returns None and the
+# env default (fp4=True) misclassifies converted-FP8 checkpoints -> the
+# 'Hidden size mismatch' false positive this fixes.
+def write_dtype_probe_safetensors(out_dir: Path, key: str, dtype: str, edits: list[str]) -> None:
+    import struct
+    nbytes = {"I8": 1, "U8": 1, "F8_E4M3": 1, "BF16": 2, "F16": 2, "F32": 4}[dtype] * 4
+    header = {key: {"dtype": dtype, "shape": [4], "data_offsets": [0, nbytes]},
+              "__metadata__": {"aic_probe": "dtype signal only; dummy weights are runtime-generated"}}
+    hj = json.dumps(header).encode()
+    pad = (8 - len(hj) % 8) % 8
+    hj += b" " * pad
+    with open(out_dir / "dtype_probe.safetensors", "wb") as f:
+        f.write(struct.pack("<Q", len(hj)))
+        f.write(hj)
+        f.write(b"\x00" * nbytes)
+    edits.append(f"dtype_probe.safetensors written: {key}={dtype} (real header signal)")
+
+
 _LAYER_REF_RE = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|\*|$)")
 
 
@@ -473,6 +496,11 @@ def main() -> int:
             out_dir = args.out / family / tag
             out_dir.mkdir(parents=True, exist_ok=True)
             (out_dir / "config.json").write_text(json.dumps(cfg, indent=2))
+            _dtp = args.configs / "dsv4_expert_dtypes.json"
+            if _dtp.exists():
+                _dt = json.loads(_dtp.read_text()).get(repo)
+                if _dt and _dt.get("dtype"):
+                    write_dtype_probe_safetensors(out_dir, _dt["key"], _dt["dtype"], edits)
             # modelopt/NVFP4 repos carry the authoritative quant description in
             # a SEPARATE hf_quant_config.json; without it the framework loads
             # the checkpoint as unquantized (looked like a silent-downgrade bug

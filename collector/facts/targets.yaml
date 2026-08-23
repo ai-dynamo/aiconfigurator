@@ -39,11 +39,16 @@ backends:
 families:
   dsv4:
     known_sm90:
-      sglang_0516: 'ue8m0-scale fp8 DSV4 on SM90 tp1: ALL FIVE MoE runners fail — auto->triton (w13 requantized
-        to ue8m0 deepgemm layout, ''Hidden size mismatch''), deep_gemm (SM100-only packed-fp4 branch),
-        cutlass (Fp8MoEMethod lacks ab_strides1), triton_kernel (arange power-of-2 assert), flashinfer_cutlass
-        (lacks .runner). cause=framework_bug: no working path exists. Evidence facts/bisect_dsv4_{A..I,runner_*}.json,
-        2026-08-20/22.'
+      sglang_0516: 'CORRECTED 2026-08-23 (retracts the earlier framework_bug verdict): the ''Hidden size
+        mismatch'' chain was a DUMMY false positive for converted-FP8 checkpoints. sglang picks the DSV4
+        expert layout by probing the safetensors HEADER dtype of one routed-expert tensor (configs/deepseek_v4.py
+        try_detect_fp4_experts); weightless dummies probed None -> env default fp4=True -> fp4-packed
+        weights fed to the triton fp8 kernel. Real header dtypes (fetched from HF): native deepseek-ai
+        = I8 (fp4-packed), sgl-project FP8 = F8_E4M3, nvidia NVFP4 = U8. With the dtype_probe.safetensors
+        signal: converted-FP8 checkpoints RUN OUT OF THE BOX (ok); native/NVFP4 (true fp4 experts) fail
+        under runner=auto on SM90 and RUN with moe_runner_backend=marlin -> needs_flags (facts/bisect_dsv4_{fp8experts,native_marlin}.json).
+        The earlier five-runner-all-fail experiments ran under the wrong fp4 layout and are retracted.
+        The ue8m0/deep_gemm SM100-only branch remains a separate real limit for the deep_gemm runner choice.'
       trtllm_rc23: 'DSV4 rejected at load: ''Missing COMPRESS pool metadata for compress ratio 4'' — CSA
         compression unsupported on this path.'
       trtllm_tokens_per_block: DeepseekV4CacheManager requires tokens_per_block in [128,256]; the generator
