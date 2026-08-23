@@ -303,8 +303,10 @@ worker/recycle settings used.
   (last full run 2026-06-16, commit `048c3a7f`: gate CLOSED, 0 REGRESSION,
   DRIFT list triaged over ~2,158 entries):
   `parity-scan-report.md`.
-- Why Phase 2 needs this (flip Rust to default, then delete the Python latency
-  path): `python-dedup-plan.md`.
+- Why Phase 2 needed this (flip Rust to default, then delete the Python
+  latency path): #1357, closed — the compiled engine is now the only
+  step executor and the only per-op oracle. The standing policy that
+  replaced the plan is `.claude/rules/rust-core/parity.md`.
 - Re-run this runbook on the current HEAD whenever the support matrix grows or
   the Rust hot path changes; the runner refuses to mix results across commits
   (§4.3), so record the `commit_sha` under test.

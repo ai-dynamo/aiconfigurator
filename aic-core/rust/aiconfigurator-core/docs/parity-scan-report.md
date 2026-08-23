@@ -30,7 +30,9 @@ model × system × backend × version matrix.
 This report is that gate's evidence: the coverage swept, the methodology, the
 results, and every parity bug found and fixed along the way.
 
-- Plan: [`aic-core/rust/aiconfigurator-core/docs/python-dedup-plan.md`](./python-dedup-plan.md)
+- Plan: the Phase 2/3 dedup plan this gated (#1357, closed; its record doc was
+  retired once the ladder landed). The resulting policy is
+  `.claude/rules/rust-core/parity.md`.
 - Scan runbook: [`aic-core/rust/aiconfigurator-core/docs/parity-scan-runbook.md`](./parity-scan-runbook.md)
 - Harness: `tools/support_matrix/scan_rust_parity.py`
 

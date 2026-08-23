@@ -155,7 +155,7 @@ outside or under-sampled in the scan matrix, and Rust-side oracles were
 constructed to match (heads=128, pre-#1337 fixtures). **Every P0 fix should add
 its trigger config to SMOKE_CASES / the scan matrix.**
 
-## Migration gates (from `docs/python-dedup-plan.md`, status unchanged)
+## Migration gates (from the Phase 2 plan doc, since retired; status as of this audit)
 
 - Gate 1 (default flip): blocked by #1333 (SILICON-only) **and now by P0 1–8 above**.
 - Gate 2 (golden oracle capture): NOT STARTED — must land before any Python deletion, or the regression detector disappears.
