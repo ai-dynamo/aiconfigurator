@@ -5,13 +5,18 @@ SPDX-License-Identifier: Apache-2.0
 
 # Phase 2 Execution Plan — Rust-default flip and Python latency-path removal
 
-**Status (2026-08-14): PR-1 (#1454), PR-2 (#1496) and PR-2.5 (#1508) MERGED;
-PR-3 (#1521 — the PR carrying this text) delivers the ENGINE-STEP-path
-retirement and is in flight until it merges — see "PR-3 disposition"
-below.** The original PR-3 scope ("delete the per-call query stack
-wholesale") was revised after FPM (#1384) landed a live consumer of that
-stack; #1461's Rust FPM port (Op::FpmForward + fpm_sol.rs) then let PR-3
-delete the Python FPM walk too.
+**Status (2026-08-23): FULLY LANDED — this document is a record, not a
+plan. Phase 2 merged as PR-1 (#1454), PR-2 (#1496), PR-2.5 (#1508) and
+PR-3 (#1521, the PR that first carried this text); the Phase 3 sequel
+ladder below closed out with PR-4 (#1547), PR-5 (#1552), PR-6 (#1555)
+and the deprecation-cleanup PR (#1566), and issue #1357 is closed. The
+only work still tracked here is the pair of deferrals recorded on ladder
+item 4 (kv-cache bytes, the AFD orchestration quartet).** PR-3 delivered
+the ENGINE-STEP-path retirement — see "PR-3 disposition" below. Its
+original scope ("delete the per-call query stack wholesale") was revised
+after FPM (#1384) landed a live consumer of that stack; #1461's Rust FPM
+port (Op::FpmForward + fpm_sol.rs) then let PR-3 delete the Python FPM
+walk too.
 
 ## PR-3 disposition (2026-08-14) — what was deleted, what was kept, and why
 
@@ -83,9 +88,14 @@ roofline queried every op-level op in SOL — but #1461 moved that to
    (`tools/sanity_check/engine_reference.py` over a model-less
    `EngineHandle.for_database` probe). The charts show OP-LEVEL
    estimates (context attention includes the fused extras; gemm
-   fp8_static charts the op model). One deliberate residual for PR-5:
-   the `query_trtllm_alltoall` per-phase chart stays on the facade
-   (no op-level evaluation expresses the raw phase table).
+   fp8_static charts the op model). The one residual left open here —
+   the `query_trtllm_alltoall` per-phase chart, which no op-level
+   evaluation expresses — was closed by PR-5 (#1552): the chart walks
+   the raw phase table (`_trtllm_alltoall_data`) directly and scores it
+   against a closed-form wire model mirrored in the notebook, verified
+   0-mismatch against the retired facade. That mirror is a knowing
+   exception to the single-oracle rule below, confined to the
+   diagnostic notebook.
 2. **PR-5 — per-call query-stack retirement** (needs PR-3 + PR-4): delete
    the per-call stack family-by-family (#1357's thin-delegation shape),
    retiring `query_*`, the empirical/silicon table bodies, and
