@@ -181,6 +181,45 @@ def main() -> None:
                 if key in name and key not in {s.split("::")[0] for s in samples}:
                     samples[f"{key}::{name}"] = f"{p.dtype} {tuple(p.shape)}"
         rec["weight_samples"] = samples
+
+        kvres = {}
+        vcfg = getattr(engine, "vllm_config", None)
+        if vcfg is not None:
+            kvres["cache_config_dtype"] = str(getattr(vcfg.cache_config, "cache_dtype", None))
+        for _name, mod in model.named_modules():
+            kd = getattr(mod, "kv_cache_dtype", None)
+            if kd is not None:
+                kvres["attn_kv_cache_dtype"] = str(kd)
+                break
+        # ground truth: the torch dtype the model runner allocates the cache
+        # with (this is where vllm's 'auto' finally resolves)
+        seen, queue = set(), [(engine, 0)]
+        while queue:
+            obj, d = queue.pop(0)
+            if id(obj) in seen or d > 8:
+                continue
+            seen.add(id(obj))
+            if type(obj).__name__.endswith("ModelRunner"):
+                kvres["runner_kv_cache_dtype"] = str(getattr(obj, "kv_cache_dtype", None))
+                spec = None
+                try:
+                    spec = obj.get_kv_cache_spec()
+                except Exception:
+                    pass
+                if spec:
+                    kvres["kv_cache_spec_dtypes"] = sorted(
+                        {str(getattr(s, "dtype", None)) for s in spec.values()})
+                break
+            for name in dir(obj):
+                if name.startswith("__"):
+                    continue
+                try:
+                    child = getattr(obj, name)
+                except Exception:
+                    continue
+                if not isinstance(child, (str, int, float, bool, bytes, type(None))):
+                    queue.append((child, d + 1))
+        rec["kv_cache_resolved"] = kvres or None
     except Exception:
         rec["errors"]["load"] = traceback.format_exc()
 

@@ -177,6 +177,21 @@ def main() -> None:
             rec["quant_methods"] = {k: {"count": len(v), "modules": v} for k, v in qm_classes.items()}
             rec["param_dtypes"] = dict(Counter(str(p.dtype) for p in model.parameters()))
 
+            # ground truth for kv dtype: what the KV pool actually allocates
+            # with ('auto' in server args resolves here, not in ServerArgs)
+            kvres = {"server_arg": str(getattr(sa, "kv_cache_dtype", None))}
+            rd = getattr(model_runner, "kv_cache_dtype", None)
+            if rd is not None:
+                kvres["runner_kv_cache_dtype"] = str(rd)
+            pool = getattr(model_runner, "token_to_kv_pool", None)
+            if pool is not None:
+                kvres["pool_class"] = type(pool).__name__
+                for a in ("dtype", "kv_cache_dtype", "store_dtype"):
+                    v = getattr(pool, a, None)
+                    if v is not None:
+                        kvres[f"pool.{a}"] = str(v)
+            rec["kv_cache_resolved"] = kvres
+
             samples = {}
             for name, p in model.named_parameters():
                 for key in ("experts", "q_proj", "kv_b_proj", "o_proj", "qkv_proj",

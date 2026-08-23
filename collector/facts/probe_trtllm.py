@@ -208,6 +208,36 @@ def main() -> None:
             rec["quant_methods"] = {k: {"count": len(v), "modules": v[:4]} for k, v in qm.items()}
             rec["param_dtypes"] = dict(Counter(str(p.dtype) for p in model.parameters()))
 
+        # ground truth for kv dtype: what the KV cache manager actually
+        # allocates with (llmapi 'auto' resolves inside the executor)
+        kvres = {"configured": str(getattr(kwargs.get("kv_cache_config"), "dtype", None))}
+        seen_kv, queue_kv = set(), [(llm, 0)]
+        while queue_kv:
+            obj, d = queue_kv.pop(0)
+            if id(obj) in seen_kv or d > 8:
+                continue
+            seen_kv.add(id(obj))
+            tn = type(obj).__name__
+            if "CacheManager" in tn:  # KVCacheManager, MambaHybridCacheManager, ...
+                for a in ("dtype", "kv_cache_dtype", "kv_dtype", "kv_cache_type",
+                          "mamba_ssm_cache_dtype"):
+                    v = getattr(obj, a, None)
+                    if v is not None:
+                        kvres[f"manager.{a}"] = str(v)
+                kvres.setdefault("manager_class", tn)
+                if any(k.startswith("manager.") for k in kvres):
+                    break
+            for name in dir(obj):
+                if name.startswith("__"):
+                    continue
+                try:
+                    child = getattr(obj, name)
+                except Exception:
+                    continue
+                if not isinstance(child, (str, int, float, bool, bytes, type(None))):
+                    queue_kv.append((child, d + 1))
+        rec["kv_cache_resolved"] = kvres
+
         try:
             import torch
             from torch.profiler import ProfilerActivity, profile
