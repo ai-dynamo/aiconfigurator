@@ -874,13 +874,6 @@ mod tests {
         SystemSpec::load(&systems_yaml).expect("b200_sxm.yaml must parse")
     }
 
-    fn b200_gemm_parquet(backend: &str, version: &str) -> PathBuf {
-        PathBuf::from(REPO_ROOT_HINT)
-            .join("../..")
-            .join(format!(
-                "src/aiconfigurator_core/systems/data/b200_sxm/gemm/{backend}/{version}/gemm_perf.parquet"
-            ))
-    }
 
     fn gemm_shape_count(grids: &GemmGrids) -> usize {
         grids
@@ -895,53 +888,62 @@ mod tests {
     /// Shared-layer sibling merge: sources are read in priority order, later
     /// sources only add shapes the earlier ones lack (first-wins), and a
     /// per-source `kernel_source` allowlist gates which sibling rows are
-    /// admitted. Mirrors Python `_read_filtered_rows` + `load_gemm_data`.
+    /// admitted. Synthetic vehicle (2026-08 test policy): the primary and
+    /// sibling overlap at one shape with DIFFERENT latencies — first-wins is
+    /// observable without any recorded-value pin.
     #[test]
     fn shared_layer_merges_siblings_with_kernel_source_filter_and_first_wins() {
-        // trtllm 1.3.0rc10 primary + 1.2.0rc5 sibling — the real shape the
-        // retired Python `_compute_perf_db_sources` emitted for this backend
-        // (the live resolver derives the same walk).
-        let primary = b200_gemm_parquet("trtllm", "1.3.0rc10");
-        let sibling = b200_gemm_parquet("trtllm", "1.2.0rc5");
-
-        let primary_only = load_gemm_parquet(&[PerfSource(primary.clone(), None)]).unwrap();
-
-        // Sibling admitted unfiltered: never drops a primary shape, only adds.
-        let merged = load_gemm_parquet(&[
-            PerfSource(primary.clone(), None),
-            PerfSource(sibling.clone(), None),
-        ])
-        .unwrap();
-        assert!(
-            gemm_shape_count(&merged) >= gemm_shape_count(&primary_only),
-            "unfiltered sibling must not drop shapes"
+        use crate::perf_database::energy_test_fixtures::{write_parquet, Col};
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let primary_path = tmp.path().join("primary_gemm_perf.parquet");
+        let sibling_path = tmp.path().join("sibling_gemm_perf.parquet");
+        write_parquet(
+            &primary_path,
+            &[
+                Col::Str("gemm_dtype", vec!["bfloat16", "bfloat16"]),
+                Col::I64("m", vec![64, 128]),
+                Col::I64("n", vec![256, 256]),
+                Col::I64("k", vec![256, 256]),
+                Col::Str("kernel_source", vec!["prim_kernel", "prim_kernel"]),
+                Col::F64("latency", vec![1.0, 2.0]),
+            ],
+        );
+        write_parquet(
+            &sibling_path,
+            &[
+                // overlaps primary at (bf16, 64, 256, 256) with a DIFFERENT
+                // latency, and adds one new shape (m=512).
+                Col::Str("gemm_dtype", vec!["bfloat16", "bfloat16"]),
+                Col::I64("m", vec![64, 512]),
+                Col::I64("n", vec![256, 256]),
+                Col::I64("k", vec![256, 256]),
+                Col::Str("kernel_source", vec!["sib_kernel", "sib_kernel"]),
+                Col::F64("latency", vec![9.0, 4.0]),
+            ],
         );
 
-        // First-wins: every primary (quant,m,n,k) keeps the PRIMARY latency even
-        // though the sibling also carries rows.
-        for (q, by_m) in &primary_only.by_quant {
-            for (m, by_n) in by_m {
-                for (n, by_k) in by_n {
-                    for (k, v) in by_k {
-                        let got = merged
-                            .by_quant
-                            .get(q)
-                            .and_then(|x| x.get(m))
-                            .and_then(|x| x.get(n))
-                            .and_then(|x| x.get(k))
-                            .copied();
-                        assert_eq!(got, Some(*v), "first source must win at ({q},{m},{n},{k})");
-                    }
-                }
-            }
-        }
+        let primary_only = load_gemm_parquet(&[PerfSource(primary_path.clone(), None)]).unwrap();
+        assert_eq!(gemm_shape_count(&primary_only), 2);
+
+        // Sibling admitted unfiltered: adds the new shape, never overwrites.
+        let merged = load_gemm_parquet(&[
+            PerfSource(primary_path.clone(), None),
+            PerfSource(sibling_path.clone(), None),
+        ])
+        .unwrap();
+        assert_eq!(gemm_shape_count(&merged), 3, "sibling must add its new shape");
+        let overlap = merged.by_quant["bfloat16"][&64][&256][&256];
+        assert_eq!(
+            overlap.latency, 1.0,
+            "first source must win at the overlapping shape (sibling carried 9.0)"
+        );
 
         // A `kernel_source` allowlist that matches nothing drops every sibling
         // row, so the merged table equals primary-only.
         let blocked = load_gemm_parquet(&[
-            PerfSource(primary.clone(), None),
+            PerfSource(primary_path.clone(), None),
             PerfSource(
-                sibling.clone(),
+                sibling_path.clone(),
                 Some(vec!["__no_such_kernel_source__".to_string()]),
             ),
         ])
@@ -951,6 +953,14 @@ mod tests {
             gemm_shape_count(&primary_only),
             "a non-matching kernel_source filter must exclude all sibling rows"
         );
+
+        // An allowlist naming the sibling's kernel admits it again.
+        let allowed = load_gemm_parquet(&[
+            PerfSource(primary_path, None),
+            PerfSource(sibling_path, Some(vec!["sib_kernel".to_string()])),
+        ])
+        .unwrap();
+        assert_eq!(gemm_shape_count(&allowed), 3);
     }
 
     #[test]

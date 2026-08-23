@@ -883,7 +883,7 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("src/aiconfigurator_core/systems");
-        PerfDatabase::load(&root, "b200_sxm", "trtllm", "1.2.0rc5").expect("db loads")
+        PerfDatabase::load(&root, "b200_sxm", "trtllm", "1.3.0rc20").expect("db loads")
     }
 
     /// Python `resolve_transfer_policy("conservative")`: xshape only.

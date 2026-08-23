@@ -873,7 +873,7 @@ mod tests {
         let systems_root = PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
             .join("src/aiconfigurator_core/systems");
-        PerfDatabase::load(&systems_root, "gb200", "trtllm", "1.3.0rc10").expect("db must load")
+        PerfDatabase::load(&systems_root, "gb200", "trtllm", "1.3.0rc20").expect("db must load")
     }
 
     fn assert_close(got: f64, expected: f64, what: &str) {

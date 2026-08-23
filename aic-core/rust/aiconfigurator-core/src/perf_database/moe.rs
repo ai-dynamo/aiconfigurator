@@ -620,40 +620,7 @@ mod tests {
         assert_eq!(r1.is_ok(), r2.is_ok());
     }
 
-    fn b200_trtllm_data_root() -> PathBuf {
-        PathBuf::from(REPO_ROOT_HINT)
-            .join("../..")
-            .join("src/aiconfigurator_core/systems/data/b200_sxm/trtllm/1.2.0rc5")
-    }
-
-    /// Cross-language parity with the Python v2 engine. Expected values from:
-    ///
-    /// ```text
-    /// PYTHONPATH=src python3 -c "
-    /// from aiconfigurator.sdk.perf_database import PerfDatabase
-    /// from aiconfigurator.sdk import common
-    /// db = PerfDatabase('b200_sxm','vllm','0.19.0',
-    ///                   systems_root='src/aiconfigurator_core/systems', database_mode='SOL')
-    /// for nt in [384, 4096, 7]:
-    ///     r = db.query_moe(num_tokens=nt, hidden_size=5120, inter_size=8192, topk=1,
-    ///                      num_experts=16, moe_tp_size=1, moe_ep_size=1,
-    ///                      quant_mode=common.MoEQuantMode.bfloat16,
-    ///                      workload_distribution='power_law_1.01',
-    ///                      database_mode=common.DatabaseMode.SILICON)
-    ///     print(nt, repr(float(r)))"
-    /// ```
-    ///
-    /// (`database_mode='SOL'` at construction disables the shared layer so
-    /// Python loads exactly the same primary parquet the Rust table reads.)
-    /// The collected token curve is {128, 256, 512, 1024}: nt=384 is an
-    /// interior RAW lerp; nt=4096 / nt=7 are beyond-range util-holds where
-    /// the MoE roofline SOL carries the growth (weight-load-dominated regime
-    /// — a raw linear extrapolation would give ~2.0 ms at nt=4096, the
-    /// roofline hold gives ~0.97 ms).
-    // NOTE(shared-layer merge): oracle generated pre-shared-layer; regenerate if
-    // this fails. `MoeTable::new` resolves to the single primary source with no
-    // kernel_source filter, so no shared rows should join this curve.
-   #[test]
+    #[test]
     fn moe_low_latency_grid_split_routes_by_kernel_source() {
         // Synthetic vehicle (no data-version anchoring): rows labelled
         // `moe_torch_flow_min_latency` must land in the low_latency grid; a
