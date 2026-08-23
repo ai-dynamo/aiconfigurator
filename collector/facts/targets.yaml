@@ -445,6 +445,19 @@ families:
             = config_gap, kv-auto A/B passes; door 2 ckpt hf_quant kv_cache_quant_algo:FP8 (NVFP4 artifacts)
             = framework/platform gap, kv-auto still fails. Same two-door structure as trtllm. Evidence
             facts/vllm_ab_kvauto_*.json, 2026-08-22.'
+      nvidia/Gemma-4-26B-A4B-NVFP4:
+        known:
+          sglang_sm90: 'NO working path: SM90 gates NVFP4 MoE to marlin only (flashinfer_mxfp4/flashinfer_cutlass/triton
+            all rejected ''platform does not support NVFP4 with selected backend''), and marlin fused_moe
+            asserts ''Only gated SiLU is supported'' — Gemma uses gelu_pytorch_tanh. framework gap: NVFP4xgelu-MoE
+            unservable on sglang/SM90. Dense 31B-IT-NVFP4 passes (no MoE). Evidence facts/bisect_gemma4nvfp4_*.json,
+            2026-08-24.'
+          vllm_024: 'NotImplementedError at load: checkpoint hf_quant excludes lm_head but NOT model.embed_tokens
+            while weights are tied; vllm''s ModelOpt NVFP4 config has no embedding quant method. Real-artifact
+            metadata x framework combination — real deployment hits the same. Affects both 26B and 31B-IT.'
+      nvidia/Gemma-4-31B-IT-NVFP4:
+        known:
+          vllm_024: same tied-embedding NotImplementedError as 26B (see its entry).
 topologies:
 - tp: 1
   ep: 1
