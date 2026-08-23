@@ -15,7 +15,7 @@ Four op classes migrate from ``_legacy.py`` into ``operations/dsv4.py``:
   ``_context_deepseek_v4_attention_module_data`` (merged from csa+hca
   split files), ``_raw_context_deepseek_v4_attention_module_data``
   (deepcopy used for topk piecewise lookup), and the
-  ``_dsv4_sparse_kernel_data`` sidecar dict (paged_mqa_logits + hca_attn)
+  ``_dsv4_sparse_kernel_data`` sidecar dict (paged_mqa_logits)
   used for prefix kernel-Δ correction.
 - ``GenerationDeepSeekV4AttentionModule`` — decode-phase. Owns
   ``_generation_deepseek_v4_attention_module_data`` (merged from
@@ -119,7 +119,7 @@ class ContextDeepSeekV4AttentionModule(_core.ContextDeepSeekV4AttentionModule, O
     - ``_raw_data_cache`` — deepcopy of the merged table, kept untouched
       so the topk-piecewise lookup can consult the original
       compress_ratio==4 rows for boundary correctness.
-    - ``_sparse_kernel_cache`` — dict ``{"paged_mqa_logits", "hca_attn"}``
+    - ``_sparse_kernel_cache`` — dict ``{"paged_mqa_logits"}``
       of ``LoadedOpData`` used for prefix kernel-Δ correction.
     """
 
@@ -175,10 +175,12 @@ class ContextDeepSeekV4AttentionModule(_core.ContextDeepSeekV4AttentionModule, O
                 view = fetch_table_view(database, f"_dsv4_sparse_kernel_data.{sub_key}")
                 return LoadedOpData(view, filename_enum, _primary(filename_enum))
 
+            # paged_mqa_logits is the only sparse-kernel sidecar with a live
+            # consumer (the CP chunk walk). The hca_attn/csa_attn sidecars
+            # were design placeholders with no query path and were retired
+            # (csa_attn never even shipped data).
             sparse_loaded = {
                 "paged_mqa_logits": _load_sparse("paged_mqa_logits", PerfDataFilename.dsv4_paged_mqa_logits_module),
-                "hca_attn": _load_sparse("hca_attn", PerfDataFilename.dsv4_hca_attn_module),
-                "csa_attn": _load_sparse("csa_attn", PerfDataFilename.dsv4_csa_attn_module),
             }
 
             cls._data_cache[key] = merged_loaded
