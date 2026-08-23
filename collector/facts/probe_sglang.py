@@ -50,6 +50,11 @@ def main() -> None:
     args = ap.parse_args()
 
     rec: dict = {"model_path": args.model, "tp": args.tp, "errors": {}}
+    try:
+        import torch
+        rec["device_capability"] = "sm%d%d" % torch.cuda.get_device_capability()
+    except Exception:
+        rec["device_capability"] = None
     import sglang
 
     rec["sglang_version"] = sglang.__version__

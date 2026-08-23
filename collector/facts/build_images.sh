@@ -31,3 +31,13 @@ docker pull lmsysorg/sglang:v0.5.16
 docker pull nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc23
 # rc20 needed onnx pinned to 1.19.1 (trtllm-probe:1.3.0rc20-onnxfix); rc23
 # does not need it — probe_trtllm's conditional cutlass stub covers both.
+
+# --- generator CLI venv (golden pipeline) -----------------------------------
+# The golden loop invokes the REAL `aiconfigurator cli generate` command; the
+# checkout's python sources need only the compiled rust core from PyPI.
+python3 -m venv venv_aic
+./venv_aic/bin/pip install -q aiconfigurator-core==0.11.0 \
+  jinja2 packaging 'numpy~=1.26.4' pandas plotext plotly prettytable pydantic pyarrow pyyaml tqdm matplotlib
+./venv_aic/bin/pip install -q -e ./aic --no-deps
+ln -sf "$(pwd)/venv_aic/lib/python3.10/site-packages/aiconfigurator_core/_aiconfigurator_core.abi3.so" \
+       aic/aic-core/src/aiconfigurator_core/_aiconfigurator_core.abi3.so

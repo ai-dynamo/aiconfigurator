@@ -113,6 +113,11 @@ def main() -> None:
     args = ap.parse_args()
 
     rec: dict = {"run_sh": args.run_sh, "errors": {}}
+    try:
+        import torch
+        rec["device_capability"] = "sm%d%d" % torch.cuda.get_device_capability()
+    except Exception:
+        rec["device_capability"] = None
     os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")  # keep EngineCore in-process
 
     argv, sh_env = parse_run_sh(args.run_sh)

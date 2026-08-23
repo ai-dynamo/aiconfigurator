@@ -105,6 +105,80 @@ def render_trtllm_engine_yaml(run: dict) -> str:
     return arts[key]
 
 
+GOLDEN_TARGET = {"sglang": "dynamo-python", "vllm": "fpm", "trtllm": "dynamo-python"}
+VENV_PY = ROOT / "venv_aic" / "bin" / "python"
+
+
+def render_golden(run: dict) -> Path | None:
+    """Invoke the REAL user-facing generator command and archive it verbatim.
+
+    golden/<id>/command.txt is the exact `aiconfigurator cli generate` argv —
+    the thing we converge on and guarantee. Artifacts are stored untouched;
+    every probe-side adaptation happens later as a RECORDED post-process.
+    Owner decisions: --system comes from targets.platform (h200_sxm proxies
+    the H20 probe box — same VRAM, h20 deliberately not added to code); per-checkpoint extra args live in targets.yaml
+    checkpoint_overrides.cli_extra_args and are spliced into the command.
+    """
+    import shutil
+    import subprocess
+    gdir = ROOT / "archive" / "golden" / run["id"]
+    cmd = [str(VENV_PY), "-m", "aiconfigurator.main", "cli", "generate",
+           "--model-path", run["repo"],
+           "--total-gpus", str(run["tp"]),
+           "--system", run["system"],
+           "--backend", run["backend"],
+           "--deployment-target", GOLDEN_TARGET[run["backend"]],
+           "--config-template-version", run["version"],
+           "--save-dir", str(gdir)]
+    cmd += list(run.get("cli_extra_args") or [])
+    cmd_txt = shlex.join(cmd)
+    stamp = gdir / "command.txt"
+    if stamp.exists() and stamp.read_text().splitlines()[0] == cmd_txt:
+        sub = next((d for d in gdir.iterdir() if d.is_dir()), None)
+        if sub is not None:
+            return sub  # cached golden for the identical command
+    if gdir.exists():
+        shutil.rmtree(gdir)
+    gdir.mkdir(parents=True)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT / "aic" / "aic-core" / "src")
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=900)
+    stamp.write_text(cmd_txt + f"\n# exit={r.returncode}\n")
+    (gdir / "render.log").write_text((r.stdout or "")[-8000:] + (r.stderr or "")[-8000:])
+    if r.returncode != 0:
+        run["golden_error"] = (r.stderr or r.stdout or "").strip().splitlines()[-1][:200] if (r.stderr or r.stdout) else "no output"
+        return None
+    return next((d for d in gdir.iterdir() if d.is_dir()), None)
+
+
+def extract_sglang_cli_from_run_sh(run_sh: Path) -> str:
+    """Post-process: lift the dynamo.sglang engine args out of golden run_0.sh.
+    Drops only wrapper plumbing ($MODEL_PATH placeholder, host/metrics/shell);
+    engine-selection flags pass through verbatim."""
+    import re
+    text = run_sh.read_text()
+    m = re.search(r"python3 -m dynamo\.sglang((?:[^\n]*\\\n)*[^\n]*)", text)
+    if not m:
+        raise SystemExit(f"golden run_0.sh has no dynamo.sglang block: {run_sh}")
+    block = m.group(1).replace("\\\n", " ")
+    block = re.split(r"\s(?:2>&1|\||&|;|\))", block)[0]
+    toks = shlex.split(block)
+    out, skip = [], False
+    DROP = {"--model-path", "--served-model-name", "--host", "--port"}
+    FLAG_DROP = {"--enable-metrics"}
+    for i, tk in enumerate(toks):
+        if skip:
+            skip = False
+            continue
+        if tk in DROP:
+            skip = True
+            continue
+        if tk in FLAG_DROP:
+            continue
+        out.append(tk)
+    return " ".join(out)
+
+
 def derive_roster_checkpoints(fam: dict, targets: dict) -> list[dict]:
     """Roster checkpoints DERIVED from the collector's own case declarations:
     every org/repo its cases yamls mention, minus gated repos and repos owned
@@ -200,8 +274,10 @@ def enumerate_runs(targets: dict, full: bool, backends: list[str]) -> list[dict]
                             rid = hashlib.sha1(
                                 f"{ck['repo']}|{variant}|{backend}|{version}|{ck['profile']}|tp{topo['tp']}".encode()
                             ).hexdigest()[:12]
+                            plat = targets.get("platform") or {"name": "h20_sm90", "sm": 90, "system": "h200_sxm"}
                             runs.append({
                                 "id": rid, "family": fam_name, "repo": ck["repo"], "profile": ck["profile"],
+                                "platform": plat["name"], "sm": plat["sm"], "system": plat["system"],
                                 "kv_cli": pairing["cli"], "kvcache_quant_mode": pairing["kvcache"],
                                 "variant": variant, "backend": backend, "version": version,
                                 "image": be["images"][version], "tp": topo["tp"],
@@ -209,6 +285,9 @@ def enumerate_runs(targets: dict, full: bool, backends: list[str]) -> list[dict]
                                 "aic_registered": ck.get("aic_registered", False),
                                 "render_overrides": ((ck.get("render_overrides") or {}).get(backend)
                                                      or (fam.get("render_overrides") or {}).get(backend) or {}),
+                                "cli_extra_args": (list(be.get("cli_extra_args") or [])
+                                                   + ((ck.get("cli_extra_args") or {}).get(backend)
+                                                      or (fam.get("cli_extra_args") or {}).get(backend) or [])),
                             })
     return runs
 
@@ -293,24 +372,49 @@ def emit_queues(runs: list[dict], n_gpus: int, gpu_offset: int, plan_name: str) 
                 f"-v {ROOT}:{WORK} -v {ROOT}/jitcache:/root/.cache "
                 f"-e TRITON_CACHE_DIR=/root/.cache/triton -e DG_JIT_CACHE_DIR=/root/.cache/deep_gemm ")
         if run["backend"] == "sglang":
-            cli = render_sglang_cli(run["model_dir"], run["tp"], run["version"])
+            art = render_golden(run)
+            if art is None:
+                run["skip"] = f"golden render failed: {run.get('golden_error')}"
+                continue
+            cli = extract_sglang_cli_from_run_sh(art / "run_0.sh")
             run["engine_cli"] = cli
+            run["engine_args_fidelity"] = "cli-golden"
+            run["golden_dir"] = str(art)
             kv = f"--kv-dtype {run['kv_cli']} " if run["kv_cli"] else ""
             cmd = (head + f"{run['image']} python3 {WORK}/probe/probe_sglang.py "
                    f"--model {run['model_dir']} --engine-cli {shlex.quote(cli)} {kv}--trace "
                    f"--out {WORK}/archive/raw/{run['id']}.json 2>&1 | tail -1 ; }}")
-        elif run["backend"] == "vllm":  # via the FPM adapter
+        elif run["backend"] == "vllm":  # golden fpm run.sh, consumed verbatim
+            art = render_golden(run)
+            if art is None:
+                run["skip"] = f"golden render failed: {run.get('golden_error')}"
+                continue
+            src = next((p for p in (art / "run.sh", art / "run_0.sh") if p.exists()), None)
+            if src is None:
+                run["skip"] = f"golden has no run.sh: {art}"
+                continue
             rsh = ROOT / "archive" / "run_sh" / f"{run['id']}.sh"
-            rsh.write_text(render_vllm_run_sh(run))
+            rsh.write_text(src.read_text())
             run["run_sh"] = str(rsh)
+            run["engine_args_fidelity"] = "cli-golden"
+            run["golden_dir"] = str(art)
             cmd = (head + f"--entrypoint python3 {run['image']} {WORK}/probe/probe_vllm.py "
                    f"--run-sh {WORK}/archive/run_sh/{run['id']}.sh --model-override {run['model_dir']} "
                    f"--trace --out {WORK}/archive/raw/{run['id']}.json 2>&1 | tail -1 ; }}")
-        else:  # trtllm: generator-rendered extra_engine_args (dynamo.trtllm contract)
+        else:  # trtllm: golden extra_engine_args (agg_config.yaml), consumed verbatim
+            art = render_golden(run)
+            if art is None:
+                run["skip"] = f"golden render failed: {run.get('golden_error')}"
+                continue
+            src = art / "agg_config.yaml"
+            if not src.exists():
+                run["skip"] = f"golden has no agg_config.yaml: {art}"
+                continue
             eyml = ROOT / "archive" / "run_sh" / f"{run['id']}.engine.yaml"
-            eyml.write_text(render_trtllm_engine_yaml(run))
-            run["engine_args_fidelity"] = "generator-rendered"
+            eyml.write_text(src.read_text())
+            run["engine_args_fidelity"] = "cli-golden"
             run["render_artifact"] = str(eyml)
+            run["golden_dir"] = str(art)
             # any checkpoint with custom code (auto_map) needs it; cheapest
             # correct rule is to always pass it for dummy probing
             trc = "--trust-remote-code "

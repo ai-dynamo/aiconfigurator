@@ -113,6 +113,11 @@ def main() -> None:
                     help="generator-rendered extra_engine_args yaml (dynamo.trtllm contract)")
     args = ap.parse_args()
     rec: dict = {"model_path": args.model, "errors": {}}
+    try:
+        import torch
+        rec["device_capability"] = "sm%d%d" % torch.cuda.get_device_capability()
+    except Exception:
+        rec["device_capability"] = None
 
     import tensorrt_llm
 

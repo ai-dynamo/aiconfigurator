@@ -162,7 +162,9 @@ def main() -> None:
                 "runtime": {**{k: run.get(k) for k in ("backend", "version", "image", "tp")},
                             "engine_cli": run.get("engine_cli"),
                             "unknown_args": f.get("engine_cli_unknown_args") or None,
-                            "platform": "h20_sm90", "evidence": "real"},
+                            "platform": run.get("platform", "h20_sm90"),
+                            "sm_measured": f.get("device_capability"),
+                            "evidence": "real"},
                 "resolved": {k: v for k, v in sa.items() if v is not None},
                 "identity": {
                     "model_class": f.get("model_class"),

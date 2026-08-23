@@ -31,6 +31,15 @@ backends:
     - 0.24.0
     images:
       0.24.0: vllm-probe:0.24.0-fix
+    cli_extra_args:
+    - --generator-set
+    - params.agg.extra_cli_args=["--benchmark-mode","agg"]
+    - --generator-set
+    - params.agg.trust_remote_code=true
+    cli_extra_args_note: 'FPM V1 refuses to render without --benchmark-mode in extra_cli_args — questionable
+      for a deploy artifact from `generate` (generator UX issue, bucket-1 candidate); required as of 2026-08-23.
+      | trust_remote_code: sglang template renders it by default, vllm''s does not (backend asymmetry,
+      bucket-1) — supplied as input meanwhile.'
   trtllm:
     versions:
     - 1.3.0rc23
@@ -55,6 +64,10 @@ families:
         renders 64 (FPM example value) — ILLEGAL FOR THIS ARCH ON ANY PLATFORM (needs_flags for the generator).
         With 128 the load proceeds to the explicit pre-blackwell rejection -> final cause on SM90 is platform_floor.
         Evidence facts/trt_ab_dsv4_tpb128.json, 2026-08-22.
+      vllm_kv_required: 'INVERTED requirement vs GLM: vllm''s DeepseekV4 fp8_ds_mla layout REQUIRES fp8
+        kv-cache (attention.py:79 assert, golden auto crashed 2026-08-23) while GLM head-576 has NO backend
+        with fp8 KV. kv dtype must be rendered per (model, backend) — neither blanket auto nor blanket
+        profile->fp8 works.'
     architecture: DeepseekV4ForCausalLM
     checkpoints:
     - repo: deepseek-ai/DeepSeek-V4-Pro-0813
@@ -64,19 +77,53 @@ families:
         (both sglang versions)'
       variant_overrides:
         vllm: interleave_pair
+      cli_extra_args:
+        sglang: &id001
+        - --generator-set
+        - params.agg.moe_backend=marlin
+        vllm:
+        - --generator-set
+        - params.agg.kv_cache_dtype=fp8
+        trtllm:
+        - --generator-set
+        - params.agg.tokens_per_block=128
     - repo: deepseek-ai/DeepSeek-V4-Flash-0731
       profile: fp8
       aic_registered: deepseek-ai--DeepSeek-V4-Flash
       known: same W4A8 crash class as Pro
+      cli_extra_args:
+        sglang: *id001
+        vllm:
+        - --generator-set
+        - params.agg.kv_cache_dtype=fp8
+        trtllm:
+        - --generator-set
+        - params.agg.tokens_per_block=128
     - repo: nvidia/DeepSeek-V4-Pro-NVFP4
       profile: nvfp4
       aic_registered: false
       variant_overrides:
         vllm: interleave_pair
+      cli_extra_args:
+        sglang: *id001
+        vllm:
+        - --generator-set
+        - params.agg.kv_cache_dtype=fp8
+        trtllm:
+        - --generator-set
+        - params.agg.tokens_per_block=128
     - repo: nvidia/DeepSeek-V4-Flash-NVFP4
       profile: nvfp4
       aic_registered: false
       known: 'SM90: MoE dispatches to Marlin (bf16 dequant), NOT fp4 tensor cores'
+      cli_extra_args:
+        sglang: *id001
+        vllm:
+        - --generator-set
+        - params.agg.kv_cache_dtype=fp8
+        trtllm:
+        - --generator-set
+        - params.agg.tokens_per_block=128
     dummy_variants:
     - csa
     - hca
@@ -184,12 +231,24 @@ families:
         render_overrides:
           vllm:
             tokens_per_block: null
+        cli_extra_args:
+          sglang: *id001
+          vllm: &id002
+          - --generator-set
+          - params.agg.kv_cache_dtype=fp8
+          trtllm: &id003
+          - --generator-set
+          - params.agg.tokens_per_block=128
       deepseek-ai/DeepSeek-V4-Pro:
         variant_overrides:
           vllm: interleave_pair
         render_overrides:
           vllm:
             tokens_per_block: null
+        cli_extra_args:
+          sglang: *id001
+          vllm: *id002
+          trtllm: *id003
       moonshotai/Kimi-K3:
         known:
           support: 'KimiK3ForConditionalGeneration lands in the LATEST releases: sglang v0.5.17, vllm
@@ -225,12 +284,26 @@ families:
         render_overrides:
           vllm:
             tokens_per_block: null
+        cli_extra_args:
+          vllm:
+          - --generator-set
+          - params.agg.kv_cache_dtype=fp8
+          trtllm:
+          - --generator-set
+          - params.agg.tokens_per_block=128
       sgl-project/DeepSeek-V4-Pro-FP8:
         variant_overrides:
           vllm: interleave_pair
         render_overrides:
           vllm:
             tokens_per_block: null
+        cli_extra_args:
+          vllm:
+          - --generator-set
+          - params.agg.kv_cache_dtype=fp8
+          trtllm:
+          - --generator-set
+          - params.agg.tokens_per_block=128
       zai-org/GLM-5-FP8:
         known:
           trtllm_fp8kv: 'trtllm rc23/SM90 UNIFIED root cause: fp8 KV cache in the MLA/DSA path crashes
@@ -369,3 +442,10 @@ topologies:
 policy: 'topology is ALWAYS recorded even when kernels match (owner: Kimi-K3 TEP8 is known to fork kernels;
   K3 itself is unregistered at current pins, so the K3 verification is parked until a supporting framework
   pin exists).'
+platform:
+  name: h20_sm90
+  sm: 90
+  system: h200_sxm
+  facts_systems:
+  - h100_sxm
+  - h200_sxm
