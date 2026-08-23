@@ -1011,7 +1011,7 @@ mod tests {
         let systems_root = PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
             .join("src/aiconfigurator_core/systems");
-        PerfDatabase::load(&systems_root, "b200_sxm", "vllm", "0.19.0").expect("db must load")
+        PerfDatabase::load(&systems_root, "b200_sxm", "vllm", "0.24.0").expect("db must load")
     }
 
     #[test]
@@ -1029,7 +1029,7 @@ mod tests {
         let result = op
             .query(&db, 8, 16384, 0, 1.0)
             .expect("context attention query must succeed");
-        // Table value at exact hit is 19.82; mem_op extras add ~0-1ms on top.
+        // Table value at exact hit is 22.52; mem_op extras add ~0-1ms on top.
         assert!(result.latency_ms > 19.0 && result.latency_ms < 30.0);
         // Measured table leaf + empirical rope/kv_write extras -> "mixed"
         // (Python `ContextAttention.query` PerformanceResult composition).
@@ -1071,16 +1071,13 @@ mod tests {
         // matching Python's `_query_generation_attention_table`; s=1 sits
         // below the collected range, so it resolves via the past-frontier
         // hold (util blended from the nearest measured leaves in joint log2
-        // space). Verified against
-        // `PerfDatabase.query_generation_attention(32, 2, 64, 4, fp8,
-        // SILICON, 0, 128)` on b200_sxm/vllm/0.19.0.
+        // space). Pin re-minted from the rust table query at the 0.24 re-anchor.
         let result = op
             .query(&db, 32, 2, 1.0)
             .expect("gen attention query must succeed");
         assert!(
-            // Python v2 engine value (tapered past-frontier hold); the
-            // nearest-path-snap expectation was 0.008451361751014535.
-            (result.latency_ms - 0.009131092737966444).abs() < 1e-9,
+            // Tapered past-frontier hold; pin re-minted at the 0.24 re-anchor.
+            (result.latency_ms - 0.011779225298748223).abs() < 1e-9,
             "expected 5-sample-averaged gen latency, got {}",
             result.latency_ms
         );
@@ -1101,10 +1098,10 @@ mod tests {
         assert!((latency - expected).abs() < 1e-12);
     }
 
-    /// Oracle values generated from the Python reference on the same data:
+    /// Regression pins re-minted from the rust engine at the vllm-0.24 re-anchor (the python query layer retired with #1357; the python-era oracles that seeded this test are in git history). Coordinates:
     /// `ContextAttention._query_context_attention_table(db, b, s, prefix, n,
     /// n_kv, kv, fmha, database_mode=EMPIRICAL, window_size=w, head_size=hs)`
-    /// on b200_sxm/vllm/0.19.0. Regenerate if the shipped attention tables or
+    /// on b200_sxm/vllm/0.24.0. Regenerate if the shipped attention tables or
     /// the util-empirical math changes.
     #[test]
     fn context_attention_empirical_matches_python_oracles() {
@@ -1122,7 +1119,7 @@ mod tests {
                 128,
                 0,
                 KvCacheQuantMode::Fp8,
-                0.771381792089557,
+                0.8141674017344127,
             ),
             // exact collected hit: util reconstruction returns the measured value
             (
@@ -1134,7 +1131,7 @@ mod tests {
                 128,
                 0,
                 KvCacheQuantMode::Fp8,
-                19.820667266845703,
+                22.518948872884113,
             ),
             // prefix baked into the query SOL (util from the full-seq point)
             (
@@ -1146,7 +1143,7 @@ mod tests {
                 128,
                 0,
                 KvCacheQuantMode::Fp8,
-                7.964372158050536,
+                8.413388252258299,
             ),
             // head_size=192 XSHAPE transfer (collected head sizes are {128, 256};
             // ref=128, util_scale = ratio(vllm,192)/ratio(vllm,128) = 1.27)
@@ -1159,7 +1156,7 @@ mod tests {
                 192,
                 0,
                 KvCacheQuantMode::Fp8,
-                0.7588535312592514,
+                0.9292976124080148,
             ),
             // collected windowed slice (bfloat16 kv, w=8192) as its own carrier
             (
@@ -1171,7 +1168,7 @@ mod tests {
                 128,
                 8192,
                 KvCacheQuantMode::Bfloat16,
-                6.254832211751053,
+                2.203104142145887,
             ),
             // uncollected window (w=4096) -> window=0 slice as the util carrier
             (
@@ -1183,7 +1180,7 @@ mod tests {
                 128,
                 4096,
                 KvCacheQuantMode::Bfloat16,
-                1.0547865593548398,
+                1.0957746474517327,
             ),
         ];
         for &(b, s, prefix, n, n_kv, hs, w, kv, expected) in cases {
@@ -1210,10 +1207,10 @@ mod tests {
         }
     }
 
-    /// Oracle values generated from the Python reference:
+    /// Regression pins re-minted from the rust engine at the vllm-0.24 re-anchor (the python query layer retired with #1357; the python-era oracles that seeded this test are in git history). Coordinates:
     /// `GenerationAttention._query_generation_attention_table(db, b, s, n,
     /// n_kv, kv, database_mode=EMPIRICAL, window_size=w, head_size=hs)` on
-    /// b200_sxm/vllm/0.19.0.
+    /// b200_sxm/vllm/0.24.0.
     #[test]
     fn generation_attention_empirical_matches_python_oracles() {
         let mut db = b200_vllm_db();
@@ -1229,7 +1226,7 @@ mod tests {
                 128,
                 0,
                 KvCacheQuantMode::Fp8,
-                0.1302149492334821,
+                0.12259039946751225,
             ),
             // exact collected hit (isl=1 + step=1 -> stored s=2), calibrated
             // from the RAW (SOL-clamped) table -- NOT the 5-sample silicon avg
@@ -1241,7 +1238,7 @@ mod tests {
                 128,
                 0,
                 KvCacheQuantMode::Fp8,
-                0.008661333471536636,
+                0.010944000134865442,
             ),
             // head_size=192 XSHAPE transfer (decode util_scale stays 1.0)
             (
@@ -1252,7 +1249,7 @@ mod tests {
                 192,
                 0,
                 KvCacheQuantMode::Fp8,
-                0.03992800042033196,
+                0.04618399962782861,
             ),
             // collected windowed slice (bfloat16 kv, w=8192) as its own carrier
             (
@@ -1263,7 +1260,7 @@ mod tests {
                 128,
                 8192,
                 KvCacheQuantMode::Bfloat16,
-                0.07096281754412269,
+                0.015057045374918697,
             ),
             // uncollected window (w=2048) -> window=0 slice as the util carrier
             (
@@ -1274,7 +1271,7 @@ mod tests {
                 128,
                 2048,
                 KvCacheQuantMode::Bfloat16,
-                0.0023706380832401778,
+                0.0028775096757825305,
             ),
         ];
         for &(b, s, n, n_kv, hs, w, kv, expected) in cases {
@@ -1290,9 +1287,9 @@ mod tests {
         }
     }
 
-    /// Oracle values generated from the Python reference:
+    /// Regression pins re-minted from the rust engine at the vllm-0.24 re-anchor (the python query layer retired with #1357; the python-era oracles that seeded this test are in git history). Coordinates:
     /// `EncoderAttention._query_encoder_attention_table(db, 3, 900, 16, 64,
-    /// bfloat16, database_mode=...)` on b200_sxm/vllm/0.19.0. EMPIRICAL
+    /// bfloat16, database_mode=...)` on b200_sxm/vllm/0.24.0. EMPIRICAL
     /// estimates from the util grid; HYBRID resolves on silicon (the slice is
     /// collected) and must NOT detour through the empirical layer.
     #[test]
@@ -1303,7 +1300,7 @@ mod tests {
             .expect("empirical query");
         let (latency, source) = (result.latency_ms, result.source);
         assert!(
-            (latency - 0.03625488888618745).abs() < 1e-9,
+            (latency - 0.02150375827181834).abs() < 1e-9,
             "got {latency}"
         );
         assert_eq!(source, Source::Empirical);
@@ -1313,7 +1310,7 @@ mod tests {
             .expect("hybrid query");
         let (latency, source) = (result.latency_ms, result.source);
         assert!(
-            (latency - 0.038151752523614205).abs() < 1e-9,
+            (latency - 0.025345554480708972).abs() < 1e-9,
             "got {latency}"
         );
         assert_eq!(source, Source::Silicon);
@@ -1321,8 +1318,8 @@ mod tests {
 
     /// HYBRID: an uncollected head_size (192) misses silicon and falls back
     /// to the XSHAPE empirical estimate (same value as EMPIRICAL mode), while
-    /// a collected slice keeps resolving on silicon. Oracle from Python
-    /// `_query_context_attention_table(..., database_mode=HYBRID)`.
+    /// a collected slice keeps resolving on silicon. Pins re-minted from the
+    /// rust engine at the 0.24 re-anchor (HYBRID mode).
     #[test]
     fn context_attention_hybrid_dispatch_matches_python() {
         let mut db = b200_vllm_db();
@@ -1341,7 +1338,7 @@ mod tests {
         )
         .expect("hybrid query");
         let (latency, source) = (result.latency_ms, result.source);
-        assert!((latency - 0.7588535312592514).abs() < 1e-9, "got {latency}");
+        assert!((latency - 0.9292976124080148).abs() < 1e-9, "got {latency}");
         assert_eq!(source, Source::Empirical);
 
         // Collected slice: silicon exact hit, untouched by the fallback.
@@ -1359,7 +1356,7 @@ mod tests {
         )
         .expect("hybrid query");
         let (latency, source) = (result.latency_ms, result.source);
-        assert!((latency - 19.820667266845703).abs() < 1e-9, "got {latency}");
+        assert!((latency - 22.518948872884113).abs() < 1e-9, "got {latency}");
         assert_eq!(source, Source::Silicon);
     }
 

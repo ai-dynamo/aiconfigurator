@@ -1394,7 +1394,7 @@ mod tests {
 
     const TEST_MODEL: &str = "MiniMaxAI/MiniMax-M2.5";
 
-    /// Hand-built context op list against the b200_sxm/vllm/0.19.0 perf tables.
+    /// Hand-built context op list against the b200_sxm/vllm/0.24.0 perf tables.
     /// `Elementwise` is DB-free (pure mem-bandwidth SOL); `Gemm` and
     /// `ContextAttention` hit existing perf tables. The (deleted) model layer
     /// previously sourced these lists from the HF config.
@@ -1461,7 +1461,7 @@ mod tests {
             system_name: "b200_sxm".to_string(),
             systems_path: None,
             backend: BackendKind::Vllm,
-            backend_version: Some("0.19.0".to_string()),
+            backend_version: Some("0.24.0".to_string()),
             forward_model: None,
             kv_block_size: None,
             parallel: ParallelMapping {
@@ -1489,7 +1489,7 @@ mod tests {
 
     /// Build an `Engine` from the hand-built op lists over the real fixture DB.
     fn build_engine(nextn: Option<u32>) -> Engine {
-        let db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
+        let db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.24.0").unwrap();
         let spec = EngineSpec::new(
             fixture_engine_config(nextn),
             context_ops(),
@@ -1664,7 +1664,7 @@ mod tests {
             default_identity, default_rows, write_pair,
         };
         write_pair(tmp, &default_rows());
-        let mut db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
+        let mut db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.24.0").unwrap();
         db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(
             tmp.to_path_buf(),
             "b200_sxm",
@@ -1697,7 +1697,7 @@ mod tests {
 
         // Mixed granular + FPM list is invalid.
         use crate::perf_database::fpm_forward::tests::default_identity;
-        let db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
+        let db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.24.0").unwrap();
         let fpm_op = Op::FpmForward(FpmForwardOp {
             name: "fpm_forward_prefill".into(),
             phase: FpmPhase::Prefill,
@@ -1746,7 +1746,7 @@ mod tests {
     ) -> Result<Engine, AicError> {
         use crate::perf_database::fpm_forward::tests::{default_identity, write_pair};
         write_pair(tmp, rows);
-        let mut db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
+        let mut db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.24.0").unwrap();
         db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(
             tmp.to_path_buf(),
             "b200_sxm",
@@ -1943,7 +1943,7 @@ mod tests {
     #[test]
     fn nested_fpm_op_is_rejected_at_build() {
         use crate::perf_database::fpm_forward::tests::default_identity;
-        let db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
+        let db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.24.0").unwrap();
         let hidden = Op::Overlap(crate::operators::OverlapOp::new(
             "hidden",
             vec![Op::FpmForward(FpmForwardOp {

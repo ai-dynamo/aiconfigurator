@@ -1342,7 +1342,7 @@ mod tests {
     fn b200_vllm_data_root() -> PathBuf {
         PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
-            .join("src/aiconfigurator_core/systems/data/b200_sxm/vllm/0.19.0")
+            .join("src/aiconfigurator_core/systems/data/b200_sxm/vllm/0.24.0")
     }
 
     fn gb200_trtllm_data_root() -> PathBuf {
@@ -1388,8 +1388,8 @@ mod tests {
     #[test]
     fn module_level_context_mla_exact_hit() {
         // First row of
-        // b200_sxm/mla/vllm/0.19.0/mla_context_module_perf.parquet:
-        // mla=bfloat16 kv=bfloat16 gemm=bfloat16 n=128 b=1 isl=1 step=0 latency=0.1351
+        // b200_sxm/mla/vllm/0.24.0/mla_context_module_perf.parquet:
+        // mla=bfloat16 kv=bfloat16 gemm=bfloat16 n=128 b=1 isl=1 step=0 latency=0.0955
         let table = MlaTable::new(b200_vllm_data_root(), load_spec("b200_sxm"));
         let latency = table
             .query_context_module(
@@ -1404,7 +1404,7 @@ mod tests {
             .expect("module context MLA query must succeed")
             .latency;
         assert!(
-            (latency - 0.1351).abs() < 1e-6,
+            (latency - 0.0955).abs() < 1e-6,
             "expected recorded module latency, got {latency}"
         );
     }

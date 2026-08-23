@@ -1028,8 +1028,8 @@ mod tests {
     #[test]
     fn state_space_loaders_smoke() {
         // GDN data exists on vLLM b200 (Nemotron-H slice); Mamba2 may not.
-        let root = data_root("b200_sxm/vllm/0.19.0");
-        let table = StateSpaceTable::new(root, "vllm", "0.19.0");
+        let root = data_root("b200_sxm/vllm/0.24.0");
+        let table = StateSpaceTable::new(root, "vllm", "0.24.0");
         // Just verify loader doesn't panic on missing-key path; we don't
         // assert a specific value here.
         let _ = table
@@ -1051,8 +1051,8 @@ mod tests {
 
     #[test]
     fn gdn_table_finds_qwen35_27b_conv1d_update() {
-        let root = data_root("b200_sxm/vllm/0.19.0");
-        let table = StateSpaceTable::new(root, "vllm", "0.19.0");
+        let root = data_root("b200_sxm/vllm/0.24.0");
+        let table = StateSpaceTable::new(root, "vllm", "0.24.0");
         let r = table.query_gdn(
             "causal_conv1d_update",
             "generation",

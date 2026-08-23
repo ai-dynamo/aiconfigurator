@@ -42,7 +42,7 @@ memory = pytest.importorskip("aiconfigurator.sdk.memory")
 # native cases. h200_sxm perf DB supplies the SystemSpec capacity.
 NATIVE_CASES = [
     ("Qwen/Qwen3-32B", "h200_sxm", "trtllm", "1.3.0rc20", "of_free"),
-    ("Qwen/Qwen3-32B", "h200_sxm", "vllm", "0.19.0", "of_total"),
+    ("Qwen/Qwen3-32B", "h200_sxm", "vllm", "0.24.0", "of_total"),
 ]
 
 _FRACTION = 0.9

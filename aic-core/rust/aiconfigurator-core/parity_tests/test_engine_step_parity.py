@@ -617,32 +617,22 @@ SMOKE_CASES = [
 PARITY_RTOL = 0.01
 
 
-# Power/energy parity cases: one per power-carrying database identity (the
-# only shipped identities whose perf parquets carry measured power columns:
-# b200_sxm/vllm/0.22.0, b200_sxm/trtllm/1.3.0rc15, gb200/vllm/0.22.0,
-# gb200/trtllm/1.3.0rc17, h200_sxm/vllm/0.22.0). Every SMOKE_CASE sits on
-# 0.19.0 / 0.5.x / 1.3.0rc10 tables, which are latency-only — without these
-# cases the per-op energy that now crosses the FFI (PR-2) would have ZERO
-# numeric coverage in the parity suites. ``compare_energy=True`` extends the
-# static surface with the context/generation energy sums and the summary
-# power averages; the mixed/agg/disagg surfaces run at the standard latency
-# metrics. Models verified to have perf data on these versions (probed on
-# the live Python engine): dense Qwen3-32B on four identities, MoE
-# Qwen3-30B-A3B on b200_sxm/vllm/0.22.0 (gb200/trtllm ships no MoE tables at
-# 1.3.0rc17, so that identity stays dense).
+# Power/energy parity cases. After the 2026-08 data prune no engine-step-
+# complete power identity remains (measured power columns survive only in
+# b200_sxm/vllm/0.22.0 {attention, moe} and the 0.22 sparse_attention dirs;
+# that identity's gemm tables are gone, so a full engine step cannot run
+# there and its value-pinned power case was removed per the no-version-bound-
+# value-pins test policy). What anchors energy now:
+#  - energy MATH: rust synthetic oracles on power-carrying fixtures
+#    (`energy_test_fixtures` tests in operators/{gemm,attention}.rs);
+#  - data invariants: tests/unit/sdk/database/test_power_data_invariants.py
+#    (any parquet with power columns -> non-negative, bounded);
+#  - the FFI energy SURFACE: the ``compare_energy=True`` cases below on
+#    latency-only current-slot identities (energy sums well-typed zeros).
+# ``compare_energy=True`` extends the static surface with the context/
+# generation energy sums and the summary power averages; the mixed/agg/
+# disagg surfaces run at the standard latency metrics.
 POWER_CASES = [
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3-30B-A3B",
-            # sole power-measured MoE coordinate (kept donor data): energy
-            # parity must exercise real power rows, which only 0.22 carries.
-            backend_version="0.22.0",
-            tp_size=4,
-            moe_ep_size=4,
-            compare_energy=True,
-        ),
-        id="qwen3-30b-a3b-b200-vllm-022-power",
-    ),
     pytest.param(
         EngineStepParityCase(
             model_path="Qwen/Qwen3-32B",
@@ -689,7 +679,7 @@ POWER_CASES = [
 # broke that tie differently and silently drifted these exact configs. Each
 # case pins the surface that originally exposed the divergence, so the
 # tie-break stays anchored in CI:
-#  - Qwen3-32B-FP8 @ h200_sxm/vllm/0.19.0, agg: off-grid fp8_block GEMM
+#  - Qwen3-32B-FP8 @ h200_sxm/vllm (current slot), agg: off-grid fp8_block GEMM
 #    n=1280 k=5120 (the tp8 fused-QKV projection).
 #  - Llama-4-Scout @ gb200/vllm/0.24.0, disagg decode: the mirror bf16 shape
 #    n=5120 k=1280 (the tp4 attention out-projection; tp4 * moe_ep4 keeps the
@@ -1684,7 +1674,7 @@ HYBRID_CASES = [
         id="minimax-m3-b200-vllm-024-hybrid-policy-balanced",
     ),
     # xquant: forced MoE quant w4a16_mxfp4_cutlass is uncollected on
-    # b200/vllm/0.19.0 but shares the (memory=0.5, compute=1) profile with
+    # b200/vllm/0.24.0 but shares the (memory=0.5, compute=1) profile with
     # collected int4_wo / w4a16_mxfp4 — the ladder lands on the xquant tier.
     # Probed: 90.578/10.908 ms, tags {xquant}.
     pytest.param(
@@ -1695,8 +1685,9 @@ HYBRID_CASES = [
         ),
         id="qwen3-235b-a22b-b200-vllm-024-hybrid-xquant",
     ),
-    # xprofile: forced MoE quant w4afp8 (memory=0.5, compute=2) has NO
-    # collected same-profile sibling on b200/vllm/0.19.0 — the ladder falls
+    # xprofile: forced MoE quant w4afp8 (memory=0.5, compute=2) had NO
+    # collected same-profile sibling (0.19-era probe; the golden pins the
+    # live tier on the current slot) — the ladder falls
     # through to the cross-profile tier with the util-level rescale.
     # Probed: 47.755/8.450 ms, tags {xprofile}.
     pytest.param(
@@ -1707,8 +1698,8 @@ HYBRID_CASES = [
         ),
         id="qwen3-235b-a22b-b200-vllm-024-hybrid-xprofile",
     ),
-    # Attention cross-head_size xshape: MiMo-V2-Flash has head_dim=192 while
-    # b200/vllm/0.19.0 collected only {128, 256} — SILICON raises, HYBRID
+    # Attention cross-head_size xshape: MiMo-V2-Flash queries head_dim=192
+    # with bf16 KV, collected at 0.24 for fp8 KV only — SILICON raises, HYBRID
     # borrows the nearest collected head_size (`attention.py` ctx + gen
     # reference grids). Probed: 33.253/3.499 ms, tags {xshape}.
     pytest.param(
@@ -1718,7 +1709,7 @@ HYBRID_CASES = [
         ),
         id="mimo-v2-flash-b200-vllm-024-hybrid-attn-xshape",
     ),
-    # HYBRID==SILICON invariance: Kimi-K2.5 on b200/vllm/0.19.0 is fully
+    # HYBRID==SILICON invariance: Kimi-K2.5 on b200/vllm (current slot) is fully
     # covered by silicon data (probed worst-provenance = silicon, no empirical
     # tier fires). The hybrid layer must not perturb covered queries; this
     # pins Rust-HYBRID == Python-HYBRID (== SILICON) on a collected config.
@@ -1745,7 +1736,8 @@ HYBRID_CASES = [
     ),
     # Ladder miss (error-symmetry): with XPROFILE policy-disabled
     # ("balanced" = xshape+xquant), NVFP4 GEMM (profile (0.5625, 4)) has no
-    # same-profile sibling anywhere in the h200/vllm/0.19.0 tables — Python
+    # same-profile sibling anywhere in the h200/vllm tables (0.19-era probe;
+    # the golden pins the live behavior) — Python
     # raises EmpiricalNotImplementedError; the Rust port must fail the same
     # query point, never fabricate a SOL/constant value.
     pytest.param(
@@ -1948,7 +1940,7 @@ class TestRustEngineStepSolMixedStepParity:
 # evaluate FFI (`AFDInferenceSession._sum_latency`). rust==python was verified
 # manually (bit-identical) when that sourcing landed; this case pins it in CI.
 # One MoE model with AFD support on a version with data: Qwen3-30B-A3B on
-# h200_sxm/vllm/0.19.0, one A node + one F node (a_tp=4, a_batch=32,
+# h200_sxm/vllm (current slot), one A node + one F node (a_tp=4, a_batch=32,
 # f_moe_ep=8) — verified end-to-end through `cli_estimate(mode="afd", ...)`.
 AFD_CASES = [
     pytest.param(
@@ -2112,9 +2104,10 @@ class TestRustTypedErrorsAcrossFfi:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # MiMo-V2-Flash has head_dim=192 while b200/vllm/0.19.0 collected only
-        # {128, 256}: under SILICON, Rust hits `AicError::PerfDatabase` at the
-        # attention query point — which must cross the FFI as the SAME sdk
+        # MiMo-V2-Flash queries head_dim=192 with the default bfloat16 KV
+        # cache; b200/vllm/0.24.0 collects 192 for fp8 KV only, so the bf16
+        # lane is a genuine silicon gap: Rust hits `AicError::PerfDatabase` at
+        # the attention query point — which must cross the FFI as the SAME sdk
         # class Python raises, recognized by the cause-chain walker (the
         # miss-classification the sweep/support-matrix rely on). (The previous
         # vehicle, NVFP4 GEMM on h200, now classifies as the strict
@@ -2122,9 +2115,10 @@ class TestRustTypedErrorsAcrossFfi:
         # fp4_tc_flops — see the missing-dtype test below.)
         _prepare_rust_core(monkeypatch)
         case = EngineStepParityCase(
+            # current-slot data-gap coordinate: head_dim=192 exists for fp8 KV
+            # only, and the model's default KV dtype is bfloat16. If a future
+            # collection adds bf16@192 this stops being a gap — re-anchor then.
             model_path="XiaomiMiMo/MiMo-V2-Flash",
-            # deliberate data-gap coordinate: 0.19.0 collected head_dim {128,256} only
-            backend_version="0.19.0",
         )
         with pytest.raises(errors.PerfDataNotAvailableError) as excinfo:
             _rust_static_breakdown(case)
@@ -2275,7 +2269,7 @@ class TestRustProvenanceCapture:
 # --------------------------------------------------------------------------- #
 
 _FPM_MODEL = "MiniMaxAI/MiniMax-M2.5"
-_FPM_VERSION = "0.19.0"
+_FPM_VERSION = "0.24.0"
 # (workload_kind, batch, total_prefill, total_kv, latency_ms) — per-DP-rank
 # iteration totals, batch domains sized for the runtime points below.
 _FPM_ROWS = [
@@ -2445,9 +2439,7 @@ class TestRustEngineStepFpmParity:
             forward_model="fpm",
         )
         model = get_model(_FPM_MODEL, cfg, "vllm")
-        database = _quiet_call(
-            perf_database.get_database, "b200_sxm", "vllm", _FPM_VERSION, allow_unlisted_version=True
-        )
+        database = _quiet_call(perf_database.get_database, "b200_sxm", "vllm", _FPM_VERSION)
         return model, get_backend("vllm"), database
 
     def _static(self, model, backend, database, mode, batch, isl, osl, prefix):

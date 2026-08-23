@@ -119,12 +119,12 @@ def _verify_core(*, exercise_engine: bool) -> str:
     required_resources = (
         resources / "model_configs" / "meta-llama--Meta-Llama-3.1-8B_config.json",
         resources / "systems" / "h100_sxm.yaml",
-        resources / "systems" / "data" / "b200_sxm" / "gemm" / "vllm" / "0.19.0" / "gemm_perf.parquet",
+        resources / "systems" / "data" / "b200_sxm" / "gemm" / "vllm" / "0.24.0" / "gemm_perf.parquet",
         # reuse.yaml wheel-packaging representative: the rc23 overlay marker is a
         # live upstream declaration (the previous sample, l40s/gemm/vllm/0.22.0,
         # was removed with its pruned version directory).
         resources / "systems" / "data" / "b200_sxm" / "gemm" / "trtllm" / "1.3.0rc23" / "reuse.yaml",
-        resources / "systems" / "data" / "b200_sxm" / "gemm" / "vllm" / "0.19.0" / "collection_meta.yaml",
+        resources / "systems" / "data" / "b200_sxm" / "gemm" / "vllm" / "0.24.0" / "collection_meta.yaml",
     )
     missing = [str(path) for path in required_resources if not path.is_file()]
     if missing:
@@ -137,7 +137,7 @@ def _verify_core(*, exercise_engine: bool) -> str:
             "MiniMaxAI/MiniMax-M2.5",
             "b200_sxm",
             "vllm",
-            backend_version="0.19.0",
+            backend_version="0.24.0",
             tp_size=8,
             moe_tp_size=1,
             moe_ep_size=8,

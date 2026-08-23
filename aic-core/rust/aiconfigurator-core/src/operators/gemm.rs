@@ -574,17 +574,17 @@ mod tests {
         let systems_root = PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
             .join("src/aiconfigurator_core/systems");
-        PerfDatabase::load(&systems_root, "b200_sxm", "vllm", "0.19.0").expect("db must load")
+        PerfDatabase::load(&systems_root, "b200_sxm", "vllm", "0.24.0").expect("db must load")
     }
 
     #[test]
     fn gemm_op_query_exact_hit_matches_table() {
         let db = b200_vllm_db();
-        // bf16 GEMM at m=32768 n=65536 k=16384 -> latency=41.5967
+        // bf16 GEMM at m=32768 n=65536 k=16384 -> latency=40.7114
         let op = GemmOp::new("test", 65536, 16384, GemmQuantMode::Bfloat16);
         let result = op.query(&db, 32768, None).expect("query must succeed");
         assert!(
-            (result.latency_ms - 41.59673055013021).abs() < 1e-9,
+            (result.latency_ms - 40.71141560872396).abs() < 1e-9,
             "expected recorded latency, got {}",
             result.latency_ms
         );
@@ -607,7 +607,7 @@ mod tests {
         };
         let result = op.query(&db, 32768, None).expect("query must succeed");
         assert!(
-            (result.latency_ms - 41.59673055013021 * 0.5).abs() < 1e-9,
+            (result.latency_ms - 40.71141560872396 * 0.5).abs() < 1e-9,
             "scale_factor must be applied to latency: got {}",
             result.latency_ms
         );
@@ -630,7 +630,7 @@ mod tests {
         };
         let result = op.query(&db, 65536, None).expect("query must succeed");
         assert!(
-            (result.latency_ms - 41.59673055013021).abs() < 1e-9,
+            (result.latency_ms - 40.71141560872396).abs() < 1e-9,
             "scale_num_tokens must divide x: got {}",
             result.latency_ms
         );
@@ -666,21 +666,21 @@ mod tests {
         let db = b200_vllm_db();
         let op = GemmOp::new("default-bf16", 65536, 16384, GemmQuantMode::Bfloat16);
 
-        // Override to nvfp4 at the same shape -> latency 20.5387 (recorded).
+        // Override to nvfp4 at the same shape -> latency 19.8905 (recorded).
         let result = op
             .query(&db, 32768, Some(GemmQuantMode::Nvfp4))
             .expect("override query must succeed");
         assert!(
-            (result.latency_ms - 20.538665771484375).abs() < 1e-9,
+            (result.latency_ms - 19.890548706054688).abs() < 1e-9,
             "quant override must change the lookup: got {}",
             result.latency_ms
         );
     }
 
-    /// Oracle values generated from the Python reference on the same data:
-    /// `GEMM._query_gemm_table(db, m, n, k, quant, database_mode=EMPIRICAL)`
-    /// on b200_sxm/vllm/0.19.0. Regenerate if the shipped GEMM table or the
-    /// util-empirical math changes.
+    /// Regression pins re-minted from the rust engine at the vllm-0.24 re-anchor (the python query layer retired with #1357; the python-era oracles that seeded this test are in git history).
+    /// EMPIRICAL-mode `query_gemm_table` on b200_sxm/vllm/0.24.0. Re-mint
+    /// from the rust engine if the shipped GEMM table or the util-empirical
+    /// math changes.
     #[test]
     fn gemm_empirical_matches_python_oracles() {
         let mut db = b200_vllm_db();
@@ -692,7 +692,7 @@ mod tests {
                 65536u32,
                 16384u32,
                 GemmQuantMode::Bfloat16,
-                3.7278025700902204,
+                3.6079002932710407,
             ),
             // fully off-site query
             (
@@ -700,7 +700,7 @@ mod tests {
                 4000,
                 5000,
                 GemmQuantMode::Bfloat16,
-                0.023767651577298037,
+                0.023124830290836663,
             ),
             // exact collected hit: util reconstruction returns the measured value
             (
@@ -708,10 +708,10 @@ mod tests {
                 65536,
                 16384,
                 GemmQuantMode::Nvfp4,
-                20.538665771484375,
+                19.890548706054688,
             ),
             // small-shape corner
-            (1, 129, 130, GemmQuantMode::Fp8, 0.004668885990466126),
+            (1, 129, 130, GemmQuantMode::Fp8, 0.01886943112340755),
         ];
         for (m, n, k, quant, expected) in cases {
             let result = query_gemm_table(&db, quant, m, n, k).expect("empirical query");
@@ -768,14 +768,15 @@ mod tests {
     }
 
     /// Under the default (all-on) policy the same query resolves via the
-    /// xprofile borrow. Python oracle (shared layer OFF, HYBRID):
+    /// xprofile borrow. Regression pin (rust engine, HYBRID; python-era
+    /// oracle in git history):
     ///
     /// ```text
-    /// db = perf_database.get_database_view("b200_sxm", "vllm", "0.19.0",
+    /// db = perf_database.get_database_view("b200_sxm", "vllm", "0.24.0",
     ///     allow_missing_data=True, database_mode=DatabaseMode.HYBRID,
     ///     shared_layer=False)
     /// float(GEMM._query_gemm_table(db, 64, 64, 64, GEMMQuantMode.int4_wo))
-    /// # -> 0.0007006913814463733, provenance {"xprofile"}
+    /// # -> 0.0007162468944802695, provenance {"xprofile"}
     /// ```
     ///
     /// The b200/vllm file order is [nvfp4, bfloat16, fp8, fp8_block]; the
@@ -789,7 +790,7 @@ mod tests {
             query_gemm_table(&db, GemmQuantMode::Int4Wo, 64, 64, 64).expect("xprofile borrow");
         let latency = result.latency_ms;
         assert!(
-            (latency - 0.0007006913814463733).abs() < 1e-9,
+            (latency - 0.0007162468944802695).abs() < 1e-9,
             "expected python oracle, got {latency}"
         );
         assert_eq!(result.source, Source::Empirical);
@@ -803,24 +804,22 @@ mod tests {
         let systems_root = PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
             .join("src/aiconfigurator_core/systems");
-        PerfDatabase::load(&systems_root, "h200_sxm", "vllm", "0.19.0").expect("db must load")
+        PerfDatabase::load(&systems_root, "h200_sxm", "vllm", "0.24.0").expect("db must load")
     }
 
-    /// Quant-transfer ladder oracles on h200/vllm/0.19.0 (collected quants in
-    /// file order: [fp8, bfloat16, fp8_block]). Python oracle generation:
-    ///
-    /// ```text
-    /// db = perf_database.get_database_view("h200_sxm", "vllm", "0.19.0",
-    ///     allow_missing_data=True, database_mode=DatabaseMode.HYBRID,
-    ///     shared_layer=False)
-    /// float(GEMM._query_gemm_table(db, m, 4096, 4096, quant))
-    /// ```
+    /// Quant-transfer ladder pins on h200/vllm/0.24.0 (collected quants in
+    /// file order: [bfloat16, fp8, fp8_block]). Values are rust-engine
+    /// regression pins re-minted at the 0.24 re-anchor (the python query
+    /// layer retired with #1357; the python-era oracles live in git history).
     ///
     /// - sq (1, 2): xquant borrow from fp8 (first same-profile in file
     ///   order; identical SOL, no rescale).
-    /// - int4_wo (0.5, 1): xprofile borrow from bfloat16 (Δcompute=0), NOT
-    ///   the file-order-first fp8 — under plain L1 the two TIE at 1.5 and a
-    ///   regression to L1/file-order selection changes this value.
+    /// - int4_wo (0.5, 1): xprofile borrow from bfloat16 (Δcompute=0). NOTE:
+    ///   since the 0.24 refresh bfloat16 is ALSO file-order-first here, so
+    ///   this case no longer distinguishes compute-first selection from
+    ///   file-order selection — that regression guard lives in
+    ///   `gemm_hybrid_missing_quant_borrows_xprofile_under_default_policy`
+    ///   on b200, where the file order starts with nvfp4.
     /// - nvfp4 (0.5625, 4): NO LONGER a ladder vehicle on h200 — the strict
     ///   per-dtype resolution (#1398) rejects fp4 at query entry because
     ///   h200 has no fp4 tensor cores (its old xprofile estimate was
@@ -836,25 +835,25 @@ mod tests {
             (
                 GemmQuantMode::Sq,
                 512u32,
-                0.01826755536927117,
+                0.02199555602338579,
                 util_empirical::ProvenanceTier::XQuant,
             ),
             (
                 GemmQuantMode::Sq,
                 8192,
-                0.21285422643025717,
+                0.252329773373074,
                 util_empirical::ProvenanceTier::XQuant,
             ),
             (
                 GemmQuantMode::Int4Wo,
                 512,
-                0.036529976276703825,
+                0.0363363958435294,
                 util_empirical::ProvenanceTier::XProfile,
             ),
             (
                 GemmQuantMode::Int4Wo,
                 8192,
-                0.5714972813924153,
+                0.5939359841523346,
                 util_empirical::ProvenanceTier::XProfile,
             ),
         ];

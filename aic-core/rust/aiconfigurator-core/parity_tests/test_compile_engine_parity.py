@@ -65,15 +65,15 @@ pytestmark = pytest.mark.integration
 # sglang/vllm emit `CustomAllReduce` — trtllm comm quant, and the
 # SGLang/TRT-LLM-only Fallback-MLA chain) uncovered here.
 #
-# Cases drawn straight from `SMOKE_CASES` (plus one `POWER_CASES` member) so
-# this tracks the same matrix. All compute (no error-symmetry cases), so every
+# Cases drawn straight from `SMOKE_CASES` so this tracks the same matrix. All compute (no error-symmetry cases), so every
 # surface yields a real number.
 #
-#   vllm   : the original 5 b200_sxm/vllm/0.19.0 cases, plus the
-#            Qwen3-30B-A3B b200_sxm/vllm/0.22.0 POWER_CASES member — every
-#            0.19.0/0.5.x/1.3.0rc10 identity is latency-only (energy_wms == 0
-#            in every per-op golden), so this is the one subset case whose
-#            per-op energy comparison actually executes.
+#   vllm   : the original 5 b200_sxm/vllm cases (current slot). The former
+#            b200_sxm/vllm/0.22.0 POWER_CASES member was removed with the
+#            2026-08 prune (its gemm tables are gone; no engine-step-complete
+#            power identity remains). Per-op energy on current-slot goldens
+#            is well-typed zero; the energy MATH is anchored by the rust
+#            synthetic energy oracles instead.
 #   sglang : Kimi-K2.5 (Fallback-MLA + MoE) and MiniMax-M2.5 (MoE), both
 #            b200_sxm/sglang/0.5.10. SGLang's MoEDispatch flavor is the same
 #            `CustomAllReduce` else-branch as vllm; its distinct value is the
@@ -90,7 +90,6 @@ _SUBSET_IDS_BY_BACKEND = {
         "minimax-m25-b200-vllm-024-sampled-prefix",
         "minimax-m27-b200-vllm-024-isl1024-osl2",
         "qwen3-30b-a3b-b200-vllm-024-isl1024-osl2",
-        "qwen3-30b-a3b-b200-vllm-022-power",
     ],
     "sglang": [
         "kimi-k25-b200-sglang-0514-isl1024-osl2",
@@ -104,8 +103,10 @@ _SUBSET_IDS_BY_BACKEND = {
 
 # Subset members on power-carrying database identities: their per-op goldens
 # must carry nonzero energy_wms, so the energy comparison branch is proven to
-# execute (see the anti-vacuous guard in TestCompileEnginePerOpParity).
-_POWER_SUBSET_IDS = {"qwen3-30b-a3b-b200-vllm-022-power"}
+# execute (anti-vacuous guard in TestCompileEnginePerOpParity). EMPTY since
+# the 2026-08 prune removed the last engine-step-complete power identity —
+# repopulate when a current-slot power collection lands.
+_POWER_SUBSET_IDS: set[str] = set()
 
 # Preserve the per-backend ordering (vllm, then sglang, then trtllm) so the
 # parametrize ids group readably and the determinism sweep covers vllm first.

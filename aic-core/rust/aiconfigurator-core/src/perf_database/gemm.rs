@@ -864,7 +864,7 @@ mod tests {
     fn b200_vllm_data_root() -> PathBuf {
         PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
-            .join("src/aiconfigurator_core/systems/data/b200_sxm/vllm/0.19.0")
+            .join("src/aiconfigurator_core/systems/data/b200_sxm/vllm/0.24.0")
     }
 
     fn b200_sxm_spec() -> SystemSpec {
@@ -956,14 +956,14 @@ mod tests {
     #[test]
     fn gemm_exact_hit_returns_recorded_latency() {
         let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
-        // First row of b200_sxm/gemm/vllm/0.19.0/gemm_perf.parquet
+        // First row of b200_sxm/gemm/vllm/0.24.0/gemm_perf.parquet
         // (bfloat16 32768x65536x16384).
         let latency = table
             .query(GemmQuantMode::Bfloat16, 32768, 65536, 16384)
             .expect("query must succeed")
             .latency;
         assert!(
-            (latency - 41.59673055013021).abs() < 1e-9,
+            (latency - 40.71141560872396).abs() < 1e-9,
             "expected recorded latency, got {latency}"
         );
     }
@@ -1167,8 +1167,8 @@ mod tests {
         );
     }
 
-    /// Values generated from the Python v2 engine on the same table
-    /// (`db.query_gemm(..., SILICON)` on b200_sxm/vllm/0.19.0, bfloat16):
+    /// Regression pins (rust engine; python-v2-era lineage in git history) on
+    /// the same table (bfloat16, b200_sxm/vllm/0.24.0):
     /// exact hit, m-interp on a collected (n,k) site, m util-hold beyond the
     /// sweep, and an unknown (n,k) site via neighbour util transfer. The two
     /// engines must agree because they implement the same resolution chain.
@@ -1178,10 +1178,10 @@ mod tests {
         let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let q = GemmQuantMode::Bfloat16;
         let cases: &[(u32, u32, u32, f64)] = &[
-            (256, 32, 32, 0.00186666660011),
-            (259, 32, 32, 0.00184757819233),
-            (10_000_000, 32, 32, 1.51111355145),
-            (256, 128, 96, 0.00187964537818),
+            (256, 32, 32, 0.0018382221460342407),
+            (259, 32, 32, 0.0018560279461033724),
+            (10_000_000, 32, 32, 1.5073194785460546),
+            (256, 128, 96, 0.0018989143586689112),
         ];
         for &(m, n, k, expected) in cases {
             let got = table.query(q, m, n, k).unwrap().latency;
@@ -1195,7 +1195,7 @@ mod tests {
     #[test]
     fn gemm_missing_quant_mode_errors() {
         let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
-        // vLLM 0.19.0 b200 collects bfloat16/fp8/fp8_block/nvfp4 — int4_wo
+        // vLLM 0.24.0 b200 collects bfloat16/fp8/fp8_block/nvfp4 — int4_wo
         // is genuinely absent for this slice.
         match table.query(GemmQuantMode::Int4Wo, 1024, 4096, 4096) {
             Err(AicError::PerfDatabase(msg)) => {
@@ -1220,9 +1220,25 @@ mod tests {
     }
 
     #[test]
-    fn compute_scale_absent_on_vllm_b200_errors_clearly() {
-        // vLLM doesn't ship compute_scale data on b200; expect a clear IO error.
-        let table = GemmTable::new(b200_vllm_data_root(), b200_sxm_spec());
+    fn compute_scale_absent_errors_clearly() {
+        // A data root with a gemm table but NO computescale parquet must
+        // surface a clear miss from query_compute_scale. Synthetic fixture:
+        // every live version dir eventually collects the family (vllm b200
+        // 0.24.0 did, retiring the old version-pinned vehicle), so the
+        // absence contract is anchored on a root we construct ourselves.
+        use crate::perf_database::energy_test_fixtures::{energy_test_spec, write_parquet, Col};
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        write_parquet(
+            &tmp.path().join("gemm_perf.parquet"),
+            &[
+                Col::Str("gemm_dtype", vec!["fp8"]),
+                Col::I64("m", vec![1024]),
+                Col::I64("n", vec![4096]),
+                Col::I64("k", vec![4096]),
+                Col::F64("latency", vec![1.0]),
+            ],
+        );
+        let table = GemmTable::new(tmp.path().to_path_buf(), energy_test_spec());
         let err = table
             .query_compute_scale(GemmQuantMode::Fp8Static, 1024, 4096)
             .unwrap_err();

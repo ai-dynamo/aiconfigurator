@@ -617,30 +617,25 @@ mod tests {
     /// `GenerationMSAModule` with `scale_factor=1.0` on a HYBRID
     /// `shared_layer=False` view). Regenerate if the DSA tables or the
     /// util math change.
+    ///
+    /// The XOP transfer needs a backend whose current slot ships NO msa
+    /// tables; sglang/0.5.14 is that vehicle. The former vllm branch was
+    /// dropped when vllm/0.24.0 started shipping msa data (the op then
+    /// silicon-hits and never reaches the transfer) — the silicon-hit
+    /// precedence is covered by `msa_silicon_table_hit_prefers_silicon_over_xop`
+    /// on injected grids.
     #[test]
     fn msa_xop_transfer_matches_python_oracles() {
-        for (backend, version, anchors) in [
-            (
-                "sglang",
-                "0.5.14",
-                [
-                    (1u32, 1024u32, 0u32, true, 0.15945479750992286),
-                    (2, 3000, 512, true, 1.0573128907623435),
-                    (8, 1025, 0, false, 0.03198051529058935),
-                    (4, 7777, 0, false, 0.03568683502696848),
-                ],
-            ),
-            (
-                "vllm",
-                "0.19.0",
-                [
-                    (1, 1024, 0, true, 0.44046553899838176),
-                    (2, 3000, 512, true, 11.227158155846752),
-                    (8, 1025, 0, false, 0.07392686165512992),
-                    (4, 7777, 0, false, 0.0756313776883858),
-                ],
-            ),
-        ] {
+        for (backend, version, anchors) in [(
+            "sglang",
+            "0.5.14",
+            [
+                (1u32, 1024u32, 0u32, true, 0.15945479750992286),
+                (2, 3000, 512, true, 1.0573128907623435),
+                (8, 1025, 0, false, 0.03198051529058935),
+                (4, 7777, 0, false, 0.03568683502696848),
+            ],
+        )] {
             let db = db(backend, version);
             let op = msa_op();
             for (b, s, prefix, is_context, expected) in anchors {
@@ -727,7 +722,7 @@ mod tests {
     #[test]
     fn msa_silicon_table_hit_prefers_silicon_over_xop() {
         for mode in [DatabaseMode::Silicon, DatabaseMode::Hybrid] {
-            let mut db = db("vllm", "0.19.0");
+            let mut db = db("vllm", "0.24.0");
             db.database_mode = mode;
             inject_msa_grids(&db);
             let op = msa_op();
@@ -754,7 +749,7 @@ mod tests {
     /// behaviour, unregressed).
     #[test]
     fn msa_missing_quant_slice_falls_back_to_xop_under_hybrid() {
-        let mut silicon = db("vllm", "0.19.0");
+        let mut silicon = db("vllm", "0.24.0");
         silicon.database_mode = DatabaseMode::Silicon;
         inject_msa_grids(&silicon);
         let mut op = msa_op();
@@ -764,9 +759,9 @@ mod tests {
             Err(AicError::PerfDatabase(_))
         ));
 
-        let hybrid = db("vllm", "0.19.0"); // Hybrid by default in `db()`
+        let hybrid = db("vllm", "0.24.0"); // Hybrid by default in `db()`
         inject_msa_grids(&hybrid);
-        let bf16_op = msa_op(); // bf16 KV: DSA util source exists on vllm 0.19.0
+        let bf16_op = msa_op(); // bf16 KV: DSA util source exists on vllm 0.24.0
         let mut fp8_kv = msa_op();
         fp8_kv.kv_cache_dtype = KvCacheQuantMode::Fp8;
         // Injected slice is bf16-only -> fp8-KV misses silicon; the xop value
@@ -784,9 +779,11 @@ mod tests {
 
     /// XOP disabled ("balanced" preset) -> the terminal empirical miss; and
     /// SILICON mode -> the perf-data miss ("MSA module data missing").
+    /// Anchored on sglang/0.5.14, whose current slot ships no msa tables
+    /// (vllm/0.24.0 does, so it can no longer carry these absence contracts).
     #[test]
     fn msa_policy_and_silicon_contracts() {
-        let mut hybrid = db("vllm", "0.19.0");
+        let mut hybrid = db("sglang", "0.5.14");
         hybrid.transfer_policy = TransferPolicy {
             xshape: true,
             xquant: true,
@@ -803,7 +800,7 @@ mod tests {
             Err(AicError::EmpiricalNotImplemented(_))
         ));
 
-        let mut silicon = db("vllm", "0.19.0");
+        let mut silicon = db("sglang", "0.5.14");
         silicon.database_mode = DatabaseMode::Silicon;
         assert!(matches!(
             op.query_context(&silicon, 1, 1024, 0),
@@ -820,7 +817,7 @@ mod tests {
     fn msa_empirical_mode_never_reads_silicon() {
         let op = msa_op();
 
-        let mut silicon = db("vllm", "0.19.0");
+        let mut silicon = db("vllm", "0.24.0");
         silicon.database_mode = DatabaseMode::Silicon;
         inject_msa_grids(&silicon);
         assert_eq!(
@@ -832,14 +829,14 @@ mod tests {
             Source::Silicon
         );
 
-        let hybrid = db("vllm", "0.19.0"); // Hybrid by default in `db()`
+        let hybrid = db("vllm", "0.24.0"); // Hybrid by default in `db()`
         inject_msa_grids(&hybrid);
         assert_eq!(
             op.query_context(&hybrid, 1, 1024, 0).expect("hybrid ctx").source,
             Source::Silicon
         );
 
-        let mut empirical = db("vllm", "0.19.0");
+        let mut empirical = db("vllm", "0.24.0");
         empirical.database_mode = DatabaseMode::Empirical;
         inject_msa_grids(&empirical);
         empirical.reset_provenance();

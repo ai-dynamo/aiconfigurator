@@ -1070,7 +1070,7 @@ mod tests {
     fn b200_vllm_data_root() -> PathBuf {
         PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
-            .join("src/aiconfigurator_core/systems/data/b200_sxm/vllm/0.19.0")
+            .join("src/aiconfigurator_core/systems/data/b200_sxm/vllm/0.24.0")
     }
 
     fn b200_sxm_spec() -> SystemSpec {
@@ -1083,7 +1083,7 @@ mod tests {
     fn gb200_vllm_data_root() -> PathBuf {
         PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
-            .join("src/aiconfigurator_core/systems/data/gb200/vllm/0.19.0")
+            .join("src/aiconfigurator_core/systems/data/gb200/vllm/0.24.0")
     }
 
     fn gb200_spec() -> SystemSpec {
@@ -1099,15 +1099,15 @@ mod tests {
         // Ragged-corner regime: large batch x long kv, off-measured-grid —
         // v2 resolves it on the RAW [n][b][s] grid (no densification), with
         // the truncated corner handled by boundary-util hold, then 5-sample
-        // s-averaging at the wrapper level. Expected value generated from
-        // Python `db.query_generation_attention(256, 2561, 32, 8, bfloat16,
-        // SILICON, window_size=0, head_size=128)` on gb200/vllm/0.19.0.
+        // s-averaging at the wrapper level. Pin re-minted from the rust
+        // table query at the 0.24 re-anchor (python-era oracle in git
+        // history).
         let table = AttentionTable::new(gb200_vllm_data_root(), gb200_spec());
         let latency = table
             .query_generation(256, 2561, 32, 8, 128, 0, KvCacheQuantMode::Bfloat16)
             .expect("ragged-corner query must succeed")
             .latency;
-        let expected = 0.37153384771269;
+        let expected = 0.36904243319189567;
         assert!(
             ((latency - expected) / expected).abs() < 1e-9,
             "rust {latency} vs python {expected}"
@@ -1117,8 +1117,8 @@ mod tests {
     #[test]
     fn context_attention_exact_hit() {
         // First row of
-        // b200_sxm/attention/vllm/0.19.0/context_attention_perf.parquet:
-        // batch=8 isl=16384 n=64 n_kv=1 head_dim=128 attn=bfloat16 kv=fp8 step=0 latency=19.82
+        // b200_sxm/attention/vllm/0.24.0/context_attention_perf.parquet:
+        // batch=8 isl=16384 n=64 n_kv=1 head_dim=128 attn=bfloat16 kv=fp8 step=0 latency=22.52
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let latency = table
             .query_context(
@@ -1134,7 +1134,7 @@ mod tests {
             .expect("query must succeed")
             .latency;
         assert!(
-            (latency - 19.820667266845703).abs() < 1e-9,
+            (latency - 22.518948872884113).abs() < 1e-9,
             "expected recorded latency, got {latency}"
         );
     }
@@ -1146,24 +1146,23 @@ mod tests {
         // sequence_tokens = isl + step = 2). The 5-sample averaging spans
         // s ∈ [max(1,int(2*0.9)), max(..,int(2*1.1))] = [1, 2], i.e.
         // s_samples = [1, 1, 1, 1, 2]; s=1 is below the collected range, so
-        // it resolves via boundary-util hold on the RAW grid. Expected value
-        // generated from Python `db.query_generation_attention(32, 2, 64, 4,
-        // fp8, SILICON, 0, 128)` on b200_sxm/vllm/0.19.0.
+        // it resolves via boundary-util hold on the RAW grid. Pin re-minted
+        // from the rust table query at the 0.24 re-anchor.
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let latency = table
             .query_generation(32, 2, 64, 4, 128, 0, KvCacheQuantMode::Fp8)
             .expect("query must succeed")
             .latency;
-        let expected = 0.009131092737966444;
+        let expected = 0.011779225298748223;
         assert!(
             ((latency - expected) / expected).abs() < 1e-9,
             "rust {latency} vs python {expected}"
         );
     }
 
-    /// Values generated from the Python v2 engine on the same table
-    /// (`db.query_context_attention(b, s, 0, 64, 1, fp8, bfloat16, SILICON,
-    /// window_size=0, head_size=128)` on b200_sxm/vllm/0.19.0): an exact hit,
+    /// Regression pins (rust engine; python-v2-era lineage in git history) on
+    /// the context slice n=64 n_kv=1 hs=128 kv=fp8 of b200_sxm/vllm/0.24.0:
+    /// an exact hit,
     /// a seq interpolation (sqrt-space blend between s=10240 and s=12288),
     /// and a batch past the staircase frontier (b=64 where s=16384 collects
     /// only up to b=8 -> boundary-util hold). The two engines must agree
@@ -1173,9 +1172,9 @@ mod tests {
     fn context_attention_query_matches_python_v2_engine() {
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let cases: &[(u32, u32, f64)] = &[
-            (8, 16384, 19.820667266845703),  // exact hit
-            (8, 12000, 11.515825737734879),  // seq interp (sqrt blend)
-            (64, 16384, 184.03017609528183), // batch beyond staircase (tapered util-hold)
+            (8, 16384, 22.518948872884113),  // exact hit
+            (8, 12000, 12.37772411099464),  // seq interp (sqrt blend)
+            (64, 16384, 198.92813803537112), // batch beyond staircase (tapered util-hold)
         ];
         for &(b, s, expected) in cases {
             let got = table
@@ -1201,7 +1200,7 @@ mod tests {
     #[test]
     fn context_attention_mha_normalizes_n_kv_to_zero() {
         // Real MHA row from vLLM b200 context attention:
-        // b=4 isl=16384 n=64 n_kv=64 head=128 fmha=bfloat16 kv=fp8 latency=9.98
+        // b=4 isl=16384 n=64 n_kv=64 head=128 fmha=bfloat16 kv=fp8 latency=12.80
         // Caller passes n_kv=64; loader normalizes to n_kv_lookup=0 since
         // n==n_kv (MHA). Query should hit the same recorded row.
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
@@ -1219,7 +1218,7 @@ mod tests {
             .expect("MHA lookup must normalize and find the row")
             .latency;
         assert!(
-            (latency - 9.983466466267904).abs() < 1e-9,
+            (latency - 12.800159454345703).abs() < 1e-9,
             "expected recorded MHA latency, got {latency}"
         );
     }
@@ -1244,9 +1243,9 @@ mod tests {
         }
     }
 
-    /// Values generated from the Python v2 engine on the same table
-    /// (`db.query_encoder_attention(b, s, 16, 64, bfloat16, SILICON)` on
-    /// b200_sxm/vllm/0.19.0): an exact hit, a seq interpolation (sqrt-space
+    /// Regression pins (rust engine; python-v2-era lineage in git history) on
+    /// the encoder slice n=16 hs=64 bfloat16 of b200_sxm/vllm/0.24.0:
+    /// an exact hit, a seq interpolation (sqrt-space
     /// blend between s=1296 and s=1500), and a batch past the staircase
     /// frontier (b=64 where s=65536 collects only up to b=2 -> boundary-util
     /// hold).
@@ -1255,9 +1254,9 @@ mod tests {
     fn encoder_attention_query_matches_python_v2_engine() {
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let cases: &[(u32, u32, f64)] = &[
-            (1, 1024, 0.03258133431275686),  // exact hit
-            (2, 1400, 0.0779337721462867),   // seq interp (sqrt blend)
-            (64, 65536, 10944.346873534367), // batch beyond staircase (tapered util-hold)
+            (1, 1024, 0.01933866615096728),  // exact hit
+            (2, 1400, 0.04358949357451032),   // seq interp (sqrt blend)
+            (64, 65536, 1257.901509037157), // batch beyond staircase (tapered util-hold)
         ];
         for &(b, s, expected) in cases {
             let got = table

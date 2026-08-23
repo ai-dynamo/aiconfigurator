@@ -849,7 +849,7 @@ mod tests {
         let systems_root = PathBuf::from(REPO_ROOT_HINT)
             .join("../..")
             .join("src/aiconfigurator_core/systems");
-        PerfDatabase::load(&systems_root, "b200_sxm", "vllm", "0.19.0").expect("db must load")
+        PerfDatabase::load(&systems_root, "b200_sxm", "vllm", "0.24.0").expect("db must load")
     }
 
     #[test]
@@ -862,10 +862,10 @@ mod tests {
             FmhaQuantMode::Bfloat16,
             GemmQuantMode::Bfloat16,
         );
-        // Exact-hit row latency=0.1351, prefix=0 means prefix_correction=1.0.
+        // Exact-hit row latency=0.0955, prefix=0 means prefix_correction=1.0.
         let result = op.query_context(&db, 1, 1, 0).expect("query must succeed");
         assert!(
-            (result.latency_ms - 0.1351).abs() < 1e-6,
+            (result.latency_ms - 0.0955).abs() < 1e-6,
             "expected recorded module latency, got {}",
             result.latency_ms
         );
@@ -1057,8 +1057,8 @@ mod tests {
         assert_close(lat7, lat8 * 7.0 / 8.0, "mla_bmm 7 -> 8-head slice reroute");
     }
 
-    /// Python oracle: `MLAModule._query_context_mla_module_table` in
-    /// EMPIRICAL mode on b200_sxm/vllm/0.19.0 (shared_layer=False).
+    /// Regression pins re-minted from the rust engine at the vllm-0.24 re-anchor (the python query layer retired with #1357; the python-era oracles that seeded this test are in git history).
+    /// EMPIRICAL mode, b200_sxm/vllm/0.24.0, single-primary loader.
     #[test]
     fn context_mla_module_empirical_matches_python_oracles() {
         let mut db = b200_vllm_db();
@@ -1083,7 +1083,7 @@ mod tests {
                 FmhaQuantMode::Bfloat16,
                 KvCacheQuantMode::Bfloat16,
                 GemmQuantMode::Bfloat16,
-                5.030970266382403,
+                3.6034676932991445,
             ),
             // prefix > 0
             (
@@ -1094,7 +1094,7 @@ mod tests {
                 FmhaQuantMode::Bfloat16,
                 KvCacheQuantMode::Bfloat16,
                 GemmQuantMode::Bfloat16,
-                0.3328645307516498,
+                0.20511976936920295,
             ),
             // exact collected hit
             (
@@ -1105,7 +1105,7 @@ mod tests {
                 FmhaQuantMode::Bfloat16,
                 KvCacheQuantMode::Bfloat16,
                 GemmQuantMode::Bfloat16,
-                0.1351,
+                0.0955,
             ),
             // fp8 fmha/kv with fp8_block gemm slice
             (
@@ -1116,7 +1116,7 @@ mod tests {
                 FmhaQuantMode::Fp8,
                 KvCacheQuantMode::Fp8,
                 GemmQuantMode::Fp8Block,
-                4.68971474347924,
+                3.553519280764969,
             ),
         ];
         for &(b, s, prefix, n, fmha, kv, gemm, expected) in cases {
@@ -1152,8 +1152,8 @@ mod tests {
         );
     }
 
-    /// Python oracle: `MLAModule._query_generation_mla_module_table` in
-    /// EMPIRICAL mode on b200_sxm/vllm/0.19.0 (shared_layer=False). The
+    /// Regression pins re-minted from the rust engine at the vllm-0.24 re-anchor (the python query layer retired with #1357; the python-era oracles that seeded this test are in git history).
+    /// EMPIRICAL mode, b200_sxm/vllm/0.24.0, single-primary loader. The
     /// fp8/fp8_block case exercises the module SOL's dependence on the gemm
     /// quant (the BMM terms close over it).
     #[test]
@@ -1167,7 +1167,7 @@ mod tests {
                 128,
                 KvCacheQuantMode::Bfloat16,
                 GemmQuantMode::Bfloat16,
-                0.16175364801657854,
+                0.11163838072766873,
             ),
             // exact collected hit (s = isl + step)
             (
@@ -1176,7 +1176,7 @@ mod tests {
                 128,
                 KvCacheQuantMode::Bfloat16,
                 GemmQuantMode::Bfloat16,
-                0.1497,
+                0.1063,
             ),
             (
                 8,
@@ -1184,7 +1184,7 @@ mod tests {
                 16,
                 KvCacheQuantMode::Fp8,
                 GemmQuantMode::Fp8Block,
-                0.1146692546817411,
+                0.05223016364994479,
             ),
         ];
         for &(b, s, n, kv, gemm, expected) in cases {
