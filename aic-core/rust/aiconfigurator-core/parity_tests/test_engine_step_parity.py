@@ -87,6 +87,13 @@ class EngineStepParityCase:
     afd_f_moe_ep_size: int = 1
 
 
+# Coverage contract (first principles, 2026-08): a case earns its slot by
+# exercising something NO other case exercises — a distinct architecture x
+# backend op graph, a distinct system SPEC CLASS (b200 baseline, b60 edge
+# spec, gb200 NVL72 comm), a database mode / transfer-policy tier, or a
+# mechanic (prefix, CP, MTP, AFD, the energy surface). Running the same op
+# graph on another system is NOT coverage — data-grid diversity is the
+# support matrix's job. When adding a case, name the unique thing it pins.
 SMOKE_CASES = [
     # Original 3 smoke cases (Phase 3).
     pytest.param(
@@ -120,10 +127,6 @@ SMOKE_CASES = [
         ),
         id="qwen3-30b-a3b-b200-vllm-isl1024-osl2",
     ),
-    pytest.param(
-        EngineStepParityCase(model_path="Qwen/Qwen3-235B-A22B"),
-        id="qwen3-235b-a22b-b200-vllm-isl1024-osl2",
-    ),
     # Phase 4 D1: dense (Llama-family) coverage on b200_sxm/vllm (current slot).
     # The smoke MoE defaults (`moe_ep_size=8`) are unused by the dense path
     # but pass through `cli_estimate` without harm.
@@ -132,51 +135,15 @@ SMOKE_CASES = [
         id="qwen3-32b-b200-vllm-isl1024-osl2",
     ),
     pytest.param(
-        EngineStepParityCase(model_path="meta-llama/Meta-Llama-3.1-70B"),
-        id="llama31-70b-b200-vllm-isl1024-osl2",
-    ),
-    pytest.param(
         EngineStepParityCase(model_path="meta-llama/Meta-Llama-3.1-8B"),
         id="llama31-8b-b200-vllm-isl1024-osl2",
     ),
     # Phase 4 D1: cross-system coverage on the smoke MiniMax model.
-    pytest.param(
-        EngineStepParityCase(
-            model_path="MiniMaxAI/MiniMax-M2.5",
-            system_name="h200_sxm",
-        ),
-        id="minimax-m25-h200-vllm-isl1024-osl2",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="MiniMaxAI/MiniMax-M2.5",
-            system_name="h100_sxm",
-        ),
-        id="minimax-m25-h100-vllm-isl1024-osl2",
-    ),
     # Phase 4 D4: DeepSeek-family coverage unlocked by the `Op::Overlap`
     # variant + `128 // tp_size` MLA head count fix.
     pytest.param(
-        EngineStepParityCase(model_path="deepseek-ai/DeepSeek-V3"),
-        id="deepseek-v3-b200-vllm-isl1024-osl2",
-    ),
-    pytest.param(
         EngineStepParityCase(model_path="deepseek-ai/DeepSeek-R1"),
         id="deepseek-r1-b200-vllm-isl1024-osl2",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="moonshotai/Kimi-K2.5",
-            system_name="h200_sxm",
-        ),
-        id="kimi-k25-h200-vllm-isl1024-osl2",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="moonshotai/Kimi-K2.5",
-            system_name="h100_sxm",
-        ),
-        id="kimi-k25-h100-vllm-isl1024-osl2",
     ),
     # Phase 4 D4: cross-backend (SGLang non-DeepEP path) coverage.
     pytest.param(
@@ -197,14 +164,6 @@ SMOKE_CASES = [
             backend_name="sglang",
         ),
         id="kimi-k25-b200-sglang-isl1024-osl2",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="moonshotai/Kimi-K2.5",
-            system_name="h200_sxm",
-            backend_name="sglang",
-        ),
-        id="kimi-k25-h200-sglang-isl1024-osl2",
     ),
     # Phase 4 D6: NemotronNas (Puzzle / DeciLM per-block architecture).
     pytest.param(
@@ -229,10 +188,6 @@ SMOKE_CASES = [
     pytest.param(
         EngineStepParityCase(model_path="deepseek-ai/DeepSeek-V3.2"),
         id="deepseek-v32-b200-vllm-isl1024-osl2",
-    ),
-    pytest.param(
-        EngineStepParityCase(model_path="zai-org/GLM-5"),
-        id="glm5-b200-vllm-isl1024-osl2",
     ),
     # Tripwire for the DSA kernel_source bucket contract (review B1, both
     # halves): sglang 0.5.14 records executed-kernel names whose bucket
@@ -441,14 +396,6 @@ SMOKE_CASES = [
     # full triage / cluster table.
     pytest.param(
         EngineStepParityCase(
-            model_path="Qwen/Qwen3-1.7B",
-            system_name="h100_sxm",
-            backend_name="vllm",
-        ),
-        id="qwen3-17b-h100-vllm-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
             model_path="Qwen/Qwen3-30B-A3B",
             system_name="b60",
             backend_name="vllm",
@@ -459,94 +406,11 @@ SMOKE_CASES = [
     ),
     pytest.param(
         EngineStepParityCase(
-            model_path="Qwen/Qwen3-30B-A3B",
-            system_name="h200_sxm",
-            backend_name="sglang",
-            tp_size=4,
-            moe_ep_size=4,
-        ),
-        id="qwen3-30b-a3b-h200-sglang-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3-30B-A3B",
-            system_name="gb300",
-            backend_name="sglang",
-            tp_size=4,
-            moe_ep_size=4,
-        ),
-        id="qwen3-30b-a3b-gb300-sglang-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3-8B",
-            backend_name="trtllm",
-        ),
-        id="qwen3-8b-b200-trtllm-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3.5-27B",
-            system_name="b300_sxm",
-            backend_name="trtllm",
-        ),
-        id="qwen35-27b-b300-trtllm-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
             model_path="deepseek-ai/DeepSeek-R1",
             system_name="gb200",
             backend_name="vllm",
         ),
         id="deepseek-r1-gb200-vllm-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="deepseek-ai/DeepSeek-V3",
-            system_name="gb200",
-            backend_name="vllm",
-        ),
-        id="deepseek-v3-gb200-vllm-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="meta-llama/Meta-Llama-3.1-405B",
-            system_name="b300_sxm",
-            backend_name="sglang",
-        ),
-        id="llama31-405b-b300-sglang-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="meta-llama/Meta-Llama-3.1-8B",
-            system_name="gb200",
-            backend_name="trtllm",
-        ),
-        id="llama31-8b-gb200-trtllm-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="moonshotai/Kimi-K2.5",
-            system_name="b300_sxm",
-            backend_name="vllm",
-        ),
-        id="kimi-k25-b300-vllm-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="moonshotai/Kimi-K2.5",
-            system_name="gb300",
-            backend_name="vllm",
-        ),
-        id="kimi-k25-gb300-vllm-scan-coverage",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="nvidia/Nemotron-H-56B-Base-8K",
-            system_name="h200_sxm",
-            backend_name="vllm",
-        ),
-        id="nemotron-h-56b-h200-vllm-scan-coverage",
     ),
     # Kimi-K3 (review Blocker 1 anchor): hybrid KDA + MLA LatentMoE. The
     # case defaults (tp8/ep8) put KDA on the fused 12-head shard — the exact
@@ -608,71 +472,12 @@ POWER_CASES = [
     pytest.param(
         EngineStepParityCase(
             model_path="Qwen/Qwen3-32B",
-            backend_name="trtllm",
-            compare_energy=True,
-        ),
-        id="qwen3-32b-b200-trtllm-power",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3-32B",
             system_name="gb200",
             compare_energy=True,
         ),
         id="qwen3-32b-gb200-vllm-power",
     ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3-32B",
-            system_name="gb200",
-            backend_name="trtllm",
-            compare_energy=True,
-        ),
-        id="qwen3-32b-gb200-trtllm-power",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3-32B",
-            system_name="h200_sxm",
-            compare_energy=True,
-        ),
-        id="qwen3-32b-h200-vllm-power",
-    ),
 ]
-
-
-# Site-transfer tie-break anchors (issue #1456): when a GEMM query lands off
-# the collected grid, Python resolves equidistant candidate sites through a
-# *stable* sort over the index's enumeration order; the pre-fix Rust selection
-# broke that tie differently and silently drifted these exact configs. Each
-# case pins the surface that originally exposed the divergence, so the
-# tie-break stays anchored in CI:
-#  - Qwen3-32B-FP8 @ h200_sxm/vllm (current slot), agg: off-grid fp8_block GEMM
-#    n=1280 k=5120 (the tp8 fused-QKV projection).
-#  - Llama-4-Scout @ gb200/vllm/0.24.0, disagg decode: the mirror bf16 shape
-#    n=5120 k=1280 (the tp4 attention out-projection; tp4 * moe_ep4 keeps the
-#    16-expert MoE mapping valid).
-TIE_AGG_CASES = [
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3-32B-FP8",
-            system_name="h200_sxm",
-        ),
-        id="qwen3-32b-fp8-h200-vllm-tiebreak-agg",
-    ),
-]
-TIE_DISAGG_CASES = [
-    pytest.param(
-        EngineStepParityCase(
-            model_path="meta-llama/Llama-4-Scout-17B-16E-Instruct",
-            system_name="gb200",
-            tp_size=4,
-            moe_ep_size=4,
-        ),
-        id="llama4-scout-gb200-vllm-tiebreak-disagg",
-    ),
-]
-TIE_CASES = [*TIE_AGG_CASES, *TIE_DISAGG_CASES]
 
 
 # Error-symmetry contract: when Python raises one of these, Rust is
@@ -1356,34 +1161,6 @@ class TestRustEngineStepDisaggParity:
         assert reason is None, reason
 
 
-class TestRustEngineStepTieBreakParity:
-    """#1456 site-transfer tie-break anchors (see TIE_AGG/TIE_DISAGG_CASES):
-    each trigger config runs on the surface that originally exposed the
-    off-grid GEMM tie divergence, at the standard latency tolerance."""
-
-    @pytest.mark.parametrize("case", TIE_AGG_CASES)
-    def test_agg_tie_break_parity(
-        self,
-        case: EngineStepParityCase,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _prepare_rust_core(monkeypatch)
-
-        reason = _parity_mismatch_reason(_agg_comparison_metrics(case))
-        assert reason is None, reason
-
-    @pytest.mark.parametrize("case", TIE_DISAGG_CASES)
-    def test_disagg_tie_break_parity(
-        self,
-        case: EngineStepParityCase,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _prepare_rust_core(monkeypatch)
-
-        reason = _parity_mismatch_reason(_disagg_comparison_metrics(case))
-        assert reason is None, reason
-
-
 # Context-parallelism (CP) parity cases. CP is SGLang-only and shards prefill
 # sequence tokens: token-major ops divide their per-rank token count by cp
 # (seq_split), ContextAttention models rank-0's zigzag chunk split, and
@@ -1408,19 +1185,6 @@ CP_CASES = [
             cp_size=8,
         ),
         id="qwen3-235b-a22b-b200-sglang-cp8",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3-235B-A22B",
-            system_name="b200_sxm",
-            backend_name="sglang",
-            tp_size=1,
-            attention_dp_size=1,
-            moe_tp_size=4,
-            moe_ep_size=1,
-            cp_size=4,
-        ),
-        id="qwen3-235b-a22b-b200-sglang-cp4",
     ),
     # MLA context-parallelism: Kimi is MLA with bfloat16 FMHA (collected on
     # sglang), so it exercises the ContextMLA cp zigzag sharding. (DeepSeek-R1
@@ -1862,13 +1626,6 @@ SOL_CASES = [
     ),
     pytest.param(
         EngineStepParityCase(
-            model_path="meta-llama/Meta-Llama-3.1-70B",
-            database_mode="SOL",
-        ),
-        id="llama31-70b-b200-vllm-sol",
-    ),
-    pytest.param(
-        EngineStepParityCase(
             model_path="Qwen/Qwen3-235B-A22B",
             database_mode="SOL",
         ),
@@ -1969,8 +1726,6 @@ ENGINE_STEP_GOLDEN_MATRIX: tuple[tuple[list, tuple[str, ...]], ...] = (
     (DSV4_CP_CASES, ("cp_static_ctx", "mixed")),
     (HYBRID_CASES, ENGINE_STEP_SURFACES),
     (SOL_CASES, ("static", "mixed")),
-    (TIE_AGG_CASES, ("agg",)),
-    (TIE_DISAGG_CASES, ("disagg",)),
     (AFD_CASES, ("afd",)),
 )
 
