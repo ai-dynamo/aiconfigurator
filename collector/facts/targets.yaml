@@ -192,12 +192,36 @@ families:
     - repo: MiniMaxAI/MiniMax-M3
       profile: bfloat16
       aic_registered: MiniMaxAI--MiniMax-M3
+      cli_extra_args:
+        trtllm:
+          args:
+          - --generator-set
+          - params.agg.sparse_attention_config={"algorithm":"minimax_m3"}
+          fact: MiniMax-M3 trtllm requires sparse_attention_config to get MiniMaxM3KVCacheManagerV2 (modeling_minimaxm3
+            RuntimeError without it; facts/trt_ab_m3_sparse.json). Passthrough added to extra_engine_args
+            template 2026-08-23.
     - repo: MiniMaxAI/MiniMax-M3-MXFP8
       profile: mxfp8
       aic_registered: false
+      cli_extra_args:
+        trtllm:
+          args:
+          - --generator-set
+          - params.agg.sparse_attention_config={"algorithm":"minimax_m3"}
+          fact: MiniMax-M3 trtllm requires sparse_attention_config to get MiniMaxM3KVCacheManagerV2 (modeling_minimaxm3
+            RuntimeError without it; facts/trt_ab_m3_sparse.json). Passthrough added to extra_engine_args
+            template 2026-08-23.
     - repo: nvidia/MiniMax-M3-NVFP4
       profile: nvfp4
       aic_registered: false
+      cli_extra_args:
+        trtllm:
+          args:
+          - --generator-set
+          - params.agg.sparse_attention_config={"algorithm":"minimax_m3"}
+          fact: MiniMax-M3 trtllm requires sparse_attention_config to get MiniMaxM3KVCacheManagerV2 (modeling_minimaxm3
+            RuntimeError without it; facts/trt_ab_m3_sparse.json). Passthrough added to extra_engine_args
+            template 2026-08-23.
     dummy_variants:
     - moe_sparse_attn
     - dense_full_attn_head
