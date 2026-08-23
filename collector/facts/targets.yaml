@@ -305,9 +305,11 @@ families:
         known:
           support: 'same as moonshotai/Kimi-K3: architecture unregistered at all three pinned framework
             versions (probe-verified 2026-08-20).'
-          trtllm_quant_algo: 'hf_quant declares quant_algo FP8_PB_WO — absent from the QuantAlgo enum
-            in BOTH rc23 and rc24 (grep-verified 2026-08-24): unservable on trtllm until the enum learns
-            it, independent of K3 arch support.'
+          trtllm_quant_algo: hf_quant mixes NVFP4 experts (552 layers) with FP8_PB_WO attention projections
+            (2790 layers, fp8 per-block WEIGHT-ONLY). FP8_PB_WO is absent from the QuantAlgo enum in rc23
+            AND rc24; nearest member FP8_BLOCK_SCALES is W8A8 (fp8 activations), NOT weight-only — no
+            semantic equivalent exists, so this needs a new enum + fp8 weight-only dequant path in trtllm,
+            not a rename. W4A16 kernels exist but only apply to the expert half. Enum grep-verified 2026-08-24.
       nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4:
         known:
           trtllm_rc23: 'cudaError check abort during dummy load, root-caused 2026-08-21: the all_kinds
