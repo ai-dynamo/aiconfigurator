@@ -33,8 +33,11 @@ results, and every parity bug found and fixed along the way.
 - Plan: the Phase 2/3 dedup plan this gated (#1357, closed; its record doc was
   retired once the ladder landed). The resulting policy is
   `.claude/rules/rust-core/parity.md`.
-- Scan runbook: [`aic-core/rust/aiconfigurator-core/docs/parity-scan-runbook.md`](./parity-scan-runbook.md)
-- Harness: `tools/support_matrix/scan_rust_parity.py`
+- Scan runbook and harness: both retired. `tools/support_matrix/scan_rust_parity.py`
+  was deleted with the Python engine-step path in #1521, and the runbook that
+  drove it went with it — there is no second engine to scan against. The
+  numbers below therefore cannot be reproduced on any current commit; they
+  stand as a historical record only. Recover either from git history.
 
 ## 2. Coverage
 
