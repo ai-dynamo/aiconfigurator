@@ -1,0 +1,194 @@
+# OUTPUT: curated conclusions from probe campaigns (the facts archive's
+# human layer). Each finding states its own evidence paths, versions and
+# dates inline; applies_to lists where it was observed. Rots with
+# framework releases — re-verify on version bumps. Inputs live in targets.yaml.
+findings:
+  dummy_notes:
+    statement: layer-kind period is FRAMEWORK-HARDCODED (sglang llama4.py:217 use_rope=(layer_id+1)%4!=0) with no
+      config field -> _ARCH_IMPLICIT_PERIODS; aic-core config lacks vision_config -> merged from unsloth mirror
+      (vllm builds the vision tower and profiles it even for text-only probes).
+    applies_to:
+    - meta-llama/Llama-4-Scout-17B-16E-Instruct
+  k3_deepep:
+    statement: 'NO working deepep mode on sglang 0.5.17 + bundled DeepEP @ SM90 tp8/ep8 (A/B 2026-08-24, both deterministic):
+      mode=auto -> AssertionError forward_deepgemm_contiguous is deprecated at the first MoE forward (normal dispatch
+      routed into the removed contiguous-deepgemm path; all 8 ranks); mode=low_latency -> DeepEP device assert internode_ll.cu:358
+      num_topk <= kNumMaxTopK (K3 num_experts_per_token=16 exceeds the LL kernel cap). Additionally K3''s own SP-collective/MegaMoE
+      path is SM103-gated (startup log: requires SM103, TP4/TP8, MegaMoE/DeepEP, CustomAllReduceV2 multicast; falls
+      back to NCCL on SM90) — the independent kernel route is unreachable on H20 regardless. Non-deepep tp8/ep8
+      (a2a=none) works and matches tp1 kernel families. Evidence facts/tepdep/k3_deepep_{auto_v2,ll}.rank*.json
+      + run logs.'
+    applies_to:
+    - moonshotai/Kimi-K3
+  sglang_0516_flaky:
+    statement: trace NONDETERMINISTICALLY fails (~1/3 of runs) in flashinfer cutlass-DSL fused_add_rmsnorm via tvm_ffi
+      'Mismatched Tensor' — the same command text both passes and fails on the same GPU (12 controlled reruns 2026-08-21);
+      every generator flag excluded by bisection; suspected timing-dependent tensor layout under enable-mixed-chunk.
+      Also hits MiniMax-M2.5. Probe retries once and records warmup_retry; persistent failure is a record, not a
+      block.
+    applies_to:
+    - MiniMaxAI/MiniMax-M2
+  sglang_marlin_ab:
+    statement: 'runner=marlin A/B''d 2026-08-24: SAME capability ValueError — the gate (loader.py:282) checks the
+      quant config''s declared min_capability=100 before model construction; runner choice never enters. Declaration-locked,
+      no flag escape. Evidence facts/bisect_m3mxfp8_marlin.json.'
+    applies_to:
+    - MiniMaxAI/MiniMax-M3-MXFP8
+  sglang_silent_downgrade:
+    statement: 'SGLANG BUG (not ours), mechanism pinned: the artifact ships quant_method=''modelopt'' + quant_algo=''MIXED_PRECISION'';
+      sglang 0.5.16''s mixed detector matches only the literal ''modelopt_mixed'' (modelopt_quant.py:622) and the
+      generic modelopt fallback greps quant_algo for FP8/NVFP4/FP4 substrings (base_config.py:189-196) — MIXED_PRECISION
+      matches neither -> silently Unquantized, zero warnings. Our dummy carries the full real metadata and the SAME
+      metadata binds ModelOptNvFp4FusedMoE correctly on vllm. Worth reporting upstream; recheck on 0.5.17.'
+    applies_to:
+    - nvidia/MiniMax-M3-NVFP4
+  sglang_sm90:
+    statement: 'NO working path: SM90 gates NVFP4 MoE to marlin only (flashinfer_mxfp4/flashinfer_cutlass/triton
+      all rejected ''platform does not support NVFP4 with selected backend''), and marlin fused_moe asserts ''Only
+      gated SiLU is supported'' — Gemma uses gelu_pytorch_tanh. framework gap: NVFP4xgelu-MoE unservable on sglang/SM90.
+      Dense 31B-IT-NVFP4 passes (no MoE). Evidence facts/bisect_gemma4nvfp4_*.json, 2026-08-24.'
+    applies_to:
+    - nvidia/Gemma-4-26B-A4B-NVFP4
+  sglang_workaround:
+    statement: 'flake root-caused to flashinfer cutlass-DSL fused_add_rmsnorm tvm_ffi nondeterminism: SGLANG_IS_FLASHINFER_AVAILABLE=false
+      passes 4/4 (facts/bisect_m2_noflashinfer_*.json, 2026-08-22). Deterministic workaround exists; perf cost unmeasured.'
+    applies_to:
+    - MiniMaxAI/MiniMax-M2
+    - MiniMaxAI/MiniMax-M2.5
+  sm90_triple:
+    statement: 'Same checkpoint, three fates on SM90. vllm 0.24 RUNS but NOT at mxfp8 precision: binds ModelOptMxFp8FusedMoE/LinearMethod
+      yet executes marlin_moe_wna16::Marlin + marlin::Marlin — weight-only dequant (W8A16 semantics); perf collected
+      here is Marlin-dequant data, not mxfp8 tensor-core data (same class as NVFP4-on-SM90). sglang 0.5.16 DEFINITIVELY
+      unservable: explicit quant-method capability floor ''mxfp8 minimum capability 100, current 90'' — not runner-selectable,
+      no flag bypasses it. trtllm rc23 DEFINITIVELY unservable but for a NON-quant reason: all three M3 artifacts
+      die at the sparse-attention wiring wall before quant matters. Evidence: records + raws, 2026-08-24.'
+    applies_to:
+    - MiniMaxAI/MiniMax-M3-MXFP8
+  support:
+    statement: 'Generator/SDK supports K3 since upstream rebase 2026-08-23 (KimiK3Config, KIMIK3 family); the golden
+      command renders. Failure now correctly sits at the FRAMEWORK layer: unregistered at the pins (sglang 0.5.16
+      / vllm 0.24 / trtllm rc23); registered in latest releases (0.5.17 / 0.27.1 / rc24, probed).'
+    applies_to:
+    - moonshotai/Kimi-K3
+  support_2:
+    statement: 'same as moonshotai/Kimi-K3: architecture unregistered at all three pinned framework versions (probe-verified
+      2026-08-20).'
+    applies_to:
+    - nvidia/Kimi-K3-NVFP4
+  topology_invariance:
+    statement: 'ep/tp sharding on the a2a=none (single-node default) path does NOT change kernel families — measured
+      across GLM-5.2-FP8 (tp2/tp8 x ep1/ep2/ep8: triton fused_moe throughout), DSV4-NVFP4 (tp2 x ep1/ep2: marlin),
+      Kimi-K2.5-FP8 (tp8 x ep1/ep8: fused_marlin_moe). Evidence facts/tepdep/*.rank0.json, 2026-08-21. Therefore
+      tp1 probes represent kernel identity for the default path; multi-rank probing is scoped to routes that change
+      kernels.'
+    applies_to:
+    - a2a=none sharding
+  topology_sm103:
+    statement: 'the owner-reported TEP8 kernel fork is SM-gated, from sglang''s own dispatch log: ''K3 SP collective
+      requires SM103, TP4/TP8, MegaMoE/DeepEP, and CustomAllReduceV2 with multicast; using NCCL.'' — the special
+      path never activates on SM90; verify on SM103 (Blackwell Ultra) during the Blackwell replay.'
+    applies_to:
+    - moonshotai/Kimi-K3
+  topology_sm90:
+    statement: 'sglang 0.5.17 on SM90 (probed): tp1 and TEP8 and DEP8(a2a=none) all run Mxfp4MoEMethod -> bf16-dequant
+      triton fused_moe_kernel, IDENTICAL kernel sets (facts/tepdep/k3_{tep8,dep8}.rank0.json). DEP8+deepep (the
+      real DEP deployment route) CRASHES at warmup: ''AssertionError: forward_deepgemm_contiguous is deprecated''
+      — the DeepEPMoE route for this quant recipe is broken at 0.5.17/SM90.'
+    applies_to:
+    - moonshotai/Kimi-K3
+  topology_verdict:
+    statement: 'Kimi-K2.5 (compressed-tensors W4-packed -> marlin): TEP8 == DEP8 kernel family (sglang::fused_marlin_moe
+      + device::marlin_moe::Marlin, same align/reduce/activation set; only shape-tuning template args differ). facts/tepdep/k25_fp8_{tep8,dep8}.rank0.json,
+      2026-08-21.'
+    applies_to:
+    - tp8/ep1
+  trtllm_fp8kv:
+    statement: 'trtllm rc23/SM90 UNIFIED root cause: fp8 KV cache in the MLA/DSA path crashes natively in flash_mla
+      (frame#62 abort). Door 1 = engine kv_cache_config.dtype:fp8 (generator renders for fp8 profiles) -> config_gap,
+      kv-auto A/B passes (GLM-5/5.1/5.2-FP8, DSV3.2, MiniMax-M2/M2.5 whose ''Linear assert'' was the same trigger).
+      Door 2 = checkpoint hf_quant kv_cache_quant_algo:FP8 (all NVFP4 artifacts) -> framework_bug, kv-auto STILL
+      crashes (GLM-5/5.1-NVFP4, DSV3.2-NVFP4). Evidence facts/trt_ab_kvauto_*.json, 2026-08-22.'
+    applies_to:
+    - MiniMaxAI/MiniMax-M2
+    - zai-org/GLM-5-FP8
+    - zai-org/GLM-5.1-FP8
+    - deepseek-ai/DeepSeek-V3.2
+    - MiniMaxAI/MiniMax-M2.5
+    - nvidia/GLM-5-NVFP4
+    - nvidia/GLM-5.1-NVFP4
+    - nvidia/DeepSeek-V3.2-NVFP4
+  trtllm_layers:
+    statement: 'rc23 fails in QUANT PARSING before the arch check (quant_config_utils.py:43 NoneType on the 4-bit-float
+      compressed-tensors config) — two walls stacked: parser first, arch-unregistered behind it. rc24 passes parsing
+      AND registers the arch, then stops at the missing ''fla'' package in the image.'
+    applies_to:
+    - moonshotai/Kimi-K3
+  trtllm_linear_assert:
+    statement: 'trtllm rc23: fp8 Linear.apply assertion (linear.py:1142) under the generator-rendered engine args;
+      probe-default args loaded fine — surfaced by the fidelity upgrade 2026-08-21.'
+    applies_to:
+    - MiniMaxAI/MiniMax-M2
+    - MiniMaxAI/MiniMax-M2.5
+  trtllm_quant_algo:
+    statement: hf_quant mixes NVFP4 experts (552 layers) with FP8_PB_WO attention projections (2790 layers, fp8
+      per-block WEIGHT-ONLY). FP8_PB_WO is absent from the QuantAlgo enum in rc23 AND rc24; nearest member FP8_BLOCK_SCALES
+      is W8A8 (fp8 activations), NOT weight-only — no semantic equivalent exists, so this needs a new enum + fp8
+      weight-only dequant path in trtllm, not a rename. W4A16 kernels exist but only apply to the expert half. Enum
+      grep-verified 2026-08-24.
+    applies_to:
+    - nvidia/Kimi-K3-NVFP4
+  trtllm_quant_parser:
+    statement: rc23 quant_config_utils.py:43 crashes (NoneType) parsing the native compressed-tensors W4 quantization_config
+      — framework_bug; K2.5-NVFP4 sibling fails separately on NVFP4 MoE tactics (platform_floor SM100).
+    applies_to:
+    - moonshotai/Kimi-K2.5
+  trtllm_rc23:
+    statement: 'trtllm rc23: NOT capacity (2026-08-21 explanation RETRACTED — the 64B/120GiB arithmetic used gated-3-mat
+      at hidden width, ignoring moe_latent_size=2048+relu2; true experts/layer ~10.7B). Measured 2026-08-23: peak
+      33GB/96GB, weights fit; crash is a native ILLEGAL MEMORY ACCESS right after model init (cudaStreamDestroy
+      IMA -> abort in KVCacheManager teardown, exit 139, no raw written). Isolation: Ultra-BF16/FP8 pass trtllm,
+      Nano/Super-NVFP4 pass trtllm — Ultra-shape x NVFP4-path specific framework bug. Evidence facts/ultra_nvfp4_trt_ima.log
+      + mem monitor.'
+    applies_to:
+    - nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+  trtllm_rc24:
+    statement: rc24 registers KimiK3ForConditionalGeneration but the nvcr image lacks the 'fla' (flash-linear-attention)
+      package its model file imports — K3 is unserveable on the shipped image (probe-verified 2026-08-21).
+    applies_to:
+    - moonshotai/Kimi-K3
+  vllm_024:
+    statement: 'NotImplementedError at load: checkpoint hf_quant excludes lm_head but NOT model.embed_tokens while
+      weights are tied; vllm''s ModelOpt NVFP4 config has no embedding quant method. Real-artifact metadata x framework
+      combination — real deployment hits the same. Affects both 26B and 31B-IT.'
+    applies_to:
+    - nvidia/Gemma-4-26B-A4B-NVFP4
+  vllm_024_2:
+    statement: same tied-embedding NotImplementedError as 26B (see its entry).
+    applies_to:
+    - nvidia/Gemma-4-31B-IT-NVFP4
+  vllm_024_image_tilelang_stub:
+    statement: 'PRISTINE vllm/vllm-openai:v0.24.0 CANNOT load DSV4 on vllm: tilelang (hard dep of DSV4 mhc) ships
+      lib/libcudart_stub.so with undefined symbol cudaDeviceReset; vllm''s load path resolves the stub via ctypes
+      and crashes (A/B on pristine image: facts/ab_dsv4_vllm_pristine_image.json, 2026-08-24 — minimal ''import
+      tilelang; import flashinfer.comm'' does NOT trigger it, the engine load path does). Real 0.24.0-image deployments
+      of DSV4 hit the same. Upstream-fixed: v0.27.1 ships tilelang without stub files. The -fix image only symlinks
+      the stub to the real libcudart (no dispatch change); drop it when the vllm pin moves past 0.24.'
+    applies_to:
+    - vllm/vllm-openai:v0.24.0
+  vllm_0271:
+    statement: 'vllm v0.27.1 probed OK: KimiK3DeltaAttention (+MTP model registered), Mxfp4MoEMethod — same quant
+      identity as sglang 0.5.17.'
+    applies_to:
+    - moonshotai/Kimi-K3
+  vllm_fp8kv:
+    statement: 'vllm 0.24/SM90: head-576 MLA has NO attention backend with fp8 KV; kv-auto(bf16) resolves DeepseekV2MLAAttention+SparseAttnIndexer
+      and runs. Door 1 engine kv dtype (fp8 ckpts) = config_gap, kv-auto A/B passes; door 2 ckpt hf_quant kv_cache_quant_algo:FP8
+      (NVFP4 artifacts) = framework/platform gap, kv-auto still fails. Same two-door structure as trtllm. Evidence
+      facts/vllm_ab_kvauto_*.json, 2026-08-22.'
+    applies_to:
+    - zai-org/GLM-5-FP8
+    - nvidia/GLM-5-NVFP4
+    - nvidia/GLM-5.1-NVFP4
+    - nvidia/DeepSeek-V3.2-NVFP4
+    - zai-org/GLM-5.2-FP8
+    - nvidia/GLM-5.2-NVFP4
