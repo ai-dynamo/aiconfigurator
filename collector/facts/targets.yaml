@@ -528,6 +528,7 @@ platform:
   - h100_sxm
   - h200_sxm
 tooling:
+  vllm_probe_base_image_fact: 'PRISTINE vllm/vllm-openai:v0.24.0 CANNOT load DSV4 on vllm: tilelang (hard dep of DSV4 mhc) ships lib/libcudart_stub.so with undefined symbol cudaDeviceReset; vllm''s load path resolves the stub via ctypes and crashes (A/B on pristine image: facts/ab_dsv4_vllm_pristine_image.json, 2026-08-24 — minimal ''import tilelang; import flashinfer.comm'' does NOT trigger it, the engine load path does). Real 0.24.0-image deployments of DSV4 hit the same. Upstream-fixed: v0.27.1 ships tilelang without stub files. The -fix image only symlinks the stub to the real libcudart (no dispatch change); drop it when the vllm pin moves past 0.24.'
   vllm_probe_base_image: vllm/vllm-openai:v0.24.0
   note: aiconfigurator-core wheel version is READ FROM aic/pyproject.toml (the checkout declares it);
     only probe-specific pins live here.
