@@ -1722,7 +1722,9 @@ def draw_pareto_to_string(
             keys "df", "label", "color", "marker" similar to ``series``.
     """
 
-    plotext.plot_size(80, 30)
+    # plotsize is the stable alias supported across plotext versions;
+    # plot_size was added later and is absent in older CI environments.
+    plotext.plotsize(80, 30)
     plotext.theme("clear")
 
     palette = [
