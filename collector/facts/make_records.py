@@ -160,6 +160,11 @@ def main() -> None:
                 "target": {k: run.get(k) for k in ("repo", "family", "variant", "profile",
                                                    "kvcache_quant_mode", "aic_registered")},
                 "runtime": {**{k: run.get(k) for k in ("backend", "version", "image", "tp")},
+                            # parallel dims are identity keys: ep sharding is
+                            # kernel-invariant on the a2a=none path (measured,
+                            # facts/tepdep/), but a2a=deepep changes the route
+                            "ep": run.get("ep", 1), "dp": run.get("dp", 1),
+                            "a2a": run.get("a2a", "none"),
                             "engine_cli": run.get("engine_cli"),
                             "unknown_args": f.get("engine_cli_unknown_args") or None,
                             "platform": run.get("platform", "h20_sm90"),

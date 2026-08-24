@@ -517,9 +517,29 @@ topologies:
   evidence: real
   status: implemented
   route: same as tp8, --ep-size 8
-policy: 'topology is ALWAYS recorded even when kernels match (owner: Kimi-K3 TEP8 is known to fork kernels;
-  K3 itself is unregistered at current pins, so the K3 verification is parked until a supporting framework
-  pin exists).'
+topology_policy:
+  default: tp1
+  note: topology is ALWAYS recorded in records.runtime (tp/ep/dp/a2a) even when kernels match.
+  invariance_fact: 'ep/tp sharding on the a2a=none (single-node default) path does NOT change
+    kernel families — measured across GLM-5.2-FP8 (tp2/tp8 x ep1/ep2/ep8: triton fused_moe
+    throughout), DSV4-NVFP4 (tp2 x ep1/ep2: marlin), Kimi-K2.5-FP8 (tp8 x ep1/ep8:
+    fused_marlin_moe). Evidence facts/tepdep/*.rank0.json, 2026-08-21. Therefore tp1 probes
+    represent kernel identity for the default path; multi-rank probing is scoped to routes
+    that change kernels.'
+  deepep_required:
+  - repo: moonshotai/Kimi-K3
+    reason: 'owner request 2026-08-24: K3 must be probed on the deepep a2a route (independent
+      kernel path); other models are represented by tp1 per the invariance fact.'
+    verdict: 'NO working deepep mode on sglang 0.5.17 + bundled DeepEP @ SM90 tp8/ep8 (A/B
+      2026-08-24, both deterministic): mode=auto -> AssertionError forward_deepgemm_contiguous
+      is deprecated at the first MoE forward (normal dispatch routed into the removed
+      contiguous-deepgemm path; all 8 ranks); mode=low_latency -> DeepEP device assert
+      internode_ll.cu:358 num_topk <= kNumMaxTopK (K3 num_experts_per_token=16 exceeds the LL
+      kernel cap). Additionally K3''s own SP-collective/MegaMoE path is SM103-gated (startup
+      log: requires SM103, TP4/TP8, MegaMoE/DeepEP, CustomAllReduceV2 multicast; falls back to
+      NCCL on SM90) — the independent kernel route is unreachable on H20 regardless. Non-deepep
+      tp8/ep8 (a2a=none) works and matches tp1 kernel families. Evidence
+      facts/tepdep/k3_deepep_{auto_v2,ll}.rank*.json + run logs.'
 platform:
   name: h20_sm90
   sm: 90

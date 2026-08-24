@@ -106,16 +106,23 @@ if _OUT:
                         FusedMoE.forward._aic = True
                 except Exception:
                     pass
-                # deepep route: DeepEPMoE overrides forward — wrap it too
-                try:
-                    from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE
-                    if "forward" in vars(DeepEPMoE) and not getattr(DeepEPMoE.forward, "_aic", False):
-                        DeepEPMoE.forward = _capture(
-                            DeepEPMoE.forward, "moe_calls",
-                            lambda s: f"DeepEPMoE[{type(getattr(s, 'quant_method', None)).__name__}]")
-                        DeepEPMoE.forward._aic = True
-                except Exception:
-                    pass
+                # instance-driven wrap: entry points move between releases
+                # (deepep/TBO dispatchers bypassed the class imports above),
+                # so hook the ACTUAL expert-module classes found in the model
+                seen_cls: set = set()
+                for _n, _m in self.model.named_modules():
+                    tn = type(_m).__name__
+                    if ("MoE" in tn or "Experts" in tn) and type(_m) not in seen_cls:
+                        seen_cls.add(type(_m))
+                        for klass in type(_m).__mro__:
+                            if "forward" in vars(klass) and klass.__module__.startswith("sglang"):
+                                if not getattr(klass.forward, "_aic", False):
+                                    w = _capture(
+                                        klass.forward, "moe_calls",
+                                        lambda s, t=tn: f"{t}[{type(getattr(s, 'quant_method', None)).__name__}]")
+                                    w._aic = True
+                                    setattr(klass, "forward", w)
+                                break
                 ab_cls = type(self.attn_backend)
                 for meth in ("forward_extend", "forward_decode"):
                     fn = getattr(ab_cls, meth, None)
