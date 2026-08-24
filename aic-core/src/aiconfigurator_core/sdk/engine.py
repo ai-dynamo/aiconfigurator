@@ -81,7 +81,18 @@ from aiconfigurator_core.sdk.rust_engine_step import (
 # - 5 (PR #1460): `MlaModule{Context,Generation}` payloads gained
 #   `native_num_heads` (always serialized — bincode decodes positionally).
 # - 6: `Kda` op variant appended (Kimi-K3 KDA kernels; draft_tokens field).
-# - 7 (AIC-1601): the wideEP MoE op variants (`WideEpMoe` /
+#   Claimed version 5 concurrently with #1460; renumbered at the merge.
+# - 7: `MoEDispatchOp` gained `attn_ar_modeled` (always serialized — bincode
+#   decodes positionally).
+# - 8: `GemmOp` gained `below_grid_sol` (always serialized — bincode decodes
+#   positionally).
+# - 9: the Rust `Op::FpmForward` whole-model variant (forward_model="fpm").
+#   Claimed 5, 7 and 8 concurrently with other landings; renumbered at each
+#   merge (same precedent as the v3/v4 collision).
+# - 10 (issue #1498): `Mhc` payload gained `seq_split` (CP per-rank token
+#   division) — a bincode op-layout change. Claimed 7 concurrently with
+#   `attn_ar_modeled`; renumbered at the rebase.
+# - 11 (AIC-1601): the wideEP MoE op variants (`WideEpMoe` /
 #   `WideEpMoeDispatch`) were removed mid-enum, shifting every later bincode
 #   enum index; large-EP is now modeled natively by the `MoeAllToAll` /
 #   `MoeExpertCompute` variants appended after `FpmForward`, and
@@ -223,7 +234,6 @@ def _engine_config_dict(
         "systems_path": systems_path,
         "backend": backend,
         "backend_version": backend_version,
-        "forward_model": getattr(model, "forward_model", "op_level"),
         "kv_block_size": kv_block_size,
         # ParallelMapping (flattened)
         "tp_size": int(cfg.tp_size or 1),
@@ -797,11 +807,9 @@ class EngineHandle:
         list[PerOpValue],
         list[PerOpValue],
     ]:
-        """Per-op ``(name, latency_ms, energy_wms, source)`` for the three
-        mixed-step passes (shared non-attention, context-attention, decode-
-        attention). Mirrors ``mixed_step_breakdown`` but retains per-op values
-        so the caller can build the same StepEstimate shape as the Python
-        step."""
+        """``mixed_step_breakdown`` with the per-op values kept:
+        ``(shared_non_attention, context_attention, decode_attention)`` lists;
+        context-attention entries arrive already divided by ``ceil(isl/ctx)``."""
         return self._engine.mixed_step_breakdown_per_op(
             int(ctx_tokens),
             int(gen_tokens),
@@ -846,10 +854,7 @@ class EngineHandle:
     ) -> list[PerOpValue]:
         """``decode_step_latency`` with the per-op values kept."""
         return self._engine.decode_step_per_op(
-            int(gen_tokens),
-            int(isl),
-            int(osl),
-            float(gen_seq_imbalance_correction_scale),
+            int(gen_tokens), int(isl), int(osl), float(gen_seq_imbalance_correction_scale)
         )
 
     def _decode_step_per_op_with_metadata(
@@ -881,12 +886,12 @@ class EngineHandle:
         own x policy, e.g. AFD's uniform ``batch * s``); ``None`` keeps the
         base-phase rule (``batch * s``, logits-GEMM exception)."""
         return self._engine.evaluate_context_ops(
-            list(indices),
+            [int(i) for i in indices],
             int(batch_size),
             int(s),
             int(prefix),
             float(seq_imbalance_correction_scale),
-            x if x is None else int(x),
+            int(x) if x is not None else None,
         )
 
     def evaluate_generation_ops(
@@ -904,12 +909,12 @@ class EngineHandle:
         walk carries no prefix; ``prefix`` exists for orchestrations that
         thread it (AFD)."""
         return self._engine.evaluate_generation_ops(
-            list(indices),
+            [int(i) for i in indices],
             int(batch_size),
             int(s),
             float(gen_seq_imbalance_correction_scale),
             int(prefix),
-            x if x is None else int(x),
+            int(x) if x is not None else None,
         )
 
     def evaluate_ops_json(

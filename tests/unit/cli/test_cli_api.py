@@ -51,6 +51,9 @@ class TestCLIEstimateUnit:
             def get_power_data_coverage(self):
                 return 1.0
 
+            def get_moe_comm_fallbacks(self):
+                return ()
+
         class FakeSession:
             def __init__(self, model, loaded_database, backend):
                 assert loaded_database is database
@@ -103,9 +106,11 @@ class TestCLIEstimateUnit:
         assert captured["built_config"].moe_comm_query_profile["generation"] == (4, 1)
         assert captured["resolver_kwargs"] == {
             "model_path": "deepseek-ai/DeepSeek-R1",
-            "system_name": "gb200",
             "backend_name": "trtllm",
             "database": database,
+            "required_phases": ("context", "generation"),
+            "fmha_quant_mode_explicit": False,
+            "kvcache_quant_mode_explicit": False,
         }
 
     def test_systems_paths_are_scoped_to_call(self, tmp_path, monkeypatch):

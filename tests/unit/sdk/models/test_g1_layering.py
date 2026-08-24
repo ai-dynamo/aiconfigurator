@@ -7,7 +7,7 @@ The redesign's first goal (spec section 4.1) has two enforceable halves:
 
 - LAYERING: the MoE block builder (``models/blocks/moe.py``) is the ONE place
   that emits the large-EP ops. No module under ``models/`` outside ``blocks/``
-  may import ``operations.moe_comm`` or construct ``MoEAllToAll`` / ``ModeledEPMoE``
+  may import ``operations.moe_comm`` or construct ``MoEAllToAll`` / ``MoEExpertCompute``
   directly -- model classes reach the large-EP emission only through
   ``build_moe_block_ops`` (or a ``register_moe_block`` family variant), so the
   emission stays swappable per (family, framework, system) without touching
@@ -37,7 +37,7 @@ MODELS_ROOT = Path(__file__).parents[4] / "aic-core" / "src" / "aiconfigurator_c
 #: Package parts used to resolve relative imports inside models/<module>.py.
 _MODELS_PACKAGE_PARTS = ("aiconfigurator_core", "sdk", "models")
 
-LARGE_EP_OP_NAMES = frozenset({"MoEAllToAll", "ModeledEPMoE"})
+LARGE_EP_OP_NAMES = frozenset({"MoEAllToAll", "MoEExpertCompute"})
 
 DELETED_WIDEEP_CLASSES = (
     "SGLangEPMOEModel",
@@ -104,7 +104,7 @@ def _moe_comm_import_offenders(rel_path: Path, source: str) -> list[str]:
 
 
 def _large_ep_constructor_offenders(rel_path: Path, source: str) -> list[str]:
-    """Call nodes whose callee names ``MoEAllToAll`` / ``ModeledEPMoE`` -- bare
+    """Call nodes whose callee names ``MoEAllToAll`` / ``MoEExpertCompute`` -- bare
     (``MoEAllToAll(...)``) or attribute (``ops.MoEAllToAll(...)``) form."""
     offenders: list[str] = []
     tree = ast.parse(source, filename=str(rel_path))
@@ -167,7 +167,7 @@ def test_blocks_moe_is_the_large_ep_emission_site() -> None:
     assert imports_moe_comm
     constructed = {offender.split(":")[0] for offender in _large_ep_constructor_offenders(rel, source)}
     assert constructed == {"blocks/moe.py"}
-    assert len(_large_ep_constructor_offenders(rel, source)) >= 2
+    assert len(_large_ep_constructor_offenders(rel, source)) >= 2  # MoEAllToAll + MoEExpertCompute
 
 
 # --- scanner self-checks (synthetic sources; mirrors the layering-test style) ---
@@ -180,7 +180,7 @@ def test_blocks_moe_is_the_large_ep_emission_site() -> None:
         (Path("memory.py"), "from aiconfigurator_core.sdk.operations.moe_comm import MoEAllToAll\n"),
         (Path("memory.py"), "from aiconfigurator_core.sdk.operations import moe_comm\n"),
         (Path("memory.py"), "from .operations.moe_comm import nodes_for\n"),
-        (Path("memory.py"), "from ..operations.moe_comm import ModeledEPMoE\n"),
+        (Path("memory.py"), "from ..operations.moe_comm import MoEExpertCompute\n"),
         (Path("memory.py"), "from ..operations import moe_comm\n"),
     ],
 )
@@ -205,9 +205,9 @@ def test_moe_comm_import_scanner_ignores_non_offenders(path: Path, source: str) 
     ("path", "source"),
     [
         (Path("memory.py"), "op = MoEAllToAll('n', 1.0)\n"),
-        (Path("memory.py"), "op = ModeledEPMoE('n', 1.0)\n"),
+        (Path("memory.py"), "op = MoEExpertCompute('n', 1.0)\n"),
         (Path("memory.py"), "op = ops.MoEAllToAll('n', 1.0)\n"),
-        (Path("memory.py"), "op = operations.ModeledEPMoE('n', 1.0)\n"),
+        (Path("memory.py"), "op = operations.moe_comm.MoEExpertCompute('n', 1.0)\n"),
     ],
 )
 def test_constructor_scanner_flags_call_forms(path: Path, source: str) -> None:
@@ -218,7 +218,7 @@ def test_constructor_scanner_flags_call_forms(path: Path, source: str) -> None:
     ("path", "source"),
     [
         (Path("memory.py"), "x = 'MoEAllToAll'\n"),
-        (Path("memory.py"), "# ModeledEPMoE mentioned in a comment\npass\n"),
+        (Path("memory.py"), "# MoEExpertCompute mentioned in a comment\npass\n"),
         (Path("memory.py"), "ok = isinstance(op, ops.MoEAllToAll)\n"),  # reference, not construction
         (Path("memory.py"), "op = MoEDispatch('n', 1.0)\n"),
     ],

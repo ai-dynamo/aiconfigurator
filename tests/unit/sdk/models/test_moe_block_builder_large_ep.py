@@ -1,28 +1,104 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Large-EP graph wiring and stock-MoE local-compute mapping."""
+"""Large-EP emission of ``build_moe_block_ops``: oracle equivalence vs the legacy wideEP graphs.
 
-from unittest.mock import Mock
+RECORDED-VALUE ORACLE FORM. The class-based form of this file instantiated
+the live legacy model classes (``WideEPDeepSeekModel`` /
+``TrtllmWideEPDeepSeekModel``) and pinned the builder op-for-op
+(name/type/``__dict__``) and value-for-value (rel <= 1e-9 over six token
+points per phase, EPLB on/off, num_slots=288) against them — 24/24 green
+before conversion. This committed form outlives the Task 6 class deletion:
 
+- structural expectations are RECORDED transcriptions of the legacy
+  constructor calls (cited per site), validated verbatim in that run;
+- value expectations are recomputed through the surviving legacy QUERY
+  functions (``query_wideep_deepep_normal``/``ll``, ``query_moe`` with
+  ``moe_backend="deepep_moe"``, ``query_trtllm_alltoall``,
+  ``query_wideep_moe_compute``) exactly the way the legacy ops called them.
+
+Oracle configs (pp=1 PRECONDITION): both legacy graphs derive the comm node
+span from the whole MoE group (``moe_ep * moe_tp`` GPUs), which coincides
+with the builder's ``nodes_for(moe_ep * moe_tp, gpus_per_node)`` (A5) only
+when the worker spans exactly that group — i.e. pp=1 and attention width ==
+MoE width. Both oracle configs use pp=1.
+
+A6 name mapping between the two graphs:
+
+- sglang: legacy ``{p}_moe_pre_dispatch`` (one op whose deepep table row sums
+  dispatch+combine) == builder ``{p}_moe_dispatch`` + ``{p}_moe_combine``;
+  there is no legacy post_dispatch op.
+- trtllm: legacy ``{p}_moe_pre_dispatch`` (queries alltoall prepare+dispatch)
+  == builder ``{p}_moe_prepare`` + ``{p}_moe_dispatch``; legacy
+  ``{p}_moe_post_dispatch`` == builder ``{p}_moe_combine``.
+
+Workload-distribution strings are transcribed from the legacy classes into
+this test (the builder takes the string as a parameter; Task 6 moves the
+computation into the model classes): sglang prefill alpha 0.6-if-eplb else
+1.01, decode alpha 1.01 (deepseek.py:1089-1101); trtllm ``power_law_1.01``
+with ``_eplb`` suffix when EPLB is on (deepseek.py:626-636).
+"""
+
+import os
+from pathlib import Path
+
+import pandas as pd
 import pytest
+import yaml
 
 import aiconfigurator_core.sdk.operations as ops
 from aiconfigurator_core.sdk import common, config
 from aiconfigurator_core.sdk.models.blocks import MoEBlockShape, build_moe_block_ops
-from aiconfigurator_core.sdk.performance_result import PerformanceResult
+from aiconfigurator_core.sdk.models.helpers import _get_model_info
+from aiconfigurator_core.sdk.operations.base import resolve_op_data_path
+from aiconfigurator_core.sdk.perf_database import get_database
 
 pytestmark = pytest.mark.unit
 
-SHAPE = MoEBlockShape(
-    hidden_size=7168,
-    moe_inter_size=2048,
-    topk=8,
-    num_experts=256,
-    num_shared_experts=0,
-    num_moe_layers=61,
+REPO_ROOT = Path(__file__).resolve().parents[4]
+SYSTEMS_ROOT = REPO_ROOT / "aic-core" / "src" / "aiconfigurator_core" / "systems"
+SYSTEMS_DATA_ROOT = SYSTEMS_ROOT / "data"
+
+DSR1 = "deepseek-ai/DeepSeek-R1"
+
+# Recorded from the legacy oracle instances (nextn=0): the classes scale MoE
+# ops by their full layer count; trtllm generation additionally carries the
+# PDL factor (TrtllmWideEPDeepSeekModel._pdl_factor = 0.9, deepseek.py:604).
+NUM_LAYERS = 61
+PDL_FACTOR = 0.9
+
+# Recorded quant resolution of the oracle ModelConfigs after get_model's
+# checkpoint-driven defaults (DeepSeek-R1 is an FP8 checkpoint).
+SGLANG_GEMM_QUANT = common.GEMMQuantMode.fp8_block
+SGLANG_MOE_QUANT = common.MoEQuantMode.fp8_block
+TRTLLM_GEMM_QUANT = common.GEMMQuantMode.fp8_block
+TRTLLM_MOE_QUANT = common.MoEQuantMode.nvfp4
+
+# Shipped-data gates (same resolution as the PR 1 query-equivalence tests).
+SGLANG_DATA_PATHS = [
+    resolve_op_data_path(str(SYSTEMS_DATA_ROOT / "h200_sxm"), "sglang", "0.5.6.post2", filename)
+    for filename in (
+        "wideep_deepep_normal_perf.parquet",
+        "wideep_deepep_ll_perf.parquet",
+        "wideep_context_moe_perf.parquet",
+        "wideep_generation_moe_perf.parquet",
+    )
+]
+TRTLLM_DATA_PATHS = [
+    resolve_op_data_path(str(SYSTEMS_DATA_ROOT / "gb200"), "trtllm", "1.3.0rc10", filename)
+    for filename in ("trtllm_alltoall_perf.parquet", "wideep_moe_perf.parquet")
+]
+
+sglang_data_present = pytest.mark.skipif(
+    not all(os.path.exists(p) for p in SGLANG_DATA_PATHS),
+    reason="shipped h200_sxm sglang 0.5.6.post2 wideEP parquets not present",
+)
+trtllm_data_present = pytest.mark.skipif(
+    not all(os.path.exists(p) for p in TRTLLM_DATA_PATHS),
+    reason="shipped gb200 trtllm 1.3.0rc10 wideEP parquets not present",
 )
 
+REL_TOL = 1e-9
 
 # Six token points per phase spanning small -> in-range -> beyond-range
 # overflow of the shipped compute token grids (the comm legs now pick
@@ -85,26 +161,29 @@ def _sglang_cfg(enable_eplb):
     cfg = config.ModelConfig(
         tp_size=1,
         moe_tp_size=1,
-        moe_ep_size=ep,
-        attention_dp_size=adp,
-        moe_quant_mode=common.MoEQuantMode.fp8_block,
-        enable_eplb=True,
+        moe_ep_size=32,
+        attention_dp_size=32,
+        gemm_quant_mode=SGLANG_GEMM_QUANT,
+        moe_quant_mode=SGLANG_MOE_QUANT,
+        moe_backend="deepep_moe",
+        enable_eplb=enable_eplb,
     )
-    cfg.moe_comm_backend = {"context": "deepep_ht", "generation": "deepep_ll"}
+    cfg.moe_comm_backend = dict(SGLANG_COMM)
+    cfg.num_gpus_per_node = 8
     return cfg
 
 
-def _build(phase: str = "context"):
+def _build_sglang(cfg, phase, enable_eplb, model_family="DEEPSEEK"):
     return build_moe_block_ops(
         phase,
-        SHAPE,
-        _cfg(),
-        common.MoEQuantMode.fp8_block,
-        "power_law_1.2",
-        scale_factor=61,
-        backend_name="vllm",
+        _dsr1_shape(),
+        cfg,
+        cfg.moe_quant_mode,
+        _sglang_distribution(phase, enable_eplb),
+        scale_factor=NUM_LAYERS,  # mtp factor is 1.0 at nextn=0
+        backend_name="sglang",
         inference_phase=phase,
-        model_family="DEEPSEEK",
+        model_family=model_family,
         gpus_per_node=8,
     )
 
@@ -276,23 +355,31 @@ def _trtllm_cfg(enable_eplb, wideep_num_slots):
         tp_size=1,
         moe_tp_size=1,
         moe_ep_size=16,
-        quant_mode=common.MoEQuantMode.fp8_block,
-        workload_distribution="balanced",
-        is_context=True,
-        moe_backend=None,
-        is_gated=True,
-        enable_eplb=False,
+        attention_dp_size=16,
+        gemm_quant_mode=TRTLLM_GEMM_QUANT,
+        moe_quant_mode=TRTLLM_MOE_QUANT,
+        enable_eplb=enable_eplb,
+        wideep_num_slots=wideep_num_slots,
     )
-    assert float(result) == pytest.approx(0.25 * 61)
-    assert result.energy == pytest.approx(0.5 * 61)
-    assert result.source == "estimated"
+    cfg.moe_comm_backend = dict(TRTLLM_COMM)
+    cfg.num_gpus_per_node = 8
+    cfg.num_gpus_per_node = 8
+    return cfg
 
 
-def test_modeled_local_compute_has_no_eplb_or_num_slots_state():
-    modeled = next(op for op in _build() if isinstance(op, ops.ModeledEPMoE))
-    assert not hasattr(modeled, "_enable_eplb")
-    assert not hasattr(modeled, "_num_slots")
-    assert not hasattr(modeled, "_workload_distribution")
+def _build_trtllm(cfg, phase, enable_eplb):
+    return build_moe_block_ops(
+        phase,
+        _dsr1_shape(),
+        cfg,
+        cfg.moe_quant_mode,
+        _trtllm_distribution(enable_eplb),
+        scale_factor=_trtllm_scale(phase),
+        backend_name="trtllm",
+        inference_phase=phase,
+        model_family="DEEPSEEK",
+        gpus_per_node=4,
+    )
 
 
 def _trtllm_a2a_grid(db, op_name):
@@ -784,4 +871,23 @@ class TestBuilderGpusPerNodeResolution:
             scale_factor=NUM_LAYERS,
             backend_name="sglang",
             inference_phase="context",
+            model_family="DEEPSEEK",
         )
+        a2a = [op for op in built if isinstance(op, ops.MoEAllToAll)]
+        assert a2a and all(op._node_num == 8 for op in a2a)  # nodes_for(32*1, 4)
+
+    def test_omitted_gpus_per_node_with_unset_config_raises(self):
+        cfg = _sglang_cfg(enable_eplb=False)
+        cfg.num_gpus_per_node = None
+        with pytest.raises(ValueError, match="num_gpus_per_node"):
+            build_moe_block_ops(
+                "context",
+                _dsr1_shape(),
+                cfg,
+                cfg.moe_quant_mode,
+                _sglang_distribution("context", False),
+                scale_factor=NUM_LAYERS,
+                backend_name="sglang",
+                inference_phase="context",
+                model_family="DEEPSEEK",
+            )

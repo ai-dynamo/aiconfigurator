@@ -23,10 +23,13 @@ import pyarrow.parquet as pq
 import pytest
 import yaml
 
-from aiconfigurator.cli.api import cli_estimate
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.config import ModelConfig
-from aiconfigurator.sdk.moe_comm_resolver import a2a_covers_parallel, resolve_model_config_moe_comm
+from aiconfigurator.sdk.moe_comm_resolver import (
+    a2a_covers_parallel,
+    resolve_a2a_query_profile,
+    resolve_model_config_moe_comm,
+)
 from aiconfigurator.sdk.perf_database import (
     PerfDataNotAvailableError,
     databases_cache,
@@ -34,7 +37,6 @@ from aiconfigurator.sdk.perf_database import (
     set_systems_paths,
 )
 from aiconfigurator.sdk.task_v2 import Task
-from aiconfigurator_core.sdk.models import get_model
 
 pytestmark = pytest.mark.unit
 
@@ -51,6 +53,9 @@ SYNTH_VERSION = "9.9.9"
 # (deepep_ll) — the asymmetry every per-phase assertion below keys on.
 _HT_PAIRS = ((8, 1), (16, 2), (32, 4))
 _LL_PAIRS = ((8, 1), (16, 2))
+# Expert-compute rows exist for bfloat16 only: a task on another MoE quant has
+# comm coverage but no compute coverage, so it stays fused.
+_EP_QUANT = "bfloat16"
 
 
 def _a2a_rows(backends=(("deepep_ht", _HT_PAIRS), ("deepep_ll", _LL_PAIRS))) -> list[dict]:
@@ -75,6 +80,32 @@ def _a2a_rows(backends=(("deepep_ht", _HT_PAIRS), ("deepep_ll", _LL_PAIRS))) -> 
                             "power": 300.0,
                         }
                     )
+    return rows
+
+
+def _ep_rows(phases=(("context", _HT_PAIRS), ("generation", _LL_PAIRS))) -> list[dict]:
+    rows = []
+    for phase, pairs in phases:
+        for ep_size, _node in pairs:
+            for num_tokens in (128, 1024):
+                rows.append(
+                    {
+                        "kernel_source": "deepep_moe",
+                        "moe_dtype": _EP_QUANT,
+                        "distribution": "power_law_1.2",
+                        "inference_phase": phase,
+                        "topk": SYNTH_TOPK,
+                        "num_experts": SYNTH_EXPERTS,
+                        "num_slots": SYNTH_EXPERTS,
+                        "hidden_size": SYNTH_HIDDEN,
+                        "inter_size": SYNTH_INTER,
+                        "moe_tp_size": 1,
+                        "moe_ep_size": ep_size,
+                        "num_tokens": num_tokens,
+                        "latency": 1.5,
+                        "power": 400.0,
+                    }
+                )
     return rows
 
 
@@ -109,8 +140,9 @@ def _one_shot_log_state():
         task_v2._LARGE_EP_ASYMMETRIC_COVERAGE_WARNED.update(asym_before)
 
 
-def _build_synth_root(tmp_path, a2a_rows) -> str:
-    """A synthetic systems root holding only the large-EP A2A table."""
+def _build_synth_root(tmp_path, a2a_rows, ep_rows) -> str:
+    """A synthetic systems root (8 GPUs/node, SM 90) holding ONLY the two
+    large-EP tables, mounted alongside the shipped default systems path."""
     root = str(tmp_path / "systems")
     os.makedirs(root, exist_ok=True)
     with open(os.path.join(root, f"{SYNTH_SYSTEM}.yaml"), "w", encoding="utf-8") as f:
@@ -134,13 +166,14 @@ def _build_synth_root(tmp_path, a2a_rows) -> str:
             f,
         )
     _write_version_dir(root, "comm", "moe_a2a_perf.parquet", a2a_rows)
+    _write_version_dir(root, "moe", "moe_expert_compute_perf.parquet", ep_rows)
     return root
 
 
 @pytest.fixture
 def synth_systems(tmp_path):
     """Both phases collected (context via deepep_ht, generation via deepep_ll)."""
-    root = _build_synth_root(tmp_path, _a2a_rows())
+    root = _build_synth_root(tmp_path, _a2a_rows(), _ep_rows())
     databases_cache.clear()
     set_systems_paths(["default", root])
     try:
@@ -153,10 +186,11 @@ def synth_systems(tmp_path):
 @pytest.fixture
 def synth_systems_generation_only(tmp_path):
     """GENERATION rows only: the day a collection lands one phase ahead of the
-    other. No context communication rows at all."""
+    other. No context comm/compute rows at all."""
     root = _build_synth_root(
         tmp_path,
         _a2a_rows((("deepep_ll", _LL_PAIRS),)),
+        _ep_rows((("generation", _LL_PAIRS),)),
     )
     databases_cache.clear()
     set_systems_paths(["default", root])
@@ -251,6 +285,61 @@ def test_sglang_node1_fallback_requires_legacy_canonical_coordinate(noncanonical
     )
 
 
+def test_vllm_unscaled_proxy_is_scoped_to_approved_dataset_identity():
+    pairs = {(4, 1)}
+    kwargs = {
+        "framework": "vllm",
+        "comm_backend": "deepep_v2",
+        "moe_ep_size": 64,
+        "expected_nodes": 16,
+    }
+
+    assert resolve_a2a_query_profile(
+        pairs,
+        dataset_identity=("gb200", "vllm", "0.24.0"),
+        **kwargs,
+    ) == (4, 1)
+    assert resolve_a2a_query_profile(
+        pairs,
+        dataset_identity=("gb200", "vllm", "0.25.0"),
+        **kwargs,
+    ) is None
+
+
+def test_exact_a2a_coordinate_wins_over_approved_proxy():
+    assert resolve_a2a_query_profile(
+        {(4, 1), (64, 16)},
+        framework="vllm",
+        comm_backend="deepep_v2",
+        moe_ep_size=64,
+        expected_nodes=16,
+        dataset_identity=("gb200", "vllm", "0.24.0"),
+    ) == (64, 16)
+
+
+def test_exact_resolver_records_approved_vllm_proxy_but_still_requires_compute():
+    database = SimpleNamespace(
+        system="gb200",
+        backend="vllm",
+        version="0.24.0",
+        system_spec={"node": {"num_gpus_per_node": 4}, "gpu": {"sm_version": 100}},
+        moe_a2a_coverage=lambda *_args: {"deepep_v2": {(4, 1)}},
+        moe_expert_compute_coverage=lambda *_args: {64},
+    )
+    model_config = ModelConfig(attention_dp_size=64, moe_tp_size=1, moe_ep_size=64)
+
+    resolved = resolve_model_config_moe_comm(
+        model_config,
+        model_path=SYNTH_MODEL,
+        backend_name="vllm",
+        database=database,
+        required_phases=("context", "generation"),
+    )
+
+    assert resolved == {"context": "deepep_v2", "generation": "deepep_v2"}
+    assert model_config.moe_comm_query_profile == {"context": (4, 1), "generation": (4, 1)}
+
+
 def test_exact_resolver_accepts_sglang_node1_deepep_substitution():
     database = SimpleNamespace(
         system="synthetic",
@@ -301,7 +390,7 @@ def test_agg_requires_both_phases_covered(synth_systems):
     t = _synth_task()
     point = _tuple(dp=32, moe_ep=32)
     assert t._resolve_moe_comm_backend("agg", point) is None
-    with pytest.raises(PerfDataNotAvailableError, match=r"Cross-node EP.*DeepEP A2A.*moe_ep=32"):
+    with pytest.raises(PerfDataNotAvailableError, match=r"Cross-node EP.*A2A and expert-compute.*moe_ep=32"):
         t.build_model_config(role="agg", parallel=point)
 
 
@@ -387,7 +476,9 @@ def test_uncovered_ep_and_moe_tp_gt_1_stay_fused(synth_systems):
     assert t._resolve_moe_comm_backend("agg", _tuple(dp=1, moe_ep=1)) is None  # ep == 1 is fused
 
 
-def test_a2a_coverage_is_independent_of_compute_quant(synth_systems):
+def test_compute_coverage_is_quant_specific(synth_systems):
+    """Comm coverage alone is not enough: the EP expert-compute table is keyed
+    by the run's MoE quant mode, so another quant gets no large-EP tuples."""
     t = _synth_task(moe_quant_mode=common.MoEQuantMode.fp8_block)
     assert t._resolve_moe_comm_backend("agg", _tuple(dp=8, moe_ep=8)) is None
     assert t.agg_moe_ep_candidates == [1, 2, 4, 8, 16]  # fused defaults
@@ -406,7 +497,6 @@ def test_build_model_config_sets_backend_and_node_width(synth_systems):
     t = _synth_task()
     mc = t.build_model_config(role="agg", parallel=_tuple(dp=8, moe_ep=8))
     assert mc.moe_comm_backend == {"context": "deepep_ht", "generation": "deepep_ll"}
-    assert mc.moe_comm_query_profile == {"context": (8, 1), "generation": (8, 1)}
     assert mc.num_gpus_per_node == 8
     fused = t.build_model_config(role="agg", parallel=_tuple(dp=4, moe_ep=4))
     assert fused.moe_comm_backend is None
@@ -531,11 +621,8 @@ def test_disagg_replica_budget_follows_coverage(synth_systems):
 
 
 def test_uncovered_model_keeps_fused_defaults_and_logs_once(caplog):
-    """A model+system+backend combo whose shipped moe_a2a table doesn't cover
-    the shape keeps the fused ladders and states which collector to run.
-
-    Uses a100_sxm/sglang, which ships no wideep DeepEP data and therefore
-    can never adapt into moe_a2a coverage for any shape."""
+    """Shipped h200_sxm/sglang carries no moe_a2a rows for the Qwen3 shape, so
+    the task keeps the fused ladders and states which collector to run."""
     import aiconfigurator.sdk.task_v2 as task_v2
 
     task_v2._LARGE_EP_EMPTY_COVERAGE_LOGGED.clear()  # restored by the autouse fixture
@@ -543,7 +630,7 @@ def test_uncovered_model_keeps_fused_defaults_and_logs_once(caplog):
         t = Task(
             serving_mode="agg",
             model_path=SYNTH_MODEL,
-            system_name="a100_sxm",
+            system_name="h200_sxm",
             backend_name="sglang",
             total_gpus=8,
         )
@@ -553,68 +640,6 @@ def test_uncovered_model_keeps_fused_defaults_and_logs_once(caplog):
     assert all(t._resolve_moe_comm_backend("agg", tup) is None for tup in t.iter_parallel("agg"))
     hits = [r for r in caplog.records if "large-EP" in r.message and "collector" in r.message]
     assert len(hits) == 1, [r.message for r in caplog.records]
-
-
-# ---------------------------------------------------------------------------
-# (c) shipped vllm single-node profile -> explicit unscaled cross-node proxy
-# ---------------------------------------------------------------------------
-
-
-def test_shipped_vllm_ep4_profile_drives_ep32_static_generation():
-    """The imported GB200/vLLM profile is measured only at EP4/node1.
-
-    EP32 is deliberately admitted by the dataset-specific proxy policy, and
-    the emitted communication ops query that unchanged donor geometry.  The
-    final static-gen call proves the profile survives candidate resolution,
-    model construction, Rust engine compilation, and silicon lookup.
-    """
-    parallel = _tuple(dp=32, moe_ep=32)
-    t = Task(
-        serving_mode="agg",
-        model_path="deepseek-ai/DeepSeek-R1",
-        system_name="gb200",
-        backend_name="vllm",
-        backend_version="0.24.0",
-        total_gpus=32,
-    )
-    assert t._resolve_moe_comm_backend("agg", parallel) == {
-        "context": "deepep_ht",
-        "generation": "deepep_ll",
-    }
-    base = t.build_model_config(role="agg", parallel=parallel)
-    assert base.moe_comm_query_profile == {"context": (4, 1), "generation": (4, 1)}
-
-    model_config = replace(
-        base,
-        tp_size=1,
-        pp_size=1,
-        attention_dp_size=32,
-        moe_tp_size=1,
-        moe_ep_size=32,
-        cp_size=1,
-    )
-    model = get_model("deepseek-ai/DeepSeek-R1", model_config, "vllm")
-    generation_a2a = [op for op in model.generation_ops if type(op).__name__ == "MoEAllToAll"]
-    assert generation_a2a
-    assert {(op._moe_ep_size, op._node_num) for op in generation_a2a} == {(4, 1)}
-
-    result = cli_estimate(
-        "deepseek-ai/DeepSeek-R1",
-        "gb200",
-        mode="static_gen",
-        backend_name="vllm",
-        backend_version="0.24.0",
-        isl=8,
-        osl=2,
-        batch_size=1,
-        tp_size=1,
-        attention_dp_size=32,
-        moe_tp_size=1,
-        moe_ep_size=32,
-        engine_step_backend="rust",
-    )
-    assert result.tpot > 0
-    assert result.raw["parallel"] == "tp1pp1dp32etp1ep32"
 
 
 # ---------------------------------------------------------------------------
@@ -639,7 +664,6 @@ def test_shipped_trtllm_nvfp4_resolves_nvlink_two_sided_both_phases():
     assert t._resolve_moe_comm_backend("agg", _tuple(dp=8, moe_ep=8)) == both
     assert t._resolve_moe_comm_backend("agg", _tuple(dp=64, moe_ep=64)) == both
     mc = t.build_model_config(role="agg", parallel=_tuple(dp=8, moe_ep=8))
-    assert mc.moe_comm_query_profile == {"context": (8, 2), "generation": (8, 2)}
     assert mc.num_gpus_per_node == 4  # GB200 NVL4 — not the 8-GPU HGX default
 
 
@@ -716,8 +740,8 @@ def test_all_tables_uninformative_abstains(monkeypatch):
 @pytest.mark.parametrize(
     "kwargs, expect_large_ep, expect_raises",
     [
-        # No wideep DeepEP data on a100_sxm/sglang -> fused regime only.
-        (dict(model_path=SYNTH_MODEL, system_name="a100_sxm", backend_name="sglang", total_gpus=8), False, False),
+        # No coverage for the Qwen3 shape -> fused regime only.
+        (dict(model_path=SYNTH_MODEL, system_name="h200_sxm", backend_name="sglang", total_gpus=8), False, False),
         # Dense model -> never large EP.
         (
             dict(model_path="meta-llama/Meta-Llama-3.1-70B", system_name="h100_sxm", backend_name="sglang"),

@@ -170,10 +170,10 @@ def enumerate_parallel_config(
         backend: backend name enum. Important for moe parallel enumeration as different backends
             have different moe parallel support.
         enable_wideep: DEPRECATED and ignored. Large-EP participation is decided per
-            parallel config from A2A perf-data coverage (``PerfDatabase.moe_a2a_coverage``);
-            local expert compute is modeled from stock ``moe_perf``. This flag no longer
-            narrows the enumeration. Still accepted so existing callers keep working;
-            restrict the search with ``moe_ep_list`` instead.
+            parallel config from perf-data coverage (``PerfDatabase.moe_a2a_coverage`` /
+            ``moe_expert_compute_coverage``), not by a flag, so this no longer narrows the
+            enumeration. Still accepted so existing callers keep working; restrict the
+            search with ``moe_ep_list`` instead.
         real_silicon_sweep: when True, exclude PP (force pp_list=[1]) and filter by
             min_num_gpus/max_num_gpus bounds on total GPUs per config. For MoE models,
             only allows pure TEP, pure DEP, and (optionally) pure TP.

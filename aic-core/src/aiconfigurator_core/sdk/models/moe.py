@@ -94,8 +94,8 @@ class MOEModel(BaseModel):
 
         self._backend_name = backend_name
         # Large EP: the enumerator picks a per-phase MoE comm backend; the MoE
-        # block builder then emits the MoEAllToAll/ModeledEPMoE graph instead
-        # of the fused dispatch/MoE/dispatch one. No flag selects it -- see
+        # block builder then emits the MoEAllToAll/MoEExpertCompute graph instead of the
+        # fused dispatch/MoE/dispatch one. No flag selects it -- see
         # ``ModelConfig.moe_comm_backend``.
         self._is_large_ep = bool(self.config.moe_comm_backend)
         # Node width is a hardware fact with no default: an unset value would
@@ -237,7 +237,7 @@ class MOEModel(BaseModel):
 
         # MoE block: router gemm + dispatch/compute/combine. One builder call per
         # phase; ``cfg.moe_comm_backend`` (set by the enumerator) picks the
-        # large-EP MoEAllToAll/ModeledEPMoE emission over the fused dispatch/MoE pair.
+        # large-EP MoEAllToAll/MoEExpertCompute emission over the fused dispatch/MoE pair.
         moe_shape = MoEBlockShape(
             hidden_size=h,
             moe_inter_size=self._moe_inter_size,
