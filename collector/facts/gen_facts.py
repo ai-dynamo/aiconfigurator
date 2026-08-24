@@ -630,6 +630,114 @@ def build_records() -> None:
     raw_bytes = sum(p.stat().st_size for p in (ROOT / "archive" / "raw").glob("*.json"))
     print(f"wrote {out}: {n} records, {out.stat().st_size // 1024}KB (raw evidence: {raw_bytes // 1024}KB)")
 
+
+# ---------------------------------------------------------------------------
+# results matrix: THE consolidated output file — per (checkpoint x backend):
+# can it boot, under what command, and what identity the framework actually
+# deployed. Machine facts stay in archive/records.jsonl (per-run evidence);
+# this is their consolidation.
+def _fail_cause(note: str) -> str:
+    rules = [
+        ("not a valid Hugg", "generator rejects"),
+        ("Cannot find model module|not a registered|not supported for now|Unknown architecture|pydantic.*value_", "arch not registered"),
+        ("NotImplementedError", "tied-embedding quant gap"),
+        ("Only gated SiLU", "NVFP4 x gelu-MoE: no kernel path"),
+        ("pre-blackwell|Arch unsupported|use Blackwell|TllmGenFmhaRunner|Minimum ca|COMPRESS pool|No supported MoE GEMM tactic|mxfp8 is not supported|NVFP4 quantization with the selected", "platform floor (needs Blackwell)"),
+        ("Mismatched Tensor", "flake (flashinfer; env workaround exists)"),
+        ("sparse forward|KVCacheManagerV2", "rc23 M3-sparse not wired"),
+        ("frame #|No valid attention backend", "ckpt-forced fp8-KV"),
+        ("NoneType|QuantAlgo", "quant parser gap"),
+    ]
+    for pat, tag in rules:
+        if re.search(pat, note):
+            return tag
+    return "framework gap"
+
+
+def build_matrix(targets: dict) -> None:
+    plans = {"sglang": "plan_roster_sgl.json", "vllm": "plan_roster_vllm.json",
+             "trtllm": "plan_roster_trt.json"}
+    # pass+custom means PER-CHECKPOINT facts-derived args (backend-level
+    # generator-sets like --benchmark-mode apply to every run and are not
+    # a customization of this model)
+    custom: dict = {}
+    for fam in targets["families"].values():
+        for ck in fam.get("checkpoints") or []:
+            for be2, v2 in (ck.get("cli_extra_args") or {}).items():
+                custom[(ck["repo"], be2)] = " ".join(v2["args"] if isinstance(v2, dict) else v2)
+        for repo2, o2 in (fam.get("checkpoint_overrides") or {}).items():
+            for be2, v2 in ((o2 or {}).get("cli_extra_args") or {}).items():
+                custom[(repo2, be2)] = " ".join(v2["args"] if isinstance(v2, dict) else v2)
+    recs: dict = {}
+    for line in (ROOT / "archive" / "records.jsonl").open():
+        r = json.loads(line)
+        k = (r["target"].get("repo"), r["runtime"]["backend"])
+        ok = (r.get("outcome") or {}).get("status") == "ok"
+        if ok or k not in recs:
+            recs[k] = r
+    kvcap = {}
+    for p in (ROOT / "facts" / "kvcap").glob("*.json"):
+        kvcap[p.stem] = (json.loads(p.read_text()) or {}).get("kv_cache_resolved") or {}
+    short = {"torch.bfloat16": "bf16", "torch.float16": "fp16",
+             "torch.float8_e4m3fn": "fp8_e4m3", "torch.uint8": "fp8(u8)"}
+    out: dict = {}
+    counts: dict = {}
+    for be, pf in plans.items():
+        for run in json.loads((ROOT / "archive" / pf).read_text()):
+            repo = run.get("repo")
+            cell: dict = {}
+            raw = ROOT / "archive" / "raw" / f"{run.get('id','')}.json"
+            if "skip" in run:
+                cell = {"verdict": "fail", "cause": "generator rejects", "error": run["skip"][:160]}
+            elif not raw.exists():
+                cell = {"verdict": "fail", "cause": "no raw (crashed before dump)"}
+            else:
+                f = json.loads(raw.read_text())
+                err = f.get("errors") or {}
+                if err:
+                    note = next(iter(err.values())).strip().splitlines()[-1][:200]
+                    cell = {"verdict": "fail", "cause": _fail_cause(note), "error": note}
+                else:
+                    ca = custom.get((repo, be))
+                    cell = {"verdict": "pass+custom" if ca else "pass"}
+                    if ca:
+                        cell["extra_args"] = ca
+                    rec = recs.get((repo, be))
+                    if rec and (rec.get("outcome") or {}).get("status") == "ok":
+                        ident = rec.get("identity") or {}
+                        res = rec.get("resolved") or {}
+                        cell["attention"] = ident.get("attn_backend")
+                        moe_q = next((k for k in (ident.get("modules") or {}) if "MoE" in k), None)
+                        moe_b = set()
+                        for op in rec.get("ops") or []:
+                            if re.search(r"moe|Marlin|marlin|grouped|expert",
+                                         " ".join(op.get("kernels") or [])):
+                                moe_b |= set(op.get("backends") or [])
+                        moe_b -= {"cublas", "vllm_kernel", "sgl_kernel", "torch"}
+                        if moe_q:
+                            cell["moe"] = (moe_q.replace("Method", "")
+                                           + ("->" + "/".join(sorted(moe_b)) if moe_b else ""))
+                        kv = kvcap.get(rec["id"], {})
+                        act = (kv.get("runner_kv_cache_dtype") or kv.get("pool.dtype")
+                               or next((v for k2, v in kv.items()
+                                        if k2.startswith("manager.") and "dtype" in k2), None)
+                               or res.get("kv_cache_dtype"))
+                        act = short.get(str(act), str(act).replace("DataType.", "").lower()) if act else None
+                        cell["kv_allocated"] = act
+                        cell["topology"] = f"tp{run.get('tp',1)}"
+            out.setdefault(repo, {})[be] = cell
+            c = counts.setdefault(be, {"pass": 0, "pass+custom": 0, "fail": 0})
+            c[cell["verdict"]] += 1
+    doc = {"_meta": {"platform": "h20_sm90",
+                     "verdicts": "pass = plain `cli generate` output boots+runs; "
+                                 "pass+custom = boots with facts-derived extra generate args; "
+                                 "fail = root-caused (see findings.yaml)",
+                     "summary": counts},
+           "matrix": dict(sorted(out.items()))}
+    path = ROOT / "matrix.yaml"
+    path.write_text(yaml.safe_dump(doc, width=200, sort_keys=False, allow_unicode=True))
+    print(f"wrote {path} ({path.stat().st_size//1024} KB) summary={counts}")
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--targets", type=Path, default=Path(__file__).parent / "targets.yaml")
@@ -644,10 +752,14 @@ def main() -> None:
     ap.add_argument("--backends", default="sglang", help="comma list: sglang,vllm")
     ap.add_argument("--plan-name", default="plan.json")
     ap.add_argument("--records", action="store_true", help="raw probe JSONs -> archive/records.jsonl")
+    ap.add_argument("--matrix", action="store_true", help="consolidated results: matrix.yaml (verdict + deployed identity per model x backend)")
     args = ap.parse_args()
 
     if args.records:
         build_records()
+        return
+    if args.matrix:
+        build_matrix(yaml.safe_load(args.targets.read_text()))
         return
     if args.collect:
         collect()
