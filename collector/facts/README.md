@@ -38,14 +38,12 @@ Rule 6 (2026-08-23, from the DSV4 false positive): when a framework probes WEIGH
 |---|---|
 | `targets.yaml` | Target matrix: model families x checkpoints (default / FP8 / NVFP4 / MXFP4...), KV pairing copied from AIC `_PROFILE_TO_QUANT`, backend images, dummy-variant taxonomy, per-backend overrides. Known findings are recorded inline as `known:` fields. |
 | `gen_dummy_models.py` | HF config -> depth-cut dummy model dirs. Width is NEVER shrunk (TP divisibility and quant shape checks must behave like the real checkpoint). One variant per interleaved layer kind; per-layer quant-config entries filtered and renumbered; a post-check fails loudly on any surviving out-of-range layer reference. |
-| `gen_facts.py` | Driver: targets -> generator-rendered engine args (`render_backend_templates`, so the probe runs exactly what a deployment would) -> per-GPU probe queues -> `archive.jsonl` with provenance (incl. generator src commit). |
+| `gen_facts.py` | THE driver (single entry point): `--emit-queues` targets -> golden `cli generate` renders -> per-GPU probe queues; `--collect` raw JSONs -> archive; `--records` raw -> curated `records.jsonl` (kernel normalization + taxonomy backend labels + compressed errors); `--check-coverage` collector-roster lower bound; `--snapshot-update/--snapshot-check` golden render snapshots (facts freshness). Also owns checkpoint quant-profile derivation (from quant metadata, never repo names). |
 | `probe_sglang.py` | sglang in-container probe. `--engine-cli` parses generator output through sglang's own CLI parser; overrides (dummy load, KV-pool cap, cuda-graph off) are appended as CLI flags so `ServerArgs.__post_init__` sees them. `--trace` runs one eager prefill+decode under the profiler. |
 | `probe_vllm.py` | vLLM probe via the FPM path: parse `run.sh`'s `engine_command`, strip FPM-owned flags, feed vLLM's `EngineArgs.from_cli_args`, in-process EngineCore, generic attention-class scan on the loaded model. |
 | `probe_trtllm.py` | TRT-LLM probe: llmapi with `TLLM_WORKER_USE_SINGLE_PROCESS=1` (in-process worker), dummy load, kernel capture. Includes narrowly-scoped shims for a broken cutlass-DSL package walk (needed on both 1.3.0rc20 and rc23 images; the stub tries the real import first and only fills genuine holes, documented inline). |
-| `make_records.py` | Raw facts -> curated records: kernel-name normalization, infrastructure-noise filters, nested-span merge, compressed errors. Labels every op's kernels with canonical backends via the taxonomy; unmatched kernels surface as `unclassified_kernels`. Raw JSONs remain as evidence; records are the consumption layer. |
 | `kernel_taxonomy.yaml` | Observed CUDA kernel name -> canonical backend (regex rules, first match wins). Uses the SAME backend vocabulary as `collector/kernel_source_backends.yaml`, so probe evidence and collector claims translate through one namespace. Seeded from a 258-kernel SM90 inventory; unmatched kernels are the file's backlog signal. |
-| `check_facts.py` | Conformance checker: for every `op_backend_facts.yaml` row on a probe-adjudicable system, translate its `kernel_sources` to canonical backends and check the probe actually observed them executing. Verdicts: confirmed / contradicted / needs-taxonomy / unprobed. |
-| `configs/repos.txt` + `configs/inaccessible.json` | The probe roster (every checkpoint the collector's case yamls mention, plus probe-only additions) and the gated-repo exemption list. `gen_facts.py --check-coverage` enforces the collector roster as a coverage LOWER bound. |
+| `configs/repos.txt` | The probe roster (every checkpoint the collector's case yamls mention, plus probe-only additions). `gen_facts.py --check-coverage` enforces the collector roster as a coverage LOWER bound; owner-decided exclusions live in `targets.yaml roster.excluded` (decided_by/reason required). |
 
 ## Usage
 
@@ -59,7 +57,7 @@ bash <ws>/archive/queues/gpu0.sh   # ... one per GPU; done-guard makes reruns in
 
 # 3. collect + curate
 AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/gen_facts.py --collect
-AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/make_records.py
+AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/gen_facts.py --records
 ```
 
 A full three-backend sweep of the 76-checkpoint roster is ~226 runs, minutes
@@ -67,11 +65,6 @@ each on one GPU per run (DeepGEMM/flashinfer JIT warmup dominates; mount a
 shared cache to amortize). Every checkpoint runs individually — architecture
 dedup is deliberately NOT done, because quant-artifact siblings of one
 architecture have been observed to select different backends.
-
-```bash
-# 4. conformance: probe records vs the hand-written collector facts
-AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/check_facts.py --ignore-version
-```
 
 ## Selected findings from the first sweeps (SM90, details in records)
 
