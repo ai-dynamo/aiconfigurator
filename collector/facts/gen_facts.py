@@ -685,6 +685,8 @@ def build_matrix(targets: dict) -> None:
     for be, pf in plans.items():
         for run in json.loads((ROOT / "archive" / pf).read_text()):
             repo = run.get("repo")
+            if run.get("version"):
+                versions[be] = run["version"]
             cell: dict = {}
             raw = ROOT / "archive" / "raw" / f"{run.get('id','')}.json"
             if "skip" in run:
@@ -728,15 +730,25 @@ def build_matrix(targets: dict) -> None:
             out.setdefault(repo, {})[be] = cell
             c = counts.setdefault(be, {"pass": 0, "pass+custom": 0, "fail": 0})
             c[cell["verdict"]] += 1
-    doc = {"_meta": {"platform": "h20_sm90",
-                     "verdicts": "pass = plain `cli generate` output boots+runs; "
-                                 "pass+custom = boots with facts-derived extra generate args; "
-                                 "fail = root-caused (see findings.yaml)",
-                     "summary": counts},
-           "matrix": dict(sorted(out.items()))}
-    path = ROOT / "matrix.yaml"
-    path.write_text(yaml.safe_dump(doc, width=200, sort_keys=False, allow_unicode=True))
-    print(f"wrote {path} ({path.stat().st_size//1024} KB) summary={counts}")
+    # one file per (SM, framework); version pinned inside and OVERWRITTEN on
+    # bumps — git diff of a re-run IS the upgrade audit. Future SMs are
+    # sibling dirs (results/sm100/...).
+    sm = (targets.get("platform") or {}).get("name", "sm90").split("_")[-1]
+    versions: dict = {}  # measured: the version the plan actually ran
+    outdir = ROOT / "results" / sm
+    outdir.mkdir(parents=True, exist_ok=True)
+    for be in plans:
+        rows = {repo: cells[be] for repo, cells in sorted(out.items()) if be in cells}
+        doc = {"_meta": {"platform": (targets.get("platform") or {}).get("name"),
+                         "framework": be, "version": versions.get(be),
+                         "verdicts": "pass = plain `cli generate` output boots+runs; "
+                                     "pass+custom = boots with facts-derived extra generate args; "
+                                     "fail = root-caused (see findings.yaml)",
+                         "summary": counts.get(be)},
+               "results": rows}
+        p = outdir / f"{be}.yaml"
+        p.write_text(yaml.safe_dump(doc, width=200, sort_keys=False, allow_unicode=True))
+        print(f"wrote {p} ({p.stat().st_size//1024} KB) {counts.get(be)}")
 
 def main() -> None:
     ap = argparse.ArgumentParser()
