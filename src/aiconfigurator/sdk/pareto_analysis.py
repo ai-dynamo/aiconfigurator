@@ -1722,7 +1722,19 @@ def draw_pareto_to_string(
             keys "df", "label", "color", "marker" similar to ``series``.
     """
 
-    plotext.plot_size(80, 30)
+    # plotext 6.x is a full rewrite with an incompatible API (no theme/plot/build).
+    # Return early so callers get an empty string rather than an AttributeError.
+    if not hasattr(plotext, "theme") or not hasattr(plotext, "build"):
+        return ""
+
+    # The size-setting function was renamed/aliased across versions (plot_size in
+    # 3.x-5.x, absent in 6.x which is already excluded above).  Probe in
+    # preference order; skip gracefully if none match (default terminal size).
+    for _size_fn_name in ("plotsize", "plot_size", "limit_size", "limitsize"):
+        _size_fn = getattr(plotext, _size_fn_name, None)
+        if _size_fn is not None:
+            _size_fn(80, 30)
+            break
     plotext.theme("clear")
 
     palette = [
