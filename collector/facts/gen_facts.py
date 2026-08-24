@@ -746,7 +746,7 @@ def build_matrix(targets: dict) -> None:
                                      "fail = root-caused (see findings.yaml)",
                          "summary": counts.get(be)},
                "results": rows}
-        p = outdir / f"{be}.yaml"
+        p = outdir / f"{be}-{versions.get(be)}.yaml"
         p.write_text(yaml.safe_dump(doc, width=200, sort_keys=False, allow_unicode=True))
         print(f"wrote {p} ({p.stat().st_size//1024} KB) {counts.get(be)}")
 
@@ -758,10 +758,12 @@ def main() -> None:
     ap.add_argument("--collect", action="store_true")
     ap.add_argument("--check-coverage", action="store_true",
                     help="every model repo the collector's case yamls mention must be a target")
-    ap.add_argument("--full", action="store_true", help="all variants x both sglang versions (default: representative)")
+    ap.add_argument("--full", action="store_true", help="all variants x all pinned versions (default: representative)")
     ap.add_argument("--gpus", type=int, default=4)
     ap.add_argument("--gpu-offset", type=int, default=0)
     ap.add_argument("--backends", default="sglang", help="comma list: sglang,vllm")
+    ap.add_argument("--only", default=None,
+                    help="comma list of repo substrings — plan/queues cover only matching checkpoints")
     ap.add_argument("--plan-name", default="plan.json")
     ap.add_argument("--records", action="store_true", help="raw probe JSONs -> archive/records.jsonl")
     ap.add_argument("--matrix", action="store_true", help="consolidated results: matrix.yaml (verdict + deployed identity per model x backend)")
@@ -781,6 +783,10 @@ def main() -> None:
         return
     targets = yaml.safe_load(args.targets.read_text())
     runs = enumerate_runs(targets, args.full, args.backends.split(","))
+    if args.only:
+        pats = [p.strip() for p in args.only.split(",") if p.strip()]
+        runs = [r for r in runs if any(p in (r.get("repo") or "") for p in pats)]
+        print(f"--only {args.only}: {len(runs)} runs")
     if args.plan:
         for r in runs:
             print(json.dumps(r))
