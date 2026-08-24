@@ -682,6 +682,7 @@ def build_matrix(targets: dict) -> None:
              "torch.float8_e4m3fn": "fp8_e4m3", "torch.uint8": "fp8(u8)"}
     out: dict = {}
     counts: dict = {}
+    versions: dict = {}  # measured: the version the plan actually ran
     for be, pf in plans.items():
         for run in json.loads((ROOT / "archive" / pf).read_text()):
             repo = run.get("repo")
@@ -734,7 +735,6 @@ def build_matrix(targets: dict) -> None:
     # bumps — git diff of a re-run IS the upgrade audit. Future SMs are
     # sibling dirs (results/sm100/...).
     sm = (targets.get("platform") or {}).get("name", "sm90").split("_")[-1]
-    versions: dict = {}  # measured: the version the plan actually ran
     outdir = ROOT / "results" / sm
     outdir.mkdir(parents=True, exist_ok=True)
     for be in plans:
