@@ -1,7 +1,10 @@
 """Checkpoint quant profile derivation — from the checkpoint's own quant
 metadata, NEVER from the repo name (dummy fidelity rule 4).
 
-Profile vocabulary matches targets.yaml kv_pairing keys."""
+Profiles: nvfp4 / mxfp8 / fp8 / bfloat16 (MISSING = no fetched config,
+which is an owner decision upstream). Consumed by derive_roster_checkpoints;
+a targets.yaml profile pin that disagrees with the derivation is reported
+loudly as drift."""
 from __future__ import annotations
 
 import json
