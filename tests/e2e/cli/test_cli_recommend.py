@@ -10,25 +10,25 @@ import pytest
 
 from aiconfigurator.cli.api import cli_recommend
 
-pytestmark = pytest.mark.e2e
+pytestmark = [pytest.mark.e2e, pytest.mark.build]
 
 
 def test_recommend_multi_node_moe_returns_results():
-    """cli_recommend finds valid configs for DeepSeek-V3 on H200.
+    """cli_recommend escalates to multi-node for Kimi-K3 on B200.
 
-    DeepSeek-V3 (671B MoE) does not fit in a single H200 node (8x 80 GB).
+    Kimi-K3 (large MoE) does not fit in a single B200 node (8x 192 GB).
     The recommend escalation must scale TP/EP candidates beyond the single-node
-    limit and return at least one feasible configuration.  Uses a hermetic local
-    config (no HuggingFace credentials required).
+    limit and return at least one feasible configuration.  Uses real silicon
+    data (no HuggingFace credentials required).
     """
     result = cli_recommend(
-        model_path="deepseek-ai/DeepSeek-V3",
-        system="h200_sxm",
+        model_path="moonshotai/Kimi-K3",
+        system="b200_sxm",
         backend="vllm",
         isl=4000,
         osl=1000,
         target_concurrency=16,
-        database_mode="HYBRID",
+        database_mode="SILICON",
     )
 
     assert result.chosen_exp is not None
@@ -36,11 +36,22 @@ def test_recommend_multi_node_moe_returns_results():
     assert best is not None and not best.empty, "Expected at least one recommended config"
 
     top = best.iloc[0]
-    # Model requires more than one H200 node (8 GPUs) to fit in memory.
+    # Model requires more than one B200 node (8 GPUs) to fit in memory.
     assert top["num_total_gpus"] > 8, f"Expected multi-node config (>8 GPUs), got {top['num_total_gpus']}"
     # At least one parallelism dimension must exceed single-node capacity,
     # confirming TP/EP candidates were actually scaled during escalation.
-    assert max(top["tp"], top["moe_tp"], top["moe_ep"]) > 8
+    # agg rows use plain tp/moe_tp/moe_ep; disagg rows use (p)tp/(d)tp etc.
+    # Check both name sets so the assertion holds regardless of which wins.
+    parallel_dims = [
+        top.get("tp", 1),
+        top.get("moe_tp", 1),
+        top.get("moe_ep", 1),
+        top.get("(p)tp", 1),
+        top.get("(d)tp", 1),
+        top.get("(p)moe_ep", 1),
+        top.get("(d)moe_ep", 1),
+    ]
+    assert max(parallel_dims) > 8
     # Sanity: predicted latencies are positive and finite.
     assert top["ttft"] > 0
     assert top["tpot"] > 0
@@ -49,7 +60,7 @@ def test_recommend_multi_node_moe_returns_results():
 def test_recommend_single_node_dense_model():
     """cli_recommend finds configs for a small dense model within one node."""
     result = cli_recommend(
-        model_path="meta-llama/Llama-3.1-8B-Instruct",
+        model_path="meta-llama/Meta-Llama-3.1-8B",
         system="h200_sxm",
         backend="vllm",
         isl=4000,
