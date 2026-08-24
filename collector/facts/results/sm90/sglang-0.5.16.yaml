@@ -2,7 +2,7 @@ _meta:
   platform: h20_sm90
   framework: sglang
   version: 0.5.16
-  verdicts: pass = plain `cli generate` output boots+runs; pass+custom = boots with facts-derived extra generate args; fail = root-caused (see findings.yaml)
+  verdicts: pass = plain `cli generate` output boots+runs; pass+custom = boots with facts-derived extra generate args; fail = root-caused (see results/findings.yaml)
   summary:
     pass: 83
     pass+custom: 6

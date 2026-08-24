@@ -2,7 +2,7 @@ _meta:
   platform: h20_sm90
   framework: vllm
   version: 0.24.0
-  verdicts: pass = plain `cli generate` output boots+runs; pass+custom = boots with facts-derived extra generate args; fail = root-caused (see findings.yaml)
+  verdicts: pass = plain `cli generate` output boots+runs; pass+custom = boots with facts-derived extra generate args; fail = root-caused (see results/findings.yaml)
   summary:
     pass: 79
     pass+custom: 8

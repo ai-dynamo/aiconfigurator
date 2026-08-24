@@ -713,7 +713,7 @@ def build_matrix(targets: dict) -> None:
                          "framework": be, "version": versions.get(be),
                          "verdicts": "pass = plain `cli generate` output boots+runs; "
                                      "pass+custom = boots with facts-derived extra generate args; "
-                                     "fail = root-caused (see findings.yaml)",
+                                     "fail = root-caused (see results/findings.yaml)",
                          "summary": counts.get(be)},
                "results": rows}
         p = outdir / f"{be}-{versions.get(be)}.yaml"

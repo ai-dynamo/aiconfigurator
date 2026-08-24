@@ -2,7 +2,7 @@ _meta:
   platform: h20_sm90
   framework: trtllm
   version: 1.3.0rc23
-  verdicts: pass = plain `cli generate` output boots+runs; pass+custom = boots with facts-derived extra generate args; fail = root-caused (see findings.yaml)
+  verdicts: pass = plain `cli generate` output boots+runs; pass+custom = boots with facts-derived extra generate args; fail = root-caused (see results/findings.yaml)
   summary:
     pass: 60
     pass+custom: 0
