@@ -25,7 +25,7 @@ import yaml
 ROOT = Path(os.environ.get("AIC_PROBE_WORKSPACE", Path.cwd()))
 # generator source: this repo by default; override to pin a specific checkout
 AIC_SRC = os.environ.get("AIC_GENERATOR_SRC",
-                         str(Path(__file__).resolve().parents[2] / "src"))
+                         str(Path(__file__).resolve().parents[1] / "aic" / "src"))
 if AIC_SRC not in sys.path:
     sys.path.insert(0, AIC_SRC)
 WORK = "/work"  # container mount of ROOT
@@ -140,15 +140,13 @@ def derive_roster_checkpoints(fam: dict, targets: dict) -> list[dict]:
             # brace-expansion prose like org/Name-{A,B}-X truncates at '{'
             if not m.endswith("-") and not m.endswith(".py"):
                 mentioned.add(m)
-    inaccessible: set[str] = set()
-    for inacc in (ROOT / "configs" / "inaccessible.json",
-                  Path(__file__).parent / "configs" / "inaccessible.json"):
-        if inacc.exists():
-            inaccessible = set(json.loads(inacc.read_text()))
-            break
+    # owner-decided exclusions live in targets.yaml roster.excluded (each entry
+    # carries decided_by/reason); any OTHER missing config is a hard stop that
+    # goes back to the owner — there is no self-service escape hatch.
+    excluded = {e["repo"] for e in (fam.get("excluded") or [])}
     owned_elsewhere = {ck["repo"] for fname, f in targets["families"].items()
                       if not f.get("derive") for ck in f.get("checkpoints", [])}
-    repos = sorted((mentioned - inaccessible - owned_elsewhere)
+    repos = sorted((mentioned - excluded - owned_elsewhere)
                    | set(fam.get("extra_repos") or []))
     manifest = json.loads((ROOT / "dummy_models" / "variants_manifest.json").read_text())
     variants_of: dict[str, list[str]] = {}
@@ -168,7 +166,8 @@ def derive_roster_checkpoints(fam: dict, targets: dict) -> list[dict]:
     for repo in repos:
         profile = derive_profile(repo, ROOT / "configs")
         if profile == "MISSING":
-            raise SystemExit(f"derive_roster: no fetched config for {repo} — fetch it or add to inaccessible.json")
+            raise SystemExit(f"derive_roster: no fetched config for {repo} — OWNER DECISION NEEDED "
+                             f"(fetch the config, or the owner records an exclusion in targets.yaml roster.excluded)")
         ck = {"repo": repo, "profile": profile, "variants": variants_of.get(repo, [])}
         ov = dict(overrides.get(repo) or {})
         if "profile" in ov:  # explicit pin wins, but derivation drift is loud
@@ -374,13 +373,11 @@ def check_coverage(targets: dict) -> None:
         if fam.get("derive") and "checkpoints" not in fam:
             fam["checkpoints"] = derive_roster_checkpoints(fam, targets)
     covered = {ck["repo"] for fam in targets["families"].values() for ck in fam["checkpoints"]}
-    inaccessible = set()
-    inacc = ROOT / "configs" / "inaccessible.json"
-    if inacc.exists():
-        inaccessible = set(json.loads(inacc.read_text()))
-    missing = sorted(mentioned - covered - inaccessible)
+    excluded = {e["repo"] for f in targets["families"].values()
+                for e in (f.get("excluded") or [])}
+    missing = sorted(mentioned - covered - excluded)
     print(f"collector mentions {len(mentioned)} repos; targets cover {len(covered)}; "
-          f"gated/inaccessible {len(mentioned & inaccessible)}")
+          f"owner-excluded {len(mentioned & excluded)}")
     if missing:
         print("MISSING FROM TARGETS (coverage floor violated):")
         for r in missing:

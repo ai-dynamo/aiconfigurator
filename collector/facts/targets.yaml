@@ -242,6 +242,17 @@ families:
     - sliding_attention
     - full_attention
   roster:
+    excluded:
+    - repo: meta-llama/Llama-4-Scout-17B-16E
+      decided_by: tianhaox
+      date: 2026-08-24
+      reason: base variant of an already-probed Instruct checkpoint — same architecture and
+        shapes, kernel identity is covered by meta-llama/Llama-4-Scout-17B-16E-Instruct;
+        owner chose not to duplicate.
+    - repo: nvidia/nemotron-ultra-rl-050826
+      decided_by: tianhaox
+      date: 2026-08-24
+      reason: internal RL checkpoint with no public artifact; revisit if it gets a public release.
     architecture: full support-matrix roster (per-checkpoint, no arch dedup)
     derive: true
     extra_repos:
