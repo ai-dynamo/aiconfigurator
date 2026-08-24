@@ -5,10 +5,8 @@ schema: aic-probe-targets/v1
 backends:
   sglang:
     versions:
-    - 0.5.14
     - 0.5.16
     images:
-      0.5.14: lmsysorg/sglang:v0.5.14
       0.5.16: lmsysorg/sglang:v0.5.16
   vllm:
     versions:
