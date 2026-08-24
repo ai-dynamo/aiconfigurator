@@ -34,27 +34,39 @@ from pathlib import Path
 # Collector ground truth (collect_dsv4_attn.py:313-316): csa=4, hca=128.
 DSV4_RATIO_KIND = {4: "csa", 128: "hca", 0: "full"}
 
-# Special-family adapters keyed by exact repo; EVERYTHING else uses the
-# generic adapter. The roster itself lives in repos.txt (one repo per line,
-# optional "<repo> <family>") so growing coverage never edits code.
-_SPECIAL = {
-    "deepseek-ai/DeepSeek-V4-Pro-0813": "dsv4",
-    "deepseek-ai/DeepSeek-V4-Flash-0731": "dsv4",
-    "deepseek-ai/DeepSeek-V4-Pro": "dsv4",
-    "deepseek-ai/DeepSeek-V4-Flash": "dsv4",
-    "sgl-project/DeepSeek-V4-Pro-FP8": "dsv4",
-    "sgl-project/DeepSeek-V4-Flash-FP8": "dsv4",
-    "nvidia/DeepSeek-V4-Pro-NVFP4": "dsv4",
-    "nvidia/DeepSeek-V4-Flash-NVFP4": "dsv4",
-    "zai-org/GLM-5.2": "glm",
-    "zai-org/GLM-5.2-FP8": "glm",
-    "nvidia/GLM-5.2-NVFP4": "glm",
-    "MiniMaxAI/MiniMax-M3": "m3",
-    "MiniMaxAI/MiniMax-M3-MXFP8": "m3",
-    "nvidia/MiniMax-M3-NVFP4": "m3",
-    "openai/gpt-oss-120b": "gptoss",
-    "openai/gpt-oss-20b": "gptoss",
-}
+# Per-repo declarations live in targets.yaml (single per-model surface):
+#   families.<fam>.checkpoints[].repo         -> special-family adapter routing
+#   ...checkpoint_overrides.<repo>.dummy_overrides:
+#       hfquant_exclude_from_sibling: <repo>  -> complete condensed hf_quant stubs
+#       drop_auto_map: <reason>               -> declared auto_map removal
+# Loaded once at import; the roster itself lives in repos.txt (one repo per
+# line, optional "<repo> <family>") so growing coverage never edits code.
+def _load_targets_declarations() -> tuple[dict, dict, dict]:
+    import yaml
+    here = Path(__file__).resolve().parent
+    for cand in (here / "targets.yaml", here.parent / "targets.yaml"):
+        if cand.exists():
+            t = yaml.safe_load(cand.read_text())
+            break
+    else:
+        return {}, {}, {}
+    special, sib, drop = {}, {}, {}
+    for fam, spec in (t.get("families") or {}).items():
+        if fam != "roster":
+            for ck in spec.get("checkpoints") or []:
+                special[ck["repo"]] = fam
+        for repo, o in (spec.get("checkpoint_overrides") or {}).items():
+            dv = o.get("dummy_overrides") or {}
+            if dv.get("family"):
+                special[repo] = dv["family"]
+            if dv.get("hfquant_exclude_from_sibling"):
+                sib[repo] = dv["hfquant_exclude_from_sibling"]
+            if dv.get("drop_auto_map"):
+                drop[repo] = dv["drop_auto_map"]
+    return special, sib, drop
+
+
+_SPECIAL, _HFQUANT_COMPLETE_FROM_SIBLING, _DROP_AUTO_MAP = _load_targets_declarations()
 
 
 def load_repos(configs_dir: Path) -> dict[str, str]:
@@ -85,15 +97,6 @@ def load_repos(configs_dir: Path) -> dict[str, str]:
 # REAL hf_quant file — the exclusion set is architecture-structural
 # (conv1d/gate/latent_proj/embeddings/lm_head/mtp*), identical across the
 # family's quant artifacts. Recorded as an edit.
-_HFQUANT_COMPLETE_FROM_SIBLING = {
-    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8":
-        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
-}
-
-_DROP_AUTO_MAP = {
-    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-FP8":
-        "gated custom code; official NVFP4 sibling has no auto_map (native nemotron_h)",
-}
 
 # Rule-3 extension: when a framework probes WEIGHT-FILE properties (sglang
 # reads the safetensors header dtype of one routed-expert tensor to pick the
