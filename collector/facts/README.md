@@ -37,10 +37,10 @@ Rule 6 (2026-08-23, from the DSV4 false positive): when a framework probes WEIGH
 | File | Role |
 |---|---|
 | `targets.yaml` | INPUT only: what to probe and how — platform, backend image/version pins, model roster (derived from collector cases + owner extras/exclusions), per-model generate args (`cli_extra_args`, each with a `fact:` citation) and dummy overrides. |
-| `results/<sm>/<framework>.yaml` | THE consolidated results (`gen_facts.py --matrix`): per checkpoint — verdict (pass / pass+custom / fail), extra generate args when needed, failure cause, and the deployed identity actually measured (attention backend, MoE quant→kernel family, allocated KV dtype, topology). One file per (SM, framework); the probed version is pinned inside and OVERWRITTEN on bumps, so the git diff of a re-run is the upgrade audit. Future SMs are sibling dirs. |
+| `results/<sm>/<framework>.yaml` | THE consolidated results (`gen_facts.py --matrix`): per checkpoint — verdict (pass / pass+custom / fail), extra generate args when needed, failure cause, and the deployed identity actually measured (attention backend, MoE quant→kernel family, allocated KV dtype, topology). One file per (SM, framework, version) — the version is in the filename (`sglang-0.5.16.yaml`), so results for multiple versions coexist side by side. targets.yaml pins exactly one version per backend; bumping the pin produces a NEW result file. Future SMs are sibling dirs. |
 | `findings.yaml` | OUTPUT: curated conclusions from probe campaigns, one entry per finding with `applies_to` scopes and inline evidence/versions/dates. Separate lifecycle from targets.yaml — findings rot with framework releases and are re-verified on version bumps. |
 | `gen_dummy_models.py` | HF config -> depth-cut dummy model dirs. Width is NEVER shrunk (TP divisibility and quant shape checks must behave like the real checkpoint). One variant per interleaved layer kind; per-layer quant-config entries filtered and renumbered; a post-check fails loudly on any surviving out-of-range layer reference. |
-| `gen_facts.py` | THE driver (single entry point): `--emit-queues` targets -> golden `cli generate` renders -> per-GPU probe queues; `--collect` raw JSONs -> archive; `--records` raw -> curated `records.jsonl` (kernel normalization + taxonomy backend labels + compressed errors); `--check-coverage` collector-roster lower bound. Also owns checkpoint quant-profile derivation (from quant metadata, never repo names). |
+| `gen_facts.py` | THE driver (single entry point): `--emit-queues` targets -> golden `cli generate` renders -> per-GPU probe queues (`--only` scopes to a repo subset); `--records` raw probe JSONs -> curated `records.jsonl` (kernel normalization + taxonomy backend labels + compressed errors); `--matrix` -> `results/<sm>/<framework>-<version>.yaml`; `--check-coverage` collector-roster lower bound. Also owns checkpoint quant-profile derivation (from quant metadata, never repo names). |
 | `probe_sglang.py` | sglang in-container probe. `--engine-cli` parses generator output through sglang's own CLI parser; overrides (dummy load, KV-pool cap, cuda-graph off) are appended as CLI flags so `ServerArgs.__post_init__` sees them. `--trace` runs one eager prefill+decode under the profiler. |
 | `probe_vllm.py` | vLLM probe via the FPM path: parse `run.sh`'s `engine_command`, strip FPM-owned flags, feed vLLM's `EngineArgs.from_cli_args`, in-process EngineCore, generic attention-class scan on the loaded model. |
 | `probe_trtllm.py` | TRT-LLM probe: llmapi with `TLLM_WORKER_USE_SINGLE_PROCESS=1` (in-process worker), dummy load, kernel capture. Includes narrowly-scoped shims for a broken cutlass-DSL package walk (needed on both 1.3.0rc20 and rc23 images; the stub tries the real import first and only fills genuine holes, documented inline). |
@@ -58,8 +58,8 @@ AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/gen_facts.py --emit-queues --ba
 bash <ws>/archive/queues/gpu0.sh   # ... one per GPU; done-guard makes reruns incremental
 
 # 3. collect + curate
-AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/gen_facts.py --collect
 AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/gen_facts.py --records
+AIC_PROBE_WORKSPACE=<ws> python3 collector/facts/gen_facts.py --matrix
 ```
 
 A full three-backend sweep of the 76-checkpoint roster is ~226 runs, minutes

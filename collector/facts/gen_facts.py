@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Facts generator (sweep driver): targets.yaml -> generator-rendered engine args
--> probe runs -> facts archive with provenance.
+"""Facts driver: given a generator-rendered config, what does the framework
+actually deploy? targets.yaml (input) -> golden `cli generate` renders ->
+per-GPU probe queues -> evidence (archive/raw, records.jsonl) -> results.
 
 Runs on the host (needs the aiconfigurator repo importable for rendering).
 
-  PYTHONPATH=<aic>/src python3 probe/gen_facts.py --plan            # show runs
-  PYTHONPATH=<aic>/src python3 probe/gen_facts.py --emit-queues     # write per-GPU queue scripts
-  python3 probe/gen_facts.py --collect                              # raw JSONs -> archive.jsonl
+  --plan            enumerate runs (use --backends / --only to scope)
+  --emit-queues     render goldens + write per-GPU queue scripts
+  --records         raw probe JSONs -> archive/records.jsonl (curated evidence)
+  --matrix          consolidated results/<sm>/<framework>-<version>.yaml
+  --check-coverage  collector-mentioned repos are a coverage LOWER bound
 """
 
 from __future__ import annotations
@@ -31,10 +34,6 @@ if AIC_SRC not in sys.path:
     sys.path.insert(0, AIC_SRC)
 WORK = "/work"  # container mount of ROOT
 SCRATCH_QUEUES = ROOT / "archive" / "queues"
-
-
-
-
 
 GOLDEN_TARGET = {"sglang": "dynamo-python", "vllm": "fpm", "trtllm": "dynamo-python"}
 VENV_PY = ROOT / "venv_aic" / "bin" / "python"
@@ -122,24 +121,30 @@ def _cea(v):
     return list(v["args"]) if isinstance(v, dict) else list(v)
 
 
+
+_MENTION_ORGS = (r"(?:deepseek-ai|zai-org|moonshotai|nvidia|openai|meta-llama|"
+                 r"mistralai|google|Qwen|XiaomiMiMo|MiniMaxAI|sgl-project)")
+
+
+def collector_mentioned_repos() -> set[str]:
+    """Every HF repo the collector's case yamls mention (the coverage floor).
+    Brace-expansion prose like org/Name-{A,B}-X truncates at '{' and .py
+    paths false-match — both filtered."""
+    mentioned: set[str] = set()
+    cases = Path(AIC_SRC).parent / "collector" / "cases" / "models"
+    for f in cases.glob("*_cases.yaml"):
+        for m in re.findall(rf"\b({_MENTION_ORGS}/[\w.\-]+)", f.read_text()):
+            if not m.endswith("-") and not m.endswith(".py"):
+                mentioned.add(m)
+    return mentioned
+
 def derive_roster_checkpoints(fam: dict, targets: dict) -> list[dict]:
     """Roster checkpoints DERIVED from the collector's own case declarations:
     every org/repo its cases yamls mention, minus gated repos and repos owned
     by other (special-adapter) families, plus probe-only extra_repos. Profile
     comes from the checkpoint's quant metadata; variants from the dummy
     manifest. targets.yaml holds only the overlay (checkpoint_overrides)."""
-    import re
-    sys.path.insert(0, str(Path(__file__).parent))
-
-    cases = Path(AIC_SRC).parent / "collector" / "cases" / "models"
-    org = (r"(?:deepseek-ai|zai-org|moonshotai|nvidia|openai|meta-llama|"
-           r"mistralai|google|Qwen|XiaomiMiMo|MiniMaxAI|sgl-project)")
-    mentioned: set[str] = set()
-    for f in cases.glob("*_cases.yaml"):
-        for m in re.findall(rf"\b({org}/[\w.\-]+)", f.read_text()):
-            # brace-expansion prose like org/Name-{A,B}-X truncates at '{'
-            if not m.endswith("-") and not m.endswith(".py"):
-                mentioned.add(m)
+    mentioned = collector_mentioned_repos()
     # owner-decided exclusions live in targets.yaml roster.excluded (each entry
     # carries decided_by/reason); any OTHER missing config is a hard stop that
     # goes back to the owner — there is no self-service escape hatch.
@@ -330,45 +335,10 @@ def emit_queues(runs: list[dict], n_gpus: int, gpu_offset: int, plan_name: str) 
           f"{sum(1 for r in runs if 'skip' in r)} skipped)")
 
 
-def collect() -> None:
-    plan: dict = {}
-    for pf in sorted((ROOT / "archive").glob("plan*.json")):
-        plan.update({r["id"]: r for r in json.loads(pf.read_text()) if "skip" not in r})
-    out = ROOT / "archive" / "archive.jsonl"
-    n_ok = n_err = n_missing = 0
-    with out.open("w") as f:
-        for rid, run in plan.items():
-            raw = ROOT / "archive" / "raw" / f"{rid}.json"
-            if not raw.exists():
-                run["status"] = "missing"
-                n_missing += 1
-                f.write(json.dumps({"provenance": run}) + "\n")
-                continue
-            facts = json.loads(raw.read_text())
-            soft = {"attn_hook", "moe_hook", "quant_hook"}  # probe degradations, not run failures
-            errs = set(facts.get("errors", {}))
-            status = "ok" if not errs else ("ok_degraded" if errs <= soft else "error")
-            n_ok += status == "ok"
-            n_err += status == "error"
-            f.write(json.dumps({
-                "provenance": {**run, "status": status, "evidence": "real", "platform": "h20_sm90"},
-                "facts": facts,
-            }) + "\n")
-    print(f"{out}: {n_ok} ok, {n_err} with recorded errors, {n_missing} missing")
-
-
-
 def check_coverage(targets: dict) -> None:
     """Coverage floor: the collector's declared model roster is a LOWER bound
     for probe targets (targets may exceed it, never trail it)."""
-    import re
-    cases = Path(AIC_SRC).parent / "collector" / "cases" / "models"
-    mentioned: set[str] = set()
-    org = r"(?:deepseek-ai|zai-org|moonshotai|nvidia|openai|meta-llama|mistralai|google|Qwen|XiaomiMiMo|MiniMaxAI|sgl-project)"
-    for f in cases.glob("*_cases.yaml"):
-        for m in re.findall(rf"\b({org}/[\w.\-]+)", f.read_text()):
-            if not m.endswith("-") and not m.endswith(".py"):
-                mentioned.add(m)
+    mentioned = collector_mentioned_repos()
     for fam in targets["families"].values():
         if fam.get("derive") and "checkpoints" not in fam:
             fam["checkpoints"] = derive_roster_checkpoints(fam, targets)
@@ -755,7 +725,6 @@ def main() -> None:
     ap.add_argument("--targets", type=Path, default=Path(__file__).parent / "targets.yaml")
     ap.add_argument("--plan", action="store_true")
     ap.add_argument("--emit-queues", action="store_true")
-    ap.add_argument("--collect", action="store_true")
     ap.add_argument("--check-coverage", action="store_true",
                     help="every model repo the collector's case yamls mention must be a target")
     ap.add_argument("--full", action="store_true", help="all variants x all pinned versions (default: representative)")
@@ -774,9 +743,6 @@ def main() -> None:
         return
     if args.matrix:
         build_matrix(yaml.safe_load(args.targets.read_text()))
-        return
-    if args.collect:
-        collect()
         return
     if args.check_coverage:
         check_coverage(yaml.safe_load(args.targets.read_text()))

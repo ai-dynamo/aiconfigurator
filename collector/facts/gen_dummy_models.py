@@ -39,6 +39,7 @@ DSV4_RATIO_KIND = {4: "csa", 128: "hca", 0: "full"}
 #   ...checkpoint_overrides.<repo>.dummy_overrides:
 #       hfquant_exclude_from_sibling: <repo>  -> complete condensed hf_quant stubs
 #       drop_auto_map: <reason>               -> declared auto_map removal
+#   (both are RECORDED edits with facts in targets.yaml — never silent fallbacks)
 # Loaded once at import; the roster itself lives in repos.txt (one repo per
 # line, optional "<repo> <family>") so growing coverage never edits code.
 def _load_targets_declarations() -> tuple[dict, dict, dict]:
@@ -86,17 +87,6 @@ def load_repos(configs_dir: Path) -> dict[str, str]:
             repo = f.stem.replace("_", "/", 1)
             repos[repo] = _SPECIAL.get(repo, "generic")
     return repos
-
-# Explicit, recorded auto_map removals: the gated repo's custom code is
-# unobtainable, and the OFFICIAL sibling artifact (NVFP4 requant) ships
-# without auto_map — frameworks resolve model_type natively. Removing it is
-# a declared edit, never a silent fallback.
-# Explicit hf_quant stub completions: aic-core ships CONDENSED hf_quant stubs
-# (quant_algo only) that sglang's modelopt parser cannot load (it requires
-# exclude_modules). The completion copies the field from the NVFP4 sibling's
-# REAL hf_quant file — the exclusion set is architecture-structural
-# (conv1d/gate/latent_proj/embeddings/lm_head/mtp*), identical across the
-# family's quant artifacts. Recorded as an edit.
 
 # Rule-3 extension: when a framework probes WEIGHT-FILE properties (sglang
 # reads the safetensors header dtype of one routed-expert tensor to pick the
