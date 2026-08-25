@@ -80,6 +80,58 @@ impl SolComponents {
     }
 }
 
+/// Actual MoE communication topology substitution used by one query.
+///
+/// Attached only after the measurement lookup succeeds. The inference phase
+/// (context or generation) is supplied by the engine loop that evaluates the
+/// operator; this payload owns the remaining lookup provenance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MoeCommFallback {
+    pub comm_backend: &'static str,
+    pub requested_ep_size: u32,
+    pub requested_node_num: u32,
+    pub measurement_ep_size: u32,
+    pub measurement_node_num: u32,
+}
+
+/// Ordered, de-duplicated fallback records carried by one composed result.
+///
+/// The common zero- and one-record cases do not allocate. A heap allocation
+/// is needed only when a composition executes two or more distinct topology
+/// substitutions.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MoeCommFallbacks {
+    first: Option<MoeCommFallback>,
+    additional: Vec<MoeCommFallback>,
+}
+
+impl MoeCommFallbacks {
+    pub fn is_empty(&self) -> bool {
+        self.first.is_none()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &MoeCommFallback> {
+        self.first.iter().chain(self.additional.iter())
+    }
+
+    fn insert(&mut self, fallback: MoeCommFallback) {
+        if self.iter().any(|existing| *existing == fallback) {
+            return;
+        }
+        if self.first.is_none() {
+            self.first = Some(fallback);
+        } else {
+            self.additional.push(fallback);
+        }
+    }
+
+    pub(crate) fn extend(&mut self, other: Self) {
+        for fallback in other.iter().copied() {
+            self.insert(fallback);
+        }
+    }
+}
+
 /// Componentwise subtraction for optional SOL decompositions (the GEMM
 /// fp8_static overhead-table subtraction). Either side missing → `None`:
 /// an incomplete breakdown must not masquerade as a full one.
@@ -125,13 +177,16 @@ pub(crate) fn blend_sol(
 /// its components (the notebook re-oracle FFI reads them); `None` everywhere
 /// else. It rides along through `scaled`/`plus`/`clamp_non_negative` so op-
 /// level composition (scale factors, additive modules) stays consistent
-/// with the latency.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// with the latency. `moe_comm_fallbacks` identifies successful substitute
+/// topology lookups and follows the same combinators as an ordered,
+/// de-duplicated collection.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PerformanceResult {
     pub latency_ms: f64,
     pub energy_wms: f64,
     pub source: Source,
     pub sol: Option<SolComponents>,
+    pub moe_comm_fallbacks: MoeCommFallbacks,
 }
 
 impl PerformanceResult {
@@ -141,6 +196,7 @@ impl PerformanceResult {
             energy_wms: 0.0,
             source,
             sol: None,
+            moe_comm_fallbacks: MoeCommFallbacks::default(),
         }
     }
 
@@ -150,6 +206,7 @@ impl PerformanceResult {
             energy_wms,
             source,
             sol: None,
+            moe_comm_fallbacks: MoeCommFallbacks::default(),
         }
     }
 
@@ -161,6 +218,7 @@ impl PerformanceResult {
             energy_wms: 0.0,
             source: Source::Sol,
             sol: Some(components),
+            moe_comm_fallbacks: MoeCommFallbacks::default(),
         }
     }
 
@@ -169,6 +227,18 @@ impl PerformanceResult {
     /// (pure-bandwidth comm bounds, composed module SOLs).
     pub fn with_sol(mut self, components: SolComponents) -> Self {
         self.sol = Some(components);
+        self
+    }
+
+    /// Attach an executed MoE communication topology substitution.
+    pub fn with_moe_comm_fallback(mut self, fallback: MoeCommFallback) -> Self {
+        self.moe_comm_fallbacks.insert(fallback);
+        self
+    }
+
+    /// Attach every executed substitution from a composed result.
+    pub fn with_moe_comm_fallbacks(mut self, fallbacks: MoeCommFallbacks) -> Self {
+        self.moe_comm_fallbacks.extend(fallbacks);
         self
     }
 
@@ -194,6 +264,7 @@ impl PerformanceResult {
                 math_ms: c.math_ms * factor,
                 mem_ms: c.mem_ms * factor,
             }),
+            moe_comm_fallbacks: self.moe_comm_fallbacks,
         }
     }
 
@@ -202,6 +273,8 @@ impl PerformanceResult {
     /// AND energy both 0.0) is a source-neutral identity — the other
     /// side's tag survives, mirroring Python's zero-identity rule.
     pub fn plus(self, other: PerformanceResult) -> Self {
+        let mut moe_comm_fallbacks = self.moe_comm_fallbacks;
+        moe_comm_fallbacks.extend(other.moe_comm_fallbacks);
         let (source, sol) = if self.latency_ms == 0.0 && self.energy_wms == 0.0 {
             (other.source, other.sol)
         } else if other.latency_ms == 0.0 && other.energy_wms == 0.0 {
@@ -224,6 +297,7 @@ impl PerformanceResult {
             energy_wms: self.energy_wms + other.energy_wms,
             source,
             sol,
+            moe_comm_fallbacks,
         }
     }
 
@@ -239,6 +313,7 @@ impl PerformanceResult {
                 math_ms: c.math_ms.max(0.0),
                 mem_ms: c.mem_ms.max(0.0),
             }),
+            moe_comm_fallbacks: self.moe_comm_fallbacks,
         }
     }
 }
@@ -278,6 +353,90 @@ mod tests {
     }
 
     #[test]
+    fn moe_comm_fallbacks_ride_through_result_combinators_without_loss() {
+        assert_eq!(
+            PerformanceResult::default()
+                .moe_comm_fallbacks
+                .additional
+                .capacity(),
+            0
+        );
+        let ht = MoeCommFallback {
+            comm_backend: "deepep_ht",
+            requested_ep_size: 32,
+            requested_node_num: 8,
+            measurement_ep_size: 8,
+            measurement_node_num: 1,
+        };
+        let ll = MoeCommFallback {
+            comm_backend: "deepep_ll",
+            ..ht
+        };
+        let tagged = PerformanceResult::new(-2.0, Source::Estimated).with_moe_comm_fallback(ht);
+        assert_eq!(tagged.moe_comm_fallbacks.additional.capacity(), 0);
+
+        assert_eq!(
+            tagged
+                .clone()
+                .scaled(2.0)
+                .moe_comm_fallbacks
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![ht]
+        );
+        assert_eq!(
+            tagged
+                .clone()
+                .clamp_non_negative()
+                .moe_comm_fallbacks
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![ht]
+        );
+        assert_eq!(
+            tagged
+                .clone()
+                .plus(PerformanceResult::new(1.0, Source::Silicon))
+                .moe_comm_fallbacks
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![ht]
+        );
+        assert_eq!(
+            tagged
+                .clone()
+                .plus(tagged.clone())
+                .moe_comm_fallbacks
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![ht]
+        );
+        assert_eq!(
+            tagged
+                .plus(PerformanceResult::new(1.0, Source::Estimated).with_moe_comm_fallback(ll))
+                .moe_comm_fallbacks
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![ht, ll]
+        );
+        assert_eq!(
+            PerformanceResult::new(0.0, Source::Estimated)
+                .with_moe_comm_fallback(ht)
+                .plus(PerformanceResult::new(0.0, Source::Estimated).with_moe_comm_fallback(ll))
+                .moe_comm_fallbacks
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![ht, ll]
+        );
+    }
+
+    #[test]
     fn sol_components_ride_through_combinators() {
         // Leaf: latency = max(math, mem), Source::Sol.
         let leaf = PerformanceResult::sol(SolComponents::new(3.0, 5.0));
@@ -285,22 +444,24 @@ mod tests {
         assert_eq!(leaf.source, Source::Sol);
 
         // scaled: components scale with the latency.
-        let scaled = leaf.scaled(2.0);
+        let scaled = leaf.clone().scaled(2.0);
         assert_eq!(scaled.sol, Some(SolComponents::new(6.0, 10.0)));
 
         // plus: componentwise sum when both sides carry components...
-        let sum = leaf.plus(PerformanceResult::sol(SolComponents::new(1.0, 0.5)));
+        let sum = leaf
+            .clone()
+            .plus(PerformanceResult::sol(SolComponents::new(1.0, 0.5)));
         assert_eq!(sum.latency_ms, 6.0);
         assert_eq!(sum.sol, Some(SolComponents::new(4.0, 5.5)));
 
         // ...poisoned to None when one side has none (incomplete breakdown)...
-        let poisoned = leaf.plus(PerformanceResult::new(1.0, Source::Sol));
+        let poisoned = leaf.clone().plus(PerformanceResult::new(1.0, Source::Sol));
         assert_eq!(poisoned.sol, None);
 
         // ...and passed through a zero identity (either side).
         let zero = PerformanceResult::zero();
-        assert_eq!(leaf.plus(zero).sol, leaf.sol);
-        assert_eq!(zero.plus(leaf).sol, leaf.sol);
+        assert_eq!(leaf.clone().plus(zero.clone()).sol, leaf.sol);
+        assert_eq!(zero.plus(leaf.clone()).sol, leaf.sol);
 
         // clamp: components clamp to >= 0 alongside the latency.
         let negative = subtract_sol(
@@ -325,11 +486,11 @@ mod tests {
         // (0.0, 0.0) operand must not force `Mixed`.
         let zero = PerformanceResult::new(0.0, Source::Empirical);
         let real = PerformanceResult::with_energy(2.0, 10.0, Source::Silicon);
-        assert_eq!(zero.plus(real).source, Source::Silicon);
-        assert_eq!(real.plus(zero).source, Source::Silicon);
+        assert_eq!(zero.clone().plus(real.clone()).source, Source::Silicon);
+        assert_eq!(real.clone().plus(zero).source, Source::Silicon);
         // Non-zero operands with different tags still merge to Mixed.
         let sol = PerformanceResult::new(1.0, Source::Sol);
-        assert_eq!(real.plus(sol).source, Source::Mixed);
+        assert_eq!(real.clone().plus(sol).source, Source::Mixed);
         // A zero-latency result that still carries energy is NOT neutral.
         let energetic_zero = PerformanceResult::with_energy(0.0, 5.0, Source::Empirical);
         assert_eq!(real.plus(energetic_zero).source, Source::Mixed);

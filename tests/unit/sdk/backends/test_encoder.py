@@ -482,6 +482,7 @@ class TestEncoderMemoryInSummary:
                 {"generation_attention": 0.0},
                 {"context_attention": "silicon"},
                 {"generation_attention": "silicon"},
+                (),
             ),
         )
 

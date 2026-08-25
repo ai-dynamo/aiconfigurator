@@ -99,13 +99,56 @@ pub struct GenerationKey {
     pub kv_quant: String,
 }
 
+fn resolve_context_key(grids: &WideEpContextMlaGrids, requested: ContextKey) -> ContextKey {
+    if grids.by_keys.contains_key(&requested) {
+        return requested;
+    }
+    if !matches!(requested.kernel_source.as_str(), "flashinfer" | "fa3") {
+        return requested;
+    }
+    let fallback = ContextKey {
+        kernel_source: "trtllm_mla".to_string(),
+        ..requested.clone()
+    };
+    if grids.by_keys.contains_key(&fallback) {
+        fallback
+    } else {
+        requested
+    }
+}
+
+fn resolve_generation_key(
+    grids: &WideEpGenerationMlaGrids,
+    requested: GenerationKey,
+) -> GenerationKey {
+    if grids.by_keys.contains_key(&requested) {
+        return requested;
+    }
+    if !matches!(requested.kernel_source.as_str(), "flashinfer" | "fa3") {
+        return requested;
+    }
+    let fallback = GenerationKey {
+        kernel_source: "trtllm_mla".to_string(),
+        ..requested.clone()
+    };
+    if grids.by_keys.contains_key(&fallback) {
+        fallback
+    } else {
+        requested
+    }
+}
+
 impl WideEpMlaTable {
     /// Construct an empty table for the given data directory. No I/O. Each
     /// perf file is sourced solely from `data_root/<basename>` with no
     /// `kernel_source` filter (pre-shared-layer behaviour).
     pub fn new(data_root: PathBuf, system_spec: SystemSpec) -> Self {
-        Self::with_sources(data_root, system_spec, &SourceResolver::fixed(PerfDbSources::default()))
-            .expect("fixed-map resolution is infallible")
+        Self::with_sources(
+            data_root,
+            system_spec,
+            &SourceResolver::fixed(PerfDbSources::default()),
+        )
+        .expect("fixed-map resolution is infallible")
     }
 
     /// Construct with shared-layer (sibling/cross-version) sources supplied by the
@@ -117,8 +160,10 @@ impl WideEpMlaTable {
         system_spec: SystemSpec,
         resolver: &SourceResolver,
     ) -> Result<Self, AicError> {
-        let context_sources = resolver.sources_for("wideep_context_mla_perf.parquet", &data_root)?;
-        let generation_sources = resolver.sources_for("wideep_generation_mla_perf.parquet", &data_root)?;
+        let context_sources =
+            resolver.sources_for("wideep_context_mla_perf.parquet", &data_root)?;
+        let generation_sources =
+            resolver.sources_for("wideep_generation_mla_perf.parquet", &data_root)?;
         Ok(Self {
             data_root,
             system_spec,
@@ -149,11 +194,14 @@ impl WideEpMlaTable {
         let main_flops = quant_tc_flops(&self.system_spec, fmha_quant.mapping())?;
         let bf16_flops = quant_tc_flops(&self.system_spec, FmhaQuantMode::Bfloat16.mapping())?;
         let grids = self.load_context()?;
-        let key = ContextKey {
-            kernel_source: kernel_source.to_string(),
-            fmha_quant: fmha_quant.name().to_string(),
-            kv_quant: kv_quant.name().to_string(),
-        };
+        let key = resolve_context_key(
+            grids,
+            ContextKey {
+                kernel_source: kernel_source.to_string(),
+                fmha_quant: fmha_quant.name().to_string(),
+                kv_quant: kv_quant.name().to_string(),
+            },
+        );
         let node = grids
             .by_keys
             .get(&key)
@@ -209,10 +257,13 @@ impl WideEpMlaTable {
         let main_flops = quant_tc_flops(&self.system_spec, fmha_quant.mapping())?;
         let bf16_flops = quant_tc_flops(&self.system_spec, FmhaQuantMode::Bfloat16.mapping())?;
         let grids = self.load_generation()?;
-        let key = GenerationKey {
-            kernel_source: kernel_source.to_string(),
-            kv_quant: kv_quant.name().to_string(),
-        };
+        let key = resolve_generation_key(
+            grids,
+            GenerationKey {
+                kernel_source: kernel_source.to_string(),
+                kv_quant: kv_quant.name().to_string(),
+            },
+        );
         let node = grids
             .by_keys
             .get(&key)
@@ -259,11 +310,14 @@ impl WideEpMlaTable {
         fmha_quant: FmhaQuantMode,
     ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
         let grids = self.load_context()?;
-        let key = ContextKey {
-            kernel_source: kernel_source.to_string(),
-            fmha_quant: fmha_quant.name().to_string(),
-            kv_quant: kv_quant.name().to_string(),
-        };
+        let key = resolve_context_key(
+            grids,
+            ContextKey {
+                kernel_source: kernel_source.to_string(),
+                fmha_quant: fmha_quant.name().to_string(),
+                kv_quant: kv_quant.name().to_string(),
+            },
+        );
         let node = grids
             .by_keys
             .get(&key)
@@ -279,10 +333,13 @@ impl WideEpMlaTable {
         kv_quant: KvCacheQuantMode,
     ) -> Result<Vec<(Vec<f64>, f64)>, AicError> {
         let grids = self.load_generation()?;
-        let key = GenerationKey {
-            kernel_source: kernel_source.to_string(),
-            kv_quant: kv_quant.name().to_string(),
-        };
+        let key = resolve_generation_key(
+            grids,
+            GenerationKey {
+                kernel_source: kernel_source.to_string(),
+                kv_quant: kv_quant.name().to_string(),
+            },
+        );
         let node = grids
             .by_keys
             .get(&key)
@@ -662,6 +719,107 @@ mod tests {
             .join("../..")
             .join(format!("src/aiconfigurator_core/systems/{name}.yaml"));
         SystemSpec::load(&systems_yaml).unwrap_or_else(|_| panic!("{name}.yaml must parse"))
+    }
+
+    fn context_key(kernel_source: &str) -> ContextKey {
+        ContextKey {
+            kernel_source: kernel_source.to_string(),
+            fmha_quant: "fp8_block".to_string(),
+            kv_quant: "fp8".to_string(),
+        }
+    }
+
+    fn generation_key(kernel_source: &str) -> GenerationKey {
+        GenerationKey {
+            kernel_source: kernel_source.to_string(),
+            kv_quant: "fp8".to_string(),
+        }
+    }
+
+    #[test]
+    fn wideep_mla_supported_attention_backends_use_trtllm_compatibility_slice() {
+        let context = WideEpContextMlaGrids {
+            by_keys: BTreeMap::from([(context_key("trtllm_mla"), Node::branch())]),
+        };
+        let generation = WideEpGenerationMlaGrids {
+            by_keys: BTreeMap::from([(generation_key("trtllm_mla"), Node::branch())]),
+        };
+
+        for source in ["flashinfer", "fa3"] {
+            assert_eq!(
+                resolve_context_key(&context, context_key(source)),
+                context_key("trtllm_mla")
+            );
+            assert_eq!(
+                resolve_generation_key(&generation, generation_key(source)),
+                generation_key("trtllm_mla")
+            );
+        }
+    }
+
+    #[test]
+    fn wideep_mla_exact_slice_precedes_compatibility_fallback() {
+        let context = WideEpContextMlaGrids {
+            by_keys: BTreeMap::from([
+                (context_key("flashinfer"), Node::branch()),
+                (context_key("trtllm_mla"), Node::branch()),
+            ]),
+        };
+        let generation = WideEpGenerationMlaGrids {
+            by_keys: BTreeMap::from([
+                (generation_key("flashinfer"), Node::branch()),
+                (generation_key("trtllm_mla"), Node::branch()),
+            ]),
+        };
+
+        assert_eq!(
+            resolve_context_key(&context, context_key("flashinfer")),
+            context_key("flashinfer")
+        );
+        assert_eq!(
+            resolve_generation_key(&generation, generation_key("flashinfer")),
+            generation_key("flashinfer")
+        );
+    }
+
+    #[test]
+    fn wideep_mla_missing_compatibility_slice_preserves_requested_key() {
+        let context = WideEpContextMlaGrids {
+            by_keys: BTreeMap::new(),
+        };
+        let generation = WideEpGenerationMlaGrids {
+            by_keys: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            resolve_context_key(&context, context_key("flashinfer")),
+            context_key("flashinfer")
+        );
+        assert_eq!(
+            resolve_generation_key(&generation, generation_key("flashinfer")),
+            generation_key("flashinfer")
+        );
+    }
+
+    #[test]
+    fn wideep_mla_invalid_or_empty_source_never_uses_compatibility_slice() {
+        let context = WideEpContextMlaGrids {
+            by_keys: BTreeMap::from([(context_key("trtllm_mla"), Node::branch())]),
+        };
+        let generation = WideEpGenerationMlaGrids {
+            by_keys: BTreeMap::from([(generation_key("trtllm_mla"), Node::branch())]),
+        };
+
+        for source in ["torch", ""] {
+            assert_eq!(
+                resolve_context_key(&context, context_key(source)),
+                context_key(source)
+            );
+            assert_eq!(
+                resolve_generation_key(&generation, generation_key(source)),
+                generation_key(source)
+            );
+        }
     }
 
     #[test]

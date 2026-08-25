@@ -475,13 +475,14 @@ impl Op {
                 for inner in &op.group_b {
                     total_b = total_b.plus(inner.query(db, ctx)?);
                 }
+                let latency_ms = total_a.latency_ms.max(total_b.latency_ms);
+                let energy_wms = total_a.energy_wms + total_b.energy_wms;
                 let merged = total_a.plus(total_b);
-                Ok(PerformanceResult::with_energy(
-                    total_a.latency_ms.max(total_b.latency_ms),
-                    total_a.energy_wms + total_b.energy_wms,
-                    merged.source,
+                Ok(
+                    PerformanceResult::with_energy(latency_ms, energy_wms, merged.source)
+                        .with_moe_comm_fallbacks(merged.moe_comm_fallbacks)
+                        .clamp_non_negative(),
                 )
-                .clamp_non_negative())
             }
             Op::Fallback(op) => {
                 // Mirrors Python `FallbackOp.query`: try the primary; on
@@ -529,6 +530,7 @@ impl Op {
                             total.energy_wms,
                             total.source,
                         )
+                        .with_moe_comm_fallbacks(total.moe_comm_fallbacks)
                         .clamp_non_negative())
                     }
                     Err(other) => Err(other),
@@ -565,7 +567,8 @@ mod tests {
     /// fp8 query (no fp8 table exists).
     fn one_row_gemm_db() -> (tempfile::TempDir, PerfDatabase) {
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let data = crate::perf_database::energy_test_fixtures::write_energy_systems_root(tmp.path());
+        let data =
+            crate::perf_database::energy_test_fixtures::write_energy_systems_root(tmp.path());
         write_parquet(
             &data.join("gemm_perf.parquet"),
             &[
@@ -635,7 +638,11 @@ mod tests {
         ));
         let r = op.query(&db, &ctx()).expect("query");
         assert!((r.latency_ms - 1.0).abs() < 1e-12);
-        assert_eq!(r.source, Source::Silicon, "zero-valued nested composite must be source-neutral");
+        assert_eq!(
+            r.source,
+            Source::Silicon,
+            "zero-valued nested composite must be source-neutral"
+        );
     }
 
     #[test]
@@ -648,7 +655,11 @@ mod tests {
         ));
         let r = op.query(&db, &ctx()).expect("query");
         assert!((r.latency_ms - 1.0).abs() < 1e-12);
-        assert_eq!(r.source, Source::Silicon, "zero-valued opposite group must be source-neutral");
+        assert_eq!(
+            r.source,
+            Source::Silicon,
+            "zero-valued opposite group must be source-neutral"
+        );
     }
 
     #[test]
@@ -670,4 +681,3 @@ mod tests {
         assert_eq!(r.source, Source::Silicon);
     }
 }
-

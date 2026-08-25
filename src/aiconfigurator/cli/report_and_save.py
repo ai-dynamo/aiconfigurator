@@ -13,6 +13,7 @@ import pandas as pd
 import yaml
 from prettytable import PrettyTable
 
+from aiconfigurator.cli.estimate_detail_report import format_moe_comm_fallback
 from aiconfigurator.generator.api import (
     generate_from_request,
     get_default_dynamo_version_mapping,
@@ -24,6 +25,11 @@ from aiconfigurator.generator.request import from_legacy_params
 from aiconfigurator.logging_utils import _cli_bold, _cli_underline
 from aiconfigurator.sdk import pareto_analysis
 from aiconfigurator.sdk.pareto_analysis import draw_pareto_to_string
+from aiconfigurator.sdk.performance_result import (
+    MOE_COMM_FALLBACKS_COLUMN,
+    merge_moe_comm_fallbacks,
+    moe_comm_fallbacks_to_dicts,
+)
 from aiconfigurator.sdk.picking import WORKER_GPU_DIMS, parallel_dim
 from aiconfigurator.sdk.task_v2 import Task
 from aiconfigurator.sdk.utils import safe_mkdir
@@ -884,15 +890,24 @@ def save_results(
             #    saved as one per_ops_source.json per topN/ subdir below.
             best_config_df = display_best_configs.get(exp_name)  # top n configs
             best_config_per_ops_source: list[dict | None] = []
+            best_config_moe_comm_fallbacks: list[tuple | None] = []
             if best_config_df is not None:
                 if "_per_ops_source" in best_config_df.columns:
                     best_config_per_ops_source = best_config_df["_per_ops_source"].tolist()
-                best_config_df = best_config_df.drop(columns=["_per_ops_source", "_task_key"], errors="ignore")
+                if MOE_COMM_FALLBACKS_COLUMN in best_config_df.columns:
+                    best_config_moe_comm_fallbacks = best_config_df[MOE_COMM_FALLBACKS_COLUMN].tolist()
+                best_config_df = best_config_df.drop(
+                    columns=["_per_ops_source", MOE_COMM_FALLBACKS_COLUMN, "_task_key"],
+                    errors="ignore",
+                )
                 best_config_df.to_csv(os.path.join(exp_dir, "best_config_topn.csv"), index=False)
 
             # 2. Save all pareto dataframe (also stripped of _per_ops_source)
             if pareto_df is not None:
-                pareto_csv_df = pareto_df.drop(columns=["_per_ops_source", "_task_key"], errors="ignore")
+                pareto_csv_df = pareto_df.drop(
+                    columns=["_per_ops_source", MOE_COMM_FALLBACKS_COLUMN, "_task_key"],
+                    errors="ignore",
+                )
                 pareto_csv_df.to_csv(os.path.join(exp_dir, "pareto.csv"), index=False)
 
             # 3. Save the config for this experiment
@@ -1068,6 +1083,23 @@ def save_results(
                         with open(os.path.join(top_config_dir, "per_ops_source.json"), "w") as f:
                             json.dump(best_config_per_ops_source[i], f, indent=2, sort_keys=True)
 
+                    fallback_records = merge_moe_comm_fallbacks(
+                        best_config_moe_comm_fallbacks[i] if i < len(best_config_moe_comm_fallbacks) else ()
+                    )
+                    fallback_payload = moe_comm_fallbacks_to_dicts(fallback_records)
+                    if fallback_payload:
+                        sidecar_path = os.path.join(top_config_dir, "moe_comm_fallbacks.json")
+                        with open(sidecar_path, "w") as f:
+                            json.dump(fallback_payload, f, indent=2, sort_keys=True)
+                        logger.warning(
+                            "%s top%d uses estimated MoE communication latency from substitute silicon data: %s. "
+                            "Requested-versus-measurement provenance saved to %s.",
+                            exp_name,
+                            i + 1,
+                            "; ".join(format_moe_comm_fallback(record) for record in fallback_records),
+                            sidecar_path,
+                        )
+
                     enc_workers = result_df.get("(e)workers", 0)
                     if pd.notna(enc_workers) and enc_workers > 0:
                         logger.warning(
@@ -1080,7 +1112,10 @@ def save_results(
                         )
                         continue
 
-                    result_df = result_df.drop(labels=["_task_key"], errors="ignore")
+                    result_df = result_df.drop(
+                        labels=["_task_key", MOE_COMM_FALLBACKS_COLUMN],
+                        errors="ignore",
+                    )
                     cfg = task_config_to_generator_config(
                         task_config=row_task,
                         result_df=result_df,

@@ -62,8 +62,8 @@ def _dir_is_incomplete(path: str) -> bool:
 # Legacy top-level backend dirs. Family-first layout (Collector V3) treats any
 # other first-level directory under a system dir as a family dir containing
 # <backend>/<version> subtrees. Keep this set textually identical to
-# check_kernel_source.py's _LEGACY_BACKEND_DIRS union _SKIP_BACKEND_DIRS
-# (tools/perf_database/check_kernel_source.py).
+# perf_data_layout.py's LEGACY_BACKEND_DIRS union SKIP_BACKEND_DIRS
+# (tools/perf_database/perf_data_layout.py).
 _LEGACY_BACKEND_DIRS = {"trtllm", "sglang", "vllm"}
 
 # --------------------------------------------------------------------------

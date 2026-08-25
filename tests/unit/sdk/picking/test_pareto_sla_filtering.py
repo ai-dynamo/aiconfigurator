@@ -19,6 +19,7 @@ from aiconfigurator.sdk.pareto_analysis import (
     get_best_configs_under_tpot_constraint,
     get_pareto_front,
 )
+from aiconfigurator.sdk.performance_result import MOE_COMM_FALLBACKS_COLUMN, MoECommFallback
 from aiconfigurator.sdk.picking import pick_default
 
 pytestmark = pytest.mark.unit
@@ -314,3 +315,23 @@ class TestNonStrictPreservesFullPareto:
         frontier = result["pareto_frontier_df"]
         assert len(frontier) == 1, "Strict mode removes TPOT violators from frontier"
         assert (frontier["tpot"] <= 15.0).all()
+
+
+def test_pick_default_preserves_fallback_provenance_in_best_and_pareto_rows() -> None:
+    fallback = MoECommFallback("context", "deepep_ht", 32, 8, 8, 1)
+    df = _make_pareto_df(
+        [
+            {
+                "tpot": 10.0,
+                "ttft": 500.0,
+                "tokens/s/gpu": 800.0,
+                "tokens/s/user": 100.0,
+                MOE_COMM_FALLBACKS_COLUMN: (fallback,),
+            }
+        ]
+    )
+
+    result = pick_default(df, total_gpus=8, serving_mode="agg", target_tpot=15.0)
+
+    assert result["best_config_df"].iloc[0][MOE_COMM_FALLBACKS_COLUMN] == (fallback,)
+    assert result["pareto_frontier_df"].iloc[0][MOE_COMM_FALLBACKS_COLUMN] == (fallback,)

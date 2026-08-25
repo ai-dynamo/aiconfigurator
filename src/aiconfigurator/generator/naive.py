@@ -30,6 +30,8 @@ from aiconfigurator.sdk.utils import (
     get_model_config_from_model_path,
 )
 
+from .utils import msa_sparse_implementation
+
 logger = logging.getLogger(__name__)
 
 _RFC1123_MAX_LEN = 63
@@ -547,6 +549,14 @@ def build_naive_generator_params(
         "fits_in_memory": fits,
         "required_tp": required_tp,
     }
+    # Shared MSA prescription (see utils.msa_sparse_implementation): the
+    # naive entry point must emit the same MiniMax-M3/SM100-family
+    # sparse-attention implementation as the optimized path — otherwise a
+    # naive deployment runs the TRT-LLM default the perf rows do not
+    # represent (PR #1507 review 4969690316).
+    _msa_impl = msa_sparse_implementation(backend_name, model_name, system_name)
+    if _msa_impl is not None:
+        model_config["msa_sparse_implementation"] = _msa_impl
 
     service = _deep_merge_dicts(service, _section_override(overrides, "ServiceConfig"))
     k8s = _deep_merge_dicts(k8s, _section_override(overrides, "K8sConfig"))

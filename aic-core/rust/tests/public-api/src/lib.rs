@@ -4,7 +4,7 @@
 //! Compile-time contract tests from an external crate's point of view.
 
 use aiconfigurator_core::{
-    build_aic_engine, AicEngine, AicEngineBuilder, AicError, BackendKind, ForwardPassPerfModel,
+    AicEngine, AicEngineBuilder, AicError, BackendKind, ForwardPassPerfModel,
     ForwardPassPerfOptions, KvCacheEstimateRequest,
 };
 
@@ -33,31 +33,6 @@ pub fn build_engine(builder: AicEngineBuilder) -> Result<AicEngine, AicError> {
     builder.build()
 }
 
-/// Keep the flat compatibility adapter source-compatible through 0.10. The
-/// function is compiled but not called because it embeds Python and needs
-/// installed model/system data.
-pub fn build_engine_compatibility_adapter() -> Result<AicEngine, AicError> {
-    build_aic_engine(
-        "Qwen/Qwen3-32B",
-        "h200_sxm",
-        "vllm",
-        Some("0.10.2"),
-        2,
-        1,
-        1,
-        None,
-        None,
-        Some("bfloat16"),
-        Some("bfloat16"),
-        Some("bfloat16"),
-        Some("bfloat16"),
-        Some("bfloat16"),
-        0,
-        Some(16),
-        Some("/tmp/systems"),
-    )
-}
-
 /// Compile the forward-pass model's public constructor and telemetry type.
 pub fn regression_model() -> Result<ForwardPassPerfModel, AicError> {
     ForwardPassPerfModel::from_regression(ForwardPassPerfOptions::default())
@@ -72,9 +47,14 @@ pub fn accept_kv_request(request: KvCacheEstimateRequest) -> KvCacheEstimateRequ
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aiconfigurator_core::engine::{Engine, PerOpValue, RuntimeConfig, StaticMode};
     use aiconfigurator_core::{
         ForwardPassMetrics, ENGINE_CONFIG_SCHEMA_VERSION, ENGINE_SPEC_SCHEMA_VERSION, FPM_VERSION,
     };
+
+    type PerOpResult = Result<Vec<PerOpValue>, AicError>;
+    type StaticPerOpResult = Result<(Vec<PerOpValue>, Vec<PerOpValue>), AicError>;
+    type MixedPerOpResult = Result<(Vec<PerOpValue>, Vec<PerOpValue>, Vec<PerOpValue>), AicError>;
 
     #[test]
     fn schema_constants_and_metric_defaults_are_public() {
@@ -109,5 +89,23 @@ mod tests {
     #[test]
     fn regression_constructor_is_environment_independent() {
         let _model = regression_model().expect("construct regression model");
+    }
+
+    #[test]
+    fn per_op_engine_interface_remains_four_field_tuples() {
+        let value: PerOpValue = ("op".to_string(), 1.0, 0.0, "silicon");
+        let (_name, _latency_ms, _energy_wms, _source): (String, f64, f64, &'static str) = value;
+
+        let _: fn(&Engine, &RuntimeConfig, StaticMode, u32) -> StaticPerOpResult =
+            Engine::run_static_per_op;
+        let _: fn(&Engine, u32, u32, u32, u32, u32, f64, f64) -> MixedPerOpResult =
+            Engine::mixed_step_breakdown_per_op;
+        let _: fn(&Engine, u32, u32, u32, f64) -> PerOpResult = Engine::decode_step_per_op;
+        let _: fn(&Engine, &[usize], u32, u32, u32, f64, Option<u32>) -> PerOpResult =
+            Engine::evaluate_context_ops;
+        let _: fn(&Engine, &[usize], u32, u32, f64, u32, Option<u32>) -> PerOpResult =
+            Engine::evaluate_generation_ops;
+        let _: fn(&Engine, &str, bool, u32, u32, u32, f64, Option<u32>) -> PerOpResult =
+            Engine::evaluate_ops_json;
     }
 }

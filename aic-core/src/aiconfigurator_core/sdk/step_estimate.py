@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from aiconfigurator_core.sdk.performance_result import MoECommFallback
+
 
 @dataclass(frozen=True)
 class MixedStepInput:
@@ -40,6 +42,7 @@ class StepEstimate:
     context_tokens: int = 0
     num_decode_requests: int = 0
     num_decode_query_tokens: int = 0
+    moe_comm_fallbacks: tuple[MoECommFallback, ...] = ()
 
     def legacy_tuple(self) -> tuple[float, float, dict[str, float], dict[str, str]]:
         """Return the pre-contract private-helper shape."""

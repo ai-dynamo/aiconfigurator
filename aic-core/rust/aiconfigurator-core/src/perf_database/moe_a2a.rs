@@ -114,9 +114,9 @@ impl MoeA2aTable {
     /// from `perf_db_sources` (Python-supplied). Each perf file falls back to
     /// its primary `data_root/<basename>` when absent from the map. No I/O.
     pub fn with_sources(data_root: PathBuf, resolver: &SourceResolver) -> Result<Self, AicError> {
-        let moe_a2a_sources =
-            resolver.sources_for("moe_a2a_perf.parquet", &data_root)?;
-        let legacy_normal_sources = resolver.sources_for("wideep_deepep_normal_perf.parquet", &data_root)?;
+        let moe_a2a_sources = resolver.sources_for("moe_a2a_perf.parquet", &data_root)?;
+        let legacy_normal_sources =
+            resolver.sources_for("wideep_deepep_normal_perf.parquet", &data_root)?;
         let legacy_ll_sources =
             resolver.sources_for("wideep_deepep_ll_perf.parquet", &data_root)?;
         let legacy_trtllm_alltoall_sources =
@@ -129,6 +129,54 @@ impl MoeA2aTable {
             legacy_trtllm_alltoall_sources,
             grids: OnceLock::new(),
         })
+    }
+
+    /// Whether an exact A2A shape coordinate has at least one collected SM
+    /// curve. Token-axis coverage is deliberately not checked here: an exact
+    /// scale with an incomplete curve must fail at its own interpolation
+    /// boundary rather than silently falling back to another node scale.
+    #[allow(clippy::too_many_arguments)]
+    pub fn has_shape(
+        &self,
+        comm_backend: &str,
+        phase: &str,
+        comm_dtype: &str,
+        ep_size: u32,
+        node_num: u32,
+        hidden_size: u32,
+        topk: u32,
+        num_experts: u32,
+    ) -> Result<bool, AicError> {
+        let grids = self.load()?;
+        let phase_slice = (comm_backend.to_string(), phase.to_string());
+        let Some(dtypes) = grids.dtypes_by_phase.get(&phase_slice) else {
+            return Ok(false);
+        };
+        let used_dtype = if dtypes.contains(comm_dtype) {
+            comm_dtype
+        } else if comm_dtype == "fp8_block" && dtypes.contains("fp8") {
+            "fp8"
+        } else if dtypes.len() == 1 && dtypes.contains("default") {
+            "default"
+        } else {
+            return Ok(false);
+        };
+        let key_at = |sms: u32| MoeA2aKey {
+            comm_backend: comm_backend.to_string(),
+            phase: phase.to_string(),
+            comm_dtype: used_dtype.to_string(),
+            ep_size,
+            node_num,
+            hidden_size,
+            topk,
+            num_experts,
+            sms,
+        };
+        Ok(grids
+            .by_keys
+            .range(key_at(0)..=key_at(u32::MAX))
+            .next()
+            .is_some())
     }
 
     /// Unified MoE all-to-all latency (ms) for one comm phase.
@@ -544,7 +592,9 @@ pub(crate) fn legacy_trtllm_backend(kernel_source: &str) -> Option<&'static str>
 /// low-precision combine kernel gets its own `"fp4"` dtype key (an nvfp4
 /// run's STANDARD combine still keys as `"nvfp4"`). An unmapped op_name skips
 /// the row. Shared with the table view.
-pub(crate) fn legacy_trtllm_phase_dtype(op_name: &str) -> Option<(&'static str, Option<&'static str>)> {
+pub(crate) fn legacy_trtllm_phase_dtype(
+    op_name: &str,
+) -> Option<(&'static str, Option<&'static str>)> {
     match op_name {
         "alltoall_prepare" => Some(("prepare", None)),
         "alltoall_dispatch" => Some(("dispatch", None)),

@@ -408,3 +408,54 @@ def test_real_tree_passes_the_check(mod):
     results = mod.run_checks(REAL_DATA_ROOT, REAL_CATALOG)
     report, failed = mod.render_report(results)
     assert not failed, report
+
+
+# ---------------------------------------------------------------------------
+# R7: attested case plan
+# ---------------------------------------------------------------------------
+
+
+def _meta_with_plan_hash(table: str, *, rows: int, plan_hash: str) -> str:
+    return (
+        "schema_version: 1\n"
+        "runtime:\n"
+        "  framework: trtllm\n"
+        '  version: "1.3.0rc23"\n'
+        "tables:\n"
+        f"  {table}:\n"
+        "    status: complete\n"
+        f"    rows: {rows}\n"
+        f"    case_plan_hash: {plan_hash}\n"
+    )
+
+
+class TestR7AttestedCasePlan:
+    def test_empty_plan_hash_with_rows_fails(self, mod, tmp_path):
+        _touch(tmp_path, "b200_sxm/moe/trtllm/1.3.0rc23/moe_perf.parquet")
+        _write(
+            tmp_path,
+            "b200_sxm/moe/trtllm/1.3.0rc23/collection_meta.yaml",
+            _meta_with_plan_hash("moe_perf", rows=4212, plan_hash=mod.EMPTY_CASE_PLAN_HASH),
+        )
+        failures = mod.check_r7_attested_case_plan(tmp_path, mod.iter_version_dirs(tmp_path))
+        assert len(failures) == 1
+        assert "EMPTY attempted-case set" in failures[0]
+        assert "moe_perf" in failures[0]
+
+    def test_real_plan_hash_with_rows_passes(self, mod, tmp_path):
+        _touch(tmp_path, "b200_sxm/moe/trtllm/1.3.0rc23/moe_perf.parquet")
+        _write(
+            tmp_path,
+            "b200_sxm/moe/trtllm/1.3.0rc23/collection_meta.yaml",
+            _meta_with_plan_hash("moe_perf", rows=4212, plan_hash="sha256:" + "b2" * 32),
+        )
+        assert mod.check_r7_attested_case_plan(tmp_path, mod.iter_version_dirs(tmp_path)) == []
+
+    def test_empty_plan_hash_without_rows_is_not_r7s_problem(self, mod, tmp_path):
+        _touch(tmp_path, "b200_sxm/moe/trtllm/1.3.0rc23/moe_perf.parquet")
+        _write(
+            tmp_path,
+            "b200_sxm/moe/trtllm/1.3.0rc23/collection_meta.yaml",
+            _meta_with_plan_hash("moe_perf", rows=0, plan_hash=mod.EMPTY_CASE_PLAN_HASH),
+        )
+        assert mod.check_r7_attested_case_plan(tmp_path, mod.iter_version_dirs(tmp_path)) == []

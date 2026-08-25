@@ -12,9 +12,9 @@
 //! stride quadrature and the `(nextn + 1)` decode-batch multiplier around it.
 //!
 //! The `Engine` is pure-Rust internals; its PyO3 bindings (`run_static`,
-//! `predict_*_latency`, `mixed_step_latency`, `decode_step_latency`,
-//! `build_aic_engine`) live in [`crate::py`]. The agg sweep is orchestrated in
-//! Python — there is no Rust `run_agg`.
+//! `predict_*_latency`, `mixed_step_latency`, `decode_step_latency`) and the
+//! embedded [`crate::AicEngineBuilder`] live in [`crate::py`]. The agg sweep is
+//! orchestrated in Python — there is no Rust `run_agg`.
 
 use std::sync::Arc;
 
@@ -100,6 +100,16 @@ pub struct StaticResult {
 /// `run_static` / `_run_generation_phase` (the `DEFAULT_STATIC_STRIDE`).
 pub const DEFAULT_STATIC_STRIDE: u32 = 32;
 
+/// Executed MoE communication fallback as it crosses the private FFI:
+/// `(inference_phase, comm_backend, requested_ep, requested_nodes,
+/// measurement_ep, measurement_nodes)`.
+pub(crate) type MoeCommFallbackValue = (&'static str, &'static str, u32, u32, u32, u32);
+
+/// Inline-first fallback metadata for one name-folded op. The first record
+/// lives inline; `additional` allocates only when a second distinct record is
+/// inserted.
+pub(crate) type MoeCommFallbackValues = (MoeCommFallbackValue, Vec<MoeCommFallbackValue>);
+
 /// One evaluated op as it crosses the FFI: `(name, latency_ms, energy_wms,
 /// source)`. Entries are NAME-FOLDED before crossing — repeated names
 /// accumulate with `+=` and sources merge to `"mixed"` on mismatch, the
@@ -108,9 +118,28 @@ pub const DEFAULT_STATIC_STRIDE: u32 = 32;
 /// because streaming the raw ops × stride-steps tuples through pyo3
 /// measurably slowed the engine step on per-block puzzle nets (hundreds of
 /// String allocations + Python tuple constructions per call). `source` is
-/// the provenance tag (`silicon|empirical|sol|estimated|mixed`). A plain
-/// tuple so pyo3 converts to `list[tuple[str, float, float, str]]`.
+/// the provenance tag (`silicon|empirical|sol|estimated|mixed`).
 pub type PerOpValue = (String, f64, f64, &'static str);
+
+/// Internal per-op value used by the provenance-aware engine walk. The fifth
+/// field is `None` or `(first_record, additional_records)` in deterministic
+/// encounter order; public Rust and Python methods strip it and retain their
+/// documented four-tuple contract.
+pub(crate) type PerOpValueWithMetadata = (
+    String,
+    f64,
+    f64,
+    &'static str,
+    Option<MoeCommFallbackValues>,
+);
+
+/// Per-op values for the shared, context-attention, and decode-attention
+/// buckets returned by the metadata-bearing mixed-step evaluation.
+pub(crate) type MixedStepPerOpValuesWithMetadata = (
+    Vec<PerOpValueWithMetadata>,
+    Vec<PerOpValueWithMetadata>,
+    Vec<PerOpValueWithMetadata>,
+);
 
 /// One SOL-decomposed per-op value: `(name, sol_time_ms, sol_math_ms,
 /// sol_mem_ms)`, mirroring Python's SOL_FULL triple `(sol_time, sol_math,
@@ -125,30 +154,90 @@ pub type PerOpSolValue = (String, f64, f64, f64);
 /// order is preserved (mirrors Python dict insertion order). Linear scan on
 /// purpose: unique-name counts are a few dozen (per-block families repeat
 /// names), far below where a map would win.
-#[derive(Default)]
 struct PerOpFold {
-    entries: Vec<PerOpValue>,
+    inference_phase: &'static str,
+    entries: Vec<PerOpValueWithMetadata>,
+}
+
+fn insert_per_op_fallback(
+    fallbacks: &mut Option<MoeCommFallbackValues>,
+    fallback: MoeCommFallbackValue,
+) {
+    match fallbacks {
+        None => *fallbacks = Some((fallback, Vec::new())),
+        Some((first, additional)) if *first == fallback || additional.contains(&fallback) => {}
+        Some((_first, additional)) => additional.push(fallback),
+    }
+}
+
+fn extend_per_op_fallbacks(
+    fallbacks: &mut Option<MoeCommFallbackValues>,
+    other: Option<MoeCommFallbackValues>,
+) {
+    let Some((first, additional)) = other else {
+        return;
+    };
+    insert_per_op_fallback(fallbacks, first);
+    for fallback in additional {
+        insert_per_op_fallback(fallbacks, fallback);
+    }
 }
 
 impl PerOpFold {
+    fn new(inference_phase: &'static str) -> Self {
+        Self {
+            inference_phase,
+            entries: Vec::new(),
+        }
+    }
+
     fn add(&mut self, op: &Op, r: PerformanceResult) {
         let name = op.name();
         let source = r.source.as_str();
+        let mut fallbacks = None;
+        for fallback in r.moe_comm_fallbacks.iter() {
+            insert_per_op_fallback(
+                &mut fallbacks,
+                (
+                    self.inference_phase,
+                    fallback.comm_backend,
+                    fallback.requested_ep_size,
+                    fallback.requested_node_num,
+                    fallback.measurement_ep_size,
+                    fallback.measurement_node_num,
+                ),
+            );
+        }
         if let Some(entry) = self.entries.iter_mut().find(|e| e.0 == name) {
             entry.1 += r.latency_ms;
             entry.2 += r.energy_wms;
             if entry.3 != source {
                 entry.3 = "mixed";
             }
+            extend_per_op_fallbacks(&mut entry.4, fallbacks);
             return;
         }
-        self.entries
-            .push((name.to_string(), r.latency_ms, r.energy_wms, source));
+        self.entries.push((
+            name.to_string(),
+            r.latency_ms,
+            r.energy_wms,
+            source,
+            fallbacks,
+        ));
     }
 
-    fn into_values(self) -> Vec<PerOpValue> {
+    fn into_values(self) -> Vec<PerOpValueWithMetadata> {
         self.entries
     }
+}
+
+fn strip_per_op_metadata(entries: Vec<PerOpValueWithMetadata>) -> Vec<PerOpValue> {
+    entries
+        .into_iter()
+        .map(|(name, latency_ms, energy_wms, source, _fallbacks)| {
+            (name, latency_ms, energy_wms, source)
+        })
+        .collect()
 }
 
 /// Name-folding accumulator for [`PerOpSolValue`] streams (fold semantics of
@@ -167,7 +256,7 @@ impl PerOpSolFold {
             // contribution is exact, not a coverage gap.
             None if r.latency_ms == 0.0 && r.energy_wms == 0.0 => (0.0, 0.0),
             None => {
-                return Err(AicError::InvalidEngineConfig(format!(
+                return Err(AicError::SolNotImplemented(format!(
                     "evaluate_ops_sol_json: op '{}' has no SOL decomposition \
                      (family not exported yet — see PerformanceResult::sol)",
                     op.name()
@@ -233,7 +322,7 @@ impl Engine {
     /// Build an `Engine` from a spec and a pre-loaded database.
     ///
     /// Extracts the op lists and the `nextn` scalar from `spec.engine`. The
-    /// caller (`build_aic_engine` / `from_spec_bytes`) is responsible for
+    /// caller (`AicEngineBuilder` / `from_spec_bytes`) is responsible for
     /// having loaded the matching `PerfDatabase` from `spec.engine`'s identity.
     pub fn build(spec: EngineSpec, db: Arc<PerfDatabase>) -> Result<Engine, AicError> {
         let nextn = spec
@@ -508,6 +597,7 @@ impl Engine {
                         if entry.1.source != r.source {
                             entry.1.source = crate::operators::base::Source::Mixed;
                         }
+                        entry.1.moe_comm_fallbacks.extend(r.moe_comm_fallbacks);
                     } else {
                         step_fold.push((op, r));
                     }
@@ -912,7 +1002,32 @@ impl Engine {
         mode: StaticMode,
         stride: u32,
     ) -> Result<(Vec<PerOpValue>, Vec<PerOpValue>), AicError> {
-        let mut context = PerOpFold::default();
+        let (context, generation) = self.run_static_per_op_impl(runtime, mode, stride)?;
+        Ok((
+            strip_per_op_metadata(context),
+            strip_per_op_metadata(generation),
+        ))
+    }
+
+    /// Metadata-bearing counterpart used only by the private PyO3 provenance
+    /// endpoint. Evaluation stays in this single implementation so the value
+    /// and its fallback records always come from the same query.
+    pub(crate) fn run_static_per_op_with_metadata(
+        &self,
+        runtime: &RuntimeConfig,
+        mode: StaticMode,
+        stride: u32,
+    ) -> Result<(Vec<PerOpValueWithMetadata>, Vec<PerOpValueWithMetadata>), AicError> {
+        self.run_static_per_op_impl(runtime, mode, stride)
+    }
+
+    fn run_static_per_op_impl(
+        &self,
+        runtime: &RuntimeConfig,
+        mode: StaticMode,
+        stride: u32,
+    ) -> Result<(Vec<PerOpValueWithMetadata>, Vec<PerOpValueWithMetadata>), AicError> {
+        let mut context = PerOpFold::new("context");
         if matches!(mode, StaticMode::Context | StaticMode::Both) {
             if runtime.prefix >= runtime.isl {
                 return Err(AicError::InvalidEngineConfig(format!(
@@ -931,7 +1046,7 @@ impl Engine {
                 |op, r| context.add(op, r),
             )?;
         }
-        let mut generation = PerOpFold::default();
+        let mut generation = PerOpFold::new("generation");
         if matches!(mode, StaticMode::Generation | StaticMode::Both) {
             self.run_generation_phase_with(runtime, stride, |op, r| generation.add(op, r))?;
         }
@@ -953,6 +1068,57 @@ impl Engine {
         seq_imbalance_correction_scale: f64,
         gen_seq_imbalance_correction_scale: f64,
     ) -> Result<(Vec<PerOpValue>, Vec<PerOpValue>, Vec<PerOpValue>), AicError> {
+        let (shared, context_attention, decode_attention) = self.mixed_step_breakdown_per_op_impl(
+            ctx_tokens,
+            gen_tokens,
+            isl,
+            osl,
+            prefix,
+            seq_imbalance_correction_scale,
+            gen_seq_imbalance_correction_scale,
+        )?;
+        Ok((
+            strip_per_op_metadata(shared),
+            strip_per_op_metadata(context_attention),
+            strip_per_op_metadata(decode_attention),
+        ))
+    }
+
+    /// Metadata-bearing counterpart used only by the private PyO3 provenance
+    /// endpoint. See [`Self::mixed_step_breakdown_per_op`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn mixed_step_breakdown_per_op_with_metadata(
+        &self,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> Result<MixedStepPerOpValuesWithMetadata, AicError> {
+        self.mixed_step_breakdown_per_op_impl(
+            ctx_tokens,
+            gen_tokens,
+            isl,
+            osl,
+            prefix,
+            seq_imbalance_correction_scale,
+            gen_seq_imbalance_correction_scale,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mixed_step_breakdown_per_op_impl(
+        &self,
+        ctx_tokens: u32,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        prefix: u32,
+        seq_imbalance_correction_scale: f64,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> Result<MixedStepPerOpValuesWithMetadata, AicError> {
         // Whole-model FPM: never the name-filtered three-pass split (see
         // mixed_step_breakdown_with). Report the scalar path's component
         // mapping as per-op entries — the prefill component under the
@@ -969,19 +1135,25 @@ impl Engine {
                 osl.max(1),
                 prefix,
             )?;
-            let mut shared: Vec<PerOpValue> = Vec::new();
+            let mut shared: Vec<PerOpValueWithMetadata> = Vec::new();
             if ctx_tokens > 0 {
-                shared.push((prefill_op.name.clone(), prefill_ms, 0.0, "silicon"));
+                shared.push((prefill_op.name.clone(), prefill_ms, 0.0, "silicon", None));
             }
-            let mut dec_attn: Vec<PerOpValue> = Vec::new();
+            let mut dec_attn: Vec<PerOpValueWithMetadata> = Vec::new();
             if gen_tokens > 0 {
-                dec_attn.push((decode_op.name.clone(), marginal_decode_ms, 0.0, "silicon"));
+                dec_attn.push((
+                    decode_op.name.clone(),
+                    marginal_decode_ms,
+                    0.0,
+                    "silicon",
+                    None,
+                ));
             }
             return Ok((shared, Vec::new(), dec_attn));
         }
-        let mut shared = PerOpFold::default();
-        let mut ctx_attn = PerOpFold::default();
-        let mut dec_attn = PerOpFold::default();
+        let mut shared = PerOpFold::new("context");
+        let mut ctx_attn = PerOpFold::new("context");
+        let mut dec_attn = PerOpFold::new("generation");
         self.mixed_step_breakdown_with(
             ctx_tokens,
             gen_tokens,
@@ -1021,7 +1193,30 @@ impl Engine {
         osl: u32,
         gen_seq_imbalance_correction_scale: f64,
     ) -> Result<Vec<PerOpValue>, AicError> {
-        let mut out = PerOpFold::default();
+        self.decode_step_per_op_impl(gen_tokens, isl, osl, gen_seq_imbalance_correction_scale)
+            .map(strip_per_op_metadata)
+    }
+
+    /// Metadata-bearing counterpart used only by the private PyO3 provenance
+    /// endpoint. See [`Self::decode_step_per_op`].
+    pub(crate) fn decode_step_per_op_with_metadata(
+        &self,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> Result<Vec<PerOpValueWithMetadata>, AicError> {
+        self.decode_step_per_op_impl(gen_tokens, isl, osl, gen_seq_imbalance_correction_scale)
+    }
+
+    fn decode_step_per_op_impl(
+        &self,
+        gen_tokens: u32,
+        isl: u32,
+        osl: u32,
+        gen_seq_imbalance_correction_scale: f64,
+    ) -> Result<Vec<PerOpValueWithMetadata>, AicError> {
+        let mut out = PerOpFold::new("generation");
         if gen_tokens == 0 {
             return Ok(out.into_values());
         }
@@ -1054,7 +1249,7 @@ impl Engine {
         seq_imbalance_correction_scale: f64,
         x_override: Option<u32>,
     ) -> Result<Vec<PerOpValue>, AicError> {
-        let mut out = PerOpFold::default();
+        let mut out = PerOpFold::new("context");
         for &i in indices {
             let op = self.context_ops.get(i).ok_or_else(|| {
                 AicError::InvalidEngineConfig(format!(
@@ -1073,7 +1268,7 @@ impl Engine {
             )?;
             out.add(op, r);
         }
-        Ok(out.into_values())
+        Ok(strip_per_op_metadata(out.into_values()))
     }
 
     /// Evaluate an index-addressed sublist of the compiled GENERATION op list
@@ -1088,7 +1283,7 @@ impl Engine {
         prefix: u32,
         x_override: Option<u32>,
     ) -> Result<Vec<PerOpValue>, AicError> {
-        let mut out = PerOpFold::default();
+        let mut out = PerOpFold::new("generation");
         for &i in indices {
             let op = self.generation_ops.get(i).ok_or_else(|| {
                 AicError::InvalidEngineConfig(format!(
@@ -1108,7 +1303,7 @@ impl Engine {
             )?;
             out.add(op, r);
         }
-        Ok(out.into_values())
+        Ok(strip_per_op_metadata(out.into_values()))
     }
 
     /// Evaluate an ad-hoc op list (a JSON array of `OpSpec` objects, the same
@@ -1129,7 +1324,7 @@ impl Engine {
         let ops: Vec<Op> = serde_json::from_str(ops_json).map_err(|e| {
             AicError::InvalidEngineConfig(format!("evaluate_ops_json: invalid op list JSON: {e}"))
         })?;
-        let mut out = PerOpFold::default();
+        let mut out = PerOpFold::new(if is_context { "context" } else { "generation" });
         for op in &ops {
             let r = if is_context {
                 query_context_op(
@@ -1155,7 +1350,7 @@ impl Engine {
             };
             out.add(op, r);
         }
-        Ok(out.into_values())
+        Ok(strip_per_op_metadata(out.into_values()))
     }
 
     /// [`Self::evaluate_ops_json`] under the SOL_FULL view: evaluate an
@@ -1385,7 +1580,9 @@ mod tests {
     use crate::common::enums::{FmhaQuantMode, GemmQuantMode, KvCacheQuantMode};
     use crate::engine::spec::EngineSpec;
     use crate::operators::op::Op;
-    use crate::operators::{ContextAttentionOp, ElementwiseOp, GemmOp, GenerationAttentionOp};
+    use crate::operators::{
+        ContextAttentionOp, ElementwiseOp, GemmOp, GenerationAttentionOp, MoeAllToAllOp,
+    };
     use crate::{BackendKind, EngineConfig, ParallelMapping, QuantizationConfig};
 
     fn systems_root() -> PathBuf {
@@ -1505,6 +1702,145 @@ mod tests {
             osl,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn per_op_fold_attaches_the_inference_phase_only_to_executed_fallbacks() {
+        use crate::operators::base::{MoeCommFallback, Source};
+
+        let op = context_ops().remove(0);
+        let fallback = MoeCommFallback {
+            comm_backend: "deepep_ht",
+            requested_ep_size: 32,
+            requested_node_num: 8,
+            measurement_ep_size: 8,
+            measurement_node_num: 1,
+        };
+        for inference_phase in ["context", "generation"] {
+            let mut fold = PerOpFold::new(inference_phase);
+            fold.add(
+                &op,
+                PerformanceResult::new(1.0, Source::Estimated).with_moe_comm_fallback(fallback),
+            );
+            assert_eq!(
+                fold.into_values()[0].4,
+                Some(((inference_phase, "deepep_ht", 32, 8, 8, 1), vec![]))
+            );
+        }
+
+        let mut repeated_name = PerOpFold::new("context");
+        repeated_name.add(
+            &op,
+            PerformanceResult::new(1.0, Source::Estimated).with_moe_comm_fallback(fallback),
+        );
+        repeated_name.add(
+            &op,
+            PerformanceResult::new(1.0, Source::Estimated).with_moe_comm_fallback(
+                MoeCommFallback {
+                    comm_backend: "deepep_ll",
+                    ..fallback
+                },
+            ),
+        );
+        assert_eq!(
+            repeated_name.into_values()[0].4,
+            Some((
+                ("context", "deepep_ht", 32, 8, 8, 1),
+                vec![("context", "deepep_ll", 32, 8, 8, 1)],
+            ))
+        );
+
+        let mut exact = PerOpFold::new("context");
+        exact.add(&op, PerformanceResult::new(1.0, Source::Silicon));
+        assert_eq!(exact.into_values()[0].4, None);
+    }
+
+    #[test]
+    fn per_op_fold_allocates_additional_storage_only_for_distinct_fallbacks_after_the_first() {
+        use crate::operators::base::{MoeCommFallback, Source};
+
+        let op = context_ops().remove(0);
+        let ht = MoeCommFallback {
+            comm_backend: "deepep_ht",
+            requested_ep_size: 32,
+            requested_node_num: 8,
+            measurement_ep_size: 8,
+            measurement_node_num: 1,
+        };
+        let ll = MoeCommFallback {
+            comm_backend: "deepep_ll",
+            ..ht
+        };
+
+        let mut empty = PerOpFold::new("context");
+        empty.add(&op, PerformanceResult::new(1.0, Source::Silicon));
+        assert!(empty.into_values().pop().unwrap().4.is_none());
+
+        let mut single = PerOpFold::new("context");
+        single.add(
+            &op,
+            PerformanceResult::new(1.0, Source::Estimated).with_moe_comm_fallback(ht),
+        );
+        let (first, additional) = single.into_values().pop().unwrap().4.unwrap();
+        assert_eq!(first, ("context", "deepep_ht", 32, 8, 8, 1));
+        assert_eq!(additional.capacity(), 0);
+
+        let mut multiple = PerOpFold::new("generation");
+        for fallback in [ht, ht, ll, ll] {
+            multiple.add(
+                &op,
+                PerformanceResult::new(1.0, Source::Estimated).with_moe_comm_fallback(fallback),
+            );
+        }
+        let (first, additional) = multiple.into_values().pop().unwrap().4.unwrap();
+        assert_eq!(first, ("generation", "deepep_ht", 32, 8, 8, 1));
+        assert_eq!(additional, vec![("generation", "deepep_ll", 32, 8, 8, 1)]);
+    }
+
+    #[test]
+    fn generation_step_preserves_distinct_same_name_deepep_fallbacks() {
+        let mut config = fixture_engine_config(None);
+        config.system_name = "gb200".to_string();
+        config.backend = BackendKind::Sglang;
+        config.backend_version = Some("0.5.16".to_string());
+
+        let a2a = |moe_ep_size, node_num| {
+            Op::MoeAllToAll(MoeAllToAllOp {
+                name: "generation_moe_dispatch".to_string(),
+                scale_factor: 1.0,
+                phase: "dispatch".to_string(),
+                comm_backend: "deepep_ll".to_string(),
+                comm_dtype: "default".to_string(),
+                hidden_size: 7168,
+                topk: 8,
+                num_experts: 256,
+                moe_ep_size,
+                node_num,
+                sms: 0,
+                attention_tp_size: 1,
+            })
+        };
+        let spec = EngineSpec::new(config, Vec::new(), vec![a2a(32, 8), a2a(64, 16)]);
+        let engine = Engine::from_spec_bytes(&spec.to_bincode().unwrap(), &systems_root())
+            .expect("shipped GB200 SGLang DeepEP data must load");
+        let runtime = RuntimeConfig {
+            batch_size: 1,
+            isl: 1024,
+            osl: 2,
+            ..Default::default()
+        };
+
+        let (_, generation) = engine
+            .run_static_per_op_with_metadata(&runtime, StaticMode::Generation, 32)
+            .unwrap();
+        assert_eq!(generation.len(), 1, "same-name ops must remain name-folded");
+        assert_eq!(
+            generation[0].4,
+            Some((
+                ("generation", "deepep_ll", 32, 8, 8, 1),
+                vec![("generation", "deepep_ll", 64, 16, 8, 1)],
+            ))
+        );
     }
 
     #[test]
@@ -1660,10 +1996,17 @@ mod tests {
     /// prefill], generation = [FpmForward decode], empty sol_ops (grid-exact
     /// queries never call SOL).
     fn build_fpm_engine(tmp: &std::path::Path, nextn: Option<u32>) -> Result<Engine, AicError> {
-        use crate::perf_database::fpm_forward::tests::{default_identity, default_rows, write_pair};
+        use crate::perf_database::fpm_forward::tests::{
+            default_identity, default_rows, write_pair,
+        };
         write_pair(tmp, &default_rows());
         let mut db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
-        db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(tmp.to_path_buf(), "b200_sxm", "vllm", "0.25.1"));
+        db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(
+            tmp.to_path_buf(),
+            "b200_sxm",
+            "vllm",
+            "0.25.1",
+        ));
         let fpm_op = |phase: FpmPhase| {
             Op::FpmForward(FpmForwardOp {
                 name: format!("fpm_forward_{}", phase.as_str()),
@@ -1721,7 +2064,9 @@ mod tests {
         // gen: batch 8; osl=0 clamps to 1 -> isl' = 2048, one step at
         // s = 2049 -> kv = 8*2049 = 16392: lerp between (8,4096)->7.0 and
         // (8,65536)->9.0, minus baseline (8, kv_floor=8) -> 6.0.
-        let ms = engine.mixed_step_latency(2048, 8, 2048, 0, 0, 1.0, 1.0).unwrap();
+        let ms = engine
+            .mixed_step_latency(2048, 8, 2048, 0, 0, 1.0, 1.0)
+            .unwrap();
         let pre = 20.0 + (40.0 - 20.0) * (2056.0 - 2048.0) / (4096.0 - 2048.0);
         let w = (16392.0 - 4096.0) / (65536.0 - 4096.0);
         let decode = 7.0 + (9.0 - 7.0) * w;
@@ -1738,7 +2083,12 @@ mod tests {
         use crate::perf_database::fpm_forward::tests::{default_identity, write_pair};
         write_pair(tmp, rows);
         let mut db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
-        db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(tmp.to_path_buf(), "b200_sxm", "vllm", "0.25.1"));
+        db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(
+            tmp.to_path_buf(),
+            "b200_sxm",
+            "vllm",
+            "0.25.1",
+        ));
         let fpm_op = |phase: FpmPhase| {
             Op::FpmForward(FpmForwardOp {
                 name: format!("fpm_forward_{}", phase.as_str()),
@@ -1789,11 +2139,23 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let engine = build_fpm_engine_with_rows(tmp.path(), &cliff_rows()).unwrap();
         // In-graph: pure prefill step, totals (1, 2048, 0) -> exact 47.0.
-        let graph = engine.mixed_step_breakdown(2048, 0, 2048, 0, 0, 1.0, 1.0).unwrap();
-        assert!((graph[1] - 47.0).abs() < 1e-9, "graph-side prefill {}", graph[1]);
+        let graph = engine
+            .mixed_step_breakdown(2048, 0, 2048, 0, 0, 1.0, 1.0)
+            .unwrap();
+        assert!(
+            (graph[1] - 47.0).abs() < 1e-9,
+            "graph-side prefill {}",
+            graph[1]
+        );
         // Crossing: 8 decode riders push the total to 2056 -> eager plateau.
-        let eager = engine.mixed_step_breakdown(2048, 8, 2048, 0, 0, 1.0, 1.0).unwrap();
-        assert!((eager[1] - 99.0).abs() < 1e-9, "eager-side prefill {}", eager[1]);
+        let eager = engine
+            .mixed_step_breakdown(2048, 8, 2048, 0, 0, 1.0, 1.0)
+            .unwrap();
+        assert!(
+            (eager[1] - 99.0).abs() < 1e-9,
+            "eager-side prefill {}",
+            eager[1]
+        );
         assert!(eager[1] > graph[1] * 2.0 - 1e-9);
     }
 
@@ -1805,7 +2167,9 @@ mod tests {
         let engine = build_fpm_engine_with_rows(tmp.path(), &cliff_rows()).unwrap();
         // ctx=1024 of isl=2048: chunk 1 -> (1, 1032, 0) = 10.0,
         // chunk 2 -> (1, 1032, 1024) = 14.0; average 12.0.
-        let parts = engine.mixed_step_breakdown(1024, 8, 2048, 0, 0, 1.0, 1.0).unwrap();
+        let parts = engine
+            .mixed_step_breakdown(1024, 8, 2048, 0, 0, 1.0, 1.0)
+            .unwrap();
         assert!((parts[1] - 12.0).abs() < 1e-9, "chunk average {}", parts[1]);
     }
 
@@ -1820,7 +2184,9 @@ mod tests {
         let ms = engine.decode_step_latency(8, 511, 0, 1.0).unwrap();
         assert!((ms - 7.0).abs() < 1e-12, "got {ms}");
         // mixed with ctx_tokens=0 must agree with the genonly convention
-        let mixed = engine.mixed_step_latency(0, 8, 511, 0, 0, 1.0, 1.0).unwrap();
+        let mixed = engine
+            .mixed_step_latency(0, 8, 511, 0, 0, 1.0, 1.0)
+            .unwrap();
         assert!((mixed - 7.0).abs() < 1e-12, "got {mixed}");
         assert_eq!(engine.decode_step_latency(0, 511, 0, 1.0).unwrap(), 0.0);
     }
@@ -1929,7 +2295,8 @@ mod tests {
         let spec = EngineSpec::new(fixture_engine_config(None), vec![hidden], generation_ops());
         let err = Engine::build(spec, Arc::new(db)).unwrap_err();
         assert!(
-            err.to_string().contains("exactly one FpmForward op per phase"),
+            err.to_string()
+                .contains("exactly one FpmForward op per phase"),
             "{err}"
         );
     }
@@ -2023,7 +2390,11 @@ mod tests {
         let math = 2.0 * m * n * k / tc_flops * 1000.0;
         let mem = quant.mapping().memory * (m * n + m * k + n * k) / spec.gpu.mem_bw * 1000.0;
         let gemm = &sol[1];
-        assert!((gemm.2 - math).abs() < 1e-12, "sol_math {} != {math}", gemm.2);
+        assert!(
+            (gemm.2 - math).abs() < 1e-12,
+            "sol_math {} != {math}",
+            gemm.2
+        );
         assert!((gemm.3 - mem).abs() < 1e-12, "sol_mem {} != {mem}", gemm.3);
     }
 
@@ -2058,8 +2429,7 @@ mod tests {
         assert_eq!(sol.len(), 1);
 
         let dims = dsa_dims(&op.architecture);
-        let flops =
-            dsa_context_sol_flops(spec, op.gemm_quant_mode, op.fmha_quant_mode).unwrap();
+        let flops = dsa_context_sol_flops(spec, op.gemm_quant_mode, op.fmha_quant_mode).unwrap();
         let leaf = |skip: bool| {
             dsa_context_sol(
                 spec,
@@ -2081,9 +2451,18 @@ mod tests {
         let expected_mem = w * full.mem_ms + (1.0 - w) * skip.mem_ms;
         let expected_time = w * full.time_ms() + (1.0 - w) * skip.time_ms();
         let (_, sol_time, sol_math, sol_mem) = &sol[0];
-        assert!((sol_time - expected_time).abs() < 1e-12, "{sol_time} vs {expected_time}");
-        assert!((sol_math - expected_math).abs() < 1e-12, "{sol_math} vs {expected_math}");
-        assert!((sol_mem - expected_mem).abs() < 1e-12, "{sol_mem} vs {expected_mem}");
+        assert!(
+            (sol_time - expected_time).abs() < 1e-12,
+            "{sol_time} vs {expected_time}"
+        );
+        assert!(
+            (sol_math - expected_math).abs() < 1e-12,
+            "{sol_math} vs {expected_math}"
+        );
+        assert!(
+            (sol_mem - expected_mem).abs() < 1e-12,
+            "{sol_mem} vs {expected_mem}"
+        );
         // The skip leaf must actually differ from the full leaf, or this
         // test would pass vacuously on a broken blend.
         assert!(skip.time_ms() < full.time_ms());
@@ -2150,6 +2529,7 @@ mod tests {
         let err = engine
             .evaluate_ops_sol_json(&ops_json, true, 1, 128, 0, 1.0, None)
             .unwrap_err();
+        assert!(matches!(&err, AicError::SolNotImplemented(_)));
         assert!(
             err.to_string().contains("no SOL decomposition"),
             "unexpected error: {err}"

@@ -1076,7 +1076,7 @@ def _cp_static_ctx_ms(case: EngineStepParityCase) -> float:
         prefix=case.prefix,
         engine_step_backend="rust",
     )
-    ctx_lat, _ctx_e, _gen_lat, _gen_e, _ctx_src, _gen_src = _quiet_call(
+    ctx_lat, _ctx_e, _gen_lat, _gen_e, _ctx_src, _gen_src, _fallbacks = _quiet_call(
         backend._run_static_breakdown, model, database, runtime_config, "static_ctx", 1
     )
     return float(sum(ctx_lat.values()))

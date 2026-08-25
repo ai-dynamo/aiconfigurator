@@ -17,4 +17,7 @@ tables:
     # marlin_moe_wna16 does NOT have the Hopper EP>1 crash that blocks
     # the sglang 0.5.14 marlin lane. Same 3 classified moe_tp=32 marlin
     # tile-limit failures ("Invalid thread config") as every other system.
+    # 2026-08-09: appended 1053 MiniMax-M3 MoE shape rows (6144/3072, 128x4,
+    # bf16, vllm_unquantizedfusedmoe_triton_tritonexperts; model-filtered
+    # internal collection CI run, zero failures).
     status: complete

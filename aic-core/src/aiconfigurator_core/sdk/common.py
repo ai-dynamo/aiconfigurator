@@ -321,6 +321,8 @@ DEEPSEEK_V4_HF_MODELS = frozenset(
         "deepseek-ai/DeepSeek-V4-Pro",
         "sgl-project/DeepSeek-V4-Flash-FP8",
         "sgl-project/DeepSeek-V4-Pro-FP8",
+        "nvidia/DeepSeek-V4-Flash-NVFP4",
+        "nvidia/DeepSeek-V4-Pro-NVFP4",
     }
 )
 
@@ -542,6 +544,8 @@ DefaultHFModels = {
     # Kimi K3
     "moonshotai/Kimi-K3",
     "nvidia/Kimi-K2.5-NVFP4",
+    "nvidia/Kimi-K2.6-NVFP4",
+    "nvidia/Kimi-K2.7-Code-NVFP4",
     # DeepSeek V3.2 / GLM-5 (DEEPSEEKV32 family)
     "deepseek-ai/DeepSeek-V3.2",
     "nvidia/DeepSeek-V3.2-NVFP4",
@@ -582,6 +586,7 @@ DefaultHFModels = {
     "MiniMaxAI/MiniMax-M2.7",
     "nvidia/MiniMax-M2.7-NVFP4",
     "MiniMaxAI/MiniMax-M3",
+    "nvidia/MiniMax-M3-NVFP4",
     # GPT-OSS Models
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
@@ -592,12 +597,18 @@ DefaultHFModels = {
     "Qwen/Qwen3.5-27B",
     "Qwen/Qwen3.5-35B-A3B",
     "Qwen/Qwen3.5-397B-A17B",
+    "nvidia/Qwen3.5-122B-A10B-NVFP4",
+    "nvidia/Qwen3.5-397B-A17B-NVFP4",
+    # Qwen 3.6 Models
+    "nvidia/Qwen3.6-27B-NVFP4",
+    "nvidia/Qwen3.6-35B-A3B-NVFP4",
     # MiMo Models
     "XiaomiMiMo/MiMo-V2-Flash",
     "XiaomiMiMo/MiMo-7B-Base",
     # NVIDIA Nemotron
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
     "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
@@ -609,6 +620,8 @@ DefaultHFModels = {
     # StepFun Step-3.7 Models
     "stepfun-ai/Step-3.7-Flash",
     "stepfun-ai/Step-3.7-Flash-FP8",
+    "nvidia/Gemma-4-26B-A4B-NVFP4",
+    "nvidia/Gemma-4-31B-IT-NVFP4",
 }
 
 # Bundled model configs and the default support-matrix roster intentionally have
@@ -1158,6 +1171,9 @@ class PerfDataFilename(Enum):
     # NOTE: GLM-5.2 skip-indexer (reuse-layer) rows live in the SAME
     # dsa_*_module file, tagged by the op_name column; the loader splits them
     # via op_kind="full"/"skip" — no separate filename needed here.
+    # MiniMax MSA modules share the DSA-module row schema (see operations/msa.py).
+    msa_context_module = "msa_context_module_perf.parquet"
+    msa_generation_module = "msa_generation_module_perf.parquet"
     mhc_module = "mhc_module_perf.parquet"
     # DeepSeek-V4 module-level data — one file per (attn_kind ∈ {csa, hca},
     # mode ∈ {context, generation}) = 4 files. Each file contains all
@@ -1214,6 +1230,9 @@ class GEMMQuantMode(Enum):
     )  # in future, should deprecate this mode as it's specific for trtllm trt backend
     nvfp4 = QuantMapping(9 / 16, 4, "nvfp4", "fp4")  # nvfp4 on blackwell. 1 fp8 scale per 16 nvfp4 weights.
     nvfp4_wo = QuantMapping(9 / 16, 1, "nvfp4_wo", "bfloat16")  # nvfp4 sw dequant to bf16 (non-Blackwell)
+    w4a16_nvfp4 = QuantMapping(
+        9 / 16, 1, "w4a16_nvfp4", "bfloat16"
+    )  # NVFP4 weights + 1 fp8 scale per 16 weights, dequantized into the bf16 MMA lane.
 
 
 class MoEQuantMode(Enum):
@@ -1243,6 +1262,8 @@ class MoEQuantMode(Enum):
     # (cutlass_fused_moe(use_w4_group_scaling=True)) -- MXFP4 weights x BF16
     # activations (weight-only). Distinct backend from w4a16_mxfp4 above, which is
     # GPT-OSS's triton_kernels mxfp4 path. (DSV4 Hopper silicon data pending.)
+    w4a16_nvfp4 = QuantMapping(9 / 16, 1, "w4a16_nvfp4", "bfloat16")
+    # Scale-aware NVFP4 weights dequantized into the BF16 MoE compute lane.
 
 
 class FMHAQuantMode(Enum):

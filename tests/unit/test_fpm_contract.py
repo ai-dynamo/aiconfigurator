@@ -13,9 +13,13 @@ from __future__ import annotations
 import pytest
 
 from aiconfigurator.fpm_contract import (
+    FPM_RESOLVED_CONFIG_GLOB,
+    FPM_RESOLVED_CONFIG_TEMPLATE,
     fpm_benchmark_result_name,
     fpm_expected_result_paths,
+    fpm_resolved_config_name,
     fpm_validate_benchmark_output_path,
+    fpm_validate_resolved_config_path,
     fpm_workload_node_count,
 )
 
@@ -51,6 +55,9 @@ def test_fpm_benchmark_result_name_rejects_invalid_ranks(dp_rank):
         pytest.param("/results/benchmark.json", id="default"),
         pytest.param("/results/benchmark_smoke.json", id="custom-conforming"),
         pytest.param("/results/benchmark.smoke.json", id="multi-dot-conforming"),
+        # Subdirectories stay discoverable: the pod-side manifest, the
+        # transfer, and every discovery sweep are all recursive.
+        pytest.param("/results/run1/benchmark.json", id="subdirectory"),
     ],
 )
 def test_fpm_validate_benchmark_output_path_accepts_discoverable_paths(output_path):
@@ -66,6 +73,8 @@ def test_fpm_validate_benchmark_output_path_accepts_discoverable_paths(output_pa
         pytest.param("relative/benchmark.json", "must be absolute", id="relative"),
         pytest.param("/results/benchmark", "basename must match", id="extensionless"),
         pytest.param("/results", "must live under /results", id="results-dir-itself"),
+        pytest.param("/results/benchmark_merged.json", "reserved for merged", id="merged-default"),
+        pytest.param("/results/benchmark.smoke_merged.json", "reserved for merged", id="merged-multi-dot"),
     ],
 )
 def test_fpm_validate_benchmark_output_path_rejects_undiscoverable_paths(output_path, match):
@@ -82,13 +91,64 @@ def test_every_gate_accepted_path_is_discoverable_by_every_glob_consumer():
 
     from aiconfigurator.fpm_contract import FPM_BENCHMARK_RESULT_GLOB, FPM_RESULTS_DIR
 
-    accepted = ["/results/benchmark.json", "/results/benchmark_smoke.json", "/results/benchmark.v2.json"]
+    accepted = [
+        "/results/benchmark.json",
+        "/results/benchmark_smoke.json",
+        "/results/benchmark.v2.json",
+        "/results/run1/benchmark.json",
+    ]
     for base in accepted:
         fpm_validate_benchmark_output_path(base)
         for dp_rank in range(0, 5):
             name = PurePosixPath(fpm_benchmark_result_name(base, dp_rank))
             assert fnmatch.fnmatch(name.name, FPM_BENCHMARK_RESULT_GLOB), name
             assert PurePosixPath(FPM_RESULTS_DIR) in name.parents, name
+
+
+def test_fpm_resolved_config_name_matches_the_shared_glob():
+    # Both sides import the convention; the name must stay discoverable by
+    # the glob the collector sweeps for expected-marker validation.
+    import fnmatch
+
+    for node_rank in range(0, 4):
+        name = fpm_resolved_config_name(node_rank)
+        assert name == f"resolved-config-node{node_rank}.json"
+        assert name == FPM_RESOLVED_CONFIG_TEMPLATE.format(node_rank=node_rank)
+        assert fnmatch.fnmatch(name, FPM_RESOLVED_CONFIG_GLOB), name
+
+
+@pytest.mark.parametrize("node_rank", [-1, True, 1.5, "0"], ids=["negative", "bool", "float", "string"])
+def test_fpm_resolved_config_name_rejects_invalid_ranks(node_rank):
+    with pytest.raises(ValueError, match="node_rank must be a non-negative integer"):
+        fpm_resolved_config_name(node_rank)
+
+
+@pytest.mark.parametrize(
+    "output_path",
+    [
+        pytest.param("/results/resolved-config-node0.json", id="default-single-node"),
+        pytest.param("/results/resolved-config.json", id="custom-conforming"),
+        pytest.param("/results/run1/resolved-config-node{node_rank}.json", id="nested-placeholder"),
+    ],
+)
+def test_fpm_validate_resolved_config_path_accepts_discoverable_paths(output_path):
+    fpm_validate_resolved_config_path(output_path)
+
+
+@pytest.mark.parametrize(
+    ("output_path", "match"),
+    [
+        pytest.param("/results/custom-config.json", "basename must match", id="glob-mismatch"),
+        pytest.param("/tmp/resolved-config-node0.json", "must live under /results", id="outside-results"),
+        pytest.param("/results/../tmp/resolved-config.json", "without '.' or '..'", id="traversal"),
+        pytest.param("relative/resolved-config.json", "must be absolute", id="relative"),
+        pytest.param("/results/resolved-config", "basename must match", id="extensionless"),
+        pytest.param("/results", "must live under /results", id="results-dir-itself"),
+    ],
+)
+def test_fpm_validate_resolved_config_path_rejects_undiscoverable_paths(output_path, match):
+    with pytest.raises(ValueError, match=match):
+        fpm_validate_resolved_config_path(output_path)
 
 
 def test_fpm_expected_result_paths_window_covers_the_node_local_rank_range():
@@ -129,7 +189,7 @@ def _podcliqueset(spec: object) -> dict:
     [
         pytest.param({"kind": "Pod"}, 1, id="pod-is-one-node"),
         pytest.param(
-            {"kind": "LeaderWorkerSet", "spec": {"leaderWorkerTemplate": {"size": 4}}},
+            {"kind": "LeaderWorkerSet", "spec": {"replicas": 1, "leaderWorkerTemplate": {"size": 4}}},
             4,
             id="lws-size",
         ),
@@ -192,6 +252,60 @@ def test_fpm_workload_node_count_rejects_non_mapping_clique_spec(clique):
     workload = _podcliqueset({"replicas": 1, "template": {"cliques": [clique]}})
 
     with pytest.raises(TypeError, match="cliques must be mappings with spec"):
+        fpm_workload_node_count(workload)
+
+
+@pytest.mark.parametrize(
+    "replicas",
+    [
+        pytest.param(2, id="multiple"),
+        pytest.param(True, id="bool"),
+        pytest.param(0, id="zero"),
+        pytest.param(-1, id="negative"),
+        pytest.param("1", id="string"),
+        pytest.param(None, id="missing"),
+    ],
+)
+def test_fpm_workload_node_count_rejects_lws_replicas_other_than_one(replicas):
+    workload = {
+        "kind": "LeaderWorkerSet",
+        "spec": {"replicas": replicas, "leaderWorkerTemplate": {"size": 4}},
+    }
+
+    with pytest.raises(ValueError, match=r"LeaderWorkerSet spec\.replicas must be 1"):
+        fpm_workload_node_count(workload)
+
+
+@pytest.mark.parametrize(
+    ("spec", "match"),
+    [
+        pytest.param("invalid", "spec must be a mapping", id="non-mapping-spec"),
+        pytest.param(
+            {"replicas": 1, "leaderWorkerTemplate": "invalid"},
+            "leaderWorkerTemplate must be a mapping",
+            id="non-mapping-template",
+        ),
+    ],
+)
+def test_fpm_workload_node_count_rejects_malformed_lws_structure(spec, match):
+    with pytest.raises(ValueError, match=match):
+        fpm_workload_node_count({"kind": "LeaderWorkerSet", "spec": spec})
+
+
+@pytest.mark.parametrize(
+    "size",
+    [
+        pytest.param(True, id="bool"),
+        pytest.param(0, id="zero"),
+        pytest.param(-2, id="negative"),
+        pytest.param("4", id="string"),
+        pytest.param(4.0, id="float"),
+    ],
+)
+def test_fpm_workload_node_count_rejects_non_strict_lws_size(size):
+    workload = {"kind": "LeaderWorkerSet", "spec": {"replicas": 1, "leaderWorkerTemplate": {"size": size}}}
+
+    with pytest.raises(ValueError, match=r"leaderWorkerTemplate\.size must be a positive integer"):
         fpm_workload_node_count(workload)
 
 

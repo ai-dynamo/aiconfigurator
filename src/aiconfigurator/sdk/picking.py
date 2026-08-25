@@ -25,6 +25,7 @@ from typing import Any, Literal
 import pandas as pd
 
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.performance_result import MOE_COMM_FALLBACKS_COLUMN, merge_moe_comm_fallbacks
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +196,10 @@ def _build_disagg_summary_dict(
         "(e)parallel": "",
         "(e)memory": encoder_memory,
         "power_w": disagg_power_avg,
+        MOE_COMM_FALLBACKS_COLUMN: merge_moe_comm_fallbacks(
+            prefill_summary_dict.get(MOE_COMM_FALLBACKS_COLUMN),
+            decode_summary_dict.get(MOE_COMM_FALLBACKS_COLUMN),
+        ),
     }
 
 
@@ -555,7 +560,7 @@ def pick_autoscale(
     if not all_combos:
         return empty_result
 
-    disagg_df = pd.DataFrame(all_combos, columns=common.ColumnsDisagg).round(3)
+    disagg_df = pd.DataFrame(all_combos, columns=[*common.ColumnsDisagg, MOE_COMM_FALLBACKS_COLUMN]).round(3)
     disagg_df = disagg_df.sort_values(by=["tokens/s/gpu"], ascending=[False]).head(top_n).reset_index(drop=True)
 
     return {

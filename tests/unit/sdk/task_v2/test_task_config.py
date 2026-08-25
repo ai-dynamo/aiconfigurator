@@ -11,6 +11,7 @@ prefix discipline, and the build_* helpers.
 import pytest
 
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.performance_result import MOE_COMM_FALLBACKS_COLUMN, MoECommFallback
 from aiconfigurator.sdk.task_v2 import Task
 
 pytestmark = pytest.mark.unit
@@ -851,6 +852,28 @@ def test_dsv4_native_sglang_moe_remap():
     assert moe("sglang", mp="sgl-project/DeepSeek-V4-Flash-FP8") != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
 
 
+@pytest.mark.parametrize(
+    ("model_path", "replacement"),
+    [
+        ("nvidia/DeepSeek-V4-Flash-NVFP4", "sgl-project/DeepSeek-V4-Flash-FP8"),
+        ("nvidia/DeepSeek-V4-Pro-NVFP4", "sgl-project/DeepSeek-V4-Pro-FP8"),
+    ],
+)
+def test_dsv4_nvfp4_exports_get_the_curated_hopper_rejection(model_path, replacement):
+    """The ModelOpt NVFP4 exports carry the same native FP4 routed-expert
+    weights as the deepseek-ai checkpoints, so Hopper tasks must get the
+    curated use-the-FP8-build redirect, not a downstream missing-data error
+    (AIC-1749 registration follow-through)."""
+    with pytest.raises(ValueError, match="native FP4 routed-expert") as exc:
+        Task(
+            serving_mode="agg",
+            model_path=model_path,
+            system_name="h200_sxm",
+            backend_name="sglang",
+        )
+    assert replacement in str(exc.value)
+
+
 def test_dsv4_third_party_fp4_sglang_moe_remap_on_hopper():
     """Third-party FP4-expert DSV4 checkpoints (e.g. RedHatAI) get the sglang
     MoE remap based on expert_dtype rather than hardcoded model paths.
@@ -1457,7 +1480,11 @@ def test_to_dict_skips_predictor_strategy_field():
 # ---------------------------------------------------------------------------
 
 
-def _build_fake_summary(result_dict: dict | None = None, oom: bool = False):
+def _build_fake_summary(
+    result_dict: dict | None = None,
+    oom: bool = False,
+    moe_comm_fallbacks: tuple[MoECommFallback, ...] = (),
+):
     """Return a MagicMock InferenceSummary."""
     from unittest.mock import MagicMock
 
@@ -1472,6 +1499,7 @@ def _build_fake_summary(result_dict: dict | None = None, oom: bool = False):
 
     s.get_summary_df.return_value = pd.DataFrame([result_dict or {"tokens/s/gpu": 100.0, "ttft": 50.0, "tpot": 20.0}])
     s.get_power_data_coverage.return_value = 1.0
+    s.get_moe_comm_fallbacks.return_value = moe_comm_fallbacks
     return s
 
 
@@ -1497,7 +1525,10 @@ def test_run_single_agg_calls_predict_agg_worker_with_fixed_point(monkeypatch):
 
     def fake_predict_agg_worker(**kwargs):
         captured["predict_kwargs"] = kwargs
-        return _build_fake_summary(result_dict={"tokens/s/gpu": 999.0, "ttft": 42.0, "tpot": 7.0})
+        return _build_fake_summary(
+            result_dict={"tokens/s/gpu": 999.0, "ttft": 42.0, "tpot": 7.0},
+            moe_comm_fallbacks=(MoECommFallback("context", "deepep_ht", 32, 8, 8, 1),),
+        )
 
     monkeypatch.setattr("aiconfigurator.sdk.perf_database.get_database_view", fake_get_database)
     monkeypatch.setattr("aiconfigurator.sdk.backends.factory.get_backend", fake_get_backend)
@@ -1510,6 +1541,7 @@ def test_run_single_agg_calls_predict_agg_worker_with_fixed_point(monkeypatch):
     # Result is the fake_predict_agg_worker's result_dict
     assert result["tokens/s/gpu"] == 999.0
     assert result["ttft"] == 42.0
+    assert result[MOE_COMM_FALLBACKS_COLUMN] == (MoECommFallback("context", "deepep_ht", 32, 8, 8, 1),)
     # ModelConfig built with the requested parallelism
     mc = captured["model_config"]
     assert mc.tp_size == 4 and mc.pp_size == 1 and mc.moe_tp_size == 1 and mc.moe_ep_size == 1
@@ -1610,7 +1642,12 @@ def test_run_single_disagg_invokes_both_phases_and_rate_matches(monkeypatch):
             "system": "h200_sxm",
             "power_w": 500.0,
         }
-        return _build_fake_summary(result_dict=base)
+        backend = "deepep_ht" if role == "prefill" else "deepep_ll"
+        phase = "context" if role == "prefill" else "generation"
+        return _build_fake_summary(
+            result_dict=base,
+            moe_comm_fallbacks=(MoECommFallback(phase, backend, 32, 8, 8, 1),),
+        )
 
     def fake_predict_disagg_worker(**kwargs):
         call_roles.append(kwargs["role"])
@@ -1644,6 +1681,10 @@ def test_run_single_disagg_invokes_both_phases_and_rate_matches(monkeypatch):
     assert row["(p)workers"] == 2
     assert row["(d)workers"] == 4
     assert "(e)workers" in row  # encoder placeholders preserved
+    assert row[MOE_COMM_FALLBACKS_COLUMN] == (
+        MoECommFallback("context", "deepep_ht", 32, 8, 8, 1),
+        MoECommFallback("generation", "deepep_ll", 32, 8, 8, 1),
+    )
 
 
 def test_run_single_disagg_rejects_agg_task():
@@ -1820,6 +1861,31 @@ def test_validate_moe_quant_transfer_reachable_in_hybrid():
     # reject the quant at query time, so validate must NOT pre-admit it.
     for disabled in ("off", "conservative"):
         with pytest.raises(ValueError, match="Unsupported moe quant mode 'int4_wo'"):
+            make("HYBRID", disabled).validate()
+
+
+def test_validate_w4a16_nvfp4_moe_xprofile_reachable_in_hybrid():
+    """The scale-aware W4A16 NVFP4 MoE profile is intentionally data-less.
+    HYBRID admits it only through the calibrated XPROFILE relation."""
+
+    def make(mode, policy=None):
+        return Task(
+            serving_mode="agg",
+            model_path="nvidia/Qwen3.6-35B-A3B-NVFP4",
+            system_name="b200_sxm",
+            backend_name="vllm",
+            backend_version="0.22.0",
+            database_mode=mode,
+            transfer_policy=policy,
+        )
+
+    with pytest.raises(ValueError, match="Unsupported moe quant mode 'w4a16_nvfp4'"):
+        make("SILICON").validate()
+    make("HYBRID").validate()
+    make("HYBRID", "xprofile").validate()
+
+    for disabled in ("off", "conservative", "balanced", "xquant"):
+        with pytest.raises(ValueError, match="Unsupported moe quant mode 'w4a16_nvfp4'"):
             make("HYBRID", disabled).validate()
 
 

@@ -848,9 +848,11 @@ class TestGptOssHybridKVCache:
         *,
         tp_size: int = 1,
         kvcache_quant_mode: common.KVCacheQuantMode = common.KVCacheQuantMode.fp8,
+        nextn: int = 0,
     ):
         model_config = config.ModelConfig(tp_size=tp_size, moe_tp_size=tp_size, moe_ep_size=1)
         model_config.kvcache_quant_mode = kvcache_quant_mode
+        model_config.nextn = nextn
         return get_model(cls.MODEL, model_config, backend_name="vllm")
 
     def test_long_sequence_uses_hybrid_layout(self):
@@ -907,6 +909,58 @@ class TestGptOssHybridKVCache:
         max_tokens = model.get_kvcache_max_tokens(budget)
         assert model.get_kvcache_bytes_per_sequence(max_tokens) <= budget
         assert model.get_kvcache_bytes_per_sequence(max_tokens + 1) > budget
+
+    @pytest.mark.parametrize("nextn", [0, 1, 3], ids=("spec-off", "nextn1", "nextn3"))
+    def test_kv_bytes_is_nextn_independent(self, nextn: int):
+        """Speculative decoding must not re-linearize the window-capped KV curve.
+
+        Draft tokens are a per-step compute cost, not extra resident KV, so the
+        hybrid-SWA byte count is identical with spec decode on and off.
+        """
+        model = self._model(nextn=nextn)
+        seq_len = 65_936  # 65536 ISL + 400 OSL, the 64k agentic recipe shape
+        assert model.get_kvcache_bytes_per_sequence(seq_len) == pytest.approx(self._expected_bytes(seq_len), rel=1e-9)
+
+    def test_backend_memory_kv_stays_window_aware_under_spec_decode(self):
+        """The breakdown's ``kvcache`` (``base_backend._get_memory_usage``, the sole
+        KV sizing site) must follow the window-capped curve with ``nextn > 0``.
+
+        Pins the recipe operating point: batch 48 at ISL 65536 / OSL 400, fp8 KV,
+        TP1 -> 54.4 GiB, not the ~2x all-layers-full-context value that false-OOMs
+        the shipped 8xB200 agg recipe.
+        """
+        from types import SimpleNamespace
+
+        from aiconfigurator.sdk.backends.factory import get_backend
+
+        batch_size, isl, osl = 48, 65_536, 400
+        seq_len = isl + osl
+        model = self._model(nextn=3)
+        database = SimpleNamespace(system_spec={"misc": {"nccl_mem": {1: 0}, "other_mem": 0}})
+
+        memory = get_backend("vllm")._get_memory_usage(
+            model, database, batch_size=batch_size, beam_width=1, isl=isl, osl=osl
+        )
+
+        expected_gib = batch_size * self._expected_bytes(seq_len) / (1 << 30)
+        assert memory["kvcache"] == pytest.approx(expected_gib, rel=1e-9)
+        assert memory["kvcache"] == pytest.approx(54.4, abs=0.1)
+        linear_gib = batch_size * seq_len * self.LAYERS * 2 * self.KV_HEADS * self.HEAD_SIZE / (1 << 30)
+        assert memory["kvcache"] < 0.52 * linear_gib
+
+    def test_kv_bytes_scale_linearly_with_kvcache_dtype(self):
+        """Guard against misreading a dtype difference as a layout regression.
+
+        The window-aware bf16 figure (2.268 GiB/seq at 65,936) is within 0.2% of
+        the *linear* fp8 figure (2.264 GiB/seq) that the hybrid override removed,
+        so the two are easy to confuse when reading a CLI breakdown. Pin that the
+        only difference between the two dtypes is the element size.
+        """
+        seq_len = 65_936
+        fp8 = self._model().get_kvcache_bytes_per_sequence(seq_len)
+        bf16 = self._model(kvcache_quant_mode=common.KVCacheQuantMode.bfloat16).get_kvcache_bytes_per_sequence(seq_len)
+        assert bf16 == pytest.approx(2 * fp8, rel=1e-9)
+        assert bf16 == pytest.approx(self._expected_bytes(seq_len, bytes_per_elem=2), rel=1e-9)
 
 
 class TestGetKvcacheMaxTokens:
@@ -1784,6 +1838,38 @@ class TestBundledModelConfigsOffline:
         assert raw.get("hf_quant_config"), "bundled hf_quant_config not attached"
         sdk_utils._load_model_config_from_model_path.cache_clear()
 
+    def test_minimax_m3_nvfp4_bundle_resolves_mixed_precision_modes(self, monkeypatch):
+        """nvidia/MiniMax-M3-NVFP4 end-to-end: bundled MIXED_PRECISION metadata
+        resolves gemm=fp8_block (MXFP8 approximation, owner decision 2026-08-09),
+        moe=nvfp4 (routed experts), kv=bfloat16 (kv_cache_quant_algo null)."""
+        import aiconfigurator.sdk.utils as sdk_utils
+
+        def _no_network(*a, **k):
+            raise AssertionError("network path reached")
+
+        monkeypatch.setattr(sdk_utils, "_download_hf_config", _no_network, raising=False)
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+
+        cfg = sdk_utils.get_model_config_from_model_path("nvidia/MiniMax-M3-NVFP4")
+        raw = cfg["raw_config"]
+        # The bundled NVFP4 config is the raw hub (VL-wrapper) form since
+        # upstream 90f7fc0f; the parser keeps the top-level architecture and
+        # unwraps the text fields.
+        assert cfg["architecture"] == "MiniMaxM3SparseForConditionalGeneration"
+        assert raw["quant_algo"] == "mixed_precision"
+        assert raw.get("kv_cache_quant_algo") is None
+
+        model_config = config.ModelConfig(tp_size=1, attention_dp_size=1, moe_tp_size=1, moe_ep_size=1)
+        model = get_model("nvidia/MiniMax-M3-NVFP4", model_config, backend_name="trtllm")
+
+        assert model.model_family == "MINIMAXM3"
+        assert model_config.gemm_quant_mode == common.GEMMQuantMode.fp8_block
+        assert model_config.moe_quant_mode == common.MoEQuantMode.nvfp4
+        assert model_config.kvcache_quant_mode == common.KVCacheQuantMode.bfloat16
+        assert model_config.fmha_quant_mode == common.FMHAQuantMode.bfloat16
+
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+
 
 class TestWideEPAttentionExclusions:
     """TRT-LLM large-EP must inherit the checkpoint's per-projection attention
@@ -1821,3 +1907,75 @@ class TestWideEPAttentionExclusions:
         assert by_name["generation_proj_gemm"]._quant_mode == common.GEMMQuantMode.nvfp4
         # fused q_a+kv_a downscale: BF16 iff both groups excluded.
         assert by_name["context_downscale_gemm"]._quant_mode == common.GEMMQuantMode.bfloat16
+
+
+class TestDSV4NVFP4QuantResolution:
+    """AIC-1749: quant resolution for the nvidia/DeepSeek-V4-*-NVFP4 exports.
+
+    Their ModelOpt sidecars name the expert stack as bare module paths
+    (``layers.N.ffn.experts`` — no trailing tensor segment), which the
+    routing-expert classifier used to miss, flooding ``gemm_algos`` with
+    nvfp4 and driving every sweep into the phantom
+    ``ModuleKey { gemm_quant: "nvfp4" }`` lookup. The checkpoints were also
+    absent from ``DEEPSEEK_V4_HF_MODELS``, so ``get_model`` bypassed the
+    packaged configs and re-downloaded the HF ``quantization_config`` (whose
+    blanket ``Linear`` config-group target re-created the same phantom).
+    """
+
+    @pytest.mark.parametrize(
+        ("target", "expected"),
+        [
+            # The DSV4 sidecar shape: bare module path, no trailing segment.
+            ("layers.0.ffn.experts", True),
+            # Tensor under the expert stack (the historical shape).
+            ("model.layers.3.mlp.experts.7.down_proj", True),
+            ("routing_expert_gemm", True),
+            # Shared experts are dense-path, never routed.
+            ("layers.0.ffn.shared_experts", False),
+            ("layers.0.ffn.shared_experts.0.up_proj", False),
+            ("layers.0.self_attn.q_proj", False),
+            # Suffix precision: "experts" embedded in a longer leaf name is
+            # not the expert module.
+            ("layers.0.ffn.experts_gate", False),
+        ],
+    )
+    def test_routing_expert_target_classification(self, target: str, expected: bool):
+        from aiconfigurator_core.sdk.models.helpers import _is_routing_expert_target
+
+        assert _is_routing_expert_target(target) is expected
+
+    def test_nvfp4_exports_are_registered_for_offline_configs(self):
+        for hf_id in ("nvidia/DeepSeek-V4-Flash-NVFP4", "nvidia/DeepSeek-V4-Pro-NVFP4"):
+            assert hf_id in common.DEEPSEEK_V4_HF_MODELS
+            assert hf_id in common.DefaultHFModels
+            # Derived roster: they join the daily support matrix (the AIC-1743
+            # §3 coverage gap) unless explicitly retired.
+            assert hf_id in common.SupportMatrixHFModels
+
+    @pytest.mark.parametrize("hf_id", ["nvidia/DeepSeek-V4-Flash-NVFP4", "nvidia/DeepSeek-V4-Pro-NVFP4"])
+    def test_nvfp4_export_resolves_offline_without_phantom_gemm_quant(self, hf_id: str, monkeypatch):
+        """The packaged sidecar preserves the base checkpoint's FP8-block
+        non-expert lane and quantizes the routed experts as NVFP4. The explicit
+        sidecar MoE mode must win over the native DeepSeek-V4 ``expert_dtype``
+        fallback so the SDK key matches the Collector artifact contract.
+        """
+        import aiconfigurator.sdk.utils as sdk_utils
+        from aiconfigurator_core.sdk.models.helpers import _get_model_info
+
+        def _no_network(*args, **kwargs):
+            raise AssertionError("network path reached")
+
+        monkeypatch.setattr(sdk_utils, "_download_hf_config", _no_network)
+        sdk_utils.get_model_config_from_model_path.cache_clear()
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+        _get_model_info.cache_clear()
+        try:
+            model_config = config.ModelConfig(tp_size=1, pp_size=1, attention_dp_size=8, moe_tp_size=1, moe_ep_size=8)
+            model = models.get_model(hf_id, model_config, backend_name="vllm")
+            assert model.config.gemm_quant_mode == common.GEMMQuantMode.fp8_block
+            assert model.config.moe_quant_mode == common.MoEQuantMode.nvfp4
+            assert model.config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+        finally:
+            sdk_utils.get_model_config_from_model_path.cache_clear()
+            sdk_utils._load_model_config_from_model_path.cache_clear()
+            _get_model_info.cache_clear()

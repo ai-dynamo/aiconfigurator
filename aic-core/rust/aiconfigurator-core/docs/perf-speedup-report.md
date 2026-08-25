@@ -12,10 +12,14 @@ real bf16 (#1339)`) **plus the `SiteIndex::resolve` hot-path optimization** in
 curve-coverage bounds, `select_nth` instead of a full site sort, single working
 allocation).
 
-This report replaces the old `benchmarks.md` (whose numbers were captured on
-pre-merge migration branches and no longer reflect `main`). It is the perf
-sibling of `parity-scan-report.md`; regenerate both together and re-stamp the
-date/commit whenever the Rust hot path changes.
+**These numbers can no longer be regenerated.** They are a Rust-vs-Python
+ratio, and the Python engine-step arm was deleted in #1521 — see
+`benchmark_engine_step.py`'s docstring, which records that the arm and the
+speedup-vs-python columns went with it. The standing instruction this report
+used to carry ("regenerate together with `parity-scan-report.md` whenever the
+Rust hot path changes") is void; that sibling report has itself been retired.
+What follows is a historical record of the migration, not a measurement anyone
+can reproduce on a current commit.
 
 ## What is measured
 

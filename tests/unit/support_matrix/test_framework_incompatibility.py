@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from aiconfigurator.sdk.errors import PerfDataNotAvailableError
+from aiconfigurator.sdk.operations.util_empirical import note_provenance
 from tools.support_matrix import support_matrix as support_matrix_module
 from tools.support_matrix.support_matrix import (
     STATUS_FAIL,
@@ -53,6 +54,38 @@ def _patch_large_constraints(monkeypatch) -> None:
     )
 
 
+def test_w4a16_nvfp4_moe_silicon_gap_is_rescued_by_hybrid(monkeypatch):
+    calls: list[str] = []
+
+    def fake_run_mode(**kwargs):
+        calls.append(kwargs["database_mode"])
+        if kwargs["database_mode"] == "SILICON":
+            raise ValueError(
+                "Unsupported moe quant mode 'w4a16_nvfp4' for system='b200_sxm', backend='vllm', version='0.22.0'."
+            )
+        note_provenance("xprofile")
+        return pd.DataFrame({"x": [1.0]})
+
+    monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
+    _patch_large_constraints(monkeypatch)
+
+    statuses, errors, commands, provenance = SupportMatrix.run_single_test(
+        model="nvidia/Qwen3.6-35B-A3B-NVFP4",
+        system="b200_sxm",
+        backend="vllm",
+        version="0.22.0",
+        system_spec=_b200_system_spec(),
+        modes_to_test=["agg"],
+        include_commands=True,
+    )
+
+    assert statuses == {"agg": STATUS_HYBRID_PASS}
+    assert errors == {"agg": None}
+    assert provenance == {"agg": "xprofile"}
+    assert calls == ["SILICON", "HYBRID"]
+    assert "--database-mode HYBRID" in commands["agg"]
+
+
 def test_dsv4_vllm_019_unsupported_mxfp8_quant_is_framework_incompatible(monkeypatch):
     def fake_run_mode(**_kwargs):
         raise ValueError(
@@ -74,12 +107,17 @@ def test_dsv4_vllm_019_unsupported_mxfp8_quant_is_framework_incompatible(monkeyp
     assert "Unsupported moe quant mode" in errors["agg"]
 
 
-def test_dsv4_vllm_019_missing_mhc_data_is_framework_incompatible(monkeypatch):
+@pytest.mark.parametrize(
+    "error_message",
+    [
+        "DeepSeek-V4 mHC module data not loaded for system='b200_sxm', backend='vllm', version='0.19.0'.",
+        "no MHC module rows loaded from 1 source(s) (first: systems/data/b200_sxm/vllm/0.19.0/mhc_module_perf.parquet)",
+    ],
+)
+def test_dsv4_vllm_019_missing_mhc_data_is_framework_incompatible(monkeypatch, error_message):
     def fake_run_mode(**_kwargs):
         raise PerfDataNotAvailableError(
-            "No results found for any parallel configuration. Showing last exception: "
-            "DeepSeek-V4 mHC module data not loaded for system='b200_sxm', "
-            "backend='vllm', version='0.19.0'."
+            "No results found for any parallel configuration. Showing last exception: " + error_message
         )
 
     monkeypatch.setattr(SupportMatrix, "_run_mode", staticmethod(fake_run_mode))
@@ -94,7 +132,7 @@ def test_dsv4_vllm_019_missing_mhc_data_is_framework_incompatible(monkeypatch):
     )
 
     assert statuses == {"agg": STATUS_FRAMEWORK_INCOMPATIBLE, "disagg": STATUS_FRAMEWORK_INCOMPATIBLE}
-    assert "DeepSeek-V4 mHC module data not loaded" in errors["disagg"]
+    assert error_message in errors["disagg"]
 
 
 @pytest.mark.parametrize("system", ["b200_sxm", "b300_sxm", "gb200", "gb300"])
