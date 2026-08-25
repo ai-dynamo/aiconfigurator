@@ -115,12 +115,30 @@ campaign_root=$(safe_existing_path "campaign root" "${CAMPAIGN_ROOT}")
 
 if [[ "${CONTAINER_IMAGE}" == /* ]]; then
     container_image=$(safe_existing_path "container image" "${CONTAINER_IMAGE}")
+    container_image_meta=$(safe_existing_path "container image metadata" "${container_image}.meta.json")
+    python3 - "${container_image}" "${container_image_meta}" "${IMAGE_DIGEST}" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+image, metadata, expected_digest = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+payload = json.loads(metadata.read_text())
+if payload.get("source_image_digest") != expected_digest:
+    raise SystemExit("local container source digest mismatch")
+observed = hashlib.sha256()
+with image.open("rb") as stream:
+    for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+        observed.update(chunk)
+if payload.get("sqsh_sha256") != observed.hexdigest():
+    raise SystemExit("local container squashfs checksum mismatch")
+PY
 else
     container_image=${CONTAINER_IMAGE}
     [[ "${container_image}" == *@sha256:* ]] || die "registry image must be digest pinned"
+    [[ "${container_image}" == *@"${IMAGE_DIGEST}" ]] || die "container image does not use IMAGE_DIGEST"
 fi
 [[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid IMAGE_DIGEST"
-[[ "${container_image}" == *@"${IMAGE_DIGEST}" ]] || die "container image does not use IMAGE_DIGEST"
 
 mapfile -t allocated_nodes < <(scontrol show hostnames "${SLURM_NODELIST}" | sort -u)
 [[ "${#allocated_nodes[@]}" == "${NODE_NUM}" ]] || die \

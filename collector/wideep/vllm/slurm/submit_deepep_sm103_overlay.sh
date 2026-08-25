@@ -12,14 +12,16 @@ die() {
 system=""
 campaign_root=""
 vllm_source_root=""
+container_image=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --system) system=$2; shift 2 ;;
         --campaign-root) campaign_root=$2; shift 2 ;;
         --vllm-source-root) vllm_source_root=$2; shift 2 ;;
+        --container-image) container_image=$2; shift 2 ;;
         -h|--help)
-            echo "Usage: $0 --system gb300|b300_sxm --campaign-root PATH --vllm-source-root PATH"
+            echo "Usage: $0 --system gb300|b300_sxm --campaign-root PATH --vllm-source-root PATH [--container-image PATH]"
             exit 0
             ;;
         *) die "unknown argument $1" ;;
@@ -53,6 +55,14 @@ for checked_path in "${campaign_root}" "${vllm_source_root}"; do
         /mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*) die "prohibited shared storage path ${checked_path}" ;;
     esac
 done
+if [[ -z "${container_image}" ]]; then
+    container_image="vllm/vllm-openai:v0.24.0@${image_digest}"
+else
+    container_image=$(realpath -e -- "${container_image}")
+    case "${container_image}" in
+        /mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*) die "prohibited container image path ${container_image}" ;;
+    esac
+fi
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
 payload=$(realpath -e "${script_dir}/run_deepep_sm103_overlay_job.sh")
@@ -63,7 +73,7 @@ log_dir=$(realpath -e "${log_dir}")
 export SYSTEM="${system}"
 export CAMPAIGN_ROOT="${campaign_root}"
 export VLLM_SOURCE_ROOT="${vllm_source_root}"
-export CONTAINER_IMAGE="vllm/vllm-openai:v0.24.0@${image_digest}"
+export CONTAINER_IMAGE="${container_image}"
 export IMAGE_DIGEST="${image_digest}"
 
 job_id=$(sbatch \

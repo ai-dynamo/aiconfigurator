@@ -39,7 +39,31 @@ require_env SLURM_JOB_ID
 
 case "${SYSTEM}" in gb300|b300_sxm) ;; *) die "unsupported SM103 system ${SYSTEM}" ;; esac
 [[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid image digest"
-[[ "${CONTAINER_IMAGE}" == *@"${IMAGE_DIGEST}" ]] || die "container image does not use IMAGE_DIGEST"
+if [[ "${CONTAINER_IMAGE}" == /* ]]; then
+    CONTAINER_IMAGE=$(safe_existing_path "container image" "${CONTAINER_IMAGE}")
+    unsquashfs -s "${CONTAINER_IMAGE}" >/dev/null || die "container image is not a valid squashfs"
+    container_image_meta=$(safe_existing_path "container image metadata" "${CONTAINER_IMAGE}.meta.json")
+    python3 - "${CONTAINER_IMAGE}" "${container_image_meta}" "${IMAGE_DIGEST}" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+image, metadata, expected_digest = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+payload = json.loads(metadata.read_text())
+if payload.get("source_image_digest") != expected_digest:
+    raise SystemExit("local container source digest mismatch")
+observed = hashlib.sha256()
+with image.open("rb") as stream:
+    for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+        observed.update(chunk)
+if payload.get("sqsh_sha256") != observed.hexdigest():
+    raise SystemExit("local container squashfs checksum mismatch")
+PY
+    export CONTAINER_IMAGE
+else
+    [[ "${CONTAINER_IMAGE}" == *@"${IMAGE_DIGEST}" ]] || die "container image does not use IMAGE_DIGEST"
+fi
 
 campaign_root=$(safe_existing_path "campaign root" "${CAMPAIGN_ROOT}")
 vllm_source_root=$(safe_existing_path "vLLM source" "${VLLM_SOURCE_ROOT}")

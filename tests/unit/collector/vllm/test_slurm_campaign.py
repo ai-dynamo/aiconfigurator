@@ -18,6 +18,8 @@ RUNNER = REPO_ROOT / "collector/wideep/vllm/slurm/run_vllm_moe_a2a_job.sh"
 SUBMITTER = REPO_ROOT / "collector/wideep/vllm/slurm/submit_vllm_moe_a2a.sh"
 OVERLAY_RUNNER = REPO_ROOT / "collector/wideep/vllm/slurm/run_deepep_sm103_overlay_job.sh"
 OVERLAY_SUBMITTER = REPO_ROOT / "collector/wideep/vllm/slurm/submit_deepep_sm103_overlay.sh"
+IMAGE_RUNNER = REPO_ROOT / "collector/wideep/vllm/slurm/run_vllm_image_stage_job.sh"
+IMAGE_SUBMITTER = REPO_ROOT / "collector/wideep/vllm/slurm/submit_vllm_image_stage.sh"
 
 
 def test_six_system_matrix_has_exact_formal_topologies():
@@ -39,7 +41,9 @@ def test_six_system_matrix_has_exact_formal_topologies():
     }
 
 
-@pytest.mark.parametrize("script", [RUNNER, SUBMITTER, OVERLAY_RUNNER, OVERLAY_SUBMITTER])
+@pytest.mark.parametrize(
+    "script", [RUNNER, SUBMITTER, OVERLAY_RUNNER, OVERLAY_SUBMITTER, IMAGE_RUNNER, IMAGE_SUBMITTER]
+)
 def test_slurm_campaign_scripts_are_valid_bash(script):
     subprocess.run(["bash", "-n", str(script)], check=True)
 
@@ -79,6 +83,8 @@ def test_vllm_collector_hash_closure_includes_campaign_pipeline():
     assert "collector/wideep/vllm/slurm/submit_vllm_moe_a2a.sh" in closure
     assert "collector/wideep/vllm/slurm/run_deepep_sm103_overlay_job.sh" in closure
     assert "collector/wideep/vllm/slurm/submit_deepep_sm103_overlay.sh" in closure
+    assert "collector/wideep/vllm/slurm/run_vllm_image_stage_job.sh" in closure
+    assert "collector/wideep/vllm/slurm/submit_vllm_image_stage.sh" in closure
 
 
 def test_sm103_overlay_build_is_exact_and_separate_from_formal_data():
@@ -90,5 +96,23 @@ def test_sm103_overlay_build_is_exact_and_separate_from_formal_data():
     assert "CUDA_ARCHES='10.0a 10.3a'" in runner
     assert "wheel_sha256" in runner
     assert "gb300|b300_sxm" in runner
+    assert 'CONTAINER_IMAGE=$(safe_existing_path "container image"' in runner
+    assert 'safe_existing_path "container image metadata"' in runner
+    assert "local container squashfs checksum mismatch" in runner
+    assert "--container-image" in submitter
+    assert "--exclusive" in submitter
+    assert "--switches=1" in submitter
+
+
+def test_image_stage_serializes_exact_digest_to_verified_sqsh():
+    runner = IMAGE_RUNNER.read_text(encoding="utf-8")
+    submitter = IMAGE_SUBMITTER.read_text(encoding="utf-8")
+    assert "ENROOT_MAX_CONNECTIONS=1" in runner
+    assert "ENROOT_TRANSFER_RETRIES=8" in runner
+    assert '--container-save="${temporary_image}"' in runner
+    assert "unsquashfs -s" in runner
+    assert "source_image_digest" in runner
+    assert 'runtime["vllm"] != "0.24.0"' in runner
+    assert "sqsh_sha256" in runner
     assert "--exclusive" in submitter
     assert "--switches=1" in submitter

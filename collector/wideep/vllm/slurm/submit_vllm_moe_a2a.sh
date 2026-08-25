@@ -109,8 +109,17 @@ case "${system}" in
     *) die "unsupported system ${system}" ;;
 esac
 
-container_image=${container_image:-"vllm/vllm-openai:v0.24.0@${image_digest}"}
-[[ "${container_image}" == *@"${image_digest}" ]] || die "container reference and observed child digest differ"
+if [[ -z "${container_image}" ]]; then
+    container_image="vllm/vllm-openai:v0.24.0@${image_digest}"
+elif [[ "${container_image}" == /* ]]; then
+    container_image=$(realpath -e -- "${container_image}")
+    case "${container_image}" in
+        /mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*) die "prohibited container image path ${container_image}" ;;
+    esac
+else
+    [[ "${container_image}" == *@"${image_digest}" ]] || die \
+        "container reference and observed child digest differ"
+fi
 
 if [[ "${system}" == gb300 || "${system}" == b300_sxm ]]; then
     [[ -f "${overlay_wheel}" ]] || die "SM103 system requires --overlay-wheel"
