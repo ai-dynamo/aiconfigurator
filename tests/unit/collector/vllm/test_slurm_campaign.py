@@ -131,6 +131,9 @@ def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     assert "registry-1.docker.io/v2/vllm/vllm-openai/manifests/v0.24.0" in runner
     assert "matches != [expected_digest]" in runner
     assert "image_reference_mode=enroot-3.4-digest" in runner
+    assert 'enroot_library_dir="/tmp/aic-enroot-library-${SLURM_JOB_ID}"' in runner
+    assert ".manifests[]? | select" in runner
+    assert 'ENROOT_LIBRARY_PATH="${enroot_library_dir}" enroot import' in runner
     assert "image_reference_mode=verified-tag" in runner
     assert '"image_reference_mode": image_reference_mode' in runner
     assert "--exclusive" in submitter

@@ -97,12 +97,42 @@ export ENROOT_TRANSFER_RETRIES=8
 mkdir -p "${ENROOT_CACHE_PATH}"
 safe_existing_path "image layer cache" "${ENROOT_CACHE_PATH}" >/dev/null
 
+runtime_container_image=${CONTAINER_IMAGE}
+container_save_args=(--container-save="${temporary_image}")
+if [[ "${image_reference_mode}" == enroot-3.4-digest ]]; then
+    # Enroot 3.4 assumes every manifest response is a multi-arch index and
+    # errors on a digest-selected single manifest. Patch a job-local copy only;
+    # never alter the cluster installation or shared Enroot configuration.
+    enroot_library_dir="/tmp/aic-enroot-library-${SLURM_JOB_ID}"
+    [[ ! -e "${enroot_library_dir}" ]] || die "stale job-local Enroot library ${enroot_library_dir}"
+    mkdir -p "${enroot_library_dir}"
+    cp -a /usr/lib/enroot/. "${enroot_library_dir}/"
+    python3 - "${enroot_library_dir}/docker.sh" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+source = path.read_text()
+needle = '.manifests[] | select(.platform.architecture == "${arch}")'
+replacement = '.manifests[]? | select(.platform.architecture == "${arch}")'
+if source.count(needle) != 1:
+    raise SystemExit("unexpected Enroot docker manifest-list parser")
+path.write_text(source.replace(needle, replacement))
+PY
+    ENROOT_LIBRARY_PATH="${enroot_library_dir}" enroot import \
+        --arch="${IMAGE_ARCH}" \
+        --output="${temporary_image}" \
+        "docker://${CONTAINER_IMAGE}"
+    runtime_container_image=$(safe_existing_path "temporary staged image" "${temporary_image}")
+    container_save_args=()
+fi
+
 export AIC_IMAGE_STAGE_EVIDENCE="${job_dir}/runtime.json"
 srun \
     --nodes=1 \
     --ntasks=1 \
-    --container-image="${CONTAINER_IMAGE}" \
-    --container-save="${temporary_image}" \
+    --container-image="${runtime_container_image}" \
+    "${container_save_args[@]}" \
     --container-mounts="${job_dir}:${job_dir}" \
     bash -lc 'python3 - "${AIC_IMAGE_STAGE_EVIDENCE}" <<'"'"'PY'"'"'
 import json
