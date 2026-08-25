@@ -18,6 +18,7 @@ Options:
   --v2-overlay-dir PATH       Required for every deepep_v2 job.
   --approved-nodelist LIST    Required for B200/B300.
   --fabric-approval-id ID     Required for B200/B300; copied into provenance.
+  --afterok-job JOB_ID        Gate every submitted full job on this canary.
   --allow-full-without-canary Diagnostic escape hatch; formal operators should not use it.
 EOF
 }
@@ -40,6 +41,7 @@ legacy_overlay_dir=""
 v2_overlay_dir=""
 approved_nodelist=""
 fabric_approval_id=""
+afterok_job=""
 allow_full_without_canary=false
 
 while [[ $# -gt 0 ]]; do
@@ -57,6 +59,7 @@ while [[ $# -gt 0 ]]; do
         --v2-overlay-dir) v2_overlay_dir=$2; shift 2 ;;
         --approved-nodelist) approved_nodelist=$2; shift 2 ;;
         --fabric-approval-id) fabric_approval_id=$2; shift 2 ;;
+        --afterok-job) afterok_job=$2; shift 2 ;;
         --allow-full-without-canary) allow_full_without_canary=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown argument $1" ;;
@@ -70,6 +73,10 @@ case "${run_kind}" in
     full) nodes=${nodes:-1}; [[ "${nodes}" == 1 || "${nodes}" == 2 || "${nodes}" == 4 || "${nodes}" == all ]] || die "bad --nodes" ;;
     *) die "--run-kind must be canary or full" ;;
 esac
+if [[ -n "${afterok_job}" ]]; then
+    [[ "${run_kind}" == full ]] || die "--afterok-job is valid only for full jobs"
+    [[ "${afterok_job}" =~ ^[0-9]+$ ]] || die "--afterok-job must be a numeric Slurm job ID"
+fi
 
 arm64_digest="sha256:32445b36556244d8a721cd21a2b47a7915bc6408432d05aaeab205bb223ced8b"
 amd64_digest="sha256:f9de5cd9fa907fbf6dbba691eb7db095d48ad58ea283e3eba7142f9a91e186e8"
@@ -162,7 +169,7 @@ for node_num in "${node_values[@]}"; do
                 /mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*) die "prohibited overlay path ${overlay_dir}" ;;
             esac
         fi
-        if [[ "${run_kind}" == full && "${allow_full_without_canary}" != true ]]; then
+        if [[ "${run_kind}" == full && -z "${afterok_job}" && "${allow_full_without_canary}" != true ]]; then
             compgen -G "${campaign_root}/${system}/canary/${node_num}n/${backend}/job_*/SUCCESS" >/dev/null || die \
                 "no successful ${node_num}-node ${backend} canary found for ${system}"
         fi
@@ -195,6 +202,9 @@ for node_num in "${node_values[@]}"; do
         )
         if [[ -n "${approved_nodelist}" ]]; then
             sbatch_args+=(--nodelist="${approved_nodelist}")
+        fi
+        if [[ -n "${afterok_job}" ]]; then
+            sbatch_args+=(--dependency="afterok:${afterok_job}")
         fi
         job_id=$(sbatch "${sbatch_args[@]}" "${payload}")
         echo "submitted ${job_id}: ${system} ${node_num}-node ${backend} ${run_kind}"

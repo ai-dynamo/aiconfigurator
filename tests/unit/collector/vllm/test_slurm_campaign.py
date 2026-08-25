@@ -99,6 +99,8 @@ def test_submitter_requires_canaries_and_one_job_per_backend():
     assert "--switches=1" in source
     assert "multi-node ${system} submission requires infra-approved nodelist" in source
     assert "topology_mode=single_node" in RUNNER.read_text(encoding="utf-8")
+    assert '--dependency="afterok:${afterok_job}"' in source
+    assert '"${afterok_job}" =~ ^[0-9]+$' in source
     assert "requires --legacy-overlay-dir" in source
 
 
