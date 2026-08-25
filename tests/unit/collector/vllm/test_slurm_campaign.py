@@ -20,6 +20,7 @@ OVERLAY_RUNNER = REPO_ROOT / "collector/wideep/vllm/slurm/run_deepep_sm103_overl
 OVERLAY_SUBMITTER = REPO_ROOT / "collector/wideep/vllm/slurm/submit_deepep_sm103_overlay.sh"
 IMAGE_RUNNER = REPO_ROOT / "collector/wideep/vllm/slurm/run_vllm_image_stage_job.sh"
 IMAGE_SUBMITTER = REPO_ROOT / "collector/wideep/vllm/slurm/submit_vllm_image_stage.sh"
+IBSTAT_WRAPPER = REPO_ROOT / "collector/wideep/vllm/slurm/host_tools/ibstat"
 LEGACY_NVL4_PATCH = REPO_ROOT / "collector/wideep/vllm/patches/deepep_73b_nvl4.patch"
 
 
@@ -43,7 +44,8 @@ def test_six_system_matrix_has_exact_formal_topologies():
 
 
 @pytest.mark.parametrize(
-    "script", [RUNNER, SUBMITTER, OVERLAY_RUNNER, OVERLAY_SUBMITTER, IMAGE_RUNNER, IMAGE_SUBMITTER]
+    "script",
+    [RUNNER, SUBMITTER, OVERLAY_RUNNER, OVERLAY_SUBMITTER, IMAGE_RUNNER, IMAGE_SUBMITTER, IBSTAT_WRAPPER],
 )
 def test_slurm_campaign_scripts_are_valid_bash(script):
     subprocess.run(["bash", "-n", str(script)], check=True)
@@ -79,6 +81,10 @@ def test_runner_discovers_and_records_a_routable_gloo_interface():
     assert 'export GLOO_SOCKET_IFNAME="${gloo_socket_ifname}"' in source
     assert 'collector_ref=$(git -C "${repo_dir}" rev-parse HEAD)' in source
     assert 'export AIC_COLLECTOR_REF="${collector_ref}"' in source
+    assert 'export AIC_IBSTAT_TOOL_ROOT="${staging_root}/host-rdma-tools"' in source
+    assert "container_command+=" in source and "ibstat_output=$(ibstat mlx5_0)" in source
+    assert '"ibstat_bundle_sha256"' in source
+    assert '"ibstat_mlx5_0_rate_gbps"' in source
 
 
 def test_submitter_requires_canaries_and_one_job_per_backend():
@@ -99,6 +105,7 @@ def test_vllm_collector_hash_closure_includes_campaign_pipeline():
     assert "collector/framework_manifest.yaml" in closure
     assert "collector/wideep/vllm/finalize_campaign.py" in closure
     assert "collector/wideep/vllm/slurm/run_vllm_moe_a2a_job.sh" in closure
+    assert "collector/wideep/vllm/slurm/host_tools/ibstat" in closure
     assert "collector/wideep/vllm/slurm/submit_vllm_moe_a2a.sh" in closure
     assert "collector/wideep/vllm/slurm/run_deepep_sm103_overlay_job.sh" in closure
     assert "collector/wideep/vllm/slurm/submit_deepep_sm103_overlay.sh" in closure

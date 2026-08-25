@@ -301,6 +301,98 @@ output_dir="${staging_root}/${SYSTEM}/${RUN_KIND}/${NODE_NUM}n/${BACKEND}"
 srun --nodes="${NODE_NUM}" --ntasks="${NODE_NUM}" --ntasks-per-node=1 mkdir -p -- "${output_dir}"
 output_dir=$(safe_existing_path "job output" "${output_dir}")
 
+ibstat_loader_basename=""
+ibstat_bundle_sha256=""
+if [[ "${BACKEND}" == deepep_v2 ]]; then
+    export AIC_IBSTAT_TOOL_ROOT="${staging_root}/host-rdma-tools"
+    ibstat_inventory=$(srun --nodes="${NODE_NUM}" --ntasks="${NODE_NUM}" --ntasks-per-node=1 \
+        bash -lc '
+            set -euo pipefail
+            case "${AIC_IBSTAT_TOOL_ROOT}" in
+                /tmp/aic-vllm-a2a-*/host-rdma-tools) ;;
+                *) echo "unsafe host RDMA tool root ${AIC_IBSTAT_TOOL_ROOT}" >&2; exit 1 ;;
+            esac
+            ibstat_path=$(realpath -e -- "$(command -v ibstat)")
+            case "${ibstat_path}" in
+                /mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*)
+                    echo "ibstat resolves to prohibited storage: ${ibstat_path}" >&2
+                    exit 1
+                    ;;
+            esac
+            mapfile -t dependencies < <(
+                ldd "${ibstat_path}" |
+                    awk '\''{for (i = 1; i <= NF; i++) if ($i ~ /^\//) print $i}'\'' |
+                    sort -u
+            )
+            [[ "${#dependencies[@]}" -gt 0 ]] || {
+                echo "ibstat has no discoverable dynamic dependencies" >&2
+                exit 1
+            }
+            loader_path=""
+            for dependency in "${dependencies[@]}"; do
+                dependency=$(realpath -e -- "${dependency}")
+                case "${dependency}" in
+                    /mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*)
+                        echo "ibstat dependency resolves to prohibited storage: ${dependency}" >&2
+                        exit 1
+                        ;;
+                esac
+                dependency_name=$(basename -- "${dependency}")
+                if [[ "${dependency_name}" == ld*.so* ]]; then
+                    loader_path=${dependency}
+                fi
+            done
+            [[ -n "${loader_path}" ]] || {
+                echo "unable to discover the ibstat ELF loader" >&2
+                exit 1
+            }
+            mkdir -p -- "${AIC_IBSTAT_TOOL_ROOT}/bin" "${AIC_IBSTAT_TOOL_ROOT}/lib"
+            cp -- "${ibstat_path}" "${AIC_IBSTAT_TOOL_ROOT}/bin/ibstat.real"
+            for dependency in "${dependencies[@]}"; do
+                cp -L -- "${dependency}" "${AIC_IBSTAT_TOOL_ROOT}/lib/$(basename -- "${dependency}")"
+            done
+            loader_basename=$(basename -- "${loader_path}")
+            bundle_sha=$(
+                find "${AIC_IBSTAT_TOOL_ROOT}" -type f -print0 |
+                    sort -z |
+                    xargs -0 sha256sum |
+                    sha256sum |
+                    awk '\''{print $1}'\''
+            )
+            mlx5_0_rate=$(ibstat mlx5_0 | awk '\''/Rate:/ {print $2; exit}'\'')
+            [[ "${mlx5_0_rate}" =~ ^[0-9]+$ && "${mlx5_0_rate}" -gt 0 ]] || {
+                echo "unable to observe a positive mlx5_0 RDMA rate" >&2
+                exit 1
+            }
+            printf "%s|%s|%s|%s\n" \
+                "$(hostname)" "${loader_basename}" "${bundle_sha}" "${mlx5_0_rate}"
+        ') || die "failed to stage host RDMA observation tools"
+    mapfile -t ibstat_inventory_lines <<< "${ibstat_inventory}"
+    [[ "${#ibstat_inventory_lines[@]}" == "${NODE_NUM}" ]] || die \
+        "ibstat inventory has ${#ibstat_inventory_lines[@]} rows, expected ${NODE_NUM}: ${ibstat_inventory}"
+    ibstat_loaders_seen=()
+    ibstat_bundles_seen=()
+    ibstat_rates_seen=()
+    for ibstat_line in "${ibstat_inventory_lines[@]}"; do
+        IFS='|' read -r ibstat_host ibstat_loader ibstat_bundle ibstat_rate <<< "${ibstat_line}"
+        [[ -n "${ibstat_host}" && "${ibstat_loader}" == ld*.so* && \
+           "${ibstat_bundle}" =~ ^[0-9a-f]{64}$ && "${ibstat_rate}" =~ ^[0-9]+$ && \
+           "${ibstat_rate}" -gt 0 ]] || die "malformed ibstat inventory row: ${ibstat_line}"
+        ibstat_loaders_seen+=("${ibstat_loader}")
+        ibstat_bundles_seen+=("${ibstat_bundle}")
+        ibstat_rates_seen+=("${ibstat_rate}")
+    done
+    mapfile -t ibstat_loaders < <(printf '%s\n' "${ibstat_loaders_seen[@]}" | sort -u)
+    mapfile -t ibstat_bundles < <(printf '%s\n' "${ibstat_bundles_seen[@]}" | sort -u)
+    mapfile -t ibstat_rates < <(printf '%s\n' "${ibstat_rates_seen[@]}" | sort -u)
+    [[ "${#ibstat_loaders[@]}" == 1 && "${#ibstat_bundles[@]}" == 1 && \
+       "${#ibstat_rates[@]}" == 1 ]] || die \
+        "allocated nodes have inconsistent host RDMA tools: ${ibstat_inventory}"
+    ibstat_loader_basename=${ibstat_loaders[0]}
+    ibstat_bundle_sha256=${ibstat_bundles[0]}
+    ibstat_mlx5_0_rate_gbps=${ibstat_rates[0]}
+fi
+
 export ENROOT_CACHE_PATH="/tmp/aic-enroot-cache-${SLURM_JOB_ID}"
 [[ "${ENROOT_CACHE_PATH}" == /tmp/aic-enroot-cache-* ]] || die "unsafe container cache path"
 srun --nodes="${NODE_NUM}" --ntasks="${NODE_NUM}" --ntasks-per-node=1 mkdir -p -- "${ENROOT_CACHE_PATH}"
@@ -309,7 +401,8 @@ safe_existing_path "container cache" "${ENROOT_CACHE_PATH}" >/dev/null
 runtime_abi_json=$(
     python3 - "${RUNTIME_ABI_JSON}" "${SYSTEM}" "${fabric_identity}" "${gpu_name}" \
         "${driver_version}" "${compute_capability}" "${rdma_device_count_min}" \
-        "${cross_node_nvlink_capable}" "${nvlink_topology_sha256}" "${gloo_socket_ifname}" <<'PY'
+        "${cross_node_nvlink_capable}" "${nvlink_topology_sha256}" "${gloo_socket_ifname}" \
+        "${ibstat_loader_basename}" "${ibstat_bundle_sha256}" "${ibstat_mlx5_0_rate_gbps:-}" <<'PY'
 import json
 import sys
 
@@ -328,6 +421,10 @@ payload.update(
         "slurm_topology_verified": "true",
     }
 )
+if sys.argv[11]:
+    payload["ibstat_loader"] = sys.argv[11]
+    payload["ibstat_bundle_sha256"] = sys.argv[12]
+    payload["ibstat_mlx5_0_rate_gbps"] = sys.argv[13]
 print(json.dumps(payload, separators=(",", ":")))
 PY
 )
@@ -446,11 +543,14 @@ PY
     export AIC_DEEP_EP_WHEEL="${overlay_deep_ep_wheel}"
     export AIC_NCCL_WHEEL="${overlay_nccl_wheel}"
     export AIC_PYARROW_WHEEL="${overlay_pyarrow_wheel}"
-    container_command='overlay_target="${AIC_STAGING_ROOT}/overlay-${SLURM_PROCID}"; mkdir -p "${overlay_target}";'
+    container_command='set -euo pipefail; overlay_target="${AIC_STAGING_ROOT}/overlay-${SLURM_PROCID}"; mkdir -p "${overlay_target}";'
     container_command+=' mapfile -t base_nvshmem_libs < <(find /usr/local/lib/python* -type d -path "*/nvidia/nvshmem/lib" -print); [[ "${#base_nvshmem_libs[@]}" == 1 && -f "${base_nvshmem_libs[0]}/libnvshmem_host.so.3" ]]; export LD_LIBRARY_PATH="${base_nvshmem_libs[0]}:${LD_LIBRARY_PATH:-}";'
     container_command+=' python3 -m pip install --no-deps --target "${overlay_target}" "${AIC_PYARROW_WHEEL}" >/dev/null;'
     if [[ "${BACKEND}" == deepep_v2 ]]; then
         [[ -n "${overlay_nccl_wheel}" ]] || die "v2 overlay has no NCCL wheel"
+        export AIC_IBSTAT_LOADER_BASENAME="${ibstat_loader_basename}"
+        container_command+=' export PATH="${AIC_REPO_DIR}/collector/wideep/vllm/slurm/host_tools:${PATH}";'
+        container_command+=' ibstat_output=$(ibstat mlx5_0); grep -q "Rate:" <<< "${ibstat_output}";'
         container_command+=' python3 -m pip install --no-deps --target "${overlay_target}" "${AIC_NCCL_WHEEL}" >/dev/null; export LD_LIBRARY_PATH="${overlay_target}/nvidia/nccl/lib:${LD_LIBRARY_PATH:-}";'
     fi
     container_command+=' python3 -m pip install --no-deps --target "${overlay_target}" "${AIC_DEEP_EP_WHEEL}" >/dev/null; export PYTHONPATH="${overlay_target}:${AIC_REPO_DIR}:${PYTHONPATH:-}";'
