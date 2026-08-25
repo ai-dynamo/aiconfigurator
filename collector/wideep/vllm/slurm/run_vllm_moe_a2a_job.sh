@@ -138,12 +138,27 @@ if [[ "${topology_mode}" == approved_nodelist ]]; then
     fabric_identity="approval:${AIC_FABRIC_APPROVAL_ID}"
 else
     topology_matches=()
+    first_allocated_node=${allocated_nodes[0]}
     while IFS= read -r topology_line; do
         [[ "${topology_line}" == BlockName=* || \
            ("${topology_line}" == SwitchName=* && "${topology_line}" == *"Level=0"*) ]] || continue
         topology_nodes=${topology_line#*Nodes=}
         topology_nodes=${topology_nodes%% *}
         [[ -n "${topology_nodes}" ]] || continue
+        # Expanding every block in a large Slurm topology takes minutes and
+        # hammers the controller. Select textual candidates by their literal
+        # nodelist prefix, then prove membership by expanding only those
+        # candidates through Slurm's authoritative hostlist parser.
+        prefix_matches=false
+        IFS=',' read -r -a topology_segments <<< "${topology_nodes}"
+        for topology_segment in "${topology_segments[@]}"; do
+            topology_prefix=${topology_segment%%\[*}
+            if [[ "${first_allocated_node}" == "${topology_prefix}"* ]]; then
+                prefix_matches=true
+                break
+            fi
+        done
+        [[ "${prefix_matches}" == true ]] || continue
         mapfile -t expanded_topology_nodes < <(scontrol show hostnames "${topology_nodes}" 2>/dev/null | sort -u)
         all_present=true
         for allocated_node in "${allocated_nodes[@]}"; do

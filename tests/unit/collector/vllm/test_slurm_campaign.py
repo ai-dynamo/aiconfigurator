@@ -51,6 +51,7 @@ def test_runner_rejects_cifs_and_requires_authoritative_topology():
     assert "AIC_APPROVED_NODELIST" in source
     assert "AIC_FABRIC_APPROVAL_ID" in source
     assert "topology_matches" in source
+    assert "prefix_matches" in source
     assert 'staging_root="/tmp/aic-vllm-a2a-${SLURM_JOB_ID}"' in source
     assert "gpu_inventory" in source
     assert "--gpus-per-task" not in source
