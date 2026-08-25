@@ -131,6 +131,54 @@ impl MoeA2aTable {
         })
     }
 
+    /// Whether an exact A2A shape coordinate has at least one collected SM
+    /// curve. Token-axis coverage is deliberately not checked here: an exact
+    /// scale with an incomplete curve must fail at its own interpolation
+    /// boundary rather than silently falling back to another node scale.
+    #[allow(clippy::too_many_arguments)]
+    pub fn has_shape(
+        &self,
+        comm_backend: &str,
+        phase: &str,
+        comm_dtype: &str,
+        ep_size: u32,
+        node_num: u32,
+        hidden_size: u32,
+        topk: u32,
+        num_experts: u32,
+    ) -> Result<bool, AicError> {
+        let grids = self.load()?;
+        let phase_slice = (comm_backend.to_string(), phase.to_string());
+        let Some(dtypes) = grids.dtypes_by_phase.get(&phase_slice) else {
+            return Ok(false);
+        };
+        let used_dtype = if dtypes.contains(comm_dtype) {
+            comm_dtype
+        } else if comm_dtype == "fp8_block" && dtypes.contains("fp8") {
+            "fp8"
+        } else if dtypes.len() == 1 && dtypes.contains("default") {
+            "default"
+        } else {
+            return Ok(false);
+        };
+        let key_at = |sms: u32| MoeA2aKey {
+            comm_backend: comm_backend.to_string(),
+            phase: phase.to_string(),
+            comm_dtype: used_dtype.to_string(),
+            ep_size,
+            node_num,
+            hidden_size,
+            topk,
+            num_experts,
+            sms,
+        };
+        Ok(grids
+            .by_keys
+            .range(key_at(0)..=key_at(u32::MAX))
+            .next()
+            .is_some())
+    }
+
     /// Unified MoE all-to-all latency (ms) for one comm phase.
     ///
     /// Mirrors the SILICON body of Python `_query_a2a_table`: slice walk

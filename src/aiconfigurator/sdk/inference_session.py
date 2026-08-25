@@ -13,6 +13,7 @@ from aiconfigurator.sdk import common, config, models, perf_database
 from aiconfigurator.sdk.backends.base_backend import BaseBackend
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.inference_summary import InferenceSummary
+from aiconfigurator.sdk.performance_result import merge_moe_comm_fallbacks
 from aiconfigurator.sdk.picking import (
     _AUTOSCALE_TTFT_CORRECTION_FACTOR,
     _RATE_MATCHING_DECODE_DEGRADATION_FACTOR,
@@ -435,6 +436,12 @@ class DisaggInferenceSession:
             disagg_summary.set_per_ops_data(per_ops_data)
         if per_ops_source:
             disagg_summary.set_per_ops_source(per_ops_source)
+        disagg_summary.set_moe_comm_fallbacks(
+            merge_moe_comm_fallbacks(
+                prefill_summary.get_moe_comm_fallbacks(),
+                decode_summary.get_moe_comm_fallbacks(),
+            )
+        )
 
         return disagg_summary
 

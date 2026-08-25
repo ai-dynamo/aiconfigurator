@@ -7,6 +7,7 @@ from aiconfigurator.cli.api import EstimateResult
 from aiconfigurator.cli.estimate_detail_report import format_estimate_detail_report
 from aiconfigurator.sdk.config import RuntimeConfig
 from aiconfigurator.sdk.inference_summary import InferenceSummary
+from aiconfigurator.sdk.performance_result import MoECommFallback
 
 pytestmark = pytest.mark.unit
 
@@ -18,6 +19,7 @@ def _estimate_result(
     summary: InferenceSummary | None = None,
     per_ops_data: dict | None = None,
     per_ops_source: dict | None = None,
+    moe_comm_fallbacks: tuple[MoECommFallback, ...] = (),
 ) -> EstimateResult:
     return EstimateResult(
         ttft=float(raw.get("ttft", 0.0) or 0.0),
@@ -38,6 +40,7 @@ def _estimate_result(
         summary=summary,
         per_ops_data=per_ops_data,
         per_ops_source=per_ops_source,
+        moe_comm_fallbacks=moe_comm_fallbacks,
     )
 
 
@@ -145,3 +148,27 @@ def test_format_estimate_detail_report_uses_raw_per_ops_source() -> None:
     assert "Decode (static_gen)" in report
     assert "generation_attention" in report
     assert "empirical" in report
+
+
+def test_source_detail_renders_executed_moe_comm_fallback_topology() -> None:
+    result = _estimate_result(
+        mode="static",
+        raw={"ttft": 100.0, "tpot": 10.0, "request_latency": 250.0},
+        summary=_static_summary({"context_moe_dispatch": 5.0}, {}),
+        moe_comm_fallbacks=(
+            MoECommFallback(
+                inference_phase="context",
+                comm_backend="deepep_ht",
+                requested_ep_size=32,
+                requested_node_num=8,
+                measurement_ep_size=8,
+                measurement_node_num=1,
+            ),
+        ),
+    )
+
+    report = format_estimate_detail_report(result, detail="source")
+
+    assert "context_moe_dispatch" in report
+    assert "MoE communication fallback provenance (executed)" in report
+    assert "context/deepep_ht: requested EP32/node8; using EP8/node1 silicon data" in report

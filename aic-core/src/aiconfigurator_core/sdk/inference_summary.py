@@ -7,6 +7,7 @@ import pandas as pd
 
 from aiconfigurator_core.sdk.common import ColumnsAgg
 from aiconfigurator_core.sdk.config import RuntimeConfig
+from aiconfigurator_core.sdk.performance_result import MoECommFallback
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,9 @@ class InferenceSummary:
         # Per-op data source breakdown, parallel to _per_ops_data. Values are
         # PerformanceResult.source tags.
         self._per_ops_source: dict | None = None
+        # Executed substitutions emitted by Rust operator queries. These exist
+        # only after the measured fallback lookup succeeds.
+        self._moe_comm_fallbacks: tuple[MoECommFallback, ...] = ()
         # Raw forward-pass estimates used by the agg analytic scheduler.
         self._step_estimates: dict | None = None
 
@@ -499,6 +503,14 @@ class InferenceSummary:
     def get_per_ops_source(self) -> dict | None:
         """Get per-operation data-source breakdown, parallel to per_ops_data."""
         return self._per_ops_source
+
+    def set_moe_comm_fallbacks(self, fallbacks: tuple[MoECommFallback, ...]) -> None:
+        """Set executed MoE communication topology substitutions."""
+        self._moe_comm_fallbacks = tuple(fallbacks)
+
+    def get_moe_comm_fallbacks(self) -> tuple[MoECommFallback, ...]:
+        """Get executed MoE communication topology substitutions."""
+        return self._moe_comm_fallbacks
 
     def set_step_estimates(self, step_estimates: dict) -> None:
         """Set raw per-iteration estimates used by aggregate scheduling."""

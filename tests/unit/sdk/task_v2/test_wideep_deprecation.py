@@ -21,6 +21,7 @@ import warnings
 import pytest
 
 from aiconfigurator.sdk import task_v2
+from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 from aiconfigurator.sdk.task_v2 import Task, _warn_large_ep_flag
 
 pytestmark = pytest.mark.unit
@@ -233,6 +234,15 @@ def _agg_task(**overrides) -> Task:
     )
 
 
+def _model_config_outcome(task: Task, role: str, parallel: tuple) -> tuple:
+    """Comparable result for tuples that may hit the cross-node data gate."""
+    try:
+        model_config = task.build_model_config(role=role, parallel=parallel)
+    except PerfDataNotAvailableError as exc:
+        return ("error", type(exc), str(exc))
+    return ("ok", model_config.moe_comm_backend, model_config.moe_backend)
+
+
 def test_flag_vs_flagless_agg_trtllm_identical():
     """Same Task inputs +- enable_wideep -> identical resolved candidate lists,
     identical sweep_agg_kwargs parallel_config_list, and identical per-tuple
@@ -249,10 +259,9 @@ def test_flag_vs_flagless_agg_trtllm_identical():
     assert kw_flagged["parallel_config_list"] == kw_flagless["parallel_config_list"]
 
     for tup in kw_flagless["parallel_config_list"]:
-        mc_flagged = flagged.build_model_config(role="agg", parallel=tuple(tup))
-        mc_flagless = flagless.build_model_config(role="agg", parallel=tuple(tup))
-        assert mc_flagged.moe_comm_backend == mc_flagless.moe_comm_backend, tup
-        assert mc_flagged.moe_backend == mc_flagless.moe_backend  # deepep_moe never forwarded
+        flagged_outcome = _model_config_outcome(flagged, "agg", tuple(tup))
+        flagless_outcome = _model_config_outcome(flagless, "agg", tuple(tup))
+        assert flagged_outcome == flagless_outcome, tup
 
 
 def _disagg_task(**overrides) -> Task:
@@ -285,9 +294,9 @@ def test_flag_vs_flagless_disagg_trtllm_identical():
         tuples_flagless = list(flagless.iter_parallel(role))
         assert tuples_flagged == tuples_flagless, role
         for tup in tuples_flagless:
-            mc_flagged = flagged.build_model_config(role=role, parallel=tuple(tup))
-            mc_flagless = flagless.build_model_config(role=role, parallel=tuple(tup))
-            assert mc_flagged.moe_comm_backend == mc_flagless.moe_comm_backend, (role, tup)
+            flagged_outcome = _model_config_outcome(flagged, role, tuple(tup))
+            flagless_outcome = _model_config_outcome(flagless, role, tuple(tup))
+            assert flagged_outcome == flagless_outcome, (role, tup)
 
 
 # ---------------------------------------------------------------------------

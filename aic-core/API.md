@@ -121,14 +121,20 @@ node width would silently mis-price the cross-node all-to-all.
 
 Enumeration follows the coverage probes. A parallel tuple with `moe_tp == 1`
 and `moe_ep > 1` participates in the large-EP regime when
-`moe_a2a_coverage(...)` and `moe_expert_compute_coverage(...)` cover its EP size
-— at this system's `nodes_for(ep, gpus_per_node)` topology and the run's MoE
-quant mode — for every phase the worker runs, plus the context phase for
-every role (a worker's weights are sized from its context ops). Coverage is
-necessary, not sufficient: each tuple is resolved individually, the per-phase
-backend being the first `MOE_A2A_BACKENDS` registry entry that covers the
-tuple's EP, and a tuple that resolves no backend for a required phase builds
-the fused graph instead. Collecting the two tables for a model shape on a
+`moe_expert_compute_coverage(...)` covers its requested EP size under the run's
+MoE quant mode for every phase the worker runs, plus the context phase for
+every role (a worker's weights are sized from its context ops), and compatible
+all-to-all data is reported by `moe_a2a_coverage(...)`. The resolver prefers
+the exact requested EP/node topology. For multi-node SGLang DeepEP
+(`deepep_ht` or `deepep_ll`) only, the canonical shape-filtered EP8/node1 row
+may be used unchanged as `estimated`; no topology scaling is synthesized.
+Other frameworks, backends, and single-node requests remain exact-topology
+only.
+
+Each tuple is resolved individually. A tuple that resolves a backend for every
+required phase builds the large-EP graph. An unresolved intra-node tuple keeps
+the fused graph, while an unresolved cross-node tuple raises
+`PerfDataNotAvailableError`. Collecting both tables for a model shape on a
 system is what makes large EP explorable there — no flag, no code change.
 
 `aiconfigurator_core.sdk.__all__` is the supported high-level surface. The

@@ -10,11 +10,13 @@ while keeping heavy computation mocked out.
 
 import argparse
 import logging
+from dataclasses import fields
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
+from aiconfigurator.cli.api import EstimateResult
 from aiconfigurator.cli.main import (
     _execute_tasks,
     _resolve_cli_log_level,
@@ -28,6 +30,31 @@ from aiconfigurator.cli.report_and_save import _apply_inclusive_tpot
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 
 pytestmark = pytest.mark.unit
+
+
+def test_estimate_result_preserves_existing_positional_field_order() -> None:
+    assert [field.name for field in fields(EstimateResult)][:-1] == [
+        "ttft",
+        "tpot",
+        "power_w",
+        "isl",
+        "osl",
+        "batch_size",
+        "ctx_tokens",
+        "tp_size",
+        "pp_size",
+        "model_path",
+        "system_name",
+        "backend_name",
+        "backend_version",
+        "raw",
+        "mode",
+        "summary",
+        "per_ops_data",
+        "per_ops_source",
+        "kv_cache_warning",
+    ]
+    assert fields(EstimateResult)[-1].name == "moe_comm_fallbacks"
 
 
 class TestCLILogLevelResolution:
