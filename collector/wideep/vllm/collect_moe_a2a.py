@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Standalone, single-node vLLM DeepEP serving-parity collector.
+"""Standalone multi-node vLLM DeepEP serving-parity collector.
 
-Launch with ``torchrun --standalone --nproc-per-node {2,4,8} ...``.  The
+Launch one rank per local GPU under a multi-node torch/Slurm world.  The
 collector calls vLLM's prepare/finalize implementations directly and allocates
 no model weights.  vLLM imports are intentionally confined to
 ``VllmBenchmarkAdapter`` so population and persistence can be tested on CPU.
 
-The adapter mirrors vLLM commit ``d8c70f2``:
+The adapter mirrors vLLM v0.24.0 commit ``ee0da84``:
 
 * HT buffer/default SMS: ``all2all.py:169-171,218-257`` and constructor call
   ``all2all_utils.py:159-169``.
@@ -44,9 +44,10 @@ if str(_REPO_ROOT) not in sys.path:
 
 from collector import provenance
 from collector.framework_manifest import get_collector_runtime
-from collector.helper import finalize_perf_files, log_perf
+from collector.helper import finalize_perf_files, log_perf, stale_output_artifacts
 from collector.registry_types import PerfFile
 from collector.wideep.backend_contracts import contract_for
+from collector.wideep.distributed_lifecycle import StageAgreement, agree_stage, raise_for_stage
 from collector.wideep.sglang.collect_moe_a2a import (
     DistIdentity,
     MoeA2ADeclarationError,
@@ -66,11 +67,12 @@ COMM_DTYPE = "default"
 PHASES = ("combine", "dispatch")
 BACKENDS = ("deepep_ht", "deepep_ll", "deepep_v2")
 BACKEND_CONTRACTS = {backend: contract_for("vllm", backend) for backend in BACKENDS}
-SUPPORTED_WORLD_SIZES = (2, 4, 8)
+SUPPORTED_WORLD_SIZES = (8, 16, 32)
+SUPPORTED_NODE_COUNTS = (2, 4)
 HT_SMS = 20
 LL_SMS = 0
 HT_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024
-TARGET_VLLM_SOURCE_COMMIT = "d8c70f22434afcbd6644aa43d3f23aecb6e5a09f"
+TARGET_VLLM_SOURCE_COMMIT = "ee0da84ab9e04ac7610e28580af62c365e898389"
 ERRORS_FILENAME_TEMPLATE = "errors_moe_a2a_vllm.rank{rank}.json"
 
 
@@ -165,11 +167,14 @@ def _next_power_of_two(value: int) -> int:
     return 1 << (value - 1).bit_length()
 
 
-def get_vllm_moe_a2a_shapes() -> list[MoeA2AShape]:
+def get_vllm_moe_a2a_shapes(*, required_expert_parallel_size: int | None = None) -> list[MoeA2AShape]:
     """Resolve correlated WideEP shapes through the vLLM case population."""
     from collector.case_generator import get_common_moe_test_cases, is_wideep_moe_model
 
-    recipes = get_common_moe_test_cases(backend="vllm")
+    recipes = get_common_moe_test_cases(
+        backend="vllm",
+        required_expert_parallel_size=required_expert_parallel_size,
+    )
     shapes = {
         MoeA2AShape(int(recipe.hidden_size), int(recipe.topk), int(recipe.num_experts))
         for recipe in recipes
@@ -188,18 +193,21 @@ def build_case_plan(
     shapes: list[MoeA2AShape],
     grid: dict[str, list[int]],
     world_size: int,
+    node_num: int,
     backends: tuple[str, ...] = BACKENDS,
 ) -> list[VllmMoeA2ACase]:
-    """Build deterministic single-node cases with serving-owned policies.
+    """Build deterministic multi-node cases with serving-owned policies.
 
     v2 uses the union of the two declared token axes.  Tokens on the LL axis
     use generation/cudagraph mode; remaining HT-only tokens use context/eager
     mode.  This gives every persisted v2 key exactly one invocation identity.
     """
     if world_size not in SUPPORTED_WORLD_SIZES:
-        raise VllmMoeA2ADeclarationError(
-            f"single-node vLLM moe_a2a supports world sizes {SUPPORTED_WORLD_SIZES}, got {world_size}"
-        )
+        raise VllmMoeA2ADeclarationError(f"vLLM moe_a2a supports world sizes {SUPPORTED_WORLD_SIZES}, got {world_size}")
+    if node_num not in SUPPORTED_NODE_COUNTS:
+        raise VllmMoeA2ADeclarationError(f"vLLM moe_a2a supports node counts {SUPPORTED_NODE_COUNTS}, got {node_num}")
+    if world_size % node_num:
+        raise VllmMoeA2ADeclarationError(f"world_size={world_size} is not divisible by node_num={node_num}")
     unknown = sorted(set(backends) - set(BACKENDS))
     if unknown:
         raise VllmMoeA2ADeclarationError(f"unsupported DeepEP backend(s): {unknown}")
@@ -208,12 +216,16 @@ def build_case_plan(
 
     ht_tokens = _validated_axis(grid, "ht_token_counts")
     ll_tokens = _validated_axis(grid, "ll_token_counts")
+    invalid_shapes = [shape for shape in shapes if shape.num_experts % world_size != 0]
+    if invalid_shapes:
+        raise VllmMoeA2ADeclarationError(
+            f"declared vLLM moe_a2a shapes are not divisible by world_size={world_size}: "
+            f"{invalid_shapes}; request the EP constraint from get_vllm_moe_a2a_shapes "
+            "instead of filtering a generated plan"
+        )
+
     cases: list[VllmMoeA2ACase] = []
-    dropped = 0
     for shape in shapes:
-        if shape.num_experts % world_size:
-            dropped += 1
-            continue
         if "deepep_ht" in backends:
             cases.extend(
                 VllmMoeA2ACase("deepep_ht", "context", shape, tokens, HT_SMS, HT_BUFFER_SIZE_BYTES)
@@ -240,8 +252,7 @@ def build_case_plan(
     cases.sort(key=VllmMoeA2ACase.sort_key)
     if not cases:
         raise VllmMoeA2ADeclarationError(
-            f"moe_a2a expanded to zero cases: {len(shapes)} shapes, world_size={world_size}, "
-            f"{dropped} not divisible by world size"
+            f"moe_a2a expanded to zero cases: {len(shapes)} shapes, world_size={world_size}, node_num={node_num}"
         )
     invocation_ids = [
         (
@@ -256,12 +267,11 @@ def build_case_plan(
     ]
     if len(invocation_ids) != len(set(invocation_ids)):
         raise VllmMoeA2ADeclarationError("duplicate vLLM DeepEP benchmark invocation identity")
-    static_keys = [case.persisted_key(ep_size=world_size, node_num=1) for case in cases if case.sms is not None]
+    static_keys = [case.persisted_key(ep_size=world_size, node_num=node_num) for case in cases if case.sms is not None]
     if len(static_keys) != len(set(static_keys)):
         raise VllmMoeA2ADeclarationError("duplicate vLLM DeepEP persisted key")
     print(
-        f"moe_a2a vllm: {len(cases)} cases from {len(shapes)} shapes "
-        f"(dropped {dropped} shapes not divisible by world_size={world_size})",
+        f"moe_a2a vllm: {len(cases)} cases from {len(shapes)} shapes for world_size={world_size}, node_num={node_num}",
         flush=True,
     )
     return cases
@@ -279,7 +289,7 @@ def _validated_axis(grid: dict[str, list[int]], name: str) -> list[int]:
     return sorted(parsed)
 
 
-def case_plan_ids(cases: list[VllmMoeA2ACase], *, world_size: int) -> list[str]:
+def case_plan_ids(cases: list[VllmMoeA2ACase], *, world_size: int, node_num: int) -> list[str]:
     ids = []
     for case in cases:
         payload = {
@@ -288,7 +298,7 @@ def case_plan_ids(cases: list[VllmMoeA2ACase], *, world_size: int) -> list[str]:
             "ep_size": world_size,
             "hidden_size": case.shape.hidden_size,
             "inference_phase": case.inference_phase,
-            "node_num": 1,
+            "node_num": node_num,
             "num_experts": case.shape.num_experts,
             "num_tokens": case.num_tokens,
             "sms": case.sms,
@@ -311,75 +321,97 @@ def collect_with_adapter(
     *,
     adapter: BenchmarkAdapter,
     world_size: int,
+    node_num: int,
     failure_agreement: Callable[[bool], bool] = bool,
+    stage_agreement: StageAgreement | None = None,
 ) -> CollectionResult:
     """Pure collection loop used by GPU-free tests and the torchrun entrypoint."""
     rows: list[dict[str, Any]] = []
     failures: list[CaseFailure] = []
     resolved_cases: list[VllmMoeA2ACase] = []
     resolved_keys: set[tuple[Any, ...]] = set()
+    agreement = stage_agreement or (
+        lambda stage, failed: failure_agreement(failed) if stage.endswith(":benchmark") else failed
+    )
+    for case_index, case in enumerate(cases):
+        case_rows: list[dict[str, Any]] = []
+        resolved: VllmMoeA2ACase | None = None
+        local_error: BaseException | None = None
+        try:
+            result = adapter.benchmark(case)
+            contract = BACKEND_CONTRACTS[case.comm_backend]
+            if contract.kernel_source != KERNEL_SOURCE:
+                raise VllmMoeA2ABenchmarkError(
+                    f"{case.comm_backend} contract kernel source is {contract.kernel_source!r}"
+                )
+            expected_sms = {"deepep_ht": HT_SMS, "deepep_ll": LL_SMS}.get(case.comm_backend)
+            if expected_sms is not None and result.sms != expected_sms:
+                raise VllmMoeA2ABenchmarkError(
+                    f"{case.comm_backend} returned sms={result.sms}, expected {expected_sms}"
+                )
+            if result.capacity != case.capacity:
+                raise VllmMoeA2ABenchmarkError(
+                    f"{case.comm_backend} returned capacity={result.capacity}, expected {case.capacity}"
+                )
+            if set(result.timings) != set(PHASES):
+                raise VllmMoeA2ABenchmarkError(
+                    f"{case.comm_backend} returned phases {sorted(result.timings)}, expected {list(PHASES)}"
+                )
+            resolved = replace(case, sms=result.sms)
+            key = resolved.persisted_key(ep_size=world_size, node_num=node_num)
+            if key in resolved_keys:
+                raise VllmMoeA2ADeclarationError(f"duplicate resolved persisted key: {key}")
+            for phase in PHASES:
+                timing = result.timings[phase]
+                case_rows.append(
+                    _build_moe_a2a_row(
+                        comm_backend=case.comm_backend,
+                        phase=phase,
+                        ep_size=world_size,
+                        node_num=node_num,
+                        shape=case.shape,
+                        num_tokens=case.num_tokens,
+                        sms=result.sms,
+                        transmit_us=timing.transmit_us,
+                        notify_us=timing.notify_us,
+                        comm_dtype=COMM_DTYPE,
+                    )
+                )
+        except Exception as error:
+            local_error = error
+
+        # Agree before accepting this case's rows. A rank-local post-kernel
+        # validation failure must not let rank 0 publish the same physical
+        # key as successfully collected.
+        outcome = agree_stage(
+            f"case:{case_index}:benchmark",
+            local_error,
+            agreement=agreement,
+            peer_error_type=VllmMoeA2APeerError,
+        )
+        if outcome.failed:
+            assert outcome.error is not None
+            error = outcome.error
+            failures.append(CaseFailure(case, type(error).__name__, str(error)))
+            continue
+
+        assert resolved is not None
+        resolved_keys.add(resolved.persisted_key(ep_size=world_size, node_num=node_num))
+        resolved_cases.append(resolved)
+        rows.extend(case_rows)
+    close_error: BaseException | None = None
     try:
-        for case in cases:
-            case_rows: list[dict[str, Any]] = []
-            resolved: VllmMoeA2ACase | None = None
-            local_error: BaseException | None = None
-            try:
-                result = adapter.benchmark(case)
-                contract = BACKEND_CONTRACTS[case.comm_backend]
-                if contract.kernel_source != KERNEL_SOURCE:
-                    raise VllmMoeA2ABenchmarkError(
-                        f"{case.comm_backend} contract kernel source is {contract.kernel_source!r}"
-                    )
-                expected_sms = {"deepep_ht": HT_SMS, "deepep_ll": LL_SMS}.get(case.comm_backend)
-                if expected_sms is not None and result.sms != expected_sms:
-                    raise VllmMoeA2ABenchmarkError(
-                        f"{case.comm_backend} returned sms={result.sms}, expected {expected_sms}"
-                    )
-                if result.capacity != case.capacity:
-                    raise VllmMoeA2ABenchmarkError(
-                        f"{case.comm_backend} returned capacity={result.capacity}, expected {case.capacity}"
-                    )
-                if set(result.timings) != set(PHASES):
-                    raise VllmMoeA2ABenchmarkError(
-                        f"{case.comm_backend} returned phases {sorted(result.timings)}, expected {list(PHASES)}"
-                    )
-                resolved = replace(case, sms=result.sms)
-                key = resolved.persisted_key(ep_size=world_size, node_num=1)
-                if key in resolved_keys:
-                    raise VllmMoeA2ADeclarationError(f"duplicate resolved persisted key: {key}")
-                for phase in PHASES:
-                    timing = result.timings[phase]
-                    case_rows.append(
-                        _build_moe_a2a_row(
-                            comm_backend=case.comm_backend,
-                            phase=phase,
-                            ep_size=world_size,
-                            node_num=1,
-                            shape=case.shape,
-                            num_tokens=case.num_tokens,
-                            sms=result.sms,
-                            transmit_us=timing.transmit_us,
-                            notify_us=timing.notify_us,
-                            comm_dtype=COMM_DTYPE,
-                        )
-                    )
-            except Exception as error:
-                local_error = error
-
-            # Agree before accepting this case's rows. A rank-local post-kernel
-            # validation failure must not let rank 0 publish the same physical
-            # key as successfully collected.
-            if failure_agreement(local_error is not None):
-                error = local_error or VllmMoeA2APeerError("another rank failed this queued case")
-                failures.append(CaseFailure(case, type(error).__name__, str(error)))
-                continue
-
-            assert resolved is not None
-            resolved_keys.add(resolved.persisted_key(ep_size=world_size, node_num=1))
-            resolved_cases.append(resolved)
-            rows.extend(case_rows)
-    finally:
         adapter.close()
+    except BaseException as error:
+        close_error = error
+    raise_for_stage(
+        agree_stage(
+            "adapter_close",
+            close_error,
+            agreement=agreement,
+            peer_error_type=VllmMoeA2APeerError,
+        )
+    )
     return CollectionResult(rows, failures, resolved_cases)
 
 
@@ -388,10 +420,10 @@ def _init_nccl_group(identity: DistIdentity):
     import torch
     import torch.distributed as dist
 
-    if identity.node_num != 1 or identity.world_size not in SUPPORTED_WORLD_SIZES:
+    if identity.node_num not in SUPPORTED_NODE_COUNTS or identity.world_size not in SUPPORTED_WORLD_SIZES:
         raise VllmMoeA2ADeclarationError(
-            f"vLLM standalone collector requires one node and world size {SUPPORTED_WORLD_SIZES}; "
-            f"got nodes={identity.node_num}, world={identity.world_size}"
+            f"vLLM collector requires nodes {SUPPORTED_NODE_COUNTS} and world size "
+            f"{SUPPORTED_WORLD_SIZES}; got nodes={identity.node_num}, world={identity.world_size}"
         )
     torch.cuda.set_device(identity.local_rank)
     if not dist.is_initialized():
@@ -406,11 +438,22 @@ def _init_nccl_group(identity: DistIdentity):
 
 
 class VllmBenchmarkAdapter:
-    """vLLM-specific invocation adapter for commit ``d8c70f2``."""
+    """vLLM-specific invocation adapter for v0.24.0 commit ``ee0da84``."""
 
-    def __init__(self, group, identity: DistIdentity, *, warmups: int = 3, runs: int = 10):
+    def __init__(
+        self,
+        group,
+        identity: DistIdentity,
+        *,
+        allow_mnnvl: bool = True,
+        disable_nvlink: bool = False,
+        warmups: int = 3,
+        runs: int = 10,
+    ):
         self.group = group
         self.identity = identity
+        self.allow_mnnvl = allow_mnnvl
+        self.disable_nvlink = disable_nvlink
         self.warmups = warmups
         self.runs = runs
         self._buffer = None
@@ -508,14 +551,36 @@ class VllmBenchmarkAdapter:
 
     def _forward_context(self, case: VllmMoeA2ACase):
         """Mirror the pinned serving model-forward scope around MoE calls."""
-        from vllm.config import VllmConfig
+        import torch
+        from vllm.config import ParallelConfig, VllmConfig
         from vllm.forward_context import set_forward_context
 
-        # vLLM d8c70f2 wraps model execution in set_forward_context
-        # (vllm/v1/worker/gpu/model_runner.py:1457-1467). DeepEP v2 decode
-        # reads that context to bound its receive allocation
-        # (prepare_finalize/deepep_v2.py:121-141).
-        return set_forward_context(None, VllmConfig(), num_tokens=case.num_tokens)
+        # vLLM ee0da84 wraps model execution in set_forward_context
+        # (vllm/v1/worker/gpu/model_runner.py:1271-1280). DeepEP v2 decode
+        # reads DPMetadata to bound its receive allocation
+        # (prepare_finalize/deepep_v2.py:121-140). Supply the serving DP/EP
+        # identity and its already-coordinated per-rank token vector so this
+        # standalone adapter does not fall back to a false DP=1 context.
+        parallel_config = ParallelConfig(
+            data_parallel_size=self.identity.world_size,
+            data_parallel_size_local=self.identity.gpus_per_node,
+            data_parallel_rank=self.identity.rank,
+            data_parallel_rank_local=self.identity.local_rank,
+            is_moe_model=True,
+            enable_expert_parallel=True,
+        )
+        num_tokens_across_dp = torch.full(
+            (self.identity.world_size,),
+            case.num_tokens,
+            dtype=torch.int32,
+            device="cpu",
+        )
+        return set_forward_context(
+            None,
+            VllmConfig(parallel_config=parallel_config),
+            num_tokens=case.num_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
+        )
 
     def _make_runtime(self, case: VllmMoeA2ACase):
         import deep_ep
@@ -539,12 +604,13 @@ class VllmBenchmarkAdapter:
         rank_offset = self.identity.rank * local_experts
         quant_config = FusedMoEQuantConfig.make(None)
         if case.comm_backend == "deepep_ht":
+            is_internode = self.identity.node_num > 1
             self._buffer = deep_ep.Buffer(
                 group=self.group,
                 num_nvl_bytes=case.capacity,
-                num_rdma_bytes=0,
+                num_rdma_bytes=case.capacity if is_internode else 0,
                 low_latency_mode=False,
-                num_qps_per_rank=1,
+                num_qps_per_rank=HT_SMS // 2 if is_internode else 1,
                 explicitly_destroy=True,
             )
             deep_ep.Buffer.set_num_sms(HT_SMS)
@@ -568,8 +634,9 @@ class VllmBenchmarkAdapter:
                 num_rdma_bytes=rdma_bytes,
                 low_latency_mode=True,
                 num_qps_per_rank=local_experts,
-                allow_nvlink_for_low_latency_mode=True,
+                allow_nvlink_for_low_latency_mode=not self.disable_nvlink,
                 explicitly_destroy=True,
+                allow_mnnvl=self.allow_mnnvl,
             )
             prepare_finalize = DeepEPLLPrepareAndFinalize(
                 self._buffer,
@@ -649,11 +716,19 @@ def attest_vllm_runtime(
         raise VllmMoeA2ADeclarationError(
             f"vLLM source must be {TARGET_VLLM_SOURCE_COMMIT}, found {source_commit!r} at {source_root}"
         )
-    if observed_abi != runtime.abi:
-        raise VllmMoeA2ADeclarationError(f"wideep_vllm ABI mismatch: expected {runtime.abi}, found {observed_abi}")
+    required_abi = runtime.abi or {}
+    mismatched_abi = {
+        key: {"expected": expected, "observed": observed_abi.get(key)}
+        for key, expected in required_abi.items()
+        if observed_abi.get(key) != expected
+    }
+    if mismatched_abi:
+        raise VllmMoeA2ADeclarationError(
+            f"wideep_vllm ABI mismatch: {mismatched_abi}; full observed ABI={observed_abi}"
+        )
     matching_images = [
-        image.partition("@")
-        for image in runtime.images.values()
+        (variant, image.partition("@"))
+        for variant, image in runtime.images.items()
         if image.partition("@")[1] and image.partition("@")[2] == observed_image_digest
     ]
     if not matching_images:
@@ -661,11 +736,12 @@ def attest_vllm_runtime(
         raise VllmMoeA2ADeclarationError(
             f"wideep_vllm image digest mismatch: expected one of {expected_digests!r}, found {observed_image_digest!r}"
         )
-    image, _, digest = matching_images[0]
+    image_variant, (image, _, digest) = matching_images[0]
     return {
         "framework": runtime.framework,
         "version": installed_version,
         "image": image,
+        "image_variant": image_variant,
         "image_digest": digest,
         "source_commit": source_commit,
         "abi": observed_abi,
@@ -765,7 +841,7 @@ def _write_failures(output_dir: Path, failures: list[CaseFailure], identity: Dis
                     "comm_backend": failure.case.comm_backend,
                     "inference_phase": failure.case.inference_phase,
                     "ep_size": identity.world_size,
-                    "node_num": 1,
+                    "node_num": identity.node_num,
                     "hidden_size": failure.case.shape.hidden_size,
                     "topk": failure.case.shape.topk,
                     "num_experts": failure.case.shape.num_experts,
@@ -842,6 +918,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--image-digest")
     parser.add_argument("--runtime-abi-json")
+    parser.add_argument(
+        "--allow-mnnvl",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="allow MNNVL in the low-latency DeepEP buffer (publishable default: enabled)",
+    )
+    parser.add_argument(
+        "--disable-nvlink",
+        action="store_true",
+        help="disable NVLink in the low-latency DeepEP buffer (diagnostic only)",
+    )
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--canary", action="store_true")
     parser.add_argument("--world-size", type=int)
@@ -856,23 +943,29 @@ def _parse_backends(raw: str) -> tuple[str, ...]:
     return values
 
 
+def transport_is_default(*, allow_mnnvl: bool, disable_nvlink: bool) -> bool:
+    """Only one transport flag combination may finalize publishable rows."""
+
+    return allow_mnnvl and not disable_nvlink
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     env = dict(os.environ)
     if args.plan_only and args.world_size is not None:
         env["WORLD_SIZE"] = str(args.world_size)
     identity = derive_dist_identity(env, gpus_per_node=args.gpus_per_node)
-    if identity.node_num != 1:
-        raise VllmMoeA2ADeclarationError("vLLM moe_a2a collector is single-node only")
+    backends = _parse_backends(args.backends)
     cases = build_case_plan(
-        shapes=get_vllm_moe_a2a_shapes(),
+        shapes=get_vllm_moe_a2a_shapes(required_expert_parallel_size=identity.ep_size),
         grid=get_moe_a2a_workload_grid(),
         world_size=identity.world_size,
-        backends=_parse_backends(args.backends),
+        node_num=identity.node_num,
+        backends=backends,
     )
     if args.canary:
         cases = select_canary_cases(cases)
-    ids = case_plan_ids(cases, world_size=identity.world_size)
+    ids = case_plan_ids(cases, world_size=identity.world_size, node_num=identity.node_num)
     if args.plan_only:
         print(json.dumps({"cases": len(cases), "case_plan_hash": provenance.case_plan_hash(ids)}, indent=2))
         return
@@ -900,9 +993,12 @@ def main(argv: list[str] | None = None) -> None:
         observed_abi=observed_abi,
         observed_image_digest=args.image_digest,
     )
+    runtime_meta["transport"] = {
+        "allow_mnnvl": args.allow_mnnvl,
+        "allow_nvlink": not args.disable_nvlink,
+    }
     group = _init_nccl_group(identity)
     output_dir = Path(args.output_path)
-    output_dir.mkdir(parents=True, exist_ok=True)
     print(
         f"[vllm moe_a2a] host={socket.gethostname()} rank={identity.rank}/{identity.world_size} "
         f"source={runtime_meta['source_commit']}",
@@ -911,47 +1007,152 @@ def main(argv: list[str] | None = None) -> None:
     run_failed = False
     try:
 
-        def agree_case_failure(failed: bool) -> bool:
+        def agree(stage: str, failed: bool) -> bool:
             failure = torch.tensor([int(failed)], device="cuda", dtype=torch.int64)
             dist.all_reduce(failure, op=dist.ReduceOp.MAX, group=group)
             return bool(failure.item())
 
+        preflight_error: BaseException | None = None
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            stale = stale_output_artifacts(output_dir, PerfFile.MOE_A2A.value)
+            if stale:
+                raise VllmMoeA2ABenchmarkError(
+                    f"vLLM moe_a2a refuses stale output artifacts in {output_dir}: {', '.join(stale)}"
+                )
+        except BaseException as error:
+            preflight_error = error
+        raise_for_stage(
+            agree_stage(
+                "preflight",
+                preflight_error,
+                agreement=agree,
+                peer_error_type=VllmMoeA2APeerError,
+            )
+        )
+
         result = collect_with_adapter(
             cases,
-            adapter=VllmBenchmarkAdapter(group, identity),
+            adapter=VllmBenchmarkAdapter(
+                group,
+                identity,
+                allow_mnnvl=args.allow_mnnvl,
+                disable_nvlink=args.disable_nvlink,
+            ),
             world_size=identity.world_size,
-            failure_agreement=agree_case_failure,
+            node_num=identity.node_num,
+            stage_agreement=agree,
         )
-        _write_failures(output_dir, result.failures, identity)
-        failure_tensor = torch.tensor([len(result.failures)], device="cuda", dtype=torch.int64)
-        dist.all_reduce(failure_tensor, op=dist.ReduceOp.MAX, group=group)
-        failure_count = int(failure_tensor.item())
+
+        failure_record_error: BaseException | None = None
+        try:
+            _write_failures(output_dir, result.failures, identity)
+        except BaseException as error:
+            failure_record_error = error
+        raise_for_stage(
+            agree_stage(
+                "failure_records",
+                failure_record_error,
+                agreement=agree,
+                peer_error_type=VllmMoeA2APeerError,
+            )
+        )
+
+        failure_count = len(result.failures)
         if failure_count == len(cases):
             raise VllmMoeA2ABenchmarkError(
                 f"all {len(cases)} cases failed; no parquet or complete sidecar will be written"
             )
+
+        perf_path = output_dir / PerfFile.MOE_A2A.value
+        row_write_error: BaseException | None = None
         if identity.rank == 0:
-            perf_path = output_dir / PerfFile.MOE_A2A.value
-            _write_rows(
-                result.rows,
-                perf_path=perf_path,
-                runtime_meta=runtime_meta,
-                device_name=torch.cuda.get_device_name(identity.local_rank),
+            try:
+                _write_rows(
+                    result.rows,
+                    perf_path=perf_path,
+                    runtime_meta=runtime_meta,
+                    device_name=torch.cuda.get_device_name(identity.local_rank),
+                )
+            except BaseException as error:
+                row_write_error = error
+        raise_for_stage(
+            agree_stage(
+                "row_write",
+                row_write_error,
+                agreement=agree,
+                peer_error_type=VllmMoeA2APeerError,
             )
-            converted = finalize_perf_files([perf_path], merge_existing=False)
-            if len(converted) != 1:
-                raise VllmMoeA2ABenchmarkError("finalization did not produce exactly one parquet")
-            sidecar = _write_sidecar(
-                output_dir,
-                runtime_meta=runtime_meta,
-                case_ids=ids,
-                parquet_path=converted[0],
-                failure_count=failure_count,
+        )
+
+        publishable = "deepep_ll" not in backends or transport_is_default(
+            allow_mnnvl=args.allow_mnnvl,
+            disable_nvlink=args.disable_nvlink,
+        )
+        parquet_path: Path | None = None
+        finalize_error: BaseException | None = None
+        if publishable and identity.rank == 0:
+            try:
+                converted = finalize_perf_files([perf_path], merge_existing=False)
+                if len(converted) != 1:
+                    raise VllmMoeA2ABenchmarkError("finalization did not produce exactly one parquet")
+                parquet_path = Path(converted[0])
+            except BaseException as error:
+                finalize_error = error
+        raise_for_stage(
+            agree_stage(
+                "parquet_finalize",
+                finalize_error,
+                agreement=agree,
+                peer_error_type=VllmMoeA2APeerError,
             )
-            print(
-                f"[vllm moe_a2a] wrote {converted[0]} and {sidecar}; {failure_count} classified failures",
-                flush=True,
+        )
+
+        sidecar: Path | None = None
+        sidecar_error: BaseException | None = None
+        if publishable and identity.rank == 0:
+            try:
+                assert parquet_path is not None
+                sidecar = _write_sidecar(
+                    output_dir,
+                    runtime_meta=runtime_meta,
+                    case_ids=ids,
+                    parquet_path=parquet_path,
+                    failure_count=failure_count,
+                )
+            except BaseException as error:
+                sidecar_error = error
+        raise_for_stage(
+            agree_stage(
+                "sidecar_write",
+                sidecar_error,
+                agreement=agree,
+                peer_error_type=VllmMoeA2APeerError,
             )
+        )
+
+        raise_for_stage(
+            agree_stage(
+                "final_ready",
+                None,
+                agreement=agree,
+                peer_error_type=VllmMoeA2APeerError,
+            )
+        )
+        dist.barrier(group=group)
+
+        if identity.rank == 0:
+            if not publishable:
+                print(
+                    f"[vllm moe_a2a] diagnostic transport staged rows at {perf_path}; "
+                    "parquet and collection_meta.yaml will not be finalized",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[vllm moe_a2a] wrote {parquet_path} and {sidecar}; {failure_count} classified failures",
+                    flush=True,
+                )
     except BaseException as error:
         run_failed = True
         try:
@@ -966,8 +1167,6 @@ def main(argv: list[str] | None = None) -> None:
         raise
     finally:
         if dist.is_initialized():
-            if not run_failed:
-                dist.barrier(group=group)
             try:
                 dist.destroy_process_group()
             except Exception as error:

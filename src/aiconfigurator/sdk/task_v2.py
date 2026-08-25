@@ -50,7 +50,7 @@ from aiconfigurator.sdk.models import (
 )
 from aiconfigurator.sdk.models.blocks.moe import LARGE_EP_READY_FAMILIES, MoEBlockShape
 from aiconfigurator.sdk.moe_comm_resolver import (
-    resolve_a2a_query_profile,
+    a2a_covers_parallel,
     resolve_model_config_moe_comm,
     select_moe_comm_backend,
 )
@@ -723,10 +723,6 @@ class Task:
     # system / backend / MoE quant mode only, never on the candidate lists, so
     # it survives post-construction edits to those.
     _large_ep_coverage_cache: dict = field(default_factory=dict, repr=False, init=False)
-    # role -> phase -> comm backend -> deployed EP -> measured (EP, node)
-    # coordinate. This is separate from eligibility so proxy provenance is
-    # never lost when a target EP is admitted.
-    _large_ep_query_profile_cache: dict = field(default_factory=dict, repr=False, init=False)
 
     # =====================================================================
     # Construction
@@ -1333,14 +1329,8 @@ class Task:
         a2a_probe = getattr(database, "moe_a2a_coverage", None)
         compute_probe = getattr(database, "moe_expert_compute_coverage", None)
         coverage: dict[str, dict[str, set[int]]] = {}
-        query_profiles: dict[str, dict[str, dict[int, tuple[int, int]]]] = {}
         if gpus_per_node and a2a_probe is not None and compute_probe is not None:
             a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts)
-            dataset_identity = (
-                str(getattr(database, "system", system_name)),
-                str(getattr(database, "backend", backend_name)),
-                str(getattr(database, "version", "")),
-            )
             quant_mode = self._role_attr(role, "moe_quant_mode")
             if quant_mode is not None and not isinstance(quant_mode, common.MoEQuantMode):
                 # The compute table is keyed by MoEQuantMode members; any
@@ -1356,36 +1346,31 @@ class Task:
                     shape.hidden_size, shape.moe_inter_size, shape.topk, shape.num_experts, quant_mode, phase
                 )
                 per_backend: dict[str, set[int]] = {}
-                per_backend_profiles: dict[str, dict[int, tuple[int, int]]] = {}
                 for name, backend_spec in MOE_A2A_BACKENDS.items():
                     if backend_name not in backend_spec.frameworks or phase not in backend_spec.inference_phases:
                         continue
-                    profiles = {}
-                    for ep in compute:
-                        query_profile = resolve_a2a_query_profile(
+                    eps = {
+                        ep
+                        for ep in compute
+                        if a2a_covers_parallel(
                             a2a.get(name, set()),
                             framework=backend_name,
                             comm_backend=name,
                             moe_ep_size=ep,
                             expected_nodes=nodes_for(ep, gpus_per_node),
-                            dataset_identity=dataset_identity,
                         )
-                        if query_profile is not None and backend_spec.feasible(
+                        and backend_spec.feasible(
                             topk=shape.topk,
                             num_experts=shape.num_experts,
                             moe_tp_size=1,
                             moe_ep_size=ep,
                             sm_version=sm_version,
-                        ):
-                            profiles[ep] = query_profile
-                    if profiles:
-                        per_backend[name] = set(profiles)
-                        per_backend_profiles[name] = profiles
+                        )
+                    }
+                    if eps:
+                        per_backend[name] = eps
                 if per_backend:
                     coverage[phase] = per_backend
-                    query_profiles[phase] = per_backend_profiles
-
-        self._large_ep_query_profile_cache[role] = query_profiles
 
         if not coverage:
             log_key = (model_path, system_name, backend_name, self._role_attr(role, "backend_version"))
@@ -1452,21 +1437,6 @@ class Task:
                 self._warn_context_coverage_gap(role, moe_ep)
             return None
         return resolved
-
-    def _resolve_moe_comm_query_profile(self, role: str, parallel_tuple) -> dict | None:
-        """Measured A2A coordinates for one resolved deployment tuple."""
-        resolved = self._resolve_moe_comm_backend(role, parallel_tuple)
-        if resolved is None:
-            return None
-        profiles = self._large_ep_query_profile_cache.get(role)
-        if profiles is None:
-            self._large_ep_coverage(role)
-            profiles = self._large_ep_query_profile_cache.get(role, {})
-        moe_ep = tuple(parallel_tuple)[4]
-        return {
-            phase: profiles[phase][backend][moe_ep]
-            for phase, backend in resolved.items()
-        }
 
     def _warn_context_coverage_gap(self, role: str, moe_ep: int) -> None:
         """One-shot warning: the role's own phase is covered but context is not."""
@@ -2094,7 +2064,6 @@ class Task:
                 kvcache_quant_mode_explicit=self._kvcache_explicit.get(role, False),
                 coverage_snapshot=self._large_ep_coverage(role),
             )
-            model_config.moe_comm_query_profile = self._resolve_moe_comm_query_profile(role, parallel)
         return model_config
 
     def _model_config_factory(self, role: Literal["agg", "prefill", "decode"]):

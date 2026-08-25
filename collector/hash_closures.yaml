@@ -202,6 +202,11 @@ collector.wideep.sglang.collect_deepep_ll:
   - collector/wideep/sglang/deepep/test_low_latency.py
   - collector/wideep/sglang/deepep/utils.py
   - __model_cases__
+collector.wideep.sglang.collect_deepep_moe:
+  # Uses case_generator.get_common_moe_test_cases / is_wideep_moe_model /
+  # moe_model_allows_quantization.
+  - collector/cases/base_ops/moe.yaml
+  - __model_cases__
 collector.wideep.sglang.collect_deepep_normal:
   # Same self-contained shape derivation and model_configs caveat as
   # collect_deepep_ll above. test_intranode.test_main runs the normal-mode
@@ -220,6 +225,7 @@ collector.wideep.sglang.collect_moe_a2a:
   # so it is in the closure like the dsv4_megamoe run scripts.
   - collector/cases/base_ops/moe_a2a.yaml
   - collector/cases/base_ops/moe.yaml
+  - collector/wideep/distributed_lifecycle.py
   - collector/network/slurm/submit_moe_a2a.sh
   - __model_cases__
 collector.wideep.vllm.collect_moe_a2a:
@@ -228,7 +234,16 @@ collector.wideep.vllm.collect_moe_a2a:
   - collector/cases/base_ops/moe_a2a.yaml
   - collector/cases/base_ops/moe.yaml
   - collector/wideep/backend_contracts.py
+  - collector/wideep/distributed_lifecycle.py
+  - collector/wideep/vllm/slurm/run_vllm_moe_a2a_job.sh
+  - collector/wideep/vllm/slurm/submit_vllm_moe_a2a.sh
+  - collector/wideep/vllm/finalize_campaign.py
   - collector/wideep/sglang/collect_moe_a2a.py
+  - __model_cases__
+collector.wideep.trtllm.collect_moe_compute:
+  # moe_ep (trtllm): uses case_generator.get_common_moe_test_cases /
+  # is_wideep_moe_model.
+  - collector/cases/base_ops/moe.yaml
   - __model_cases__
 collector.wideep.trtllm.collect_moe_a2a:
   # moe_a2a (trtllm serving adapter): the factory-forced DeepEP paths use the
@@ -236,5 +251,6 @@ collector.wideep.trtllm.collect_moe_a2a:
   - collector/cases/base_ops/moe_a2a.yaml
   - collector/cases/base_ops/moe.yaml
   - collector/wideep/backend_contracts.py
+  - collector/wideep/distributed_lifecycle.py
   - collector/wideep/sglang/collect_moe_a2a.py
   - __model_cases__

@@ -223,6 +223,8 @@ framework_specific_op_cases:
       cases: all
     dsa_generation_module:
       cases: all
+    moe_ep:
+      cases: all
   vllm:
     dsa_context_module:
       cases: all

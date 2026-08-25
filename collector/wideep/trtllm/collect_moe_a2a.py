@@ -38,6 +38,7 @@ from collector.framework_manifest import get_collector_runtime
 from collector.helper import finalize_perf_files, log_perf
 from collector.registry_types import PerfFile
 from collector.wideep.backend_contracts import contract_for
+from collector.wideep.distributed_lifecycle import StageAgreement, agree_stage, raise_for_stage
 from collector.wideep.sglang.collect_moe_a2a import (
     MoeA2AShape,
     _build_moe_a2a_row,
@@ -49,8 +50,7 @@ __compat__ = "trtllm==1.3.0rc11"
 MODULE_NAME = "collector.wideep.trtllm.collect_moe_a2a"
 OP_NAME = "moe_a2a"
 FRAMEWORK = "TRTLLM"
-MANIFEST_FRAMEWORK = "trtllm"
-MANIFEST_WORKLOAD = "wideep"
+MANIFEST_FRAMEWORK = "trtllm_a2a"
 TARGET_SOURCE_COMMIT = "14efb6ac673c0cbe828e1206cc5c7d5748d05ffa"
 KERNEL_SOURCE = "deepep"
 SMS = 0
@@ -225,11 +225,14 @@ def derive_dist_identity(env: dict[str, str], *, gpus_per_node: int) -> DistIden
     return DistIdentity(rank, world_size, local_rank, gpus_per_node, world_size // gpus_per_node)
 
 
-def get_moe_a2a_shapes() -> list[MoeA2AShape]:
+def get_moe_a2a_shapes(*, required_expert_parallel_size: int | None = None) -> list[MoeA2AShape]:
     """Return declared TensorRT-LLM WideEP geometry, physically deduplicated."""
     from collector.case_generator import get_common_moe_test_cases, is_wideep_moe_model
 
-    recipes = get_common_moe_test_cases(backend="trtllm")
+    recipes = get_common_moe_test_cases(
+        backend="trtllm",
+        required_expert_parallel_size=required_expert_parallel_size,
+    )
     shapes = {
         MoeA2AShape(int(recipe.hidden_size), int(recipe.topk), int(recipe.num_experts))
         for recipe in recipes
@@ -280,12 +283,16 @@ def build_case_plan(
     """Expand declared shapes/tokens and deduplicate on invocation + physical keys."""
     if not shapes:
         raise MoeA2ADeclarationError("moe_a2a cannot build a plan from zero shapes")
+    invalid_shapes = [shape for shape in shapes if shape.num_experts % ep_size != 0]
+    if invalid_shapes:
+        raise MoeA2ADeclarationError(
+            f"declared TensorRT-LLM moe_a2a shapes are not divisible by ep_size={ep_size}: "
+            f"{invalid_shapes}; request the EP constraint from get_moe_a2a_shapes instead of "
+            "filtering a generated plan"
+        )
+
     candidates: list[MoeA2ACase] = []
-    dropped_alignment = 0
     for shape in shapes:
-        if shape.num_experts % ep_size:
-            dropped_alignment += 1
-            continue
         for backend in modes:
             contract_for("trtllm", backend)
             token_key = "ht_token_counts" if backend == COMM_BACKEND_HT else "ll_token_counts"
@@ -326,15 +333,11 @@ def build_case_plan(
     cases = sorted(by_invocation.values(), key=MoeA2ACase.sort_key)
     print(
         f"trtllm moe_a2a: {len(cases)} cases from {len(shapes)} shapes "
-        f"(dropped: {dropped_alignment} with num_experts % ep_size != 0; "
-        f"deduplicated: {duplicates} identical invocation/physical keys)",
+        f"(deduplicated: {duplicates} identical invocation/physical keys)",
         flush=True,
     )
     if not cases:
-        raise MoeA2ADeclarationError(
-            f"trtllm moe_a2a expanded to zero cases for ep_size={ep_size}; "
-            f"{dropped_alignment} shapes failed expert alignment"
-        )
+        raise MoeA2ADeclarationError(f"trtllm moe_a2a expanded to zero cases for ep_size={ep_size}")
     return cases
 
 
@@ -667,7 +670,7 @@ def resolve_runtime_meta(
     """Fail closed unless version, source and DeepEP/NVSHMEM ABI match the pin."""
     from packaging.version import InvalidVersion, Version
 
-    runtime = get_collector_runtime(MANIFEST_FRAMEWORK, workload=MANIFEST_WORKLOAD)
+    runtime = get_collector_runtime(MANIFEST_FRAMEWORK)
     try:
         version_matches = Version(installed_version).public == Version(runtime.version).public
     except InvalidVersion as error:
@@ -745,20 +748,37 @@ def run_collection(
     runtime_meta: dict[str, Any],
     finalize: Callable[[list[str]], list[Path]] = finalize_perf_files,
     failure_agreement: Callable[[bool], bool] = bool,
+    stage_agreement: StageAgreement | None = None,
+    final_barrier: Callable[[], None] = lambda: None,
 ) -> Path | None:
     """Execute, write, finalize and attest; zero/partial/write states fail closed."""
     if not cases:
         raise MoeA2ADeclarationError("refusing to run or attest a zero-case plan")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    agreement = stage_agreement or (
+        lambda stage, failed: failure_agreement(failed) if stage.endswith(":benchmark") else failed
+    )
     perf_path = str(output_dir / PerfFile.MOE_A2A.value)
-    if rank == 0 and Path(perf_path).exists():
-        raise MoeA2AWriteError(f"stale staging file exists at {perf_path}; resume/merge must be explicit")
     error_path = output_dir / f"errors_moe_a2a_trtllm.rank{rank}.json"
-    if error_path.exists():
-        raise MoeA2AWriteError(f"stale failure staging exists at {error_path}; resume/merge must be explicit")
+    preflight_error: BaseException | None = None
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if rank == 0 and Path(perf_path).exists():
+            raise MoeA2AWriteError(f"stale staging file exists at {perf_path}; resume/merge must be explicit")
+        if error_path.exists():
+            raise MoeA2AWriteError(f"stale failure staging exists at {error_path}; resume/merge must be explicit")
+    except BaseException as error:
+        preflight_error = error
+    raise_for_stage(
+        agree_stage(
+            "preflight",
+            preflight_error,
+            agreement=agreement,
+            peer_error_type=MoeA2APeerError,
+        )
+    )
+
     failures = 0
-    rows_written = 0
-    for case in cases:
+    for case_index, case in enumerate(cases):
         result = None
         local_error: BaseException | None = None
         try:
@@ -769,17 +789,32 @@ def run_collection(
         # Every rank reaches this agreement point before any row is persisted.
         # A failure observed only by a non-writer rank therefore cannot leave
         # rank 0 with a falsely complete table.
-        if failure_agreement(local_error is not None):
+        benchmark_outcome = agree_stage(
+            f"case:{case_index}:benchmark",
+            local_error,
+            agreement=agreement,
+            peer_error_type=MoeA2APeerError,
+        )
+        if benchmark_outcome.failed:
             failures += 1
-            record_failure(
-                output_dir,
-                case,
-                local_error or MoeA2APeerError("another rank failed this queued case"),
-                rank=rank,
+            assert benchmark_outcome.error is not None
+            record_error: BaseException | None = None
+            try:
+                record_failure(output_dir, case, benchmark_outcome.error, rank=rank)
+            except BaseException as error:
+                record_error = error
+            raise_for_stage(
+                agree_stage(
+                    f"case:{case_index}:failure_record",
+                    record_error,
+                    agreement=agreement,
+                    peer_error_type=MoeA2APeerError,
+                )
             )
             continue
 
         assert result is not None
+        row_error: BaseException | None = None
         try:
             rows = build_unified_rows(case, result)
             if rank == 0:
@@ -797,34 +832,91 @@ def run_collection(
                         raise MoeA2AWriteError(
                             f"log_perf rejected {case.physical_key(row['phase'], row['comm_dtype'])}"
                         )
-                    rows_written += 1
-        except Exception as error:
-            failures += 1
-            record_failure(output_dir, case, error, rank=rank)
+        except BaseException as error:
+            row_error = error
+        row_outcome = agree_stage(
+            f"case:{case_index}:row_write",
+            row_error,
+            agreement=agreement,
+            peer_error_type=MoeA2APeerError,
+        )
+        if row_outcome.failed:
+            assert row_outcome.error is not None
+            record_error = None
+            try:
+                record_failure(output_dir, case, row_outcome.error, rank=rank)
+            except BaseException as error:
+                record_error = error
+            raise_for_stage(
+                agree_stage(
+                    f"case:{case_index}:row_write_failure_record",
+                    record_error,
+                    agreement=agreement,
+                    peer_error_type=MoeA2APeerError,
+                )
+            )
+            raise row_outcome.error
 
-    if rank != 0:
-        if failures:
-            raise MoeA2ABenchmarkError(f"rank {rank} observed {failures}/{len(cases)} failed cases")
-        return None
-    if rows_written == 0:
+    if failures == len(cases):
         raise MoeA2ABenchmarkError(f"TensorRT-LLM DeepEP produced zero rows; {failures}/{len(cases)} cases failed")
-    converted = finalize([perf_path])
-    if len(converted) != 1:
-        raise MoeA2AWriteError(f"expected one finalized moe_a2a parquet, got {len(converted)}")
-    parquet_path = Path(converted[0])
-    write_moe_a2a_sidecar(
-        output_dir,
-        runtime_meta=runtime_meta,
-        case_ids=case_plan_ids(cases),
-        parquet_path=parquet_path,
-        failure_count=failures,
-        module_name=MODULE_NAME,
+
+    parquet_path: Path | None = None
+    finalize_error: BaseException | None = None
+    if rank == 0:
+        try:
+            converted = finalize([perf_path])
+            if len(converted) != 1:
+                raise MoeA2AWriteError(f"expected one finalized moe_a2a parquet, got {len(converted)}")
+            parquet_path = Path(converted[0])
+        except BaseException as error:
+            finalize_error = error
+    raise_for_stage(
+        agree_stage(
+            "parquet_finalize",
+            finalize_error,
+            agreement=agreement,
+            peer_error_type=MoeA2APeerError,
+        )
     )
+
+    sidecar_error: BaseException | None = None
+    if rank == 0:
+        try:
+            assert parquet_path is not None
+            write_moe_a2a_sidecar(
+                output_dir,
+                runtime_meta=runtime_meta,
+                case_ids=case_plan_ids(cases),
+                parquet_path=parquet_path,
+                failure_count=failures,
+                module_name=MODULE_NAME,
+            )
+        except BaseException as error:
+            sidecar_error = error
+    raise_for_stage(
+        agree_stage(
+            "sidecar_write",
+            sidecar_error,
+            agreement=agreement,
+            peer_error_type=MoeA2APeerError,
+        )
+    )
+
     if failures:
         raise MoeA2ABenchmarkError(
             f"refusing clean completion for partial TensorRT-LLM DeepEP collection: "
             f"{failures}/{len(cases)} cases failed"
         )
+
+    raise_for_stage(
+        agree_stage(
+            "final_ready",
+            None,
+            agreement=agreement,
+            peer_error_type=MoeA2APeerError,
+        )
+    )
+    final_barrier()
     return parquet_path
 
 
@@ -850,7 +942,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     import tensorrt_llm
     import torch
-    from tensorrt_llm._utils import mpi_allgather
+    from tensorrt_llm._utils import mpi_allgather, mpi_barrier
 
     identity = derive_dist_identity(dict(os.environ), gpus_per_node=args.gpus_per_node)
     torch.cuda.set_device(identity.local_rank)
@@ -867,7 +959,7 @@ def main(argv: list[str] | None = None) -> None:
         observed_image_digest=args.image_digest,
     )
     cases = build_case_plan(
-        shapes=get_moe_a2a_shapes(),
+        shapes=get_moe_a2a_shapes(required_expert_parallel_size=identity.ep_size),
         token_grid=get_moe_a2a_token_grid(),
         ep_size=identity.ep_size,
         node_num=identity.node_num,
@@ -887,7 +979,8 @@ def main(argv: list[str] | None = None) -> None:
         version=tensorrt_llm.__version__,
         device_name=torch.cuda.get_device_name(identity.local_rank),
         runtime_meta=runtime_meta,
-        failure_agreement=lambda failed: any(mpi_allgather(bool(failed))),
+        stage_agreement=lambda _stage, failed: any(mpi_allgather(bool(failed))),
+        final_barrier=mpi_barrier,
     )
 
 

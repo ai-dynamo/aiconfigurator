@@ -24,6 +24,8 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 SOURCE_PATH = REPO_ROOT / "collector" / "wideep" / "vllm" / "collect_moe_a2a.py"
 SOURCE = SOURCE_PATH.read_text()
 SHAPE = MoeA2AShape(7168, 8, 256)
+WORLD_SIZE = 8
+NODE_NUM = 2
 GRID = {
     "ht_token_counts": [16, 512],
     "ll_token_counts": [1, 16, 256],
@@ -70,7 +72,8 @@ def _plan(backends=a2a.BACKENDS):
     return a2a.build_case_plan(
         shapes=[SHAPE],
         grid=GRID,
-        world_size=2,
+        world_size=WORLD_SIZE,
+        node_num=NODE_NUM,
         backends=backends,
     )
 
@@ -96,6 +99,20 @@ def test_declared_shapes_use_vllm_population(monkeypatch):
     assert shapes
     assert shapes == sorted(set(shapes))
     assert SHAPE in shapes
+
+
+def test_transport_defaults_are_publishable_and_alternates_are_diagnostic():
+    args = a2a.parse_args(["--gpus-per-node", "4"])
+
+    assert args.allow_mnnvl is True
+    assert args.disable_nvlink is False
+    assert a2a.transport_is_default(
+        allow_mnnvl=args.allow_mnnvl,
+        disable_nvlink=args.disable_nvlink,
+    )
+    assert not a2a.transport_is_default(allow_mnnvl=False, disable_nvlink=False)
+    assert not a2a.transport_is_default(allow_mnnvl=True, disable_nvlink=True)
+    assert "diagnostic transport staged rows" in SOURCE
 
 
 def test_plan_maps_backend_phase_dtype_sms_and_capacity():
@@ -125,32 +142,40 @@ def test_plan_is_deterministic_and_static_keys_are_unique():
     left = _plan()
     right = _plan()
     assert left == right
-    keys = [case.persisted_key(ep_size=2, node_num=1) for case in left if case.comm_backend != "deepep_v2"]
+    keys = [
+        case.persisted_key(ep_size=WORLD_SIZE, node_num=NODE_NUM) for case in left if case.comm_backend != "deepep_v2"
+    ]
     assert len(keys) == len(set(keys))
     assert [case.sort_key() for case in left] == sorted(case.sort_key() for case in left)
-    assert a2a.case_plan_ids(left, world_size=2) == a2a.case_plan_ids(right, world_size=2)
+    assert a2a.case_plan_ids(left, world_size=WORLD_SIZE, node_num=NODE_NUM) == a2a.case_plan_ids(
+        right,
+        world_size=WORLD_SIZE,
+        node_num=NODE_NUM,
+    )
 
 
-@pytest.mark.parametrize("world_size", [2, 4, 8])
-def test_supported_single_node_world_sizes(world_size):
+@pytest.mark.parametrize(("world_size", "node_num"), [(8, 2), (16, 2), (16, 4), (32, 4)])
+def test_supported_multi_node_world_sizes(world_size, node_num):
     assert a2a.build_case_plan(
         shapes=[SHAPE],
         grid=GRID,
         world_size=world_size,
+        node_num=node_num,
         backends=("deepep_ll",),
     )
 
 
 def test_unsupported_world_size_and_zero_case_fail_closed():
     with pytest.raises(a2a.VllmMoeA2ADeclarationError, match="world sizes"):
-        a2a.build_case_plan(shapes=[SHAPE], grid=GRID, world_size=3)
+        a2a.build_case_plan(shapes=[SHAPE], grid=GRID, world_size=3, node_num=2)
 
     indivisible = MoeA2AShape(4096, 6, 10)
-    with pytest.raises(a2a.VllmMoeA2ADeclarationError, match="zero cases"):
+    with pytest.raises(a2a.VllmMoeA2ADeclarationError, match="not divisible"):
         a2a.build_case_plan(
             shapes=[indivisible],
             grid=GRID,
-            world_size=4,
+            world_size=8,
+            node_num=2,
             backends=("deepep_ll",),
         )
 
@@ -158,7 +183,12 @@ def test_unsupported_world_size_and_zero_case_fail_closed():
 def test_pure_adapter_builds_unified_rows_and_full_unique_keys():
     cases = _plan()
     adapter = FakeAdapter()
-    result = a2a.collect_with_adapter(cases, adapter=adapter, world_size=2)
+    result = a2a.collect_with_adapter(
+        cases,
+        adapter=adapter,
+        world_size=WORLD_SIZE,
+        node_num=NODE_NUM,
+    )
 
     assert adapter.closed
     assert not result.failures
@@ -189,11 +219,23 @@ def test_adapter_forward_context_uses_pinned_serving_api(monkeypatch):
     calls = []
 
     class FakeVllmConfig:
-        pass
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class FakeParallelConfig:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class FakeTorch(ModuleType):
+        int32 = "int32"
+
+        @staticmethod
+        def full(shape, value, **kwargs):
+            return {"shape": shape, "value": value, **kwargs}
 
     @contextmanager
-    def fake_set_forward_context(attn_metadata, config, *, num_tokens):
-        calls.append(("enter", attn_metadata, config, num_tokens))
+    def fake_set_forward_context(attn_metadata, config, *, num_tokens, num_tokens_across_dp):
+        calls.append(("enter", attn_metadata, config, num_tokens, num_tokens_across_dp))
         yield
         calls.append(("exit",))
 
@@ -201,19 +243,32 @@ def test_adapter_forward_context_uses_pinned_serving_api(monkeypatch):
     vllm.__path__ = []
     config = ModuleType("vllm.config")
     config.VllmConfig = FakeVllmConfig
+    config.ParallelConfig = FakeParallelConfig
     forward_context = ModuleType("vllm.forward_context")
     forward_context.set_forward_context = fake_set_forward_context
     monkeypatch.setitem(sys.modules, "vllm", vllm)
     monkeypatch.setitem(sys.modules, "vllm.config", config)
     monkeypatch.setitem(sys.modules, "vllm.forward_context", forward_context)
+    monkeypatch.setitem(sys.modules, "torch", FakeTorch("torch"))
 
     case = next(case for case in _plan(("deepep_v2",)) if case.inference_phase == "generation")
-    adapter = a2a.VllmBenchmarkAdapter(group=None, identity=None)
+    identity = a2a.DistIdentity(
+        rank=3,
+        world_size=WORLD_SIZE,
+        local_rank=3,
+        gpus_per_node=4,
+        node_num=NODE_NUM,
+        master_addr="127.0.0.1",
+        master_port="29500",
+    )
+    adapter = a2a.VllmBenchmarkAdapter(group=None, identity=identity)
     with adapter._forward_context(case):
         calls.append(("body",))
 
     assert calls[0][0:2] == ("enter", None)
     assert isinstance(calls[0][2], FakeVllmConfig)
+    assert calls[0][2].parallel_config.data_parallel_size == WORLD_SIZE
+    assert calls[0][2].parallel_config.data_parallel_rank == 3
     assert calls[0][3] == case.num_tokens
     assert calls[1:] == [("body",), ("exit",)]
 
@@ -221,7 +276,12 @@ def test_adapter_forward_context_uses_pinned_serving_api(monkeypatch):
 def test_case_failure_is_classified_data_and_adapter_still_closes():
     cases = _plan(("deepep_ll",))
     adapter = FakeAdapter(fail_tokens={16})
-    result = a2a.collect_with_adapter(cases, adapter=adapter, world_size=2)
+    result = a2a.collect_with_adapter(
+        cases,
+        adapter=adapter,
+        world_size=WORLD_SIZE,
+        node_num=NODE_NUM,
+    )
 
     assert adapter.closed
     assert len(result.failures) == 1
@@ -235,7 +295,8 @@ def test_peer_failure_discards_rank_local_success_rows():
     result = a2a.collect_with_adapter(
         [case],
         adapter=FakeAdapter(),
-        world_size=2,
+        world_size=WORLD_SIZE,
+        node_num=NODE_NUM,
         failure_agreement=lambda local_failed: True,
     )
 
@@ -249,7 +310,12 @@ def test_adapter_close_failure_aborts_before_returning_rows():
     adapter = FakeAdapter(close_error=RuntimeError("cudaErrorUnknown during destroy"))
 
     with pytest.raises(RuntimeError, match="cudaErrorUnknown"):
-        a2a.collect_with_adapter([case], adapter=adapter, world_size=2)
+        a2a.collect_with_adapter(
+            [case],
+            adapter=adapter,
+            world_size=WORLD_SIZE,
+            node_num=NODE_NUM,
+        )
 
     assert adapter.closed
 
@@ -291,10 +357,16 @@ def test_adapter_contract_mismatch_becomes_visible_failure(adapter, match):
     [case] = a2a.build_case_plan(
         shapes=[SHAPE],
         grid={"ht_token_counts": [16], "ll_token_counts": [1], "sms": [16]},
-        world_size=2,
+        world_size=WORLD_SIZE,
+        node_num=NODE_NUM,
         backends=("deepep_ht",),
     )
-    result = a2a.collect_with_adapter([case], adapter=adapter, world_size=2)
+    result = a2a.collect_with_adapter(
+        [case],
+        adapter=adapter,
+        world_size=WORLD_SIZE,
+        node_num=NODE_NUM,
+    )
     assert len(result.failures) == 1
     assert match in result.failures[0].error
     assert result.rows == []
@@ -304,7 +376,8 @@ def test_write_loss_is_checked(monkeypatch, tmp_path):
     row = a2a.collect_with_adapter(
         _plan(("deepep_ht",)),
         adapter=FakeAdapter(),
-        world_size=2,
+        world_size=WORLD_SIZE,
+        node_num=NODE_NUM,
     ).rows[0]
     monkeypatch.setattr(a2a, "log_perf", lambda **kwargs: False)
     with pytest.raises(a2a.VllmMoeA2ABenchmarkError, match="write loss"):
@@ -333,7 +406,8 @@ def test_writer_uses_sglang_unified_schema(tmp_path):
     rows = a2a.collect_with_adapter(
         _plan(("deepep_ht",)),
         adapter=FakeAdapter(),
-        world_size=2,
+        world_size=WORLD_SIZE,
+        node_num=NODE_NUM,
     ).rows
     path = tmp_path / "moe_a2a_perf.txt"
     a2a._write_rows(
@@ -464,7 +538,8 @@ def test_classified_case_failures_do_not_demote_finalized_table(tmp_path):
     rows = a2a.collect_with_adapter(
         _plan(("deepep_ht",)),
         adapter=FakeAdapter(),
-        world_size=2,
+        world_size=WORLD_SIZE,
+        node_num=NODE_NUM,
     ).rows
     perf = tmp_path / "moe_a2a_perf.txt"
     a2a._write_rows(

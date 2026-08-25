@@ -72,3 +72,8 @@ model_case_values:
 all_frameworks_op_cases:
   moe:
     cases: all
+
+framework_specific_op_cases:
+  trtllm:
+    moe_ep:
+      cases: all

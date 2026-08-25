@@ -140,19 +140,17 @@ def test_case_plan_is_emitted_in_d5_sort_order(monkeypatch):
         assert sms_order == sorted(sms_order)
 
 
-def test_shapes_not_divisible_by_the_world_are_dropped_with_a_count(capsys):
+def test_explicit_shapes_not_divisible_by_the_world_fail_loudly():
     shapes = [a2a.MoeA2AShape(7168, 8, 256), a2a.MoeA2AShape(7168, 6, 384)]
     grid = {"ht_token_counts": [128], "ll_token_counts": [8], "sms": [24]}
-    cases = a2a.build_case_plan(shapes=shapes, grid=grid, ep_size=256, node_num=32)
-    # 384 % 256 != 0 -> that shape cannot be sharded over this world.
-    assert {case.shape for case in cases} == {a2a.MoeA2AShape(7168, 8, 256)}
-    assert "1 shapes with num_experts % ep_size != 0" in capsys.readouterr().out
+    with pytest.raises(a2a.MoeA2ADeclarationError, match="not divisible by ep_size=256"):
+        a2a.build_case_plan(shapes=shapes, grid=grid, ep_size=256, node_num=32)
 
 
 def test_zero_case_expansion_raises_with_the_logged_reasons():
     shapes = [a2a.MoeA2AShape(7168, 6, 384)]
     grid = {"ht_token_counts": [128], "ll_token_counts": [8], "sms": [24]}
-    with pytest.raises(a2a.MoeA2ADeclarationError, match="expanded to zero cases"):
+    with pytest.raises(a2a.MoeA2ADeclarationError, match="not divisible by ep_size=256"):
         a2a.build_case_plan(shapes=shapes, grid=grid, ep_size=256, node_num=32)
 
 
@@ -411,7 +409,7 @@ def test_ll_buffer_is_allocated_only_after_the_ht_buffers_are_torn_down():
     # mutually exclusive branches in the source scripts and would otherwise
     # double the resident RDMA/NVL allocation for the whole run.
     main_body = SOURCE_TEXT.split("def main(", 1)[1]
-    pre_loop, run_loop = main_body.split("for case in cases:", 1)
+    pre_loop, run_loop = main_body.split("for case_index, case in enumerate(cases):", 1)
     assert "create_ll_buffer(" not in pre_loop
     assert run_loop.index("ht_buffer = None") < run_loop.index("ll_buffer = create_ll_buffer(")
 
@@ -620,12 +618,18 @@ def test_stale_output_artifacts_fail_closed(tmp_path):
     assert "refuses to run into" in SOURCE_TEXT
 
 
-# The sglang-side "diagnostic transport" finalization guard
-# (transport_is_default + diagnostic_transport check that used to gate
-# finalize_perf_files on --allow-mnnvl / --disable-nvlink being off) was
-# deleted in 2b046af3 when the sglang collector was simplified. The trtllm
-# side (collector/network/slurm/collect_trtllm_alltoall.py) still owns that
-# behavior and is covered by test_collect_trtllm_alltoall.py.
+def test_transport_defaults_are_publishable_and_alternates_are_diagnostic():
+    args = a2a.parse_args(["--gpus-per-node", "8"])
+
+    assert args.allow_mnnvl is True
+    assert args.disable_nvlink is False
+    assert a2a.transport_is_default(
+        allow_mnnvl=args.allow_mnnvl,
+        disable_nvlink=args.disable_nvlink,
+    )
+    assert not a2a.transport_is_default(allow_mnnvl=False, disable_nvlink=False)
+    assert not a2a.transport_is_default(allow_mnnvl=True, disable_nvlink=True)
+    assert "diagnostic transport staged rows" in SOURCE_TEXT
 
 
 # ---------------------------------------------------------------------------

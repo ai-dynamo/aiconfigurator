@@ -23,51 +23,7 @@ from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 _DEEPEP_NODE1_FALLBACK_BACKENDS = frozenset(("deepep_ht", "deepep_ll"))
 _LEGACY_DEEPEP_NODE1_COORDINATE = (8, 1)
 
-# These vLLM imports were measured on one NVLink domain at EP=4. Until
-# multi-node measurements land, their reviewed dataset policy reuses that
-# exact curve for cross-node EP configurations without rescaling its token
-# axis. Keep this allow-list scoped to the physical dataset identity so an
-# incomplete table can never opt into the approximation accidentally.
-_UNSCALED_SINGLE_NODE_PROXY_DATASETS = frozenset(
-    {
-        ("gb200", "vllm", "0.24.0"),
-        ("gb300", "vllm", "0.24.0"),
-    }
-)
-
 LargeEpCoverage = Mapping[str, Mapping[str, Set[int]]]
-
-
-def resolve_a2a_query_profile(
-    pairs: set[tuple[int, int]],
-    *,
-    framework: str,
-    comm_backend: str,
-    moe_ep_size: int,
-    expected_nodes: int,
-    dataset_identity: tuple[str, str, str] | None = None,
-) -> tuple[int, int] | None:
-    """Return the measured ``(ep, node)`` coordinate serving a request.
-
-    Exact coverage always wins. SGLang keeps the legacy DeepEP EP8/node-1
-    fallback from #1578. The only other substitution is the explicitly
-    allow-listed, unscaled vLLM EP4/node-1 dataset policy above.
-    """
-    exact = (moe_ep_size, expected_nodes)
-    if exact in pairs:
-        return exact
-    if (
-        framework == "sglang"
-        and comm_backend in _DEEPEP_NODE1_FALLBACK_BACKENDS
-        and expected_nodes > 1
-        and _LEGACY_DEEPEP_NODE1_COORDINATE in pairs
-    ):
-        return _LEGACY_DEEPEP_NODE1_COORDINATE
-    if dataset_identity in _UNSCALED_SINGLE_NODE_PROXY_DATASETS and expected_nodes > 1:
-        donors = sorted((ep, node_num) for ep, node_num in pairs if node_num == 1)
-        if donors:
-            return donors[-1]
-    return None
 
 
 def a2a_covers_parallel(
@@ -87,15 +43,13 @@ def a2a_covers_parallel(
     coordinate and marks that substitution as estimated. Other frameworks
     and communication backends remain exact-scale only.
     """
+    if (moe_ep_size, expected_nodes) in pairs:
+        return True
     return (
-        resolve_a2a_query_profile(
-            pairs,
-            framework=framework,
-            comm_backend=comm_backend,
-            moe_ep_size=moe_ep_size,
-            expected_nodes=expected_nodes,
-        )
-        is not None
+        framework == "sglang"
+        and comm_backend in _DEEPEP_NODE1_FALLBACK_BACKENDS
+        and expected_nodes > 1
+        and _LEGACY_DEEPEP_NODE1_COORDINATE in pairs
     )
 
 
@@ -181,7 +135,6 @@ def resolve_model_config_moe_comm(
     expected_nodes = nodes_for(moe_ep_size, gpus_per_node)
 
     resolved: dict[str, str]
-    query_profiles: dict[str, tuple[int, int]] = {}
     if coverage_snapshot is not None:
         resolved = select_moe_comm_backend(
             coverage_snapshot,
@@ -196,11 +149,6 @@ def resolve_model_config_moe_comm(
         a2a_probe = getattr(database, "moe_a2a_coverage", None)
         compute_probe = getattr(database, "moe_expert_compute_coverage", None)
         a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts) if a2a_probe is not None else {}
-        dataset_identity = (
-            str(getattr(database, "system", getattr(model_config, "system", "") or "")),
-            str(getattr(database, "backend", backend_name)),
-            str(getattr(database, "version", "")),
-        )
         for phase in dict.fromkeys(required_phases):
             compute_eps = (
                 compute_probe(
@@ -222,16 +170,14 @@ def resolve_model_config_moe_comm(
                     # large EP requires attention DP. Do not return early;
                     # cross-node EP must reach the missing-coverage error.
                     continue
-                query_profile = resolve_a2a_query_profile(
-                    a2a.get(comm_backend, set()),
-                    framework=backend_name,
-                    comm_backend=comm_backend,
-                    moe_ep_size=moe_ep_size,
-                    expected_nodes=expected_nodes,
-                    dataset_identity=dataset_identity,
-                )
                 if (
-                    query_profile is not None
+                    a2a_covers_parallel(
+                        a2a.get(comm_backend, set()),
+                        framework=backend_name,
+                        comm_backend=comm_backend,
+                        moe_ep_size=moe_ep_size,
+                        expected_nodes=expected_nodes,
+                    )
                     and moe_ep_size in compute_eps
                     and backend_spec.feasible(
                         topk=shape.topk,
@@ -242,7 +188,6 @@ def resolve_model_config_moe_comm(
                     )
                 ):
                     coverage.setdefault(phase, {}).setdefault(comm_backend, set()).add(moe_ep_size)
-                    query_profiles[phase] = query_profile
                     break
         resolved = select_moe_comm_backend(
             coverage,
@@ -257,8 +202,7 @@ def resolve_model_config_moe_comm(
             system_name = getattr(database, "system", "") if database is not None else ""
             version = getattr(database, "version", "") if database is not None else ""
             raise PerfDataNotAvailableError(
-                "Cross-node EP requires compatible A2A and expert-compute data, but no exact or approved "
-                "proxy coverage "
+                "Cross-node EP requires DeepEP A2A data, but no compatible exact or supported node-1 coverage "
                 "was found for "
                 f"model={model_path!r}, system={system_name!r}, backend={backend_name!r}, version={version!r}, "
                 f"moe_ep={moe_ep_size}, gpus_per_node={gpus_per_node}, "
@@ -267,7 +211,6 @@ def resolve_model_config_moe_comm(
         return None
 
     model_config.moe_comm_backend = resolved
-    model_config.moe_comm_query_profile = query_profiles or None
     if backend_name == "sglang" and info["architecture"] == "DeepseekV3ForCausalLM":
         # The SGLang WideEP MLA collectors label their rows fp8_block/fp8.
         # Preserve explicit user modes, but restore the PR #1314 defaults for

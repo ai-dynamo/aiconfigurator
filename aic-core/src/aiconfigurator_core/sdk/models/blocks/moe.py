@@ -568,17 +568,13 @@ def _large_ep_block_ops(
 
     spec = MOE_A2A_BACKENDS[comm_backend]
     node_num = nodes_for(cfg.moe_ep_size * cfg.moe_tp_size, gpus_per_node)  # A5
-    query_profile = (getattr(cfg, "moe_comm_query_profile", None) or {}).get(inference_phase)
-    query_ep_size, query_node_num = query_profile or (cfg.moe_ep_size, node_num)
     a2a_kwargs = {
         "comm_backend": comm_backend,
         "hidden_size": shape.hidden_size,
         "topk": shape.topk,
         "num_experts": shape.num_experts,
-        # An approved dataset policy may borrow a measured communication
-        # coordinate. Expert compute below remains on the deployed EP size.
-        "moe_ep_size": query_ep_size,
-        "node_num": query_node_num,
+        "moe_ep_size": cfg.moe_ep_size,
+        "node_num": node_num,
         "sms": cfg.sms if comm_backend == "deepep_ht" else 0,
         # DeepEP context receives per-attention-rank tokens. Context
         # parallelism contributes to that attention width just like TP does;

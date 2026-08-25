@@ -13,6 +13,7 @@ import pytest
 
 from collector.case_generator import (
     get_attention_head_configs,
+    get_gemm_case_specs,
     get_moe_quantization_specs,
     moe_model_allows_quantization,
 )
@@ -38,6 +39,19 @@ def _load_mla_adapter(module_path: str, globals_dict: dict):
     namespace = dict(globals_dict)
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
     return namespace["_build_mla_test_cases"]
+
+
+def _load_gdn_getter(module_path: str):
+    from collector.case_generator import get_common_gdn_test_cases
+
+    source_path = REPO_ROOT / module_path
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "get_gdn_test_cases"
+    )
+    namespace = {"get_common_gdn_test_cases": get_common_gdn_test_cases}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
+    return namespace["get_gdn_test_cases"]
 
 
 def test_model_case_plan_merges_required_base_and_framework_specific_ops():
@@ -1537,6 +1551,7 @@ def test_vllm_024_model_plans_only_schedule_representable_attention_paths():
         "mla_context",
         "mla_generation",
         "moe",
+        "moe_ep",
     ]
     assert build_collection_case_plan(backend="vllm_xpu", model_path=kimi_path).ops == ["gemm", "moe"]
 

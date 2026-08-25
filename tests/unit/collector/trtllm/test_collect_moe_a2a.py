@@ -245,7 +245,7 @@ def test_prepare_or_unsupported_dtype_never_gets_relabelled():
 def test_zero_case_paths_fail_closed():
     with pytest.raises(a2a.MoeA2ADeclarationError, match="zero shapes"):
         a2a.build_case_plan(shapes=[], token_grid=GRID, ep_size=8, node_num=1)
-    with pytest.raises(a2a.MoeA2ADeclarationError, match="zero cases"):
+    with pytest.raises(a2a.MoeA2ADeclarationError, match="not divisible by ep_size=384"):
         a2a.build_case_plan(shapes=[SHAPE], token_grid=GRID, ep_size=384, node_num=1)
     with pytest.raises(a2a.MoeA2ADeclarationError, match="zero-case"):
         a2a.run_collection(
@@ -260,7 +260,7 @@ def test_zero_case_paths_fail_closed():
 
 
 def test_runtime_source_and_abi_attestation_hooks_fail_closed():
-    runtime = a2a.get_collector_runtime("trtllm", workload="wideep")
+    runtime = a2a.get_collector_runtime("trtllm_a2a")
     image_digest = runtime.image().split("@", 1)[1]
     meta = a2a.resolve_runtime_meta(
         runtime.version,
@@ -311,7 +311,7 @@ class _PartialAdapter:
 
 def test_write_failure_is_recorded_and_cannot_complete(tmp_path, monkeypatch):
     monkeypatch.setattr(a2a, "log_perf", lambda **kwargs: False)
-    with pytest.raises(a2a.MoeA2ABenchmarkError, match="zero rows"):
+    with pytest.raises(a2a.MoeA2AWriteError, match="log_perf rejected"):
         a2a.run_collection(
             cases=[_case()],
             adapter=_GoodAdapter(),

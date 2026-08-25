@@ -64,10 +64,6 @@ class ModelConfig:
     forward_model: str = "op_level"
     # internal — per-phase comm backend {"context": ..., "generation": ...}; set by the enumerator, never a user flag
     moe_comm_backend: dict | None = None
-    # internal — per-phase measured (ep_size, node_num) query keys.  Normally
-    # these equal the deployed topology; an explicit dataset policy may point
-    # at an approved proxy profile instead.
-    moe_comm_query_profile: dict | None = None
     # internal — set alongside moe_comm_backend by the enumerator (system topology).
     # No default: a wrong node width silently mis-prices cross-node all-to-all, so
     # large-EP construction raises when it is missing (models.helpers.large_ep_gpus_per_node).

@@ -1461,7 +1461,19 @@ def get_moe_backend_test_cases(backend: str) -> list[MoeCommonTestCase]:
     return test_cases
 
 
-def get_common_moe_test_cases(*, backend: str | None = None):
+def get_common_moe_test_cases(
+    *,
+    backend: str | None = None,
+    required_expert_parallel_size: int | None = None,
+):
+    """Return declared MoE recipes, optionally constrained to one EP world.
+
+    ``num_experts % expert_parallel_size == 0`` is universal MoE sharding
+    math, so callers that collect one fixed EP world declare that requirement
+    here rather than silently discarding generated shapes in collector code.
+    """
+    if required_expert_parallel_size is not None and required_expert_parallel_size <= 0:
+        raise ValueError(f"required_expert_parallel_size must be positive, got {required_expert_parallel_size}")
     moe_sweep = _required_base_common_case_values("moe")
     num_tokens = _as_int_list(moe_sweep.get("token_counts"), field_name="moe.token_counts")
     tp_list = _as_int_list(moe_sweep.get("tensor_parallel_sizes"), field_name="moe.tensor_parallel_sizes")
@@ -1524,6 +1536,9 @@ def get_common_moe_test_cases(*, backend: str | None = None):
         topk = int(model_config["topk"])
         num_experts = int(model_config["num_experts"])
         model_name = str(model_config["model_path"])
+
+        if required_expert_parallel_size is not None and num_experts % required_expert_parallel_size != 0:
+            continue
 
         max_tp_exclusive = model_config.get("max_tp_exclusive")
         if max_tp_exclusive is not None and tp >= int(max_tp_exclusive):

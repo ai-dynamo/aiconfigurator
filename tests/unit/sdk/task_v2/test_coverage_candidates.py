@@ -25,11 +25,7 @@ import yaml
 
 from aiconfigurator.sdk import common
 from aiconfigurator.sdk.config import ModelConfig
-from aiconfigurator.sdk.moe_comm_resolver import (
-    a2a_covers_parallel,
-    resolve_a2a_query_profile,
-    resolve_model_config_moe_comm,
-)
+from aiconfigurator.sdk.moe_comm_resolver import a2a_covers_parallel, resolve_model_config_moe_comm
 from aiconfigurator.sdk.perf_database import (
     PerfDataNotAvailableError,
     databases_cache,
@@ -285,61 +281,6 @@ def test_sglang_node1_fallback_requires_legacy_canonical_coordinate(noncanonical
     )
 
 
-def test_vllm_unscaled_proxy_is_scoped_to_approved_dataset_identity():
-    pairs = {(4, 1)}
-    kwargs = {
-        "framework": "vllm",
-        "comm_backend": "deepep_v2",
-        "moe_ep_size": 64,
-        "expected_nodes": 16,
-    }
-
-    assert resolve_a2a_query_profile(
-        pairs,
-        dataset_identity=("gb200", "vllm", "0.24.0"),
-        **kwargs,
-    ) == (4, 1)
-    assert resolve_a2a_query_profile(
-        pairs,
-        dataset_identity=("gb200", "vllm", "0.25.0"),
-        **kwargs,
-    ) is None
-
-
-def test_exact_a2a_coordinate_wins_over_approved_proxy():
-    assert resolve_a2a_query_profile(
-        {(4, 1), (64, 16)},
-        framework="vllm",
-        comm_backend="deepep_v2",
-        moe_ep_size=64,
-        expected_nodes=16,
-        dataset_identity=("gb200", "vllm", "0.24.0"),
-    ) == (64, 16)
-
-
-def test_exact_resolver_records_approved_vllm_proxy_but_still_requires_compute():
-    database = SimpleNamespace(
-        system="gb200",
-        backend="vllm",
-        version="0.24.0",
-        system_spec={"node": {"num_gpus_per_node": 4}, "gpu": {"sm_version": 100}},
-        moe_a2a_coverage=lambda *_args: {"deepep_v2": {(4, 1)}},
-        moe_expert_compute_coverage=lambda *_args: {64},
-    )
-    model_config = ModelConfig(attention_dp_size=64, moe_tp_size=1, moe_ep_size=64)
-
-    resolved = resolve_model_config_moe_comm(
-        model_config,
-        model_path=SYNTH_MODEL,
-        backend_name="vllm",
-        database=database,
-        required_phases=("context", "generation"),
-    )
-
-    assert resolved == {"context": "deepep_v2", "generation": "deepep_v2"}
-    assert model_config.moe_comm_query_profile == {"context": (4, 1), "generation": (4, 1)}
-
-
 def test_exact_resolver_accepts_sglang_node1_deepep_substitution():
     database = SimpleNamespace(
         system="synthetic",
@@ -390,7 +331,7 @@ def test_agg_requires_both_phases_covered(synth_systems):
     t = _synth_task()
     point = _tuple(dp=32, moe_ep=32)
     assert t._resolve_moe_comm_backend("agg", point) is None
-    with pytest.raises(PerfDataNotAvailableError, match=r"Cross-node EP.*A2A and expert-compute.*moe_ep=32"):
+    with pytest.raises(PerfDataNotAvailableError, match=r"Cross-node EP.*DeepEP A2A.*moe_ep=32"):
         t.build_model_config(role="agg", parallel=point)
 
 

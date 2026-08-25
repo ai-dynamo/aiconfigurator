@@ -89,6 +89,7 @@ from collector import provenance
 from collector.framework_manifest import get_collector_runtime
 from collector.helper import finalize_perf_files, log_perf, stale_output_artifacts
 from collector.registry_types import PerfFile
+from collector.wideep.distributed_lifecycle import agree_stage, raise_for_stage
 
 MODULE_NAME = "collector.wideep.sglang.collect_moe_a2a"
 OP_NAME = "moe_a2a"
@@ -142,6 +143,10 @@ class MoeA2ADeclarationError(RuntimeError):
 
 class MoeA2ABenchmarkError(RuntimeError):
     """A queued case failed to execute. Classified failure record, never a skip."""
+
+
+class MoeA2APeerError(MoeA2ABenchmarkError):
+    """Another distributed rank failed the same lifecycle stage."""
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +296,7 @@ class MoeA2ACase:
         )
 
 
-def get_moe_a2a_shapes() -> list[MoeA2AShape]:
+def get_moe_a2a_shapes(*, required_expert_parallel_size: int | None = None) -> list[MoeA2AShape]:
     """The declared MoE geometries this comm table is collected for.
 
     Sourced from ``cases/models/*_cases.yaml`` ``model_case_values.moe`` rows
@@ -302,7 +307,10 @@ def get_moe_a2a_shapes() -> list[MoeA2AShape]:
     """
     from collector.case_generator import get_common_moe_test_cases, is_wideep_moe_model
 
-    recipes = get_common_moe_test_cases(backend="sglang")
+    recipes = get_common_moe_test_cases(
+        backend="sglang",
+        required_expert_parallel_size=required_expert_parallel_size,
+    )
     dropped_not_declared = 0
     shapes: set[MoeA2AShape] = set()
     for recipe in recipes:
@@ -366,16 +374,20 @@ def build_case_plan(
 
     Emitted in D5 sort order.
     """
+    invalid_shapes = [shape for shape in shapes if shape.num_experts % ep_size != 0]
+    if invalid_shapes:
+        raise MoeA2ADeclarationError(
+            f"declared moe_a2a shapes are not divisible by ep_size={ep_size}: {invalid_shapes}; "
+            "request the EP constraint from get_moe_a2a_shapes instead of filtering a generated plan"
+        )
+    invalid_node_shapes = [shape for shape in shapes if shape.num_experts % node_num != 0]
+    if invalid_node_shapes:
+        raise MoeA2ADeclarationError(
+            f"declared moe_a2a shapes are not divisible by node_num={node_num}: {invalid_node_shapes}"
+        )
+
     cases: list[MoeA2ACase] = []
-    dropped_ep = 0
-    dropped_node = 0
     for shape in shapes:
-        if shape.num_experts % ep_size != 0:
-            dropped_ep += 1
-            continue
-        if shape.num_experts % node_num != 0:
-            dropped_node += 1
-            continue
         if COMM_BACKEND_HT in modes:
             for sms in grid["sms"]:
                 for num_tokens in grid["ht_token_counts"]:
@@ -388,17 +400,13 @@ def build_case_plan(
     print(
         f"moe_a2a: {len(cases)} cases for ep_size={ep_size} node_num={node_num} "
         f"from {len(shapes)} declared shapes x {len(grid['sms'])} sms x "
-        f"{len(grid['ht_token_counts'])} HT tokens + {len(grid['ll_token_counts'])} LL tokens "
-        f"(dropped: {dropped_ep} shapes with num_experts % ep_size != 0, "
-        f"{dropped_node} with num_experts % node_num != 0)",
+        f"{len(grid['ht_token_counts'])} HT tokens + {len(grid['ll_token_counts'])} LL tokens",
         flush=True,
     )
     if not cases:
         raise MoeA2ADeclarationError(
-            f"moe_a2a expanded to zero cases for ep_size={ep_size} node_num={node_num}: all "
-            f"{len(shapes)} declared shapes were dropped ({dropped_ep} not divisible by ep_size, "
-            f"{dropped_node} not divisible by node_num). Collecting nothing is never a clean "
-            "completion — fix the world layout or the declared shapes."
+            f"moe_a2a expanded to zero cases for ep_size={ep_size} node_num={node_num}; "
+            "collecting nothing is never a clean completion"
         )
     return cases
 
@@ -1055,6 +1063,33 @@ def record_failure(output_dir: Path, case: MoeA2ACase, error: BaseException, ide
     )
 
 
+def record_stage_failure(
+    output_dir: Path,
+    error: BaseException,
+    identity: DistIdentity,
+    *,
+    stage: str,
+) -> Path:
+    """Append a fatal non-case lifecycle failure to this rank's log."""
+
+    path = output_dir / ERRORS_FILENAME_TEMPLATE.format(rank=identity.rank)
+    existing = json.loads(path.read_text()) if path.exists() else []
+    existing.append(
+        {
+            "module": MODULE_NAME,
+            "op": OP_NAME,
+            "classification": "unexpected",
+            "stage": stage,
+            "error_type": type(error).__name__,
+            "error": str(error),
+            "rank": identity.rank,
+            "case": None,
+        }
+    )
+    path.write_text(json.dumps(existing, indent=2))
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -1130,7 +1165,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="container image the job was launched with (the launcher's ${CONTAINER_IMAGE}); must be a "
         "manifest wideep_sglang image variant — recorded in the sidecar runtime block",
     )
-    parser.add_argument("--allow-mnnvl", action="store_true", help="allow MNNVL for the low-latency buffer")
+    parser.add_argument(
+        "--allow-mnnvl",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="allow MNNVL for the low-latency buffer (publishable default: enabled)",
+    )
     parser.add_argument("--disable-nvlink", action="store_true", help="disable NVLink for the low-latency buffer")
     parser.add_argument(
         "--plan-only",
@@ -1156,6 +1196,12 @@ def resolve_modes(raw: str) -> tuple[str, ...]:
     return modes
 
 
+def transport_is_default(*, allow_mnnvl: bool, disable_nvlink: bool) -> bool:
+    """Return whether LL transport flags match the sole publishable mode."""
+
+    return allow_mnnvl and not disable_nvlink
+
+
 def require_supported_framework(framework: str) -> None:
     """D3: the vLLM leg is declared but dormant — no pinned image exists yet."""
     if framework == "vllm":
@@ -1179,7 +1225,7 @@ def main(argv: list[str] | None = None) -> None:
             env["WORLD_SIZE"] = str(args.world_size)
         identity = derive_dist_identity(env, gpus_per_node=args.gpus_per_node)
         cases = build_case_plan(
-            shapes=get_moe_a2a_shapes(),
+            shapes=get_moe_a2a_shapes(required_expert_parallel_size=identity.ep_size),
             grid=get_moe_a2a_workload_grid(),
             ep_size=identity.ep_size,
             node_num=identity.node_num,
@@ -1198,6 +1244,10 @@ def main(argv: list[str] | None = None) -> None:
         dict(os.environ), gpus_per_node=args.gpus_per_node, visible_device_count=torch.cuda.device_count()
     )
     runtime_meta = resolve_runtime_meta(get_version("sglang"), args.image_ref)
+    runtime_meta["transport"] = {
+        "allow_mnnvl": args.allow_mnnvl,
+        "allow_nvlink": not args.disable_nvlink,
+    }
     group = init_distributed(identity)
     print(
         f"[moe_a2a] host={socket.gethostname()} rank={identity.rank}/{identity.world_size} "
@@ -1207,7 +1257,7 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     cases = build_case_plan(
-        shapes=get_moe_a2a_shapes(),
+        shapes=get_moe_a2a_shapes(required_expert_parallel_size=identity.ep_size),
         grid=get_moe_a2a_workload_grid(),
         ep_size=identity.ep_size,
         node_num=identity.node_num,
@@ -1216,21 +1266,6 @@ def main(argv: list[str] | None = None) -> None:
     case_ids = case_plan_ids(cases, ep_size=identity.ep_size, node_num=identity.node_num)
 
     output_dir = Path(args.output_path)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    # F19: log_perf appends to the staging CSV and record_failure appends per-rank
-    # error sidecars, so a rerun into a directory holding a previous attempt's
-    # artifacts would finalize/attest stale rows under this run's provenance. No
-    # validated resume protocol exists for this standalone collector — the launcher
-    # derives a fresh per-Slurm-job --output-path — so the collector refuses to run
-    # into a dirty directory outright, before any benchmark or write.
-    stale = stale_output_artifacts(output_dir, PerfFile.MOE_A2A.value)
-    if stale:
-        raise MoeA2ADeclarationError(
-            f"moe_a2a refuses to run into {output_dir}: it holds artifacts from a previous "
-            f"attempt ({', '.join(stale)}). log_perf appends to the staging CSV and per-rank "
-            "error sidecars accumulate, so rerunning here would finalize stale rows under "
-            "this run's attestation. Use a fresh --output-path."
-        )
     perf_path = str(output_dir / PerfFile.MOE_A2A.value)
     device_name = torch.cuda.get_device_name(torch.device("cuda", identity.local_rank))
 
@@ -1239,88 +1274,223 @@ def main(argv: list[str] | None = None) -> None:
     current_sms = None
     failure_count = 0
     ll_cases = [case for case in cases if case.comm_backend == COMM_BACKEND_LL]
+    run_failed = False
     try:
-        for case in cases:
-            if case.comm_backend == COMM_BACKEND_HT:
-                # One Buffer per SM budget; the plan is sms-major so each is
-                # created once.
-                if case.sms != current_sms:
-                    if ht_buffer is not None:
-                        ht_buffer.destroy()
-                    ht_buffer = create_ht_buffer(group, case.sms)
-                    current_sms = case.sms
-            elif ll_buffer is None:
-                # First LL case, i.e. every HT case is done (the plan sorts
-                # deepep_ht before deepep_ll). DeepEP Buffers with
-                # low_latency_mode=True and =False are never co-resident on
-                # one group in the source scripts — test_internode.py:368/401
-                # allocates them in mutually exclusive branches — and holding
-                # both would double the resident RDMA/NVL allocation.
-                if ht_buffer is not None:
-                    ht_buffer.destroy()
-                    ht_buffer = None
-                ll_buffer = create_ll_buffer(
-                    group,
-                    identity=identity,
-                    cases=ll_cases,
-                    allow_mnnvl=args.allow_mnnvl,
-                    disable_nvlink=args.disable_nvlink,
-                )
 
-            failed = 0
+        def agree(_stage: str, failed: bool) -> bool:
+            failure = torch.tensor([int(failed)], dtype=torch.int32, device="cuda")
+            dist.all_reduce(failure, op=dist.ReduceOp.MAX, group=group)
+            return bool(failure.item())
+
+        preflight_error: BaseException | None = None
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            stale = stale_output_artifacts(output_dir, PerfFile.MOE_A2A.value)
+            if stale:
+                raise MoeA2ADeclarationError(
+                    f"moe_a2a refuses to run into {output_dir}: it holds artifacts from a previous "
+                    f"attempt ({', '.join(stale)}). Use a fresh --output-path."
+                )
+        except BaseException as error:
+            preflight_error = error
+        raise_for_stage(
+            agree_stage(
+                "preflight",
+                preflight_error,
+                agreement=agree,
+                peer_error_type=MoeA2APeerError,
+            )
+        )
+
+        for case_index, case in enumerate(cases):
             timings = None
+            benchmark_error: BaseException | None = None
             try:
                 if case.comm_backend == COMM_BACKEND_HT:
+                    if case.sms != current_sms:
+                        if ht_buffer is not None:
+                            ht_buffer.destroy()
+                        ht_buffer = create_ht_buffer(group, case.sms)
+                        current_sms = case.sms
                     timings = run_ht_case(buffer=ht_buffer, group=group, case=case, identity=identity)
                 else:
+                    if ll_buffer is None:
+                        if ht_buffer is not None:
+                            ht_buffer.destroy()
+                            ht_buffer = None
+                        ll_buffer = create_ll_buffer(
+                            group,
+                            identity=identity,
+                            cases=ll_cases,
+                            allow_mnnvl=args.allow_mnnvl,
+                            disable_nvlink=args.disable_nvlink,
+                        )
                     timings = run_ll_case(buffer=ll_buffer, group=group, case=case, identity=identity)
-            except Exception as error:
-                failed = 1
-                record_failure(output_dir, case, error, identity)
+            except BaseException as error:
+                benchmark_error = error
 
-            # Every rank must agree whether this case produced data, or the
-            # next collective desyncs. See the module's known-limitation note.
-            agreement = torch.tensor([failed], dtype=torch.int32, device="cuda")
-            dist.all_reduce(agreement, op=dist.ReduceOp.MAX, group=group)
-            if int(agreement.item()) != 0:
+            benchmark_outcome = agree_stage(
+                f"case:{case_index}:benchmark",
+                benchmark_error,
+                agreement=agree,
+                peer_error_type=MoeA2APeerError,
+            )
+            if benchmark_outcome.failed:
                 failure_count += 1
+                assert benchmark_outcome.error is not None
+                record_error: BaseException | None = None
+                try:
+                    record_failure(output_dir, case, benchmark_outcome.error, identity)
+                except BaseException as error:
+                    record_error = error
+                raise_for_stage(
+                    agree_stage(
+                        f"case:{case_index}:failure_record",
+                        record_error,
+                        agreement=agree,
+                        peer_error_type=MoeA2APeerError,
+                    )
+                )
                 continue
 
+            row_error: BaseException | None = None
             if identity.rank == 0:
-                _emit_case_rows(
-                    timings=timings,
-                    case=case,
-                    identity=identity,
-                    perf_path=perf_path,
-                    version=runtime_meta["version"],
-                    device_name=device_name,
+                try:
+                    assert timings is not None
+                    _emit_case_rows(
+                        timings=timings,
+                        case=case,
+                        identity=identity,
+                        perf_path=perf_path,
+                        version=runtime_meta["version"],
+                        device_name=device_name,
+                    )
+                except BaseException as error:
+                    row_error = error
+            raise_for_stage(
+                agree_stage(
+                    f"case:{case_index}:row_write",
+                    row_error,
+                    agreement=agree,
+                    peer_error_type=MoeA2APeerError,
                 )
-    finally:
-        if ht_buffer is not None:
-            ht_buffer.destroy()
-        if ll_buffer is not None:
-            ll_buffer.destroy()
-        if dist.is_initialized():
-            dist.barrier()
-            dist.destroy_process_group()
-
-    if identity.rank == 0:
-        converted = finalize_perf_files([perf_path])
-        if not converted:
-            raise MoeA2ABenchmarkError(
-                f"moe_a2a produced no rows: all {failure_count}/{len(cases)} cases failed. See "
-                f"{output_dir / ERRORS_FILENAME_TEMPLATE.format(rank='*')} — a whole-family failure is a "
-                "collector problem to fix, not a partial collection to publish."
             )
-        [parquet_path] = converted
-        meta_path = write_moe_a2a_sidecar(
-            output_dir,
-            runtime_meta=runtime_meta,
-            case_ids=case_ids,
-            parquet_path=parquet_path,
-            failure_count=failure_count,
+
+        buffer_error: BaseException | None = None
+        try:
+            if ht_buffer is not None:
+                ht_buffer.destroy()
+                ht_buffer = None
+            if ll_buffer is not None:
+                ll_buffer.destroy()
+                ll_buffer = None
+        except BaseException as error:
+            buffer_error = error
+        raise_for_stage(
+            agree_stage(
+                "buffer_teardown",
+                buffer_error,
+                agreement=agree,
+                peer_error_type=MoeA2APeerError,
+            )
         )
-        print(f"[moe_a2a] wrote {parquet_path} and {meta_path} ({failure_count} classified failures)", flush=True)
+
+        publishable = COMM_BACKEND_LL not in modes or transport_is_default(
+            allow_mnnvl=args.allow_mnnvl,
+            disable_nvlink=args.disable_nvlink,
+        )
+        parquet_path: Path | None = None
+        finalize_error: BaseException | None = None
+        if publishable and identity.rank == 0:
+            try:
+                converted = finalize_perf_files([perf_path])
+                if len(converted) != 1:
+                    raise MoeA2ABenchmarkError(
+                        f"moe_a2a produced no finalized parquet; {failure_count}/{len(cases)} cases failed"
+                    )
+                parquet_path = Path(converted[0])
+            except BaseException as error:
+                finalize_error = error
+        raise_for_stage(
+            agree_stage(
+                "parquet_finalize",
+                finalize_error,
+                agreement=agree,
+                peer_error_type=MoeA2APeerError,
+            )
+        )
+
+        meta_path: Path | None = None
+        sidecar_error: BaseException | None = None
+        if publishable and identity.rank == 0:
+            try:
+                assert parquet_path is not None
+                meta_path = write_moe_a2a_sidecar(
+                    output_dir,
+                    runtime_meta=runtime_meta,
+                    case_ids=case_ids,
+                    parquet_path=parquet_path,
+                    failure_count=failure_count,
+                )
+            except BaseException as error:
+                sidecar_error = error
+        raise_for_stage(
+            agree_stage(
+                "sidecar_write",
+                sidecar_error,
+                agreement=agree,
+                peer_error_type=MoeA2APeerError,
+            )
+        )
+        raise_for_stage(
+            agree_stage(
+                "final_ready",
+                None,
+                agreement=agree,
+                peer_error_type=MoeA2APeerError,
+            )
+        )
+        dist.barrier(group=group)
+
+        if identity.rank == 0:
+            if publishable:
+                print(
+                    f"[moe_a2a] wrote {parquet_path} and {meta_path} ({failure_count} classified failures)",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[moe_a2a] diagnostic transport staged rows at {perf_path}; "
+                    "parquet and collection_meta.yaml will not be finalized",
+                    flush=True,
+                )
+    except BaseException as error:
+        run_failed = True
+        try:
+            record_stage_failure(output_dir, error, identity, stage="fatal_runtime")
+        except Exception as record_error:
+            print(
+                f"[moe_a2a] failed to record fatal failure {error!r}: {record_error}",
+                file=sys.stderr,
+                flush=True,
+            )
+        raise
+    finally:
+        for buffer in (ht_buffer, ll_buffer):
+            if buffer is not None:
+                try:
+                    buffer.destroy()
+                except Exception as error:
+                    if not run_failed:
+                        raise
+                    print(f"[moe_a2a] buffer destroy after failure also failed: {error}", file=sys.stderr)
+        if dist.is_initialized():
+            try:
+                dist.destroy_process_group()
+            except Exception as error:
+                if not run_failed:
+                    raise
+                print(f"[moe_a2a] process-group destroy after failure also failed: {error}", file=sys.stderr)
 
 
 if __name__ == "__main__":

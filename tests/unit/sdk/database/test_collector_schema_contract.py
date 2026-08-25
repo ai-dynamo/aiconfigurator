@@ -34,7 +34,6 @@ these tests keep visible (see "MoE table units and caveats" in
 ``collector/README.md``).
 """
 
-import ast
 from pathlib import Path
 
 import pandas as pd
@@ -53,9 +52,17 @@ MOE_A2A_HEADER = (
     "comm_backend,phase,comm_dtype,ep_size,node_num,hidden_size,topk,num_experts,"
     "num_tokens,sms,transmit_us,notify_us,latency"
 )
+MOE_EXPERT_COMPUTE_HEADER = (
+    "framework,version,device,op_name,kernel_source,"
+    "moe_dtype,distribution,inference_phase,num_tokens,hidden_size,inter_size,"
+    "topk,num_experts,num_slots,moe_tp_size,moe_ep_size,latency"
+)
 _TWIN_PINS = {
-    "tests/unit/collector/test_collect_moe_a2a.py": MOE_A2A_HEADER,
-    "tests/unit/collector/test_collect_trtllm_alltoall.py": MOE_A2A_HEADER,
+    "tests/unit/collector/test_collect_moe_a2a.py": ("MOE_A2A_HEADER", MOE_A2A_HEADER),
+    "tests/unit/collector/test_collect_trtllm_alltoall.py": ("MOE_A2A_HEADER", MOE_A2A_HEADER),
+    "tests/unit/collector/sglang/test_collect_moe_ep.py": ("MOE_EP_HEADER", MOE_EXPERT_COMPUTE_HEADER),
+    "tests/unit/collector/trtllm/test_collect_moe_ep.py": ("MOE_EP_HEADER", MOE_EXPERT_COMPUTE_HEADER),
+    "tests/unit/collector/test_vllm_collect_moe_ep.py": ("MOE_EP_HEADER", MOE_EXPERT_COMPUTE_HEADER),
 }
 
 
