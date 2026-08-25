@@ -956,10 +956,11 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _git_collector_ref(repo_root: Path) -> str:
+def _git_collector_ref(repo_root: Path, declared: str | None = None) -> str:
     """Return the host-attested collector SHA, rejecting observable drift."""
 
-    declared = os.environ.get("AIC_COLLECTOR_REF", "")
+    if declared is None:
+        declared = os.environ.get("AIC_COLLECTOR_REF", "")
     if not declared:
         return _unattested_git_collector_ref(repo_root)
     if len(declared) != 40 or any(character not in "0123456789abcdef" for character in declared.lower()):
@@ -1147,6 +1148,7 @@ def _write_sidecar(
     case_ids: list[str],
     parquet_path: Path,
     failure_count: int,
+    collector_ref: str | None = None,
 ) -> Path:
     import pyarrow.parquet as pq
 
@@ -1154,7 +1156,7 @@ def _write_sidecar(
         raise VllmMoeA2ADeclarationError("refusing to attest an empty case plan")
     closures = provenance.load_closures(_REPO_ROOT / "collector" / "hash_closures.yaml")
     table = {
-        "collector_ref": _git_collector_ref(_REPO_ROOT),
+        "collector_ref": collector_ref or _git_collector_ref(_REPO_ROOT),
         "collector_hash": provenance.collector_hash(MODULE_NAME, _REPO_ROOT, closures),
         "case_plan_hash": provenance.case_plan_hash(case_ids),
         "collected_at": date.today().isoformat(),
@@ -1182,6 +1184,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--image-digest")
     parser.add_argument("--runtime-abi-json")
+    parser.add_argument(
+        "--collector-ref",
+        help="host-attested 40-character collector commit; passed explicitly by the Slurm runner",
+    )
     parser.add_argument(
         "--allow-mnnvl",
         action=argparse.BooleanOptionalAction,
@@ -1266,6 +1272,7 @@ def main(argv: list[str] | None = None) -> None:
         isinstance(key, str) and isinstance(value, str) for key, value in observed_abi.items()
     ):
         raise VllmMoeA2ADeclarationError("--runtime-abi-json must be a JSON object of string fields")
+    collector_ref = _git_collector_ref(_REPO_ROOT, args.collector_ref)
     if backends[0] == "deepep_v2":
         _activate_v2_rdma_rate_tool(observed_abi.get("ibstat_mlx5_0_rate_gbps", ""))
     runtime_meta = attest_vllm_runtime(
@@ -1417,6 +1424,7 @@ def main(argv: list[str] | None = None) -> None:
                     case_ids=ids,
                     parquet_path=parquet_path,
                     failure_count=failure_count,
+                    collector_ref=collector_ref,
                 )
             except BaseException as error:
                 sidecar_error = error

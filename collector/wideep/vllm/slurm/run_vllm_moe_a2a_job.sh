@@ -588,7 +588,9 @@ export AIC_COLLECTOR_REF="${collector_ref}"
 export AIC_GPUS_PER_NODE="${GPUS_PER_NODE}"
 export AIC_BACKEND="${BACKEND}"
 export AIC_CANARY_FLAG="${canary_flag}"
-container_command+=' python3 -m collector.wideep.vllm.collect_moe_a2a --gpus-per-node "${AIC_GPUS_PER_NODE}" --backends "${AIC_BACKEND}" --output-path "${AIC_OUTPUT_DIR}" --vllm-source-root "${AIC_VLLM_SOURCE_ROOT}" --image-digest "${AIC_IMAGE_DIGEST}" --runtime-abi-json "${AIC_RUNTIME_ABI_JSON}" ${AIC_CANARY_FLAG}'
+container_command+=' python3 -m collector.wideep.vllm.collect_moe_a2a --gpus-per-node "${AIC_GPUS_PER_NODE}" --backends "${AIC_BACKEND}" --output-path "${AIC_OUTPUT_DIR}" --vllm-source-root "${AIC_VLLM_SOURCE_ROOT}" --image-digest "${AIC_IMAGE_DIGEST}" --runtime-abi-json "${AIC_RUNTIME_ABI_JSON}"'
+container_command+=" --collector-ref ${collector_ref}"
+container_command+=' ${AIC_CANARY_FLAG}'
 
 set +e
 srun \

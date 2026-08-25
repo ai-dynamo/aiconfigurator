@@ -81,6 +81,7 @@ def test_runner_discovers_and_records_a_routable_gloo_interface():
     assert 'export GLOO_SOCKET_IFNAME="${gloo_socket_ifname}"' in source
     assert 'collector_ref=$(git -C "${repo_dir}" rev-parse HEAD)' in source
     assert 'export AIC_COLLECTOR_REF="${collector_ref}"' in source
+    assert 'container_command+=" --collector-ref ${collector_ref}"' in source
     assert 'export AIC_IBSTAT_TOOL_ROOT="${staging_root}/host-rdma-tools"' in source
     assert "container_command+=" in source and "ibstat_output=$(ibstat mlx5_0)" in source
     assert '"ibstat_bundle_sha256"' in source

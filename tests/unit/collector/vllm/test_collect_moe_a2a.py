@@ -741,6 +741,13 @@ def test_collector_ref_rejects_invalid_or_mismatched_host_attestation(tmp_path, 
         a2a._git_collector_ref(tmp_path)
 
 
+def test_collector_ref_explicit_argument_does_not_depend_on_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("AIC_COLLECTOR_REF", "b" * 40)
+    monkeypatch.setattr(a2a, "_unattested_git_collector_ref", lambda _path: "unknown")
+
+    assert a2a._git_collector_ref(tmp_path, "a" * 40) == "a" * 40
+
+
 def test_v2_rdma_rate_tool_is_reactivated_and_attested_in_python(tmp_path, monkeypatch):
     tool_root = tmp_path / "aic-vllm-a2a-123" / "host-rdma-tools"
     (tool_root / "bin").mkdir(parents=True)
