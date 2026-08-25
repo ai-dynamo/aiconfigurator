@@ -42,36 +42,36 @@ arm64_digest=sha256:32445b36556244d8a721cd21a2b47a7915bc6408432d05aaeab205bb223c
 amd64_digest=sha256:f9de5cd9fa907fbf6dbba691eb7db095d48ad58ea283e3eba7142f9a91e186e8
 case "${system}" in
     gb200)
-        account=coreai_comparch_inferencex; partition=batch; qos=normal; gpus_per_node=4
+        account=coreai_comparch_inferencex; partition=batch; qos=normal
         image_digest=${arm64_digest}; cuda_arches=${cuda_arches:-"10.0a 10.3a"}
         [[ "${profile}" != legacy-nvl8 ]] || die "gb200 overlay builds use legacy-nvl4"
         ;;
     gb300)
-        account=blackwell; partition=gb300nvl72_preprod; qos=normal; gpus_per_node=4
+        account=blackwell; partition=gb300nvl72_preprod; qos=normal
         image_digest=${arm64_digest}; cuda_arches=${cuda_arches:-"10.0a 10.3a"}
         [[ "${profile}" != legacy-nvl8 ]] || die "gb300 overlay builds use legacy-nvl4"
         ;;
     h100_sxm)
-        account=dl_frameworks; partition=dgxh100; qos=normal; gpus_per_node=8
+        account=dl_frameworks; partition=dgxh100; qos=normal
         image_digest=${amd64_digest}; cuda_arches=${cuda_arches:-"9.0 10.0a 10.3a"}
         [[ "${profile}" != legacy-nvl4 ]] || die "H100 overlay builds use legacy-nvl8"
         ;;
     h200_sxm)
-        account=dl_frameworks; partition=dgxh200; qos=normal; gpus_per_node=8
+        account=dl_frameworks; partition=dgxh200; qos=normal
         image_digest=${amd64_digest}; cuda_arches=${cuda_arches:-"9.0 10.0a 10.3a"}
         [[ "${profile}" != legacy-nvl4 ]] || die "H200 overlay builds use legacy-nvl8"
         ;;
     b200_sxm)
         account=beta-users_fallback
         partition='b200@cr+mp-1000W/umbriel-b200@ts4/8gpu-224cpu-2048gb'
-        qos=batch-short; gpus_per_node=8; image_digest=${amd64_digest}
+        qos=batch-short; image_digest=${amd64_digest}
         cuda_arches=${cuda_arches:-"9.0 10.0a 10.3a"}
         [[ "${profile}" != legacy-nvl4 ]] || die "B200 overlay builds use legacy-nvl8"
         ;;
     b300_sxm)
         account=beta-users_b300
         partition='b300@ts5/b300-nvl8@ts5/8gpu-224cpu-2048gb'
-        qos=batch-short; gpus_per_node=8; image_digest=${amd64_digest}
+        qos=batch-short; image_digest=${amd64_digest}
         cuda_arches=${cuda_arches:-"9.0 10.0a 10.3a"}
         [[ "${profile}" != legacy-nvl4 ]] || die "B300 overlay builds use legacy-nvl8"
         ;;
@@ -110,6 +110,8 @@ export VLLM_SOURCE_ROOT="${vllm_source_root}"
 export CONTAINER_IMAGE="${container_image}"
 export IMAGE_DIGEST="${image_digest}"
 
+# Overlay compilation emits no benchmark data. One typed GPU is sufficient for
+# the post-build CUDA/ABI check; benchmark jobs remain exclusive-node jobs.
 job_id=$(sbatch \
     --parsable \
     --job-name="aic-v024-${system}-${profile}-overlay" \
@@ -118,8 +120,7 @@ job_id=$(sbatch \
     --qos="${qos}" \
     --nodes=1 \
     --ntasks=1 \
-    --gpus-per-node="${gpus_per_node}" \
-    --exclusive \
+    --gpus-per-node=1 \
     --switches=1 \
     --time=04:00:00 \
     --output="${log_dir}/${profile}_%j.out" \

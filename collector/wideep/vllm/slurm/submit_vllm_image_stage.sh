@@ -25,19 +25,19 @@ arm64_digest=sha256:32445b36556244d8a721cd21a2b47a7915bc6408432d05aaeab205bb223c
 amd64_digest=sha256:f9de5cd9fa907fbf6dbba691eb7db095d48ad58ea283e3eba7142f9a91e186e8
 case "${system}" in
     gb200)
-        account=coreai_comparch_inferencex; partition=batch; qos=normal; gpus_per_node=4
+        account=coreai_comparch_inferencex; partition=batch; qos=normal
         image_digest=${arm64_digest}; image_arch=arm64
         ;;
     gb300)
-        account=blackwell; partition=gb300nvl72_preprod; qos=normal; gpus_per_node=4
+        account=blackwell; partition=gb300nvl72_preprod; qos=normal
         image_digest=${arm64_digest}; image_arch=arm64
         ;;
     h100_sxm)
-        account=dl_frameworks; partition=dgxh100; qos=normal; gpus_per_node=8
+        account=dl_frameworks; partition=dgxh100; qos=normal
         image_digest=${amd64_digest}; image_arch=amd64
         ;;
     h200_sxm)
-        account=dl_frameworks; partition=dgxh200; qos=normal; gpus_per_node=8
+        account=dl_frameworks; partition=dgxh200; qos=normal
         image_digest=${amd64_digest}; image_arch=amd64
         ;;
     *) die "unsupported image-staging system ${system}" ;;
@@ -60,6 +60,8 @@ case "${system}" in
     h100_sxm|h200_sxm) export CONTAINER_IMAGE="docker.io#vllm/vllm-openai:${image_digest}" ;;
 esac
 
+# Image staging emits no benchmark data and only imports the runtime for ABI
+# attestation. Keep scarce full nodes available for exclusive benchmark jobs.
 job_id=$(sbatch \
     --parsable \
     --job-name="aic-v024-${system}-image-stage" \
@@ -68,8 +70,7 @@ job_id=$(sbatch \
     --qos="${qos}" \
     --nodes=1 \
     --ntasks=1 \
-    --gpus-per-node="${gpus_per_node}" \
-    --exclusive \
+    --gpus-per-node=1 \
     --switches=1 \
     --time=02:00:00 \
     --output="${log_dir}/image_stage_%j.out" \
