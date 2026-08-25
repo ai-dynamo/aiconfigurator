@@ -409,6 +409,13 @@ SMOKE_CASES = [
             model_path="deepseek-ai/DeepSeek-R1",
             system_name="gb200",
             backend_name="vllm",
+            # All-TP MoE placement: #1578 (merged 2026-08-25) makes cross-node
+            # EP require DeepEP A2A data, which gb200/vllm has not collected
+            # (default ep8 spans 4-GPU nodes). The collected grid offers
+            # (moe_tp=8, ep=1); the case keeps its purpose — NVL72 edge-spec
+            # coverage — with real numbers instead of a frozen error.
+            moe_ep_size=1,
+            moe_tp_size=8,
         ),
         id="deepseek-r1-gb200-vllm-scan-coverage",
     ),
