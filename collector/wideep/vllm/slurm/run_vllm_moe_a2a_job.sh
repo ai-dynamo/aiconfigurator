@@ -322,6 +322,7 @@ export AIC_BACKEND="${BACKEND}"
 export AIC_CANARY_FLAG="${canary_flag}"
 container_command+=' python3 -m collector.wideep.vllm.collect_moe_a2a --gpus-per-node "${AIC_GPUS_PER_NODE}" --backends "${AIC_BACKEND}" --output-path "${AIC_OUTPUT_DIR}" --vllm-source-root "${AIC_VLLM_SOURCE_ROOT}" --image-digest "${AIC_IMAGE_DIGEST}" --runtime-abi-json "${AIC_RUNTIME_ABI_JSON}" ${AIC_CANARY_FLAG}'
 
+set +e
 srun \
     --nodes="${NODE_NUM}" \
     --ntasks="${expected_ep}" \
@@ -331,6 +332,21 @@ srun \
     --container-mounts="${container_mounts}" \
     --container-workdir="${repo_dir}" \
     bash -lc "${container_command}"
+benchmark_status=$?
+set -e
+if [[ "${benchmark_status}" -ne 0 ]]; then
+    failure_dir="${campaign_root}/failure_evidence/${SYSTEM}/${RUN_KIND}/${NODE_NUM}n/${BACKEND}/job_${SLURM_JOB_ID}"
+    mkdir -p "${failure_dir}"
+    failure_dir=$(safe_existing_path "failure evidence directory" "${failure_dir}")
+    export AIC_FAILURE_DIR="${failure_dir}"
+    srun --nodes="${NODE_NUM}" --ntasks="${NODE_NUM}" --ntasks-per-node=1 bash -lc '
+        destination="${AIC_FAILURE_DIR}/$(hostname)"
+        mkdir -p "${destination}"
+        find "${AIC_OUTPUT_DIR}" -maxdepth 1 -type f -name "errors_moe_a2a_vllm.rank*.json" \
+            -exec cp -- {} "${destination}/" \;
+    ' || true
+    die "collector step failed with status ${benchmark_status}; rank evidence copied to ${failure_dir}"
+fi
 
 parquet_path="${output_dir}/moe_a2a_perf.parquet"
 sidecar_path="${output_dir}/collection_meta.yaml"

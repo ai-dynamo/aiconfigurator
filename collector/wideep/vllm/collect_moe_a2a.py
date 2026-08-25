@@ -1057,6 +1057,14 @@ def main(argv: list[str] | None = None) -> None:
                 peer_error_type=VllmMoeA2APeerError,
             )
         )
+        if identity.rank == 0:
+            for failure in result.failures:
+                print(
+                    f"[vllm moe_a2a] case failure {failure.case.comm_backend} "
+                    f"tokens={failure.case.num_tokens}: {failure.error_type}: {failure.error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
         failure_count = len(result.failures)
         if failure_count == len(cases):
