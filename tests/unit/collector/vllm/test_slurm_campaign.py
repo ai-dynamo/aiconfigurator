@@ -71,6 +71,17 @@ def test_runner_rejects_cifs_and_requires_authoritative_topology():
     assert "--gpu-bind" not in source
 
 
+def test_runner_only_carries_the_exact_kimi_k3_ep4_limit_and_checksums_it():
+    source = RUNNER.read_text(encoding="utf-8")
+
+    assert 'record.get("classification") == "known_framework_limit"' in source
+    assert "num_experts / num_ranks <= kNumThreads and num_ranks <= kNumThreads" in source
+    assert '("gb200", "deepep_ht", "1", "4")' in source
+    assert '("gb300", "deepep_ht", "1", "4")' in source
+    assert 'case.get("num_experts") == 896' in source
+    assert "\"${failure_paths[@]}\" <<'PY'" in source
+
+
 def test_runner_discovers_and_records_a_routable_gloo_interface():
     source = RUNNER.read_text(encoding="utf-8")
     assert 'export AIC_GLOO_ROUTE_PROBE_NODES="${allocated_nodes[*]}"' in source

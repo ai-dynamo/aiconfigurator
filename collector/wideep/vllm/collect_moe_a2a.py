@@ -76,6 +76,8 @@ SUPPORTED_NODE_COUNTS = (1, 2, 4)
 HT_SMS = 20
 LL_SMS = 0
 HT_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024
+KNOWN_DEEPEP_HT_EP4_LIMIT_ERROR = "num_experts / num_ranks <= kNumThreads and num_ranks <= kNumThreads"
+KNOWN_DEEPEP_HT_EP4_LIMIT_TOKENS = frozenset({16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536})
 DEEPEP_LL_SUPPORTED_HIDDEN_SIZES = frozenset({2048, 2560, 3072, 4096, 5120, 6144, 7168, 8192})
 TARGET_VLLM_SOURCE_COMMIT = "ee0da84ab9e04ac7610e28580af62c365e898389"
 LEGACY_DEEPEP_COMMIT = "73b6ea4a439ba03a695563f9fd242c8e4b02b37c"
@@ -1098,7 +1100,7 @@ def _write_failures(output_dir: Path, failures: list[CaseFailure], identity: Dis
             {
                 "module": MODULE_NAME,
                 "op": OP_NAME,
-                "classification": "unexpected",
+                "classification": _case_failure_classification(failure, identity),
                 "error_type": failure.error_type,
                 "error": failure.error,
                 "rank": identity.rank,
@@ -1119,6 +1121,26 @@ def _write_failures(output_dir: Path, failures: list[CaseFailure], identity: Dis
     if records:
         path = output_dir / ERRORS_FILENAME_TEMPLATE.format(rank=identity.rank)
         path.write_text(json.dumps(records, indent=2))
+
+
+def _case_failure_classification(failure: CaseFailure, identity: DistIdentity) -> str:
+    """Classify the explicitly accepted DeepEP EP4 expert-count limit."""
+
+    case = failure.case
+    if (
+        identity.node_num == 1
+        and identity.world_size == 4
+        and case.comm_backend == "deepep_ht"
+        and case.inference_phase == "context"
+        and case.shape == MoeA2AShape(hidden_size=3584, topk=16, num_experts=896)
+        and case.num_tokens in KNOWN_DEEPEP_HT_EP4_LIMIT_TOKENS
+        and case.sms == HT_SMS
+        and case.capacity == HT_BUFFER_SIZE_BYTES
+        and failure.error_type == "RuntimeError"
+        and KNOWN_DEEPEP_HT_EP4_LIMIT_ERROR in failure.error
+    ):
+        return "known_framework_limit"
+    return "unexpected"
 
 
 def _write_rank_error(output_dir: Path, error: BaseException, identity: DistIdentity, *, stage: str) -> Path:
@@ -1161,6 +1183,7 @@ def _write_sidecar(
         "case_plan_hash": provenance.case_plan_hash(case_ids),
         "collected_at": date.today().isoformat(),
         "rows": pq.read_metadata(parquet_path).num_rows,
+        "classified_failures": failure_count,
         "status": provenance.derive_table_status(
             unresolved_failed_count=failure_count,
             had_module_failure=False,

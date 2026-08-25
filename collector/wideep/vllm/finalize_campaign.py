@@ -4,10 +4,11 @@
 """Validate and merge one three-job vLLM DeepEP campaign for one system.
 
 Formal input is exactly one job for every supported ``(node_num, backend)``
-pair.  A job with classified failures, incomplete provenance, an undeclared
-row, or a duplicate physical key is rejected.  The merged parquet is built in
-job-unique ``/tmp`` staging and copied atomically into the requested output
-directory only after all validation succeeds.
+pair.  Apart from the exact Kimi-K3 DeepEP EP4 expert-count limit, a job with
+classified failures, incomplete provenance, an undeclared row, or a duplicate
+physical key is rejected.  The merged parquet is built in job-unique ``/tmp``
+staging and copied atomically into the requested output directory only after
+all validation succeeds.
 """
 
 from __future__ import annotations
@@ -33,6 +34,10 @@ from collector.registry_types import PerfFile
 from collector.wideep.vllm.collect_moe_a2a import (
     BACKENDS,
     DEEPEP_LL_SUPPORTED_HIDDEN_SIZES,
+    HT_BUFFER_SIZE_BYTES,
+    HT_SMS,
+    KNOWN_DEEPEP_HT_EP4_LIMIT_ERROR,
+    KNOWN_DEEPEP_HT_EP4_LIMIT_TOKENS,
     LEGACY_NVL4_PATCH,
     TARGET_VLLM_SOURCE_COMMIT,
     build_case_plan,
@@ -238,11 +243,95 @@ def _validate_runtime(
         raise CampaignValidationError(f"{job_dir}: invalid image digest {image_digest!r}")
 
 
-def _validate_failures(job_dir: Path) -> None:
-    for error_path in sorted(job_dir.glob("errors_moe_a2a_vllm.rank*.json")):
+def _validate_failures(
+    job_dir: Path,
+    *,
+    system: str,
+    backend: str,
+    node_num: int,
+    ep_size: int,
+    cases: list[Any],
+) -> set[tuple[Any, ...]]:
+    error_paths = sorted(job_dir.glob("errors_moe_a2a_vllm.rank*.json"))
+    if not error_paths:
+        return set()
+
+    known_cases = [
+        case
+        for case in cases
+        if case.comm_backend == "deepep_ht"
+        and case.shape.hidden_size == 3584
+        and case.shape.topk == 16
+        and case.shape.num_experts == 896
+    ]
+    known_bases = {
+        (backend, ep_size, node_num, case.shape.hidden_size, case.shape.topk, case.shape.num_experts, case.num_tokens)
+        for case in known_cases
+    }
+    if system not in ("gb200", "gb300") or backend != "deepep_ht" or node_num != 1 or ep_size != 4:
+        raise CampaignValidationError(f"{job_dir}: formal input has unapproved classified failures")
+    if not known_bases:
+        raise CampaignValidationError(f"{job_dir}: declared plan has no accepted Kimi-K3 EP4 failure cases")
+    known_tokens = {case.num_tokens for case in known_cases}
+    if known_tokens != KNOWN_DEEPEP_HT_EP4_LIMIT_TOKENS:
+        raise CampaignValidationError(f"{job_dir}: declared plan does not contain the exact Kimi-K3 token set")
+
+    observed_by_rank: dict[int, set[tuple[Any, ...]]] = {}
+    for error_path in error_paths:
+        try:
+            file_rank = int(error_path.stem.rsplit("rank", 1)[1])
+        except (IndexError, ValueError) as error:
+            raise CampaignValidationError(f"{job_dir}: malformed failure filename {error_path.name}") from error
         records = json.loads(error_path.read_text(encoding="utf-8"))
-        if records:
-            raise CampaignValidationError(f"{job_dir}: formal input has classified failures in {error_path.name}")
+        if not isinstance(records, list) or not records:
+            raise CampaignValidationError(f"{job_dir}: empty or malformed failure records in {error_path.name}")
+        rank_bases: list[tuple[Any, ...]] = []
+        for record in records:
+            case = record.get("case") if isinstance(record, dict) else None
+            approved = (
+                record.get("module") == "collector.wideep.vllm.collect_moe_a2a"
+                and record.get("op") == "moe_a2a"
+                and record.get("classification") == "known_framework_limit"
+                and record.get("error_type") == "RuntimeError"
+                and KNOWN_DEEPEP_HT_EP4_LIMIT_ERROR in str(record.get("error", ""))
+                and record.get("rank") == file_rank
+                and isinstance(case, dict)
+                and case.get("comm_backend") == "deepep_ht"
+                and case.get("inference_phase") == "context"
+                and case.get("ep_size") == 4
+                and case.get("node_num") == 1
+                and case.get("hidden_size") == 3584
+                and case.get("topk") == 16
+                and case.get("num_experts") == 896
+                and case.get("sms") == HT_SMS
+                and case.get("capacity") == HT_BUFFER_SIZE_BYTES
+            )
+            if not approved:
+                raise CampaignValidationError(
+                    f"{job_dir}: {error_path.name} contains a failure outside the accepted Kimi-K3 EP4 limit"
+                )
+            rank_bases.append(
+                (
+                    backend,
+                    ep_size,
+                    node_num,
+                    case["hidden_size"],
+                    case["topk"],
+                    case["num_experts"],
+                    case["num_tokens"],
+                )
+            )
+        if len(rank_bases) != len(set(rank_bases)) or set(rank_bases) != known_bases:
+            raise CampaignValidationError(
+                f"{job_dir}: {error_path.name} does not contain the exact accepted Kimi-K3 EP4 failure set"
+            )
+        observed_by_rank[file_rank] = set(rank_bases)
+    if set(observed_by_rank) != set(range(ep_size)):
+        raise CampaignValidationError(
+            f"{job_dir}: accepted failures require evidence from ranks 0..{ep_size - 1}, "
+            f"found {sorted(observed_by_rank)}"
+        )
+    return known_bases
 
 
 def validate_job_dir(job_dir: str | Path, *, system: str) -> ValidatedJob:
@@ -254,8 +343,6 @@ def validate_job_dir(job_dir: str | Path, *, system: str) -> ValidatedJob:
     if not parquet_path.is_file():
         raise CampaignValidationError(f"missing parquet {parquet_path}")
     runtime, table = _load_sidecar(resolved)
-    _validate_failures(resolved)
-
     frame = pd.read_parquet(parquet_path)
     if tuple(frame.columns) != ROW_COLUMNS:
         raise CampaignValidationError(
@@ -289,18 +376,29 @@ def validate_job_dir(job_dir: str | Path, *, system: str) -> ValidatedJob:
     _validate_runtime(runtime, job_dir=resolved, system=system, backend=backend, ep_size=ep_size)
 
     cases = _expected_cases(ep_size=ep_size, node_num=node_num, backend=backend)
-    if len(frame) != len(cases) * 2:
+    failed_bases = _validate_failures(
+        resolved,
+        system=system,
+        backend=backend,
+        node_num=node_num,
+        ep_size=ep_size,
+        cases=cases,
+    )
+    expected_row_count = (len(cases) - len(failed_bases)) * 2
+    if len(frame) != expected_row_count:
         raise CampaignValidationError(
-            f"{parquet_path}: expected {len(cases) * 2} rows for the declared plan, found {len(frame)}"
+            f"{parquet_path}: expected {expected_row_count} rows for the declared plan and accepted failures, "
+            f"found {len(frame)}"
         )
     expected_bases = {
         (backend, ep_size, node_num, case.shape.hidden_size, case.shape.topk, case.shape.num_experts, case.num_tokens)
         for case in cases
     }
+    expected_successful_bases = expected_bases - failed_bases
     observed_bases = set(frame[list(CASE_BASE_COLUMNS)].itertuples(index=False, name=None))
-    if observed_bases != expected_bases:
-        missing = sorted(expected_bases - observed_bases)[:5]
-        extra = sorted(observed_bases - expected_bases)[:5]
+    if observed_bases != expected_successful_bases:
+        missing = sorted(expected_successful_bases - observed_bases)[:5]
+        extra = sorted(observed_bases - expected_successful_bases)[:5]
         raise CampaignValidationError(f"{parquet_path}: case population mismatch; missing={missing}, extra={extra}")
     phases = frame.groupby(list(CASE_BASE_COLUMNS), dropna=False)["phase"].agg(lambda values: tuple(sorted(values)))
     if not phases.map(lambda value: value == ("combine", "dispatch")).all():
@@ -310,6 +408,8 @@ def validate_job_dir(job_dir: str | Path, *, system: str) -> ValidatedJob:
 
     if table.get("status") != provenance.STATUS_COMPLETE or int(table.get("rows", -1)) != len(frame):
         raise CampaignValidationError(f"{resolved}: incomplete or row-mismatched sidecar table")
+    if int(table.get("classified_failures", 0)) != len(failed_bases):
+        raise CampaignValidationError(f"{resolved}: sidecar classified-failure count mismatch")
     for field in ("collector_ref", "collector_hash", "case_plan_hash", "collected_at"):
         if not table.get(field):
             raise CampaignValidationError(f"{resolved}: sidecar table is missing {field}")
@@ -323,6 +423,9 @@ def validate_job_dir(job_dir: str | Path, *, system: str) -> ValidatedJob:
         sidecar = resolved / "collection_meta.yaml"
         if checksums.get(sidecar.name) != _sha256(sidecar):
             raise CampaignValidationError(f"{resolved}: sidecar checksum mismatch")
+        for error_path in sorted(resolved.glob("errors_moe_a2a_vllm.rank*.json")):
+            if checksums.get(error_path.name) != _sha256(error_path):
+                raise CampaignValidationError(f"{resolved}: classified-failure checksum mismatch for {error_path.name}")
 
     return ValidatedJob(resolved, frame, runtime, table, backend, node_num, ep_size)
 
@@ -436,6 +539,7 @@ def merge_campaign(
             "case_plan_hash": provenance.case_plan_hash(all_case_ids),
             "collected_at": date.today().isoformat(),
             "rows": len(merged),
+            "classified_failures": sum(int(job.table.get("classified_failures", 0)) for job in jobs),
             "status": provenance.STATUS_COMPLETE,
         }
         staged_sidecar = provenance.write_collection_meta(
@@ -444,11 +548,28 @@ def merge_campaign(
             existing_tables,
         )
 
+        failure_sources = [
+            error_path for job in jobs for error_path in sorted(job.path.glob("errors_moe_a2a_vllm.rank*.json"))
+        ]
+        if len({path.name for path in failure_sources}) != len(failure_sources):
+            raise CampaignValidationError("campaign has colliding classified-failure filenames")
+        staged_failures = []
+        for failure_source in failure_sources:
+            staged_failure = staging / failure_source.name
+            shutil.copyfile(failure_source, staged_failure)
+            staged_failures.append(staged_failure)
+
         staged_checksums = {
             staged_parquet.name: _sha256(staged_parquet),
             staged_sidecar.name: _sha256(staged_sidecar),
+            **{path.name: _sha256(path) for path in staged_failures},
         }
-        for staged_file, final_file in ((staged_parquet, final_parquet), (staged_sidecar, final_sidecar)):
+        publish_pairs = [
+            (staged_parquet, final_parquet),
+            (staged_sidecar, final_sidecar),
+            *((path, destination / path.name) for path in staged_failures),
+        ]
+        for staged_file, final_file in publish_pairs:
             temporary_destination = destination / f".{final_file.name}.tmp.{os.getpid()}"
             shutil.copyfile(staged_file, temporary_destination)
             os.replace(temporary_destination, final_file)
@@ -459,7 +580,12 @@ def merge_campaign(
         checksum_path.write_text(json.dumps(staged_checksums, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     parquet_mismatch = _sha256(final_parquet) != staged_checksums[final_parquet.name]
     sidecar_mismatch = _sha256(final_sidecar) != staged_checksums[final_sidecar.name]
-    if parquet_mismatch or sidecar_mismatch:
+    failure_mismatch = any(
+        _sha256(destination / name) != expected
+        for name, expected in staged_checksums.items()
+        if name.startswith("errors_moe_a2a_vllm.rank")
+    )
+    if parquet_mismatch or sidecar_mismatch or failure_mismatch:
         raise CampaignValidationError("atomic publish checksum verification failed")
     return final_parquet, final_sidecar
 

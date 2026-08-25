@@ -72,7 +72,15 @@ _RUNTIME_FIELD_ORDER = (
     "backend_abis",
     "backend_capabilities",
 )
-_TABLE_FIELD_ORDER = ("collector_ref", "collector_hash", "case_plan_hash", "collected_at", "rows", "status")
+_TABLE_FIELD_ORDER = (
+    "collector_ref",
+    "collector_hash",
+    "case_plan_hash",
+    "collected_at",
+    "rows",
+    "classified_failures",
+    "status",
+)
 
 
 def enumerate_registry_modules() -> set[str]:

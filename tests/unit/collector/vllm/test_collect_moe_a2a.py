@@ -472,6 +472,59 @@ def test_rank_error_records_non_case_failure(tmp_path):
     assert "cudaErrorUnknown" in record["error"]
 
 
+def test_only_exact_kimi_k3_deepep_ep4_limit_is_classified_as_known():
+    identity = a2a.DistIdentity(
+        rank=0,
+        world_size=4,
+        local_rank=0,
+        gpus_per_node=4,
+        node_num=1,
+        master_addr="127.0.0.1",
+        master_port="12345",
+    )
+    case = a2a.VllmMoeA2ACase(
+        comm_backend="deepep_ht",
+        inference_phase="context",
+        shape=MoeA2AShape(hidden_size=3584, topk=16, num_experts=896),
+        num_tokens=16,
+        sms=a2a.HT_SMS,
+        capacity=a2a.HT_BUFFER_SIZE_BYTES,
+    )
+    known = a2a.CaseFailure(
+        case=case,
+        error_type="RuntimeError",
+        error=f"DeepEP assertion: {a2a.KNOWN_DEEPEP_HT_EP4_LIMIT_ERROR}",
+    )
+
+    assert a2a._case_failure_classification(known, identity) == "known_framework_limit"
+    assert (
+        a2a._case_failure_classification(
+            a2a.CaseFailure(case=case, error_type="RuntimeError", error="different failure"),
+            identity,
+        )
+        == "unexpected"
+    )
+    unsupported_token = a2a.VllmMoeA2ACase(
+        comm_backend=case.comm_backend,
+        inference_phase=case.inference_phase,
+        shape=case.shape,
+        num_tokens=3,
+        sms=case.sms,
+        capacity=case.capacity,
+    )
+    assert (
+        a2a._case_failure_classification(
+            a2a.CaseFailure(
+                case=unsupported_token,
+                error_type="RuntimeError",
+                error=a2a.KNOWN_DEEPEP_HT_EP4_LIMIT_ERROR,
+            ),
+            identity,
+        )
+        == "unexpected"
+    )
+
+
 @pytest.mark.parametrize(
     ("adapter", "match"),
     [
@@ -819,7 +872,9 @@ def test_classified_case_failures_do_not_demote_finalized_table(tmp_path):
     )
     import yaml
 
-    assert yaml.safe_load(complete.read_text())["tables"]["moe_a2a_perf"]["status"] == "complete"
+    complete_table = yaml.safe_load(complete.read_text())["tables"]["moe_a2a_perf"]
+    assert complete_table["status"] == "complete"
+    assert complete_table["classified_failures"] == 0
     with_failures = a2a._write_sidecar(
         tmp_path,
         runtime_meta=runtime,
@@ -827,7 +882,9 @@ def test_classified_case_failures_do_not_demote_finalized_table(tmp_path):
         parquet_path=parquet,
         failure_count=1,
     )
-    assert yaml.safe_load(with_failures.read_text())["tables"]["moe_a2a_perf"]["status"] == "complete"
+    failure_table = yaml.safe_load(with_failures.read_text())["tables"]["moe_a2a_perf"]
+    assert failure_table["status"] == "complete"
+    assert failure_table["classified_failures"] == 1
     with pytest.raises(a2a.VllmMoeA2ADeclarationError, match="empty"):
         a2a._write_sidecar(
             tmp_path,

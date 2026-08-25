@@ -629,19 +629,92 @@ fi
 parquet_path="${output_dir}/moe_a2a_perf.parquet"
 sidecar_path="${output_dir}/collection_meta.yaml"
 [[ -f "${parquet_path}" && -f "${sidecar_path}" ]] || die "collector did not finalize both formal artifacts"
-if compgen -G "${output_dir}/errors_moe_a2a_vllm.rank*.json" >/dev/null; then
-    die "formal job produced classified failure records"
+mapfile -t failure_paths < <(
+    find "${output_dir}" -maxdepth 1 -type f -name 'errors_moe_a2a_vllm.rank*.json' -print | sort
+)
+if [[ "${#failure_paths[@]}" -gt 0 ]]; then
+    python3 - "${SYSTEM}" "${BACKEND}" "${NODE_NUM}" "${expected_ep}" "${output_dir}" <<'PY' || \
+        die "formal job produced failures outside the accepted Kimi-K3 DeepEP EP4 limit"
+import json
+import re
+import sys
+from pathlib import Path
+
+system, backend, node_num, ep_size, output_dir = sys.argv[1:]
+expected_tokens = {
+    16,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1024,
+    2048,
+    4096,
+    8192,
+    16384,
+    32768,
+    65536,
+}
+known_error = "num_experts / num_ranks <= kNumThreads and num_ranks <= kNumThreads"
+if (system, backend, node_num, ep_size) not in {
+    ("gb200", "deepep_ht", "1", "4"),
+    ("gb300", "deepep_ht", "1", "4"),
+}:
+    raise SystemExit("classified failures are not approved for this formal job identity")
+
+paths = sorted(Path(output_dir).glob("errors_moe_a2a_vllm.rank*.json"))
+observed_ranks = set()
+for path in paths:
+    match = re.fullmatch(r"errors_moe_a2a_vllm\.rank(\d+)\.json", path.name)
+    if match is None:
+        raise SystemExit(f"malformed failure filename: {path.name}")
+    file_rank = int(match.group(1))
+    records = json.loads(path.read_text())
+    if not isinstance(records, list) or len(records) != len(expected_tokens):
+        raise SystemExit(f"{path.name} does not contain exactly {len(expected_tokens)} failures")
+    observed_tokens = set()
+    for record in records:
+        case = record.get("case") if isinstance(record, dict) else None
+        approved = (
+            record.get("module") == "collector.wideep.vllm.collect_moe_a2a"
+            and record.get("op") == "moe_a2a"
+            and record.get("classification") == "known_framework_limit"
+            and record.get("error_type") == "RuntimeError"
+            and known_error in str(record.get("error", ""))
+            and record.get("rank") == file_rank
+            and isinstance(case, dict)
+            and case.get("comm_backend") == "deepep_ht"
+            and case.get("inference_phase") == "context"
+            and case.get("ep_size") == 4
+            and case.get("node_num") == 1
+            and case.get("hidden_size") == 3584
+            and case.get("topk") == 16
+            and case.get("num_experts") == 896
+            and case.get("sms") == 20
+            and case.get("capacity") == 1024 * 1024 * 1024
+        )
+        if not approved:
+            raise SystemExit(f"{path.name} contains an unapproved failure record")
+        observed_tokens.add(case.get("num_tokens"))
+    if observed_tokens != expected_tokens:
+        raise SystemExit(f"{path.name} does not contain the exact Kimi-K3 token set")
+    observed_ranks.add(file_rank)
+if observed_ranks != set(range(int(ep_size))):
+    raise SystemExit(f"failure evidence is missing ranks: observed {sorted(observed_ranks)}")
+PY
 fi
 
-python3 - "${parquet_path}" "${sidecar_path}" "${output_dir}/artifact_checksums.json" <<'PY'
+python3 - "${output_dir}/artifact_checksums.json" "${parquet_path}" "${sidecar_path}" \
+    "${failure_paths[@]}" <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 
-paths = [Path(value) for value in sys.argv[1:3]]
+paths = [Path(value) for value in sys.argv[2:]]
 checksums = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
-Path(sys.argv[3]).write_text(json.dumps(checksums, indent=2, sort_keys=True) + "\n")
+Path(sys.argv[1]).write_text(json.dumps(checksums, indent=2, sort_keys=True) + "\n")
 PY
 
 campaign_job_dir=$(safe_future_path \
