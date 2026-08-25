@@ -356,31 +356,48 @@ abi = {
 }
 if payload.get("deep_ep_patch_sha256"):
     abi["deep_ep_patch_sha256"] = payload["deep_ep_patch_sha256"]
-print(json.dumps({"deep_ep_wheel": deep_ep_wheel, "nccl_wheel": nccl_wheel, "abi": abi}, separators=(",", ":")))
+if payload.get("pyarrow") != "24.0.0":
+    raise SystemExit(f"overlay pyarrow mismatch: {payload.get('pyarrow')!r}")
+pyarrow_wheel, pyarrow_sha = checked_wheel("pyarrow_wheel", "pyarrow_wheel_sha256")
+abi["pyarrow"] = payload["pyarrow"]
+abi["pyarrow_wheel_sha256"] = pyarrow_sha
+print(json.dumps({
+    "deep_ep_wheel": deep_ep_wheel,
+    "nccl_wheel": nccl_wheel,
+    "pyarrow_wheel": pyarrow_wheel,
+    "abi": abi,
+}, separators=(",", ":")))
 PY
     ) || die "overlay validation failed"
-    read -r overlay_deep_ep_wheel overlay_nccl_wheel runtime_abi_json < <(
+    read -r overlay_deep_ep_wheel overlay_nccl_wheel overlay_pyarrow_wheel runtime_abi_json < <(
         python3 - "${overlay_values}" "${runtime_abi_json}" <<'PY'
 import json
 import sys
 
 overlay, abi = map(json.loads, sys.argv[1:])
 abi.update(overlay["abi"])
-print(overlay["deep_ep_wheel"], overlay["nccl_wheel"] or "-", json.dumps(abi, separators=(",", ":")))
+print(
+    overlay["deep_ep_wheel"],
+    overlay["nccl_wheel"] or "-",
+    overlay["pyarrow_wheel"],
+    json.dumps(abi, separators=(",", ":")),
+)
 PY
     )
     [[ "${overlay_nccl_wheel}" != - ]] || overlay_nccl_wheel=""
     container_mounts+=",${overlay_dir}:${overlay_dir}"
     export AIC_DEEP_EP_WHEEL="${overlay_deep_ep_wheel}"
     export AIC_NCCL_WHEEL="${overlay_nccl_wheel}"
+    export AIC_PYARROW_WHEEL="${overlay_pyarrow_wheel}"
     container_command='overlay_target="${AIC_STAGING_ROOT}/overlay-${SLURM_PROCID}"; mkdir -p "${overlay_target}";'
+    container_command+=' python3 -m pip install --no-deps --target "${overlay_target}" "${AIC_PYARROW_WHEEL}" >/dev/null;'
     if [[ "${BACKEND}" == deepep_v2 ]]; then
         [[ -n "${overlay_nccl_wheel}" ]] || die "v2 overlay has no NCCL wheel"
         container_command+=' python3 -m pip install --no-deps --target "${overlay_target}" "${AIC_NCCL_WHEEL}" >/dev/null; export LD_LIBRARY_PATH="${overlay_target}/nvidia/nccl/lib:${LD_LIBRARY_PATH:-}";'
     fi
     container_command+=' python3 -m pip install --no-deps --target "${overlay_target}" "${AIC_DEEP_EP_WHEEL}" >/dev/null; export PYTHONPATH="${overlay_target}:${AIC_REPO_DIR}:${PYTHONPATH:-}";'
-elif [[ "${BACKEND}" == deepep_v2 || "${SYSTEM}" == gb200 || "${SYSTEM}" == gb300 || "${SYSTEM}" == b300_sxm ]]; then
-    die "${SYSTEM} ${BACKEND} requires an attested overlay directory"
+elif [[ "${BACKEND}" == deepep_ht || "${BACKEND}" == deepep_ll || "${BACKEND}" == deepep_v2 ]]; then
+    die "${SYSTEM} ${BACKEND} requires an attested runtime overlay directory"
 else
     runtime_abi_json=$(
         python3 - "${runtime_abi_json}" <<'PY'

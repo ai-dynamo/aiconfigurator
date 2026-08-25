@@ -76,6 +76,7 @@ def test_submitter_requires_canaries_and_one_job_per_backend():
     assert "--switches=1" in source
     assert "B200 formal/canary submission requires infra-approved nodelist" in source
     assert "B300 formal/canary submission requires infra-approved nodelist" in source
+    assert "requires --legacy-overlay-dir" in source
 
 
 def test_vllm_collector_hash_closure_includes_campaign_pipeline():
@@ -107,7 +108,9 @@ def test_backend_overlay_build_is_exact_and_separate_from_formal_data():
     assert 'safe_existing_path "container image metadata"' in runner
     assert "local container squashfs checksum mismatch" in runner
     assert "nvidia-nccl-cu13==${AIC_NCCL_VERSION}" in runner
-    assert "export EP_NCCL_ROOT_DIR=" in runner
+    assert "unset EP_NCCL_ROOT_DIR" in runner
+    assert '"pyarrow==${AIC_PYARROW_VERSION}"' in runner
+    assert '"pyarrow_wheel_sha256": pyarrow_sha' in runner
     assert 'path "*/nvidia/cu13/include"' in runner
     assert 'export CPATH="${bundled_cuda_include}:${CPATH:-}"' in runner
     assert 'export LIBRARY_PATH="${bundled_cuda_lib}:${LIBRARY_PATH:-}"' in runner

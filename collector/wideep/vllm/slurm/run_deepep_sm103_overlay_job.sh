@@ -12,6 +12,7 @@ V2_DEEPEP_COMMIT=b306af06afd412c88e51e71802951606e40b7358
 VLLM_COMMIT=ee0da84ab9e04ac7610e28580af62c365e898389
 NVSHMEM_VERSION=3.3.24
 V2_NCCL_VERSION=2.30.4
+PYARROW_VERSION=24.0.0
 
 die() {
     echo "ERROR: $*" >&2
@@ -123,6 +124,7 @@ export AIC_OVERLAY_PROFILE="${OVERLAY_PROFILE}"
 export AIC_LEGACY_PATCH="${legacy_patch}"
 export AIC_NVSHMEM_VERSION="${NVSHMEM_VERSION}"
 export AIC_NCCL_VERSION="${V2_NCCL_VERSION}"
+export AIC_PYARROW_VERSION="${PYARROW_VERSION}"
 export AIC_CUDA_ARCHES="${CUDA_ARCHES}"
 export AIC_EXPECTED_API="${expected_api}"
 
@@ -169,16 +171,25 @@ srun \
         export LD_LIBRARY_PATH="${bundled_cuda_lib}:${LD_LIBRARY_PATH:-}"
         printf "%s\n" "${bundled_cuda_include}" > "${AIC_OVERLAY_STAGING}/cuda_devel_root.txt"
 
+        mkdir -p "${AIC_OVERLAY_STAGING}/deps"
+        python3 -m pip download --no-deps --dest "${AIC_OVERLAY_STAGING}/deps" \
+            "pyarrow==${AIC_PYARROW_VERSION}" >/dev/null
+        mapfile -t pyarrow_wheels < <(
+            find "${AIC_OVERLAY_STAGING}/deps" -maxdepth 1 -type f -name "pyarrow-*.whl" -print
+        )
+        [[ "${#pyarrow_wheels[@]}" == 1 ]]
+        basename "${pyarrow_wheels[0]}" > "${AIC_OVERLAY_STAGING}/pyarrow_wheel_name.txt"
+
         if [[ "${AIC_OVERLAY_PROFILE}" == v2 ]]; then
-            mkdir -p "${AIC_OVERLAY_STAGING}/deps"
             python3 -m pip download --no-deps --dest "${AIC_OVERLAY_STAGING}/deps" \
                 "nvidia-nccl-cu13==${AIC_NCCL_VERSION}" >/dev/null
             mapfile -t nccl_wheels < <(find "${AIC_OVERLAY_STAGING}/deps" -maxdepth 1 -type f -name "nvidia_nccl_cu13-*.whl" -print)
             [[ "${#nccl_wheels[@]}" == 1 ]]
             python3 -m pip install --no-deps --target "${AIC_OVERLAY_STAGING}/build-nccl" "${nccl_wheels[0]}" >/dev/null
             export PYTHONPATH="${AIC_OVERLAY_STAGING}/build-nccl:${PYTHONPATH:-}"
-            export EP_NCCL_ROOT_DIR="${AIC_OVERLAY_STAGING}/build-nccl/nvidia/nccl"
-            export LD_LIBRARY_PATH="${EP_NCCL_ROOT_DIR}/lib:${LD_LIBRARY_PATH:-}"
+            build_nccl_root="${AIC_OVERLAY_STAGING}/build-nccl/nvidia/nccl"
+            export LD_LIBRARY_PATH="${build_nccl_root}/lib:${LD_LIBRARY_PATH:-}"
+            unset EP_NCCL_ROOT_DIR
             basename "${nccl_wheels[0]}" > "${AIC_OVERLAY_STAGING}/nccl_wheel_name.txt"
         fi
 
@@ -192,6 +203,7 @@ srun \
 
         import_dir="${AIC_OVERLAY_STAGING}/import-test"
         mkdir -p "${import_dir}"
+        python3 -m pip install --no-deps --target "${import_dir}" "${pyarrow_wheels[0]}" >/dev/null
         if [[ "${AIC_OVERLAY_PROFILE}" == v2 ]]; then
             python3 -m pip install --no-deps --target "${import_dir}" "${nccl_wheels[0]}" >/dev/null
             export LD_LIBRARY_PATH="${import_dir}/nvidia/nccl/lib:${LD_LIBRARY_PATH:-}"
@@ -204,6 +216,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 import deep_ep
+import pyarrow
 
 api, output = sys.argv[1:]
 if not hasattr(deep_ep, api):
@@ -212,6 +225,7 @@ payload = {
     "deep_ep": version("deep_ep"),
     "deep_ep_api": api,
     "deep_ep_import": str(Path(deep_ep.__file__).resolve()),
+    "pyarrow": pyarrow.__version__,
 }
 if api == "ElasticBuffer":
     payload["nccl"] = version("nvidia-nccl-cu13")
@@ -225,6 +239,12 @@ deep_ep_wheel_name=$(<"$(safe_existing_path "DeepEP wheel-name marker" "${stagin
    "${deep_ep_wheel_name}" == *.whl ]] || die "unsafe DeepEP wheel name ${deep_ep_wheel_name}"
 deep_ep_wheel=$(safe_existing_path "DeepEP overlay wheel" "${staging_root}/workspace/dist/${deep_ep_wheel_name}")
 deep_ep_wheel_sha256=$(sha256sum "${deep_ep_wheel}" | awk '{print $1}')
+
+pyarrow_wheel_name=$(<"$(safe_existing_path "pyarrow wheel-name marker" "${staging_root}/pyarrow_wheel_name.txt")")
+[[ -n "${pyarrow_wheel_name}" && "${pyarrow_wheel_name}" == "$(basename -- "${pyarrow_wheel_name}")" && \
+   "${pyarrow_wheel_name}" == *.whl ]] || die "unsafe pyarrow wheel name ${pyarrow_wheel_name}"
+pyarrow_wheel=$(safe_existing_path "pyarrow runtime wheel" "${staging_root}/deps/${pyarrow_wheel_name}")
+pyarrow_wheel_sha256=$(sha256sum "${pyarrow_wheel}" | awk '{print $1}')
 
 nccl_wheel_name=""
 nccl_wheel_sha256=""
@@ -244,6 +264,7 @@ publish_dir="${campaign_root}/overlays/${architecture}/${OVERLAY_PROFILE}/job_${
 mkdir -p "${publish_dir}"
 publish_dir=$(safe_existing_path "overlay publish directory" "${publish_dir}")
 cp "${deep_ep_wheel}" "${publish_dir}/${deep_ep_wheel_name}"
+cp "${pyarrow_wheel}" "${publish_dir}/${pyarrow_wheel_name}"
 if [[ "${OVERLAY_PROFILE}" == v2 ]]; then
     cp "${nccl_wheel}" "${publish_dir}/${nccl_wheel_name}"
 fi
@@ -254,7 +275,7 @@ python3 - "${publish_dir}/build_meta.json" "${SYSTEM}" "${architecture}" "${OVER
     "${scaleup_ranks}" "${IMAGE_DIGEST}" "${VLLM_COMMIT}" "${deepep_commit}" \
     "${legacy_patch_sha256}" "${NVSHMEM_VERSION}" "${V2_NCCL_VERSION}" "${CUDA_ARCHES}" \
     "${deep_ep_wheel_name}" "${deep_ep_wheel_sha256}" "${nccl_wheel_name}" "${nccl_wheel_sha256}" \
-    "${gpu_identity}" <<'PY'
+    "${PYARROW_VERSION}" "${pyarrow_wheel_name}" "${pyarrow_wheel_sha256}" "${gpu_identity}" <<'PY'
 import json
 import sys
 from datetime import date
@@ -263,7 +284,7 @@ from pathlib import Path
 (
     output, system, architecture, profile, scaleup_ranks, image, vllm, deepep,
     patch_sha, nvshmem, nccl, arches, deep_ep_wheel, deep_ep_sha,
-    nccl_wheel, nccl_sha, gpu,
+    nccl_wheel, nccl_sha, pyarrow, pyarrow_wheel, pyarrow_sha, gpu,
 ) = sys.argv[1:]
 payload = {
     "schema_version": 2,
@@ -282,6 +303,9 @@ payload = {
     "deep_ep_wheel_sha256": deep_ep_sha,
     "nccl_wheel": nccl_wheel,
     "nccl_wheel_sha256": nccl_sha,
+    "pyarrow": pyarrow,
+    "pyarrow_wheel": pyarrow_wheel,
+    "pyarrow_wheel_sha256": pyarrow_sha,
     "build_gpu": gpu,
     "built_at": date.today().isoformat(),
 }
@@ -290,6 +314,8 @@ PY
 
 [[ "$(sha256sum "${publish_dir}/${deep_ep_wheel_name}" | awk '{print $1}')" == "${deep_ep_wheel_sha256}" ]] || \
     die "published DeepEP wheel checksum mismatch"
+[[ "$(sha256sum "${publish_dir}/${pyarrow_wheel_name}" | awk '{print $1}')" == "${pyarrow_wheel_sha256}" ]] || \
+    die "published pyarrow wheel checksum mismatch"
 if [[ "${OVERLAY_PROFILE}" == v2 ]]; then
     [[ "$(sha256sum "${publish_dir}/${nccl_wheel_name}" | awk '{print $1}')" == "${nccl_wheel_sha256}" ]] || \
         die "published NCCL wheel checksum mismatch"

@@ -155,13 +155,9 @@ for node_num in "${node_values[@]}"; do
             runtime_abi_json='{"build_mode":"official-v0.24.0-image+deepep-v2-overlay","torch":"2.11.0","cuda":"13.0.2","deep_ep":"b306af06afd412c88e51e71802951606e40b7358","nvshmem":"3.3.24","deep_ep_api":"ElasticBuffer","nccl":"2.30.4","deep_ep_topology_source":"nccl_lsa"}'
         else
             runtime_abi_json='{"build_mode":"official-v0.24.0-image","torch":"2.11.0","cuda":"13.0.2","deep_ep":"73b6ea4a439ba03a695563f9fd242c8e4b02b37c","nvshmem":"3.3.24","deep_ep_api":"Buffer"}'
-            if [[ "${system}" == gb200 || "${system}" == gb300 || "${system}" == b300_sxm ]]; then
-                [[ -d "${legacy_overlay_dir}" ]] || die \
-                    "${system} ${backend} requires --legacy-overlay-dir"
-                overlay_dir=$(realpath -e -- "${legacy_overlay_dir}")
-            elif [[ -n "${legacy_overlay_dir}" ]]; then
-                overlay_dir=$(realpath -e -- "${legacy_overlay_dir}")
-            fi
+            [[ -d "${legacy_overlay_dir}" ]] || die \
+                "${system} ${backend} requires --legacy-overlay-dir"
+            overlay_dir=$(realpath -e -- "${legacy_overlay_dir}")
         fi
         if [[ -n "${overlay_dir}" ]]; then
             case "${overlay_dir}" in
