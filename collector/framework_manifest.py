@@ -29,6 +29,7 @@ class CollectorRuntime:
     images: dict[str, str]
     source_commit: str | None = None
     abi: dict[str, str] | None = None
+    backend_abi: dict[str, dict[str, str]] | None = None
     source_repo: str | None = None
     collector_dir: str | None = None
     data_backend: str | None = None
@@ -37,6 +38,13 @@ class CollectorRuntime:
 
     def image(self, variant: str = "default") -> str:
         return self.images.get(variant) or self.images["default"]
+
+    def abi_for_backend(self, backend: str) -> dict[str, str]:
+        """Return the common ABI with an optional backend-specific override."""
+
+        resolved = dict(self.abi or {})
+        resolved.update((self.backend_abi or {}).get(backend, {}))
+        return resolved
 
 
 def load_manifest(path: str | Path = MANIFEST_PATH) -> dict[str, Any]:
@@ -88,6 +96,11 @@ def _runtime_from_spec(
         images=dict(runtime_spec["images"]),
         source_commit=runtime_spec.get("source_commit"),
         abi=dict(runtime_spec["abi"]) if runtime_spec.get("abi") else None,
+        backend_abi=(
+            {backend: dict(abi) for backend, abi in runtime_spec["backend_abi"].items()}
+            if runtime_spec.get("backend_abi")
+            else None
+        ),
         source_repo=source_repo,
         collector_dir=spec.get("collector_dir"),
         data_backend=spec.get("data_backend"),
@@ -164,6 +177,7 @@ def _runtime_identity(runtime: CollectorRuntime) -> tuple:
         tuple(sorted(runtime.images.items())),
         runtime.source_commit,
         tuple(sorted((runtime.abi or {}).items())),
+        tuple((backend, tuple(sorted(abi.items()))) for backend, abi in sorted((runtime.backend_abi or {}).items())),
     )
 
 
@@ -354,3 +368,18 @@ def _validate_runtime_spec(name: str, spec: object) -> None:
         or not all(isinstance(key, str) and isinstance(value, str) and key and value for key, value in abi.items())
     ):
         raise ValueError(f"{name}.abi must map non-empty names to non-empty pinned values")
+    backend_abi = spec.get("backend_abi")
+    if backend_abi is not None:
+        if not isinstance(backend_abi, dict) or not backend_abi:
+            raise ValueError(f"{name}.backend_abi must be a non-empty mapping")
+        for backend, override in backend_abi.items():
+            if (
+                not isinstance(backend, str)
+                or not backend
+                or not isinstance(override, dict)
+                or not override
+                or not all(
+                    isinstance(key, str) and isinstance(value, str) and key and value for key, value in override.items()
+                )
+            ):
+                raise ValueError(f"{name}.backend_abi must map backend names to non-empty pinned string mappings")

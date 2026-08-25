@@ -14,7 +14,8 @@ Options:
   --backends LIST             Default: deepep_ht,deepep_ll,deepep_v2.
   --container-image REF       Digest-pinned image; defaults by architecture.
   --image-digest DIGEST       Observed child digest; defaults by architecture.
-  --overlay-wheel PATH        Required for GB300/B300 (SM103 DeepEP wheel).
+  --legacy-overlay-dir PATH   Required for GB200/GB300 and B300 legacy jobs.
+  --v2-overlay-dir PATH       Required for every deepep_v2 job.
   --approved-nodelist LIST    Required for B200/B300.
   --fabric-approval-id ID     Required for B200/B300; copied into provenance.
   --allow-full-without-canary Diagnostic escape hatch; formal operators should not use it.
@@ -35,7 +36,8 @@ nodes=""
 backends="deepep_ht,deepep_ll,deepep_v2"
 container_image=""
 image_digest=""
-overlay_wheel=""
+legacy_overlay_dir=""
+v2_overlay_dir=""
 approved_nodelist=""
 fabric_approval_id=""
 allow_full_without_canary=false
@@ -51,7 +53,8 @@ while [[ $# -gt 0 ]]; do
         --backends) backends=$2; shift 2 ;;
         --container-image) container_image=$2; shift 2 ;;
         --image-digest) image_digest=$2; shift 2 ;;
-        --overlay-wheel) overlay_wheel=$2; shift 2 ;;
+        --legacy-overlay-dir) legacy_overlay_dir=$2; shift 2 ;;
+        --v2-overlay-dir) v2_overlay_dir=$2; shift 2 ;;
         --approved-nodelist) approved_nodelist=$2; shift 2 ;;
         --fabric-approval-id) fabric_approval_id=$2; shift 2 ;;
         --allow-full-without-canary) allow_full_without_canary=true; shift ;;
@@ -121,16 +124,6 @@ else
         "container reference and observed child digest differ"
 fi
 
-if [[ "${system}" == gb300 || "${system}" == b300_sxm ]]; then
-    [[ -f "${overlay_wheel}" ]] || die "SM103 system requires --overlay-wheel"
-    overlay_sha256=$(sha256sum "${overlay_wheel}" | awk '{print $1}')
-    runtime_abi_json=$(printf \
-        '{"build_mode":"official-v0.24.0-image","torch":"2.11.0","cuda":"13.0.2","deep_ep":"73b6ea4a439ba03a695563f9fd242c8e4b02b37c","nvshmem":"3.3.24","deep_ep_overlay_wheel_sha256":"%s","deep_ep_cuda_arches":"10.0a 10.3a"}' \
-        "${overlay_sha256}")
-else
-    runtime_abi_json='{"build_mode":"official-v0.24.0-image","torch":"2.11.0","cuda":"13.0.2","deep_ep":"73b6ea4a439ba03a695563f9fd242c8e4b02b37c","nvshmem":"3.3.24"}'
-fi
-
 script_dir=$(cd "$(dirname "$0")" && pwd)
 payload=$(realpath -e "${script_dir}/run_vllm_moe_a2a_job.sh")
 campaign_root=$(realpath -e "${campaign_root}")
@@ -155,6 +148,26 @@ fi
 for node_num in "${node_values[@]}"; do
     for backend in "${backend_values[@]}"; do
         case "${backend}" in deepep_ht|deepep_ll|deepep_v2) ;; *) die "bad backend ${backend}" ;; esac
+        overlay_dir=""
+        if [[ "${backend}" == deepep_v2 ]]; then
+            [[ -d "${v2_overlay_dir}" ]] || die "deepep_v2 requires --v2-overlay-dir"
+            overlay_dir=$(realpath -e -- "${v2_overlay_dir}")
+            runtime_abi_json='{"build_mode":"official-v0.24.0-image+deepep-v2-overlay","torch":"2.11.0","cuda":"13.0.2","deep_ep":"b306af06afd412c88e51e71802951606e40b7358","nvshmem":"3.3.24","deep_ep_api":"ElasticBuffer","nccl":"2.30.4","deep_ep_topology_source":"nccl_lsa"}'
+        else
+            runtime_abi_json='{"build_mode":"official-v0.24.0-image","torch":"2.11.0","cuda":"13.0.2","deep_ep":"73b6ea4a439ba03a695563f9fd242c8e4b02b37c","nvshmem":"3.3.24","deep_ep_api":"Buffer"}'
+            if [[ "${system}" == gb200 || "${system}" == gb300 || "${system}" == b300_sxm ]]; then
+                [[ -d "${legacy_overlay_dir}" ]] || die \
+                    "${system} ${backend} requires --legacy-overlay-dir"
+                overlay_dir=$(realpath -e -- "${legacy_overlay_dir}")
+            elif [[ -n "${legacy_overlay_dir}" ]]; then
+                overlay_dir=$(realpath -e -- "${legacy_overlay_dir}")
+            fi
+        fi
+        if [[ -n "${overlay_dir}" ]]; then
+            case "${overlay_dir}" in
+                /mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*) die "prohibited overlay path ${overlay_dir}" ;;
+            esac
+        fi
         if [[ "${run_kind}" == full && "${allow_full_without_canary}" != true ]]; then
             compgen -G "${campaign_root}/${system}/canary/2n/${backend}/job_*/SUCCESS" >/dev/null || die \
                 "no successful 2-node ${backend} canary found for ${system}"
@@ -166,7 +179,7 @@ for node_num in "${node_values[@]}"; do
         export REPO_DIR="${repo_dir}" VLLM_SOURCE_ROOT="${vllm_source_root}"
         export CONTAINER_IMAGE="${container_image}" IMAGE_DIGEST="${image_digest}"
         export RUNTIME_ABI_JSON="${runtime_abi_json}"
-        export DEEP_EP_OVERLAY_WHEEL="${overlay_wheel}"
+        export DEEP_EP_OVERLAY_DIR="${overlay_dir}"
         export AIC_APPROVED_NODELIST="${approved_nodelist}" AIC_FABRIC_APPROVAL_ID="${fabric_approval_id}"
 
         sbatch_args=(

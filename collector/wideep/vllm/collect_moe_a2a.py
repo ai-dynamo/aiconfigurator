@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import socket
@@ -73,6 +74,9 @@ HT_SMS = 20
 LL_SMS = 0
 HT_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024
 TARGET_VLLM_SOURCE_COMMIT = "ee0da84ab9e04ac7610e28580af62c365e898389"
+LEGACY_DEEPEP_COMMIT = "73b6ea4a439ba03a695563f9fd242c8e4b02b37c"
+V2_DEEPEP_COMMIT = "b306af06afd412c88e51e71802951606e40b7358"
+LEGACY_NVL4_PATCH = _REPO_ROOT / "collector" / "wideep" / "vllm" / "patches" / "deepep_73b_nvl4.patch"
 ERRORS_FILENAME_TEMPLATE = "errors_moe_a2a_vllm.rank{rank}.json"
 
 
@@ -457,6 +461,7 @@ class VllmBenchmarkAdapter:
         self.warmups = warmups
         self.runs = runs
         self._buffer = None
+        self.runtime_capability: dict[str, str] | None = None
 
     def close(self) -> None:
         if self._buffer is not None:
@@ -610,6 +615,13 @@ class VllmBenchmarkAdapter:
                 num_qps_per_rank=HT_SMS // 2 if is_internode else 1,
                 explicitly_destroy=True,
             )
+            num_scaleout_ranks = int(self._buffer.runtime.get_num_rdma_ranks())
+            self._record_capability(
+                backend=case.comm_backend,
+                topology_source="legacy_compile_time",
+                num_scaleout_ranks=num_scaleout_ranks,
+                num_scaleup_ranks=self.identity.world_size // num_scaleout_ranks,
+            )
             deep_ep.Buffer.set_num_sms(HT_SMS)
             prepare_finalize = DeepEPHTPrepareAndFinalize(
                 self._buffer,
@@ -635,6 +647,13 @@ class VllmBenchmarkAdapter:
                 explicitly_destroy=True,
                 allow_mnnvl=self.allow_mnnvl,
             )
+            num_scaleout_ranks = int(self._buffer.runtime.get_num_rdma_ranks())
+            self._record_capability(
+                backend=case.comm_backend,
+                topology_source="legacy_compile_time",
+                num_scaleout_ranks=num_scaleout_ranks,
+                num_scaleup_ranks=self.identity.world_size // num_scaleout_ranks,
+            )
             prepare_finalize = DeepEPLLPrepareAndFinalize(
                 self._buffer,
                 max_tokens_per_rank=case.capacity,
@@ -654,10 +673,20 @@ class VllmBenchmarkAdapter:
                 hidden=case.shape.hidden_size,
                 num_topk=case.shape.topk,
                 use_fp8_dispatch=False,
-                allow_hybrid_mode=False,
+                allow_hybrid_mode=True,
                 prefer_overlap_with_compute=False,
                 allow_multiple_reduction=False,
                 explicitly_destroy=True,
+            )
+            num_scaleout_ranks, num_scaleup_ranks = self._buffer.get_logical_domain_size()
+            num_rdma_ranks, num_nvlink_ranks = self._buffer.get_physical_domain_size()
+            self._record_capability(
+                backend=case.comm_backend,
+                topology_source="nccl_lsa",
+                num_scaleout_ranks=num_scaleout_ranks,
+                num_scaleup_ranks=num_scaleup_ranks,
+                num_rdma_ranks=num_rdma_ranks,
+                num_nvlink_ranks=num_nvlink_ranks,
             )
             prepare_finalize = DeepEPV2PrepareAndFinalize(
                 buffer=self._buffer,
@@ -673,6 +702,22 @@ class VllmBenchmarkAdapter:
         else:  # defensive: population rejects this before execution
             raise VllmMoeA2ADeclarationError(f"unsupported backend {case.comm_backend!r}")
         return torch, prepare_finalize, quant_config, reduce_impl
+
+    def _record_capability(self, *, backend: str, topology_source: str, **domains: int) -> None:
+        capability = {
+            "backend": backend,
+            "topology_source": topology_source,
+            **{key: str(value) for key, value in domains.items()},
+        }
+        if int(capability["num_scaleout_ranks"]) * int(capability["num_scaleup_ranks"]) != self.identity.world_size:
+            raise VllmMoeA2ABenchmarkError(
+                f"DeepEP reported an invalid logical topology: {capability}, world={self.identity.world_size}"
+            )
+        if self.runtime_capability is not None and self.runtime_capability != capability:
+            raise VllmMoeA2ABenchmarkError(
+                f"DeepEP topology changed between cases: {self.runtime_capability} != {capability}"
+            )
+        self.runtime_capability = capability
 
     def _probe_v2_gin(self) -> None:
         """Use vLLM's live NCCL-GIN query; unsupported v2 is a classified raise."""
@@ -691,15 +736,21 @@ class VllmBenchmarkAdapter:
 def attest_vllm_runtime(
     *,
     source_root: str | Path,
+    backend: str,
     observed_abi: dict[str, str],
     observed_image_digest: str,
     installed_version_getter=distribution_version,
     source_commit_getter=None,
+    live_abi_getter=None,
 ) -> dict[str, Any]:
-    """Attest the live installed version and exact source checkout."""
+    """Attest the live installed version, backend ABI, and source checkout."""
     source_root = Path(source_root)
     if source_commit_getter is None:
         source_commit_getter = _git_head
+    if live_abi_getter is None:
+        live_abi_getter = _observe_live_backend_abi
+    if backend not in BACKENDS:
+        raise VllmMoeA2ADeclarationError(f"unsupported runtime backend {backend!r}")
     installed_version = installed_version_getter("vllm")
     source_commit = source_commit_getter(source_root)
     runtime = get_collector_runtime("vllm", workload="wideep")
@@ -717,7 +768,15 @@ def attest_vllm_runtime(
         raise VllmMoeA2ADeclarationError(
             f"vLLM source must be {TARGET_VLLM_SOURCE_COMMIT}, found {source_commit!r} at {source_root}"
         )
-    required_abi = runtime.abi or {}
+    required_abi = runtime.abi_for_backend(backend)
+    system = observed_abi.get("system")
+    if backend in ("deepep_ht", "deepep_ll"):
+        expected_scaleup_ranks = "4" if system in ("gb200", "gb300") else "8"
+        required_abi["deep_ep_scaleup_ranks"] = expected_scaleup_ranks
+        if expected_scaleup_ranks == "4":
+            required_abi["deep_ep_patch_sha256"] = _file_sha256(LEGACY_NVL4_PATCH)
+    else:
+        required_abi["deep_ep_topology_source"] = "nccl_lsa"
     mismatched_abi = {
         key: {"expected": expected, "observed": observed_abi.get(key)}
         for key, expected in required_abi.items()
@@ -727,6 +786,38 @@ def attest_vllm_runtime(
         raise VllmMoeA2ADeclarationError(
             f"wideep_vllm ABI mismatch: {mismatched_abi}; full observed ABI={observed_abi}"
         )
+    overlay_sha = observed_abi.get("deep_ep_overlay_wheel_sha256")
+    overlay_required = backend == "deepep_v2" or bool(observed_abi.get("deep_ep_patch_sha256"))
+    overlay_invalid = bool(overlay_sha) and (
+        len(overlay_sha) != 64 or any(char not in "0123456789abcdef" for char in overlay_sha)
+    )
+    if overlay_invalid or (overlay_required and not overlay_sha):
+        raise VllmMoeA2ADeclarationError(
+            f"{backend} requires an attested DeepEP overlay wheel SHA256; observed ABI={observed_abi}"
+        )
+    live_abi = live_abi_getter(backend)
+    live_mismatches = {
+        key: {"expected": expected, "observed": live_abi.get(key)}
+        for key, expected in (
+            ("torch", required_abi["torch"]),
+            ("deep_ep_api", required_abi["deep_ep_api"]),
+        )
+        if live_abi.get(key) != expected
+    }
+    expected_deepep = required_abi["deep_ep"]
+    if overlay_sha:
+        # The exact overlay is identified by the verified wheel SHA and build
+        # metadata. Patched legacy wheels deliberately report ``+local``.
+        pass
+    elif expected_deepep[:7] not in live_abi.get("deep_ep_distribution", ""):
+        live_mismatches["deep_ep_distribution"] = {
+            "expected": f"*+{expected_deepep[:7]}",
+            "observed": live_abi.get("deep_ep_distribution"),
+        }
+    if backend == "deepep_v2" and live_abi.get("nccl") != required_abi["nccl"]:
+        live_mismatches["nccl"] = {"expected": required_abi["nccl"], "observed": live_abi.get("nccl")}
+    if live_mismatches:
+        raise VllmMoeA2ADeclarationError(f"wideep_vllm live ABI mismatch: {live_mismatches}; full live ABI={live_abi}")
     matching_images = [
         (variant, image.partition("@"))
         for variant, image in runtime.images.items()
@@ -746,7 +837,40 @@ def attest_vllm_runtime(
         "image_digest": digest,
         "source_commit": source_commit,
         "abi": observed_abi,
+        "live_abi": live_abi,
     }
+
+
+def _observe_live_backend_abi(backend: str) -> dict[str, str]:
+    """Observe fields that must come from the process actually loading DeepEP."""
+
+    import deep_ep
+    import torch
+    from packaging.version import Version
+
+    api = "ElasticBuffer" if backend == "deepep_v2" else "Buffer"
+    nccl_version = ""
+    if backend == "deepep_v2":
+        try:
+            nccl_version = distribution_version("nvidia-nccl-cu13")
+        except Exception as error:
+            raise VllmMoeA2ADeclarationError("deepep_v2 cannot observe nvidia-nccl-cu13") from error
+    return {
+        "torch": Version(distribution_version("torch")).public,
+        "torch_cuda": str(torch.version.cuda),
+        "deep_ep_distribution": distribution_version("deep_ep"),
+        "deep_ep_api": api if hasattr(deep_ep, api) else "missing",
+        "deep_ep_import": str(Path(deep_ep.__file__).resolve()),
+        "nccl": nccl_version,
+    }
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _git_head(path: Path) -> str:
@@ -971,6 +1095,11 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps({"cases": len(cases), "case_plan_hash": provenance.case_plan_hash(ids)}, indent=2))
         return
 
+    if len(backends) != 1:
+        raise VllmMoeA2ADeclarationError(
+            "measured runs require exactly one backend because HT/LL and V2 use distinct DeepEP ABIs"
+        )
+
     import torch
     import torch.distributed as dist
 
@@ -991,6 +1120,7 @@ def main(argv: list[str] | None = None) -> None:
         raise VllmMoeA2ADeclarationError("--runtime-abi-json must be a JSON object of string fields")
     runtime_meta = attest_vllm_runtime(
         source_root=args.vllm_source_root,
+        backend=backends[0],
         observed_abi=observed_abi,
         observed_image_digest=args.image_digest,
     )
@@ -1032,18 +1162,22 @@ def main(argv: list[str] | None = None) -> None:
             )
         )
 
+        adapter = VllmBenchmarkAdapter(
+            group,
+            identity,
+            allow_mnnvl=args.allow_mnnvl,
+            disable_nvlink=args.disable_nvlink,
+        )
         result = collect_with_adapter(
             cases,
-            adapter=VllmBenchmarkAdapter(
-                group,
-                identity,
-                allow_mnnvl=args.allow_mnnvl,
-                disable_nvlink=args.disable_nvlink,
-            ),
+            adapter=adapter,
             world_size=identity.world_size,
             node_num=identity.node_num,
             stage_agreement=agree,
         )
+        if adapter.runtime_capability is None:
+            raise VllmMoeA2ABenchmarkError("DeepEP did not report a runtime topology capability")
+        runtime_meta["backend_capability"] = adapter.runtime_capability
 
         failure_record_error: BaseException | None = None
         try:

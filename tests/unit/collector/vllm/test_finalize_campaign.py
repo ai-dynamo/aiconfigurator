@@ -21,23 +21,48 @@ from collector.wideep.vllm.collect_moe_a2a import (
 pytestmark = pytest.mark.unit
 
 
-def _runtime(*, fabric_identity: str) -> dict:
+def _runtime(*, fabric_identity: str, backend: str, ep_size: int) -> dict:
+    abi = campaign.VLLM_RUNTIME.abi_for_backend(backend) | {
+        "slurm_topology_verified": "true",
+        "fabric_identity": fabric_identity,
+        "system": "h200_sxm",
+        "gpu_name": "NVIDIA H200",
+        "compute_capability": "9.0",
+        "cross_node_nvlink_capable": "runtime_probe_required",
+        "rdma_device_count": "8",
+    }
+    if backend == "deepep_v2":
+        abi |= {
+            "deep_ep_topology_source": "nccl_lsa",
+            "deep_ep_overlay_wheel_sha256": "3" * 64,
+        }
+        capability = {
+            "backend": backend,
+            "topology_source": "nccl_lsa",
+            "num_scaleout_ranks": str(ep_size // 8),
+            "num_scaleup_ranks": "8",
+            "num_rdma_ranks": str(ep_size // 8),
+            "num_nvlink_ranks": "8",
+        }
+        live_abi = {"deep_ep_api": "ElasticBuffer", "nccl": "2.30.4"}
+    else:
+        abi["deep_ep_scaleup_ranks"] = "8"
+        capability = {
+            "backend": backend,
+            "topology_source": "legacy_compile_time",
+            "num_scaleout_ranks": str(ep_size // 8),
+            "num_scaleup_ranks": "8",
+        }
+        live_abi = {"deep_ep_api": "Buffer"}
     return {
         "framework": "vllm",
         "version": "0.24.0",
         "image": "vllm/vllm-openai:v0.24.0",
         "image_digest": "sha256:" + "1" * 64,
         "source_commit": TARGET_VLLM_SOURCE_COMMIT,
-        "abi": {
-            **campaign.REQUIRED_ABI,
-            "slurm_topology_verified": "true",
-            "fabric_identity": fabric_identity,
-            "system": "h200_sxm",
-            "gpu_name": "NVIDIA H200",
-            "compute_capability": "9.0",
-            "cross_node_nvlink_capable": "false",
-            "rdma_device_count": "8",
-        },
+        "abi": abi,
+        "backend_capability": capability,
+        "live_abi": live_abi,
     }
 
 
@@ -74,7 +99,7 @@ def _write_job(root: Path, *, node_num: int, ep_size: int, backend: str) -> Path
     frame.to_parquet(job_dir / "moe_a2a_perf.parquet", index=False)
     provenance.write_collection_meta(
         job_dir,
-        _runtime(fabric_identity=f"leaf-{node_num}"),
+        _runtime(fabric_identity=f"leaf-{node_num}", backend=backend, ep_size=ep_size),
         {
             "moe_a2a_perf": {
                 "collector_ref": "deadbeef",
@@ -125,6 +150,8 @@ def test_merge_campaign_requires_and_validates_all_six_formal_jobs(tmp_path):
     assert meta["tables"]["custom_allreduce_perf"] == {"status": "complete"}
     assert meta["tables"]["moe_a2a_perf"]["rows"] == len(merged)
     assert meta["runtime"]["abi"]["campaign_system"] == "h200_sxm"
+    assert meta["runtime"]["backend_abis"]["deepep_v2"]["deep_ep"] == "b306af06afd412c88e51e71802951606e40b7358"
+    assert set(meta["runtime"]["backend_capabilities"]["deepep_v2"]) == {"2n_ep16", "4n_ep32"}
     assert checksums.is_file()
 
 
@@ -146,5 +173,5 @@ def test_validate_job_rejects_classified_failure(tmp_path):
 def test_validate_job_rejects_wrong_system_identity(tmp_path):
     job = _write_job(tmp_path, node_num=2, ep_size=16, backend="deepep_ht")
 
-    with pytest.raises(campaign.CampaignValidationError, match="runtime system is not b200_sxm"):
+    with pytest.raises(campaign.CampaignValidationError, match="does not match b200_sxm"):
         campaign.validate_job_dir(job, system="b200_sxm")

@@ -65,6 +65,18 @@ def test_wideep_runtime_stays_independent_from_default_framework_runtime():
     assert "deepseek-v4" in wideep_sglang.image()
 
 
+def test_wideep_vllm_runtime_has_backend_specific_deepep_abis():
+    runtime = get_collector_runtime("vllm", workload="wideep")
+
+    assert runtime.abi_for_backend("deepep_ht")["deep_ep"] == "73b6ea4a439ba03a695563f9fd242c8e4b02b37c"
+    assert runtime.abi_for_backend("deepep_ht")["deep_ep_api"] == "Buffer"
+    assert runtime.abi_for_backend("deepep_ll")["deep_ep_api"] == "Buffer"
+    v2 = runtime.abi_for_backend("deepep_v2")
+    assert v2["deep_ep"] == "b306af06afd412c88e51e71802951606e40b7358"
+    assert v2["deep_ep_api"] == "ElasticBuffer"
+    assert v2["nccl"] == "2.30.4"
+
+
 def test_deepep_ops_resolve_to_the_comm_family_runtime(monkeypatch):
     # The `comm` family override retargets exactly the two DeepEP ops; moe_ep
     # is family `moe` and stays on the DeepSeek-V4 runtime its 0.5.10 dataset

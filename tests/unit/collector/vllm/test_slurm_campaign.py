@@ -80,27 +80,33 @@ def test_submitter_requires_canaries_and_one_job_per_backend():
 def test_vllm_collector_hash_closure_includes_campaign_pipeline():
     closures = provenance.load_closures(REPO_ROOT / "collector/hash_closures.yaml")
     closure = closures["collector.wideep.vllm.collect_moe_a2a"]
+    assert "collector/framework_manifest.yaml" in closure
     assert "collector/wideep/vllm/finalize_campaign.py" in closure
     assert "collector/wideep/vllm/slurm/run_vllm_moe_a2a_job.sh" in closure
     assert "collector/wideep/vllm/slurm/submit_vllm_moe_a2a.sh" in closure
     assert "collector/wideep/vllm/slurm/run_deepep_sm103_overlay_job.sh" in closure
     assert "collector/wideep/vllm/slurm/submit_deepep_sm103_overlay.sh" in closure
+    assert "collector/wideep/vllm/patches/deepep_73b_nvl4.patch" in closure
     assert "collector/wideep/vllm/slurm/run_vllm_image_stage_job.sh" in closure
     assert "collector/wideep/vllm/slurm/submit_vllm_image_stage.sh" in closure
 
 
-def test_sm103_overlay_build_is_exact_and_separate_from_formal_data():
+def test_backend_overlay_build_is_exact_and_separate_from_formal_data():
     runner = OVERLAY_RUNNER.read_text(encoding="utf-8")
     submitter = OVERLAY_SUBMITTER.read_text(encoding="utf-8")
     assert "73b6ea4a439ba03a695563f9fd242c8e4b02b37c" in runner
+    assert "b306af06afd412c88e51e71802951606e40b7358" in runner
     assert "ee0da84ab9e04ac7610e28580af62c365e898389" in runner
     assert "NVSHMEM_VERSION=3.3.24" in runner
-    assert "CUDA_ARCHES='10.0a 10.3a'" in runner
-    assert "wheel_sha256" in runner
-    assert "gb300|b300_sxm" in runner
-    assert 'CONTAINER_IMAGE=$(safe_existing_path "container image"' in runner
+    assert "V2_NCCL_VERSION=2.30.4" in runner
+    assert "legacy-nvl8|legacy-nvl4|v2" in submitter
+    assert "deep_ep_wheel_sha256" in runner
+    assert "deepep_73b_nvl4.patch" in runner
+    assert 'container_image=$(safe_existing_path "container image"' in runner
     assert 'safe_existing_path "container image metadata"' in runner
     assert "local container squashfs checksum mismatch" in runner
+    assert "nvidia-nccl-cu13==${AIC_NCCL_VERSION}" in runner
+    assert "export EP_NCCL_ROOT_DIR=" in runner
     assert "--container-image" in submitter
     assert "--exclusive" in submitter
     assert "--switches=1" in submitter

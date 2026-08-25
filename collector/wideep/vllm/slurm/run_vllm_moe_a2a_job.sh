@@ -55,6 +55,7 @@ require_env IMAGE_DIGEST
 require_env RUNTIME_ABI_JSON
 require_env SLURM_JOB_ID
 require_env SLURM_NODELIST
+DEEP_EP_OVERLAY_DIR=${DEEP_EP_OVERLAY_DIR:-}
 
 case "${BACKEND}" in
     deepep_ht|deepep_ll|deepep_v2) ;;
@@ -73,7 +74,7 @@ case "${SYSTEM}" in
     gb200|gb300)
         [[ "${GPUS_PER_NODE}" == 4 ]] || die "${SYSTEM} requires 4 GPUs/node"
         expected_ep=$((NODE_NUM * 4))
-        cross_node_nvlink_capable=true
+        cross_node_nvlink_capable=runtime_probe_required
         topology_mode=native
         if [[ "${SYSTEM}" == gb200 ]]; then
             expected_gpu_token=GB200
@@ -86,7 +87,7 @@ case "${SYSTEM}" in
     b200_sxm|b300_sxm|h100_sxm|h200_sxm)
         [[ "${GPUS_PER_NODE}" == 8 ]] || die "${SYSTEM} requires 8 GPUs/node"
         expected_ep=$((NODE_NUM * 8))
-        cross_node_nvlink_capable=false
+        cross_node_nvlink_capable=runtime_probe_required
         if [[ "${SYSTEM}" == b200_sxm || "${SYSTEM}" == b300_sxm ]]; then
             topology_mode=approved_nodelist
         else
@@ -279,28 +280,118 @@ PY
 
 master_addr=${allocated_nodes[0]}
 container_mounts="${repo_dir}:${repo_dir},${vllm_source_root}:${vllm_source_root},${staging_root}:${staging_root}"
-if [[ "${SYSTEM}" == gb300 || "${SYSTEM}" == b300_sxm ]]; then
-    require_env DEEP_EP_OVERLAY_WHEEL
-    overlay_wheel=$(safe_existing_path "DeepEP overlay wheel" "${DEEP_EP_OVERLAY_WHEEL}")
-    overlay_sha256=$(sha256sum "${overlay_wheel}" | awk '{print $1}')
-    read -r attested_overlay_sha256 attested_cuda_arches < <(
+container_command='export PYTHONPATH="${AIC_REPO_DIR}:${PYTHONPATH:-}";'
+if [[ -n "${DEEP_EP_OVERLAY_DIR}" ]]; then
+    overlay_dir=$(safe_existing_path "DeepEP overlay directory" "${DEEP_EP_OVERLAY_DIR}")
+    safe_existing_path "DeepEP overlay success marker" "${overlay_dir}/SUCCESS" >/dev/null
+    overlay_meta=$(safe_existing_path "DeepEP overlay metadata" "${overlay_dir}/build_meta.json")
+    expected_profile=legacy-nvl8
+    if [[ "${BACKEND}" == deepep_v2 ]]; then
+        expected_profile=v2
+    elif [[ "${SYSTEM}" == gb200 || "${SYSTEM}" == gb300 ]]; then
+        expected_profile=legacy-nvl4
+    fi
+    overlay_values=$(
+        python3 - "${overlay_dir}" "${overlay_meta}" "${expected_profile}" "${IMAGE_DIGEST}" \
+            "${compute_capability}" "${repo_dir}" <<'PY'
+import hashlib
+import json
+import platform
+import sys
+from pathlib import Path
+
+overlay_dir, meta_path, profile, image_digest, compute_capability, repo_dir = sys.argv[1:]
+overlay_dir = Path(overlay_dir)
+payload = json.loads(Path(meta_path).read_text())
+expected_commit = {
+    "v2": "b306af06afd412c88e51e71802951606e40b7358",
+    "legacy-nvl4": "73b6ea4a439ba03a695563f9fd242c8e4b02b37c",
+    "legacy-nvl8": "73b6ea4a439ba03a695563f9fd242c8e4b02b37c",
+}[profile]
+checks = {
+    "schema_version": 2,
+    "architecture": platform.machine(),
+    "profile": profile,
+    "image_digest": image_digest,
+    "vllm_source_commit": "ee0da84ab9e04ac7610e28580af62c365e898389",
+    "deep_ep_source_commit": expected_commit,
+    "nvshmem": "3.3.24",
+}
+for key, expected in checks.items():
+    if payload.get(key) != expected:
+        raise SystemExit(f"overlay {key} mismatch: {payload.get(key)!r} != {expected!r}")
+arches = payload.get("cuda_arches", "").split()
+if not any(value.rstrip("a") == compute_capability for value in arches):
+    raise SystemExit(f"overlay CUDA arches {arches!r} do not cover {compute_capability}")
+if profile == "legacy-nvl4":
+    patch = Path(repo_dir) / "collector/wideep/vllm/patches/deepep_73b_nvl4.patch"
+    patch_sha = hashlib.sha256(patch.read_bytes()).hexdigest()
+    if payload.get("deep_ep_patch_sha256") != patch_sha:
+        raise SystemExit("legacy four-rank patch SHA mismatch")
+elif payload.get("deep_ep_patch_sha256"):
+    raise SystemExit("unexpected topology patch on this overlay profile")
+if profile == "v2" and payload.get("nccl") != "2.30.4":
+    raise SystemExit("v2 overlay does not pin NCCL 2.30.4")
+
+def checked_wheel(name_key, sha_key, required=True):
+    name = payload.get(name_key, "")
+    if not name:
+        if required:
+            raise SystemExit(f"overlay metadata is missing {name_key}")
+        return "", ""
+    path = (overlay_dir / name).resolve(strict=True)
+    if path.parent != overlay_dir.resolve():
+        raise SystemExit(f"unsafe overlay wheel path {path}")
+    observed = hashlib.sha256(path.read_bytes()).hexdigest()
+    if observed != payload.get(sha_key):
+        raise SystemExit(f"overlay wheel checksum mismatch for {path.name}")
+    return str(path), observed
+
+deep_ep_wheel, deep_ep_sha = checked_wheel("deep_ep_wheel", "deep_ep_wheel_sha256")
+nccl_wheel, nccl_sha = checked_wheel("nccl_wheel", "nccl_wheel_sha256", profile == "v2")
+abi = {
+    "deep_ep_overlay_wheel_sha256": deep_ep_sha,
+    "deep_ep_cuda_arches": payload["cuda_arches"],
+    "deep_ep_scaleup_ranks": payload["deep_ep_scaleup_ranks"],
+}
+if payload.get("deep_ep_patch_sha256"):
+    abi["deep_ep_patch_sha256"] = payload["deep_ep_patch_sha256"]
+print(json.dumps({"deep_ep_wheel": deep_ep_wheel, "nccl_wheel": nccl_wheel, "abi": abi}, separators=(",", ":")))
+PY
+    ) || die "overlay validation failed"
+    read -r overlay_deep_ep_wheel overlay_nccl_wheel runtime_abi_json < <(
+        python3 - "${overlay_values}" "${runtime_abi_json}" <<'PY'
+import json
+import sys
+
+overlay, abi = map(json.loads, sys.argv[1:])
+abi.update(overlay["abi"])
+print(overlay["deep_ep_wheel"], overlay["nccl_wheel"] or "-", json.dumps(abi, separators=(",", ":")))
+PY
+    )
+    [[ "${overlay_nccl_wheel}" != - ]] || overlay_nccl_wheel=""
+    container_mounts+=",${overlay_dir}:${overlay_dir}"
+    export AIC_DEEP_EP_WHEEL="${overlay_deep_ep_wheel}"
+    export AIC_NCCL_WHEEL="${overlay_nccl_wheel}"
+    container_command='overlay_target="${AIC_STAGING_ROOT}/overlay-${SLURM_PROCID}"; mkdir -p "${overlay_target}";'
+    if [[ "${BACKEND}" == deepep_v2 ]]; then
+        [[ -n "${overlay_nccl_wheel}" ]] || die "v2 overlay has no NCCL wheel"
+        container_command+=' python3 -m pip install --no-deps --target "${overlay_target}" "${AIC_NCCL_WHEEL}" >/dev/null; export LD_LIBRARY_PATH="${overlay_target}/nvidia/nccl/lib:${LD_LIBRARY_PATH:-}";'
+    fi
+    container_command+=' python3 -m pip install --no-deps --target "${overlay_target}" "${AIC_DEEP_EP_WHEEL}" >/dev/null; export PYTHONPATH="${overlay_target}:${AIC_REPO_DIR}:${PYTHONPATH:-}";'
+elif [[ "${BACKEND}" == deepep_v2 || "${SYSTEM}" == gb200 || "${SYSTEM}" == gb300 || "${SYSTEM}" == b300_sxm ]]; then
+    die "${SYSTEM} ${BACKEND} requires an attested overlay directory"
+else
+    runtime_abi_json=$(
         python3 - "${runtime_abi_json}" <<'PY'
 import json
 import sys
 
 abi = json.loads(sys.argv[1])
-print(abi.get("deep_ep_overlay_wheel_sha256", ""), abi.get("deep_ep_cuda_arches", ""))
+abi["deep_ep_scaleup_ranks"] = "8"
+print(json.dumps(abi, separators=(",", ":")))
 PY
     )
-    [[ "${attested_overlay_sha256}" == "${overlay_sha256}" ]] || die \
-        "SM103 overlay wheel SHA256 differs from the runtime attestation"
-    [[ "${attested_cuda_arches}" == "10.0a 10.3a" ]] || die \
-        "SM103 runtime ABI must attest exact CUDA arches 10.0a 10.3a"
-    container_mounts+=",${overlay_wheel}:${overlay_wheel}"
-    export AIC_OVERLAY_WHEEL="${overlay_wheel}"
-    container_command='overlay_dir="${AIC_STAGING_ROOT}/overlay-${SLURM_PROCID}"; mkdir -p "${overlay_dir}"; python3 -m pip install --no-deps --target "${overlay_dir}" "${AIC_OVERLAY_WHEEL}" >/dev/null; export PYTHONPATH="${overlay_dir}:${AIC_REPO_DIR}:${PYTHONPATH:-}";'
-else
-    container_command='export PYTHONPATH="${AIC_REPO_DIR}:${PYTHONPATH:-}";'
 fi
 
 canary_flag=""

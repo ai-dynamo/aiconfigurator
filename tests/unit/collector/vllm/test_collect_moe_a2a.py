@@ -446,44 +446,109 @@ def test_writer_uses_sglang_unified_schema(tmp_path):
 def test_runtime_attestation_uses_live_hooks_and_rejects_wrong_commit(tmp_path):
     runtime = a2a.get_collector_runtime("vllm", workload="wideep")
     image_digest = runtime.image().split("@", 1)[1]
+    observed_abi = runtime.abi_for_backend("deepep_ht") | {
+        "system": "h100_sxm",
+        "deep_ep_scaleup_ranks": "8",
+    }
+    live_abi = {
+        "torch": "2.11.0",
+        "deep_ep_api": "Buffer",
+        "deep_ep_distribution": "1.2.1+73b6ea4",
+    }
     meta = a2a.attest_vllm_runtime(
         source_root=tmp_path,
-        observed_abi=runtime.abi,
+        backend="deepep_ht",
+        observed_abi=observed_abi,
         observed_image_digest=image_digest,
         installed_version_getter=lambda name: runtime.version,
         source_commit_getter=lambda path: a2a.TARGET_VLLM_SOURCE_COMMIT,
+        live_abi_getter=lambda backend: live_abi,
     )
     assert meta["framework"] == "wideep_vllm"
     assert meta["version"] == runtime.version
     assert meta["source_commit"] == a2a.TARGET_VLLM_SOURCE_COMMIT
-    assert meta["abi"] == runtime.abi
+    assert meta["abi"] == observed_abi
+    assert meta["live_abi"] == live_abi
     assert meta["image_digest"] == image_digest
     grace_image, grace_image_digest = runtime.image("grace_blackwell").split("@", 1)
     grace_meta = a2a.attest_vllm_runtime(
         source_root=tmp_path,
-        observed_abi=runtime.abi,
+        backend="deepep_ht",
+        observed_abi=observed_abi,
         observed_image_digest=grace_image_digest,
         installed_version_getter=lambda name: runtime.version,
         source_commit_getter=lambda path: a2a.TARGET_VLLM_SOURCE_COMMIT,
+        live_abi_getter=lambda backend: live_abi,
     )
     assert grace_meta["image"] == grace_image
     assert grace_meta["image_digest"] == grace_image_digest
     with pytest.raises(a2a.VllmMoeA2ADeclarationError, match="source must be"):
         a2a.attest_vllm_runtime(
             source_root=tmp_path,
-            observed_abi=runtime.abi,
+            backend="deepep_ht",
+            observed_abi=observed_abi,
             observed_image_digest=image_digest,
             installed_version_getter=lambda name: runtime.version,
             source_commit_getter=lambda path: "wrong",
+            live_abi_getter=lambda backend: live_abi,
         )
     with pytest.raises(a2a.VllmMoeA2ADeclarationError, match="image digest mismatch"):
         a2a.attest_vllm_runtime(
             source_root=tmp_path,
-            observed_abi=runtime.abi,
+            backend="deepep_ht",
+            observed_abi=observed_abi,
             observed_image_digest="sha256:" + "0" * 64,
             installed_version_getter=lambda name: runtime.version,
             source_commit_getter=lambda path: a2a.TARGET_VLLM_SOURCE_COMMIT,
+            live_abi_getter=lambda backend: live_abi,
         )
+
+
+def test_runtime_attestation_splits_v2_and_legacy_nvl4_abis(tmp_path):
+    runtime = a2a.get_collector_runtime("vllm", workload="wideep")
+    image_digest = runtime.image().split("@", 1)[1]
+    wheel_sha = "a" * 64
+    v2_abi = runtime.abi_for_backend("deepep_v2") | {
+        "system": "gb200",
+        "deep_ep_topology_source": "nccl_lsa",
+        "deep_ep_overlay_wheel_sha256": wheel_sha,
+    }
+    meta = a2a.attest_vllm_runtime(
+        source_root=tmp_path,
+        backend="deepep_v2",
+        observed_abi=v2_abi,
+        observed_image_digest=image_digest,
+        installed_version_getter=lambda name: runtime.version,
+        source_commit_getter=lambda path: a2a.TARGET_VLLM_SOURCE_COMMIT,
+        live_abi_getter=lambda backend: {
+            "torch": "2.11.0",
+            "deep_ep_api": "ElasticBuffer",
+            "deep_ep_distribution": "1.2.1+b306af0",
+            "nccl": "2.30.4",
+        },
+    )
+    assert meta["abi"]["deep_ep"] == a2a.V2_DEEPEP_COMMIT
+
+    patch_sha = a2a._file_sha256(a2a.LEGACY_NVL4_PATCH)
+    legacy_abi = runtime.abi_for_backend("deepep_ht") | {
+        "system": "gb200",
+        "deep_ep_scaleup_ranks": "4",
+        "deep_ep_patch_sha256": patch_sha,
+        "deep_ep_overlay_wheel_sha256": wheel_sha,
+    }
+    a2a.attest_vllm_runtime(
+        source_root=tmp_path,
+        backend="deepep_ht",
+        observed_abi=legacy_abi,
+        observed_image_digest=image_digest,
+        installed_version_getter=lambda name: runtime.version,
+        source_commit_getter=lambda path: a2a.TARGET_VLLM_SOURCE_COMMIT,
+        live_abi_getter=lambda backend: {
+            "torch": "2.11.0",
+            "deep_ep_api": "Buffer",
+            "deep_ep_distribution": "1.2.1+local",
+        },
+    )
 
 
 def test_git_head_reads_checkout_metadata_when_git_is_unavailable(tmp_path, monkeypatch):
@@ -592,6 +657,7 @@ def test_exact_vllm_prepare_finalize_classes_and_calls_are_present():
     assert "prepare_finalize.prepare(" in SOURCE
     assert "prepare_finalize.finalize(" in SOURCE
     assert "deep_ep.ElasticBuffer(" in SOURCE
+    assert "allow_hybrid_mode=True" in SOURCE
     assert "get_theoretical_num_sms(" in SOURCE
     assert 'backend="nccl"' in SOURCE
     assert SOURCE.index('elif case.comm_backend == "deepep_v2":') < SOURCE.index(

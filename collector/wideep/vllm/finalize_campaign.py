@@ -28,9 +28,11 @@ import pyarrow.parquet as pq
 import yaml
 
 from collector import provenance
+from collector.framework_manifest import get_collector_runtime
 from collector.registry_types import PerfFile
 from collector.wideep.vllm.collect_moe_a2a import (
     BACKENDS,
+    LEGACY_NVL4_PATCH,
     TARGET_VLLM_SOURCE_COMMIT,
     build_case_plan,
     case_plan_ids,
@@ -97,13 +99,10 @@ CASE_BASE_COLUMNS = (
     "num_experts",
     "num_tokens",
 )
-REQUIRED_ABI = {
-    "build_mode": "official-v0.24.0-image",
-    "torch": "2.11.0",
-    "cuda": "13.0.2",
-    "deep_ep": "73b6ea4a439ba03a695563f9fd242c8e4b02b37c",
-    "nvshmem": "3.3.24",
-}
+VLLM_RUNTIME = get_collector_runtime("vllm", workload="wideep")
+# Compatibility name used by older unit fixtures; per-backend validation below
+# always resolves through ``abi_for_backend``.
+REQUIRED_ABI = VLLM_RUNTIME.abi or {}
 
 
 class CampaignValidationError(RuntimeError):
@@ -160,7 +159,14 @@ def _load_sidecar(job_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     return runtime, table
 
 
-def _validate_runtime(runtime: dict[str, Any], *, job_dir: Path, system: str) -> None:
+def _validate_runtime(
+    runtime: dict[str, Any],
+    *,
+    job_dir: Path,
+    system: str,
+    backend: str,
+    ep_size: int,
+) -> None:
     if str(runtime.get("framework", "")).lower() != "vllm":
         raise CampaignValidationError(f"{job_dir}: runtime framework is not vllm")
     if str(runtime.get("version")) != EXPECTED_VERSION:
@@ -170,7 +176,15 @@ def _validate_runtime(runtime: dict[str, Any], *, job_dir: Path, system: str) ->
     abi = runtime.get("abi")
     if not isinstance(abi, dict):
         raise CampaignValidationError(f"{job_dir}: runtime ABI is missing")
-    mismatch = {key: (value, abi.get(key)) for key, value in REQUIRED_ABI.items() if abi.get(key) != value}
+    required_abi = VLLM_RUNTIME.abi_for_backend(backend)
+    expected_scaleup_ranks = 4 if system in ("gb200", "gb300") else 8
+    if backend in ("deepep_ht", "deepep_ll"):
+        required_abi["deep_ep_scaleup_ranks"] = str(expected_scaleup_ranks)
+        if expected_scaleup_ranks == 4:
+            required_abi["deep_ep_patch_sha256"] = _sha256(LEGACY_NVL4_PATCH)
+    else:
+        required_abi["deep_ep_topology_source"] = "nccl_lsa"
+    mismatch = {key: (value, abi.get(key)) for key, value in required_abi.items() if abi.get(key) != value}
     if mismatch:
         raise CampaignValidationError(f"{job_dir}: runtime ABI mismatch {mismatch}")
     if abi.get("slurm_topology_verified") != "true":
@@ -182,6 +196,39 @@ def _validate_runtime(runtime: dict[str, Any], *, job_dir: Path, system: str) ->
         raise CampaignValidationError(f"{job_dir}: runtime GPU does not match {system}")
     if str(abi.get("compute_capability")) != compute_capability:
         raise CampaignValidationError(f"{job_dir}: runtime compute capability does not match {system}")
+    capability = runtime.get("backend_capability")
+    if not isinstance(capability, dict) or capability.get("backend") != backend:
+        raise CampaignValidationError(f"{job_dir}: runtime backend capability is missing or mismatched")
+    try:
+        num_scaleout_ranks = int(capability["num_scaleout_ranks"])
+        num_scaleup_ranks = int(capability["num_scaleup_ranks"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise CampaignValidationError(f"{job_dir}: invalid runtime topology capability {capability}") from error
+    if num_scaleout_ranks * num_scaleup_ranks != ep_size:
+        raise CampaignValidationError(f"{job_dir}: runtime topology capability does not cover EP{ep_size}")
+    if backend in ("deepep_ht", "deepep_ll"):
+        if capability.get("topology_source") != "legacy_compile_time" or num_scaleup_ranks != expected_scaleup_ranks:
+            raise CampaignValidationError(f"{job_dir}: legacy DeepEP topology is not the required scale-up size")
+    else:
+        if capability.get("topology_source") != "nccl_lsa":
+            raise CampaignValidationError(f"{job_dir}: DeepEP V2 topology was not observed from NCCL LSA")
+        try:
+            num_rdma_ranks = int(capability["num_rdma_ranks"])
+            num_nvlink_ranks = int(capability["num_nvlink_ranks"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise CampaignValidationError(f"{job_dir}: V2 physical domain evidence is missing") from error
+        if num_rdma_ranks * num_nvlink_ranks != ep_size:
+            raise CampaignValidationError(f"{job_dir}: V2 physical domains do not cover EP{ep_size}")
+    live_abi = runtime.get("live_abi")
+    if not isinstance(live_abi, dict) or live_abi.get("deep_ep_api") != required_abi["deep_ep_api"]:
+        raise CampaignValidationError(f"{job_dir}: live DeepEP API evidence is missing or mismatched")
+    if backend == "deepep_v2" and live_abi.get("nccl") != required_abi["nccl"]:
+        raise CampaignValidationError(f"{job_dir}: live NCCL does not match the V2 ABI")
+    overlay_required = backend == "deepep_v2" or system in ("gb200", "gb300") or system == "b300_sxm"
+    if overlay_required:
+        overlay_sha = str(abi.get("deep_ep_overlay_wheel_sha256", ""))
+        if len(overlay_sha) != 64 or any(char not in "0123456789abcdef" for char in overlay_sha):
+            raise CampaignValidationError(f"{job_dir}: required DeepEP overlay wheel SHA256 is missing")
     image_digest = str(runtime.get("image_digest", ""))
     if not image_digest.startswith("sha256:") or len(image_digest) != 71:
         raise CampaignValidationError(f"{job_dir}: invalid image digest {image_digest!r}")
@@ -203,7 +250,6 @@ def validate_job_dir(job_dir: str | Path, *, system: str) -> ValidatedJob:
     if not parquet_path.is_file():
         raise CampaignValidationError(f"missing parquet {parquet_path}")
     runtime, table = _load_sidecar(resolved)
-    _validate_runtime(runtime, job_dir=resolved, system=system)
     _validate_failures(resolved)
 
     frame = pd.read_parquet(parquet_path)
@@ -234,6 +280,9 @@ def validate_job_dir(job_dir: str | Path, *, system: str) -> ValidatedJob:
             f"{parquet_path}: rejected formal identity system={system}, "
             f"nodes={node_num}, ep={ep_size}, backend={backend}"
         )
+    if runtime.get("abi", {}).get("system") != system:
+        raise CampaignValidationError(f"{parquet_path}: runtime and requested systems differ")
+    _validate_runtime(runtime, job_dir=resolved, system=system, backend=backend, ep_size=ep_size)
 
     cases = _expected_cases(ep_size=ep_size, node_num=node_num, backend=backend)
     if len(frame) != len(cases) * 2:
@@ -296,8 +345,34 @@ def _merge_runtime(jobs: list[ValidatedJob], *, system: str) -> dict[str, Any]:
             "fabric_identities": ",".join(sorted({str(job.runtime["abi"].get("fabric_identity")) for job in jobs})),
         }
     )
+    backend_abis: dict[str, dict[str, str]] = {}
+    backend_capabilities: dict[str, dict[str, dict[str, str]]] = {}
+    for backend in BACKENDS:
+        backend_jobs = [job for job in jobs if job.backend == backend]
+        contract_keys = set(VLLM_RUNTIME.abi_for_backend(backend)) | {
+            "deep_ep_overlay_wheel_sha256",
+            "deep_ep_cuda_arches",
+            "deep_ep_patch_sha256",
+            "deep_ep_scaleup_ranks",
+            "deep_ep_topology_source",
+        }
+        backend_abi = {
+            key: backend_jobs[0].runtime["abi"][key]
+            for key in sorted(contract_keys)
+            if key in backend_jobs[0].runtime["abi"]
+        }
+        for candidate in backend_jobs[1:]:
+            observed = {key: candidate.runtime["abi"].get(key) for key in backend_abi}
+            if observed != backend_abi:
+                raise CampaignValidationError(f"campaign {backend} ABI differs across node counts")
+        backend_abis[backend] = backend_abi
+        backend_capabilities[backend] = {
+            f"{job.node_num}n_ep{job.ep_size}": dict(job.runtime["backend_capability"]) for job in backend_jobs
+        }
     return {field: jobs[0].runtime[field] for field in immutable_fields if field in jobs[0].runtime} | {
-        "abi": immutable_abi
+        "abi": immutable_abi,
+        "backend_abis": backend_abis,
+        "backend_capabilities": backend_capabilities,
     }
 
 
