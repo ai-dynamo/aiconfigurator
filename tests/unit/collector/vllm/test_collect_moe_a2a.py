@@ -723,6 +723,24 @@ def test_collector_ref_degrades_to_unknown_outside_a_repo(tmp_path, monkeypatch)
     assert a2a._git_collector_ref(tmp_path) == "unknown"
 
 
+def test_collector_ref_uses_host_attestation_when_git_is_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setenv("AIC_COLLECTOR_REF", a2a.TARGET_VLLM_SOURCE_COMMIT)
+    monkeypatch.setattr(a2a, "_unattested_git_collector_ref", lambda _path: "unknown")
+
+    assert a2a._git_collector_ref(tmp_path) == a2a.TARGET_VLLM_SOURCE_COMMIT
+
+
+def test_collector_ref_rejects_invalid_or_mismatched_host_attestation(tmp_path, monkeypatch):
+    monkeypatch.setenv("AIC_COLLECTOR_REF", "not-a-sha")
+    with pytest.raises(a2a.VllmMoeA2ADeclarationError, match="invalid AIC_COLLECTOR_REF"):
+        a2a._git_collector_ref(tmp_path)
+
+    monkeypatch.setenv("AIC_COLLECTOR_REF", "a" * 40)
+    monkeypatch.setattr(a2a, "_unattested_git_collector_ref", lambda _path: "b" * 40)
+    with pytest.raises(a2a.VllmMoeA2ADeclarationError, match="does not match mounted checkout"):
+        a2a._git_collector_ref(tmp_path)
+
+
 def test_classified_case_failures_do_not_demote_finalized_table(tmp_path):
     pyarrow = pytest.importorskip("pyarrow")
     del pyarrow

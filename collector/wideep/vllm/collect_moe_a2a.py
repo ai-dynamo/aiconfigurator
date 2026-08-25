@@ -55,9 +55,11 @@ from collector.wideep.sglang.collect_moe_a2a import (
     MoeA2AShape,
     PhaseTiming,
     _build_moe_a2a_row,
-    _git_collector_ref,
     derive_dist_identity,
     get_moe_a2a_workload_grid,
+)
+from collector.wideep.sglang.collect_moe_a2a import (
+    _git_collector_ref as _unattested_git_collector_ref,
 )
 
 MODULE_NAME = "collector.wideep.vllm.collect_moe_a2a"
@@ -951,6 +953,22 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _git_collector_ref(repo_root: Path) -> str:
+    """Return the host-attested collector SHA, rejecting observable drift."""
+
+    declared = os.environ.get("AIC_COLLECTOR_REF", "")
+    if not declared:
+        return _unattested_git_collector_ref(repo_root)
+    if len(declared) != 40 or any(character not in "0123456789abcdef" for character in declared.lower()):
+        raise VllmMoeA2ADeclarationError(f"invalid AIC_COLLECTOR_REF {declared!r}")
+    observed = _unattested_git_collector_ref(repo_root)
+    if observed != "unknown" and observed.lower() != declared.lower():
+        raise VllmMoeA2ADeclarationError(
+            f"host-attested collector ref {declared} does not match mounted checkout {observed}"
+        )
+    return declared.lower()
 
 
 def _git_head(path: Path) -> str:

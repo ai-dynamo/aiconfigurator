@@ -111,6 +111,8 @@ vllm_source_root=$(safe_existing_path "vLLM source" "${VLLM_SOURCE_ROOT}")
 campaign_root=$(safe_existing_path "campaign root" "${CAMPAIGN_ROOT}")
 [[ -z "$(git -C "${repo_dir}" status --porcelain)" ]] || die "repository checkout is dirty"
 [[ -z "$(git -C "${vllm_source_root}" status --porcelain)" ]] || die "vLLM source checkout is dirty"
+collector_ref=$(git -C "${repo_dir}" rev-parse HEAD)
+[[ "${collector_ref}" =~ ^[0-9a-f]{40}$ ]] || die "invalid repository HEAD ${collector_ref}"
 [[ "$(git -C "${vllm_source_root}" rev-parse HEAD)" == \
     "ee0da84ab9e04ac7610e28580af62c365e898389" ]] || die "vLLM source commit mismatch"
 
@@ -482,6 +484,7 @@ export AIC_OUTPUT_DIR="${output_dir}"
 export AIC_VLLM_SOURCE_ROOT="${vllm_source_root}"
 export AIC_IMAGE_DIGEST="${IMAGE_DIGEST}"
 export AIC_RUNTIME_ABI_JSON="${runtime_abi_json}"
+export AIC_COLLECTOR_REF="${collector_ref}"
 export AIC_GPUS_PER_NODE="${GPUS_PER_NODE}"
 export AIC_BACKEND="${BACKEND}"
 export AIC_CANARY_FLAG="${canary_flag}"
