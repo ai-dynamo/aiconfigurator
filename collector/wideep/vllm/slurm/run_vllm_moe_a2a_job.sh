@@ -600,7 +600,7 @@ srun \
     --mpi=pmix \
     --container-image="${container_image}" \
     --container-mounts="${container_mounts}" \
-    --container-workdir="${repo_dir}" \
+    --container-workdir="${staging_root}" \
     bash -lc "${container_command}"
 benchmark_status=$?
 set -e

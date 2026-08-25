@@ -65,6 +65,8 @@ def test_runner_rejects_cifs_and_requires_authoritative_topology():
     assert " python -m collector.wideep.vllm.collect_moe_a2a" not in source
     assert "failure_evidence" in source
     assert "benchmark_status=$?" in source
+    assert '--container-workdir="${staging_root}"' in source
+    assert '--container-workdir="${repo_dir}"' not in source
     assert "--gpus-per-task" not in source
     assert "--gpu-bind" not in source
 
