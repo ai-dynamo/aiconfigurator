@@ -117,10 +117,14 @@ needle = ".manifests[]"
 replacement = ".manifests[]?"
 if source.count(needle) != 1 or replacement in source:
     raise SystemExit("unexpected Enroot docker manifest-list parser")
-path.write_text(source.replace(needle, replacement))
+    path.write_text(source.replace(needle, replacement))
 PY
+    case "${IMAGE_ARCH}" in
+        amd64) enroot_arch=x86_64 ;;
+        arm64) enroot_arch=aarch64 ;;
+    esac
     ENROOT_LIBRARY_PATH="${enroot_library_dir}" enroot import \
-        --arch="${IMAGE_ARCH}" \
+        --arch="${enroot_arch}" \
         --output="${temporary_image}" \
         "docker://${CONTAINER_IMAGE}"
     runtime_container_image=$(safe_existing_path "temporary staged image" "${temporary_image}")
