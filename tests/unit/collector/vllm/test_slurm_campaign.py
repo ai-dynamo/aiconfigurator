@@ -20,6 +20,7 @@ OVERLAY_RUNNER = REPO_ROOT / "collector/wideep/vllm/slurm/run_deepep_sm103_overl
 OVERLAY_SUBMITTER = REPO_ROOT / "collector/wideep/vllm/slurm/submit_deepep_sm103_overlay.sh"
 IMAGE_RUNNER = REPO_ROOT / "collector/wideep/vllm/slurm/run_vllm_image_stage_job.sh"
 IMAGE_SUBMITTER = REPO_ROOT / "collector/wideep/vllm/slurm/submit_vllm_image_stage.sh"
+LEGACY_NVL4_PATCH = REPO_ROOT / "collector/wideep/vllm/patches/deepep_73b_nvl4.patch"
 
 
 def test_six_system_matrix_has_exact_formal_topologies():
@@ -107,6 +108,9 @@ def test_backend_overlay_build_is_exact_and_separate_from_formal_data():
     assert "local container squashfs checksum mismatch" in runner
     assert "nvidia-nccl-cu13==${AIC_NCCL_VERSION}" in runner
     assert "export EP_NCCL_ROOT_DIR=" in runner
+    assert 'path "*/nvidia/cu13/include"' in runner
+    assert 'export CPATH="${bundled_cuda_include}:${CPATH:-}"' in runner
+    assert 'export LIBRARY_PATH="${bundled_cuda_lib}:${LIBRARY_PATH:-}"' in runner
     assert "--container-image" in submitter
     assert "--exclusive" in submitter
     assert "--switches=1" in submitter
@@ -124,5 +128,18 @@ def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     assert "73b6ea4a439ba03a695563f9fd242c8e4b02b37c" in runner
     assert '"deep_ep_v2_available": hasattr(deep_ep, "ElasticBuffer")' in runner
     assert "sqsh_sha256" in runner
+    assert "registry-1.docker.io/v2/vllm/vllm-openai/manifests/v0.24.0" in runner
+    assert "matches != [expected_digest]" in runner
+    assert "image_reference_mode=verified-tag" in runner
+    assert '"image_reference_mode": image_reference_mode' in runner
     assert "--exclusive" in submitter
     assert "--switches=1" in submitter
+
+
+def test_legacy_nvl4_patch_updates_every_four_byte_token_mask_use():
+    patch = LEGACY_NVL4_PATCH.read_text(encoding="utf-8")
+    assert "uint32_t is_token_in_rank_uint32" in patch
+    assert "while (is_token_in_rank_uint32 != 0" in patch
+    assert "broadcast(is_token_in_rank_uint32, i)" in patch
+    assert "recv_is_token_in_rank_uint32" in patch
+    assert "if (is_token_in_rank_uint32 != 0)" in patch

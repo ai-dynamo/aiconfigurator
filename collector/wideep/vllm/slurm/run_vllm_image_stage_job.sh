@@ -27,7 +27,53 @@ for required_name in SYSTEM CAMPAIGN_ROOT IMAGE_DIGEST IMAGE_ARCH CONTAINER_IMAG
 done
 case "${IMAGE_ARCH}" in arm64|amd64) ;; *) die "bad image architecture ${IMAGE_ARCH}" ;; esac
 [[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid image digest"
-[[ "${CONTAINER_IMAGE}" == *@"${IMAGE_DIGEST}" ]] || die "container ref is not digest pinned"
+if [[ "${CONTAINER_IMAGE}" == *@"${IMAGE_DIGEST}" ]]; then
+    image_reference_mode=digest
+elif [[ "${CONTAINER_IMAGE}" == "docker.io#vllm/vllm-openai:v0.24.0" ]]; then
+    # Enroot before 4.0 parses tag@digest as registry credentials. Resolve the
+    # multi-arch tag immediately before import and fail closed unless its
+    # selected platform manifest is the locked digest.
+    python3 - "${IMAGE_ARCH}" "${IMAGE_DIGEST}" <<'PY'
+import json
+import sys
+import urllib.parse
+import urllib.request
+
+architecture, expected_digest = sys.argv[1:]
+query = urllib.parse.urlencode({
+    "service": "registry.docker.io",
+    "scope": "repository:vllm/vllm-openai:pull",
+})
+with urllib.request.urlopen(f"https://auth.docker.io/token?{query}") as response:
+    token = json.load(response)["token"]
+request = urllib.request.Request(
+    "https://registry-1.docker.io/v2/vllm/vllm-openai/manifests/v0.24.0",
+    headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": ",".join((
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+        )),
+    },
+)
+with urllib.request.urlopen(request) as response:
+    manifest = json.load(response)
+matches = [
+    entry["digest"]
+    for entry in manifest.get("manifests", [])
+    if entry.get("platform", {}).get("os") == "linux"
+    and entry.get("platform", {}).get("architecture") == architecture
+]
+if matches != [expected_digest]:
+    raise SystemExit(
+        f"vLLM 0.24.0 {architecture} registry digest mismatch: "
+        f"expected {[expected_digest]}, observed {matches}"
+    )
+PY
+    image_reference_mode=verified-tag
+else
+    die "container ref is neither digest pinned nor the verified vLLM 0.24.0 legacy-Pyxis tag"
+fi
 
 campaign_root=$(safe_existing_path "campaign root" "${CAMPAIGN_ROOT}")
 digest_value=${IMAGE_DIGEST#sha256:}
@@ -81,13 +127,16 @@ temporary_meta="${image_meta}.tmp.${SLURM_JOB_ID}"
 [[ ! -e "${image_meta}" && ! -e "${temporary_meta}" ]] || die "refusing to overwrite staged image metadata"
 python3 - "${job_dir}/image_meta.json" "${SYSTEM}" "${IMAGE_ARCH}" "${CONTAINER_IMAGE}" \
     "${IMAGE_DIGEST}" "${sqsh_sha256}" "${final_image}" "${AIC_IMAGE_STAGE_EVIDENCE}" \
-    "${DEEPEP_COMMIT}" <<'PY'
+    "${DEEPEP_COMMIT}" "${image_reference_mode}" <<'PY'
 import json
 import sys
 from datetime import date
 from pathlib import Path
 
-output, system, arch, source_image, digest, sqsh_sha, image, runtime_path, deepep_commit = sys.argv[1:]
+(
+    output, system, arch, source_image, digest, sqsh_sha, image, runtime_path,
+    deepep_commit, image_reference_mode,
+) = sys.argv[1:]
 runtime = json.loads(Path(runtime_path).read_text())
 if runtime["vllm"] != "0.24.0":
     raise SystemExit(f"unexpected vLLM version: {runtime['vllm']}")
@@ -102,6 +151,7 @@ Path(output).write_text(json.dumps({
     "deep_ep_source_commit": deepep_commit,
     "sqsh_sha256": sqsh_sha,
     "image": image,
+    "image_reference_mode": image_reference_mode,
     "runtime": runtime,
     "staged_at": date.today().isoformat(),
 }, indent=2, sort_keys=True) + "\n")

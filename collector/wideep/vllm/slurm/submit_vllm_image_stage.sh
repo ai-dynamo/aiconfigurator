@@ -55,7 +55,10 @@ log_dir=$(realpath -e "${log_dir}")
 
 export SYSTEM="${system}" CAMPAIGN_ROOT="${campaign_root}"
 export IMAGE_DIGEST="${image_digest}" IMAGE_ARCH="${image_arch}"
-export CONTAINER_IMAGE="vllm/vllm-openai:v0.24.0@${image_digest}"
+case "${system}" in
+    gb200|gb300) export CONTAINER_IMAGE="vllm/vllm-openai:v0.24.0@${image_digest}" ;;
+    h100_sxm|h200_sxm) export CONTAINER_IMAGE="docker.io#vllm/vllm-openai:v0.24.0" ;;
+esac
 
 job_id=$(sbatch \
     --parsable \

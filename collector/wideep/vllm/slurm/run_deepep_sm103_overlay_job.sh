@@ -150,6 +150,25 @@ srun \
         mkdir -p "${workspace}"
         export TORCH_CUDA_ARCH_LIST="${AIC_CUDA_ARCHES}"
 
+        # The vLLM 0.24.0 child image carries its CUDA 13 development headers
+        # alongside the pip-installed CUDA libraries instead of under
+        # /usr/local/cuda/include. Keep the build in the digest-pinned runtime
+        # image and explicitly expose those bundled headers to both the host
+        # compiler and nvcc.
+        mapfile -t bundled_cuda_includes < <(
+            find /usr/local/lib/python* -type d -path "*/nvidia/cu13/include" -print
+        )
+        [[ "${#bundled_cuda_includes[@]}" == 1 ]]
+        bundled_cuda_include="${bundled_cuda_includes[0]}"
+        bundled_cuda_lib="$(dirname "${bundled_cuda_include}")/lib"
+        [[ -f "${bundled_cuda_include}/cusparse.h" ]]
+        [[ -f "${bundled_cuda_include}/nvrtc.h" ]]
+        [[ -d "${bundled_cuda_lib}" ]]
+        export CPATH="${bundled_cuda_include}:${CPATH:-}"
+        export LIBRARY_PATH="${bundled_cuda_lib}:${LIBRARY_PATH:-}"
+        export LD_LIBRARY_PATH="${bundled_cuda_lib}:${LD_LIBRARY_PATH:-}"
+        printf "%s\n" "${bundled_cuda_include}" > "${AIC_OVERLAY_STAGING}/cuda_devel_root.txt"
+
         if [[ "${AIC_OVERLAY_PROFILE}" == v2 ]]; then
             mkdir -p "${AIC_OVERLAY_STAGING}/deps"
             python3 -m pip download --no-deps --dest "${AIC_OVERLAY_STAGING}/deps" \
@@ -229,6 +248,7 @@ if [[ "${OVERLAY_PROFILE}" == v2 ]]; then
     cp "${nccl_wheel}" "${publish_dir}/${nccl_wheel_name}"
 fi
 cp "${staging_root}/runtime.json" "${publish_dir}/runtime.json"
+cp "${staging_root}/cuda_devel_root.txt" "${publish_dir}/cuda_devel_root.txt"
 
 python3 - "${publish_dir}/build_meta.json" "${SYSTEM}" "${architecture}" "${OVERLAY_PROFILE}" \
     "${scaleup_ranks}" "${IMAGE_DIGEST}" "${VLLM_COMMIT}" "${deepep_commit}" \

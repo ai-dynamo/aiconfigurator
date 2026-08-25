@@ -47,3 +47,14 @@ index e6a8510..d79b2e9 100644
 @@ -630 +630 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
 -            auto rdma_tail_idx = is_token_in_rank_uint64 == 0 ? -1 : global_rdma_tail_idx - 1;
 +            auto rdma_tail_idx = is_token_in_rank_uint32 == 0 ? -1 : global_rdma_tail_idx - 1;
+@@ -634 +634 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
+-            while (is_token_in_rank_uint64 != 0 and rdma_tail_idx - cached_rdma_channel_head >= num_max_rdma_chunked_recv_tokens) {
++            while (is_token_in_rank_uint32 != 0 and rdma_tail_idx - cached_rdma_channel_head >= num_max_rdma_chunked_recv_tokens) {
+@@ -664,2 +664,2 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
+-                    auto recv_is_token_in_rank_uint64 = broadcast(is_token_in_rank_uint64, i);
+-                    auto recv_is_token_in_rank_values = reinterpret_cast<const bool*>(&recv_is_token_in_rank_uint64);
++                    auto recv_is_token_in_rank_uint32 = broadcast(is_token_in_rank_uint32, i);
++                    auto recv_is_token_in_rank_values = reinterpret_cast<const bool*>(&recv_is_token_in_rank_uint32);
+@@ -716 +716 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
+-            if (is_token_in_rank_uint64 != 0) {
++            if (is_token_in_rank_uint32 != 0) {
