@@ -212,9 +212,10 @@ def _solve_n(points, cols, target) -> tuple[float, ...] | None:
     # n, not n+1. With exactly n rungs the system is square, so it reproduces
     # its labels whatever the prices are and leaves no residual to read. That is
     # a reason to report no residual, not a reason to refuse: residuals are
-    # diagnostics here and never reject a fit, and collection cannot afford a
-    # spare rung -- the planner emits two mixed rungs because two is what a
-    # mixed segment needs. Demanding a third rejected 2 cells outright whose
+    # diagnostics here and never reject a fit. The planner asks for a third
+    # mixed candidate at an unsaturated average point, but a label can later
+    # fall below the measured-noise floor; the two surviving rungs still
+    # determine both prices. Refusing that square solve rejected 2 cells whose
     # prices were fully determined.
     if len(points) < n:
         return None

@@ -484,9 +484,12 @@ def _pick_rungs(rungs: list[tuple[float, CalibrationBatch]], want: int) -> list[
     return [ranked[i][1] for i in sorted(picks)]
 
 
-# A mixed segment at a saturated average point is solved for one unknown, so two
-# rungs already leave a degree of freedom; at an unsaturated one it carries two
-# unknown and needs two. A pure segment carries one.
+# Two candidate rungs are the planning floor for every segment. That leaves a
+# residual when only one price is live and is the algebraic minimum when an
+# unsaturated-point mixed segment must carry both prices. ``plan_cell`` raises
+# that last case to three candidates before retaining it, then selects up to
+# three rungs per usable segment so the pure median and residual diagnostics
+# have redundancy where the candidate space permits.
 _RUNGS_NEEDED = {SAT: 2, UNSAT: 2, MIXED: 2}
 
 

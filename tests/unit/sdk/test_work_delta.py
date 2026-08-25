@@ -149,9 +149,9 @@ def test_a_cell_whose_labels_are_all_noise_is_rejected():
 
 
 def test_residuals_are_reported_but_never_reject():
-    """Collection affords one rung per pure segment, so an exactly determined
-    cell has no residual to show. Gating on it would reject cells for having
-    been over-sampled rather than for being wrong."""
+    """A cell can retain one usable label after noise filtering, so an exactly
+    determined fit may have no residual to show. Gating on it would reject a
+    cell for lacking redundant labels rather than for being wrong."""
     pure = [(96, 0), (48, 0), (48, 0), (64, 0)]
     fit = solve_cell(4, 64, 0, False, [_measure(4, 64, 0, pure, 3.0, 7.0)])
     assert fit.residuals == {}
@@ -318,9 +318,8 @@ def test_a_plan_carries_two_columns():
     assert all(len(batch.columns) == 2 for batch in plan.batches)
 
 
-def test_the_minimum_plan_solves_both_prices():
-    """One pure rung plus two mixed rungs is what collection affords, and it
-    has to be enough."""
+def test_the_planned_rungs_solve_both_prices():
+    """Every rung retained by the planner recovers the two planted prices."""
     plan = plan_cell(8, 4096, 1024, 2048, kv_block=64)
     assert plan is not None
     ms = [_measure(8, 4096, 1024, b.rows, 9.6e-7, 4.9e-6, topk=2048, noise=1e-3) for b in plan.batches]
