@@ -140,6 +140,8 @@ def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     assert "registry-1.docker.io/v2/vllm/vllm-openai/manifests/v0.24.0" in runner
     assert "matches != [expected_digest]" in runner
     assert "image_reference_mode=enroot-3.4-digest" in runner
+    assert "registry-1.docker.io#vllm/vllm-openai:${IMAGE_DIGEST}" in runner
+    assert 'CONTAINER_IMAGE="registry-1.docker.io#vllm/vllm-openai:${image_digest}"' in submitter
     assert 'enroot_library_dir="/tmp/aic-enroot-library-${SLURM_JOB_ID}"' in runner
     assert 'replacement = ".manifests[]?"' in runner
     assert "docker_path.write_text(source.replace(needle, replacement))" in runner

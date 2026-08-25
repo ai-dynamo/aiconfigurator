@@ -68,7 +68,7 @@ export IMAGE_DIGEST="${image_digest}" IMAGE_ARCH="${image_arch}"
 case "${system}" in
     gb200|gb300) export CONTAINER_IMAGE="vllm/vllm-openai:v0.24.0@${image_digest}" ;;
     b200_sxm|b300_sxm|h100_sxm|h200_sxm) \
-        export CONTAINER_IMAGE="docker.io#vllm/vllm-openai:${image_digest}" ;;
+        export CONTAINER_IMAGE="registry-1.docker.io#vllm/vllm-openai:${image_digest}" ;;
 esac
 
 # Image staging emits no benchmark data and only imports the runtime for ABI

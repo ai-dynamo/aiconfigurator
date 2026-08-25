@@ -29,10 +29,11 @@ case "${IMAGE_ARCH}" in arm64|amd64) ;; *) die "bad image architecture ${IMAGE_A
 [[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid image digest"
 if [[ "${CONTAINER_IMAGE}" == *@"${IMAGE_DIGEST}" ]]; then
     image_reference_mode=digest
-elif [[ "${CONTAINER_IMAGE}" == "docker.io#vllm/vllm-openai:${IMAGE_DIGEST}" ]]; then
+elif [[ "${CONTAINER_IMAGE}" == "registry-1.docker.io#vllm/vllm-openai:${IMAGE_DIGEST}" ]]; then
     # Enroot 3.4 does not accept Docker's @digest spelling, but its tag parser
     # accepts ':' and sends this exact value to the registry manifest endpoint.
-    # This remains a digest request; it is not a mutable registry tag.
+    # Raw Enroot needs the registry API host, not Docker Hub's web host. This
+    # remains a digest request; it is not a mutable registry tag.
     image_reference_mode=enroot-3.4-digest
 elif [[ "${CONTAINER_IMAGE}" == "docker.io#vllm/vllm-openai:v0.24.0" ]]; then
     # Enroot before 4.0 parses tag@digest as registry credentials. Resolve the
