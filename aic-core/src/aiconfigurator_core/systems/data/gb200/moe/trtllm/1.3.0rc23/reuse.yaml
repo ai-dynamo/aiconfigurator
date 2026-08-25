@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+reuse:
+- table: moe_perf
+  from_version: 1.3.0rc20
+  reason: >-
+    DSV4 enablement (#1480) — rc23 collects the DSV4 moe shapes fresh (see
+    collection_meta.yaml beside this file); the remaining moe shapes reuse the
+    1.3.0rc20 collection as an owner-approved declaration (design §9 as
+    revised 2026-08-19). Cross-version comparison, stated exactly (exact
+    consumer-key join of the rc23 recollection against the rc20 rows, all
+    four Blackwell systems): median latency ratio rc23/rc20 = 1.003-1.013
+    (centered), median absolute per-row difference 2.4-2.9 percent, and about
+    a quarter of rows differ by more than 5 percent — consistent with moe
+    benchmark run-to-run spread rather than a systematic kernel shift. The
+    owner sign-off accepts that residual risk for the reused (non-DSV4)
+    shapes; a fresh rc23 moe collection retires this declaration. Evidence
+    campaign: GitLab aic-auto-collector (project 205688) pipelines
+    61692150-61692160, 2026-08-08.
+  approved_by: tianhaox

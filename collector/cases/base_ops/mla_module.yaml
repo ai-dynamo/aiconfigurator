@@ -74,14 +74,20 @@ common_case_values:
         kv_cache_dtype: fp8
         gemm_type: bfloat16
         min_sm: 90
+      # fp8_block projections exist for MLA/DSA checkpoints only; the M3
+      # (msa) BF16 artifact has no quantized projections in SGLang serving
+      # (its quantized-M3 flow is MXFP8) — scope these away from msa at the
+      # declaration instead of filtering in the collector.
       - compute_dtype: bfloat16
         kv_cache_dtype: bfloat16
         gemm_type: fp8_block
         min_sm: 89
+        attention_types: [mla, dsa]
       - compute_dtype: bfloat16
         kv_cache_dtype: fp8
         gemm_type: fp8_block
         min_sm: 90
+        attention_types: [mla, dsa]
     context_sequence_lengths:
       - 1
       - 4
@@ -148,8 +154,48 @@ common_case_values:
         - 524288
         - 1000000
         - 1048575
+    generation:
+      # max_tokens is the MLA/DSA collectors' decode memory contract
+      # (b*kv <= 256K; their guard tests pin it). The MSA decode sweep needs
+      # the large-batch x long-kv corner, so it carries its own budget below
+      # (2026-08-09 raise, spot-measured on hardware; documented in the
+      # b200_sxm msa collection_meta coverage note) — scoped to msa so the
+      # MLA/DSA plans keep their contract.
+      max_tokens: 262144
+      msa_max_tokens: 33554432
+      large_sequence_min: 8192
+      large_sequence_max_batch_size: 1024
   mla_module_trtllm:
     description: Exact TRT-LLM full MLA/DSA module micro-benchmark sweep.
+    # Declared TRT-LLM module precision policy (review 4969690316 S4: the
+    # collectors consume these specs instead of re-implementing SM gates in
+    # Python). The mla/dsa combo mirrors the shared default this section
+    # previously inherited; MLA/DSA fp8-KV handling stays in
+    # collect_mla_module's hardware-validated in-code combos (pre-existing).
+    # MSA (MiniMax-M3, 1.3.0rc23): attention/KV are bf16-only end to end
+    # (sparse backend gathers K/V in the cache dtype, index-K side cache is
+    # bf16 — collect_msa_module docstring citations); the projection GEMM
+    # sweeps bf16 everywhere, fp8_block from SM89 (Ada/Hopper/Blackwell
+    # blockwise-FP8 path), nvfp4 from SM100.
+    module_precision_combos:
+      - compute_dtype: bfloat16
+        kv_cache_dtype: bfloat16
+        gemm_type: bfloat16
+        attention_types: [mla, dsa]
+      - compute_dtype: bfloat16
+        kv_cache_dtype: bfloat16
+        gemm_type: bfloat16
+        attention_types: [msa]
+      - compute_dtype: bfloat16
+        kv_cache_dtype: bfloat16
+        gemm_type: fp8_block
+        min_sm: 89
+        attention_types: [msa]
+      - compute_dtype: bfloat16
+        kv_cache_dtype: bfloat16
+        gemm_type: nvfp4
+        min_sm: 100
+        attention_types: [msa]
     context_batch_sizes:
       - 1
       - 2
@@ -300,11 +346,13 @@ common_case_values:
         kv_cache_dtype: bfloat16
         gemm_type: bfloat16
         phases: [context, generation]
+        attention_types: [mla, dsa]
       - compute_dtype: bfloat16
         kv_cache_dtype: fp8
         gemm_type: bfloat16
         min_sm: 90
         phases: [context, generation]
+        attention_types: [mla, dsa]
       # FP8 prefill query compute: opt-in via vLLM's
       # attention_config.use_prefill_query_quantization plus an explicit
       # supporting mla_prefill_backend; requires FP8 KV cache and the SM100
@@ -325,11 +373,13 @@ common_case_values:
         gemm_type: fp8_block
         min_sm: 89
         phases: [context, generation]
+        attention_types: [mla, dsa]
       - compute_dtype: bfloat16
         kv_cache_dtype: fp8
         gemm_type: fp8_block
         min_sm: 90
         phases: [context, generation]
+        attention_types: [mla, dsa]
       - compute_dtype: fp8
         kv_cache_dtype: fp8
         gemm_type: fp8_block
@@ -341,11 +391,50 @@ common_case_values:
         gemm_type: nvfp4
         min_sm: 100
         phases: [context, generation]
+        attention_types: [mla, dsa]
       - compute_dtype: bfloat16
         kv_cache_dtype: fp8
         gemm_type: nvfp4
         min_sm: 100
         phases: [context, generation]
+        attention_types: [mla, dsa]
+      # MSA (MiniMax-M3) precision policy — declared here so the collector
+      # consumes YAML instead of re-implementing SM gates (review 4969690316
+      # S4). vLLM's M3 sparse backend accepts an fp8 (e4m3) main KV cache on
+      # EVERY SM this op runs on (supported_kv_cache_dtypes, common/
+      # sparse_attention.py:56-62@v0.24.0; Triton in-kernel dequant off the
+      # SM100 family, MSA attend on it), so fp8-KV carries no SM floor —
+      # unlike the MLA/DSA combos above. GEMM tiers: fp8_block from SM89
+      # (blockwise-FP8 checkpoint path), nvfp4 from SM100 (ModelOpt NVFP4),
+      # both through the generic linear quant dispatch.
+      - compute_dtype: bfloat16
+        kv_cache_dtype: bfloat16
+        gemm_type: bfloat16
+        attention_types: [msa]
+      - compute_dtype: bfloat16
+        kv_cache_dtype: fp8
+        gemm_type: bfloat16
+        attention_types: [msa]
+      - compute_dtype: bfloat16
+        kv_cache_dtype: bfloat16
+        gemm_type: fp8_block
+        min_sm: 89
+        attention_types: [msa]
+      - compute_dtype: bfloat16
+        kv_cache_dtype: fp8
+        gemm_type: fp8_block
+        min_sm: 89
+        attention_types: [msa]
+      - compute_dtype: bfloat16
+        kv_cache_dtype: bfloat16
+        gemm_type: nvfp4
+        min_sm: 100
+        attention_types: [msa]
+      - compute_dtype: bfloat16
+        kv_cache_dtype: fp8
+        gemm_type: nvfp4
+        min_sm: 100
+        attention_types: [msa]
       - compute_dtype: fp8
         kv_cache_dtype: fp8
         gemm_type: nvfp4

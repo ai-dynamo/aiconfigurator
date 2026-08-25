@@ -20,4 +20,7 @@ tables:
     # Blackwell trtllm-gen lanes are unaffected, same kernel + epilogue
     # constants). Re-collections on stock images must re-apply the suffix
     # until the sglang collector learns the checkpoint's situ property.
+    # 2026-08-09: appended 3078 MiniMax-M3 MoE shape rows (6144/3072, 128x4,
+    # bf16, sglang_fused_moe_triton; model-filtered internal collection CI
+    # run, zero failures).
     status: complete

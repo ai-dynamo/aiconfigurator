@@ -407,12 +407,15 @@ def test_dsv4_megamoe_module_support_matrix_empty_without_data(tmp_path):
     assert db.supported_quant_mode["dsv4_megamoe_module"] == []
 
 
-def test_comprehensive_router_survives_scoped_stub_patch(stub_perf_db, mutable_comprehensive_perf_db, monkeypatch):
+def test_comprehensive_router_survives_scoped_stub_patch(mutable_comprehensive_perf_db, stub_perf_db, monkeypatch):
     """Fixture-order regression: a scoped ``stub_perf_db`` fetch patch active
     while the comprehensive singleton is (re)used must not be captured as the
     router's pass-through — after cache clears, ``test_system`` reloads must
     still resolve to the synthetic tables (the router is module-level and
-    scoped patches layer on top of it)."""
+    scoped patches layer on top of it). Fixture order matters: the
+    comprehensive singleton must be built BEFORE the scoped stub patch is
+    active, or the singleton itself is constructed through the stubbed fetch
+    and every later same-worker test reads a bf16-only singleton."""
     from aiconfigurator.sdk.operations import warm_all_op_data
     from aiconfigurator.sdk.operations.base import clear_all_op_caches
     from aiconfigurator.sdk.operations.gemm import GEMM

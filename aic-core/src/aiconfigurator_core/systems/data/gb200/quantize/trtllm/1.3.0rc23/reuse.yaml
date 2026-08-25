@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+reuse:
+- table: computescale_perf
+  from_version: 1.3.0rc20
+  reason: >-
+    DSV4 enablement (#1480) — rc23 adds only the DSV4 sparse-attention family;
+    the quantize tables reuse the 1.3.0rc20 collection as an owner-approved
+    declaration (design §9 as revised 2026-08-19). Strengthening note — the
+    invoked op surface (quantize_e4m3_per_tensor /
+    static_quantize_e4m3_per_tensor) is registration-identical between rc20
+    and rc23.
+  approved_by: tianhaox
+- table: scale_matrix_perf
+  from_version: 1.3.0rc20
+  reason: >-
+    DSV4 enablement (#1480) — rc23 adds only the DSV4 sparse-attention family;
+    the quantize tables reuse the 1.3.0rc20 collection as an owner-approved
+    declaration (design §9 as revised 2026-08-19). Strengthening note — the
+    invoked op surface (quantize_e4m3_per_tensor /
+    static_quantize_e4m3_per_tensor) is registration-identical between rc20
+    and rc23.
+  approved_by: tianhaox

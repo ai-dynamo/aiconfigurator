@@ -113,7 +113,10 @@ def test_nvfp4_variant_loads_offline_with_quant_metadata(hf_id, monkeypatch):
         ],
         (
             "nvidia/MiniMax-M3-NVFP4",
-            common.GEMMQuantMode.fp8,
+            # MXFP8 prices as fp8_block (owner decision 2026-08-09; DSV4
+            # precedent, and the shipped M3 MSA tables carry the fp8_block
+            # gemm tier this lane resolves to — see helpers.py).
+            common.GEMMQuantMode.fp8_block,
             common.MoEQuantMode.nvfp4,
             common.KVCacheQuantMode.bfloat16,
             common.FMHAQuantMode.bfloat16,
@@ -291,7 +294,8 @@ def test_minimax_m3_uses_mxfp8_lane_for_non_experts_and_nvfp4_for_experts():
     model = get_model("nvidia/MiniMax-M3-NVFP4", _model_config(), backend_name="trtllm")
     by_name = {op._name: op for op in model.context_ops + model.generation_ops}
 
-    assert by_name["context_shared_gate_up_gemm"]._quant_mode == common.GEMMQuantMode.fp8
+    # MXFP8 non-expert lane prices as fp8_block (owner decision 2026-08-09).
+    assert by_name["context_shared_gate_up_gemm"]._quant_mode == common.GEMMQuantMode.fp8_block
     assert by_name["context_moe"]._quant_mode == common.MoEQuantMode.nvfp4
 
 

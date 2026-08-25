@@ -475,13 +475,14 @@ impl Op {
                 for inner in &op.group_b {
                     total_b = total_b.plus(inner.query(db, ctx)?);
                 }
+                let latency_ms = total_a.latency_ms.max(total_b.latency_ms);
+                let energy_wms = total_a.energy_wms + total_b.energy_wms;
                 let merged = total_a.plus(total_b);
-                Ok(PerformanceResult::with_energy(
-                    total_a.latency_ms.max(total_b.latency_ms),
-                    total_a.energy_wms + total_b.energy_wms,
-                    merged.source,
+                Ok(
+                    PerformanceResult::with_energy(latency_ms, energy_wms, merged.source)
+                        .with_moe_comm_fallbacks(merged.moe_comm_fallbacks)
+                        .clamp_non_negative(),
                 )
-                .clamp_non_negative())
             }
             Op::Fallback(op) => {
                 // Mirrors Python `FallbackOp.query`: try the primary; on
@@ -529,6 +530,7 @@ impl Op {
                             total.energy_wms,
                             total.source,
                         )
+                        .with_moe_comm_fallbacks(total.moe_comm_fallbacks)
                         .clamp_non_negative())
                     }
                     Err(other) => Err(other),

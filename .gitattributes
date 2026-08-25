@@ -2,3 +2,7 @@ aic-core/src/aiconfigurator_core/systems/**/*.txt filter=lfs diff=lfs merge=lfs 
 aic-core/src/aiconfigurator_core/systems/**/INCOMPLETE.txt -filter -diff -merge text
 aic-core/src/aiconfigurator_core/systems/**/*.parquet diff=parquet -text
 ATTRIBUTIONS.md filter=lfs diff=lfs merge=lfs -text
+# ModelOpt MIXED_PRECISION checkpoint quant configs are verbatim HF artifacts
+# (byte-identical to the hub file; the M3 one enumerates 22k quantized
+# tensors) — mark generated so review diffs collapse them.
+aic-core/src/aiconfigurator_core/model_configs/*_hf_quant_config.json linguist-generated=true

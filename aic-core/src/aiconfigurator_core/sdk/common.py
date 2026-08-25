@@ -558,6 +558,9 @@ DefaultHFModels = {
     "zai-org/GLM-5.2",
     "zai-org/GLM-5.2-FP8",
     "nvidia/GLM-5.2-NVFP4",
+    "zai-org/GLM-5.3",
+    "zai-org/GLM-5.3-FP8",
+    "nvidia/GLM-5.3-NVFP4",
     # DeepSeek V4
     *DEEPSEEK_V4_HF_MODELS,
     # Qwen 3 Models
@@ -586,6 +589,7 @@ DefaultHFModels = {
     "MiniMaxAI/MiniMax-M2.7",
     "nvidia/MiniMax-M2.7-NVFP4",
     "MiniMaxAI/MiniMax-M3",
+    "nvidia/MiniMax-M3-NVFP4",
     # GPT-OSS Models
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
@@ -621,8 +625,6 @@ DefaultHFModels = {
     "stepfun-ai/Step-3.7-Flash-FP8",
     "nvidia/Gemma-4-26B-A4B-NVFP4",
     "nvidia/Gemma-4-31B-IT-NVFP4",
-    # MiniMax M3
-    "nvidia/MiniMax-M3-NVFP4",
 }
 
 # Bundled model configs and the default support-matrix roster intentionally have
@@ -1172,6 +1174,9 @@ class PerfDataFilename(Enum):
     # NOTE: GLM-5.2 skip-indexer (reuse-layer) rows live in the SAME
     # dsa_*_module file, tagged by the op_name column; the loader splits them
     # via op_kind="full"/"skip" — no separate filename needed here.
+    # MiniMax MSA modules share the DSA-module row schema (see operations/msa.py).
+    msa_context_module = "msa_context_module_perf.parquet"
+    msa_generation_module = "msa_generation_module_perf.parquet"
     mhc_module = "mhc_module_perf.parquet"
     # DeepSeek-V4 module-level data — one file per (attn_kind ∈ {csa, hca},
     # mode ∈ {context, generation}) = 4 files. Each file contains all

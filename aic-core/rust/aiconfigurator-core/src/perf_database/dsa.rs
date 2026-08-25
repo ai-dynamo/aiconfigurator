@@ -106,9 +106,9 @@ pub fn dsa_sparse_file_prefix(architecture: &str) -> &'static str {
     }
 }
 
-struct NodeCache {
+pub(crate) struct NodeCache {
     /// (arch, fmha, kv, gemm) → dsa_backend → engine table.
-    by_keys: BTreeMap<DsaKey, BTreeMap<String, Node>>,
+    pub(crate) by_keys: BTreeMap<DsaKey, BTreeMap<String, Node>>,
 }
 
 /// num_heads → step → isl → batch → measured leaf
@@ -128,7 +128,7 @@ pub struct DsaGrids {
 /// resolve). The derived backend values are only ever `trtllm` /
 /// `flashmla_kv`, so the final arm is a defensive mirror of Python's
 /// `next(iter(arch_dict.values()))`.
-fn select_dsa_backend<'a, T>(
+pub(crate) fn select_dsa_backend<'a, T>(
     by_backend: &'a BTreeMap<String, T>,
     dsa_backend: &str,
 ) -> Option<&'a T> {
@@ -642,7 +642,7 @@ impl DsaTable {
 /// Materialise the per-`(DsaKey, dsa_backend)` engine table for
 /// `query_context` with the raw nesting `[num_heads][step][isl][batch]` (the
 /// 4-axis grid Python v2 resolves on).
-fn build_context_nodes(grids: &DsaGrids) -> NodeCache {
+pub(crate) fn build_context_nodes(grids: &DsaGrids) -> NodeCache {
     let mut by_keys: BTreeMap<DsaKey, BTreeMap<String, Node>> = BTreeMap::new();
     for (key, by_backend) in &grids.by_keys {
         let backends = by_keys.entry(key.clone()).or_default();
@@ -669,7 +669,7 @@ fn build_context_nodes(grids: &DsaGrids) -> NodeCache {
 /// (`load_dsa_parquet` with `collapse_isl_step_to_seq`), mirroring Python's
 /// per-row overwrite; the grids reaching here carry `step = 0, isl = seq`,
 /// so `seq = isl + step` below is the identity and no tie remains to break.
-fn build_generation_nodes(grids: &DsaGrids) -> NodeCache {
+pub(crate) fn build_generation_nodes(grids: &DsaGrids) -> NodeCache {
     let mut by_keys: BTreeMap<DsaKey, BTreeMap<String, Node>> = BTreeMap::new();
     for (key, by_backend) in &grids.by_keys {
         let backends = by_keys.entry(key.clone()).or_default();
@@ -1010,7 +1010,8 @@ pub(crate) fn dsa_generation_sol_ms(
 /// skip data exists.
 const NO_DSA_ROWS_PREFIX: &str = "no DSA module rows loaded";
 
-fn load_dsa_parquet(
+// pub(crate): the MSA tables reuse this loader verbatim (perf_database/msa.rs).
+pub(crate) fn load_dsa_parquet(
     sources: &[PerfSource],
     collapse_isl_step_to_seq: bool,
     want_skip_rows: bool,
@@ -1293,14 +1294,14 @@ pub fn lookup_2d(
     ))
 }
 
-fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {
+pub(crate) fn missing(table: &str, data_root: &Path, descriptor: String) -> AicError {
     AicError::PerfDatabase(format!(
         "{table} data missing for {descriptor} at {}",
         data_root.display()
     ))
 }
 
-fn clone_err(err: &AicError) -> AicError {
+pub(crate) fn clone_err(err: &AicError) -> AicError {
     AicError::PerfDatabase(err.to_string())
 }
 

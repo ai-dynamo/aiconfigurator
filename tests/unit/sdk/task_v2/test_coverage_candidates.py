@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+from types import SimpleNamespace
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -23,7 +24,14 @@ import pytest
 import yaml
 
 from aiconfigurator.sdk import common
-from aiconfigurator.sdk.perf_database import databases_cache, set_systems_paths
+from aiconfigurator.sdk.config import ModelConfig
+from aiconfigurator.sdk.moe_comm_resolver import a2a_covers_parallel, resolve_model_config_moe_comm
+from aiconfigurator.sdk.perf_database import (
+    PerfDataNotAvailableError,
+    databases_cache,
+    load_system_spec,
+    set_systems_paths,
+)
 from aiconfigurator.sdk.task_v2 import Task
 
 pytestmark = pytest.mark.unit
@@ -189,6 +197,25 @@ def synth_systems_generation_only(tmp_path):
         databases_cache.clear()
 
 
+@pytest.fixture
+def synth_systems_node1_fallback(tmp_path):
+    """Only node-1 DeepEP comm is measured; compute covers a wider EP."""
+    node1 = ((8, 1),)
+    compute = ((8, 1), (32, 4))
+    root = _build_synth_root(
+        tmp_path,
+        _a2a_rows((("deepep_ht", node1), ("deepep_ll", node1))),
+        _ep_rows((("context", compute), ("generation", compute))),
+    )
+    databases_cache.clear()
+    set_systems_paths(["default", root])
+    try:
+        yield root
+    finally:
+        set_systems_paths(None)
+        databases_cache.clear()
+
+
 def _synth_task(**overrides) -> Task:
     kwargs = {
         "serving_mode": "agg",
@@ -235,11 +262,152 @@ def test_covered_tuple_resolves_per_phase_deepep_backends(synth_systems):
     }
 
 
+def test_sglang_node1_deepep_coverage_represents_multi_node_ep(synth_systems_node1_fallback):
+    t = _synth_task()
+    point = _tuple(dp=32, moe_ep=32)
+    both = {"context": "deepep_ht", "generation": "deepep_ll"}
+    assert t._resolve_moe_comm_backend("agg", point) == both
+    assert t.build_model_config(role="agg", parallel=point).moe_comm_backend == both
+
+
+@pytest.mark.parametrize("noncanonical_pair", [{(4, 1)}, {(16, 1)}, {(32, 2)}])
+def test_sglang_node1_fallback_requires_legacy_canonical_coordinate(noncanonical_pair):
+    assert not a2a_covers_parallel(
+        noncanonical_pair,
+        framework="sglang",
+        comm_backend="deepep_ht",
+        moe_ep_size=32,
+        expected_nodes=8,
+    )
+
+
+def test_exact_resolver_accepts_sglang_node1_deepep_substitution():
+    database = SimpleNamespace(
+        system="synthetic",
+        version="1.0",
+        system_spec={"node": {"num_gpus_per_node": 4}, "gpu": {"sm_version": 100}},
+        moe_a2a_coverage=lambda *_args: {"deepep_ht": {(8, 1)}, "deepep_ll": {(8, 1)}},
+        moe_expert_compute_coverage=lambda *_args: {128},
+    )
+    model_config = ModelConfig(attention_dp_size=128, moe_tp_size=1, moe_ep_size=128)
+
+    resolved = resolve_model_config_moe_comm(
+        model_config,
+        model_path=SYNTH_MODEL,
+        backend_name="sglang",
+        database=database,
+        required_phases=("context", "generation"),
+    )
+
+    assert resolved == {"context": "deepep_ht", "generation": "deepep_ll"}
+
+
+def test_sglang_deepseek_node1_substitution_restores_wideep_mla_defaults():
+    database = SimpleNamespace(
+        system="synthetic",
+        version="1.0",
+        system_spec={"node": {"num_gpus_per_node": 4}, "gpu": {"sm_version": 100}},
+        moe_a2a_coverage=lambda *_args: {"deepep_ht": {(8, 1)}},
+        moe_expert_compute_coverage=lambda *_args: {128},
+    )
+    model_config = ModelConfig(attention_dp_size=128, moe_tp_size=1, moe_ep_size=128)
+
+    resolve_model_config_moe_comm(
+        model_config,
+        model_path="deepseek-ai/DeepSeek-R1",
+        backend_name="sglang",
+        database=database,
+        required_phases=("context",),
+    )
+
+    assert model_config.fmha_quant_mode == common.FMHAQuantMode.fp8_block
+    assert model_config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+
+
 def test_agg_requires_both_phases_covered(synth_systems):
     """ep=32 is collected for deepep_ht (context) only; an agg worker runs both
-    phases, so the tuple stays fused."""
+    phases, so the capability probe does not resolve a backend. The exact
+    model-config build then rejects the cross-node fused fallback."""
     t = _synth_task()
-    assert t._resolve_moe_comm_backend("agg", _tuple(dp=32, moe_ep=32)) is None
+    point = _tuple(dp=32, moe_ep=32)
+    assert t._resolve_moe_comm_backend("agg", point) is None
+    with pytest.raises(PerfDataNotAvailableError, match=r"Cross-node EP.*DeepEP A2A.*moe_ep=32"):
+        t.build_model_config(role="agg", parallel=point)
+
+
+@pytest.mark.parametrize(
+    ("system", "gpus_per_node"),
+    [
+        ("gb200", 4),
+        ("gb300", 4),
+        ("b200_sxm", 8),
+        ("b300_sxm", 8),
+        ("h100_sxm", 8),
+        ("h200_sxm", 8),
+    ],
+)
+def test_cross_node_boundary_comes_from_system_topology(system, gpus_per_node):
+    assert load_system_spec(system)["node"]["num_gpus_per_node"] == gpus_per_node
+
+
+@pytest.mark.parametrize(("gpus_per_node", "local_ep", "cross_node_ep"), [(4, 4, 8), (8, 8, 16)])
+def test_exact_config_allows_intra_node_fused_but_requires_deepep_cross_node(
+    synth_systems, monkeypatch, gpus_per_node, local_ep, cross_node_ep
+):
+    t = _synth_task()
+    monkeypatch.setattr(t, "_num_gpus_per_node", lambda _role: gpus_per_node)
+    monkeypatch.setattr(t, "_large_ep_coverage", lambda _role: {})
+    database = SimpleNamespace(
+        system=SYNTH_SYSTEM,
+        version=SYNTH_VERSION,
+        system_spec={"node": {"num_gpus_per_node": gpus_per_node}, "gpu": {"sm_version": 90}},
+    )
+    monkeypatch.setattr(t, "_try_load_role_database", lambda _role: database)
+
+    local = t.build_model_config(role="agg", parallel=_tuple(dp=local_ep, moe_ep=local_ep))
+    assert local.moe_comm_backend is None
+    with pytest.raises(PerfDataNotAvailableError, match=rf"Cross-node EP.*moe_ep={cross_node_ep}"):
+        t.build_model_config(role="agg", parallel=_tuple(dp=cross_node_ep, moe_ep=cross_node_ep))
+
+
+def test_trtllm_attention_dp_gate_falls_through_to_cross_node_data_error():
+    database = SimpleNamespace(
+        system="synthetic",
+        version="1.0",
+        system_spec={"node": {"num_gpus_per_node": 8}, "gpu": {"sm_version": 100}},
+        moe_a2a_coverage=lambda *_args: {"nvlink_two_sided": {(16, 2)}},
+        moe_expert_compute_coverage=lambda *_args: {16},
+    )
+    model_config = ModelConfig(attention_dp_size=1, moe_tp_size=1, moe_ep_size=16)
+
+    with pytest.raises(PerfDataNotAvailableError, match=r"Cross-node EP.*moe_ep=16"):
+        resolve_model_config_moe_comm(
+            model_config,
+            model_path=SYNTH_MODEL,
+            backend_name="trtllm",
+            database=database,
+            required_phases=("context", "generation"),
+        )
+
+
+def test_trtllm_attention_dp_gate_keeps_intra_node_ep_fused():
+    database = SimpleNamespace(
+        system="synthetic",
+        version="1.0",
+        system_spec={"node": {"num_gpus_per_node": 8}, "gpu": {"sm_version": 100}},
+    )
+    model_config = ModelConfig(attention_dp_size=1, moe_tp_size=1, moe_ep_size=8)
+
+    assert (
+        resolve_model_config_moe_comm(
+            model_config,
+            model_path=SYNTH_MODEL,
+            backend_name="trtllm",
+            database=database,
+            required_phases=("context", "generation"),
+        )
+        is None
+    )
 
 
 def test_uncovered_ep_and_moe_tp_gt_1_stay_fused(synth_systems):
@@ -274,6 +442,23 @@ def test_build_model_config_sets_backend_and_node_width(synth_systems):
     fused = t.build_model_config(role="agg", parallel=_tuple(dp=4, moe_ep=4))
     assert fused.moe_comm_backend is None
     assert fused.num_gpus_per_node == 8  # always injected; only large EP reads it
+
+
+def test_build_model_config_reuses_task_coverage_snapshot(synth_systems, monkeypatch):
+    t = _synth_task()
+    expected = t._large_ep_coverage("agg")
+    database = t._try_load_role_database("agg")
+
+    def unexpected_probe(*_args, **_kwargs):
+        raise AssertionError("build_model_config must reuse the Task coverage cache")
+
+    monkeypatch.setattr(database, "moe_a2a_coverage", unexpected_probe)
+    monkeypatch.setattr(database, "moe_expert_compute_coverage", unexpected_probe)
+
+    point = _tuple(dp=16, moe_ep=16)
+    model_config = t.build_model_config(role="agg", parallel=point)
+    assert expected
+    assert model_config.moe_comm_backend == {"context": "deepep_ht", "generation": "deepep_ll"}
 
 
 # ---------------------------------------------------------------------------
