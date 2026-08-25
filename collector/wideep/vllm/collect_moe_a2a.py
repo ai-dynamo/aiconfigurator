@@ -669,7 +669,6 @@ class VllmBenchmarkAdapter:
                 DeepEPV2PrepareAndFinalize,
             )
 
-            self._probe_v2_gin()
             self._buffer = deep_ep.ElasticBuffer(
                 group=self.group,
                 num_max_tokens_per_rank=case.capacity,
@@ -721,19 +720,6 @@ class VllmBenchmarkAdapter:
                 f"DeepEP topology changed between cases: {self.runtime_capability} != {capability}"
             )
         self.runtime_capability = capability
-
-    def _probe_v2_gin(self) -> None:
-        """Use vLLM's live NCCL-GIN query; unsupported v2 is a classified raise."""
-        import torch
-        import torch.distributed as dist
-        from vllm.utils.nccl import query_nccl_gin_type
-
-        dist.all_reduce(torch.zeros(1, device="cuda"), group=self.group)
-        gin_type = query_nccl_gin_type(self.group)
-        if not gin_type:
-            raise VllmMoeA2ABenchmarkError(
-                "deepep_v2 requires NCCL GIN; the live process group reported no GIN support"
-            )
 
 
 def attest_vllm_runtime(

@@ -680,7 +680,10 @@ def test_exact_vllm_prepare_finalize_classes_and_calls_are_present():
 
 
 def test_v2_is_never_silently_skipped():
-    assert "deepep_v2 requires NCCL GIN" in SOURCE
-    assert "VllmMoeA2ABenchmarkError" in SOURCE
-    probe_body = SOURCE.split("def _probe_v2_gin(", 1)[1].split("\n\ndef ", 1)[0]
-    assert "raise VllmMoeA2ABenchmarkError" in probe_body
+    v2_body = SOURCE.split('elif case.comm_backend == "deepep_v2":', 1)[1].split("else:  # defensive", 1)[0]
+    assert "deep_ep.ElasticBuffer(" in v2_body
+    assert "get_logical_domain_size()" in v2_body
+    assert "get_physical_domain_size()" in v2_body
+    assert "_record_capability(" in v2_body
+    assert "continue" not in v2_body
+    assert "query_nccl_gin_type" not in SOURCE
