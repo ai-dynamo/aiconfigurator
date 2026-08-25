@@ -123,7 +123,7 @@ docker_path.write_text(source.replace(needle, replacement))
 # stderr so a registry or parser regression has actionable evidence.
 source = common_path.read_text()
 needle = 'if ! jq "$@" 2> /dev/null; then'
-replacement = 'if ! jq "$@"; then'
+replacement = 'if ! tee "${AIC_ENROOT_JSON_DEBUG_FILE:-/dev/null}" | jq "$@"; then'
 if source.count(needle) != 1 or replacement in source:
     raise SystemExit("unexpected Enroot jq wrapper")
 common_path.write_text(source.replace(needle, replacement))
@@ -132,6 +132,7 @@ PY
         amd64) enroot_arch=x86_64 ;;
         arm64) enroot_arch=aarch64 ;;
     esac
+    export AIC_ENROOT_JSON_DEBUG_FILE="${job_dir}/registry_manifest_response.json"
     ENROOT_LIBRARY_PATH="${enroot_library_dir}" enroot import \
         --arch="${enroot_arch}" \
         --output="${temporary_image}" \
