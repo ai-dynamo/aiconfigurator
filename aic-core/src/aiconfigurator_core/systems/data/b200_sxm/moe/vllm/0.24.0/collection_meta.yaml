@@ -21,4 +21,11 @@ tables:
     # table per owner decision 2026-08-01, keys disjoint. Classified
     # failures: 3 moe_tp=32 tasks (marlin Invalid thread config at
     # inter_size/32 = 96 — kernel tile limit).
+    # 2026-08-24: appended 1134 Nemotron-3-Super-120B-A12B moe rows
+    # (hidden=1024, inter=2688, 512x22 experts; recollection campaign on
+    # stock v0.24.0-cu129, AIC revision 1982d8d4) — restores the
+    # vllm-native Nemotron-3-Super lane after the 0.19/0.22 bridging moe
+    # dirs were flagged for retirement. The campaign's Ultra rows
+    # (inter=5120) duplicated keys already in this table and were
+    # discarded at merge time (existing values kept).
     status: complete
