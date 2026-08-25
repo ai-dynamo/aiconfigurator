@@ -16,6 +16,8 @@ pytestmark = pytest.mark.unit
 REPO_ROOT = Path(__file__).resolve().parents[4]
 RUNNER = REPO_ROOT / "collector/wideep/vllm/slurm/run_vllm_moe_a2a_job.sh"
 SUBMITTER = REPO_ROOT / "collector/wideep/vllm/slurm/submit_vllm_moe_a2a.sh"
+OVERLAY_RUNNER = REPO_ROOT / "collector/wideep/vllm/slurm/run_deepep_sm103_overlay_job.sh"
+OVERLAY_SUBMITTER = REPO_ROOT / "collector/wideep/vllm/slurm/submit_deepep_sm103_overlay.sh"
 
 
 def test_six_system_matrix_has_exact_formal_topologies():
@@ -37,7 +39,7 @@ def test_six_system_matrix_has_exact_formal_topologies():
     }
 
 
-@pytest.mark.parametrize("script", [RUNNER, SUBMITTER])
+@pytest.mark.parametrize("script", [RUNNER, SUBMITTER, OVERLAY_RUNNER, OVERLAY_SUBMITTER])
 def test_slurm_campaign_scripts_are_valid_bash(script):
     subprocess.run(["bash", "-n", str(script)], check=True)
 
@@ -72,3 +74,18 @@ def test_vllm_collector_hash_closure_includes_campaign_pipeline():
     assert "collector/wideep/vllm/finalize_campaign.py" in closure
     assert "collector/wideep/vllm/slurm/run_vllm_moe_a2a_job.sh" in closure
     assert "collector/wideep/vllm/slurm/submit_vllm_moe_a2a.sh" in closure
+    assert "collector/wideep/vllm/slurm/run_deepep_sm103_overlay_job.sh" in closure
+    assert "collector/wideep/vllm/slurm/submit_deepep_sm103_overlay.sh" in closure
+
+
+def test_sm103_overlay_build_is_exact_and_separate_from_formal_data():
+    runner = OVERLAY_RUNNER.read_text(encoding="utf-8")
+    submitter = OVERLAY_SUBMITTER.read_text(encoding="utf-8")
+    assert "73b6ea4a439ba03a695563f9fd242c8e4b02b37c" in runner
+    assert "ee0da84ab9e04ac7610e28580af62c365e898389" in runner
+    assert "NVSHMEM_VERSION=3.3.24" in runner
+    assert "CUDA_ARCHES='10.0a 10.3a'" in runner
+    assert "wheel_sha256" in runner
+    assert "gb300|b300_sxm" in runner
+    assert "--exclusive" in submitter
+    assert "--switches=1" in submitter

@@ -237,6 +237,8 @@ collector.wideep.vllm.collect_moe_a2a:
   - collector/wideep/distributed_lifecycle.py
   - collector/wideep/vllm/slurm/run_vllm_moe_a2a_job.sh
   - collector/wideep/vllm/slurm/submit_vllm_moe_a2a.sh
+  - collector/wideep/vllm/slurm/run_deepep_sm103_overlay_job.sh
+  - collector/wideep/vllm/slurm/submit_deepep_sm103_overlay.sh
   - collector/wideep/vllm/finalize_campaign.py
   - collector/wideep/sglang/collect_moe_a2a.py
   - __model_cases__
