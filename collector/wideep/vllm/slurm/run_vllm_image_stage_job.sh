@@ -4,6 +4,8 @@
 
 set -euo pipefail
 
+DEEPEP_COMMIT=73b6ea4a439ba03a695563f9fd242c8e4b02b37c
+
 die() {
     echo "ERROR: $*" >&2
     exit 1
@@ -61,11 +63,12 @@ import deep_ep
 import torch
 
 assert hasattr(deep_ep, "Buffer")
-assert hasattr(deep_ep, "ElasticBuffer")
 Path(sys.argv[1]).write_text(json.dumps({
     "vllm": version("vllm"),
     "torch": version("torch"),
     "cuda": torch.version.cuda,
+    "deep_ep": version("deep_ep"),
+    "deep_ep_v2_available": hasattr(deep_ep, "ElasticBuffer"),
     "deep_ep_import": str(Path(deep_ep.__file__).resolve()),
 }, indent=2, sort_keys=True) + "\n")
 PY'
@@ -77,22 +80,26 @@ image_meta="${final_image}.meta.json"
 temporary_meta="${image_meta}.tmp.${SLURM_JOB_ID}"
 [[ ! -e "${image_meta}" && ! -e "${temporary_meta}" ]] || die "refusing to overwrite staged image metadata"
 python3 - "${job_dir}/image_meta.json" "${SYSTEM}" "${IMAGE_ARCH}" "${CONTAINER_IMAGE}" \
-    "${IMAGE_DIGEST}" "${sqsh_sha256}" "${final_image}" "${AIC_IMAGE_STAGE_EVIDENCE}" <<'PY'
+    "${IMAGE_DIGEST}" "${sqsh_sha256}" "${final_image}" "${AIC_IMAGE_STAGE_EVIDENCE}" \
+    "${DEEPEP_COMMIT}" <<'PY'
 import json
 import sys
 from datetime import date
 from pathlib import Path
 
-output, system, arch, source_image, digest, sqsh_sha, image, runtime_path = sys.argv[1:]
+output, system, arch, source_image, digest, sqsh_sha, image, runtime_path, deepep_commit = sys.argv[1:]
 runtime = json.loads(Path(runtime_path).read_text())
 if runtime["vllm"] != "0.24.0":
     raise SystemExit(f"unexpected vLLM version: {runtime['vllm']}")
+if runtime["deep_ep"] != f"1.2.1+{deepep_commit[:7]}":
+    raise SystemExit(f"unexpected DeepEP build: {runtime['deep_ep']}")
 Path(output).write_text(json.dumps({
     "schema_version": 1,
     "system": system,
     "architecture": arch,
     "source_image": source_image,
     "source_image_digest": digest,
+    "deep_ep_source_commit": deepep_commit,
     "sqsh_sha256": sqsh_sha,
     "image": image,
     "runtime": runtime,

@@ -113,6 +113,8 @@ def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     assert "unsquashfs -s" in runner
     assert "source_image_digest" in runner
     assert 'runtime["vllm"] != "0.24.0"' in runner
+    assert "73b6ea4a439ba03a695563f9fd242c8e4b02b37c" in runner
+    assert '"deep_ep_v2_available": hasattr(deep_ep, "ElasticBuffer")' in runner
     assert "sqsh_sha256" in runner
     assert "--exclusive" in submitter
     assert "--switches=1" in submitter

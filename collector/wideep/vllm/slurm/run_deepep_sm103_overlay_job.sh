@@ -101,7 +101,7 @@ srun \
         [[ "${#wheels[@]}" == 1 ]]
         python3 -m pip install --no-deps --target "${AIC_OVERLAY_STAGING}/import-test" "${wheels[0]}" >/dev/null
         PYTHONPATH="${AIC_OVERLAY_STAGING}/import-test" python3 -c \
-            "import deep_ep; assert hasattr(deep_ep, \"Buffer\"); assert hasattr(deep_ep, \"ElasticBuffer\")"
+            "import deep_ep; assert hasattr(deep_ep, \"Buffer\")"
         basename "${wheels[0]}" > "${AIC_OVERLAY_STAGING}/wheel_name.txt"
     '
 
