@@ -14,6 +14,7 @@ import dataclasses
 import functools
 import itertools
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Optional
 
@@ -1465,15 +1466,23 @@ def get_common_moe_test_cases(
     *,
     backend: str | None = None,
     required_expert_parallel_size: int | None = None,
+    supported_hidden_sizes: Iterable[int] | None = None,
 ):
-    """Return declared MoE recipes, optionally constrained to one EP world.
+    """Return declared MoE recipes with optional runtime constraints.
 
     ``num_experts % expert_parallel_size == 0`` is universal MoE sharding
     math, so callers that collect one fixed EP world declare that requirement
     here rather than silently discarding generated shapes in collector code.
+    ``supported_hidden_sizes`` similarly lets a pinned kernel declare its
+    exact compiled widths without changing the default MoE population.
     """
     if required_expert_parallel_size is not None and required_expert_parallel_size <= 0:
         raise ValueError(f"required_expert_parallel_size must be positive, got {required_expert_parallel_size}")
+    allowed_hidden_sizes: frozenset[int] | None = None
+    if supported_hidden_sizes is not None:
+        allowed_hidden_sizes = frozenset(int(value) for value in supported_hidden_sizes)
+        if not allowed_hidden_sizes or any(value <= 0 for value in allowed_hidden_sizes):
+            raise ValueError("supported_hidden_sizes must contain positive integers")
     moe_sweep = _required_base_common_case_values("moe")
     num_tokens = _as_int_list(moe_sweep.get("token_counts"), field_name="moe.token_counts")
     tp_list = _as_int_list(moe_sweep.get("tensor_parallel_sizes"), field_name="moe.tensor_parallel_sizes")
@@ -1538,6 +1547,8 @@ def get_common_moe_test_cases(
         model_name = str(model_config["model_path"])
 
         if required_expert_parallel_size is not None and num_experts % required_expert_parallel_size != 0:
+            continue
+        if allowed_hidden_sizes is not None and hs not in allowed_hidden_sizes:
             continue
 
         max_tp_exclusive = model_config.get("max_tp_exclusive")

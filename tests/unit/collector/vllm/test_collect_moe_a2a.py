@@ -101,6 +101,21 @@ def test_declared_shapes_use_vllm_population(monkeypatch):
     assert SHAPE in shapes
 
 
+def test_ll_shape_population_declares_the_pinned_kernel_hidden_sizes(monkeypatch):
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
+    baseline = a2a.get_vllm_moe_a2a_shapes(required_expert_parallel_size=WORLD_SIZE)
+    ll_shapes = a2a.get_vllm_moe_a2a_shapes(
+        required_expert_parallel_size=WORLD_SIZE,
+        supported_hidden_sizes=a2a.DEEPEP_LL_SUPPORTED_HIDDEN_SIZES,
+    )
+
+    assert ll_shapes
+    assert set(ll_shapes) < set(baseline)
+    assert all(shape.hidden_size in a2a.DEEPEP_LL_SUPPORTED_HIDDEN_SIZES for shape in ll_shapes)
+    assert any(shape.hidden_size == 3584 for shape in baseline)
+    assert all(shape.hidden_size != 3584 for shape in ll_shapes)
+
+
 def test_transport_defaults_are_publishable_and_alternates_are_diagnostic():
     args = a2a.parse_args(["--gpus-per-node", "4"])
 
@@ -192,6 +207,23 @@ def test_unsupported_world_size_and_zero_case_fail_closed():
             node_num=2,
             backends=("deepep_ll",),
         )
+
+    unsupported_ll = MoeA2AShape(3584, 8, 256)
+    with pytest.raises(a2a.VllmMoeA2ADeclarationError, match="pinned kernel capability"):
+        a2a.build_case_plan(
+            shapes=[unsupported_ll],
+            grid=GRID,
+            world_size=WORLD_SIZE,
+            node_num=NODE_NUM,
+            backends=("deepep_ll",),
+        )
+    assert a2a.build_case_plan(
+        shapes=[unsupported_ll],
+        grid=GRID,
+        world_size=WORLD_SIZE,
+        node_num=NODE_NUM,
+        backends=("deepep_ht",),
+    )
 
 
 def test_pure_adapter_builds_unified_rows_and_full_unique_keys():

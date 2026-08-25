@@ -73,6 +73,7 @@ SUPPORTED_NODE_COUNTS = (2, 4)
 HT_SMS = 20
 LL_SMS = 0
 HT_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024
+DEEPEP_LL_SUPPORTED_HIDDEN_SIZES = frozenset({2048, 2560, 3072, 4096, 5120, 6144, 7168, 8192})
 TARGET_VLLM_SOURCE_COMMIT = "ee0da84ab9e04ac7610e28580af62c365e898389"
 LEGACY_DEEPEP_COMMIT = "73b6ea4a439ba03a695563f9fd242c8e4b02b37c"
 V2_DEEPEP_COMMIT = "b306af06afd412c88e51e71802951606e40b7358"
@@ -171,13 +172,18 @@ def _next_power_of_two(value: int) -> int:
     return 1 << (value - 1).bit_length()
 
 
-def get_vllm_moe_a2a_shapes(*, required_expert_parallel_size: int | None = None) -> list[MoeA2AShape]:
+def get_vllm_moe_a2a_shapes(
+    *,
+    required_expert_parallel_size: int | None = None,
+    supported_hidden_sizes: frozenset[int] | None = None,
+) -> list[MoeA2AShape]:
     """Resolve correlated WideEP shapes through the vLLM case population."""
     from collector.case_generator import get_common_moe_test_cases, is_wideep_moe_model
 
     recipes = get_common_moe_test_cases(
         backend="vllm",
         required_expert_parallel_size=required_expert_parallel_size,
+        supported_hidden_sizes=supported_hidden_sizes,
     )
     shapes = {
         MoeA2AShape(int(recipe.hidden_size), int(recipe.topk), int(recipe.num_experts))
@@ -226,6 +232,17 @@ def build_case_plan(
             f"declared vLLM moe_a2a shapes are not divisible by world_size={world_size}: "
             f"{invalid_shapes}; request the EP constraint from get_vllm_moe_a2a_shapes "
             "instead of filtering a generated plan"
+        )
+    unsupported_ll_shapes = [
+        shape
+        for shape in shapes
+        if "deepep_ll" in backends and shape.hidden_size not in DEEPEP_LL_SUPPORTED_HIDDEN_SIZES
+    ]
+    if unsupported_ll_shapes:
+        raise VllmMoeA2ADeclarationError(
+            "declared vLLM DeepEP-LL shapes use hidden sizes outside the pinned kernel capability "
+            f"{sorted(DEEPEP_LL_SUPPORTED_HIDDEN_SIZES)}: {unsupported_ll_shapes}; request the hidden-size "
+            "constraint from get_vllm_moe_a2a_shapes instead of filtering a generated plan"
         )
 
     cases: list[VllmMoeA2ACase] = []
@@ -1144,13 +1161,22 @@ def main(argv: list[str] | None = None) -> None:
         env["WORLD_SIZE"] = str(args.world_size)
     identity = derive_dist_identity(env, gpus_per_node=args.gpus_per_node)
     backends = _parse_backends(args.backends)
-    cases = build_case_plan(
-        shapes=get_vllm_moe_a2a_shapes(required_expert_parallel_size=identity.ep_size),
-        grid=get_moe_a2a_workload_grid(),
-        world_size=identity.world_size,
-        node_num=identity.node_num,
-        backends=backends,
-    )
+    cases = []
+    for backend in backends:
+        supported_hidden_sizes = DEEPEP_LL_SUPPORTED_HIDDEN_SIZES if backend == "deepep_ll" else None
+        cases.extend(
+            build_case_plan(
+                shapes=get_vllm_moe_a2a_shapes(
+                    required_expert_parallel_size=identity.ep_size,
+                    supported_hidden_sizes=supported_hidden_sizes,
+                ),
+                grid=get_moe_a2a_workload_grid(),
+                world_size=identity.world_size,
+                node_num=identity.node_num,
+                backends=(backend,),
+            )
+        )
+    cases.sort(key=VllmMoeA2ACase.sort_key)
     if args.canary:
         cases = select_canary_cases(cases)
     ids = case_plan_ids(cases, world_size=identity.world_size, node_num=identity.node_num)

@@ -32,6 +32,7 @@ from collector.framework_manifest import get_collector_runtime
 from collector.registry_types import PerfFile
 from collector.wideep.vllm.collect_moe_a2a import (
     BACKENDS,
+    DEEPEP_LL_SUPPORTED_HIDDEN_SIZES,
     LEGACY_NVL4_PATCH,
     TARGET_VLLM_SOURCE_COMMIT,
     build_case_plan,
@@ -137,7 +138,10 @@ def _as_single(frame: pd.DataFrame, column: str) -> Any:
 
 def _expected_cases(*, ep_size: int, node_num: int, backend: str):
     return build_case_plan(
-        shapes=get_vllm_moe_a2a_shapes(required_expert_parallel_size=ep_size),
+        shapes=get_vllm_moe_a2a_shapes(
+            required_expert_parallel_size=ep_size,
+            supported_hidden_sizes=DEEPEP_LL_SUPPORTED_HIDDEN_SIZES if backend == "deepep_ll" else None,
+        ),
         grid=get_moe_a2a_workload_grid(),
         world_size=ep_size,
         node_num=node_num,
