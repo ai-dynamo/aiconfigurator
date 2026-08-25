@@ -741,6 +741,46 @@ def test_collector_ref_rejects_invalid_or_mismatched_host_attestation(tmp_path, 
         a2a._git_collector_ref(tmp_path)
 
 
+def test_v2_rdma_rate_tool_is_reactivated_and_attested_in_python(tmp_path, monkeypatch):
+    tool_root = tmp_path / "aic-vllm-a2a-123" / "host-rdma-tools"
+    (tool_root / "bin").mkdir(parents=True)
+    (tool_root / "lib").mkdir()
+    (tool_root / "bin" / "ibstat.real").touch()
+    (tool_root / "lib" / "ld-linux-test.so.2").touch()
+    monkeypatch.setenv("AIC_IBSTAT_TOOL_ROOT", str(tool_root))
+    monkeypatch.setenv("AIC_IBSTAT_LOADER_BASENAME", "ld-linux-test.so.2")
+    original_resolve = a2a.Path.resolve
+
+    def _resolve(path, strict=False):
+        if path == tool_root:
+            return a2a.Path("/tmp/aic-vllm-a2a-123/host-rdma-tools")
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(a2a.Path, "resolve", _resolve)
+    monkeypatch.setattr(a2a.Path, "is_file", lambda _self: True)
+    observed = {}
+
+    def _run(command, **kwargs):
+        observed["command"] = command
+        observed["kwargs"] = kwargs
+        return a2a.subprocess.CompletedProcess(command, 0, "\t\tRate: 400\n", "")
+
+    monkeypatch.setattr(a2a.subprocess, "run", _run)
+
+    a2a._activate_v2_rdma_rate_tool("400")
+
+    assert observed["command"] == ["ibstat", "mlx5_0"]
+    assert observed["kwargs"] == {"check": True, "capture_output": True, "text": True}
+    assert a2a.os.environ["PATH"].startswith(str(a2a._REPO_ROOT / "collector/wideep/vllm/slurm/host_tools"))
+
+
+def test_v2_rdma_rate_tool_rejects_missing_or_mismatched_attestation(tmp_path, monkeypatch):
+    monkeypatch.delenv("AIC_IBSTAT_TOOL_ROOT", raising=False)
+    monkeypatch.delenv("AIC_IBSTAT_LOADER_BASENAME", raising=False)
+    with pytest.raises(a2a.VllmMoeA2ADeclarationError, match="requires staged host ibstat"):
+        a2a._activate_v2_rdma_rate_tool("400")
+
+
 def test_classified_case_failures_do_not_demote_finalized_table(tmp_path):
     pyarrow = pytest.importorskip("pyarrow")
     del pyarrow

@@ -29,6 +29,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -971,6 +972,46 @@ def _git_collector_ref(repo_root: Path) -> str:
     return declared.lower()
 
 
+def _activate_v2_rdma_rate_tool(expected_rate_gbps: str) -> None:
+    """Expose the host-attested ibstat wrapper to DeepEP V2 inside Python."""
+
+    tool_root_raw = os.environ.get("AIC_IBSTAT_TOOL_ROOT", "")
+    loader = os.environ.get("AIC_IBSTAT_LOADER_BASENAME", "")
+    if not tool_root_raw or not loader:
+        raise VllmMoeA2ADeclarationError("deepep_v2 requires staged host ibstat attestation")
+    tool_root = Path(tool_root_raw).resolve(strict=True)
+    if not str(tool_root).startswith("/tmp/aic-vllm-a2a-") or tool_root.name != "host-rdma-tools":
+        raise VllmMoeA2ADeclarationError(f"unsafe AIC_IBSTAT_TOOL_ROOT {tool_root}")
+    if not re.fullmatch(r"ld[^/]*\.so(?:\.[0-9]+)*", loader):
+        raise VllmMoeA2ADeclarationError(f"invalid AIC_IBSTAT_LOADER_BASENAME {loader!r}")
+    for required in (
+        tool_root / "bin" / "ibstat.real",
+        tool_root / "lib" / loader,
+    ):
+        if not required.is_file():
+            raise VllmMoeA2ADeclarationError(f"missing staged ibstat runtime file {required}")
+
+    wrapper_dir = _REPO_ROOT / "collector" / "wideep" / "vllm" / "slurm" / "host_tools"
+    wrapper = wrapper_dir / "ibstat"
+    if not wrapper.is_file():
+        raise VllmMoeA2ADeclarationError(f"missing attested ibstat wrapper {wrapper}")
+    os.environ["PATH"] = f"{wrapper_dir}:{os.environ.get('PATH', '')}"
+    try:
+        result = subprocess.run(
+            ["ibstat", "mlx5_0"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise VllmMoeA2ADeclarationError(f"staged ibstat runtime check failed: {error}") from error
+    rates = re.findall(r"^\s*Rate:\s*([0-9]+)\s*$", result.stdout, re.MULTILINE)
+    if len(rates) != 1 or rates[0] != expected_rate_gbps:
+        raise VllmMoeA2ADeclarationError(
+            f"staged ibstat rate mismatch: expected {expected_rate_gbps!r}, observed {rates!r}"
+        )
+
+
 def _git_head(path: Path) -> str:
     try:
         return subprocess.run(
@@ -1225,6 +1266,8 @@ def main(argv: list[str] | None = None) -> None:
         isinstance(key, str) and isinstance(value, str) for key, value in observed_abi.items()
     ):
         raise VllmMoeA2ADeclarationError("--runtime-abi-json must be a JSON object of string fields")
+    if backends[0] == "deepep_v2":
+        _activate_v2_rdma_rate_tool(observed_abi.get("ibstat_mlx5_0_rate_gbps", ""))
     runtime_meta = attest_vllm_runtime(
         source_root=args.vllm_source_root,
         backend=backends[0],
