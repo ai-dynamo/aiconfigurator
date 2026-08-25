@@ -75,8 +75,8 @@ srun \
             --nvshmem-ver "${AIC_NVSHMEM_VERSION}"
         mapfile -t wheels < <(find "${AIC_OVERLAY_STAGING}/workspace/dist" -maxdepth 1 -type f -name "*.whl" -print)
         [[ "${#wheels[@]}" == 1 ]]
-        python -m pip install --no-deps --target "${AIC_OVERLAY_STAGING}/import-test" "${wheels[0]}" >/dev/null
-        PYTHONPATH="${AIC_OVERLAY_STAGING}/import-test" python -c \
+        python3 -m pip install --no-deps --target "${AIC_OVERLAY_STAGING}/import-test" "${wheels[0]}" >/dev/null
+        PYTHONPATH="${AIC_OVERLAY_STAGING}/import-test" python3 -c \
             "import deep_ep; assert hasattr(deep_ep, \"Buffer\"); assert hasattr(deep_ep, \"ElasticBuffer\")"
         basename "${wheels[0]}" > "${AIC_OVERLAY_STAGING}/wheel_name.txt"
     '

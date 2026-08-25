@@ -280,7 +280,7 @@ PY
         "SM103 runtime ABI must attest exact CUDA arches 10.0a 10.3a"
     container_mounts+=",${overlay_wheel}:${overlay_wheel}"
     export AIC_OVERLAY_WHEEL="${overlay_wheel}"
-    container_command='overlay_dir="${AIC_STAGING_ROOT}/overlay-${SLURM_PROCID}"; mkdir -p "${overlay_dir}"; python -m pip install --no-deps --target "${overlay_dir}" "${AIC_OVERLAY_WHEEL}" >/dev/null; export PYTHONPATH="${overlay_dir}:${AIC_REPO_DIR}:${PYTHONPATH:-}";'
+    container_command='overlay_dir="${AIC_STAGING_ROOT}/overlay-${SLURM_PROCID}"; mkdir -p "${overlay_dir}"; python3 -m pip install --no-deps --target "${overlay_dir}" "${AIC_OVERLAY_WHEEL}" >/dev/null; export PYTHONPATH="${overlay_dir}:${AIC_REPO_DIR}:${PYTHONPATH:-}";'
 else
     container_command='export PYTHONPATH="${AIC_REPO_DIR}:${PYTHONPATH:-}";'
 fi
@@ -302,7 +302,7 @@ export AIC_RUNTIME_ABI_JSON="${runtime_abi_json}"
 export AIC_GPUS_PER_NODE="${GPUS_PER_NODE}"
 export AIC_BACKEND="${BACKEND}"
 export AIC_CANARY_FLAG="${canary_flag}"
-container_command+=' python -m collector.wideep.vllm.collect_moe_a2a --gpus-per-node "${AIC_GPUS_PER_NODE}" --backends "${AIC_BACKEND}" --output-path "${AIC_OUTPUT_DIR}" --vllm-source-root "${AIC_VLLM_SOURCE_ROOT}" --image-digest "${AIC_IMAGE_DIGEST}" --runtime-abi-json "${AIC_RUNTIME_ABI_JSON}" ${AIC_CANARY_FLAG}'
+container_command+=' python3 -m collector.wideep.vllm.collect_moe_a2a --gpus-per-node "${AIC_GPUS_PER_NODE}" --backends "${AIC_BACKEND}" --output-path "${AIC_OUTPUT_DIR}" --vllm-source-root "${AIC_VLLM_SOURCE_ROOT}" --image-digest "${AIC_IMAGE_DIGEST}" --runtime-abi-json "${AIC_RUNTIME_ABI_JSON}" ${AIC_CANARY_FLAG}'
 
 srun \
     --nodes="${NODE_NUM}" \

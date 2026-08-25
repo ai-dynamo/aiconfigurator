@@ -54,6 +54,8 @@ def test_runner_rejects_cifs_and_requires_authoritative_topology():
     assert "prefix_matches" in source
     assert 'staging_root="/tmp/aic-vllm-a2a-${SLURM_JOB_ID}"' in source
     assert "gpu_inventory" in source
+    assert "python3 -m collector.wideep.vllm.collect_moe_a2a" in source
+    assert " python -m collector.wideep.vllm.collect_moe_a2a" not in source
     assert "--gpus-per-task" not in source
     assert "--gpu-bind" not in source
 
