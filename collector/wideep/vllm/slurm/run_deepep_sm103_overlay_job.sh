@@ -141,6 +141,37 @@ if [[ "${OVERLAY_PROFILE}" == legacy-nvl4 ]]; then
     git -C "${workspace}/DeepEP" apply --unidiff-zero "${legacy_patch}"
 fi
 
+# Both supported DeepEP revisions encode build-directory library paths in the
+# extension RUNPATH. Remove those source-level rpaths while retaining explicit
+# link directories, then attest the exact rewritten setup.py in the overlay.
+python3 - "${workspace}/DeepEP/setup.py" "${OVERLAY_PROFILE}" \
+    "${staging_root}/deep_ep_setup_sha256.txt" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+path, profile, output = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+source = path.read_text()
+legacy = ", f'-Wl,-rpath,{nvshmem_dir}/lib'"
+v2_nvshmem = ", f'-Wl,-rpath,{nvshmem_root_dir}/lib'"
+v2_nccl = "extra_link_args.extend([f'-l:libnccl.so', f'-Wl,-rpath,{nccl_root_dir}/lib'])"
+v2_nccl_portable = "library_dirs.extend([f'{nccl_root_dir}/lib'])\n    extra_link_args.extend([f'-l:libnccl.so'])"
+
+if profile.startswith("legacy-"):
+    if source.count(legacy) != 1 or v2_nvshmem in source or v2_nccl in source:
+        raise SystemExit("unexpected legacy DeepEP linker configuration")
+    source = source.replace(legacy, "")
+elif profile == "v2":
+    if source.count(v2_nvshmem) != 1 or source.count(v2_nccl) != 1 or legacy in source:
+        raise SystemExit("unexpected DeepEP V2 linker configuration")
+    source = source.replace(v2_nvshmem, "").replace(v2_nccl, v2_nccl_portable)
+else:
+    raise SystemExit(f"unsupported overlay profile {profile}")
+
+path.write_text(source)
+output.write_text(hashlib.sha256(source.encode()).hexdigest() + "\n")
+PY
+
 srun \
     --nodes=1 \
     --ntasks=1 \
@@ -170,6 +201,14 @@ srun \
         export LIBRARY_PATH="${bundled_cuda_lib}:${LIBRARY_PATH:-}"
         export LD_LIBRARY_PATH="${bundled_cuda_lib}:${LD_LIBRARY_PATH:-}"
         printf "%s\n" "${bundled_cuda_include}" > "${AIC_OVERLAY_STAGING}/cuda_devel_root.txt"
+
+        mapfile -t base_nvshmem_libs < <(
+            find /usr/local/lib/python* -type d -path "*/nvidia/nvshmem/lib" -print
+        )
+        [[ "${#base_nvshmem_libs[@]}" == 1 ]]
+        base_nvshmem_lib="${base_nvshmem_libs[0]}"
+        [[ -f "${base_nvshmem_lib}/libnvshmem_host.so.3" ]]
+        base_ld_library_path="${base_nvshmem_lib}:${LD_LIBRARY_PATH:-}"
 
         mkdir -p "${AIC_OVERLAY_STAGING}/deps"
         python3 -m pip download --no-deps --dest "${AIC_OVERLAY_STAGING}/deps" \
@@ -201,12 +240,36 @@ srun \
         mapfile -t deep_ep_wheels < <(find "${workspace}/dist" -maxdepth 1 -type f -name "*.whl" -print)
         [[ "${#deep_ep_wheels[@]}" == 1 ]]
 
+        elf_audit_dir="${AIC_OVERLAY_STAGING}/elf-audit"
+        mkdir -p "${elf_audit_dir}"
+        python3 - "${deep_ep_wheels[0]}" "${elf_audit_dir}" <<'"'"'PY'"'"'
+import sys
+import zipfile
+from pathlib import Path
+
+wheel, output = Path(sys.argv[1]), Path(sys.argv[2])
+with zipfile.ZipFile(wheel) as archive:
+    shared_objects = [name for name in archive.namelist() if name.endswith(".so")]
+    if len(shared_objects) != 1:
+        raise SystemExit(f"expected one DeepEP shared object, found {shared_objects}")
+    archive.extract(shared_objects[0], output)
+PY
+        mapfile -t deep_ep_shared_objects < <(find "${elf_audit_dir}" -type f -name "*.so" -print)
+        [[ "${#deep_ep_shared_objects[@]}" == 1 ]]
+        readelf -d "${deep_ep_shared_objects[0]}" > "${AIC_OVERLAY_STAGING}/elf_dynamic.txt"
+        if grep -Eq "\((RPATH|RUNPATH)\)" "${AIC_OVERLAY_STAGING}/elf_dynamic.txt"; then
+            echo "DeepEP wheel contains a non-portable RPATH/RUNPATH" >&2
+            exit 1
+        fi
+
         import_dir="${AIC_OVERLAY_STAGING}/import-test"
         mkdir -p "${import_dir}"
         python3 -m pip install --no-deps --target "${import_dir}" "${pyarrow_wheels[0]}" >/dev/null
         if [[ "${AIC_OVERLAY_PROFILE}" == v2 ]]; then
             python3 -m pip install --no-deps --target "${import_dir}" "${nccl_wheels[0]}" >/dev/null
-            export LD_LIBRARY_PATH="${import_dir}/nvidia/nccl/lib:${LD_LIBRARY_PATH:-}"
+            export LD_LIBRARY_PATH="${import_dir}/nvidia/nccl/lib:${base_ld_library_path}"
+        else
+            export LD_LIBRARY_PATH="${base_ld_library_path}"
         fi
         python3 -m pip install --no-deps --target "${import_dir}" "${deep_ep_wheels[0]}" >/dev/null
         PYTHONPATH="${import_dir}" python3 - "${AIC_EXPECTED_API}" "${AIC_OVERLAY_STAGING}/runtime.json" <<'"'"'PY'"'"'
@@ -239,6 +302,9 @@ deep_ep_wheel_name=$(<"$(safe_existing_path "DeepEP wheel-name marker" "${stagin
    "${deep_ep_wheel_name}" == *.whl ]] || die "unsafe DeepEP wheel name ${deep_ep_wheel_name}"
 deep_ep_wheel=$(safe_existing_path "DeepEP overlay wheel" "${staging_root}/workspace/dist/${deep_ep_wheel_name}")
 deep_ep_wheel_sha256=$(sha256sum "${deep_ep_wheel}" | awk '{print $1}')
+deep_ep_setup_sha256=$(<"$(safe_existing_path \
+    "rewritten DeepEP setup SHA" "${staging_root}/deep_ep_setup_sha256.txt")")
+[[ "${deep_ep_setup_sha256}" =~ ^[0-9a-f]{64}$ ]] || die "invalid rewritten DeepEP setup SHA"
 
 pyarrow_wheel_name=$(<"$(safe_existing_path "pyarrow wheel-name marker" "${staging_root}/pyarrow_wheel_name.txt")")
 [[ -n "${pyarrow_wheel_name}" && "${pyarrow_wheel_name}" == "$(basename -- "${pyarrow_wheel_name}")" && \
@@ -270,12 +336,14 @@ if [[ "${OVERLAY_PROFILE}" == v2 ]]; then
 fi
 cp "${staging_root}/runtime.json" "${publish_dir}/runtime.json"
 cp "${staging_root}/cuda_devel_root.txt" "${publish_dir}/cuda_devel_root.txt"
+cp "${staging_root}/elf_dynamic.txt" "${publish_dir}/elf_dynamic.txt"
 
 python3 - "${publish_dir}/build_meta.json" "${SYSTEM}" "${architecture}" "${OVERLAY_PROFILE}" \
     "${scaleup_ranks}" "${IMAGE_DIGEST}" "${VLLM_COMMIT}" "${deepep_commit}" \
     "${legacy_patch_sha256}" "${NVSHMEM_VERSION}" "${V2_NCCL_VERSION}" "${CUDA_ARCHES}" \
     "${deep_ep_wheel_name}" "${deep_ep_wheel_sha256}" "${nccl_wheel_name}" "${nccl_wheel_sha256}" \
-    "${PYARROW_VERSION}" "${pyarrow_wheel_name}" "${pyarrow_wheel_sha256}" "${gpu_identity}" <<'PY'
+    "${PYARROW_VERSION}" "${pyarrow_wheel_name}" "${pyarrow_wheel_sha256}" "${gpu_identity}" \
+    "${deep_ep_setup_sha256}" <<'PY'
 import json
 import sys
 from datetime import date
@@ -284,10 +352,10 @@ from pathlib import Path
 (
     output, system, architecture, profile, scaleup_ranks, image, vllm, deepep,
     patch_sha, nvshmem, nccl, arches, deep_ep_wheel, deep_ep_sha,
-    nccl_wheel, nccl_sha, pyarrow, pyarrow_wheel, pyarrow_sha, gpu,
+    nccl_wheel, nccl_sha, pyarrow, pyarrow_wheel, pyarrow_sha, gpu, setup_sha,
 ) = sys.argv[1:]
 payload = {
-    "schema_version": 2,
+    "schema_version": 3,
     "system": system,
     "architecture": architecture,
     "profile": profile,
@@ -301,6 +369,7 @@ payload = {
     "cuda_arches": arches,
     "deep_ep_wheel": deep_ep_wheel,
     "deep_ep_wheel_sha256": deep_ep_sha,
+    "deep_ep_setup_sha256": setup_sha,
     "nccl_wheel": nccl_wheel,
     "nccl_wheel_sha256": nccl_sha,
     "pyarrow": pyarrow,

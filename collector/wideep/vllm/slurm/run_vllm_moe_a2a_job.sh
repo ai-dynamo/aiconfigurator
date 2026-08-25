@@ -309,7 +309,7 @@ expected_commit = {
     "legacy-nvl8": "73b6ea4a439ba03a695563f9fd242c8e4b02b37c",
 }[profile]
 checks = {
-    "schema_version": 2,
+    "schema_version": 3,
     "architecture": platform.machine(),
     "profile": profile,
     "image_digest": image_digest,
@@ -332,6 +332,9 @@ elif payload.get("deep_ep_patch_sha256"):
     raise SystemExit("unexpected topology patch on this overlay profile")
 if profile == "v2" and payload.get("nccl") != "2.30.4":
     raise SystemExit("v2 overlay does not pin NCCL 2.30.4")
+setup_sha = payload.get("deep_ep_setup_sha256", "")
+if len(setup_sha) != 64 or any(value not in "0123456789abcdef" for value in setup_sha):
+    raise SystemExit("overlay metadata has an invalid rewritten DeepEP setup SHA")
 
 def checked_wheel(name_key, sha_key, required=True):
     name = payload.get(name_key, "")
@@ -351,6 +354,7 @@ deep_ep_wheel, deep_ep_sha = checked_wheel("deep_ep_wheel", "deep_ep_wheel_sha25
 nccl_wheel, nccl_sha = checked_wheel("nccl_wheel", "nccl_wheel_sha256", profile == "v2")
 abi = {
     "deep_ep_overlay_wheel_sha256": deep_ep_sha,
+    "deep_ep_setup_sha256": setup_sha,
     "deep_ep_cuda_arches": payload["cuda_arches"],
     "deep_ep_scaleup_ranks": payload["deep_ep_scaleup_ranks"],
 }
@@ -390,6 +394,7 @@ PY
     export AIC_NCCL_WHEEL="${overlay_nccl_wheel}"
     export AIC_PYARROW_WHEEL="${overlay_pyarrow_wheel}"
     container_command='overlay_target="${AIC_STAGING_ROOT}/overlay-${SLURM_PROCID}"; mkdir -p "${overlay_target}";'
+    container_command+=' mapfile -t base_nvshmem_libs < <(find /usr/local/lib/python* -type d -path "*/nvidia/nvshmem/lib" -print); [[ "${#base_nvshmem_libs[@]}" == 1 && -f "${base_nvshmem_libs[0]}/libnvshmem_host.so.3" ]]; export LD_LIBRARY_PATH="${base_nvshmem_libs[0]}:${LD_LIBRARY_PATH:-}";'
     container_command+=' python3 -m pip install --no-deps --target "${overlay_target}" "${AIC_PYARROW_WHEEL}" >/dev/null;'
     if [[ "${BACKEND}" == deepep_v2 ]]; then
         [[ -n "${overlay_nccl_wheel}" ]] || die "v2 overlay has no NCCL wheel"

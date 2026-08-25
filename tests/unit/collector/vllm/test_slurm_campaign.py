@@ -109,6 +109,11 @@ def test_backend_overlay_build_is_exact_and_separate_from_formal_data():
     assert "local container squashfs checksum mismatch" in runner
     assert "nvidia-nccl-cu13==${AIC_NCCL_VERSION}" in runner
     assert "unset EP_NCCL_ROOT_DIR" in runner
+    assert 'source.replace(v2_nvshmem, "")' in runner
+    assert "library_dirs.extend([f'{nccl_root_dir}/lib'])" in runner
+    assert 'grep -Eq "\\((RPATH|RUNPATH)\\)"' in runner
+    assert '"schema_version": 3' in runner
+    assert '"deep_ep_setup_sha256": setup_sha' in runner
     assert '"pyarrow==${AIC_PYARROW_VERSION}"' in runner
     assert '"pyarrow_wheel_sha256": pyarrow_sha' in runner
     assert 'path "*/nvidia/cu13/include"' in runner
