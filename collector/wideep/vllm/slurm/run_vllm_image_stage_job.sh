@@ -113,9 +113,9 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 source = path.read_text()
-needle = '.manifests[] | select(.platform.architecture == "${arch}")'
-replacement = '.manifests[]? | select(.platform.architecture == "${arch}")'
-if source.count(needle) != 1:
+needle = ".manifests[]"
+replacement = ".manifests[]?"
+if source.count(needle) != 1 or replacement in source:
     raise SystemExit("unexpected Enroot docker manifest-list parser")
 path.write_text(source.replace(needle, replacement))
 PY
