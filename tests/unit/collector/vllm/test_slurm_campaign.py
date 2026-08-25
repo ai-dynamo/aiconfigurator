@@ -120,7 +120,7 @@ def test_backend_overlay_build_is_exact_and_separate_from_formal_data():
     assert 'export CPATH="${bundled_cuda_include}:${CPATH:-}"' in runner
     assert 'export LIBRARY_PATH="${bundled_cuda_lib}:${LIBRARY_PATH:-}"' in runner
     assert "--container-image" in submitter
-    assert "--gpus-per-node=1" in submitter
+    assert "--gpus=1" in submitter
     assert "--exclusive" not in submitter
     assert "--switches=1" in submitter
 
@@ -148,7 +148,7 @@ def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     assert "arm64) enroot_arch=aarch64" in runner
     assert "image_reference_mode=verified-tag" in runner
     assert '"image_reference_mode": image_reference_mode' in runner
-    assert "--gpus-per-node=1" in submitter
+    assert "--gpus=1" in submitter
     assert "--exclusive" not in submitter
     assert "--switches=1" in submitter
 
