@@ -116,16 +116,15 @@ def _write_job(root: Path, *, node_num: int, ep_size: int, backend: str) -> Path
     return job_dir
 
 
-def _six_h200_jobs(root: Path) -> list[Path]:
+def _three_h200_jobs(root: Path) -> list[Path]:
     return [
-        _write_job(root, node_num=node_num, ep_size=ep_size, backend=backend)
-        for node_num, ep_size in ((2, 16), (4, 32))
+        _write_job(root, node_num=1, ep_size=8, backend=backend)
         for backend in campaign.BACKENDS
     ]
 
 
-def test_merge_campaign_requires_and_validates_all_six_formal_jobs(tmp_path):
-    jobs = _six_h200_jobs(tmp_path / "jobs")
+def test_merge_campaign_requires_and_validates_all_three_formal_jobs(tmp_path):
+    jobs = _three_h200_jobs(tmp_path / "jobs")
     output = tmp_path / "published"
     output.mkdir()
     (output / "collection_meta.yaml").write_text(
@@ -144,26 +143,26 @@ def test_merge_campaign_requires_and_validates_all_six_formal_jobs(tmp_path):
 
     merged = pd.read_parquet(parquet_path)
     assert len(merged) == sum(len(pd.read_parquet(job / "moe_a2a_perf.parquet")) for job in jobs)
-    assert set(zip(merged["node_num"], merged["ep_size"], strict=True)) == {(2, 16), (4, 32)}
+    assert set(zip(merged["node_num"], merged["ep_size"], strict=True)) == {(1, 8)}
     assert set(merged["comm_backend"]) == set(campaign.BACKENDS)
     meta = yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
     assert meta["tables"]["custom_allreduce_perf"] == {"status": "complete"}
     assert meta["tables"]["moe_a2a_perf"]["rows"] == len(merged)
     assert meta["runtime"]["abi"]["campaign_system"] == "h200_sxm"
     assert meta["runtime"]["backend_abis"]["deepep_v2"]["deep_ep"] == "b306af06afd412c88e51e71802951606e40b7358"
-    assert set(meta["runtime"]["backend_capabilities"]["deepep_v2"]) == {"2n_ep16", "4n_ep32"}
+    assert set(meta["runtime"]["backend_capabilities"]["deepep_v2"]) == {"1n_ep8"}
     assert checksums.is_file()
 
 
 def test_merge_campaign_rejects_missing_backend_job(tmp_path):
-    jobs = _six_h200_jobs(tmp_path / "jobs")
+    jobs = _three_h200_jobs(tmp_path / "jobs")
 
     with pytest.raises(campaign.CampaignValidationError, match="requires exactly"):
         campaign.merge_campaign(jobs[:-1], system="h200_sxm", output_dir=tmp_path / "published")
 
 
 def test_validate_job_rejects_classified_failure(tmp_path):
-    job = _write_job(tmp_path, node_num=2, ep_size=16, backend="deepep_ht")
+    job = _write_job(tmp_path, node_num=1, ep_size=8, backend="deepep_ht")
     (job / "errors_moe_a2a_vllm.rank0.json").write_text('[{"error": "boom"}]', encoding="utf-8")
 
     with pytest.raises(campaign.CampaignValidationError, match="classified failures"):
@@ -171,7 +170,7 @@ def test_validate_job_rejects_classified_failure(tmp_path):
 
 
 def test_validate_job_rejects_wrong_system_identity(tmp_path):
-    job = _write_job(tmp_path, node_num=2, ep_size=16, backend="deepep_ht")
+    job = _write_job(tmp_path, node_num=1, ep_size=8, backend="deepep_ht")
 
     with pytest.raises(campaign.CampaignValidationError, match="does not match b200_sxm"):
         campaign.validate_job_dir(job, system="b200_sxm")

@@ -183,8 +183,8 @@ def test_plan_is_deterministic_and_static_keys_are_unique():
     )
 
 
-@pytest.mark.parametrize(("world_size", "node_num"), [(8, 2), (16, 2), (16, 4), (32, 4)])
-def test_supported_multi_node_world_sizes(world_size, node_num):
+@pytest.mark.parametrize(("world_size", "node_num"), [(4, 1), (8, 1), (8, 2), (16, 2), (16, 4), (32, 4)])
+def test_supported_world_sizes(world_size, node_num):
     assert a2a.build_case_plan(
         shapes=[SHAPE],
         grid=GRID,

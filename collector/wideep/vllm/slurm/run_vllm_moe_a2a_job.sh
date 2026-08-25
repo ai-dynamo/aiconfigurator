@@ -66,8 +66,8 @@ case "${RUN_KIND}" in
     *) die "RUN_KIND must be canary or full" ;;
 esac
 case "${NODE_NUM}" in
-    2|4) ;;
-    *) die "NODE_NUM must be 2 or 4" ;;
+    1|2|4) ;;
+    *) die "NODE_NUM must be 1, 2, or 4" ;;
 esac
 
 case "${SYSTEM}" in
@@ -75,7 +75,11 @@ case "${SYSTEM}" in
         [[ "${GPUS_PER_NODE}" == 4 ]] || die "${SYSTEM} requires 4 GPUs/node"
         expected_ep=$((NODE_NUM * 4))
         cross_node_nvlink_capable=runtime_probe_required
-        topology_mode=native
+        if [[ "${NODE_NUM}" == 1 ]]; then
+            topology_mode=single_node
+        else
+            topology_mode=native
+        fi
         if [[ "${SYSTEM}" == gb200 ]]; then
             expected_gpu_token=GB200
             expected_compute_capability=10.0
@@ -88,7 +92,9 @@ case "${SYSTEM}" in
         [[ "${GPUS_PER_NODE}" == 8 ]] || die "${SYSTEM} requires 8 GPUs/node"
         expected_ep=$((NODE_NUM * 8))
         cross_node_nvlink_capable=runtime_probe_required
-        if [[ "${SYSTEM}" == b200_sxm || "${SYSTEM}" == b300_sxm ]]; then
+        if [[ "${NODE_NUM}" == 1 ]]; then
+            topology_mode=single_node
+        elif [[ "${SYSTEM}" == b200_sxm || "${SYSTEM}" == b300_sxm ]]; then
             topology_mode=approved_nodelist
         else
             topology_mode=native
@@ -148,7 +154,9 @@ mapfile -t allocated_nodes < <(scontrol show hostnames "${SLURM_NODELIST}" | sor
     "allocation has ${#allocated_nodes[@]} nodes, expected ${NODE_NUM}"
 
 fabric_identity=""
-if [[ "${topology_mode}" == approved_nodelist ]]; then
+if [[ "${topology_mode}" == single_node ]]; then
+    fabric_identity="single-node:${allocated_nodes[0]}"
+elif [[ "${topology_mode}" == approved_nodelist ]]; then
     require_env AIC_APPROVED_NODELIST
     require_env AIC_FABRIC_APPROVAL_ID
     mapfile -t approved_nodes < <(scontrol show hostnames "${AIC_APPROVED_NODELIST}" | sort -u)

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Validate and merge one six-job vLLM DeepEP campaign for one system.
+"""Validate and merge one three-job vLLM DeepEP campaign for one system.
 
 Formal input is exactly one job for every supported ``(node_num, backend)``
 pair.  A job with classified failures, incomplete provenance, an undeclared
@@ -44,12 +44,12 @@ from collector.wideep.vllm.collect_moe_a2a import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 EXPECTED_VERSION = "0.24.0"
 SYSTEM_LAYOUTS: dict[str, tuple[int, dict[int, int]]] = {
-    "gb200": (4, {2: 8, 4: 16}),
-    "gb300": (4, {2: 8, 4: 16}),
-    "b200_sxm": (8, {2: 16, 4: 32}),
-    "b300_sxm": (8, {2: 16, 4: 32}),
-    "h100_sxm": (8, {2: 16, 4: 32}),
-    "h200_sxm": (8, {2: 16, 4: 32}),
+    "gb200": (4, {1: 4}),
+    "gb300": (4, {1: 4}),
+    "b200_sxm": (8, {1: 8}),
+    "b300_sxm": (8, {1: 8}),
+    "h100_sxm": (8, {1: 8}),
+    "h200_sxm": (8, {1: 8}),
 }
 SYSTEM_GPU_IDENTITIES: dict[str, tuple[str, str]] = {
     "gb200": ("GB200", "10.0"),

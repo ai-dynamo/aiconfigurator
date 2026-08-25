@@ -26,12 +26,12 @@ LEGACY_NVL4_PATCH = REPO_ROOT / "collector/wideep/vllm/patches/deepep_73b_nvl4.p
 
 def test_six_system_matrix_has_exact_formal_topologies():
     assert SYSTEM_LAYOUTS == {
-        "gb200": (4, {2: 8, 4: 16}),
-        "gb300": (4, {2: 8, 4: 16}),
-        "b200_sxm": (8, {2: 16, 4: 32}),
-        "b300_sxm": (8, {2: 16, 4: 32}),
-        "h100_sxm": (8, {2: 16, 4: 32}),
-        "h200_sxm": (8, {2: 16, 4: 32}),
+        "gb200": (4, {1: 4}),
+        "gb300": (4, {1: 4}),
+        "b200_sxm": (8, {1: 8}),
+        "b300_sxm": (8, {1: 8}),
+        "h100_sxm": (8, {1: 8}),
+        "h200_sxm": (8, {1: 8}),
     }
     assert SYSTEM_GPU_IDENTITIES == {
         "gb200": ("GB200", "10.0"),
@@ -93,12 +93,12 @@ def test_runner_discovers_and_records_a_routable_gloo_interface():
 def test_submitter_requires_canaries_and_one_job_per_backend():
     source = SUBMITTER.read_text(encoding="utf-8")
     assert 'backends="deepep_ht,deepep_ll,deepep_v2"' in source
-    assert "canary/2n/${backend}/job_*/SUCCESS" in source
+    assert "canary/${node_num}n/${backend}/job_*/SUCCESS" in source
     assert '--gpus-per-node="${gpus_per_node}"' in source
     assert "--exclusive" in source
     assert "--switches=1" in source
-    assert "B200 formal/canary submission requires infra-approved nodelist" in source
-    assert "B300 formal/canary submission requires infra-approved nodelist" in source
+    assert "multi-node ${system} submission requires infra-approved nodelist" in source
+    assert "topology_mode=single_node" in RUNNER.read_text(encoding="utf-8")
     assert "requires --legacy-overlay-dir" in source
 
 

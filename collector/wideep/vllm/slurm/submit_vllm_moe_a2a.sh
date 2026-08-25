@@ -10,7 +10,7 @@ Usage: submit_vllm_moe_a2a.sh --system SYSTEM --run-kind canary|full \
   --campaign-root PATH --repo-dir PATH --vllm-source-root PATH [OPTIONS]
 
 Options:
-  --nodes 2|4|all             Canary accepts only 2; full defaults to all.
+  --nodes 1|2|4|all           Canary accepts only 1; full defaults to 1.
   --backends LIST             Default: deepep_ht,deepep_ll,deepep_v2.
   --container-image REF       Digest-pinned image; defaults by architecture.
   --image-digest DIGEST       Observed child digest; defaults by architecture.
@@ -66,8 +66,8 @@ done
 [[ -n "${system}" && -n "${run_kind}" && -n "${campaign_root}" && \
    -n "${repo_dir}" && -n "${vllm_source_root}" ]] || { usage; exit 2; }
 case "${run_kind}" in
-    canary) [[ -z "${nodes}" || "${nodes}" == 2 ]] || die "canary is always 2-node"; nodes=2 ;;
-    full) nodes=${nodes:-all}; [[ "${nodes}" == 2 || "${nodes}" == 4 || "${nodes}" == all ]] || die "bad --nodes" ;;
+    canary) [[ -z "${nodes}" || "${nodes}" == 1 ]] || die "canary is always 1-node"; nodes=1 ;;
+    full) nodes=${nodes:-1}; [[ "${nodes}" == 1 || "${nodes}" == 2 || "${nodes}" == 4 || "${nodes}" == all ]] || die "bad --nodes" ;;
     *) die "--run-kind must be canary or full" ;;
 esac
 
@@ -96,18 +96,12 @@ case "${system}" in
         partition='b200@cr+mp-1000W/umbriel-b200@ts4/8gpu-224cpu-2048gb'
         qos=batch-short; gpus_per_node=8; time_limit=04:00:00
         image_digest=${image_digest:-${amd64_digest}}
-        [[ -n "${approved_nodelist}" && -n "${fabric_approval_id}" ]] || die \
-            "B200 formal/canary submission requires infra-approved nodelist and approval ID"
-        [[ "${nodes}" != all ]] || die "B200 needs a distinct approved nodelist for each node count"
         ;;
     b300_sxm)
         account=beta-users_b300
         partition='b300@ts5/b300-nvl8@ts5/8gpu-224cpu-2048gb'
         qos=batch-short; gpus_per_node=8; time_limit=04:00:00
         image_digest=${image_digest:-${amd64_digest}}
-        [[ -n "${approved_nodelist}" && -n "${fabric_approval_id}" ]] || die \
-            "B300 formal/canary submission requires infra-approved nodelist and approval ID"
-        [[ "${nodes}" != all ]] || die "B300 needs a distinct approved nodelist for each node count"
         ;;
     *) die "unsupported system ${system}" ;;
 esac
@@ -140,7 +134,7 @@ log_dir=$(realpath -e "${log_dir}")
 
 IFS=',' read -r -a backend_values <<< "${backends}"
 if [[ "${nodes}" == all ]]; then
-    node_values=(2 4)
+    node_values=(1 2 4)
 else
     node_values=("${nodes}")
 fi
@@ -148,6 +142,10 @@ fi
 for node_num in "${node_values[@]}"; do
     for backend in "${backend_values[@]}"; do
         case "${backend}" in deepep_ht|deepep_ll|deepep_v2) ;; *) die "bad backend ${backend}" ;; esac
+        if [[ ("${system}" == b200_sxm || "${system}" == b300_sxm) && "${node_num}" -gt 1 ]]; then
+            [[ -n "${approved_nodelist}" && -n "${fabric_approval_id}" ]] || die \
+                "multi-node ${system} submission requires infra-approved nodelist and approval ID"
+        fi
         overlay_dir=""
         if [[ "${backend}" == deepep_v2 ]]; then
             [[ -d "${v2_overlay_dir}" ]] || die "deepep_v2 requires --v2-overlay-dir"
@@ -165,8 +163,8 @@ for node_num in "${node_values[@]}"; do
             esac
         fi
         if [[ "${run_kind}" == full && "${allow_full_without_canary}" != true ]]; then
-            compgen -G "${campaign_root}/${system}/canary/2n/${backend}/job_*/SUCCESS" >/dev/null || die \
-                "no successful 2-node ${backend} canary found for ${system}"
+            compgen -G "${campaign_root}/${system}/canary/${node_num}n/${backend}/job_*/SUCCESS" >/dev/null || die \
+                "no successful ${node_num}-node ${backend} canary found for ${system}"
         fi
         world_size=$((node_num * gpus_per_node))
         job_name="aic-v024-${system}-${node_num}n-${backend}-${run_kind}"
