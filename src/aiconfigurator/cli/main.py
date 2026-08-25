@@ -1474,6 +1474,21 @@ def _ensure_backend_version_available(
     if backend_version is None or backend_version in versions:
         return
 
+    # Old-style raw-version escape: the loader-level unlisted-version gate
+    # (perf_database resolve) honors this variable; the precheck must not be
+    # stricter than the loader, or the documented escape is unreachable.
+    if os.environ.get("AIC_ALLOW_UNLISTED_VERSIONS", "").lower() in ("1", "true", "yes"):
+        logger.warning(
+            "AIC_ALLOW_UNLISTED_VERSIONS is set: querying raw version %s/%s on %s "
+            "outside the queryable slots %s. This data is not maintained to the "
+            "queryable bar; results may have partial op coverage.",
+            backend_name,
+            backend_version,
+            system_name,
+            versions,
+        )
+        return
+
     systems_paths = perf_database.get_systems_paths()
     systems_paths_display = ", ".join(systems_paths) if systems_paths else "<none>"
 
@@ -1501,6 +1516,11 @@ def _ensure_backend_version_available(
             "--backend-version to use current. Versions outside the slots "
             "are data coordinates, not queryable versions "
             "(see systems/query_versions.yaml).",
+        )
+        logger.error(
+            "Old-style raw-version query (data outside the slots is not "
+            "maintained to the queryable bar): re-run the same command with "
+            "AIC_ALLOW_UNLISTED_VERSIONS=1.",
         )
     else:
         logger.error("Available versions: none")

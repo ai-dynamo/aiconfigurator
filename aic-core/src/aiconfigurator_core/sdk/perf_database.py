@@ -293,9 +293,14 @@ def resolve_query_version(
     if os.environ.get("AIC_ALLOW_UNLISTED_VERSIONS", "").lower() in ("1", "true", "yes"):
         return version
     raise ValueError(
-        f"{backend}/{version} is not a queryable version on {system}; "
-        f"available: {slots} (or pass allow_unlisted_version=True for "
-        f"fixture/data-coordinate access)"
+        f"{backend}/{version!r} looks like an old-style raw version query; "
+        f"{system} now resolves versions through queryable slots. "
+        f"New way: use an alias ('current'/'previous'/'next') or one of the "
+        f"slot versions {slots}. "
+        f"Old way (raw data-coordinate access, data outside these slots is "
+        f"not maintained to the queryable bar): re-run with the environment "
+        f"variable AIC_ALLOW_UNLISTED_VERSIONS=1, or pass "
+        f"allow_unlisted_version=True in SDK code."
     )
 
 

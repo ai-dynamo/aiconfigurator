@@ -86,7 +86,7 @@ def test_aliases_resolve(systems_root):
 
 def test_slot_values_pass_and_unlisted_raise(systems_root):
     assert pdb.resolve_query_version("h200_sxm", "trtllm", "1.3.0rc20", systems_root) == "1.3.0rc20"
-    with pytest.raises(ValueError, match="not a queryable version"):
+    with pytest.raises(ValueError, match="old-style raw version query"):
         pdb.resolve_query_version("h200_sxm", "trtllm", "1.3.0rc10", systems_root)
     assert (
         pdb.resolve_query_version("h200_sxm", "trtllm", "1.3.0rc10", systems_root, allow_unlisted=True) == "1.3.0rc10"
