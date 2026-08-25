@@ -73,11 +73,14 @@ class CoefficientField:
     """The accepted per-cell fits, queryable at batch sizes between them."""
 
     def __init__(self, fits: dict[tuple[int, int, int], CellFit], topk: int):
-        # Only accepted fits enter. A fit whose residual exceeded tolerance is
-        # worth reporting and worth keeping in the calibration record, but
-        # using it is not a lesser form of correcting -- one such cell, whose
-        # uniform batch had been mismeasured, produced coefficients that drove
-        # a 1709.8 ms estimate negative.
+        # Only structurally determined fits enter: ``accepted`` means every
+        # price the cell's segments could isolate was isolated. It says
+        # nothing about residuals -- those are diagnostics and never reject.
+        # The failure this filter is easy to misread as guarding -- a
+        # mismeasured uniform batch whose coefficients drove a 1709.8 ms
+        # estimate negative -- is caught at query time instead: the bad fit
+        # prices a column below zero, and ``at`` refuses a negative price
+        # wherever it appears, calibrated or interpolated.
         self._fits = {k: v for k, v in fits.items() if v.accepted}
         self._topk = topk
 

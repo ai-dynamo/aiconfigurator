@@ -158,6 +158,36 @@ def test_residuals_are_reported_but_never_reject():
     assert fit.accepted
 
 
+def test_two_mixed_rungs_alone_carry_both_prices():
+    """The square mixed-only solve: no pure segment survived, and exactly as
+    many rungs as unknowns is solved rather than refused. The two rungs are
+    conditioned by moving the prefix, not the split -- concentrated on the
+    crossing row in one, spread over the short rows in the other -- which is
+    what makes their columns point in genuinely different directions."""
+    concentrated = [(200, 256), (24, 0), (16, 0), (16, 0)]
+    spread = [(200, 0), (24, 64), (16, 96), (16, 96)]
+    ms = [_measure(4, 64, 64, r, 3.0, 7.0) for r in (concentrated, spread)]
+    assert all(m.regime == "mixed" for m in ms)
+    fit = solve_cell(4, 64, 64, False, ms)
+    assert fit.accepted
+    assert fit.c_idx == pytest.approx(3.0)
+    assert fit.c_mla == pytest.approx(7.0)
+
+
+def test_nearly_parallel_mixed_rungs_are_refused():
+    """Two mixed rungs from the same knob family carry almost proportional
+    columns; their weighted sum is determined but the split between the prices
+    is decided by noise, and the Gram-pivot guard refuses to invent it."""
+    ms = [
+        _measure(4, 64, 0, [(200, 0), (24, 0), (16, 0), (16, 0)], 3.0, 7.0),
+        _measure(4, 64, 0, [(180, 0), (32, 0), (24, 0), (20, 0)], 3.0, 7.0),
+    ]
+    assert all(m.regime == "mixed" for m in ms)
+    fit = solve_cell(4, 64, 0, False, ms)
+    assert not fit.accepted
+    assert fit.c_idx is None and fit.c_mla is None
+
+
 # --------------------------------------------------------------- applying
 
 

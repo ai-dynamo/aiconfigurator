@@ -17,13 +17,17 @@ scan is priced through ``c_mla``, not ``c_idx``.
 Nothing here fits both at once. The order is forced by what each segment
 can move, and each step subtracts what the previous one already fixed:
 
-    1. c_mla  from the unsaturated segments. Those batches short-circuit the
-       indexer on every row, so ``x_idx`` is identically
-       zero and the segment pins the dense price on its own. It is fitted per
-       batch size rather than per cell -- it is a property of the dense kernel,
-       and at a cell whose average request is long it cannot be measured at all,
-       because a dense row is capped at ``topk`` tokens while the cell's own
-       work grows with ``s_bar^2``.
+    1. c_mla  from the unsaturated segments. No row crosses ``topk``, so
+       ``x_idx`` is identically zero by the column definition and the segment
+       pins ``c_mla`` on its own -- the whole below-bound price, a row's
+       attention together with its own indexer scan. Solved per cell like
+       every other price: an earlier revision shared it across cells as a
+       kernel property, and measurement rejected that (see :mod:`planner` --
+       the ratio varies by orders of magnitude between cells). At a cell whose
+       average request is long it cannot be measured from a pure segment at
+       all, because a capped row reads at most ``topk`` tokens while the
+       cell's own work grows with ``s_bar^2`` -- there the mixed segment
+       carries it (step 3).
 
     2. c_idx  from each cell's saturated segment. Every row is above ``topk``
        so the indexer is pinned there for all of them, which makes the attention
@@ -37,9 +41,10 @@ can move, and each step subtracts what the previous one already fixed:
 
 The rungs within a segment are not redundancy. A coefficient fitted at one
 imbalance magnitude says nothing about whether the relation is linear; rungs
-spanning the segment's own range make the residual meaningful, and a residual
-above the tolerance is the signal that the linear form does not hold for that
-cell rather than that the measurement was noisy.
+spanning the segment's own range make the residual meaningful. A large
+residual is the signal that the linear form is strained for that cell rather
+than that the measurement was noisy -- a diagnostic to read, never a gate:
+``CellFit.accepted`` is structural only.
 """
 
 from __future__ import annotations
@@ -253,9 +258,12 @@ def solve_cell(b: int, s_bar: int, p_bar: int, avg_is_sat: bool, measurements: l
                           the rungs with a degree of freedom left over.
 
     A cell expresses exactly two of the three regimes, so one pure rung and one
-    mixed rung determine both prices, and the second mixed rung the planner
-    emits leaves a residual worth reading. That matches what collection can
-    afford: one rung per pure segment and two for mixed.
+    mixed rung already determine both prices; every rung beyond that feeds the
+    pure segment's median or leaves a residual worth reading. The planner emits
+    up to three rungs per segment, and refuses a segment below its floor -- two
+    rungs for a pure or saturated-point-mixed segment, three for a mixed
+    segment at an unsaturated average point, where the mixed rungs carry both
+    unknowns alone.
 
     Repeated rungs in a pure segment are averaged by median rather than
     least-squares -- the segment is one-dimensional, so each rung is an

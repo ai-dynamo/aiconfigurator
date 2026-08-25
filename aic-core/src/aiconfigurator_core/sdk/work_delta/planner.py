@@ -355,7 +355,7 @@ def mixed_rows(
 ) -> list[tuple[int, int]] | None:
     """``m`` long requests carrying ALL the prefix, ``b - m`` short ones with none.
 
-    Concentrating the prefix is what gives the attention columns room to move:
+    Concentrating the prefix is what gives the work columns room to move:
     spread evenly their deviation stays within a few percent however skewed the
     new-token counts are. The short rows are placed and the long ones take the
     remainder, which is what guarantees they clear ``topk``.
@@ -447,7 +447,7 @@ def _knobs(b: int, s_bar: int, want: Regime, topk: int, avg_is_sat: bool):
 
     Which knob carries the ladder depends on the average point's regime, because
     it decides which columns have to be separated. At a saturated average point
-    the two attention columns are the unknowns and their ratio is
+    the two work columns are the unknowns and their ratio is
     ``-2 * topk / (short_len + 1)`` -- it depends on the short row's length and
     on nothing else, so varying ``m`` would leave the design matrix rank one
     while varying the length conditions it. Everywhere else it is ``m``.
