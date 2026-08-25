@@ -67,6 +67,16 @@ def test_runner_rejects_cifs_and_requires_authoritative_topology():
     assert "--gpu-bind" not in source
 
 
+def test_runner_discovers_and_records_a_routable_gloo_interface():
+    source = RUNNER.read_text(encoding="utf-8")
+    assert 'export AIC_GLOO_ROUTE_PROBE_NODES="${allocated_nodes[*]}"' in source
+    assert 'ip -o route get "${peer}"' in source
+    assert '"${selected_interface}" != lo' in source
+    assert '"allocated nodes use inconsistent Gloo interface names:' in source
+    assert '"gloo_socket_ifname": sys.argv[10]' in source
+    assert 'export GLOO_SOCKET_IFNAME="${gloo_socket_ifname}"' in source
+
+
 def test_submitter_requires_canaries_and_one_job_per_backend():
     source = SUBMITTER.read_text(encoding="utf-8")
     assert 'backends="deepep_ht,deepep_ll,deepep_v2"' in source

@@ -240,6 +240,49 @@ nvlink_topology_sha256=$(
         'hostname; nvidia-smi topo -m' | sha256sum | awk '{print $1}'
 )
 
+# Gloo must use the routable control interface for its CPU-only failure
+# agreement group.  Hostname resolution can otherwise select 127.0.1.1 on
+# DLCluster nodes and leave every rank stuck in connectFullMesh.  Probe a
+# route to another allocated node from every host and fail closed unless the
+# allocation exposes one consistent, non-loopback interface name.
+master_addr=${allocated_nodes[0]}
+export AIC_GLOO_ROUTE_PROBE_NODES="${allocated_nodes[*]}"
+gloo_interface_inventory=$(srun --nodes="${NODE_NUM}" --ntasks="${NODE_NUM}" --ntasks-per-node=1 \
+    bash -lc '
+        local_host=$(hostname -s)
+        selected_interface=""
+        for peer in ${AIC_GLOO_ROUTE_PROBE_NODES}; do
+            [[ "${peer%%.*}" == "${local_host}" ]] && continue
+            selected_interface=$(
+                ip -o route get "${peer}" 2>/dev/null |
+                    awk '\''{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}'\''
+            )
+            if [[ -n "${selected_interface}" && "${selected_interface}" != lo ]]; then
+                break
+            fi
+            selected_interface=""
+        done
+        [[ -n "${selected_interface}" ]] || {
+            echo "unable to discover a non-loopback route to another allocated node" >&2
+            exit 1
+        }
+        printf "%s|%s\n" "$(hostname)" "${selected_interface}"
+    ') || die "failed to discover Gloo control interfaces"
+mapfile -t gloo_interface_lines <<< "${gloo_interface_inventory}"
+[[ "${#gloo_interface_lines[@]}" == "${NODE_NUM}" ]] || die \
+    "Gloo interface inventory has ${#gloo_interface_lines[@]} rows, expected ${NODE_NUM}: ${gloo_interface_inventory}"
+gloo_interfaces_seen=()
+for interface_line in "${gloo_interface_lines[@]}"; do
+    IFS='|' read -r interface_host interface_name <<< "${interface_line}"
+    [[ -n "${interface_host}" && -n "${interface_name}" && "${interface_name}" != lo ]] || die \
+        "malformed Gloo interface inventory row: ${interface_line}"
+    gloo_interfaces_seen+=("${interface_name}")
+done
+mapfile -t gloo_interfaces < <(printf '%s\n' "${gloo_interfaces_seen[@]}" | sort -u)
+[[ "${#gloo_interfaces[@]}" == 1 ]] || die \
+    "allocated nodes use inconsistent Gloo interface names: ${gloo_interface_inventory}"
+gloo_socket_ifname=${gloo_interfaces[0]}
+
 staging_root="/tmp/aic-vllm-a2a-${SLURM_JOB_ID}"
 [[ "${staging_root}" == /tmp/aic-vllm-a2a-* ]] || die "unsafe staging root ${staging_root}"
 mkdir -p -- "${staging_root}"
@@ -256,7 +299,7 @@ safe_existing_path "container cache" "${ENROOT_CACHE_PATH}" >/dev/null
 runtime_abi_json=$(
     python3 - "${RUNTIME_ABI_JSON}" "${SYSTEM}" "${fabric_identity}" "${gpu_name}" \
         "${driver_version}" "${compute_capability}" "${rdma_device_count_min}" \
-        "${cross_node_nvlink_capable}" "${nvlink_topology_sha256}" <<'PY'
+        "${cross_node_nvlink_capable}" "${nvlink_topology_sha256}" "${gloo_socket_ifname}" <<'PY'
 import json
 import sys
 
@@ -271,6 +314,7 @@ payload.update(
         "rdma_device_count_min": sys.argv[7],
         "cross_node_nvlink_capable": sys.argv[8],
         "nvlink_topology_sha256": sys.argv[9],
+        "gloo_socket_ifname": sys.argv[10],
         "slurm_topology_verified": "true",
     }
 )
@@ -278,7 +322,6 @@ print(json.dumps(payload, separators=(",", ":")))
 PY
 )
 
-master_addr=${allocated_nodes[0]}
 container_mounts="${repo_dir}:${repo_dir},${vllm_source_root}:${vllm_source_root},${staging_root}:${staging_root}"
 container_command='export PYTHONPATH="${AIC_REPO_DIR}:${PYTHONPATH:-}";'
 if [[ -n "${DEEP_EP_OVERLAY_DIR}" ]]; then
@@ -423,6 +466,7 @@ fi
 
 export MASTER_ADDR="${master_addr}"
 export MASTER_PORT="${MASTER_PORT:-29500}"
+export GLOO_SOCKET_IFNAME="${gloo_socket_ifname}"
 export VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL=1
 export AIC_STAGING_ROOT="${staging_root}"
 export AIC_REPO_DIR="${repo_dir}"
