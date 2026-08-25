@@ -23,10 +23,10 @@ class _FakeRecommendTask:
     """Minimal stand-in for Task in escalation-loop unit tests.
 
     Only the fields that cli_recommend and _build_recommend_tasks read are
-    present.  Candidate fields are intentionally absent: they all use
-    default_factory on real Tasks (so f.default is MISSING, not None) and
-    _build_recommend_tasks would skip them anyway.  Escalation behavior is
-    tested here; candidate-reset correctness is covered by
+    present.  Candidate fields are intentionally absent: real Task candidate
+    fields default to None, but _build_recommend_tasks resets them via
+    TASK_REBUILD_FIELDS — not _FakeRecommendTask internals.  Escalation loop
+    behavior is tested here; candidate-reset correctness is covered by
     TestBuildRecommendTasksScaling which uses real Task objects.
     """
 
@@ -998,5 +998,5 @@ class TestBuildRecommendTasksScaling:
         assert rebuilt.max_gpu_per_replica is not None
         assert rebuilt.max_gpu_per_replica >= 64, (
             f"max_gpu_per_replica={rebuilt.max_gpu_per_replica} — disagg escalation "
-            "is defeated; _REBUILD_RESET_FIELDS must include this field"
+            "is defeated; TASK_REBUILD_FIELDS must include this field"
         )

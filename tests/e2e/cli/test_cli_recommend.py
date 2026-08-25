@@ -14,12 +14,11 @@ pytestmark = [pytest.mark.e2e, pytest.mark.build]
 
 
 def test_recommend_multi_node_moe_returns_results():
-    """cli_recommend escalates to multi-node for Kimi-K3 on B200.
+    """cli_recommend returns a multi-node config for Kimi-K3 on B200.
 
     Kimi-K3 (large MoE) does not fit in a single B200 node (8x 192 GB).
-    The recommend escalation must scale TP/EP candidates beyond the single-node
-    limit and return at least one feasible configuration.  Uses real silicon
-    data (no HuggingFace credentials required).
+    cli_recommend must return at least one feasible configuration with
+    num_total_gpus > 8.  Uses real silicon data.
     """
     result = cli_recommend(
         model_path="moonshotai/Kimi-K3",

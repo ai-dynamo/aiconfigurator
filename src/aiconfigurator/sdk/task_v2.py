@@ -1615,7 +1615,7 @@ class Task:
         if self.serving_mode == "agg":
             self._resolve_agg_search()
         else:
-            self._resolve_disagg_search()
+            self._resolve_disagg_search(defaulted)
         self._apply_large_pipeline_parallel(defaulted)
         self._apply_total_gpus_budget()
 
@@ -1796,7 +1796,7 @@ class Task:
         for dim, values in fused.items():
             _set(f"agg_{dim}_candidates", values)
 
-    def _resolve_disagg_search(self) -> None:
+    def _resolve_disagg_search(self, defaulted: set[str]) -> None:
         def _lists(wide: bool) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
             return build_disagg_parallel_lists(
                 backend_name=self.prefill_backend_name,
@@ -1835,9 +1835,13 @@ class Task:
 
         # Extend per-worker num_gpu candidates to the full escalation budget on
         # fused (non-large-EP) paths — same rationale as the agg fix above.
+        # Only extend fields the user did not supply (same contract as _set in
+        # _resolve_agg_search): a user-pinned candidate list wins unchanged.
         # _apply_total_gpus_budget trims both fields to <= total_gpus afterward.
         if self.total_gpus is not None:
             for _field in ("prefill_num_gpu_candidates", "decode_num_gpu_candidates"):
+                if _field not in defaulted:
+                    continue
                 _current = getattr(self, _field)
                 if _current is not None:
                     _extras = {n for n in [32, 64] if n <= self.total_gpus}
