@@ -15,7 +15,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --system) system=$2; shift 2 ;;
         --campaign-root) campaign_root=$2; shift 2 ;;
-        -h|--help) echo "Usage: $0 --system gb200|gb300|h100_sxm|h200_sxm --campaign-root PATH"; exit 0 ;;
+        -h|--help) echo "Usage: $0 --system gb200|gb300|b200_sxm|b300_sxm|h100_sxm|h200_sxm --campaign-root PATH"; exit 0 ;;
         *) die "unknown argument $1" ;;
     esac
 done
@@ -40,6 +40,16 @@ case "${system}" in
         account=dl_frameworks; partition=dgxh200; qos=normal
         image_digest=${amd64_digest}; image_arch=amd64
         ;;
+    b200_sxm)
+        account=beta-users_fallback
+        partition='b200@cr+mp-1000W/umbriel-b200@ts4/8gpu-224cpu-2048gb'
+        qos=batch-short; image_digest=${amd64_digest}; image_arch=amd64
+        ;;
+    b300_sxm)
+        account=beta-users_b300
+        partition='b300@ts5/b300-nvl8@ts5/8gpu-224cpu-2048gb'
+        qos=batch-short; image_digest=${amd64_digest}; image_arch=amd64
+        ;;
     *) die "unsupported image-staging system ${system}" ;;
 esac
 
@@ -57,7 +67,8 @@ export SYSTEM="${system}" CAMPAIGN_ROOT="${campaign_root}"
 export IMAGE_DIGEST="${image_digest}" IMAGE_ARCH="${image_arch}"
 case "${system}" in
     gb200|gb300) export CONTAINER_IMAGE="vllm/vllm-openai:v0.24.0@${image_digest}" ;;
-    h100_sxm|h200_sxm) export CONTAINER_IMAGE="docker.io#vllm/vllm-openai:${image_digest}" ;;
+    b200_sxm|b300_sxm|h100_sxm|h200_sxm) \
+        export CONTAINER_IMAGE="docker.io#vllm/vllm-openai:${image_digest}" ;;
 esac
 
 # Image staging emits no benchmark data and only imports the runtime for ABI

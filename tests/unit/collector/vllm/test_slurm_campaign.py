@@ -148,6 +148,9 @@ def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     assert "arm64) enroot_arch=aarch64" in runner
     assert "image_reference_mode=verified-tag" in runner
     assert '"image_reference_mode": image_reference_mode' in runner
+    assert "b200_sxm|b300_sxm|h100_sxm|h200_sxm" in submitter
+    assert "beta-users_fallback" in submitter
+    assert "beta-users_b300" in submitter
     assert "--gpus=1" in submitter
     assert "--exclusive" not in submitter
     assert "--switches=1" in submitter
