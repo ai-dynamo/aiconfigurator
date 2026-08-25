@@ -126,6 +126,19 @@ export AIC_NCCL_VERSION="${V2_NCCL_VERSION}"
 export AIC_CUDA_ARCHES="${CUDA_ARCHES}"
 export AIC_EXPECTED_API="${expected_api}"
 
+# The official vLLM child image intentionally does not ship the git CLI.
+# Resolve and attest the DeepEP checkout on the host, then mount the exact
+# checkout into the build container through the job-local staging directory.
+workspace="${staging_root}/workspace"
+mkdir -p "${workspace}"
+git clone --filter=blob:none https://github.com/deepseek-ai/DeepEP "${workspace}/DeepEP"
+git -C "${workspace}/DeepEP" checkout --detach "${deepep_commit}"
+[[ "$(git -C "${workspace}/DeepEP" rev-parse HEAD)" == "${deepep_commit}" ]] || die "DeepEP source commit mismatch"
+if [[ "${OVERLAY_PROFILE}" == legacy-nvl4 ]]; then
+    git -C "${workspace}/DeepEP" apply --check --unidiff-zero "${legacy_patch}"
+    git -C "${workspace}/DeepEP" apply --unidiff-zero "${legacy_patch}"
+fi
+
 srun \
     --nodes=1 \
     --ntasks=1 \
@@ -148,13 +161,6 @@ srun \
             export EP_NCCL_ROOT_DIR="${AIC_OVERLAY_STAGING}/build-nccl/nvidia/nccl"
             export LD_LIBRARY_PATH="${EP_NCCL_ROOT_DIR}/lib:${LD_LIBRARY_PATH:-}"
             basename "${nccl_wheels[0]}" > "${AIC_OVERLAY_STAGING}/nccl_wheel_name.txt"
-        fi
-
-        if [[ "${AIC_OVERLAY_PROFILE}" == legacy-nvl4 ]]; then
-            git clone https://github.com/deepseek-ai/DeepEP "${workspace}/DeepEP"
-            git -C "${workspace}/DeepEP" checkout --detach "${AIC_DEEPEP_COMMIT}"
-            git -C "${workspace}/DeepEP" apply --check --unidiff-zero "${AIC_LEGACY_PATCH}"
-            git -C "${workspace}/DeepEP" apply --unidiff-zero "${AIC_LEGACY_PATCH}"
         fi
 
         "${AIC_VLLM_SOURCE_ROOT}/tools/ep_kernels/install_python_libraries.sh" \
