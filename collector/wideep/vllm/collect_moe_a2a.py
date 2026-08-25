@@ -419,8 +419,8 @@ def collect_with_adapter(
     return CollectionResult(rows, failures, resolved_cases)
 
 
-def _init_nccl_group(identity: DistIdentity):
-    """Initialize one direct NCCL process group; no vLLM engine/model state."""
+def _init_process_groups(identity: DistIdentity):
+    """Initialize separate benchmark and CPU failure-agreement groups."""
     import torch
     import torch.distributed as dist
 
@@ -438,7 +438,10 @@ def _init_nccl_group(identity: DistIdentity):
             rank=identity.rank,
             device_id=torch.device(f"cuda:{identity.local_rank}"),
         )
-    return dist.new_group(list(range(identity.world_size)), backend="nccl")
+    ranks = list(range(identity.world_size))
+    benchmark_group = dist.new_group(ranks, backend="nccl")
+    agreement_group = dist.new_group(ranks, backend="gloo")
+    return benchmark_group, agreement_group
 
 
 class VllmBenchmarkAdapter:
@@ -1127,8 +1130,9 @@ def main(argv: list[str] | None = None) -> None:
     runtime_meta["transport"] = {
         "allow_mnnvl": args.allow_mnnvl,
         "allow_nvlink": not args.disable_nvlink,
+        "failure_agreement": "gloo_cpu",
     }
-    group = _init_nccl_group(identity)
+    group, agreement_group = _init_process_groups(identity)
     output_dir = Path(args.output_path)
     print(
         f"[vllm moe_a2a] host={socket.gethostname()} rank={identity.rank}/{identity.world_size} "
@@ -1139,8 +1143,12 @@ def main(argv: list[str] | None = None) -> None:
     try:
 
         def agree(stage: str, failed: bool) -> bool:
-            failure = torch.tensor([int(failed)], device="cuda", dtype=torch.int64)
-            dist.all_reduce(failure, op=dist.ReduceOp.MAX, group=group)
+            # Keep lifecycle agreement independent of the CUDA context and
+            # benchmark NCCL communicator. A failed DeepEP kernel can poison
+            # both; the CPU/Gloo group must still propagate the original stage
+            # failure to every rank.
+            failure = torch.tensor([int(failed)], device="cpu", dtype=torch.int64)
+            dist.all_reduce(failure, op=dist.ReduceOp.MAX, group=agreement_group)
             return bool(failure.item())
 
         preflight_error: BaseException | None = None
@@ -1282,7 +1290,7 @@ def main(argv: list[str] | None = None) -> None:
                 peer_error_type=VllmMoeA2APeerError,
             )
         )
-        dist.barrier(group=group)
+        dist.barrier(group=agreement_group)
 
         if identity.rank == 0:
             if not publishable:

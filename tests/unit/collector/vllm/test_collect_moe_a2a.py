@@ -115,6 +115,13 @@ def test_transport_defaults_are_publishable_and_alternates_are_diagnostic():
     assert "diagnostic transport staged rows" in SOURCE
 
 
+def test_rank_lifecycle_agreement_is_cpu_gloo_not_benchmark_nccl():
+    assert 'agreement_group = dist.new_group(ranks, backend="gloo")' in SOURCE
+    assert 'device="cpu"' in SOURCE
+    assert "group=agreement_group" in SOURCE
+    assert '"failure_agreement": "gloo_cpu"' in SOURCE
+
+
 def test_plan_maps_backend_phase_dtype_sms_and_capacity():
     cases = _plan()
     by_backend = {backend: [case for case in cases if case.comm_backend == backend] for backend in a2a.BACKENDS}
