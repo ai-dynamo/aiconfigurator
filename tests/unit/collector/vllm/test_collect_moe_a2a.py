@@ -122,6 +122,13 @@ def test_rank_lifecycle_agreement_is_cpu_gloo_not_benchmark_nccl():
     assert '"failure_agreement": "gloo_cpu"' in SOURCE
 
 
+def test_case_failures_are_persisted_before_runtime_capability_gate():
+    main_source = SOURCE[SOURCE.index("def main(") :]
+    assert main_source.index("_write_failures(") < main_source.index(
+        "DeepEP did not report a runtime topology capability"
+    )
+
+
 def test_plan_maps_backend_phase_dtype_sms_and_capacity():
     cases = _plan()
     by_backend = {backend: [case for case in cases if case.comm_backend == backend] for backend in a2a.BACKENDS}

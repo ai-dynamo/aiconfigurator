@@ -1183,9 +1183,6 @@ def main(argv: list[str] | None = None) -> None:
             node_num=identity.node_num,
             stage_agreement=agree,
         )
-        if adapter.runtime_capability is None:
-            raise VllmMoeA2ABenchmarkError("DeepEP did not report a runtime topology capability")
-        runtime_meta["backend_capability"] = adapter.runtime_capability
 
         failure_record_error: BaseException | None = None
         try:
@@ -1214,6 +1211,9 @@ def main(argv: list[str] | None = None) -> None:
             raise VllmMoeA2ABenchmarkError(
                 f"all {len(cases)} cases failed; no parquet or complete sidecar will be written"
             )
+        if adapter.runtime_capability is None:
+            raise VllmMoeA2ABenchmarkError("DeepEP did not report a runtime topology capability")
+        runtime_meta["backend_capability"] = adapter.runtime_capability
 
         perf_path = output_dir / PerfFile.MOE_A2A.value
         row_write_error: BaseException | None = None
