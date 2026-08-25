@@ -541,6 +541,18 @@ SMOKE_CASES = [
     ),
     pytest.param(
         EngineStepParityCase(
+            model_path="Qwen/Qwen3.5-397B-A17B",
+            system_name="gb200",
+            backend_name="sglang",
+            backend_version="0.5.14",
+            tp_size=16,
+        ),
+        # Beyond-node TP on a 4-GPU-node system: pins the recorded
+        # multi-node custom-AR fan-out pricing (AIC-1808).
+        id="qwen35-397b-a17b-gb200-sglang-0514-tp16-scan-coverage",
+    ),
+    pytest.param(
+        EngineStepParityCase(
             model_path="meta-llama/Meta-Llama-3.1-8B",
             system_name="gb200",
             backend_name="trtllm",

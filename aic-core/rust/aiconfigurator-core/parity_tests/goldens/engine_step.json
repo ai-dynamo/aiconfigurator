@@ -2328,6 +2328,20 @@
           "static_total": 49.944
         }
       }
+    },
+    "qwen35-397b-a17b-gb200-sglang-0514-tp16-scan-coverage": {
+      "agg": {
+        "error": "ValueError"
+      },
+      "disagg": {
+        "error": "ValueError"
+      },
+      "mixed": {
+        "error": "ValueError"
+      },
+      "static": {
+        "error": "ValueError"
+      }
     }
   },
   "header": {
@@ -2389,6 +2403,22 @@
     "minimax-m3-b200-sglang-0514-hybrid-xop::static": {
       "engine": "rust",
       "git_head": "547edbab6abe18f378db9a3960287873b890b0f8"
+    },
+    "qwen35-397b-a17b-gb200-sglang-0514-tp16-scan-coverage::agg": {
+      "engine": "rust",
+      "git_head": "2c51f91b4bcbdcaca133de657fc51ea28ba3c153"
+    },
+    "qwen35-397b-a17b-gb200-sglang-0514-tp16-scan-coverage::disagg": {
+      "engine": "rust",
+      "git_head": "2c51f91b4bcbdcaca133de657fc51ea28ba3c153"
+    },
+    "qwen35-397b-a17b-gb200-sglang-0514-tp16-scan-coverage::mixed": {
+      "engine": "rust",
+      "git_head": "2c51f91b4bcbdcaca133de657fc51ea28ba3c153"
+    },
+    "qwen35-397b-a17b-gb200-sglang-0514-tp16-scan-coverage::static": {
+      "engine": "rust",
+      "git_head": "2c51f91b4bcbdcaca133de657fc51ea28ba3c153"
     }
   }
 }
