@@ -65,8 +65,8 @@ pytestmark = pytest.mark.integration
 # sglang/vllm emit `CustomAllReduce` — trtllm comm quant, and the
 # SGLang/TRT-LLM-only Fallback-MLA chain) uncovered here.
 #
-# Cases drawn straight from `SMOKE_CASES` so this tracks the same matrix. All compute (no error-symmetry cases), so every
-# surface yields a real number.
+# Cases drawn straight from `SMOKE_CASES` so this tracks the same matrix. All
+# compute (no error-symmetry cases), so every surface yields a real number.
 #
 #   vllm   : the original 5 b200_sxm/vllm cases (current slot). The former
 #            b200_sxm/vllm/0.22.0 POWER_CASES member was removed with the
