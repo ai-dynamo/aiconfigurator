@@ -337,6 +337,21 @@ def collect_with_adapter(
     agreement = stage_agreement or (
         lambda stage, failed: failure_agreement(failed) if stage.endswith(":benchmark") else failed
     )
+    prepare_error: BaseException | None = None
+    try:
+        prepare = getattr(adapter, "prepare", None)
+        if prepare is not None:
+            prepare(cases)
+    except BaseException as error:
+        prepare_error = error
+    raise_for_stage(
+        agree_stage(
+            "adapter_prepare",
+            prepare_error,
+            agreement=agreement,
+            peer_error_type=VllmMoeA2APeerError,
+        )
+    )
     for case_index, case in enumerate(cases):
         case_rows: list[dict[str, Any]] = []
         resolved: VllmMoeA2ACase | None = None
@@ -464,16 +479,53 @@ class VllmBenchmarkAdapter:
         self.warmups = warmups
         self.runs = runs
         self._buffer = None
+        self._buffer_key: tuple[Any, ...] | None = None
+        self._ll_rdma_bytes: int | None = None
+        self._ll_num_qps_per_rank: int | None = None
+        self._v2_max_tokens: dict[tuple[Any, ...], int] = {}
         self.runtime_capability: dict[str, str] | None = None
+
+    def prepare(self, cases: list[VllmMoeA2ACase]) -> None:
+        """Size reusable DeepEP buffers once from the declared case plan.
+
+        A serving worker owns a long-lived DeepEP buffer. Recreating NVSHMEM
+        for every benchmark key leaks/invalidates GDR resources on real
+        multi-node runs, so the collector follows that lifecycle too.
+        """
+        if not cases:
+            raise VllmMoeA2ADeclarationError("cannot prepare an empty vLLM moe_a2a case plan")
+        backends = {case.comm_backend for case in cases}
+        if len(backends) != 1:
+            raise VllmMoeA2ADeclarationError(
+                f"one adapter may prepare exactly one DeepEP backend, found {sorted(backends)}"
+            )
+        backend = next(iter(backends))
+        if backend == "deepep_ll":
+            import deep_ep
+
+            self._ll_rdma_bytes = max(
+                deep_ep.Buffer.get_low_latency_rdma_size_hint(
+                    num_max_dispatch_tokens_per_rank=case.capacity,
+                    hidden=case.shape.hidden_size,
+                    num_ranks=self.identity.world_size,
+                    num_experts=case.shape.num_experts,
+                )
+                for case in cases
+            )
+            self._ll_num_qps_per_rank = max(case.shape.num_experts // self.identity.world_size for case in cases)
+        elif backend == "deepep_v2":
+            for case in cases:
+                key = self._runtime_buffer_key(case)
+                self._v2_max_tokens[key] = max(self._v2_max_tokens.get(key, 0), case.capacity)
 
     def close(self) -> None:
         if self._buffer is not None:
             self._buffer.destroy()
             self._buffer = None
+            self._buffer_key = None
 
     def benchmark(self, case: VllmMoeA2ACase) -> BenchmarkResult:
         """Run exact public prepare/finalize calls with synthetic activations."""
-        self.close()
         torch, prepare_finalize, quant_config, reduce_impl = self._make_runtime(case)
         torch.manual_seed(17 + self.identity.rank)
         tokens = torch.randn(
@@ -590,6 +642,16 @@ class VllmBenchmarkAdapter:
             num_tokens_across_dp=num_tokens_across_dp,
         )
 
+    @staticmethod
+    def _runtime_buffer_key(case: VllmMoeA2ACase) -> tuple[Any, ...]:
+        if case.comm_backend == "deepep_v2":
+            # ElasticBuffer fixes hidden/top-k at construction. Token capacity
+            # is overprovisioned per signature by prepare().
+            return (case.comm_backend, case.shape.hidden_size, case.shape.topk)
+        # Legacy HT/LL buffers can serve every declared shape when their byte
+        # allocation and QP count are sized to the maximum plan requirement.
+        return (case.comm_backend,)
+
     def _make_runtime(self, case: VllmMoeA2ACase):
         import deep_ep
         import torch
@@ -608,23 +670,28 @@ class VllmBenchmarkAdapter:
         local_experts = case.shape.num_experts // self.identity.world_size
         rank_offset = self.identity.rank * local_experts
         quant_config = FusedMoEQuantConfig.make(None)
+        buffer_key = self._runtime_buffer_key(case)
+        if self._buffer is not None and self._buffer_key != buffer_key:
+            self.close()
         if case.comm_backend == "deepep_ht":
-            is_internode = self.identity.node_num > 1
-            self._buffer = deep_ep.Buffer(
-                group=self.group,
-                num_nvl_bytes=case.capacity,
-                num_rdma_bytes=case.capacity if is_internode else 0,
-                low_latency_mode=False,
-                num_qps_per_rank=HT_SMS // 2 if is_internode else 1,
-                explicitly_destroy=True,
-            )
-            num_scaleout_ranks = int(self._buffer.runtime.get_num_rdma_ranks())
-            self._record_capability(
-                backend=case.comm_backend,
-                topology_source="legacy_compile_time",
-                num_scaleout_ranks=num_scaleout_ranks,
-                num_scaleup_ranks=self.identity.world_size // num_scaleout_ranks,
-            )
+            if self._buffer is None:
+                is_internode = self.identity.node_num > 1
+                self._buffer = deep_ep.Buffer(
+                    group=self.group,
+                    num_nvl_bytes=case.capacity,
+                    num_rdma_bytes=case.capacity if is_internode else 0,
+                    low_latency_mode=False,
+                    num_qps_per_rank=HT_SMS // 2 if is_internode else 1,
+                    explicitly_destroy=True,
+                )
+                self._buffer_key = buffer_key
+                num_scaleout_ranks = int(self._buffer.runtime.get_num_rdma_ranks())
+                self._record_capability(
+                    backend=case.comm_backend,
+                    topology_source="legacy_compile_time",
+                    num_scaleout_ranks=num_scaleout_ranks,
+                    num_scaleup_ranks=self.identity.world_size // num_scaleout_ranks,
+                )
             deep_ep.Buffer.set_num_sms(HT_SMS)
             prepare_finalize = DeepEPHTPrepareAndFinalize(
                 self._buffer,
@@ -634,29 +701,34 @@ class VllmBenchmarkAdapter:
             )
             reduce_impl = TopKWeightAndReduceNoOP()
         elif case.comm_backend == "deepep_ll":
-            rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-                num_max_dispatch_tokens_per_rank=case.capacity,
-                hidden=case.shape.hidden_size,
-                num_ranks=self.identity.world_size,
-                num_experts=case.shape.num_experts,
-            )
-            self._buffer = deep_ep.Buffer(
-                group=self.group,
-                num_nvl_bytes=HT_BUFFER_SIZE_BYTES,
-                num_rdma_bytes=rdma_bytes,
-                low_latency_mode=True,
-                num_qps_per_rank=local_experts,
-                allow_nvlink_for_low_latency_mode=not self.disable_nvlink,
-                explicitly_destroy=True,
-                allow_mnnvl=self.allow_mnnvl,
-            )
-            num_scaleout_ranks = int(self._buffer.runtime.get_num_rdma_ranks())
-            self._record_capability(
-                backend=case.comm_backend,
-                topology_source="legacy_compile_time",
-                num_scaleout_ranks=num_scaleout_ranks,
-                num_scaleup_ranks=self.identity.world_size // num_scaleout_ranks,
-            )
+            if self._buffer is None:
+                rdma_bytes = self._ll_rdma_bytes
+                if rdma_bytes is None:
+                    rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
+                        num_max_dispatch_tokens_per_rank=case.capacity,
+                        hidden=case.shape.hidden_size,
+                        num_ranks=self.identity.world_size,
+                        num_experts=case.shape.num_experts,
+                    )
+                num_qps_per_rank = self._ll_num_qps_per_rank or local_experts
+                self._buffer = deep_ep.Buffer(
+                    group=self.group,
+                    num_nvl_bytes=HT_BUFFER_SIZE_BYTES,
+                    num_rdma_bytes=rdma_bytes,
+                    low_latency_mode=True,
+                    num_qps_per_rank=num_qps_per_rank,
+                    allow_nvlink_for_low_latency_mode=not self.disable_nvlink,
+                    explicitly_destroy=True,
+                    allow_mnnvl=self.allow_mnnvl,
+                )
+                self._buffer_key = buffer_key
+                num_scaleout_ranks = int(self._buffer.runtime.get_num_rdma_ranks())
+                self._record_capability(
+                    backend=case.comm_backend,
+                    topology_source="legacy_compile_time",
+                    num_scaleout_ranks=num_scaleout_ranks,
+                    num_scaleup_ranks=self.identity.world_size // num_scaleout_ranks,
+                )
             prepare_finalize = DeepEPLLPrepareAndFinalize(
                 self._buffer,
                 max_tokens_per_rank=case.capacity,
@@ -669,27 +741,29 @@ class VllmBenchmarkAdapter:
                 DeepEPV2PrepareAndFinalize,
             )
 
-            self._buffer = deep_ep.ElasticBuffer(
-                group=self.group,
-                num_max_tokens_per_rank=case.capacity,
-                hidden=case.shape.hidden_size,
-                num_topk=case.shape.topk,
-                use_fp8_dispatch=False,
-                allow_hybrid_mode=True,
-                prefer_overlap_with_compute=False,
-                allow_multiple_reduction=False,
-                explicitly_destroy=True,
-            )
-            num_scaleout_ranks, num_scaleup_ranks = self._buffer.get_logical_domain_size()
-            num_rdma_ranks, num_nvlink_ranks = self._buffer.get_physical_domain_size()
-            self._record_capability(
-                backend=case.comm_backend,
-                topology_source="nccl_lsa",
-                num_scaleout_ranks=num_scaleout_ranks,
-                num_scaleup_ranks=num_scaleup_ranks,
-                num_rdma_ranks=num_rdma_ranks,
-                num_nvlink_ranks=num_nvlink_ranks,
-            )
+            if self._buffer is None:
+                self._buffer = deep_ep.ElasticBuffer(
+                    group=self.group,
+                    num_max_tokens_per_rank=self._v2_max_tokens.get(buffer_key, case.capacity),
+                    hidden=case.shape.hidden_size,
+                    num_topk=case.shape.topk,
+                    use_fp8_dispatch=False,
+                    allow_hybrid_mode=True,
+                    prefer_overlap_with_compute=False,
+                    allow_multiple_reduction=False,
+                    explicitly_destroy=True,
+                )
+                self._buffer_key = buffer_key
+                num_scaleout_ranks, num_scaleup_ranks = self._buffer.get_logical_domain_size()
+                num_rdma_ranks, num_nvlink_ranks = self._buffer.get_physical_domain_size()
+                self._record_capability(
+                    backend=case.comm_backend,
+                    topology_source="nccl_lsa",
+                    num_scaleout_ranks=num_scaleout_ranks,
+                    num_scaleup_ranks=num_scaleup_ranks,
+                    num_rdma_ranks=num_rdma_ranks,
+                    num_nvlink_ranks=num_nvlink_ranks,
+                )
             prepare_finalize = DeepEPV2PrepareAndFinalize(
                 buffer=self._buffer,
                 num_dispatchers=self.identity.world_size,

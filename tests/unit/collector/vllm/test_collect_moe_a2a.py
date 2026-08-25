@@ -218,6 +218,86 @@ def test_pure_adapter_builds_unified_rows_and_full_unique_keys():
     assert all(row["latency"] == row["transmit_us"] + row["notify_us"] for row in result.rows)
 
 
+def test_collection_prepares_adapter_before_first_case_and_closes_after_last():
+    events = []
+
+    class PreparingAdapter(FakeAdapter):
+        def prepare(self, cases):
+            events.append(("prepare", tuple(cases)))
+
+        def benchmark(self, case):
+            assert events and events[0][0] == "prepare"
+            events.append(("benchmark", case))
+            return super().benchmark(case)
+
+        def close(self):
+            events.append(("close",))
+            super().close()
+
+    cases = _plan(("deepep_ll",))
+    adapter = PreparingAdapter()
+    a2a.collect_with_adapter(
+        cases,
+        adapter=adapter,
+        world_size=WORLD_SIZE,
+        node_num=NODE_NUM,
+    )
+
+    assert events[0] == ("prepare", tuple(cases))
+    assert [event[0] for event in events].count("benchmark") == len(cases)
+    assert events[-1] == ("close",)
+
+
+def test_real_adapter_sizes_one_ll_buffer_for_the_whole_plan(monkeypatch):
+    hints = []
+
+    class FakeBuffer:
+        @staticmethod
+        def get_low_latency_rdma_size_hint(**kwargs):
+            hints.append(kwargs)
+            return kwargs["num_max_dispatch_tokens_per_rank"] + kwargs["hidden"] + kwargs["num_experts"]
+
+    deep_ep = ModuleType("deep_ep")
+    deep_ep.Buffer = FakeBuffer
+    monkeypatch.setitem(sys.modules, "deep_ep", deep_ep)
+    identity = a2a.DistIdentity(
+        rank=0,
+        world_size=WORLD_SIZE,
+        local_rank=0,
+        gpus_per_node=4,
+        node_num=NODE_NUM,
+        master_addr="127.0.0.1",
+        master_port="29500",
+    )
+    cases = _plan(("deepep_ll",))
+    adapter = a2a.VllmBenchmarkAdapter(group=None, identity=identity)
+
+    adapter.prepare(cases)
+
+    assert len(hints) == len(cases)
+    assert adapter._ll_rdma_bytes == max(
+        case.capacity + case.shape.hidden_size + case.shape.num_experts for case in cases
+    )
+    assert adapter._ll_num_qps_per_rank == max(case.shape.num_experts // WORLD_SIZE for case in cases)
+    assert {adapter._runtime_buffer_key(case) for case in cases} == {("deepep_ll",)}
+
+
+def test_real_adapter_rejects_mixed_backend_buffer_plan():
+    identity = a2a.DistIdentity(
+        rank=0,
+        world_size=WORLD_SIZE,
+        local_rank=0,
+        gpus_per_node=4,
+        node_num=NODE_NUM,
+        master_addr="127.0.0.1",
+        master_port="29500",
+    )
+    adapter = a2a.VllmBenchmarkAdapter(group=None, identity=identity)
+
+    with pytest.raises(a2a.VllmMoeA2ADeclarationError, match="exactly one DeepEP backend"):
+        adapter.prepare(_plan(("deepep_ht", "deepep_ll")))
+
+
 def test_canary_selects_every_backend_and_v2_inference_phase():
     selected = a2a.select_canary_cases(_plan())
     assert {(case.comm_backend, case.inference_phase) for case in selected} == {
