@@ -107,17 +107,26 @@ if [[ "${image_reference_mode}" == enroot-3.4-digest ]]; then
     [[ ! -e "${enroot_library_dir}" ]] || die "stale job-local Enroot library ${enroot_library_dir}"
     mkdir -p "${enroot_library_dir}"
     cp -a /usr/lib/enroot/. "${enroot_library_dir}/"
-    python3 - "${enroot_library_dir}/docker.sh" <<'PY'
+    python3 - "${enroot_library_dir}/docker.sh" "${enroot_library_dir}/common.sh" <<'PY'
 import sys
 from pathlib import Path
 
-path = Path(sys.argv[1])
-source = path.read_text()
+docker_path, common_path = map(Path, sys.argv[1:])
+source = docker_path.read_text()
 needle = ".manifests[]"
 replacement = ".manifests[]?"
 if source.count(needle) != 1 or replacement in source:
     raise SystemExit("unexpected Enroot docker manifest-list parser")
-path.write_text(source.replace(needle, replacement))
+docker_path.write_text(source.replace(needle, replacement))
+
+# Cluster Enroot suppresses jq's actual parser error. The job-local copy keeps
+# stderr so a registry or parser regression has actionable evidence.
+source = common_path.read_text()
+needle = 'if ! jq "$@" 2> /dev/null; then'
+replacement = 'if ! jq "$@"; then'
+if source.count(needle) != 1 or replacement in source:
+    raise SystemExit("unexpected Enroot jq wrapper")
+common_path.write_text(source.replace(needle, replacement))
 PY
     case "${IMAGE_ARCH}" in
         amd64) enroot_arch=x86_64 ;;
