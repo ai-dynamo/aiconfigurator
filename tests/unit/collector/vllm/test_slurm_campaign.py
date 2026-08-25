@@ -70,7 +70,9 @@ def test_runner_rejects_cifs_and_requires_authoritative_topology():
 def test_runner_discovers_and_records_a_routable_gloo_interface():
     source = RUNNER.read_text(encoding="utf-8")
     assert 'export AIC_GLOO_ROUTE_PROBE_NODES="${allocated_nodes[*]}"' in source
-    assert 'ip -o route get "${peer}"' in source
+    assert 'getent ahostsv4 "${peer}"' in source
+    assert 'ip -o route get "${peer_address}"' in source
+    assert "ip -o route show default" in source
     assert '"${selected_interface}" != lo' in source
     assert '"allocated nodes use inconsistent Gloo interface names:' in source
     assert '"gloo_socket_ifname": sys.argv[10]' in source

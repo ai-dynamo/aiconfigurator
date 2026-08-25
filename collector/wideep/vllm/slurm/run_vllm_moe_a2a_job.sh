@@ -253,8 +253,10 @@ gloo_interface_inventory=$(srun --nodes="${NODE_NUM}" --ntasks="${NODE_NUM}" --n
         selected_interface=""
         for peer in ${AIC_GLOO_ROUTE_PROBE_NODES}; do
             [[ "${peer%%.*}" == "${local_host}" ]] && continue
+            peer_address=$(getent ahostsv4 "${peer}" 2>/dev/null | awk '\''NR == 1 {print $1; exit}'\'')
+            [[ -n "${peer_address}" ]] || continue
             selected_interface=$(
-                ip -o route get "${peer}" 2>/dev/null |
+                ip -o route get "${peer_address}" 2>/dev/null |
                     awk '\''{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}'\''
             )
             if [[ -n "${selected_interface}" && "${selected_interface}" != lo ]]; then
@@ -262,6 +264,12 @@ gloo_interface_inventory=$(srun --nodes="${NODE_NUM}" --ntasks="${NODE_NUM}" --n
             fi
             selected_interface=""
         done
+        if [[ -z "${selected_interface}" ]]; then
+            selected_interface=$(
+                ip -o route show default 2>/dev/null |
+                    awk '\''{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}'\''
+            )
+        fi
         [[ -n "${selected_interface}" ]] || {
             echo "unable to discover a non-loopback route to another allocated node" >&2
             exit 1
