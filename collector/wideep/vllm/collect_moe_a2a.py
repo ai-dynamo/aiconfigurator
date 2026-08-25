@@ -592,9 +592,6 @@ class VllmBenchmarkAdapter:
         from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
             DeepEPLLPrepareAndFinalize,
         )
-        from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2 import (
-            DeepEPV2PrepareAndFinalize,
-        )
         from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
             TopKWeightAndReduceDelegate,
             TopKWeightAndReduceNoOP,
@@ -646,6 +643,10 @@ class VllmBenchmarkAdapter:
             )
             reduce_impl = TopKWeightAndReduceDelegate()
         elif case.comm_backend == "deepep_v2":
+            from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2 import (
+                DeepEPV2PrepareAndFinalize,
+            )
+
             self._probe_v2_gin()
             self._buffer = deep_ep.ElasticBuffer(
                 group=self.group,

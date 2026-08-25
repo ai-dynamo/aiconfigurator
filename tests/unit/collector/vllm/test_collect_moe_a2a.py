@@ -594,6 +594,9 @@ def test_exact_vllm_prepare_finalize_classes_and_calls_are_present():
     assert "deep_ep.ElasticBuffer(" in SOURCE
     assert "get_theoretical_num_sms(" in SOURCE
     assert 'backend="nccl"' in SOURCE
+    assert SOURCE.index('elif case.comm_backend == "deepep_v2":') < SOURCE.index(
+        "from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2 import"
+    )
 
 
 def test_v2_is_never_silently_skipped():
