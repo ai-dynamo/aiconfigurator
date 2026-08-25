@@ -443,6 +443,10 @@ def test_moe_model_quantization_policy_is_yaml_backed():
     assert not moe_model_allows_quantization("sglang", "nvidia/GLM-5.2-NVFP4", "bfloat16")
     assert moe_model_allows_quantization("sglang", "zai-org/GLM-5-FP8", "fp8_block")
     assert not moe_model_allows_quantization("sglang", "zai-org/GLM-5-FP8", "nvfp4")
+    assert moe_model_allows_quantization("sglang", "zai-org/GLM-5.3-FP8", "fp8_block")
+    assert not moe_model_allows_quantization("sglang", "zai-org/GLM-5.3-FP8", "nvfp4")
+    assert moe_model_allows_quantization("sglang", "zai-org/GLM-5.3", "bfloat16")
+    assert not moe_model_allows_quantization("sglang", "zai-org/GLM-5.3", "fp8_block")
 
     assert moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "w4a16_mxfp4")
     assert moe_model_allows_quantization("sglang", "openai/gpt-oss-120b", "w4a8_mxfp4_mxfp8")
@@ -810,6 +814,8 @@ def test_cross_model_common_cases_expand_from_base_op_yaml_sweeps(monkeypatch):
     # plus exact quant-sensitive rows for the current NVIDIA NVFP4 artifacts.
     # +198 from Step-3.7-Flash: 99 cases for each physical BF16/FP8 artifact.
     # +117 for the vLLM Nemotron Super FP8 latent-MoE row (1024/2688, 512x22).
+    # GLM-5.3 (BF16/FP8/NVFP4) adds no physical cases: its three identifiers
+    # are model_aliases on the existing GLM-5.2 rows (same base, zero deltas).
     # +114 for nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4, the nvfp4
     # checkpoint release of the 30B/A3B shape (AIC-1743/AIC-1748); same
     # topk=6/e128/h2688/i1856 geometry as Nano-BF16, hence the identical
@@ -1275,6 +1281,9 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         "zai-org/GLM-5.2",
         "zai-org/GLM-5.2-FP8",
         "nvidia/GLM-5.2-NVFP4",
+        "zai-org/GLM-5.3",
+        "zai-org/GLM-5.3-FP8",
+        "nvidia/GLM-5.3-NVFP4",
     }
     assert {spec.native_num_heads for spec in dsa_specs if spec.architecture == "GlmMoeDsaForCausalLM"} == {64}
     assert {(spec.model_path, spec.architecture, spec.native_num_heads) for spec in kimi_specs} == {
