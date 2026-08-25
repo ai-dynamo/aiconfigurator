@@ -169,6 +169,7 @@ for node_num in "${node_values[@]}"; do
             --nodes="${node_num}"
             --ntasks="${world_size}"
             --ntasks-per-node="${gpus_per_node}"
+            --gpus-per-node="${gpus_per_node}"
             --exclusive
             --switches=1
             --time="${time_limit}"

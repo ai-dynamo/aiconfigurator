@@ -59,6 +59,7 @@ def test_submitter_requires_canaries_and_one_job_per_backend():
     source = SUBMITTER.read_text(encoding="utf-8")
     assert 'backends="deepep_ht,deepep_ll,deepep_v2"' in source
     assert "canary/2n/${backend}/job_*/SUCCESS" in source
+    assert '--gpus-per-node="${gpus_per_node}"' in source
     assert "--exclusive" in source
     assert "--switches=1" in source
     assert "B200 formal/canary submission requires infra-approved nodelist" in source
