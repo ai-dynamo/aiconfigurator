@@ -75,6 +75,13 @@ case "${SYSTEM}" in
         expected_ep=$((NODE_NUM * 4))
         cross_node_nvlink_capable=true
         topology_mode=native
+        if [[ "${SYSTEM}" == gb200 ]]; then
+            expected_gpu_token=GB200
+            expected_compute_capability=10.0
+        else
+            expected_gpu_token=GB300
+            expected_compute_capability=10.3
+        fi
         ;;
     b200_sxm|b300_sxm|h100_sxm|h200_sxm)
         [[ "${GPUS_PER_NODE}" == 8 ]] || die "${SYSTEM} requires 8 GPUs/node"
@@ -85,6 +92,12 @@ case "${SYSTEM}" in
         else
             topology_mode=native
         fi
+        case "${SYSTEM}" in
+            b200_sxm) expected_gpu_token=B200; expected_compute_capability=10.0 ;;
+            b300_sxm) expected_gpu_token=B300; expected_compute_capability=10.3 ;;
+            h100_sxm) expected_gpu_token=H100; expected_compute_capability=9.0 ;;
+            h200_sxm) expected_gpu_token=H200; expected_compute_capability=9.0 ;;
+        esac
         ;;
     *) die "unsupported system ${SYSTEM}" ;;
 esac
@@ -95,6 +108,8 @@ esac
 repo_dir=$(safe_existing_path "repository" "${REPO_DIR}")
 vllm_source_root=$(safe_existing_path "vLLM source" "${VLLM_SOURCE_ROOT}")
 campaign_root=$(safe_existing_path "campaign root" "${CAMPAIGN_ROOT}")
+[[ -z "$(git -C "${repo_dir}" status --porcelain)" ]] || die "repository checkout is dirty"
+[[ -z "$(git -C "${vllm_source_root}" status --porcelain)" ]] || die "vLLM source checkout is dirty"
 [[ "$(git -C "${vllm_source_root}" rev-parse HEAD)" == \
     "ee0da84ab9e04ac7610e28580af62c365e898389" ]] || die "vLLM source commit mismatch"
 
@@ -105,6 +120,7 @@ else
     [[ "${container_image}" == *@sha256:* ]] || die "registry image must be digest pinned"
 fi
 [[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid IMAGE_DIGEST"
+[[ "${container_image}" == *@"${IMAGE_DIGEST}" ]] || die "container image does not use IMAGE_DIGEST"
 
 mapfile -t allocated_nodes < <(scontrol show hostnames "${SLURM_NODELIST}" | sort -u)
 [[ "${#allocated_nodes[@]}" == "${NODE_NUM}" ]] || die \
@@ -153,9 +169,38 @@ while read -r rdma_count; do
 done <<< "${rdma_counts}"
 rdma_device_count_min=$(printf '%s\n' "${rdma_counts}" | sort -n | head -n 1)
 
-gpu_name=$(srun --nodes=1 --ntasks=1 nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)
-driver_version=$(srun --nodes=1 --ntasks=1 nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1)
-compute_capability=$(srun --nodes=1 --ntasks=1 nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)
+gpu_inventory=$(srun --nodes="${NODE_NUM}" --ntasks="${NODE_NUM}" --ntasks-per-node=1 \
+    bash -lc 'nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader,nounits | sed "s/^/$(hostname)|/"')
+mapfile -t gpu_inventory_lines <<< "${gpu_inventory}"
+[[ "${#gpu_inventory_lines[@]}" == "${expected_ep}" ]] || die \
+    "GPU inventory has ${#gpu_inventory_lines[@]} rows, expected ${expected_ep}: ${gpu_inventory}"
+gpu_names_seen=()
+driver_versions_seen=()
+compute_capabilities_seen=()
+for inventory_line in "${gpu_inventory_lines[@]}"; do
+    IFS='|' read -r inventory_host inventory_fields <<< "${inventory_line}"
+    IFS=',' read -r inventory_gpu inventory_driver inventory_capability <<< "${inventory_fields}"
+    inventory_gpu=$(xargs <<< "${inventory_gpu:-}")
+    inventory_driver=$(xargs <<< "${inventory_driver:-}")
+    inventory_capability=$(xargs <<< "${inventory_capability:-}")
+    [[ -n "${inventory_host}" && -n "${inventory_gpu}" && -n "${inventory_driver}" && \
+       -n "${inventory_capability}" ]] || die "malformed GPU inventory row: ${inventory_line}"
+    [[ "${inventory_gpu^^}" == *"${expected_gpu_token}"* ]] || die \
+        "${inventory_host} has ${inventory_gpu}, expected ${expected_gpu_token} for ${SYSTEM}"
+    [[ "${inventory_capability}" == "${expected_compute_capability}" ]] || die \
+        "${inventory_host} has compute capability ${inventory_capability}, expected ${expected_compute_capability}"
+    gpu_names_seen+=("${inventory_gpu}")
+    driver_versions_seen+=("${inventory_driver}")
+    compute_capabilities_seen+=("${inventory_capability}")
+done
+mapfile -t gpu_names < <(printf '%s\n' "${gpu_names_seen[@]}" | sort -u)
+mapfile -t driver_versions < <(printf '%s\n' "${driver_versions_seen[@]}" | sort -u)
+mapfile -t compute_capabilities < <(printf '%s\n' "${compute_capabilities_seen[@]}" | sort -u)
+[[ "${#gpu_names[@]}" == 1 && "${#driver_versions[@]}" == 1 && \
+   "${#compute_capabilities[@]}" == 1 ]] || die "heterogeneous GPU inventory: ${gpu_inventory}"
+gpu_name=${gpu_names[0]}
+driver_version=${driver_versions[0]}
+compute_capability=${compute_capabilities[0]}
 nvlink_topology_sha256=$(
     srun --nodes="${NODE_NUM}" --ntasks="${NODE_NUM}" --ntasks-per-node=1 bash -lc \
         'hostname; nvidia-smi topo -m' | sha256sum | awk '{print $1}'
@@ -204,9 +249,20 @@ container_mounts="${repo_dir}:${repo_dir},${vllm_source_root}:${vllm_source_root
 if [[ "${SYSTEM}" == gb300 || "${SYSTEM}" == b300_sxm ]]; then
     require_env DEEP_EP_OVERLAY_WHEEL
     overlay_wheel=$(safe_existing_path "DeepEP overlay wheel" "${DEEP_EP_OVERLAY_WHEEL}")
-    [[ "${runtime_abi_json}" == *'"deep_ep_overlay_wheel_sha256"'* ]] || die \
-        "SM103 runtime ABI must attest the overlay wheel SHA256"
-    [[ "${runtime_abi_json}" == *'10.3a'* ]] || die "SM103 runtime ABI must attest CUDA arch 10.3a"
+    overlay_sha256=$(sha256sum "${overlay_wheel}" | awk '{print $1}')
+    read -r attested_overlay_sha256 attested_cuda_arches < <(
+        python3 - "${runtime_abi_json}" <<'PY'
+import json
+import sys
+
+abi = json.loads(sys.argv[1])
+print(abi.get("deep_ep_overlay_wheel_sha256", ""), abi.get("deep_ep_cuda_arches", ""))
+PY
+    )
+    [[ "${attested_overlay_sha256}" == "${overlay_sha256}" ]] || die \
+        "SM103 overlay wheel SHA256 differs from the runtime attestation"
+    [[ "${attested_cuda_arches}" == "10.0a 10.3a" ]] || die \
+        "SM103 runtime ABI must attest exact CUDA arches 10.0a 10.3a"
     container_mounts+=",${overlay_wheel}:${overlay_wheel}"
     export AIC_OVERLAY_WHEEL="${overlay_wheel}"
     container_command='overlay_dir="${AIC_STAGING_ROOT}/overlay-${SLURM_PROCID}"; mkdir -p "${overlay_dir}"; python -m pip install --no-deps --target "${overlay_dir}" "${AIC_OVERLAY_WHEEL}" >/dev/null; export PYTHONPATH="${overlay_dir}:${AIC_REPO_DIR}:${PYTHONPATH:-}";'
@@ -237,8 +293,6 @@ srun \
     --nodes="${NODE_NUM}" \
     --ntasks="${expected_ep}" \
     --ntasks-per-node="${GPUS_PER_NODE}" \
-    --gpus-per-task=1 \
-    --gpu-bind=single:1 \
     --mpi=pmix \
     --container-image="${container_image}" \
     --container-mounts="${container_mounts}" \

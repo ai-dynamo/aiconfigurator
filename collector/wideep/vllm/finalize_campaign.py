@@ -48,6 +48,14 @@ SYSTEM_LAYOUTS: dict[str, tuple[int, dict[int, int]]] = {
     "h100_sxm": (8, {2: 16, 4: 32}),
     "h200_sxm": (8, {2: 16, 4: 32}),
 }
+SYSTEM_GPU_IDENTITIES: dict[str, tuple[str, str]] = {
+    "gb200": ("GB200", "10.0"),
+    "gb300": ("GB300", "10.3"),
+    "b200_sxm": ("B200", "10.0"),
+    "b300_sxm": ("B300", "10.3"),
+    "h100_sxm": ("H100", "9.0"),
+    "h200_sxm": ("H200", "9.0"),
+}
 ROW_COLUMNS = (
     "framework",
     "version",
@@ -152,7 +160,7 @@ def _load_sidecar(job_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     return runtime, table
 
 
-def _validate_runtime(runtime: dict[str, Any], *, job_dir: Path) -> None:
+def _validate_runtime(runtime: dict[str, Any], *, job_dir: Path, system: str) -> None:
     if str(runtime.get("framework", "")).lower() != "vllm":
         raise CampaignValidationError(f"{job_dir}: runtime framework is not vllm")
     if str(runtime.get("version")) != EXPECTED_VERSION:
@@ -167,6 +175,13 @@ def _validate_runtime(runtime: dict[str, Any], *, job_dir: Path) -> None:
         raise CampaignValidationError(f"{job_dir}: runtime ABI mismatch {mismatch}")
     if abi.get("slurm_topology_verified") != "true":
         raise CampaignValidationError(f"{job_dir}: Slurm/fabric topology was not attested")
+    gpu_token, compute_capability = SYSTEM_GPU_IDENTITIES[system]
+    if abi.get("system") != system:
+        raise CampaignValidationError(f"{job_dir}: runtime system is not {system}")
+    if gpu_token not in str(abi.get("gpu_name", "")).upper():
+        raise CampaignValidationError(f"{job_dir}: runtime GPU does not match {system}")
+    if str(abi.get("compute_capability")) != compute_capability:
+        raise CampaignValidationError(f"{job_dir}: runtime compute capability does not match {system}")
     image_digest = str(runtime.get("image_digest", ""))
     if not image_digest.startswith("sha256:") or len(image_digest) != 71:
         raise CampaignValidationError(f"{job_dir}: invalid image digest {image_digest!r}")
@@ -188,7 +203,7 @@ def validate_job_dir(job_dir: str | Path, *, system: str) -> ValidatedJob:
     if not parquet_path.is_file():
         raise CampaignValidationError(f"missing parquet {parquet_path}")
     runtime, table = _load_sidecar(resolved)
-    _validate_runtime(runtime, job_dir=resolved)
+    _validate_runtime(runtime, job_dir=resolved, system=system)
     _validate_failures(resolved)
 
     frame = pd.read_parquet(parquet_path)
@@ -202,6 +217,9 @@ def validate_job_dir(job_dir: str | Path, *, system: str) -> ValidatedJob:
         raise CampaignValidationError(f"{parquet_path}: duplicate physical row key")
     if _as_single(frame, "framework").lower() != "vllm" or _as_single(frame, "version") != EXPECTED_VERSION:
         raise CampaignValidationError(f"{parquet_path}: row framework/version mismatch")
+    device = str(_as_single(frame, "device"))
+    if SYSTEM_GPU_IDENTITIES[system][0] not in device.upper():
+        raise CampaignValidationError(f"{parquet_path}: row device {device!r} does not match {system}")
     if _as_single(frame, "op_name") != "moe_a2a" or _as_single(frame, "kernel_source") != "deepep":
         raise CampaignValidationError(f"{parquet_path}: row operation/kernel identity mismatch")
     if _as_single(frame, "comm_dtype") != "default":

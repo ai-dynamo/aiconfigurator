@@ -32,6 +32,9 @@ def _runtime(*, fabric_identity: str) -> dict:
             **campaign.REQUIRED_ABI,
             "slurm_topology_verified": "true",
             "fabric_identity": fabric_identity,
+            "system": "h200_sxm",
+            "gpu_name": "NVIDIA H200",
+            "compute_capability": "9.0",
             "cross_node_nvlink_capable": "false",
             "rdma_device_count": "8",
         },
@@ -138,3 +141,10 @@ def test_validate_job_rejects_classified_failure(tmp_path):
 
     with pytest.raises(campaign.CampaignValidationError, match="classified failures"):
         campaign.validate_job_dir(job, system="h200_sxm")
+
+
+def test_validate_job_rejects_wrong_system_identity(tmp_path):
+    job = _write_job(tmp_path, node_num=2, ep_size=16, backend="deepep_ht")
+
+    with pytest.raises(campaign.CampaignValidationError, match="runtime system is not b200_sxm"):
+        campaign.validate_job_dir(job, system="b200_sxm")

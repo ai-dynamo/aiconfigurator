@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from collector import provenance
-from collector.wideep.vllm.finalize_campaign import SYSTEM_LAYOUTS
+from collector.wideep.vllm.finalize_campaign import SYSTEM_GPU_IDENTITIES, SYSTEM_LAYOUTS
 
 pytestmark = pytest.mark.unit
 
@@ -27,6 +27,14 @@ def test_six_system_matrix_has_exact_formal_topologies():
         "h100_sxm": (8, {2: 16, 4: 32}),
         "h200_sxm": (8, {2: 16, 4: 32}),
     }
+    assert SYSTEM_GPU_IDENTITIES == {
+        "gb200": ("GB200", "10.0"),
+        "gb300": ("GB300", "10.3"),
+        "b200_sxm": ("B200", "10.0"),
+        "b300_sxm": ("B300", "10.3"),
+        "h100_sxm": ("H100", "9.0"),
+        "h200_sxm": ("H200", "9.0"),
+    }
 
 
 @pytest.mark.parametrize("script", [RUNNER, SUBMITTER])
@@ -42,6 +50,9 @@ def test_runner_rejects_cifs_and_requires_authoritative_topology():
     assert "AIC_FABRIC_APPROVAL_ID" in source
     assert "topology_matches" in source
     assert 'staging_root="/tmp/aic-vllm-a2a-${SLURM_JOB_ID}"' in source
+    assert "gpu_inventory" in source
+    assert "--gpus-per-task" not in source
+    assert "--gpu-bind" not in source
 
 
 def test_submitter_requires_canaries_and_one_job_per_backend():
