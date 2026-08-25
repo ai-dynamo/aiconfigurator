@@ -136,6 +136,7 @@ def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     assert "image_reference_mode=enroot-3.4-digest" in runner
     assert 'enroot_library_dir="/tmp/aic-enroot-library-${SLURM_JOB_ID}"' in runner
     assert 'replacement = ".manifests[]?"' in runner
+    assert '\npath.write_text(source.replace(needle, replacement))\nPY' in runner
     assert 'ENROOT_LIBRARY_PATH="${enroot_library_dir}" enroot import' in runner
     assert "amd64) enroot_arch=x86_64" in runner
     assert "arm64) enroot_arch=aarch64" in runner

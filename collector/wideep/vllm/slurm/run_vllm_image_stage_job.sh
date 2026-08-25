@@ -117,7 +117,7 @@ needle = ".manifests[]"
 replacement = ".manifests[]?"
 if source.count(needle) != 1 or replacement in source:
     raise SystemExit("unexpected Enroot docker manifest-list parser")
-    path.write_text(source.replace(needle, replacement))
+path.write_text(source.replace(needle, replacement))
 PY
     case "${IMAGE_ARCH}" in
         amd64) enroot_arch=x86_64 ;;
