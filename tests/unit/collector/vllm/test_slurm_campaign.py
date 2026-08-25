@@ -130,6 +130,7 @@ def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     assert "sqsh_sha256" in runner
     assert "registry-1.docker.io/v2/vllm/vllm-openai/manifests/v0.24.0" in runner
     assert "matches != [expected_digest]" in runner
+    assert "image_reference_mode=enroot-3.4-digest" in runner
     assert "image_reference_mode=verified-tag" in runner
     assert '"image_reference_mode": image_reference_mode' in runner
     assert "--exclusive" in submitter
