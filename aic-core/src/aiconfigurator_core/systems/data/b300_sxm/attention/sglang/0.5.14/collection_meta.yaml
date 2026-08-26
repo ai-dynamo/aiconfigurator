@@ -1,25 +1,48 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# V3 sidecar for the original replacement runs (manual JET pipelines
+# 63033558/63034673/63061173 on aws-pdx, resume-chained, finished
+# 2026-08-16, 8x NVIDIA B300 SXM6 AC, mirrored amd64 build of the image
+# below, collector @ eda12dc). The run workdirs (and their generated
+# sidecars) were cleaned from cluster scratch before this migration, so the
+# hash fields here were RECOMPUTED deterministically per the provenance
+# design (content hashes, ref-stable): collector_hash from the eda12dc
+# source closure (verified identical on two independent hosts) and
+# case_plan_hash from the re-expanded sm103 case plans at eda12dc — valid
+# because the runs attempted the full plan (resume-chained to completion
+# with exactly one deterministic failure, attested below), so the
+# checkpoint's done+failed set equals the planned set. Nothing fabricated.
 schema_version: 1
-provenance: legacy
 runtime:
   framework: sglang
   version: 0.5.14
+  image: lmsysorg/sglang:v0.5.14
+  image_digest: sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3
 tables:
   context_attention_perf:
-    # 2026-08-17: device-truth replacement: the stored 0.5.14 table carried
-    # device='NVIDIA GB300' (borrowed from the GB300 collection); re-collected
-    # on 8x 'NVIDIA B300 SXM6 AC' (aws-pdx, manual JET runs 63034673+63061173,
-    # mirrored lmsysorg/sglang:v0.5.14-cu130 amd64 image, PR #1519 branch
-    # collector @ eda12dc). Values-only vs borrowed at matched keys (median
-    # 1.029); grid is a strict superset (+1906 trtllm_mha keys from case-plan
-    # growth since the borrowed collection). ONE key intentionally absent:
-    # trtllm_mha b32/isl1/h1/kv1/hd256/win1024 fails deterministically on the
-    # amd64 build across two independent runs (passes on GB300 arm64);
-    # interpolation covers the interior point.
-    status: complete
+    # Device-truth replacement of the borrowed (device='NVIDIA GB300') table;
+    # values-only at matched keys (median 1.029), strict grid superset
+    # (+1906 trtllm_mha keys). status partial per derive_table_status: ONE
+    # unresolved deterministic failure — trtllm_mha b32/isl1/h1/kv1/hd256/
+    # win1024 fails on the amd64 build across two independent runs (passes
+    # on GB300 arm64); interior grid point covered by interpolation.
+    # 2026-08-26: 5 loader-selected spike values re-measured values-only
+    # (scoped re-collection x2 runs, per-key MIN; PR #1558 review).
+    collector_ref: eda12dc15b7e04c3463a4c19f0fd3c0811df9ca7
+    collector_hash: sha256:7071dc3f080341739b9d6730667df1fe9e68207e245a551a9719df200ad747cd
+    case_plan_hash: sha256:45cbfb91ca05c5f7ac0c64197aedc7c0ddb80c90ff1152abaa89778ea6d935e8
+    collected_at: '2026-08-16'
+    rows: 44167
+    status: partial
   generation_attention_perf:
-    # 2026-08-17: same replacement run as context (median 1.000); strict
-    # superset (+2745 trtllm_mha keys), no missing keys, no duplicate keys.
+    # Same replacement run (median 1.000), strict superset (+2745 trtllm_mha
+    # keys), zero failures.
+    # 2026-08-26: 7 loader-selected spike values re-measured values-only
+    # (scoped re-collection x2 runs, per-key MIN; PR #1558 review).
+    collector_ref: eda12dc15b7e04c3463a4c19f0fd3c0811df9ca7
+    collector_hash: sha256:7071dc3f080341739b9d6730667df1fe9e68207e245a551a9719df200ad747cd
+    case_plan_hash: sha256:59939c09c19c2096e9fd8e07e36e9b3a2a4d5fadaff1552569bd4bc935463b91
+    collected_at: '2026-08-16'
+    rows: 49680
     status: complete

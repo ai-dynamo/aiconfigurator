@@ -1,23 +1,37 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# V3 sidecar recovered verbatim from the original collection run (manual JET
+# pipeline 62938134 on aws-pdx, 2026-08-16, 8x NVIDIA B300 SXM6 AC, mirrored
+# amd64 build of the image above): the run wrote this attestation beside its
+# parquets and shipped it in the job trace; restored here to replace the
+# legacy-tier placeholder (PR #1558 review).
 schema_version: 1
-provenance: legacy
 runtime:
   framework: sglang
   version: 0.5.14
+  image: lmsysorg/sglang:v0.5.14
+  image_digest: sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3
 tables:
   computescale_perf:
-    # 2026-08-17: device-truth replacement: the stored 0.5.14 table carried
-    # device='NVIDIA GB300' (borrowed from the GB300 collection); re-collected
-    # on 8x 'NVIDIA B300 SXM6 AC' (aws-pdx, manual JET runs 62938134,
-    # mirrored lmsysorg/sglang:v0.5.14-cu130 amd64 image, PR #1519 branch
-    # collector @ eda12dc). Values-only vs borrowed at matched keys.
+    # 2026-08-17 replacement context: stored table carried device='NVIDIA
+    # GB300' (borrowed); values-only replacement at matched keys.
     # NOTE this table is 1627/1628 zeros on every system (sub-resolution
     # kernels); the single nonzero key (m32768/k32/fp8) drops 380us -> 22us —
     # the borrowed value looks like a captured first-call hiccup.
+    collector_ref: eda12dc15b7e04c3463a4c19f0fd3c0811df9ca7
+    collector_hash: sha256:4898e53163d06164ce4edd9d5e3de5987b9f0e6410c6172e3eaa67a3e312928e
+    case_plan_hash: sha256:ca81e4943e3e9949e1db0b1ee6eabea53e5d15bf865e9c945899c108a989c0c1
+    collected_at: '2026-08-16'
+    rows: 1628
     status: complete
   scale_matrix_perf:
-    # 2026-08-17: same replacement run (median 1.027), key-identical grid,
-    # zero failures.
+    # Same-run secondary output of the compute_scale op (median 1.027 vs
+    # borrowed, key-identical grid, zero failures). The run's generator
+    # attested only the primary computescale_perf table, so this entry
+    # carries the run facts without per-table hashes (none were produced;
+    # nothing is fabricated).
+    collector_ref: eda12dc15b7e04c3463a4c19f0fd3c0811df9ca7
+    collected_at: '2026-08-16'
+    rows: 1628
     status: complete
