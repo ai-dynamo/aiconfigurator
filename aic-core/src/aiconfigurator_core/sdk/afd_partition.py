@@ -244,17 +244,15 @@ def _unknown_or_default(
 
 
 def _is_skipped_model_internal_op(op: operations.Operation, name: str) -> bool:
-    # TODO(afd, Phase-2): when an ``MoEDispatch`` op (name contains ``"dispatch"``)
+    # NOTE(afd): when an ``MoEDispatch`` op (name contains ``"dispatch"``)
     # appears inside an ``OverlapOp`` (e.g. ``generation_moe_overlap``), this
     # skip-list only excludes it from the overlap *classification vote* --
-    # its cost is still folded into the OverlapOp's F-pool latency via
-    # ``OverlapOp.query()`` and stays invisible to the AFD comm ops /
-    # ``_pipeline_tcycle``. That hides the MoE EP all-to-all from the AFD
-    # pipeline overlap math, so contention between the MoE all-to-all and
-    # the cross-pool A<->F transfer on the same NIC fabric is silently
-    # dropped. Surface ``MoEDispatch`` cost as an additional contribution
-    # to ``t_c_layer`` (or split the OverlapOp into compute + dispatch
-    # sub-stages) when AFD is active, instead of folding it into ``t_f``.
+    # ``OverlapOp.query()`` still sums it into the F-pool latency. That is
+    # why the AFD session strips nested dispatch ops from the F partition
+    # before summing (``_strip_moe_dispatch_from_partition``): under AFD the
+    # dispatch all-to-all IS the cross-pool A<->F transfer, already billed
+    # as t_a2f/t_f2a by ``AFDTransfer``. Do NOT additionally surface it as a
+    # ``t_c_layer`` contribution -- that would bill the same bytes twice.
     if isinstance(op, (operations.CustomAllReduce, operations.P2P, operations.NCCL)):
         return True
 
@@ -350,15 +348,22 @@ def _is_attention_side_op(name: str) -> bool:
 
 
 def _is_ffn_side_op(name: str) -> bool:
-    # TODO(afd, Phase-2): the ``"shared"`` marker pins shared-expert ops to
-    # the F-Worker, but the optimal placement is topology-dependent. From a
-    # comm standpoint shared belongs on A (every token is already there, no
-    # cross-pool replication needed); from a compute standpoint it belongs
-    # on F (scale-out across F GPUs and TP-shard the GEMMs). Add a knob --
-    # ``AFDConfig.shared_on_attn`` parallel to ``boundary_on_attn`` -- so
-    # callers can flip the side without editing this classifier. Note that
-    # moving shared to A also requires AFDTransfer to drop the redundant
-    # shared-replication term added by the companion TODO in ``operations.py``.
+    # NOTE(afd, closed): the ``"shared"`` marker pins shared-expert ops to
+    # the F-Worker. A ``shared_on_attn`` flip (parallel to
+    # ``boundary_on_attn``) was considered and is dominated in the current
+    # model, so the knob is deliberately absent:
+    #   * comm: AFDTransfer's volume is p_send-driven (routed dispatch);
+    #     shared placement does not change cross-pool traffic at all.
+    #   * compute: on F, shared overlaps the routed path inside
+    #     ``generation_moe_overlap`` (cost = max(routed, shared)) and is
+    #     nearly free; on A, ops sum serially, so t_a grows by the full
+    #     shared time. max(a+s, r) >= max(a, max(r, s)) always holds --
+    #     the flip can at best tie (s < r and a+s <= r) and never wins.
+    #   * memory: shared is ~1/257 of MoE weights on DeepSeek-V3, so the
+    #     HBM shift between pools is negligible.
+    # A flip would also require dissolving the OverlapOp first (routing its
+    # groups to different pools raises AFDPartitionError). Reopen only if
+    # A-side overlap modeling lands or a shared-dominant model appears.
     return any(
         marker in name
         for marker in (
