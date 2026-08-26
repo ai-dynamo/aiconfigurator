@@ -192,6 +192,9 @@ def test_backend_overlay_build_is_exact_and_separate_from_formal_data():
 def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     runner = IMAGE_RUNNER.read_text(encoding="utf-8")
     submitter = IMAGE_SUBMITTER.read_text(encoding="utf-8")
+    enroot_patch_program = runner.split(
+        'python3 - "${enroot_library_dir}/docker.sh" "${enroot_library_dir}/common.sh" <<\'PY\'', 1
+    )[1].split("\nPY\n", 1)[0]
     assert "ENROOT_MAX_CONNECTIONS=1" in runner
     assert "ENROOT_TRANSFER_RETRIES=8" in runner
     assert "unsquashfs -s" in runner
@@ -210,6 +213,8 @@ def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     assert 'CONTAINER_IMAGE="registry-1.docker.io#vllm/vllm-openai:${image_index_digest}"' in submitter
     assert 'enroot_library_dir="/tmp/aic-enroot-library-${SLURM_JOB_ID}"' in runner
     assert 'replacement = ".manifests[]?"' in runner
+    assert "import re" in enroot_patch_program
+    assert "re.subn" in enroot_patch_program
     assert 're.subn(r"\\.manifests\\[\\](?!\\?)", replacement, source)' in runner
     assert "replacement_count == 0 and replacement not in source" in runner
     assert runner.count("if replacement not in source:") == 1

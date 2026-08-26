@@ -34,7 +34,6 @@ case "${IMAGE_ARCH}" in arm64|amd64) ;; *) die "bad image architecture ${IMAGE_A
 # time. The child is observed evidence, never a second configured image pin.
 IMAGE_DIGEST=$(python3 - "${IMAGE_ARCH}" "${IMAGE_INDEX_DIGEST}" <<'PY'
 import json
-import re
 import sys
 import urllib.parse
 import urllib.request
@@ -101,6 +100,7 @@ enroot_library_dir="/tmp/aic-enroot-library-${SLURM_JOB_ID}"
 mkdir -p "${enroot_library_dir}"
 cp -a /usr/lib/enroot/. "${enroot_library_dir}/"
 python3 - "${enroot_library_dir}/docker.sh" "${enroot_library_dir}/common.sh" <<'PY'
+import re
 import sys
 from pathlib import Path
 
