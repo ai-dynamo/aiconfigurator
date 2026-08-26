@@ -152,6 +152,9 @@ aiconfigurator cli estimate --model-path Qwen/Qwen3-32B --system h200_sxm --tp-s
 - `--decode-batch-size`: Decode batch size (required for disagg)
 - `--decode-num-workers`: Number of decode workers (required for disagg)
 
+**AFD-specific arguments** (used when `--estimate-mode afd`, Attention-FFN disaggregation):
+- `--afd-dispatch-mode`: Cross-pool dispatch topology. `f_side_routing` (default) keeps routing on the F side — A→F dedups per F-node and the F-node AllGather/ReduceScatter then spread tokens across that node's GPUs. `a_side_routing` models DeepEP low-latency style dispatch — the A worker routes and sends each token straight to the GPUs owning its top-k experts (replicated up to `topk` times, billed as one A-rank's aggregate egress) and the F-node collectives drop to 0. MoE models only; pair it with `--f-moe-ep-size` equal to the F-pool GPU count for a pure-EP F pool.
+
 **Example output (agg):**
 ```text
 ============================================================

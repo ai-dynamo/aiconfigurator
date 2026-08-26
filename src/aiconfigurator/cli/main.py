@@ -28,6 +28,7 @@ from aiconfigurator.generator.api import (
 )
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
+from aiconfigurator.sdk.config import AFD_DISPATCH_MODES
 from aiconfigurator.sdk.config_builders import resolve_nextn_auto
 from aiconfigurator.sdk.errors import (
     EmpiricalNotImplementedError,
@@ -1171,6 +1172,17 @@ def _add_estimate_mode_arguments(parser):
         action="store_true",
         default=False,
         help="Assign boundary ops (add_norm_2, logits_gemm) to F-Worker. Default is A-Worker; pass this flag to flip.",
+    )
+    parser.add_argument(
+        "--afd-dispatch-mode",
+        choices=list(AFD_DISPATCH_MODES),
+        type=str,
+        default="f_side_routing",
+        help="Cross-pool dispatch topology (AFD only). 'f_side_routing' (default) keeps routing "
+        "on the F side: A->F dedups per F-node and the F-node AllGather/ReduceScatter spread "
+        "tokens across the node's GPUs. 'a_side_routing' models DeepEP low-latency style "
+        "dispatch: the A worker routes and sends each token straight to the GPUs owning its "
+        "top-k experts and the F-node collectives drop to 0. Requires a MoE model.",
     )
 
     # Quantization
@@ -2746,6 +2758,7 @@ def _run_estimate_mode(args):
             afd_phase=args.afd_phase,
             afd_combined_with_pd=getattr(args, "afd_combined_with_pd", True),
             afd_boundary_on_attn=not getattr(args, "boundary_on_ffn", False),
+            afd_dispatch_mode=getattr(args, "afd_dispatch_mode", "f_side_routing"),
         )
 
     result = cli_estimate(**estimate_kwargs)
@@ -2815,6 +2828,7 @@ def _run_estimate_mode(args):
         print(f"  Micro-batches:    {raw.get('num_microbatches', 'N/A')}")
         boundary_side = "A-Worker" if raw.get("boundary_on_attn", True) else "F-Worker"
         print(f"  Boundary on:      {boundary_side}")
+        print(f"  Dispatch Mode:    {raw.get('dispatch_mode', 'N/A')}")
     else:
         # agg / static / static_ctx / static_gen share the same single-replica shape.
         print(f"  Batch Size:       {result.batch_size}")
