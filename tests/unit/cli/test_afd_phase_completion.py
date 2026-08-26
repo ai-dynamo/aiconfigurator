@@ -382,7 +382,10 @@ def test_afd_prefill_uses_uncached_prefix_suffix_for_token_math(monkeypatch):
 
     monkeypatch.setattr(
         "aiconfigurator.sdk.afd_partition.build_afd_ops_partition",
-        lambda *_args, **_kwargs: SimpleNamespace(attn_ops=[], ffn_ops=[]),
+        # ``skipped_ops`` mirrors the real ``AFDOpsPartition`` dataclass field.
+        # The session's MoE-dispatch strip appends to it, so a double without it
+        # is simply not faithful to the type it stands in for.
+        lambda *_args, **_kwargs: SimpleNamespace(attn_ops=[], ffn_ops=[], skipped_ops=[]),
     )
     monkeypatch.setattr(AFDInferenceSession, "_build_afd_comm_ops", fake_build_comm_ops)
     monkeypatch.setattr(AFDInferenceSession, "_sum_latency", fake_sum_latency)
@@ -464,7 +467,10 @@ def test_afd_decode_mtp_widens_compute_and_communication_queries(monkeypatch, ca
 
     monkeypatch.setattr(
         "aiconfigurator.sdk.afd_partition.build_afd_ops_partition",
-        lambda *_args, **_kwargs: SimpleNamespace(attn_ops=[], ffn_ops=[]),
+        # ``skipped_ops`` mirrors the real ``AFDOpsPartition`` dataclass field.
+        # The session's MoE-dispatch strip appends to it, so a double without it
+        # is simply not faithful to the type it stands in for.
+        lambda *_args, **_kwargs: SimpleNamespace(attn_ops=[], ffn_ops=[], skipped_ops=[]),
     )
     monkeypatch.setattr(AFDInferenceSession, "_build_afd_comm_ops", fake_build_comm_ops)
     monkeypatch.setattr(AFDInferenceSession, "_sum_latency", fake_sum_latency)

@@ -213,6 +213,10 @@ class AFDFAllGather(PythonOperation):
     FFN/MoE computation.
 
     Returns 0 when the node has only 1 GPU or under broadcast rank mapping.
+
+    Also returns 0 under pure expert parallelism. A token-dimension collective
+    presupposes a TP group on the F side; when ``f_moe_tp_size == 1`` every F
+    rank owns its own experts and there is nothing to gather along tokens.
     """
 
     _VALID_RANK_MAPPINGS = ("one_to_one", "broadcast")
@@ -227,6 +231,7 @@ class AFDFAllGather(PythonOperation):
         n_f_workers: int,
         gpus_per_node: int = 8,
         f_gpus_per_node: int | None = None,
+        f_moe_tp_size: int = 0,
         num_experts: int = 0,
         topk: int = 0,
         comm_quant_mode: Optional[common.CommQuantMode] = None,
@@ -244,6 +249,12 @@ class AFDFAllGather(PythonOperation):
         # F-node grouping / intra-node F-GPU count are F-pool hardware
         # facts; under hetero A/F they differ from the A pool.
         self._f_gpus_per_node = max(int(f_gpus_per_node or gpus_per_node), 1)
+        # Existence gate only -- it does not touch sizing. The historical gate
+        # was ``min(n_f_workers, gpus_per_node) > 1``, a property of the fabric,
+        # which fires whether or not a TP group exists. 0 means "caller did not
+        # say" and preserves the historical behavior exactly; it is deliberately
+        # not folded into 1.
+        self._f_moe_tp_size = max(int(f_moe_tp_size), 0)
         self._num_experts = max(int(num_experts), 0)
         self._topk = max(int(topk), 0)
         self._comm_quant_mode = comm_quant_mode or common.CommQuantMode.half
@@ -258,13 +269,18 @@ class AFDFAllGather(PythonOperation):
         )
 
     @property
+    def has_tp_group(self) -> bool:
+        """False only when the caller declared pure EP (TP width exactly 1)."""
+        return self._f_moe_tp_size != 1
+
+    @property
     def f_gpus_in_node(self) -> int:
         """Number of F-GPUs within a single node."""
         return min(self._n_f_workers, self._f_gpus_per_node)
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         f_local = self.f_gpus_in_node
-        if f_local <= 1 or self._rank_mapping != "one_to_one":
+        if f_local <= 1 or self._rank_mapping != "one_to_one" or not self.has_tp_group:
             return PerformanceResult(0.0, 0.0, source="empirical")
         x = int(kwargs.get("x", 0))
         if x <= 0:
@@ -299,9 +315,9 @@ class AFDFReduceScatter(PythonOperation):
     for the F->A P2P transfer.
 
     The number of participants is ``min(n_f_workers, gpus_per_node)``
-    -- the intra-node F-GPU count -- regardless of TP or EP configuration.
-    Returns 0 when the node has only 1 F-GPU or under broadcast rank
-    mapping.
+    -- the intra-node F-GPU count. Returns 0 when the node has only 1
+    F-GPU, under broadcast rank mapping, or under pure expert parallelism
+    (``f_moe_tp_size == 1``), where no token-dimension TP group exists.
     """
 
     _VALID_RANK_MAPPINGS = ("one_to_one", "broadcast")
@@ -316,6 +332,7 @@ class AFDFReduceScatter(PythonOperation):
         n_f_workers: int,
         gpus_per_node: int = 8,
         f_gpus_per_node: int | None = None,
+        f_moe_tp_size: int = 0,
         num_experts: int = 0,
         topk: int = 0,
         comm_quant_mode: Optional[common.CommQuantMode] = None,
@@ -333,6 +350,9 @@ class AFDFReduceScatter(PythonOperation):
         # F-node grouping / intra-node F-GPU count are F-pool hardware
         # facts; under hetero A/F they differ from the A pool.
         self._f_gpus_per_node = max(int(f_gpus_per_node or gpus_per_node), 1)
+        # Existence gate only -- see ``AFDFAllGather``. 0 means "caller did not
+        # say" and preserves the historical behavior exactly.
+        self._f_moe_tp_size = max(int(f_moe_tp_size), 0)
         self._num_experts = max(int(num_experts), 0)
         self._topk = max(int(topk), 0)
         self._comm_quant_mode = comm_quant_mode or common.CommQuantMode.half
@@ -344,13 +364,18 @@ class AFDFReduceScatter(PythonOperation):
         return max((self._n_f_workers + self._f_gpus_per_node - 1) // self._f_gpus_per_node, 1)
 
     @property
+    def has_tp_group(self) -> bool:
+        """False only when the caller declared pure EP (TP width exactly 1)."""
+        return self._f_moe_tp_size != 1
+
+    @property
     def f_gpus_in_node(self) -> int:
         """Number of F-GPUs within a single node."""
         return min(self._n_f_workers, self._f_gpus_per_node)
 
     def query(self, database: PerfDatabase, **kwargs) -> PerformanceResult:
         f_local = self.f_gpus_in_node
-        if f_local <= 1 or self._rank_mapping != "one_to_one":
+        if f_local <= 1 or self._rank_mapping != "one_to_one" or not self.has_tp_group:
             return PerformanceResult(0.0, 0.0, source="empirical")
         x = int(kwargs.get("x", 0))
         if x <= 0:

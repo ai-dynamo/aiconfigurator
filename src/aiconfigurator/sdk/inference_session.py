@@ -955,6 +955,74 @@ class DisaggInferenceSession:
         return disagg_summary
 
 
+def _is_moe_dispatch_op(op) -> bool:
+    """True for the model-internal MoE dispatch/combine all-to-all."""
+    return "dispatch" in str(getattr(op, "_name", "")).lower()
+
+
+def _strip_moe_dispatch_from_partition(partition):
+    """Return ``partition`` with MoE dispatch ops removed, OverlapOps included.
+
+    Under AFD the model-internal MoE dispatch all-to-all *is* the cross-pool
+    A<->F transfer; it does not run in addition to it. Leaving it in the F pool
+    bills the same bytes twice -- once as F compute, once as ``t_a2f``/``t_f2a``.
+
+    ``build_afd_ops_partition`` drops a bare ``MoEDispatch`` via its skip list,
+    but one nested inside an ``OverlapOp`` survives because the skip marker only
+    affects that op's classification vote -- ``OverlapOp.query()`` still sums it
+    into the F-pool latency. Rebuild such OverlapOps without the dispatch legs.
+
+    An OverlapOp whose subtree contains no dispatch is returned as-is rather
+    than rebuilt: the sweep walks this path once per candidate per layer, and
+    rebuilding would churn objects for nothing.
+    """
+    from aiconfigurator.sdk import operations
+
+    def _overlap_groups(op):
+        """``(group_a, group_b)`` if ``op`` is an overlap composite, else None.
+
+        Deliberately duck-typed rather than ``isinstance(op, OverlapOp)``.
+        Reading ``_group_a`` off a composite hands back objects rebuilt by the
+        engine, whose type is the *Rust base* ``_core.OverlapOp`` -- not the
+        Python subclass -- so an isinstance check silently skips every nested
+        composite. Upstream's own ``_infer_phase`` / ``_has_leaves`` probe the
+        same attributes for the same reason.
+        """
+        group_a = getattr(op, "_group_a", None)
+        if group_a is None:
+            return None
+        return list(group_a), list(getattr(op, "_group_b", ()) or ())
+
+    def _has_dispatch(op) -> bool:
+        groups = _overlap_groups(op)
+        if groups is None:
+            return _is_moe_dispatch_op(op)
+        return any(_has_dispatch(child) for child in groups[0] + groups[1])
+
+    def rewrite(op):
+        groups = _overlap_groups(op)
+        if groups is None:
+            return None if _is_moe_dispatch_op(op) else op
+        # Leave a clean subtree alone. Object identity cannot be used to detect
+        # "nothing changed" -- the children read back as fresh engine-side
+        # objects every time -- so decide from the subtree's content instead.
+        if not _has_dispatch(op):
+            return op
+        group_a = [o for o in (rewrite(i) for i in groups[0]) if o is not None]
+        group_b = [o for o in (rewrite(i) for i in groups[1]) if o is not None]
+        if not group_a and not group_b:
+            return None
+        return operations.OverlapOp(op._name, group_a, group_b)
+
+    stripped = [op for op in partition.ffn_ops if _is_moe_dispatch_op(op)]
+    partition.ffn_ops = [o for o in (rewrite(op) for op in partition.ffn_ops) if o is not None]
+    # Make the removal visible. A dispatch nested in an OverlapOp never reached
+    # ``skipped_ops`` before, so the audit trail said nothing was dropped --
+    # which is why this cost went unnoticed inside t_f for so long.
+    partition.skipped_ops = list(partition.skipped_ops) + stripped
+    return partition
+
+
 # Private helper: bundles the five comm-side ops a single AFD layer needs.
 # Kept module-private; if a second consumer appears in the future, promote
 # to a public dataclass at that point.
@@ -1094,7 +1162,11 @@ class AFDInferenceSession:
         """
         ops = list(ops_iter)
         x = batch_size * seq_len if is_context else batch_size
-        db = database if database is not None else self._a_database
+        # ``_a_database`` is the hetero-era primary-pool name; ``_database``
+        # is set to the same object. Resolve either so a caller predating
+        # hetero -- including a session double that only carries the older
+        # attribute -- still works.
+        db = database if database is not None else getattr(self, "_a_database", None) or self._database
 
         rust = self._sum_latency_with_rust(
             ops,
@@ -1163,7 +1235,11 @@ class AFDInferenceSession:
             should_use_rust_engine_step,
         )
 
-        db = database if database is not None else self._a_database
+        # ``_a_database`` is the hetero-era primary-pool name; ``_database``
+        # is set to the same object. Resolve either so a caller predating
+        # hetero -- including a session double that only carries the older
+        # attribute -- still works.
+        db = database if database is not None else getattr(self, "_a_database", None) or self._database
 
         if not ops or not should_use_rust_engine_step(runtime_config, db):
             return None
@@ -1307,6 +1383,10 @@ class AFDInferenceSession:
         # num_gpus_per_rack on the scale-out fabric. The F-side AG/RS are
         # intra-node and a_combine is a local HBM reduce, so neither can
         # cross a rack and neither takes a span.
+        #
+        # ``f_moe_tp_size`` is the mirror case: only the F-node collectives
+        # take it, because it gates whether a token-dimension TP group exists
+        # at all. The cross-pool transfers move tokens regardless.
         span_gpus = cfg.n_a_nodes * cfg.effective_a_gpus_per_node + cfg.n_f_nodes * cfg.effective_f_gpus_per_node
         return _AFDCommOps(
             a2f=AFDTransfer(
@@ -1329,12 +1409,14 @@ class AFDInferenceSession:
                 name="afd_f_node_allgather",
                 scale_factor=1.0,
                 rank_mapping=rank_mapping,
+                f_moe_tp_size=cfg.f_moe_tp_size,
                 **shared,
             ),
             f_rs=AFDFReduceScatter(
                 name="afd_f_node_reducescatter",
                 scale_factor=1.0,
                 rank_mapping=rank_mapping,
+                f_moe_tp_size=cfg.f_moe_tp_size,
                 **shared,
             ),
             a_combine=AFDCombine(
@@ -1370,6 +1452,10 @@ class AFDInferenceSession:
 
               TPOT_layer = t_a + t_a2f + t_f + t_f2a
 
+          ``num_microbatches < 2`` also lands here regardless of the
+          requested model: with one microbatch in flight there is nothing to
+          overlap.
+
         The optimistic model falls back to conservative when there are
         not enough in-flight micro-batches to fill the K=3 pipeline,
         unless the round trip is a negligible fraction of compute
@@ -1387,6 +1473,16 @@ class AFDInferenceSession:
         num_microbatches = max(int(cfg.num_microbatches or 1), 1)
         t_c = t_a2f + t_f2a
         if cfg.pipeline_model == "serial":
+            return t_a + t_a2f + t_f + t_f2a, False
+        if num_microbatches < 2:
+            # A single in-flight microbatch cannot overlap anything: layer
+            # i+1's A input IS layer i's F output, so the two pools strictly
+            # alternate and neither has work to fill the other's gap. Both
+            # K=3 and K=2 need N_min >= 2, but only the optimistic branch
+            # enforced a threshold -- and its fallback landed on
+            # conservative, which cannot be sustained at mb=1 either. Nor is
+            # there intra-layer slack to exploit: every A-side op sits either
+            # before the dispatch or after the combine.
             return t_a + t_a2f + t_f + t_f2a, False
         if cfg.pipeline_model == "optimistic":
             # Need ≥ 2 + t_c / max(t_a, t_f) in-flight microbatches to
@@ -1741,6 +1837,14 @@ class AFDInferenceSession:
             boundary_on_attn=cfg.boundary_on_attn,
             router_on_attn=cfg.router_on_attn,
         )
+        # The model-internal MoE dispatch all-to-all IS the cross-pool A<->F
+        # transfer under AFD; it does not run in addition to it. The
+        # partitioner's "dispatch" skip marker only steers the OverlapOp
+        # classification vote, so a nested dispatch stays folded into t_f and
+        # the same bytes get billed twice. Strip it here, unconditionally --
+        # only ``f_partition.ffn_ops`` feeds F-pool compute, and a MoE
+        # OverlapOp always classifies to the F side.
+        f_partition = _strip_moe_dispatch_from_partition(f_partition)
 
         isl = runtime_config.isl
         osl = runtime_config.osl or 1
