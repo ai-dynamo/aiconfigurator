@@ -12,6 +12,22 @@ runtime:
 # internal CI run, zero failures).
 tables:
   moe_perf:
+    # 2026-08-20: appended 2106 DeepSeek-V4 NVFP4 nvfp4 rows for the ModelOpt
+    # exports (AIC-1749): 1134 nvidia/DeepSeek-V4-Flash-NVFP4 (4096/2048,
+    # 256x6) + 972 nvidia/DeepSeek-V4-Pro-NVFP4 (7168/3072, 384x6);
+    # kernel_source
+    # vllm_compressedtensorsw4a4nvfp4moe_flashinfer_trtllm_trtllmnvfp4expertsmodular.
+    # Collected on 8x B200 (computelab) in stock vllm/vllm-openai:v0.24.0-cu129
+    # (aic-auto-collector pipelines 63587809/63587813, jobs flash=404285265,
+    # pro=404285947; collector pinned to main 40c1e749 = the AIC-1749 case
+    # plan). Keys disjoint (no prior nvfp4 rows at either geometry). Zero
+    # failed tasks.
+    # Latency values are the per-key MINIMUM of two independent runs (the
+    # jobs above + exclusive-node reruns 404428657 flash / 404428731 pro):
+    # single-run rows carried isolated one-sided scheduler spikes (flagged
+    # via the PR #1574 review pattern); the cross-run min removes them from
+    # either run (post-merge isolation sweep clean).
+    # AIC-1743/AIC-1749.
     # 2026-08-19: appended 1,053 Nemotron-3.5-Lightning-30B-A3B-NVFP4 nvfp4
     # rows (2688/1856, 128x6; kernel_source
     # vllm_compressedtensorsw4a4nvfp4moe_flashinfer_trtllm_trtllmnvfp4expertsmonolithic).
