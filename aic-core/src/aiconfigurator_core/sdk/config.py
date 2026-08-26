@@ -383,3 +383,18 @@ class AFDConfig:
     def effective_f_gpus_per_node(self) -> int:
         """F-pool GPUs per node; ``f_gpus_per_node`` or ``gpus_per_node``."""
         return self.f_gpus_per_node if self.f_gpus_per_node else self.gpus_per_node
+
+    @property
+    def f_moe_tp_size(self) -> int:
+        """F-side MoE tensor-parallel width: ``tp_f / f_moe_ep_size``.
+
+        ``1`` means pure expert parallelism -- every F rank owns its own
+        experts, so no token-dimension TP group exists and the F-node
+        AllGather/ReduceScatter pair has nothing to exchange. Consumers use
+        this as an *existence* gate; it never affects collective sizing.
+
+        Derived rather than configured: under the Phase 1 F-DP=1 assumption
+        ``tp_f == n_f_workers``, which already follows the F pool's own node
+        width under hetero A/F.
+        """
+        return max(self.n_f_workers // max(int(self.f_moe_ep_size), 1), 1)
