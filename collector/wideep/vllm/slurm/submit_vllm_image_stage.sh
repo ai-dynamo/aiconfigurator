@@ -26,28 +26,34 @@ case "${system}" in
     gb200)
         account=coreai_comparch_inferencex; partition=batch; qos=normal
         image_arch=arm64
+        image_stage_gpu_args=(--gpus-per-node=4)
         ;;
     gb300)
         account=blackwell; partition=gb300nvl72_preprod; qos=normal
         image_arch=arm64
+        image_stage_gpu_args=(--gpus-per-node=4)
         ;;
     h100_sxm)
         account=dl_frameworks; partition=dgxh100; qos=normal
         image_arch=amd64
+        image_stage_gpu_args=(--gpus=1)
         ;;
     h200_sxm)
         account=dl_frameworks; partition=dgxh200; qos=normal
         image_arch=amd64
+        image_stage_gpu_args=(--gpus=1)
         ;;
     b200_sxm)
         account=beta-users_fallback
         partition='b200@cr+mp-1000W/umbriel-b200@ts4/8gpu-224cpu-2048gb'
         qos=batch-short; image_arch=amd64
+        image_stage_gpu_args=(--gpus=1)
         ;;
     b300_sxm)
         account=beta-users_b300
         partition='b300@ts5/b300-nvl8@ts5/8gpu-224cpu-2048gb'
         qos=batch-short; image_arch=amd64
+        image_stage_gpu_args=(--gpus=1)
         ;;
     *) die "unsupported image-staging system ${system}" ;;
 esac
@@ -76,7 +82,7 @@ job_id=$(sbatch \
     --qos="${qos}" \
     --nodes=1 \
     --ntasks=1 \
-    --gpus=1 \
+    "${image_stage_gpu_args[@]}" \
     --switches=1 \
     --time=02:00:00 \
     --output="${log_dir}/image_stage_%j.out" \

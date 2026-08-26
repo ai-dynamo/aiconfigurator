@@ -210,8 +210,9 @@ def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     assert 'CONTAINER_IMAGE="registry-1.docker.io#vllm/vllm-openai:${image_index_digest}"' in submitter
     assert 'enroot_library_dir="/tmp/aic-enroot-library-${SLURM_JOB_ID}"' in runner
     assert 'replacement = ".manifests[]?"' in runner
-    assert "docker_path.write_text(source.replace(needle, replacement))" in runner
-    assert "common_path.write_text(source.replace(needle, replacement))" in runner
+    assert runner.count("if replacement not in source:") == 2
+    assert "docker_path.write_text(source)" in runner
+    assert "common_path.write_text(source)" in runner
     assert "AIC_ENROOT_JSON_DEBUG_FILE" in runner
     assert 'replacement = \'if ! tee "${AIC_ENROOT_JSON_DEBUG_FILE:-/dev/null}" | jq "$@"; then\'' in runner
     assert 'ENROOT_LIBRARY_PATH="${enroot_library_dir}" enroot import' in runner
@@ -222,7 +223,9 @@ def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     assert "b200_sxm|b300_sxm|h100_sxm|h200_sxm" in submitter
     assert "beta-users_fallback" in submitter
     assert "beta-users_b300" in submitter
-    assert "--gpus=1" in submitter
+    assert "image_stage_gpu_args=(--gpus-per-node=4)" in submitter
+    assert "image_stage_gpu_args=(--gpus=1)" in submitter
+    assert '"${image_stage_gpu_args[@]}"' in submitter
     assert "--exclusive" not in submitter
     assert "--switches=1" in submitter
 

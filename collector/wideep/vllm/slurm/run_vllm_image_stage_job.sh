@@ -107,18 +107,22 @@ docker_path, common_path = map(Path, sys.argv[1:])
 source = docker_path.read_text()
 needle = ".manifests[]"
 replacement = ".manifests[]?"
-if source.count(needle) != 1 or replacement in source:
-    raise SystemExit("unexpected Enroot docker manifest-list parser")
-docker_path.write_text(source.replace(needle, replacement))
+if replacement not in source:
+    if source.count(needle) != 1:
+        raise SystemExit("unexpected Enroot docker manifest-list parser")
+    source = source.replace(needle, replacement)
+docker_path.write_text(source)
 
 # Cluster Enroot suppresses jq's actual parser error. The job-local copy keeps
 # stderr so a registry or parser regression has actionable evidence.
 source = common_path.read_text()
 needle = 'if ! jq "$@" 2> /dev/null; then'
 replacement = 'if ! tee "${AIC_ENROOT_JSON_DEBUG_FILE:-/dev/null}" | jq "$@"; then'
-if source.count(needle) != 1 or replacement in source:
-    raise SystemExit("unexpected Enroot jq wrapper")
-common_path.write_text(source.replace(needle, replacement))
+if replacement not in source:
+    if source.count(needle) != 1:
+        raise SystemExit("unexpected Enroot jq wrapper")
+    source = source.replace(needle, replacement)
+common_path.write_text(source)
 PY
 case "${IMAGE_ARCH}" in
     amd64) enroot_arch=x86_64 ;;
