@@ -29,4 +29,10 @@ tables:
     # same case plan as the gb300/gb200 2026-08-13 appends. Auto-collector
     # pipeline 62894161 on the PR #1519 branch (lmsysorg/sglang:v0.5.14-cu130);
     # zero failures, keys disjoint from prior rows.
+    # 2026-08-26: replaced 54 rows (2 plans x 27 tokens) at the Qwen3.5-397B
+    # nvfp4 shape — PR #1519 review healing of isolated latency spikes
+    # (tp2/ep64 pl1.01, tp16/ep16 pl1.01). Scoped --case-filter
+    # re-collection on 1x B200 (nsc-svg, lmsysorg/sglang:v0.5.14-cu130 —
+    # the original grid's image), per-key MIN of two runs. Scoped checker
+    # after: 0 same-plan >1.5x cells vs gb200 (was 2).
     status: complete
