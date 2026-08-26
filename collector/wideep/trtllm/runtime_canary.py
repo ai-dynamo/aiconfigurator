@@ -34,13 +34,26 @@ def main() -> None:
         )
     )
     adapter = TensorRTLLMBenchmarkAdapter(warmup=1, iterations=2)
+    injected_rank = int(os.environ.get("AIC_INJECT_FAILURE_RANK", "-1"))
     failures = []
     rows = 0
     for case in cases:
+        injected_error = "RuntimeError: injected pre-benchmark rank failure" if identity.rank == injected_rank else None
+        injected_errors = mpi_allgather(injected_error)
+        if any(error is not None for error in injected_errors):
+            failures.append(
+                {
+                    "backend": case.comm_backend,
+                    "dtype": case.quant.comm_dtype,
+                    "rank_errors": injected_errors,
+                }
+            )
+            continue
         local_error = None
         result = None
         try:
-            result = adapter.run(case)
+            all_rank_num_tokens = list(mpi_allgather(case.num_tokens))
+            result = adapter.run(case, all_rank_num_tokens)
             build_unified_rows(case, result)
         except Exception as error:
             local_error = f"{type(error).__name__}: {error}"
@@ -67,6 +80,7 @@ def main() -> None:
                     "cases": len(cases),
                     "rows": rows,
                     "modes": [[case.comm_backend, case.quant.comm_dtype] for case in cases],
+                    "injected_failure_rank": injected_rank,
                 },
                 sort_keys=True,
             ),

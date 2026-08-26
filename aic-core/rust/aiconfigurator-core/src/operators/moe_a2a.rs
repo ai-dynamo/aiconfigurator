@@ -45,9 +45,12 @@ use crate::perf_database::PerfDatabase;
 /// is a config `ValueError`, failed where the intent is expressed rather than
 /// surfacing later as a data miss. Pinned by
 /// `undeclared_phase_is_a_config_error_not_a_data_miss`.
-const MOE_A2A_BACKENDS: [(&str, &[&str]); 4] = [
+const MOE_A2A_BACKENDS: [(&str, &[&str]); 7] = [
     ("deepep_ht", &["dispatch", "combine"]),
     ("deepep_ll", &["dispatch", "combine"]),
+    ("deepep_v2", &["dispatch", "combine"]),
+    ("trtllm_deepep_ht", &["dispatch", "combine"]),
+    ("trtllm_deepep_ll", &["dispatch", "combine"]),
     ("nvlink_two_sided", &["prepare", "dispatch", "combine"]),
     ("nvlink_one_sided", &["dispatch", "combine"]),
 ];
@@ -741,6 +744,35 @@ mod tests {
                     "{backend} declares an unvalidatable phase {phase:?}"
                 );
             }
+        }
+    }
+
+    /// Keep the Rust constructor's validation registry in exact identity
+    /// parity with Python's public `MOE_A2A_BACKENDS` registry. A missing
+    /// identity here turns a valid Python request into a Rust config error.
+    #[test]
+    fn registry_contains_every_python_backend_identity() {
+        let names = MOE_A2A_BACKENDS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "deepep_ht",
+                "deepep_ll",
+                "deepep_v2",
+                "trtllm_deepep_ht",
+                "trtllm_deepep_ll",
+                "nvlink_two_sided",
+                "nvlink_one_sided",
+            ]
+        );
+        for backend in names {
+            validate_a2a_request(backend, "dispatch")
+                .unwrap_or_else(|error| panic!("{backend} rejected: {error}"));
+            validate_a2a_request(backend, "combine")
+                .unwrap_or_else(|error| panic!("{backend} rejected: {error}"));
         }
     }
 

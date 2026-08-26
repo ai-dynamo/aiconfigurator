@@ -15,9 +15,6 @@ from collector import provenance
 from collector.wideep.sglang.collect_moe_a2a import _build_moe_a2a_row
 from collector.wideep.vllm import finalize_campaign as campaign
 from collector.wideep.vllm.collect_moe_a2a import (
-    HT_BUFFER_SIZE_BYTES,
-    HT_SMS,
-    KNOWN_DEEPEP_HT_EP4_LIMIT_ERROR,
     TARGET_VLLM_SOURCE_COMMIT,
     case_plan_ids,
 )
@@ -66,9 +63,10 @@ def _runtime(*, fabric_identity: str, backend: str, ep_size: int, system: str) -
         }
         live_abi = {"deep_ep_api": "Buffer"}
     return {
-        "framework": "vllm",
+        "framework": campaign.VLLM_RUNTIME.framework,
         "version": "0.24.0",
-        "image": "vllm/vllm-openai:v0.24.0",
+        "image": campaign.VLLM_RUNTIME.image(),
+        "image_variant": "linux/arm64" if system in ("gb200", "gb300") else "linux/amd64",
         "image_digest": "sha256:" + "1" * 64,
         "source_commit": TARGET_VLLM_SOURCE_COMMIT,
         "abi": abi,
@@ -84,23 +82,12 @@ def _write_job(
     ep_size: int,
     backend: str,
     system: str = "h200_sxm",
-    carry_known_kimi_limit: bool = False,
 ) -> Path:
     job_dir = root / f"{node_num}n" / backend
     job_dir.mkdir(parents=True)
     cases = campaign._expected_cases(ep_size=ep_size, node_num=node_num, backend=backend)
-    known_failures = [
-        case
-        for case in cases
-        if carry_known_kimi_limit
-        and case.shape.hidden_size == 3584
-        and case.shape.topk == 16
-        and case.shape.num_experts == 896
-    ]
     rows = []
     for case in cases:
-        if case in known_failures:
-            continue
         sms = case.sms if case.sms is not None else 24
         for phase in ("combine", "dispatch"):
             payload = _build_moe_a2a_row(
@@ -143,49 +130,11 @@ def _write_job(
                 ),
                 "collected_at": date.today().isoformat(),
                 "rows": len(frame),
-                "classified_failures": len(known_failures),
+                "classified_failures": 0,
                 "status": "complete",
             }
         },
     )
-    if known_failures:
-        for rank in range(ep_size):
-            records = [
-                {
-                    "module": "collector.wideep.vllm.collect_moe_a2a",
-                    "op": "moe_a2a",
-                    "classification": "known_framework_limit",
-                    "error_type": "RuntimeError",
-                    "error": f"DeepEP assertion: {KNOWN_DEEPEP_HT_EP4_LIMIT_ERROR}",
-                    "rank": rank,
-                    "case": {
-                        "comm_backend": case.comm_backend,
-                        "inference_phase": case.inference_phase,
-                        "ep_size": ep_size,
-                        "node_num": node_num,
-                        "hidden_size": case.shape.hidden_size,
-                        "topk": case.shape.topk,
-                        "num_experts": case.shape.num_experts,
-                        "num_tokens": case.num_tokens,
-                        "sms": HT_SMS,
-                        "capacity": HT_BUFFER_SIZE_BYTES,
-                    },
-                }
-                for case in known_failures
-            ]
-            (job_dir / f"errors_moe_a2a_vllm.rank{rank}.json").write_text(
-                json.dumps(records, indent=2),
-                encoding="utf-8",
-            )
-        artifact_paths = [
-            job_dir / "moe_a2a_perf.parquet",
-            job_dir / "collection_meta.yaml",
-            *sorted(job_dir.glob("errors_moe_a2a_vllm.rank*.json")),
-        ]
-        (job_dir / "artifact_checksums.json").write_text(
-            json.dumps({path.name: campaign._sha256(path) for path in artifact_paths}, sort_keys=True),
-            encoding="utf-8",
-        )
     return job_dir
 
 
@@ -224,7 +173,7 @@ def test_merge_campaign_requires_and_validates_all_three_formal_jobs(tmp_path):
     assert checksums.is_file()
 
 
-def test_merge_campaign_ships_and_checksums_original_known_failure_records(tmp_path):
+def test_clean_republish_removes_stale_error_files_and_checksum_entries(tmp_path):
     jobs = [
         _write_job(
             tmp_path / "jobs",
@@ -232,12 +181,19 @@ def test_merge_campaign_ships_and_checksums_original_known_failure_records(tmp_p
             ep_size=4,
             backend=backend,
             system="gb200",
-            carry_known_kimi_limit=backend == "deepep_ht",
         )
         for backend in campaign.BACKENDS
     ]
     output = tmp_path / "published"
+    output.mkdir()
+    stale_error = output / "errors_moe_a2a_vllm.rank99.json"
+    stale_error.write_text('[{"classification": "unexpected"}]\n', encoding="utf-8")
     checksums = tmp_path / "evidence" / "artifact_checksums.json"
+    checksums.parent.mkdir()
+    checksums.write_text(
+        json.dumps({stale_error.name: campaign._sha256(stale_error)}),
+        encoding="utf-8",
+    )
 
     _, sidecar = campaign.merge_campaign(
         jobs,
@@ -246,12 +202,12 @@ def test_merge_campaign_ships_and_checksums_original_known_failure_records(tmp_p
         checksum_output=checksums,
     )
 
-    error_paths = sorted(output.glob("errors_moe_a2a_vllm.rank*.json"))
-    assert len(error_paths) == 4
+    assert not list(output.glob("errors_moe_a2a_vllm.rank*.json"))
     checksum_payload = json.loads(checksums.read_text(encoding="utf-8"))
-    assert all(checksum_payload[path.name] == campaign._sha256(path) for path in error_paths)
+    assert stale_error.name not in checksum_payload
+    assert set(checksum_payload) == {"moe_a2a_perf.parquet", "collection_meta.yaml"}
     meta = yaml.safe_load(sidecar.read_text(encoding="utf-8"))
-    assert meta["tables"]["moe_a2a_perf"]["classified_failures"] == 13
+    assert meta["tables"]["moe_a2a_perf"]["classified_failures"] == 0
 
 
 def test_merge_campaign_rejects_missing_backend_job(tmp_path):
@@ -265,42 +221,31 @@ def test_validate_job_rejects_classified_failure(tmp_path):
     job = _write_job(tmp_path, node_num=1, ep_size=8, backend="deepep_ht")
     (job / "errors_moe_a2a_vllm.rank0.json").write_text('[{"error": "boom"}]', encoding="utf-8")
 
-    with pytest.raises(campaign.CampaignValidationError, match="classified failures"):
+    with pytest.raises(campaign.CampaignValidationError, match="unexpected failures"):
         campaign.validate_job_dir(job, system="h200_sxm")
 
 
-def test_validate_job_accepts_exact_kimi_k3_deepep_ep4_limit(tmp_path):
+def test_validate_job_rejects_kimi_k3_ep4_failure_even_when_recorded(tmp_path):
     job = _write_job(
         tmp_path,
         node_num=1,
         ep_size=4,
         backend="deepep_ht",
         system="gb200",
-        carry_known_kimi_limit=True,
+    )
+    (job / "errors_moe_a2a_vllm.rank0.json").write_text(
+        json.dumps(
+            [
+                {
+                    "classification": "unexpected",
+                    "error": "Kimi-K3 exceeds the pinned DeepEP local-expert limit",
+                }
+            ]
+        ),
+        encoding="utf-8",
     )
 
-    validated = campaign.validate_job_dir(job, system="gb200")
-
-    assert len(validated.frame) == 156
-    assert validated.table["classified_failures"] == 13
-    assert len(list(job.glob("errors_moe_a2a_vllm.rank*.json"))) == 4
-
-
-def test_validate_job_rejects_a_variant_of_the_known_kimi_k3_limit(tmp_path):
-    job = _write_job(
-        tmp_path,
-        node_num=1,
-        ep_size=4,
-        backend="deepep_ht",
-        system="gb200",
-        carry_known_kimi_limit=True,
-    )
-    error_path = job / "errors_moe_a2a_vllm.rank0.json"
-    records = json.loads(error_path.read_text(encoding="utf-8"))
-    records[0]["classification"] = "unexpected"
-    error_path.write_text(json.dumps(records, indent=2), encoding="utf-8")
-
-    with pytest.raises(campaign.CampaignValidationError, match="outside the accepted Kimi-K3"):
+    with pytest.raises(campaign.CampaignValidationError, match="unexpected failures"):
         campaign.validate_job_dir(job, system="gb200")
 
 

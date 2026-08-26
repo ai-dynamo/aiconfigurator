@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -217,6 +218,13 @@ def test_rc11_adapter_destroys_a_replaced_resource_once():
     assert adapter._active_moe is None
 
 
+def test_adapter_has_no_internal_mpi_collective_or_barrier():
+    source = inspect.getsource(a2a.TensorRTLLMBenchmarkAdapter.run)
+    assert "mpi_allgather" not in source
+    assert "mpi_barrier" not in source
+    assert "all_rank_num_tokens" in source
+
+
 def test_rows_have_no_prepare_phase_and_preserve_truthful_dtype():
     rows = a2a.build_unified_rows(_case(a2a.COMM_BACKEND_LL, "fp8", tokens=2), _result("fp8"))
     assert [(row["phase"], row["comm_dtype"]) for row in rows] == [
@@ -225,6 +233,22 @@ def test_rows_have_no_prepare_phase_and_preserve_truthful_dtype():
     ]
     assert all(row["sms"] == 0 and row["notify_us"] == 0 for row in rows)
     assert [row["latency"] for row in rows] == [31.0, 17.0]
+
+
+def test_nvfp4_low_latency_uses_phase_specific_consumer_dtypes():
+    rows = a2a.build_unified_rows(
+        _case(a2a.COMM_BACKEND_LL, "nvfp4", tokens=2),
+        a2a.BenchmarkResult(
+            (
+                a2a.PhaseMeasurement("combine", 31.0, "fp4"),
+                a2a.PhaseMeasurement("dispatch", 17.0, "nvfp4"),
+            )
+        ),
+    )
+    assert [(row["phase"], row["comm_dtype"]) for row in rows] == [
+        ("combine", "fp4"),
+        ("dispatch", "nvfp4"),
+    ]
 
 
 def test_prepare_or_unsupported_dtype_never_gets_relabelled():
@@ -294,7 +318,8 @@ def test_runtime_source_and_abi_attestation_hooks_fail_closed():
 
 
 class _GoodAdapter:
-    def run(self, case):
+    def run(self, case, all_rank_num_tokens):
+        assert all_rank_num_tokens == [case.num_tokens] * case.ep_size
         return _result(case.quant.comm_dtype)
 
 
@@ -302,7 +327,8 @@ class _PartialAdapter:
     def __init__(self):
         self.calls = 0
 
-    def run(self, case):
+    def run(self, case, all_rank_num_tokens):
+        assert all_rank_num_tokens == [case.num_tokens] * case.ep_size
         self.calls += 1
         if self.calls == 2:
             raise RuntimeError("rank-local benchmark failure")
@@ -329,7 +355,7 @@ def test_write_failure_is_recorded_and_cannot_complete(tmp_path, monkeypatch):
 def test_stale_staging_is_rejected_before_append(tmp_path):
     path = tmp_path / "moe_a2a_perf.txt"
     path.write_text("stale\n")
-    with pytest.raises(a2a.MoeA2AWriteError, match="stale staging"):
+    with pytest.raises(a2a.MoeA2AWriteError, match="stale output artifacts"):
         a2a.run_collection(
             cases=[_case()],
             adapter=_GoodAdapter(),
@@ -347,7 +373,7 @@ def test_stale_failure_staging_is_rejected_before_benchmark(tmp_path):
     path.write_text('[{"error": "old run"}]\n')
     adapter = _PartialAdapter()
 
-    with pytest.raises(a2a.MoeA2AWriteError, match="stale failure staging"):
+    with pytest.raises(a2a.MoeA2AWriteError, match="stale output artifacts"):
         a2a.run_collection(
             cases=[_case()],
             adapter=adapter,
@@ -381,7 +407,7 @@ def test_partial_collection_writes_partial_attestation_then_raises(tmp_path, mon
             version="1.3.0rc11",
             device_name="NVIDIA B200",
             runtime_meta={"framework": "wideep_trtllm"},
-            finalize=lambda paths: [tmp_path / "moe_a2a_perf.parquet"],
+            finalize=lambda paths, **kwargs: [tmp_path / "moe_a2a_perf.parquet"],
         )
     assert observed["failure_count"] == 1
     assert observed["module_name"] == a2a.MODULE_NAME
@@ -426,3 +452,50 @@ def test_classified_error_record_carries_physical_identity(tmp_path):
         "num_tokens": 2,
         "sms": 0,
     }
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "moe_a2a_perf.parquet",
+        "moe_a2a_perf.parquet.sha256",
+        "collection_meta.yaml",
+        "errors_moe_a2a_trtllm.rank7.json",
+    ],
+)
+def test_every_owned_stale_artifact_is_rejected_before_benchmark(tmp_path, name):
+    (tmp_path / name).write_text("stale\n")
+    adapter = _PartialAdapter()
+    with pytest.raises(a2a.MoeA2AWriteError, match="stale output artifacts"):
+        a2a.run_collection(
+            cases=[_case()],
+            adapter=adapter,
+            output_dir=tmp_path,
+            rank=0,
+            version="1.3.0rc11",
+            device_name="NVIDIA B200",
+            runtime_meta={},
+        )
+    assert adapter.calls == 0
+
+
+def test_finalize_disables_existing_parquet_merge(tmp_path, monkeypatch):
+    monkeypatch.setattr(a2a, "log_perf", lambda **kwargs: True)
+    monkeypatch.setattr(a2a, "write_moe_a2a_sidecar", lambda output_dir, **kwargs: output_dir / "collection_meta.yaml")
+    observed = []
+
+    def finalize(paths, **kwargs):
+        observed.append((paths, kwargs))
+        return [tmp_path / "moe_a2a_perf.parquet"]
+
+    a2a.run_collection(
+        cases=[_case()],
+        adapter=_GoodAdapter(),
+        output_dir=tmp_path,
+        rank=0,
+        version="1.3.0rc11",
+        device_name="NVIDIA B200",
+        runtime_meta={},
+        finalize=finalize,
+    )
+    assert observed == [([str(tmp_path / "moe_a2a_perf.txt")], {"merge_existing": False})]

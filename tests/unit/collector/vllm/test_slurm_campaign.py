@@ -71,15 +71,12 @@ def test_runner_rejects_cifs_and_requires_authoritative_topology():
     assert "--gpu-bind" not in source
 
 
-def test_runner_only_carries_the_exact_kimi_k3_ep4_limit_and_checksums_it():
+def test_runner_never_publishes_a_failed_case_plan():
     source = RUNNER.read_text(encoding="utf-8")
 
-    assert 'record.get("classification") == "known_framework_limit"' in source
-    assert "num_experts / num_ranks <= kNumThreads and num_ranks <= kNumThreads" in source
-    assert '("gb200", "deepep_ht", "1", "4")' in source
-    assert '("gb300", "deepep_ht", "1", "4")' in source
-    assert 'case.get("num_experts") == 896' in source
-    assert "\"${failure_paths[@]}\" <<'PY'" in source
+    assert '[[ "${NODE_NUM}" == 1 ]]' in source
+    assert "formal job produced unexpected case failures; refusing publication" in source
+    assert "known_framework_limit" not in source
 
 
 def test_runner_discovers_and_records_a_routable_gloo_interface():
@@ -108,11 +105,41 @@ def test_submitter_requires_canaries_and_one_job_per_backend():
     assert '--gpus-per-node="${gpus_per_node}"' in source
     assert "--exclusive" in source
     assert "--switches=1" in source
-    assert "multi-node ${system} submission requires infra-approved nodelist" in source
+    assert "${system} submission requires infra-approved nodelist" in source
+    assert '[[ "${nodes}" == 1 ]]' in source
+    assert "supports only --nodes 1" in source
+    assert "node_values=(1)" in source
+    assert "node_values=(1 2 4)" not in source
     assert "topology_mode=single_node" in RUNNER.read_text(encoding="utf-8")
     assert '--dependency="afterok:${afterok_job}"' in source
     assert '"${afterok_job}" =~ ^[0-9]+$' in source
     assert "requires --legacy-overlay-dir" in source
+
+
+@pytest.mark.parametrize("nodes", ["2", "4", "all"])
+def test_submitter_rejects_every_non_single_node_formal_request(nodes):
+    result = subprocess.run(
+        [
+            "bash",
+            str(SUBMITTER),
+            "--system",
+            "h200_sxm",
+            "--run-kind",
+            "full",
+            "--nodes",
+            nodes,
+            "--campaign-root",
+            "/does-not-need-to-exist",
+            "--repo-dir",
+            "/does-not-need-to-exist",
+            "--vllm-source-root",
+            "/does-not-need-to-exist",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "supports only --nodes 1" in result.stderr
 
 
 def test_vllm_collector_hash_closure_includes_campaign_pipeline():
@@ -167,18 +194,20 @@ def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     submitter = IMAGE_SUBMITTER.read_text(encoding="utf-8")
     assert "ENROOT_MAX_CONNECTIONS=1" in runner
     assert "ENROOT_TRANSFER_RETRIES=8" in runner
-    assert '--container-save="${temporary_image}"' in runner
     assert "unsquashfs -s" in runner
-    assert "source_image_digest" in runner
+    assert "configured_image_digest" in runner
+    assert "observed_image_digest" in runner
+    assert '"image_variant": f"linux/{arch}"' in runner
     assert 'runtime["vllm"] != "0.24.0"' in runner
     assert "73b6ea4a439ba03a695563f9fd242c8e4b02b37c" in runner
     assert '"deep_ep_v2_available": hasattr(deep_ep, "ElasticBuffer")' in runner
     assert "sqsh_sha256" in runner
-    assert "registry-1.docker.io/v2/vllm/vllm-openai/manifests/v0.24.0" in runner
-    assert "matches != [expected_digest]" in runner
-    assert "image_reference_mode=enroot-3.4-digest" in runner
-    assert "registry-1.docker.io#vllm/vllm-openai:${IMAGE_DIGEST}" in runner
-    assert 'CONTAINER_IMAGE="registry-1.docker.io#vllm/vllm-openai:${image_digest}"' in submitter
+    assert "manifests/{expected_index_digest}" in runner
+    assert "observed_index_digest != expected_index_digest" in runner
+    assert "len(matches) != 1" in runner
+    assert "image_reference_mode=enroot-3.4-index-digest" in runner
+    assert "registry-1.docker.io#vllm/vllm-openai:${IMAGE_INDEX_DIGEST}" in runner
+    assert 'CONTAINER_IMAGE="registry-1.docker.io#vllm/vllm-openai:${image_index_digest}"' in submitter
     assert 'enroot_library_dir="/tmp/aic-enroot-library-${SLURM_JOB_ID}"' in runner
     assert 'replacement = ".manifests[]?"' in runner
     assert "docker_path.write_text(source.replace(needle, replacement))" in runner
@@ -188,7 +217,7 @@ def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     assert 'ENROOT_LIBRARY_PATH="${enroot_library_dir}" enroot import' in runner
     assert "amd64) enroot_arch=x86_64" in runner
     assert "arm64) enroot_arch=aarch64" in runner
-    assert "image_reference_mode=verified-tag" in runner
+    assert "verified-tag" not in runner
     assert '"image_reference_mode": image_reference_mode' in runner
     assert "b200_sxm|b300_sxm|h100_sxm|h200_sxm" in submitter
     assert "beta-users_fallback" in submitter

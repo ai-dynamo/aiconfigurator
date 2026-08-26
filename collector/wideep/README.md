@@ -16,25 +16,25 @@ Layout:
 - `vllm/collect_moe_ep.py`: dormant vLLM expert-compute implementation; it is
   not registered until its serving dispatch identity is hardware-verified.
 - `vllm/slurm/`: the fail-closed six-system canary/full campaign launcher.
-- `vllm/finalize_campaign.py`: validates six independent backend/topology
+- `vllm/finalize_campaign.py`: validates three independent backend
   jobs for one system and atomically merges the publishable parquet/sidecar.
 - `sglang/deepep/`: deprecated manual log collection and extraction scripts.
 
-## vLLM 0.24.0 multi-node campaign
+## vLLM 0.24.0 single-node campaign
 
 The formal matrix is:
 
-| System | GPUs/node | 2-node identity | 4-node identity |
-| --- | ---: | --- | --- |
-| `gb200` | 4 | EP8 | EP16 |
-| `gb300` | 4 | EP8 | EP16 |
-| `b200_sxm` | 8 | EP16 | EP32 |
-| `b300_sxm` | 8 | EP16 | EP32 |
-| `h100_sxm` | 8 | EP16 | EP32 |
-| `h200_sxm` | 8 | EP16 | EP32 |
+| System | Nodes | GPUs/node | Formal identity |
+| --- | ---: | ---: | --- |
+| `gb200` | 1 | 4 | EP4 |
+| `gb300` | 1 | 4 | EP4 |
+| `b200_sxm` | 1 | 8 | EP8 |
+| `b300_sxm` | 1 | 8 | EP8 |
+| `h100_sxm` | 1 | 8 | EP8 |
+| `h200_sxm` | 1 | 8 | EP8 |
 
-Each topology runs three independent jobs, one per backend. A short 2-node
-canary must succeed for every backend before full jobs may be submitted.
+Each system runs three independent jobs, one per backend. A short single-node
+canary must succeed for every backend before its full job may be submitted.
 Non-default LL transport flags are diagnostic: the collectors keep staging
 rows but do not finalize parquet or a sidecar under the default identity.
 
@@ -43,9 +43,8 @@ image, cache, log, staging, and output path. `/mnt/cifs` and `/mnt/nvdl` are
 always rejected. Artifacts finalize in job-unique `/tmp`, receive parquet and
 sidecar checksums, and are copied to the campaign root only after validation.
 
-GB200, GB300, H100, and H200 allocations must be contained in exactly one
-authoritative Slurm leaf switch or NVL block. ComputeLab exposes B200/B300
-through `topology/flat`; consequently B200/B300 submission additionally
+The formal launcher rejects every node count other than one. ComputeLab exposes
+B200/B300 through `topology/flat`; consequently B200/B300 submission also
 requires an infrastructure-approved exact nodelist and approval ID. Without
 both, the launcher exits before `sbatch`.
 

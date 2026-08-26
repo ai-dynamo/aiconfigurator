@@ -10,10 +10,10 @@ Usage: submit_vllm_moe_a2a.sh --system SYSTEM --run-kind canary|full \
   --campaign-root PATH --repo-dir PATH --vllm-source-root PATH [OPTIONS]
 
 Options:
-  --nodes 1|2|4|all           Canary accepts only 1; full defaults to 1.
+  --nodes 1                   Formal campaign is single-node only (default: 1).
   --backends LIST             Default: deepep_ht,deepep_ll,deepep_v2.
-  --container-image REF       Digest-pinned image; defaults by architecture.
-  --image-digest DIGEST       Observed child digest; defaults by architecture.
+  --container-image PATH      Required image staged from the pinned index.
+  --image-index-digest DIGEST Configured multi-arch index digest.
   --legacy-overlay-dir PATH   Required for GB200/GB300 and B300 legacy jobs.
   --v2-overlay-dir PATH       Required for every deepep_v2 job.
   --approved-nodelist LIST    Required for B200/B300.
@@ -36,7 +36,9 @@ vllm_source_root=""
 nodes=""
 backends="deepep_ht,deepep_ll,deepep_v2"
 container_image=""
+image_index_digest="sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f"
 image_digest=""
+image_variant=""
 legacy_overlay_dir=""
 v2_overlay_dir=""
 approved_nodelist=""
@@ -54,7 +56,7 @@ while [[ $# -gt 0 ]]; do
         --nodes) nodes=$2; shift 2 ;;
         --backends) backends=$2; shift 2 ;;
         --container-image) container_image=$2; shift 2 ;;
-        --image-digest) image_digest=$2; shift 2 ;;
+        --image-index-digest) image_index_digest=$2; shift 2 ;;
         --legacy-overlay-dir) legacy_overlay_dir=$2; shift 2 ;;
         --v2-overlay-dir) v2_overlay_dir=$2; shift 2 ;;
         --approved-nodelist) approved_nodelist=$2; shift 2 ;;
@@ -69,8 +71,10 @@ done
 [[ -n "${system}" && -n "${run_kind}" && -n "${campaign_root}" && \
    -n "${repo_dir}" && -n "${vllm_source_root}" ]] || { usage; exit 2; }
 case "${run_kind}" in
-    canary) [[ -z "${nodes}" || "${nodes}" == 1 ]] || die "canary is always 1-node"; nodes=1 ;;
-    full) nodes=${nodes:-1}; [[ "${nodes}" == 1 || "${nodes}" == 2 || "${nodes}" == 4 || "${nodes}" == all ]] || die "bad --nodes" ;;
+    canary|full)
+        nodes=${nodes:-1}
+        [[ "${nodes}" == 1 ]] || die "the formal vLLM campaign supports only --nodes 1"
+        ;;
     *) die "--run-kind must be canary or full" ;;
 esac
 if [[ -n "${afterok_job}" ]]; then
@@ -78,52 +82,68 @@ if [[ -n "${afterok_job}" ]]; then
     [[ "${afterok_job}" =~ ^[0-9]+$ ]] || die "--afterok-job must be a numeric Slurm job ID"
 fi
 
-arm64_digest="sha256:32445b36556244d8a721cd21a2b47a7915bc6408432d05aaeab205bb223ced8b"
-amd64_digest="sha256:f9de5cd9fa907fbf6dbba691eb7db095d48ad58ea283e3eba7142f9a91e186e8"
-
 case "${system}" in
     gb200)
         account=coreai_comparch_inferencex; partition=batch; qos=normal; gpus_per_node=4; time_limit=04:00:00
-        image_digest=${image_digest:-${arm64_digest}}
+        image_arch=arm64
         ;;
     gb300)
         account=blackwell; partition=gb300nvl72_preprod; qos=normal; gpus_per_node=4; time_limit=04:00:00
-        image_digest=${image_digest:-${arm64_digest}}
+        image_arch=arm64
         ;;
     h100_sxm)
         account=dl_frameworks; partition=dgxh100; qos=normal; gpus_per_node=8; time_limit=04:00:00
-        image_digest=${image_digest:-${amd64_digest}}
+        image_arch=amd64
         ;;
     h200_sxm)
         account=dl_frameworks; partition=dgxh200; qos=normal; gpus_per_node=8; time_limit=04:00:00
-        image_digest=${image_digest:-${amd64_digest}}
+        image_arch=amd64
         ;;
     b200_sxm)
         account=beta-users_fallback
         partition='b200@cr+mp-1000W/umbriel-b200@ts4/8gpu-224cpu-2048gb'
         qos=batch-short; gpus_per_node=8; time_limit=04:00:00
-        image_digest=${image_digest:-${amd64_digest}}
+        image_arch=amd64
         ;;
     b300_sxm)
         account=beta-users_b300
         partition='b300@ts5/b300-nvl8@ts5/8gpu-224cpu-2048gb'
         qos=batch-short; gpus_per_node=8; time_limit=04:00:00
-        image_digest=${image_digest:-${amd64_digest}}
+        image_arch=amd64
         ;;
     *) die "unsupported system ${system}" ;;
 esac
 
-if [[ -z "${container_image}" ]]; then
-    container_image="vllm/vllm-openai:v0.24.0@${image_digest}"
-elif [[ "${container_image}" == /* ]]; then
-    container_image=$(realpath -e -- "${container_image}")
-    case "${container_image}" in
-        /mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*) die "prohibited container image path ${container_image}" ;;
-    esac
-else
-    [[ "${container_image}" == *@"${image_digest}" ]] || die \
-        "container reference and observed child digest differ"
-fi
+[[ "${image_index_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid image index digest"
+[[ "${container_image}" == /* ]] || die "--container-image must be a locally staged squashfs path"
+container_image=$(realpath -e -- "${container_image}")
+case "${container_image}" in
+    /mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*) die "prohibited container image path ${container_image}" ;;
+esac
+container_image_meta=$(realpath -e -- "${container_image}.meta.json")
+read -r image_digest image_variant < <(
+    python3 - "${container_image_meta}" "${image_index_digest}" "${image_arch}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+meta_path, expected_index, expected_arch = sys.argv[1:]
+payload = json.loads(Path(meta_path).read_text())
+checks = {
+    "schema_version": 2,
+    "configured_image": f"vllm/vllm-openai:v0.24.0@{expected_index}",
+    "configured_image_digest": expected_index,
+    "image_variant": f"linux/{expected_arch}",
+}
+for key, expected in checks.items():
+    if payload.get(key) != expected:
+        raise SystemExit(f"staged image {key} mismatch: {payload.get(key)!r} != {expected!r}")
+child = payload.get("observed_image_digest", "")
+if not child.startswith("sha256:") or len(child) != 71:
+    raise SystemExit(f"staged image has invalid observed child digest: {child!r}")
+print(child, payload["image_variant"])
+PY
+) || die "staged image metadata validation failed"
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
 payload=$(realpath -e "${script_dir}/run_vllm_moe_a2a_job.sh")
@@ -140,18 +160,14 @@ mkdir -p "${log_dir}"
 log_dir=$(realpath -e "${log_dir}")
 
 IFS=',' read -r -a backend_values <<< "${backends}"
-if [[ "${nodes}" == all ]]; then
-    node_values=(1 2 4)
-else
-    node_values=("${nodes}")
-fi
+node_values=(1)
 
 for node_num in "${node_values[@]}"; do
     for backend in "${backend_values[@]}"; do
         case "${backend}" in deepep_ht|deepep_ll|deepep_v2) ;; *) die "bad backend ${backend}" ;; esac
-        if [[ ("${system}" == b200_sxm || "${system}" == b300_sxm) && "${node_num}" -gt 1 ]]; then
+        if [[ "${system}" == b200_sxm || "${system}" == b300_sxm ]]; then
             [[ -n "${approved_nodelist}" && -n "${fabric_approval_id}" ]] || die \
-                "multi-node ${system} submission requires infra-approved nodelist and approval ID"
+                "${system} submission requires infra-approved nodelist and approval ID"
         fi
         overlay_dir=""
         if [[ "${backend}" == deepep_v2 ]]; then
@@ -178,7 +194,8 @@ for node_num in "${node_values[@]}"; do
         export SYSTEM="${system}" NODE_NUM="${node_num}" GPUS_PER_NODE="${gpus_per_node}"
         export BACKEND="${backend}" RUN_KIND="${run_kind}" CAMPAIGN_ROOT="${campaign_root}"
         export REPO_DIR="${repo_dir}" VLLM_SOURCE_ROOT="${vllm_source_root}"
-        export CONTAINER_IMAGE="${container_image}" IMAGE_DIGEST="${image_digest}"
+        export CONTAINER_IMAGE="${container_image}" IMAGE_INDEX_DIGEST="${image_index_digest}"
+        export IMAGE_DIGEST="${image_digest}" IMAGE_VARIANT="${image_variant}"
         export RUNTIME_ABI_JSON="${runtime_abi_json}"
         export DEEP_EP_OVERLAY_DIR="${overlay_dir}"
         export AIC_APPROVED_NODELIST="${approved_nodelist}" AIC_FABRIC_APPROVAL_ID="${fabric_approval_id}"

@@ -101,19 +101,11 @@ def test_declared_shapes_use_vllm_population(monkeypatch):
     assert SHAPE in shapes
 
 
-def test_ll_shape_population_declares_the_pinned_kernel_hidden_sizes(monkeypatch):
+def test_ll_shape_population_keeps_kimi_in_the_declared_plan(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
-    baseline = a2a.get_vllm_moe_a2a_shapes(required_expert_parallel_size=WORLD_SIZE)
-    ll_shapes = a2a.get_vllm_moe_a2a_shapes(
-        required_expert_parallel_size=WORLD_SIZE,
-        supported_hidden_sizes=a2a.DEEPEP_LL_SUPPORTED_HIDDEN_SIZES,
-    )
+    shapes = a2a.get_vllm_moe_a2a_shapes(required_expert_parallel_size=WORLD_SIZE)
 
-    assert ll_shapes
-    assert set(ll_shapes) < set(baseline)
-    assert all(shape.hidden_size in a2a.DEEPEP_LL_SUPPORTED_HIDDEN_SIZES for shape in ll_shapes)
-    assert any(shape.hidden_size == 3584 for shape in baseline)
-    assert all(shape.hidden_size != 3584 for shape in ll_shapes)
+    assert any(shape == MoeA2AShape(hidden_size=3584, topk=16, num_experts=896) for shape in shapes)
 
 
 def test_transport_defaults_are_publishable_and_alternates_are_diagnostic():
@@ -209,14 +201,13 @@ def test_unsupported_world_size_and_zero_case_fail_closed():
         )
 
     unsupported_ll = MoeA2AShape(3584, 8, 256)
-    with pytest.raises(a2a.VllmMoeA2ADeclarationError, match="pinned kernel capability"):
-        a2a.build_case_plan(
-            shapes=[unsupported_ll],
-            grid=GRID,
-            world_size=WORLD_SIZE,
-            node_num=NODE_NUM,
-            backends=("deepep_ll",),
-        )
+    assert a2a.build_case_plan(
+        shapes=[unsupported_ll],
+        grid=GRID,
+        world_size=WORLD_SIZE,
+        node_num=NODE_NUM,
+        backends=("deepep_ll",),
+    )
     assert a2a.build_case_plan(
         shapes=[unsupported_ll],
         grid=GRID,
@@ -472,7 +463,7 @@ def test_rank_error_records_non_case_failure(tmp_path):
     assert "cudaErrorUnknown" in record["error"]
 
 
-def test_only_exact_kimi_k3_deepep_ep4_limit_is_classified_as_known():
+def test_kimi_k3_deepep_ep4_limit_remains_unexpected():
     identity = a2a.DistIdentity(
         rank=0,
         world_size=4,
@@ -490,39 +481,13 @@ def test_only_exact_kimi_k3_deepep_ep4_limit_is_classified_as_known():
         sms=a2a.HT_SMS,
         capacity=a2a.HT_BUFFER_SIZE_BYTES,
     )
-    known = a2a.CaseFailure(
+    failure = a2a.CaseFailure(
         case=case,
         error_type="RuntimeError",
-        error=f"DeepEP assertion: {a2a.KNOWN_DEEPEP_HT_EP4_LIMIT_ERROR}",
+        error="DeepEP assertion: local expert limit exceeded",
     )
 
-    assert a2a._case_failure_classification(known, identity) == "known_framework_limit"
-    assert (
-        a2a._case_failure_classification(
-            a2a.CaseFailure(case=case, error_type="RuntimeError", error="different failure"),
-            identity,
-        )
-        == "unexpected"
-    )
-    unsupported_token = a2a.VllmMoeA2ACase(
-        comm_backend=case.comm_backend,
-        inference_phase=case.inference_phase,
-        shape=case.shape,
-        num_tokens=3,
-        sms=case.sms,
-        capacity=case.capacity,
-    )
-    assert (
-        a2a._case_failure_classification(
-            a2a.CaseFailure(
-                case=unsupported_token,
-                error_type="RuntimeError",
-                error=a2a.KNOWN_DEEPEP_HT_EP4_LIMIT_ERROR,
-            ),
-            identity,
-        )
-        == "unexpected"
-    )
+    assert a2a._case_failure_classification(failure, identity) == "unexpected"
 
 
 @pytest.mark.parametrize(
@@ -624,7 +589,8 @@ def test_writer_uses_sglang_unified_schema(tmp_path):
 
 def test_runtime_attestation_uses_live_hooks_and_rejects_wrong_commit(tmp_path):
     runtime = a2a.get_collector_runtime("vllm", workload="wideep")
-    image_digest = runtime.image().split("@", 1)[1]
+    image_index_digest = runtime.image().split("@", 1)[1]
+    child_digest = "sha256:" + "1" * 64
     observed_abi = runtime.abi_for_backend("deepep_ht") | {
         "system": "h100_sxm",
         "deep_ep_scaleup_ranks": "8",
@@ -638,7 +604,9 @@ def test_runtime_attestation_uses_live_hooks_and_rejects_wrong_commit(tmp_path):
         source_root=tmp_path,
         backend="deepep_ht",
         observed_abi=observed_abi,
-        observed_image_digest=image_digest,
+        observed_image_index_digest=image_index_digest,
+        observed_image_digest=child_digest,
+        observed_image_variant="linux/amd64",
         installed_version_getter=lambda name: runtime.version,
         source_commit_getter=lambda path: a2a.TARGET_VLLM_SOURCE_COMMIT,
         live_abi_getter=lambda backend: live_abi,
@@ -648,35 +616,29 @@ def test_runtime_attestation_uses_live_hooks_and_rejects_wrong_commit(tmp_path):
     assert meta["source_commit"] == a2a.TARGET_VLLM_SOURCE_COMMIT
     assert meta["abi"] == observed_abi
     assert meta["live_abi"] == live_abi
-    assert meta["image_digest"] == image_digest
-    grace_image, grace_image_digest = runtime.image("grace_blackwell").split("@", 1)
-    grace_meta = a2a.attest_vllm_runtime(
-        source_root=tmp_path,
-        backend="deepep_ht",
-        observed_abi=observed_abi,
-        observed_image_digest=grace_image_digest,
-        installed_version_getter=lambda name: runtime.version,
-        source_commit_getter=lambda path: a2a.TARGET_VLLM_SOURCE_COMMIT,
-        live_abi_getter=lambda backend: live_abi,
-    )
-    assert grace_meta["image"] == grace_image
-    assert grace_meta["image_digest"] == grace_image_digest
+    assert meta["image"] == runtime.image()
+    assert meta["image_variant"] == "linux/amd64"
+    assert meta["image_digest"] == child_digest
     with pytest.raises(a2a.VllmMoeA2ADeclarationError, match="source must be"):
         a2a.attest_vllm_runtime(
             source_root=tmp_path,
             backend="deepep_ht",
             observed_abi=observed_abi,
-            observed_image_digest=image_digest,
+            observed_image_index_digest=image_index_digest,
+            observed_image_digest=child_digest,
+            observed_image_variant="linux/amd64",
             installed_version_getter=lambda name: runtime.version,
             source_commit_getter=lambda path: "wrong",
             live_abi_getter=lambda backend: live_abi,
         )
-    with pytest.raises(a2a.VllmMoeA2ADeclarationError, match="image digest mismatch"):
+    with pytest.raises(a2a.VllmMoeA2ADeclarationError, match="image-index digest mismatch"):
         a2a.attest_vllm_runtime(
             source_root=tmp_path,
             backend="deepep_ht",
             observed_abi=observed_abi,
-            observed_image_digest="sha256:" + "0" * 64,
+            observed_image_index_digest="sha256:" + "0" * 64,
+            observed_image_digest=child_digest,
+            observed_image_variant="linux/amd64",
             installed_version_getter=lambda name: runtime.version,
             source_commit_getter=lambda path: a2a.TARGET_VLLM_SOURCE_COMMIT,
             live_abi_getter=lambda backend: live_abi,
@@ -685,7 +647,8 @@ def test_runtime_attestation_uses_live_hooks_and_rejects_wrong_commit(tmp_path):
 
 def test_runtime_attestation_splits_v2_and_legacy_nvl4_abis(tmp_path):
     runtime = a2a.get_collector_runtime("vllm", workload="wideep")
-    image_digest = runtime.image().split("@", 1)[1]
+    image_index_digest = runtime.image().split("@", 1)[1]
+    child_digest = "sha256:" + "2" * 64
     wheel_sha = "a" * 64
     v2_abi = runtime.abi_for_backend("deepep_v2") | {
         "system": "gb200",
@@ -696,7 +659,9 @@ def test_runtime_attestation_splits_v2_and_legacy_nvl4_abis(tmp_path):
         source_root=tmp_path,
         backend="deepep_v2",
         observed_abi=v2_abi,
-        observed_image_digest=image_digest,
+        observed_image_index_digest=image_index_digest,
+        observed_image_digest=child_digest,
+        observed_image_variant="linux/arm64",
         installed_version_getter=lambda name: runtime.version,
         source_commit_getter=lambda path: a2a.TARGET_VLLM_SOURCE_COMMIT,
         live_abi_getter=lambda backend: {
@@ -719,7 +684,9 @@ def test_runtime_attestation_splits_v2_and_legacy_nvl4_abis(tmp_path):
         source_root=tmp_path,
         backend="deepep_ht",
         observed_abi=legacy_abi,
-        observed_image_digest=image_digest,
+        observed_image_index_digest=image_index_digest,
+        observed_image_digest=child_digest,
+        observed_image_variant="linux/arm64",
         installed_version_getter=lambda name: runtime.version,
         source_commit_getter=lambda path: a2a.TARGET_VLLM_SOURCE_COMMIT,
         live_abi_getter=lambda backend: {
@@ -841,7 +808,7 @@ def test_v2_rdma_rate_tool_rejects_missing_or_mismatched_attestation(tmp_path, m
         a2a._activate_v2_rdma_rate_tool("400")
 
 
-def test_classified_case_failures_do_not_demote_finalized_table(tmp_path):
+def test_classified_case_failures_demote_formal_vllm_table(tmp_path):
     pyarrow = pytest.importorskip("pyarrow")
     del pyarrow
     rows = a2a.collect_with_adapter(
@@ -883,7 +850,7 @@ def test_classified_case_failures_do_not_demote_finalized_table(tmp_path):
         failure_count=1,
     )
     failure_table = yaml.safe_load(with_failures.read_text())["tables"]["moe_a2a_perf"]
-    assert failure_table["status"] == "complete"
+    assert failure_table["status"] == "partial"
     assert failure_table["classified_failures"] == 1
     with pytest.raises(a2a.VllmMoeA2ADeclarationError, match="empty"):
         a2a._write_sidecar(

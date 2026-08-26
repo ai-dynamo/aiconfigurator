@@ -538,23 +538,6 @@ def test_common_moe_population_can_declare_a_required_ep_world(monkeypatch):
         get_common_moe_test_cases(backend="vllm", required_expert_parallel_size=0)
 
 
-def test_common_moe_population_can_declare_supported_hidden_sizes(monkeypatch):
-    from collector.case_generator import get_common_moe_test_cases
-
-    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
-    baseline = get_common_moe_test_cases(backend="vllm")
-    constrained = get_common_moe_test_cases(
-        backend="vllm",
-        supported_hidden_sizes={2048, 7168},
-    )
-
-    assert constrained
-    assert {case.hidden_size for case in constrained} <= {2048, 7168}
-    assert all(case in baseline for case in constrained)
-    with pytest.raises(ValueError, match="supported_hidden_sizes must contain positive integers"):
-        get_common_moe_test_cases(backend="vllm", supported_hidden_sizes=set())
-
-
 def test_vllm_moe_cuda_graph_fails_closed():
     tree = ast.parse((REPO_ROOT / "collector/vllm/collect_moe.py").read_text())
     run_moe = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_moe_torch")

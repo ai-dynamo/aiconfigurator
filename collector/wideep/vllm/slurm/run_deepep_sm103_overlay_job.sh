@@ -42,7 +42,9 @@ require_env CAMPAIGN_ROOT
 require_env REPO_DIR
 require_env VLLM_SOURCE_ROOT
 require_env CONTAINER_IMAGE
+require_env IMAGE_INDEX_DIGEST
 require_env IMAGE_DIGEST
+require_env IMAGE_VARIANT
 require_env SLURM_JOB_ID
 
 case "${SYSTEM}" in gb200|gb300|b200_sxm|b300_sxm|h100_sxm|h200_sxm) ;; *) die "unsupported system ${SYSTEM}" ;; esac
@@ -65,21 +67,33 @@ case "${OVERLAY_PROFILE}" in
     *) die "unsupported overlay profile ${OVERLAY_PROFILE}" ;;
 esac
 
-[[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid image digest"
-if [[ "${CONTAINER_IMAGE}" == /* ]]; then
-    container_image=$(safe_existing_path "container image" "${CONTAINER_IMAGE}")
-    unsquashfs -s "${container_image}" >/dev/null || die "container image is not a valid squashfs"
-    container_image_meta=$(safe_existing_path "container image metadata" "${container_image}.meta.json")
-    python3 - "${container_image}" "${container_image_meta}" "${IMAGE_DIGEST}" <<'PY'
+[[ "${IMAGE_INDEX_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid image index digest"
+[[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid image child digest"
+case "${IMAGE_VARIANT}" in linux/amd64|linux/arm64) ;; *) die "invalid image variant" ;; esac
+[[ "${CONTAINER_IMAGE}" == /* ]] || die "overlay build requires a locally staged image"
+container_image=$(safe_existing_path "container image" "${CONTAINER_IMAGE}")
+unsquashfs -s "${container_image}" >/dev/null || die "container image is not a valid squashfs"
+container_image_meta=$(safe_existing_path "container image metadata" "${container_image}.meta.json")
+python3 - "${container_image}" "${container_image_meta}" "${IMAGE_INDEX_DIGEST}" \
+    "${IMAGE_DIGEST}" "${IMAGE_VARIANT}" <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 
-image, metadata, expected_digest = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+image, metadata = map(Path, sys.argv[1:3])
+expected_index, expected_child, expected_variant = sys.argv[3:]
 payload = json.loads(metadata.read_text())
-if payload.get("source_image_digest") != expected_digest:
-    raise SystemExit("local container source digest mismatch")
+checks = {
+    "schema_version": 2,
+    "configured_image": f"vllm/vllm-openai:v0.24.0@{expected_index}",
+    "configured_image_digest": expected_index,
+    "observed_image_digest": expected_child,
+    "image_variant": expected_variant,
+}
+for key, expected in checks.items():
+    if payload.get(key) != expected:
+        raise SystemExit(f"local container {key} mismatch")
 observed = hashlib.sha256()
 with image.open("rb") as stream:
     for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
@@ -87,10 +101,6 @@ with image.open("rb") as stream:
 if payload.get("sqsh_sha256") != observed.hexdigest():
     raise SystemExit("local container squashfs checksum mismatch")
 PY
-else
-    container_image=${CONTAINER_IMAGE}
-    [[ "${container_image}" == *@"${IMAGE_DIGEST}" ]] || die "container image does not use IMAGE_DIGEST"
-fi
 
 campaign_root=$(safe_existing_path "campaign root" "${CAMPAIGN_ROOT}")
 repo_dir=$(safe_existing_path "repository" "${REPO_DIR}")

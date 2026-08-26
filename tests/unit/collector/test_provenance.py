@@ -224,6 +224,7 @@ RUNTIME_META = {
     "framework": "sglang",
     "version": "0.5.14",
     "image": "lmsysorg/sglang:v0.5.14",
+    "image_variant": "linux/amd64",
     "image_digest": "sha256:" + "0" * 64,
 }
 
@@ -262,6 +263,7 @@ def test_write_collection_meta_schema_matches_design_5(tmp_path):
         "framework": "sglang",
         "version": "0.5.14",
         "image": "lmsysorg/sglang:v0.5.14",
+        "image_variant": "linux/amd64",
         "image_digest": "sha256:" + "0" * 64,
     }
     assert set(doc["tables"]) == {"moe_perf", "gemm_perf"}
@@ -328,8 +330,14 @@ def test_write_collection_meta_deterministic_key_order(tmp_path):
 
     all_lines = text.splitlines()
     runtime_start = all_lines.index("runtime:") + 1
-    runtime_lines = all_lines[runtime_start : runtime_start + 4]
-    assert [line.split(":")[0].strip() for line in runtime_lines] == ["framework", "version", "image", "image_digest"]
+    runtime_lines = all_lines[runtime_start : runtime_start + 5]
+    assert [line.split(":")[0].strip() for line in runtime_lines] == [
+        "framework",
+        "version",
+        "image",
+        "image_variant",
+        "image_digest",
+    ]
 
     # tables render in sorted (not insertion) order.
     tables_section = text.split("tables:", 1)[1]

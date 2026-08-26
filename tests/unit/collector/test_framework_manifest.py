@@ -68,6 +68,9 @@ def test_wideep_runtime_stays_independent_from_default_framework_runtime():
 def test_wideep_vllm_runtime_has_backend_specific_deepep_abis():
     runtime = get_collector_runtime("vllm", workload="wideep")
 
+    assert runtime.images == {
+        "default": "vllm/vllm-openai:v0.24.0@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f"
+    }
     assert runtime.abi_for_backend("deepep_ht")["deep_ep"] == "73b6ea4a439ba03a695563f9fd242c8e4b02b37c"
     assert runtime.abi_for_backend("deepep_ht")["deep_ep_api"] == "Buffer"
     assert runtime.abi_for_backend("deepep_ll")["deep_ep_api"] == "Buffer"

@@ -35,7 +35,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from collector.framework_manifest import get_collector_runtime
-from collector.helper import finalize_perf_files, log_perf
+from collector.helper import finalize_perf_files, log_perf, stale_output_artifacts
 from collector.registry_types import PerfFile
 from collector.wideep.backend_contracts import contract_for
 from collector.wideep.distributed_lifecycle import StageAgreement, agree_stage, raise_for_stage
@@ -201,7 +201,7 @@ class BenchmarkResult:
 class BenchmarkAdapter(Protocol):
     """Injectable boundary around CUDA/MPI/TensorRT-LLM benchmark execution."""
 
-    def run(self, case: MoeA2ACase) -> BenchmarkResult: ...
+    def run(self, case: MoeA2ACase, all_rank_num_tokens: list[int]) -> BenchmarkResult: ...
 
 
 def derive_dist_identity(env: dict[str, str], *, gpus_per_node: int) -> DistIdentity:
@@ -469,13 +469,13 @@ class TensorRTLLMBenchmarkAdapter:
             if destroy is not None:
                 destroy()
 
-    def run(self, case: MoeA2ACase) -> BenchmarkResult:
+    def run(self, case: MoeA2ACase, all_rank_num_tokens: list[int]) -> BenchmarkResult:
         import torch
         from tensorrt_llm._torch.model_config import ModelConfig
         from tensorrt_llm._torch.modules.fused_moe import CutlassFusedMoE
         from tensorrt_llm._torch.modules.fused_moe.communication import CommunicationFactory
         from tensorrt_llm._torch.modules.fused_moe.routing import DefaultMoeRoutingMethod
-        from tensorrt_llm._utils import mpi_allgather, mpi_barrier, mpi_rank
+        from tensorrt_llm._utils import mpi_rank
         from tensorrt_llm.mapping import Mapping
         from tensorrt_llm.models.modeling_utils import QuantConfig
         from tensorrt_llm.quantization.mode import QuantAlgo
@@ -509,7 +509,9 @@ class TensorRTLLMBenchmarkAdapter:
                 max_num_tokens=max_num_tokens,
                 moe_max_num_tokens=max_num_tokens,
                 use_cuda_graph=False,
-                use_low_precision_moe_combine=False,
+                use_low_precision_moe_combine=(
+                    case.comm_backend == COMM_BACKEND_LL and case.quant.comm_dtype == "nvfp4"
+                ),
             )
             backend = create_forced_communication(
                 CommunicationFactory,
@@ -547,7 +549,10 @@ class TensorRTLLMBenchmarkAdapter:
         backend = self._active_backend
         moe = self._active_moe
         assert backend is not None
-        all_rank_num_tokens = list(mpi_allgather(case.num_tokens))
+        if len(all_rank_num_tokens) != case.ep_size or any(
+            not isinstance(tokens, int) or tokens <= 0 for tokens in all_rank_num_tokens
+        ):
+            raise MoeA2ABenchmarkError(f"invalid rank token vector for ep_size={case.ep_size}: {all_rank_num_tokens!r}")
         if not backend.is_workload_feasible(all_rank_num_tokens, num_chunks=1):
             raise MoeA2ABenchmarkError(
                 f"forced {FORCED_METHODS[case.comm_backend]} reports workload infeasible "
@@ -611,18 +616,22 @@ class TensorRTLLMBenchmarkAdapter:
                 combine_start.elapsed_time(combine_end) * 1000.0,
             )
 
-        mpi_barrier()
         for _ in range(self.warmup):
             iteration()
         samples = [iteration() for _ in range(self.iterations)]
-        mpi_barrier()
         if not samples:
             raise MoeA2ABenchmarkError("benchmark produced zero timing samples")
         dispatch_us = sum(sample[0] for sample in samples) / len(samples)
         combine_us = sum(sample[1] for sample in samples) / len(samples)
         return BenchmarkResult(
             (
-                PhaseMeasurement("combine", combine_us, case.quant.comm_dtype),
+                PhaseMeasurement(
+                    "combine",
+                    combine_us,
+                    "fp4"
+                    if case.comm_backend == COMM_BACKEND_LL and case.quant.comm_dtype == "nvfp4"
+                    else case.quant.comm_dtype,
+                ),
                 PhaseMeasurement("dispatch", dispatch_us, case.quant.comm_dtype),
             )
         )
@@ -746,7 +755,8 @@ def run_collection(
     version: str,
     device_name: str,
     runtime_meta: dict[str, Any],
-    finalize: Callable[[list[str]], list[Path]] = finalize_perf_files,
+    finalize: Callable[..., list[Path]] = finalize_perf_files,
+    token_gather: Callable[[int], list[int]] | None = None,
     failure_agreement: Callable[[bool], bool] = bool,
     stage_agreement: StageAgreement | None = None,
     final_barrier: Callable[[], None] = lambda: None,
@@ -758,14 +768,15 @@ def run_collection(
         lambda stage, failed: failure_agreement(failed) if stage.endswith(":benchmark") else failed
     )
     perf_path = str(output_dir / PerfFile.MOE_A2A.value)
-    error_path = output_dir / f"errors_moe_a2a_trtllm.rank{rank}.json"
     preflight_error: BaseException | None = None
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
-        if rank == 0 and Path(perf_path).exists():
-            raise MoeA2AWriteError(f"stale staging file exists at {perf_path}; resume/merge must be explicit")
-        if error_path.exists():
-            raise MoeA2AWriteError(f"stale failure staging exists at {error_path}; resume/merge must be explicit")
+        if rank == 0:
+            stale = stale_output_artifacts(output_dir, PerfFile.MOE_A2A.value)
+            if stale:
+                raise MoeA2AWriteError(
+                    f"stale output artifacts exist in {output_dir}: {stale}; resume/merge must be explicit"
+                )
     except BaseException as error:
         preflight_error = error
     raise_for_stage(
@@ -778,11 +789,16 @@ def run_collection(
     )
 
     failures = 0
+    gather_tokens = token_gather or (lambda tokens: [tokens] * cases[0].ep_size)
     for case_index, case in enumerate(cases):
         result = None
         local_error: BaseException | None = None
         try:
-            result = adapter.run(case)
+            # This is the only per-case MPI metadata collective. It happens in
+            # the outer lifecycle, before the adapter enters any DeepEP
+            # operation, so every rank follows the same collective ordering.
+            all_rank_num_tokens = list(gather_tokens(case.num_tokens))
+            result = adapter.run(case, all_rank_num_tokens)
         except Exception as error:
             local_error = error
 
@@ -864,7 +880,7 @@ def run_collection(
     finalize_error: BaseException | None = None
     if rank == 0:
         try:
-            converted = finalize([perf_path])
+            converted = finalize([perf_path], merge_existing=False)
             if len(converted) != 1:
                 raise MoeA2AWriteError(f"expected one finalized moe_a2a parquet, got {len(converted)}")
             parquet_path = Path(converted[0])
@@ -980,6 +996,7 @@ def main(argv: list[str] | None = None) -> None:
         device_name=torch.cuda.get_device_name(identity.local_rank),
         runtime_meta=runtime_meta,
         stage_agreement=lambda _stage, failed: any(mpi_allgather(bool(failed))),
+        token_gather=lambda tokens: list(mpi_allgather(tokens)),
         final_barrier=mpi_barrier,
     )
 

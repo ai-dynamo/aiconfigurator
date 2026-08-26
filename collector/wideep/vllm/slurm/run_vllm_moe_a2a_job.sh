@@ -51,7 +51,9 @@ require_env CAMPAIGN_ROOT
 require_env REPO_DIR
 require_env VLLM_SOURCE_ROOT
 require_env CONTAINER_IMAGE
+require_env IMAGE_INDEX_DIGEST
 require_env IMAGE_DIGEST
+require_env IMAGE_VARIANT
 require_env RUNTIME_ABI_JSON
 require_env SLURM_JOB_ID
 require_env SLURM_NODELIST
@@ -65,10 +67,7 @@ case "${RUN_KIND}" in
     canary|full) ;;
     *) die "RUN_KIND must be canary or full" ;;
 esac
-case "${NODE_NUM}" in
-    1|2|4) ;;
-    *) die "NODE_NUM must be 1, 2, or 4" ;;
-esac
+[[ "${NODE_NUM}" == 1 ]] || die "formal vLLM collection requires NODE_NUM=1"
 
 case "${SYSTEM}" in
     gb200|gb300)
@@ -92,10 +91,10 @@ case "${SYSTEM}" in
         [[ "${GPUS_PER_NODE}" == 8 ]] || die "${SYSTEM} requires 8 GPUs/node"
         expected_ep=$((NODE_NUM * 8))
         cross_node_nvlink_capable=runtime_probe_required
-        if [[ "${NODE_NUM}" == 1 ]]; then
-            topology_mode=single_node
-        elif [[ "${SYSTEM}" == b200_sxm || "${SYSTEM}" == b300_sxm ]]; then
+        if [[ "${SYSTEM}" == b200_sxm || "${SYSTEM}" == b300_sxm ]]; then
             topology_mode=approved_nodelist
+        elif [[ "${NODE_NUM}" == 1 ]]; then
+            topology_mode=single_node
         else
             topology_mode=native
         fi
@@ -122,19 +121,29 @@ collector_ref=$(git -C "${repo_dir}" rev-parse HEAD)
 [[ "$(git -C "${vllm_source_root}" rev-parse HEAD)" == \
     "ee0da84ab9e04ac7610e28580af62c365e898389" ]] || die "vLLM source commit mismatch"
 
-if [[ "${CONTAINER_IMAGE}" == /* ]]; then
-    container_image=$(safe_existing_path "container image" "${CONTAINER_IMAGE}")
-    container_image_meta=$(safe_existing_path "container image metadata" "${container_image}.meta.json")
-    python3 - "${container_image}" "${container_image_meta}" "${IMAGE_DIGEST}" <<'PY'
+[[ "${CONTAINER_IMAGE}" == /* ]] || die "formal benchmark requires a locally staged image"
+container_image=$(safe_existing_path "container image" "${CONTAINER_IMAGE}")
+container_image_meta=$(safe_existing_path "container image metadata" "${container_image}.meta.json")
+python3 - "${container_image}" "${container_image_meta}" "${IMAGE_INDEX_DIGEST}" \
+    "${IMAGE_DIGEST}" "${IMAGE_VARIANT}" <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 
-image, metadata, expected_digest = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+image, metadata = map(Path, sys.argv[1:3])
+expected_index, expected_child, expected_variant = sys.argv[3:]
 payload = json.loads(metadata.read_text())
-if payload.get("source_image_digest") != expected_digest:
-    raise SystemExit("local container source digest mismatch")
+checks = {
+    "schema_version": 2,
+    "configured_image": f"vllm/vllm-openai:v0.24.0@{expected_index}",
+    "configured_image_digest": expected_index,
+    "observed_image_digest": expected_child,
+    "image_variant": expected_variant,
+}
+for key, expected in checks.items():
+    if payload.get(key) != expected:
+        raise SystemExit(f"local container {key} mismatch: {payload.get(key)!r} != {expected!r}")
 observed = hashlib.sha256()
 with image.open("rb") as stream:
     for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
@@ -142,12 +151,9 @@ with image.open("rb") as stream:
 if payload.get("sqsh_sha256") != observed.hexdigest():
     raise SystemExit("local container squashfs checksum mismatch")
 PY
-else
-    container_image=${CONTAINER_IMAGE}
-    [[ "${container_image}" == *@sha256:* ]] || die "registry image must be digest pinned"
-    [[ "${container_image}" == *@"${IMAGE_DIGEST}" ]] || die "container image does not use IMAGE_DIGEST"
-fi
+[[ "${IMAGE_INDEX_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid IMAGE_INDEX_DIGEST"
 [[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid IMAGE_DIGEST"
+case "${IMAGE_VARIANT}" in linux/amd64|linux/arm64) ;; *) die "invalid IMAGE_VARIANT" ;; esac
 
 mapfile -t allocated_nodes < <(scontrol show hostnames "${SLURM_NODELIST}" | sort -u)
 [[ "${#allocated_nodes[@]}" == "${NODE_NUM}" ]] || die \
@@ -590,13 +596,15 @@ export AIC_STAGING_ROOT="${staging_root}"
 export AIC_REPO_DIR="${repo_dir}"
 export AIC_OUTPUT_DIR="${output_dir}"
 export AIC_VLLM_SOURCE_ROOT="${vllm_source_root}"
+export AIC_IMAGE_INDEX_DIGEST="${IMAGE_INDEX_DIGEST}"
 export AIC_IMAGE_DIGEST="${IMAGE_DIGEST}"
+export AIC_IMAGE_VARIANT="${IMAGE_VARIANT}"
 export AIC_RUNTIME_ABI_JSON="${runtime_abi_json}"
 export AIC_COLLECTOR_REF="${collector_ref}"
 export AIC_GPUS_PER_NODE="${GPUS_PER_NODE}"
 export AIC_BACKEND="${BACKEND}"
 export AIC_CANARY_FLAG="${canary_flag}"
-container_command+=' python3 -m collector.wideep.vllm.collect_moe_a2a --gpus-per-node "${AIC_GPUS_PER_NODE}" --backends "${AIC_BACKEND}" --output-path "${AIC_OUTPUT_DIR}" --vllm-source-root "${AIC_VLLM_SOURCE_ROOT}" --image-digest "${AIC_IMAGE_DIGEST}" --runtime-abi-json "${AIC_RUNTIME_ABI_JSON}"'
+container_command+=' python3 -m collector.wideep.vllm.collect_moe_a2a --gpus-per-node "${AIC_GPUS_PER_NODE}" --backends "${AIC_BACKEND}" --output-path "${AIC_OUTPUT_DIR}" --vllm-source-root "${AIC_VLLM_SOURCE_ROOT}" --image-index-digest "${AIC_IMAGE_INDEX_DIGEST}" --image-digest "${AIC_IMAGE_DIGEST}" --image-variant "${AIC_IMAGE_VARIANT}" --runtime-abi-json "${AIC_RUNTIME_ABI_JSON}"'
 container_command+=" --collector-ref ${collector_ref}"
 container_command+=' ${AIC_CANARY_FLAG}'
 
@@ -633,80 +641,10 @@ mapfile -t failure_paths < <(
     find "${output_dir}" -maxdepth 1 -type f -name 'errors_moe_a2a_vllm.rank*.json' -print | sort
 )
 if [[ "${#failure_paths[@]}" -gt 0 ]]; then
-    python3 - "${SYSTEM}" "${BACKEND}" "${NODE_NUM}" "${expected_ep}" "${output_dir}" <<'PY' || \
-        die "formal job produced failures outside the accepted Kimi-K3 DeepEP EP4 limit"
-import json
-import re
-import sys
-from pathlib import Path
-
-system, backend, node_num, ep_size, output_dir = sys.argv[1:]
-expected_tokens = {
-    16,
-    32,
-    64,
-    128,
-    256,
-    512,
-    1024,
-    2048,
-    4096,
-    8192,
-    16384,
-    32768,
-    65536,
-}
-known_error = "num_experts / num_ranks <= kNumThreads and num_ranks <= kNumThreads"
-if (system, backend, node_num, ep_size) not in {
-    ("gb200", "deepep_ht", "1", "4"),
-    ("gb300", "deepep_ht", "1", "4"),
-}:
-    raise SystemExit("classified failures are not approved for this formal job identity")
-
-paths = sorted(Path(output_dir).glob("errors_moe_a2a_vllm.rank*.json"))
-observed_ranks = set()
-for path in paths:
-    match = re.fullmatch(r"errors_moe_a2a_vllm\.rank(\d+)\.json", path.name)
-    if match is None:
-        raise SystemExit(f"malformed failure filename: {path.name}")
-    file_rank = int(match.group(1))
-    records = json.loads(path.read_text())
-    if not isinstance(records, list) or len(records) != len(expected_tokens):
-        raise SystemExit(f"{path.name} does not contain exactly {len(expected_tokens)} failures")
-    observed_tokens = set()
-    for record in records:
-        case = record.get("case") if isinstance(record, dict) else None
-        approved = (
-            record.get("module") == "collector.wideep.vllm.collect_moe_a2a"
-            and record.get("op") == "moe_a2a"
-            and record.get("classification") == "known_framework_limit"
-            and record.get("error_type") == "RuntimeError"
-            and known_error in str(record.get("error", ""))
-            and record.get("rank") == file_rank
-            and isinstance(case, dict)
-            and case.get("comm_backend") == "deepep_ht"
-            and case.get("inference_phase") == "context"
-            and case.get("ep_size") == 4
-            and case.get("node_num") == 1
-            and case.get("hidden_size") == 3584
-            and case.get("topk") == 16
-            and case.get("num_experts") == 896
-            and case.get("sms") == 20
-            and case.get("capacity") == 1024 * 1024 * 1024
-        )
-        if not approved:
-            raise SystemExit(f"{path.name} contains an unapproved failure record")
-        observed_tokens.add(case.get("num_tokens"))
-    if observed_tokens != expected_tokens:
-        raise SystemExit(f"{path.name} does not contain the exact Kimi-K3 token set")
-    observed_ranks.add(file_rank)
-if observed_ranks != set(range(int(ep_size))):
-    raise SystemExit(f"failure evidence is missing ranks: observed {sorted(observed_ranks)}")
-PY
+    die "formal job produced unexpected case failures; refusing publication"
 fi
 
-python3 - "${output_dir}/artifact_checksums.json" "${parquet_path}" "${sidecar_path}" \
-    "${failure_paths[@]}" <<'PY'
+python3 - "${output_dir}/artifact_checksums.json" "${parquet_path}" "${sidecar_path}" <<'PY'
 import hashlib
 import json
 import sys

@@ -162,15 +162,13 @@ frameworks:
           nccl: "2.30.4"
       images:
         default: "vllm/vllm-openai:v0.24.0@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f"
-        amd64: "vllm/vllm-openai:v0.24.0@sha256:f9de5cd9fa907fbf6dbba691eb7db095d48ad58ea283e3eba7142f9a91e186e8"
-        arm64: "vllm/vllm-openai:v0.24.0@sha256:32445b36556244d8a721cd21a2b47a7915bc6408432d05aaeab205bb223ced8b"
-        grace_blackwell: "vllm/vllm-openai:v0.24.0@sha256:32445b36556244d8a721cd21a2b47a7915bc6408432d05aaeab205bb223ced8b"
     notes: >
-      The official multi-arch v0.24.0 image and both architecture children are
-      accepted only with the exact source/ABI above. HT/LL use the legacy Buffer
-      API. V2 uses the separately attested b306af0 ElasticBuffer overlay and NCCL
-      2.30.4. Four-GPU GB scale-up groups additionally require the checked-in
-      legacy topology patch; every overlay records its wheel and patch SHA256.
+      The official multi-arch v0.24.0 index is the configured image identity;
+      launchers resolve and attest its platform child at runtime. HT/LL use the
+      legacy Buffer API. V2 uses the separately attested b306af0 ElasticBuffer
+      overlay and NCCL 2.30.4. Four-GPU GB scale-up groups additionally require
+      the checked-in legacy topology patch; every overlay records its wheel and
+      patch SHA256.
   wideep_trtllm:
     base_framework: trtllm
     collector_dir: "collector/wideep/trtllm"

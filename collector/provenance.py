@@ -63,6 +63,7 @@ _RUNTIME_FIELD_ORDER = (
     "framework",
     "version",
     "image",
+    "image_variant",
     "image_digest",
     "source_commit",
     "abi",

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Standalone multi-node vLLM DeepEP serving-parity collector.
+"""Standalone distributed vLLM DeepEP serving-parity collector.
 
 Launch one rank per local GPU under a multi-node torch/Slurm world.  The
 collector calls vLLM's prepare/finalize implementations directly and allocates
@@ -76,9 +76,6 @@ SUPPORTED_NODE_COUNTS = (1, 2, 4)
 HT_SMS = 20
 LL_SMS = 0
 HT_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024
-KNOWN_DEEPEP_HT_EP4_LIMIT_ERROR = "num_experts / num_ranks <= kNumThreads and num_ranks <= kNumThreads"
-KNOWN_DEEPEP_HT_EP4_LIMIT_TOKENS = frozenset({16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536})
-DEEPEP_LL_SUPPORTED_HIDDEN_SIZES = frozenset({2048, 2560, 3072, 4096, 5120, 6144, 7168, 8192})
 TARGET_VLLM_SOURCE_COMMIT = "ee0da84ab9e04ac7610e28580af62c365e898389"
 LEGACY_DEEPEP_COMMIT = "73b6ea4a439ba03a695563f9fd242c8e4b02b37c"
 V2_DEEPEP_COMMIT = "b306af06afd412c88e51e71802951606e40b7358"
@@ -180,7 +177,6 @@ def _next_power_of_two(value: int) -> int:
 def get_vllm_moe_a2a_shapes(
     *,
     required_expert_parallel_size: int | None = None,
-    supported_hidden_sizes: frozenset[int] | None = None,
 ) -> list[MoeA2AShape]:
     """Resolve correlated WideEP shapes through the vLLM case population."""
     from collector.case_generator import get_common_moe_test_cases, is_wideep_moe_model
@@ -188,7 +184,6 @@ def get_vllm_moe_a2a_shapes(
     recipes = get_common_moe_test_cases(
         backend="vllm",
         required_expert_parallel_size=required_expert_parallel_size,
-        supported_hidden_sizes=supported_hidden_sizes,
     )
     shapes = {
         MoeA2AShape(int(recipe.hidden_size), int(recipe.topk), int(recipe.num_experts))
@@ -238,18 +233,6 @@ def build_case_plan(
             f"{invalid_shapes}; request the EP constraint from get_vllm_moe_a2a_shapes "
             "instead of filtering a generated plan"
         )
-    unsupported_ll_shapes = [
-        shape
-        for shape in shapes
-        if "deepep_ll" in backends and shape.hidden_size not in DEEPEP_LL_SUPPORTED_HIDDEN_SIZES
-    ]
-    if unsupported_ll_shapes:
-        raise VllmMoeA2ADeclarationError(
-            "declared vLLM DeepEP-LL shapes use hidden sizes outside the pinned kernel capability "
-            f"{sorted(DEEPEP_LL_SUPPORTED_HIDDEN_SIZES)}: {unsupported_ll_shapes}; request the hidden-size "
-            "constraint from get_vllm_moe_a2a_shapes instead of filtering a generated plan"
-        )
-
     cases: list[VllmMoeA2ACase] = []
     for shape in shapes:
         if "deepep_ht" in backends:
@@ -823,7 +806,9 @@ def attest_vllm_runtime(
     source_root: str | Path,
     backend: str,
     observed_abi: dict[str, str],
+    observed_image_index_digest: str,
     observed_image_digest: str,
+    observed_image_variant: str,
     installed_version_getter=distribution_version,
     source_commit_getter=None,
     live_abi_getter=None,
@@ -903,23 +888,25 @@ def attest_vllm_runtime(
         live_mismatches["nccl"] = {"expected": required_abi["nccl"], "observed": live_abi.get("nccl")}
     if live_mismatches:
         raise VllmMoeA2ADeclarationError(f"wideep_vllm live ABI mismatch: {live_mismatches}; full live ABI={live_abi}")
-    matching_images = [
-        (variant, image.partition("@"))
-        for variant, image in runtime.images.items()
-        if image.partition("@")[1] and image.partition("@")[2] == observed_image_digest
-    ]
-    if not matching_images:
-        expected_digests = sorted(image.partition("@")[2] for image in runtime.images.values() if "@" in image)
+    configured_image = runtime.image()
+    _, separator, configured_digest = configured_image.partition("@")
+    if not separator or observed_image_index_digest != configured_digest:
         raise VllmMoeA2ADeclarationError(
-            f"wideep_vllm image digest mismatch: expected one of {expected_digests!r}, found {observed_image_digest!r}"
+            "wideep_vllm configured image-index digest mismatch: "
+            f"expected {configured_digest!r}, found {observed_image_index_digest!r}"
         )
-    image_variant, (image, _, digest) = matching_images[0]
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", observed_image_digest):
+        raise VllmMoeA2ADeclarationError(
+            f"wideep_vllm observed platform-child digest is invalid: {observed_image_digest!r}"
+        )
+    if observed_image_variant not in ("linux/amd64", "linux/arm64"):
+        raise VllmMoeA2ADeclarationError(f"wideep_vllm observed image variant is invalid: {observed_image_variant!r}")
     return {
         "framework": runtime.framework,
         "version": installed_version,
-        "image": image,
-        "image_variant": image_variant,
-        "image_digest": digest,
+        "image": configured_image,
+        "image_variant": observed_image_variant,
+        "image_digest": observed_image_digest,
         "source_commit": source_commit,
         "abi": observed_abi,
         "live_abi": live_abi,
@@ -1124,22 +1111,9 @@ def _write_failures(output_dir: Path, failures: list[CaseFailure], identity: Dis
 
 
 def _case_failure_classification(failure: CaseFailure, identity: DistIdentity) -> str:
-    """Classify the explicitly accepted DeepEP EP4 expert-count limit."""
+    """Every failed declared case remains unexpected and blocks publication."""
 
-    case = failure.case
-    if (
-        identity.node_num == 1
-        and identity.world_size == 4
-        and case.comm_backend == "deepep_ht"
-        and case.inference_phase == "context"
-        and case.shape == MoeA2AShape(hidden_size=3584, topk=16, num_experts=896)
-        and case.num_tokens in KNOWN_DEEPEP_HT_EP4_LIMIT_TOKENS
-        and case.sms == HT_SMS
-        and case.capacity == HT_BUFFER_SIZE_BYTES
-        and failure.error_type == "RuntimeError"
-        and KNOWN_DEEPEP_HT_EP4_LIMIT_ERROR in failure.error
-    ):
-        return "known_framework_limit"
+    del failure, identity
     return "unexpected"
 
 
@@ -1184,10 +1158,10 @@ def _write_sidecar(
         "collected_at": date.today().isoformat(),
         "rows": pq.read_metadata(parquet_path).num_rows,
         "classified_failures": failure_count,
-        "status": provenance.derive_table_status(
-            unresolved_failed_count=failure_count,
-            had_module_failure=False,
-        ),
+        # Standalone formal vLLM campaigns require the complete declared case
+        # population. Failure records remain useful evidence, but their table
+        # is partial and cannot pass the formal publisher.
+        "status": provenance.STATUS_PARTIAL if failure_count else provenance.STATUS_COMPLETE,
     }
     return provenance.write_collection_meta(
         output_dir,
@@ -1205,7 +1179,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--vllm-source-root",
         default=os.environ.get("VLLM_SOURCE_ROOT", str(_REPO_ROOT / "libaries.tmpfile" / "vllm")),
     )
+    parser.add_argument("--image-index-digest")
     parser.add_argument("--image-digest")
+    parser.add_argument("--image-variant")
     parser.add_argument("--runtime-abi-json")
     parser.add_argument(
         "--collector-ref",
@@ -1251,12 +1227,16 @@ def main(argv: list[str] | None = None) -> None:
     backends = _parse_backends(args.backends)
     cases = []
     for backend in backends:
-        supported_hidden_sizes = DEEPEP_LL_SUPPORTED_HIDDEN_SIZES if backend == "deepep_ll" else None
+        # FIXME(kernel-limit): Keep the complete declared model population in
+        # the plan and observe the pinned runtime's native failures. In
+        # particular, Kimi-K3 at EP4 exceeds legacy DeepEP's 128 local-expert
+        # limit (intranode.cu:152-155 at LEGACY_DEEPEP_COMMIT), and legacy LL
+        # does not instantiate every declared hidden width. Neither limitation
+        # is a declaration filter or permission to publish a partial table.
         cases.extend(
             build_case_plan(
                 shapes=get_vllm_moe_a2a_shapes(
                     required_expert_parallel_size=identity.ep_size,
-                    supported_hidden_sizes=supported_hidden_sizes,
                 ),
                 grid=get_moe_a2a_workload_grid(),
                 world_size=identity.world_size,
@@ -1285,8 +1265,11 @@ def main(argv: list[str] | None = None) -> None:
         gpus_per_node=args.gpus_per_node,
         visible_device_count=torch.cuda.device_count(),
     )
-    if not args.image_digest or not args.runtime_abi_json:
-        raise VllmMoeA2ADeclarationError("--image-digest and --runtime-abi-json are required for a measured run")
+    if not args.image_index_digest or not args.image_digest or not args.image_variant or not args.runtime_abi_json:
+        raise VllmMoeA2ADeclarationError(
+            "--image-index-digest, --image-digest, --image-variant and --runtime-abi-json "
+            "are required for a measured run"
+        )
     try:
         observed_abi = json.loads(args.runtime_abi_json)
     except json.JSONDecodeError as error:
@@ -1302,7 +1285,9 @@ def main(argv: list[str] | None = None) -> None:
         source_root=args.vllm_source_root,
         backend=backends[0],
         observed_abi=observed_abi,
+        observed_image_index_digest=args.image_index_digest,
         observed_image_digest=args.image_digest,
+        observed_image_variant=args.image_variant,
     )
     runtime_meta["transport"] = {
         "allow_mnnvl": args.allow_mnnvl,
