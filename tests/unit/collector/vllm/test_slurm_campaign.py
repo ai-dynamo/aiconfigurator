@@ -210,7 +210,9 @@ def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     assert 'CONTAINER_IMAGE="registry-1.docker.io#vllm/vllm-openai:${image_index_digest}"' in submitter
     assert 'enroot_library_dir="/tmp/aic-enroot-library-${SLURM_JOB_ID}"' in runner
     assert 'replacement = ".manifests[]?"' in runner
-    assert runner.count("if replacement not in source:") == 2
+    assert 're.subn(r"\\.manifests\\[\\](?!\\?)", replacement, source)' in runner
+    assert "replacement_count == 0 and replacement not in source" in runner
+    assert runner.count("if replacement not in source:") == 1
     assert "docker_path.write_text(source)" in runner
     assert "common_path.write_text(source)" in runner
     assert "AIC_ENROOT_JSON_DEBUG_FILE" in runner

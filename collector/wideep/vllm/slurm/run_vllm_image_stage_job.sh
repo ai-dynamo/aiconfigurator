@@ -34,6 +34,7 @@ case "${IMAGE_ARCH}" in arm64|amd64) ;; *) die "bad image architecture ${IMAGE_A
 # time. The child is observed evidence, never a second configured image pin.
 IMAGE_DIGEST=$(python3 - "${IMAGE_ARCH}" "${IMAGE_INDEX_DIGEST}" <<'PY'
 import json
+import re
 import sys
 import urllib.parse
 import urllib.request
@@ -107,10 +108,9 @@ docker_path, common_path = map(Path, sys.argv[1:])
 source = docker_path.read_text()
 needle = ".manifests[]"
 replacement = ".manifests[]?"
-if replacement not in source:
-    if source.count(needle) != 1:
-        raise SystemExit("unexpected Enroot docker manifest-list parser")
-    source = source.replace(needle, replacement)
+source, replacement_count = re.subn(r"\.manifests\[\](?!\?)", replacement, source)
+if replacement_count == 0 and replacement not in source:
+    raise SystemExit("unexpected Enroot docker manifest-list parser")
 docker_path.write_text(source)
 
 # Cluster Enroot suppresses jq's actual parser error. The job-local copy keeps
