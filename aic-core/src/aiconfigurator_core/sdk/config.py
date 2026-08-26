@@ -297,11 +297,19 @@ class AFDConfig:
     # AFD decode pool with a regular prefill pool (or vice versa); the
     # combined estimate is the number a sizing exercise actually needs.
     #
-    # TODO(afd, Phase-2): extend pareto_analysis to merge the AFD
-    # frontier with the agg / disagg frontiers so end-to-end Pareto
-    # evaluation across mixed AFD + P/D deployments is possible. Today
-    # the CLI single-point combine path is in place, but the Pareto
-    # sweep does not yet enumerate AFD-combined-with-PD points.
+    # NOTE(afd, closed): per-mode Pareto fronts are not merged into a
+    # single envelope, and that is fine. What the cross-mode question
+    # needs already works: with serving_mode=all the CLI picks the global
+    # best across agg/disagg/afd (chosen_exp = max(best_throughputs)) and
+    # plots every mode's frontier on the same axes; AFD-combined-with-PD
+    # points are enumerated by _enumerate_afd_prefill_options, so the
+    # A/F/P splits in the report are real candidates. The only residue is
+    # chart noise: because each front is computed independently, points
+    # that a stronger mode dominates still show up. No recommendation
+    # changes. If the chart ever needs cleaning, concat the fronts with a
+    # serving_mode column and rerun get_pareto_front -- mirroring
+    # merge_experiment_results_by_mode, which already does this across
+    # backends within one mode.
     combined_with_pd: bool = True
     # Boundary-op assignment: ``add_norm_2`` and ``logits_gemm`` sit at
     # the natural Attention/FFN boundary and can be assigned to either
