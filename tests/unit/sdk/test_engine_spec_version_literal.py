@@ -72,3 +72,45 @@ def test_spec_resolves_alias_even_without_a_loaded_database():
 def test_spec_keeps_explicit_literal_versions_verbatim():
     db = perf_database.get_database(_SYSTEM, _BACKEND, "current")
     assert _spec_backend_version(db.version, db) == db.version
+
+
+def test_spec_maps_omitted_version_to_the_current_literal():
+    # An omitted version means the current slot; the wire must carry its
+    # literal, never null (the Rust reload path resolves no defaults).
+    expected = perf_database.resolve_query_version(_SYSTEM, _BACKEND, "current")
+    assert _spec_backend_version(None, None) == expected
+
+
+def test_spec_build_rejects_unlisted_versions_without_the_escape(monkeypatch):
+    # Review blocker (2026-08): the shim used to fall back to the raw input
+    # when resolution failed, smuggling ungated coordinates onto the wire.
+    monkeypatch.delenv("AIC_ALLOW_UNLISTED_VERSIONS", raising=False)
+    with pytest.raises(ValueError, match="old-style raw version query"):
+        _spec_backend_version("0.22.0", None)
+
+
+def test_spec_build_rejects_unpopulated_alias(monkeypatch):
+    monkeypatch.delenv("AIC_ALLOW_UNLISTED_VERSIONS", raising=False)
+    with pytest.raises(ValueError, match="has no 'previous'"):
+        _spec_backend_version("previous", None)
+
+
+def test_engine_handle_reload_path_resolves_the_alias():
+    # The actual reload path the review blocker names: compile with an ALIAS,
+    # construct an EngineHandle from the bytes (the native engine reloads the
+    # database from the embedded string verbatim), and get a real answer —
+    # possible only if the wire carried the literal.
+    from aiconfigurator_core.sdk.engine import EngineHandle, compile_engine
+
+    blob = compile_engine(_MODEL, _SYSTEM, _BACKEND, "current")
+    handle = EngineHandle(blob)
+    result = handle.run_static(batch_size=1, isl=64, osl=2, mode="static")
+    assert result is not None
+
+
+def test_engine_handle_compile_rejects_unlisted_versions(monkeypatch):
+    from aiconfigurator_core.sdk.engine import compile_engine
+
+    monkeypatch.delenv("AIC_ALLOW_UNLISTED_VERSIONS", raising=False)
+    with pytest.raises(ValueError, match="old-style raw version query"):
+        compile_engine(_MODEL, _SYSTEM, _BACKEND, "0.22.0")

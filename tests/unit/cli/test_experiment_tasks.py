@@ -174,3 +174,31 @@ def test_build_experiment_skips_backend_version_preflight_for_formula_modes(monk
 
     assert "exp_empirical" in tasks
     assert calls == []
+
+
+class TestBackendVersionAliasAcceptance:
+    """Review blocker (2026-08): `get_supported_databases` enumerates resolved
+    literals, so every membership check must resolve a requested alias first —
+    `--backend-version current` must be accepted wherever its literal is."""
+
+    def test_precheck_accepts_the_current_alias(self):
+        from aiconfigurator.cli import main as cli_main
+
+        # Raises SystemExit on rejection; literal equivalence is the contract.
+        cli_main._ensure_backend_version_available("h200_sxm", "trtllm", "current")
+
+    def test_precheck_still_rejects_unknown_versions(self):
+        from aiconfigurator.cli import main as cli_main
+
+        with pytest.raises(SystemExit):
+            cli_main._ensure_backend_version_available("h200_sxm", "trtllm", "0.0.0-nonexistent")
+
+    def test_resolver_helper_maps_alias_per_system_backend(self):
+        from aiconfigurator.cli import main as cli_main
+        from aiconfigurator_core.sdk import perf_database
+
+        literal = perf_database.resolve_query_version("h200_sxm", "trtllm", "current")
+        assert cli_main._resolve_version_for_matching("h200_sxm", "trtllm", "current") == literal
+        assert cli_main._resolve_version_for_matching("h200_sxm", "trtllm", None) is None
+        # raw versions pass through for the membership check to reject normally
+        assert cli_main._resolve_version_for_matching("h200_sxm", "trtllm", "9.9.9") == "9.9.9"

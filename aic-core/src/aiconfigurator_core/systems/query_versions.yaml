@@ -32,4 +32,7 @@ overrides:
     sglang: {current: "0.5.10", previous: null}
     vllm: {current: "0.14.0", previous: null}
   b60:
-    vllm: {current: "0.20.0", previous: null}
+    # 2026-08-26: main #1441 landed a complete b60/vLLM 0.26.0 collection
+    # (attention/gemm/moe/comm), so the frozen 0.20.0 baseline moves to
+    # previous. Override systems stay out of the fleet next derivation.
+    vllm: {current: "0.26.0", previous: "0.20.0"}

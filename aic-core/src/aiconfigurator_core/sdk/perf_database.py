@@ -225,17 +225,27 @@ def get_version_slots(system: str, backend: str, systems_paths: str | list[str] 
     # rows the retired reuse markers used to graft). Override systems
     # (frozen baselines like a100/b60) expose no next.
     if override_entry is None:
-        nxt = _derive_fleet_next(tuple(systems_paths), backend, slots["current"])
+        # Override-governed systems (frozen baselines like a100/b60) are a
+        # separate compatibility domain: their data drops must not advertise
+        # a fleet-wide next that defaults-governed systems cannot load.
+        override_systems = frozenset(
+            name for name, per_backend in (doc.get("overrides") or {}).items() if (per_backend or {}).get(backend)
+        )
+        nxt = _derive_fleet_next(tuple(systems_paths), backend, slots["current"], override_systems)
         if nxt is not None:
             slots["next"] = nxt
     return slots
 
 
 @functools.cache
-def _derive_fleet_next(systems_paths: tuple[str, ...], backend: str, current: str) -> str | None:
+def _derive_fleet_next(
+    systems_paths: tuple[str, ...], backend: str, current: str, exclude_systems: frozenset[str] = frozenset()
+) -> str | None:
     """Highest DATA-BACKED version strictly newer than `current`, across all
-    systems in the tree. Marker-only directories do not qualify — next means a
-    developer actually dropped measurements somewhere."""
+    defaults-governed systems in the tree (override-governed systems are
+    excluded — their frozen baselines are not part of the fleet upgrade
+    cadence). Marker-only directories do not qualify — next means a developer
+    actually dropped measurements somewhere."""
     current_key = _version_sort_tuple(current)
     candidates: set[str] = set()
     for systems_root in systems_paths:
@@ -245,6 +255,8 @@ def _derive_fleet_next(systems_paths: tuple[str, ...], backend: str, current: st
             continue
         for entry in entries:
             if not entry.endswith(".yaml"):
+                continue
+            if entry[: -len(".yaml")] in exclude_systems:
                 continue
             try:
                 with open(os.path.join(systems_root, entry)) as f:

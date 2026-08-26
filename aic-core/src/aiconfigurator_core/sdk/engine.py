@@ -212,20 +212,23 @@ def _literal_backend_version(
     the Dynamo Mocker) and resolves no slot aliases — slot semantics
     (``current`` / ``previous`` / ``next``) live in the python layer only.
     Preference order: the loaded database's own version (the ground truth for
-    what the spec was compiled against), then an explicit alias resolution,
-    then the raw input as a last resort.
+    what the spec was compiled against), then slot resolution of the request
+    (an omitted version means the ``current`` slot). Slot-policy errors
+    (unlisted versions, unpopulated aliases) PROPAGATE — the spec builder is
+    a user-level surface and must not smuggle ungated coordinates onto the
+    wire. Trees without a slots file (synthetic/external) keep the ungated
+    passthrough.
     """
     resolved = getattr(database, "version", None) if database is not None else None
     if resolved:
         return str(resolved)
-    if backend_version is None:
-        return None
-    try:
-        from aiconfigurator_core.sdk import perf_database
+    from aiconfigurator_core.sdk import perf_database
 
-        return perf_database.resolve_query_version(system, backend, backend_version, systems_paths=systems_path)
-    except Exception:
+    slots = perf_database.get_version_slots(system, backend, systems_paths=systems_path)
+    if slots is None:
         return backend_version
+    requested = "current" if backend_version is None else backend_version
+    return perf_database.resolve_query_version(system, backend, requested, systems_paths=systems_path)
 
 
 def _engine_config_dict(
@@ -388,17 +391,19 @@ def compile_engine(
     apply_nextn(model_config, nextn)
     model = get_model(model_path, model_config, backend)
 
-    # The database supplies the shared-layer perf sources, the query mode and
-    # the transfer policy stamped into the compiled `EngineConfig`. Load lazily
-    # and tolerate failure; the Rust core falls back to its own defaults.
-    database = _maybe_load_database(system, backend, backend_version, systems_path)
+    # Slot policy FIRST, tolerance second: resolve the requested version to a
+    # literal (raising on unlisted versions / unpopulated aliases) before the
+    # tolerant database load — `_maybe_load_database` forgives LOAD failures
+    # (the Rust core falls back to its own defaults), never policy violations.
+    literal_version = _literal_backend_version(system, backend, backend_version, systems_path, None)
+    database = _maybe_load_database(system, backend, literal_version, systems_path)
 
     spec_json = build_engine_spec_json(
         model,
         model_path=model_path,
         system=system,
         backend=backend,
-        backend_version=backend_version,
+        backend_version=literal_version,
         kv_block_size=kv_block_size,
         systems_path=systems_path,
         nextn=model_config.nextn,
