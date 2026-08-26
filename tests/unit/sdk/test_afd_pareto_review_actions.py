@@ -204,6 +204,27 @@ def test_afd_pareto_fixed_total_batch_uses_exact_a_batch(monkeypatch):
     assert captured["derive_called"] is False
 
 
+def test_afd_pareto_moe_sweeps_both_dispatch_modes(monkeypatch):
+    """For MoE models dispatch_mode is a search dimension: every topology
+    candidate is evaluated under f_side_routing AND a_side_routing."""
+    captured = _patch_afd_pareto_fixed_batch_dependencies(monkeypatch, max_batch_size=1024)
+    monkeypatch.setattr(pa, "check_is_moe", lambda _model_path: True)
+
+    df = pa.afd_pareto(
+        model_path="Qwen/Qwen3-32B",
+        runtime_config=RuntimeConfig(isl=128, osl=32, tpot=25.0),
+        database=_FakeDatabase(),
+        backend_name="trtllm",
+        afd_parallel_config_list=[(1, 1, 2, 8, 3, "optimistic")],
+        gpus_per_node=8,
+        combined_with_pd=False,
+        total_batch_size=256,
+    )
+
+    assert not df.empty
+    assert [cfg.dispatch_mode for cfg in captured["sessions"]] == ["f_side_routing", "a_side_routing"]
+
+
 def test_afd_pareto_request_latency_enumerates_constraints_and_filters_final_rows(monkeypatch):
     captured = _patch_afd_pareto_fixed_batch_dependencies(monkeypatch, max_batch_size=1024, tpot=None)
     monkeypatch.setattr(

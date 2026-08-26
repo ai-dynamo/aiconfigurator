@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import itertools
 import logging
 import math
 from collections import Counter
@@ -1037,7 +1038,7 @@ def afd_pareto(
     ``tokens/s/gpu``.
     """
     from aiconfigurator.sdk.afd_partition import build_afd_ops_partition
-    from aiconfigurator.sdk.config import AFDConfig
+    from aiconfigurator.sdk.config import AFD_DISPATCH_MODES, AFDConfig
 
     fixed_total_batch_size = None
     if total_batch_size is not None:
@@ -1111,9 +1112,12 @@ def afd_pareto(
     # Track topologies that OOMed at a given microbatch count; higher counts
     # use a larger KV-cache multiplier and can be pruned for the same topology.
     _oom_at_mb: dict[tuple[int, int, int, int], int] = {}
+    # dispatch_mode is a search dimension, not a user knob: MoE models are
+    # evaluated under both topologies and the Pareto selection keeps the best.
+    dispatch_modes = AFD_DISPATCH_MODES if check_is_moe(model_path) else ("f_side_routing",)
     for eval_runtime_config in runtime_configs_to_evaluate:
         target_tpot = eval_runtime_config.tpot
-        for candidate in afd_parallel_config_list:
+        for candidate, dispatch_mode in itertools.product(afd_parallel_config_list, dispatch_modes):
             n_a_nodes, n_f_nodes, tp_a, f_moe_ep_size, num_microbatches, pipeline_model = candidate
             topo_key = (int(n_a_nodes), int(n_f_nodes), int(tp_a), int(f_moe_ep_size))
             oom_mb = _oom_at_mb.get(topo_key)
@@ -1280,6 +1284,7 @@ def afd_pareto(
                         phase="decode",
                         combined_with_pd=bool(combined_with_pd),
                         boundary_on_attn=bool(boundary_on_attn),
+                        dispatch_mode=str(dispatch_mode),
                     )
                     candidate_runtime_config = copy.deepcopy(eval_runtime_config)
                     candidate_runtime_config.batch_size = afd_config.n_a_workers * afd_config.a_batch_size
@@ -1409,6 +1414,7 @@ def afd_pareto(
                             phase="decode",
                             combined_with_pd=bool(combined_with_pd),
                             boundary_on_attn=bool(boundary_on_attn),
+                            dispatch_mode=str(dispatch_mode),
                         )
 
                         candidate_runtime_config = copy.deepcopy(eval_runtime_config)
