@@ -96,6 +96,7 @@ _REGISTRY_MODULES = {
     "sglang": "collector.sglang.registry",
     "trtllm": "collector.trtllm.registry",
     "vllm": "collector.vllm.registry",
+    "vllm_xpu": "collector.vllm.registry",
     "wideep_sglang": "collector.wideep.sglang.registry",
     "wideep_trtllm": "collector.wideep.trtllm.registry",
 }
@@ -105,7 +106,8 @@ def _registry_entries(framework_key: str) -> list[OpEntry]:
     module_path = _REGISTRY_MODULES.get(framework_key)
     if module_path is None:
         raise KeyError(f"No collector registry is known for framework {framework_key!r}")
-    return list(importlib.import_module(module_path).REGISTRY)
+    registry_name = "REGISTRY_XPU" if framework_key == "vllm_xpu" else "REGISTRY"
+    return list(getattr(importlib.import_module(module_path), registry_name))
 
 
 def _resolve_from(
