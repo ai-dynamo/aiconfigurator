@@ -616,6 +616,30 @@ def test_unknown_comm_storage_backend_fails_closed(systems_root: Path) -> None:
     assert _channels(db, "custom_allreduce_perf.parquet") == ["primary"]
 
 
+@pytest.mark.parametrize("storage_backend", ["vllm", "futurelib"])
+def test_legacy_comm_override_preserves_physical_backend(systems_root: Path, storage_backend: str) -> None:
+    """Family inference must not replace a legacy path's physical backend.
+
+    Both a validated-but-mismatched framework and an unknown backend are
+    primary-only for a TRT-LLM request.
+    """
+    requested, older = "2.0.0", "1.0.0"
+    primary = systems_root / f"data/h100_sxm/{storage_backend}/{requested}/custom_allreduce_perf.parquet"
+    _write(systems_root, str(primary.relative_to(systems_root)))
+    _write(systems_root, f"data/h100_sxm/comm/trtllm/{older}/custom_allreduce_perf.parquet")
+
+    db = _build_db(systems_root, backend="trtllm", version=requested)
+    system_data_root = str(systems_root / "data" / "h100_sxm")
+    sources = db._build_op_sources(
+        common.PerfDataFilename.custom_allreduce,
+        str(primary),
+        system_data_root,
+    )
+
+    assert sources == [(str(primary), None)]
+    assert _channels(db, "custom_allreduce_perf.parquet") == ["primary"]
+
+
 @pytest.mark.parametrize(
     ("storage_backend", "op"),
     [

@@ -31,10 +31,11 @@
 //!   milliseconds — stored raw, no conversion (see
 //!   `_adapt_legacy_trtllm_alltoall`'s docstring).
 //!
-//! Merge (Python `load_moe_a2a_data`): legacy rows load first, keep-first on
-//! an intra-source collision; the FIRST new-schema occurrence of a key then
-//! overwrites whatever a legacy adapter stored there, and repeats of that key
-//! keep the first new-schema value.
+//! Merge preserves resolver priority ACROSS all four formats: every source at
+//! the requested version loads before any earlier fallback version. Within one
+//! version tier, legacy rows load first and the first new-schema occurrence of
+//! a key overrides legacy; completed lower-priority tiers fill missing
+//! coordinates only.
 //!
 //! Query resolves the comm-dtype chain (exact -> `fp8_block` reusing `fp8`
 //! -> the sole collected dtype -> typed miss, `_resolve_comm_dtype_slice`)
@@ -51,10 +52,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::OnceLock;
+
+use pep440_rs::Version;
 
 use super::axis_curve::AxisCurve;
 use super::perf_interp::{self, Node, OpInterpConfig};
+use super::source_resolution::PrioritizedSource;
 use super::{kernel_source_ok, SourceResolver};
 use crate::common::error::AicError;
 use crate::config::{PerfDbSources, PerfSource};
@@ -89,15 +94,107 @@ struct MoeA2aGrids {
 
 type A2aGrid = BTreeMap<MoeA2aKey, BTreeMap<u32, f64>>;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct A2aSourcePriority {
+    channel: &'static str,
+    version: String,
+}
+
+/// One global priority tier across all four physical A2A formats. The
+/// resolver orders each basename independently; retaining its channel/version
+/// metadata lets the unified loader group every requested-version format
+/// before any nearest-earlier fallback format.
+pub(crate) struct MoeA2aSourceTier {
+    pub(crate) moe_a2a: Vec<PerfSource>,
+    pub(crate) legacy_normal: Vec<PerfSource>,
+    pub(crate) legacy_ll: Vec<PerfSource>,
+    pub(crate) legacy_trtllm_alltoall: Vec<PerfSource>,
+}
+
+fn source_channel_rank(channel: &str) -> u8 {
+    match channel {
+        "primary" => 0,
+        "declared_reuse" => 1,
+        "fallback" => 2,
+        "cross_backend" => 3,
+        _ => 4,
+    }
+}
+
+fn compare_source_priority(a: &A2aSourcePriority, b: &A2aSourcePriority) -> std::cmp::Ordering {
+    source_channel_rank(a.channel)
+        .cmp(&source_channel_rank(b.channel))
+        .then_with(|| {
+            // Framework communication reuse admits only `primary` and
+            // `fallback`. Fallback versions are PEP-440 and must be consumed
+            // nearest-first across the UNION of all contributing basenames.
+            if a.channel != "fallback" || b.channel != "fallback" {
+                return a.version.cmp(&b.version);
+            }
+            match (Version::from_str(&a.version), Version::from_str(&b.version)) {
+                (Ok(a_version), Ok(b_version)) => b_version.cmp(&a_version),
+                (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                (Err(_), Err(_)) => b.version.cmp(&a.version),
+            }
+        })
+}
+
+/// Build the source tiers shared by the query grid and raw table view. Within
+/// a tier, callers load the three legacy adapters first and the new schema
+/// last; across tiers, callers merge lower-priority coordinates fill-only.
+pub(crate) fn source_tiers(
+    moe_a2a: &[PrioritizedSource],
+    legacy_normal: &[PrioritizedSource],
+    legacy_ll: &[PrioritizedSource],
+    legacy_trtllm_alltoall: &[PrioritizedSource],
+) -> Vec<MoeA2aSourceTier> {
+    let mut priorities: Vec<A2aSourcePriority> = Vec::new();
+    for source in moe_a2a
+        .iter()
+        .chain(legacy_normal)
+        .chain(legacy_ll)
+        .chain(legacy_trtllm_alltoall)
+    {
+        let priority = A2aSourcePriority {
+            channel: source.channel,
+            version: source.version.clone(),
+        };
+        if !priorities.contains(&priority) {
+            priorities.push(priority);
+        }
+    }
+    priorities.sort_by(compare_source_priority);
+
+    let select = |sources: &[PrioritizedSource], priority: &A2aSourcePriority| {
+        sources
+            .iter()
+            .filter(|source| {
+                source.channel == priority.channel && source.version == priority.version
+            })
+            .map(|source| source.source.clone())
+            .collect()
+    };
+    priorities
+        .iter()
+        .map(|priority| MoeA2aSourceTier {
+            moe_a2a: select(moe_a2a, priority),
+            legacy_normal: select(legacy_normal, priority),
+            legacy_ll: select(legacy_ll, priority),
+            legacy_trtllm_alltoall: select(legacy_trtllm_alltoall, priority),
+        })
+        .collect()
+}
+
 pub struct MoeA2aTable {
     data_root: PathBuf,
     /// Ordered, priority-sorted sources per distinct perf-file basename
     /// (shared-layer aware; see [`PerfSource`]). Single-primary, no-filter by
     /// default (`MoeA2aTable::new`).
-    moe_a2a_sources: Vec<PerfSource>,
-    legacy_normal_sources: Vec<PerfSource>,
-    legacy_ll_sources: Vec<PerfSource>,
-    legacy_trtllm_alltoall_sources: Vec<PerfSource>,
+    moe_a2a_sources: Vec<PrioritizedSource>,
+    legacy_normal_sources: Vec<PrioritizedSource>,
+    legacy_ll_sources: Vec<PrioritizedSource>,
+    legacy_trtllm_alltoall_sources: Vec<PrioritizedSource>,
     grids: OnceLock<Result<MoeA2aGrids, AicError>>,
 }
 
@@ -114,13 +211,14 @@ impl MoeA2aTable {
     /// from `perf_db_sources` (Python-supplied). Each perf file falls back to
     /// its primary `data_root/<basename>` when absent from the map. No I/O.
     pub fn with_sources(data_root: PathBuf, resolver: &SourceResolver) -> Result<Self, AicError> {
-        let moe_a2a_sources = resolver.sources_for("moe_a2a_perf.parquet", &data_root)?;
+        let moe_a2a_sources =
+            resolver.prioritized_sources_for("moe_a2a_perf.parquet", &data_root)?;
         let legacy_normal_sources =
-            resolver.sources_for("wideep_deepep_normal_perf.parquet", &data_root)?;
+            resolver.prioritized_sources_for("wideep_deepep_normal_perf.parquet", &data_root)?;
         let legacy_ll_sources =
-            resolver.sources_for("wideep_deepep_ll_perf.parquet", &data_root)?;
+            resolver.prioritized_sources_for("wideep_deepep_ll_perf.parquet", &data_root)?;
         let legacy_trtllm_alltoall_sources =
-            resolver.sources_for("trtllm_alltoall_perf.parquet", &data_root)?;
+            resolver.prioritized_sources_for("trtllm_alltoall_perf.parquet", &data_root)?;
         Ok(Self {
             data_root,
             moe_a2a_sources,
@@ -314,20 +412,35 @@ pub(crate) fn legacy_deepep_ep_size(node_num: u32) -> u32 {
 /// `load_trtllm_alltoall_data` twin, which used the same default).
 pub(crate) const LEGACY_TRTLLM_DEFAULT_KERNEL_SOURCE: &str = "NVLinkTwoSided";
 
-/// Load the unified table: legacy adapters first (keep-first), then the new
-/// schema (first occurrence of a key overwrites, repeats keep first) —
-/// Python `load_moe_a2a_data`.
+/// Load the unified table in global resolver tiers. Within one tier, legacy
+/// adapters load first (keep-first), then the new schema overrides legacy on
+/// its first occurrence. Lower-priority tiers fill missing coordinates only.
 fn load_moe_a2a_grids(
-    a2a_sources: &[PerfSource],
-    normal_sources: &[PerfSource],
-    ll_sources: &[PerfSource],
-    trtllm_sources: &[PerfSource],
+    a2a_sources: &[PrioritizedSource],
+    normal_sources: &[PrioritizedSource],
+    ll_sources: &[PrioritizedSource],
+    trtllm_sources: &[PrioritizedSource],
 ) -> Result<MoeA2aGrids, AicError> {
     let mut by_keys: A2aGrid = BTreeMap::new();
-    let mut any_source = adapt_legacy_deepep_normal(normal_sources, &mut by_keys)?;
-    any_source |= adapt_legacy_deepep_ll(ll_sources, &mut by_keys)?;
-    any_source |= adapt_legacy_trtllm_alltoall(trtllm_sources, &mut by_keys)?;
-    any_source |= load_new_schema(a2a_sources, &mut by_keys)?;
+    let mut any_source = false;
+    for tier in source_tiers(a2a_sources, normal_sources, ll_sources, trtllm_sources) {
+        let mut tier_keys: A2aGrid = BTreeMap::new();
+        let mut tier_has_source = adapt_legacy_deepep_normal(&tier.legacy_normal, &mut tier_keys)?;
+        tier_has_source |= adapt_legacy_deepep_ll(&tier.legacy_ll, &mut tier_keys)?;
+        tier_has_source |=
+            adapt_legacy_trtllm_alltoall(&tier.legacy_trtllm_alltoall, &mut tier_keys)?;
+        tier_has_source |= load_new_schema(&tier.moe_a2a, &mut tier_keys)?;
+        any_source |= tier_has_source;
+
+        // The tier is complete, including same-tier new-schema-over-legacy.
+        // Lower-priority versions may now fill missing coordinates only.
+        for (key, token_curve) in tier_keys {
+            let final_curve = by_keys.entry(key).or_default();
+            for (num_tokens, latency_ms) in token_curve {
+                final_curve.entry(num_tokens).or_insert(latency_ms);
+            }
+        }
+    }
     if !any_source || by_keys.is_empty() {
         return Err(AicError::PerfDatabase(format!(
             "no MoE all-to-all rows loaded from {} source(s) (moe_a2a + 3 legacy tables; \
@@ -335,7 +448,7 @@ fn load_moe_a2a_grids(
             a2a_sources.len() + normal_sources.len() + ll_sources.len() + trtllm_sources.len(),
             a2a_sources
                 .first()
-                .map(|s| s.path().display().to_string())
+                .map(|s| s.source.path().display().to_string())
                 .unwrap_or_else(|| "<no moe_a2a sources>".to_string())
         )));
     }
@@ -1632,6 +1745,110 @@ mod tests {
                 )
                 .unwrap(),
             0.3,
+        );
+    }
+
+    /// Global source priority crosses format boundaries: a requested-version
+    /// legacy TRT-LLM coordinate outranks an older unified-schema coordinate,
+    /// while a requested-version unified coordinate still overrides legacy in
+    /// the same tier. Pin both the engine query and raw table view because they
+    /// share the resolver contract but fold rows independently.
+    #[test]
+    fn requested_legacy_coordinate_beats_older_new_schema() {
+        use crate::perf_database::source_resolution::ResolveCtx;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let data = root.join("data");
+        let requested = data.join("comm/trtllm/2.0.0");
+        let fallback = data.join("comm/trtllm/1.0.0");
+        std::fs::create_dir_all(&requested).unwrap();
+        std::fs::create_dir_all(&fallback).unwrap();
+
+        // Requested legacy row at the fixed point under test: 1.5 ms.
+        write_trtllm_alltoall_parquet(
+            &requested.join("trtllm_alltoall_perf.parquet"),
+            &[("NVLinkTwoSided", "alltoall_dispatch", "fp8", 16, 64, 1.5)],
+            None,
+        );
+        // Requested unified table exists but is partial at this curve.
+        write_a2a_parquet(
+            &requested.join("moe_a2a_perf.parquet"),
+            &[a2a_row(
+                "nvlink_two_sided",
+                "dispatch",
+                "fp8",
+                16,
+                4,
+                None,
+                32,
+                7_000.0,
+            )],
+            true,
+        );
+        // Older unified row collides with the requested legacy coordinate.
+        write_a2a_parquet(
+            &fallback.join("moe_a2a_perf.parquet"),
+            &[a2a_row(
+                "nvlink_two_sided",
+                "dispatch",
+                "fp8",
+                16,
+                4,
+                None,
+                64,
+                9_000.0,
+            )],
+            true,
+        );
+
+        let resolver = SourceResolver::live(ResolveCtx {
+            systems_root: root.to_path_buf(),
+            system_data_root: data.clone(),
+            backend: "trtllm".to_string(),
+            version: "2.0.0".to_string(),
+            enable_shared_layer: true,
+            strict: false,
+        });
+        let table = MoeA2aTable::with_sources(data.join("trtllm/2.0.0"), &resolver).unwrap();
+        approx(
+            table
+                .query(
+                    "nvlink_two_sided",
+                    "dispatch",
+                    "fp8",
+                    16,
+                    4,
+                    7168,
+                    8,
+                    256,
+                    64,
+                    0,
+                )
+                .unwrap(),
+            1.5,
+        );
+
+        let prioritized = |basename| {
+            resolver
+                .prioritized_sources_for(basename, &data.join("trtllm/2.0.0"))
+                .unwrap()
+        };
+        let view = crate::perf_database::table_view::view_moe_a2a(
+            &prioritized("moe_a2a_perf.parquet"),
+            &prioritized("wideep_deepep_normal_perf.parquet"),
+            &prioritized("wideep_deepep_ll_perf.parquet"),
+            &prioritized("trtllm_alltoall_perf.parquet"),
+        )
+        .unwrap()
+        .unwrap();
+        let view_json: serde_json::Value = serde_json::from_str(&view.to_json()).unwrap();
+        approx(
+            view_json["nvlink_two_sided"]["dispatch"]["fp8"]["16"]["4"]["7168"]["8"]["256"]["0"]
+                ["64"]["latency"]
+                .as_f64()
+                .unwrap(),
+            1.5,
         );
     }
 

@@ -613,14 +613,14 @@ class TestWideEpDeepEpParity:
 # --------------------------------------------------------------------------- #
 
 
-def _build_wideep_trtllm():
+def _build_wideep_trtllm(backend_version: str = "1.3.0rc10"):
     """(model, backend, database, spec_json) for the TRT-LLM WideEP config;
     shared by the parity test (handle side) and the golden capture."""
     from aiconfigurator.sdk import common
 
-    database = _quiet(perf_database.get_database, "gb200", "trtllm", "1.3.0rc10")
+    database = _quiet(perf_database.get_database, "gb200", "trtllm", backend_version)
     if database is None:
-        pytest.skip("no perf database for gb200/trtllm/1.3.0rc10")
+        pytest.skip(f"no perf database for gb200/trtllm/{backend_version}")
     model_config = config.ModelConfig(
         tp_size=1,
         attention_dp_size=8,
@@ -641,7 +641,7 @@ def _build_wideep_trtllm():
         model_path="deepseek-ai/DeepSeek-V3",
         system="gb200",
         backend="trtllm",
-        backend_version="1.3.0rc10",
+        backend_version=backend_version,
         kv_block_size=None,
         systems_path=None,
         nextn=0,
@@ -667,6 +667,25 @@ class TestTrtllmWideEpParity:
         )
         _assert_within(
             "trtllm_wideep_static_gen", _golden_reference("wideep_trtllm::static_gen"), new_gen, backend="trtllm"
+        )
+
+    def test_trtllm_wideep_rc20_fallback_static_parity(self) -> None:
+        """Pin the newly reachable rc20 config whose MoE A2A rows come from
+        rc10's earlier same-backend ``trtllm_alltoall`` table."""
+        _model, _backend, _database, spec_json = _build_wideep_trtllm("1.3.0rc20")
+        handle = _handle_from_spec_json(spec_json)
+        new_ctx, new_gen, _ = handle.run_static(batch_size=1, isl=1024, osl=4, prefix=0, stride=1)
+        _assert_within(
+            "trtllm_wideep_rc20_fallback_static_ctx",
+            _golden_reference("wideep_trtllm_rc20_fallback::static_ctx"),
+            new_ctx,
+            backend="trtllm",
+        )
+        _assert_within(
+            "trtllm_wideep_rc20_fallback_static_gen",
+            _golden_reference("wideep_trtllm_rc20_fallback::static_gen"),
+            new_gen,
+            backend="trtllm",
         )
 
 

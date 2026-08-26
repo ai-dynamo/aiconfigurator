@@ -136,6 +136,30 @@ impl ResolveReport {
             })
             .collect()
     }
+
+    fn prioritized_sources(&self) -> Vec<PrioritizedSource> {
+        self.records
+            .iter()
+            .zip(self.sources())
+            .map(|(record, source)| PrioritizedSource {
+                channel: record.channel,
+                version: record.version.clone(),
+                source,
+            })
+            .collect()
+    }
+}
+
+/// Load-facing source plus the resolver priority metadata that is deliberately
+/// absent from the public/wire [`PerfSource`] tuple. Most table loaders need
+/// only the ordered source projection; multi-basename adapters such as MoE A2A
+/// need the channel and version to preserve one global priority order across
+/// all contributing file formats.
+#[derive(Clone, Debug)]
+pub(crate) struct PrioritizedSource {
+    pub(crate) channel: &'static str,
+    pub(crate) version: String,
+    pub(crate) source: PerfSource,
 }
 
 // ---------------------------------------------------------------------------
@@ -576,39 +600,52 @@ fn iter_version_subdirs(backend_path: &Path, out: &mut Vec<(String, PathBuf)>) {
     }
 }
 
-/// Family/backend namespace encoded by a family-first primary path.
-fn op_file_namespace_from_path(
+/// Physical location encoded by either a family-first
+/// `<family>/<backend>/<version>/<table>` path or a legacy
+/// `<backend>/<version>/<table>` path. Family inference is deliberately kept
+/// separate: a legacy override still carries an authoritative physical
+/// backend even though its operation family must be discovered elsewhere.
+#[derive(Clone, Debug)]
+struct OpFileLocation {
+    family: Option<String>,
+    storage_backend: String,
+}
+
+fn op_file_location_from_path(
     primary_path: &Path,
     system_data_root: &Path,
-) -> Option<(String, String)> {
+) -> Option<OpFileLocation> {
     let rel = primary_path.strip_prefix(system_data_root).ok()?;
     let parts: Vec<_> = rel
         .components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect();
     if parts.len() == 4 && !KNOWN_BACKEND_DIRS.contains(&parts[0].as_str()) {
-        return Some((parts[0].to_lowercase(), parts[1].to_lowercase()));
+        return Some(OpFileLocation {
+            family: Some(parts[0].to_lowercase()),
+            storage_backend: parts[1].to_lowercase(),
+        });
+    }
+    if parts.len() == 3 {
+        return Some(OpFileLocation {
+            family: None,
+            storage_backend: parts[0].to_lowercase(),
+        });
     }
     None
 }
 
-/// Infer namespace metadata for a legacy-shaped or missing primary from
+/// Infer operation-family metadata for a legacy-shaped or missing primary from
 /// family-first copies of the same table. This is namespace discovery, not an
 /// operation allowlist: a newly added table under
 /// `comm/<validated-backend>/...` automatically gets the comm policy.
 ///
 /// More than one result is deliberately preserved so the caller can fail
 /// closed when a legacy basename is ambiguous across families.
-/// The backend component is always the requested backend, not the storage
-/// directory that happened to contain the table.
-fn inferred_op_namespaces(
-    system_data_root: &Path,
-    backend: &str,
-    op_file_basename: &str,
-) -> BTreeSet<(String, String)> {
-    let mut namespaces = BTreeSet::new();
+fn inferred_op_families(system_data_root: &Path, op_file_basename: &str) -> BTreeSet<String> {
+    let mut families_with_table = BTreeSet::new();
     let Ok(families) = std::fs::read_dir(system_data_root) else {
-        return namespaces;
+        return families_with_table;
     };
     for family_entry in families.flatten() {
         let family = family_entry.file_name().to_string_lossy().into_owned();
@@ -638,10 +675,10 @@ fn inferred_op_namespaces(
             })
         });
         if family_has_table {
-            namespaces.insert((family.to_lowercase(), backend.to_lowercase()));
+            families_with_table.insert(family.to_lowercase());
         }
     }
-    namespaces
+    families_with_table
 }
 
 // ---------------------------------------------------------------------------
@@ -898,10 +935,23 @@ pub fn resolve_one(
             op_file_basename,
         ),
     };
-    let direct_namespace = op_file_namespace_from_path(&primary_path, &ctx.system_data_root);
-    let candidate_namespaces = match &direct_namespace {
-        Some(namespace) => BTreeSet::from([namespace.clone()]),
-        None => inferred_op_namespaces(&ctx.system_data_root, &backend_lower, op_file_basename),
+    let primary_location = op_file_location_from_path(&primary_path, &ctx.system_data_root);
+    let candidate_namespaces = match &primary_location {
+        Some(OpFileLocation {
+            family: Some(family),
+            storage_backend,
+        }) => BTreeSet::from([(family.clone(), storage_backend.clone())]),
+        Some(OpFileLocation {
+            family: None,
+            storage_backend,
+        }) => inferred_op_families(&ctx.system_data_root, op_file_basename)
+            .into_iter()
+            .map(|family| (family, storage_backend.clone()))
+            .collect(),
+        None => inferred_op_families(&ctx.system_data_root, op_file_basename)
+            .into_iter()
+            .map(|family| (family, String::new()))
+            .collect(),
     };
     let comm_namespace_ambiguous = candidate_namespaces.len() > 1
         && candidate_namespaces
@@ -927,7 +977,12 @@ pub fn resolve_one(
             ctx.strict,
             &mut warnings,
         )?;
-    if primary_is_file && !primary_unusable && direct_namespace.is_some() {
+    if primary_is_file
+        && !primary_unusable
+        && primary_location
+            .as_ref()
+            .is_some_and(|location| location.family.is_some())
+    {
         check_strict_provenance_coverage(&primary_version_dir, ctx.strict, None, &mut warnings)?;
     }
     if primary_unusable {
@@ -1027,7 +1082,9 @@ pub fn resolve_one(
             )? {
                 continue;
             }
-            if op_file_namespace_from_path(&donor_path, &ctx.system_data_root).is_some() {
+            if op_file_location_from_path(&donor_path, &ctx.system_data_root)
+                .is_some_and(|location| location.family.is_some())
+            {
                 check_strict_provenance_coverage(
                     &donor_dir,
                     ctx.strict,
@@ -1255,7 +1312,7 @@ enum ResolverKind {
 /// directories and parses sidecar yaml).
 pub struct SourceResolver {
     kind: ResolverKind,
-    cache: Mutex<BTreeMap<String, Vec<PerfSource>>>,
+    cache: Mutex<BTreeMap<String, Vec<PrioritizedSource>>>,
 }
 
 impl SourceResolver {
@@ -1282,29 +1339,61 @@ impl SourceResolver {
         basename: &str,
         data_root: &Path,
     ) -> Result<Vec<PerfSource>, AicError> {
+        Ok(self
+            .prioritized_sources_for(basename, data_root)?
+            .into_iter()
+            .map(|source| source.source)
+            .collect())
+    }
+
+    /// Source list with internal resolver priority retained. The public wire
+    /// remains [`PerfSource`]; this richer projection is for loaders that merge
+    /// multiple basenames into one logical table and therefore cannot infer a
+    /// global order from four independently ordered vectors.
+    pub(crate) fn prioritized_sources_for(
+        &self,
+        basename: &str,
+        data_root: &Path,
+    ) -> Result<Vec<PrioritizedSource>, AicError> {
         match &self.kind {
-            ResolverKind::Fixed(map) => Ok(match map.get(basename) {
-                Some(sources) if !sources.is_empty() => sources.clone(),
-                // A PRESENT but EMPTY list is a deliberate veto statement:
-                // load NO sources. Falling back to the primary here would
-                // silently undo the veto.
-                Some(_) => Vec::new(),
-                None => {
-                    let legacy = data_root.join(basename);
-                    let path = if legacy.is_file() {
-                        legacy
-                    } else {
-                        find_in_family_dirs(data_root, basename).unwrap_or(legacy)
-                    };
-                    vec![PerfSource(path, None)]
-                }
-            }),
+            ResolverKind::Fixed(map) => {
+                let sources = match map.get(basename) {
+                    Some(sources) if !sources.is_empty() => sources.clone(),
+                    // A PRESENT but EMPTY list is a deliberate veto statement:
+                    // load NO sources. Falling back to the primary here would
+                    // silently undo the veto.
+                    Some(_) => Vec::new(),
+                    None => {
+                        let legacy = data_root.join(basename);
+                        let path = if legacy.is_file() {
+                            legacy
+                        } else {
+                            find_in_family_dirs(data_root, basename).unwrap_or(legacy)
+                        };
+                        vec![PerfSource(path, None)]
+                    }
+                };
+                Ok(sources
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, source)| PrioritizedSource {
+                        channel: if index == 0 { "primary" } else { "fallback" },
+                        version: source
+                            .path()
+                            .parent()
+                            .and_then(Path::file_name)
+                            .map(|value| value.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        source,
+                    })
+                    .collect())
+            }
             ResolverKind::Live(ctx) => {
                 if let Some(cached) = self.cache.lock().unwrap().get(basename) {
                     return Ok(cached.clone());
                 }
                 let report = resolve_one(ctx, basename, None)?;
-                let sources = report.sources();
+                let sources = report.prioritized_sources();
                 self.cache
                     .lock()
                     .unwrap()
@@ -1747,6 +1836,48 @@ mod tests {
         write(&primary, "stub");
         write(
             &data.join("comm/vllm/1.0.0/custom_allreduce_perf.parquet"),
+            "stub",
+        );
+
+        let report = resolve_one(
+            &ctx(root, "trtllm", "2.0.0"),
+            "custom_allreduce_perf.parquet",
+            Some(&primary),
+        )
+        .unwrap();
+        assert_eq!(channels(&report), ["primary"]);
+    }
+
+    #[test]
+    fn legacy_comm_primary_preserves_mismatched_physical_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let data = root.join("data");
+        let primary = data.join("vllm/2.0.0/custom_allreduce_perf.parquet");
+        write(&primary, "stub");
+        write(
+            &data.join("comm/trtllm/1.0.0/custom_allreduce_perf.parquet"),
+            "stub",
+        );
+
+        let report = resolve_one(
+            &ctx(root, "trtllm", "2.0.0"),
+            "custom_allreduce_perf.parquet",
+            Some(&primary),
+        )
+        .unwrap();
+        assert_eq!(channels(&report), ["primary"]);
+    }
+
+    #[test]
+    fn legacy_comm_primary_preserves_unknown_physical_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let data = root.join("data");
+        let primary = data.join("futurelib/2.0.0/custom_allreduce_perf.parquet");
+        write(&primary, "stub");
+        write(
+            &data.join("comm/trtllm/1.0.0/custom_allreduce_perf.parquet"),
             "stub",
         );
 
