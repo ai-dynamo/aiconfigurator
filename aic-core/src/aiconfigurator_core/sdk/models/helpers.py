@@ -663,6 +663,44 @@ def _infer_quant_modes_from_raw_config(raw_config: dict, architecture: str | Non
     return overrides
 
 
+# Architectures whose vLLM MoE dispatch is PROVEN w4a4 for W4A16_NVFP4-labeled
+# checkpoints: the collected kernel_source is
+# ``vllm_compressedtensorsw4a4nvfp4moe_*`` (activations quantized at run time,
+# FP4 tensor cores), so the storage label misdescribes the execution lane.
+# Scoped per-architecture deliberately: Qwen3.6-style checkpoints stay on the
+# weight-only ``w4a16_nvfp4`` profile, which vLLM reaches through HYBRID's
+# calibrated XPROFILE relation by design (see
+# test_validate_w4a16_nvfp4_moe_xprofile_reachable_in_hybrid).
+_VLLM_W4A4_MOE_ARCHITECTURES = frozenset({"NemotronHForCausalLM"})
+
+
+def resolve_vllm_moe_execution_mode(
+    moe_quant_mode: common.MoEQuantMode | None,
+    backend_name: str | None,
+    architecture: str | None,
+) -> common.MoEQuantMode | None:
+    """Map an HF/label-derived MoE mode to the lane vLLM actually executes.
+
+    For NemotronH checkpoints, vLLM's compressed-tensors dispatch quantizes
+    activations at run time and serves the FP4-tensor-core (w4a4) kernels
+    regardless of the ``W4A16_NVFP4`` ModelOpt storage label (the collected
+    kernel_source proves it), so the mode remaps to ``nvfp4`` — the lane the
+    silicon rows live in. trtllm/sglang keep the label mode (their
+    weight-only dequant-to-BF16 MoE path is real), and non-NemotronH
+    architectures keep it on vLLM too (Qwen3.6's profile is served via the
+    HYBRID XPROFILE relation by design). Callers apply this to HF-DERIVED
+    modes only — a truly explicit user mode must bypass it
+    (AIC-1748/AIC-1743).
+    """
+    if (
+        backend_name == "vllm"
+        and architecture in _VLLM_W4A4_MOE_ARCHITECTURES
+        and moe_quant_mode == common.MoEQuantMode.w4a16_nvfp4
+    ):
+        return common.MoEQuantMode.nvfp4
+    return moe_quant_mode
+
+
 def _apply_model_quant_defaults(
     model_config: config.ModelConfig,
     raw_config: dict,
@@ -721,18 +759,13 @@ def _apply_model_quant_defaults(
         if backend_name == "vllm" and model_config.fmha_quant_mode == common.FMHAQuantMode.fp8:
             model_config.fmha_quant_mode = common.FMHAQuantMode.bfloat16
 
-    # vLLM has no weight-only NVFP4 MoE lane: its compressed-tensors dispatch
-    # quantizes activations at run time and serves the FP4-tensor-core (w4a4)
-    # kernels for NVFP4-weight experts regardless of the ModelOpt storage
-    # label — ``W4A16_NVFP4`` describes the artifact, not the dispatch (the
-    # collected kernel_source is ``vllm_compressedtensorsw4a4nvfp4moe_*``, and
-    # no collector emits w4a16_nvfp4 MoE rows on any backend). Remap the
-    # label-inferred mode to the lane vLLM actually executes; trtllm/sglang
-    # keep the label mode (their weight-only dequant-to-BF16 MoE path is
-    # real, e.g. Qwen3.6). Applies only when the mode was inferred here — an
-    # explicit user mode wins (AIC-1748/AIC-1743).
-    if moe_was_unset and backend_name == "vllm" and model_config.moe_quant_mode == common.MoEQuantMode.w4a16_nvfp4:
-        model_config.moe_quant_mode = common.MoEQuantMode.nvfp4
+    # Inferred-mode-only remap (see resolve_vllm_moe_execution_mode): an
+    # explicit user mode wins, and validate fails fast on it — the
+    # explicit-is-the-user's-contract doctrine.
+    if moe_was_unset:
+        model_config.moe_quant_mode = resolve_vllm_moe_execution_mode(
+            model_config.moe_quant_mode, backend_name, architecture
+        )
 
     # Only log if model_config was modified
     if original_config != model_config:

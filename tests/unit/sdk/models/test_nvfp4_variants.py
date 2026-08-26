@@ -258,7 +258,10 @@ def test_qwen36_preserves_explicit_global_gemm_override(hf_id, ffn_name, gemm_mo
         # vllm_compressedtensorsw4a4nvfp4moe_*), so the W4A16_NVFP4 storage
         # label resolves to the nvfp4 execution mode there (AIC-1748).
         ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4", "vllm", common.MoEQuantMode.nvfp4),
-        ("nvidia/Qwen3.6-35B-A3B-NVFP4", "vllm", common.MoEQuantMode.nvfp4),
+        # Qwen3.6 stays on the weight-only profile even on vLLM: it is served
+        # through HYBRID's calibrated XPROFILE relation by design (the remap
+        # is scoped to architectures with PROVEN w4a4 vLLM dispatch).
+        ("nvidia/Qwen3.6-35B-A3B-NVFP4", "vllm", common.MoEQuantMode.w4a16_nvfp4),
         # trtllm/sglang keep the label mode: their dequant-to-BF16 weight-only
         # MoE path is the real dispatch (the Qwen3.6 profile above).
         ("nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4", "trtllm", common.MoEQuantMode.w4a16_nvfp4),
