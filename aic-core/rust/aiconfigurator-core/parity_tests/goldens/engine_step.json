@@ -2448,19 +2448,19 @@
     },
     "qwen35-397b-a17b-b200-sglang-0514-isl1024-osl2::agg": {
       "engine": "rust",
-      "git_head": "6b0aa584a28fc8025a561811f27c132fd5754659"
+      "git_head": "0a205cf5fd2e352ce8a64a9fdaa59131b3c79df2"
     },
     "qwen35-397b-a17b-b200-sglang-0514-isl1024-osl2::disagg": {
       "engine": "rust",
-      "git_head": "6b0aa584a28fc8025a561811f27c132fd5754659"
+      "git_head": "0a205cf5fd2e352ce8a64a9fdaa59131b3c79df2"
     },
     "qwen35-397b-a17b-b200-sglang-0514-isl1024-osl2::mixed": {
       "engine": "rust",
-      "git_head": "6b0aa584a28fc8025a561811f27c132fd5754659"
+      "git_head": "0a205cf5fd2e352ce8a64a9fdaa59131b3c79df2"
     },
     "qwen35-397b-a17b-b200-sglang-0514-isl1024-osl2::static": {
       "engine": "rust",
-      "git_head": "6b0aa584a28fc8025a561811f27c132fd5754659"
+      "git_head": "0a205cf5fd2e352ce8a64a9fdaa59131b3c79df2"
     }
   }
 }
