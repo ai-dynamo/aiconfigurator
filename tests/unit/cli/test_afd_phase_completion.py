@@ -3,6 +3,7 @@
 
 """Unit tests for completing single-phase AFD estimates with regular static phases."""
 
+import json
 import logging
 import math
 from types import SimpleNamespace
@@ -314,6 +315,7 @@ def test_run_afd_estimate_passes_prefix_and_nextn(monkeypatch):
         afd_phase="decode",
         afd_combined_with_pd=False,
         afd_boundary_on_attn=True,
+        afd_dispatch_mode="f_side_routing",
         gemm_quant_mode=None,
         kvcache_quant_mode=None,
         fmha_quant_mode=None,
@@ -361,7 +363,7 @@ def test_afd_prefill_uses_uncached_prefix_suffix_for_token_math(monkeypatch):
             # before folding it into the breakdown dict.
             return 0.0
 
-    def fake_build_comm_ops(self, _a_model, _f_model, *, rank_mapping="one_to_one"):
+    def fake_build_comm_ops(self, _a_model, _f_model):
         return _AFDCommOps(
             a2f=FakeCommOp("afd_a2f_transfer"),
             f2a=FakeCommOp("afd_f2a_transfer"),
@@ -443,7 +445,7 @@ def test_afd_decode_mtp_widens_compute_and_communication_queries(monkeypatch, ca
             captured["x_queries"].append(x)
             return 0.0
 
-    def fake_build_comm_ops(self, _a_model, _f_model, *, rank_mapping="one_to_one"):
+    def fake_build_comm_ops(self, _a_model, _f_model):
         return _AFDCommOps(
             a2f=FakeCommOp("afd_a2f_transfer"),
             f2a=FakeCommOp("afd_f2a_transfer"),
@@ -902,6 +904,84 @@ def test_afd_config_phase_decode_with_combined_with_pd_allowed():
     )
     assert cfg.combined_with_pd is True
     assert cfg.phase == "decode"
+
+
+def test_afd_config_dispatch_mode_defaults_to_f_side_and_validates():
+    cfg = AFDConfig(n_a_nodes=1, n_f_nodes=1, gpus_per_node=8, tp_a=1)
+    assert cfg.dispatch_mode == "f_side_routing"
+
+    cfg_a_side = AFDConfig(
+        n_a_nodes=1, n_f_nodes=1, gpus_per_node=8, tp_a=1, f_moe_ep_size=8, dispatch_mode="a_side_routing"
+    )
+    assert cfg_a_side.dispatch_mode == "a_side_routing"
+
+    with pytest.raises(ValueError, match="dispatch_mode must be one of"):
+        AFDConfig(n_a_nodes=1, n_f_nodes=1, gpus_per_node=8, tp_a=1, dispatch_mode="a_side")
+
+
+def test_afd_a_side_routing_reaches_the_comm_ops(monkeypatch):
+    """``AFDConfig.dispatch_mode`` must reach all five comm ops.
+
+    Covers the config -> session -> op wiring in one shot: under A-side
+    routing the cross-pool transfers grow with the per-token EP-rank fan-out,
+    the F-node collectives go to exactly zero, and the A-side combine reduces
+    fewer partials (only the ranks actually reached).
+
+    The ops fetch per-message latency through the engine seam
+    (``afd_transfer._engine_comm_query``); stub it with a latency
+    proportional to each probe's message volume so mode comparisons hold.
+    """
+    from aiconfigurator.sdk.performance_result import PerformanceResult
+    from aiconfigurator_core.sdk.operations import afd_transfer as afd_transfer_module
+    from aiconfigurator_core.sdk.operations.communication import NCCL, P2P
+    from aiconfigurator_core.sdk.operations.elementwise import ElementWise
+
+    def fake_engine_query(_database, op):
+        if isinstance(op, P2P):
+            volume = op._h * 2
+        elif isinstance(op, NCCL):
+            volume = op._num_elements_per_token
+        elif isinstance(op, ElementWise):
+            volume = json.loads(op._spec_json())["Elementwise"]["bytes_per_token"]
+        else:  # pragma: no cover
+            raise TypeError(f"unexpected probe op {type(op).__name__}")
+        return PerformanceResult(latency=float(volume), energy=0.0)
+
+    monkeypatch.setattr(afd_transfer_module, "_engine_comm_query", fake_engine_query)
+
+    model = SimpleNamespace(_hidden_size=7168, _num_experts=256, _topk=8, _num_layers=61)
+    database = object()  # the stub never touches the database
+
+    def latencies(dispatch_mode):
+        session = AFDInferenceSession(
+            model_path="test-model",
+            a_model_config=SimpleNamespace(nextn=0, comm_quant_mode=None),
+            f_model_config=SimpleNamespace(nextn=0, comm_quant_mode=None),
+            database=database,
+            backend=SimpleNamespace(name=SimpleNamespace(value="test-backend")),
+            afd_config=AFDConfig(
+                n_a_nodes=1,
+                n_f_nodes=2,
+                gpus_per_node=8,
+                tp_a=1,
+                f_moe_ep_size=16,
+                dispatch_mode=dispatch_mode,
+            ),
+        )
+        comm_ops = session._build_afd_comm_ops(model, model)
+        return {
+            field: float(getattr(comm_ops, field).query(database, x=128))
+            for field in ("a2f", "f2a", "f_ag", "f_rs", "a_combine")
+        }
+
+    f_side = latencies("f_side_routing")
+    a_side = latencies("a_side_routing")
+
+    assert a_side["a2f"] > f_side["a2f"]
+    assert a_side["f2a"] > f_side["f2a"]
+    assert f_side["f_ag"] > 0.0 and f_side["f_rs"] > 0.0
+    assert a_side["f_ag"] == 0.0 and a_side["f_rs"] == 0.0
+    assert 0.0 < a_side["a_combine"] < f_side["a_combine"]
 
 
 def _afd_cli_estimate_kwargs(**overrides):

@@ -95,6 +95,9 @@ OPERATIONS_DEF_INVENTORY = {
             "AFDTransfer.num_f_nodes",
             "AFDTransfer.query",
             "_afd_send_prob",
+            # Combinatorial destination-EP-rank fan-out for a_side_routing —
+            # topology math (same family as _afd_send_prob), not a perf value.
+            "afd_dest_ep_ranks",
             "_engine_comm_query",
         }
     ),

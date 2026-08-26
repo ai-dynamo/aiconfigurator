@@ -1194,7 +1194,7 @@ class AFDInferenceSession:
             num_microbatches,
         )
 
-    def _build_afd_comm_ops(self, a_model, f_model, *, rank_mapping: str = "one_to_one") -> _AFDCommOps:
+    def _build_afd_comm_ops(self, a_model, f_model) -> _AFDCommOps:
         """Construct the five comm-side ops modeling AFD per-layer traffic.
 
         AFD comm decomposes into five independent pieces. Each is now its
@@ -1206,15 +1206,11 @@ class AFDInferenceSession:
         * ``a2f`` / ``f2a`` — cross-pool single-direction P2P transfers.
         * ``f_ag`` / ``f_rs`` — F-node intra-node AllGather (dispatch)
           and ReduceScatter (combine) along the token dimension. They
-          return 0 when ``f_local <= 1`` or under broadcast mapping, so
-          the session can sum them unconditionally.
+          return 0 when ``f_local <= 1`` or when ``cfg.dispatch_mode`` is
+          not ``"f_side_routing"``, so the session can sum them
+          unconditionally.
         * ``a_combine`` — A-side local HBM reduce-add over EP partial
           results. Returns 0 when ``f_moe_ep_size <= 1``.
-
-        ``rank_mapping`` selects the dispatch topology:
-        ``"one_to_one"`` (default) keeps the F-side AG/RS;
-        ``"broadcast"`` reports them as 0 (placeholder for future
-        modeling of A-rank → all-F-ranks fan-out).
 
         MoE dispatch probability is driven by ``f_model._num_experts`` /
         ``f_model._topk`` (combinatorial formula when both present and
@@ -1222,6 +1218,10 @@ class AFDInferenceSession:
         uniform ``1 / num_f_nodes`` split. EP=1 MoE models still use the
         combinatorial form since each token activates only ``topk``
         experts regardless of EP layout.
+
+        Under ``cfg.dispatch_mode == "a_side_routing"`` the same five ops
+        switch to the direct-to-EP-rank byte model: A→F / F→A grow with the
+        per-token fan-out and the F-node AG/RS drop to 0.
         """
         from aiconfigurator.sdk.operations import (
             AFDCombine,
@@ -1243,6 +1243,7 @@ class AFDInferenceSession:
             num_experts=num_experts,
             topk=topk,
             comm_quant_mode=comm_quant,
+            dispatch_mode=cfg.dispatch_mode,
         )
         return _AFDCommOps(
             a2f=AFDTransfer(
@@ -1250,6 +1251,7 @@ class AFDInferenceSession:
                 scale_factor=1.0,
                 direction="a2f",
                 comm_overhead_factor=cfg.comm_overhead_factor,
+                f_moe_ep_size=cfg.f_moe_ep_size,
                 **shared,
             ),
             f2a=AFDTransfer(
@@ -1257,18 +1259,17 @@ class AFDInferenceSession:
                 scale_factor=1.0,
                 direction="f2a",
                 comm_overhead_factor=cfg.comm_overhead_factor,
+                f_moe_ep_size=cfg.f_moe_ep_size,
                 **shared,
             ),
             f_ag=AFDFAllGather(
                 name="afd_f_node_allgather",
                 scale_factor=1.0,
-                rank_mapping=rank_mapping,
                 **shared,
             ),
             f_rs=AFDFReduceScatter(
                 name="afd_f_node_reducescatter",
                 scale_factor=1.0,
-                rank_mapping=rank_mapping,
                 **shared,
             ),
             a_combine=AFDCombine(
@@ -1278,6 +1279,9 @@ class AFDInferenceSession:
                 tp_a=cfg.tp_a,
                 f_moe_ep_size=cfg.f_moe_ep_size,
                 comm_quant_mode=comm_quant,
+                dispatch_mode=cfg.dispatch_mode,
+                num_experts=num_experts,
+                topk=topk,
             ),
         )
 
@@ -1655,7 +1659,8 @@ class AFDInferenceSession:
         # Five comm-side ops model the per-layer AFD traffic:
         #   * a2f / f2a — cross-pool single-direction P2P transfers.
         #   * f_ag / f_rs — F-node intra-node AG (dispatch) and RS (combine)
-        #     along the token dimension; return 0 outside one-to-one mapping.
+        #     along the token dimension; only needed under
+        #     ``dispatch_mode="f_side_routing"``, 0 otherwise.
         #   * a_combine — A-side local HBM reduce-add over EP partials;
         #     returns 0 for dense FFN (``f_moe_ep_size <= 1``).
         # All five bill by token volume only — independent of ``s`` — so
@@ -2135,6 +2140,7 @@ class AFDInferenceSession:
             "nextn": self._nextn,
             "combined_with_pd": bool(cfg.combined_with_pd),
             "boundary_on_attn": bool(cfg.boundary_on_attn),
+            "dispatch_mode": cfg.dispatch_mode,
             "num_total_gpus": total_gpus,
             "memory": round(max(a_memory_gb, f_memory_gb), 2),
             "backend": self._backend.name.value,

@@ -178,6 +178,9 @@ class RuntimeConfig:
     num_image_tokens: int = 0  # override: ViT output tokens per image; ignored when image_height/width are set
 
 
+AFD_DISPATCH_MODES = ("f_side_routing", "a_side_routing")
+
+
 @dataclass
 class AFDConfig:
     """Configuration for Attention-FFN Disaggregated (AFD) serving mode.
@@ -284,6 +287,14 @@ class AFDConfig:
     # partition instead.
     boundary_on_attn: bool = True
 
+    # -- Cross-pool dispatch topology --
+    # "f_side_routing" (default): routing stays on the F side — A->F dedups
+    # per F-node, then the F-node AllGather/ReduceScatter redistribute.
+    # "a_side_routing": DeepEP low-latency style — the A worker routes and
+    # sends each token straight to the EP ranks owning its top-k experts;
+    # MoE only. Full byte models in ``operations.afd_transfer``.
+    dispatch_mode: str = "f_side_routing"
+
     # -- Derived (set in __post_init__) --
     n_a_workers: int = field(init=False)
     n_f_workers: int = field(init=False)
@@ -293,6 +304,8 @@ class AFDConfig:
         valid_pipeline_models = ("optimistic", "conservative", "serial")
         if self.phase not in valid_phases:
             raise ValueError(f"phase must be one of {valid_phases}, got {self.phase!r}.")
+        if self.dispatch_mode not in AFD_DISPATCH_MODES:
+            raise ValueError(f"dispatch_mode must be one of {AFD_DISPATCH_MODES}, got {self.dispatch_mode!r}.")
         if self.pipeline_model not in valid_pipeline_models:
             raise ValueError(f"pipeline_model must be one of {valid_pipeline_models}, got {self.pipeline_model!r}.")
         if self.n_a_nodes < 1 or self.n_f_nodes < 1:

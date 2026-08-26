@@ -17,11 +17,13 @@ Public surface preserves the prior import pattern:
 from __future__ import annotations
 
 from aiconfigurator_core.sdk.operations.afd_transfer import (
+    AFD_DISPATCH_MODES,
     AFDCombine,
     AFDFAllGather,
     AFDFReduceScatter,
     AFDTransfer,
     _afd_send_prob,
+    afd_dest_ep_ranks,
 )
 from aiconfigurator_core.sdk.operations.attention import ContextAttention, EncoderAttention, GenerationAttention
 from aiconfigurator_core.sdk.operations.base import (
@@ -63,6 +65,7 @@ from aiconfigurator_core.sdk.operations.overlap import FallbackOp, OverlapOp
 from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
 __all__ = [
+    "AFD_DISPATCH_MODES",
     "GEMM",
     "NCCL",
     "P2P",
@@ -105,6 +108,7 @@ __all__ = [
     "WideEPContextMLA",
     "WideEPGenerationMLA",
     "_afd_send_prob",
+    "afd_dest_ep_ranks",
     "clear_all_op_caches",
     "warm_all_op_data",
 ]
