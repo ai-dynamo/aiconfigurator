@@ -757,6 +757,15 @@ MULTIMODAL_TEXT_CONFIG_KEY = {
 # not apply (see Task._resolve_model_identity).
 DSPARK_ARCHITECTURES = frozenset({"KimiK3ForConditionalGeneration"})
 
+# Block size (draft tokens proposed per step) for each DSPARK architecture.
+# This is a fixed constant of the draft model's design — not user-configurable
+# and not present in the main checkpoint (the draft is a separate artifact).
+# Maps architecture name → nextn block size passed to the backend as
+# speculative_config.num_speculative_tokens.
+DSPARK_NEXTN: dict[str, int] = {
+    "KimiK3ForConditionalGeneration": 7,
+}
+
 """
 All reduce strategy for trtllm custom allreduce
 """
