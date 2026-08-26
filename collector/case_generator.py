@@ -2009,6 +2009,13 @@ class GdnCommonTestCase:
     batch_size_list: Optional[list[int]]
     seq_len_list: Optional[list[int]]  # For context phase; None for generation
     model_name: str
+    # SSM state dtype from the model config (`mamba_ssm_dtype`; serving
+    # default "float32" — sglang configs/mamba_utils.py @0.5.14). Decides
+    # whether SM-major-10 sglang serving auto-selects the FlashInfer GDN
+    # decode backend (bfloat16 only; server_args.py:4884-4915 @0.5.14), so
+    # the sglang collector requires the FlashInfer lane only for bf16-state
+    # cases.
+    mamba_ssm_dtype: str = "float32"
 
 
 # =============================================================================
@@ -2063,7 +2070,7 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
     sweep grid only, like every other base op.
     """
     test_cases: list[GdnCommonTestCase] = []
-    seen_model_keys: set[tuple[int, int, int, int, int, int]] = set()
+    seen_model_keys: set[tuple[int, int, int, int, int, int, str]] = set()
     gdn_sweep = _required_base_common_case_values("gdn")
     context_seq_lens = _as_int_list(
         gdn_sweep.get("context_sequence_lengths"),
@@ -2088,6 +2095,12 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
         num_v_heads = int(model_config["num_v_heads"])
         head_v_dim = int(model_config["head_v_dim"])
         model_name = str(model_config["model_path"])
+        mamba_ssm_dtype = str(model_config.get("mamba_ssm_dtype", "float32"))
+        if mamba_ssm_dtype not in ("float32", "bfloat16", "float16"):
+            raise ValueError(
+                "model_case_values.gdn.mamba_ssm_dtype must be one of float32/bfloat16/float16, "
+                f"got {mamba_ssm_dtype!r} for {model_name}"
+            )
         tp_sizes = _as_int_list(
             model_config.get("tensor_parallel_sizes"),
             field_name="model_case_values.gdn.tensor_parallel_sizes",
@@ -2107,6 +2120,9 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
 
             local_num_k_heads = num_k_heads // tp_size
             local_num_v_heads = num_v_heads // tp_size
+            # The dtype joins the dedup key: shape-identical models with
+            # different SSM state dtypes need distinct cases (the dtype
+            # gates the sglang FlashInfer decode lane requirement).
             model_key = (
                 d_model,
                 local_num_k_heads,
@@ -2114,6 +2130,7 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
                 local_num_v_heads,
                 head_v_dim,
                 d_conv,
+                mamba_ssm_dtype,
             )
             if model_key in seen_model_keys:
                 continue
@@ -2132,6 +2149,7 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
                     batch_size_list=context_batch_sizes,
                     seq_len_list=context_seq_lens,
                     model_name=model_name,
+                    mamba_ssm_dtype=mamba_ssm_dtype,
                 )
             )
 
@@ -2148,6 +2166,7 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
                     batch_size_list=generation_batch_sizes,
                     seq_len_list=None,
                     model_name=model_name,
+                    mamba_ssm_dtype=mamba_ssm_dtype,
                 )
             )
 

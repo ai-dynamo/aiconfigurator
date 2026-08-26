@@ -9,17 +9,34 @@ runtime:
   image_digest: sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3
 tables:
   gdn_perf:
-    # 2026-08-14 (AIC-1759): appended 54 flashinfer_gated_delta_rule_decode
-    # rows — the SM100+ serving-mandated bf16-state decode lane, 0.51x the
-    # fla fp32 lane at matched keys (state-bytes ratio). First true-b300
-    # collection of this lane (manual JET job, aws-pdx, pipeline 62709074).
-    # Keys disjoint from prior rows.
-    collector_ref: 5a1834df2865d291f84f5fc1fbf6f3c99b69afba
-    collector_hash: sha256:e18b5b3a83ff649f4955a271b0d3b3680be2c43a5e07e68882b4e91a6991d075
-    case_plan_hash: sha256:1e658e78c925cba9773688165ecec208c0c2c2f0b931268cc15a245fc878ac48
-    collected_at: '2026-08-10'
-    rows: 8820
-    # All 32 failed tasks are strict-completeness raises on the largest
-    # batch x seq inner points (memory-bound sweep tail); collected rows
-    # are unaffected.
+    # Two collection events (per-event attestations under `collections`
+    # below); rows/status here describe the merged table as shipped.
+    rows: 8874
     status: complete
+    collections:
+      # Base sweep: the 2026-08-10 registry collector run (fully attested;
+      # every row carries device 'NVIDIA B300 SXM6 AC').
+      # All 32 failed tasks are strict-completeness raises on the largest
+      # batch x seq inner points (memory-bound sweep tail); collected rows
+      # are unaffected.
+      - collector_ref: 5a1834df2865d291f84f5fc1fbf6f3c99b69afba
+        collector_hash: sha256:e18b5b3a83ff649f4955a271b0d3b3680be2c43a5e07e68882b4e91a6991d075
+        case_plan_hash: sha256:1e658e78c925cba9773688165ecec208c0c2c2f0b931268cc15a245fc878ac48
+        collected_at: '2026-08-10'
+        rows: 8820
+      # 2026-08-14 (AIC-1759): appended 54 flashinfer_gated_delta_rule_decode
+      # rows — the FlashInfer bf16-state decode SIBLING lane (serving selects
+      # it only on SM-major-10 for bfloat16-state models,
+      # server_args.py:4884-4915 @0.5.14), 0.51x the fla fp32 lane at matched
+      # keys (state-bytes ratio). First true-b300 collection of this lane.
+      # Keys disjoint from prior rows. Manual JET job on aws-pdx-slurm-1
+      # (pipeline 62709074) from the AIC-1744/1745 PR branch (#1533), using
+      # the mirrored sglang:v0.5.14-cu130-amd64 image (mirror of the
+      # runtime.image above; mirror digest not recorded). collector_ref /
+      # collector_hash / case_plan_hash are ABSENT because they cannot be
+      # recomputed honestly: the branch history that ran was rewritten by two
+      # post-review rebases (2026-08-15, 2026-08-20), and the case-plan hash
+      # is attested only at run time from the campaign checkpoint, which was
+      # not retained.
+      - collected_at: '2026-08-14'
+        rows: 54

@@ -46,11 +46,14 @@ def _load_function(source_path: Path, name: str, namespace: dict | None = None):
 
 
 class TestResolveFlashinferGdnDecode:
-    """_resolve_flashinfer_gdn_decode (CodeRabbit collect_gdn.py:369, Major):
-    SM100+ sglang serving mandates the FlashInfer bf16-state GDN decode
-    kernel (server_args.py:4884-4915 @0.5.14); an import failure there must
-    surface as a classified failure the caller raises, never a silent skip
-    that omits the serving-selected lane. SM<100 stays a legitimate no-op."""
+    """_resolve_flashinfer_gdn_decode (CodeRabbit collect_gdn.py:369, Major;
+    lane-predicate fix, jasonqinzhou PR #1533 review): serving auto-selects
+    the FlashInfer bf16-state GDN decode kernel only on capability major 10
+    (is_sm100_supported() — sm 100/103 yes, sm 120 NO) AND when the model's
+    mamba_ssm_dtype is bfloat16 (server_args.py:4884-4915 @0.5.14). An
+    import failure must surface as a classified failure the caller raises
+    ONLY for bf16-state cases; fp32-state (every bundled Qwen3.5/3.6 config)
+    and non-major-10 SMs stay legitimate no-ops."""
 
     def _resolve(self, sm_version: int):
         return _load_function(
@@ -62,22 +65,31 @@ class TestResolveFlashinferGdnDecode:
     def test_not_applicable_below_sm100(self):
         resolve = self._resolve(90)
 
-        assert resolve() == (None, None)
+        assert resolve("bfloat16") == (None, None)
 
-    def test_boundary_sm100_takes_mandatory_lane_branch(self, monkeypatch):
+    def test_not_applicable_on_sm120_regardless_of_dtype(self):
+        # is_sm100_supported() is capability major EXACTLY 10: sm 120
+        # (rtx_pro_6000_server) never takes the FlashInfer decode lane, so
+        # the resolver must not require (or even attempt) it there.
+        resolve = self._resolve(120)
+
+        assert resolve("float32") == (None, None)
+        assert resolve("bfloat16") == (None, None)
+
+    def test_boundary_sm100_takes_mandatory_lane_branch_for_bf16(self, monkeypatch):
         # SM100 itself (the boundary) must already take the mandatory-lane
-        # branch: the guard is a strict `< 100`, so only SM99 and below skip.
+        # branch for a bf16-state case: the guard is `100 <= sm < 110`.
         monkeypatch.delitem(sys.modules, "flashinfer.gdn_decode", raising=False)
         monkeypatch.delitem(sys.modules, "flashinfer", raising=False)
         resolve = self._resolve(100)
 
-        kernel_fn, error_message = resolve()
+        kernel_fn, error_message = resolve("bfloat16")
 
         assert kernel_fn is None
         assert error_message is not None
         assert "SM100" in error_message
 
-    def test_classified_error_when_unavailable_on_sm100(self, monkeypatch):
+    def test_classified_error_when_unavailable_on_sm100_bf16(self, monkeypatch):
         # flashinfer is genuinely not installed in this dev/CI venv, so this
         # reproduces the real gap without needing a sys.modules trick: the
         # previous code returned a bare None here (CodeRabbit finding), so
@@ -86,12 +98,23 @@ class TestResolveFlashinferGdnDecode:
         monkeypatch.delitem(sys.modules, "flashinfer", raising=False)
         resolve = self._resolve(103)
 
-        kernel_fn, error_message = resolve()
+        kernel_fn, error_message = resolve("bfloat16")
 
         assert kernel_fn is None
         assert error_message is not None
         assert "SM103" in error_message
         assert "collection environment gap" in error_message
+
+    def test_no_required_lane_error_for_fp32_state_on_sm100(self, monkeypatch):
+        # Serving never selects the FlashInfer backend for an fp32-state
+        # model (every bundled Qwen3.5/3.6 config): a missing flashinfer
+        # install must be a logged sibling-lane skip, not a classified
+        # required-lane failure.
+        monkeypatch.delitem(sys.modules, "flashinfer.gdn_decode", raising=False)
+        monkeypatch.delitem(sys.modules, "flashinfer", raising=False)
+        resolve = self._resolve(103)
+
+        assert resolve("float32") == (None, None)
 
     def test_returns_kernel_when_available_on_sm100(self, monkeypatch):
         sentinel = object()
@@ -103,10 +126,13 @@ class TestResolveFlashinferGdnDecode:
         monkeypatch.setitem(sys.modules, "flashinfer.gdn_decode", fake_gdn_decode)
         resolve = self._resolve(103)
 
-        kernel_fn, error_message = resolve()
+        # Sibling coverage is collected for every state dtype when the
+        # kernel is importable on SM major 10.
+        for dtype in ("float32", "bfloat16"):
+            kernel_fn, error_message = resolve(dtype)
 
-        assert kernel_fn is sentinel
-        assert error_message is None
+            assert kernel_fn is sentinel
+            assert error_message is None
 
 
 def test_run_gdn_generation_benchmark_raises_classified_error_not_silent_skip():

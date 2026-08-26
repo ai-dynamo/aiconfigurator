@@ -2,10 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: 1
-provenance: legacy
+# `local`: a manual out-of-band collection with structured but hash-less
+# provenance (same tier as the b200_sxm kda/mla_bmm sidecars) — no longer
+# `legacy`, since the whole table now comes from one known 2026-08-14 run.
+provenance: local
 runtime:
   framework: sglang
   version: 0.5.14
+  # Mirrored sglang:v0.5.14-cu130-amd64 image (mirror of
+  # lmsysorg/sglang:v0.5.14; mirror digest not recorded).
+  image: lmsysorg/sglang:v0.5.14
 tables:
   gemm_perf:
     # 2026-08-14 (AIC-1759): FULL-TABLE replacement with the first true
@@ -15,5 +21,14 @@ tables:
     # (m32 @ n5120xk4096: 20.3 -> 11.0 us). New grid strictly supersets
     # the old for every dtype (+222 bfloat16, +148 fp8 shapes from
     # Step-3.7 cases). Collected via manual JET job on aws-pdx-slurm-1
-    # from the AIC-1744/1745 branch (pipeline 62709074).
+    # from the AIC-1744/1745 PR branch (#1533, pipeline 62709074).
+    # collector_ref / collector_hash / case_plan_hash are ABSENT because
+    # they cannot be recomputed honestly: the branch history that ran was
+    # rewritten by two post-review rebases (2026-08-15, 2026-08-20), and
+    # the case-plan hash is attested only at run time from the campaign
+    # checkpoint, which was not retained.
+    # (A values-only re-measurement of six stalled/spiked rows lands separately;
+    # it does not change the row count.)
+    collected_at: '2026-08-14'
+    rows: 130906
     status: complete

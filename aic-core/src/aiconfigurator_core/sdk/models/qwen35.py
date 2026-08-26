@@ -154,6 +154,15 @@ class Qwen35Model(BaseModel):
         if self.config.cp_size > 1:
             raise ValueError("Qwen3.5 does not model context parallelism; cp_size must be 1")
 
+        # SSM state dtype, resolved the way sglang's mamba2_state_dtype does
+        # (configs/mamba_utils.py @ pinned v0.5.14: config.mamba_ssm_dtype or
+        # config.text_config.mamba_ssm_dtype, default "float32"). Every
+        # bundled Qwen3.5/3.6 config pins "float32"; only a bfloat16 state
+        # lets SM-major-10 sglang serving auto-select the FlashInfer GDN
+        # decode backend (server_args.py:4884-4915), which the Rust GDN query
+        # gate mirrors.
+        self._mamba_ssm_dtype = self._resolve_mamba_ssm_dtype(raw_config or {})
+
         if self.config.moe_backend == "megamoe":
             raise ValueError("Qwen3.5 does not model moe_backend='megamoe'; sglang MegaMoE serves DeepSeek-V4 only")
 
@@ -172,6 +181,22 @@ class Qwen35Model(BaseModel):
 
         self._build_context_ops()
         self._build_generation_ops()
+
+    @staticmethod
+    def _resolve_mamba_ssm_dtype(raw_config: dict) -> str:
+        """Mirror sglang's ``mamba2_state_dtype`` config resolution
+        (configs/mamba_utils.py @ pinned v0.5.14): the FIRST config that
+        declares ``mamba_ssm_dtype`` wins outright (``text_config`` before
+        root — serving's branches are an ``elif`` chain, so root is never
+        consulted once text_config declares the field); an invalid declared
+        value keeps the ``float32`` default, as serving does."""
+        valid = ("float32", "bfloat16", "float16")
+        text_config = raw_config.get("text_config")
+        for source in (text_config if isinstance(text_config, dict) else {}, raw_config):
+            if "mamba_ssm_dtype" in source:
+                dtype = source["mamba_ssm_dtype"]
+                return dtype if dtype in valid else "float32"
+        return "float32"
 
     def _count_layer_types(self) -> dict[str, int]:
         cfg: common.Qwen35Config = self.extra_params
@@ -669,6 +694,9 @@ class Qwen35Model(BaseModel):
                         gdn_nv_per_tp,
                         hv,
                         d_conv,
+                        # Gates the SM-major-10 sglang FlashInfer decode-lane
+                        # preference in the Rust GDN query (bfloat16 only).
+                        mamba_ssm_dtype=self._mamba_ssm_dtype,
                     ),
                     ops.GEMM(
                         "generation_gdn_out_proj_gemm",

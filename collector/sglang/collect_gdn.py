@@ -17,10 +17,13 @@ Generation (decode) phase:
     - fused_recurrent_gated_delta_rule_packed_decode: Packed GDN recurrence
       (fla/triton fp32-state lane; every SM)
     - flashinfer_gated_delta_rule_decode: FlashInfer bf16-state decode via
-      flashinfer.gdn_decode.gated_delta_rule_decode_pretranspose (SM100+
-      only; sglang serving makes this the mandatory decode kernel once
-      mamba_ssm_dtype defaults to bfloat16 — server_args.py
-      _handle_linear_attn_backend, :4884-4915 @0.5.14)
+      flashinfer.gdn_decode.gated_delta_rule_decode_pretranspose (SM-major-10
+      only — is_sm100_supported() is capability major EXACTLY 10, so sm
+      100/103 yes, sm 120 no; sglang serving auto-selects this decode kernel
+      only when the model's mamba_ssm_dtype is bfloat16 — server_args.py
+      _handle_linear_attn_backend, :4884-4915 @0.5.14. Every bundled
+      Qwen3.5/3.6 config pins float32, so the lane is collected as sibling
+      coverage there and REQUIRED only for bf16-state cases.)
 
 The in_proj and out_proj GEMMs are standard linear layers modeled by the
 existing GEMM infrastructure. This collector focuses on the unique GDN ops.
@@ -100,6 +103,7 @@ def get_gdn_test_cases():
                     common_case.batch_size_list,
                     common_case.seq_len_list,
                     common_case.model_name,
+                    common_case.mamba_ssm_dtype,
                 ]
             )
         else:
@@ -115,6 +119,7 @@ def get_gdn_test_cases():
                     common_case.batch_size_list,
                     None,  # seq_len_list not used for generation
                     common_case.model_name,
+                    common_case.mamba_ssm_dtype,
                 ]
             )
 
@@ -335,52 +340,73 @@ def run_gdn_context_benchmark(
         raise RuntimeError(f"SGLang GDN context collection failed strict completeness: {summary}")
 
 
-def _resolve_flashinfer_gdn_decode():
+def _resolve_flashinfer_gdn_decode(mamba_ssm_dtype: str = "float32"):
     """
-    Resolve the FlashInfer bf16-state GDN decode kernel for the SM100+ lane.
+    Resolve the FlashInfer bf16-state GDN decode kernel for the SM-major-10 lane.
 
-    Returns a ``(kernel_fn, classified_error)`` pair, exactly one of which is
+    ``mamba_ssm_dtype`` is the case's model-config SSM state dtype (serving
+    default "float32" — configs/mamba_utils.py @0.5.14). Serving's own
+    predicate for auto-selecting this backend is ``is_sm100_supported()``
+    (capability major EXACTLY 10 — sm 100/103 yes, sm 120 NO) AND
+    ``mamba_ssm_dtype == "bfloat16"`` (server_args.py's
+    _handle_linear_attn_backend, :4884-4915 @0.5.14; it hard-errors a
+    non-bf16 state on that backend).
+
+    Returns a ``(kernel_fn, classified_error)`` pair, at most one of which is
     not None:
-    - SM<100: ``(None, None)``. The lane genuinely does not apply (SM90 keeps
-      the fla/triton fp32-state lane; no auto-flip there per
-      server_args.py:4884-4915) -- a legitimate skip, logged and done.
-    - SM100+, flashinfer importable: ``(kernel_fn, None)``.
-    - SM100+, flashinfer NOT importable: ``(None, message)``. SM100+ sglang
-      serving makes this the mandatory decode kernel: server_args.py's
-      _handle_linear_attn_backend (server_args.py:4884-4915 @0.5.14)
-      defaults linear_attn_decode_backend=flashinfer on SM100+ once
-      mamba_ssm_dtype == "bfloat16" (the model default) and hard-errors a
-      non-bf16 state on that backend. A missing import here is therefore a
-      collection-environment gap, not a legitimate skip: the caller raises
-      this message as a classified failure (layer_permissions.md: "execute
-      it, or raise") once it has attempted the other decode lanes for the
-      point, so the row is recorded as failed instead of silently omitted.
+    - SM major != 10 (SM90, SM120, ...): ``(None, None)``. The lane genuinely
+      does not apply — serving never selects it there — a legitimate skip,
+      logged and done.
+    - SM major 10, flashinfer importable: ``(kernel_fn, None)`` — collected
+      for every state dtype (the rows are sibling coverage keyed by
+      kernel_source; serving-selected only for bf16-state models).
+    - SM major 10, flashinfer NOT importable, dtype == "bfloat16":
+      ``(None, message)``. Serving MANDATES this kernel for the case's model
+      there, so a missing import is a collection-environment gap, not a
+      legitimate skip: the caller raises this message as a classified failure
+      (layer_permissions.md: "execute it, or raise") once it has attempted
+      the other decode lanes for the point, so the row is recorded as failed
+      instead of silently omitted.
+    - SM major 10, flashinfer NOT importable, fp32/fp16 state:
+      ``(None, None)``. Serving never selects the FlashInfer backend for this
+      model (it stays on the fla lane), so the missing sibling lane is a
+      logged skip, never a classified failure.
 
     The lazy import mirrors sglang's own guard for this kernel
     (gdn_flashinfer.py:34-56 @0.5.14, _get_flashinfer_gdn_kernels ->
     gated_delta_rule_decode_pretranspose).
     """
     sm_version = get_sm_version()
-    if sm_version < 100:
+    if not 100 <= sm_version < 110:
         print(
             f"  SM{sm_version}: FlashInfer bf16 GDN decode lane not applicable "
-            "(SM100+ only; SM90 keeps the fla/triton fp32-state lane, no "
-            "auto-flip there per server_args.py:4884-4915); skipping "
-            "flashinfer_gated_delta_rule_decode rows for this case."
+            "(capability major 10 only — is_sm100_supported(), sglang "
+            "utils/common.py @0.5.14; SM90/SM120 keep the fla/triton "
+            "fp32-state lane, no auto-flip per server_args.py:4884-4915); "
+            "skipping flashinfer_gated_delta_rule_decode rows for this case."
         )
         return None, None
     try:
         from flashinfer.gdn_decode import gated_delta_rule_decode_pretranspose
     except (ImportError, RuntimeError) as e:
-        message = (
-            f"SM{sm_version}: FlashInfer bf16 GDN decode lane required but unavailable "
-            f"(flashinfer.gdn_decode import failed: {type(e).__name__}: {e}); SM100+ "
-            "sglang serving mandates this kernel for GDN decode once mamba_ssm_dtype "
-            "defaults to bfloat16 (server_args.py:4884-4915 @0.5.14) -- this is a "
-            "collection environment gap, not a skip."
+        if mamba_ssm_dtype == "bfloat16":
+            message = (
+                f"SM{sm_version}: FlashInfer bf16 GDN decode lane required but unavailable "
+                f"(flashinfer.gdn_decode import failed: {type(e).__name__}: {e}); SM100 "
+                "sglang serving mandates this kernel for GDN decode when mamba_ssm_dtype "
+                "== 'bfloat16' (server_args.py:4884-4915 @0.5.14) -- this is a "
+                "collection environment gap, not a skip."
+            )
+            print(f"  {message}")
+            return None, message
+        print(
+            f"  SM{sm_version}: FlashInfer bf16 GDN decode sibling lane unavailable "
+            f"(flashinfer.gdn_decode import failed: {type(e).__name__}: {e}); the case's "
+            f"model pins mamba_ssm_dtype={mamba_ssm_dtype!r}, for which serving keeps the "
+            "fla/triton fp32-state lane (server_args.py:4884-4915 @0.5.14) -- skipping the "
+            "sibling rows for this case."
         )
-        print(f"  {message}")
-        return None, message
+        return None, None
     return gated_delta_rule_decode_pretranspose, None
 
 
@@ -396,6 +422,7 @@ def run_gdn_generation_benchmark(
     perf_filename: str,
     sglang_version: str,
     device: str = "cuda:0",
+    mamba_ssm_dtype: str = "float32",
 ):
     """
     Benchmark GDN operations for generation (decode) phase using SGLang's Triton FLA kernels.
@@ -405,8 +432,9 @@ def run_gdn_generation_benchmark(
     2. fused_recurrent_gated_delta_rule_packed_decode — Packed GDN recurrence
        (fla/triton fp32-state lane; every SM)
     3. flashinfer_gated_delta_rule_decode — FlashInfer bf16-state decode,
-       SIBLING lane collected only when SM100+ and flashinfer are available
-       (see _resolve_flashinfer_gdn_decode)
+       SIBLING lane collected only when the SM major is 10 and flashinfer is
+       available; REQUIRED (classified failure when unavailable) only for
+       bf16-state cases (see _resolve_flashinfer_gdn_decode)
     """
     device = torch.device(device)
     torch.cuda.set_device(device)
@@ -425,13 +453,15 @@ def run_gdn_generation_benchmark(
 
     conv_weight = torch.randn(conv_channels, d_conv, dtype=dtype, device=device)
     # SIBLING lane, resolved once per test case (same shape/batch grid as the
-    # fla lane below): SM100+ + flashinfer-importable also benchmarks the
-    # FlashInfer bf16-state decode kernel serving mandates there. On SM100+
-    # with flashinfer unavailable, flashinfer_gdn_decode_error carries the
-    # classified-failure message raised below (once the other two decode
-    # lanes have already logged for the point); it stays None on SM<100,
-    # where the lane genuinely does not apply. See _resolve_flashinfer_gdn_decode.
-    flashinfer_gdn_decode_fn, flashinfer_gdn_decode_error = _resolve_flashinfer_gdn_decode()
+    # fla lane below): SM major 10 + flashinfer-importable also benchmarks
+    # the FlashInfer bf16-state decode kernel serving auto-selects there for
+    # bf16-state models. On SM major 10 with flashinfer unavailable,
+    # flashinfer_gdn_decode_error carries the classified-failure message
+    # raised below ONLY when the case's mamba_ssm_dtype is bfloat16 (serving
+    # mandates the kernel then); it stays None on other SMs and for fp32/fp16
+    # state, where the lane genuinely does not apply / is not required. See
+    # _resolve_flashinfer_gdn_decode.
+    flashinfer_gdn_decode_fn, flashinfer_gdn_decode_error = _resolve_flashinfer_gdn_decode(mamba_ssm_dtype)
     successful_points = 0
     failed_points = 0
 
@@ -662,6 +692,7 @@ def run_gdn_torch(
     batch_size_list: list[int],
     seq_len_list: list[int] | None,
     model_name: str,
+    mamba_ssm_dtype: str = "float32",
     *,
     perf_filename: str,
     device: str = "cuda:0",
@@ -731,6 +762,7 @@ def run_gdn_torch(
             perf_filename=perf_filename,
             sglang_version=sglang_version,
             device=device,
+            mamba_ssm_dtype=mamba_ssm_dtype,
         )
     else:
         raise ValueError(f"Unknown phase: {phase}")
@@ -777,6 +809,7 @@ if __name__ == "__main__":
             batch_size_list,
             seq_len_list,
             model_name,
+            mamba_ssm_dtype,
         ) = test_case
 
         print(f"\n[{i + 1}/{len(test_cases)}] {model_name} - {phase}")
@@ -802,6 +835,7 @@ if __name__ == "__main__":
             batch_size_list=batch_size_list,
             seq_len_list=seq_len_list,
             model_name=model_name,
+            mamba_ssm_dtype=mamba_ssm_dtype,
             perf_filename=PerfFile.GDN,
         )
 

@@ -9,19 +9,30 @@ runtime:
   image_digest: sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3
 tables:
   gdn_perf:
-    # 2026-08-13: appended 54 flashinfer_gated_delta_rule_decode rows
-    # (AIC-1745) — the SM100+ serving-mandated FlashInfer bf16-state decode
-    # lane (sglang v0.5.14 hard-errors on flashinfer decode with non-bf16
-    # state). Measures ~0.50x the fla fp32-state lane at matched keys,
-    # exactly the state-bytes ratio. Keys disjoint from prior rows.
-    collector_ref: 5a1834df2865d291f84f5fc1fbf6f3c99b69afba
-    collector_hash: sha256:e18b5b3a83ff649f4955a271b0d3b3680be2c43a5e07e68882b4e91a6991d075
-    case_plan_hash: sha256:1e658e78c925cba9773688165ecec208c0c2c2f0b931268cc15a245fc878ac48
-    collected_at: '2026-08-10'
-    rows: 8820
-    # rows above is this 2026-08-10 collector run's count; the 2026-08-13
-    # append (comment above, AIC-1745) brings the table total to 8874.
-    # All 32 failed tasks are strict-completeness raises on the largest
-    # batch x seq inner points (memory-bound sweep tail); collected rows
-    # are unaffected.
+    # Two collection events (per-event attestations under `collections`
+    # below); rows/status here describe the merged table as shipped.
+    rows: 8874
     status: complete
+    collections:
+      # Base sweep: the 2026-08-10 registry collector run (fully attested).
+      # All 32 failed tasks are strict-completeness raises on the largest
+      # batch x seq inner points (memory-bound sweep tail); collected rows
+      # are unaffected.
+      - collector_ref: 5a1834df2865d291f84f5fc1fbf6f3c99b69afba
+        collector_hash: sha256:e18b5b3a83ff649f4955a271b0d3b3680be2c43a5e07e68882b4e91a6991d075
+        case_plan_hash: sha256:1e658e78c925cba9773688165ecec208c0c2c2f0b931268cc15a245fc878ac48
+        collected_at: '2026-08-10'
+        rows: 8820
+      # 2026-08-13 (AIC-1745): appended 54 flashinfer_gated_delta_rule_decode
+      # rows — the FlashInfer bf16-state decode SIBLING lane (serving selects
+      # it only on SM-major-10 for bfloat16-state models,
+      # server_args.py:4884-4915 @0.5.14). Measures ~0.50x the fla fp32-state
+      # lane at matched keys, exactly the state-bytes ratio. Keys disjoint
+      # from prior rows. Run via the auto-collect pipeline from the AIC-1744/
+      # 1745 PR branch (#1533). collector_ref / collector_hash /
+      # case_plan_hash are ABSENT because they cannot be recomputed honestly:
+      # the branch history that ran was rewritten by two post-review rebases
+      # (2026-08-15, 2026-08-20), and the case-plan hash is attested only at
+      # run time from the campaign checkpoint, which was not retained.
+      - collected_at: '2026-08-13'
+        rows: 54

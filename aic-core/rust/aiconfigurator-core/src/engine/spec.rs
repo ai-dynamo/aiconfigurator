@@ -508,6 +508,9 @@ mod tests {
             head_k_dim: 128,
             num_v_heads: 32,
             head_v_dim: 128,
+            // Non-default value so the round-trip notices a
+            // `#[serde(default)]` swallowing the carried field.
+            mamba_ssm_dtype: "bfloat16".into(),
         }
     }
 

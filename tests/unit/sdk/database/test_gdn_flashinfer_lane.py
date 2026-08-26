@@ -1,17 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GDN decode lane preference: FlashInfer bf16-state lane on SM100+ sglang
-(AIC-1745, Task 3).
+"""GDN decode lane preference: FlashInfer bf16-state lane on SM-major-10
+sglang (AIC-1745, Task 3).
 
 Task 2 (collector) added ``flashinfer_gated_delta_rule_decode`` as a SIBLING
 decode row alongside the existing fla/triton fp32-state lane
 (``fused_sigmoid_gating_delta_rule_update``) on SM100+ sglang. This module
-covers the modeling side: on SM100+ sglang, the compiled engine must
+covers the modeling side, mirroring serving's exact predicate
+(``_handle_linear_attn_backend``, server_args.py:4884-4915 @ pinned v0.5.14:
+``is_sm100_supported()`` — capability major EXACTLY 10 — AND
+``mamba_ssm_dtype == "bfloat16"``): the compiled engine must
 (a) prefer the FlashInfer lane's own rows over the fla lane when both cover
-a shape, degrading to the fla lane exactly as before when the FlashInfer
-lane is absent, and (b) size the recurrent state at 2 bytes (bf16) for the
-FlashInfer lane vs. 4 bytes (fp32) for fla lanes in the SOL formula.
+a shape AND the model's SSM state dtype is bfloat16, degrading to the fla
+lane exactly as before when the FlashInfer lane is absent, (b) keep the fla
+lane for float32-state models (every bundled Qwen3.5/3.6 config pins
+``mamba_ssm_dtype: float32``), and (c) size the recurrent state at 2 bytes
+(bf16) for the FlashInfer lane vs. 4 bytes (fp32) for fla lanes in the SOL
+formula.
 
 Rebase note (post pyo3 op-unification, #1552/#1555/#1566): the Python
 per-call query stack (``GDNKernel._query_gdn_table``, ``PerfDatabase.query_gdn``)
@@ -28,13 +34,15 @@ version of this file) is invisible to it and no longer proves anything about
 query-time behavior.
 
 The Rust unit tests in ``operators/mamba.rs`` and
-``perf_database/state_space.rs`` (``sglang_sm100_gdn_prefers_flashinfer_decode_lane_when_present``,
+``perf_database/state_space.rs`` (``sglang_sm100_gdn_prefers_flashinfer_decode_lane_for_bf16_state``,
+``sglang_sm100_gdn_keeps_fla_lane_for_fp32_state_even_if_flashinfer_present``,
 ``sglang_sm100_gdn_falls_back_to_fla_lane_when_flashinfer_absent``,
 ``sglang_sm90_gdn_never_selects_flashinfer_lane_even_if_present``,
+``sglang_sm120_gdn_never_selects_flashinfer_lane_regardless_of_dtype``,
 ``gdn_flashinfer_lane_sol_matches_python_bs128_census_anchor``) cover the
-same claims with synthetic in-memory tables (including the strict "SM90
-ignores a present flashinfer row" edge case real data cannot exercise, since
-serving never collects that combination) — this file is the Python-level,
+same claims with synthetic in-memory tables (including the strict "SM90/SM120
+ignores a present flashinfer row" edge cases real data cannot exercise, since
+serving never collects those combinations) — this file is the Python-level,
 real-data-grounded companion, not a duplicate.
 
 Fixture style follows ``test_gdn_donor_fill_pins.py`` (direct ``get_database``
@@ -55,19 +63,29 @@ pytestmark = pytest.mark.unit
 MODEL_KEY = (2048, 16, 128, 32, 128, 4)
 
 
-def _gdn_op(kernel_source, phase, model_key):
+def _gdn_op(kernel_source, phase, model_key, mamba_ssm_dtype="float32"):
     d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv = model_key
     return GDNKernel(
-        "gdn", 1.0, kernel_source, phase, d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv
+        "gdn",
+        1.0,
+        kernel_source,
+        phase,
+        d_model,
+        num_k_heads,
+        head_k_dim,
+        num_v_heads,
+        head_v_dim,
+        d_conv,
+        mamba_ssm_dtype=mamba_ssm_dtype,
     )
 
 
-def _query_gdn_generation(db, kernel_source, model_key, batch, d_model=None):
+def _query_gdn_generation(db, kernel_source, model_key, batch, d_model=None, mamba_ssm_dtype="float32"):
     """Query the GDN op's generation phase through the compiled engine
     (``Operation._engine_query`` — the permanent internal single-op plumbing,
     see ``test_msa.py``). Returns ``(latency_ms, source)``."""
     key = model_key if d_model is None else (d_model, *model_key[1:])
-    op = _gdn_op(kernel_source, "generation", key)
+    op = _gdn_op(kernel_source, "generation", key, mamba_ssm_dtype=mamba_ssm_dtype)
     result = op._engine_query(db, batch_size=batch, s=1)
     return float(result), result.source
 
@@ -80,15 +98,17 @@ def _query_gdn_context(db, kernel_source, model_key, batch, seq_len, d_model=Non
 
 
 # ---------------------------------------------------------------------------
-# Precedence: SM100+ sglang decode prefers the FlashInfer lane when present.
-# Real on-disk tables (AIC-1745's gb300/gb200/b200_sxm sglang/0.5.14 rows):
-# both lanes cover the Qwen3.5-397B tp4 shard shape, with distinct measured
-# values, so a query resolving to the FlashInfer value (not the fla value)
-# is a genuine query-time proof, not a fixture artifact.
+# Precedence: SM-major-10 sglang decode prefers the FlashInfer lane when
+# present AND the model's SSM state dtype is bfloat16 (serving's exact
+# predicate). Real on-disk tables (AIC-1745's gb300/gb200/b200_sxm
+# sglang/0.5.14 rows): both lanes cover the Qwen3.5-397B tp4 shard shape,
+# with distinct measured values, so a query resolving to the FlashInfer
+# value (not the fla value) is a genuine query-time proof, not a fixture
+# artifact.
 # ---------------------------------------------------------------------------
 
 
-def test_query_gdn_sglang_sm100_prefers_flashinfer_decode_lane():
+def test_query_gdn_sglang_sm100_prefers_flashinfer_decode_lane_for_bf16_state():
     db = get_database("gb300", "sglang", "0.5.14")
     assert db.system_spec["gpu"]["sm_version"] >= 100
     model_key = (4096, 4, 128, 16, 128, 4)  # Qwen3.5-397B GDN tp4 shard
@@ -107,14 +127,36 @@ def test_query_gdn_sglang_sm100_prefers_flashinfer_decode_lane():
     assert fi_latency == pytest.approx(0.0023209600150585173, rel=1e-9)
     assert fi_latency < fla_raw  # bf16 (2-byte) state genuinely cheaper than fp32 (4-byte)
 
-    # The precedence claim: querying the FLA kernel_source on SM100+ sglang
-    # must resolve the FlashInfer lane's row, not its own raw value.
+    # The precedence claim: querying the FLA kernel_source on SM-major-10
+    # sglang with a bf16-state model must resolve the FlashInfer lane's row,
+    # not its own raw value.
     resolved_latency, resolved_source = _query_gdn_generation(
-        db, "fused_sigmoid_gating_delta_rule_update", model_key, batch=1
+        db, "fused_sigmoid_gating_delta_rule_update", model_key, batch=1, mamba_ssm_dtype="bfloat16"
     )
     assert resolved_source == "silicon"
     assert resolved_latency == pytest.approx(fi_latency, rel=1e-9)
     assert resolved_latency != pytest.approx(fla_raw, rel=1e-9)
+
+
+def test_query_gdn_sglang_sm100_keeps_fla_lane_for_fp32_state():
+    """Every bundled Qwen3.5/3.6 config pins mamba_ssm_dtype=float32, and
+    serving auto-selects the FlashInfer decode backend only for bfloat16
+    state (server_args.py:4884-4915 @0.5.14) — so the DEFAULT query must
+    resolve the fla lane's own row even though the FlashInfer sibling row
+    covers the same shape in this real table."""
+    db = get_database("gb300", "sglang", "0.5.14")
+    assert db.system_spec["gpu"]["sm_version"] >= 100
+    model_key = (4096, 4, 128, 16, 128, 4)  # Qwen3.5-397B GDN tp4 shard
+
+    GDNKernel.load_data(db)
+    fla_raw = db._gdn_data["fused_sigmoid_gating_delta_rule_update"]["generation"][model_key][1]["latency"]
+
+    resolved_latency, resolved_source = _query_gdn_generation(
+        db, "fused_sigmoid_gating_delta_rule_update", model_key, batch=1
+    )
+    assert resolved_source == "silicon"
+    assert resolved_latency == pytest.approx(fla_raw, rel=1e-9)
+    assert resolved_latency == pytest.approx(0.004236159920692444, rel=1e-9)
 
 
 def test_query_gdn_sglang_sm90_keeps_fla_lane_first():
@@ -150,7 +192,11 @@ def test_query_gdn_sglang_sm100_falls_back_to_fla_when_flashinfer_lane_absent():
     GDNKernel.load_data(db)
     assert "flashinfer_gated_delta_rule_decode" not in db._gdn_data  # pre-AIC-1745 collector data
 
-    latency, source = _query_gdn_generation(db, "fused_sigmoid_gating_delta_rule_update", model_key, batch=1)
+    # bf16 state so the alias branch actually fires (fp32 would bypass it);
+    # the empty alias slot must degrade to the fla lane, not hard-fail.
+    latency, source = _query_gdn_generation(
+        db, "fused_sigmoid_gating_delta_rule_update", model_key, batch=1, mamba_ssm_dtype="bfloat16"
+    )
     assert source == "silicon"
     assert latency > 0
 

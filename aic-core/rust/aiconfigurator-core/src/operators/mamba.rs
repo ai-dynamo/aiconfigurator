@@ -115,6 +115,18 @@ pub struct GdnOp {
     pub head_k_dim: u32,
     pub num_v_heads: u32,
     pub head_v_dim: u32,
+    /// Mamba SSM state dtype from the model config (`mamba_ssm_dtype`).
+    /// sglang v0.5.14 auto-selects the FlashInfer GDN decode backend only
+    /// when this is "bfloat16" (`_handle_linear_attn_backend`,
+    /// server_args.py:4884-4915 @ pinned v0.5.14 clone); every bundled
+    /// Qwen3.5/3.6 config pins "float32", which serving's
+    /// `mamba2_state_dtype` default also is — hence the serde default.
+    #[serde(default = "default_mamba_ssm_dtype")]
+    pub mamba_ssm_dtype: String,
+}
+
+fn default_mamba_ssm_dtype() -> String {
+    "float32".to_string()
 }
 
 impl GdnOp {
@@ -140,6 +152,7 @@ impl GdnOp {
             self.head_k_dim,
             self.num_v_heads,
             self.head_v_dim,
+            &self.mamba_ssm_dtype,
             &|b, s| self.sol_latency_ms(db, b, s),
         ) {
             Ok(value) => {
@@ -545,6 +558,7 @@ mod tests {
             head_k_dim: 128,
             num_v_heads: 16,
             head_v_dim: 128,
+            mamba_ssm_dtype: "bfloat16".into(),
         };
 
         let sol_us = op.sol_latency_ms(&db, 128.0, 0.0) * 1000.0;
