@@ -13,6 +13,16 @@
       "RAYON_NUM_THREADS": "1"
     }
   },
+  "post_freeze_pins": {
+    "wideep_trtllm_rc20_fallback::static_ctx": {
+      "engine": "rust",
+      "git_head": "492053dfed3443155967c84e00b098f880753a2b"
+    },
+    "wideep_trtllm_rc20_fallback::static_gen": {
+      "engine": "rust",
+      "git_head": "492053dfed3443155967c84e00b098f880753a2b"
+    }
+  },
   "references": {
     "chunked_prefill::ctx300_gen7_isl1000_osl64_prefix100::mixed_step": 21.17940829999926,
     "chunked_prefill::ctx512_gen4_isl4096_osl128_prefix0::mixed_step": 24.469393866631147,
@@ -66,6 +76,8 @@
     "wideep_sglang::static_ctx": 99.42331852569644,
     "wideep_sglang::static_gen": 32.82787657651461,
     "wideep_trtllm::static_ctx": 80.41054370779536,
-    "wideep_trtllm::static_gen": 51.04392295026042
+    "wideep_trtllm::static_gen": 51.04392295026042,
+    "wideep_trtllm_rc20_fallback::static_ctx": 81.1084122560448,
+    "wideep_trtllm_rc20_fallback::static_gen": 50.115260968358655
   }
 }
