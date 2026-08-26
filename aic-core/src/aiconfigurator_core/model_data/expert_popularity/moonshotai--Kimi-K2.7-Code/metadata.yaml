@@ -1,0 +1,176 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+model:
+  architecture: KimiK25ForConditionalGeneration
+  id: moonshotai/Kimi-K2.7-Code
+  revision: 74797c9c62378b951a1f6fcf5c4631024e9b8bef
+  tokenizer_revision: 74797c9c62378b951a1f6fcf5c4631024e9b8bef
+  aliases: []
+routing:
+  moe_layer_ids:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 20
+  - 21
+  - 22
+  - 23
+  - 24
+  - 25
+  - 26
+  - 27
+  - 28
+  - 29
+  - 30
+  - 31
+  - 32
+  - 33
+  - 34
+  - 35
+  - 36
+  - 37
+  - 38
+  - 39
+  - 40
+  - 41
+  - 42
+  - 43
+  - 44
+  - 45
+  - 46
+  - 47
+  - 48
+  - 49
+  - 50
+  - 51
+  - 52
+  - 53
+  - 54
+  - 55
+  - 56
+  - 57
+  - 58
+  - 59
+  - 60
+  num_layers: 61
+  num_routed_experts: 384
+  replication_factor: 4
+  top_k: 8
+measurement:
+  phase: prefill
+  count_semantics: activation_count[layer, expert] is the number of canonical prompt
+    tokens whose serving router selected that logical routed expert
+  token_hit_rate_denominator: routed_token_count
+  assignment_share_denominator: routed_token_count * top_k
+  popularity_rank_order: activation_count descending, then expert_id ascending
+  workload:
+    excluded_special_token_ids:
+    - 163584
+    - 163585
+    - 163586
+    - 163587
+    - 163588
+    - 163590
+    - 163591
+    - 163593
+    - 163594
+    - 163601
+    - 163602
+    - 163603
+    - 163604
+    - 163605
+    - 163838
+    - 163839
+    isl_distribution: discrete_uniform
+    isl_max: 4096
+    isl_min: 128
+    max_new_tokens: 1
+    phase: prefill
+    repeat_count: 2
+    request_count: 137
+    seeds:
+    - 2026082501
+    - 2026082502
+    - 2026082503
+    - 2026082504
+    sequential: true
+    shard_count: 4
+    temperature: 0
+    token_distribution: uniform_valid_non_special_token_ids
+    tokenizer_vocab_size: 163840
+    tokens_per_shard_minimum: 65536
+    total_prompt_tokens: 266528
+validation:
+  status: PASS
+  gates:
+    layer_assignment_conservation: true
+    maximum_mean_layer_jensen_shannon_divergence_bits: 0.01
+    minimum_mean_layer_pearson: 0.95
+    repeat_counts_exact: true
+  stability:
+    comparisons:
+    - left_shard: 0
+      mean_layer_jensen_shannon_divergence_bits: 0.0005599561667426648
+      mean_layer_pearson: 0.9995286911689727
+      right_shard: 1
+      top1_expert_match_rate: 1.0
+    - left_shard: 0
+      mean_layer_jensen_shannon_divergence_bits: 0.0005294111979167325
+      mean_layer_pearson: 0.9996428959737533
+      right_shard: 2
+      top1_expert_match_rate: 0.9833333333333333
+    - left_shard: 0
+      mean_layer_jensen_shannon_divergence_bits: 0.0005331865501976028
+      mean_layer_pearson: 0.9996290222865525
+      right_shard: 3
+      top1_expert_match_rate: 0.9833333333333333
+    - left_shard: 1
+      mean_layer_jensen_shannon_divergence_bits: 0.0006405350290570228
+      mean_layer_pearson: 0.9994828307776819
+      right_shard: 2
+      top1_expert_match_rate: 0.9833333333333333
+    - left_shard: 1
+      mean_layer_jensen_shannon_divergence_bits: 0.0005217190002965326
+      mean_layer_pearson: 0.9996081298014073
+      right_shard: 3
+      top1_expert_match_rate: 0.9833333333333333
+    - left_shard: 2
+      mean_layer_jensen_shannon_divergence_bits: 0.0005577634048845344
+      mean_layer_pearson: 0.9996288615327241
+      right_shard: 3
+      top1_expert_match_rate: 0.9666666666666667
+    maximum_mean_layer_jensen_shannon_divergence_bits: 0.0006405350290570228
+    minimum_mean_layer_pearson: 0.9994828307776819
+provenance:
+  collector_code_sha256: 3379dfccf191bf5afd6ce06c5eefc0bd6b97595c4c0f6ec63f7bb05ba8232043
+  framework: sglang
+  framework_version: 0.5.14
+  image_reference: lmsysorg/sglang:v0.5.14-cu130
+  image_sha256: 1ae1eb63f74b925e70a1ce8c245f6bab1d8852e727a793fb24b00d0ea0787754
+  routing_observation_method: sglang_explicit_topk_triton_compressed_tensors_mxint4
+  collection_result_sha256: 58a0d943e35aab4c6ca78149b1c4188aea98ca94f277e003544e7266460b40e9
+  normalized_counts_sha256: ec75feb8dced11288a546b1e4e639b35da2ff5ba4ad4eb772f0bcc8fa701fc54
+  published_at: '2026-08-26T05:32:52.086957+00:00'
+files:
+  parquet:
+    name: model_expert_popularity.parquet
+    sha256: 6c0113082ff6cbd18dbf2d8dc71ca727af42f37ec6a828d813256b330e8c4cc2
+    rows: 23040

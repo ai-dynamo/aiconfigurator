@@ -28,6 +28,7 @@ CORE_SDK_LEAF_MODULES = [
     "engine",
     "engine_table_view",
     "errors",
+    "expert_popularity",
     "inference_summary",
     "memory",
     "models.base",

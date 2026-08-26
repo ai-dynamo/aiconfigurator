@@ -1,0 +1,208 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+model:
+  architecture: Qwen3MoeForCausalLM
+  id: Qwen/Qwen3-235B-A22B
+  revision: 8efa61729e24bd65b1d152b5ab5409052aa80e65
+  tokenizer_revision: 8efa61729e24bd65b1d152b5ab5409052aa80e65
+  aliases: []
+routing:
+  moe_layer_ids:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 20
+  - 21
+  - 22
+  - 23
+  - 24
+  - 25
+  - 26
+  - 27
+  - 28
+  - 29
+  - 30
+  - 31
+  - 32
+  - 33
+  - 34
+  - 35
+  - 36
+  - 37
+  - 38
+  - 39
+  - 40
+  - 41
+  - 42
+  - 43
+  - 44
+  - 45
+  - 46
+  - 47
+  - 48
+  - 49
+  - 50
+  - 51
+  - 52
+  - 53
+  - 54
+  - 55
+  - 56
+  - 57
+  - 58
+  - 59
+  - 60
+  - 61
+  - 62
+  - 63
+  - 64
+  - 65
+  - 66
+  - 67
+  - 68
+  - 69
+  - 70
+  - 71
+  - 72
+  - 73
+  - 74
+  - 75
+  - 76
+  - 77
+  - 78
+  - 79
+  - 80
+  - 81
+  - 82
+  - 83
+  - 84
+  - 85
+  - 86
+  - 87
+  - 88
+  - 89
+  - 90
+  - 91
+  - 92
+  - 93
+  num_layers: 94
+  num_routed_experts: 128
+  replication_factor: 4
+  top_k: 8
+measurement:
+  phase: prefill
+  count_semantics: activation_count[layer, expert] is the number of canonical prompt
+    tokens whose serving router selected that logical routed expert
+  token_hit_rate_denominator: routed_token_count
+  assignment_share_denominator: routed_token_count * top_k
+  popularity_rank_order: activation_count descending, then expert_id ascending
+  workload:
+    excluded_special_token_ids:
+    - 151643
+    - 151644
+    - 151645
+    - 151646
+    - 151647
+    - 151648
+    - 151649
+    - 151650
+    - 151651
+    - 151652
+    - 151653
+    - 151654
+    - 151655
+    - 151656
+    isl_distribution: discrete_uniform
+    isl_max: 4096
+    isl_min: 128
+    max_new_tokens: 1
+    phase: prefill
+    repeat_count: 2
+    request_count: 127
+    seeds:
+    - 2026082501
+    - 2026082502
+    - 2026082503
+    - 2026082504
+    sequential: true
+    shard_count: 4
+    temperature: 0
+    token_distribution: uniform_valid_non_special_token_ids
+    tokenizer_vocab_size: 151643
+    tokens_per_shard_minimum: 65536
+    total_prompt_tokens: 268405
+validation:
+  status: PASS
+  gates:
+    layer_assignment_conservation: true
+    maximum_mean_layer_jensen_shannon_divergence_bits: 0.01
+    minimum_mean_layer_pearson: 0.95
+    repeat_counts_exact: true
+  stability:
+    comparisons:
+    - left_shard: 0
+      mean_layer_jensen_shannon_divergence_bits: 0.00019416434140651168
+      mean_layer_pearson: 0.9998541054533795
+      right_shard: 1
+      top1_expert_match_rate: 0.9893617021276596
+    - left_shard: 0
+      mean_layer_jensen_shannon_divergence_bits: 0.0001630324519539658
+      mean_layer_pearson: 0.9998932752642359
+      right_shard: 2
+      top1_expert_match_rate: 0.9787234042553191
+    - left_shard: 0
+      mean_layer_jensen_shannon_divergence_bits: 0.0001946437773851596
+      mean_layer_pearson: 0.9998540754709039
+      right_shard: 3
+      top1_expert_match_rate: 0.9893617021276596
+    - left_shard: 1
+      mean_layer_jensen_shannon_divergence_bits: 0.00020167310447678755
+      mean_layer_pearson: 0.9998380249230391
+      right_shard: 2
+      top1_expert_match_rate: 0.9680851063829787
+    - left_shard: 1
+      mean_layer_jensen_shannon_divergence_bits: 0.00024560353451618235
+      mean_layer_pearson: 0.9997831453889486
+      right_shard: 3
+      top1_expert_match_rate: 0.9787234042553191
+    - left_shard: 2
+      mean_layer_jensen_shannon_divergence_bits: 0.00021746927116714427
+      mean_layer_pearson: 0.9998226994934281
+      right_shard: 3
+      top1_expert_match_rate: 0.9680851063829787
+    maximum_mean_layer_jensen_shannon_divergence_bits: 0.00024560353451618235
+    minimum_mean_layer_pearson: 0.9997831453889486
+provenance:
+  collector_code_sha256: cc58d6083a92cc22efb0027633c9c02ff3b6dda09ef51db7a217c95ae5e7a831
+  framework: sglang
+  framework_version: 0.5.14
+  image_reference: lmsysorg/sglang:v0.5.14-cu130
+  image_sha256: 1ae1eb63f74b925e70a1ce8c245f6bab1d8852e727a793fb24b00d0ea0787754
+  routing_observation_method: sglang_explicit_topk_flashinfer_trtllm_routed
+  collection_result_sha256: aa8e546f347ebb0d52c83d53233dcfd01fac3af9107e74e964495365d189d4ee
+  normalized_counts_sha256: e23061a6e286a1ee2f7d59842d0852d9100ec21254de39a3f3732275955398ff
+  published_at: '2026-08-26T05:59:38.647959+00:00'
+files:
+  parquet:
+    name: model_expert_popularity.parquet
+    sha256: abd71f6dda8aec320cdab870dda6b4821ff75b4ef13fdf575003296a80fbc830
+    rows: 12032

@@ -1,0 +1,160 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+model:
+  architecture: DeepseekV32ForCausalLM
+  id: deepseek-ai/DeepSeek-V3.2
+  revision: a7e62ac04ecb2c0a54d736dc46601c5606cf10a6
+  tokenizer_revision: a7e62ac04ecb2c0a54d736dc46601c5606cf10a6
+  aliases: []
+routing:
+  moe_layer_ids:
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 20
+  - 21
+  - 22
+  - 23
+  - 24
+  - 25
+  - 26
+  - 27
+  - 28
+  - 29
+  - 30
+  - 31
+  - 32
+  - 33
+  - 34
+  - 35
+  - 36
+  - 37
+  - 38
+  - 39
+  - 40
+  - 41
+  - 42
+  - 43
+  - 44
+  - 45
+  - 46
+  - 47
+  - 48
+  - 49
+  - 50
+  - 51
+  - 52
+  - 53
+  - 54
+  - 55
+  - 56
+  - 57
+  - 58
+  - 59
+  - 60
+  num_layers: 61
+  num_routed_experts: 256
+  replication_factor: 16
+  top_k: 8
+measurement:
+  phase: prefill
+  count_semantics: activation_count[layer, expert] is the number of canonical prompt
+    tokens whose serving router selected that logical routed expert
+  token_hit_rate_denominator: routed_token_count
+  assignment_share_denominator: routed_token_count * top_k
+  popularity_rank_order: activation_count descending, then expert_id ascending
+  workload:
+    excluded_special_token_ids:
+    - 0
+    - 1
+    isl_distribution: discrete_uniform
+    isl_max: 4096
+    isl_min: 128
+    max_new_tokens: 1
+    phase: prefill
+    repeat_count: 2
+    request_count: 130
+    seeds:
+    - 2026082501
+    - 2026082502
+    - 2026082503
+    - 2026082504
+    sequential: true
+    shard_count: 4
+    temperature: 0
+    token_distribution: uniform_valid_non_special_token_ids
+    tokenizer_vocab_size: 128000
+    tokens_per_shard_minimum: 65536
+    total_prompt_tokens: 268115
+validation:
+  status: PASS
+  gates:
+    layer_assignment_conservation: true
+    maximum_mean_layer_jensen_shannon_divergence_bits: 0.01
+    minimum_mean_layer_pearson: 0.95
+    repeat_counts_exact: true
+  stability:
+    comparisons:
+    - left_shard: 0
+      mean_layer_jensen_shannon_divergence_bits: 0.0006513386798723818
+      mean_layer_pearson: 0.9991326853956607
+      right_shard: 1
+      top1_expert_match_rate: 0.9827586206896551
+    - left_shard: 0
+      mean_layer_jensen_shannon_divergence_bits: 0.0006074324635900668
+      mean_layer_pearson: 0.9992017536595816
+      right_shard: 2
+      top1_expert_match_rate: 0.9655172413793104
+    - left_shard: 0
+      mean_layer_jensen_shannon_divergence_bits: 0.000980502208961848
+      mean_layer_pearson: 0.9984915656517621
+      right_shard: 3
+      top1_expert_match_rate: 0.9482758620689655
+    - left_shard: 1
+      mean_layer_jensen_shannon_divergence_bits: 0.0005731134473209149
+      mean_layer_pearson: 0.9992922664534206
+      right_shard: 2
+      top1_expert_match_rate: 0.9827586206896551
+    - left_shard: 1
+      mean_layer_jensen_shannon_divergence_bits: 0.0005867059708076549
+      mean_layer_pearson: 0.9992441697923232
+      right_shard: 3
+      top1_expert_match_rate: 0.9655172413793104
+    - left_shard: 2
+      mean_layer_jensen_shannon_divergence_bits: 0.000693224901385537
+      mean_layer_pearson: 0.9989531021961879
+      right_shard: 3
+      top1_expert_match_rate: 0.9482758620689655
+    maximum_mean_layer_jensen_shannon_divergence_bits: 0.000980502208961848
+    minimum_mean_layer_pearson: 0.9984915656517621
+provenance:
+  collector_code_sha256: 0f1b7dcb5f8ff1d37e015e7fd22ccec9be9f9a9a6eb521b301d2adcd8c508b8d
+  framework: sglang
+  framework_version: 0.5.14
+  image_reference: lmsysorg/sglang:v0.5.14-cu130
+  image_sha256: 99d6f3e95c8abac6ffd2518f679afc3b203a3abd0da68a73fa1c16a6036fa910
+  routing_observation_method: sglang_explicit_topk_deterministic_triton_attention
+  collection_result_sha256: 038efa6a943ae72c3f45435a2de5ed2fd555de6b9019bd67d4aecd3c98bcdcef
+  normalized_counts_sha256: 9291f500c4b7346309fc3433e84af12f2c3e79ee2d8f6fed498148707c12bbd1
+  published_at: '2026-08-26T05:07:11.373216+00:00'
+files:
+  parquet:
+    name: model_expert_popularity.parquet
+    sha256: 8221374483dbedb894317c9ceedf4a5125fa0db2a1d99f0deacf6d811a03c88d
+    rows: 14848

@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+model:
+  architecture: GptOssForCausalLM
+  id: openai/gpt-oss-20b
+  revision: 6cee5e81ee83917806bbde320786a8fb61efebee
+  tokenizer_revision: 6cee5e81ee83917806bbde320786a8fb61efebee
+  aliases: []
+routing:
+  moe_layer_ids:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 20
+  - 21
+  - 22
+  - 23
+  num_layers: 24
+  num_routed_experts: 32
+  replication_factor: 1
+  top_k: 4
+measurement:
+  phase: prefill
+  count_semantics: activation_count[layer, expert] is the number of canonical prompt
+    tokens whose serving router selected that logical routed expert
+  token_hit_rate_denominator: routed_token_count
+  assignment_share_denominator: routed_token_count * top_k
+  popularity_rank_order: activation_count descending, then expert_id ascending
+  workload:
+    excluded_special_token_ids:
+    - 199998
+    - 199999
+    - 200002
+    isl_distribution: discrete_uniform
+    isl_max: 4096
+    isl_min: 128
+    max_new_tokens: 1
+    phase: prefill
+    repeat_count: 2
+    request_count: 131
+    seeds:
+    - 2026082501
+    - 2026082502
+    - 2026082503
+    - 2026082504
+    sequential: true
+    shard_count: 4
+    temperature: 0
+    token_distribution: uniform_valid_non_special_token_ids
+    tokenizer_vocab_size: 199998
+    tokens_per_shard_minimum: 65536
+    total_prompt_tokens: 266056
+validation:
+  status: PASS
+  gates:
+    layer_assignment_conservation: true
+    maximum_mean_layer_jensen_shannon_divergence_bits: 0.01
+    minimum_mean_layer_pearson: 0.95
+    repeat_counts_exact: true
+  stability:
+    comparisons:
+    - left_shard: 0
+      mean_layer_jensen_shannon_divergence_bits: 9.848200628327803e-05
+      mean_layer_pearson: 0.9999228635714902
+      right_shard: 1
+      top1_expert_match_rate: 1.0
+    - left_shard: 0
+      mean_layer_jensen_shannon_divergence_bits: 0.00010553045427166049
+      mean_layer_pearson: 0.999913352051526
+      right_shard: 2
+      top1_expert_match_rate: 1.0
+    - left_shard: 0
+      mean_layer_jensen_shannon_divergence_bits: 0.00012441424047860905
+      mean_layer_pearson: 0.9998951130979327
+      right_shard: 3
+      top1_expert_match_rate: 1.0
+    - left_shard: 1
+      mean_layer_jensen_shannon_divergence_bits: 7.335039084382008e-05
+      mean_layer_pearson: 0.999938056769358
+      right_shard: 2
+      top1_expert_match_rate: 1.0
+    - left_shard: 1
+      mean_layer_jensen_shannon_divergence_bits: 9.184916455491935e-05
+      mean_layer_pearson: 0.999926176160348
+      right_shard: 3
+      top1_expert_match_rate: 1.0
+    - left_shard: 2
+      mean_layer_jensen_shannon_divergence_bits: 0.00010853913371757587
+      mean_layer_pearson: 0.9999070809592263
+      right_shard: 3
+      top1_expert_match_rate: 1.0
+    maximum_mean_layer_jensen_shannon_divergence_bits: 0.00012441424047860905
+    minimum_mean_layer_pearson: 0.9998951130979327
+provenance:
+  collector_code_sha256: ee6302341f6267a4abe153138cc53453ff1fa4565e8a82e4b8e70b94f457e29e
+  framework: sglang
+  framework_version: 0.5.14
+  image_reference: lmsysorg/sglang:v0.5.14-cu130
+  image_sha256: 99d6f3e95c8abac6ffd2518f679afc3b203a3abd0da68a73fa1c16a6036fa910
+  routing_observation_method: sglang_explicit_topk_flashinfer_mxfp4_routed_bridge_v2
+  collection_result_sha256: 1eb209859d3b7b347cfb1b5a1107346bd103407e9f917ca85779c7d7c2256433
+  normalized_counts_sha256: 958b28957ae16870fbf167913459a2f95085416065bec4cd9155938be0b872cb
+  published_at: '2026-08-26T01:19:30.037124+00:00'
+files:
+  parquet:
+    name: model_expert_popularity.parquet
+    sha256: cefc44cdb079aa19afc299c0c193b6264fc4cec3b8a8a76e75ed84e20d4861d0
+    rows: 768
