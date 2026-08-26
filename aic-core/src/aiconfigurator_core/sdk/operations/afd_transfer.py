@@ -30,9 +30,10 @@ Two dispatch topologies are modeled, selected by ``dispatch_mode``:
   F side (it is tiny and, for the big MoE models, fused into an
   un-splittable ``OverlapOp``).
 
-In both modes the A<->F transfer is billed as the TOTAL bytes one A-rank
-sends (all destinations share the rank's single NIC), so the two modes
-are directly comparable.
+In both modes the A<->F transfer is billed the same way -- the TOTAL bytes
+one A-rank sends (all destinations share the rank's single NIC), raised to
+the F-side per-GPU volume when the A pool is the wider one -- so the two
+modes are directly comparable.
 
 TODO(#1357 follow-up): consider porting these four ops into the compiled
 engine as real ``Op`` variants. Their call surface is already op-shaped
@@ -119,9 +120,10 @@ class AFDTransfer(PythonOperation):
 
     A-side operates in DP mode: each A-rank holds its own independent
     tokens and sends/receives them with the full ``hidden_size`` per
-    token.  Billed volume = total bytes one A-rank sends across all its
-    destinations (they share one NIC); byte formulas are inline in
-    :meth:`query`.
+    token.  Billed volume = the bytes handled by the busier endpoint --
+    one A-rank's total send (its destinations share one NIC), scaled up
+    when the A pool outnumbers the F pool and the F GPUs become the
+    congestion point.  Byte formulas are inline in :meth:`query`.
     """
 
     _VALID_DIRECTIONS = ("a2f", "f2a")
@@ -193,7 +195,9 @@ class AFDTransfer(PythonOperation):
             nf = self.num_f_nodes
             n_dest = nf * _afd_send_prob(self._num_experts, self._topk, nf)
             copies = 1
-        message_bytes = int(n_dest * copies * x * self._hidden_size * bpe)
+
+        endpoint_factor = max(1.0, self._n_a_workers / self._n_f_workers)
+        message_bytes = int(endpoint_factor * n_dest * copies * x * self._hidden_size * bpe)
         if message_bytes <= 0:
             return PerformanceResult(0.0, 0.0, source="empirical")
         # pp_size=2 passes the twin's "pp_size=1 is a no-op" gate; a single

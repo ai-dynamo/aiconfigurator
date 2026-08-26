@@ -174,6 +174,13 @@ class TestAFDTransfer:
         expected_bytes = int(nf * p_send * 32 * 1024 * 2)
         assert engine.p2p_calls[0] == _half_ceil(expected_bytes)
 
+    def test_wide_a_pool_is_billed_at_the_f_side_ingress(self, engine):
+        # 64 A ranks feeding 16 F GPUs: each F GPU handles 4x what one A rank
+        # sends, so the F side sets the pace.
+        self._make(n_a_workers=64, n_f_workers=16, gpus_per_node=8).query(_DB, x=32)
+        self._make(n_a_workers=4, n_f_workers=16, gpus_per_node=8).query(_DB, x=32)
+        assert engine.p2p_calls[0] == 4 * engine.p2p_calls[1]
+
     def test_num_f_nodes_property(self):
         op = self._make(n_f_workers=20, gpus_per_node=8)
         assert op.num_f_nodes == 3
