@@ -671,16 +671,22 @@ class TestExpLoaderAcceptsAfd:
 def test_hybrid_auto_mode_skips_missing_decode_backend(monkeypatch):
     import aiconfigurator.cli.main as cli_main
 
+    # The real enumeration carries resolved LITERALS (never aliases); the
+    # request below uses the alias and must match through per-(system,
+    # backend) resolution. Version-agnostic: literals come from the slots.
+    trtllm_cur = cli_main.perf_database.resolve_query_version("h200_sxm", "trtllm", "current")
+    sglang_cur = cli_main.perf_database.resolve_query_version("h200_sxm", "sglang", "current")
+    h100_trtllm_cur = cli_main.perf_database.resolve_query_version("h100_sxm", "trtllm", "current")
     monkeypatch.setattr(
         cli_main.perf_database,
         "get_supported_databases",
         lambda: {
             "h200_sxm": {
-                "trtllm": ["current"],
-                "sglang": ["current"],
+                "trtllm": [trtllm_cur],
+                "sglang": [sglang_cur],
             },
             "h100_sxm": {
-                "trtllm": ["current"],
+                "trtllm": [h100_trtllm_cur],
             },
         },
     )
