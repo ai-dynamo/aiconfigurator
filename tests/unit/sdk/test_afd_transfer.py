@@ -153,22 +153,24 @@ class TestAFDTransfer:
         with pytest.raises(ValueError, match="direction"):
             self._make(direction="both")
 
-    def test_dense_per_link_bytes(self, engine):
+    def test_dense_aggregate_egress_bytes(self, engine):
         op = self._make(n_a_workers=4, n_f_workers=16, gpus_per_node=8, hidden_size=1024)
         op.query(_DB, x=32)
         nf = 2  # 16 / 8
         p_send = _afd_send_prob(0, 0, nf)  # 1/nf = 0.5
-        # per-link = single A-rank's tokens * p_send * hidden * bpe
-        expected_bytes = int(p_send * 32 * 1024 * 2)
+        # Aggregate egress of one A-rank: nf destinations sharing one NIC.
+        # Dense: nf * (1/nf) = 1, i.e. the whole batch leaves the NIC once.
+        expected_bytes = int(nf * p_send * 32 * 1024 * 2)
         assert engine.p2p_calls[0] == _half_ceil(expected_bytes)
+        assert expected_bytes == 32 * 1024 * 2
 
-    def test_moe_selective_per_link_bytes(self, engine):
+    def test_moe_selective_aggregate_egress_bytes(self, engine):
         op = self._make(num_experts=256, topk=8)
         op.query(_DB, x=32)
         nf = 2
         p_send = _afd_send_prob(256, 8, nf)
-        # per-link = single A-rank's 32 tokens
-        expected_bytes = int(p_send * 32 * 1024 * 2)
+        # Aggregate over both destination nodes; each gets the deduped subset.
+        expected_bytes = int(nf * p_send * 32 * 1024 * 2)
         assert engine.p2p_calls[0] == _half_ceil(expected_bytes)
 
     def test_num_f_nodes_property(self):

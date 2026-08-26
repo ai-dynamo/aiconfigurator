@@ -90,8 +90,8 @@ class AFDTransfer(PythonOperation):
 
     A-side operates in DP mode: each A-rank holds its own independent
     tokens and sends/receives them with the full ``hidden_size`` per
-    token.  The per-link payload is therefore symmetric for both
-    directions.
+    token.  Billed volume = total bytes one A-rank sends across all its
+    destinations (they share one NIC); symmetric for both directions.
     """
 
     _VALID_DIRECTIONS = ("a2f", "f2a")
@@ -141,14 +141,14 @@ class AFDTransfer(PythonOperation):
         nf = self.num_f_nodes
         p_send = _afd_send_prob(self._num_experts, self._topk, nf)
         bpe = self._comm_quant_mode.value.memory
-        # x = tokens held by a single A-rank; per_link_bytes is
-        # the volume on one A-rank → F-rank P2P connection.
-        per_link_bytes = int(p_send * x * self._hidden_size * bpe)
-        if per_link_bytes <= 0:
+        # Each of the nf F-nodes receives the p_send-deduped share of the
+        # x tokens. Dense case: p_send = 1/nf, so total = x * H exactly.
+        message_bytes = int(nf * p_send * x * self._hidden_size * bpe)
+        if message_bytes <= 0:
             return PerformanceResult(0.0, 0.0, source="empirical")
         # pp_size=2 passes the twin's "pp_size=1 is a no-op" gate; a single
         # P2P link is charged regardless of the actual pp depth.
-        result = _engine_comm_query(database, P2P("afd_p2p", 1.0, -(-per_link_bytes // 2), 2))
+        result = _engine_comm_query(database, P2P("afd_p2p", 1.0, -(-message_bytes // 2), 2))
         lat = float(result) * self._comm_overhead_factor
         return PerformanceResult(
             lat * self._scale_factor,
