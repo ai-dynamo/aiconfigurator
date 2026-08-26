@@ -378,25 +378,133 @@ def test_resolved_lane_order_for_op_ranks_donors_from_real_density_not_the_blind
     )
 
 
-def test_resolved_lane_order_for_op_surfaces_leftover_lanes_on_an_unmapped_backend(lane_systems_root):
-    """An unmapped (backend, version) resolves an EMPTY pinned order (no
-    override, no framework-default map entry), so every lane in the walk
-    comes from the leftover tier. Under Blocker 1 this collapsed to
-    ``["default"]`` in production for exactly this scenario shape
-    (h200_sxm/trtllm, b200_sxm/vllm-0.19.0 in the real-world report).
+def test_resolved_lane_order_for_op_fails_closed_on_an_unmapped_backend_version(lane_systems_root):
+    """An unmapped (backend, version) with no override resolves NO evidence of
+    the framework default (empty pinned head, no map entry), so the walk must
+    FAIL CLOSED to ``["default"]`` — the pre-density behavior, relying on the
+    Rust-side ``lane_slice`` BTreeMap fallback — rather than density-rank the
+    table's lanes and silently crown the densest donor as if it were the
+    framework default (PR #1519 review, jasonqinzhou P1: shipped B200 vllm
+    0.22.0/0.19.0 tables have no map entry).
     """
     from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
 
     raw = {"torch_flow": _ctx_lane(_SLOW_LATENCY), "torch_flow_flashinfer": _ctx_lane(_FAST_LATENCY)}
     db = _StubDatabase(lane_systems_root, context_lanes=raw)
-    db.version = "0.9.9"  # not in the fixture map -> resolver order is empty
+    db.version = "0.5.9"  # below every fixture map entry (floor-match misses) -> no framework-default evidence
 
     order = resolved_lane_order_for_op(db, "_context_attention_data")
 
-    assert "torch_flow" in order and "torch_flow_flashinfer" in order, (
-        f"table's own kernel_source lanes must stay reachable; got {order}"
+    assert order == ["default"], (
+        f"an unmapped version must not consult donor density; got {order} "
+        "(the Rust lane_slice fallback still reaches the table's own lanes deterministically)"
     )
-    assert order != ["default"], "must not collapse to the always-valid fallback when real lanes exist"
+
+
+def test_resolved_lane_order_for_op_fails_closed_on_a_missing_sm_row(lane_systems_root):
+    """A mapped backend/version whose map has no row for THIS sm_version is
+    just as unmapped as an unknown version: no override, no evidence, fail
+    closed to ``["default"]``."""
+    from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
+
+    raw = {"flashinfer": _ctx_lane(_SLOW_LATENCY), "trtllm_mha": _ctx_lane(_FAST_LATENCY)}
+    db = _StubDatabase(lane_systems_root, context_lanes=raw, sm_version=999)  # no sm row in the fixture map
+
+    assert resolved_lane_order_for_op(db, "_context_attention_data") == ["default"]
+
+
+def test_explicit_override_is_translated_to_the_backends_stored_labels(lane_systems_root):
+    """User-facing override values are the CLI vocabulary (``triton``, ...);
+    vllm stores backend-prefixed ``kernel_source`` labels
+    (``vllm_triton_attn``, ``vllm_flashinfer*``). The override must pin the
+    STORED labels — a verbatim ``triton`` pin can never match a vllm table and
+    every query would silently fall through to the density-ranked donor
+    (PR #1519 review, jasonqinzhou P1)."""
+    from aiconfigurator_core.sdk.attention_lanes import resolve_attention_lane_order
+
+    order = resolve_attention_lane_order("vllm", "0.22.0", 100, "triton", lane_systems_root)
+    assert order[0] == "vllm_triton_attn"
+    assert order.pinned_count == 1
+
+    # The flashinfer pin covers every shipped label spelling, most specific
+    # first: 0.24.0 splits the lane into trtllm prefill/decode kernels,
+    # 0.22.0-era tables carry the single vllm_flashinfer label. The table walk
+    # serves the first pinned lane that exists, so one order fits all.
+    order = resolve_attention_lane_order("vllm", "0.24.0", 100, "flashinfer", lane_systems_root)
+    assert order[:3] == ("vllm_flashinfer_trtllmprefill", "vllm_flashinfer_trtllmdecode", "vllm_flashinfer")
+    assert order.pinned_count == 3
+
+    # sglang collects under the user-facing names themselves.
+    order = resolve_attention_lane_order("sglang", "0.5.14", 103, "fa3", lane_systems_root)
+    assert order[0] == "fa3"
+
+
+def test_unsupported_backend_override_pairs_are_rejected_not_donor_served(lane_systems_root):
+    """An override the backend's tables cannot serve must raise the typed
+    error (the CLI reports it as an expected ``Error:`` line) instead of being
+    silently accepted and served by an arbitrary donor lane."""
+    from aiconfigurator_core.sdk.attention_lanes import (
+        UnsupportedAttentionBackendError,
+        resolve_attention_lane_order,
+    )
+    from aiconfigurator_core.sdk.errors import is_expected_cli_error
+    from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
+
+    # fa3 is a Hopper sglang kernel; no vllm table collects it.
+    with pytest.raises(UnsupportedAttentionBackendError, match=r"fa3.*vllm"):
+        resolve_attention_lane_order("vllm", "0.24.0", 100, "fa3", lane_systems_root)
+
+    # trtllm collects torch_flow* lanes only: no user-facing override maps.
+    with pytest.raises(UnsupportedAttentionBackendError):
+        resolve_attention_lane_order("trtllm", "1.3.0rc20", 100, "triton", lane_systems_root)
+
+    # "default" (the framework default) stays accepted on every backend.
+    assert resolve_attention_lane_order("vllm", "0.24.0", 100, "default", lane_systems_root)
+
+    # The rejection must ESCAPE resolved_lane_order_for_op's degrade-to-
+    # ["default"] blanket except — an explicit override is user intent.
+    db = _StubDatabase(lane_systems_root, context_lanes={"vllm_triton_attn": _ctx_lane(_FAST_LATENCY)})
+    db.backend = "vllm"
+    db.version = "0.24.0"
+    with pytest.raises(UnsupportedAttentionBackendError) as excinfo:
+        resolved_lane_order_for_op(db, "_context_attention_data", "fa3")
+    assert is_expected_cli_error(excinfo.value), "must surface as a concise CLI error, not a traceback"
+
+
+@pytest.mark.parametrize("table_attr", ["_context_attention_data", "_generation_attention_data"])
+def test_real_shipped_vllm_0220_b200_table_unset_override_fails_closed_and_triton_pins_the_stored_lane(table_attr):
+    """Regression on the REAL shipped b200_sxm/vllm/0.22.0 tables (PR #1519
+    review, jasonqinzhou P1, both findings):
+
+    - 0.22.0 has no ``attention_lane_defaults.yaml`` entry, so an UNSET
+      override must resolve ``["default"]`` — never a density-ranked donor
+      pin (the densest lane, e.g. ``vllm_flashinfer``, is not evidence of the
+      framework default).
+    - An explicit ``triton`` override must pin the STORED label
+      ``vllm_triton_attn`` (the user-facing spelling matches no stored lane).
+    - An unsupported pair (``fa3`` on vllm) must raise, not donor-serve.
+    """
+    from aiconfigurator_core.sdk.attention_lanes import UnsupportedAttentionBackendError
+    from aiconfigurator_core.sdk.engine_table_view import fetch_attention_lane_density
+    from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
+    from aiconfigurator_core.sdk.perf_database import get_database
+
+    db = get_database("b200_sxm", "vllm", "0.22.0")
+
+    # Guard: the real table really does carry prefixed donor lanes a density
+    # ranking WOULD have crowned (vllm_flashinfer is the 0.19/0.22 label).
+    density = fetch_attention_lane_density(db, table_attr)
+    assert "vllm_triton_attn" in density and "vllm_flashinfer" in density
+
+    assert resolved_lane_order_for_op(db, table_attr) == ["default"], (
+        "unset override on an unmapped shipped version must not silently pick a donor lane"
+    )
+
+    order = resolved_lane_order_for_op(db, table_attr, "triton")
+    assert order[0] == "vllm_triton_attn", f"explicit triton must select the stored triton rows; got {order}"
+
+    with pytest.raises(UnsupportedAttentionBackendError):
+        resolved_lane_order_for_op(db, table_attr, "fa3")
 
 
 # ---------------------------------------------------------------------------

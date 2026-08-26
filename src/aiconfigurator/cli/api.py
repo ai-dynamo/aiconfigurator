@@ -490,6 +490,12 @@ def cli_recommend(
         max_seq_len: TRT-LLM max_seq_len setting.
         enable_wideep: Enable Wide Expert Parallelism for MoE models.
         moe_backend: Explicit SGLang MoE backend override.
+        attention_backend: Attention kernel-lane override ('fa3', 'triton',
+            'trtllm_mha', 'flashinfer', 'fla', or 'default'). Supported values
+            depend on the backend's collected tables (e.g. vllm supports
+            'triton', 'flashinfer', and 'default'); an unsupported
+            (backend, value) pair raises. None (default) uses the framework
+            default for the target system/backend version.
         top_n: Number of top configurations to return per mode. Default is 5.
         save_dir: Directory to save results. If None, results are not saved.
         engine_step_backend: Engine-step backend; "rust" (the compiled engine,
@@ -1149,6 +1155,13 @@ def cli_estimate(
             disagg. Overrides ``max_seq_len`` for the decode worker.
         engine_step_backend: Engine-step backend; "rust" (the compiled engine,
             default and only executor) is the only accepted value.
+        attention_backend: Attention kernel-lane override ('fa3', 'triton',
+            'trtllm_mha', 'flashinfer', 'fla', or 'default'). Supported values
+            depend on the backend's collected tables (e.g. vllm supports
+            'triton', 'flashinfer', and 'default'); an unsupported
+            (backend_name, value) pair raises. None (default) uses the
+            framework default for the target system/backend version. Applied
+            to agg, disagg, afd, and all static modes.
         prefix: (common) Prefix cache length (subset of ``isl`` already cached).
             Applied to agg, disagg, and all static modes. Default 0.
         nextn: (common) MTP draft length, or ``"auto"`` to use the checkpoint's

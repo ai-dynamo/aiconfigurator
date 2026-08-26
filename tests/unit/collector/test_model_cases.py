@@ -1806,12 +1806,16 @@ def test_nemotron_super_fp8_vllm_moe_case_covers_missing_consumer_key(monkeypatc
     assert config_path.is_file()
 
 
-def test_qwen35_397b_nvfp4_moe_cases_are_declared_with_correct_shape_and_runner():
+def test_qwen35_397b_nvfp4_moe_cases_are_declared_with_correct_shape_and_runner(monkeypatch):
     from collector.case_generator import (
         get_common_moe_test_cases,
         get_sglang_moe_backend,
         moe_model_allows_quantization,
     )
+
+    # The full-roster case counts below assume no model filter: an inherited
+    # COLLECTOR_MODEL_PATH would silently narrow the expansion.
+    monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
 
     cases = get_common_moe_test_cases()
     nvfp4_cases = [case for case in cases if case.model_name == "nvidia/Qwen3.5-397B-A17B-NVFP4"]

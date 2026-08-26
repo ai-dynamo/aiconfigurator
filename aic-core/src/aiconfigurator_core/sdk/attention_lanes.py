@@ -21,10 +21,62 @@ from typing import Optional
 
 import yaml
 
+from aiconfigurator_core.sdk.errors import UnsupportedAttentionBackendError
+
 logger = logging.getLogger(__name__)
 
 # Canonical set of named measurement lanes (excludes "default" which is always appended last).
 _KNOWN_LANES: frozenset[str] = frozenset({"fa3", "triton", "trtllm_mha", "flashinfer", "fla"})
+
+# User-facing override vocabulary (the CLI's ``--attention-backend`` choices,
+# minus the universal ``"default"``) -> the stored ``kernel_source`` labels
+# each backend collects under, most specific first. sglang collects under the
+# user-facing names themselves; vllm prefixes its labels. vllm's flashinfer
+# entry lists every label the shipped tables use across versions (0.24.0
+# splits the lane into trtllm prefill/decode kernels, 0.22.0-era tables carry
+# the single ``vllm_flashinfer`` label) — the table walk serves the first
+# listed lane that carries the queried slice, so one pinned order covers all
+# shipped versions and both the context and generation tables. A backend
+# absent from this map supports NO override (trtllm collects ``torch_flow*``
+# lanes that correspond to no user-facing choice).
+_OVERRIDE_LANES: dict[str, dict[str, tuple[str, ...]]] = {
+    "sglang": {
+        "fa3": ("fa3",),
+        "triton": ("triton",),
+        "trtllm_mha": ("trtllm_mha",),
+        "flashinfer": ("flashinfer",),
+        "fla": ("fla",),
+    },
+    "vllm": {
+        "triton": ("vllm_triton_attn",),
+        "flashinfer": (
+            "vllm_flashinfer_trtllmprefill",
+            "vllm_flashinfer_trtllmdecode",
+            "vllm_flashinfer",
+        ),
+    },
+}
+
+
+def _override_lanes(backend: str, override: str) -> tuple[str, ...]:
+    """Stored ``kernel_source`` labels for a user-facing *override* on *backend*.
+
+    Raises :class:`UnsupportedAttentionBackendError` for a (backend, override)
+    pair outside :data:`_OVERRIDE_LANES` — an explicit override the backend's
+    tables cannot serve must fail loudly, never fall through to a donor lane.
+    ``"default"`` (the framework default) is accepted for every backend.
+    """
+    if override == "default":
+        return ("default",)
+    supported = _OVERRIDE_LANES.get(backend, {})
+    lanes = supported.get(override)
+    if lanes is None:
+        raise UnsupportedAttentionBackendError(
+            f"attention_backend={override!r} is not supported on backend {backend!r}; "
+            f"supported values: {sorted(supported) + ['default']}."
+        )
+    return lanes
+
 
 # Leading digits of a version segment, e.g. the "0" in "0rc23" or "14" in "14a1".
 _LEADING_DIGITS = re.compile(r"^(\d+)")
@@ -74,11 +126,20 @@ class LaneOrder(tuple):
     CANNOT be recovered from the flat tuple: a pinned ``("fa3", …)`` head and
     the unpinned alphabetical donor tier — which also starts with ``fa3`` — are
     byte-identical, so a reconstruction silently demotes the pin.
+
+    ``framework_default_matched`` records whether the framework-default map
+    had an entry for this exact (backend, floor-matched version, sm_version).
+    It is NOT derivable from the tuple either: a map entry of ``"default"``
+    pins nothing (``"default"`` always rides the donor tail), yet it is still
+    positive evidence — unlike a version/backend with no entry at all, where
+    donor density is no evidence of the framework default and the caller must
+    fail closed (``operations.attention.resolved_lane_order_for_op``).
     """
 
-    def __new__(cls, lanes, pinned_count: int = 0):
+    def __new__(cls, lanes, pinned_count: int = 0, framework_default_matched: bool = False):
         self = super().__new__(cls, lanes)
         self.pinned_count = pinned_count
+        self.framework_default_matched = framework_default_matched
         return self
 
 
@@ -140,23 +201,31 @@ def resolve_attention_lane_tiers(
     sm_version: int,
     override: Optional[str],
     systems_root: Optional[str] = None,
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Return ``(pinned, donors)`` for the given context.
+) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
+    """Return ``(pinned, donors, framework_default_matched)`` for the context.
 
-    *pinned* is the explicit-intent head — the override and the
-    framework-default map lane, in that precedence, ``"default"`` excluded (it
-    is always the donor tier's last element). *donors* is the generic tail from
-    :func:`_donor_tier`. :func:`resolve_attention_lane_order` concatenates the
-    two; this function is what makes the boundary between them knowable
-    downstream (see :class:`LaneOrder`).
+    *pinned* is the explicit-intent head — the override (translated to the
+    backend's stored ``kernel_source`` labels, see :func:`_override_lanes`)
+    and the framework-default map lane, in that precedence, ``"default"``
+    excluded (it is always the donor tier's last element). *donors* is the
+    generic tail from :func:`_donor_tier`.  *framework_default_matched* is
+    True when the map had an entry for this exact (backend, floor-matched
+    version, sm_version) — even one whose lane is ``"default"`` and therefore
+    pins nothing. :func:`resolve_attention_lane_order` concatenates the first
+    two; this function is what makes the boundary between them (and the
+    map-evidence bit) knowable downstream (see :class:`LaneOrder`).
+
+    Raises :class:`UnsupportedAttentionBackendError` when *override* names a
+    lane the backend's tables do not collect.
     """
     defaults = _load_defaults(systems_root)
 
     listed: list[str] = []
+    framework_default_matched = False
 
-    # Step 1: override first.
+    # Step 1: override first, translated to the stored kernel_source labels.
     if override is not None:
-        listed.append(override)
+        listed.extend(_override_lanes(backend, override))
 
     # Step 2: framework-default lane from the map.
     backend_map = defaults.get(backend)
@@ -178,8 +247,10 @@ def resolve_attention_lane_tiers(
                     backend,
                     best_v_str,
                 )
-            elif map_lane not in listed:
-                listed.append(map_lane)
+            else:
+                framework_default_matched = True
+                if map_lane not in listed:
+                    listed.append(map_lane)
         else:
             logger.warning(
                 "resolve_attention_lane_order: version %r is below all entries for backend %r"
@@ -191,7 +262,7 @@ def resolve_attention_lane_tiers(
     # Steps 3-4: the donor tier — remaining known lanes alphabetically, then
     # "default" last exactly once (so a pinned "default" moves to the tail).
     pinned = tuple(lane for lane in listed if lane != "default")
-    return pinned, _donor_tier(pinned)
+    return pinned, _donor_tier(pinned), framework_default_matched
 
 
 def resolve_attention_lane_order(
@@ -205,7 +276,10 @@ def resolve_attention_lane_order(
 
     Precedence rules (applied in order, each lane included at most once):
 
-    1. *override* — always first when given.
+    1. *override* — always first when given, translated to the backend's
+       stored ``kernel_source`` labels (:func:`_override_lanes`; an override
+       the backend does not support raises
+       :class:`UnsupportedAttentionBackendError`).
     2. The framework-default lane for (*backend*, floor-matched *version*,
        *sm_version*) from ``attention_lane_defaults.yaml``, if present and
        not already listed.
@@ -219,7 +293,10 @@ def resolve_attention_lane_order(
 
     The return value is the flat tuple of steps 1-4 (:class:`LaneOrder`, which
     is a ``tuple``), carrying the length of its pinned head so downstream
-    re-ranking can leave that head alone.
+    re-ranking can leave that head alone, plus whether the framework-default
+    map matched so the caller can fail closed when it did not.
     """
-    pinned, donors = resolve_attention_lane_tiers(backend, version, sm_version, override, systems_root)
-    return LaneOrder(pinned + donors, len(pinned))
+    pinned, donors, framework_default_matched = resolve_attention_lane_tiers(
+        backend, version, sm_version, override, systems_root
+    )
+    return LaneOrder(pinned + donors, len(pinned), framework_default_matched)

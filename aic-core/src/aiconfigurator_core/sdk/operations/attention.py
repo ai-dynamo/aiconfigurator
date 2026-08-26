@@ -25,7 +25,11 @@ import logging
 from typing import TYPE_CHECKING, ClassVar
 
 import aiconfigurator_core._aiconfigurator_core as _core
-from aiconfigurator_core.sdk.attention_lanes import resolve_attention_lane_order, split_attention_lane_tiers
+from aiconfigurator_core.sdk.attention_lanes import (
+    UnsupportedAttentionBackendError,
+    resolve_attention_lane_order,
+    split_attention_lane_tiers,
+)
 from aiconfigurator_core.sdk.operations.base import OpShellKit
 
 if TYPE_CHECKING:
@@ -127,30 +131,38 @@ def resolved_lane_order_for_op(database, table_attr: str, override: str | None =
     engine spec must never carry an empty lane list.
 
     Table-aware extension (donor/leftover-lane density ranking) fires ONLY
-    when there is genuine positive intent — an explicit *override*, or a
-    REAL (non-``"default"``) framework-default map entry for this exact
-    (backend, floor-matched version, sm_version) — i.e. ``resolve_lane_order``
-    produced a non-empty pinned head (``LaneOrder.pinned_count > 0``). Every
-    backend/version this branch's own ``attention_lane_defaults.yaml`` entries
-    cover (sglang 0.5.14, vllm 0.24.0 non-Blackwell) satisfies this. Backends
-    with NO map entry, or whose map entry IS ``"default"`` (e.g. vllm 0.24.0
-    on Blackwell) still get the density-ranked walk — ``lane_walk_order``
-    only needs the REAL per-lane density (now sourced straight from the
-    compiled engine, not the lane-blind enumeration view) to rank donors
-    correctly; there is no "unvalidated" case left to guard against once the
-    ranking itself is correct. See git history for the retired
-    ``pinned_count == 0`` short-circuit this replaced — that gate was a
-    workaround for a since-fixed bug in the density source, not a
-    deliberate scope limit.
+    when there is EVIDENCE of intent — an explicit *override* (a non-empty
+    pinned head), or a framework-default map entry for this exact (backend,
+    floor-matched version, sm_version), including an entry whose lane is
+    ``"default"`` (it pins nothing, yet it is a sourced statement about the
+    framework default — e.g. vllm 0.24.0 on Blackwell). With NEITHER — no
+    override and no map entry (unknown backend, unmapped shipped versions
+    such as vllm 0.22.0/0.19.0, or a missing sm row) — donor density is no
+    evidence of the framework default at all, so this FAILS CLOSED to the
+    plain ``["default"]`` the pyo3 constructor already carries, relying only
+    on the Rust-side ``lane_slice`` fallback (any other table lane, BTreeMap
+    order) — unchanged from this op's behavior before AIC-1715/1716. Do not
+    "fix" the unmapped case by extending the density walk to it; map the
+    version with a verifiable source instead (PR #1519 review).
+
+    An explicit *override* the backend cannot serve raises
+    ``UnsupportedAttentionBackendError`` (never a silent donor fallback);
+    every other resolution failure degrades to ``["default"]``.
     """
     if database is None:
         return ["default"]
     try:
         order = resolve_lane_order(database, override)
+        if getattr(order, "pinned_count", 0) == 0 and not getattr(order, "framework_default_matched", False):
+            # No override, no framework-default map entry: fail closed (see
+            # docstring) instead of density-ranking the whole vocabulary.
+            return ["default"]
         from aiconfigurator_core.sdk.engine_table_view import fetch_attention_lane_density
 
         density = fetch_attention_lane_density(database, table_attr)
         return list(lane_walk_order(density, order))
+    except UnsupportedAttentionBackendError:
+        raise
     except Exception:
         logger.debug("attention lane order unresolvable for %s; serializing the default-only order", table_attr)
         return ["default"]
