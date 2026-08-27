@@ -242,3 +242,15 @@ def test_real_shipped_yaml_sglang_0514_sm103_triton():
     result = _resolve("sglang", "0.5.14", 103, None, None)
     assert result[0] == "triton", f"real shipped YAML must yield triton head for sglang/0.5.14/sm103; got {result}"
     assert result[-1] == "default", "real shipped YAML result must end with 'default'"
+
+
+def test_custom_systems_root_without_lane_defaults_falls_back_to_packaged_copy(tmp_path, caplog):
+    """Custom perf roots inherit packaged framework defaults when absent."""
+    custom_root = tmp_path / "custom-systems"
+    custom_root.mkdir()
+
+    with caplog.at_level(logging.WARNING, logger="aiconfigurator_core.sdk.attention_lanes"):
+        result = _resolve("sglang", "0.5.14", 103, None, str(custom_root))
+
+    assert result[0] == "triton", f"packaged sglang/0.5.14/sm103 default must survive; got {result}"
+    assert "falling back to packaged attention-lane defaults" in caplog.text

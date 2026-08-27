@@ -2179,7 +2179,32 @@ class Task:
             self._validate_afd()
         else:
             raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
+        self._validate_sglang_wideep_attention_backend()
         self._validate_database_quant_modes()
+
+    def _validate_sglang_wideep_attention_backend(self) -> None:
+        """Reject dense-only attention backends when a role can reach WideEP.
+
+        SGLang's WideEP MLA operators accept only ``flashinfer`` and ``fa3``;
+        ``default`` means their established framework default (``flashinfer``).
+        The wider attention-lane vocabulary remains valid for tasks whose
+        enumerated tuples are all dense/fused.
+        """
+        if self.attention_backend in (None, "default", "flashinfer", "fa3"):
+            return
+        roles = ("agg",) if self.serving_mode in ("agg", "afd") else ("prefill", "decode")
+        for role in roles:
+            if self._role_attr(role, "backend_name") != "sglang":
+                continue
+            if ("wideep_context_mla", "wideep_generation_mla") not in self._reachable_attention_op_keys(role):
+                continue
+            from aiconfigurator.sdk.errors import UnsupportedAttentionBackendError
+
+            raise UnsupportedAttentionBackendError(
+                f"SGLang WideEP MLA does not support attention_backend={self.attention_backend!r}; "
+                "supported values: ['fa3', 'flashinfer', 'default']. "
+                "Dense-only SGLang tasks may use the wider attention-backend vocabulary."
+            )
 
     def _validate_agg(self) -> None:
         if not self.model_path:

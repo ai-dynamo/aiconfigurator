@@ -88,15 +88,28 @@ def _load_defaults(systems_root: Optional[str]) -> dict:
 
     When *systems_root* is ``None`` the default package systems directory is
     used — the same location PerfDatabase resolves via
-    ``_normalize_systems_paths(None)``.
+    ``_normalize_systems_paths(None)``. A custom systems root may override the
+    map by shipping its own file; when it does not, the packaged map remains
+    the framework-default contract while only the perf-data root changes.
     """
-    if systems_root is None:
-        systems_root = os.fspath(pkg_resources.files("aiconfigurator_core") / "systems")
-    path = os.path.join(systems_root, "attention_lane_defaults.yaml")
+    packaged_path = pkg_resources.files("aiconfigurator_core") / "systems" / "attention_lane_defaults.yaml"
+    path = (
+        os.fspath(packaged_path) if systems_root is None else os.path.join(systems_root, "attention_lane_defaults.yaml")
+    )
     try:
         with open(path, encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
     except FileNotFoundError:
+        if systems_root is not None:
+            logger.warning(
+                "attention_lane_defaults.yaml not found at %s; falling back to packaged attention-lane defaults",
+                path,
+            )
+            try:
+                with packaged_path.open(encoding="utf-8") as f:
+                    return yaml.safe_load(f) or {}
+            except FileNotFoundError:
+                path = os.fspath(packaged_path)
         logger.warning(
             "attention_lane_defaults.yaml not found at %s; no framework defaults available",
             path,

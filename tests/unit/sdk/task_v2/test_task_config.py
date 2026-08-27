@@ -320,16 +320,38 @@ def test_invalid_attention_backend_rejected():
 
 
 def test_valid_attention_backend_choices_accepted():
-    """Test that all valid attention_backend choices are accepted without raising."""
+    """Dense-only SGLang tasks retain the full attention-lane vocabulary."""
     valid_choices = ["flashinfer", "fa3", "triton", "trtllm_mha", "fla", "default"]
     for choice in valid_choices:
         t = Task(
             serving_mode="agg",
-            model_path="deepseek-ai/DeepSeek-V3",
+            model_path="meta-llama/Meta-Llama-3.1-8B",
             system_name="h200_sxm",
+            backend_name="sglang",
             attention_backend=choice,
         )
-        # Should not raise
+        assert t._reachable_attention_op_keys("agg") == [("context_attention", "generation_attention")]
+        t.validate()
+
+
+def test_sglang_wideep_rejects_unsupported_attention_backend_before_sweep():
+    """The general dense-attention vocabulary must not leak into WideEP MLA.
+
+    This real task reaches both fused and SGLang WideEP candidates.  ``triton``
+    is valid for dense attention, but the WideEP Rust ops accept only
+    ``flashinfer`` / ``fa3``; validation must reject it before sweep error
+    handling can silently discard every WideEP candidate.
+    """
+    t = Task(
+        serving_mode="agg",
+        model_path="deepseek-ai/DeepSeek-V3",
+        system_name="h200_sxm",
+        backend_name="sglang",
+        attention_backend="triton",
+    )
+    assert ("wideep_context_mla", "wideep_generation_mla") in t._reachable_attention_op_keys("agg")
+
+    with pytest.raises(ValueError, match=r"SGLang WideEP MLA.*triton"):
         t.validate()
 
 

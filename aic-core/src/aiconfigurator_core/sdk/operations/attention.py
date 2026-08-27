@@ -113,6 +113,27 @@ def lane_walk_order(density: dict[str, tuple[int, int]], lane_order: tuple[str, 
     return pinned + tuple(known) + tail + tuple(leftovers)
 
 
+def _source_tiered_lane_walk_order(
+    density: dict[str, tuple[int, int]],
+    primary_density: dict[str, tuple[int, int]],
+    lane_order: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Rank requested-version lanes before shared donor-version lanes.
+
+    ``AttentionTable::by_lane`` merges sources under their bare lane labels,
+    so the shared density alone cannot distinguish a requested-version lane
+    from a denser inherited lane.  Build each tier with the same density
+    ranking, then remove primary lanes from the donor walk.  Within a lane,
+    Rust's existing first-source-wins fold still preserves requested-version
+    rows when the same label also appears in a donor.
+    """
+    shared_order = lane_walk_order(density, lane_order)
+    if not primary_density:
+        return shared_order
+    primary_order = tuple(lane for lane in lane_walk_order(primary_density, lane_order) if lane in primary_density)
+    return primary_order + tuple(lane for lane in shared_order if lane not in primary_density)
+
+
 def resolved_lane_order_for_op(database, table_attr: str, override: str | None = None) -> list[str]:
     """Kernel-lane precedence for an attention op, RESOLVED python-side.
 
@@ -145,9 +166,10 @@ def resolved_lane_order_for_op(database, table_attr: str, override: str | None =
     "fix" the unmapped case by extending the density walk to it; map the
     version with a verifiable source instead (PR #1519 review).
 
-    An explicit *override* the backend cannot serve raises
-    ``UnsupportedAttentionBackendError`` (never a silent donor fallback);
-    every other resolution failure degrades to ``["default"]``.
+    An explicit named *override* is user intent: unsupported pairs and
+    unexpected resolver/density failures both propagate rather than silently
+    discarding it. Unset and literal ``"default"`` paths may safely degrade to
+    ``["default"]``, with a WARNING so the fallback remains observable.
     """
     if database is None:
         return ["default"]
@@ -160,11 +182,20 @@ def resolved_lane_order_for_op(database, table_attr: str, override: str | None =
         from aiconfigurator_core.sdk.engine_table_view import fetch_attention_lane_density
 
         density = fetch_attention_lane_density(database, table_attr)
+        if getattr(order, "pinned_count", 0) == 0:
+            primary_density = fetch_attention_lane_density(database, table_attr, shared_layer=False)
+            return list(_source_tiered_lane_walk_order(density, primary_density, order))
         return list(lane_walk_order(density, order))
     except UnsupportedAttentionBackendError:
         raise
     except Exception:
-        logger.debug("attention lane order unresolvable for %s; serializing the default-only order", table_attr)
+        if override not in (None, "default"):
+            raise
+        logger.warning(
+            "attention lane order unresolvable for %s; serializing the default-only order",
+            table_attr,
+            exc_info=True,
+        )
         return ["default"]
 
 

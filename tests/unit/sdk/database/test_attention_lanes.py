@@ -217,10 +217,10 @@ def _route_lane_density_through_the_stub(monkeypatch):
 
     real_fetch = _etv.fetch_attention_lane_density
 
-    def _fetch(database, attribute):
+    def _fetch(database, attribute, *, shared_layer=None):
         if isinstance(database, _StubDatabase):
             return database.lane_density.get(attribute, {})
-        return real_fetch(database, attribute)
+        return real_fetch(database, attribute, shared_layer=shared_layer)
 
     monkeypatch.setattr(_etv, "fetch_attention_lane_density", _fetch)
 
@@ -471,6 +471,47 @@ def test_unsupported_backend_override_pairs_are_rejected_not_donor_served(lane_s
     assert is_expected_cli_error(excinfo.value), "must surface as a concise CLI error, not a traceback"
 
 
+def test_explicit_override_propagates_unexpected_density_resolution_failure(lane_systems_root, monkeypatch):
+    """Unexpected resolver failures must not silently discard user intent."""
+    import aiconfigurator_core.sdk.engine_table_view as engine_table_view
+    from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
+
+    db = _StubDatabase(lane_systems_root, context_lanes={"fa3": _ctx_lane(_FAST_LATENCY)})
+
+    def _fail_density(*_args, **_kwargs):
+        raise RuntimeError("density accessor unavailable")
+
+    monkeypatch.setattr(engine_table_view, "fetch_attention_lane_density", _fail_density)
+
+    with pytest.raises(RuntimeError, match="density accessor unavailable"):
+        resolved_lane_order_for_op(db, "_context_attention_data", "fa3")
+
+
+@pytest.mark.parametrize("override", [None, "default"], ids=["unset", "default"])
+def test_framework_default_path_warns_and_falls_back_on_unexpected_density_failure(
+    lane_systems_root, monkeypatch, caplog, override
+):
+    """Only non-specific intent retains the observable safe fallback."""
+    import logging
+
+    import aiconfigurator_core.sdk.engine_table_view as engine_table_view
+    from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
+
+    db = _StubDatabase(lane_systems_root, context_lanes={"triton": _ctx_lane(_FAST_LATENCY)})
+
+    def _fail_density(*_args, **_kwargs):
+        raise RuntimeError("density accessor unavailable")
+
+    monkeypatch.setattr(engine_table_view, "fetch_attention_lane_density", _fail_density)
+
+    with caplog.at_level(logging.WARNING, logger="aiconfigurator_core.sdk.operations.attention"):
+        order = resolved_lane_order_for_op(db, "_context_attention_data", override)
+
+    assert order == ["default"]
+    assert "attention lane order unresolvable" in caplog.text
+    assert "density accessor unavailable" in caplog.text
+
+
 @pytest.mark.parametrize("table_attr", ["_context_attention_data", "_generation_attention_data"])
 def test_real_shipped_vllm_0220_b200_table_unset_override_fails_closed_and_triton_pins_the_stored_lane(table_attr):
     """Regression on the REAL shipped b200_sxm/vllm/0.22.0 tables (PR #1519
@@ -505,6 +546,37 @@ def test_real_shipped_vllm_0220_b200_table_unset_override_fails_closed_and_trito
 
     with pytest.raises(UnsupportedAttentionBackendError):
         resolved_lane_order_for_op(db, table_attr, "fa3")
+
+
+@pytest.mark.parametrize("table_attr", ["_context_attention_data", "_generation_attention_data"])
+@pytest.mark.parametrize("override", [None, "default"], ids=["unset", "default"])
+def test_real_shipped_vllm_0240_h200_primary_lanes_precede_shared_donors(table_attr, override):
+    """A mapped literal ``default`` means framework dispatch, not donor-first.
+
+    The requested vLLM 0.24.0 table carries ``vllm_flash_attn_fa3`` / ``fa4``
+    lanes, while shared-layer inheritance adds the denser 0.22.0
+    ``vllm_flash_attn`` lane.  With no named override, requested-version lanes
+    must stay ahead of every donor-version lane so donors only fill missing
+    slices; density may rank lanes within either provenance tier, never across
+    the tier boundary.  Explicit ``attention_backend=default`` has the same
+    framework-default semantics as an unset override.
+    """
+    from aiconfigurator_core.sdk.engine_table_view import fetch_attention_lane_density
+    from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
+    from aiconfigurator_core.sdk.perf_database import get_database
+
+    primary_db = get_database("h200_sxm", "vllm", "0.24.0", shared_layer=False)
+    shared_db = get_database("h200_sxm", "vllm", "0.24.0", shared_layer=True)
+    primary_lanes = set(fetch_attention_lane_density(primary_db, table_attr))
+    shared_lanes = set(fetch_attention_lane_density(shared_db, table_attr))
+    donor_lanes = shared_lanes - primary_lanes
+
+    assert primary_lanes == {"vllm_flash_attn_fa3", "vllm_flash_attn_fa4"}
+    assert "vllm_flash_attn" in donor_lanes, "the regression needs the denser 0.22.0 donor lane"
+
+    order = resolved_lane_order_for_op(shared_db, table_attr, override)
+
+    assert max(order.index(lane) for lane in primary_lanes) < min(order.index(lane) for lane in donor_lanes), order
 
 
 # ---------------------------------------------------------------------------

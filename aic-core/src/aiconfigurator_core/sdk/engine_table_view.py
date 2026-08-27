@@ -17,6 +17,7 @@ in the Rust fold, never here (single-oracle rule).
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Callable
 from typing import Any
@@ -207,7 +208,9 @@ def fetch_table_view(database, attribute: str):
     return _rehydrate(json.loads(raw), VIEW_KEY_LAYERS[attribute], 0)
 
 
-def fetch_attention_lane_density(database, attribute: str) -> dict[str, tuple[int, int]]:
+def fetch_attention_lane_density(
+    database, attribute: str, *, shared_layer: bool | None = None
+) -> dict[str, tuple[int, int]]:
     """``{kernel_source: (slice_count, row_count)}`` for one attention QUERY
     table (AIC-1715/1716 follow-up). ``attribute`` is
     ``"_context_attention_data"`` or ``"_generation_attention_data"``.
@@ -223,7 +226,21 @@ def fetch_attention_lane_density(database, attribute: str) -> dict[str, tuple[in
     lanes with their measured coverage. Backs
     ``operations/attention.py::lane_walk_order``'s donor/leftover density
     ranking. Empty (never raises) when the table has no data.
+
+    ``shared_layer=False`` probes the requested version's own rows through the
+    same FFI.  Lane resolution uses that view to preserve source precedence:
+    requested-version lanes form a tier ahead of inherited donor lanes, with
+    density ranking confined to each tier.  The lightweight copy changes only
+    the probe-spec policy bit; it never mutates the caller's database view.
     """
+    if shared_layer is not None and bool(shared_layer) != bool(database.enable_shared_layer):
+        database = copy.copy(database)
+        database._shared_layer_mode = bool(shared_layer)
+        database.__dict__.pop("_table_view_probe_spec", None)
+        # The caller's normal shared-view probe owns source diagnostics.  This
+        # auxiliary provenance probe only needs the compiled table and must not
+        # duplicate every fallback warning or mutate shallow-copied reports.
+        database._source_reports_materialized = True
     handle = _probe_engine_handle(database)
     return {lane: (slices, rows) for lane, slices, rows in handle._engine.attention_lane_density(attribute)}
 
