@@ -1,0 +1,377 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Validate and merge one single-node TensorRT-LLM DeepEP campaign."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import tempfile
+from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import pyarrow.parquet as pq
+import yaml
+
+from collector import provenance
+from collector.framework_manifest import get_collector_runtime
+from collector.registry_types import PerfFile
+from collector.wideep.trtllm.collect_moe_a2a import (
+    COMM_BACKEND_HT,
+    COMM_BACKEND_LL,
+    SMS,
+    TARGET_SOURCE_COMMIT,
+    build_case_plan,
+    case_plan_ids,
+    get_moe_a2a_shapes,
+    get_moe_a2a_token_grid,
+)
+
+BACKENDS = (COMM_BACKEND_HT, COMM_BACKEND_LL)
+EXPECTED_VERSION = "1.3.0rc11"
+SYSTEM_LAYOUTS = {
+    "gb200": (4, 4),
+    "gb300": (4, 4),
+    "b200_sxm": (8, 8),
+    "b300_sxm": (8, 8),
+    "h100_sxm": (8, 8),
+    "h200_sxm": (8, 8),
+}
+SYSTEM_GPU_IDENTITIES = {
+    "gb200": ("GB200", "10.0"),
+    "gb300": ("GB300", "10.3"),
+    "b200_sxm": ("B200", "10.0"),
+    "b300_sxm": ("B300", "10.3"),
+    "h100_sxm": ("H100", "9.0"),
+    "h200_sxm": ("H200", "9.0"),
+}
+RUNTIME = get_collector_runtime("trtllm_a2a")
+ROW_COLUMNS = (
+    "framework",
+    "version",
+    "device",
+    "op_name",
+    "kernel_source",
+    "comm_backend",
+    "phase",
+    "comm_dtype",
+    "ep_size",
+    "node_num",
+    "hidden_size",
+    "topk",
+    "num_experts",
+    "num_tokens",
+    "sms",
+    "transmit_us",
+    "notify_us",
+    "latency",
+)
+PHYSICAL_KEY_COLUMNS = (
+    "comm_backend",
+    "phase",
+    "comm_dtype",
+    "ep_size",
+    "node_num",
+    "hidden_size",
+    "topk",
+    "num_experts",
+    "num_tokens",
+    "sms",
+)
+
+
+class CampaignValidationError(RuntimeError):
+    """A campaign artifact is incomplete or incorrectly identified."""
+
+
+@dataclass(frozen=True)
+class ValidatedJob:
+    path: Path
+    frame: pd.DataFrame
+    runtime: dict[str, Any]
+    table: dict[str, Any]
+    evidence: dict[str, Any]
+    backend: str
+    failures: tuple[dict[str, Any], ...]
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _single(frame: pd.DataFrame, column: str) -> Any:
+    values = frame[column].drop_duplicates().tolist()
+    if len(values) != 1:
+        raise CampaignValidationError(f"{column} must have exactly one value, found {values!r}")
+    return values[0]
+
+
+def _cases(ep_size: int, backend: str):
+    return build_case_plan(
+        shapes=get_moe_a2a_shapes(required_expert_parallel_size=ep_size),
+        token_grid=get_moe_a2a_token_grid(),
+        ep_size=ep_size,
+        node_num=1,
+        modes=(backend,),
+    )
+
+
+def _expected_keys(ep_size: int, backend: str) -> set[tuple[Any, ...]]:
+    keys = set()
+    for case in _cases(ep_size, backend):
+        for phase in ("combine", "dispatch"):
+            dtype = (
+                "fp4"
+                if backend == COMM_BACKEND_LL and case.quant.comm_dtype == "nvfp4" and phase == "combine"
+                else case.quant.comm_dtype
+            )
+            keys.add(
+                (
+                    backend,
+                    phase,
+                    dtype,
+                    ep_size,
+                    1,
+                    case.shape.hidden_size,
+                    case.shape.topk,
+                    case.shape.num_experts,
+                    case.num_tokens,
+                    SMS,
+                )
+            )
+    return keys
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise CampaignValidationError(f"invalid JSON artifact {path}") from error
+    if not isinstance(payload, dict):
+        raise CampaignValidationError(f"{path}: expected JSON object")
+    return payload
+
+
+def validate_job_dir(
+    job_dir: str | Path,
+    *,
+    system: str,
+    allow_partial_evidence: bool = False,
+) -> ValidatedJob:
+    if system not in SYSTEM_LAYOUTS:
+        raise CampaignValidationError(f"unsupported system {system!r}")
+    path = Path(job_dir).expanduser().resolve(strict=True)
+    parquet_path = path / "moe_a2a_perf.parquet"
+    sidecar_path = path / "collection_meta.yaml"
+    evidence_path = path / "runtime_evidence.json"
+    if not parquet_path.is_file() or not sidecar_path.is_file() or not evidence_path.is_file():
+        raise CampaignValidationError(f"{path}: missing parquet, sidecar, or runtime evidence")
+    frame = pd.read_parquet(parquet_path)
+    if tuple(frame.columns) != ROW_COLUMNS or frame.empty:
+        raise CampaignValidationError(f"{parquet_path}: empty table or schema drift")
+    if frame[list(PHYSICAL_KEY_COLUMNS)].duplicated().any():
+        raise CampaignValidationError(f"{parquet_path}: duplicate physical key")
+    if str(_single(frame, "framework")).lower() != "trtllm" or _single(frame, "version") != EXPECTED_VERSION:
+        raise CampaignValidationError(f"{parquet_path}: framework/version mismatch")
+    if _single(frame, "op_name") != "moe_a2a" or _single(frame, "kernel_source") != "deepep":
+        raise CampaignValidationError(f"{parquet_path}: operation/kernel mismatch")
+    backend = str(_single(frame, "comm_backend"))
+    expected_gpus, ep_size = SYSTEM_LAYOUTS[system]
+    if backend not in BACKENDS or int(_single(frame, "node_num")) != 1 or int(_single(frame, "ep_size")) != ep_size:
+        raise CampaignValidationError(f"{parquet_path}: rejected backend/node/EP identity")
+    if SYSTEM_GPU_IDENTITIES[system][0] not in str(_single(frame, "device")).upper():
+        raise CampaignValidationError(f"{parquet_path}: device does not match {system}")
+    observed_keys = set(frame[list(PHYSICAL_KEY_COLUMNS)].itertuples(index=False, name=None))
+    expected_keys = _expected_keys(ep_size, backend)
+    if not observed_keys <= expected_keys:
+        raise CampaignValidationError(
+            f"{parquet_path}: undeclared physical keys {sorted(observed_keys - expected_keys)[:3]}"
+        )
+    if not (frame["latency"] - frame["transmit_us"] - frame["notify_us"]).abs().lt(1e-6).all():
+        raise CampaignValidationError(f"{parquet_path}: latency accounting mismatch")
+
+    document = yaml.safe_load(sidecar_path.read_text(encoding="utf-8")) or {}
+    runtime = document.get("runtime")
+    table = (document.get("tables") or {}).get(Path(PerfFile.MOE_A2A.value).stem)
+    if document.get("schema_version") != 1 or not isinstance(runtime, dict) or not isinstance(table, dict):
+        raise CampaignValidationError(f"{sidecar_path}: invalid collector provenance")
+    if runtime.get("framework") != RUNTIME.framework or str(runtime.get("version")) != EXPECTED_VERSION:
+        raise CampaignValidationError(f"{sidecar_path}: runtime identity mismatch")
+    if runtime.get("source_commit") != TARGET_SOURCE_COMMIT or runtime.get("abi") != RUNTIME.abi:
+        raise CampaignValidationError(f"{sidecar_path}: source/ABI mismatch")
+    configured_image, configured_digest = RUNTIME.image().split("@", 1)
+    if runtime.get("image") != configured_image or runtime.get("image_digest") != configured_digest:
+        raise CampaignValidationError(f"{sidecar_path}: configured image identity mismatch")
+    evidence = _load_json(evidence_path)
+    expected_variant = "linux/arm64" if system in ("gb200", "gb300") else "linux/amd64"
+    if evidence.get("system") != system or evidence.get("image_variant") != expected_variant:
+        raise CampaignValidationError(f"{evidence_path}: system/image variant mismatch")
+    if evidence.get("configured_image_digest") != configured_digest:
+        raise CampaignValidationError(f"{evidence_path}: configured image digest mismatch")
+    for key in ("observed_image_digest", "wheel_sha256", "collector_ref"):
+        value = str(evidence.get(key, ""))
+        expected_length = 71 if key == "observed_image_digest" else 64 if key == "wheel_sha256" else 40
+        if len(value) != expected_length:
+            raise CampaignValidationError(f"{evidence_path}: invalid {key}")
+    if evidence.get("slurm_topology_verified") is not True:
+        raise CampaignValidationError(f"{evidence_path}: topology was not verified")
+
+    failures: list[dict[str, Any]] = []
+    for error_path in sorted(path.glob("errors_moe_a2a_trtllm.rank*.json")):
+        payload = json.loads(error_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, list) or any(row.get("classification") != "unexpected" for row in payload):
+            raise CampaignValidationError(f"{error_path}: malformed failure evidence")
+        failures.extend(payload)
+    missing = expected_keys - observed_keys
+    if failures or missing:
+        if not allow_partial_evidence:
+            raise CampaignValidationError(
+                f"{path}: incomplete formal input ({len(failures)} failures, {len(missing)} missing rows)"
+            )
+        if not failures or not missing:
+            raise CampaignValidationError(f"{path}: partial rows and failure evidence are inconsistent")
+    if int(table.get("rows", -1)) != len(frame):
+        raise CampaignValidationError(f"{sidecar_path}: row count mismatch")
+    for field in ("collector_ref", "collector_hash", "case_plan_hash", "collected_at"):
+        if not table.get(field):
+            raise CampaignValidationError(f"{sidecar_path}: missing {field}")
+    checksum_path = path / "artifact_checksums.json"
+    if checksum_path.is_file():
+        checksums = _load_json(checksum_path)
+        for artifact in (parquet_path, sidecar_path, evidence_path):
+            if checksums.get(artifact.name) != _sha256(artifact):
+                raise CampaignValidationError(f"{artifact}: checksum mismatch")
+    del expected_gpus
+    return ValidatedJob(path, frame, runtime, table, evidence, backend, tuple(failures))
+
+
+def merge_campaign(
+    input_dirs: list[str | Path],
+    *,
+    system: str,
+    output_dir: str | Path,
+    checksum_output: str | Path | None = None,
+    allow_partial_evidence: bool = False,
+) -> tuple[Path, Path]:
+    jobs = [validate_job_dir(path, system=system, allow_partial_evidence=allow_partial_evidence) for path in input_dirs]
+    if len(jobs) != 2 or {job.backend for job in jobs} != set(BACKENDS):
+        raise CampaignValidationError(f"campaign requires exactly one job for each of {BACKENDS}")
+    if (
+        len({job.table["collector_ref"] for job in jobs}) != 1
+        or len({job.table["collector_hash"] for job in jobs}) != 1
+    ):
+        raise CampaignValidationError("campaign jobs use different collector refs/hashes")
+    immutable_evidence = ("observed_image_digest", "image_variant", "wheel_sha256", "collector_ref")
+    for field in immutable_evidence:
+        if len({job.evidence[field] for job in jobs}) != 1:
+            raise CampaignValidationError(f"campaign runtime evidence differs for {field}")
+    merged = pd.concat([job.frame for job in jobs], ignore_index=True)
+    if merged[list(PHYSICAL_KEY_COLUMNS)].duplicated().any():
+        raise CampaignValidationError("merged campaign contains duplicate physical keys")
+    merged = merged.sort_values(list(PHYSICAL_KEY_COLUMNS), kind="stable").reset_index(drop=True)
+    total_failures = sum(len(job.failures) for job in jobs)
+    status = provenance.STATUS_PARTIAL if total_failures else provenance.STATUS_COMPLETE
+    all_case_ids = [
+        case_id for backend in BACKENDS for case_id in case_plan_ids(_cases(SYSTEM_LAYOUTS[system][1], backend))
+    ]
+
+    destination = Path(output_dir).expanduser()
+    destination.mkdir(parents=True, exist_ok=True)
+    final_parquet = destination / "moe_a2a_perf.parquet"
+    final_sidecar = destination / "collection_meta.yaml"
+    with tempfile.TemporaryDirectory(prefix="aic-trtllm-a2a-finalize-", dir="/tmp") as staging_name:
+        staging = Path(staging_name)
+        staged_parquet = staging / final_parquet.name
+        merged.to_parquet(staged_parquet, index=False)
+        if pq.read_metadata(staged_parquet).num_rows != len(merged):
+            raise CampaignValidationError("staged parquet row count mismatch")
+        existing_tables: dict[str, dict[str, Any]] = {}
+        if final_sidecar.is_file():
+            existing_tables = dict(
+                (yaml.safe_load(final_sidecar.read_text(encoding="utf-8")) or {}).get("tables") or {}
+            )
+        existing_tables["moe_a2a_perf"] = {
+            "collector_ref": jobs[0].table["collector_ref"],
+            "collector_hash": jobs[0].table["collector_hash"],
+            "case_plan_hash": provenance.case_plan_hash(all_case_ids),
+            "collected_at": date.today().isoformat(),
+            "rows": len(merged),
+            "classified_failures": total_failures,
+            "status": status,
+        }
+        runtime = dict(jobs[0].runtime)
+        runtime["image"] = RUNTIME.image()
+        runtime["image_variant"] = jobs[0].evidence["image_variant"]
+        runtime["image_digest"] = jobs[0].evidence["observed_image_digest"]
+        runtime["abi"] = dict(runtime["abi"]) | {
+            "campaign_system": system,
+            "campaign_ep_size": str(SYSTEM_LAYOUTS[system][1]),
+            "campaign_backends": ",".join(BACKENDS),
+            "source_wheel_sha256": jobs[0].evidence["wheel_sha256"],
+            "configured_image_digest": RUNTIME.image().split("@", 1)[1],
+            "slurm_topology_verified": "true",
+        }
+        staged_sidecar = provenance.write_collection_meta(staging, runtime, existing_tables)
+        staged_errors: list[Path] = []
+        if total_failures:
+            for job in jobs:
+                if job.failures:
+                    target = staging / f"errors_moe_a2a_trtllm.{job.backend}.json"
+                    target.write_text(json.dumps(job.failures, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                    staged_errors.append(target)
+        staged_checksums = {p.name: _sha256(p) for p in (staged_parquet, staged_sidecar, *staged_errors)}
+        publish = [(staged_parquet, final_parquet), (staged_sidecar, final_sidecar)] + [
+            (path, destination / path.name) for path in staged_errors
+        ]
+        if checksum_output:
+            checksum_path = Path(checksum_output).expanduser()
+            checksum_path.parent.mkdir(parents=True, exist_ok=True)
+            staged_checksum = staging / "artifact_checksums.json"
+            staged_checksum.write_text(json.dumps(staged_checksums, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            publish.append((staged_checksum, checksum_path))
+        for source, target in publish:
+            temporary = target.parent / f".{target.name}.tmp.{os.getpid()}"
+            shutil.copyfile(source, temporary)
+            os.replace(temporary, target)
+        for stale in destination.glob("errors_moe_a2a_trtllm.*.json"):
+            if stale.name not in staged_checksums:
+                stale.unlink()
+    if (
+        _sha256(final_parquet) != staged_checksums[final_parquet.name]
+        or _sha256(final_sidecar) != staged_checksums[final_sidecar.name]
+    ):
+        raise CampaignValidationError("published artifact checksum mismatch")
+    return final_parquet, final_sidecar
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--system", choices=sorted(SYSTEM_LAYOUTS), required=True)
+    parser.add_argument("--input", action="append", required=True, dest="inputs")
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--checksum-output")
+    parser.add_argument("--allow-partial-evidence", action="store_true")
+    args = parser.parse_args(argv)
+    parquet, sidecar = merge_campaign(
+        args.inputs,
+        system=args.system,
+        output_dir=args.output_dir,
+        checksum_output=args.checksum_output,
+        allow_partial_evidence=args.allow_partial_evidence,
+    )
+    print(json.dumps({"parquet": str(parquet), "sidecar": str(sidecar)}, indent=2))
+
+
+if __name__ == "__main__":
+    main()

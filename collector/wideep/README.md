@@ -18,6 +18,10 @@ Layout:
 - `vllm/slurm/`: the fail-closed six-system canary/full campaign launcher.
 - `vllm/finalize_campaign.py`: validates three independent backend
   jobs for one system and atomically merges the publishable parquet/sidecar.
+- `trtllm/slurm/`: the fail-closed TensorRT-LLM source-wheel stage and
+  single-node canary/full campaign launcher.
+- `trtllm/finalize_campaign.py`: validates independent HT and LL jobs and
+  merges them without relabeling the pinned TensorRT-LLM runtime.
 - `sglang/deepep/`: deprecated manual log collection and extraction scripts.
 
 ## vLLM 0.24.0 single-node campaign
@@ -47,6 +51,26 @@ The formal launcher rejects every node count other than one. ComputeLab exposes
 B200/B300 through `topology/flat`; consequently B200/B300 submission also
 requires an infrastructure-approved exact nodelist and approval ID. Without
 both, the launcher exits before `sbatch`.
+
+## TensorRT-LLM 1.3.0rc11 single-node campaign
+
+TensorRT-LLM uses the same six-system one-node layout as vLLM: GB200/GB300
+run EP4 on four GPUs, while B200/B300/H100/H200 run EP8 on eight GPUs. Each
+system has two independent chains: `trtllm_deepep_ht` and
+`trtllm_deepep_ll`, with every full job gated by its own successful canary.
+
+The configured runtime identity is the multi-architecture TensorRT-LLM rc20
+container index, used only as the immutable build base. Image staging resolves
+and records the platform child, checks out source commit `14efb6ac`, verifies
+the vendored DeepEP and NVSHMEM pins, builds package version `1.3.0rc11`, and
+records the source-wheel SHA256. The runner installs that wheel in a job-local
+overlay before entering the MPI collector.
+
+Case failures are never allowlisted. A failed full job preserves its partial
+parquet, sidecar, and rank failure records in campaign failure evidence. The
+finalizer rejects those inputs by default; `--allow-partial-evidence` may be
+used only to assemble an explicitly `partial` evidence table, never a complete
+formal publication.
 
 ## Deprecated SGLang manual pipeline
 
