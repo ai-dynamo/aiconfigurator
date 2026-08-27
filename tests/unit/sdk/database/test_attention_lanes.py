@@ -11,8 +11,8 @@ frozen parity goldens (single-oracle rule, see
 tested here, is lane PRECEDENCE RESOLUTION: given a database identity
 (backend/version/sm_version), an optional ``attention_backend`` override, and
 a loaded table's own kernel_source lanes, compute the concrete walk order
-(override -> framework default -> remaining known lanes -> ``"default"`` ->
-the table's own leftover lanes, donor tiers ranked by measured coverage).
+(pinned intent -> requested-version lanes -> shared-only donor lanes, with
+each provenance tier ranked by measured coverage).
 That order is serialized verbatim onto the op spec and the Rust engine
 replays it without any lane-vocabulary knowledge of its own.
 
@@ -545,11 +545,18 @@ def test_real_shipped_vllm_0220_b200_table_unset_override_fails_closed_and_trito
       framework default).
     - An explicit ``triton`` override must pin the STORED label
       ``vllm_triton_attn`` (the user-facing spelling matches no stored lane).
+      If that sparse lane misses a slice, every requested-version lane must be
+      tried before inherited donor-version lanes.
     - An unsupported pair (``fa3`` on vllm) must raise, not donor-serve.
     """
     from aiconfigurator_core.sdk.attention_lanes import UnsupportedAttentionBackendError
+    from aiconfigurator_core.sdk.engine import _evaluate_single_op
     from aiconfigurator_core.sdk.engine_table_view import fetch_attention_lane_density
-    from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
+    from aiconfigurator_core.sdk.operations.attention import (
+        ContextAttention,
+        GenerationAttention,
+        resolved_lane_order_for_op,
+    )
     from aiconfigurator_core.sdk.perf_database import get_database
 
     db = get_database("b200_sxm", "vllm", "0.22.0")
@@ -557,17 +564,75 @@ def test_real_shipped_vllm_0220_b200_table_unset_override_fails_closed_and_trito
     # Guard: the real table really does carry prefixed donor lanes a density
     # ranking WOULD have crowned (vllm_flashinfer is the 0.19/0.22 label).
     density = fetch_attention_lane_density(db, table_attr)
+    primary_density = fetch_attention_lane_density(db, table_attr, shared_layer=False)
+    donor_lanes = set(density) - set(primary_density)
     assert "vllm_triton_attn" in density and "vllm_flashinfer" in density
+    assert set(primary_density) == {"vllm_triton_attn", "vllm_flashinfer"}
+    assert donor_lanes
 
     assert resolved_lane_order_for_op(db, table_attr) == ["default"], (
         "unset override on an unmapped shipped version must not silently pick a donor lane"
     )
+    assert resolved_lane_order_for_op(db, table_attr, "default") == ["default"]
 
     order = resolved_lane_order_for_op(db, table_attr, "triton")
     assert order[0] == "vllm_triton_attn", f"explicit triton must select the stored triton rows; got {order}"
+    assert order.index("vllm_flashinfer") < min(order.index(lane) for lane in donor_lanes), order
+
+    # MHA/bfloat16/head-size 64/window 0 is absent from Triton but overlaps
+    # the requested 0.22 FlashInfer lane and inherited 0.24 lanes. Only the
+    # 0.22 rows carry power, so positive energy proves the primary lane served
+    # the query instead of a donor that happened to be denser.
+    if table_attr == "_context_attention_data":
+        op = ContextAttention("ctx", 1.0, 1, 1, KVCacheQuantMode.bfloat16, FMHAQuantMode.bfloat16, 0, 64)
+        query = {"is_context": True, "batch_size": 1, "s": 1}
+    else:
+        op = GenerationAttention("gen", 1.0, 1, 1, KVCacheQuantMode.bfloat16, 0, 64)
+        query = {"is_context": False, "batch_size": 1, "s": 2}
+
+    op._lane_order = order
+    selected = _evaluate_single_op(db, op, **query)
+    op._lane_order = ["vllm_triton_attn", "vllm_flashinfer"]
+    primary = _evaluate_single_op(db, op, **query)
+    op._lane_order = ["vllm_triton_attn", *sorted(donor_lanes), "vllm_flashinfer"]
+    donor = _evaluate_single_op(db, op, **query)
+
+    assert float(selected) == pytest.approx(float(primary))
+    assert selected.energy == pytest.approx(primary.energy)
+    assert selected.energy > 0.0
+    assert donor.energy == 0.0
+    assert float(selected) != pytest.approx(float(donor))
 
     with pytest.raises(UnsupportedAttentionBackendError):
         resolved_lane_order_for_op(db, table_attr, "fa3")
+
+
+def test_real_shipped_vllm_0220_b200_donor_only_override_pin_stays_first():
+    """A pin is explicit intent even when only an inherited version carries it.
+
+    vLLM's ``flashinfer`` override expands to the 0.24 split labels before the
+    0.22 monolithic label. On the requested 0.22 context table the first split
+    label exists only in the shared layer, but provenance tiering must not
+    move it behind requested-version lanes.
+    """
+    from aiconfigurator_core.sdk.engine_table_view import fetch_attention_lane_density
+    from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
+    from aiconfigurator_core.sdk.perf_database import get_database
+
+    table_attr = "_context_attention_data"
+    db = get_database("b200_sxm", "vllm", "0.22.0")
+    primary_lanes = set(fetch_attention_lane_density(db, table_attr, shared_layer=False))
+    shared_lanes = set(fetch_attention_lane_density(db, table_attr))
+    donor_only_lanes = shared_lanes - primary_lanes
+
+    order = resolved_lane_order_for_op(db, table_attr, "flashinfer")
+
+    assert order[:3] == [
+        "vllm_flashinfer_trtllmprefill",
+        "vllm_flashinfer_trtllmdecode",
+        "vllm_flashinfer",
+    ]
+    assert order[0] in donor_only_lanes
 
 
 @pytest.mark.parametrize("table_attr", ["_context_attention_data", "_generation_attention_data"])

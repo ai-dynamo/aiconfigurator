@@ -122,16 +122,21 @@ def _source_tiered_lane_walk_order(
 
     ``AttentionTable::by_lane`` merges sources under their bare lane labels,
     so the shared density alone cannot distinguish a requested-version lane
-    from a denser inherited lane.  Build each tier with the same density
-    ranking, then remove primary lanes from the donor walk.  Within a lane,
-    Rust's existing first-source-wins fold still preserves requested-version
-    rows when the same label also appears in a donor.
+    from a denser inherited lane. Preserve the resolver's pinned intent first,
+    then build requested-version and shared-only tiers with the same density
+    ranking. Within a lane, Rust's existing first-source-wins fold still
+    preserves requested-version rows when the same label also appears in a
+    donor. A pinned lane remains first even when it exists only in a donor.
     """
     shared_order = lane_walk_order(density, lane_order)
     if not primary_density:
         return shared_order
-    primary_order = tuple(lane for lane in lane_walk_order(primary_density, lane_order) if lane in primary_density)
-    return primary_order + tuple(lane for lane in shared_order if lane not in primary_density)
+    pinned, _ = split_attention_lane_tiers(lane_order)
+    primary_order = tuple(
+        lane for lane in lane_walk_order(primary_density, lane_order) if lane in primary_density and lane not in pinned
+    )
+    shared_only_order = tuple(lane for lane in shared_order if lane not in primary_density and lane not in pinned)
+    return pinned + primary_order + shared_only_order
 
 
 def resolved_lane_order_for_op(database, table_attr: str, override: str | None = None) -> list[str]:
@@ -187,10 +192,8 @@ def resolved_lane_order_for_op(database, table_attr: str, override: str | None =
         from aiconfigurator_core.sdk.engine_table_view import fetch_attention_lane_density
 
         density = fetch_attention_lane_density(database, table_attr)
-        if getattr(order, "pinned_count", 0) == 0:
-            primary_density = fetch_attention_lane_density(database, table_attr, shared_layer=False)
-            return list(_source_tiered_lane_walk_order(density, primary_density, order))
-        return list(lane_walk_order(density, order))
+        primary_density = fetch_attention_lane_density(database, table_attr, shared_layer=False)
+        return list(_source_tiered_lane_walk_order(density, primary_density, order))
     except UnsupportedAttentionBackendError:
         raise
     except Exception:
