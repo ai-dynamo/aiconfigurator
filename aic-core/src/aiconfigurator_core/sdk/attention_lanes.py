@@ -25,8 +25,10 @@ from aiconfigurator_core.sdk.errors import UnsupportedAttentionBackendError
 
 logger = logging.getLogger(__name__)
 
-# Canonical set of named measurement lanes (excludes "default" which is always appended last).
-_KNOWN_LANES: frozenset[str] = frozenset({"fa3", "triton", "trtllm_mha", "flashinfer", "fla"})
+# Canonical user-facing attention-backend vocabulary. ``"default"`` selects
+# the framework default and is not a named measurement lane.
+ATTENTION_BACKEND_CHOICES: tuple[str, ...] = ("fa3", "triton", "trtllm_mha", "flashinfer", "fla", "default")
+_KNOWN_LANES: frozenset[str] = frozenset(choice for choice in ATTENTION_BACKEND_CHOICES if choice != "default")
 
 # User-facing override vocabulary (the CLI's ``--attention-backend`` choices,
 # minus the universal ``"default"``) -> the stored ``kernel_source`` labels

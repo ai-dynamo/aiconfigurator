@@ -10,6 +10,7 @@ Tests CLI argument validation, choices, and default values.
 import pytest
 
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.attention_lanes import ATTENTION_BACKEND_CHOICES
 
 pytestmark = pytest.mark.unit
 
@@ -679,23 +680,32 @@ class TestCLIArgumentParsing:
         )
         assert args.attention_backend is None
 
-    def test_attention_backend_valid_choice(self, cli_parser):
+    @pytest.mark.parametrize("choice", ATTENTION_BACKEND_CHOICES)
+    def test_attention_backend_valid_choice(self, cli_parser, choice):
         """Test that --attention-backend accepts valid choices."""
-        for choice in ["fa3", "triton", "trtllm_mha", "flashinfer", "fla", "default"]:
-            args = cli_parser.parse_args(
-                [
-                    "default",
-                    "--model-path",
-                    "Qwen/Qwen3-32B",
-                    "--total-gpus",
-                    "8",
-                    "--system",
-                    "h200_sxm",
-                    "--attention-backend",
-                    choice,
-                ]
-            )
-            assert args.attention_backend == choice
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "8",
+                "--system",
+                "h200_sxm",
+                "--attention-backend",
+                choice,
+            ]
+        )
+        assert args.attention_backend == choice
+
+    @pytest.mark.parametrize("mode", ("default", "recommend", "estimate", "exp"))
+    def test_attention_backend_parser_choices(self, cli_parser, mode):
+        """Every mode exposes the canonical attention-backend choices."""
+        subparser_action = next(action for action in cli_parser._actions if action.dest == "mode")
+        mode_parser = subparser_action.choices[mode]
+        attention_backend_action = next(action for action in mode_parser._actions if action.dest == "attention_backend")
+
+        assert tuple(attention_backend_action.choices) == ATTENTION_BACKEND_CHOICES
 
     def test_attention_backend_invalid_choice_rejected(self, cli_parser):
         """Test that invalid --attention-backend choice is rejected by argparse."""

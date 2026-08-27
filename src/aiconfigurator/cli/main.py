@@ -28,6 +28,7 @@ from aiconfigurator.generator.api import (
 )
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
+from aiconfigurator.sdk.attention_lanes import ATTENTION_BACKEND_CHOICES
 from aiconfigurator.sdk.config_builders import resolve_nextn_auto
 from aiconfigurator.sdk.errors import (
     EmpiricalNotImplementedError,
@@ -302,6 +303,22 @@ def _parse_afd_max_candidates(value: str) -> int:
     return parsed
 
 
+def _add_attention_backend_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--attention-backend",
+        type=str,
+        choices=ATTENTION_BACKEND_CHOICES,
+        default=None,
+        help="Attention kernel backend used by the deployment. Applies to every model graph with standard "
+        "dense ContextAttention/GenerationAttention ops and to supported DeepSeek MLA/WideEP paths. "
+        "Support depends on the serving backend, performance tables, and backend version; unsupported named "
+        "values fail closed. For modeling, unset/default uses the mapped framework default when available and "
+        "otherwise the safe default fallback. SGLang WideEP maps unset/default to flashinfer and also supports "
+        "fa3. The deployment generator emits supported named SGLang values, omits unset/default, and rejects "
+        "fla for SGLang 0.5.14.",
+    )
+
+
 def _add_default_mode_arguments(parser):
     parser.add_argument(
         "--model-path",
@@ -570,16 +587,7 @@ def _add_default_mode_arguments(parser):
         help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell. "
         "'deepep_moe' is deprecated and ignored (large-EP is explored automatically from data coverage).",
     )
-    parser.add_argument(
-        "--attention-backend",
-        type=str,
-        choices=["fa3", "triton", "trtllm_mha", "flashinfer", "fla", "default"],
-        default=None,
-        help="Attention kernel backend the deployment serves with (mirrors sglang --attention-backend). "
-        "Selects the matching perf-table lane; unset uses the framework default for the target system. "
-        "Currently consumed by Qwen3.5 (dense attention) and DeepSeek WideEP MLA; other models ignore "
-        "this override.",
-    )
+    _add_attention_backend_argument(parser)
 
 
 def _add_recommend_mode_arguments(parser):
@@ -754,16 +762,7 @@ def _add_recommend_mode_arguments(parser):
         help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell. "
         "'deepep_moe' is deprecated and ignored (large-EP is explored automatically from data coverage).",
     )
-    parser.add_argument(
-        "--attention-backend",
-        type=str,
-        choices=["fa3", "triton", "trtllm_mha", "flashinfer", "fla", "default"],
-        default=None,
-        help="Attention kernel backend the deployment serves with (mirrors sglang --attention-backend). "
-        "Selects the matching perf-table lane; unset uses the framework default for the target system. "
-        "Currently consumed by Qwen3.5 (dense attention) and DeepSeek WideEP MLA; other models ignore "
-        "this override.",
-    )
+    _add_attention_backend_argument(parser)
 
 
 def _add_experiments_mode_arguments(parser):
@@ -782,16 +781,7 @@ def _add_experiments_mode_arguments(parser):
             "Affects terminal output and saved CSV only; SLA filtering always uses inter-token latency."
         ),
     )
-    parser.add_argument(
-        "--attention-backend",
-        type=str,
-        choices=["fa3", "triton", "trtllm_mha", "flashinfer", "fla", "default"],
-        default=None,
-        help="Attention kernel backend the deployment serves with (mirrors sglang --attention-backend). "
-        "Selects the matching perf-table lane; unset uses the framework default for the target system. "
-        "Currently consumed by Qwen3.5 (dense attention) and DeepSeek WideEP MLA; other models ignore "
-        "this override.",
-    )
+    _add_attention_backend_argument(parser)
 
 
 def _add_generate_mode_arguments(parser):
@@ -1324,16 +1314,7 @@ def _add_estimate_mode_arguments(parser):
         "Controls how many KV blocks TRT-LLM pre-allocates per sequence. "
         "Set this to match your actual deployment to get an accurate KV cache capacity warning.",
     )
-    parser.add_argument(
-        "--attention-backend",
-        type=str,
-        choices=["fa3", "triton", "trtllm_mha", "flashinfer", "fla", "default"],
-        default=None,
-        help="Attention kernel backend the deployment serves with (mirrors sglang --attention-backend). "
-        "Selects the matching perf-table lane; unset uses the framework default for the target system. "
-        "Currently consumed by Qwen3.5 (dense attention) and DeepSeek WideEP MLA; other models ignore "
-        "this override.",
-    )
+    _add_attention_backend_argument(parser)
 
 
 def _add_support_mode_arguments(parser):

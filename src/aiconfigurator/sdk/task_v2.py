@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.attention_lanes import ATTENTION_BACKEND_CHOICES
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.models import (
     _get_model_info,
@@ -561,7 +562,11 @@ class Task:
     nextn: int | str = 0
     nextn_accepted: float | None = None
     moe_backend: str | None = None
-    attention_backend: str | None = None  # 'flashinfer' (default) or 'fa3'; only consumed by MLA models
+    # Applies to every graph with standard dense ContextAttention/GenerationAttention ops and to
+    # supported DeepSeek MLA/WideEP paths. Named support is backend/table/version-specific and fails
+    # closed; None/default uses the mapped framework default or safe default fallback. SGLang WideEP
+    # maps None/default to flashinfer and also supports fa3.
+    attention_backend: str | None = None
     wideep_num_slots: int | None = None  # EPLB slot count; defaults to num_experts when None
     gemm_quant_mode: common.GEMMQuantMode | None = None
     moe_quant_mode: common.MoEQuantMode | None = None
@@ -2145,10 +2150,9 @@ class Task:
             UnsupportedWideepConfigError specifically for wideep_* ops
             (lets callers distinguish from generic ``ValueError``).
         """
-        valid_attention_backends = ("flashinfer", "fa3", "triton", "trtllm_mha", "fla", "default")
-        if self.attention_backend is not None and self.attention_backend not in valid_attention_backends:
+        if self.attention_backend is not None and self.attention_backend not in ATTENTION_BACKEND_CHOICES:
             raise ValueError(
-                f"attention_backend must be one of {', '.join(repr(b) for b in valid_attention_backends)}, "
+                f"attention_backend must be one of {', '.join(repr(b) for b in ATTENTION_BACKEND_CHOICES)}, "
                 f"got {self.attention_backend!r}."
             )
         if self.wideep_num_slots is not None and self.wideep_num_slots <= 0:

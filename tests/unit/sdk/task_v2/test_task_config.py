@@ -11,6 +11,7 @@ prefix discipline, and the build_* helpers.
 import pytest
 
 from aiconfigurator.sdk import common
+from aiconfigurator.sdk.attention_lanes import ATTENTION_BACKEND_CHOICES
 from aiconfigurator.sdk.performance_result import MOE_COMM_FALLBACKS_COLUMN, MoECommFallback
 from aiconfigurator.sdk.task_v2 import Task
 
@@ -321,8 +322,7 @@ def test_invalid_attention_backend_rejected():
 
 def test_valid_attention_backend_choices_accepted():
     """Dense-only SGLang tasks retain the full attention-lane vocabulary."""
-    valid_choices = ["flashinfer", "fa3", "triton", "trtllm_mha", "fla", "default"]
-    for choice in valid_choices:
+    for choice in ATTENTION_BACKEND_CHOICES:
         t = Task(
             serving_mode="agg",
             model_path="meta-llama/Meta-Llama-3.1-8B",
