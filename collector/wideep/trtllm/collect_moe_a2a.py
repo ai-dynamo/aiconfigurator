@@ -57,6 +57,8 @@ SMS = 0
 
 COMM_BACKEND_HT = "trtllm_deepep_ht"
 COMM_BACKEND_LL = "trtllm_deepep_ll"
+FORMAL_SYSTEMS = frozenset({"gb200", "gb300", "b200_sxm", "b300_sxm", "h100_sxm", "h200_sxm"})
+HOPPER_SYSTEMS = frozenset({"h100_sxm", "h200_sxm"})
 FORCED_METHODS = {
     COMM_BACKEND_HT: "DEEPEP",
     COMM_BACKEND_LL: "DEEPEPLOWLATENCY",
@@ -131,6 +133,26 @@ QUANT_SPECS = {
         QuantSpec("w4afp8", "W4A8_AWQ"),
     ),
 }
+
+
+def quant_specs_for_system(backend: str, system: str | None) -> tuple[QuantSpec, ...]:
+    """Return only invocations implemented by the pinned build architecture.
+
+    TensorRT-LLM's pinned DeepEP CMake contract states that its FP4 conversion
+    instructions require SM100a, SM110a, or SM120a.  Low-latency NVFP4 combine
+    therefore cannot execute in the SM90-real H100/H200 wheels.  HT NVFP4 does
+    not use that conversion path and remains declared (and was observed by the
+    H100 runtime canary).
+    """
+
+    if backend not in QUANT_SPECS:
+        raise MoeA2ADeclarationError(f"unsupported TensorRT-LLM DeepEP backend: {backend}")
+    if system is not None and system not in FORMAL_SYSTEMS:
+        raise MoeA2ADeclarationError(f"unsupported TensorRT-LLM formal system: {system}")
+    specs = QUANT_SPECS[backend]
+    if system in HOPPER_SYSTEMS and backend == COMM_BACKEND_LL:
+        return tuple(spec for spec in specs if spec.comm_dtype != "nvfp4")
+    return specs
 
 
 @dataclass(frozen=True)
@@ -279,6 +301,7 @@ def build_case_plan(
     ep_size: int,
     node_num: int,
     modes: tuple[str, ...] = (COMM_BACKEND_HT, COMM_BACKEND_LL),
+    system: str | None = None,
 ) -> list[MoeA2ACase]:
     """Expand declared shapes/tokens and deduplicate on invocation + physical keys."""
     if not shapes:
@@ -296,7 +319,7 @@ def build_case_plan(
         for backend in modes:
             contract_for("trtllm", backend)
             token_key = "ht_token_counts" if backend == COMM_BACKEND_HT else "ll_token_counts"
-            for quant in QUANT_SPECS[backend]:
+            for quant in quant_specs_for_system(backend, system):
                 for num_tokens in token_grid[token_key]:
                     candidates.append(
                         MoeA2ACase(
@@ -941,6 +964,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Collect TensorRT-LLM serving-parity DeepEP moe_a2a rows under external MPI"
     )
     parser.add_argument("--gpus-per-node", type=int, required=True)
+    parser.add_argument("--system", choices=sorted(FORMAL_SYSTEMS), required=True)
     parser.add_argument("--modes", default=f"{COMM_BACKEND_HT},{COMM_BACKEND_LL}")
     parser.add_argument("--output-path", default=os.getcwd())
     parser.add_argument("--source-commit", required=True)
@@ -980,6 +1004,7 @@ def main(argv: list[str] | None = None) -> None:
         ep_size=identity.ep_size,
         node_num=identity.node_num,
         modes=resolve_modes(args.modes),
+        system=args.system,
     )
     if args.canary:
         cases = select_canary_cases(cases)

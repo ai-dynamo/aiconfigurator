@@ -86,6 +86,7 @@ def test_runner_is_one_node_mpi_and_preserves_failed_rows():
     assert "formal TRT-LLM campaign is single-node only" in source
     assert "--mpi=pmix" in source
     assert "python3 -m collector.wideep.trtllm.collect_moe_a2a" in source
+    assert '--system "${AIC_SYSTEM}"' in source
     assert 'staging_root="/tmp/aic-trtllm-a2a-${SLURM_JOB_ID}"' in source
     assert "benchmark_status=$?" in source
     assert "all partial rows and rank evidence preserved" in source

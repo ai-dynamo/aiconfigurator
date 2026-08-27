@@ -89,6 +89,32 @@ def test_canary_selects_every_backend_and_truthful_dtype():
     assert {case.shape.hidden_size for case in selected if case.comm_backend == a2a.COMM_BACKEND_LL} == {7168}
 
 
+@pytest.mark.parametrize("system", ["h100_sxm", "h200_sxm"])
+def test_hopper_low_latency_excludes_unsupported_nvfp4_conversion(system: str):
+    cases = a2a.build_case_plan(
+        shapes=[SHAPE],
+        token_grid=GRID,
+        ep_size=8,
+        node_num=1,
+        modes=(a2a.COMM_BACKEND_LL,),
+        system=system,
+    )
+    assert {case.quant.comm_dtype for case in cases} == {"bfloat16", "fp8", "w4afp8"}
+
+
+@pytest.mark.parametrize("system", ["gb200", "gb300", "b200_sxm", "b300_sxm"])
+def test_blackwell_low_latency_keeps_nvfp4_conversion(system: str):
+    cases = a2a.build_case_plan(
+        shapes=[SHAPE],
+        token_grid=GRID,
+        ep_size=8,
+        node_num=1,
+        modes=(a2a.COMM_BACKEND_LL,),
+        system=system,
+    )
+    assert {case.quant.comm_dtype for case in cases} == {"bfloat16", "fp8", "nvfp4", "w4afp8"}
+
+
 def test_declared_duplicate_shapes_deduplicate_on_physical_identity(capsys):
     cases = a2a.build_case_plan(
         shapes=[SHAPE, SHAPE],
