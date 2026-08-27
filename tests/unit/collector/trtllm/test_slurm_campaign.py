@@ -47,6 +47,7 @@ def test_image_stage_builds_and_attests_exact_source_runtime():
     # The pinned rc11 setup.py requires the generated ``bindings/`` stub
     # package to exist before it will build the wheel.
     assert "--skip-stubs" not in source
+    assert "srun --mpi=pmix" in source
     assert "--cuda_architectures" in source
     assert 'tensorrt_llm.__version__ == "1.3.0rc11"' in source
     assert '"wheel_sha256": wheel_sha' in source
