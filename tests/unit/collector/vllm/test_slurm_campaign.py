@@ -89,6 +89,7 @@ def test_runner_discovers_and_records_a_routable_gloo_interface():
     assert '"allocated nodes use inconsistent Gloo interface names:' in source
     assert '"gloo_socket_ifname": sys.argv[10]' in source
     assert 'export GLOO_SOCKET_IFNAME="${gloo_socket_ifname}"' in source
+    assert "export VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE=0" in source
     assert 'collector_ref=$(git -C "${repo_dir}" rev-parse HEAD)' in source
     assert 'export AIC_COLLECTOR_REF="${collector_ref}"' in source
     assert 'container_command+=" --collector-ref ${collector_ref}"' in source

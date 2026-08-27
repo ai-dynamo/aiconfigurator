@@ -474,6 +474,7 @@ class VllmBenchmarkAdapter:
         *,
         allow_mnnvl: bool = True,
         disable_nvlink: bool = False,
+        v2_allow_hybrid_mode: bool = False,
         warmups: int = 3,
         runs: int = 10,
     ):
@@ -481,6 +482,7 @@ class VllmBenchmarkAdapter:
         self.identity = identity
         self.allow_mnnvl = allow_mnnvl
         self.disable_nvlink = disable_nvlink
+        self.v2_allow_hybrid_mode = v2_allow_hybrid_mode
         self.warmups = warmups
         self.runs = runs
         self._buffer = None
@@ -753,7 +755,13 @@ class VllmBenchmarkAdapter:
                     hidden=case.shape.hidden_size,
                     num_topk=case.shape.topk,
                     use_fp8_dispatch=False,
-                    allow_hybrid_mode=True,
+                    # Mirror vLLM ee0da84's DeepEPV2All2AllManager exactly:
+                    # all2all.py:899-916 reads the pinned vLLM env setting,
+                    # whose default is false in envs.py:1749-1750.  Forcing
+                    # hybrid mode makes a single-node serving-default run
+                    # query the NCCL railed GIN path instead of the full GIN
+                    # path and is not serving parity.
+                    allow_hybrid_mode=self.v2_allow_hybrid_mode,
                     prefer_overlap_with_compute=False,
                     allow_multiple_reduction=False,
                     explicitly_destroy=True,
@@ -935,6 +943,19 @@ def _observe_live_backend_abi(backend: str) -> dict[str, str]:
         "deep_ep_import": str(Path(deep_ep.__file__).resolve()),
         "nccl": nccl_version,
     }
+
+
+def _observe_vllm_v2_allow_hybrid_mode() -> bool:
+    """Read the DeepEP V2 transport setting from the pinned vLLM runtime."""
+
+    from vllm import envs as vllm_envs
+
+    value = vllm_envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE
+    if not isinstance(value, bool):
+        raise VllmMoeA2ADeclarationError(
+            f"vLLM VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE must resolve to bool, observed {value!r}"
+        )
+    return value
 
 
 def _file_sha256(path: Path) -> str:
@@ -1289,11 +1310,16 @@ def main(argv: list[str] | None = None) -> None:
         observed_image_digest=args.image_digest,
         observed_image_variant=args.image_variant,
     )
+    v2_allow_hybrid_mode = False
+    if backends[0] == "deepep_v2":
+        v2_allow_hybrid_mode = _observe_vllm_v2_allow_hybrid_mode()
     runtime_meta["transport"] = {
         "allow_mnnvl": args.allow_mnnvl,
         "allow_nvlink": not args.disable_nvlink,
         "failure_agreement": "gloo_cpu",
     }
+    if backends[0] == "deepep_v2":
+        runtime_meta["transport"]["v2_allow_hybrid_mode"] = v2_allow_hybrid_mode
     group, agreement_group = _init_process_groups(identity)
     output_dir = Path(args.output_path)
     print(
@@ -1337,6 +1363,7 @@ def main(argv: list[str] | None = None) -> None:
             identity,
             allow_mnnvl=args.allow_mnnvl,
             disable_nvlink=args.disable_nvlink,
+            v2_allow_hybrid_mode=v2_allow_hybrid_mode,
         )
         result = collect_with_adapter(
             cases,

@@ -592,6 +592,10 @@ export MASTER_ADDR="${master_addr}"
 export MASTER_PORT="${MASTER_PORT:-29500}"
 export GLOO_SOCKET_IFNAME="${gloo_socket_ifname}"
 export VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL=1
+# Pinned vLLM ee0da84 defaults DeepEP V2 hybrid mode off.  Keep the formal
+# single-node campaign explicit so its NCCL GIN selection is auditable and
+# cannot inherit a login or cluster environment override.
+export VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE=0
 export AIC_STAGING_ROOT="${staging_root}"
 export AIC_REPO_DIR="${repo_dir}"
 export AIC_OUTPUT_DIR="${output_dir}"

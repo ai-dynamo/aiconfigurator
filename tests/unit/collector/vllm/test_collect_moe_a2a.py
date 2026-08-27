@@ -872,7 +872,7 @@ def test_exact_vllm_prepare_finalize_classes_and_calls_are_present():
     assert "prepare_finalize.prepare(" in SOURCE
     assert "prepare_finalize.finalize(" in SOURCE
     assert "deep_ep.ElasticBuffer(" in SOURCE
-    assert "allow_hybrid_mode=True" in SOURCE
+    assert "allow_hybrid_mode=self.v2_allow_hybrid_mode" in SOURCE
     assert "get_theoretical_num_sms(" in SOURCE
     assert 'backend="nccl"' in SOURCE
     assert SOURCE.index('elif case.comm_backend == "deepep_v2":') < SOURCE.index(
@@ -888,3 +888,29 @@ def test_v2_is_never_silently_skipped():
     assert "_record_capability(" in v2_body
     assert "continue" not in v2_body
     assert "query_nccl_gin_type" not in SOURCE
+
+
+def test_v2_hybrid_mode_observes_pinned_vllm_runtime(monkeypatch):
+    class FakeVllmEnvs:
+        VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE = False
+
+    fake_vllm = type("FakeVllm", (), {"envs": FakeVllmEnvs})
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+    assert a2a._observe_vllm_v2_allow_hybrid_mode() is False
+
+    FakeVllmEnvs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE = True
+    assert a2a._observe_vllm_v2_allow_hybrid_mode() is True
+
+
+def test_v2_adapter_defaults_to_serving_default_hybrid_mode_off():
+    identity = a2a.DistIdentity(
+        rank=0,
+        local_rank=0,
+        world_size=8,
+        node_num=1,
+        gpus_per_node=8,
+        master_addr="localhost",
+        master_port=29500,
+    )
+    adapter = a2a.VllmBenchmarkAdapter(group=None, identity=identity)
+    assert adapter.v2_allow_hybrid_mode is False
