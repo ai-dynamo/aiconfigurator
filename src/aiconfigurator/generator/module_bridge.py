@@ -124,6 +124,7 @@ def task_config_to_generator_config(
         and (_num_images is None or _num_images > 0)
     ):
         encoder_dp = bool(getattr(task_config, "enable_encoder_dp", True))
+    attention_backend = getattr(task_config, "attention_backend", None)
 
     def _build_worker_params(prefix: str, extra_overrides: dict | None) -> tuple[dict, int]:
         workers = _safe_int(_series_val(result_df, f"{prefix}workers", 1), 1)
@@ -160,6 +161,8 @@ def task_config_to_generator_config(
             worker_payload["kv_cache_dtype"] = quant["kvcache_quant_mode"]
         if encoder_dp is not None:
             worker_payload["enable_encoder_dp"] = encoder_dp
+        if attention_backend is not None:
+            worker_payload["attention_backend"] = attention_backend
 
         worker_payload = _deep_merge(worker_payload, extra_overrides)
         return worker_payload, max(workers, 1)
