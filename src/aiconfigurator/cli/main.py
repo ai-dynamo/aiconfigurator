@@ -1506,7 +1506,17 @@ def _ensure_backend_version_available(
         raise SystemExit(1)
 
     versions = supported.get(system_name, {}).get(backend_name, [])
-    backend_version = _resolve_version_for_matching(system_name, backend_name, backend_version)
+    if backend_version in ("current", "previous", "next"):
+        # An alias that fails to resolve deserves the alias-specific error
+        # ("has no 'previous' version; available slots: ..."), not the
+        # generic missing-directory guidance that circularly suggests aliases.
+        try:
+            backend_version = perf_database.resolve_query_version(system_name, backend_name, backend_version)
+        except ValueError as e:
+            logger.error("%s", e)
+            raise SystemExit(1) from e
+    else:
+        backend_version = _resolve_version_for_matching(system_name, backend_name, backend_version)
     if backend_version is None or backend_version in versions:
         return
 
