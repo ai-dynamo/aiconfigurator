@@ -165,6 +165,14 @@ def task_config_to_generator_config(
             worker_payload["attention_backend"] = attention_backend
 
         worker_payload = _deep_merge(worker_payload, extra_overrides)
+        effective_attention_backend = worker_payload.get("attention_backend")
+        if effective_attention_backend == "default":
+            worker_payload.pop("attention_backend")
+        elif task_config.primary_backend_name == "sglang" and effective_attention_backend == "fla":
+            raise ValueError(
+                f"SGLang {task_config.primary_backend_version} rejects attention_backend='fla'; "
+                "use 'default' to let SGLang choose its attention backend or select a supported named backend."
+            )
         return worker_payload, max(workers, 1)
 
     backend_name = task_config.primary_backend_name

@@ -101,6 +101,41 @@ def test_explicit_worker_override_wins_for_its_role():
     assert result["params"]["decode"]["attention_backend"] == "fa3"
 
 
+def test_worker_default_override_clears_task_attention_backend_for_its_role():
+    row = pd.Series(
+        {
+            "(p)workers": 1,
+            "(p)tp": 1,
+            "(p)pp": 1,
+            "(p)dp": 1,
+            "(p)bs": 8,
+            "(d)workers": 1,
+            "(d)tp": 1,
+            "(d)pp": 1,
+            "(d)dp": 1,
+            "(d)bs": 64,
+        }
+    )
+    params = task_config_to_generator_config(
+        _task(serving_mode="disagg"),
+        row,
+        generator_overrides={"Workers": {"prefill": {"attention_backend": "default"}}},
+        num_gpus_per_node=4,
+    )
+
+    artifacts = generate_backend_artifacts(
+        params,
+        "sglang",
+        backend_version="0.5.14",
+        deployment_target="dynamo-j2",
+    )
+
+    assert "attention_backend" not in params["params"]["prefill"]
+    assert params["params"]["decode"]["attention_backend"] == "fa3"
+    assert "--attention-backend" not in shlex.split(artifacts["cli_args_prefill"])
+    assert _flag_value(artifacts["cli_args_decode"], "--attention-backend") == "fa3"
+
+
 def test_sglang_artifact_uses_task_attention_backend():
     row = pd.Series({"workers": 1, "tp": 1, "pp": 1, "dp": 1, "bs": 64})
     params = task_config_to_generator_config(_task(), row, num_gpus_per_node=4)
@@ -132,6 +167,70 @@ def test_unset_attention_backend_is_omitted():
 
     assert "attention_backend" not in params["params"]["agg"]
     assert "--attention-backend" not in shlex.split(artifacts["cli_args_agg"])
+
+
+def test_task_default_attention_backend_is_omitted_for_aggregate_worker():
+    row = pd.Series({"workers": 1, "tp": 1, "pp": 1, "dp": 1, "bs": 64})
+    params = task_config_to_generator_config(
+        _task(attention_backend="default"),
+        row,
+        num_gpus_per_node=4,
+    )
+
+    artifacts = generate_backend_artifacts(
+        params,
+        "sglang",
+        backend_version="0.5.14",
+        deployment_target="dynamo-j2",
+    )
+
+    assert "attention_backend" not in params["params"]["agg"]
+    assert "--attention-backend" not in shlex.split(artifacts["cli_args_agg"])
+
+
+def test_task_default_attention_backend_is_omitted_for_disaggregated_workers():
+    row = pd.Series(
+        {
+            "(p)workers": 1,
+            "(p)tp": 1,
+            "(p)pp": 1,
+            "(p)dp": 1,
+            "(p)bs": 8,
+            "(d)workers": 1,
+            "(d)tp": 1,
+            "(d)pp": 1,
+            "(d)dp": 1,
+            "(d)bs": 64,
+        }
+    )
+    params = task_config_to_generator_config(
+        _task(serving_mode="disagg", attention_backend="default"),
+        row,
+        num_gpus_per_node=4,
+    )
+
+    artifacts = generate_backend_artifacts(
+        params,
+        "sglang",
+        backend_version="0.5.14",
+        deployment_target="dynamo-j2",
+    )
+
+    assert "attention_backend" not in params["params"]["prefill"]
+    assert "attention_backend" not in params["params"]["decode"]
+    assert "--attention-backend" not in shlex.split(artifacts["cli_args_prefill"])
+    assert "--attention-backend" not in shlex.split(artifacts["cli_args_decode"])
+
+
+def test_sglang_fla_attention_backend_is_rejected():
+    row = pd.Series({"workers": 1, "tp": 1, "pp": 1, "dp": 1, "bs": 64})
+
+    with pytest.raises(ValueError, match=r"SGLang 0\.5\.14.*attention_backend='fla'"):
+        task_config_to_generator_config(
+            _task(attention_backend="fla"),
+            row,
+            num_gpus_per_node=4,
+        )
 
 
 @pytest.mark.parametrize(
