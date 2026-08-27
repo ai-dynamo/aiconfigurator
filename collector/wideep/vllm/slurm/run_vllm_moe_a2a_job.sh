@@ -124,10 +124,11 @@ collector_ref=$(git -C "${repo_dir}" rev-parse HEAD)
 [[ "${CONTAINER_IMAGE}" == /* ]] || die "formal benchmark requires a locally staged image"
 container_image=$(safe_existing_path "container image" "${CONTAINER_IMAGE}")
 container_image_meta=$(safe_existing_path "container image metadata" "${container_image}.meta.json")
-python3 - "${container_image}" "${container_image_meta}" "${IMAGE_INDEX_DIGEST}" \
+image_metadata_migration_json=$(python3 - "${container_image}" "${container_image_meta}" "${IMAGE_INDEX_DIGEST}" \
     "${IMAGE_DIGEST}" "${IMAGE_VARIANT}" <<'PY'
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -150,7 +151,35 @@ with image.open("rb") as stream:
         observed.update(chunk)
 if payload.get("sqsh_sha256") != observed.hexdigest():
     raise SystemExit("local container squashfs checksum mismatch")
+provenance = payload.get("metadata_migration")
+reference_mode = payload.get("image_reference_mode")
+if provenance is None:
+    if reference_mode != "enroot-3.4-index-digest":
+        raise SystemExit(f"unmigrated local container has invalid reference mode {reference_mode!r}")
+    print("")
+else:
+    if not isinstance(provenance, dict) or reference_mode != "attested-schema1-migration":
+        raise SystemExit("invalid local container metadata migration provenance")
+    checks = {
+        "migration_type": "vllm-image-metadata-schema1-to-schema2",
+        "source_schema_version": 2,
+        "destination_schema_version": 1,
+        "source_configured_image_digest": expected_index,
+        "source_observed_image_digest": expected_child,
+        "destination_source_image_digest": expected_child,
+        "destination_sqsh_sha256": observed.hexdigest(),
+    }
+    for key, expected in checks.items():
+        if provenance.get(key) != expected:
+            raise SystemExit(
+                f"local container migration {key} mismatch: {provenance.get(key)!r} != {expected!r}"
+            )
+    for key in ("source_metadata_sha256", "source_sqsh_sha256", "destination_metadata_sha256"):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(provenance.get(key, ""))):
+            raise SystemExit(f"local container migration has invalid {key}")
+    print(json.dumps(provenance, sort_keys=True, separators=(",", ":")))
 PY
+)
 [[ "${IMAGE_INDEX_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid IMAGE_INDEX_DIGEST"
 [[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid IMAGE_DIGEST"
 case "${IMAGE_VARIANT}" in linux/amd64|linux/arm64) ;; *) die "invalid IMAGE_VARIANT" ;; esac
@@ -416,7 +445,8 @@ runtime_abi_json=$(
     python3 - "${RUNTIME_ABI_JSON}" "${SYSTEM}" "${fabric_identity}" "${gpu_name}" \
         "${driver_version}" "${compute_capability}" "${rdma_device_count_min}" \
         "${cross_node_nvlink_capable}" "${nvlink_topology_sha256}" "${gloo_socket_ifname}" \
-        "${ibstat_loader_basename}" "${ibstat_bundle_sha256}" "${ibstat_mlx5_0_rate_gbps:-}" <<'PY'
+        "${ibstat_loader_basename}" "${ibstat_bundle_sha256}" "${ibstat_mlx5_0_rate_gbps:-}" \
+        "${image_metadata_migration_json}" <<'PY'
 import json
 import sys
 
@@ -439,6 +469,8 @@ if sys.argv[11]:
     payload["ibstat_loader"] = sys.argv[11]
     payload["ibstat_bundle_sha256"] = sys.argv[12]
     payload["ibstat_mlx5_0_rate_gbps"] = sys.argv[13]
+if sys.argv[14]:
+    payload["image_metadata_migration"] = json.loads(sys.argv[14])
 print(json.dumps(payload, separators=(",", ":")))
 PY
 )

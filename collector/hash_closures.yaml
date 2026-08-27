@@ -244,6 +244,7 @@ collector.wideep.vllm.collect_moe_a2a:
   - collector/wideep/vllm/patches/deepep_73b_nvl4.patch
   - collector/wideep/vllm/slurm/run_vllm_image_stage_job.sh
   - collector/wideep/vllm/slurm/submit_vllm_image_stage.sh
+  - collector/wideep/vllm/runtime_artifacts.py
   - collector/wideep/vllm/finalize_campaign.py
   - collector/wideep/sglang/collect_moe_a2a.py
   - __model_cases__

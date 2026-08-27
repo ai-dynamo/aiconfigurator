@@ -79,6 +79,13 @@ def test_runner_never_publishes_a_failed_case_plan():
     assert "known_framework_limit" not in source
 
 
+def test_runner_validates_and_propagates_image_metadata_migration():
+    source = RUNNER.read_text(encoding="utf-8")
+    assert 'reference_mode != "attested-schema1-migration"' in source
+    assert '"source_metadata_sha256", "source_sqsh_sha256", "destination_metadata_sha256"' in source
+    assert 'payload["image_metadata_migration"] = json.loads(sys.argv[14])' in source
+
+
 def test_runner_discovers_and_records_a_routable_gloo_interface():
     source = RUNNER.read_text(encoding="utf-8")
     assert 'export AIC_GLOO_ROUTE_PROBE_NODES="${allocated_nodes[*]}"' in source
@@ -156,6 +163,7 @@ def test_vllm_collector_hash_closure_includes_campaign_pipeline():
     assert "collector/wideep/vllm/patches/deepep_73b_nvl4.patch" in closure
     assert "collector/wideep/vllm/slurm/run_vllm_image_stage_job.sh" in closure
     assert "collector/wideep/vllm/slurm/submit_vllm_image_stage.sh" in closure
+    assert "collector/wideep/vllm/runtime_artifacts.py" in closure
 
 
 def test_backend_overlay_build_is_exact_and_separate_from_formal_data():
