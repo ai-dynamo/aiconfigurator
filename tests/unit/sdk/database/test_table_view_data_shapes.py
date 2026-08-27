@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import copy
 import pickle
+import weakref
 from pathlib import Path
 
 import pyarrow as pa
@@ -490,6 +491,46 @@ def test_attention_density_cache_separates_attributes_and_refetches_after_genera
         "_generation_attention_data",
         "_context_attention_data",
     ]
+
+
+def test_store_loaded_database_refreshes_same_path_attention_probes(systems_root: Path) -> None:
+    """Publishing a freshly loaded database after an in-place parquet update
+    must evict the Rust probe snapshot and every generation-tagged Python memo."""
+    from aiconfigurator_core.sdk import engine, engine_table_view, perf_database
+
+    rel = "data/h100_sxm/attention/trtllm/1.0.0/context_attention_perf.parquet"
+    old_columns = _attention_columns([0])
+    old_columns["kernel_source"] = ["fa3"]
+    _write_parquet(systems_root, rel, old_columns)
+
+    retained_database = _build_db(systems_root)
+    assert engine_table_view.fetch_attention_lane_density(retained_database, "_context_attention_data") == {
+        "fa3": (1, 1)
+    }
+    old_handle = weakref.ref(engine_table_view._probe_engine_handle(retained_database))
+    assert old_handle() is not None
+    old_generation = engine._PROBE_CACHE_GENERATION
+
+    new_columns = _attention_columns([0])
+    new_columns["kernel_source"] = ["triton"]
+    _write_parquet(systems_root, rel, new_columns)
+    replacement = _build_db(systems_root)
+    loaded_databases = perf_database._new_database_dict()
+    ref = ("h100_sxm", "trtllm", "1.0.0", str(systems_root))
+
+    perf_database._store_loaded_database(loaded_databases, ref, replacement)
+
+    assert old_generation + 1 == engine._PROBE_CACHE_GENERATION
+    assert engine._PROBE_HANDLE_CACHE == {}
+    assert old_handle() is None
+    installed = loaded_databases["h100_sxm"]["trtllm"]["1.0.0"]
+    assert installed is replacement
+    assert engine_table_view.fetch_attention_lane_density(installed, "_context_attention_data") == {"triton": (1, 1)}
+    replacement_handle = engine_table_view._probe_engine_handle(installed)
+    assert engine_table_view.fetch_attention_lane_density(retained_database, "_context_attention_data") == {
+        "triton": (1, 1)
+    }
+    assert engine_table_view._probe_engine_handle(retained_database) is replacement_handle
 
 
 def _gemm_columns(latency: float) -> dict[str, list]:

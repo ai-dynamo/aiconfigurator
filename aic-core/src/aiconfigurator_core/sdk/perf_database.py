@@ -1585,7 +1585,11 @@ def _store_loaded_database(
 ) -> None:
     system, backend, version, systems_root = ref
     # A worker result may replace an existing root object for this data key.
-    # Drop configured copies keyed by the old root so they cannot accumulate.
+    # Evict probe snapshots before publishing that replacement, and drop
+    # configured copies keyed by the old root so they cannot accumulate.
+    from aiconfigurator_core.sdk import engine
+
+    engine._clear_probe_handle_cache()
     _cached_configured_database_view.cache_clear()
     database_dict[system][backend][version] = database
     # get_all_databases() constructs the default (shared-enabled) view. Preserve
