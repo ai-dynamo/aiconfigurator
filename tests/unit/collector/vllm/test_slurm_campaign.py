@@ -83,7 +83,8 @@ def test_runner_validates_and_propagates_image_metadata_migration():
     source = RUNNER.read_text(encoding="utf-8")
     assert 'reference_mode != "attested-schema1-migration"' in source
     assert '"source_metadata_sha256", "source_sqsh_sha256", "destination_metadata_sha256"' in source
-    assert 'payload["image_metadata_migration"] = json.loads(sys.argv[14])' in source
+    assert 'payload["image_metadata_migration"] = json.dumps(' in source
+    assert 'json.loads(sys.argv[14]), sort_keys=True, separators=(",", ":")' in source
 
 
 def test_runner_discovers_and_records_a_routable_gloo_interface():

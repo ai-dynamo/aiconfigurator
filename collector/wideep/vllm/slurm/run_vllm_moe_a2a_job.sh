@@ -470,7 +470,13 @@ if sys.argv[11]:
     payload["ibstat_bundle_sha256"] = sys.argv[12]
     payload["ibstat_mlx5_0_rate_gbps"] = sys.argv[13]
 if sys.argv[14]:
-    payload["image_metadata_migration"] = json.loads(sys.argv[14])
+    # The collector's observed-ABI contract is deliberately flat and all
+    # values must be strings.  Preserve the structured migration provenance
+    # as canonical JSON instead of injecting a nested object that the
+    # collector must reject before benchmarking.
+    payload["image_metadata_migration"] = json.dumps(
+        json.loads(sys.argv[14]), sort_keys=True, separators=(",", ":")
+    )
 print(json.dumps(payload, separators=(",", ":")))
 PY
 )
