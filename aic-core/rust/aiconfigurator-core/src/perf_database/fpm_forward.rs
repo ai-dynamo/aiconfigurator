@@ -152,10 +152,10 @@ struct LoadedPair {
     /// extrapolation.
     replaced_fake_fallback: u64,
     /// Fake-fallback rows KEPT with their original (untrusted) latency
-    /// because their station had fewer than two `real_kv` anchors (or the
-    /// extrapolated value was not finite/positive) — the proposal's
-    /// keep-and-warn case, or every fake row when the raw escape hatch is
-    /// on.
+    /// because their station had fewer than two `real_kv` anchors below the
+    /// fake row's kv coordinate (or the extrapolated value was not
+    /// finite/positive) — the proposal's keep-and-warn case, or every fake
+    /// row when the raw escape hatch is on.
     kept_fake_fallback: u64,
 }
 
@@ -248,10 +248,10 @@ impl FpmForwardTable {
     }
 
     /// How many fake-fallback rows KEPT their original untrusted latency —
-    /// the <2-anchor keep-and-warn tally (every fake row when the raw
-    /// escape hatch is on). A non-zero value under default semantics is the
-    /// warning the proposal requires; callers surfacing load reports should
-    /// print it.
+    /// the fewer-than-two-anchors-below keep-and-warn tally (every fake row
+    /// when the raw escape hatch is on). A non-zero value under default
+    /// semantics is the warning the proposal requires; callers surfacing
+    /// load reports should print it.
     pub fn kept_fake_fallback_rows(&self) -> Result<u64, AicError> {
         Ok(self.loaded()?.kept_fake_fallback)
     }
@@ -760,17 +760,22 @@ fn load_pair(
 
     // ---- fake-fallback healing (R17) ----
     // For every decode row marked `fake_fallback`, linearly extrapolate from
-    // the same station's (same cell key, same batch rung) last two `real_kv`
-    // rows — sorted by kv, the top two — to the fake row's kv coordinate,
-    // and overwrite its latency in memory. Rows, coordinates, the grid, and
-    // the domain gate are untouched; the parquet keeps the original
-    // measurement + marker (audit chain). Same-node A/B (5,524 votes):
-    // serving fake values scored top-band MAPE tep4 29.8% / tp4 42.6% /
-    // tp2 11.9%; the healed values score 2.34% / 0.34% / 2.71%.
-    // A station with fewer than two anchors (or a non-finite/non-positive
-    // extrapolation, or a fake marker on a non-decode row) keeps its
-    // original value and is tallied in `kept_fake_fallback` — the
-    // keep-and-warn case; zero occurrences across all measured shapes.
+    // the same station's (same cell key, same batch rung) two highest
+    // `real_kv` rows STRICTLY BELOW the fake row's kv coordinate, and
+    // overwrite its latency in memory. Below-only anchoring matches the
+    // Python loader (`FPM_REPLACE_FAKE_EXTRAP`): a fake rung is only ever a
+    // forward extension of the real curve beneath it, never back-extrapolated
+    // from real rows above it. Rows, coordinates, the grid, and the domain
+    // gate are untouched; the parquet keeps the original measurement + marker
+    // (audit chain). Same-node A/B (5,524 votes): serving fake values scored
+    // top-band MAPE tep4 29.8% / tp4 42.6% / tp2 11.9%; the healed values
+    // score 2.34% / 0.34% / 2.71% (every R17 fake rung is its station's kv
+    // top, where below-only and station-top-two anchors coincide).
+    // A station with fewer than two anchors below the fake row (or a
+    // non-finite/non-positive extrapolation, or a fake marker on a
+    // non-decode row) keeps its original value and is tallied in
+    // `kept_fake_fallback` — the keep-and-warn case; zero occurrences across
+    // all measured shapes.
     let mut replaced_fake_fallback: u64 = 0;
     let mut kept_fake_fallback: u64 = 0;
     if !replace_fake_fallback {
@@ -798,9 +803,13 @@ fn load_pair(
             let mut healed = None;
             if row.workload_kind == "decode" {
                 if let Some(list) = anchors.get(&(row.cell_key(), row.batch_size)) {
-                    if list.len() >= 2 {
-                        let (k1, l1) = list[list.len() - 2];
-                        let (k2, l2) = list[list.len() - 1];
+                    // Anchors strictly below the fake rung (the list is
+                    // kv-sorted; the collision check above guarantees no
+                    // anchor shares the fake row's kv coordinate).
+                    let below = list.partition_point(|&(kv, _)| kv < row.total_kv_read_tokens);
+                    if below >= 2 {
+                        let (k1, l1) = list[below - 2];
+                        let (k2, l2) = list[below - 1];
                         let slope = (l2 - l1) / (f64::from(k2) - f64::from(k1));
                         let value =
                             l2 + (f64::from(row.total_kv_read_tokens) - f64::from(k2)) * slope;
@@ -1765,6 +1774,49 @@ pub(crate) mod tests {
         assert_eq!(table.kept_fake_fallback_rows().unwrap(), 1);
     }
 
+    /// A fake rung that is NOT its station's kv top anchors on the two
+    /// `real_kv` rows strictly BELOW it — never back-extrapolated from the
+    /// reals above — and a fake rung with fewer than two reals beneath it
+    /// keeps its value. This pins the below-filter semantics shared with the
+    /// Python loader (`FPM_REPLACE_FAKE_EXTRAP`).
+    #[test]
+    fn non_top_fake_rung_anchors_strictly_below_never_backward() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let mk = |kv: u32, lat: f64, seed: &'static str| RowSpec {
+            workload_kind: "decode",
+            batch_size: 2,
+            total_prefill_tokens: 0,
+            total_kv_read_tokens: kv,
+            latency_ms: lat,
+            kv_seed_regime: Some(seed),
+            ..RowSpec::default()
+        };
+        let rows = vec![
+            mk(1024, 5.0, FPM_KV_SEED_REAL_KV),
+            mk(2048, 8.0, FPM_KV_SEED_REAL_KV),
+            mk(4096, 12.0, FPM_KV_SEED_REAL_KV),
+            // Mid-curve fake: heals from (1024, 2048) below it. Backward
+            // anchoring on the station's top two (2048, 4096) would answer
+            // 10.0 instead.
+            mk(3072, 99.0, FPM_KV_SEED_FAKE_FALLBACK),
+            // Only one real below -> keep-and-warn, not back-extrapolated.
+            mk(1536, 6.6, FPM_KV_SEED_FAKE_FALLBACK),
+        ];
+        write_pair(tmp.path(), &rows);
+        let table = loaded_table(tmp.path());
+        let cells = table.cells().expect("must load");
+        let curves = decode_curves(&cells[0].decode);
+        let healed = 8.0 + (3072.0 - 2048.0) * ((8.0 - 5.0) / (2048.0 - 1024.0));
+        assert_eq!(healed, 11.0);
+        assert_eq!(curves[&2][&3072], healed);
+        assert_eq!(curves[&2][&1536], 6.6);
+        assert_eq!(curves[&2][&1024], 5.0);
+        assert_eq!(curves[&2][&2048], 8.0);
+        assert_eq!(curves[&2][&4096], 12.0);
+        assert_eq!(table.replaced_fake_fallback_rows().unwrap(), 1);
+        assert_eq!(table.kept_fake_fallback_rows().unwrap(), 1);
+    }
+
     /// Opt-in replay against a real collected pair (skipped in CI): point
     /// `AIC_FPM_R17_PAIR_DIR` at a directory holding an R17-style
     /// `fpm_forward_perf.parquet` + sidecar (h200_sxm / vllm / 0.25.1) and
@@ -1811,9 +1863,12 @@ pub(crate) mod tests {
                         continue;
                     }
                     checked += 1;
-                    assert!(anchors.len() >= 2, "batch {batch}: <2 anchors");
-                    let (k1, l1) = anchors[anchors.len() - 2];
-                    let (k2, l2) = anchors[anchors.len() - 1];
+                    // Below-only anchoring: the two highest anchors strictly
+                    // below the healed row's kv coordinate.
+                    let below = anchors.partition_point(|&(akv, _)| akv < kv);
+                    assert!(below >= 2, "batch {batch} kv {kv}: <2 anchors below");
+                    let (k1, l1) = anchors[below - 2];
+                    let (k2, l2) = anchors[below - 1];
                     let slope = (l2 - l1) / (f64::from(k2) - f64::from(k1));
                     let expect = l2 + (f64::from(kv) - f64::from(k2)) * slope;
                     assert_eq!(hv, expect, "batch {batch} kv {kv}");
