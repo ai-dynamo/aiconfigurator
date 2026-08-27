@@ -104,6 +104,12 @@ def test_runner_is_one_node_mpi_and_preserves_failed_rows():
     assert 'payload["seed_provenance"] = seed' in source
     assert "runtime dependency wheel set mismatch" in source
     assert '--no-index --find-links "${AIC_DEPENDENCY_DIR}"' in source
+    assert 'AIC_CACHE_ROOT="${staging_root}/rank-cache"' in source
+    assert 'HOME="${rank_cache}/home"' in source
+    assert 'XDG_CACHE_HOME="${rank_cache}/xdg"' in source
+    assert 'HF_HOME="${rank_cache}/huggingface"' in source
+    assert 'FLASHINFER_WORKSPACE_DIR="${rank_cache}/flashinfer"' in source
+    assert 'TRITON_CACHE_DIR="${rank_cache}/triton"' in source
     assert 'touch "${destination}/SUCCESS"' in source
     assert "/mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*" in source
 
