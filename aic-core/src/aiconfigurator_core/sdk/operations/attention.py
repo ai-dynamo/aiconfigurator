@@ -147,9 +147,10 @@ def resolved_lane_order_for_op(database, table_attr: str, override: str | None =
     serialization; it is NOT reachable from the op's own ``__init__``.
 
     ``table_attr`` is ``"_context_attention_data"`` or
-    ``"_generation_attention_data"``. With no resolvable database (or any
-    resolution failure) the always-valid ``["default"]`` is returned — the
-    engine spec must never carry an empty lane list.
+    ``"_generation_attention_data"``. With no database, an unset or literal
+    ``"default"`` override returns the always-valid ``["default"]``; a named
+    override raises because it cannot be verified without database metadata.
+    The engine spec must never carry an empty lane list.
 
     Table-aware extension (donor/leftover-lane density ranking) fires ONLY
     when there is EVIDENCE of intent — an explicit *override* (a non-empty
@@ -172,6 +173,10 @@ def resolved_lane_order_for_op(database, table_attr: str, override: str | None =
     ``["default"]``, with a WARNING so the fallback remains observable.
     """
     if database is None:
+        if override not in (None, "default"):
+            raise UnsupportedAttentionBackendError(
+                f"attention_backend={override!r} cannot be resolved without an attention performance database"
+            )
         return ["default"]
     try:
         order = resolve_lane_order(database, override)

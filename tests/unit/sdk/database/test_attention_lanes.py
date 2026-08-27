@@ -471,6 +471,28 @@ def test_unsupported_backend_override_pairs_are_rejected_not_donor_served(lane_s
     assert is_expected_cli_error(excinfo.value), "must surface as a concise CLI error, not a traceback"
 
 
+def test_explicit_override_without_database_is_rejected():
+    """A missing database cannot silently discard an explicit lane choice."""
+    from aiconfigurator_core.sdk.errors import UnsupportedAttentionBackendError, is_expected_cli_error
+    from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
+
+    with pytest.raises(
+        UnsupportedAttentionBackendError,
+        match=r"attention_backend='fa3'.*database",
+    ) as excinfo:
+        resolved_lane_order_for_op(None, "_context_attention_data", "fa3")
+
+    assert is_expected_cli_error(excinfo.value)
+
+
+@pytest.mark.parametrize("override", [None, "default"], ids=["unset", "default"])
+def test_non_specific_override_without_database_uses_default_lane(override):
+    """Only non-specific intent may use the database-free safe fallback."""
+    from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
+
+    assert resolved_lane_order_for_op(None, "_context_attention_data", override) == ["default"]
+
+
 def test_explicit_override_propagates_unexpected_density_resolution_failure(lane_systems_root, monkeypatch):
     """Unexpected resolver failures must not silently discard user intent."""
     import aiconfigurator_core.sdk.engine_table_view as engine_table_view

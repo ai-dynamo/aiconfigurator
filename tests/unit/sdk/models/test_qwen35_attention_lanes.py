@@ -78,9 +78,8 @@ def test_attention_backend_reaches_both_attention_ops():
     order once ``build_engine_spec_json`` resolves it against a real database
     (context AND generation, not just one side) — the modern equivalent of the
     retired per-op ``_attention_backend`` attribute check. A database is
-    required: resolution reads backend/version/sm_version/systems_root off it
-    (``database=None`` always yields the always-valid ``["default"]``, override
-    or not — see the no-override twin below)."""
+    required: resolution reads backend/version/sm_version/systems_root off it;
+    without one, a named override is rejected rather than silently discarded."""
     from aiconfigurator.sdk.perf_database import get_database
     from aiconfigurator_core.sdk.engine import _resolve_attention_lane_orders
 
