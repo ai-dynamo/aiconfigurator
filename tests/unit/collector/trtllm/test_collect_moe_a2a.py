@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -60,7 +61,6 @@ def test_case_plan_uses_distinct_trtllm_backend_and_dtype_keys():
         "bfloat16",
         "fp8",
         "nvfp4",
-        "w4afp8",
     }
     assert all(case.sms == 0 for case in cases)
     assert len({case.invocation_key() for case in cases}) == len(cases)
@@ -82,15 +82,14 @@ def test_canary_selects_every_backend_and_truthful_dtype():
         ("trtllm_deepep_ll", "bfloat16"),
         ("trtllm_deepep_ll", "fp8"),
         ("trtllm_deepep_ll", "nvfp4"),
-        ("trtllm_deepep_ll", "w4afp8"),
     }
-    assert len(selected) == 6
+    assert len(selected) == 5
     assert {case.shape.hidden_size for case in selected if case.comm_backend == a2a.COMM_BACKEND_HT} == {3072}
     assert {case.shape.hidden_size for case in selected if case.comm_backend == a2a.COMM_BACKEND_LL} == {7168}
 
 
 @pytest.mark.parametrize("system", ["h100_sxm", "h200_sxm"])
-def test_hopper_low_latency_excludes_unsupported_nvfp4_conversion(system: str):
+def test_hopper_low_latency_excludes_unsupported_nvfp4_and_w4(system: str):
     cases = a2a.build_case_plan(
         shapes=[SHAPE],
         token_grid=GRID,
@@ -99,11 +98,11 @@ def test_hopper_low_latency_excludes_unsupported_nvfp4_conversion(system: str):
         modes=(a2a.COMM_BACKEND_LL,),
         system=system,
     )
-    assert {case.quant.comm_dtype for case in cases} == {"bfloat16", "fp8", "w4afp8"}
+    assert {case.quant.comm_dtype for case in cases} == {"bfloat16", "fp8"}
 
 
 @pytest.mark.parametrize("system", ["gb200", "gb300", "b200_sxm", "b300_sxm"])
-def test_blackwell_low_latency_keeps_nvfp4_conversion(system: str):
+def test_blackwell_low_latency_keeps_nvfp4_but_excludes_unsupported_w4(system: str):
     cases = a2a.build_case_plan(
         shapes=[SHAPE],
         token_grid=GRID,
@@ -112,7 +111,39 @@ def test_blackwell_low_latency_keeps_nvfp4_conversion(system: str):
         modes=(a2a.COMM_BACKEND_LL,),
         system=system,
     )
-    assert {case.quant.comm_dtype for case in cases} == {"bfloat16", "fp8", "nvfp4", "w4afp8"}
+    assert {case.quant.comm_dtype for case in cases} == {"bfloat16", "fp8", "nvfp4"}
+
+
+@pytest.mark.parametrize(
+    ("system", "ep_size", "hidden_3072_cases", "hidden_6144_fp8_cases"),
+    [
+        ("gb200", 4, 42, 14),
+        ("gb300", 4, 42, 14),
+        ("b200_sxm", 8, 42, 14),
+        ("b300_sxm", 8, 42, 14),
+        ("h100_sxm", 8, 28, 14),
+        ("h200_sxm", 8, 28, 14),
+    ],
+)
+def test_pinned_ll_hidden_limits_remain_observable_failures(
+    system: str,
+    ep_size: int,
+    hidden_3072_cases: int,
+    hidden_6144_fp8_cases: int,
+):
+    cases = a2a.build_case_plan(
+        shapes=a2a.get_moe_a2a_shapes(required_expert_parallel_size=ep_size),
+        token_grid=a2a.get_moe_a2a_token_grid(),
+        ep_size=ep_size,
+        node_num=1,
+        modes=(a2a.COMM_BACKEND_LL,),
+        system=system,
+    )
+
+    assert sum(case.shape.hidden_size == 3072 for case in cases) == hidden_3072_cases
+    assert sum(case.shape.hidden_size == 6144 and case.quant.comm_dtype == "fp8" for case in cases) == (
+        hidden_6144_fp8_cases
+    )
 
 
 def test_declared_duplicate_shapes_deduplicate_on_physical_identity(capsys):
@@ -222,7 +253,7 @@ def test_rc11_adapter_reuses_resources_only_across_the_token_axis():
     assert adapter._resource_key(base) != adapter._resource_key(different_shape)
 
 
-def test_rc11_adapter_destroys_a_replaced_resource_once():
+def test_rc11_adapter_failure_reset_destroys_active_resource_once():
     class Backend:
         def __init__(self):
             self.destroy_calls = 0
@@ -236,7 +267,7 @@ def test_rc11_adapter_destroys_a_replaced_resource_once():
     adapter._active_backend = backend
     adapter._active_moe = object()
 
-    adapter._destroy_active_resources()
+    adapter.reset_after_failure()
 
     assert backend.destroy_calls == 1
     assert adapter._active_resource_key is None
@@ -359,6 +390,177 @@ class _PartialAdapter:
         if self.calls == 2:
             raise RuntimeError("rank-local benchmark failure")
         return _result(case.quant.comm_dtype)
+
+
+class _PoisonableAdapter:
+    def __init__(self, *, reset_error: BaseException | None = None):
+        self.calls = []
+        self.reset_calls = 0
+        self.active_resource = None
+        self.reset_error = reset_error
+
+    def run(self, case, all_rank_num_tokens):
+        assert all_rank_num_tokens == [case.num_tokens] * case.ep_size
+        self.calls.append((case.shape.num_experts, case.num_tokens))
+        if len(self.calls) == 1:
+            self.active_resource = (case.shape.num_experts, case.num_tokens)
+            raise RuntimeError("DeepEP topk guard")
+        if self.active_resource is not None:
+            raise AssertionError("poisoned adapter state was reused")
+        self.active_resource = (case.shape.num_experts, case.num_tokens)
+        return _result(case.quant.comm_dtype)
+
+    def reset_after_failure(self):
+        self.reset_calls += 1
+        self.active_resource = None
+        if self.reset_error is not None:
+            raise self.reset_error
+
+
+def _run_expected_partial(tmp_path, monkeypatch, *, cases, adapter):
+    monkeypatch.setattr(a2a, "log_perf", lambda **kwargs: True)
+    monkeypatch.setattr(
+        a2a,
+        "write_moe_a2a_sidecar",
+        lambda output_dir, **kwargs: output_dir / "collection_meta.yaml",
+    )
+    with pytest.raises(a2a.MoeA2ABenchmarkError, match="partial"):
+        a2a.run_collection(
+            cases=cases,
+            adapter=adapter,
+            output_dir=tmp_path,
+            rank=0,
+            version="1.3.0rc11",
+            device_name="NVIDIA H100",
+            runtime_meta={},
+            finalize=lambda paths, **kwargs: [tmp_path / "moe_a2a_perf.parquet"],
+        )
+
+
+@pytest.mark.parametrize(
+    "transition",
+    ["experts-896-to-256", "same-resource-next-token"],
+)
+def test_benchmark_failure_resets_adapter_before_next_case(tmp_path, monkeypatch, transition):
+    first_case = replace(
+        _case(a2a.COMM_BACKEND_LL, tokens=1),
+        shape=a2a.MoeA2AShape(hidden_size=3584, topk=16, num_experts=896),
+    )
+    if transition == "experts-896-to-256":
+        second_case = _case(a2a.COMM_BACKEND_LL, tokens=1)
+    else:
+        second_case = replace(_case(a2a.COMM_BACKEND_LL, tokens=2), shape=first_case.shape)
+    adapter = _PoisonableAdapter()
+
+    _run_expected_partial(tmp_path, monkeypatch, cases=[first_case, second_case], adapter=adapter)
+
+    assert adapter.calls == [
+        (first_case.shape.num_experts, first_case.num_tokens),
+        (second_case.shape.num_experts, second_case.num_tokens),
+    ]
+    assert adapter.reset_calls == 1
+    [record] = json.loads((tmp_path / "errors_moe_a2a_trtllm.rank0.json").read_text())
+    assert record["error_type"] == "RuntimeError"
+    assert record["error"] == "DeepEP topk guard"
+
+
+def test_peer_benchmark_failure_resets_successful_rank(tmp_path):
+    class PeerAdapter(_GoodAdapter):
+        def __init__(self):
+            self.reset_calls = 0
+
+        def reset_after_failure(self):
+            self.reset_calls += 1
+
+    adapter = PeerAdapter()
+
+    with pytest.raises(a2a.MoeA2ABenchmarkError, match="zero rows"):
+        a2a.run_collection(
+            cases=[_case()],
+            adapter=adapter,
+            output_dir=tmp_path,
+            rank=0,
+            version="1.3.0rc11",
+            device_name="NVIDIA H100",
+            runtime_meta={},
+            stage_agreement=lambda stage, failed: failed or stage.endswith(":benchmark"),
+        )
+
+    assert adapter.reset_calls == 1
+    [record] = json.loads((tmp_path / "errors_moe_a2a_trtllm.rank0.json").read_text())
+    assert record["error_type"] == "MoeA2APeerError"
+
+
+def test_reset_failure_propagates_without_running_next_case(tmp_path):
+    adapter = _PoisonableAdapter(reset_error=RuntimeError("DeepEP reset failed"))
+
+    with pytest.raises(RuntimeError, match="DeepEP reset failed"):
+        a2a.run_collection(
+            cases=[_case(tokens=16), _case(tokens=32)],
+            adapter=adapter,
+            output_dir=tmp_path,
+            rank=0,
+            version="1.3.0rc11",
+            device_name="NVIDIA H100",
+            runtime_meta={},
+        )
+
+    assert adapter.calls == [(SHAPE.num_experts, 16)]
+    assert adapter.reset_calls == 1
+    [record] = json.loads((tmp_path / "errors_moe_a2a_trtllm.rank0.json").read_text())
+    assert record["error"] == "DeepEP topk guard"
+
+
+def test_peer_reset_failure_propagates_without_running_next_case(tmp_path):
+    adapter = _PoisonableAdapter()
+
+    with pytest.raises(a2a.MoeA2APeerError, match="failure_reset"):
+        a2a.run_collection(
+            cases=[_case(tokens=16), _case(tokens=32)],
+            adapter=adapter,
+            output_dir=tmp_path,
+            rank=0,
+            version="1.3.0rc11",
+            device_name="NVIDIA H100",
+            runtime_meta={},
+            stage_agreement=lambda stage, failed: failed or stage.endswith(":failure_reset"),
+        )
+
+    assert adapter.calls == [(SHAPE.num_experts, 16)]
+    assert adapter.reset_calls == 1
+    [record] = json.loads((tmp_path / "errors_moe_a2a_trtllm.rank0.json").read_text())
+    assert record["error"] == "DeepEP topk guard"
+
+
+def test_framework_limit_is_still_recorded_as_the_original_unexpected_error(tmp_path):
+    class FrameworkLimitAdapter:
+        def __init__(self):
+            self.reset_calls = 0
+
+        def run(self, case, all_rank_num_tokens):
+            raise AssertionError("DeepEP hidden-size guard")
+
+        def reset_after_failure(self):
+            self.reset_calls += 1
+
+    adapter = FrameworkLimitAdapter()
+
+    with pytest.raises(a2a.MoeA2ABenchmarkError, match="zero rows"):
+        a2a.run_collection(
+            cases=[_case(a2a.COMM_BACKEND_LL, "fp8", tokens=1)],
+            adapter=adapter,
+            output_dir=tmp_path,
+            rank=0,
+            version="1.3.0rc11",
+            device_name="NVIDIA H100",
+            runtime_meta={},
+        )
+
+    assert adapter.reset_calls == 1
+    [record] = json.loads((tmp_path / "errors_moe_a2a_trtllm.rank0.json").read_text())
+    assert record["classification"] == "unexpected"
+    assert record["error_type"] == "AssertionError"
+    assert record["error"] == "DeepEP hidden-size guard"
 
 
 def test_write_failure_is_recorded_and_cannot_complete(tmp_path, monkeypatch):

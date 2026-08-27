@@ -101,11 +101,11 @@ def test_declared_shapes_use_vllm_population(monkeypatch):
     assert SHAPE in shapes
 
 
-def test_ll_shape_population_keeps_kimi_in_the_declared_plan(monkeypatch):
+def test_ll_shape_population_excludes_kimi_megamoe_from_deepep_plan(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     shapes = a2a.get_vllm_moe_a2a_shapes(required_expert_parallel_size=WORLD_SIZE)
 
-    assert any(shape == MoeA2AShape(hidden_size=3584, topk=16, num_experts=896) for shape in shapes)
+    assert all(shape != MoeA2AShape(hidden_size=3584, topk=16, num_experts=896) for shape in shapes)
 
 
 def test_transport_defaults_are_publishable_and_alternates_are_diagnostic():

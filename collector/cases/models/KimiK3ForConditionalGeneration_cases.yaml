@@ -78,7 +78,11 @@ model_case_values:
         # axis gates this label to SM in [100, 120). Hopper keeps the
         # bf16-activation marlin W4A16 lane above.
         w4a8_mxfp4_mxfp8: {100: flashinfer_mxfp4, 103: flashinfer_mxfp4}
-      wideep: true
+      # Do not enroll K3 in the standalone DeepEP WideEP collectors.  The
+      # pinned vLLM 0.24.0 source predates K3 serving support, and the current
+      # vLLM/SGLang K3 expert-parallel serving path selects MegaMoE
+      # (deep_gemm_mega_moe / --moe-a2a-backend megamoe), whose fused
+      # A2A+GEMM path is not represented by the DeepEP communication table.
       framework_quantization:
         sglang:
           allowed_modes: [w4a16_mxfp4, w4a8_mxfp4_mxfp8]

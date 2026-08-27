@@ -58,10 +58,10 @@ def test_declared_shapes_come_from_the_wideep_model_rows(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     shapes = a2a.get_moe_a2a_shapes()
     # The persisted comm key has no model column, so the declared wideep
-    # model rows collapse onto 7 physical (hidden, topk, experts) tuples.
+    # model rows collapse onto 6 physical (hidden, topk, experts) tuples.
+    # Kimi-K3 is excluded because its serving EP path is MegaMoE, not DeepEP.
     assert shapes == [
         a2a.MoeA2AShape(3072, 8, 256),
-        a2a.MoeA2AShape(3584, 16, 896),
         a2a.MoeA2AShape(4096, 6, 256),
         a2a.MoeA2AShape(6144, 8, 256),
         a2a.MoeA2AShape(7168, 6, 384),
@@ -116,9 +116,9 @@ def test_case_plan_is_the_grid_times_the_shapes(monkeypatch):
 
     ht = [case for case in cases if case.comm_backend == "deepep_ht"]
     ll = [case for case in cases if case.comm_backend == "deepep_ll"]
-    assert len(ht) == 7 * 3 * 13 == 273
-    assert len(ll) == 7 * 14 == 98
-    assert len(cases) == 371
+    assert len(ht) == 6 * 3 * 13 == 234
+    assert len(ll) == 6 * 14 == 84
+    assert len(cases) == 318
     # LL rows carry no SM budget — the value the SDK's legacy adapter assigns.
     assert {case.sms for case in ll} == {0}
 

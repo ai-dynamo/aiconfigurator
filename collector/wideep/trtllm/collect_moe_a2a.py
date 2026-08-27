@@ -130,7 +130,6 @@ QUANT_SPECS = {
         QuantSpec("bfloat16", None),
         QuantSpec("fp8", "FP8"),
         QuantSpec("nvfp4", "NVFP4"),
-        QuantSpec("w4afp8", "W4A8_AWQ"),
     ),
 }
 
@@ -143,6 +142,13 @@ def quant_specs_for_system(backend: str, system: str | None) -> tuple[QuantSpec,
     therefore cannot execute in the SM90-real H100/H200 wheels.  HT NVFP4 does
     not use that conversion path and remains declared (and was observed by the
     H100 runtime canary).
+
+    W4AFP8 is absent from the LL declaration on every formal system.  The
+    pinned serving path creates and loads per-expert ``(local_experts,
+    hidden)`` pre-quant scales (quantization.py:1333-1339,1501-1578 at
+    TARGET_SOURCE_COMMIT), while DeepEPLowLatency requires a shared
+    ``(1, hidden)`` scale (deep_ep_low_latency.py:270-275).  The collector must
+    not reconstruct synthetic scale metadata to make this path run.
     """
 
     if backend not in QUANT_SPECS:
@@ -150,7 +156,7 @@ def quant_specs_for_system(backend: str, system: str | None) -> tuple[QuantSpec,
     if system is not None and system not in FORMAL_SYSTEMS:
         raise MoeA2ADeclarationError(f"unsupported TensorRT-LLM formal system: {system}")
     specs = QUANT_SPECS[backend]
-    if system in HOPPER_SYSTEMS and backend == COMM_BACKEND_LL:
+    if backend == COMM_BACKEND_LL and system in HOPPER_SYSTEMS:
         return tuple(spec for spec in specs if spec.comm_dtype != "nvfp4")
     return specs
 
@@ -492,6 +498,10 @@ class TensorRTLLMBenchmarkAdapter:
             if destroy is not None:
                 destroy()
 
+    def reset_after_failure(self) -> None:
+        """Release a failed case's native state before another case runs."""
+        self._destroy_active_resources()
+
     def run(self, case: MoeA2ACase, all_rank_num_tokens: list[int]) -> BenchmarkResult:
         import torch
         from tensorrt_llm._torch.model_config import ModelConfig
@@ -599,7 +609,7 @@ class TensorRTLLMBenchmarkAdapter:
         if moe is not None:
             hidden_states, hidden_states_sf = moe.quantize_input(hidden_states, post_quant_comm=True)
 
-        # W4AFP8 dispatch consumes the per-channel activation scale that the
+        # Post-quant dispatch consumes the activation scale that the
         # quantization method attaches to the module
         # (deep_ep_low_latency.py:271 @14efb6ac673c0cbe828e1206cc5c7d5748d05ffa).
         # Forward the framework's own tensor exactly as ConfigurableMoE does
@@ -842,14 +852,40 @@ def run_collection(
                 record_failure(output_dir, case, benchmark_outcome.error, rank=rank)
             except BaseException as error:
                 record_error = error
-            raise_for_stage(
-                agree_stage(
-                    f"case:{case_index}:failure_record",
-                    record_error,
-                    agreement=agreement,
-                    peer_error_type=MoeA2APeerError,
-                )
+            record_outcome = agree_stage(
+                f"case:{case_index}:failure_record",
+                record_error,
+                agreement=agreement,
+                peer_error_type=MoeA2APeerError,
             )
+
+            # A native benchmark exception may leave DeepEP's singleton-backed
+            # buffers unusable even when the next case has a different resource
+            # key.  Reset on every rank only after benchmark failure agreement,
+            # keeping teardown in the same distributed lifecycle order.  The
+            # hook is optional for injected CPU test adapters.
+            reset_error: BaseException | None = None
+            try:
+                reset_after_failure = getattr(adapter, "reset_after_failure", None)
+                if reset_after_failure is not None:
+                    reset_after_failure()
+            except BaseException as error:
+                reset_error = error
+            reset_outcome = agree_stage(
+                f"case:{case_index}:failure_reset",
+                reset_error,
+                agreement=agreement,
+                peer_error_type=MoeA2APeerError,
+            )
+            # All ranks participate in both stages before either error is
+            # raised, so record or reset failures cannot strand a peer in the
+            # next benchmark case.
+            raise_for_stage(record_outcome)
+            raise_for_stage(reset_outcome)
+            # Do not retain the adapter.run traceback (and its native backend
+            # locals) while constructing resources for the next case.
+            local_error = None
+            del benchmark_outcome
             continue
 
         assert result is not None

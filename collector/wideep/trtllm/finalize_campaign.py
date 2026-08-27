@@ -109,6 +109,7 @@ class ValidatedJob:
     evidence: dict[str, Any]
     backend: str
     failures: tuple[dict[str, Any], ...]
+    classified_failures: int
 
 
 def _sha256(path: Path) -> str:
@@ -126,19 +127,22 @@ def _single(frame: pd.DataFrame, column: str) -> Any:
     return values[0]
 
 
-def _cases(ep_size: int, backend: str):
+def _cases(system: str, backend: str):
+    ep_size = SYSTEM_LAYOUTS[system][1]
     return build_case_plan(
         shapes=get_moe_a2a_shapes(required_expert_parallel_size=ep_size),
         token_grid=get_moe_a2a_token_grid(),
         ep_size=ep_size,
         node_num=1,
         modes=(backend,),
+        system=system,
     )
 
 
-def _expected_keys(ep_size: int, backend: str) -> set[tuple[Any, ...]]:
+def _expected_keys(system: str, backend: str) -> set[tuple[Any, ...]]:
+    ep_size = SYSTEM_LAYOUTS[system][1]
     keys = set()
-    for case in _cases(ep_size, backend):
+    for case in _cases(system, backend):
         for phase in ("combine", "dispatch"):
             dtype = (
                 "fp4"
@@ -160,6 +164,62 @@ def _expected_keys(ep_size: int, backend: str) -> set[tuple[Any, ...]]:
                 )
             )
     return keys
+
+
+def _failure_identity(failure: dict[str, Any], *, backend: str) -> tuple[Any, ...]:
+    case = failure.get("case")
+    if not isinstance(case, dict):
+        raise CampaignValidationError("failure evidence is missing its case identity")
+    required = {
+        "comm_backend",
+        "comm_dtype",
+        "inference_phase",
+        "ep_size",
+        "node_num",
+        "hidden_size",
+        "topk",
+        "num_experts",
+        "num_tokens",
+        "sms",
+    }
+    if set(case) != required or case.get("comm_backend") != backend:
+        raise CampaignValidationError("failure evidence has an invalid case identity")
+    expected_phase = "context" if backend == COMM_BACKEND_HT else "generation"
+    if case.get("inference_phase") != expected_phase or not isinstance(case.get("comm_dtype"), str):
+        raise CampaignValidationError("failure evidence has an invalid backend/phase identity")
+    numeric_fields = ("ep_size", "node_num", "hidden_size", "topk", "num_experts", "num_tokens", "sms")
+    if any(not isinstance(case.get(field), int) or isinstance(case.get(field), bool) for field in numeric_fields):
+        raise CampaignValidationError("failure evidence has a non-integer physical identity")
+    return (
+        case["comm_backend"],
+        case["comm_dtype"],
+        case["ep_size"],
+        case["node_num"],
+        case["hidden_size"],
+        case["topk"],
+        case["num_experts"],
+        case["num_tokens"],
+        case["sms"],
+    )
+
+
+def _failure_physical_keys(identity: tuple[Any, ...]) -> set[tuple[Any, ...]]:
+    backend, comm_dtype, ep_size, node_num, hidden_size, topk, num_experts, num_tokens, sms = identity
+    return {
+        (
+            backend,
+            phase,
+            "fp4" if backend == COMM_BACKEND_LL and comm_dtype == "nvfp4" and phase == "combine" else comm_dtype,
+            ep_size,
+            node_num,
+            hidden_size,
+            topk,
+            num_experts,
+            num_tokens,
+            sms,
+        )
+        for phase in ("combine", "dispatch")
+    }
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -202,7 +262,7 @@ def validate_job_dir(
     if SYSTEM_GPU_IDENTITIES[system][0] not in str(_single(frame, "device")).upper():
         raise CampaignValidationError(f"{parquet_path}: device does not match {system}")
     observed_keys = set(frame[list(PHYSICAL_KEY_COLUMNS)].itertuples(index=False, name=None))
-    expected_keys = _expected_keys(ep_size, backend)
+    expected_keys = _expected_keys(system, backend)
     if not observed_keys <= expected_keys:
         raise CampaignValidationError(
             f"{parquet_path}: undeclared physical keys {sorted(observed_keys - expected_keys)[:3]}"
@@ -270,12 +330,14 @@ def validate_job_dir(
             raise CampaignValidationError(f"{error_path}: malformed failure evidence")
         failures.extend(payload)
     missing = expected_keys - observed_keys
+    failure_identities = {_failure_identity(failure, backend=backend) for failure in failures}
+    failed_keys = set().union(*(_failure_physical_keys(identity) for identity in failure_identities))
     if failures or missing:
         if not allow_partial_evidence:
             raise CampaignValidationError(
                 f"{path}: incomplete formal input ({len(failures)} failures, {len(missing)} missing rows)"
             )
-        if not failures or not missing:
+        if not failures or not missing or failed_keys != missing:
             raise CampaignValidationError(f"{path}: partial rows and failure evidence are inconsistent")
     if int(table.get("rows", -1)) != len(frame):
         raise CampaignValidationError(f"{sidecar_path}: row count mismatch")
@@ -289,7 +351,7 @@ def validate_job_dir(
             if checksums.get(artifact.name) != _sha256(artifact):
                 raise CampaignValidationError(f"{artifact}: checksum mismatch")
     del expected_gpus
-    return ValidatedJob(path, frame, runtime, table, evidence, backend, tuple(failures))
+    return ValidatedJob(path, frame, runtime, table, evidence, backend, tuple(failures), len(failure_identities))
 
 
 def merge_campaign(
@@ -319,11 +381,9 @@ def merge_campaign(
     if merged[list(PHYSICAL_KEY_COLUMNS)].duplicated().any():
         raise CampaignValidationError("merged campaign contains duplicate physical keys")
     merged = merged.sort_values(list(PHYSICAL_KEY_COLUMNS), kind="stable").reset_index(drop=True)
-    total_failures = sum(len(job.failures) for job in jobs)
+    total_failures = sum(job.classified_failures for job in jobs)
     status = provenance.STATUS_PARTIAL if total_failures else provenance.STATUS_COMPLETE
-    all_case_ids = [
-        case_id for backend in BACKENDS for case_id in case_plan_ids(_cases(SYSTEM_LAYOUTS[system][1], backend))
-    ]
+    all_case_ids = [case_id for backend in BACKENDS for case_id in case_plan_ids(_cases(system, backend))]
 
     destination = Path(output_dir).expanduser()
     destination.mkdir(parents=True, exist_ok=True)

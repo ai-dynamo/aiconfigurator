@@ -31,7 +31,7 @@ def _write_job(
     ep_size = campaign.SYSTEM_LAYOUTS[system][1]
     path = root / backend
     path.mkdir(parents=True)
-    cases = campaign._cases(ep_size, backend)
+    cases = campaign._cases(system, backend)
     rows = []
     emitted_cases = cases[:-1] if partial else cases
     for case in emitted_cases:
@@ -102,9 +102,21 @@ def _write_job(
         evidence["seed_provenance"] = seed_provenance
     (path / "runtime_evidence.json").write_text(json.dumps(evidence), encoding="utf-8")
     if partial:
+        failed_case = cases[-1]
         failure = {
             "classification": "unexpected",
-            "case": {"comm_backend": backend},
+            "case": {
+                "comm_backend": failed_case.comm_backend,
+                "comm_dtype": failed_case.quant.comm_dtype,
+                "inference_phase": failed_case.inference_phase,
+                "ep_size": failed_case.ep_size,
+                "node_num": failed_case.node_num,
+                "hidden_size": failed_case.shape.hidden_size,
+                "topk": failed_case.shape.topk,
+                "num_experts": failed_case.shape.num_experts,
+                "num_tokens": failed_case.num_tokens,
+                "sms": failed_case.sms,
+            },
             "error": "known observed kernel limit",
         }
         (path / "errors_moe_a2a_trtllm.rank0.json").write_text(json.dumps([failure]), encoding="utf-8")
@@ -148,6 +160,65 @@ def test_partial_input_is_rejected_by_default_and_explicitly_partial_when_reques
     assert meta["tables"]["moe_a2a_perf"]["status"] == provenance.STATUS_PARTIAL
     assert meta["tables"]["moe_a2a_perf"]["classified_failures"] == 1
     assert (tmp_path / "evidence" / f"errors_moe_a2a_trtllm.{campaign.COMM_BACKEND_HT}.json").is_file()
+
+
+def test_unrelated_failure_cannot_authorize_missing_rows(tmp_path):
+    job = _write_job(
+        tmp_path / "jobs",
+        backend=campaign.COMM_BACKEND_HT,
+        partial=True,
+    )
+    error_path = job / "errors_moe_a2a_trtllm.rank0.json"
+    [failure] = json.loads(error_path.read_text(encoding="utf-8"))
+    unrelated = campaign._cases("h200_sxm", campaign.COMM_BACKEND_HT)[0]
+    failure["case"] |= {
+        "comm_dtype": unrelated.quant.comm_dtype,
+        "hidden_size": unrelated.shape.hidden_size,
+        "topk": unrelated.shape.topk,
+        "num_experts": unrelated.shape.num_experts,
+        "num_tokens": unrelated.num_tokens,
+    }
+    error_path.write_text(json.dumps([failure]), encoding="utf-8")
+
+    with pytest.raises(campaign.CampaignValidationError, match="failure evidence are inconsistent"):
+        campaign.validate_job_dir(job, system="h200_sxm", allow_partial_evidence=True)
+
+
+def test_nvfp4_failure_maps_to_phase_specific_physical_dtypes():
+    identity = (
+        campaign.COMM_BACKEND_LL,
+        "nvfp4",
+        8,
+        1,
+        7168,
+        8,
+        256,
+        2,
+        0,
+    )
+
+    assert campaign._failure_physical_keys(identity) == {
+        (campaign.COMM_BACKEND_LL, "combine", "fp4", 8, 1, 7168, 8, 256, 2, 0),
+        (campaign.COMM_BACKEND_LL, "dispatch", "nvfp4", 8, 1, 7168, 8, 256, 2, 0),
+    }
+
+
+def test_duplicate_rank_failures_count_once(tmp_path):
+    jobs = [
+        _write_job(tmp_path / "jobs", backend=backend, partial=backend == campaign.COMM_BACKEND_HT)
+        for backend in campaign.BACKENDS
+    ]
+    source = jobs[0] / "errors_moe_a2a_trtllm.rank0.json"
+    (jobs[0] / "errors_moe_a2a_trtllm.rank7.json").write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+    _, sidecar = campaign.merge_campaign(
+        jobs,
+        system="h200_sxm",
+        output_dir=tmp_path / "evidence",
+        allow_partial_evidence=True,
+    )
+    meta = yaml.safe_load(sidecar.read_text(encoding="utf-8"))
+    assert meta["tables"]["moe_a2a_perf"]["classified_failures"] == 1
 
 
 def test_merge_requires_both_backends(tmp_path):
