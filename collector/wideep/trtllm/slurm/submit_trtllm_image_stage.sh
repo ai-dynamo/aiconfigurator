@@ -52,6 +52,7 @@ if [[ -n "${seed_wheel_dir}" ]]; then
 fi
 script_dir=$(cd "$(dirname "$0")" && pwd)
 payload=$(realpath -e "${script_dir}/run_trtllm_image_stage_job.sh")
+repo_root=$(realpath -e "${script_dir}/../../../..")
 log_dir="${campaign_root}/slurm_logs/${system}/trtllm_image_stage"
 mkdir -p "${log_dir}" "${campaign_root}/images/trtllm/${system}" "${campaign_root}/runtime/trtllm/${system}"
 
@@ -59,6 +60,7 @@ export SYSTEM="${system}" CAMPAIGN_ROOT="${campaign_root}" IMAGE_ARCH="${image_a
 export IMAGE_INDEX_DIGEST=sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88
 export CONTAINER_IMAGE="nvcr.io#nvidia/tensorrt-llm/release:${IMAGE_INDEX_DIGEST}"
 export SEED_IMAGE="${seed_image}" SEED_IMAGE_META="${seed_image_meta}" SEED_WHEEL_DIR="${seed_wheel_dir}"
+export AIC_REPO_DIR="${repo_root}"
 
 job_id=$(sbatch --parsable --job-name="aic-trt-a2a-${system}-stage" \
     --account="${account}" --partition="${partition}" --qos="${qos}" \

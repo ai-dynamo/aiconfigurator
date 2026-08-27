@@ -85,6 +85,8 @@ def test_submitters_keep_six_cluster_parameters_and_afterok_gate():
     assert "infra-approved nodelist and approval ID" in submit
     assert "trtllm_deepep_ht|trtllm_deepep_ll" in submit
     assert "--seed-image" in stage and "--seed-wheel-dir" in stage
+    assert 'export AIC_REPO_DIR="${repo_root}"' in stage
+    assert 'repo_root=$(realpath -e "${script_dir}/../../../..")' in stage
 
 
 def test_runner_is_one_node_mpi_and_preserves_failed_rows():

@@ -71,8 +71,9 @@ final_wheel_dir="${artifact_dir}/wheel_${TRT_SOURCE_COMMIT}_${CUDA_ARCHES//[^0-9
 
 temporary_image="${job_root}/runtime.sqsh"
 seed_provenance="${job_root}/seed_provenance.json"
-repo_root=$(cd "$(dirname "$0")/../../../.." && pwd)
 if [[ -n "${SEED_IMAGE}" ]]; then
+    repo_root=$(safe_existing_path "repository" "${AIC_REPO_DIR:-}")
+    [[ -f "${repo_root}/collector/wideep/trtllm/runtime_artifacts.py" ]] || die "seed validator missing from repository"
     seed_image=$(safe_existing_path "seed image" "${SEED_IMAGE}")
     seed_image_meta=$(safe_existing_path "seed image metadata" "${SEED_IMAGE_META}")
     seed_args=(--image "${seed_image}" --image-meta "${seed_image_meta}" --target-system "${SYSTEM}" --output "${seed_provenance}")
