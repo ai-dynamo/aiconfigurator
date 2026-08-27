@@ -13,6 +13,30 @@ from aiconfigurator.sdk.task_v2 import Task
 
 logger = logging.getLogger(__name__)
 
+COST_EFFICIENCY_COLUMN = "tokens/s/$"
+_THROUGHPUT_PER_GPU_COLUMN = "tokens/s/gpu_cluster"
+
+
+def add_cost_efficiency(
+    best_configs: dict[str, pd.DataFrame],
+    gpu_hour_price: float,
+) -> dict[str, pd.DataFrame]:
+    """Map the existing per-GPU throughput to cost efficiency."""
+    enriched = {}
+    for experiment, configs in best_configs.items():
+        result = configs.copy()
+        if result.empty and _THROUGHPUT_PER_GPU_COLUMN not in result.columns:
+            result[COST_EFFICIENCY_COLUMN] = pd.Series(dtype=float)
+        elif _THROUGHPUT_PER_GPU_COLUMN not in result.columns:
+            raise ValueError(
+                f"Cannot calculate cost efficiency for experiment {experiment!r}: "
+                f"missing {_THROUGHPUT_PER_GPU_COLUMN!r}."
+            )
+        else:
+            result[COST_EFFICIENCY_COLUMN] = result[_THROUGHPUT_PER_GPU_COLUMN] / gpu_hour_price
+        enriched[experiment] = result
+    return enriched
+
 
 def process_experiment_result(
     task: Task,

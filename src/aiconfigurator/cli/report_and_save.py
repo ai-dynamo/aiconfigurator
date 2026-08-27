@@ -14,6 +14,7 @@ import yaml
 from prettytable import PrettyTable
 
 from aiconfigurator.cli.estimate_detail_report import format_moe_comm_fallback
+from aiconfigurator.cli.utils import COST_EFFICIENCY_COLUMN
 from aiconfigurator.generator.api import (
     generate_from_request,
     get_default_dynamo_version_mapping,
@@ -145,6 +146,8 @@ def _plot_worker_setup_table(
     if top_configs.empty:
         return f"\nNo configurations for {exp_name} met the {constraint_label} constraint."
 
+    show_cost_efficiency = COST_EFFICIENCY_COLUMN in top_configs.columns
+
     if "replicas_needed" in top_configs.columns:
         top_configs["replicas"] = top_configs["replicas_needed"].astype(int)
         top_configs["total_gpus_used"] = top_configs["total_gpus_needed"].astype(int)
@@ -196,6 +199,8 @@ def _plot_worker_setup_table(
             "(f)ep",
             "(p)workers",
         ]
+        if show_cost_efficiency:
+            field_names.insert(3, _cli_bold(COST_EFFICIENCY_COLUMN))
         if show_power:
             field_names.append("power_w")
         table.field_names = field_names
@@ -232,6 +237,8 @@ def _plot_worker_setup_table(
                 row["(f)ep"],
                 p_workers_str,
             ]
+            if show_cost_efficiency:
+                row_data.insert(3, _cli_bold(f"{row[COST_EFFICIENCY_COLUMN]:.2f}"))
             if show_power:
                 row_data.append(_format_power(row["power_w"]))
             table.add_row(row_data)
@@ -257,6 +264,8 @@ def _plot_worker_setup_table(
             "(d)parallel",
             "(d)bs",
         ]
+        if show_cost_efficiency:
+            field_names.insert(3, _cli_bold(COST_EFFICIENCY_COLUMN))
         if has_encoder_pool:
             field_names.extend(["(e)workers", "(e)tp", "(e)bs"])
         if show_power:
@@ -336,6 +345,8 @@ def _plot_worker_setup_table(
                     row["(d)bs"],
                 ]
             )
+            if show_cost_efficiency:
+                row_data.insert(3, _cli_bold(f"{row[COST_EFFICIENCY_COLUMN]:.2f}"))
             if has_encoder_pool:
                 row_data.extend(
                     [
@@ -364,6 +375,8 @@ def _plot_worker_setup_table(
             "parallel",
             "bs",
         ]
+        if show_cost_efficiency:
+            field_names.insert(3, _cli_bold(COST_EFFICIENCY_COLUMN))
         if has_encoder_pool:
             field_names.extend(["(a)workers", "(e)workers", "(e)tp", "(e)bs"])
         if show_power:
@@ -421,6 +434,8 @@ def _plot_worker_setup_table(
                     row["bs"],
                 ]
             )
+            if show_cost_efficiency:
+                row_data.insert(3, _cli_bold(f"{row[COST_EFFICIENCY_COLUMN]:.2f}"))
             if has_encoder_pool:
                 row_data.extend(
                     [
@@ -627,6 +642,10 @@ def log_final_summary(
             total_throughput = best_throughput * display_total_gpus
         summary_box.append(f"    - Best Throughput: {total_throughput:,.2f} tokens/s")
         summary_box.append(f"    - Per-GPU Throughput: {per_gpu:.2f} tokens/s/gpu")
+        if COST_EFFICIENCY_COLUMN in best_conf_details.index:
+            summary_box.append(
+                f"    - Cost Efficiency: {best_conf_details[COST_EFFICIENCY_COLUMN]:.2f} {COST_EFFICIENCY_COLUMN}"
+            )
         summary_box.append(f"    - Per-User Throughput: {best_conf_details['tokens/s/user']:.2f} tokens/s/user")
         if load_match and "replicas_needed" in best_conf_details.index:
             cluster_rr = float(best_conf_details["request_rate"]) * int(best_conf_details["replicas_needed"])

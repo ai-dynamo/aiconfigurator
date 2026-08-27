@@ -118,6 +118,7 @@ def test_log_final_summary(caplog, use_ansi):
         "tokens/s/gpu": 100.0,
         "tokens/s/user": 50.0,
         "tokens/s/gpu_cluster": 100.0,
+        "tokens/s/$": 40.0,
         "request_rate": 2.0,
         "ttft": 100.0,
         "request_latency": 200.0,
@@ -154,6 +155,7 @@ def test_log_final_summary(caplog, use_ansi):
 
     logged = "\n".join(r.message for r in caplog.records)
     assert (_ESC in logged) == use_ansi
+    assert "Cost Efficiency: 40.00 tokens/s/$" in logged
 
     text = _plot_worker_setup_table(
         "agg",
@@ -167,6 +169,8 @@ def test_log_final_summary(caplog, use_ansi):
     )
     assert (_ESC in text) == use_ansi
     assert "tokens/s/gpu" in text
+    assert "tokens/s/$" in text
+    assert "40.00" in text
 
 
 def test_log_final_summary_no_disagg_results():

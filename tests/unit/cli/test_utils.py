@@ -12,12 +12,47 @@ import pandas as pd
 import pytest
 
 from aiconfigurator.cli.utils import (
+    COST_EFFICIENCY_COLUMN,
     _merge_into_top_n,
+    add_cost_efficiency,
     merge_experiment_results_by_mode,
     process_experiment_result,
 )
 
 pytestmark = pytest.mark.unit
+
+
+class TestCostEfficiency:
+    def test_maps_existing_per_gpu_throughput_for_every_mode(self):
+        best_configs = {
+            mode: pd.DataFrame({"tokens/s/gpu_cluster": [120.0, 90.0]}) for mode in ("agg", "disagg", "afd")
+        }
+
+        result = add_cost_efficiency(best_configs, gpu_hour_price=3.0)
+
+        for configs in result.values():
+            assert configs[COST_EFFICIENCY_COLUMN].tolist() == pytest.approx([40.0, 30.0])
+
+    def test_does_not_mutate_ranked_input(self):
+        original = pd.DataFrame({"tokens/s/gpu_cluster": [100.0]})
+
+        result = add_cost_efficiency({"agg": original}, gpu_hour_price=2.5)["agg"]
+
+        assert COST_EFFICIENCY_COLUMN not in original.columns
+        assert result.loc[0, COST_EFFICIENCY_COLUMN] == pytest.approx(40.0)
+
+    def test_empty_dataframe_adds_metric_column(self):
+        result = add_cost_efficiency({"agg": pd.DataFrame()}, gpu_hour_price=2.5)["agg"]
+
+        assert result.columns.tolist() == [COST_EFFICIENCY_COLUMN]
+        assert result.empty
+
+    def test_non_empty_dataframe_requires_cluster_throughput(self):
+        with pytest.raises(ValueError, match=r"experiment 'agg'.*tokens/s/gpu_cluster"):
+            add_cost_efficiency(
+                {"agg": pd.DataFrame({"tokens/s/gpu": [100.0]})},
+                gpu_hour_price=2.5,
+            )
 
 
 class TestProcessExperimentResult:

@@ -530,6 +530,7 @@ def test_afd_worker_table_uses_prefill_num_gpus_per_worker():
             {
                 "backend": "trtllm",
                 "tokens/s/gpu": 10.0,
+                "tokens/s/$": 4.0,
                 "tokens/s/user": 1.0,
                 "request_rate": 1.0,
                 "ttft": 10.0,
@@ -564,6 +565,8 @@ def test_afd_worker_table_uses_prefill_num_gpus_per_worker():
     )
 
     assert "24 (=A8+F8+P8)" in table
+    assert "tokens/s/$" in table
+    assert "4.00" in table
 
 
 class TestExpLoaderAcceptsAfd:

@@ -20,6 +20,7 @@ from aiconfigurator.cli.api import EstimateResult
 from aiconfigurator.cli.main import (
     _execute_tasks,
     _resolve_cli_log_level,
+    _run_recommend,
     _validate_fpm_sweep_tasks,
     build_default_tasks,
     build_experiment_tasks,
@@ -97,6 +98,54 @@ class TestCLILogLevelResolution:
 class TestCLIIntegration:
     """Workflow tests for the CLI orchestration layer (builders/executor/save)."""
 
+    def test_cost_arguments_are_scoped_to_search_modes(self):
+        parser = argparse.ArgumentParser()
+        configure_parser(parser)
+        subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+
+        for mode in ("default", "recommend", "exp"):
+            options = subparsers.choices[mode]._option_string_actions
+            assert "--gpu-hour-price" in options
+            assert "--duration-hours" not in options
+            assert "--currency" not in options
+
+        for mode in ("estimate", "generate", "support"):
+            options = subparsers.choices[mode]._option_string_actions
+            assert "--gpu-hour-price" not in options
+            assert "--duration-hours" not in options
+            assert "--currency" not in options
+
+    @patch("aiconfigurator.cli.api.cli_recommend")
+    def test_recommend_forwards_cost_inputs(self, mock_recommend, cli_parser):
+        args = cli_parser.parse_args(
+            [
+                "recommend",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--system",
+                "h200_sxm",
+                "--target-request-rate",
+                "10",
+                "--gpu-hour-price",
+                "2.50",
+            ]
+        )
+
+        _run_recommend(args)
+
+        kwargs = mock_recommend.call_args.kwargs
+        assert kwargs["gpu_hour_price"] == 2.5
+        assert "duration_hours" not in kwargs
+        assert "currency" not in kwargs
+
+    @patch("aiconfigurator.cli.main.build_default_tasks")
+    def test_invalid_cost_input_fails_before_task_build(self, mock_build, cli_args_factory, capsys):
+        with pytest.raises(SystemExit):
+            cli_args_factory(mode="default", extra_args=["--gpu-hour-price", "0"])
+
+        assert "positive finite number" in capsys.readouterr().err
+        mock_build.assert_not_called()
+
     @patch("aiconfigurator.cli.main._run_recommend")
     def test_cli_recommend_resolves_nextn_before_dispatch(self, mock_run_recommend, cli_parser, monkeypatch):
         monkeypatch.setattr("aiconfigurator.cli.main.resolve_nextn_auto", lambda _model_path: 2)
@@ -157,6 +206,35 @@ class TestCLIIntegration:
         assert save_kwargs["pareto_fronts"] == {"agg": mock_results_df}
         assert save_kwargs["tasks"] == {"agg": mock_task_config}
         assert save_kwargs["save_dir"] == sample_cli_args_with_save_dir.save_dir
+
+    @patch("aiconfigurator.cli.main.save_results")
+    @patch("aiconfigurator.cli.main._execute_tasks")
+    @patch("aiconfigurator.cli.main.build_default_tasks")
+    def test_cli_main_forwards_gpu_hour_price_to_execution(
+        self,
+        mock_build_default,
+        mock_execute,
+        mock_save,
+        cli_args_factory,
+        tmp_path,
+    ):
+        task = MagicMock(name="TaskConfig")
+        best_configs = {"agg": pd.DataFrame({"num_total_gpus": [8]})}
+        mock_build_default.return_value = {"agg": task}
+        mock_execute.return_value = ("agg", best_configs, best_configs, {}, {}, {})
+        args = cli_args_factory(
+            mode="default",
+            extra_args=[
+                "--gpu-hour-price",
+                "2.5",
+            ],
+            save_dir=str(tmp_path),
+        )
+
+        cli_main(args)
+
+        assert mock_execute.call_args.kwargs["gpu_hour_price"] == 2.5
+        assert "cost_details" not in mock_save.call_args.kwargs
 
     @patch("aiconfigurator.cli.main._execute_tasks")
     @patch("aiconfigurator.cli.main.build_default_tasks")
@@ -421,6 +499,34 @@ class TestCLIIntegration:
         assert "No successful experiment runs to compare." in caplog.text
         assert "Traceback" not in caplog.text
         assert all(record.exc_info is None for record in caplog.records)
+
+    @patch("aiconfigurator.cli.main.log_final_summary")
+    @patch("aiconfigurator.cli.main.add_cost_efficiency")
+    @patch("aiconfigurator.cli.main.process_experiment_result")
+    def test_execute_tasks_adds_cost_efficiency_after_ranking(
+        self,
+        mock_process,
+        mock_add_cost_efficiency,
+        mock_summary,
+    ):
+        task = MagicMock(name="Task")
+        task.to_yaml.return_value = "serving_mode: agg"
+        task.run.return_value = pd.DataFrame({"candidate": [1]})
+        ranked = pd.DataFrame({"tokens/s/gpu_cluster": [100.0], "num_total_gpus": [8]})
+        enriched = {"agg": ranked.assign(**{"tokens/s/$": [40.0]})}
+        mock_process.return_value = (ranked, 100.0, pd.DataFrame(), "tokens/s/user", {})
+        mock_add_cost_efficiency.return_value = enriched
+        chosen, best_configs, _, best_throughputs, _, _ = _execute_tasks(
+            {"agg": task},
+            mode="default",
+            gpu_hour_price=2.5,
+        )
+
+        assert chosen == "agg"
+        assert best_throughputs == {"agg": 100.0}
+        assert best_configs is enriched
+        mock_add_cost_efficiency.assert_called_once_with({"agg": ranked}, 2.5)
+        assert mock_summary.call_args.kwargs["best_configs"] is enriched
 
     @patch("aiconfigurator.cli.main._execute_tasks")
     @patch("aiconfigurator.cli.main.build_experiment_tasks")

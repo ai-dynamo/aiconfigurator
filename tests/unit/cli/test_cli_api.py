@@ -202,6 +202,105 @@ class TestCLIDefaultNextn:
         assert kwargs["nextn_accepted"] == 0.7
 
 
+class TestCLICostAPI:
+    @staticmethod
+    def _result() -> CLIResult:
+        return CLIResult(
+            chosen_exp="agg",
+            best_configs={"agg": pd.DataFrame({"num_total_gpus": [8]})},
+            pareto_fronts={"agg": pd.DataFrame()},
+            best_throughputs={"agg": 100.0},
+            best_latencies={},
+            tasks={"agg": MagicMock(name="Task")},
+        )
+
+    @pytest.mark.parametrize("gpu_hour_price", [True, "invalid", "nan", "inf", 0, -1])
+    @patch("aiconfigurator.cli.api.build_default_tasks")
+    def test_default_validates_cost_before_building_tasks(self, mock_build, gpu_hour_price):
+        from aiconfigurator.cli import cli_default
+
+        with pytest.raises((TypeError, ValueError), match="positive finite number"):
+            cli_default(
+                model_path="Qwen/Qwen3-32B",
+                total_gpus=8,
+                system="h200_sxm",
+                gpu_hour_price=gpu_hour_price,
+            )
+
+        mock_build.assert_not_called()
+
+    @patch("aiconfigurator.cli.api.save_results")
+    @patch("aiconfigurator.cli.api._execute_and_wrap_result")
+    @patch("aiconfigurator.cli.api.build_default_tasks")
+    def test_default_forwards_gpu_hour_price_and_saves_enriched_results(
+        self,
+        mock_build,
+        mock_execute,
+        mock_save,
+        tmp_path,
+    ):
+        from aiconfigurator.cli import cli_default
+
+        result = self._result()
+        mock_build.return_value = result.tasks
+        mock_execute.return_value = result
+
+        returned = cli_default(
+            model_path="Qwen/Qwen3-32B",
+            total_gpus=8,
+            system="h200_sxm",
+            gpu_hour_price=2.5,
+            save_dir=str(tmp_path),
+        )
+
+        assert returned is result
+        assert mock_execute.call_args.kwargs["gpu_hour_price"] == 2.5
+        assert "cost_details" not in mock_save.call_args.kwargs
+
+    @patch("aiconfigurator.cli.api._execute_and_wrap_result")
+    @patch("aiconfigurator.cli.api.build_experiment_tasks")
+    def test_exp_forwards_gpu_hour_price(self, mock_build, mock_execute):
+        result = self._result()
+        mock_build.return_value = result.tasks
+        mock_execute.return_value = result
+
+        returned = cli_exp(
+            config={"agg": {}},
+            gpu_hour_price=2.5,
+        )
+
+        assert returned is result
+        assert mock_execute.call_args.kwargs["gpu_hour_price"] == 2.5
+
+    @patch("aiconfigurator.sdk.perf_database.load_system_spec", return_value={"node": {"num_gpus_per_node": 8}})
+    @patch("aiconfigurator.cli.api._execute_and_wrap_result")
+    @patch("aiconfigurator.cli.api._build_recommend_tasks")
+    @patch("aiconfigurator.cli.api.build_default_tasks")
+    def test_recommend_forwards_gpu_hour_price(
+        self,
+        mock_build,
+        mock_build_recommend,
+        mock_execute,
+        _mock_load_system_spec,
+    ):
+        from aiconfigurator.cli import cli_recommend
+
+        result = self._result()
+        mock_build.return_value = result.tasks
+        mock_build_recommend.return_value = result.tasks
+        mock_execute.return_value = result
+
+        returned = cli_recommend(
+            model_path="Qwen/Qwen3-32B",
+            system="h200_sxm",
+            target_request_rate=10,
+            gpu_hour_price=2.5,
+        )
+
+        assert returned is result
+        assert mock_execute.call_args.kwargs["gpu_hour_price"] == 2.5
+
+
 class TestCLIExpUnit:
     """Unit tests for cli_exp API (mocked)."""
 

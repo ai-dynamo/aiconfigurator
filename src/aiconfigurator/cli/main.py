@@ -19,7 +19,7 @@ from aiconfigurator.cli.estimate_detail_report import (
     format_moe_comm_fallback,
 )
 from aiconfigurator.cli.report_and_save import log_final_summary, save_results
-from aiconfigurator.cli.utils import merge_experiment_results_by_mode, process_experiment_result
+from aiconfigurator.cli.utils import add_cost_efficiency, merge_experiment_results_by_mode, process_experiment_result
 from aiconfigurator.generator.api import (
     add_generator_override_arguments,
     generate_naive_config,
@@ -179,6 +179,16 @@ def _build_common_cli_experiments_parser() -> argparse.ArgumentParser:
     )
     add_generator_override_arguments(common_parser)
     return common_parser
+
+
+def _add_cost_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--gpu-hour-price",
+        type=_positive_float,
+        default=None,
+        metavar="PRICE",
+        help="Hourly price per GPU; when set, Top-N results also output tokens/s/$.",
+    )
 
 
 def _parse_nextn(value: str) -> int | str:
@@ -1510,6 +1520,7 @@ def configure_parser(parser):
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_default_mode_arguments(default_parser)
+    _add_cost_arguments(default_parser)
 
     help_text = "Run one or more experiments defined in a YAML file. Example: example.yaml"
     # an example yaml for demonstration
@@ -1526,6 +1537,7 @@ def configure_parser(parser):
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_experiments_mode_arguments(experiments_parser)
+    _add_cost_arguments(experiments_parser)
 
     # Generate mode - naive config without sweeping
     generate_parser = subparsers.add_parser(
@@ -1576,6 +1588,7 @@ def configure_parser(parser):
         ),
     )
     _add_recommend_mode_arguments(recommend_parser)
+    _add_cost_arguments(recommend_parser)
 
 
 def _get_system_data_root(system_name: str) -> str | None:
@@ -2175,6 +2188,7 @@ def _execute_tasks(
     strict_sla: bool = False,
     inclusive_tpot: bool = False,
     parallel_experiments: bool = False,
+    gpu_hour_price: float | None = None,
 ) -> tuple[
     str,
     dict[str, pd.DataFrame],
@@ -2200,6 +2214,8 @@ def _execute_tasks(
             during picking.
         inclusive_tpot: When True, replace TPOT in terminal and CSV output
             with (ttft + tpot * (osl - 1)) / osl.
+        gpu_hour_price: Optional hourly price per GPU used to map the existing
+            per-GPU throughput to ``tokens/s/$``. Search and ranking are unchanged.
 
     Returns:
         tuple:
@@ -2316,6 +2332,9 @@ def _execute_tasks(
         )
 
     chosen_exp = max(best_throughputs, key=best_throughputs.get) if best_throughputs else "none"
+
+    if gpu_hour_price is not None:
+        best_configs = add_cost_efficiency(best_configs, gpu_hour_price)
 
     log_final_summary(
         chosen_exp=chosen_exp,  # for summary
@@ -3147,6 +3166,7 @@ def _run_recommend(args) -> None:
         args.system,
         args.backend,
     )
+    gpu_hour_price = args.gpu_hour_price
     try:
         cli_recommend(
             model_path=args.model_path,
@@ -3179,10 +3199,13 @@ def _run_recommend(args) -> None:
             save_dir=args.save_dir,
             engine_step_backend=args.engine_step_backend,
             forward_model=args.forward_model,
+            gpu_hour_price=gpu_hour_price,
         )
     except NoResultsError as exc:
         logger.debug("Recommend mode traceback", exc_info=True)
         raise SystemExit(1) from exc
+    except ValueError as exc:
+        raise SystemExit("Error: " + str(exc)) from exc
 
 
 def _validate_default_mode_inputs(args) -> None:
@@ -3266,6 +3289,7 @@ def main(args):
     if args.mode == "default":
         _resolve_and_validate_nextn(args)
         _validate_default_mode_inputs(args)
+        gpu_hour_price = args.gpu_hour_price
 
         # No --total-gpus but a load target means recommend mode
         has_load_target = (
@@ -3350,6 +3374,7 @@ def main(args):
             moe_backend=getattr(args, "moe_backend", None),
         )
     elif args.mode == "exp":
+        gpu_hour_price = args.gpu_hour_price
         try:
             build_kwargs: dict[str, Any] = {"yaml_path": args.yaml_path}
             if args.engine_step_backend is not None:
@@ -3373,12 +3398,17 @@ def main(args):
         execute_kwargs["strict_sla"] = True
     if getattr(args, "inclusive_tpot", False):
         execute_kwargs["inclusive_tpot"] = True
-    _, best_configs, pareto_fronts, _, _, _ = _execute_tasks(
-        tasks,
-        args.mode,
-        top_n=args.top_n,
-        **execute_kwargs,
-    )
+    if gpu_hour_price is not None:
+        execute_kwargs["gpu_hour_price"] = gpu_hour_price
+    try:
+        _, best_configs, pareto_fronts, _, _, _ = _execute_tasks(
+            tasks,
+            args.mode,
+            top_n=args.top_n,
+            **execute_kwargs,
+        )
+    except ValueError as exc:
+        raise SystemExit("Error: " + str(exc)) from exc
     if not best_configs:
         raise SystemExit(1)
 
