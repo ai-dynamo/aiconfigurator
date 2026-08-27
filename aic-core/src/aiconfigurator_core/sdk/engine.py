@@ -461,6 +461,8 @@ def _resolve_attention_lane_orders(ops: Any, database: Any, override: str | None
             op._lane_order = resolved_lane_order_for_op(database, "_context_attention_data", override)
         elif isinstance(op, GenerationAttention):
             op._lane_order = resolved_lane_order_for_op(database, "_generation_attention_data", override)
+        elif isinstance(op, FPMForwardOp):
+            _resolve_attention_lane_orders(op._sol_ops, database, override)
 
 
 def build_engine_spec_json(
