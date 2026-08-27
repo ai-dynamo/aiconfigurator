@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -43,6 +44,14 @@ SYSTEM_LAYOUTS = {
     "b300_sxm": (8, 8),
     "h100_sxm": (8, 8),
     "h200_sxm": (8, 8),
+}
+SYSTEM_CUDA_ARCHES = {
+    "gb200": "100a-real",
+    "gb300": "103a-real",
+    "b200_sxm": "100a-real",
+    "b300_sxm": "103a-real",
+    "h100_sxm": "90-real",
+    "h200_sxm": "90-real",
 }
 SYSTEM_GPU_IDENTITIES = {
     "gb200": ("GB200", "10.0"),
@@ -217,6 +226,8 @@ def validate_job_dir(
     expected_variant = "linux/arm64" if system in ("gb200", "gb300") else "linux/amd64"
     if evidence.get("system") != system or evidence.get("image_variant") != expected_variant:
         raise CampaignValidationError(f"{evidence_path}: system/image variant mismatch")
+    if evidence.get("cuda_arches") != SYSTEM_CUDA_ARCHES[system]:
+        raise CampaignValidationError(f"{evidence_path}: CUDA architecture mismatch")
     if evidence.get("configured_image_digest") != configured_digest:
         raise CampaignValidationError(f"{evidence_path}: configured image digest mismatch")
     for key in ("observed_image_digest", "wheel_sha256", "collector_ref"):
@@ -226,6 +237,31 @@ def validate_job_dir(
             raise CampaignValidationError(f"{evidence_path}: invalid {key}")
     if evidence.get("slurm_topology_verified") is not True:
         raise CampaignValidationError(f"{evidence_path}: topology was not verified")
+    seed = evidence.get("seed_provenance")
+    if seed is not None:
+        required = {
+            "mode",
+            "source_system",
+            "source_image_sha256",
+            "source_image_meta_sha256",
+            "source_image_digest",
+        }
+        if not isinstance(seed, dict) or not required <= set(seed) or seed.get("mode") not in {"image", "runtime"}:
+            raise CampaignValidationError(f"{evidence_path}: invalid seed provenance")
+        for field in ("source_image_sha256", "source_image_meta_sha256"):
+            if not re.fullmatch(r"[0-9a-f]{64}", str(seed.get(field, ""))):
+                raise CampaignValidationError(f"{evidence_path}: invalid seed provenance checksum")
+        source_system = str(seed.get("source_system", ""))
+        source_variant = "linux/arm64" if source_system in ("gb200", "gb300") else "linux/amd64"
+        if source_system not in SYSTEM_LAYOUTS or source_variant != expected_variant:
+            raise CampaignValidationError(f"{evidence_path}: seed image architecture mismatch")
+        if seed.get("source_image_digest") != evidence["observed_image_digest"]:
+            raise CampaignValidationError(f"{evidence_path}: seed image digest mismatch")
+        if seed["mode"] == "runtime":
+            if seed.get("cuda_arches") != SYSTEM_CUDA_ARCHES[system]:
+                raise CampaignValidationError(f"{evidence_path}: seed runtime CUDA architecture mismatch")
+            if seed.get("source_wheel_sha256") != evidence["wheel_sha256"]:
+                raise CampaignValidationError(f"{evidence_path}: seed runtime wheel checksum mismatch")
 
     failures: list[dict[str, Any]] = []
     for error_path in sorted(path.glob("errors_moe_a2a_trtllm.rank*.json")):
@@ -272,10 +308,13 @@ def merge_campaign(
         or len({job.table["collector_hash"] for job in jobs}) != 1
     ):
         raise CampaignValidationError("campaign jobs use different collector refs/hashes")
-    immutable_evidence = ("observed_image_digest", "image_variant", "wheel_sha256", "collector_ref")
+    immutable_evidence = ("observed_image_digest", "image_variant", "wheel_sha256", "cuda_arches", "collector_ref")
     for field in immutable_evidence:
         if len({job.evidence[field] for job in jobs}) != 1:
             raise CampaignValidationError(f"campaign runtime evidence differs for {field}")
+    seed_evidence = {json.dumps(job.evidence.get("seed_provenance"), sort_keys=True) for job in jobs}
+    if len(seed_evidence) != 1:
+        raise CampaignValidationError("campaign runtime seed provenance differs")
     merged = pd.concat([job.frame for job in jobs], ignore_index=True)
     if merged[list(PHYSICAL_KEY_COLUMNS)].duplicated().any():
         raise CampaignValidationError("merged campaign contains duplicate physical keys")
@@ -322,6 +361,10 @@ def merge_campaign(
             "configured_image_digest": RUNTIME.image().split("@", 1)[1],
             "slurm_topology_verified": "true",
         }
+        if jobs[0].evidence.get("seed_provenance") is not None:
+            runtime["abi"]["runtime_seed_provenance"] = json.dumps(
+                jobs[0].evidence["seed_provenance"], sort_keys=True, separators=(",", ":")
+            )
         staged_sidecar = provenance.write_collection_meta(staging, runtime, existing_tables)
         staged_errors: list[Path] = []
         if total_failures:

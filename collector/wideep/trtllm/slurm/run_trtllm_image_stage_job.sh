@@ -22,7 +22,16 @@ case "${IMAGE_ARCH}" in arm64|amd64) ;; *) die "invalid IMAGE_ARCH" ;; esac
 [[ "${IMAGE_INDEX_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid index digest"
 [[ "${CONTAINER_IMAGE}" == "nvcr.io#nvidia/tensorrt-llm/release:${IMAGE_INDEX_DIGEST}" ]] || die "image must use configured index"
 campaign_root=$(safe_existing_path "campaign root" "${CAMPAIGN_ROOT}")
+SEED_IMAGE=${SEED_IMAGE:-}
+SEED_IMAGE_META=${SEED_IMAGE_META:-}
+SEED_WHEEL_DIR=${SEED_WHEEL_DIR:-}
+[[ -z "${SEED_WHEEL_DIR}" || -n "${SEED_IMAGE}" ]] || die "seed wheel requires seed image"
+case "${IMAGE_ARCH}" in
+    arm64) EXPECTED_IMAGE_DIGEST=sha256:2202825c5950b4925e1add7d458228c9ad3368671789856f24d8947b4defd21c ;;
+    amd64) EXPECTED_IMAGE_DIGEST=sha256:9b3b4dfb811caa9420fa99a6f958155f6a1f727ffc2b5a5c2d9d2ce51fdc323d ;;
+esac
 
+if [[ -z "${SEED_IMAGE}" ]]; then
 read -r IMAGE_DIGEST < <(python3 - "${IMAGE_ARCH}" "${IMAGE_INDEX_DIGEST}" <<'PY'
 import json, sys, urllib.parse, urllib.request
 arch, index = sys.argv[1:]
@@ -43,7 +52,11 @@ if len(matches) != 1:
 print(matches[0])
 PY
 ) || die "failed to resolve platform child"
+else
+    IMAGE_DIGEST=${EXPECTED_IMAGE_DIGEST}
+fi
 [[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid child digest"
+[[ "${IMAGE_DIGEST}" == "${EXPECTED_IMAGE_DIGEST}" ]] || die "platform child digest mismatch"
 
 image_dir="${campaign_root}/images/trtllm/${SYSTEM}"
 artifact_dir="${campaign_root}/runtime/trtllm/${SYSTEM}"
@@ -56,9 +69,24 @@ final_meta="${final_image}.meta.json"
 final_wheel_dir="${artifact_dir}/wheel_${TRT_SOURCE_COMMIT}_${CUDA_ARCHES//[^0-9A-Za-z]/_}"
 [[ ! -e "${final_image}" && ! -e "${final_meta}" && ! -e "${final_wheel_dir}" ]] || die "refusing to overwrite staged runtime"
 
-export ENROOT_CACHE_PATH="${job_root}/enroot-cache" ENROOT_MAX_CONNECTIONS=1 ENROOT_TRANSFER_RETRIES=8
-mkdir -p "${ENROOT_CACHE_PATH}"
 temporary_image="${job_root}/runtime.sqsh"
+seed_provenance="${job_root}/seed_provenance.json"
+repo_root=$(cd "$(dirname "$0")/../../../.." && pwd)
+if [[ -n "${SEED_IMAGE}" ]]; then
+    seed_image=$(safe_existing_path "seed image" "${SEED_IMAGE}")
+    seed_image_meta=$(safe_existing_path "seed image metadata" "${SEED_IMAGE_META}")
+    seed_args=(--image "${seed_image}" --image-meta "${seed_image_meta}" --target-system "${SYSTEM}" --output "${seed_provenance}")
+    if [[ -n "${SEED_WHEEL_DIR}" ]]; then
+        seed_wheel_dir=$(safe_existing_path "seed wheel directory" "${SEED_WHEEL_DIR}")
+        seed_args+=(--wheel-dir "${seed_wheel_dir}")
+    fi
+    PYTHONPATH="${repo_root}" python3 -m collector.wideep.trtllm.runtime_artifacts "${seed_args[@]}" \
+        || die "seed runtime validation failed"
+    cp --reflink=auto -- "${seed_image}" "${temporary_image}"
+else
+    printf 'null\n' > "${seed_provenance}"
+    export ENROOT_CACHE_PATH="${job_root}/enroot-cache" ENROOT_MAX_CONNECTIONS=1 ENROOT_TRANSFER_RETRIES=8
+    mkdir -p "${ENROOT_CACHE_PATH}"
 enroot_library_dir="${job_root}/enroot-library"
 mkdir -p "${enroot_library_dir}"
 cp -a /usr/lib/enroot/. "${enroot_library_dir}/"
@@ -76,7 +104,34 @@ path.write_text(source)
 PY
 ENROOT_LIBRARY_PATH="${enroot_library_dir}" enroot import --arch="$([[ "${IMAGE_ARCH}" == amd64 ]] && echo x86_64 || echo aarch64)" \
     --output="${temporary_image}" "docker://${CONTAINER_IMAGE}"
+fi
 unsquashfs -s "${temporary_image}" >/dev/null || die "invalid staged squashfs"
+
+if [[ -n "${SEED_WHEEL_DIR}" ]]; then
+    publish_wheel_dir="${job_root}/publish-wheel"
+    cp -a -- "${seed_wheel_dir}" "${publish_wheel_dir}"
+    rm -f -- "${publish_wheel_dir}/SUCCESS"
+    python3 - "${publish_wheel_dir}/build_meta.json" "${seed_provenance}" "${SYSTEM}" <<'PY'
+import json
+import sys
+from datetime import date
+from pathlib import Path
+
+meta_path, seed_path, system = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+meta = json.loads(meta_path.read_text(encoding="utf-8"))
+meta["system"] = system
+meta["seed_provenance"] = json.loads(seed_path.read_text(encoding="utf-8"))
+meta["staged_at"] = date.today().isoformat()
+meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+    cp -- "${publish_wheel_dir}/build_meta.json" "${job_root}/build_meta.json"
+    cp -- "${job_root}/build_meta.json" "${final_meta}"
+    mv -- "${temporary_image}" "${final_image}"
+    touch "${publish_wheel_dir}/SUCCESS"
+    mv -- "${publish_wheel_dir}" "${final_wheel_dir}"
+    echo "Published seeded TRT-LLM runtime ${final_image} and ${final_wheel_dir}"
+    exit 0
+fi
 
 source_root="${job_root}/TensorRT-LLM"
 git clone --filter=blob:none --no-checkout https://github.com/NVIDIA/TensorRT-LLM.git "${source_root}"
@@ -116,18 +171,18 @@ cp -- "${dependency_wheels[@]}" "${final_wheel_dir}/dependencies/"
 wheel_name=$(basename "${wheels[0]}")
 python3 - "${job_root}/build_meta.json" "${SYSTEM}" "${IMAGE_ARCH}" "${CUDA_ARCHES}" \
     "${IMAGE_INDEX_DIGEST}" "${IMAGE_DIGEST}" "${sqsh_sha}" "${wheel_name}" "${wheel_sha}" \
-    "${dependency_staging}" "${TRANSFORMERS_REQUIREMENT}" <<'PY'
+    "${dependency_staging}" "${TRANSFORMERS_REQUIREMENT}" "${seed_provenance}" <<'PY'
 import hashlib, json, sys
 from datetime import date
 from pathlib import Path
-out, system, arch, cuda_arches, index, child, sqsh_sha, wheel, wheel_sha, dependency_dir, transformers_requirement = sys.argv[1:]
+out, system, arch, cuda_arches, index, child, sqsh_sha, wheel, wheel_sha, dependency_dir, transformers_requirement, seed_path = sys.argv[1:]
 dependency_wheels = {
     path.name: hashlib.sha256(path.read_bytes()).hexdigest()
     for path in sorted(Path(dependency_dir).glob("*.whl"))
 }
 if not dependency_wheels:
     raise SystemExit("dependency wheelhouse is empty")
-Path(out).write_text(json.dumps({
+payload = {
   "schema_version": 1, "system": system, "architecture": arch, "image_variant": f"linux/{arch}",
   "configured_image": f"nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20@{index}",
   "configured_image_digest": index, "observed_image_digest": child, "sqsh_sha256": sqsh_sha,
@@ -137,7 +192,11 @@ Path(out).write_text(json.dumps({
   "cuda_arches": cuda_arches, "wheel": wheel, "wheel_sha256": wheel_sha,
   "python_requirements": [transformers_requirement], "dependency_wheels": dependency_wheels,
   "staged_at": date.today().isoformat(),
-}, indent=2, sort_keys=True) + "\n")
+}
+seed = json.loads(Path(seed_path).read_text(encoding="utf-8"))
+if seed is not None:
+    payload["seed_provenance"] = seed
+Path(out).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
 cp -- "${job_root}/build_meta.json" "${final_wheel_dir}/build_meta.json"
 cp -- "${job_root}/build_meta.json" "${final_meta}"

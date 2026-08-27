@@ -66,6 +66,13 @@ the vendored DeepEP and NVSHMEM pins, builds package version `1.3.0rc11`, and
 records the source-wheel SHA256. The runner installs that wheel in a job-local
 overlay before entering the MPI collector.
 
+Image staging may reuse an already attested same-CPU-architecture squashfs.
+Supplying its wheel directory additionally reuses the complete runtime only
+when the source and target CUDA architecture sets are identical. Seed image,
+wheel, dependencies, pins, and metadata are checksum-validated, and the seed
+provenance is carried through job evidence and the final sidecar. Cross-SM
+wheel reuse fails closed.
+
 Case failures are never allowlisted. A failed full job preserves its partial
 parquet, sidecar, and rank failure records in campaign failure evidence. The
 finalizer rejects those inputs by default; `--allow-partial-evidence` may be

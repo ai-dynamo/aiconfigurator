@@ -20,7 +20,14 @@ from collector.wideep.trtllm.collect_moe_a2a import case_plan_ids
 pytestmark = pytest.mark.unit
 
 
-def _write_job(root: Path, *, backend: str, system: str = "h200_sxm", partial: bool = False) -> Path:
+def _write_job(
+    root: Path,
+    *,
+    backend: str,
+    system: str = "h200_sxm",
+    partial: bool = False,
+    seed_provenance: dict[str, str] | None = None,
+) -> Path:
     ep_size = campaign.SYSTEM_LAYOUTS[system][1]
     path = root / backend
     path.mkdir(parents=True)
@@ -87,9 +94,12 @@ def _write_job(root: Path, *, backend: str, system: str = "h200_sxm", partial: b
         "observed_image_digest": "sha256:" + "c" * 64,
         "image_variant": "linux/arm64" if system in ("gb200", "gb300") else "linux/amd64",
         "wheel_sha256": "d" * 64,
+        "cuda_arches": campaign.SYSTEM_CUDA_ARCHES[system],
         "collector_ref": "a" * 40,
         "slurm_topology_verified": True,
     }
+    if seed_provenance is not None:
+        evidence["seed_provenance"] = seed_provenance
     (path / "runtime_evidence.json").write_text(json.dumps(evidence), encoding="utf-8")
     if partial:
         failure = {
@@ -144,3 +154,40 @@ def test_merge_requires_both_backends(tmp_path):
     job = _write_job(tmp_path / "jobs", backend=campaign.COMM_BACKEND_HT)
     with pytest.raises(campaign.CampaignValidationError, match="exactly one job"):
         campaign.merge_campaign([job], system="h200_sxm", output_dir=tmp_path / "published")
+
+
+def test_merge_preserves_matching_seed_provenance(tmp_path):
+    seed = {
+        "mode": "runtime",
+        "source_system": "h100_sxm",
+        "source_image_sha256": "e" * 64,
+        "source_image_meta_sha256": "f" * 64,
+        "source_image_digest": "sha256:" + "c" * 64,
+        "source_wheel_sha256": "d" * 64,
+        "source_wheel_meta_sha256": "a" * 64,
+        "cuda_arches": "90-real",
+    }
+    jobs = [_write_job(tmp_path / "jobs", backend=backend, seed_provenance=seed) for backend in campaign.BACKENDS]
+    _, sidecar = campaign.merge_campaign(jobs, system="h200_sxm", output_dir=tmp_path / "published")
+    meta = yaml.safe_load(sidecar.read_text(encoding="utf-8"))
+    assert json.loads(meta["runtime"]["abi"]["runtime_seed_provenance"]) == seed
+
+
+def test_merge_rejects_different_seed_provenance(tmp_path):
+    common = {
+        "mode": "image",
+        "source_system": "h100_sxm",
+        "source_image_sha256": "e" * 64,
+        "source_image_meta_sha256": "f" * 64,
+        "source_image_digest": "sha256:" + "c" * 64,
+    }
+    jobs = [
+        _write_job(tmp_path / "jobs", backend=campaign.BACKENDS[0], seed_provenance=common),
+        _write_job(
+            tmp_path / "jobs",
+            backend=campaign.BACKENDS[1],
+            seed_provenance=common | {"source_image_sha256": "0" * 64},
+        ),
+    ]
+    with pytest.raises(campaign.CampaignValidationError, match="seed provenance differs"):
+        campaign.merge_campaign(jobs, system="h200_sxm", output_dir=tmp_path / "published")

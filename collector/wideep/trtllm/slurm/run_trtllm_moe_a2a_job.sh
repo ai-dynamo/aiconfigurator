@@ -21,12 +21,12 @@ done
 case "${BACKEND}" in trtllm_deepep_ht|trtllm_deepep_ll) ;; *) die "unsupported backend" ;; esac
 case "${RUN_KIND}" in canary|full) ;; *) die "unsupported run kind" ;; esac
 case "${SYSTEM}" in
-    gb200) expected_gpus=4; gpu_token=GB200; compute_cap=10.0 ;;
-    gb300) expected_gpus=4; gpu_token=GB300; compute_cap=10.3 ;;
-    b200_sxm) expected_gpus=8; gpu_token=B200; compute_cap=10.0 ;;
-    b300_sxm) expected_gpus=8; gpu_token=B300; compute_cap=10.3 ;;
-    h100_sxm) expected_gpus=8; gpu_token=H100; compute_cap=9.0 ;;
-    h200_sxm) expected_gpus=8; gpu_token=H200; compute_cap=9.0 ;;
+    gb200) expected_gpus=4; gpu_token=GB200; compute_cap=10.0; expected_cuda_arches=100a-real ;;
+    gb300) expected_gpus=4; gpu_token=GB300; compute_cap=10.3; expected_cuda_arches=103a-real ;;
+    b200_sxm) expected_gpus=8; gpu_token=B200; compute_cap=10.0; expected_cuda_arches=100a-real ;;
+    b300_sxm) expected_gpus=8; gpu_token=B300; compute_cap=10.3; expected_cuda_arches=103a-real ;;
+    h100_sxm) expected_gpus=8; gpu_token=H100; compute_cap=9.0; expected_cuda_arches=90-real ;;
+    h200_sxm) expected_gpus=8; gpu_token=H200; compute_cap=9.0; expected_cuda_arches=90-real ;;
     *) die "unsupported system" ;;
 esac
 [[ "${GPUS_PER_NODE}" == "${expected_gpus}" && "${SLURM_NTASKS:-}" == "${expected_gpus}" ]] || die "invalid single-node rank layout"
@@ -44,10 +44,10 @@ wheel_dir=$(safe_existing_path "wheel directory" "${WHEEL_DIR}")
 [[ -z "$(git -C "${repo_dir}" status --porcelain)" ]] || die "repository checkout is dirty"
 collector_ref=$(git -C "${repo_dir}" rev-parse HEAD)
 
-read -r child_digest image_variant wheel_path wheel_sha dependency_dir < <(python3 - "${container_image}" "${container_image}.meta.json" "${wheel_dir}" "${SYSTEM}" "${IMAGE_ARCH}" <<'PY'
+read -r child_digest image_variant wheel_path wheel_sha dependency_dir < <(python3 - "${container_image}" "${container_image}.meta.json" "${wheel_dir}" "${SYSTEM}" "${IMAGE_ARCH}" "${expected_cuda_arches}" <<'PY'
 import hashlib, json, re, sys
 from pathlib import Path
-image, image_meta, wheel_dir, system, arch = sys.argv[1:]
+image, image_meta, wheel_dir, system, arch, cuda_arches = sys.argv[1:]
 image, image_meta, wheel_dir = Path(image), Path(image_meta), Path(wheel_dir)
 im = json.loads(image_meta.read_text()); wm = json.loads((wheel_dir / "build_meta.json").read_text())
 checks = {"schema_version": 1, "system": system, "architecture": arch,
@@ -55,7 +55,27 @@ checks = {"schema_version": 1, "system": system, "architecture": arch,
           "source_commit": "14efb6ac673c0cbe828e1206cc5c7d5748d05ffa",
           "deep_ep": "5be51b228a7c82dbdb213ea58e77bffd12b38af8", "nvshmem": "3.2.5-1"}
 for key, expected in checks.items():
-    if wm.get(key, im.get(key)) != expected: raise SystemExit(f"runtime {key} mismatch")
+    if im.get(key) != expected or wm.get(key) != expected: raise SystemExit(f"runtime {key} mismatch")
+if wm.get("cuda_arches") != cuda_arches: raise SystemExit("runtime CUDA architecture mismatch")
+if im.get("seed_provenance") != wm.get("seed_provenance"):
+    raise SystemExit("runtime seed provenance mismatch")
+seed = im.get("seed_provenance")
+if seed is not None:
+    required = {"mode", "source_system", "source_image_sha256", "source_image_meta_sha256", "source_image_digest"}
+    if not isinstance(seed, dict) or not required <= set(seed) or seed["mode"] not in {"image", "runtime"}:
+        raise SystemExit("invalid runtime seed provenance")
+    for key in ("source_image_sha256", "source_image_meta_sha256"):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(seed[key])): raise SystemExit("invalid runtime seed checksum")
+    system_arches = {"gb200": "arm64", "gb300": "arm64", "b200_sxm": "amd64", "b300_sxm": "amd64", "h100_sxm": "amd64", "h200_sxm": "amd64"}
+    if system_arches.get(seed["source_system"]) != arch or seed["source_image_digest"] != im["observed_image_digest"]:
+        raise SystemExit("seed image identity mismatch")
+    if seed["source_image_sha256"] != im["sqsh_sha256"]:
+        raise SystemExit("seed image checksum provenance mismatch")
+    if seed["mode"] == "runtime":
+        if seed.get("cuda_arches") != cuda_arches: raise SystemExit("seed wheel CUDA architecture mismatch")
+        if seed.get("source_wheel_sha256") != wm.get("wheel_sha256"): raise SystemExit("seed wheel checksum provenance mismatch")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(seed.get("source_wheel_meta_sha256", ""))):
+            raise SystemExit("invalid seed wheel metadata checksum")
 if hashlib.sha256(image.read_bytes()).hexdigest() != im["sqsh_sha256"]: raise SystemExit("sqsh checksum mismatch")
 wheel = (wheel_dir / wm["wheel"]).resolve(strict=True)
 if wheel.parent != wheel_dir.resolve() or hashlib.sha256(wheel.read_bytes()).hexdigest() != wm["wheel_sha256"]: raise SystemExit("wheel checksum mismatch")
@@ -88,11 +108,15 @@ staging_root="/tmp/aic-trtllm-a2a-${SLURM_JOB_ID}"
 mkdir -p "${staging_root}"
 output_dir="${staging_root}/output"
 mkdir -p "${output_dir}"
-python3 - "${output_dir}/runtime_evidence.json" "${SYSTEM}" "${nodes[0]}" "${child_digest}" "${image_variant}" "${wheel_sha}" "${collector_ref}" <<'PY'
+python3 - "${output_dir}/runtime_evidence.json" "${SYSTEM}" "${nodes[0]}" "${child_digest}" "${image_variant}" "${wheel_sha}" "${collector_ref}" "${container_image}.meta.json" "${expected_cuda_arches}" <<'PY'
 import json, sys
 from pathlib import Path
-out, system, node, child, variant, wheel_sha, collector_ref = sys.argv[1:]
-Path(out).write_text(json.dumps({"system": system, "node": node, "configured_image_digest": "sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88", "observed_image_digest": child, "image_variant": variant, "wheel_sha256": wheel_sha, "collector_ref": collector_ref, "slurm_topology_verified": True}, indent=2, sort_keys=True) + "\n")
+out, system, node, child, variant, wheel_sha, collector_ref, image_meta, cuda_arches = sys.argv[1:]
+seed = json.loads(Path(image_meta).read_text(encoding="utf-8")).get("seed_provenance")
+payload = {"system": system, "node": node, "configured_image_digest": "sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88", "observed_image_digest": child, "image_variant": variant, "wheel_sha256": wheel_sha, "cuda_arches": cuda_arches, "collector_ref": collector_ref, "slurm_topology_verified": True}
+if seed is not None:
+    payload["seed_provenance"] = seed
+Path(out).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
 
 canary_flag=""; [[ "${RUN_KIND}" != canary ]] || canary_flag=--canary

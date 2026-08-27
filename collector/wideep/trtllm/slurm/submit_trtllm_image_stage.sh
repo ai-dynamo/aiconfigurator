@@ -6,7 +6,7 @@ set -euo pipefail
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-system=""; campaign_root=""
+system=""; campaign_root=""; seed_image=""; seed_wheel_dir=""
 account_override=""; partition_override=""; qos_override=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -15,7 +15,9 @@ while [[ $# -gt 0 ]]; do
         --account) account_override=$2; shift 2 ;;
         --partition) partition_override=$2; shift 2 ;;
         --qos) qos_override=$2; shift 2 ;;
-        -h|--help) echo "Usage: $0 --system SYSTEM --campaign-root PATH [--account ACCOUNT --partition PARTITION --qos QOS]"; exit 0 ;;
+        --seed-image) seed_image=$2; shift 2 ;;
+        --seed-wheel-dir) seed_wheel_dir=$2; shift 2 ;;
+        -h|--help) echo "Usage: $0 --system SYSTEM --campaign-root PATH [--seed-image SQSH [--seed-wheel-dir DIR]] [--account ACCOUNT --partition PARTITION --qos QOS]"; exit 0 ;;
         *) die "unknown argument $1" ;;
     esac
 done
@@ -36,6 +38,18 @@ esac
 
 campaign_root=$(realpath -e -- "${campaign_root}")
 case "${campaign_root}" in /mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*) die "prohibited campaign path" ;; esac
+[[ -z "${seed_wheel_dir}" || -n "${seed_image}" ]] || die "--seed-wheel-dir requires --seed-image"
+if [[ -n "${seed_image}" ]]; then
+    seed_image=$(realpath -e -- "${seed_image}") || die "seed image does not exist"
+    seed_image_meta=$(realpath -e -- "${seed_image}.meta.json") || die "seed image metadata does not exist"
+    case "${seed_image}" in /mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*) die "seed image uses prohibited storage" ;; esac
+else
+    seed_image_meta=""
+fi
+if [[ -n "${seed_wheel_dir}" ]]; then
+    seed_wheel_dir=$(realpath -e -- "${seed_wheel_dir}") || die "seed wheel directory does not exist"
+    case "${seed_wheel_dir}" in /mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*) die "seed wheel directory uses prohibited storage" ;; esac
+fi
 script_dir=$(cd "$(dirname "$0")" && pwd)
 payload=$(realpath -e "${script_dir}/run_trtllm_image_stage_job.sh")
 log_dir="${campaign_root}/slurm_logs/${system}/trtllm_image_stage"
@@ -44,6 +58,7 @@ mkdir -p "${log_dir}" "${campaign_root}/images/trtllm/${system}" "${campaign_roo
 export SYSTEM="${system}" CAMPAIGN_ROOT="${campaign_root}" IMAGE_ARCH="${image_arch}" CUDA_ARCHES="${cuda_arches}"
 export IMAGE_INDEX_DIGEST=sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88
 export CONTAINER_IMAGE="nvcr.io#nvidia/tensorrt-llm/release:${IMAGE_INDEX_DIGEST}"
+export SEED_IMAGE="${seed_image}" SEED_IMAGE_META="${seed_image_meta}" SEED_WHEEL_DIR="${seed_wheel_dir}"
 
 job_id=$(sbatch --parsable --job-name="aic-trt-a2a-${system}-stage" \
     --account="${account}" --partition="${partition}" --qos="${qos}" \
