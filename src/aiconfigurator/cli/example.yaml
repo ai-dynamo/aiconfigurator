@@ -222,3 +222,83 @@ vl_epd_agg:
   # encoder_latency_correction: 1.0
   # encoder_system_name: h200_sxm   # hetero encode pool
   # rate_match_encoder_degradation: 0.9   # encode-pool rate-matching loss
+
+# ============================================================
+# AFD (Attention-FFN Disaggregated) — search topology
+# ============================================================
+# AFD splits each layer's compute across two GPU pools that exchange hidden
+# activations every layer: the A pool runs attention and owns the KV cache,
+# the F pool runs FFN/MoE. It is orthogonal to P/D disaggregation.
+#
+# Topology is node-granular and both pools need at least one node, so an AFD
+# run needs >= 2 nodes' worth of GPUs. With no pinned topology the sweep
+# enumerates (n_a_nodes, n_f_nodes, tp_a, f_moe_ep_size, microbatches,
+# pipeline_model) within the GPU budget.
+afd_search:
+  serving_mode: afd
+  model_path: deepseek-ai/DeepSeek-V3
+  system_name: h200_sxm
+  backend_name: sglang
+  total_gpus: 64
+
+  # Optional. When set it overrides total_gpus as the AFD budget; when unset
+  # AFD uses total_gpus. One of the two is required.
+  # afd_total_gpus: 64
+
+  # Search space (all optional -- omitted lists fall back to built-in defaults):
+  # afd_tp_a_candidates: [1, 2, 4, 8]
+  # afd_f_moe_ep_size_candidates: [8, 16, 32]
+  # afd_microbatch_candidates: [2, 3, 4]
+  # afd_pipeline_model_candidates: [optimistic, conservative, serial]
+  # afd_max_af_ratio: 4.0        # cap A:F node ratio; None = no cap
+  # afd_max_candidates: 20000    # enumeration ceiling
+  # afd_candidate_overflow: error  # or `truncate`
+
+
+# ============================================================
+# AFD — pinned topology (single-point)
+# ============================================================
+# Pinning all three of afd_n_a_nodes / afd_n_f_nodes / afd_tp_a skips
+# enumeration and evaluates exactly one topology.
+afd_pinned:
+  serving_mode: afd
+  model_path: deepseek-ai/DeepSeek-V3
+  system_name: h200_sxm
+  backend_name: sglang
+  total_gpus: 32
+
+  afd_n_a_nodes: 3
+  afd_n_f_nodes: 1
+  afd_tp_a: 2
+
+  # Optional: pin the in-flight batch too. Left unset, the A-pool batch is
+  # derived from KV-cache capacity.
+  # afd_a_batch_size: 64
+  # afd_total_batch_size: 256
+
+
+# ============================================================
+# AFD combined with a static prefill pool
+# ============================================================
+# `afd_combined_with_pd: true` (the default) pairs the AFD decode pools with a
+# regular static prefill pool, and the reported throughput denominator becomes
+# A + F + static-prefill GPUs. Set it to false to size the AFD pools alone.
+afd_combined_with_pd:
+  serving_mode: afd
+  model_path: deepseek-ai/DeepSeek-V3
+  system_name: h200_sxm
+  backend_name: sglang
+  total_gpus: 128
+
+  afd_combined_with_pd: true
+  # afd_prefill_batch_size_list: [1, 2, 4]
+  # afd_max_prefill_gpus: 64
+  # afd_max_prefill_workers: 8
+
+  # Per-pool hardware / framework. Any pool left unset inherits the top-level
+  # system_name / backend_name / backend_version, so naming no pool is
+  # identical to a homogeneous run. Modeling only -- deployment artifact
+  # generation still requires every pool to share one system.
+  # afd_a_system_name: h200_sxm
+  # afd_f_system_name: b200_sxm
+  # afd_prefill_system_name: h200_sxm

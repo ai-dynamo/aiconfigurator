@@ -189,6 +189,95 @@ pool is rate-matched against the LM pools; result rows carry `(e)workers`/`(e)tp
 
 See the `vl_epd_agg` experiment in `src/aiconfigurator/cli/example.yaml` for a complete template.
 
+## AFD (attention-FFN disaggregation) config
+`serving_mode: afd` splits each layer's compute across two GPU pools that exchange hidden activations every layer: the
+**A pool** runs attention and owns the KV cache (memory-bandwidth and HBM bound), the **F pool** runs FFN/MoE
+(compute bound). It is orthogonal to P/D disaggregation — the A/F split is about which *ops* run where inside a layer,
+P/D about which request *phase* runs where — and the two compose via `afd_combined_with_pd`. See
+[AFD mode](cli_user_guide.md#afd-serving-mode) in the CLI guide for topology rules, the GPU-budget precedence and the
+throughput denominator.
+
+Topology is node-granular and both pools need at least one node, so AFD needs **at least two nodes' worth of GPUs**.
+Keys below are Task field names, not CLI flags.
+
+### GPU budget and phase
+- `afd_total_gpus`: AFD's GPU budget. **Overrides `total_gpus`** when set; falls back to `total_gpus` when unset. One
+  of the two is required.
+- `afd_combined_with_pd`: pair the AFD pools with a static prefill pool (default `true`).
+
+Phase selection is a CLI-level choice rather than a Task field: `estimate` mode takes `--afd-phase`
+(`decode` / `prefill` / `both`). `both` is incompatible with a static prefill pool — it already covers both phases
+internally — and the combination is rejected at construction time.
+
+### Pinned topology
+Setting all three of these skips enumeration and evaluates exactly one topology. A partial pin still searches.
+
+- `afd_n_a_nodes` / `afd_n_f_nodes`: node counts per pool
+- `afd_tp_a`: A-pool tensor-parallel width (cannot exceed one A node's GPU count)
+- `afd_a_batch_size` / `afd_total_batch_size`: pin the in-flight batch; left unset the A-pool batch is derived from
+  KV-cache capacity, capped by `afd_max_a_batch_size` (default 1024)
+
+### Search space
+- `afd_tp_a_candidates`, `afd_f_moe_ep_size_candidates`, `afd_microbatch_candidates`,
+  `afd_pipeline_model_candidates`: the enumerated dimensions. Omitted lists fall back to built-in defaults.
+- `afd_max_af_ratio`: cap on the A:F node ratio. `None` (default) means no cap beyond the GPU budget — FastAFD
+  measured optima at 7:1, 11:1 and 17:1 on NVL72, all outside a 4:1 bound.
+- `afd_max_candidates`: enumeration ceiling (default 20000)
+- `afd_candidate_overflow`: `error` (default) or `truncate` when the ceiling is hit
+
+### Pipeline model and microbatches
+The per-layer cycle is `max(t_a, t_f, t_c)` under the overlapped models and `t_a + t_a2f + t_f + t_f2a` under `serial`.
+Which one applies depends on how many microbatches are in flight:
+
+| Pipeline model | Cycle | Microbatches needed |
+|---|---|---|
+| `optimistic` (K=3) | `max(t_a, t_f, t_c)` — the round trip `t_c` is its own stage | `2 + t_c / max(t_a, t_f)`, i.e. topology-dependent rather than a fixed 3 |
+| `conservative` (K=2) | `max(t_a + t_a2f, t_f + t_f2a)` — one direction hidden | 2 |
+| `serial` | `t_a + t_a2f + t_f + t_f2a` | 1 |
+
+The `optimistic` threshold is not a constant: the faster the fabric relative to compute, the fewer microbatches are
+needed to hide the round trip. Requesting `optimistic` below that bound logs once and demotes to `conservative`, unless
+`afd_comm_hiding_tolerance` (default 0.1) applies — at `mb >= 2` with `t_c <= tolerance * max(t_a, t_f)` the round trip
+is treated as negligible and `optimistic` is kept.
+
+With a single microbatch **no** overlapped model applies, whichever one is requested: layer `i+1`'s A input *is* layer
+`i`'s F output, so the pools strictly alternate and there is nothing to overlap with. `num_microbatches < 2` therefore
+falls back to `serial` — including for `conservative`, whose own bound is also 2.
+
+### Calibration knobs
+These change predicted numbers without changing modeled physics — use them to match a measured runtime, and say so
+when reporting results.
+
+- `afd_f_latency_scale`: multiply every F-side contribution (default 1.0). 0.3-0.5 approximates a fused MegaMoE-style
+  kernel against stock per-op data. Surfaced in the result schema so calibrated rows stay distinguishable.
+- `afd_router_on_attn`: assign the MoE router GEMM to the A pool (default `false`). Transfer volume is unchanged
+  either way; only pool attribution moves.
+- `afd_comm_overhead_factor`, `afd_decode_latency_correction`, `afd_prefill_degradation`,
+  `afd_decode_degradation`, `afd_ttft_correction_factor`: multiplicative corrections applied to the corresponding term.
+
+### Static prefill pool (when `afd_combined_with_pd`)
+- `afd_prefill_batch_size_list`: prefill batch sizes to sweep
+- `afd_max_prefill_gpus` / `afd_max_prefill_workers`: caps on the prefill pool
+- `afd_prefill_max_candidates` (default 256) / `afd_prefill_candidate_overflow` (default `error`)
+
+### Heterogeneous pools
+Each of the three pools can sit on its own hardware and framework via `afd_{prefill,a,f}_system_name`,
+`afd_{prefill,a,f}_backend_name` and `afd_{prefill,a,f}_backend_version`. Any pool left unset inherits the top-level
+`system_name` / `backend_name` / `backend_version`, so naming no pool is byte-for-byte identical to a homogeneous run.
+Cross-pool traffic is priced at the slower endpoint. **Modeling only** — deployment artifact generation requires every
+pool to share one system. Details in [Heterogeneous AFD pools](cli_user_guide.md#heterogeneous-afd-pools).
+
+### MTP accounting: current approximation
+With `nextn > 0` the decode path widens queries by `nextn + 1`, which prices the verify batch that actually crosses the
+pool boundary. **This treats verify positions as independent sequences with full KV histories, while real MTP verify
+positions share the sequence's KV history** — so A-side attention and KV-cache demand are over-counted relative to a
+proper multiplicity model. The approximation is deliberately conservative rather than optimistic. Two further pieces
+are not yet modeled: asymmetric A-side draft-layer scaling, and dividing TPOT by the acceptance rate. Treat MTP AFD
+numbers as an upper bound on latency, and prefer measured acceptance rates over the defaults.
+
+See the `afd_search`, `afd_pinned` and `afd_combined_with_pd` experiments in `src/aiconfigurator/cli/example.yaml` for
+complete templates.
+
 ## Practical suggestion
 In order to save search time, you need to reduce the search space by choosing fewer parallel options. Say for `*_num_gpu_candidates` here, it's DeepSeek V3 with 671B model 
 parameters. With fp8_block, the rough estimation of the model weights is 671GB. You can not hold it on 4/2/1 gpus, you can modify it to `[8]` only. 

@@ -1190,6 +1190,103 @@ We defined two experiments. `exp_h200_h200` uses H200 for both prefill and decod
 
 **Note**: You can also compare different backends by setting different `backend_name` values (trtllm, vllm, sglang) in your experiments.
 
+<a id="afd-serving-mode"></a>
+### AFD (Attention-FFN Disaggregated) mode
+
+AFD splits each layer's compute across two GPU pools that exchange hidden
+activations every layer:
+
+| Pool | What it runs | Bottleneck |
+|---|---|---|
+| **A** (attention) | attention ops, owns the KV cache | memory bandwidth + HBM capacity |
+| **F** (FFN/MoE) | FFN and MoE ops | compute |
+
+AFD is **orthogonal** to prefill/decode disaggregation: the A/F split is about
+*which ops* run where within a layer, while P/D is about *which request phase*
+runs where. The two compose — see `afd_combined_with_pd` below.
+
+```bash
+# Sweep AFD topologies under a 64-GPU budget
+aiconfigurator cli default \
+    --serving-mode afd \
+    --model-path deepseek-ai/DeepSeek-V3 \
+    --system h200_sxm \
+    --backend sglang \
+    --total-gpus 64
+```
+
+`--serving-mode` accepts `auto` (default; agg + disagg), `all` (agg + disagg +
+afd), `agg`, `disagg` or `afd`.
+
+#### Topology and the two-node minimum
+
+Topology is **node-granular**: the sweep enumerates whole nodes per pool, not
+individual GPUs. Both pools need at least one node (`n_a_nodes >= 1` and
+`n_f_nodes >= 1`), so **AFD needs at least two nodes' worth of GPUs**. On an
+8-GPU-per-node system that is a 16-GPU floor; a 64-GPU budget gives the sweep
+8 nodes to distribute.
+
+The enumerated dimensions are `(n_a_nodes, n_f_nodes, tp_a, f_moe_ep_size,
+num_microbatches, pipeline_model)`. Pinning all three of `afd_n_a_nodes` /
+`afd_n_f_nodes` / `afd_tp_a` skips enumeration and evaluates that single
+topology — a partial pin still searches.
+
+#### GPU-budget precedence
+
+`afd_total_gpus` **overrides** `total_gpus` when both are set; when it is unset,
+AFD uses `total_gpus`. At least one of the two is required — an AFD task with
+neither is rejected at construction time. This lets one YAML file give AFD a
+different budget from the agg/disagg experiments it sits next to.
+
+#### tokens/s/gpu denominator
+
+The throughput denominator depends on whether a static prefill pool is included:
+
+| Configuration | Denominator |
+|---|---|
+| pure AFD (`afd_combined_with_pd: false`) | A-pool GPUs + F-pool GPUs, i.e. `n_a_workers * tp_a + n_f_workers` |
+| combined AFD + PD (`afd_combined_with_pd: true`, the default) | the above **plus** the static prefill pool's GPUs |
+
+This matters when comparing an AFD row against an agg or disagg row: with the
+default `afd_combined_with_pd: true` the AFD denominator already includes
+prefill capacity, so the comparison is like-for-like.
+
+#### AFD flags in `default` mode
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--afd-max-a-batch-size` | `1024` | Ceiling for the automatically derived A-pool batch. |
+| `--afd-max-candidates` | `20000` | Enumeration ceiling. |
+| `--afd-candidate-overflow` | `error` | What to do when the ceiling is hit: `error` or `truncate`. |
+| `--afd-max-af-ratio` | none | Cap on the A:F node ratio. Unset means no cap beyond the GPU budget. |
+| `--afd-router-on-attn` | `false` | Assign the MoE router GEMM to the A pool. Transfer volume is unchanged either way; only pool attribution moves. |
+| `--afd-f-latency-scale` | `1.0` | Multiply every F-side contribution. A calibration knob for matching a specific FFN runtime, **not** a physical model. |
+| `--afd-comm-hiding-tolerance` | `0.1` | Keep the overlapped pipeline at `mb=2` when the cross-pool round trip is negligible against compute. |
+
+Per-pool hardware and framework flags (`--afd-{prefill,a,f}-{system,backend,backend-version}`)
+are documented under [Heterogeneous AFD pools](#heterogeneous-afd-pools).
+
+`estimate` mode additionally takes `--afd-phase` (`decode` by default; also
+`prefill` or `both`) and `--afd-combined-with-pd` (default on). The two are
+mutually exclusive: `both` already covers prefill and decode internally, so
+combining it with a static prefill pool is rejected. `estimate` also exposes
+`--router-on-attn` and `--f-latency-scale` under those shorter names.
+
+#### Current limitations
+
+- **Deployment artifact generation requires a single system.** The sweep can
+  compare heterogeneous A/F/prefill pools, but `NodeConfig` carries one system,
+  so generating deployment artifacts for a run whose pools disagree fails fast
+  with an explicit error. Hetero pools are supported for **modeling only**.
+- **MTP accounting is an approximation.** Decode queries are widened by
+  `nextn + 1`, which treats verify positions as independent sequences with full
+  KV histories; real MTP verify positions share the sequence's KV history. See
+  the MTP note in [Advanced Tuning](advanced_tuning.md).
+- **`--forward-model fpm` is not supported** in the `afd` estimate mode.
+- The pipeline model is layer-granular, so once-per-step ops (embedding,
+  logits GEMM) are folded into the per-layer average rather than modeled as
+  separate stages.
+
 <a id="heterogeneous-afd-pools"></a>
 ### Heterogeneous AFD pools
 
