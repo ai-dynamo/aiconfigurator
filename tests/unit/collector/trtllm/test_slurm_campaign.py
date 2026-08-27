@@ -49,6 +49,9 @@ def test_image_stage_builds_and_attests_exact_source_runtime():
     assert "--skip-stubs" not in source
     assert "srun --mpi=pmix" in source
     assert "--cuda_architectures" in source
+    assert "transformers==4.57.3" in source
+    assert "--only-binary=:all:" in source
+    assert '"dependency_wheels": dependency_wheels' in source
     assert 'tensorrt_llm.__version__ == "1.3.0rc11"' in source
     assert '"wheel_sha256": wheel_sha' in source
     assert "/mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*" in source
@@ -87,6 +90,9 @@ def test_runner_is_one_node_mpi_and_preserves_failed_rows():
     assert "benchmark_status=$?" in source
     assert "all partial rows and rank evidence preserved" in source
     assert "failure_evidence/${SYSTEM}/trtllm" in source
+    assert 'wm.get("python_requirements") != ["transformers==4.57.3"]' in source
+    assert "runtime dependency wheel set mismatch" in source
+    assert '--no-index --find-links "${AIC_DEPENDENCY_DIR}"' in source
     assert 'touch "${destination}/SUCCESS"' in source
     assert "/mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*" in source
 

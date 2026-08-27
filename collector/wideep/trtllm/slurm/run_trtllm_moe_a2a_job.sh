@@ -44,8 +44,8 @@ wheel_dir=$(safe_existing_path "wheel directory" "${WHEEL_DIR}")
 [[ -z "$(git -C "${repo_dir}" status --porcelain)" ]] || die "repository checkout is dirty"
 collector_ref=$(git -C "${repo_dir}" rev-parse HEAD)
 
-read -r child_digest image_variant wheel_path wheel_sha < <(python3 - "${container_image}" "${container_image}.meta.json" "${wheel_dir}" "${SYSTEM}" "${IMAGE_ARCH}" <<'PY'
-import hashlib, json, sys
+read -r child_digest image_variant wheel_path wheel_sha dependency_dir < <(python3 - "${container_image}" "${container_image}.meta.json" "${wheel_dir}" "${SYSTEM}" "${IMAGE_ARCH}" <<'PY'
+import hashlib, json, re, sys
 from pathlib import Path
 image, image_meta, wheel_dir, system, arch = sys.argv[1:]
 image, image_meta, wheel_dir = Path(image), Path(image_meta), Path(wheel_dir)
@@ -59,7 +59,21 @@ for key, expected in checks.items():
 if hashlib.sha256(image.read_bytes()).hexdigest() != im["sqsh_sha256"]: raise SystemExit("sqsh checksum mismatch")
 wheel = (wheel_dir / wm["wheel"]).resolve(strict=True)
 if wheel.parent != wheel_dir.resolve() or hashlib.sha256(wheel.read_bytes()).hexdigest() != wm["wheel_sha256"]: raise SystemExit("wheel checksum mismatch")
-print(im["observed_image_digest"], im["image_variant"], wheel, wm["wheel_sha256"])
+if wm.get("python_requirements") != ["transformers==4.57.3"]:
+    raise SystemExit("runtime Python requirement mismatch")
+dependency_dir = (wheel_dir / "dependencies").resolve(strict=True)
+expected_dependencies = wm.get("dependency_wheels")
+if not isinstance(expected_dependencies, dict) or not expected_dependencies:
+    raise SystemExit("runtime dependency wheel manifest missing")
+actual_dependencies = {path.name for path in dependency_dir.glob("*.whl")}
+if actual_dependencies != set(expected_dependencies):
+    raise SystemExit("runtime dependency wheel set mismatch")
+for name, digest in expected_dependencies.items():
+    if Path(name).name != name or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise SystemExit("invalid dependency wheel manifest entry")
+    if hashlib.sha256((dependency_dir / name).read_bytes()).hexdigest() != digest:
+        raise SystemExit(f"dependency wheel checksum mismatch: {name}")
+print(im["observed_image_digest"], im["image_variant"], wheel, wm["wheel_sha256"], dependency_dir)
 PY
 ) || die "staged runtime validation failed"
 
@@ -82,9 +96,10 @@ Path(out).write_text(json.dumps({"system": system, "node": node, "configured_ima
 PY
 
 canary_flag=""; [[ "${RUN_KIND}" != canary ]] || canary_flag=--canary
-export AIC_REPO_DIR="${repo_dir}" AIC_OUTPUT_DIR="${output_dir}" AIC_WHEEL="${wheel_path}" AIC_GPUS_PER_NODE="${GPUS_PER_NODE}" AIC_BACKEND="${BACKEND}" AIC_CANARY_FLAG="${canary_flag}"
+export AIC_REPO_DIR="${repo_dir}" AIC_OUTPUT_DIR="${output_dir}" AIC_WHEEL="${wheel_path}" AIC_DEPENDENCY_DIR="${dependency_dir}"
+export AIC_GPUS_PER_NODE="${GPUS_PER_NODE}" AIC_BACKEND="${BACKEND}" AIC_CANARY_FLAG="${canary_flag}"
 export AIC_SOURCE_COMMIT="${TRT_SOURCE_COMMIT}" AIC_DEEPEP_COMMIT="${DEEPEP_COMMIT}" AIC_NVSHMEM_VERSION="${NVSHMEM_VERSION}" AIC_NVSHMEM_SHA="${NVSHMEM_ARCHIVE_SHA256}" AIC_IMAGE_INDEX_DIGEST="${IMAGE_INDEX_DIGEST}"
-command='set -euo pipefail; target="/tmp/aic-trtllm-wheel-${SLURM_JOB_ID}-${SLURM_PROCID}"; mkdir -p "${target}"; python3 -m pip install --no-deps --target "${target}" "${AIC_WHEEL}" >/dev/null; export PYTHONPATH="${target}:${AIC_REPO_DIR}:${PYTHONPATH:-}"; python3 -m collector.wideep.trtllm.collect_moe_a2a --gpus-per-node "${AIC_GPUS_PER_NODE}" --modes "${AIC_BACKEND}" --output-path "${AIC_OUTPUT_DIR}" --source-commit "${AIC_SOURCE_COMMIT}" --image-digest "${AIC_IMAGE_INDEX_DIGEST}" --deep-ep-commit "${AIC_DEEPEP_COMMIT}" --nvshmem-version "${AIC_NVSHMEM_VERSION}" --nvshmem-archive-sha256 "${AIC_NVSHMEM_SHA}" ${AIC_CANARY_FLAG}'
+command='set -euo pipefail; target="/tmp/aic-trtllm-wheel-${SLURM_JOB_ID}-${SLURM_PROCID}"; mkdir -p "${target}"; python3 -m pip install --no-index --find-links "${AIC_DEPENDENCY_DIR}" --target "${target}" "transformers==4.57.3" >/dev/null; python3 -m pip install --no-deps --target "${target}" "${AIC_WHEEL}" >/dev/null; export PYTHONPATH="${target}:${AIC_REPO_DIR}:${PYTHONPATH:-}"; python3 -m collector.wideep.trtllm.collect_moe_a2a --gpus-per-node "${AIC_GPUS_PER_NODE}" --modes "${AIC_BACKEND}" --output-path "${AIC_OUTPUT_DIR}" --source-commit "${AIC_SOURCE_COMMIT}" --image-digest "${AIC_IMAGE_INDEX_DIGEST}" --deep-ep-commit "${AIC_DEEPEP_COMMIT}" --nvshmem-version "${AIC_NVSHMEM_VERSION}" --nvshmem-archive-sha256 "${AIC_NVSHMEM_SHA}" ${AIC_CANARY_FLAG}'
 set +e
 srun --nodes=1 --ntasks="${expected_gpus}" --ntasks-per-node="${expected_gpus}" --mpi=pmix \
     --container-image="${container_image}" --container-mounts="${repo_dir}:${repo_dir},${wheel_dir}:${wheel_dir},${staging_root}:${staging_root}" \

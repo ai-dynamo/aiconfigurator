@@ -7,6 +7,7 @@ TRT_SOURCE_COMMIT=14efb6ac673c0cbe828e1206cc5c7d5748d05ffa
 DEEPEP_COMMIT=5be51b228a7c82dbdb213ea58e77bffd12b38af8
 NVSHMEM_VERSION=3.2.5-1
 NVSHMEM_ARCHIVE_SHA256=eb2c8fb3b7084c2db86bd9fd905387909f1dfd483e7b45f7b3c3d5fcf5374b5a
+TRANSFORMERS_REQUIREMENT=transformers==4.57.3
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 safe_existing_path() {
@@ -86,30 +87,46 @@ grep -Fq "\"git_tag\": \"${DEEPEP_COMMIT}\"" "${source_root}/3rdparty/fetch_cont
 [[ "$(sha256sum "${source_root}/cpp/tensorrt_llm/deep_ep/nvshmem_src_${NVSHMEM_VERSION}.txz" | awk '{print $1}')" == "${NVSHMEM_ARCHIVE_SHA256}" ]] || die "NVSHMEM archive mismatch"
 
 wheel_staging="${job_root}/wheel"
-mkdir -p "${wheel_staging}"
+dependency_staging="${job_root}/dependencies"
+validation_root="${job_root}/validation"
+mkdir -p "${wheel_staging}" "${dependency_staging}" "${validation_root}"
 export AIC_SOURCE_ROOT="${source_root}" AIC_WHEEL_STAGING="${wheel_staging}" AIC_CUDA_ARCHES="${CUDA_ARCHES}"
+export AIC_DEPENDENCY_STAGING="${dependency_staging}" AIC_VALIDATION_ROOT="${validation_root}"
+export AIC_TRANSFORMERS_REQUIREMENT="${TRANSFORMERS_REQUIREMENT}"
 srun --mpi=pmix --nodes=1 --ntasks=1 --container-image="${temporary_image}" \
-    --container-mounts="${source_root}:${source_root},${wheel_staging}:${wheel_staging}" \
+    --container-mounts="${source_root}:${source_root},${wheel_staging}:${wheel_staging},${dependency_staging}:${dependency_staging},${validation_root}:${validation_root}" \
     --container-workdir="${source_root}" bash -lc \
-    'set -euo pipefail; python3 scripts/build_wheel.py --clean --no-venv --cuda_architectures "${AIC_CUDA_ARCHES}" --dist_dir "${AIC_WHEEL_STAGING}"; python3 -m pip install --no-deps --force-reinstall "${AIC_WHEEL_STAGING}"/tensorrt_llm-*.whl; python3 - <<'"'"'PY'"'"'
+    'set -euo pipefail; python3 scripts/build_wheel.py --clean --no-venv --cuda_architectures "${AIC_CUDA_ARCHES}" --dist_dir "${AIC_WHEEL_STAGING}"; python3 -m pip download --only-binary=:all: --dest "${AIC_DEPENDENCY_STAGING}" "${AIC_TRANSFORMERS_REQUIREMENT}"; python3 -m pip install --no-index --find-links "${AIC_DEPENDENCY_STAGING}" --target "${AIC_VALIDATION_ROOT}" "${AIC_TRANSFORMERS_REQUIREMENT}"; python3 -m pip install --no-deps --target "${AIC_VALIDATION_ROOT}" "${AIC_WHEEL_STAGING}"/tensorrt_llm-*.whl; PYTHONPATH="${AIC_VALIDATION_ROOT}" python3 - <<'"'"'PY'"'"'
 import tensorrt_llm
 assert tensorrt_llm.__version__ == "1.3.0rc11", tensorrt_llm.__version__
+import transformers
+assert transformers.__version__ == "4.57.3", transformers.__version__
 from tensorrt_llm._torch.modules.fused_moe.communication import CommunicationFactory
 assert hasattr(CommunicationFactory, "_create_forced_method")
 PY'
 mapfile -t wheels < <(find "${wheel_staging}" -maxdepth 1 -type f -name 'tensorrt_llm-*.whl' -print)
 [[ "${#wheels[@]}" == 1 ]] || die "expected exactly one TRT-LLM wheel"
+mapfile -t dependency_wheels < <(find "${dependency_staging}" -maxdepth 1 -type f -name '*.whl' -print | sort)
+[[ "${#dependency_wheels[@]}" -gt 0 ]] || die "dependency wheelhouse is empty"
 wheel_sha=$(sha256sum "${wheels[0]}" | awk '{print $1}')
 sqsh_sha=$(sha256sum "${temporary_image}" | awk '{print $1}')
-mkdir -p "${final_wheel_dir}"
+mkdir -p "${final_wheel_dir}/dependencies"
 cp -- "${wheels[0]}" "${final_wheel_dir}/"
+cp -- "${dependency_wheels[@]}" "${final_wheel_dir}/dependencies/"
 wheel_name=$(basename "${wheels[0]}")
 python3 - "${job_root}/build_meta.json" "${SYSTEM}" "${IMAGE_ARCH}" "${CUDA_ARCHES}" \
-    "${IMAGE_INDEX_DIGEST}" "${IMAGE_DIGEST}" "${sqsh_sha}" "${wheel_name}" "${wheel_sha}" <<'PY'
-import json, sys
+    "${IMAGE_INDEX_DIGEST}" "${IMAGE_DIGEST}" "${sqsh_sha}" "${wheel_name}" "${wheel_sha}" \
+    "${dependency_staging}" "${TRANSFORMERS_REQUIREMENT}" <<'PY'
+import hashlib, json, sys
 from datetime import date
 from pathlib import Path
-out, system, arch, cuda_arches, index, child, sqsh_sha, wheel, wheel_sha = sys.argv[1:]
+out, system, arch, cuda_arches, index, child, sqsh_sha, wheel, wheel_sha, dependency_dir, transformers_requirement = sys.argv[1:]
+dependency_wheels = {
+    path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+    for path in sorted(Path(dependency_dir).glob("*.whl"))
+}
+if not dependency_wheels:
+    raise SystemExit("dependency wheelhouse is empty")
 Path(out).write_text(json.dumps({
   "schema_version": 1, "system": system, "architecture": arch, "image_variant": f"linux/{arch}",
   "configured_image": f"nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20@{index}",
@@ -117,7 +134,9 @@ Path(out).write_text(json.dumps({
   "trtllm_version": "1.3.0rc11", "source_commit": "14efb6ac673c0cbe828e1206cc5c7d5748d05ffa",
   "deep_ep": "5be51b228a7c82dbdb213ea58e77bffd12b38af8", "nvshmem": "3.2.5-1",
   "nvshmem_archive_sha256": "eb2c8fb3b7084c2db86bd9fd905387909f1dfd483e7b45f7b3c3d5fcf5374b5a",
-  "cuda_arches": cuda_arches, "wheel": wheel, "wheel_sha256": wheel_sha, "staged_at": date.today().isoformat(),
+  "cuda_arches": cuda_arches, "wheel": wheel, "wheel_sha256": wheel_sha,
+  "python_requirements": [transformers_requirement], "dependency_wheels": dependency_wheels,
+  "staged_at": date.today().isoformat(),
 }, indent=2, sort_keys=True) + "\n")
 PY
 cp -- "${job_root}/build_meta.json" "${final_wheel_dir}/build_meta.json"
