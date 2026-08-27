@@ -117,6 +117,7 @@ OPERATIONS_DEF_INVENTORY = {
             # latency/energy/SOL number itself, so it stays outside the single
             # per-op-value-in-Rust-only rule.
             "_lane_order_cached",
+            "_source_tiered_lane_walk_order",
             "resolve_lane_order",
             "lane_walk_order",
             "lane_walk_order._rank",

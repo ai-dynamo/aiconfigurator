@@ -69,7 +69,9 @@ pub struct AttentionTable {
     generation_sources: Vec<PerfSource>,
     encoder_sources: Vec<PerfSource>,
     context: OnceLock<Result<ContextGrids, AicError>>,
+    context_lane_density: OnceLock<Vec<(String, u32, u32)>>,
     generation: OnceLock<Result<GenerationGrids, AicError>>,
+    generation_lane_density: OnceLock<Vec<(String, u32, u32)>>,
     encoder: OnceLock<Result<EncoderGrids, AicError>>,
 }
 
@@ -169,10 +171,11 @@ fn fallback_lanes<'a, K, V>(by_lane: &'a BTreeMap<String, BTreeMap<K, V>>, lane_
 /// enumeration view).
 fn lane_density<K>(slices: &BTreeMap<K, Node>) -> (u32, u32) {
     let slice_count = slices.len() as u32;
-    let row_count: u32 = slices
-        .values()
-        .map(|node| perf_interp::node_points(node).len() as u32)
-        .sum();
+    let mut row_count = 0;
+    let mut prefix = Vec::new();
+    for node in slices.values() {
+        perf_interp::visit_leaves(node, &mut prefix, &mut |_, _| row_count += 1);
+    }
     (slice_count, row_count)
 }
 
@@ -240,7 +243,9 @@ impl AttentionTable {
             generation_sources,
             encoder_sources,
             context: OnceLock::new(),
+            context_lane_density: OnceLock::new(),
             generation: OnceLock::new(),
+            generation_lane_density: OnceLock::new(),
             encoder: OnceLock::new(),
         })
     }
@@ -539,15 +544,20 @@ impl AttentionTable {
     ///   that view folds attention tables exactly like the pre-lane loader,
     ///   for charts/support-matrix, and was never lane-aware).
     pub fn context_lanes(&self) -> Result<Vec<(String, u32, u32)>, AicError> {
+        let grids = self.load_context()?;
         Ok(self
-            .load_context()?
-            .by_lane
-            .iter()
-            .map(|(lane, slices)| {
-                let (slice_count, row_count) = lane_density(slices);
-                (lane.clone(), slice_count, row_count)
+            .context_lane_density
+            .get_or_init(|| {
+                grids
+                    .by_lane
+                    .iter()
+                    .map(|(lane, slices)| {
+                        let (slice_count, row_count) = lane_density(slices);
+                        (lane.clone(), slice_count, row_count)
+                    })
+                    .collect()
             })
-            .collect())
+            .clone())
     }
 
     /// Collected `(num_heads, batch, seq) -> latency` points of one
@@ -638,15 +648,20 @@ impl AttentionTable {
 
     /// Decode twin of [`AttentionTable::context_lanes`].
     pub fn generation_lanes(&self) -> Result<Vec<(String, u32, u32)>, AicError> {
+        let grids = self.load_generation()?;
         Ok(self
-            .load_generation()?
-            .by_lane
-            .iter()
-            .map(|(lane, slices)| {
-                let (slice_count, row_count) = lane_density(slices);
-                (lane.clone(), slice_count, row_count)
+            .generation_lane_density
+            .get_or_init(|| {
+                grids
+                    .by_lane
+                    .iter()
+                    .map(|(lane, slices)| {
+                        let (slice_count, row_count) = lane_density(slices);
+                        (lane.clone(), slice_count, row_count)
+                    })
+                    .collect()
             })
-            .collect())
+            .clone())
     }
 
     /// Collected `(num_heads, seq, batch) -> latency` points of one encoder
@@ -1610,7 +1625,70 @@ mod tests {
         table
     }
 
-    fn two_lane_query(table: &AttentionTable, lane_order: &[String], head_size: u32) -> Result<f64, AicError> {
+    #[test]
+    fn context_lane_density_is_cached_and_returned_by_value() {
+        let table = in_memory_two_lane_context_table();
+        let expected = vec![("donor".to_string(), 2, 2), ("head".to_string(), 2, 2)];
+        assert!(table.context_lane_density.get().is_none());
+
+        let mut first = table.context_lanes().expect("context density");
+        assert_eq!(first, expected);
+        assert_eq!(table.context_lane_density.get(), Some(&expected));
+
+        first.clear();
+        assert_eq!(
+            table.context_lanes().expect("cached context density"),
+            expected
+        );
+    }
+
+    #[test]
+    fn generation_lane_density_is_cached_and_returned_by_value() {
+        let key = |head_size: u32| GenerationKey {
+            kv_quant: "bfloat16".to_string(),
+            n_kv_lookup: 0,
+            head_size,
+            window_size: 0,
+        };
+        let leaf = |latency: f64| {
+            let mut node = Node::branch();
+            node.insert(&[8, 1024, 1], latency);
+            node
+        };
+        let mut by_lane: BTreeMap<String, BTreeMap<GenerationKey, Node>> = BTreeMap::new();
+        by_lane
+            .entry("donor".to_string())
+            .or_default()
+            .extend([(key(64), leaf(1.0)), (key(128), leaf(2.0))]);
+        by_lane
+            .entry("head".to_string())
+            .or_default()
+            .insert(key(128), leaf(3.0));
+        let table = AttentionTable::new(PathBuf::from("test-data"), b200_sxm_spec());
+        assert!(table
+            .generation
+            .set(Ok(GenerationGrids { by_lane }))
+            .is_ok());
+
+        let expected = vec![("donor".to_string(), 2, 2), ("head".to_string(), 1, 1)];
+        assert!(table.generation_lane_density.get().is_none());
+
+        let mut first = table.generation_lanes().expect("generation density");
+        assert_eq!(first, expected);
+        assert_eq!(table.generation_lane_density.get(), Some(&expected));
+
+        first.clear();
+        assert_eq!(
+            table.generation_lanes().expect("cached generation density"),
+            expected
+        );
+    }
+
+    fn two_lane_query(
+        table: &AttentionTable,
+        lane_order: &[String],
+        head_size: u32,
+    ) -> Result<f64, AicError> {
         table
             .query_context(
                 lane_order,

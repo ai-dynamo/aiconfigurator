@@ -227,22 +227,42 @@ def fetch_attention_lane_density(
     ``operations/attention.py::lane_walk_order``'s donor/leftover density
     ranking. Empty (never raises) when the table has no data.
 
+    Density is immutable for a loaded probe, so the original database memoizes
+    each ``(attribute, effective shared-layer view)`` for the engine probe-cache
+    generation. The memo contains plain Python data, and every call returns a
+    copy so callers cannot mutate the cached value.
+
     ``shared_layer=False`` probes the requested version's own rows through the
     same FFI.  Lane resolution uses that view to preserve source precedence:
     requested-version lanes form a tier ahead of inherited donor lanes, with
     density ranking confined to each tier.  The lightweight copy changes only
     the probe-spec policy bit; it never mutates the caller's database view.
     """
-    if shared_layer is not None and bool(shared_layer) != bool(database.enable_shared_layer):
+    from aiconfigurator_core.sdk import engine as _engine
+
+    original_database = database
+    effective_shared_layer = bool(database.enable_shared_layer) if shared_layer is None else bool(shared_layer)
+    cache_key = (attribute, effective_shared_layer)
+    memo = original_database.__dict__.get("_attention_lane_density_cache")
+    if memo is None or memo[0] != _engine._PROBE_CACHE_GENERATION:
+        cache = {}
+        original_database.__dict__["_attention_lane_density_cache"] = (_engine._PROBE_CACHE_GENERATION, cache)
+    else:
+        cache = memo[1]
+    if cache_key in cache:
+        return dict(cache[cache_key])
+    if effective_shared_layer != bool(database.enable_shared_layer):
         database = copy.copy(database)
-        database._shared_layer_mode = bool(shared_layer)
+        database._shared_layer_mode = effective_shared_layer
         database.__dict__.pop("_table_view_probe_spec", None)
         # The caller's normal shared-view probe owns source diagnostics.  This
         # auxiliary provenance probe only needs the compiled table and must not
         # duplicate every fallback warning or mutate shallow-copied reports.
         database._source_reports_materialized = True
     handle = _probe_engine_handle(database)
-    return {lane: (slices, rows) for lane, slices, rows in handle._engine.attention_lane_density(attribute)}
+    density = {lane: (slices, rows) for lane, slices, rows in handle._engine.attention_lane_density(attribute)}
+    cache[cache_key] = density
+    return dict(density)
 
 
 def load_view(database, attribute: str, filename_enum):
