@@ -21,6 +21,7 @@ pub fn configured_builder() -> AicEngineBuilder {
         .kvcache_quant_mode("bfloat16")
         .fmha_quant_mode("bfloat16")
         .comm_quant_mode("bfloat16")
+        .attention_backend("fa3")
         .speculative_decoding(0)
         .kv_block_size(16)
         .systems_path("/tmp/systems")

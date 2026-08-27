@@ -368,6 +368,7 @@ def compile_engine(
     kvcache_quant_mode: str | None = None,
     fmha_quant_mode: str | None = None,
     comm_quant_mode: str | None = None,
+    attention_backend: str | None = None,
     nextn: int = 0,
     kv_block_size: int | None = None,
     systems_path: str | None = None,
@@ -397,6 +398,7 @@ def compile_engine(
         moe_quant_mode=moe_quant_mode,
         comm_quant_mode=comm_quant_mode,
         forward_model=forward_model,
+        attention_backend=attention_backend,
     )
     # Apply MTP BEFORE get_model so the walked op lists carry the
     # (L+nextn)/L compute scale; accepted-token progress is applied above core.
@@ -681,25 +683,32 @@ def _evaluate_single_op(
     ``SOL_FULL`` decomposition triple) — that dimension left with the shims;
     per-call SOL decomposition is served by
     ``EngineHandle.evaluate_ops_sol_json`` directly."""
+    from aiconfigurator_core.sdk.operations.attention import ContextAttention, GenerationAttention
     from aiconfigurator_core.sdk.performance_result import PerformanceResult
 
-    # AIC-1715/1716: this single-op path also needs a resolved lane order
-    # (see `_resolve_attention_lane_orders` / `build_engine_spec_json`); there
-    # is no model here to read an `attention_backend` override from, so this
-    # is always the unpinned framework-default + table-leftovers walk.
-    _resolve_attention_lane_orders([op], database, None)
-    ops_json = build_ops_json([op])
-    eval_kwargs = dict(
-        is_context=bool(is_context),
-        batch_size=int(batch_size),
-        s=int(s),
-        prefix=int(prefix),
-        imbalance_correction_scale=float(imbalance_correction_scale),
-        x=None if x is None else int(x),
-    )
-    handle = _probe_handle_for(database, None)
-    (_, latency, energy, source) = handle.evaluate_ops_json(ops_json, **eval_kwargs)[0]
-    return PerformanceResult(latency, energy=energy, source=source)
+    # AIC-1715/1716: a fresh attention op needs a table-aware lane order, but
+    # callers may already have pinned one. Resolve only the default sentinel
+    # and restore it after this evaluation so shared model ops are immutable.
+    restore_lane_order = isinstance(op, (ContextAttention, GenerationAttention)) and op._lane_order == ["default"]
+    original_lane_order = op._lane_order if restore_lane_order else None
+    try:
+        if restore_lane_order:
+            _resolve_attention_lane_orders([op], database, None)
+        ops_json = build_ops_json([op])
+        eval_kwargs = dict(
+            is_context=bool(is_context),
+            batch_size=int(batch_size),
+            s=int(s),
+            prefix=int(prefix),
+            imbalance_correction_scale=float(imbalance_correction_scale),
+            x=None if x is None else int(x),
+        )
+        handle = _probe_handle_for(database, None)
+        (_, latency, energy, source) = handle.evaluate_ops_json(ops_json, **eval_kwargs)[0]
+        return PerformanceResult(latency, energy=energy, source=source)
+    finally:
+        if restore_lane_order:
+            op._lane_order = original_lane_order
 
 
 def _maybe_load_database(system: str, backend: str, backend_version: str | None, systems_path: str | None) -> Any:

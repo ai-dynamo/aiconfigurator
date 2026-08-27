@@ -972,6 +972,7 @@ struct EngineBuildRequest {
     kvcache_quant_mode: Option<String>,
     fmha_quant_mode: Option<String>,
     comm_quant_mode: Option<String>,
+    attention_backend: Option<String>,
     nextn: u32,
     kv_block_size: Option<u32>,
     systems_path: Option<String>,
@@ -1011,6 +1012,7 @@ impl AicEngineBuilder {
                 kvcache_quant_mode: None,
                 fmha_quant_mode: None,
                 comm_quant_mode: None,
+                attention_backend: None,
                 nextn: 0,
                 kv_block_size: None,
                 systems_path: None,
@@ -1087,6 +1089,12 @@ impl AicEngineBuilder {
         self
     }
 
+    /// Override the attention kernel backend.
+    pub fn attention_backend(mut self, value: impl Into<String>) -> Self {
+        self.request.attention_backend = Some(value.into());
+        self
+    }
+
     /// Configure speculative decoding.
     pub fn speculative_decoding(mut self, nextn: u32) -> Self {
         self.request.nextn = nextn;
@@ -1125,6 +1133,7 @@ mod builder_tests {
         assert!(builder.request.backend_version.is_none());
         assert!(builder.request.moe_tp_size.is_none());
         assert!(builder.request.moe_ep_size.is_none());
+        assert!(builder.request.attention_backend.is_none());
         assert!(builder.request.kv_block_size.is_none());
     }
 
@@ -1136,6 +1145,7 @@ mod builder_tests {
             .pp_size(2)
             .attention_dp_size(4)
             .moe_parallelism(Some(1), Some(8))
+            .attention_backend("fa3")
             .speculative_decoding(2)
             .kv_block_size(16)
             .systems_path("/tmp/systems");
@@ -1147,6 +1157,7 @@ mod builder_tests {
             (builder.request.moe_tp_size, builder.request.moe_ep_size),
             (Some(1), Some(8))
         );
+        assert_eq!(builder.request.attention_backend.as_deref(), Some("fa3"));
         assert_eq!(builder.request.nextn, 2);
         assert_eq!(builder.request.kv_block_size, Some(16));
         assert_eq!(
@@ -1191,6 +1202,7 @@ fn compile_engine_from_request(request: EngineBuildRequest) -> Result<Engine, Ai
         kwargs.set_item("kvcache_quant_mode", request.kvcache_quant_mode.as_deref())?;
         kwargs.set_item("fmha_quant_mode", request.fmha_quant_mode.as_deref())?;
         kwargs.set_item("comm_quant_mode", request.comm_quant_mode.as_deref())?;
+        kwargs.set_item("attention_backend", request.attention_backend.as_deref())?;
         kwargs.set_item("forward_model", request.forward_model.as_deref())?;
         kwargs.set_item("nextn", request.nextn)?;
         kwargs.set_item("kv_block_size", request.kv_block_size)?;
@@ -1256,6 +1268,8 @@ pub(crate) fn compile_engine_to_engine(
             .map(str::to_owned),
         // Comm quant is not carried on EngineConfig; let Python default it.
         comm_quant_mode: None,
+        // Attention backend is not carried on EngineConfig; let Python resolve it.
+        attention_backend: None,
         nextn,
         kv_block_size: config.kv_block_size,
         systems_path: systems_path.map(str::to_owned),
