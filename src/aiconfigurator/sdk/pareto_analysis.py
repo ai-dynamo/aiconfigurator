@@ -787,6 +787,82 @@ def _afd_total_batch_capacity(
     return max_total_batch_size
 
 
+def _afd_setup_key(
+    model_config: config.ModelConfig,
+    backend_name: str,
+    *,
+    boundary_on_attn: bool,
+    router_on_attn: bool,
+):
+    """Cache key for the SLA-invariant part of AFD candidate setup.
+
+    A model graph and its A/F partition depend only on the parallel layout,
+    the backend, and the two partition knobs -- never on isl/osl/prefix or a
+    TTFT/TPOT target. The sweep's outer loop varies exactly those SLA values,
+    so without a key like this every SLA pair reconstructs identical objects.
+
+    The layout fields are listed explicitly rather than hashing the whole
+    ModelConfig: it carries mutable per-evaluation state, and a key that
+    silently widened would reuse a graph built for a different layout.
+    """
+    return (
+        model_config.tp_size,
+        model_config.pp_size,
+        model_config.moe_tp_size,
+        model_config.moe_ep_size,
+        model_config.attention_dp_size,
+        backend_name,
+        bool(boundary_on_attn),
+        bool(router_on_attn),
+    )
+
+
+def _afd_model_and_partition(
+    cache: dict | None,
+    model_path: str,
+    model_config: config.ModelConfig,
+    backend_name: str,
+    *,
+    phase: str = "generation",
+    boundary_on_attn: bool,
+    router_on_attn: bool = False,
+):
+    """``(model, partition)`` for one pool, memoized per topology.
+
+    ``cache=None`` disables memoization, which keeps every existing caller and
+    test that does not own a cache working unchanged. Returns the shared
+    objects, so a caller must treat them as read-only -- both the balance-ratio
+    probe and the memory estimate only read.
+    """
+    from aiconfigurator.sdk.afd_partition import build_afd_ops_partition
+
+    key = None
+    if cache is not None:
+        key = (
+            phase,
+            *_afd_setup_key(
+                model_config,
+                backend_name,
+                boundary_on_attn=boundary_on_attn,
+                router_on_attn=router_on_attn,
+            ),
+        )
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+
+    model = get_model(model_path, model_config, backend_name)
+    partition = build_afd_ops_partition(
+        model,
+        phase=phase,
+        boundary_on_attn=boundary_on_attn,
+        router_on_attn=router_on_attn,
+    )
+    if cache is not None:
+        cache[key] = (model, partition)
+    return model, partition
+
+
 def _derive_a_batch_size(
     model_path: str,
     a_model_config: config.ModelConfig,
@@ -802,6 +878,7 @@ def _derive_a_batch_size(
     max_seq_len: int | None,
     free_gpu_memory_fraction: float | None,
     max_a_batch_size: int = _AFD_MAX_A_BATCH_SIZE,
+    setup_cache: dict | None = None,
 ) -> tuple[int, object, object]:
     """Derive ``a_batch_size`` from A-pool KV-cache capacity.
 
@@ -820,12 +897,11 @@ def _derive_a_batch_size(
     if isinstance(max_a_batch_size, bool) or not isinstance(max_a_batch_size, int) or max_a_batch_size < 32:
         raise ValueError(f"max_a_batch_size must be an integer >= 32, got {max_a_batch_size!r}.")
 
-    from aiconfigurator.sdk.afd_partition import build_afd_ops_partition
-
-    a_model = get_model(model_path, a_model_config, backend.name.value)
-    a_partition = build_afd_ops_partition(
-        a_model,
-        phase="generation",
+    a_model, a_partition = _afd_model_and_partition(
+        setup_cache,
+        model_path,
+        a_model_config,
+        backend.name.value,
         boundary_on_attn=boundary_on_attn,
         router_on_attn=router_on_attn,
     )
@@ -1174,6 +1250,11 @@ def afd_pareto(
     # Track topologies that OOMed at a given microbatch count; higher counts
     # use a larger KV-cache multiplier and can be pruned for the same topology.
     _oom_at_mb: dict[tuple[int, int, int, int], int] = {}
+    # Model graphs and A/F partitions depend on the parallel layout, not on
+    # the SLA pair this loop varies. Build once per topology and share across
+    # every TTFT/TPOT evaluation; both consumers (balance probe, memory
+    # estimate) only read, so no per-evaluation state rides along.
+    _setup_cache: dict = {}
     for eval_runtime_config in runtime_configs_to_evaluate:
         target_tpot = eval_runtime_config.tpot
         for candidate in afd_parallel_config_list:
@@ -1226,6 +1307,7 @@ def afd_pareto(
                         max_seq_len=max_seq_len,
                         free_gpu_memory_fraction=free_gpu_memory_fraction,
                         max_a_batch_size=max_a_batch_size,
+                        setup_cache=_setup_cache,
                     )
                 else:
                     if n_a_workers <= 0 or fixed_total_batch_size % n_a_workers != 0:
@@ -1285,10 +1367,11 @@ def afd_pareto(
                     )
 
                 # --- F-Worker: analytical max batch_size ---
-                f_model = get_model(model_path, f_model_config, effective_f_backend.name.value)
-                f_partition = build_afd_ops_partition(
-                    f_model,
-                    phase="generation",
+                f_model, f_partition = _afd_model_and_partition(
+                    _setup_cache,
+                    model_path,
+                    f_model_config,
+                    effective_f_backend.name.value,
                     boundary_on_attn=boundary_on_attn,
                     router_on_attn=router_on_attn,
                 )
