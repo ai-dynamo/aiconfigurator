@@ -1629,8 +1629,12 @@ class AFDInferenceSession:
         # Boundary ops (``add_norm_2`` / ``logits_gemm``) default to the
         # A-Worker, but ``cfg.boundary_on_attn`` lets the user reassign
         # them to the F-Worker for sensitivity studies.
-        a_partition = build_afd_ops_partition(a_model, phase=ops_phase, boundary_on_attn=cfg.boundary_on_attn)
-        f_partition = build_afd_ops_partition(f_model, phase=ops_phase, boundary_on_attn=cfg.boundary_on_attn)
+        a_partition = build_afd_ops_partition(
+            a_model, phase=ops_phase, boundary_on_attn=cfg.boundary_on_attn, dispatch_mode=cfg.dispatch_mode
+        )
+        f_partition = build_afd_ops_partition(
+            f_model, phase=ops_phase, boundary_on_attn=cfg.boundary_on_attn, dispatch_mode=cfg.dispatch_mode
+        )
 
         isl = runtime_config.isl
         osl = runtime_config.osl or 1

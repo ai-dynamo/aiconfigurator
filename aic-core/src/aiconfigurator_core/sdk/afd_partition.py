@@ -49,6 +49,7 @@ def build_afd_ops_partition(
     phase: AFDPhase = "generation",
     *,
     boundary_on_attn: bool = True,
+    dispatch_mode: str = "f_side_routing",
     allow_unknown_ops: bool = False,
     unknown_side: Literal["attn", "ffn"] = "attn",
 ) -> AFDOpsPartition:
@@ -58,6 +59,10 @@ def build_afd_ops_partition(
         model: Model instance exposing ``context_ops`` and ``generation_ops``.
         phase: ``"context"`` or ``"generation"``.
         boundary_on_attn: Assign boundary ops to A-worker when true; otherwise F-worker.
+        dispatch_mode: Under ``"a_side_routing"`` the A worker computes the
+            routing, so standalone router GEMMs go to the A-worker. A router
+            fused inside an F-side ``OverlapOp`` stays with its block — the
+            overlap is un-splittable and the router is µs-scale.
         allow_unknown_ops: If false, unclassified ops raise ``AFDPartitionError``.
         unknown_side: Destination for unknown ops when ``allow_unknown_ops`` is true.
     """
@@ -67,7 +72,9 @@ def build_afd_ops_partition(
     partition = AFDOpsPartition(phase=model_phase)
 
     for op in op_sequence:
-        side = _classify_op(op, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
+        side = _classify_op(
+            op, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side, dispatch_mode=dispatch_mode
+        )
         _append_partition_op(partition, op, side, boundary_on_attn=boundary_on_attn)
 
     return partition
@@ -129,9 +136,15 @@ def _classify_op(
     *,
     allow_unknown_ops: bool,
     unknown_side: Literal["attn", "ffn"],
+    dispatch_mode: str = "f_side_routing",
 ) -> AFDSide:
     if isinstance(op, operations.OverlapOp):
+        # dispatch_mode deliberately does NOT reach the overlap classifiers:
+        # a router fused inside an F-side OverlapOp cannot be split out, so
+        # the whole block keeps its F-side vote.
         return _classify_overlap_op(op, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
+    if dispatch_mode == "a_side_routing" and "router" in _op_name(op):
+        return "attn"
     return _classify_by_markers(op, _op_name(op), allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
 
 

@@ -122,6 +122,33 @@ def test_build_afd_ops_partition_rejects_overlap_spanning_boundary():
         build_afd_ops_partition(model, phase="generation")
 
 
+def test_router_gemm_moves_to_attn_under_a_side_routing():
+    model = _Model(generation_ops=[_named_op("generation_router_gemm")])
+
+    default = build_afd_ops_partition(model, phase="generation")
+    a_side = build_afd_ops_partition(model, phase="generation", dispatch_mode="a_side_routing")
+
+    assert _names(default.ffn_ops) == ["generation_router_gemm"]
+    assert _names(a_side.attn_ops) == ["generation_router_gemm"]
+    assert a_side.ffn_ops == []
+
+
+def test_router_fused_in_overlap_stays_on_f_worker_under_a_side_routing():
+    # An OverlapOp is un-splittable: a fused router keeps its block's F vote
+    # instead of dragging the whole MoE block to the A side (or raising).
+    overlap = operations.OverlapOp(
+        "generation_moe_overlap",
+        group_a=[_named_op("generation_router_gemm"), _named_op("generation_moe")],
+        group_b=[_named_op("generation_shared_gemm")],
+    )
+    model = _Model(generation_ops=[overlap])
+
+    partition = build_afd_ops_partition(model, phase="generation", dispatch_mode="a_side_routing")
+
+    assert _names(partition.ffn_ops) == ["generation_moe_overlap"]
+    assert partition.attn_ops == []
+
+
 def test_build_afd_ops_partition_context_path():
     model = _Model(
         context_ops=[

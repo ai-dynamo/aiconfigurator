@@ -25,10 +25,9 @@ Two dispatch topologies are modeled, selected by ``dispatch_mode``:
   the GPUs inside the node.
 * ``"a_side_routing"`` (DeepEP low-latency style): A knows the routing and
   sends each token directly to the GPUs holding its top-k experts, so the
-  F-node AllGather/ReduceScatter return 0. MoE only. Note this only
-  changes the communication model; the router GEMM op itself stays on the
-  F side (it is tiny and, for the big MoE models, fused into an
-  un-splittable ``OverlapOp``).
+  F-node AllGather/ReduceScatter return 0. MoE only. The standalone router
+  GEMM moves to the A side with it (see ``afd_partition``); a router fused
+  inside an F-side ``OverlapOp`` stays with its block.
 
 In both modes the A<->F transfer is billed the same way -- the TOTAL bytes
 one A-rank sends (all destinations share the rank's single NIC), raised to
