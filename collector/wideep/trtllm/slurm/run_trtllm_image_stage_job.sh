@@ -19,7 +19,7 @@ for name in SYSTEM CAMPAIGN_ROOT IMAGE_ARCH CUDA_ARCHES IMAGE_INDEX_DIGEST CONTA
 done
 case "${IMAGE_ARCH}" in arm64|amd64) ;; *) die "invalid IMAGE_ARCH" ;; esac
 [[ "${IMAGE_INDEX_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid index digest"
-[[ "${CONTAINER_IMAGE}" == "nvcr.io#nvidia+tensorrt-llm+release:${IMAGE_INDEX_DIGEST}" ]] || die "image must use configured index"
+[[ "${CONTAINER_IMAGE}" == "nvcr.io#nvidia/tensorrt-llm/release:${IMAGE_INDEX_DIGEST}" ]] || die "image must use configured index"
 campaign_root=$(safe_existing_path "campaign root" "${CAMPAIGN_ROOT}")
 
 read -r IMAGE_DIGEST < <(python3 - "${IMAGE_ARCH}" "${IMAGE_INDEX_DIGEST}" <<'PY'

@@ -43,7 +43,7 @@ mkdir -p "${log_dir}" "${campaign_root}/images/trtllm/${system}" "${campaign_roo
 
 export SYSTEM="${system}" CAMPAIGN_ROOT="${campaign_root}" IMAGE_ARCH="${image_arch}" CUDA_ARCHES="${cuda_arches}"
 export IMAGE_INDEX_DIGEST=sha256:1532b38814b3faf2affdb5ef01ca91468685d314ffb7e8926a0567595355ed88
-export CONTAINER_IMAGE="nvcr.io#nvidia+tensorrt-llm+release:${IMAGE_INDEX_DIGEST}"
+export CONTAINER_IMAGE="nvcr.io#nvidia/tensorrt-llm/release:${IMAGE_INDEX_DIGEST}"
 
 job_id=$(sbatch --parsable --job-name="aic-trt-a2a-${system}-stage" \
     --account="${account}" --partition="${partition}" --qos="${qos}" \

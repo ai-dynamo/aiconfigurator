@@ -41,6 +41,7 @@ def test_image_stage_builds_and_attests_exact_source_runtime():
     assert "eb2c8fb3b7084c2db86bd9fd905387909f1dfd483e7b45f7b3c3d5fcf5374b5a" in source
     assert "manifests/{index}" in source
     assert "Docker-Content-Digest" in source
+    assert "nvcr.io#nvidia/tensorrt-llm/release:${IMAGE_INDEX_DIGEST}" in source
     assert 're.subn(r"\\.manifests\\[\\](?!\\?)"' in source
     assert "python3 scripts/build_wheel.py" in source
     assert "--cuda_architectures" in source
