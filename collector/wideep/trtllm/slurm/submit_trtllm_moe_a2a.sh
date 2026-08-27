@@ -7,6 +7,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 system=""; run_kind=""; backend=""; campaign_root=""; repo_dir=""; container_image=""; wheel_dir=""
 afterok_job=""; afterok_stage_job=""; approved_nodelist=""; fabric_approval_id=""
+account_override=""; partition_override=""; qos_override=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --system) system=$2; shift 2 ;;
@@ -20,7 +21,10 @@ while [[ $# -gt 0 ]]; do
         --afterok-stage-job) afterok_stage_job=$2; shift 2 ;;
         --approved-nodelist) approved_nodelist=$2; shift 2 ;;
         --fabric-approval-id) fabric_approval_id=$2; shift 2 ;;
-        -h|--help) echo "Usage: $0 --system SYSTEM --run-kind canary|full --backend trtllm_deepep_ht|trtllm_deepep_ll --campaign-root PATH --repo-dir PATH --container-image SQSH --wheel-dir PATH [--afterok-stage-job ID | --afterok-job ID]"; exit 0 ;;
+        --account) account_override=$2; shift 2 ;;
+        --partition) partition_override=$2; shift 2 ;;
+        --qos) qos_override=$2; shift 2 ;;
+        -h|--help) echo "Usage: $0 --system SYSTEM --run-kind canary|full --backend trtllm_deepep_ht|trtllm_deepep_ll --campaign-root PATH --repo-dir PATH --container-image SQSH --wheel-dir PATH [--afterok-stage-job ID | --afterok-job ID] [--account ACCOUNT --partition PARTITION --qos QOS]"; exit 0 ;;
         *) die "unknown argument $1" ;;
     esac
 done
@@ -36,14 +40,17 @@ fi
 [[ -z "${afterok_job}" || -z "${afterok_stage_job}" ]] || die "only one dependency kind may be specified"
 
 case "${system}" in
-    gb200) account=coreai_comparch_inferencex; partition=batch; qos=normal; gpus_per_node=4; image_arch=arm64; cuda_arches=100a_real ;;
-    gb300) account=blackwell; partition=gb300nvl72_preprod; qos=normal; gpus_per_node=4; image_arch=arm64; cuda_arches=103a_real ;;
-    h100_sxm) account=dl_frameworks; partition=dgxh100; qos=normal; gpus_per_node=8; image_arch=amd64; cuda_arches=90_real ;;
-    h200_sxm) account=dl_frameworks; partition=dgxh200; qos=normal; gpus_per_node=8; image_arch=amd64; cuda_arches=90_real ;;
-    b200_sxm) account=beta-users_fallback; partition='b200@cr+mp-1000W/umbriel-b200@ts4/8gpu-224cpu-2048gb'; qos=batch-short; gpus_per_node=8; image_arch=amd64; cuda_arches=100a_real ;;
-    b300_sxm) account=beta-users_b300; partition='b300@ts5/b300-nvl8@ts5/8gpu-224cpu-2048gb'; qos=batch-short; gpus_per_node=8; image_arch=amd64; cuda_arches=103a_real ;;
+    gb200) account=coreai_comparch_inferencex; partition=batch; qos=normal; time_limit=04:00:00; gpus_per_node=4; image_arch=arm64; cuda_arches=100a_real ;;
+    gb300) account=blackwell; partition=gb300nvl72_preprod; qos=normal; time_limit=04:00:00; gpus_per_node=4; image_arch=arm64; cuda_arches=103a_real ;;
+    h100_sxm) account=dl_frameworks; partition=dgxh100; qos=normal; time_limit=06:00:00; gpus_per_node=8; image_arch=amd64; cuda_arches=90_real ;;
+    h200_sxm) account=dl_frameworks; partition=dgxh200; qos=normal; time_limit=06:00:00; gpus_per_node=8; image_arch=amd64; cuda_arches=90_real ;;
+    b200_sxm) account=beta-users_fallback; partition='b200@cr+mp-1000W/umbriel-b200@ts4/8gpu-224cpu-2048gb'; qos=batch-short; time_limit=04:00:00; gpus_per_node=8; image_arch=amd64; cuda_arches=100a_real ;;
+    b300_sxm) account=beta-users_b300; partition='b300@ts5/b300-nvl8@ts5/8gpu-224cpu-2048gb'; qos=batch-short; time_limit=04:00:00; gpus_per_node=8; image_arch=amd64; cuda_arches=103a_real ;;
     *) die "unsupported system ${system}" ;;
 esac
+[[ -z "${account_override}" ]] || account=${account_override}
+[[ -z "${partition_override}" ]] || partition=${partition_override}
+[[ -z "${qos_override}" ]] || qos=${qos_override}
 
 for variable in campaign_root repo_dir; do
     value=$(realpath -e -- "${!variable}") || die "${variable} does not exist"
@@ -94,7 +101,7 @@ export CAMPAIGN_ROOT="${campaign_root}" REPO_DIR="${repo_dir}" CONTAINER_IMAGE="
 export IMAGE_ARCH="${image_arch}" AIC_APPROVED_NODELIST="${approved_nodelist}" AIC_FABRIC_APPROVAL_ID="${fabric_approval_id}"
 args=(--parsable --job-name="aic-trt-a2a-${system}-${backend}-${run_kind}" --account="${account}" --partition="${partition}" --qos="${qos}"
     --nodes=1 --ntasks="${gpus_per_node}" --ntasks-per-node="${gpus_per_node}" --gpus-per-node="${gpus_per_node}"
-    --exclusive --switches=1 --time=06:00:00 --output="${log_dir}/${backend}_${run_kind}_%j.out" --error="${log_dir}/${backend}_${run_kind}_%j.err" --export=ALL)
+    --exclusive --switches=1 --time="${time_limit}" --output="${log_dir}/${backend}_${run_kind}_%j.out" --error="${log_dir}/${backend}_${run_kind}_%j.err" --export=ALL)
 [[ -z "${approved_nodelist}" ]] || args+=(--nodelist="${approved_nodelist}")
 [[ -z "${afterok_stage_job}" ]] || args+=(--dependency="afterok:${afterok_stage_job}")
 [[ -z "${afterok_job}" ]] || args+=(--dependency="afterok:${afterok_job}")

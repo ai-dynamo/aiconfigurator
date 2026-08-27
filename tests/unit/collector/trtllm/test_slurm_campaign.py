@@ -61,6 +61,9 @@ def test_submitters_keep_six_cluster_parameters_and_afterok_gate():
     assert '--dependency="afterok:${afterok_job}"' in submit
     assert '--dependency="afterok:${afterok_stage_job}"' in submit
     assert "--afterok-stage-job requires a numeric canary dependency" in submit
+    assert "--account) account_override" in stage and "--account) account_override" in submit
+    assert "--partition) partition_override" in stage and "--partition) partition_override" in submit
+    assert '--time="${time_limit}"' in stage and '--time="${time_limit}"' in submit
     assert "runtime paths do not match the attested stage outputs" in submit
     assert "future runtime parent escapes campaign root" in submit
     assert "2202825c5950b4925e1add7d458228c9ad3368671789856f24d8947b4defd21c" in submit

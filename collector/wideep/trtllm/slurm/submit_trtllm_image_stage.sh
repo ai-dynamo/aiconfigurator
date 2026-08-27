@@ -7,25 +7,32 @@ set -euo pipefail
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 system=""; campaign_root=""
+account_override=""; partition_override=""; qos_override=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --system) system=$2; shift 2 ;;
         --campaign-root) campaign_root=$2; shift 2 ;;
-        -h|--help) echo "Usage: $0 --system SYSTEM --campaign-root PATH"; exit 0 ;;
+        --account) account_override=$2; shift 2 ;;
+        --partition) partition_override=$2; shift 2 ;;
+        --qos) qos_override=$2; shift 2 ;;
+        -h|--help) echo "Usage: $0 --system SYSTEM --campaign-root PATH [--account ACCOUNT --partition PARTITION --qos QOS]"; exit 0 ;;
         *) die "unknown argument $1" ;;
     esac
 done
 [[ -n "${system}" && -n "${campaign_root}" ]] || die "missing required argument"
 
 case "${system}" in
-    gb200) account=coreai_comparch_inferencex; partition=batch; qos=normal; image_arch=arm64; cuda_arches='100a-real'; gpu_args=(--gpus-per-node=4) ;;
-    gb300) account=blackwell; partition=gb300nvl72_preprod; qos=normal; image_arch=arm64; cuda_arches='103a-real'; gpu_args=(--gpus-per-node=4) ;;
-    h100_sxm) account=dl_frameworks; partition=dgxh100; qos=normal; image_arch=amd64; cuda_arches='90-real'; gpu_args=(--gpus=1) ;;
-    h200_sxm) account=dl_frameworks; partition=dgxh200; qos=normal; image_arch=amd64; cuda_arches='90-real'; gpu_args=(--gpus=1) ;;
-    b200_sxm) account=beta-users_fallback; partition='b200@cr+mp-1000W/umbriel-b200@ts4/8gpu-224cpu-2048gb'; qos=batch-short; image_arch=amd64; cuda_arches='100a-real'; gpu_args=(--gpus=1) ;;
-    b300_sxm) account=beta-users_b300; partition='b300@ts5/b300-nvl8@ts5/8gpu-224cpu-2048gb'; qos=batch-short; image_arch=amd64; cuda_arches='103a-real'; gpu_args=(--gpus=1) ;;
+    gb200) account=coreai_comparch_inferencex; partition=batch; qos=normal; time_limit=04:00:00; image_arch=arm64; cuda_arches='100a-real'; gpu_args=(--gpus-per-node=4) ;;
+    gb300) account=blackwell; partition=gb300nvl72_preprod; qos=normal; time_limit=04:00:00; image_arch=arm64; cuda_arches='103a-real'; gpu_args=(--gpus-per-node=4) ;;
+    h100_sxm) account=dl_frameworks; partition=dgxh100; qos=normal; time_limit=06:00:00; image_arch=amd64; cuda_arches='90-real'; gpu_args=(--gpus=1) ;;
+    h200_sxm) account=dl_frameworks; partition=dgxh200; qos=normal; time_limit=06:00:00; image_arch=amd64; cuda_arches='90-real'; gpu_args=(--gpus=1) ;;
+    b200_sxm) account=beta-users_fallback; partition='b200@cr+mp-1000W/umbriel-b200@ts4/8gpu-224cpu-2048gb'; qos=batch-short; time_limit=04:00:00; image_arch=amd64; cuda_arches='100a-real'; gpu_args=(--gpus=1) ;;
+    b300_sxm) account=beta-users_b300; partition='b300@ts5/b300-nvl8@ts5/8gpu-224cpu-2048gb'; qos=batch-short; time_limit=04:00:00; image_arch=amd64; cuda_arches='103a-real'; gpu_args=(--gpus=1) ;;
     *) die "unsupported system ${system}" ;;
 esac
+[[ -z "${account_override}" ]] || account=${account_override}
+[[ -z "${partition_override}" ]] || partition=${partition_override}
+[[ -z "${qos_override}" ]] || qos=${qos_override}
 
 campaign_root=$(realpath -e -- "${campaign_root}")
 case "${campaign_root}" in /mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*) die "prohibited campaign path" ;; esac
@@ -40,6 +47,6 @@ export CONTAINER_IMAGE="nvcr.io#nvidia+tensorrt-llm+release:${IMAGE_INDEX_DIGEST
 
 job_id=$(sbatch --parsable --job-name="aic-trt-a2a-${system}-stage" \
     --account="${account}" --partition="${partition}" --qos="${qos}" \
-    --nodes=1 --ntasks=1 "${gpu_args[@]}" --switches=1 --time=06:00:00 \
+    --nodes=1 --ntasks=1 "${gpu_args[@]}" --switches=1 --time="${time_limit}" \
     --output="${log_dir}/stage_%j.out" --error="${log_dir}/stage_%j.err" --export=ALL "${payload}")
 echo "submitted ${job_id}: ${system} TRT-LLM rc11 source-wheel/image stage"
