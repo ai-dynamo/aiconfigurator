@@ -18,6 +18,7 @@ Options:
   --v2-overlay-dir PATH       Required for every deepep_v2 job.
   --approved-nodelist LIST    Required for B200/B300.
   --fabric-approval-id ID     Required for B200/B300; copied into provenance.
+  --partition-override NAME   Submit to an explicitly selected compatible Slurm partition.
   --afterok-job JOB_ID        Gate every submitted full job on this canary.
   --allow-full-without-canary Diagnostic escape hatch; formal operators should not use it.
 EOF
@@ -43,6 +44,7 @@ legacy_overlay_dir=""
 v2_overlay_dir=""
 approved_nodelist=""
 fabric_approval_id=""
+partition_override=""
 afterok_job=""
 allow_full_without_canary=false
 
@@ -61,6 +63,7 @@ while [[ $# -gt 0 ]]; do
         --v2-overlay-dir) v2_overlay_dir=$2; shift 2 ;;
         --approved-nodelist) approved_nodelist=$2; shift 2 ;;
         --fabric-approval-id) fabric_approval_id=$2; shift 2 ;;
+        --partition-override) partition_override=$2; shift 2 ;;
         --afterok-job) afterok_job=$2; shift 2 ;;
         --allow-full-without-canary) allow_full_without_canary=true; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -113,6 +116,10 @@ case "${system}" in
         ;;
     *) die "unsupported system ${system}" ;;
 esac
+if [[ -n "${partition_override}" ]]; then
+    [[ "${partition_override}" =~ ^[A-Za-z0-9_.@+-]+$ ]] || die "invalid Slurm partition override"
+    partition=${partition_override}
+fi
 
 [[ "${image_index_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid image index digest"
 [[ "${container_image}" == /* ]] || die "--container-image must be a locally staged squashfs path"

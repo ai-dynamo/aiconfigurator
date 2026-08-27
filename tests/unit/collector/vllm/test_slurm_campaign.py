@@ -114,6 +114,8 @@ def test_submitter_requires_canaries_and_one_job_per_backend():
     assert "--exclusive" in source
     assert "--switches=1" in source
     assert "${system} submission requires infra-approved nodelist" in source
+    assert "--partition-override) partition_override=$2" in source
+    assert "partition=${partition_override}" in source
     assert '[[ "${nodes}" == 1 ]]' in source
     assert "supports only --nodes 1" in source
     assert "node_values=(1)" in source
@@ -148,6 +150,31 @@ def test_submitter_rejects_every_non_single_node_formal_request(nodes):
     )
     assert result.returncode != 0
     assert "supports only --nodes 1" in result.stderr
+
+
+def test_submitter_rejects_unsafe_partition_override():
+    result = subprocess.run(
+        [
+            "bash",
+            str(SUBMITTER),
+            "--system",
+            "gb300",
+            "--run-kind",
+            "canary",
+            "--campaign-root",
+            "/does-not-need-to-exist",
+            "--repo-dir",
+            "/does-not-need-to-exist",
+            "--vllm-source-root",
+            "/does-not-need-to-exist",
+            "--partition-override",
+            "unsafe;command",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "invalid Slurm partition override" in result.stderr
 
 
 def test_vllm_collector_hash_closure_includes_campaign_pipeline():
