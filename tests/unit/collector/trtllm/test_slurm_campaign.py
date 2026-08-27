@@ -44,6 +44,9 @@ def test_image_stage_builds_and_attests_exact_source_runtime():
     assert "nvcr.io#nvidia/tensorrt-llm/release:${IMAGE_INDEX_DIGEST}" in source
     assert 're.subn(r"\\.manifests\\[\\](?!\\?)"' in source
     assert "python3 scripts/build_wheel.py" in source
+    # The pinned rc11 setup.py requires the generated ``bindings/`` stub
+    # package to exist before it will build the wheel.
+    assert "--skip-stubs" not in source
     assert "--cuda_architectures" in source
     assert 'tensorrt_llm.__version__ == "1.3.0rc11"' in source
     assert '"wheel_sha256": wheel_sha' in source

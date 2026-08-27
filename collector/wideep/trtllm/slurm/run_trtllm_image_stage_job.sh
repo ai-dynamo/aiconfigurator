@@ -91,7 +91,7 @@ export AIC_SOURCE_ROOT="${source_root}" AIC_WHEEL_STAGING="${wheel_staging}" AIC
 srun --nodes=1 --ntasks=1 --container-image="${temporary_image}" \
     --container-mounts="${source_root}:${source_root},${wheel_staging}:${wheel_staging}" \
     --container-workdir="${source_root}" bash -lc \
-    'set -euo pipefail; python3 scripts/build_wheel.py --clean --no-venv --skip-stubs --cuda_architectures "${AIC_CUDA_ARCHES}" --dist_dir "${AIC_WHEEL_STAGING}"; python3 -m pip install --no-deps --force-reinstall "${AIC_WHEEL_STAGING}"/tensorrt_llm-*.whl; python3 - <<'"'"'PY'"'"'
+    'set -euo pipefail; python3 scripts/build_wheel.py --clean --no-venv --cuda_architectures "${AIC_CUDA_ARCHES}" --dist_dir "${AIC_WHEEL_STAGING}"; python3 -m pip install --no-deps --force-reinstall "${AIC_WHEEL_STAGING}"/tensorrt_llm-*.whl; python3 - <<'"'"'PY'"'"'
 import tensorrt_llm
 assert tensorrt_llm.__version__ == "1.3.0rc11", tensorrt_llm.__version__
 from tensorrt_llm._torch.modules.fused_moe.communication import CommunicationFactory
