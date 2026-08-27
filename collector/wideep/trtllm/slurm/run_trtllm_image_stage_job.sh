@@ -81,7 +81,7 @@ if [[ -n "${SEED_IMAGE}" ]]; then
         seed_wheel_dir=$(safe_existing_path "seed wheel directory" "${SEED_WHEEL_DIR}")
         seed_args+=(--wheel-dir "${seed_wheel_dir}")
     fi
-    PYTHONPATH="${repo_root}" python3 -m collector.wideep.trtllm.runtime_artifacts "${seed_args[@]}" \
+    python3 "${repo_root}/collector/wideep/trtllm/runtime_artifacts.py" "${seed_args[@]}" \
         || die "seed runtime validation failed"
     cp --reflink=auto -- "${seed_image}" "${temporary_image}"
 else

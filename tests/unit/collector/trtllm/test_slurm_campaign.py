@@ -58,7 +58,7 @@ def test_image_stage_builds_and_attests_exact_source_runtime():
     assert 'tensorrt_llm.__version__ == "1.3.0rc11"' in source
     assert '"wheel_sha256": wheel_sha' in source
     assert "/mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*" in source
-    assert "collector.wideep.trtllm.runtime_artifacts" in source
+    assert 'python3 "${repo_root}/collector/wideep/trtllm/runtime_artifacts.py"' in source
     assert 'seed_args+=(--wheel-dir "${seed_wheel_dir}")' in source
 
 
