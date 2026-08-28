@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -419,6 +420,78 @@ def test_atomic_checkpoint_replace_failure_preserves_previous_document(tmp_path,
 
     assert json.loads(checkpoint_path.read_text(encoding="utf-8")) == {"attempted": ["old"]}
     assert list(tmp_path.glob(".checkpoint.json.*.tmp")) == []
+
+
+def test_atomic_exclusive_write_rejects_regular_temp_path_swap(tmp_path, monkeypatch):
+    destination = tmp_path / "collection_meta.yaml"
+    competitor = b"competitor"
+    swapped_temp_path = None
+    real_link = collect_mod.os.link
+
+    def swap_temp_then_link(source, target, *args, **kwargs):
+        nonlocal swapped_temp_path
+        swapped_temp_path = Path(source)
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(competitor)
+        replacement.replace(swapped_temp_path)
+        return real_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(collect_mod.os, "link", swap_temp_then_link)
+
+    with pytest.raises(RuntimeError, match=r"temporary|publication|changed"):
+        collect_mod._atomic_write_bytes(destination, b"owned", replace_existing=False)
+
+    assert swapped_temp_path is not None
+    assert swapped_temp_path.read_bytes() == competitor
+    assert not destination.exists()
+
+
+def test_atomic_exclusive_write_rejects_symlink_temp_path_swap(tmp_path, monkeypatch):
+    destination = tmp_path / "collection_meta.yaml"
+    competitor = tmp_path / "competitor"
+    competitor.write_bytes(b"competitor")
+    swapped_temp_path = None
+    real_link = collect_mod.os.link
+
+    def swap_temp_then_link(source, target, *args, **kwargs):
+        nonlocal swapped_temp_path
+        swapped_temp_path = Path(source)
+        swapped_temp_path.unlink()
+        try:
+            swapped_temp_path.symlink_to(competitor)
+        except OSError as error:
+            pytest.skip(f"symlinks unavailable: {error}")
+        return real_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(collect_mod.os, "link", swap_temp_then_link)
+
+    with pytest.raises(RuntimeError, match=r"temporary|publication|changed"):
+        collect_mod._atomic_write_bytes(destination, b"owned", replace_existing=False)
+
+    assert swapped_temp_path is not None
+    assert swapped_temp_path.is_symlink()
+    assert competitor.read_bytes() == b"competitor"
+    assert not destination.exists()
+    assert not destination.is_symlink()
+
+
+def test_atomic_exclusive_write_publishes_owned_bytes_and_mode(tmp_path, monkeypatch):
+    destination = tmp_path / "collection_meta.yaml"
+    follow_symlinks = []
+    real_link = collect_mod.os.link
+
+    def record_link(source, target, *args, **kwargs):
+        follow_symlinks.append(kwargs.get("follow_symlinks"))
+        return real_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(collect_mod.os, "link", record_link)
+
+    collect_mod._atomic_write_bytes(destination, b"owned", mode=0o640, replace_existing=False)
+
+    assert destination.read_bytes() == b"owned"
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o640
+    assert follow_symlinks == [False]
+    assert list(tmp_path.glob(".collection_meta.yaml.*.tmp")) == []
 
 
 def test_claim_rejects_broken_symlink_swap_after_batch_validation(tmp_path, monkeypatch):
