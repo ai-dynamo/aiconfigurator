@@ -28,6 +28,7 @@ def _fake_phase_metrics(
     t_a2f_layer: float = 0.1,
     t_f2a_layer: float = 0.1,
     t_step: float = 50.0,
+    t_once_per_step: float = 0.0,
     comm_hidden: bool = True,
 ) -> dict:
     """Build a minimal ``_simulate_phase``-style metrics dict for AFD tests.
@@ -42,6 +43,11 @@ def _fake_phase_metrics(
         "t_f2a_layer": t_f2a_layer,
         "t_c_layer": t_a2f_layer + t_f2a_layer,
         "t_step": t_step,
+        # Embedding / logits GEMM are charged once per step rather than
+        # amortized into the per-layer cadence; ``_phase_scalars`` indexes
+        # ``_PHASE_SCALAR_KEYS`` strictly, so a double that omits the key
+        # would fail there instead of in the assertion under test.
+        "t_once_per_step": t_once_per_step,
         "comm_hidden": comm_hidden,
         "balance_ratio": balance_ratio,
         "a_per_op": {},

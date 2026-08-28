@@ -1037,6 +1037,45 @@ def _strip_moe_dispatch_from_partition(partition):
 _AFDCommOps = namedtuple("_AFDCommOps", ["a2f", "f2a", "f_ag", "f_rs", "a_combine"])
 
 
+def _is_once_per_step_op(op, num_layers: int) -> bool:
+    """True for ops that run once per step rather than once per layer.
+
+    Models build per-layer ops with ``scale_factor=num_layers`` (qkv_gemm and
+    friends) and once-per-step ops with ``scale_factor=1`` (embedding, logits
+    GEMM), so the field is the discriminator.
+
+    Deliberately wrapped in ``try``: the composite families (``Fallback`` /
+    ``Overlap``) carry no ``scale_factor`` and the pyo3 getter *raises*
+    ``TypeError`` rather than returning ``None``, so a ``getattr`` default
+    would not protect the caller. Those composites are always per-layer
+    bodies, so a raise means per-layer.
+
+    ``num_layers <= 1`` leaves nothing to amortize, so the distinction is moot
+    and every op counts as per-layer -- the caller arithmetic then collapses to
+    its pre-split form.
+    """
+    if num_layers <= 1:
+        return False
+    try:
+        return abs(float(op._scale_factor) - 1.0) < 1e-9
+    except Exception:
+        return False
+
+
+def _split_once_per_step(ops, num_layers: int) -> tuple[list, list]:
+    """Partition ``ops`` into ``(per_layer_ops, once_per_step_ops)``.
+
+    Splitting at the source rather than summing everything and subtracting
+    keeps the two categories from being averaged together, and lets the decode
+    integration evaluate the once-per-step ops a single time instead of once
+    per stride sample.
+    """
+    per_layer, once = [], []
+    for op in ops:
+        (once if _is_once_per_step_op(op, num_layers) else per_layer).append(op)
+    return per_layer, once
+
+
 class AFDInferenceSession:
     """Attention-FFN Disaggregated inference session.
 
@@ -1211,6 +1250,17 @@ class AFDInferenceSession:
             result = op._engine_query(db, **kwargs_common)
             per_op[op._name] += float(result)
         return sum(per_op.values()), per_op
+
+    def _sum_once_per_step(self, ops, **kwargs):
+        """``(total, per_op)`` for once-per-step ops; ``(0.0, {})`` when none.
+
+        Short-circuits an empty list instead of letting ``_sum_latency`` run it:
+        a no-op query still costs a call, and it would appear in any observation
+        of the query sequence as a phantom evaluation.
+        """
+        if not ops:
+            return 0.0, {}
+        return self._sum_latency(ops, **kwargs)
 
     def _sum_latency_with_rust(
         self,
@@ -1522,6 +1572,7 @@ class AFDInferenceSession:
         t_f2a: float,
         *,
         num_layers: int,
+        t_once: float = 0.0,
     ) -> tuple[float, float, bool]:
         """Return the Eq.5-style global decode-step latency.
 
@@ -1536,7 +1587,18 @@ class AFDInferenceSession:
         t_cycle, comm_hidden = self._pipeline_tcycle(t_a, t_f, t_a2f, t_f2a)
         pipeline_fill = t_a + t_f + t_a2f + t_f2a
         t_global_step = pipeline_fill + t_cycle * max(num_microbatches * num_layers - 1, 0)
-        return t_global_step, t_cycle, comm_hidden
+        # Once-per-step ops (embedding / logits GEMM) sit outside the pipelined
+        # layer loop: they run once before the first layer and once after the
+        # last, so they are added to the global step rather than folded into the
+        # per-layer cadence the pipeline maxes over.
+        #
+        # ``t_once`` arrives at MICRO-batch scale -- ``_afd_batch_shape`` sizes
+        # every latency query that way because the pipeline feeds micro-batches
+        # through one at a time. A global step therefore carries
+        # ``num_microbatches`` of them and pays embedding / logits once per
+        # micro-batch, not once in total. Scaling here rather than re-querying at
+        # full-batch size keeps the per-call shape the engine actually sees.
+        return t_global_step + t_once * num_microbatches, t_cycle, comm_hidden
 
     def _estimate_a_memory_dict(
         self,
@@ -1663,7 +1725,7 @@ class AFDInferenceSession:
         t_a2f_layer: float,
         t_f2a_layer: float,
         f_scale: float = 1.0,
-    ) -> tuple[float, float, float, float, dict, dict, bool]:
+    ) -> tuple[float, float, float, float, dict, dict, bool, float]:
         """Integrate compute latency along the decode KV-cache length.
 
         Attention is the only op whose latency reads ``s``; sampling at
@@ -1693,6 +1755,35 @@ class AFDInferenceSession:
         stride = self._AFD_DECODE_STRIDE
         verify_width = self._nextn + 1
 
+        # Embedding / logits GEMM run once per step, not once per layer, and
+        # read no ``s`` -- evaluate them once outside the stride loop and keep
+        # them out of the per-layer average the pipeline maxes over. An empty
+        # once-list is safe: ``_sum_latency`` returns ``(0.0, {})``.
+        a_layer_ops, a_once_ops = _split_once_per_step(a_partition.attn_ops, num_layers)
+        f_layer_ops, f_once_ops = _split_once_per_step(f_partition.ffn_ops, num_layers)
+        t_a_once, a_once_per_op = self._sum_once_per_step(
+            a_once_ops,
+            batch_size=a_batch_size * verify_width,
+            seq_len=isl + 1,
+            model=a_model,
+            runtime_config=runtime_config,
+            is_context=False,
+            database=self._a_database,
+        )
+        t_f_once, f_once_per_op = self._sum_once_per_step(
+            f_once_ops,
+            batch_size=b_batch_size * verify_width,
+            seq_len=isl + 1,
+            model=f_model,
+            runtime_config=runtime_config,
+            is_context=False,
+            database=self._f_database,
+        )
+        if f_scale != 1.0:
+            t_f_once *= f_scale
+            f_once_per_op = {k: v * f_scale for k, v in f_once_per_op.items()}
+        t_once = t_a_once + t_f_once
+
         t_a_layer_sum = 0.0
         t_f_layer_sum = 0.0
         t_cycle_sum = 0.0
@@ -1713,7 +1804,7 @@ class AFDInferenceSession:
                 break
 
             t_a_step_i, a_per_op_i = self._sum_latency(
-                a_partition.attn_ops,
+                a_layer_ops,
                 batch_size=a_batch_size * verify_width,
                 seq_len=s_i,
                 model=a_model,
@@ -1722,7 +1813,7 @@ class AFDInferenceSession:
                 database=self._a_database,
             )
             t_f_step_i, f_per_op_i = self._sum_latency(
-                f_partition.ffn_ops,
+                f_layer_ops,
                 batch_size=b_batch_size * verify_width,
                 seq_len=s_i,
                 model=f_model,
@@ -1746,6 +1837,7 @@ class AFDInferenceSession:
                 t_a2f_layer,
                 t_f2a_layer,
                 num_layers=num_layers,
+                t_once=t_once,
             )
             comm_hidden = comm_hidden_i
 
@@ -1766,6 +1858,12 @@ class AFDInferenceSession:
         t_step_avg = t_step_sum / denom
         a_per_op = {k: v / denom for k, v in a_per_op_sum.items()}
         f_per_op = {k: v / denom for k, v in f_per_op_sum.items()}
+        # Once-per-step costs are already whole-step values, so they are added
+        # after the stride averaging rather than being weighted by ``repeat``.
+        for k, v in a_once_per_op.items():
+            a_per_op[k] = a_per_op.get(k, 0.0) + v
+        for k, v in f_once_per_op.items():
+            f_per_op[k] = f_per_op.get(k, 0.0) + v
         return (
             t_a_layer_avg,
             t_f_layer_avg,
@@ -1774,6 +1872,7 @@ class AFDInferenceSession:
             a_per_op,
             f_per_op,
             comm_hidden,
+            t_once,
         )
 
     def _simulate_phase(
@@ -1855,7 +1954,7 @@ class AFDInferenceSession:
             a_micro_batch_size,
             _b_total,
             b_micro_total,
-            _num_microbatches,
+            num_microbatches,
         ) = self._afd_batch_shape()
 
         # AFD comm (A↔F cross-pool transfers, F-node AllGather /
@@ -1942,6 +2041,7 @@ class AFDInferenceSession:
                 a_per_op,
                 f_per_op,
                 comm_hidden,
+                t_once,
             ) = self._integrate_decode_phase(
                 a_partition=a_partition,
                 f_partition=f_partition,
@@ -1967,8 +2067,13 @@ class AFDInferenceSession:
             # Prefill: single shot over the uncached input suffix; no
             # need to integrate, ``s == isl - prefix`` everywhere.
             seq_len_query = effective_prefill_len
+            # Embedding / logits GEMM run once per step, not once per layer:
+            # amortizing them across layers would inflate the per-layer basis
+            # the pipeline maxes over.
+            a_layer_ops, a_once_ops = _split_once_per_step(a_partition.attn_ops, num_layers)
+            f_layer_ops, f_once_ops = _split_once_per_step(f_partition.ffn_ops, num_layers)
             t_a_total, a_per_op = self._sum_latency(
-                a_partition.attn_ops,
+                a_layer_ops,
                 batch_size=a_micro_batch_size,
                 seq_len=seq_len_query,
                 model=a_model,
@@ -1977,7 +2082,25 @@ class AFDInferenceSession:
                 database=self._a_database,
             )
             t_f_total, f_per_op = self._sum_latency(
-                f_partition.ffn_ops,
+                f_layer_ops,
+                batch_size=b_micro_total,
+                seq_len=seq_len_query,
+                model=f_model,
+                runtime_config=runtime_config,
+                is_context=True,
+                database=self._f_database,
+            )
+            t_a_once, a_once_per_op = self._sum_once_per_step(
+                a_once_ops,
+                batch_size=a_micro_batch_size,
+                seq_len=seq_len_query,
+                model=a_model,
+                runtime_config=runtime_config,
+                is_context=True,
+                database=self._a_database,
+            )
+            t_f_once, f_once_per_op = self._sum_once_per_step(
+                f_once_ops,
                 batch_size=b_micro_total,
                 seq_len=seq_len_query,
                 model=f_model,
@@ -1987,11 +2110,21 @@ class AFDInferenceSession:
             )
             if f_scale != 1.0:
                 t_f_total *= f_scale
+                t_f_once *= f_scale
                 f_per_op = {k: v * f_scale for k, v in f_per_op.items()}
+                f_once_per_op = {k: v * f_scale for k, v in f_once_per_op.items()}
+            for k, v in a_once_per_op.items():
+                a_per_op[k] = a_per_op.get(k, 0.0) + v
+            for k, v in f_once_per_op.items():
+                f_per_op[k] = f_per_op.get(k, 0.0) + v
+            t_once = t_a_once + t_f_once
             t_a_layer = t_a_total / num_layers + brk_t_a_per_layer
             t_f_layer = t_f_total / num_layers + brk_t_f_per_layer
             t_cycle, comm_hidden = self._pipeline_tcycle(t_a_layer, t_f_layer, t_a2f_layer, t_f2a_layer)
-            t_step = num_layers * t_cycle
+            # ``t_once`` is a per-micro-batch cost (see
+            # ``_pipeline_global_step_latency``), so a step carrying
+            # ``num_microbatches`` of them pays it that many times.
+            t_step = num_layers * t_cycle + t_once * num_microbatches
 
         # Per-op dicts are tracked in *per-step* units (matching
         # ``_sum_latency`` output), so amortize per-layer values up by
@@ -2035,6 +2168,10 @@ class AFDInferenceSession:
             "t_c_layer": t_c_layer,
             "t_cycle": t_cycle,
             "t_step": t_step,
+            # Embedding / logits GEMM: charged once per step, outside the
+            # pipelined layer loop. Surfaced so the split is observable
+            # rather than only visible as a shift in ``t_step``.
+            "t_once_per_step": t_once,
             "comm_hidden": comm_hidden,
             "balance_ratio": balance_ratio,
             # Surfaced so a calibrated row is distinguishable from raw data.
@@ -2175,13 +2312,14 @@ class AFDInferenceSession:
         "t_f2a_layer",
         "t_c_layer",
         "t_step",
+        "t_once_per_step",
         "balance_ratio",
         "comm_hidden",
     )
 
     @classmethod
     def _phase_scalars(cls, metrics: dict | None) -> dict:
-        """Return the 8 per-phase layer scalars (rounded), or NaN/None when
+        """Return the 9 per-phase layer scalars (rounded), or NaN/None when
         the phase was not run.
 
         ``comm_hidden`` is the only boolean among them; surface it as
@@ -2249,6 +2387,7 @@ class AFDInferenceSession:
             headline = self._phase_scalars(None)
         t_a_layer = headline["t_a_layer"]
         t_f_layer = headline["t_f_layer"]
+        t_once_per_step = headline["t_once_per_step"]
         t_a2f_layer = headline["t_a2f_layer"]
         t_f2a_layer = headline["t_f2a_layer"]
         t_c_layer = headline["t_c_layer"]
@@ -2341,6 +2480,11 @@ class AFDInferenceSession:
             "t_f2a_layer": t_f2a_layer,
             "t_c_layer": t_c_layer,
             "t_step": t_step,
+            # Embedding / logits GEMM: charged once per step, outside the
+            # pipelined layer loop rather than amortized into the per-layer
+            # cadence. Surfaced so the split is observable in a result row
+            # rather than only as a shift in ``t_step``.
+            "t_once_per_step": t_once_per_step,
             "balance_ratio": balance_ratio,
             "comm_hidden": comm_hidden,
             # Config-level, not per-phase: surfaced so a calibrated row is
@@ -2353,6 +2497,7 @@ class AFDInferenceSession:
             "prefill_t_f2a_layer": prefill_scalars["t_f2a_layer"],
             "prefill_t_c_layer": prefill_scalars["t_c_layer"],
             "prefill_t_step": prefill_scalars["t_step"],
+            "prefill_t_once_per_step": prefill_scalars["t_once_per_step"],
             "prefill_balance_ratio": prefill_scalars["balance_ratio"],
             "prefill_comm_hidden": prefill_scalars["comm_hidden"],
             "decode_t_a_layer": decode_scalars["t_a_layer"],
@@ -2361,6 +2506,7 @@ class AFDInferenceSession:
             "decode_t_f2a_layer": decode_scalars["t_f2a_layer"],
             "decode_t_c_layer": decode_scalars["t_c_layer"],
             "decode_t_step": decode_scalars["t_step"],
+            "decode_t_once_per_step": decode_scalars["t_once_per_step"],
             "decode_balance_ratio": decode_scalars["balance_ratio"],
             "decode_comm_hidden": decode_scalars["comm_hidden"],
             "ttft": round(ttft, 3),
