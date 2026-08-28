@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ast
+import gc
 import sys
 import types
 from pathlib import Path
@@ -166,39 +167,164 @@ class TestResolveFlashinferGdnDecode:
 
         generation_cases = [case for case in get_common_gdn_test_cases() if case.phase == "generation"]
 
-        assert generation_cases
+        assert len(generation_cases) == 37
         assert {case.mamba_ssm_dtype for case in generation_cases} == {"float32"}
         assert [case for case in generation_cases if resolve(case.mamba_ssm_dtype)[0] is not None] == []
 
 
-def test_run_gdn_generation_benchmark_raises_classified_error_not_silent_skip():
-    """Structural guard: the flashinfer sibling-lane branch in
-    run_gdn_generation_benchmark must raise the classified error resolved by
-    _resolve_flashinfer_gdn_decode rather than silently falling through when
-    the kernel is unavailable (the `if kernel is not None` guard alone would
-    silently drop the row on SM100+, matching the CodeRabbit finding)."""
-    tree = ast.parse(SOURCE_PATH.read_text(encoding="utf-8"), filename=str(SOURCE_PATH))
-    function = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_gdn_generation_benchmark"
+class _FakeTensor:
+    def view(self, *_args):
+        return self
+
+    def detach(self):
+        return self
+
+    def float(self):
+        return self
+
+
+class _FakeCuda:
+    @staticmethod
+    def set_device(_device):
+        pass
+
+    @staticmethod
+    def get_device_name(_device):
+        return "fake-gpu"
+
+    @staticmethod
+    def empty_cache():
+        pass
+
+
+class _FakeTorch:
+    bfloat16 = "bfloat16"
+    float32 = "float32"
+    int32 = "int32"
+    cuda = _FakeCuda()
+
+    @staticmethod
+    def device(value):
+        return value
+
+    @staticmethod
+    def set_default_device(_device):
+        pass
+
+    @staticmethod
+    def randn(*_args, **_kwargs):
+        return _FakeTensor()
+
+    @staticmethod
+    def zeros(*_args, **_kwargs):
+        return _FakeTensor()
+
+    @staticmethod
+    def ones(*_args, **_kwargs):
+        return _FakeTensor()
+
+    @staticmethod
+    def arange(*_args, **_kwargs):
+        return _FakeTensor()
+
+    @staticmethod
+    def empty(*_args, **_kwargs):
+        return _FakeTensor()
+
+    @staticmethod
+    def split(_tensor, _sizes, dim=-1):
+        assert dim == -1
+        return _FakeTensor(), _FakeTensor(), _FakeTensor()
+
+
+class _FakeBenchmark:
+    def __init__(self, kernel_func):
+        self._kernel_func = kernel_func
+
+    def __enter__(self):
+        self._kernel_func()
+        return {"latency_ms": 1.0, "power_stats": None}
+
+    def __exit__(self, *_args):
+        return False
+
+
+def _run_generation_case(*, dtype, flashinfer_kernel, flashinfer_error=None, invoked=None, logged=None):
+    invoked = [] if invoked is None else invoked
+    logged = [] if logged is None else logged
+    run_generation = _load_function(
+        SOURCE_PATH,
+        "run_gdn_generation_benchmark",
+        {
+            "gc": gc,
+            "torch": _FakeTorch(),
+            "aic_debug": 0,
+            "causal_conv1d_update": lambda *_args, **_kwargs: invoked.append("causal_conv1d_update"),
+            "fused_recurrent_gated_delta_rule_packed_decode": lambda **_kwargs: invoked.append(
+                "fused_recurrent_gated_delta_rule_packed_decode"
+            ),
+            "_resolve_flashinfer_gdn_decode": lambda _dtype: (flashinfer_kernel, flashinfer_error),
+            "benchmark_with_power": lambda *, kernel_func, **_kwargs: _FakeBenchmark(kernel_func),
+            "log_perf": lambda **kwargs: logged.append(kwargs["kernel_source"]) or True,
+        },
     )
 
-    flashinfer_ifs = [
-        node
-        for node in ast.walk(function)
-        if isinstance(node, ast.If)
-        and isinstance(node.test, ast.Compare)
-        and isinstance(node.test.left, ast.Name)
-        and node.test.left.id == "flashinfer_gdn_decode_fn"
-    ]
-    assert len(flashinfer_ifs) == 1
-    guard = flashinfer_ifs[0]
+    run_generation(
+        d_model=2048,
+        d_conv=4,
+        num_k_heads=16,
+        head_k_dim=128,
+        num_v_heads=32,
+        head_v_dim=128,
+        batch_size_list=[1],
+        model_name="explicit-test-fixture",
+        perf_filename="unused.txt",
+        sglang_version="0.5.14",
+        device="cuda:0",
+        mamba_ssm_dtype=dtype,
+    )
+    return invoked, logged
 
-    # ast.unparse's `elif` is represented as a single-statement `orelse`
-    # whose test references the error variable and whose body raises.
-    assert len(guard.orelse) == 1
-    error_branch = guard.orelse[0]
-    assert isinstance(error_branch, ast.If)
-    assert isinstance(error_branch.test, ast.Compare)
-    assert isinstance(error_branch.test.left, ast.Name)
-    assert error_branch.test.left.id == "flashinfer_gdn_decode_error"
-    assert any(isinstance(statement, ast.Raise) for statement in error_branch.body)
+
+@pytest.mark.parametrize(
+    ("dtype", "flashinfer_selected", "expected_decode_source"),
+    [
+        pytest.param("float32", False, "fused_recurrent_gated_delta_rule_packed_decode", id="sm100-fp32-fla"),
+        pytest.param("bfloat16", False, "fused_recurrent_gated_delta_rule_packed_decode", id="sm120-bf16-fla"),
+        pytest.param("bfloat16", True, "flashinfer_gated_delta_rule_decode", id="sm100-bf16-flashinfer"),
+    ],
+)
+def test_generation_invokes_and_logs_exactly_one_serving_decode_backend(
+    dtype, flashinfer_selected, expected_decode_source
+):
+    def flashinfer_kernel(**_kwargs):
+        invoked_by_flashinfer.append("flashinfer_gated_delta_rule_decode")
+
+    invoked_by_flashinfer = []
+    invoked, logged = _run_generation_case(
+        dtype=dtype,
+        flashinfer_kernel=flashinfer_kernel if flashinfer_selected else None,
+    )
+    invoked += invoked_by_flashinfer
+
+    assert [source for source in invoked if "gated_delta_rule" in source] == [expected_decode_source]
+    assert [source for source in logged if "gated_delta_rule" in source] == [expected_decode_source]
+
+
+def test_generation_missing_selected_flashinfer_raises_classified_failure_without_fla_row():
+    error = "SM103 FlashInfer collection environment gap"
+    invoked = []
+    logged = []
+
+    with pytest.raises(RuntimeError, match=error):
+        _run_generation_case(
+            dtype="bfloat16",
+            flashinfer_kernel=None,
+            flashinfer_error=error,
+            invoked=invoked,
+            logged=logged,
+        )
+
+    assert "fused_recurrent_gated_delta_rule_packed_decode" not in invoked
+    assert "fused_recurrent_gated_delta_rule_packed_decode" not in logged
+    assert logged == ["causal_conv1d_update"]

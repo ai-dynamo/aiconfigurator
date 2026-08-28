@@ -90,6 +90,7 @@ def _worker_dying_after_done(
     error_queue=None,
     done_tasks=None,
     failed_tasks=None,
+    attempted_tasks=None,
     module_name="unknown",
     current_task_ids=None,
     consumed_sentinel=None,
@@ -116,6 +117,7 @@ def _worker_dying_after_done(
                 consumed_sentinel[device_id] = True
             break
         task_id = task_info["id"]
+        attempted_tasks[task_id] = True
         current_task_ids[device_id] = task_id
         done_tasks[task_id] = True  # synchronous manager RPC, like the real worker
         if task_id.startswith("poison-keepid"):
@@ -213,14 +215,20 @@ def _load_failed_ids(tmp_path, module_name, backend="unknown"):
     return set(data.get("failed", []))
 
 
+def _load_attempted_ids(tmp_path, module_name, backend="unknown"):
+    data = _load_checkpoint_data(tmp_path, module_name, backend=backend)
+    return set(data.get("attempted", []))
+
+
 def _assert_all_tasks_attempted(tasks, tmp_path, module_name):
     expected = {task["id"] for task in tasks}
     done = _load_done_ids(tmp_path, module_name)
     failed = _load_failed_ids(tmp_path, module_name)
-    attempted = done | failed
-    missing = expected - attempted
-    extra = attempted - expected
-    assert attempted == expected, f"attempted mismatch: missing={missing}, extra={extra}"
+    cumulative = done | failed
+    missing = expected - cumulative
+    extra = cumulative - expected
+    assert cumulative == expected, f"attempted mismatch: missing={missing}, extra={extra}"
+    assert _load_attempted_ids(tmp_path, module_name) == expected
 
 
 def _run_and_assert_all_done(tasks, num_processes, tmp_path, module_name):
@@ -595,3 +603,43 @@ class TestResumeIntegrity:
         assert len(unresolved) == 1
         assert unresolved[0]["classification"] == "unresolved_from_checkpoint"
         assert "1 unresolved" in unresolved[0]["error_message"]
+
+    def test_retry_failed_attempt_ledger_excludes_prior_completed_case(self, tmp_path):
+        tasks = _tasks([("case-old", "normal"), ("case-retried", "error")])
+        _run(tasks, 1, tmp_path, module_name="retry_attestation")
+
+        parallel_run(
+            tasks,
+            _task_fn,
+            num_processes=1,
+            module_name="retry_attestation",
+            resume_options={
+                "checkpoint_dir": str(tmp_path / ".checkpoint"),
+                "resume": True,
+                "retry_failed": True,
+            },
+        )
+
+        assert _load_done_ids(tmp_path, "retry_attestation") == {"case-old"}
+        assert _load_failed_ids(tmp_path, "retry_attestation") == {"case-retried"}
+        assert _load_attempted_ids(tmp_path, "retry_attestation") == {"case-retried"}
+
+    def test_zero_work_resume_clears_attempt_ledger_without_losing_resume_state(self, tmp_path):
+        tasks = _tasks([("case-a", "normal"), ("case-b", "normal")])
+        _run(tasks, 1, tmp_path, module_name="zero_work_attestation")
+
+        assert _load_attempted_ids(tmp_path, "zero_work_attestation") == {"case-a", "case-b"}
+        assert (
+            parallel_run(
+                tasks,
+                _task_fn,
+                num_processes=1,
+                module_name="zero_work_attestation",
+                resume_options={"checkpoint_dir": str(tmp_path / ".checkpoint"), "resume": True},
+            )
+            == []
+        )
+
+        assert _load_done_ids(tmp_path, "zero_work_attestation") == {"case-a", "case-b"}
+        assert _load_failed_ids(tmp_path, "zero_work_attestation") == set()
+        assert _load_attempted_ids(tmp_path, "zero_work_attestation") == set()

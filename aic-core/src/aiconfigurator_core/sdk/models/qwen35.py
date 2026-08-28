@@ -13,6 +13,8 @@ from aiconfigurator_core.sdk.models.helpers import (
     quant_exclude_patterns,
 )
 
+_MAMBA_SSM_DTYPE_BYTES = {"float32": 4, "bfloat16": 2, "float16": 2}
+
 
 def _qwen35_mixed_precision_gemm_modes(
     raw_config: dict,
@@ -190,12 +192,11 @@ class Qwen35Model(BaseModel):
         root — serving's branches are an ``elif`` chain, so root is never
         consulted once text_config declares the field); an invalid declared
         value keeps the ``float32`` default, as serving does."""
-        valid = ("float32", "bfloat16", "float16")
         text_config = raw_config.get("text_config")
         for source in (text_config if isinstance(text_config, dict) else {}, raw_config):
             if "mamba_ssm_dtype" in source:
                 dtype = source["mamba_ssm_dtype"]
-                return dtype if dtype in valid else "float32"
+                return dtype if dtype in _MAMBA_SSM_DTYPE_BYTES else "float32"
         return "float32"
 
     def _count_layer_types(self) -> dict[str, int]:
@@ -218,15 +219,14 @@ class Qwen35Model(BaseModel):
         return cfg.layer_types.count("full_attention") * 2 * n_kv_per_tp * self._head_size
 
     def _gdn_state_bytes_per_request(self) -> float:
-        """Constant GDN state per request on one GPU: fp32 SSM state (Qwen3.5
-        pins mamba_ssm_dtype=float32) + model-dtype conv window, per GDN layer,
-        TP-sharded."""
+        """Constant GDN state per request on one GPU: configured SSM state
+        plus model-dtype conv window, per GDN layer, TP-sharded."""
         cfg: common.Qwen35Config = self.extra_params
         tp = self.config.tp_size
         n_gdn = cfg.layer_types.count("linear_attention")
         nk, hk = cfg.linear_num_key_heads, cfg.linear_key_head_dim
         nv, hv = cfg.linear_num_value_heads, cfg.linear_value_head_dim
-        ssm_bytes = (nv // tp) * hk * hv * 4
+        ssm_bytes = (nv // tp) * hk * hv * _MAMBA_SSM_DTYPE_BYTES[self._mamba_ssm_dtype]
         conv_bytes = (2 * nk * hk + nv * hv) // tp * (cfg.linear_conv_kernel_dim - 1) * 2
         return n_gdn * (ssm_bytes + conv_bytes)
 

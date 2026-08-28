@@ -93,7 +93,13 @@ def _xpu_provenance_ctx(collections: list[dict]) -> dict:
     }
 
 
-def _write_checkpoint(checkpoint_dir: Path, *, done: list[str], failed: list[str]) -> Path:
+def _write_checkpoint(
+    checkpoint_dir: Path,
+    *,
+    done: list[str],
+    failed: list[str],
+    attempted: list[str] | None = None,
+) -> Path:
     path = checkpoint_dir / BACKEND / f"{FULL_NAME}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -108,6 +114,7 @@ def _write_checkpoint(checkpoint_dir: Path, *, done: list[str], failed: list[str
                 "updated_at": "2026-07-20T00:00:00",
                 "done": sorted(done),
                 "failed": sorted(failed),
+                "attempted": sorted(done + failed if attempted is None else attempted),
             }
         )
     )
@@ -394,6 +401,123 @@ def test_existing_v2_same_table_history_appends_fresh_event(tmp_path):
     assert table["collections"][1]["case_plan_hash"] == provenance.case_plan_hash(["case-new"])
     assert table["collections"][1]["rows"] == 1
     assert table["rows"] == 2
+
+
+def test_retry_event_hash_attests_only_cases_attempted_this_invocation(tmp_path):
+    output_root = tmp_path / "out"
+    prior_event = {
+        "collector_ref": "a" * 40,
+        "collector_hash": "sha256:" + "b" * 64,
+        "case_plan_hash": provenance.case_plan_hash(["case-old", "case-retried"]),
+        "collected_at": "2026-08-10",
+        "rows": 1,
+        "status": "complete",
+    }
+    provenance.write_collection_meta(
+        output_root,
+        {
+            "framework": "sglang",
+            "version": "0.5.14",
+            "image": "lmsysorg/sglang:v0.5.14",
+            "image_digest": "sha256:" + "0" * 64,
+        },
+        {"gemm_perf": prior_event},
+    )
+
+    parquet_path = output_root / "gemm_perf.parquet"
+    _write_parquet(parquet_path, [{"op": "old", "latency": 1.0}])
+    perf_path = output_root / "gemm_perf.txt"
+    perf_path.write_text("op,latency\nretried,2.0\n")
+    finalization_info: dict[Path, collect_mod.PerfFinalizationInfo] = {}
+    assert collect_mod.finalize_perf_files([perf_path], finalization_info=finalization_info) == [parquet_path]
+
+    checkpoint_dir = tmp_path / "checkpoint"
+    _write_checkpoint(
+        checkpoint_dir,
+        done=["case-old", "case-retried"],
+        failed=[],
+        attempted=["case-retried"],
+    )
+    collect_mod._write_collector_provenance(
+        output_root,
+        [parquet_path],
+        _provenance_ctx(_collections()),
+        run_errors=[],
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        finalization_info=finalization_info,
+    )
+
+    doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
+    retry_event = doc["tables"]["gemm_perf"]["collections"][1]
+    assert retry_event["case_plan_hash"] == provenance.case_plan_hash(["case-retried"])
+
+
+def test_deduped_zero_row_event_still_attests_its_attempted_cases(tmp_path):
+    output_root = tmp_path / "out"
+    prior_event = {
+        "collector_ref": "a" * 40,
+        "collector_hash": "sha256:" + "b" * 64,
+        "case_plan_hash": provenance.case_plan_hash(["case-old"]),
+        "collected_at": "2026-08-10",
+        "rows": 1,
+        "status": "complete",
+    }
+    provenance.write_collection_meta(
+        output_root,
+        {
+            "framework": "sglang",
+            "version": "0.5.14",
+            "image": "lmsysorg/sglang:v0.5.14",
+            "image_digest": "sha256:" + "0" * 64,
+        },
+        {"gemm_perf": prior_event},
+    )
+    parquet_path = output_root / "gemm_perf.parquet"
+    _write_parquet(parquet_path, [{"op": "old", "latency": 1.0}])
+    checkpoint_dir = tmp_path / "checkpoint"
+    _write_checkpoint(
+        checkpoint_dir,
+        done=["case-old"],
+        failed=[],
+        attempted=["case-deduped-a", "case-deduped-a", "case-deduped-b"],
+    )
+
+    collect_mod._write_collector_provenance(
+        output_root,
+        [parquet_path],
+        _provenance_ctx(_collections()),
+        run_errors=[],
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        finalization_info={parquet_path.resolve(): collect_mod.PerfFinalizationInfo(new_rows=0, merged_existing=True)},
+    )
+
+    doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
+    event = doc["tables"]["gemm_perf"]["collections"][1]
+    assert event["rows"] == 0
+    assert event["case_plan_hash"] == provenance.case_plan_hash(["case-deduped-a", "case-deduped-b"])
+
+
+def test_cumulative_checkpoint_without_current_attempts_cannot_attest_event(tmp_path):
+    output_root = tmp_path / "out"
+    parquet_path = output_root / "gemm_perf.parquet"
+    _write_parquet(parquet_path, [{"op": "old", "latency": 1.0}])
+    checkpoint_dir = tmp_path / "checkpoint"
+    _write_checkpoint(checkpoint_dir, done=["case-from-prior-invocation"], failed=[], attempted=[])
+
+    with pytest.raises(RuntimeError, match="Zero attempted cases"):
+        collect_mod._write_collector_provenance(
+            output_root,
+            [parquet_path],
+            _provenance_ctx(_collections()),
+            run_errors=[],
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            finalization_info=_finalization_info_for(parquet_path),
+        )
+
+    assert not (output_root / "collection_meta.yaml").exists()
 
 
 def test_schema_mismatch_overwrite_replaces_stale_table_history(tmp_path):

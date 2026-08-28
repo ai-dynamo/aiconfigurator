@@ -3,11 +3,14 @@
 
 """Qwen3.5 hybrid GDN + full-attention LM modeling contracts."""
 
+import copy
+
 import pytest
 
 from aiconfigurator.sdk import common, models
 from aiconfigurator.sdk import config as sdk_config
 from aiconfigurator.sdk.operations import CustomAllReduce, OverlapOp
+from aiconfigurator_core.sdk import models as core_models
 
 pytestmark = pytest.mark.unit
 
@@ -235,6 +238,48 @@ def test_qwen35_memory_charges_kv_on_full_layers_and_constant_gdn_state():
 
     assert model.get_kvcache_elements_per_token() == 10 * 2 * 1 * 256
     expected_state = 30 * ((32 // 4) * 128 * 128 * 4 + (2 * 16 * 128 + 32 * 128) // 4 * 3 * 2)
+    assert model._gdn_state_bytes_per_request() == expected_state
+    per_token_bytes = 2 * model.get_kvcache_elements_per_token()
+    assert model.get_kvcache_bytes_per_sequence(4096) == 4096 * per_token_bytes + expected_state
+    assert model.get_kvcache_max_tokens(expected_state + 100 * per_token_bytes) == 100
+
+
+@pytest.mark.parametrize(
+    ("configured_dtype", "resolved_dtype", "ssm_element_bytes"),
+    [("bfloat16", "bfloat16", 2), ("float8_e4m3", "float32", 4)],
+)
+def test_qwen35_custom_config_sizes_only_supported_ssm_dtypes(
+    monkeypatch, configured_dtype, resolved_dtype, ssm_element_bytes
+):
+    model_name = "Qwen/Qwen3.5-35B-A3B"
+    model_info = copy.deepcopy(core_models._get_model_info(model_name))
+    raw_config = model_info["raw_config"]
+    text_config = raw_config.get("text_config")
+    if isinstance(text_config, dict):
+        text_config["mamba_ssm_dtype"] = configured_dtype
+    else:
+        raw_config["mamba_ssm_dtype"] = configured_dtype
+    monkeypatch.setattr(core_models, "_get_model_info", lambda _model_path: model_info)
+
+    model = models.get_model(model_name, _model_config(tp_size=4), "sglang")
+
+    cfg = model.extra_params
+    n_gdn = cfg.layer_types.count("linear_attention")
+    state_bytes = (
+        (cfg.linear_num_value_heads // 4) * cfg.linear_key_head_dim * cfg.linear_value_head_dim * ssm_element_bytes
+    )
+    conv_bytes = (
+        (
+            2 * cfg.linear_num_key_heads * cfg.linear_key_head_dim
+            + cfg.linear_num_value_heads * cfg.linear_value_head_dim
+        )
+        // 4
+        * (cfg.linear_conv_kernel_dim - 1)
+        * 2
+    )
+    expected_state = n_gdn * (state_bytes + conv_bytes)
+
+    assert model._mamba_ssm_dtype == resolved_dtype
     assert model._gdn_state_bytes_per_request() == expected_state
     per_token_bytes = 2 * model.get_kvcache_elements_per_token()
     assert model.get_kvcache_bytes_per_sequence(4096) == 4096 * per_token_bytes + expected_state

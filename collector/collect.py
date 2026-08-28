@@ -222,6 +222,9 @@ class ResumeCheckpoint:
         }
         self._done: set[str] = set()
         self._failed: set[str] = set()
+        # Invocation-scoped, unlike the cumulative resume sets above. The
+        # provenance event emitted by this invocation hashes exactly this set.
+        self._attempted: set[str] = set()
 
         safe_name = module_name.replace("/", "_").replace(":", "_")
         self._path = Path(checkpoint_dir).expanduser().resolve() / backend / f"{safe_name}.json"
@@ -251,6 +254,7 @@ class ResumeCheckpoint:
 
         self._done = set(data.get("done", []))
         self._failed = set(data.get("failed", []))
+        self._attempted = set(data.get("attempted", []))
         logger.info(f"{self.module_name}: loaded checkpoint — {len(self._done)} passed, {len(self._failed)} failed")
 
     # -- public API -------------------------------------------------------
@@ -283,8 +287,20 @@ class ResumeCheckpoint:
         self._dirty = True
         self.flush()
 
+    def start_invocation(self):
+        """Reset only the event attestation ledger, preserving resume state."""
+        self._attempted.clear()
+        self._dirty = True
+        self.flush(force=True)
+
+    def mark_attempted(self, task_id: str):
+        """Record that this invocation actually consumed a task."""
+        self._attempted.add(task_id)
+        self._dirty = True
+        self.flush()
+
     def mark_failed(self, task_id: str):
-        """Mark a task as attempted but failed."""
+        """Mark a task as failed in cumulative resume state."""
         self._failed.add(task_id)
         self._dirty = True
         self.flush()
@@ -308,6 +324,7 @@ class ResumeCheckpoint:
             "updated_at": datetime.now().isoformat(),
             "done": sorted(self._done),
             "failed": sorted(self._failed),
+            "attempted": sorted(self._attempted),
         }
         tmp_path = self._path.with_suffix(".json.tmp")
         with open(tmp_path, "w") as f:
@@ -499,6 +516,7 @@ def worker(
     error_queue=None,
     done_tasks=None,
     failed_tasks=None,
+    attempted_tasks=None,
     module_name="unknown",
     current_task_ids=None,
     consumed_sentinel=None,
@@ -542,6 +560,11 @@ def worker(
             task = task_info
             task_id = create_test_case_id(task, "unknown", module_name)
 
+        if attempted_tasks is not None:
+            # Record consumption before publishing the active-task pointer so
+            # a hard kill between manager RPCs cannot classify a consumed case
+            # as failed while omitting it from this invocation's attestation.
+            attempted_tasks[task_id] = True
         if current_task_ids is not None:
             current_task_ids[device_id] = task_id
 
@@ -673,6 +696,10 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     else:
         task_infos = raw_task_infos
 
+    # ``done``/``failed`` remain cumulative for resume; provenance must attest
+    # only cases consumed during this invocation.
+    resume_tracker.start_invocation()
+
     def _unresolved_failure_errors():
         # A resumed run must not look clean while its checkpoint still holds
         # unresolved failures: completion and acceptance are distinct.
@@ -722,6 +749,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     # a worker is killed by a signal on a subsequent task.
     done_tasks = manager.dict()
     failed_tasks = manager.dict()
+    attempted_tasks = manager.dict()
 
     def start_process(device_id):
         p = mp.Process(
@@ -735,6 +763,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
                 error_queue,
                 done_tasks,
                 failed_tasks,
+                attempted_tasks,
                 module_name,
                 current_task_ids,
                 consumed_sentinel,
@@ -787,6 +816,12 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
     accounted = set()
 
     def sync_done_to_checkpoint():
+        for task_id in list(attempted_tasks.keys()):
+            resume_tracker.mark_attempted(task_id)
+            try:
+                del attempted_tasks[task_id]
+            except KeyError:
+                pass
         for task_id in list(done_tasks.keys()):
             resume_tracker.mark_passed(task_id)
             accounted.add(task_id)
@@ -832,6 +867,7 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
             for task_info in task_infos:
                 task_id = task_info["id"]
                 task_params = task_info["params"]
+                resume_tracker.mark_attempted(task_id)
 
                 try:
                     func(*task_params, device=device)
@@ -1547,9 +1583,9 @@ def _write_collector_provenance(
 ) -> None:
     """Write collection_meta.yaml (design §5) flat beside the just-finalized parquet.
 
-    Reuses the checkpoint files ResumeCheckpoint already persisted per op
-    (case ids + unresolved failures) instead of re-plumbing case-id tracking
-    through parallel_run.
+    Reuses the checkpoint files ResumeCheckpoint already persisted per op.
+    ``done``/``failed`` remain cumulative resume state; ``attempted`` is the
+    invocation-scoped case-id set attested by the fresh event.
     """
     import pyarrow.parquet as pq
     import yaml
@@ -1606,17 +1642,15 @@ def _write_collector_provenance(
             except Exception as error:
                 logger.warning(f"collection_meta: failed to read checkpoint {checkpoint_path}: {error}")
                 continue
-            done = checkpoint_data.get("done", [])
+            attempted = checkpoint_data.get("attempted", [])
             failed = checkpoint_data.get("failed", [])
-            case_ids.update(done)
-            case_ids.update(failed)
+            case_ids.update(attempted)
             unresolved_failed += len(failed)
 
         if not case_ids:
-            # ResumeCheckpoint only writes a checkpoint file after >=1 case is
-            # marked done/failed (flush is dirty-gated), so empty case_ids
-            # means this table has ZERO checkpoint evidence: every op's
-            # checkpoint is missing or unreadable (or was hand-emptied).
+            # Empty invocation-scoped evidence means no case was consumed by
+            # this run: every op's checkpoint is missing/unreadable, predates
+            # the attempted ledger, or was reset by a zero-work resume.
             # Finalized parquet with zero attempted cases is unattestable —
             # fail closed instead of writing a fabricated 'complete' sidecar
             # whose case_plan_hash covers an empty case set.

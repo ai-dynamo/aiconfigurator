@@ -15,7 +15,7 @@ Context (prefill) phase:
 Generation (decode) phase:
     - causal_conv1d_update: Single-step conv state update
     - fused_recurrent_gated_delta_rule_packed_decode: Packed GDN recurrence
-      (fla/triton fp32-state lane; every SM)
+      (fla/triton lane unless serving selects FlashInfer)
     - flashinfer_gated_delta_rule_decode: FlashInfer bf16-state decode via
       flashinfer.gdn_decode.gated_delta_rule_decode_pretranspose (SM-major-10
       only — is_sm100_supported() is capability major EXACTLY 10, so sm
@@ -360,9 +360,8 @@ def _resolve_flashinfer_gdn_decode(mamba_ssm_dtype: str = "float32"):
       ``(None, message)``. Serving MANDATES this kernel for the case's model
       there, so a missing import is a collection-environment gap, not a
       legitimate skip: the caller raises this message as a classified failure
-      (layer_permissions.md: "execute it, or raise") once it has attempted
-      the other decode lanes for the point, so the row is recorded as failed
-      instead of silently omitted.
+      (layer_permissions.md: "execute it, or raise") without invoking or
+      logging the non-serving FLA decode lane.
 
     The lazy import mirrors sglang's own guard for this kernel
     (gdn_flashinfer.py:34-56 @0.5.14, _get_flashinfer_gdn_kernels ->
@@ -412,10 +411,10 @@ def run_gdn_generation_benchmark(
     Benchmarks:
     1. causal_conv1d_update  — Single-step conv state update
     2. fused_recurrent_gated_delta_rule_packed_decode — Packed GDN recurrence
-       (fla/triton fp32-state lane; every SM)
+       (fla/triton lane unless serving selects FlashInfer)
     3. flashinfer_gated_delta_rule_decode — FlashInfer bf16-state decode,
-       selected only when the SM major is 10 and the case declares bf16 state;
-       unavailable kernels raise a classified failure
+       selected instead of FLA only when the SM major is 10 and the case
+       declares bf16 state; unavailable kernels raise a classified failure
     """
     device = torch.device(device)
     torch.cuda.set_device(device)
@@ -442,6 +441,7 @@ def run_gdn_generation_benchmark(
     flashinfer_gdn_decode_fn, flashinfer_gdn_decode_error = _resolve_flashinfer_gdn_decode(mamba_ssm_dtype)
     successful_points = 0
     failed_points = 0
+    failures = []
 
     for batch_size in batch_size_list:
         if aic_debug:
@@ -461,14 +461,6 @@ def run_gdn_generation_benchmark(
                 device=device,
             )
             state_indices = torch.arange(batch_size, dtype=torch.int32, device=device)
-            recurrent_state = torch.zeros(
-                batch_size,
-                num_v_heads,
-                head_v_dim,
-                head_k_dim,
-                dtype=torch.float32,
-                device=device,
-            )
             a = torch.randn(batch_size, num_v_heads, dtype=dtype, device=device)
             b = torch.randn(batch_size, num_v_heads, dtype=dtype, device=device)
             a_log = torch.zeros(num_v_heads, dtype=torch.float32, device=device)
@@ -528,40 +520,53 @@ def run_gdn_generation_benchmark(
                 ):
                     raise RuntimeError(f"failed to persist SGLang GDN generation row to {perf_filename}")
 
-            def run_gdn_update():
-                fused_recurrent_gated_delta_rule_packed_decode(
-                    mixed_qkv=mixed_qkv,
-                    a=a,
-                    b=b,
-                    A_log=a_log,
-                    dt_bias=dt_bias,
-                    scale=head_k_dim**-0.5,
-                    initial_state=recurrent_state,
-                    out=output,
-                    ssm_state_indices=state_indices,
-                    use_qk_l2norm_in_kernel=True,
+            if flashinfer_gdn_decode_error is not None:
+                raise RuntimeError(flashinfer_gdn_decode_error)
+
+            if flashinfer_gdn_decode_fn is None:
+                recurrent_state = torch.zeros(
+                    batch_size,
+                    num_v_heads,
+                    head_v_dim,
+                    head_k_dim,
+                    dtype=torch.float32,
+                    device=device,
                 )
 
-            with benchmark_with_power(
-                device=device,
-                kernel_func=run_gdn_update,
-                num_warmups=num_warmups,
-                num_runs=num_runs,
-                repeat_n=10,
-            ) as results:
-                if not log_perf(
-                    item_list=[{**common_log_data, "latency": results["latency_ms"]}],
-                    framework="SGLang",
-                    version=sglang_version,
-                    device_name=torch.cuda.get_device_name(device),
-                    op_name="gdn",
-                    kernel_source="fused_recurrent_gated_delta_rule_packed_decode",
-                    perf_filename=perf_filename,
-                    power_stats=results["power_stats"],
-                ):
-                    raise RuntimeError(f"failed to persist SGLang GDN generation row to {perf_filename}")
+                def run_gdn_update():
+                    fused_recurrent_gated_delta_rule_packed_decode(
+                        mixed_qkv=mixed_qkv,
+                        a=a,
+                        b=b,
+                        A_log=a_log,
+                        dt_bias=dt_bias,
+                        scale=head_k_dim**-0.5,
+                        initial_state=recurrent_state,
+                        out=output,
+                        ssm_state_indices=state_indices,
+                        use_qk_l2norm_in_kernel=True,
+                    )
 
-            if flashinfer_gdn_decode_fn is not None:
+                with benchmark_with_power(
+                    device=device,
+                    kernel_func=run_gdn_update,
+                    num_warmups=num_warmups,
+                    num_runs=num_runs,
+                    repeat_n=10,
+                ) as results:
+                    if not log_perf(
+                        item_list=[{**common_log_data, "latency": results["latency_ms"]}],
+                        framework="SGLang",
+                        version=sglang_version,
+                        device_name=torch.cuda.get_device_name(device),
+                        op_name="gdn",
+                        kernel_source="fused_recurrent_gated_delta_rule_packed_decode",
+                        perf_filename=perf_filename,
+                        power_stats=results["power_stats"],
+                    ):
+                        raise RuntimeError(f"failed to persist SGLang GDN generation row to {perf_filename}")
+
+            else:
                 # Mirrors FlashInferGDNKernel.decode's
                 # use_state_pool=True branch argument-for-argument
                 # (gdn_flashinfer.py:180-193 @0.5.14 — SM100+ always takes
@@ -622,18 +627,11 @@ def run_gdn_generation_benchmark(
                         power_stats=results["power_stats"],
                     ):
                         raise RuntimeError(f"failed to persist SGLang GDN generation row to {perf_filename}")
-            elif flashinfer_gdn_decode_error is not None:
-                # SM100+ mandates this lane (see _resolve_flashinfer_gdn_decode)
-                # and it isn't available in this collection environment: raise
-                # a classified error instead of silently omitting the row. The
-                # two lanes above already logged for this point, so only the
-                # flashinfer row is recorded as failed.
-                raise RuntimeError(flashinfer_gdn_decode_error)
-
             successful_points += 1
 
         except Exception as e:
             failed_points += 1
+            failures.append(f"batch_size={batch_size}: {type(e).__name__}: {e}")
             print(f"  Error at batch_size={batch_size}: {e}")
             continue
         finally:
@@ -654,7 +652,10 @@ def run_gdn_generation_benchmark(
     summary = f"ok={successful_points} error={failed_points} skip=0"
     print(f"GDN generation summary: {summary}")
     if failed_points or successful_points == 0:
-        raise RuntimeError(f"SGLang GDN generation collection failed strict completeness: {summary}")
+        raise RuntimeError(
+            f"SGLang GDN generation collection failed strict completeness: {summary}; "
+            f"failed cells: {'; '.join(failures)}"
+        )
 
 
 def run_gdn_torch(
