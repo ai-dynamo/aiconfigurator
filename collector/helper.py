@@ -1052,7 +1052,7 @@ def _finalize_perf_file_batch(
             raise RuntimeError("Collector staging preflight does not match the selected finalization inputs")
 
     unique_inputs: list[tuple[Path, Path, Path]] = []
-    seen_inputs: set[tuple[int, int, int, int]] = set()
+    seen_inputs: set[tuple[int, int, tuple[int, int, str]]] = set()
     opened_locks: dict[tuple[int, int], int] = {}
     prepared: list[_PreparedPerfFile] = []
     try:
@@ -1060,12 +1060,12 @@ def _finalize_perf_file_batch(
             source_stat = item[0].lstat()
             if not stat.S_ISREG(source_stat.st_mode):
                 raise RuntimeError(f"Cannot convert non-regular collector staging file: {item[0]}")
-            lock_fd, lock_identity = _open_merge_lock(item[2])
+            lock_fd, lock_identity, lock_entry_key = _open_merge_lock(item[2])
             if lock_identity in opened_locks:
                 _release_merge_lock(lock_fd)
             else:
                 opened_locks[lock_identity] = lock_fd
-            input_identity = (source_stat.st_dev, source_stat.st_ino, *lock_identity)
+            input_identity = (source_stat.st_dev, source_stat.st_ino, lock_entry_key)
             if input_identity not in seen_inputs:
                 seen_inputs.add(input_identity)
                 unique_inputs.append(item)
@@ -1153,7 +1153,7 @@ def _normalize_power_metrics(table, *, pa, pc):
     return table
 
 
-def _open_merge_lock(lock_path: Path) -> tuple[int, tuple[int, int]]:
+def _open_merge_lock(lock_path: Path) -> tuple[int, tuple[int, int], tuple[int, int, str]]:
     """Open and attest a merge-lock object without acquiring its flock."""
     fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY)
     try:
@@ -1166,10 +1166,45 @@ def _open_merge_lock(lock_path: Path) -> tuple[int, tuple[int, int]]:
             or identity != (current.st_dev, current.st_ino)
         ):
             raise RuntimeError(f"Invalid collector parquet merge lock: {lock_path}")
-        return fd, identity
+        return fd, identity, _merge_lock_entry_key(lock_path, identity)
     except Exception:
         os.close(fd)
         raise
+
+
+def _merge_lock_entry_key(lock_path: Path, lock_identity: tuple[int, int]) -> tuple[int, int, str]:
+    """Identify the actual parent-directory entry naming an opened lock."""
+    parent_fd = os.open(lock_path.parent, os.O_RDONLY)
+    try:
+        parent = os.fstat(parent_fd)
+        if not stat.S_ISDIR(parent.st_mode):
+            raise RuntimeError(f"Invalid collector parquet merge lock directory: {lock_path.parent}")
+        names = os.listdir(parent_fd)
+        same_object: list[str] = []
+        for name in names:
+            try:
+                entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError as error:
+                raise RuntimeError(f"Collector parquet merge lock directory changed: {lock_path.parent}") from error
+            if stat.S_ISREG(entry.st_mode) and (entry.st_dev, entry.st_ino) == lock_identity:
+                same_object.append(name)
+
+        requested_name = lock_path.name
+        if requested_name in names:
+            if requested_name not in same_object:
+                raise RuntimeError(f"Collector parquet merge lock changed: {lock_path}")
+            actual_name = requested_name
+        else:
+            case_equivalent = [name for name in same_object if name.casefold() == requested_name.casefold()]
+            if len(case_equivalent) == 1:
+                actual_name = case_equivalent[0]
+            elif len(same_object) == 1:
+                actual_name = same_object[0]
+            else:
+                raise RuntimeError(f"Ambiguous collector parquet merge lock entry: {lock_path}")
+        return parent.st_dev, parent.st_ino, actual_name
+    finally:
+        os.close(parent_fd)
 
 
 def _acquire_merge_lock(lock_fd: int) -> None:

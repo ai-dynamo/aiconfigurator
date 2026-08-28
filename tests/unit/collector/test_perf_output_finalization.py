@@ -332,6 +332,36 @@ def test_finalize_perf_files_retains_hardlinked_sources_with_distinct_targets(tm
     assert set(finalization_info) == {path.resolve() for path in expected}
 
 
+def test_finalize_perf_files_retains_distinct_entries_when_sources_and_locks_are_hardlinked(tmp_path):
+    first = tmp_path / "a_perf.txt"
+    second = tmp_path / "b_perf.txt"
+    _write_perf_csv(first, latency=1.0)
+    helper_mod.os.link(first, second)
+    first_lock = Path(f"{first.with_suffix('.parquet')}.mergelock")
+    second_lock = Path(f"{second.with_suffix('.parquet')}.mergelock")
+    first_lock.touch()
+    helper_mod.os.link(first_lock, second_lock)
+    source_stat = first.stat()
+    source_identity = (
+        "sha256:" + hashlib.sha256(first.read_bytes()).hexdigest(),
+        source_stat.st_dev,
+        source_stat.st_ino,
+    )
+    finalization_info = {}
+
+    converted = finalize_perf_files(
+        [first, second],
+        delete_source=False,
+        finalization_info=finalization_info,
+        expected_source_identities={first.resolve(): source_identity, second.resolve(): source_identity},
+    )
+
+    expected = [first.with_suffix(".parquet"), second.with_suffix(".parquet")]
+    assert converted == expected
+    assert all(path.exists() for path in expected)
+    assert set(finalization_info) == {path.resolve() for path in expected}
+
+
 def test_finalize_perf_files_orders_locks_by_canonical_target(tmp_path, monkeypatch):
     first = tmp_path / "a_perf.txt"
     second = tmp_path / "b_perf.txt"
