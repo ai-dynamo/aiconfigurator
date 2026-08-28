@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-schema_version: 1
+schema_version: 2
 # `local`: the original manual campaign has its emitted attestation below; the
 # 2026-08-26 review-healing case-plan hashes were reconstructed from the exact
 # logged filters because those scoped runs did not export sidecars.
@@ -9,10 +9,9 @@ provenance: local
 runtime:
   framework: sglang
   version: 0.5.14
-  # Mirrored sglang:v0.5.14-cu130-amd64 image (mirror of
-  # lmsysorg/sglang:v0.5.14).
-  image: lmsysorg/sglang:v0.5.14
-  image_digest: sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3
+  # Private runtime image recorded by the JET campaign and healing jobs.
+  image: gitlab-master.nvidia.com/yimingl/aic-eval-tools/sglang:v0.5.14-cu130-amd64
+  image_digest: sha256:9611bd4c5624b0e9e17829506188a12f17205f2083de0dd44d6c521733553a50
 tables:
   gemm_perf:
     # 2026-08-14 (AIC-1759): FULL-TABLE replacement with the first true
@@ -53,6 +52,7 @@ tables:
         case_plan_hash: sha256:bf337c668c550ee41b42b70518db7552ff41ca733a88a988ea4478db28d99af9
         collected_at: '2026-08-26'
         rows: 3
+        status: complete
       # Review-healing pass 2 (JET pipeline 64694061, job 412989224): five
       # flagged rows plus both m-neighbors, two independent runs. The
       # case-plan hash is reconstructed from the exact logged 15-case filter;
@@ -62,3 +62,4 @@ tables:
         case_plan_hash: sha256:cf9758c99dc63ed7887007b6ba71bd1fe491ca8943c81918212176351c8bd7f4
         collected_at: '2026-08-26'
         rows: 15
+        status: complete

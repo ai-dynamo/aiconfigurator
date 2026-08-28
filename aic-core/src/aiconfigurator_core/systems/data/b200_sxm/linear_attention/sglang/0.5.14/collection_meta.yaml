@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-schema_version: 1
+schema_version: 2
 runtime:
   framework: sglang
   version: 0.5.14
@@ -23,6 +23,7 @@ tables:
         case_plan_hash: sha256:1e658e78c925cba9773688165ecec208c0c2c2f0b931268cc15a245fc878ac48
         collected_at: '2026-08-10'
         rows: 8820
+        status: complete
       # 2026-08-13 (AIC-1745): appended 54 flashinfer_gated_delta_rule_decode
       # rows — the FlashInfer bf16-state decode SIBLING lane (serving selects
       # it only on SM-major-10 for bfloat16-state models,
@@ -37,5 +38,6 @@ tables:
         case_plan_hash: sha256:ab10b27a07d6c11dd70b4da441c45a47bad465ecbbe40c4ff83d70fe4e1c1633
         collected_at: '2026-08-13'
         rows: 54
+        status: partial
         source_campaign_rows: 1243
         source_campaign_status: partial

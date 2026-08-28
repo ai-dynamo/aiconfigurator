@@ -312,6 +312,57 @@ def test_existing_sidecar_merge_preserves_prior_tables(tmp_path):
     assert doc["tables"]["other_table"] == {"status": "complete"}
 
 
+def test_existing_v2_same_table_history_appends_fresh_event(tmp_path):
+    output_root = tmp_path / "out"
+    prior_event = {
+        "collector_ref": "a" * 40,
+        "collector_hash": "sha256:" + "b" * 64,
+        "case_plan_hash": "sha256:" + "c" * 64,
+        "collected_at": "2026-08-10",
+        "rows": 1,
+        "status": "complete",
+        "runtime": {
+            "framework": "sglang",
+            "version": "0.5.14",
+            "image": "lmsysorg/sglang:v0.5.14",
+            "image_digest": "sha256:" + "f" * 64,
+        },
+    }
+    provenance.write_collection_meta(
+        output_root,
+        {
+            "framework": "sglang",
+            "version": "0.5.14",
+            "image": "lmsysorg/sglang:v0.5.14",
+            "image_digest": "sha256:" + "0" * 64,
+        },
+        {"gemm_perf": {"rows": 1, "status": "complete", "collections": [prior_event]}},
+        provenance_tier="local",
+    )
+
+    parquet_path = output_root / "gemm_perf.parquet"
+    _write_parquet(parquet_path, [{"op": "matmul", "latency": 1.0}, {"op": "matmul", "latency": 2.0}])
+    checkpoint_dir = tmp_path / "checkpoint"
+    _write_checkpoint(checkpoint_dir, done=["case-new"], failed=[])
+
+    collect_mod._write_collector_provenance(
+        output_root,
+        [parquet_path],
+        _provenance_ctx(_collections()),
+        run_errors=[],
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+    )
+
+    doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
+    table = doc["tables"]["gemm_perf"]
+    assert doc["schema_version"] == 2
+    assert doc["provenance"] == "local"
+    assert table["collections"][0] == prior_event
+    assert table["collections"][1]["case_plan_hash"] == provenance.case_plan_hash(["case-new"])
+    assert table["rows"] == 2
+
+
 def test_finalize_raises_when_existing_sidecar_is_legacy_tier(tmp_path):
     """A legacy sidecar (provenance: legacy, synthesized by migrate_markers.py for
     pre-V3 data) must never be silently merged-and-rebuilt by a fresh collection —

@@ -1603,6 +1603,7 @@ def _write_collector_provenance(
     # A prior invocation against the same scratch dir (e.g. --ops split across
     # runs) may have already written a sidecar for other tables; preserve them.
     existing_meta = output_root / "collection_meta.yaml"
+    provenance_tier: str | None = None
     if existing_meta.exists():
         try:
             existing_doc = yaml.safe_load(existing_meta.read_text(encoding="utf-8")) or {}
@@ -1617,11 +1618,42 @@ def _write_collector_provenance(
                 "Remove the legacy sidecar first if this directory is being deliberately "
                 "replaced by a new collection."
             )
+        existing_schema_version = existing_doc.get("schema_version", 1)
+        if existing_schema_version not in (1, 2):
+            raise RuntimeError(
+                f"{existing_meta}: unsupported collection_meta.yaml schema_version {existing_schema_version!r}"
+            )
+        provenance_tier = existing_doc.get("provenance")
         existing_tables = existing_doc.get("tables") or {}
         if isinstance(existing_tables, dict):
-            tables = {**existing_tables, **tables}
+            existing_runtime = existing_doc.get("runtime")
+            if existing_schema_version == 2 and existing_runtime != runtime_meta:
+                raise RuntimeError(
+                    f"{existing_meta}: cannot preserve collection histories across different runtime identities "
+                    f"(existing={existing_runtime!r}, current={runtime_meta!r})"
+                )
+            merged_tables = dict(existing_tables)
+            for table, current_entry in tables.items():
+                existing_entry = existing_tables.get(table)
+                if isinstance(existing_entry, dict):
+                    if existing_runtime != runtime_meta:
+                        raise RuntimeError(
+                            f"{existing_meta}: cannot append collection history for table '{table}' across "
+                            f"different runtime identities (existing={existing_runtime!r}, current={runtime_meta!r})"
+                        )
+                    merged_tables[table] = provenance.append_collection_event(
+                        existing_entry, current_entry, table=table
+                    )
+                else:
+                    merged_tables[table] = current_entry
+            tables = merged_tables
 
-    meta_path = provenance.write_collection_meta(output_root, runtime_meta, tables)
+    meta_path = provenance.write_collection_meta(
+        output_root,
+        runtime_meta,
+        tables,
+        provenance_tier=provenance_tier,
+    )
     logger.info(f"Wrote collector provenance sidecar: {meta_path}")
 
 
