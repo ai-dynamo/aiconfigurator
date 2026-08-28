@@ -130,9 +130,11 @@ impl CommunicationTable {
     /// Raw custom-allreduce value (latency ms + power/energy), 1-D
     /// interpolated along `message_size`.
     ///
-    /// `tp_size_effective` is the per-node fan-out the caller wants to look
-    /// up. For TP > num_gpus_per_node the operator caps this to
-    /// `num_gpus_per_node` and applies a bandwidth scale separately.
+    /// `tp_size_effective` is the fan-out the caller wants to look up. For
+    /// TP > num_gpus_per_node the `_scaled` caller passes the largest
+    /// recorded beyond-node fan-out when the table has one (multi-node
+    /// collection), else caps to `num_gpus_per_node` and applies a
+    /// bandwidth scale separately.
     pub fn query_custom_allreduce(
         &self,
         quant: CommQuantMode,
@@ -161,8 +163,10 @@ impl CommunicationTable {
     ///   2. GB200 NVL72 (`num_gpus_per_node == 72`) with `tp > 4` -> reroute
     ///      to NCCL all_reduce at the RAW tp (custom AR is only collected up
     ///      to tp4 there);
-    ///   3. clamp tp to the node size and interpolate the table;
-    ///   4. beyond-node overflow: scale by the p2p-bandwidth ratio.
+    ///   3. use the largest recorded fan-out <= tp (beyond-node fan-outs come
+    ///      from multi-node collection), else clamp tp to the node size, and
+    ///      interpolate the table;
+    ///   4. beyond-recorded overflow: scale by the p2p-bandwidth ratio.
     pub fn query_custom_allreduce_scaled(
         &self,
         spec: &SystemSpec,
@@ -177,14 +181,29 @@ impl CommunicationTable {
         if per_node == 72 && tp_size > 4 {
             return self.query_nccl_scaled(spec, quant, "all_reduce", tp_size, message_size);
         }
-        let effective_tp = tp_size.min(per_node);
+        // Recorded beyond-node fan-outs (multi-node collection) take
+        // precedence over the clamp+bandwidth extrapolation: use the largest
+        // recorded fan-out <= tp_size that exceeds the node size. Tables that
+        // stop at or below the node size (the historical single-node
+        // collection) keep the legacy clamp+scale behavior bit-for-bit.
+        let extended = {
+            let grids = self.load_custom_allreduce()?;
+            let quant_name = quant.name();
+            grids
+                .by_keys
+                .keys()
+                .filter(|(q, n)| q.as_str() == quant_name && *n > per_node && *n <= tp_size)
+                .map(|(_, n)| *n)
+                .max()
+        };
+        let effective_tp = extended.unwrap_or_else(|| tp_size.min(per_node));
         let mut value = self.query_custom_allreduce(quant, effective_tp, message_size)?;
-        if tp_size > per_node {
-            let base_bw = spec.get_p2p_bandwidth(per_node);
+        if tp_size > effective_tp {
+            let base_bw = spec.get_p2p_bandwidth(effective_tp);
             let target_bw = spec.get_p2p_bandwidth(tp_size);
             let f_tp = tp_size as f64;
-            let f_pn = per_node as f64;
-            let scale = (f_tp - 1.0) / f_tp * f_pn / (f_pn - 1.0).max(1.0) * base_bw / target_bw;
+            let f_eff = effective_tp as f64;
+            let scale = (f_tp - 1.0) / f_tp * f_eff / (f_eff - 1.0).max(1.0) * base_bw / target_bw;
             // Python scales latency AND energy by the beyond-node factor.
             value.latency *= scale;
             value.energy *= scale;
@@ -835,6 +854,49 @@ mod tests {
             }
             Err(other) => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn custom_allreduce_scaled_uses_recorded_beyond_node_fanouts() {
+        let spec = SystemSpec::load(&systems_root().join("gb200.yaml"))
+            .expect("gb200.yaml parse must succeed");
+        assert_eq!(
+            spec.node.num_gpus_per_node, 4,
+            "test assumes gb200 models 4-GPU nodes"
+        );
+        let curve = |lat: f64| latency_curve(BTreeMap::from([(1024, lat)]));
+        // Table with recorded beyond-node fan-outs (multi-node collection).
+        let multi = BTreeMap::from([
+            (("half".to_string(), 2), curve(0.002)),
+            (("half".to_string(), 4), curve(0.004)),
+            (("half".to_string(), 8), curve(0.030)),
+            (("half".to_string(), 16), curve(0.048)),
+        ]);
+        let table = table_with_loaded_collectives(multi, BTreeMap::new(), BTreeMap::new());
+        // tp16: exact 16-rank lookup, no scaling.
+        let v16 = table
+            .query_custom_allreduce_scaled(&spec, CommQuantMode::Half, 16, 1024.0)
+            .unwrap();
+        assert!((v16.latency - 0.048).abs() < 1e-12);
+        // tp12: largest recorded beyond-node fan-out <= 12 is 8, scaled beyond.
+        let v12 = table
+            .query_custom_allreduce_scaled(&spec, CommQuantMode::Half, 12, 1024.0)
+            .unwrap();
+        let scale12 =
+            11.0 / 12.0 * 8.0 / 7.0 * spec.get_p2p_bandwidth(8) / spec.get_p2p_bandwidth(12);
+        assert!((v12.latency - 0.030 * scale12).abs() < 1e-12);
+        // Legacy table (fan-outs stop at the node size): clamp+scale unchanged.
+        let legacy = BTreeMap::from([
+            (("half".to_string(), 2), curve(0.002)),
+            (("half".to_string(), 4), curve(0.004)),
+        ]);
+        let table = table_with_loaded_collectives(legacy, BTreeMap::new(), BTreeMap::new());
+        let v_legacy = table
+            .query_custom_allreduce_scaled(&spec, CommQuantMode::Half, 16, 1024.0)
+            .unwrap();
+        let scale_legacy =
+            15.0 / 16.0 * 4.0 / 3.0 * spec.get_p2p_bandwidth(4) / spec.get_p2p_bandwidth(16);
+        assert!((v_legacy.latency - 0.004 * scale_legacy).abs() < 1e-12);
     }
 
     #[test]
