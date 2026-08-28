@@ -16,8 +16,13 @@ tables:
     # Collected on 4x GB200 (oberon) in stock vllm/vllm-openai:v0.24.0-cu129
     # (aic-auto-collector pipelines 63587809/63587813, jobs flash=404285267,
     # pro=404285948; collector pinned to main 40c1e749 = the AIC-1749 case
-    # plan). Keys disjoint (no prior nvfp4 rows at either geometry). Zero
-    # failed tasks. AIC-1743/AIC-1749.
+    # plan). Keys disjoint (no prior nvfp4 rows at either geometry). The Flash
+    # collection had zero failures; the Pro source job was partial: three
+    # unsupported TP32/EP1 cases (balanced, power_law_1.01, power_law_1.2)
+    # each failed FlashInfer's M % 128 == 0 assertion. Its 972 rows represent
+    # the remaining 36 cases x 27 token points. TP32 is outside AIC-1743's
+    # required recipe coverage (TP <= 16); hardware-aware filtering is tracked
+    # by AIC-1883. AIC-1743/AIC-1749.
     # 2026-08-19: appended 1,053 Nemotron-3.5-Lightning-30B-A3B-NVFP4 nvfp4
     # rows (2688/1856, 128x6; kernel_source
     # vllm_compressedtensorsw4a4nvfp4moe_flashinfer_trtllm_trtllmnvfp4expertsmonolithic).

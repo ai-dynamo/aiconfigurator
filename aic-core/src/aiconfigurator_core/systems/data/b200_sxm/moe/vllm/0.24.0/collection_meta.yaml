@@ -20,8 +20,13 @@ tables:
     # Collected on 8x B200 (computelab) in stock vllm/vllm-openai:v0.24.0-cu129
     # (aic-auto-collector pipelines 63587809/63587813, jobs flash=404285265,
     # pro=404285947; collector pinned to main 40c1e749 = the AIC-1749 case
-    # plan). Keys disjoint (no prior nvfp4 rows at either geometry). Zero
-    # failed tasks.
+    # plan). Keys disjoint (no prior nvfp4 rows at either geometry). The Flash
+    # collection had zero failures; the Pro source job was partial: three
+    # unsupported TP32/EP1 cases (balanced, power_law_1.01, power_law_1.2)
+    # each failed FlashInfer's M % 128 == 0 assertion. Its 972 rows represent
+    # the remaining 36 cases x 27 token points. TP32 is outside AIC-1743's
+    # required recipe coverage (TP <= 16); hardware-aware filtering is tracked
+    # by AIC-1883.
     # Latency values are the per-key MINIMUM of two independent runs (the
     # jobs above + exclusive-node reruns 404428657 flash / 404428731 pro):
     # single-run rows carried isolated one-sided scheduler spikes (flagged
