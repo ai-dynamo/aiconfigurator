@@ -10,6 +10,22 @@ import pytest
 
 pytestmark = pytest.mark.unit
 SOURCE_PATH = Path(__file__).resolve().parents[4] / "collector" / "sglang" / "collect_gdn.py"
+BACKEND_MAP_PATH = Path(__file__).resolve().parents[4] / "collector" / "kernel_source_backends.yaml"
+
+
+def test_gdn_causal_conv_mapping_preserves_version_ambiguity_and_exact_siblings():
+    import yaml
+
+    mappings = yaml.safe_load(BACKEND_MAP_PATH.read_text(encoding="utf-8"))["mappings"]
+    by_source_and_op = {
+        (entry["kernel_source"], (entry.get("match") or {}).get("op_file")): entry["backend"]
+        for entry in mappings
+        if entry["framework"] == "sglang"
+    }
+
+    assert by_source_and_op[("causal_conv1d_update", "gdn_perf")] == "unverified"
+    assert by_source_and_op[("causal_conv1d_update", "kda_perf")] == "triton"
+    assert by_source_and_op[("flashinfer_gated_delta_rule_decode", None)] == "flashinfer"
 
 
 def test_gdn_context_does_not_silently_drop_fixed_capacity_shapes():
