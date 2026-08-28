@@ -76,6 +76,7 @@ import json
 import multiprocessing as mp
 import pstats
 import signal
+import stat
 import subprocess
 import tempfile
 import time
@@ -83,6 +84,7 @@ import traceback
 import uuid
 from collections import Counter
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime
 from inspect import Parameter, signature
 from pathlib import Path
@@ -105,7 +107,7 @@ STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before logging a stall
 # Failures of one (model, dtype) group within an op before the summary flags
 # it as systemic (a fix-me warning; nothing is skipped).
 SYSTEMIC_GROUP_THRESHOLD = 5
-_SIDECAR_TRANSACTION_SCHEMA = "collector-sidecar-transaction-v1"
+_SIDECAR_TRANSACTION_SCHEMA = "collector-sidecar-transaction-v3"
 _SIDECAR_TRANSACTION_FIELD = "sidecar_transaction"
 _SIDECAR_TRANSACTION_FILENAME = ".collection_meta.transaction.json"
 _SIDECAR_STAGING_FILENAME = ".collection_meta.pending.yaml"
@@ -118,6 +120,8 @@ _SIDECAR_TRANSACTION_FIELDS = {
     "checkpoint_root",
     "sidecar_path",
     "sidecar_digest",
+    "pending_sidecar",
+    "previous_sidecar",
     "checkpoints",
     "staging_paths",
 }
@@ -125,28 +129,155 @@ _SIDECAR_TRANSACTION_FIELDS = {
 FPM_INPUT_ERRORS = (TypeError, ValueError, subprocess.CalledProcessError, FileNotFoundError, RuntimeError)
 
 
-def _atomic_write_json(path: Path, data: dict) -> None:
-    """Atomically replace one JSON document without exposing a partial file."""
+@dataclass(frozen=True)
+class _ProducerCheckpointPlan:
+    attestation: "_FileAttestation"
+    table: str
+    identity: tuple[tuple[str, object], ...]
+    done: frozenset[str]
+    attempted: frozenset[str]
+    failed: frozenset[str]
+
+    @property
+    def path(self) -> Path:
+        return self.attestation.path
+
+    def identity_dict(self) -> dict:
+        return dict(self.identity)
+
+
+@dataclass(frozen=True)
+class _FileAttestation:
+    path: Path
+    digest: str
+    device: int
+    inode: int
+
+    @property
+    def identity(self) -> tuple[int, int]:
+        return self.device, self.inode
+
+
+@dataclass(frozen=True)
+class _ValidatedCheckpoint:
+    attestation: _FileAttestation
+    table: str
+    attempted: frozenset[str]
+    document: dict
+
+    @property
+    def path(self) -> Path:
+        return self.attestation.path
+
+
+@dataclass(frozen=True)
+class _FileSnapshot:
+    device: int
+    inode: int
+    mode: int
+    digest: str
+    contents: bytes | None = None
+
+    @property
+    def identity(self) -> tuple[int, int]:
+        return self.device, self.inode
+
+    def attest(self, path: Path) -> _FileAttestation:
+        return _FileAttestation(path=path, digest=self.digest, device=self.device, inode=self.inode)
+
+
+@dataclass(frozen=True)
+class _ClaimedTransactionFile:
+    original: _FileAttestation
+    claimed_path: Path
+
+
+def _atomic_write_bytes(
+    path: Path,
+    contents: bytes,
+    *,
+    mode: int = 0o600,
+    replace_existing: bool = True,
+) -> None:
+    """Atomically publish bytes through a private descriptor-owned temporary."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
+    temp_identity: tuple[int, int] | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
+            mode="w+b",
             dir=path.parent,
             prefix=f".{path.name}.",
             suffix=".tmp",
             delete=False,
         ) as temp_file:
             temp_path = Path(temp_file.name)
-            json.dump(data, temp_file, indent=2)
+            opened = os.fstat(temp_file.fileno())
+            temp_identity = (opened.st_dev, opened.st_ino)
+            temp_file.write(contents)
             temp_file.flush()
+            os.fchmod(temp_file.fileno(), mode & 0o666)
             os.fsync(temp_file.fileno())
-        os.replace(temp_path, path)
+        current = temp_path.lstat()
+        if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != temp_identity:
+            raise RuntimeError(f"Atomic write temporary changed before publication: {temp_path}")
+        if replace_existing:
+            os.replace(temp_path, path)
+        else:
+            os.link(temp_path, path)
+            temp_path.unlink()
         temp_path = None
     finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
+        if temp_path is not None and temp_identity is not None:
+            try:
+                current = temp_path.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                if stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == temp_identity:
+                    temp_path.unlink()
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """Atomically replace one JSON document without exposing a partial file."""
+    _atomic_write_bytes(path, json.dumps(data, indent=2).encode())
+
+
+def _checkpoint_case_ids(checkpoint: object, field: str) -> set[str]:
+    """Return one strictly formed checkpoint case-ID ledger."""
+    if not isinstance(checkpoint, dict):
+        raise TypeError("checkpoint document must be an object")
+    values = checkpoint.get(field)
+    if (
+        not isinstance(values, list)
+        or any(not isinstance(case_id, str) or not case_id for case_id in values)
+        or len(set(values)) != len(values)
+    ):
+        raise TypeError(f"checkpoint {field} must be a list of unique non-empty case IDs")
+    return set(values)
+
+
+def _load_checkpoint_for_sidecar_mutation(
+    checkpoint_path: Path,
+    expected_attestation: _FileAttestation | None,
+    *,
+    action: str,
+) -> tuple[dict, _FileAttestation]:
+    if expected_attestation is not None and expected_attestation.path != checkpoint_path:
+        raise RuntimeError(f"Failed to {action} checkpoint event {checkpoint_path}: attested path mismatch")
+    try:
+        snapshot = _validated_regular_file(
+            checkpoint_path,
+            expected_attestation.digest if expected_attestation is not None else None,
+            context_path=checkpoint_path,
+            expected_identity=expected_attestation.identity if expected_attestation is not None else None,
+            capture_contents=True,
+            kind="checkpoint",
+        )
+        data = json.loads(snapshot.contents)
+    except Exception as error:
+        raise RuntimeError(f"Failed to {action} checkpoint event {checkpoint_path}: {error}") from error
+    return data, snapshot.attest(checkpoint_path)
 
 
 def _close_checkpoint_attempts(
@@ -154,13 +285,17 @@ def _close_checkpoint_attempts(
     attempted_case_ids: set[str],
     *,
     transaction_id: str | None = None,
-) -> None:
+    expected_attestation: _FileAttestation | None = None,
+    journal_attestation: _FileAttestation | None = None,
+) -> _FileAttestation:
     """Close only the pending attempts already committed to a sidecar event."""
-    try:
-        with checkpoint_path.open(encoding="utf-8") as checkpoint_file:
-            data = json.load(checkpoint_file)
-    except Exception as error:
-        raise RuntimeError(f"Failed to close finalized checkpoint event {checkpoint_path}: {error}") from error
+    if journal_attestation is not None:
+        _revalidate_journal_attestation(journal_attestation)
+    data, live_attestation = _load_checkpoint_for_sidecar_mutation(
+        checkpoint_path,
+        expected_attestation,
+        action="close finalized",
+    )
 
     if transaction_id is not None and data.get(_SIDECAR_TRANSACTION_FIELD) != transaction_id:
         raise RuntimeError(
@@ -168,31 +303,56 @@ def _close_checkpoint_attempts(
             f"sidecar transaction {data.get(_SIDECAR_TRANSACTION_FIELD)!r} != {transaction_id!r}"
         )
 
-    current_attempted = set(data.get("attempted", []))
+    current_attempted = _checkpoint_case_ids(data, "attempted")
+    if transaction_id is not None and current_attempted != attempted_case_ids:
+        raise RuntimeError(
+            f"Failed to close finalized checkpoint event {checkpoint_path}: live attempts "
+            f"{sorted(current_attempted)} != transaction attempts {sorted(attempted_case_ids)}"
+        )
     data["attempted"] = sorted(current_attempted - attempted_case_ids)
     if transaction_id is not None:
         data.pop(_SIDECAR_TRANSACTION_FIELD, None)
     data["updated_at"] = datetime.now().isoformat()
+    _validated_regular_file(
+        checkpoint_path,
+        live_attestation.digest,
+        context_path=checkpoint_path,
+        expected_identity=live_attestation.identity,
+        kind="checkpoint",
+    )
+    if journal_attestation is not None:
+        _revalidate_journal_attestation(journal_attestation)
     _atomic_write_json(checkpoint_path, data)
+    return _validated_regular_file(
+        checkpoint_path,
+        None,
+        context_path=checkpoint_path,
+        kind="checkpoint",
+    ).attest(checkpoint_path)
 
 
 def _tag_checkpoint_sidecar_transaction(
     checkpoint_path: Path,
     attempted_case_ids: set[str],
     transaction_id: str,
-) -> None:
+    *,
+    expected_attestation: _FileAttestation | None = None,
+    journal_attestation: _FileAttestation | None = None,
+) -> _FileAttestation:
     """Durably bind pending attempts to one prepared sidecar transaction."""
-    try:
-        with checkpoint_path.open(encoding="utf-8") as checkpoint_file:
-            data = json.load(checkpoint_file)
-    except Exception as error:
-        raise RuntimeError(f"Failed to prepare finalized checkpoint event {checkpoint_path}: {error}") from error
+    if journal_attestation is not None:
+        _revalidate_journal_attestation(journal_attestation)
+    data, live_attestation = _load_checkpoint_for_sidecar_mutation(
+        checkpoint_path,
+        expected_attestation,
+        action="prepare finalized",
+    )
 
-    missing = attempted_case_ids - set(data.get("attempted", []))
-    if missing:
+    current_attempted = _checkpoint_case_ids(data, "attempted")
+    if current_attempted != attempted_case_ids:
         raise RuntimeError(
             f"Failed to prepare finalized checkpoint event {checkpoint_path}: "
-            f"pending attempts disappeared: {sorted(missing)}"
+            f"live attempts {sorted(current_attempted)} != transaction attempts {sorted(attempted_case_ids)}"
         )
     existing_transaction = data.get(_SIDECAR_TRANSACTION_FIELD)
     if existing_transaction not in (None, transaction_id):
@@ -202,7 +362,22 @@ def _tag_checkpoint_sidecar_transaction(
         )
     data[_SIDECAR_TRANSACTION_FIELD] = transaction_id
     data["updated_at"] = datetime.now().isoformat()
+    _validated_regular_file(
+        checkpoint_path,
+        live_attestation.digest,
+        context_path=checkpoint_path,
+        expected_identity=live_attestation.identity,
+        kind="checkpoint",
+    )
+    if journal_attestation is not None:
+        _revalidate_journal_attestation(journal_attestation)
     _atomic_write_json(checkpoint_path, data)
+    return _validated_regular_file(
+        checkpoint_path,
+        None,
+        context_path=checkpoint_path,
+        kind="checkpoint",
+    ).attest(checkpoint_path)
 
 
 def _resolve_fpm_cli_inputs(parser, resolver):
@@ -287,6 +462,22 @@ def _registry_with_requested_wideep(registry: list, backend: str, ops: list[str]
     return [*registry, *wideep_registry]
 
 
+def _checkpoint_backend_root(checkpoint_dir: str | Path, backend: str) -> Path:
+    """Resolve one direct backend checkpoint root without following its symlink."""
+    base = Path(checkpoint_dir).expanduser().resolve()
+    if not backend or Path(backend).name != backend:
+        raise RuntimeError(f"Invalid checkpoint backend name: {backend!r}")
+    backend_root = base / backend
+    if backend_root.is_symlink():
+        raise RuntimeError(f"Checkpoint backend directory must not be a symlink: {backend_root}")
+    return backend_root.resolve()
+
+
+def _checkpoint_path(checkpoint_root: Path, module_name: str) -> Path:
+    safe_name = module_name.replace("/", "_").replace(":", "_")
+    return checkpoint_root / f"{safe_name}.json"
+
+
 class ResumeCheckpoint:
     """Tracks which tasks are done so a collection run can be resumed.
 
@@ -326,10 +517,11 @@ class ResumeCheckpoint:
         # preserved across interrupted resumes and cleared only after the
         # common finalizer successfully writes the matching sidecar event.
         self._attempted: set[str] = set()
+        self._source_digest: str | None = None
+        self._source_device: int | None = None
+        self._source_inode: int | None = None
 
-        safe_name = module_name.replace("/", "_").replace(":", "_")
-        self._path = Path(checkpoint_dir).expanduser().resolve() / backend / f"{safe_name}.json"
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path = _checkpoint_path(_checkpoint_backend_root(checkpoint_dir, backend), module_name)
 
     def load_existing(self):
         """Load an existing checkpoint for resume.  Raises on mismatch."""
@@ -338,8 +530,14 @@ class ResumeCheckpoint:
             return
 
         try:
-            with open(self._path) as f:
-                data = json.load(f)
+            snapshot = _validated_regular_file(
+                self._path,
+                None,
+                context_path=self._path,
+                capture_contents=True,
+                kind="checkpoint",
+            )
+            data = json.loads(snapshot.contents)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to load checkpoint {self._path}: {e}. Run without --resume to start fresh."
@@ -353,9 +551,19 @@ class ResumeCheckpoint:
                     "Run without --resume to start fresh."
                 )
 
-        self._done = set(data.get("done", []))
-        self._failed = set(data.get("failed", []))
-        self._attempted = set(data.get("attempted", []))
+        try:
+            ledgers = {field: _checkpoint_case_ids(data, field) for field in ("done", "failed", "attempted")}
+        except TypeError as error:
+            raise RuntimeError(f"{self.module_name}: {error}") from error
+        if data.get(_SIDECAR_TRANSACTION_FIELD) is not None:
+            raise RuntimeError(f"{self.module_name}: checkpoint has an unresolved sidecar transaction")
+
+        self._done = ledgers["done"]
+        self._failed = ledgers["failed"]
+        self._attempted = ledgers["attempted"]
+        self._source_digest = snapshot.digest
+        self._source_device = snapshot.device
+        self._source_inode = snapshot.inode
         logger.info(f"{self.module_name}: loaded checkpoint — {len(self._done)} passed, {len(self._failed)} failed")
 
     # -- public API -------------------------------------------------------
@@ -1651,20 +1859,65 @@ def _runtime_metadata(provenance_ctx: dict) -> dict[str, str]:
     return runtime_meta
 
 
-def _preflight_collector_provenance(output_root: Path, provenance_ctx: dict) -> None:
-    """Reject an in-place runtime change before perf finalization mutates files."""
+def _load_clean_collector_sidecar(
+    output_root: Path,
+    *,
+    tables_to_update: set[str] | frozenset[str] = frozenset(),
+) -> tuple[dict | None, _FileSnapshot | None]:
+    """Load one regular sidecar only when no transaction artifacts remain."""
     import yaml
 
-    existing_meta = output_root / "collection_meta.yaml"
-    if not existing_meta.exists():
-        return
-    try:
-        existing_doc = yaml.safe_load(existing_meta.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError:
-        return
-    if not isinstance(existing_doc, dict):
-        return
+    for transaction_path in (
+        output_root / _SIDECAR_STAGING_FILENAME,
+        output_root / _SIDECAR_TRANSACTION_FILENAME,
+    ):
+        if transaction_path.is_symlink() or transaction_path.exists():
+            raise RuntimeError(f"Unexpected collector sidecar transaction document: {transaction_path}")
 
+    existing_meta = output_root / "collection_meta.yaml"
+    if existing_meta.is_symlink() or (existing_meta.exists() and not existing_meta.is_file()):
+        raise RuntimeError(f"Invalid collector sidecar document: {existing_meta}")
+    if not existing_meta.is_file():
+        return None, None
+    try:
+        snapshot = _validated_regular_file(
+            existing_meta,
+            None,
+            context_path=existing_meta,
+            capture_contents=True,
+            kind="sidecar document",
+        )
+        existing_doc = yaml.safe_load(snapshot.contents) or {}
+    except Exception as error:
+        raise RuntimeError(f"Invalid collector sidecar document {existing_meta}: {error}") from error
+    if not isinstance(existing_doc, dict):
+        raise RuntimeError(  # noqa: TRY004 - malformed persisted state, not a caller argument
+            f"Invalid collector sidecar document {existing_meta}: expected an object"
+        )
+    try:
+        from collector import provenance
+
+        provenance.validate_collection_meta_for_update(existing_doc, tables_to_update=tables_to_update)
+    except Exception as error:
+        raise RuntimeError(f"Invalid collector sidecar document {existing_meta}: {error}") from error
+    return existing_doc, snapshot
+
+
+def _preflight_collector_provenance(
+    output_root: Path,
+    provenance_ctx: dict,
+    *,
+    tables_to_update: set[str] | frozenset[str] = frozenset(),
+) -> _FileSnapshot | None:
+    """Reject unsafe sidecar state before perf finalization mutates files."""
+    existing_doc, existing_snapshot = _load_clean_collector_sidecar(
+        output_root,
+        tables_to_update=tables_to_update,
+    )
+    if existing_doc is None:
+        return existing_snapshot
+
+    existing_meta = output_root / "collection_meta.yaml"
     existing_runtime = existing_doc.get("runtime")
     runtime_meta = _runtime_metadata(provenance_ctx)
     if existing_runtime != runtime_meta:
@@ -1672,6 +1925,24 @@ def _preflight_collector_provenance(output_root: Path, provenance_ctx: dict) -> 
             f"{existing_meta}: cannot finalize collector outputs in place with a different runtime identity "
             f"(existing={existing_runtime!r}, current={runtime_meta!r}). Use a clean output directory for the "
             "new runtime."
+        )
+    return existing_snapshot
+
+
+def _revalidate_collector_sidecar_preflight(
+    output_root: Path,
+    expected_snapshot: _FileSnapshot | None,
+    *,
+    tables_to_update: set[str] | frozenset[str],
+) -> None:
+    """Require the same clean sidecar state immediately before parquet publish."""
+    _document, current_snapshot = _load_clean_collector_sidecar(
+        output_root,
+        tables_to_update=tables_to_update,
+    )
+    if not _same_file_snapshot(current_snapshot, expected_snapshot):
+        raise RuntimeError(
+            f"Collector sidecar document changed after preflight: {output_root / 'collection_meta.yaml'}"
         )
 
 
@@ -1698,6 +1969,139 @@ def _resume_tracker_for_collection(
     )
 
 
+def _registered_checkpoint_table(identity: dict, *, backend: str) -> str:
+    """Resolve a checkpoint producer to its registry-owned table."""
+    from collector.version_resolver import resolve_module
+
+    if set(identity) != set(_CHECKPOINT_IDENTITY_FIELDS) or identity.get("backend") != backend:
+        raise RuntimeError(f"checkpoint producer identity is not bound to {backend}: {identity!r}")
+    framework_version = identity.get("framework_version")
+    sm_version = identity.get("sm_version")
+    if (
+        identity.get("schema") != RESUME_SCHEMA_VERSION
+        or not isinstance(identity.get("module"), str)
+        or not identity["module"]
+        or not isinstance(identity.get("run_func"), str)
+        or not identity["run_func"]
+        or not isinstance(framework_version, str)
+        or not framework_version
+        or (sm_version is not None and (not isinstance(sm_version, int) or isinstance(sm_version, bool)))
+    ):
+        raise RuntimeError(f"invalid checkpoint producer identity: {identity!r}")
+
+    registry_module = importlib.import_module(f"collector.{backend}.registry")
+    if backend == "vllm" and sm_version is None:
+        registry = list(registry_module.REGISTRY_XPU)
+    else:
+        registry = [*registry_module.REGISTRY, *_wideep_registry_for_backend(backend)]
+    owned_tables = {
+        Path(str(entry.perf_filename)).stem
+        for entry in registry
+        if identity["module"] == f"{backend}.{entry.op}"
+        and identity["run_func"] == entry.run_func
+        and resolve_module(entry, framework_version) is not None
+    }
+    if len(owned_tables) != 1:
+        raise RuntimeError(f"checkpoint producer has no unambiguous registered table: {identity!r}")
+    return owned_tables.pop()
+
+
+def _load_selected_producer_checkpoint(
+    collection: dict,
+    provenance_ctx: dict,
+    *,
+    backend: str,
+    checkpoint_dir: str,
+    sm_version: int | None,
+    staging_path: Path,
+    required: bool,
+    context: str,
+) -> ResumeCheckpoint | None:
+    """Load and bind one selected producer checkpoint without mutating it."""
+    resume_tracker = _resume_tracker_for_collection(
+        collection,
+        provenance_ctx,
+        backend=backend,
+        checkpoint_dir=checkpoint_dir,
+        sm_version=sm_version,
+    )
+    checkpoint_path = resume_tracker._path
+    checkpoint_present = checkpoint_path.exists() or checkpoint_path.is_symlink()
+    if not checkpoint_present:
+        if not required:
+            return None
+        raise RuntimeError(
+            f"{context}: staged table {staging_path} has no checkpoint for selected producer "
+            f"{resume_tracker.module_name} at {checkpoint_path}"
+        )
+    if checkpoint_path.is_symlink() or not checkpoint_path.is_file():
+        raise RuntimeError(
+            f"{context}: producer {resume_tracker.module_name} has no regular checkpoint at {checkpoint_path}"
+        )
+    resume_tracker.load_existing()
+    if _registered_checkpoint_table(resume_tracker._metadata, backend=backend) != staging_path.stem:
+        raise RuntimeError(
+            f"{context}: checkpoint producer {resume_tracker.module_name} does not own staged table {staging_path}"
+        )
+    return resume_tracker
+
+
+def _producer_checkpoint_plan(resume_tracker: ResumeCheckpoint, table: str) -> _ProducerCheckpointPlan:
+    if (
+        resume_tracker._source_digest is None
+        or resume_tracker._source_device is None
+        or resume_tracker._source_inode is None
+    ):
+        raise RuntimeError(f"Checkpoint producer was not loaded from a regular file: {resume_tracker._path}")
+    return _ProducerCheckpointPlan(
+        attestation=_FileAttestation(
+            path=resume_tracker._path,
+            digest=resume_tracker._source_digest,
+            device=resume_tracker._source_device,
+            inode=resume_tracker._source_inode,
+        ),
+        table=table,
+        identity=tuple((field, resume_tracker._metadata[field]) for field in _CHECKPOINT_IDENTITY_FIELDS),
+        done=frozenset(resume_tracker._done),
+        attempted=frozenset(resume_tracker._attempted),
+        failed=frozenset(resume_tracker._failed),
+    )
+
+
+def _revalidate_producer_plan(producer_plan: dict[Path, _ProducerCheckpointPlan]) -> None:
+    """Require every selected producer to remain the exact preflight object."""
+    for checkpoint_path, plan in producer_plan.items():
+        try:
+            if checkpoint_path != plan.path:
+                raise RuntimeError("checkpoint path is not a regular selected producer")
+            snapshot = _validated_regular_file(
+                checkpoint_path,
+                plan.attestation.digest,
+                context_path=checkpoint_path,
+                expected_identity=plan.attestation.identity,
+                capture_contents=True,
+                kind="selected producer checkpoint",
+            )
+            checkpoint = json.loads(snapshot.contents)
+            identity = {field: checkpoint.get(field) for field in _CHECKPOINT_IDENTITY_FIELDS}
+            if (
+                identity != plan.identity_dict()
+                or _registered_checkpoint_table(identity, backend=identity["backend"]) != plan.table
+            ):
+                raise RuntimeError("checkpoint producer identity changed after preflight")
+            if (
+                _checkpoint_case_ids(checkpoint, "done") != set(plan.done)
+                or _checkpoint_case_ids(checkpoint, "attempted") != set(plan.attempted)
+                or _checkpoint_case_ids(checkpoint, "failed") != set(plan.failed)
+                or checkpoint.get(_SIDECAR_TRANSACTION_FIELD) is not None
+            ):
+                raise RuntimeError("checkpoint ledgers changed after preflight")
+        except Exception as error:
+            raise RuntimeError(
+                f"Selected producer checkpoint changed after preflight: {checkpoint_path}: {error}"
+            ) from error
+
+
 def _pending_resume_perf_outputs(
     output_root: Path,
     provenance_ctx: dict,
@@ -1719,35 +2123,185 @@ def _pending_resume_perf_outputs(
         perf_path = Path(str(collection["perf_filename"]))
         if not perf_path.is_absolute():
             perf_path = output_root / perf_path
-        if perf_path.exists() and perf_path.name.endswith("_perf.txt"):
+        if perf_path.name.endswith("_perf.txt"):
             producers_by_output.setdefault(perf_path, []).append(collection)
 
     pending_outputs: set[Path] = set()
     for perf_path, producers in producers_by_output.items():
+        staging_present = perf_path.exists() or perf_path.is_symlink()
         has_pending_attempts = False
         for collection in producers:
-            resume_tracker = _resume_tracker_for_collection(
+            resume_tracker = _load_selected_producer_checkpoint(
                 collection,
                 provenance_ctx,
                 backend=backend,
                 checkpoint_dir=checkpoint_dir,
                 sm_version=sm_version,
+                staging_path=perf_path,
+                required=staging_present,
+                context="resume finalization",
             )
-            checkpoint_path = resume_tracker._path
-            if not checkpoint_path.exists():
-                raise RuntimeError(
-                    f"resume finalization: staged table {perf_path} has no checkpoint for configured producer "
-                    f"{resume_tracker.module_name} at {checkpoint_path}"
-                )
-            resume_tracker.load_existing()
-            has_pending_attempts = has_pending_attempts or bool(resume_tracker._attempted)
+            has_pending_attempts = has_pending_attempts or bool(resume_tracker and resume_tracker._attempted)
         if has_pending_attempts:
+            if perf_path.is_symlink() or not perf_path.is_file():
+                raise RuntimeError(
+                    f"resume finalization: open checkpoint event has no regular staging table {perf_path}"
+                )
             pending_outputs.add(perf_path)
     return sorted(pending_outputs)
 
 
-def _sidecar_digest(path: Path) -> str:
-    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+def _same_file_snapshot(first: _FileSnapshot | None, second: _FileSnapshot | None) -> bool:
+    return first is second is None or (
+        first is not None and second is not None and first.identity == second.identity and first.digest == second.digest
+    )
+
+
+def _validated_regular_file(
+    path: Path,
+    expected_digest: str | None,
+    *,
+    context_path: Path,
+    expected_identity: tuple[int, int] | None = None,
+    capture_contents: bool = False,
+    kind: str,
+) -> _FileSnapshot:
+    """Read one regular file once and bind its path, descriptor, and bytes."""
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"Invalid collector {kind} in {context_path}: {path}")
+    try:
+        with path.open("rb") as owned_file:
+            opened = os.fstat(owned_file.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                raise RuntimeError(f"{kind} is not a regular file: {path}")
+            digest = hashlib.sha256()
+            captured_chunks: list[bytes] | None = [] if capture_contents else None
+            for chunk in iter(lambda: owned_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+                if captured_chunks is not None:
+                    captured_chunks.append(chunk)
+        current = path.lstat()
+    except Exception as error:
+        raise RuntimeError(f"Invalid collector {kind} in {context_path}: {path}") from error
+
+    snapshot = _FileSnapshot(
+        device=opened.st_dev,
+        inode=opened.st_ino,
+        mode=opened.st_mode & 0o666,
+        digest="sha256:" + digest.hexdigest(),
+        contents=b"".join(captured_chunks) if captured_chunks is not None else None,
+    )
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or snapshot.identity != (current.st_dev, current.st_ino)
+        or (expected_identity is not None and snapshot.identity != expected_identity)
+        or (expected_digest is not None and snapshot.digest != expected_digest)
+    ):
+        raise RuntimeError(f"Collector {kind} changed in {context_path}: {path}")
+    return snapshot
+
+
+def _validated_sidecar_document(
+    path: Path,
+    expected_digest: str,
+    *,
+    context_path: Path,
+    expected_identity: tuple[int, int] | None = None,
+) -> _FileSnapshot:
+    return _validated_regular_file(
+        path,
+        expected_digest,
+        context_path=context_path,
+        expected_identity=expected_identity,
+        capture_contents=True,
+        kind="sidecar transaction document",
+    )
+
+
+def _revalidate_journal_attestation(attestation: _FileAttestation) -> None:
+    _validated_regular_file(
+        attestation.path,
+        attestation.digest,
+        context_path=attestation.path,
+        expected_identity=attestation.identity,
+        kind="sidecar transaction journal",
+    )
+
+
+def _preflight_collector_finalization_inputs(
+    output_root: Path,
+    staging_paths: list[Path],
+    provenance_ctx: dict,
+    *,
+    backend: str,
+    checkpoint_dir: str,
+    sm_version: int | None,
+) -> tuple[dict[Path, _ProducerCheckpointPlan], dict[Path, _FileAttestation]]:
+    """Reject unsafe collector inputs before parquet finalization mutates data."""
+    output_root = output_root.resolve()
+    validated_paths = _validated_collector_staging_paths(
+        [str(path) for path in staging_paths],
+        output_root=output_root,
+        context_path=output_root / "collection_meta.yaml",
+        require_present=True,
+    )
+    staging_attestations = {
+        path: _validated_regular_file(
+            path,
+            None,
+            context_path=output_root,
+            kind="staging file",
+        ).attest(path)
+        for path in validated_paths
+    }
+    producers_by_path: dict[Path, list[dict]] = {}
+    for collection in provenance_ctx.get("collections") or []:
+        staging_path = Path(str(collection["perf_filename"]))
+        if not staging_path.is_absolute():
+            staging_path = output_root / staging_path
+        producers_by_path.setdefault(staging_path, []).append(collection)
+
+    producer_plan: dict[Path, _ProducerCheckpointPlan] = {}
+    seen_attempted_case_ids: set[str] = set()
+    for staging_path in validated_paths:
+        producers = producers_by_path.get(staging_path)
+        if not producers:
+            raise RuntimeError(f"collector finalization: staged table {staging_path} has no selected producer")
+        attempted_case_ids: set[str] = set()
+        for collection in producers:
+            resume_tracker = _load_selected_producer_checkpoint(
+                collection,
+                provenance_ctx,
+                backend=backend,
+                checkpoint_dir=checkpoint_dir,
+                sm_version=sm_version,
+                staging_path=staging_path,
+                required=True,
+                context="collector finalization",
+            )
+            if resume_tracker is not None:
+                checkpoint_path = resume_tracker._path
+                checkpoint_plan = _producer_checkpoint_plan(resume_tracker, staging_path.stem)
+                prior_plan = producer_plan.get(checkpoint_path)
+                if prior_plan is None:
+                    duplicate_case_ids = set(checkpoint_plan.attempted) & seen_attempted_case_ids
+                    if duplicate_case_ids:
+                        raise RuntimeError(
+                            "collector finalization: attempted case IDs must be unique across selected "
+                            f"checkpoint producers: {sorted(duplicate_case_ids)}"
+                        )
+                    producer_plan[checkpoint_path] = checkpoint_plan
+                    seen_attempted_case_ids.update(checkpoint_plan.attempted)
+                elif prior_plan != checkpoint_plan:
+                    raise RuntimeError(
+                        f"collector finalization: checkpoint changed during preflight: {checkpoint_path}"
+                    )
+                attempted_case_ids.update(resume_tracker._attempted)
+        if not attempted_case_ids:
+            raise RuntimeError(
+                f"collector finalization: staged table {staging_path} has no attempted checkpoint case IDs"
+            )
+    return producer_plan, staging_attestations
 
 
 def _validate_transaction_envelope(
@@ -1774,12 +2328,7 @@ def _validate_transaction_envelope(
         or any(character not in "0123456789abcdef" for character in transaction_id)
     ):
         raise RuntimeError(f"Invalid collector sidecar transaction ID in {journal_path}: {transaction_id!r}")
-    if (
-        not isinstance(expected_digest, str)
-        or not expected_digest.startswith("sha256:")
-        or len(expected_digest) != 71
-        or any(character not in "0123456789abcdef" for character in expected_digest[7:])
-    ):
+    if not _valid_sha256_digest(expected_digest):
         raise RuntimeError(f"Invalid collector sidecar digest in {journal_path}: {expected_digest!r}")
 
     expected_context = {
@@ -1796,18 +2345,18 @@ def _validate_transaction_envelope(
     return transaction_id, expected_digest
 
 
-def _validated_transaction_staging_paths(
-    transaction: dict,
+def _validated_collector_staging_paths(
+    recorded_paths: object,
     *,
     output_root: Path,
-    journal_path: Path,
+    context_path: Path,
+    require_present: bool = False,
 ) -> list[Path]:
-    """Resolve journal cleanup targets to direct registry-owned staging files."""
+    """Resolve collector staging targets to direct registry-owned files."""
     from collector.registry_types import PerfFile
 
-    recorded_paths = transaction.get("staging_paths")
     if not isinstance(recorded_paths, list) or not recorded_paths:
-        raise RuntimeError(f"Invalid staging paths in collector sidecar transaction {journal_path}")
+        raise RuntimeError(f"Invalid collector staging paths for {context_path}")
 
     root = output_root.resolve()
     allowed_paths = {root / str(perf_file) for perf_file in PerfFile}
@@ -1815,89 +2364,248 @@ def _validated_transaction_staging_paths(
     seen: set[Path] = set()
     for path_text in recorded_paths:
         if not isinstance(path_text, str):
-            raise TypeError(f"Invalid staging path in collector sidecar transaction {journal_path}: {path_text!r}")
+            raise TypeError(f"Invalid collector staging path for {context_path}: {path_text!r}")
         staging_path = Path(path_text)
         if path_text != str(staging_path) or staging_path not in allowed_paths or staging_path in seen:
-            raise RuntimeError(f"Invalid staging path in collector sidecar transaction {journal_path}: {staging_path}")
-        if staging_path.is_symlink() or (staging_path.exists() and not staging_path.is_file()):
-            raise RuntimeError(f"Invalid staging path in collector sidecar transaction {journal_path}: {staging_path}")
+            raise RuntimeError(f"Invalid collector staging path for {context_path}: {staging_path}")
+        if (
+            staging_path.is_symlink()
+            or (staging_path.exists() and not staging_path.is_file())
+            or (require_present and not staging_path.is_file())
+        ):
+            raise RuntimeError(f"Invalid collector staging path for {context_path}: {staging_path}")
+        if staging_path.is_file():
+            lock_path = Path(f"{staging_path}.lock")
+            if lock_path.exists() or lock_path.is_symlink():
+                raise RuntimeError(f"Collector staging path has an active writer lock for {context_path}: {lock_path}")
+            try:
+                if staging_path.stat().st_mode & 0o444 == 0:
+                    raise PermissionError("file has no read permission bits")
+                with staging_path.open("rb") as staging_file:
+                    if not staging_file.read(1):
+                        raise ValueError("file is empty")
+            except Exception as error:
+                raise RuntimeError(
+                    f"Collector staging path is not readable for {context_path}: {staging_path}: {error}"
+                ) from error
         seen.add(staging_path)
         staging_paths.append(staging_path)
     return staging_paths
 
 
-def _validated_transaction_checkpoint_participants(
+def _valid_sha256_digest(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith("sha256:")
+        and len(value) == 71
+        and all(character in "0123456789abcdef" for character in value[7:])
+    )
+
+
+def _attestation_record(
+    attestation: _FileAttestation | None,
+    *,
+    include_path: bool = False,
+) -> dict | None:
+    if attestation is None:
+        return None
+    record = {
+        "digest": attestation.digest,
+        "device": attestation.device,
+        "inode": attestation.inode,
+    }
+    if include_path:
+        record = {"path": str(attestation.path), **record}
+    return record
+
+
+def _attestation_from_record(
+    record: object,
+    path: Path | None,
+    *,
+    context_path: Path,
+    kind: str,
+) -> _FileAttestation:
+    expected_fields = {"digest", "device", "inode"} | ({"path"} if path is None else set())
+    if not isinstance(record, dict) or set(record) != expected_fields:
+        raise RuntimeError(f"Invalid {kind} in {context_path}: {record!r}")
+    if path is None:
+        path_text = record["path"]
+        if not isinstance(path_text, str) or path_text != str(Path(path_text)):
+            raise RuntimeError(f"Invalid {kind} in {context_path}: {record!r}")
+        path = Path(path_text)
+    digest = record["digest"]
+    device = record["device"]
+    inode = record["inode"]
+    if (
+        not _valid_sha256_digest(digest)
+        or not isinstance(device, int)
+        or isinstance(device, bool)
+        or not isinstance(inode, int)
+        or isinstance(inode, bool)
+    ):
+        raise RuntimeError(f"Invalid {kind} in {context_path}: {record!r}")
+    return _FileAttestation(path=path, digest=digest, device=device, inode=inode)
+
+
+def _validated_sidecar_target(
+    record: object,
+    meta_path: Path,
+    *,
+    context_path: Path,
+) -> _FileAttestation | None:
+    """Bind publication to the exact pre-transaction sidecar target, or its absence."""
+    if record is None:
+        if meta_path.exists() or meta_path.is_symlink():
+            raise RuntimeError(f"Collector sidecar target changed in {context_path}: {meta_path}")
+        return None
+    attestation = _attestation_from_record(
+        record,
+        meta_path,
+        context_path=context_path,
+        kind="previous sidecar target",
+    )
+    snapshot = _validated_regular_file(
+        meta_path,
+        attestation.digest,
+        context_path=context_path,
+        expected_identity=attestation.identity,
+        kind="sidecar target",
+    )
+    return snapshot.attest(meta_path)
+
+
+def _revalidate_transaction_staging_files(
+    staging_files: list[_FileAttestation],
+    *,
+    context_path: Path,
+    require_present: bool,
+) -> None:
+    """Verify all present staging bytes before any transaction mutation."""
+    for staging_file in staging_files:
+        staging_path = staging_file.path
+        if staging_path.is_symlink() or (staging_path.exists() and not staging_path.is_file()):
+            raise RuntimeError(f"Invalid collector staging path for {context_path}: {staging_path}")
+        if not staging_path.is_file():
+            if require_present:
+                raise RuntimeError(f"Missing collector staging path for {context_path}: {staging_path}")
+            continue
+        lock_path = Path(f"{staging_path}.lock")
+        if lock_path.exists() or lock_path.is_symlink():
+            raise RuntimeError(f"Collector staging path has an active writer lock for {context_path}: {lock_path}")
+        _validated_regular_file(
+            staging_path,
+            staging_file.digest,
+            context_path=context_path,
+            expected_identity=staging_file.identity,
+            kind="staging path",
+        )
+
+
+def _validated_transaction_staging_files(
+    recorded_files: object,
+    *,
+    output_root: Path,
+    context_path: Path,
+    require_present: bool,
+) -> list[_FileAttestation]:
+    """Validate canonical paths and immutable bytes from one transaction."""
+    if not isinstance(recorded_files, list) or not recorded_files:
+        raise RuntimeError(f"Invalid collector staging files for {context_path}")
+    staging_files = [
+        _attestation_from_record(
+            record,
+            None,
+            context_path=context_path,
+            kind="collector staging file",
+        )
+        for record in recorded_files
+    ]
+    if len({staging_file.path for staging_file in staging_files}) != len(staging_files):
+        raise RuntimeError(f"Duplicate collector staging files for {context_path}")
+
+    staging_paths = _validated_collector_staging_paths(
+        [str(staging_file.path) for staging_file in staging_files],
+        output_root=output_root,
+        context_path=context_path,
+        require_present=require_present,
+    )
+    record_by_path = {staging_file.path: staging_file for staging_file in staging_files}
+    staging_files = [record_by_path[path] for path in staging_paths]
+    _revalidate_transaction_staging_files(
+        staging_files,
+        context_path=context_path,
+        require_present=require_present,
+    )
+    return staging_files
+
+
+def _validated_transaction_checkpoints(
     transaction: dict,
     *,
     backend: str,
     checkpoint_root: Path,
     journal_path: Path,
-) -> list[tuple[Path, set[str], dict]]:
-    """Load every journal participant without trusting its path or identity."""
+) -> list[_ValidatedCheckpoint]:
+    """Load every journal checkpoint without trusting its path or identity."""
     participants = transaction.get("checkpoints")
     if not isinstance(participants, list) or not participants:
         raise RuntimeError(f"Invalid checkpoint participants in collector sidecar transaction {journal_path}")
 
-    validated_participants: list[tuple[Path, set[str], dict]] = []
+    validated_participants: list[_ValidatedCheckpoint] = []
     seen_checkpoint_paths: set[Path] = set()
     seen_attempted_case_ids: set[str] = set()
     for participant in participants:
         try:
-            if not isinstance(participant, dict) or set(participant) != {"path", "attempted", "identity"}:
-                raise TypeError("participant must contain exactly path, attempted, and identity")
+            if not isinstance(participant, dict) or set(participant) != {
+                "path",
+                "done",
+                "failed",
+                "attempted",
+                "identity",
+            }:
+                raise TypeError("participant has invalid fields")
             path_text = participant["path"]
-            attempted = participant["attempted"]
             identity = participant["identity"]
             if not isinstance(path_text, str):
                 raise TypeError("checkpoint path must be a string")
-            if (
-                not isinstance(attempted, list)
-                or not attempted
-                or any(not isinstance(case_id, str) or not case_id for case_id in attempted)
-                or len(set(attempted)) != len(attempted)
-            ):
-                raise TypeError("attempted case IDs must be a non-empty list of unique strings")
-            attempted_case_ids = set(attempted)
+            recorded_ledgers = {}
+            for field in ("done", "failed", "attempted"):
+                case_ids = participant[field]
+                if (
+                    not isinstance(case_ids, list)
+                    or any(not isinstance(case_id, str) or not case_id for case_id in case_ids)
+                    or len(set(case_ids)) != len(case_ids)
+                ):
+                    raise TypeError(f"{field} case IDs must be a list of unique strings")
+                recorded_ledgers[field] = set(case_ids)
+            attempted_case_ids = recorded_ledgers["attempted"]
             if attempted_case_ids & seen_attempted_case_ids:
                 raise ValueError("attempted case IDs must be unique across checkpoint participants")
             if not isinstance(identity, dict) or set(identity) != set(_CHECKPOINT_IDENTITY_FIELDS):
                 raise TypeError(f"checkpoint identity must contain exactly {_CHECKPOINT_IDENTITY_FIELDS!r}")
-            if identity["schema"] != RESUME_SCHEMA_VERSION or identity["backend"] != backend:
-                raise ValueError(f"checkpoint identity is not bound to {backend}: {identity!r}")
-            if not isinstance(identity["module"], str) or not identity["module"]:
-                raise TypeError("checkpoint module identity must be a non-empty string")
-            if not isinstance(identity["run_func"], str) or not identity["run_func"]:
-                raise TypeError("checkpoint run_func identity must be a non-empty string")
-            if identity["framework_version"] is not None and not isinstance(identity["framework_version"], str):
-                raise TypeError("checkpoint framework_version identity must be a string or null")
-            if identity["sm_version"] is not None and (
-                not isinstance(identity["sm_version"], int) or isinstance(identity["sm_version"], bool)
-            ):
-                raise TypeError("checkpoint sm_version identity must be an integer or null")
+            table = _registered_checkpoint_table(identity, backend=backend)
 
             checkpoint_path = Path(path_text)
-            expected_name = identity["module"].replace("/", "_").replace(":", "_") + ".json"
-            expected_path = checkpoint_root / expected_name
-            if (
-                path_text != str(expected_path)
-                or checkpoint_path in seen_checkpoint_paths
-                or checkpoint_path.is_symlink()
-                or not checkpoint_path.is_file()
-            ):
+            expected_path = _checkpoint_path(checkpoint_root, identity["module"])
+            if path_text != str(expected_path) or checkpoint_path in seen_checkpoint_paths:
                 raise ValueError(f"checkpoint path is not a direct owned file: {checkpoint_path}")
-            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            snapshot = _validated_regular_file(
+                checkpoint_path,
+                None,
+                context_path=journal_path,
+                capture_contents=True,
+                kind="checkpoint participant",
+            )
+            checkpoint = json.loads(snapshot.contents)
             if not isinstance(checkpoint, dict):
                 raise TypeError("checkpoint document must be an object")
             actual_identity = {field: checkpoint.get(field) for field in _CHECKPOINT_IDENTITY_FIELDS}
             if actual_identity != identity:
                 raise ValueError(f"checkpoint identity {actual_identity!r} != recorded {identity!r}")
-            checkpoint_attempted = checkpoint.get("attempted")
-            if (
-                not isinstance(checkpoint_attempted, list)
-                or any(not isinstance(case_id, str) or not case_id for case_id in checkpoint_attempted)
-                or len(set(checkpoint_attempted)) != len(checkpoint_attempted)
-            ):
-                raise TypeError("checkpoint attempted case IDs must be a list of unique strings")
+            live_ledgers = {field: _checkpoint_case_ids(checkpoint, field) for field in recorded_ledgers}
+            if any(live_ledgers[field] != recorded_ledgers[field] for field in ("done", "failed")):
+                raise ValueError("checkpoint done/failed ledgers do not match the transaction")
             checkpoint_transaction = checkpoint.get(_SIDECAR_TRANSACTION_FIELD)
             if checkpoint_transaction not in (None, transaction["transaction_id"]):
                 raise ValueError(f"checkpoint is bound to another transaction: {checkpoint_transaction!r}")
@@ -1905,14 +2613,431 @@ def _validated_transaction_checkpoint_participants(
             raise RuntimeError(f"Invalid checkpoint participant in {journal_path}: {error}") from error
         seen_checkpoint_paths.add(checkpoint_path)
         seen_attempted_case_ids.update(attempted_case_ids)
-        validated_participants.append((checkpoint_path, attempted_case_ids, checkpoint))
+        validated_participants.append(
+            _ValidatedCheckpoint(
+                attestation=snapshot.attest(checkpoint_path),
+                table=table,
+                attempted=frozenset(attempted_case_ids),
+                document=checkpoint,
+            )
+        )
     return validated_participants
 
 
-def _cleanup_sidecar_transaction_staging(staging_paths: list[Path]) -> None:
-    """Delete every committed staging input before its recovery journal."""
-    for staging_path in staging_paths:
-        staging_path.unlink(missing_ok=True)
+def _validate_transaction_table_ownership(
+    sidecar: object,
+    staging_paths: list[Path],
+    checkpoints: list[_ValidatedCheckpoint],
+    *,
+    output_root: Path,
+    journal_path: Path,
+) -> None:
+    """Bind every journal mutation target to one attested sidecar table event."""
+    from collector import provenance
+    from collector.registry_types import PerfFile
+
+    try:
+        provenance.validate_collection_meta_for_update(sidecar)
+    except Exception as error:
+        raise RuntimeError(
+            f"Invalid sidecar document in collector sidecar transaction {journal_path}: {error}"
+        ) from error
+    if not isinstance(sidecar, dict) or not isinstance(sidecar.get("tables"), dict):
+        raise TypeError(f"Invalid sidecar document in collector sidecar transaction {journal_path}")
+
+    allowed_staging_by_table = {Path(str(perf_file)).stem: output_root / str(perf_file) for perf_file in PerfFile}
+    checkpoints_by_table: dict[str, list[_ValidatedCheckpoint]] = {}
+    for checkpoint in checkpoints:
+        checkpoints_by_table.setdefault(checkpoint.table, []).append(checkpoint)
+    if any(table not in allowed_staging_by_table for table in checkpoints_by_table):
+        raise RuntimeError(f"Invalid table in collector sidecar transaction {journal_path}")
+    expected_staging_paths = {allowed_staging_by_table[table] for table in checkpoints_by_table}
+    if set(staging_paths) != expected_staging_paths:
+        raise RuntimeError(f"Collector sidecar transaction {journal_path} staging paths do not match its owned tables")
+
+    sidecar_tables = sidecar["tables"]
+    for table, table_checkpoint_records in checkpoints_by_table.items():
+        table_entry = sidecar_tables.get(table)
+        if not isinstance(table_entry, dict):
+            raise TypeError(f"Owned table {table!r} is absent from sidecar transaction {journal_path}")
+        history = table_entry.get("collections")
+        if history is None:
+            current_event = table_entry
+        elif isinstance(history, list) and history and isinstance(history[-1], dict):
+            current_event = history[-1]
+        else:
+            raise RuntimeError(f"Invalid sidecar history for owned table {table!r} in {journal_path}")
+        expected_case_plan_hash = current_event.get("case_plan_hash")
+        attempted_case_ids = set().union(*(checkpoint.attempted for checkpoint in table_checkpoint_records))
+        actual_case_plan_hash = provenance.case_plan_hash(sorted(attempted_case_ids))
+        if not attempted_case_ids or expected_case_plan_hash != actual_case_plan_hash:
+            raise RuntimeError(
+                f"Owned table {table!r} case plan does not match checkpoint participants in {journal_path}"
+            )
+
+
+def _validated_checkpoint_participants_for_phase(
+    checkpoints: list[_ValidatedCheckpoint],
+    transaction_id: str,
+    journal_path: Path,
+    *,
+    phase: str,
+) -> list[_ValidatedCheckpoint]:
+    """Prevalidate every live ledger before the transaction mutates anything."""
+    participants: list[_ValidatedCheckpoint] = []
+    for checkpoint in checkpoints:
+        checkpoint_path = checkpoint.path
+        attempted_case_ids = set(checkpoint.attempted)
+        live_attempts = set(checkpoint.document["attempted"])
+        checkpoint_transaction = checkpoint.document.get(_SIDECAR_TRANSACTION_FIELD)
+        tagged = checkpoint_transaction == transaction_id and bool(attempted_case_ids)
+        if phase == "committed" and checkpoint_transaction is None and not live_attempts:
+            continue
+        tag_matches = (
+            tagged if phase == "committed" else checkpoint_transaction is None or (phase == "preparing" and tagged)
+        )
+        if live_attempts == attempted_case_ids and tag_matches:
+            if attempted_case_ids:
+                participants.append(checkpoint)
+            continue
+        raise RuntimeError(
+            f"Invalid {phase} checkpoint participant in {journal_path}: live attempts {sorted(live_attempts)} "
+            f"or transaction tag is inconsistent for {checkpoint_path}"
+        )
+    return participants
+
+
+def _revalidate_checkpoint_attestations(attestations: Iterable[_FileAttestation]) -> None:
+    for attestation in attestations:
+        _validated_regular_file(
+            attestation.path,
+            attestation.digest,
+            context_path=attestation.path,
+            expected_identity=attestation.identity,
+            kind="checkpoint",
+        )
+
+
+def _restore_claimed_transaction_files(claimed_files: list[_ClaimedTransactionFile]) -> None:
+    for claimed_file in reversed(claimed_files):
+        try:
+            _validated_regular_file(
+                claimed_file.claimed_path,
+                claimed_file.original.digest,
+                context_path=claimed_file.claimed_path,
+                expected_identity=claimed_file.original.identity,
+                kind="sidecar transaction claim",
+            )
+        except RuntimeError:
+            continue
+        if claimed_file.original.path.exists() or claimed_file.original.path.is_symlink():
+            try:
+                _validated_regular_file(
+                    claimed_file.original.path,
+                    claimed_file.original.digest,
+                    context_path=claimed_file.claimed_path,
+                    expected_identity=claimed_file.original.identity,
+                    kind="restored sidecar transaction file",
+                )
+                _validated_regular_file(
+                    claimed_file.claimed_path,
+                    claimed_file.original.digest,
+                    context_path=claimed_file.claimed_path,
+                    expected_identity=claimed_file.original.identity,
+                    kind="sidecar transaction claim",
+                )
+                claimed_file.claimed_path.unlink()
+            except RuntimeError:
+                pass
+            continue
+        try:
+            os.link(
+                claimed_file.claimed_path,
+                claimed_file.original.path,
+                follow_symlinks=False,
+            )
+        except OSError:
+            continue
+        try:
+            restored_stat = claimed_file.original.path.lstat()
+            current_claimed_stat = claimed_file.claimed_path.lstat()
+        except FileNotFoundError:
+            continue
+        if (restored_stat.st_dev, restored_stat.st_ino) == claimed_file.original.identity and (
+            current_claimed_stat.st_dev,
+            current_claimed_stat.st_ino,
+        ) == claimed_file.original.identity:
+            claimed_file.claimed_path.unlink()
+
+
+def _transaction_claim_path(path: Path, transaction_id: str) -> Path:
+    return path.with_name(f".{path.name}.{transaction_id}.transaction-claim")
+
+
+def _recover_transaction_claim(
+    attestation: _FileAttestation,
+    transaction_id: str,
+    *,
+    context_path: Path,
+) -> _FileAttestation | None:
+    """Inspect an exact durable claim without mutating transaction state."""
+    claim_path = _transaction_claim_path(attestation.path, transaction_id)
+    if not claim_path.exists() and not claim_path.is_symlink():
+        return None
+    claim_snapshot = _validated_regular_file(
+        claim_path,
+        attestation.digest,
+        context_path=context_path,
+        expected_identity=attestation.identity,
+        kind="sidecar transaction claim",
+    )
+    return claim_snapshot.attest(claim_path)
+
+
+def _restore_transaction_claim(
+    attestation: _FileAttestation,
+    claim_attestation: _FileAttestation,
+    *,
+    context_path: Path,
+) -> None:
+    """Restore one prevalidated durable claim without overwriting a competitor."""
+    _validated_regular_file(
+        claim_attestation.path,
+        claim_attestation.digest,
+        context_path=context_path,
+        expected_identity=claim_attestation.identity,
+        kind="sidecar transaction claim",
+    )
+    if attestation.path.exists() or attestation.path.is_symlink():
+        _validated_regular_file(
+            attestation.path,
+            attestation.digest,
+            context_path=context_path,
+            expected_identity=attestation.identity,
+            kind="restored sidecar transaction file",
+        )
+    else:
+        try:
+            os.link(claim_attestation.path, attestation.path, follow_symlinks=False)
+        except FileExistsError as error:
+            raise RuntimeError(f"Collector transaction target changed in {context_path}: {attestation.path}") from error
+        _validated_regular_file(
+            attestation.path,
+            attestation.digest,
+            context_path=context_path,
+            expected_identity=attestation.identity,
+            kind="restored sidecar transaction file",
+        )
+    _validated_regular_file(
+        claim_attestation.path,
+        claim_attestation.digest,
+        context_path=context_path,
+        expected_identity=claim_attestation.identity,
+        kind="sidecar transaction claim",
+    )
+    claim_attestation.path.unlink()
+
+
+def _claim_transaction_files(
+    staging_files: list[_FileAttestation],
+    *,
+    context_path: Path,
+    require_present: bool,
+    transaction_id: str,
+) -> list[_ClaimedTransactionFile]:
+    """Exclusively claim exact transaction-owned objects under durable names."""
+    claim_plan: list[tuple[_FileAttestation, Path, bool, bool]] = []
+    for staging_file in staging_files:
+        claimed_path = _transaction_claim_path(staging_file.path, transaction_id)
+        source_present = staging_file.path.exists() or staging_file.path.is_symlink()
+        claim_present = claimed_path.exists() or claimed_path.is_symlink()
+        if source_present:
+            _validated_regular_file(
+                staging_file.path,
+                staging_file.digest,
+                context_path=context_path,
+                expected_identity=staging_file.identity,
+                kind="staging file",
+            )
+        if claim_present:
+            _validated_regular_file(
+                claimed_path,
+                staging_file.digest,
+                context_path=context_path,
+                expected_identity=staging_file.identity,
+                kind="sidecar transaction claim",
+            )
+        if require_present and not source_present and not claim_present:
+            raise RuntimeError(f"Missing collector staging file in {context_path}: {staging_file.path}")
+        claim_plan.append((staging_file, claimed_path, source_present, claim_present))
+
+    claimed_files: list[_ClaimedTransactionFile] = []
+    try:
+        for staging_file, claimed_path, source_present, claim_present in claim_plan:
+            if not source_present and not claim_present:
+                continue
+            if not claim_present:
+                _validated_regular_file(
+                    staging_file.path,
+                    staging_file.digest,
+                    context_path=context_path,
+                    expected_identity=staging_file.identity,
+                    kind="staging file",
+                )
+                try:
+                    os.link(staging_file.path, claimed_path, follow_symlinks=False)
+                except FileExistsError as error:
+                    raise RuntimeError(
+                        f"Collector transaction claim changed in {context_path}: {claimed_path}"
+                    ) from error
+            _validated_regular_file(
+                claimed_path,
+                staging_file.digest,
+                context_path=context_path,
+                expected_identity=staging_file.identity,
+                kind="claimed staging file",
+            )
+            if staging_file.path.exists() or staging_file.path.is_symlink():
+                _validated_regular_file(
+                    staging_file.path,
+                    staging_file.digest,
+                    context_path=context_path,
+                    expected_identity=staging_file.identity,
+                    kind="staging file",
+                )
+                staging_file.path.unlink()
+            claimed_file = _ClaimedTransactionFile(
+                original=staging_file,
+                claimed_path=claimed_path,
+            )
+            claimed_files.append(claimed_file)
+            _validated_regular_file(
+                claimed_path,
+                staging_file.digest,
+                context_path=context_path,
+                expected_identity=staging_file.identity,
+                kind="claimed staging file",
+            )
+        for claimed_file in claimed_files:
+            _validated_regular_file(
+                claimed_file.claimed_path,
+                claimed_file.original.digest,
+                context_path=context_path,
+                expected_identity=claimed_file.original.identity,
+                kind="claimed staging file",
+            )
+    except Exception:
+        _restore_claimed_transaction_files(claimed_files)
+        raise
+    return claimed_files
+
+
+def _delete_claimed_transaction_files(
+    claimed_files: list[_ClaimedTransactionFile],
+    *,
+    context_path: Path,
+) -> None:
+    """Delete only the private exact objects already claimed by a transaction."""
+    for claimed_file in claimed_files:
+        _validated_regular_file(
+            claimed_file.claimed_path,
+            claimed_file.original.digest,
+            context_path=context_path,
+            expected_identity=claimed_file.original.identity,
+            kind="claimed transaction file",
+        )
+    for claimed_file in claimed_files:
+        _validated_regular_file(
+            claimed_file.claimed_path,
+            claimed_file.original.digest,
+            context_path=context_path,
+            expected_identity=claimed_file.original.identity,
+            kind="claimed transaction file",
+        )
+        claimed_file.claimed_path.unlink()
+
+
+def _cleanup_transaction_files(
+    staging_files: list[_FileAttestation],
+    *,
+    context_path: Path,
+    transaction_id: str | None = None,
+) -> None:
+    """Delete only exact transaction-owned files, using durable claims when requested."""
+    if transaction_id is None:
+        _revalidate_transaction_staging_files(
+            staging_files,
+            context_path=context_path,
+            require_present=False,
+        )
+        for staging_file in staging_files:
+            if not staging_file.path.exists() and not staging_file.path.is_symlink():
+                continue
+            _validated_regular_file(
+                staging_file.path,
+                staging_file.digest,
+                context_path=context_path,
+                expected_identity=staging_file.identity,
+                kind="transaction cleanup file",
+            )
+            staging_file.path.unlink()
+        return
+
+    claimed_files = _claim_transaction_files(
+        staging_files,
+        context_path=context_path,
+        require_present=False,
+        transaction_id=transaction_id,
+    )
+    _delete_claimed_transaction_files(claimed_files, context_path=context_path)
+
+
+def _publish_transaction_sidecar(
+    source_path: Path,
+    source_snapshot: _FileSnapshot,
+    meta_path: Path,
+    target_attestation: _FileAttestation | None,
+    transaction_id: str,
+    *,
+    context_path: Path,
+    journal_attestation: _FileAttestation | None = None,
+) -> None:
+    """Publish captured bytes after claiming the exact source and prior target."""
+    if journal_attestation is not None:
+        _revalidate_journal_attestation(journal_attestation)
+    if source_snapshot.contents is None:
+        raise RuntimeError(f"Collector sidecar bytes were not captured for {context_path}")
+    source_record = source_snapshot.attest(source_path)
+    claim_records = [source_record]
+    if source_path == meta_path:
+        if target_attestation != source_record:
+            raise RuntimeError(f"Collector sidecar target changed in {context_path}: {meta_path}")
+    elif target_attestation is None:
+        if meta_path.exists() or meta_path.is_symlink():
+            raise RuntimeError(f"Collector sidecar target changed in {context_path}: {meta_path}")
+    else:
+        claim_records.append(target_attestation)
+    claimed_files = _claim_transaction_files(
+        claim_records,
+        context_path=context_path,
+        require_present=True,
+        transaction_id=transaction_id,
+    )
+    try:
+        if meta_path.exists() or meta_path.is_symlink():
+            raise RuntimeError(f"Collector sidecar target changed in {context_path}: {meta_path}")
+        if journal_attestation is not None:
+            _revalidate_journal_attestation(journal_attestation)
+        _atomic_write_bytes(
+            meta_path,
+            source_snapshot.contents,
+            mode=source_snapshot.mode,
+            replace_existing=False,
+        )
+    except Exception:
+        _restore_claimed_transaction_files(claimed_files)
+        raise
+    _delete_claimed_transaction_files(claimed_files, context_path=context_path)
 
 
 def _recover_collector_provenance_transaction(
@@ -1923,7 +3048,7 @@ def _recover_collector_provenance_transaction(
 ) -> Path | None:
     """Finish an interrupted sidecar commit without appending its event twice."""
     output_root = output_root.resolve()
-    checkpoint_root = (Path(checkpoint_dir).expanduser().resolve() / backend).resolve()
+    checkpoint_root = _checkpoint_backend_root(checkpoint_dir, backend)
     journal_path = output_root / _SIDECAR_TRANSACTION_FILENAME
     if journal_path.is_symlink():
         raise RuntimeError(f"Invalid collector sidecar transaction journal: {journal_path}")
@@ -1933,7 +3058,14 @@ def _recover_collector_provenance_transaction(
         raise RuntimeError(f"Invalid collector sidecar transaction journal: {journal_path}")
 
     try:
-        transaction = json.loads(journal_path.read_text(encoding="utf-8"))
+        journal_snapshot = _validated_regular_file(
+            journal_path,
+            None,
+            context_path=journal_path,
+            capture_contents=True,
+            kind="sidecar transaction journal",
+        )
+        transaction = json.loads(journal_snapshot.contents)
         transaction_id, expected_digest = _validate_transaction_envelope(
             transaction,
             output_root=output_root,
@@ -1946,79 +3078,250 @@ def _recover_collector_provenance_transaction(
 
     meta_path = output_root / "collection_meta.yaml"
     staged_meta_path = output_root / _SIDECAR_STAGING_FILENAME
-    validated_staging_paths = _validated_transaction_staging_paths(
-        transaction,
-        output_root=output_root,
-        journal_path=journal_path,
+    pending_attestation = _attestation_from_record(
+        transaction.get("pending_sidecar"),
+        staged_meta_path,
+        context_path=journal_path,
+        kind="pending sidecar",
     )
+    previous_record = transaction.get("previous_sidecar")
+    previous_attestation = (
+        None
+        if previous_record is None
+        else _attestation_from_record(
+            previous_record,
+            meta_path,
+            context_path=journal_path,
+            kind="previous sidecar target",
+        )
+    )
+    journal_attestation = journal_snapshot.attest(journal_path)
+    for document_path in (meta_path, staged_meta_path):
+        if document_path.is_symlink() or (document_path.exists() and not document_path.is_file()):
+            raise RuntimeError(f"Invalid collector sidecar transaction document in {journal_path}: {document_path}")
 
-    validated_participants = _validated_transaction_checkpoint_participants(
+    pending_claim = _recover_transaction_claim(
+        pending_attestation,
+        transaction_id,
+        context_path=journal_path,
+    )
+    previous_claim = (
+        _recover_transaction_claim(
+            previous_attestation,
+            transaction_id,
+            context_path=journal_path,
+        )
+        if previous_attestation is not None
+        else None
+    )
+    if previous_attestation is None:
+        unexpected_claim = _transaction_claim_path(meta_path, transaction_id)
+        if unexpected_claim.exists() or unexpected_claim.is_symlink():
+            raise RuntimeError(f"Unexpected collector transaction claim in {journal_path}: {unexpected_claim}")
+
+    committed_document_snapshot: _FileSnapshot | None = None
+    if meta_path.exists():
+        candidate_snapshot = _validated_regular_file(
+            meta_path,
+            None,
+            context_path=journal_path,
+            capture_contents=True,
+            kind="committed sidecar document",
+        )
+        if candidate_snapshot.digest == expected_digest:
+            committed_document_snapshot = _validated_sidecar_document(
+                meta_path,
+                expected_digest,
+                context_path=journal_path,
+                expected_identity=candidate_snapshot.identity,
+            )
+
+    staged_document_snapshot: _FileSnapshot | None = None
+    if staged_meta_path.exists():
+        staged_document_snapshot = _validated_sidecar_document(
+            staged_meta_path,
+            expected_digest,
+            context_path=journal_path,
+            expected_identity=pending_attestation.identity,
+        )
+    claimed_document_snapshot = (
+        _validated_sidecar_document(
+            pending_claim.path,
+            expected_digest,
+            context_path=journal_path,
+            expected_identity=pending_attestation.identity,
+        )
+        if pending_claim is not None
+        else None
+    )
+    phase = "committed" if committed_document_snapshot is not None else "preparing"
+    sidecar_snapshot = committed_document_snapshot or staged_document_snapshot or claimed_document_snapshot
+    if sidecar_snapshot is None:
+        raise RuntimeError(
+            f"Collector sidecar transaction {journal_path} has neither its committed nor staged document"
+        )
+    try:
+        import yaml
+
+        if sidecar_snapshot.contents is None:
+            raise RuntimeError("sidecar bytes were not captured")
+        sidecar = yaml.safe_load(sidecar_snapshot.contents)
+    except Exception as error:
+        raise RuntimeError(f"Invalid sidecar document in collector transaction {journal_path}: {error}") from error
+
+    validated_staging_files = _validated_transaction_staging_files(
+        transaction.get("staging_paths"),
+        output_root=output_root,
+        context_path=journal_path,
+        require_present=phase == "preparing",
+    )
+    validated_staging_paths = [staging_file.path for staging_file in validated_staging_files]
+    staging_claims = [
+        claim
+        for staging_file in validated_staging_files
+        if (
+            claim := _recover_transaction_claim(
+                staging_file,
+                transaction_id,
+                context_path=journal_path,
+            )
+        )
+        is not None
+    ]
+    if phase == "preparing" and staging_claims:
+        raise RuntimeError(f"Unexpected collector staging cleanup claim in {journal_path}")
+
+    validated_checkpoints = _validated_transaction_checkpoints(
         transaction,
         backend=backend,
         checkpoint_root=checkpoint_root,
         journal_path=journal_path,
     )
+    _validate_transaction_table_ownership(
+        sidecar,
+        validated_staging_paths,
+        validated_checkpoints,
+        output_root=output_root,
+        journal_path=journal_path,
+    )
 
-    tagged_participants: list[tuple[Path, set[str]]] = []
-    for checkpoint_path, attempted_case_ids, checkpoint in validated_participants:
-        if checkpoint.get(_SIDECAR_TRANSACTION_FIELD) != transaction_id:
-            continue
-        missing = attempted_case_ids - set(checkpoint["attempted"])
-        if missing:
-            raise RuntimeError(
-                f"Invalid checkpoint participant in {journal_path}: pending attempts disappeared from "
-                f"{checkpoint_path}: {sorted(missing)}"
+    if phase == "preparing":
+        if previous_attestation is None:
+            if meta_path.exists() or meta_path.is_symlink():
+                raise RuntimeError(f"Collector sidecar target changed in {journal_path}: {meta_path}")
+        elif meta_path.exists() or meta_path.is_symlink():
+            _validated_regular_file(
+                meta_path,
+                previous_attestation.digest,
+                context_path=journal_path,
+                expected_identity=previous_attestation.identity,
+                kind="sidecar target",
             )
-        tagged_participants.append((checkpoint_path, attempted_case_ids))
+        elif previous_claim is None:
+            raise RuntimeError(f"Missing collector sidecar target in {journal_path}: {meta_path}")
 
-    for document_path in (meta_path, staged_meta_path):
-        if document_path.is_symlink() or (document_path.exists() and not document_path.is_file()):
-            raise RuntimeError(f"Invalid collector sidecar transaction document in {journal_path}: {document_path}")
-    sidecar_committed = meta_path.exists() and _sidecar_digest(meta_path) == expected_digest
-    staged_document_exists = staged_meta_path.exists()
-    if staged_document_exists:
-        if _sidecar_digest(staged_meta_path) != expected_digest:
-            raise RuntimeError(
-                f"Collector sidecar transaction {journal_path} has neither its committed nor staged document"
+    tagged_participants = _validated_checkpoint_participants_for_phase(
+        validated_checkpoints,
+        transaction_id,
+        journal_path,
+        phase=phase,
+    )
+    participant_attestations = {checkpoint.path: checkpoint.attestation for checkpoint in tagged_participants}
+    _revalidate_checkpoint_attestations(participant_attestations.values())
+    _revalidate_journal_attestation(journal_attestation)
+
+    if phase == "preparing":
+        if pending_claim is not None:
+            _restore_transaction_claim(
+                pending_attestation,
+                pending_claim,
+                context_path=journal_path,
             )
+        if previous_attestation is not None and previous_claim is not None:
+            _restore_transaction_claim(
+                previous_attestation,
+                previous_claim,
+                context_path=journal_path,
+            )
+        source_snapshot = _validated_sidecar_document(
+            staged_meta_path,
+            expected_digest,
+            context_path=journal_path,
+            expected_identity=pending_attestation.identity,
+        )
+        sidecar_target_attestation = _validated_sidecar_target(
+            transaction.get("previous_sidecar"),
+            meta_path,
+            context_path=journal_path,
+        )
         # The journal is durable before any checkpoint is tagged. Resume a
         # prepare-phase interruption by tagging every participant, then make
         # the already-rendered exact document visible atomically.
-        for checkpoint_path, attempted_case_ids, checkpoint in validated_participants:
-            missing = attempted_case_ids - set(checkpoint["attempted"])
-            if missing:
-                raise RuntimeError(
-                    f"Invalid checkpoint participant in {journal_path}: pending attempts disappeared from "
-                    f"{checkpoint_path}: {sorted(missing)}"
-                )
-        tagged_participants = []
-        for checkpoint_path, attempted_case_ids, _checkpoint in validated_participants:
-            _tag_checkpoint_sidecar_transaction(checkpoint_path, attempted_case_ids, transaction_id)
-            tagged_participants.append((checkpoint_path, attempted_case_ids))
-        os.replace(staged_meta_path, meta_path)
-        sidecar_committed = True
-    elif not sidecar_committed:
-        raise RuntimeError(
-            f"Collector sidecar transaction {journal_path} has neither its committed nor staged document"
+        _validated_sidecar_document(
+            staged_meta_path,
+            expected_digest,
+            context_path=journal_path,
+            expected_identity=source_snapshot.identity,
+        )
+        for checkpoint in tagged_participants:
+            participant_attestations[checkpoint.path] = _tag_checkpoint_sidecar_transaction(
+                checkpoint.path,
+                set(checkpoint.attempted),
+                transaction_id,
+                expected_attestation=participant_attestations[checkpoint.path],
+                journal_attestation=journal_attestation,
+            )
+        publish_snapshot = _validated_sidecar_document(
+            staged_meta_path,
+            expected_digest,
+            context_path=journal_path,
+            expected_identity=source_snapshot.identity,
+        )
+        _revalidate_checkpoint_attestations(participant_attestations.values())
+        _publish_transaction_sidecar(
+            staged_meta_path,
+            publish_snapshot,
+            meta_path,
+            sidecar_target_attestation,
+            transaction_id,
+            context_path=journal_path,
+            journal_attestation=journal_attestation,
+        )
+    else:
+        _validated_sidecar_document(
+            meta_path,
+            expected_digest,
+            context_path=journal_path,
+            expected_identity=committed_document_snapshot.identity,
         )
 
-    if not sidecar_committed:
-        raise RuntimeError(f"Failed to recover collector sidecar transaction {journal_path}")
-
-    # A tag survives until the matching attempts are closed. Its absence means
-    # that participant already closed; importantly, a later same-plan attempt
-    # has no old tag and must not be mistaken for this transaction.
+    # A matching tag identifies work left between publish and checkpoint close;
+    # an untagged participant is accepted only when its live ledger is empty.
     recovered_open_event = bool(tagged_participants)
-    for checkpoint_path, attempted_case_ids in tagged_participants:
+    for checkpoint in tagged_participants:
         _close_checkpoint_attempts(
-            checkpoint_path,
-            attempted_case_ids,
+            checkpoint.path,
+            set(checkpoint.attempted),
             transaction_id=transaction_id,
+            expected_attestation=participant_attestations[checkpoint.path],
+            journal_attestation=journal_attestation,
         )
 
-    _cleanup_sidecar_transaction_staging(validated_staging_paths)
-    staged_meta_path.unlink(missing_ok=True)
-    journal_path.unlink()
+    _revalidate_journal_attestation(journal_attestation)
+    _cleanup_transaction_files(
+        validated_staging_files,
+        context_path=journal_path,
+        transaction_id=transaction_id,
+    )
+    if phase == "committed":
+        _cleanup_transaction_files(
+            [claim for claim in (pending_claim, previous_claim) if claim is not None],
+            context_path=journal_path,
+        )
+    _cleanup_transaction_files(
+        [journal_attestation],
+        context_path=journal_path,
+    )
     if recovered_open_event:
         logger.info(f"Recovered collector provenance sidecar transaction: {meta_path}")
         return meta_path
@@ -2031,18 +3334,19 @@ def _commit_collector_provenance_transaction(
     tables: dict[str, dict],
     *,
     provenance_tier: str | None,
-    attempts_to_close: dict[Path, set[str]],
-    checkpoint_identities: dict[Path, dict],
-    staging_paths: set[Path],
+    checkpoint_records: dict[Path, _ProducerCheckpointPlan],
+    staging_files: dict[Path, PerfFinalizationInfo],
+    existing_sidecar_snapshot: _FileSnapshot | None,
     backend: str,
     checkpoint_dir: str,
 ) -> Path:
     """Atomically publish a sidecar and close its checkpoint participants."""
     from collector import provenance
 
+    _revalidate_producer_plan(checkpoint_records)
     output_root.mkdir(parents=True, exist_ok=True)
     output_root = output_root.resolve()
-    checkpoint_root = (Path(checkpoint_dir).expanduser().resolve() / backend).resolve()
+    checkpoint_root = _checkpoint_backend_root(checkpoint_dir, backend)
     staged_meta_path = output_root / _SIDECAR_STAGING_FILENAME
     transaction_id = uuid.uuid4().hex
     meta_path = output_root / "collection_meta.yaml"
@@ -2054,6 +3358,15 @@ def _commit_collector_provenance_transaction(
             tables,
             provenance_tier=provenance_tier,
         )
+        rendered_snapshot = _validated_regular_file(
+            rendered_path,
+            None,
+            context_path=journal_path,
+            capture_contents=True,
+            kind="rendered sidecar document",
+        )
+        if rendered_snapshot.contents is None:
+            raise RuntimeError(f"Rendered sidecar bytes were not captured for {journal_path}")
         transaction = {
             "schema": _SIDECAR_TRANSACTION_SCHEMA,
             "transaction_id": transaction_id,
@@ -2061,16 +3374,33 @@ def _commit_collector_provenance_transaction(
             "backend": backend,
             "checkpoint_root": str(checkpoint_root),
             "sidecar_path": str(meta_path),
-            "sidecar_digest": _sidecar_digest(rendered_path),
+            "sidecar_digest": rendered_snapshot.digest,
+            "pending_sidecar": None,
+            "previous_sidecar": _attestation_record(
+                existing_sidecar_snapshot.attest(meta_path) if existing_sidecar_snapshot is not None else None
+            ),
             "checkpoints": [
                 {
                     "path": str(checkpoint_path),
-                    "attempted": sorted(attempted_case_ids),
-                    "identity": checkpoint_identities[checkpoint_path],
+                    "done": sorted(record.done),
+                    "failed": sorted(record.failed),
+                    "attempted": sorted(record.attempted),
+                    "identity": record.identity_dict(),
                 }
-                for checkpoint_path, attempted_case_ids in sorted(attempts_to_close.items())
+                for checkpoint_path, record in sorted(checkpoint_records.items())
             ],
-            "staging_paths": sorted(str(path) for path in staging_paths),
+            "staging_paths": [
+                _attestation_record(
+                    _FileAttestation(
+                        path=path,
+                        digest=info.source_digest,
+                        device=info.source_device,
+                        inode=info.source_inode,
+                    ),
+                    include_path=True,
+                )
+                for path, info in sorted(staging_files.items())
+            ],
         }
         _validate_transaction_envelope(
             transaction,
@@ -2079,41 +3409,120 @@ def _commit_collector_provenance_transaction(
             checkpoint_root=checkpoint_root,
             journal_path=journal_path,
         )
-        validated_staging_paths = _validated_transaction_staging_paths(
-            transaction,
+        validated_staging_files = _validated_transaction_staging_files(
+            transaction.get("staging_paths"),
             output_root=output_root,
-            journal_path=journal_path,
+            context_path=journal_path,
+            require_present=True,
         )
-        validated_participants = _validated_transaction_checkpoint_participants(
+        validated_staging_paths = [staging_file.path for staging_file in validated_staging_files]
+        validated_checkpoints = _validated_transaction_checkpoints(
             transaction,
             backend=backend,
             checkpoint_root=checkpoint_root,
             journal_path=journal_path,
         )
-        for checkpoint_path, attempted_case_ids, checkpoint in validated_participants:
-            missing = attempted_case_ids - set(checkpoint["attempted"])
-            if missing or checkpoint.get(_SIDECAR_TRANSACTION_FIELD) is not None:
-                raise RuntimeError(
-                    f"Invalid checkpoint participant in {journal_path}: cannot prepare {checkpoint_path}; "
-                    f"missing attempts={sorted(missing)}, existing transaction="
-                    f"{checkpoint.get(_SIDECAR_TRANSACTION_FIELD)!r}"
-                )
-        os.replace(rendered_path, staged_meta_path)
+        import yaml
 
-    _atomic_write_json(journal_path, transaction)
-    for checkpoint_path, attempted_case_ids, _checkpoint in validated_participants:
-        _tag_checkpoint_sidecar_transaction(checkpoint_path, attempted_case_ids, transaction_id)
-
-    os.replace(staged_meta_path, meta_path)
-    logger.info(f"Wrote collector provenance sidecar: {meta_path}")
-    for checkpoint_path, attempted_case_ids, _checkpoint in validated_participants:
-        _close_checkpoint_attempts(
-            checkpoint_path,
-            attempted_case_ids,
-            transaction_id=transaction_id,
+        rendered_sidecar = yaml.safe_load(rendered_snapshot.contents)
+        _validate_transaction_table_ownership(
+            rendered_sidecar,
+            validated_staging_paths,
+            validated_checkpoints,
+            output_root=output_root,
+            journal_path=journal_path,
         )
-    _cleanup_sidecar_transaction_staging(validated_staging_paths)
-    journal_path.unlink()
+        participants = _validated_checkpoint_participants_for_phase(
+            validated_checkpoints,
+            transaction_id,
+            journal_path,
+            phase="new",
+        )
+        _existing_sidecar, live_sidecar_snapshot = _load_clean_collector_sidecar(output_root)
+        if not _same_file_snapshot(live_sidecar_snapshot, existing_sidecar_snapshot):
+            raise RuntimeError(f"Collector sidecar document changed before transaction commit: {meta_path}")
+        sidecar_target_attestation = _validated_sidecar_target(
+            transaction["previous_sidecar"],
+            meta_path,
+            context_path=journal_path,
+        )
+        _atomic_write_bytes(
+            staged_meta_path,
+            rendered_snapshot.contents,
+            mode=rendered_snapshot.mode,
+            replace_existing=False,
+        )
+        staged_document_snapshot = _validated_sidecar_document(
+            staged_meta_path,
+            transaction["sidecar_digest"],
+            context_path=journal_path,
+        )
+        transaction["pending_sidecar"] = _attestation_record(staged_document_snapshot.attest(staged_meta_path))
+
+    _atomic_write_bytes(
+        journal_path,
+        json.dumps(transaction, indent=2).encode(),
+        replace_existing=False,
+    )
+    journal_snapshot = _validated_regular_file(
+        journal_path,
+        None,
+        context_path=journal_path,
+        kind="sidecar transaction journal",
+    )
+    journal_attestation = journal_snapshot.attest(journal_path)
+    _validated_sidecar_document(
+        staged_meta_path,
+        transaction["sidecar_digest"],
+        context_path=journal_path,
+        expected_identity=staged_document_snapshot.identity,
+    )
+    participant_attestations = {checkpoint.path: checkpoint.attestation for checkpoint in participants}
+    _revalidate_checkpoint_attestations(participant_attestations.values())
+    for checkpoint in participants:
+        participant_attestations[checkpoint.path] = _tag_checkpoint_sidecar_transaction(
+            checkpoint.path,
+            set(checkpoint.attempted),
+            transaction_id,
+            expected_attestation=participant_attestations[checkpoint.path],
+            journal_attestation=journal_attestation,
+        )
+    publish_snapshot = _validated_sidecar_document(
+        staged_meta_path,
+        transaction["sidecar_digest"],
+        context_path=journal_path,
+        expected_identity=staged_document_snapshot.identity,
+    )
+    _revalidate_checkpoint_attestations(participant_attestations.values())
+
+    _publish_transaction_sidecar(
+        staged_meta_path,
+        publish_snapshot,
+        meta_path,
+        sidecar_target_attestation,
+        transaction_id,
+        context_path=journal_path,
+        journal_attestation=journal_attestation,
+    )
+    logger.info(f"Wrote collector provenance sidecar: {meta_path}")
+    for checkpoint in participants:
+        _close_checkpoint_attempts(
+            checkpoint.path,
+            set(checkpoint.attempted),
+            transaction_id=transaction_id,
+            expected_attestation=participant_attestations[checkpoint.path],
+            journal_attestation=journal_attestation,
+        )
+    _revalidate_journal_attestation(journal_attestation)
+    _cleanup_transaction_files(
+        validated_staging_files,
+        context_path=journal_path,
+        transaction_id=transaction_id,
+    )
+    _cleanup_transaction_files(
+        [journal_attestation],
+        context_path=journal_path,
+    )
     return meta_path
 
 
@@ -2126,6 +3535,7 @@ def _write_collector_provenance(
     backend: str,
     checkpoint_dir: str,
     finalization_info: dict[Path, PerfFinalizationInfo],
+    producer_plan: dict[Path, _ProducerCheckpointPlan] | None = None,
 ) -> Path | None:
     """Write collection_meta.yaml (design §5) flat beside the just-finalized parquet.
 
@@ -2140,9 +3550,10 @@ def _write_collector_provenance(
     )
     if recovered_meta_path is not None:
         return recovered_meta_path
+    if producer_plan is not None:
+        _revalidate_producer_plan(producer_plan)
 
     import pyarrow.parquet as pq
-    import yaml
 
     from collector import provenance
 
@@ -2163,7 +3574,7 @@ def _write_collector_provenance(
         staging_by_table.setdefault(table, staging_path)
 
     module_failure_names = {e["module"] for e in run_errors if e.get("error_type") == "ModuleCollectionFailure"}
-    checkpoint_root = Path(checkpoint_dir).expanduser().resolve() / backend
+    checkpoint_root = _checkpoint_backend_root(checkpoint_dir, backend)
     closures = provenance.load_closures(_REPO_ROOT / "collector" / "hash_closures.yaml")
     collector_ref = _git_collector_ref(_REPO_ROOT)
 
@@ -2173,8 +3584,8 @@ def _write_collector_provenance(
     tables: dict[str, dict] = {}
     new_rows_by_table: dict[str, int] = {}
     merged_existing_by_table: dict[str, bool] = {}
-    attempts_to_close: dict[Path, set[str]] = {}
-    checkpoint_identities: dict[Path, dict] = {}
+    finalization_by_table: dict[str, PerfFinalizationInfo] = {}
+    checkpoint_records: dict[Path, _ProducerCheckpointPlan] = {}
     for parquet_path in converted:
         table = parquet_path.stem
         full_names = ops_by_table.get(table)
@@ -2190,33 +3601,64 @@ def _write_collector_provenance(
                 "cannot attest the current collection event"
             )
         info = finalization_info[resolved_parquet_path]
+        if (
+            not _valid_sha256_digest(info.source_digest)
+            or not isinstance(info.source_device, int)
+            or isinstance(info.source_device, bool)
+            or not isinstance(info.source_inode, int)
+            or isinstance(info.source_inode, bool)
+        ):
+            raise RuntimeError(f"collection_meta: table '{table}' has no valid staging file identity")
         new_rows_by_table[table] = info.new_rows
         merged_existing_by_table[table] = info.merged_existing
+        finalization_by_table[table] = info
 
         case_ids: set[str] = set()
         unresolved_failed = 0
         for full_name in full_names:
-            resume_tracker = _resume_tracker_for_collection(
-                collection_by_full_name[full_name],
-                provenance_ctx,
-                backend=backend,
-                checkpoint_dir=checkpoint_dir,
-                sm_version=provenance_ctx.get("sm_version"),
-            )
-            checkpoint_path = resume_tracker._path
-            if not checkpoint_path.exists():
-                raise RuntimeError(
-                    f"collection_meta: table '{table}' has no checkpoint for configured producer "
-                    f"{full_name} at {checkpoint_path}"
+            collection = collection_by_full_name[full_name]
+            if producer_plan is None:
+                resume_tracker = _load_selected_producer_checkpoint(
+                    collection,
+                    provenance_ctx,
+                    backend=backend,
+                    checkpoint_dir=checkpoint_dir,
+                    sm_version=provenance_ctx.get("sm_version"),
+                    staging_path=staging_by_table[table],
+                    required=True,
+                    context="collection_meta",
                 )
-            resume_tracker.load_existing()
-            attempted = resume_tracker._attempted
-            failed = resume_tracker._failed
+                if resume_tracker is None:
+                    continue
+                checkpoint_plan = _producer_checkpoint_plan(resume_tracker, table)
+            else:
+                resume_tracker = _resume_tracker_for_collection(
+                    collection,
+                    provenance_ctx,
+                    backend=backend,
+                    checkpoint_dir=checkpoint_dir,
+                    sm_version=provenance_ctx.get("sm_version"),
+                )
+                checkpoint_plan = producer_plan.get(resume_tracker._path)
+                if (
+                    checkpoint_plan is None
+                    or checkpoint_plan.table != table
+                    or checkpoint_plan.identity_dict() != resume_tracker._metadata
+                ):
+                    raise RuntimeError(
+                        f"collection_meta: selected producer plan does not own table '{table}': {resume_tracker._path}"
+                    )
+            checkpoint_path = checkpoint_plan.path
+            attempted = set(checkpoint_plan.attempted)
+            failed = set(checkpoint_plan.failed)
+            if checkpoint_path in checkpoint_records:
+                checkpoint_record = checkpoint_records[checkpoint_path]
+                if checkpoint_record != checkpoint_plan:
+                    raise RuntimeError(f"collection_meta: checkpoint producer {checkpoint_path} changed identity")
+            else:
+                checkpoint_records[checkpoint_path] = checkpoint_plan
             case_ids.update(attempted)
             unresolved_failed += len(failed)
-            if attempted:
-                attempts_to_close.setdefault(checkpoint_path, set()).update(attempted)
-                checkpoint_identities[checkpoint_path] = dict(resume_tracker._metadata)
 
         if not case_ids:
             # Empty pending-event evidence means no case explains these rows:
@@ -2247,70 +3689,59 @@ def _write_collector_provenance(
 
     if not tables:
         return None
-    staging_paths = {staging_by_table[table] for table in tables if table in staging_by_table}
+    staging_files = {
+        staging_by_table[table]: finalization_by_table[table]
+        for table in tables
+        if table in staging_by_table and table in finalization_by_table
+    }
 
     # A prior invocation against the same scratch dir (e.g. --ops split across
     # runs) may have already written a sidecar for other tables; preserve them.
     existing_meta = output_root / "collection_meta.yaml"
+    existing_doc, existing_sidecar_snapshot = _load_clean_collector_sidecar(
+        output_root,
+        tables_to_update=set(tables),
+    )
     provenance_tier: str | None = None
-    if existing_meta.exists():
-        try:
-            existing_doc = yaml.safe_load(existing_meta.read_text(encoding="utf-8")) or {}
-        except yaml.YAMLError as error:
-            logger.warning(f"collection_meta: could not parse existing {existing_meta}, overwriting it: {error}")
-            existing_doc = {}
-        if existing_doc.get("provenance") == "legacy":
-            raise RuntimeError(
-                f"{output_root}: existing collection_meta.yaml is a legacy-tier sidecar "
-                "(provenance: legacy). A fresh collection finalizing into this directory "
-                "must not silently merge into it — that would drop the legacy tier tag. "
-                "Remove the legacy sidecar first if this directory is being deliberately "
-                "replaced by a new collection."
-            )
-        existing_schema_version = existing_doc.get("schema_version", 1)
-        if existing_schema_version not in (1, 2):
-            raise RuntimeError(
-                f"{existing_meta}: unsupported collection_meta.yaml schema_version {existing_schema_version!r}"
-            )
+    if existing_doc is not None:
         provenance_tier = existing_doc.get("provenance")
-        existing_tables = existing_doc.get("tables") or {}
-        if isinstance(existing_tables, dict):
-            existing_runtime = existing_doc.get("runtime")
-            if existing_runtime != runtime_meta:
-                raise RuntimeError(
-                    f"{existing_meta}: cannot write collector provenance in place with a different runtime identity "
-                    f"(existing={existing_runtime!r}, current={runtime_meta!r}). Use a clean output directory for "
-                    "the new runtime."
+        existing_tables = existing_doc["tables"]
+        existing_runtime = existing_doc.get("runtime")
+        if existing_runtime != runtime_meta:
+            raise RuntimeError(
+                f"{existing_meta}: cannot write collector provenance in place with a different runtime identity "
+                f"(existing={existing_runtime!r}, current={runtime_meta!r}). Use a clean output directory for "
+                "the new runtime."
+            )
+        surviving_tables = [
+            table
+            for table in existing_tables
+            if table not in tables or merged_existing_by_table.get(table) is not False
+        ]
+        if provenance_tier == "local" and not surviving_tables:
+            provenance_tier = None
+        merged_tables = dict(existing_tables)
+        for table, current_entry in tables.items():
+            existing_entry = existing_tables.get(table)
+            if isinstance(existing_entry, dict) and merged_existing_by_table[table]:
+                merged_tables[table] = provenance.append_collection_event(
+                    existing_entry,
+                    {**current_entry, "rows": new_rows_by_table[table]},
+                    table=table,
+                    merged_rows=current_entry["rows"],
                 )
-            surviving_tables = [
-                table
-                for table in existing_tables
-                if table not in tables or merged_existing_by_table.get(table) is not False
-            ]
-            if provenance_tier == "local" and not surviving_tables:
-                provenance_tier = None
-            merged_tables = dict(existing_tables)
-            for table, current_entry in tables.items():
-                existing_entry = existing_tables.get(table)
-                if isinstance(existing_entry, dict) and merged_existing_by_table[table]:
-                    merged_tables[table] = provenance.append_collection_event(
-                        existing_entry,
-                        {**current_entry, "rows": new_rows_by_table[table]},
-                        table=table,
-                        merged_rows=current_entry["rows"],
-                    )
-                else:
-                    merged_tables[table] = current_entry
-            tables = merged_tables
+            else:
+                merged_tables[table] = current_entry
+        tables = merged_tables
 
     meta_path = _commit_collector_provenance_transaction(
         output_root,
         runtime_meta,
         tables,
         provenance_tier=provenance_tier,
-        attempts_to_close=attempts_to_close,
-        checkpoint_identities=checkpoint_identities,
-        staging_paths=staging_paths,
+        checkpoint_records=checkpoint_records,
+        staging_files=staging_files,
+        existing_sidecar_snapshot=existing_sidecar_snapshot,
         backend=backend,
         checkpoint_dir=checkpoint_dir,
     )
@@ -2650,6 +4081,7 @@ def main():
 
     converted: list[Path] = []
     finalization_info: dict[Path, PerfFinalizationInfo] = {}
+    producer_plan: dict[Path, _ProducerCheckpointPlan] = {}
     if args.keep_csv:
         logger.info("Keeping collector CSV staging files because --keep-csv was passed")
     else:
@@ -2666,8 +4098,36 @@ def main():
                 )
             )
         touched_perf_outputs = sorted(touched_perf_outputs | pending_resume_outputs)
+        prepublish_validate = None
         if touched_perf_outputs and provenance_ctx is not None:
-            _preflight_collector_provenance(output_root, provenance_ctx)
+            tables_to_update = {path.stem for path in touched_perf_outputs}
+            sidecar_snapshot = _preflight_collector_provenance(
+                output_root,
+                provenance_ctx,
+                tables_to_update=tables_to_update,
+            )
+            producer_plan, staging_attestations = _preflight_collector_finalization_inputs(
+                output_root,
+                touched_perf_outputs,
+                provenance_ctx,
+                backend=args.backend,
+                checkpoint_dir=args.checkpoint_dir,
+                sm_version=sm_version,
+            )
+
+            def prepublish_validate():
+                _revalidate_producer_plan(producer_plan)
+                _revalidate_transaction_staging_files(
+                    staging_attestations.values(),
+                    context_path=output_root,
+                    require_present=True,
+                )
+                _revalidate_collector_sidecar_preflight(
+                    output_root,
+                    sidecar_snapshot,
+                    tables_to_update=tables_to_update,
+                )
+
         if touched_perf_outputs:
             logger.info(
                 "Finalizing collector CSV staging files as parquet:\n  "
@@ -2677,6 +4137,15 @@ def main():
             touched_perf_outputs,
             delete_source=False,
             finalization_info=finalization_info,
+            prepublish_validate=prepublish_validate,
+            expected_source_identities=(
+                {
+                    path.resolve(): (attestation.digest, attestation.device, attestation.inode)
+                    for path, attestation in staging_attestations.items()
+                }
+                if touched_perf_outputs and provenance_ctx is not None
+                else None
+            ),
         )
         if converted:
             logger.info(f"Finalized {len(converted)} collector perf files as parquet")
@@ -2690,6 +4159,7 @@ def main():
             backend=args.backend,
             checkpoint_dir=args.checkpoint_dir,
             finalization_info=finalization_info,
+            producer_plan=producer_plan,
         )
 
     # A ModuleCollectionFailure means an op failed before running a single case

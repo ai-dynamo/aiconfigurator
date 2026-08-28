@@ -21,11 +21,12 @@ import multiprocessing as mp
 import os
 import shutil
 import signal
+import stat
 import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -820,12 +821,29 @@ PERF_METRIC_COLUMNS = ("latency", "power", "power_limit")
 
 @dataclass(frozen=True)
 class PerfFinalizationInfo:
-    """Facts needed to attest one finalized staging file."""
+    """Row contribution and exact byte/object identity of one staging file."""
 
     # Current-event rows that survive finalization. Compatible merges count
     # unique current identity keys; replacement paths count the written rows.
     new_rows: int
     merged_existing: bool
+    # SHA-256 and descriptor identity captured from the bytes parsed into the
+    # prepared parquet. Callers revalidate all three before publication.
+    source_digest: str
+    source_device: int
+    source_inode: int
+
+
+@dataclass(frozen=True)
+class _PreparedPerfFile:
+    """One fully rendered parquet awaiting batch publication."""
+
+    source: Path
+    target: Path
+    temporary: Path
+    temporary_device: int
+    temporary_inode: int
+    info: PerfFinalizationInfo
 
 
 def convert_perf_csv_to_parquet(
@@ -858,17 +876,167 @@ def convert_perf_csv_to_parquet(
     csv_path = Path(csv_file)
     if csv_path.name == "INCOMPLETE.txt" or not csv_path.name.endswith("_perf.txt"):
         raise ValueError(f"Expected a collector perf CSV ending in _perf.txt, got {csv_path}")
-    if not csv_path.exists():
+    if not csv_path.exists() and not csv_path.is_symlink():
         raise FileNotFoundError(csv_path)
+    return _finalize_perf_file_batch(
+        [csv_path],
+        delete_source=delete_source,
+        compression=compression,
+        merge_existing=merge_existing,
+        finalization_info=finalization_info,
+        prepublish_validate=None,
+        expected_source_identities=None,
+    )[0]
 
+
+def _stream_digest(file, *, copy_to=None) -> str:
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: file.read(1024 * 1024), b""):
+        digest.update(chunk)
+        if copy_to is not None:
+            copy_to.write(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _validate_prepared_source(item: _PreparedPerfFile, *, context: str) -> None:
+    if item.source.is_symlink() or not item.source.is_file():
+        raise RuntimeError(f"Collector staging file changed {context}: {item.source}")
+    with item.source.open("rb") as source_file:
+        opened = os.fstat(source_file.fileno())
+        source_digest = _stream_digest(source_file)
+    current = item.source.lstat()
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        or (opened.st_dev, opened.st_ino) != (item.info.source_device, item.info.source_inode)
+        or source_digest != item.info.source_digest
+    ):
+        raise RuntimeError(f"Collector staging file changed {context}: {item.source}")
+
+
+def _is_owned_temporary(path: Path, device: int, inode: int) -> bool:
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == (device, inode)
+
+
+def _require_owned_temporary(item: _PreparedPerfFile) -> None:
+    if not _is_owned_temporary(item.temporary, item.temporary_device, item.temporary_inode):
+        raise RuntimeError(f"Collector temporary file changed during finalization: {item.temporary}")
+
+
+def _remove_owned_temporary(item: _PreparedPerfFile) -> None:
+    if _is_owned_temporary(item.temporary, item.temporary_device, item.temporary_inode):
+        item.temporary.unlink()
+
+
+def _validate_perf_file_paths(csv_path: Path) -> tuple[Path, Path]:
+    if csv_path.is_symlink() or not csv_path.is_file():
+        raise RuntimeError(f"Cannot convert non-regular collector staging file: {csv_path}")
     lock_path = Path(f"{csv_path}.lock")
-    if lock_path.exists():
+    if lock_path.exists() or lock_path.is_symlink():
         raise RuntimeError(f"Cannot convert {csv_path} while lock file exists: {lock_path}")
 
+    parquet_path = csv_path.with_suffix(".parquet")
+    if parquet_path.is_symlink() or (parquet_path.exists() and not parquet_path.is_file()):
+        raise RuntimeError(f"Cannot replace non-regular collector parquet file: {parquet_path}")
+    merge_lock = parquet_path.with_name(f"{parquet_path.name}.mergelock")
+    if merge_lock.is_symlink() or (merge_lock.exists() and not merge_lock.is_file()):
+        raise RuntimeError(f"Invalid collector parquet merge lock: {merge_lock}")
+    return parquet_path, merge_lock
+
+
+def _prepare_perf_file(
+    csv_path: Path,
+    parquet_path: Path,
+    *,
+    expected_source_identity: tuple[str, int, int] | None,
+    compression: str,
+    merge_existing: bool,
+    pa,
+    pc_compute,
+    pc_csv,
+    pq,
+) -> _PreparedPerfFile:
+    with csv_path.open("rb") as source_file, tempfile.TemporaryFile(dir=parquet_path.parent) as snapshot_file:
+        source_stat = os.fstat(source_file.fileno())
+        source_mode = source_stat.st_mode & 0o666
+        source_digest = _stream_digest(source_file, copy_to=snapshot_file)
+        if (
+            expected_source_identity is not None
+            and (
+                source_digest,
+                source_stat.st_dev,
+                source_stat.st_ino,
+            )
+            != expected_source_identity
+        ):
+            raise RuntimeError(f"Collector staging file changed after preflight: {csv_path}")
+        snapshot_file.seek(0)
+        table = pc_csv.read_csv(snapshot_file)
+    new_rows = table.num_rows
+    merged_existing = False
+    if merge_existing and parquet_path.exists():
+        table, merged_existing, new_rows = _merge_perf_rows(table, parquet_path, pa=pa, pq=pq)
+    table = _normalize_power_metrics(table, pa=pa, pc=pc_compute)
+
+    temporary: Path | None = None
+    temporary_identity: tuple[int, int] | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=parquet_path.parent,
+            prefix=f".{parquet_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temporary = Path(temp_file.name)
+            temp_stat = os.fstat(temp_file.fileno())
+            temporary_identity = (temp_stat.st_dev, temp_stat.st_ino)
+            pq.write_table(table, temp_file, compression=compression)
+            temp_file.flush()
+            os.fchmod(temp_file.fileno(), source_mode)
+        prepared = _PreparedPerfFile(
+            source=csv_path,
+            target=parquet_path,
+            temporary=temporary,
+            temporary_device=temporary_identity[0],
+            temporary_inode=temporary_identity[1],
+            info=PerfFinalizationInfo(
+                new_rows=new_rows,
+                merged_existing=merged_existing,
+                source_digest=source_digest,
+                source_device=source_stat.st_dev,
+                source_inode=source_stat.st_ino,
+            ),
+        )
+        _require_owned_temporary(prepared)
+        return prepared
+    except Exception:
+        if temporary is not None and temporary_identity is not None:
+            device, inode = temporary_identity
+            if _is_owned_temporary(temporary, device, inode):
+                temporary.unlink()
+        raise
+
+
+def _finalize_perf_file_batch(
+    csv_paths: list[Path],
+    *,
+    delete_source: bool,
+    compression: str,
+    merge_existing: bool,
+    finalization_info: dict[Path, PerfFinalizationInfo] | None,
+    prepublish_validate: Callable[[], None] | None,
+    expected_source_identities: dict[Path, tuple[str, int, int]] | None,
+) -> list[Path]:
+    """Prepare every conversion before publishing any parquet target."""
     try:
         import pyarrow as pa
         import pyarrow.compute as pc_compute
-        import pyarrow.csv as pc
+        import pyarrow.csv as pc_csv
         import pyarrow.parquet as pq
     except ImportError as exc:
         raise RuntimeError(
@@ -876,35 +1044,84 @@ def convert_perf_csv_to_parquet(
             "Install the project runtime dependencies before collecting perf data."
         ) from exc
 
-    parquet_path = csv_path.with_suffix(".parquet")
-    tmp_path = parquet_path.with_name(f".{parquet_path.name}.tmp")
-    # Serialize the read-merge-replace sequence per parquet target: the source
-    # .lock above only guards CSV writers. Two finalizers racing here would
-    # both read the same existing parquet and the later os.replace would
-    # silently drop the earlier merge's rows.
-    merge_lock = parquet_path.with_name(f"{parquet_path.name}.mergelock")
-    lock_fd = _acquire_merge_lock(merge_lock)
+    validated_inputs = [(csv_path, *_validate_perf_file_paths(csv_path)) for csv_path in csv_paths]
+    if expected_source_identities is not None:
+        expected_paths = {path.resolve() for path in expected_source_identities}
+        selected_paths = {csv_path.resolve() for csv_path, _parquet_path, _merge_lock in validated_inputs}
+        if expected_paths != selected_paths:
+            raise RuntimeError("Collector staging preflight does not match the selected finalization inputs")
+
+    unique_inputs: list[tuple[Path, Path, Path]] = []
+    seen_inputs: set[tuple[int, int, int, int]] = set()
+    opened_locks: dict[tuple[int, int], int] = {}
+    prepared: list[_PreparedPerfFile] = []
     try:
-        table = pc.read_csv(csv_path)
-        new_rows = table.num_rows
-        merged_existing = False
-        if merge_existing and parquet_path.exists():
-            table, merged_existing, new_rows = _merge_perf_rows(table, parquet_path, pa=pa, pq=pq)
-        table = _normalize_power_metrics(table, pa=pa, pc=pc_compute)
-        pq.write_table(table, tmp_path, compression=compression)
-        os.replace(tmp_path, parquet_path)
-        if delete_source:
-            csv_path.unlink()
-        if finalization_info is not None:
-            finalization_info[parquet_path.resolve()] = PerfFinalizationInfo(
-                new_rows=new_rows,
-                merged_existing=merged_existing,
+        for item in validated_inputs:
+            source_stat = item[0].lstat()
+            if not stat.S_ISREG(source_stat.st_mode):
+                raise RuntimeError(f"Cannot convert non-regular collector staging file: {item[0]}")
+            lock_fd, lock_identity = _open_merge_lock(item[2])
+            if lock_identity in opened_locks:
+                _release_merge_lock(lock_fd)
+            else:
+                opened_locks[lock_identity] = lock_fd
+            input_identity = (source_stat.st_dev, source_stat.st_ino, *lock_identity)
+            if input_identity not in seen_inputs:
+                seen_inputs.add(input_identity)
+                unique_inputs.append(item)
+        for lock_identity in sorted(opened_locks):
+            _acquire_merge_lock(opened_locks[lock_identity])
+        for csv_path, parquet_path, _merge_lock in unique_inputs:
+            _validate_perf_file_paths(csv_path)
+            prepared.append(
+                _prepare_perf_file(
+                    csv_path,
+                    parquet_path,
+                    expected_source_identity=(
+                        expected_source_identities[csv_path.resolve()]
+                        if expected_source_identities is not None
+                        else None
+                    ),
+                    compression=compression,
+                    merge_existing=merge_existing,
+                    pa=pa,
+                    pc_compute=pc_compute,
+                    pc_csv=pc_csv,
+                    pq=pq,
+                )
             )
+
+        # The bytes parsed above are the bytes this batch owns. Validate the
+        # whole input set again before any parquet is replaced.
+        for item in prepared:
+            _validate_perf_file_paths(item.source)
+            _validate_prepared_source(item, context="during finalization")
+            _require_owned_temporary(item)
+        if prepublish_validate is not None:
+            prepublish_validate()
+            for item in prepared:
+                _validate_perf_file_paths(item.source)
+                _validate_prepared_source(item, context="after prepublish validation")
+                _require_owned_temporary(item)
+
+        for item in prepared:
+            _require_owned_temporary(item)
+            os.replace(item.temporary, item.target)
+
+        if delete_source:
+            for item in prepared:
+                _validate_perf_file_paths(item.source)
+                _validate_prepared_source(item, context="before cleanup")
+            for item in prepared:
+                item.source.unlink()
+        if finalization_info is not None:
+            finalization_info.update({item.target.resolve(): item.info for item in prepared})
+        return [item.target for item in prepared]
     finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
-        _release_merge_lock(merge_lock, lock_fd)
-    return parquet_path
+        for item in prepared:
+            _remove_owned_temporary(item)
+        for lock_fd in opened_locks.values():
+            _release_merge_lock(lock_fd)
 
 
 def _normalize_power_metrics(table, *, pa, pc):
@@ -936,7 +1153,26 @@ def _normalize_power_metrics(table, *, pa, pc):
     return table
 
 
-def _acquire_merge_lock(lock_path: Path) -> int:
+def _open_merge_lock(lock_path: Path) -> tuple[int, tuple[int, int]]:
+    """Open and attest a merge-lock object without acquiring its flock."""
+    fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY)
+    try:
+        opened = os.fstat(fd)
+        current = lock_path.lstat()
+        identity = (opened.st_dev, opened.st_ino)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or identity != (current.st_dev, current.st_ino)
+        ):
+            raise RuntimeError(f"Invalid collector parquet merge lock: {lock_path}")
+        return fd, identity
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _acquire_merge_lock(lock_fd: int) -> None:
     """Advisory flock on a per-target lock file (blocking).
 
     flock is atomic, releases automatically when the holding process exits
@@ -946,12 +1182,10 @@ def _acquire_merge_lock(lock_path: Path) -> int:
     """
     import fcntl
 
-    fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY)
-    fcntl.flock(fd, fcntl.LOCK_EX)
-    return fd
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
 
-def _release_merge_lock(lock_path: Path, lock_fd: int) -> None:
+def _release_merge_lock(lock_fd: int) -> None:
     os.close(lock_fd)  # closing releases the flock
 
 
@@ -1067,6 +1301,8 @@ def finalize_perf_files(
     compression: str = "zstd",
     merge_existing: bool = True,
     finalization_info: dict[Path, PerfFinalizationInfo] | None = None,
+    prepublish_validate: Callable[[], None] | None = None,
+    expected_source_identities: dict[Path, tuple[str, int, int]] | None = None,
 ) -> list[Path]:
     """Finalize explicit collector CSV staging files as parquet.
 
@@ -1075,22 +1311,26 @@ def finalize_perf_files(
     overwriting it with only this run's rows — see convert_perf_csv_to_parquet.
     When provided, ``finalization_info`` receives each staging file's finalized
     current-event row contribution and whether an existing parquet took the
-    compatible merge path.
+    compatible merge path, plus the digest of the exact staging bytes parsed.
     """
-    converted: list[Path] = []
-    for csv_file in sorted({Path(path) for path in csv_files}):
-        if csv_file.name == "INCOMPLETE.txt" or not csv_file.name.endswith("_perf.txt") or not csv_file.exists():
-            continue
-        converted.append(
-            convert_perf_csv_to_parquet(
-                csv_file,
-                delete_source=delete_source,
-                compression=compression,
-                merge_existing=merge_existing,
-                finalization_info=finalization_info,
-            )
-        )
-    return converted
+    selected = [
+        csv_file
+        for csv_file in sorted({Path(path) for path in csv_files})
+        if csv_file.name != "INCOMPLETE.txt"
+        and csv_file.name.endswith("_perf.txt")
+        and (csv_file.exists() or csv_file.is_symlink())
+    ]
+    if not selected:
+        return []
+    return _finalize_perf_file_batch(
+        selected,
+        delete_source=delete_source,
+        compression=compression,
+        merge_existing=merge_existing,
+        finalization_info=finalization_info,
+        prepublish_validate=prepublish_validate,
+        expected_source_identities=expected_source_identities,
+    )
 
 
 def finalize_perf_outputs(

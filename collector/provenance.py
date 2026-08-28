@@ -294,6 +294,79 @@ def _ordered_multi_event_table(table: str, entry: Any) -> dict[str, Any]:
     }
 
 
+def validate_collection_meta_for_update(
+    document: Any,
+    *,
+    tables_to_update: set[str] | frozenset[str] = frozenset(),
+) -> None:
+    """Validate an existing sidecar before a collector mutates table data.
+
+    Historical ``local``/``collected`` v1 sidecars may contain reduced table
+    summaries. They can be preserved beside a new table, but cannot take part
+    in a v2 history promotion when any existing table is updated.
+    """
+    if not isinstance(document, dict):
+        raise ValueError("collection_meta.yaml must be a mapping")  # noqa: TRY004
+    unknown_document_fields = sorted(set(document) - {"schema_version", "provenance", "runtime", "tables"})
+    if unknown_document_fields:
+        raise ValueError(f"collection_meta.yaml has unsupported field(s): {', '.join(unknown_document_fields)}")
+    schema_version = document.get("schema_version")
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version not in (COLLECTION_META_SCHEMA_VERSION, MULTI_EVENT_COLLECTION_META_SCHEMA_VERSION)
+    ):
+        raise ValueError(f"unsupported collection_meta.yaml schema_version {schema_version!r}")
+    provenance_tier = document.get("provenance")
+    if provenance_tier is not None and (not isinstance(provenance_tier, str) or not provenance_tier.strip()):
+        raise ValueError("collection_meta.yaml provenance must be a non-empty string when provided")
+    if provenance_tier == "legacy":
+        raise ValueError("legacy-tier collection_meta.yaml cannot be updated by a fresh collection")
+    _ordered_runtime(document.get("runtime"), field="runtime")
+
+    tables = document.get("tables")
+    if not isinstance(tables, dict):
+        raise ValueError("collection_meta.yaml tables must be a mapping")  # noqa: TRY004
+    if any(not isinstance(table, str) or not table for table in tables):
+        raise ValueError("collection_meta.yaml table names must be non-empty strings")
+
+    if schema_version == MULTI_EVENT_COLLECTION_META_SCHEMA_VERSION:
+        for table, entry in tables.items():
+            if not isinstance(entry, dict) or set(entry) != {"rows", "status", "collections"}:
+                raise ValueError(f"{table} must contain exactly rows, status, and collections")
+            _ordered_multi_event_table(table, entry)
+        return
+
+    reduced_tables: set[str] = set()
+    for table, entry in tables.items():
+        if isinstance(entry, dict) and set(entry) == {"status"} and provenance_tier in {"local", "collected"}:
+            if entry["status"] not in (STATUS_COMPLETE, STATUS_PARTIAL):
+                raise ValueError(f"{table}.status must be '{STATUS_COMPLETE}' or '{STATUS_PARTIAL}'")
+            reduced_tables.add(table)
+            continue
+        if (
+            isinstance(entry, dict)
+            and set(entry) == {"collected_at", "rows", "status"}
+            and provenance_tier in {"local", "collected"}
+        ):
+            if not isinstance(entry["collected_at"], str) or not entry["collected_at"].strip():
+                raise ValueError(f"{table}.collected_at must be a non-empty string")
+            if not isinstance(entry["rows"], int) or isinstance(entry["rows"], bool) or entry["rows"] < 0:
+                raise ValueError(f"{table}.rows must be a non-negative integer")
+            if entry["status"] not in (STATUS_COMPLETE, STATUS_PARTIAL):
+                raise ValueError(f"{table}.status must be '{STATUS_COMPLETE}' or '{STATUS_PARTIAL}'")
+            reduced_tables.add(table)
+            continue
+        if not isinstance(entry, dict) or set(entry) != set(_TABLE_FIELD_ORDER):
+            raise ValueError(f"{table} must contain exactly {', '.join(_TABLE_FIELD_ORDER)}")
+        _ordered_collection_event(entry, table=table, index=0)
+
+    if reduced_tables and set(tables_to_update) & set(tables):
+        raise ValueError(
+            "reduced historical table metadata cannot be promoted while updating an existing sidecar table"
+        )
+
+
 def append_collection_event(
     existing: dict[str, Any], current: dict[str, Any], *, table: str, merged_rows: int
 ) -> dict[str, Any]:

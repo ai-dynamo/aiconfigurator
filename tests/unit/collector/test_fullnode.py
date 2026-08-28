@@ -3,6 +3,7 @@
 
 """Focused tests for full-node collector orchestration."""
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -180,8 +181,8 @@ def _real_collection() -> dict:
         "name": "sglang",
         "type": "deepep_ll",
         "module": REAL_FULLNODE_MODULE,
-        "get_func": "get_cases",
-        "run_func": "run_cases",
+        "get_func": "get_deepep_ll_test_cases",
+        "run_func": "run_deepep_ll_fullnode",
         "perf_filename": "wideep_deepep_ll_perf.txt",
     }
 
@@ -204,7 +205,11 @@ def _run_with_real_checkpoint(
     monkeypatch.setitem(
         sys.modules,
         REAL_FULLNODE_MODULE,
-        SimpleNamespace(__compat__=">=0.5.0", get_cases=lambda: list(cases), run_cases=run_cases),
+        SimpleNamespace(
+            __compat__=">=0.5.0",
+            get_deepep_ll_test_cases=lambda: list(cases),
+            run_deepep_ll_fullnode=run_cases,
+        ),
     )
     monkeypatch.setattr(fullnode, "filter_cases", lambda values, **_kwargs: (values, []))
     checkpoint_dir = tmp_path / "checkpoint"
@@ -243,6 +248,9 @@ def _finalize_pending_fullnode_event(tmp_path, checkpoint_path):
     output_root.mkdir()
     parquet_path = output_root / "wideep_deepep_ll_perf.parquet"
     pq.write_table(pa.table({"shape": [1, 2], "latency": [1.0, 2.0]}), parquet_path)
+    staging_path = parquet_path.with_suffix(".txt")
+    staging_path.write_text("retained staging\n", encoding="utf-8")
+    staging_stat = staging_path.stat()
     runtime = CollectorRuntime(
         framework="sglang",
         version="0.5.14",
@@ -260,7 +268,15 @@ def _finalize_pending_fullnode_event(tmp_path, checkpoint_path):
         run_errors=[],
         backend="sglang",
         checkpoint_dir=str(tmp_path / "checkpoint"),
-        finalization_info={parquet_path.resolve(): collect_mod.PerfFinalizationInfo(new_rows=2, merged_existing=False)},
+        finalization_info={
+            parquet_path.resolve(): collect_mod.PerfFinalizationInfo(
+                new_rows=2,
+                merged_existing=False,
+                source_digest="sha256:" + hashlib.sha256(staging_path.read_bytes()).hexdigest(),
+                source_device=staging_stat.st_dev,
+                source_inode=staging_stat.st_ino,
+            )
+        },
     )
     table = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))["tables"][
         "wideep_deepep_ll_perf"
