@@ -198,6 +198,39 @@ def _strict_provenance_flag(database: Any) -> bool:
     return bool(getattr(database, "strict_provenance", False)) if database is not None else False
 
 
+def _literal_backend_version(
+    system: str,
+    backend: str,
+    backend_version: str | None,
+    systems_path: str | None,
+    database: Any,
+) -> str | None:
+    """Resolve the version the ``EngineSpec`` carries to a LITERAL directory name.
+
+    The Rust side reloads the perf database from this string
+    (``AicEngine.from_spec`` and the native ``AicEngineBuilder`` path used by
+    the Dynamo Mocker) and resolves no slot aliases — slot semantics
+    (``current`` / ``previous`` / ``next``) live in the python layer only.
+    Preference order: the loaded database's own version (the ground truth for
+    what the spec was compiled against), then slot resolution of the request
+    (an omitted version means the ``current`` slot). Slot-policy errors
+    (unlisted versions, unpopulated aliases) PROPAGATE — the spec builder is
+    a user-level surface and must not smuggle ungated coordinates onto the
+    wire. Trees without a slots file (synthetic/external) keep the ungated
+    passthrough.
+    """
+    resolved = getattr(database, "version", None) if database is not None else None
+    if resolved:
+        return str(resolved)
+    from aiconfigurator_core.sdk import perf_database
+
+    slots = perf_database.get_version_slots(system, backend, systems_paths=systems_path)
+    if slots is None:
+        return backend_version
+    requested = "current" if backend_version is None else backend_version
+    return perf_database.resolve_query_version(system, backend, requested, systems_paths=systems_path)
+
+
 def _engine_config_dict(
     *,
     model: Any,
@@ -233,7 +266,9 @@ def _engine_config_dict(
         "system_name": system,
         "systems_path": systems_path,
         "backend": backend,
-        "backend_version": backend_version,
+        # Always a literal version directory name, never a slot alias — the
+        # Rust side reloads the perf database from this string verbatim.
+        "backend_version": _literal_backend_version(system, backend, backend_version, systems_path, database),
         "kv_block_size": kv_block_size,
         # ParallelMapping (flattened)
         "tp_size": int(cfg.tp_size or 1),
@@ -259,6 +294,11 @@ def _engine_config_dict(
         # is always explicit kind tokens, ``None`` = the default ALL policy.
         "database_mode": _database_mode_name(database),
         "transfer_policy": _transfer_policy_tokens(database),
+        # Directory-less fleet-`next` marker (design §14): set only when the
+        # loaded database rode backward fill without a local version
+        # directory, so the Rust reload skips its missing-directory gate for
+        # exactly this identity.
+        "tolerate_dirless_version": bool(getattr(database, "dirless_next_load", False)),
         "extra": {},
     }
     # SpeculativeConfig (flattened, Option<>): emit nextn at the top level
@@ -356,17 +396,19 @@ def compile_engine(
     apply_nextn(model_config, nextn)
     model = get_model(model_path, model_config, backend)
 
-    # The database supplies the shared-layer perf sources, the query mode and
-    # the transfer policy stamped into the compiled `EngineConfig`. Load lazily
-    # and tolerate failure; the Rust core falls back to its own defaults.
-    database = _maybe_load_database(system, backend, backend_version, systems_path)
+    # Slot policy FIRST, tolerance second: resolve the requested version to a
+    # literal (raising on unlisted versions / unpopulated aliases) before the
+    # tolerant database load — `_maybe_load_database` forgives LOAD failures
+    # (the Rust core falls back to its own defaults), never policy violations.
+    literal_version = _literal_backend_version(system, backend, backend_version, systems_path, None)
+    database = _maybe_load_database(system, backend, literal_version, systems_path)
 
     spec_json = build_engine_spec_json(
         model,
         model_path=model_path,
         system=system,
         backend=backend,
-        backend_version=backend_version,
+        backend_version=literal_version,
         kv_block_size=kv_block_size,
         systems_path=systems_path,
         nextn=model_config.nextn,
@@ -474,6 +516,10 @@ def build_database_probe_spec_json(
         "strict_provenance": _strict_provenance_flag(database),
         "database_mode": database_mode or _database_mode_name(database),
         "transfer_policy": _transfer_policy_tokens(database),
+        # Same dir-less-next tolerance as the model spec builder: a database
+        # get_database returned as valid must stay valid through the probe
+        # handle (table views, ad-hoc op-list evaluation).
+        "tolerate_dirless_version": bool(getattr(database, "dirless_next_load", False)),
         "extra": {},
     }
     spec = {

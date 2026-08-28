@@ -1621,17 +1621,20 @@ def test_fmha_resolves_per_kv_dtype_against_joint_evidence(monkeypatch):
         options=FPMCollectionOptions.from_args(_args(fpm_kv_cache_dtypes=["bfloat16", "fp8"])),
     )
 
-    assert plan.dtype_profile.fmha_by_kv_dtype == {"bfloat16": "bfloat16", "fp8": "fp8"}
+    # The shipped b200/vllm dsa tables carry only a bfloat16 fmha slice (the
+    # pre-0.24 fp8-fmha donor lanes were retired in the 2026-08 prune and the
+    # stock 0.24 collector does not produce them), so BOTH kv slices resolve
+    # to the bfloat16 transfer slice — the fp8-kv cells record the
+    # data-availability fallback, the bf16-kv cells the kv-coupled dispatch.
+    assert plan.dtype_profile.fmha_by_kv_dtype == {"bfloat16": "bfloat16", "fp8": "bfloat16"}
     assert plan.dtype_profile.fmha_resolution_by_kv_dtype == {
-        # fp8 FMHA exists only with an fp8 KV cache, so the bf16-kv cells run
-        # (and are labeled with) the engine's kv-coupled bfloat16 dispatch.
         "bfloat16": "kv_dtype_dispatch_from_fp8",
-        "fp8": "checkpoint_native",
+        "fp8": "aic_data_fallback_from_fp8",
     }
     labels = {(cell.kv_cache_dtype, cell.fmha_quant_mode, cell.fmha_resolution) for cell in plan.cells}
     assert labels == {
         ("bfloat16", "bfloat16", "kv_dtype_dispatch_from_fp8"),
-        ("fp8", "fp8", "checkpoint_native"),
+        ("fp8", "bfloat16", "aic_data_fallback_from_fp8"),
     }
 
 

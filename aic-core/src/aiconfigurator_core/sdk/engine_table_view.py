@@ -89,8 +89,6 @@ VIEW_KEY_LAYERS: dict[str, tuple[KeyConverter, ...]] = {
     "_context_deepseek_v4_attention_module_data": (_FMHA_Q, _KV_Q, _GEMM_Q, _int, _int, _int, _int, _int, _int),
     "_generation_deepseek_v4_attention_module_data": (_KV_Q, _GEMM_Q, _int, _int, _int, _int, _int),
     "_dsv4_sparse_kernel_data.paged_mqa_logits": (_int, _int, _int, _int, _int),
-    "_dsv4_sparse_kernel_data.hca_attn": (_int, _int, _int, _int, _int),
-    "_dsv4_sparse_kernel_data.csa_attn": (_int, _int, _int, _int, _int),
     "_dsv4_csa_topk_calib_data": (_int, _int, _int, _int, _str),
     "_dsv4_megamoe_module_data": (
         _str,

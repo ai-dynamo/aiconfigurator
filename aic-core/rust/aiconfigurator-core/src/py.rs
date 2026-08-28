@@ -1487,7 +1487,7 @@ mod tests {
 
     const TEST_MODEL: &str = "MiniMaxAI/MiniMax-M2.5";
 
-    /// Hand-built context op list against the b200_sxm/vllm/0.19.0 perf tables.
+    /// Hand-built context op list against the b200_sxm/vllm/0.24.0 perf tables.
     /// `Elementwise` is DB-free (pure mem-bandwidth SOL); `Gemm` and
     /// `ContextAttention` hit `gemm_perf` / `context_attention_perf`, both of
     /// which exist for this fixture. Mirrors a MiniMax-shaped context graph
@@ -1558,7 +1558,7 @@ mod tests {
             system_name: "b200_sxm".to_string(),
             systems_path: None,
             backend: BackendKind::Vllm,
-            backend_version: Some("0.19.0".to_string()),
+            backend_version: Some("0.24.0".to_string()),
             forward_model: None,
             kv_block_size: None,
             parallel: ParallelMapping {
@@ -1578,6 +1578,7 @@ mod tests {
             speculative: None,
             enable_shared_layer: None,
             strict_provenance: false,
+            tolerate_dirless_version: false,
             database_mode: Default::default(),
             transfer_policy: None,
             extra: BTreeMap::new(),
@@ -1585,7 +1586,7 @@ mod tests {
     }
 
     /// Build bincoded `EngineSpec` bytes from hand-built op lists. The lists
-    /// query the real b200_sxm/vllm/0.19.0 perf tables so the binding
+    /// query the real b200_sxm/vllm/0.24.0 perf tables so the binding
     /// pass-through numbers are real, not synthetic.
     fn fixture_spec_bytes() -> Vec<u8> {
         let spec = EngineSpec::new(fixture_engine_config(), context_ops(), generation_ops());

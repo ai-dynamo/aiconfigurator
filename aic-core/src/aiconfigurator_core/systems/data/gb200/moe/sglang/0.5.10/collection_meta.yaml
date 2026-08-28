@@ -9,8 +9,6 @@ runtime:
 tables:
   dsv4_megamoe_module_perf:
     status: complete
-  moe_perf:
-    status: complete
   wideep_context_moe_perf:
     status: complete
   wideep_generation_moe_perf:

@@ -762,6 +762,7 @@ mod tests {
             enable_shared_layer: None,
             strict_provenance: false,
             database_mode: Default::default(),
+        tolerate_dirless_version: false,
             transfer_policy: None,
             extra: BTreeMap::new(),
         }
