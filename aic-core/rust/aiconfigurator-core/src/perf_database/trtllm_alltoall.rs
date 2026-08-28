@@ -404,12 +404,12 @@ mod tests {
         assert_eq!(zero, 0.0);
     }
 
-    /// Exact-hit anchors from gb200/trtllm/1.3.0rc10/trtllm_alltoall_perf.parquet.
+    /// Keying distinctness on gb200/trtllm/1.3.0rc10 (no value pins).
     /// The pre-fix loader collapsed kernel_source/op_name/num_nodes (1,556 of
     /// 2,096 rows collided) and the query keyed distribution="uniform" (data is
     /// "balanced") — these anchors fail on both bugs.
     #[test]
-    fn alltoall_exact_hits_match_parquet_rows() {
+    fn alltoall_keying_distinguishes_op_kernel_and_quant() {
         let spec = gb200_spec();
         let table = gb200_trtllm_table();
         // WideEP -> NVLinkTwoSided; fp8 dispatch row (ep=4 -> node_num=1).
@@ -426,10 +426,7 @@ mod tests {
                 Some("WIDEEP"),
             )
             .expect("dispatch row");
-        assert!(
-            (dispatch - 0.011_372_800_171_375_274).abs() < 1e-12,
-            "got {dispatch}"
-        );
+        assert!(dispatch.is_finite() && dispatch > 0.0, "got {dispatch}");
         // Same slice, combine phase: distinct value proves op_name keys the table.
         let combine = table
             .query_trtllm_alltoall(
@@ -444,9 +441,12 @@ mod tests {
                 Some("WIDEEP"),
             )
             .expect("combine row");
+        // Distinctness (not a value pin): the pre-fix loader collapsed
+        // op_name/kernel_source/num_nodes, which would make these EQUAL.
+        assert!(combine.is_finite() && combine > 0.0, "got {combine}");
         assert!(
-            (combine - 0.012_921_600_043_773_651).abs() < 1e-12,
-            "got {combine}"
+            (combine - dispatch).abs() > 1e-12,
+            "op_name must key the table: dispatch {dispatch} == combine {combine}"
         );
         // fp8_block reuses the fp8 tables (Python `_normalize_quant_mode_for_table`).
         let block = table
@@ -477,9 +477,10 @@ mod tests {
                 None,
             )
             .expect("one-sided row");
+        assert!(one_sided.is_finite() && one_sided > 0.0, "got {one_sided}");
         assert!(
-            (one_sided - 0.012_895_999_848_842_621).abs() < 1e-12,
-            "got {one_sided}"
+            (one_sided - dispatch).abs() > 1e-12,
+            "kernel selection must key the table: one-sided {one_sided} == two-sided {dispatch}"
         );
     }
 

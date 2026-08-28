@@ -26,7 +26,7 @@ fn systems_root() -> PathBuf {
 
 const TEST_MODEL: &str = "MiniMaxAI/MiniMax-M2.5";
 
-/// Hand-built context op list against the b200_sxm/vllm/0.19.0 perf tables
+/// Hand-built context op list against the b200_sxm/vllm/0.24.0 perf tables
 /// (same fixture pattern as `engine/runtime.rs` and `py.rs` tests).
 fn context_ops() -> Vec<Op> {
     vec![
@@ -91,7 +91,7 @@ fn fixture_engine_config() -> EngineConfig {
         system_name: "b200_sxm".to_string(),
         systems_path: None,
         backend: BackendKind::Vllm,
-        backend_version: Some("0.19.0".to_string()),
+        backend_version: Some("0.24.0".to_string()),
         forward_model: None,
         kv_block_size: None,
         parallel: ParallelMapping {
@@ -112,6 +112,7 @@ fn fixture_engine_config() -> EngineConfig {
         enable_shared_layer: None,
         strict_provenance: false,
         database_mode: Default::default(),
+        tolerate_dirless_version: false,
         transfer_policy: None,
         extra: BTreeMap::new(),
     }
@@ -121,14 +122,14 @@ fn fixture_engine_config() -> EngineConfig {
 /// public `from_native` constructors compile via Python; `from_engine` lets
 /// the pure-Rust tests build the native variant directly.
 fn native_model(options: ForwardPassPerfOptions) -> ForwardPassPerfModel {
-    let db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
+    let db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.24.0").unwrap();
     let spec = EngineSpec::new(fixture_engine_config(), context_ops(), generation_ops());
     let engine = Engine::build(spec, Arc::new(db)).unwrap();
     ForwardPassPerfModel::from_engine(Arc::new(engine), options)
 }
 
 fn fixture_engine() -> Arc<Engine> {
-    let db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.19.0").unwrap();
+    let db = PerfDatabase::load(&systems_root(), "b200_sxm", "vllm", "0.24.0").unwrap();
     let spec = EngineSpec::new(fixture_engine_config(), context_ops(), generation_ops());
     Arc::new(Engine::build(spec, Arc::new(db)).unwrap())
 }

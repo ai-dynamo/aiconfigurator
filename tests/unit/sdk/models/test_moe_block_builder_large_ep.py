@@ -306,7 +306,7 @@ class TestSglangLargeEPValues:
 
     @pytest.fixture(scope="class")
     def db(self):
-        db = get_database("h200_sxm", "sglang", "0.5.6.post2")
+        db = get_database("h200_sxm", "sglang", "0.5.6.post2", allow_unlisted_version=True)
         assert db is not None
         return db
 
@@ -569,7 +569,7 @@ class TestTrtllmLargeEPStructure:
 class TestTrtllmLargeEPValues:
     @pytest.fixture(scope="class")
     def db(self):
-        db = get_database("gb200", "trtllm", "1.3.0rc10")
+        db = get_database("gb200", "trtllm", "1.3.0rc10", allow_unlisted_version=True)
         assert db is not None
         return db
 

@@ -78,6 +78,21 @@ def _provenance_ctx(collections: list[dict]) -> dict:
     }
 
 
+def _xpu_provenance_ctx(collections: list[dict]) -> dict:
+    runtime = CollectorRuntime(
+        framework="vllm_xpu",
+        version="0.26.0",
+        images={"default": "vllm/vllm-openai-xpu:v0.26.0@sha256:" + "5" * 64},
+        data_backend="vllm",
+    )
+    return {
+        "framework": runtime.framework,
+        "installed_version": "0.26.0+xpu",
+        "runtime": runtime,
+        "collections": collections,
+    }
+
+
 def _write_checkpoint(checkpoint_dir: Path, *, done: list[str], failed: list[str]) -> Path:
     path = checkpoint_dir / BACKEND / f"{FULL_NAME}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,6 +105,35 @@ def _write_checkpoint(checkpoint_dir: Path, *, done: list[str], failed: list[str
                 "run_func": "run",
                 "framework_version": "0.5.14",
                 "sm_version": 100,
+                "updated_at": "2026-07-20T00:00:00",
+                "done": sorted(done),
+                "failed": sorted(failed),
+            }
+        )
+    )
+    return path
+
+
+def _write_checkpoint_for(
+    checkpoint_dir: Path,
+    *,
+    backend: str,
+    full_name: str,
+    version: str,
+    done: list[str],
+    failed: list[str],
+) -> Path:
+    path = checkpoint_dir / backend / f"{full_name}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema": collect_mod.RESUME_SCHEMA_VERSION,
+                "backend": backend,
+                "module": full_name,
+                "run_func": "run",
+                "framework_version": version,
+                "sm_version": None,
                 "updated_at": "2026-07-20T00:00:00",
                 "done": sorted(done),
                 "failed": sorted(failed),

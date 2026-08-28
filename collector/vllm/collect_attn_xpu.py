@@ -8,7 +8,7 @@ backend setup, and perf logging through XPU-capable helper paths. It benchmarks
 isolated context/generation attention kernels with synthetic KV-cache state.
 """
 
-__compat__ = "vllm>=0.11.0"
+__compat__ = "vllm==0.26.0"
 
 import os
 
@@ -71,6 +71,33 @@ class MockAttentionLayer:
         self._q_scale_float = 1.0
         self._k_scale_float = 1.0
         self._v_scale_float = 1.0
+
+
+def _apply_kv_cache_stride_order(kv_cache: torch.Tensor, stride_order: tuple[int, ...]) -> torch.Tensor:
+    if stride_order != tuple(range(kv_cache.ndim)):
+        inverse_order = [stride_order.index(i) for i in range(kv_cache.ndim)]
+        return kv_cache.permute(*stride_order).contiguous().permute(*inverse_order)
+    return kv_cache.contiguous()
+
+
+def _pack_v1_fa_kv_cache(kv_cache: torch.Tensor, stride_order: tuple[int, ...]) -> torch.Tensor:
+    logical_cache = torch.cat([kv_cache[0], kv_cache[1]], dim=-1).transpose(1, 2)
+    return _apply_kv_cache_stride_order(logical_cache, stride_order)
+
+
+def _get_backend_kv_cache_stride_order(backend_cls, ndim: int) -> tuple[int, ...]:
+    get_stride_order = getattr(backend_cls, "get_kv_cache_stride_order", None)
+    if get_stride_order is None:
+        return tuple(range(ndim))
+    return tuple(get_stride_order())
+
+
+def _forward_with_optional_kv_cache_update(
+    backend_cls, impl, layer, query, key, value, kv_cache, attn_metadata, output
+):
+    if not getattr(backend_cls, "forward_includes_kv_cache_update", False):
+        impl.do_kv_cache_update(layer, key, value, kv_cache, attn_metadata.slot_mapping)
+    return impl.forward(layer, query, key, value, kv_cache, attn_metadata, output=output)
 
 
 # https://github.com/vllm-project/vllm/tree/main/vllm/v1/attention/backends
@@ -165,8 +192,8 @@ def run_attention_torch(
                         use_v1=True,
                     )
 
-    backend_name_obj = resolve_obj_by_qualname(backend)
-    backend_name_str = backend_name_obj.get_name()
+    backend_cls = resolve_obj_by_qualname(backend)
+    backend_name_str = backend_cls.get_name()
     if AttentionBackendEnum is not None:
         backend_name = AttentionBackendEnum[backend_name_str]
     elif LegacyBackendEnum is not None:
@@ -251,19 +278,28 @@ def run_attention_torch(
         randomize_blocks=True,
     )
 
+    exit_stack.enter_context(set_current_vllm_config(vllm_config))
+
     # Fix backend-specific kv cache layout.
     backend_name_str = backend_name if isinstance(backend_name, str) else backend_name.name
 
     if backend_name_str in {"FLASH_ATTN", "FLASHINFER", "TRITON_ATTN"}:
         # The collector helper populates cache as [2, num_blocks, ...] because
-        # that layout makes K/V insertion simple. vLLM V1 backends consume it as
-        # [num_blocks, 2, ...].
-        kv_cache = kv_cache.transpose(0, 1).contiguous()
-
-    if backend_name_str == "FLASHINFER":
-        # For FlashInfer default to HND layout
-        kv_cache = kv_cache.transpose(2, 3).contiguous().transpose(2, 3)
-        set_kv_cache_layout("HND")
+        # that layout makes K/V insertion simple. vLLM V1 FA-style backends
+        # consume packed K/V as [num_blocks, num_kv_heads, block_size,
+        # 2 * head_size]. The XPU FA wrapper then transposes and splits this
+        # packed logical view into kernel inputs shaped [num_blocks,
+        # block_size, num_kv_heads, head_size]. Keep vLLM's backend-selected
+        # physical stride order so those kernel views match serving.
+        get_required_layout = getattr(backend_cls, "get_required_kv_cache_layout", None)
+        if get_required_layout is not None:
+            set_kv_cache_layout(get_required_layout())
+            exit_stack.callback(set_kv_cache_layout, None)
+        elif backend_name_str == "FLASHINFER":
+            set_kv_cache_layout("HND")
+            exit_stack.callback(set_kv_cache_layout, None)
+        stride_order = _get_backend_kv_cache_stride_order(backend_cls, 4)
+        kv_cache = _pack_v1_fa_kv_cache(kv_cache, stride_order)
 
     # Handle special case for FLEX_ATTENTION_SLOW
     actual_backend = backend_name
@@ -279,8 +315,6 @@ def run_attention_torch(
 
     builder_cls, impl_cls = get_attention_backend(actual_backend)
     layer_names = ["placeholder"]
-
-    exit_stack.enter_context(set_current_vllm_config(vllm_config))
 
     # Mock flashinfer's get_per_layer_parameters if needed
     if backend_name_str == "FLASHINFER":
@@ -347,14 +381,8 @@ def run_attention_torch(
         output = output.to(torch.bfloat16)
 
     def run():
-        impl.forward(
-            mock_layer,
-            query_vllm,
-            key_vllm,
-            value_vllm,
-            kv_cache,
-            attn_metadata,
-            output=output,
+        _forward_with_optional_kv_cache_update(
+            backend_cls, impl, mock_layer, query_vllm, key_vllm, value_vllm, kv_cache, attn_metadata, output
         )
 
     # Use benchmark_with_power context manager

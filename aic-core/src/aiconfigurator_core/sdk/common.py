@@ -437,10 +437,22 @@ def check_support(
     """
     matrix = get_support_matrix()
 
+    @cache
+    def _version_for_row_backend(row_backend: str, requested: str) -> str:
+        # Matrix rows carry resolved LITERALS; a slot alias in the request
+        # must resolve per (system, row backend) before comparison. Raw
+        # versions and unresolvable aliases compare as given.
+        try:
+            from aiconfigurator_core.sdk.perf_database import resolve_query_version
+
+            return resolve_query_version(system, row_backend, requested, allow_unlisted=True)
+        except (ValueError, KeyError):
+            return requested
+
     def _matches_filters(row: dict, backend: str | None, version: str | None) -> bool:
         if backend and row["Backend"].lower() != backend.lower():
             return False
-        return not (version and row["Version"] != version)
+        return not (version and row["Version"] != _version_for_row_backend(row["Backend"], version))
 
     # 1. Check for exact model+system matches
     exact_matches = [
@@ -558,6 +570,9 @@ DefaultHFModels = {
     "zai-org/GLM-5.2",
     "zai-org/GLM-5.2-FP8",
     "nvidia/GLM-5.2-NVFP4",
+    "zai-org/GLM-5.3",
+    "zai-org/GLM-5.3-FP8",
+    "nvidia/GLM-5.3-NVFP4",
     # DeepSeek V4
     *DEEPSEEK_V4_HF_MODELS,
     # Qwen 3 Models
@@ -754,6 +769,15 @@ MULTIMODAL_TEXT_CONFIG_KEY = {
 # nextn="auto" cannot enable speculation and the MTP mismatch warning does
 # not apply (see Task._resolve_model_identity).
 DSPARK_ARCHITECTURES = frozenset({"KimiK3ForConditionalGeneration"})
+
+# Block size (draft tokens proposed per step) for each DSPARK architecture.
+# This is a fixed constant of the draft model's design — not user-configurable
+# and not present in the main checkpoint (the draft is a separate artifact).
+# Maps architecture name → nextn block size passed to the backend as
+# speculative_config.num_speculative_tokens.
+DSPARK_NEXTN: dict[str, int] = {
+    "KimiK3ForConditionalGeneration": 7,
+}
 
 """
 All reduce strategy for trtllm custom allreduce

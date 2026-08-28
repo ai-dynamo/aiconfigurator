@@ -659,7 +659,7 @@ def test_non_strict_warns_on_unreadable_version_dir(systems_root: Path, caplog: 
 def test_real_tree_smoke_strict_on() -> None:
     databases_cache.clear()
     try:
-        db = get_database("h200_sxm", "trtllm", "1.3.0rc10", strict_provenance=True)
+        db = get_database("h200_sxm", "trtllm", "1.3.0rc20", strict_provenance=True)
         assert db is not None
         assert db.strict_provenance is True
     finally:

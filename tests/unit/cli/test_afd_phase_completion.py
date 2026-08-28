@@ -15,6 +15,7 @@ from aiconfigurator.cli.api import EstimateResult, _combine_afd_static_estimate_
 from aiconfigurator.sdk.config import AFDConfig, RuntimeConfig
 from aiconfigurator.sdk.inference_session import AFDInferenceSession
 from aiconfigurator.sdk.inference_summary import InferenceSummary
+from aiconfigurator.sdk.performance_result import MoECommFallback
 
 pytestmark = pytest.mark.unit
 
@@ -82,7 +83,7 @@ def _build_afd_session_with_phase_metrics(
     monkeypatch.setattr(AFDInferenceSession, "_simulate_phase", fake_simulate_phase)
 
     class FakeDatabase:
-        version = "test-version"
+        version = "current"
         system = "test-system"
         system_spec: ClassVar[dict] = {"gpu": {"mem_capacity": 80 * (1 << 30)}}
 
@@ -109,7 +110,13 @@ def _build_afd_session_with_phase_metrics(
     )
 
 
-def _estimate_result(*, raw: dict, mode: str = "afd", summary=None) -> EstimateResult:
+def _estimate_result(
+    *,
+    raw: dict,
+    mode: str = "afd",
+    summary=None,
+    moe_comm_fallbacks: tuple[MoECommFallback, ...] = (),
+) -> EstimateResult:
     return EstimateResult(
         ttft=float(raw.get("ttft", 0.0) or 0.0),
         tpot=float(raw.get("tpot", 0.0) or 0.0),
@@ -123,10 +130,11 @@ def _estimate_result(*, raw: dict, mode: str = "afd", summary=None) -> EstimateR
         model_path="test-model",
         system_name="test-system",
         backend_name="test-backend",
-        backend_version="test-version",
+        backend_version="current",
         raw=raw,
         mode=mode,
         summary=summary,
+        moe_comm_fallbacks=moe_comm_fallbacks,
     )
 
 
@@ -223,6 +231,28 @@ def test_prefill_afd_uses_regular_decode_metrics():
     assert combined.raw["(d)impl"] == "static_gen"
 
 
+def test_afd_static_combiner_preserves_and_deduplicates_executed_moe_fallbacks():
+    shared = MoECommFallback("context", "deepep_ht", 32, 8, 8, 1)
+    generation = MoECommFallback("generation", "deepep_ll", 32, 8, 8, 1)
+    afd_result = _estimate_result(
+        raw={"phase": "decode", "osl": 2, "tpot": 1.0, "num_total_gpus": 4},
+        moe_comm_fallbacks=(shared,),
+    )
+    static_result = _estimate_result(
+        mode="static_ctx",
+        raw={"ttft": 1.0, "seq/s": 1.0, "num_total_gpus": 4},
+        moe_comm_fallbacks=(shared, generation),
+    )
+
+    combined = _combine_afd_static_estimate_results(
+        afd_result=afd_result,
+        static_result=static_result,
+        afd_phase="decode",
+    )
+
+    assert combined.moe_comm_fallbacks == (shared, generation)
+
+
 def test_run_afd_estimate_passes_prefix_and_nextn(monkeypatch):
     captured = {}
 
@@ -269,7 +299,7 @@ def test_run_afd_estimate_passes_prefix_and_nextn(monkeypatch):
         model_path="test-model",
         system_name="test-system",
         backend_name="test-backend",
-        resolved_version="test-version",
+        resolved_version="current",
         isl=128,
         osl=10,
         tp_size=1,
@@ -903,7 +933,7 @@ def _install_estimate_perf_db_stubs(monkeypatch):
     monkeypatch.setattr(
         perf_database,
         "get_latest_database_version",
-        lambda system, backend, systems_paths=None: "test-version",
+        lambda system, backend, systems_paths=None: "current",
     )
     monkeypatch.setattr(
         perf_database,

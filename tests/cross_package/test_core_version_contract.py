@@ -17,6 +17,7 @@ CORE_ROOT = REPO_ROOT / "aic-core"
 RUST_CONFIG = CORE_ROOT / "rust" / "aiconfigurator-core" / "src" / "config.rs"
 SUPPORTED_PYTHON = ">=3.11,<3.14"
 SUPPORTED_NUMPY = "numpy>=2.1,<3"
+SUPPORTED_PLOTEXT = "plotext>=5.3.2,<6"
 
 
 def _project_version(path: Path) -> str:
@@ -47,6 +48,13 @@ def test_python_and_numpy_support_contracts_match() -> None:
         assert [dependency for dependency in project["dependencies"] if dependency.startswith("numpy")] == [
             SUPPORTED_NUMPY
         ]
+
+
+def test_plotext_support_contract_excludes_incompatible_v6() -> None:
+    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]
+    assert [dependency for dependency in project["dependencies"] if dependency.startswith("plotext")] == [
+        SUPPORTED_PLOTEXT
+    ]
 
 
 def test_engine_schema_versions_match_across_python_and_rust() -> None:

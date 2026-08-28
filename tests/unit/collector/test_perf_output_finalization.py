@@ -3,6 +3,7 @@
 
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -173,7 +174,7 @@ def test_finalize_merge_tolerates_metric_column_type_drift(tmp_path):
     rows = {r["shape"]: r for r in pq.read_table(parquet).to_pylist()}
     assert sorted(rows) == ["s1", "s2", "s3"]  # accumulated, not overwritten
     assert rows["s1"]["power"] == 5.0
-    assert rows["s3"]["power"] is None
+    assert rows["s3"]["power"] == 0.0
     # metric column keeps the existing (double) type
     assert str(pq.read_table(parquet).schema.field("power").type) == "double"
 
@@ -210,13 +211,66 @@ def test_finalize_merge_tolerates_reverse_metric_type_drift(tmp_path):
     perf = tmp_path / "gemm_perf.txt"
     parquet = perf.with_suffix(".parquet")
 
-    perf.write_text("shape,latency,power\ns1,1.0,\n")  # power inferred as null
-    finalize_perf_files([perf])
+    pq.write_table(
+        pa.table(
+            {
+                "shape": ["s1"],
+                "latency": [1.0],
+                "power": pa.nulls(1),
+            }
+        ),
+        parquet,
+    )
     perf.write_text("shape,latency,power\ns2,2.0,7.5\n")
     finalize_perf_files([perf])
 
     rows = {r["shape"]: r for r in pq.read_table(parquet).to_pylist()}
     assert sorted(rows) == ["s1", "s2"]
-    assert rows["s1"]["power"] is None
+    assert rows["s1"]["power"] == 0.0
     assert rows["s2"]["power"] == 7.5
     assert str(pq.read_table(parquet).schema.field("power").type) == "double"
+
+
+def test_finalize_normalizes_all_empty_power_metrics_to_typed_zero(tmp_path):
+    perf = tmp_path / "gemm_perf.txt"
+    parquet = perf.with_suffix(".parquet")
+
+    perf.write_text("shape,latency,power,power_limit\ns1,1.0,,\ns2,2.0,,\n")
+    finalize_perf_files([perf])
+
+    table = pq.read_table(parquet)
+    assert table.select(["power", "power_limit"]).to_pylist() == [
+        {"power": 0.0, "power_limit": 0.0},
+        {"power": 0.0, "power_limit": 0.0},
+    ]
+    assert str(table.schema.field("power").type) == "double"
+    assert str(table.schema.field("power_limit").type) == "double"
+    assert table.column("power").null_count == 0
+    assert table.column("power_limit").null_count == 0
+
+
+@pytest.mark.parametrize("value", ["-1.0", "inf"])
+def test_finalize_rejects_invalid_power_measurements(tmp_path, value):
+    perf = tmp_path / "gemm_perf.txt"
+    perf.write_text(f"shape,latency,power,power_limit\ns1,1.0,{value},1000.0\n")
+
+    with pytest.raises(ValueError, match="power must contain finite non-negative values"):
+        finalize_perf_files([perf])
+
+
+def test_finalize_treats_csv_nan_power_as_unavailable(tmp_path):
+    perf = tmp_path / "gemm_perf.txt"
+    perf.write_text("shape,latency,power,power_limit\ns1,1.0,nan,1000.0\n")
+
+    [parquet] = finalize_perf_files([perf])
+
+    assert pq.read_table(parquet).column("power").to_pylist() == [0.0]
+
+
+def test_finalize_keeps_power_disabled_schema_column_free(tmp_path):
+    perf = tmp_path / "gemm_perf.txt"
+    perf.write_text("shape,latency\ns1,1.0\n")
+
+    [parquet] = finalize_perf_files([perf])
+
+    assert pq.read_table(parquet).column_names == ["shape", "latency"]

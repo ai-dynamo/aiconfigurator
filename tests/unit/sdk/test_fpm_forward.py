@@ -372,7 +372,7 @@ class TestFPMStaticAndMixed:
 
         model, database, backend, isl, osl = fpm_session
         runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl)
-        total, _energy, per_op, _src = backend._get_genonly_step_latency(
+        total, _energy, per_op, _src, _fallbacks = backend._get_genonly_step_latency(
             model, database, runtime_config, gen_tokens=2, isl=isl, osl=osl
         )
         assert per_op["fpm_forward_decode"] == pytest.approx(7.0)
@@ -387,7 +387,7 @@ class TestFPMStaticAndMixed:
 
         model, database, backend, isl, osl = fpm_session
         runtime_config = RuntimeConfig(batch_size=2, beam_width=1, isl=isl, osl=osl)
-        total, energy, per_op, _ = backend._get_genonly_step_latency(
+        total, energy, per_op, _, _fallbacks = backend._get_genonly_step_latency(
             model, database, runtime_config, gen_tokens=2, isl=isl, osl=osl
         )
         assert per_op["fpm_forward_decode"] == pytest.approx(7.0)

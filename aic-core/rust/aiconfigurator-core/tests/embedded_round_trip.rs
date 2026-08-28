@@ -96,7 +96,7 @@ fn embedded_builder_round_trip() {
 
     // Rust -> Python (compile_engine) -> Rust path.
     let engine = AicEngineBuilder::new(TEST_MODEL, "b200_sxm", BackendKind::Vllm)
-        .backend_version("0.19.0")
+        .backend_version("0.24.0")
         .tp_size(8)
         .moe_parallelism(Some(1), Some(8))
         .build()
