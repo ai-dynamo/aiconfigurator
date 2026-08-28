@@ -443,7 +443,48 @@ def test_atomic_exclusive_write_rejects_regular_temp_path_swap(tmp_path, monkeyp
 
     assert swapped_temp_path is not None
     assert swapped_temp_path.read_bytes() == competitor
-    assert not destination.exists()
+    assert destination.read_bytes() == competitor
+    assert destination.samefile(swapped_temp_path)
+
+
+def test_atomic_exclusive_write_preserves_destination_replacement_after_mismatch(tmp_path, monkeypatch):
+    destination = tmp_path / "collection_meta.yaml"
+    observed_link = tmp_path / "observed-link"
+    second_competitor = tmp_path / "second-competitor"
+    second_competitor.write_bytes(b"second competitor")
+    swapped_temp_path = None
+    replacement_injected = False
+    real_link = collect_mod.os.link
+    real_ifmt = collect_mod.stat.S_IFMT
+
+    def swap_temp_then_link(source, target, *args, **kwargs):
+        nonlocal swapped_temp_path
+        swapped_temp_path = Path(source)
+        replacement = tmp_path / "first-competitor"
+        replacement.write_bytes(b"first competitor")
+        replacement.replace(swapped_temp_path)
+        return real_link(source, target, *args, **kwargs)
+
+    def replace_before_type_compare(mode):
+        nonlocal replacement_injected
+        file_type = real_ifmt(mode)
+        if not replacement_injected:
+            replacement_injected = True
+            destination.replace(observed_link)
+            second_competitor.replace(destination)
+        return file_type
+
+    monkeypatch.setattr(collect_mod.os, "link", swap_temp_then_link)
+    monkeypatch.setattr(collect_mod.stat, "S_IFMT", replace_before_type_compare)
+
+    with pytest.raises(RuntimeError, match=r"publication|changed"):
+        collect_mod._atomic_write_bytes(destination, b"owned", replace_existing=False)
+
+    assert replacement_injected
+    assert destination.read_bytes() == b"second competitor"
+    assert observed_link.read_bytes() == b"first competitor"
+    assert swapped_temp_path is not None
+    assert swapped_temp_path.read_bytes() == b"first competitor"
 
 
 def test_atomic_exclusive_write_rejects_symlink_temp_path_swap(tmp_path, monkeypatch):
@@ -471,8 +512,8 @@ def test_atomic_exclusive_write_rejects_symlink_temp_path_swap(tmp_path, monkeyp
     assert swapped_temp_path is not None
     assert swapped_temp_path.is_symlink()
     assert competitor.read_bytes() == b"competitor"
-    assert not destination.exists()
-    assert not destination.is_symlink()
+    assert destination.is_symlink()
+    assert destination.samefile(competitor)
 
 
 def test_atomic_exclusive_write_publishes_owned_bytes_and_mode(tmp_path, monkeypatch):
@@ -492,6 +533,49 @@ def test_atomic_exclusive_write_publishes_owned_bytes_and_mode(tmp_path, monkeyp
     assert stat.S_IMODE(destination.stat().st_mode) == 0o640
     assert follow_symlinks == [False]
     assert list(tmp_path.glob(".collection_meta.yaml.*.tmp")) == []
+
+
+def test_recovery_rejects_retained_atomic_publication_mismatch_without_mutation(tmp_path):
+    output_root = tmp_path / "out"
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.parent.mkdir(parents=True)
+    staging_path.write_bytes(b"owned staging")
+    _write_sidecar_transaction(
+        output_root,
+        [(checkpoint_path, {"case-a"})],
+        [staging_path],
+        checkpoint_dir=checkpoint_dir,
+        tagged={checkpoint_path},
+        pending_document=True,
+    )
+    meta_path = output_root / "collection_meta.yaml"
+    meta_path.write_bytes(b"retained mismatched publication")
+    tracked_paths = (
+        meta_path,
+        output_root / collect_mod._SIDECAR_STAGING_FILENAME,
+        output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME,
+        staging_path,
+        checkpoint_path,
+    )
+    before = {path: (path.lstat().st_dev, path.lstat().st_ino, path.read_bytes()) for path in tracked_paths}
+    entries_before = {path.relative_to(tmp_path) for path in tmp_path.rglob("*")}
+
+    with pytest.raises(RuntimeError, match=r"sidecar target changed"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert {path: (path.lstat().st_dev, path.lstat().st_ino, path.read_bytes()) for path in tracked_paths} == before
+    assert {path.relative_to(tmp_path) for path in tmp_path.rglob("*")} == entries_before
 
 
 def test_claim_rejects_broken_symlink_swap_after_batch_validation(tmp_path, monkeypatch):

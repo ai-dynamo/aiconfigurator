@@ -225,24 +225,12 @@ def _atomic_write_bytes(
                 os.link(temp_path, path, follow_symlinks=False)
                 published_owner = os.fstat(temp_file.fileno())
                 published = path.lstat()
-                if not stat.S_ISREG(published.st_mode) or (published.st_dev, published.st_ino) != (
+                if stat.S_IFMT(published.st_mode) != stat.S_IFREG or (published.st_dev, published.st_ino) != (
                     published_owner.st_dev,
                     published_owner.st_ino,
                 ):
-                    try:
-                        linked_source = temp_path.lstat()
-                        current_target = path.lstat()
-                    except FileNotFoundError:
-                        pass
-                    else:
-                        linked_identity = (published.st_dev, published.st_ino)
-                        if (
-                            (linked_source.st_dev, linked_source.st_ino) == linked_identity
-                            and (current_target.st_dev, current_target.st_ino) == linked_identity
-                            and stat.S_IFMT(linked_source.st_mode) == stat.S_IFMT(published.st_mode)
-                            and stat.S_IFMT(current_target.st_mode) == stat.S_IFMT(published.st_mode)
-                        ):
-                            path.unlink()
+                    # Portable unlink has no inode compare-and-swap; retain the
+                    # mismatched entry as evidence for recovery or inspection.
                     raise RuntimeError(f"Atomic write publication changed before attestation: {path}")
                 current = temp_path.lstat()
                 if stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == temp_identity:
