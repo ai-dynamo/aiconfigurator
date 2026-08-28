@@ -421,6 +421,18 @@ def run_gdn_generation_benchmark(
     torch.set_default_device(device)
 
     dtype = torch.bfloat16
+    # Serving population @v0.5.14: configs/qwen3_next.py:294-305 builds
+    # Mamba2CacheParams with configs/mamba_utils.py:63-67,70-107's resolved
+    # dtype; mem_cache/memory_pool.py:342-344,390-394 allocates the temporal
+    # state in it, and linear/kernels/gdn_triton.py:81-92 consumes it unchanged.
+    try:
+        recurrent_state_dtype = {
+            "float32": torch.float32,
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+        }[mamba_ssm_dtype]
+    except KeyError as error:
+        raise ValueError(f"Unsupported mamba_ssm_dtype for SGLang GDN: {mamba_ssm_dtype!r}") from error
     qk_dim = num_k_heads * head_k_dim
     value_dim = num_v_heads * head_v_dim
     conv_channels = 2 * qk_dim + value_dim
@@ -432,12 +444,8 @@ def run_gdn_generation_benchmark(
         )
 
     conv_weight = torch.randn(conv_channels, d_conv, dtype=dtype, device=device)
-    # Resolve serving's exact decode dispatch once per test case. Only SM
-    # major 10 + bf16 state selects FlashInfer; current repository-owned
-    # Qwen3.5/3.6 recipes all declare float32 and remain on FLA. When a real
-    # bf16-state case is declared but FlashInfer is unavailable,
-    # flashinfer_gdn_decode_error carries the classified-failure message
-    # raised below. See _resolve_flashinfer_gdn_decode.
+    # Resolve serving's exact decode dispatch: SM-major 10 + bf16 uses FI;
+    # current FP32 recipes stay on FLA, and a required-but-missing FI raises.
     flashinfer_gdn_decode_fn, flashinfer_gdn_decode_error = _resolve_flashinfer_gdn_decode(mamba_ssm_dtype)
     successful_points = 0
     failed_points = 0
@@ -529,7 +537,7 @@ def run_gdn_generation_benchmark(
                     num_v_heads,
                     head_v_dim,
                     head_k_dim,
-                    dtype=torch.float32,
+                    dtype=recurrent_state_dtype,
                     device=device,
                 )
 
@@ -574,9 +582,9 @@ def run_gdn_generation_benchmark(
                 # q/k/v split+reshaped from mixed_qkv exactly as
                 # GDNAttnBackend.forward_decode does (gdn_backend.py:348-357
                 # @0.5.14) before calling the kernel_dispatcher. The state
-                # pool is bf16 here (not fp32 like the fla lane's
-                # recurrent_state above) because server_args.py:4884-4915
-                # hard-requires bf16 state on this backend on SM100+.
+                # pool is bf16 here, independent of the FLA lane's case dtype,
+                # because server_args.py:4884-4915 hard-requires bf16 state on
+                # this backend on SM100+.
                 flashinfer_query, flashinfer_key, flashinfer_value = torch.split(
                     mixed_qkv, [qk_dim, qk_dim, value_dim], dim=-1
                 )

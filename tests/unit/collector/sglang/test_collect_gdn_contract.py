@@ -199,6 +199,7 @@ class _FakeCuda:
 
 class _FakeTorch:
     bfloat16 = "bfloat16"
+    float16 = "float16"
     float32 = "float32"
     int32 = "int32"
     cuda = _FakeCuda()
@@ -249,21 +250,32 @@ class _FakeBenchmark:
         return False
 
 
-def _run_generation_case(*, dtype, flashinfer_kernel, flashinfer_error=None, invoked=None, logged=None):
+def _run_generation_case(
+    *, dtype, flashinfer_kernel, flashinfer_error=None, invoked=None, logged=None, allocations=None, resolve=None
+):
     invoked = [] if invoked is None else invoked
     logged = [] if logged is None else logged
+    allocations = [] if allocations is None else allocations
+    fake_torch = _FakeTorch()
+    original_zeros = fake_torch.zeros
+
+    def recording_zeros(*args, **kwargs):
+        allocations.append((args, kwargs.get("dtype")))
+        return original_zeros(*args, **kwargs)
+
+    fake_torch.zeros = recording_zeros
     run_generation = _load_function(
         SOURCE_PATH,
         "run_gdn_generation_benchmark",
         {
             "gc": gc,
-            "torch": _FakeTorch(),
+            "torch": fake_torch,
             "aic_debug": 0,
             "causal_conv1d_update": lambda *_args, **_kwargs: invoked.append("causal_conv1d_update"),
             "fused_recurrent_gated_delta_rule_packed_decode": lambda **_kwargs: invoked.append(
                 "fused_recurrent_gated_delta_rule_packed_decode"
             ),
-            "_resolve_flashinfer_gdn_decode": lambda _dtype: (flashinfer_kernel, flashinfer_error),
+            "_resolve_flashinfer_gdn_decode": resolve or (lambda _dtype: (flashinfer_kernel, flashinfer_error)),
             "benchmark_with_power": lambda *, kernel_func, **_kwargs: _FakeBenchmark(kernel_func),
             "log_perf": lambda **kwargs: logged.append(kwargs["kernel_source"]) or True,
         },
@@ -283,7 +295,7 @@ def _run_generation_case(*, dtype, flashinfer_kernel, flashinfer_error=None, inv
         device="cuda:0",
         mamba_ssm_dtype=dtype,
     )
-    return invoked, logged
+    return invoked, logged, allocations
 
 
 @pytest.mark.parametrize(
@@ -301,7 +313,7 @@ def test_generation_invokes_and_logs_exactly_one_serving_decode_backend(
         invoked_by_flashinfer.append("flashinfer_gated_delta_rule_decode")
 
     invoked_by_flashinfer = []
-    invoked, logged = _run_generation_case(
+    invoked, logged, _allocations = _run_generation_case(
         dtype=dtype,
         flashinfer_kernel=flashinfer_kernel if flashinfer_selected else None,
     )
@@ -321,6 +333,89 @@ def test_generation_missing_selected_flashinfer_raises_classified_failure_withou
             dtype="bfloat16",
             flashinfer_kernel=None,
             flashinfer_error=error,
+            invoked=invoked,
+            logged=logged,
+        )
+
+    assert "fused_recurrent_gated_delta_rule_packed_decode" not in invoked
+    assert "fused_recurrent_gated_delta_rule_packed_decode" not in logged
+    assert logged == ["causal_conv1d_update"]
+
+
+@pytest.mark.parametrize(
+    ("sm_version", "dtype", "flashinfer_selected", "expected_decode_source", "expected_state_dtype"),
+    [
+        pytest.param(
+            100, "float32", False, "fused_recurrent_gated_delta_rule_packed_decode", "float32", id="sm100-fp32-fla"
+        ),
+        pytest.param(
+            103, "float32", False, "fused_recurrent_gated_delta_rule_packed_decode", "float32", id="sm103-fp32-fla"
+        ),
+        pytest.param(
+            120, "bfloat16", False, "fused_recurrent_gated_delta_rule_packed_decode", "bfloat16", id="sm120-bf16-fla"
+        ),
+        pytest.param(
+            90, "float16", False, "fused_recurrent_gated_delta_rule_packed_decode", "float16", id="sm90-fp16-fla"
+        ),
+        pytest.param(
+            103, "bfloat16", True, "flashinfer_gated_delta_rule_decode", "bfloat16", id="sm103-bf16-flashinfer"
+        ),
+    ],
+)
+def test_generation_dynamic_dispatch_allocates_serving_state_dtype(
+    monkeypatch,
+    sm_version,
+    dtype,
+    flashinfer_selected,
+    expected_decode_source,
+    expected_state_dtype,
+):
+    invoked_by_flashinfer = []
+
+    def flashinfer_kernel(**_kwargs):
+        invoked_by_flashinfer.append("flashinfer_gated_delta_rule_decode")
+
+    fake_gdn_decode = types.ModuleType("flashinfer.gdn_decode")
+    fake_gdn_decode.gated_delta_rule_decode_pretranspose = flashinfer_kernel
+    fake_flashinfer = types.ModuleType("flashinfer")
+    fake_flashinfer.gdn_decode = fake_gdn_decode
+    monkeypatch.setitem(sys.modules, "flashinfer", fake_flashinfer)
+    monkeypatch.setitem(sys.modules, "flashinfer.gdn_decode", fake_gdn_decode)
+    resolve = _load_function(
+        SOURCE_PATH,
+        "_resolve_flashinfer_gdn_decode",
+        {"get_sm_version": lambda: sm_version},
+    )
+
+    invoked, logged, allocations = _run_generation_case(
+        dtype=dtype,
+        flashinfer_kernel=flashinfer_kernel if flashinfer_selected else None,
+        resolve=resolve,
+    )
+    invoked += invoked_by_flashinfer
+
+    assert [source for source in invoked if "gated_delta_rule" in source] == [expected_decode_source]
+    assert [source for source in logged if "gated_delta_rule" in source] == [expected_decode_source]
+    state_allocations = [allocation_dtype for (shape, allocation_dtype) in allocations if len(shape) == 4]
+    assert state_allocations == [expected_state_dtype]
+
+
+def test_generation_dynamic_missing_flashinfer_raises_without_fla_invocation_or_row(monkeypatch):
+    monkeypatch.delitem(sys.modules, "flashinfer.gdn_decode", raising=False)
+    monkeypatch.delitem(sys.modules, "flashinfer", raising=False)
+    resolve = _load_function(
+        SOURCE_PATH,
+        "_resolve_flashinfer_gdn_decode",
+        {"get_sm_version": lambda: 100},
+    )
+    invoked = []
+    logged = []
+
+    with pytest.raises(RuntimeError, match="FlashInfer bf16 GDN decode lane required but unavailable"):
+        _run_generation_case(
+            dtype="bfloat16",
+            flashinfer_kernel=None,
+            resolve=resolve,
             invoked=invoked,
             logged=logged,
         )

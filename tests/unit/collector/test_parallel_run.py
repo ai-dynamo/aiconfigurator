@@ -604,10 +604,13 @@ class TestResumeIntegrity:
         assert unresolved[0]["classification"] == "unresolved_from_checkpoint"
         assert "1 unresolved" in unresolved[0]["error_message"]
 
-    def test_retry_failed_attempt_ledger_excludes_prior_completed_case(self, tmp_path):
+    def test_interrupted_retry_unions_prior_pending_attempts(self, tmp_path):
         tasks = _tasks([("case-old", "normal"), ("case-retried", "error")])
         _run(tasks, 1, tmp_path, module_name="retry_attestation")
 
+        # No common finalization happened between invocations: the staged rows
+        # from both the successful and failed case still belong to one pending
+        # provenance event. A resumed retry must extend, not replace, it.
         parallel_run(
             tasks,
             _task_fn,
@@ -622,9 +625,9 @@ class TestResumeIntegrity:
 
         assert _load_done_ids(tmp_path, "retry_attestation") == {"case-old"}
         assert _load_failed_ids(tmp_path, "retry_attestation") == {"case-retried"}
-        assert _load_attempted_ids(tmp_path, "retry_attestation") == {"case-retried"}
+        assert _load_attempted_ids(tmp_path, "retry_attestation") == {"case-old", "case-retried"}
 
-    def test_zero_work_resume_clears_attempt_ledger_without_losing_resume_state(self, tmp_path):
+    def test_zero_work_resume_preserves_unfinalized_attempt_ledger(self, tmp_path):
         tasks = _tasks([("case-a", "normal"), ("case-b", "normal")])
         _run(tasks, 1, tmp_path, module_name="zero_work_attestation")
 
@@ -642,4 +645,23 @@ class TestResumeIntegrity:
 
         assert _load_done_ids(tmp_path, "zero_work_attestation") == {"case-a", "case-b"}
         assert _load_failed_ids(tmp_path, "zero_work_attestation") == set()
-        assert _load_attempted_ids(tmp_path, "zero_work_attestation") == set()
+        assert _load_attempted_ids(tmp_path, "zero_work_attestation") == {"case-a", "case-b"}
+
+    def test_fresh_zero_work_run_replaces_stale_checkpoint(self, tmp_path):
+        module_name = "fresh_zero_work"
+        _run(_tasks([("stale-case", "normal")]), 1, tmp_path, module_name=module_name)
+
+        assert (
+            parallel_run(
+                [],
+                _task_fn,
+                num_processes=0,
+                module_name=module_name,
+                resume_options={"checkpoint_dir": str(tmp_path / ".checkpoint")},
+            )
+            == []
+        )
+
+        assert _load_done_ids(tmp_path, module_name) == set()
+        assert _load_failed_ids(tmp_path, module_name) == set()
+        assert _load_attempted_ids(tmp_path, module_name) == set()

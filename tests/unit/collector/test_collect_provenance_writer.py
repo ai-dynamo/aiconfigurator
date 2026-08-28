@@ -61,7 +61,15 @@ FULL_NAME = f"{BACKEND}.{OP_TYPE}"  # collection["name"] + "." + collection["typ
 
 
 def _collections(table: str = "gemm_perf") -> list[dict]:
-    return [{"name": BACKEND, "type": OP_TYPE, "module": REAL_MODULE, "perf_filename": f"{table}.txt"}]
+    return [
+        {
+            "name": BACKEND,
+            "type": OP_TYPE,
+            "module": REAL_MODULE,
+            "run_func": "run",
+            "perf_filename": f"{table}.txt",
+        }
+    ]
 
 
 def _provenance_ctx(collections: list[dict]) -> dict:
@@ -74,6 +82,7 @@ def _provenance_ctx(collections: list[dict]) -> dict:
         "framework": runtime.framework,
         "installed_version": runtime.version,
         "runtime": runtime,
+        "sm_version": 100,
         "collections": collections,
     }
 
@@ -89,6 +98,7 @@ def _xpu_provenance_ctx(collections: list[dict]) -> dict:
         "framework": runtime.framework,
         "installed_version": "0.26.0+xpu",
         "runtime": runtime,
+        "sm_version": None,
         "collections": collections,
     }
 
@@ -129,6 +139,7 @@ def _write_checkpoint_for(
     version: str,
     done: list[str],
     failed: list[str],
+    attempted: list[str] | None = None,
 ) -> Path:
     path = checkpoint_dir / backend / f"{full_name}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -140,10 +151,11 @@ def _write_checkpoint_for(
                 "module": full_name,
                 "run_func": "run",
                 "framework_version": version,
-                "sm_version": None,
+                "sm_version": 100,
                 "updated_at": "2026-07-20T00:00:00",
                 "done": sorted(done),
                 "failed": sorted(failed),
+                "attempted": sorted(done + failed if attempted is None else attempted),
             }
         )
     )
@@ -166,13 +178,71 @@ def _finalization_info_for(*parquet_paths: Path) -> dict[Path, collect_mod.PerfF
     }
 
 
+def _attempted(checkpoint_path: Path) -> set[str]:
+    return set(json.loads(checkpoint_path.read_text(encoding="utf-8")).get("attempted", []))
+
+
+def _write_sidecar_transaction(
+    output_root: Path,
+    participants: list[tuple[Path, set[str]]],
+    staging_paths: list[Path],
+    *,
+    tagged: set[Path],
+    pending_document: bool,
+) -> None:
+    output_root.mkdir(parents=True, exist_ok=True)
+    meta_path = output_root / "collection_meta.yaml"
+    meta_path.write_text("same sidecar bytes\n", encoding="utf-8")
+    if pending_document:
+        (output_root / collect_mod._SIDECAR_STAGING_FILENAME).write_bytes(meta_path.read_bytes())
+    transaction_id = "test-transaction"
+    for checkpoint_path, attempted_case_ids in participants:
+        if checkpoint_path in tagged:
+            collect_mod._tag_checkpoint_sidecar_transaction(
+                checkpoint_path,
+                attempted_case_ids,
+                transaction_id,
+            )
+    transaction = {
+        "schema": collect_mod._SIDECAR_TRANSACTION_SCHEMA,
+        "transaction_id": transaction_id,
+        "sidecar_path": str(meta_path.resolve()),
+        "sidecar_digest": collect_mod._sidecar_digest(meta_path),
+        "checkpoints": [
+            {"path": str(checkpoint_path), "attempted": sorted(attempted_case_ids)}
+            for checkpoint_path, attempted_case_ids in participants
+        ],
+        "staging_paths": [str(path.resolve()) for path in staging_paths],
+    }
+    (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).write_text(
+        json.dumps(transaction),
+        encoding="utf-8",
+    )
+
+
+def test_atomic_checkpoint_replace_failure_preserves_previous_document(tmp_path, monkeypatch):
+    checkpoint_path = tmp_path / "checkpoint.json"
+    checkpoint_path.write_text('{"attempted": ["old"]}', encoding="utf-8")
+
+    def fail_replace(_source, _target):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(collect_mod.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="simulated replace failure"):
+        collect_mod._atomic_write_json(checkpoint_path, {"attempted": ["new"]})
+
+    assert json.loads(checkpoint_path.read_text(encoding="utf-8")) == {"attempted": ["old"]}
+    assert list(tmp_path.glob(".checkpoint.json.*.tmp")) == []
+
+
 def test_writes_sidecar_with_rows_case_plan_hash_status_and_collector_ref(tmp_path):
     output_root = tmp_path / "out"
     parquet_path = output_root / "gemm_perf.parquet"
     _write_parquet(parquet_path, [{"op": "matmul", "latency": 1.0}, {"op": "matmul", "latency": 2.0}])
 
     checkpoint_dir = tmp_path / "checkpoint"
-    _write_checkpoint(checkpoint_dir, done=["case-a", "case-b"], failed=[])
+    checkpoint_path = _write_checkpoint(checkpoint_dir, done=["case-a", "case-b"], failed=[])
 
     collect_mod._write_collector_provenance(
         output_root,
@@ -194,6 +264,7 @@ def test_writes_sidecar_with_rows_case_plan_hash_status_and_collector_ref(tmp_pa
     assert table["status"] == provenance.STATUS_COMPLETE
     assert table["collector_ref"] == collect_mod._git_collector_ref(collect_mod._REPO_ROOT)
     assert table["collector_hash"].startswith("sha256:")
+    assert _attempted(checkpoint_path) == set()
 
 
 def test_status_complete_with_recorded_case_failures(tmp_path):
@@ -432,7 +503,7 @@ def test_retry_event_hash_attests_only_cases_attempted_this_invocation(tmp_path)
     assert collect_mod.finalize_perf_files([perf_path], finalization_info=finalization_info) == [parquet_path]
 
     checkpoint_dir = tmp_path / "checkpoint"
-    _write_checkpoint(
+    checkpoint_path = _write_checkpoint(
         checkpoint_dir,
         done=["case-old", "case-retried"],
         failed=[],
@@ -451,6 +522,7 @@ def test_retry_event_hash_attests_only_cases_attempted_this_invocation(tmp_path)
     doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
     retry_event = doc["tables"]["gemm_perf"]["collections"][1]
     assert retry_event["case_plan_hash"] == provenance.case_plan_hash(["case-retried"])
+    assert _attempted(checkpoint_path) == set()
 
 
 def test_deduped_zero_row_event_still_attests_its_attempted_cases(tmp_path):
@@ -476,7 +548,7 @@ def test_deduped_zero_row_event_still_attests_its_attempted_cases(tmp_path):
     parquet_path = output_root / "gemm_perf.parquet"
     _write_parquet(parquet_path, [{"op": "old", "latency": 1.0}])
     checkpoint_dir = tmp_path / "checkpoint"
-    _write_checkpoint(
+    checkpoint_path = _write_checkpoint(
         checkpoint_dir,
         done=["case-old"],
         failed=[],
@@ -497,6 +569,405 @@ def test_deduped_zero_row_event_still_attests_its_attempted_cases(tmp_path):
     event = doc["tables"]["gemm_perf"]["collections"][1]
     assert event["rows"] == 0
     assert event["case_plan_hash"] == provenance.case_plan_hash(["case-deduped-a", "case-deduped-b"])
+    assert _attempted(checkpoint_path) == set()
+
+
+def test_failed_sidecar_write_keeps_pending_attempts_for_retry(tmp_path, monkeypatch):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    staged = output_root / "gemm_perf.txt"
+    staged.write_text("op,latency\nmatmul,1.0\n", encoding="utf-8")
+    finalization_info: dict[Path, collect_mod.PerfFinalizationInfo] = {}
+    parquet_path = collect_mod.finalize_perf_files(
+        [staged],
+        delete_source=False,
+        finalization_info=finalization_info,
+    )[0]
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=["case-b"],
+        attempted=["case-a", "case-b"],
+    )
+
+    monkeypatch.setattr(
+        provenance,
+        "write_collection_meta",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("simulated sidecar failure")),
+    )
+
+    with pytest.raises(RuntimeError, match="simulated sidecar failure"):
+        collect_mod._write_collector_provenance(
+            output_root,
+            [parquet_path],
+            _provenance_ctx(_collections()),
+            run_errors=[],
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            finalization_info=finalization_info,
+        )
+
+    assert _attempted(checkpoint_path) == {"case-a", "case-b"}
+    assert staged.exists()
+    assert collect_mod._pending_resume_perf_outputs(
+        output_root,
+        _provenance_ctx(_collections()),
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        sm_version=100,
+    ) == [staged]
+
+
+def test_checkpoint_close_failure_retries_sidecar_transaction_without_duplicate_event(tmp_path, monkeypatch):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    staged = output_root / "gemm_perf.txt"
+    staged.write_text("op,latency\nmatmul,1.0\n", encoding="utf-8")
+    first_finalization: dict[Path, collect_mod.PerfFinalizationInfo] = {}
+    parquet_path = collect_mod.finalize_perf_files(
+        [staged],
+        delete_source=False,
+        finalization_info=first_finalization,
+    )[0]
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+
+    real_close = collect_mod._close_checkpoint_attempts
+    monkeypatch.setattr(
+        collect_mod,
+        "_close_checkpoint_attempts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("simulated checkpoint close failure")),
+    )
+    with pytest.raises(RuntimeError, match="simulated checkpoint close failure"):
+        collect_mod._write_collector_provenance(
+            output_root,
+            [parquet_path],
+            _provenance_ctx(_collections()),
+            run_errors=[],
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            finalization_info=first_finalization,
+        )
+
+    first_doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
+    first_table = first_doc["tables"]["gemm_perf"]
+    assert "collections" not in first_table
+    assert _attempted(checkpoint_path) == {"case-a"}
+    assert staged.exists()
+
+    monkeypatch.setattr(collect_mod, "_close_checkpoint_attempts", real_close)
+    retry_finalization: dict[Path, collect_mod.PerfFinalizationInfo] = {}
+    assert collect_mod.finalize_perf_files(
+        [staged],
+        delete_source=False,
+        finalization_info=retry_finalization,
+    ) == [parquet_path]
+    assert retry_finalization[parquet_path.resolve()].merged_existing is True
+
+    collect_mod._write_collector_provenance(
+        output_root,
+        [parquet_path],
+        _provenance_ctx(_collections()),
+        run_errors=[],
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        finalization_info=retry_finalization,
+    )
+
+    retry_doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
+    retry_table = retry_doc["tables"]["gemm_perf"]
+    assert retry_table == first_table
+    assert _attempted(checkpoint_path) == set()
+
+
+def test_recovery_finishes_partial_prepare_when_pending_sidecar_matches_live_bytes(tmp_path):
+    output_root = tmp_path / "out"
+    checkpoint_dir = tmp_path / "checkpoint"
+    first = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name="sglang.gemm",
+        version="0.5.14",
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    second = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name="sglang.gemm_extra",
+        version="0.5.14",
+        done=["case-b"],
+        failed=[],
+        attempted=["case-b"],
+    )
+    staged = output_root / "shared_perf.txt"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("op,latency\nshared,1.0\n", encoding="utf-8")
+    participants = [(first, {"case-a"}), (second, {"case-b"})]
+    _write_sidecar_transaction(
+        output_root,
+        participants,
+        [staged],
+        tagged={first},
+        pending_document=True,
+    )
+
+    assert collect_mod._recover_collector_provenance_transaction(output_root) == (output_root / "collection_meta.yaml")
+
+    assert _attempted(first) == set()
+    assert _attempted(second) == set()
+    assert not staged.exists()
+    assert not (output_root / collect_mod._SIDECAR_STAGING_FILENAME).exists()
+    assert not (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).exists()
+
+
+def test_recovery_cleans_staging_before_removing_journal_after_all_checkpoints_closed(tmp_path):
+    output_root = tmp_path / "out"
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=[],
+    )
+    staged = output_root / "gemm_perf.txt"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("op,latency\nmatmul,1.0\n", encoding="utf-8")
+    _write_sidecar_transaction(
+        output_root,
+        [(checkpoint_path, {"case-a"})],
+        [staged],
+        tagged=set(),
+        pending_document=False,
+    )
+
+    assert collect_mod._recover_collector_provenance_transaction(output_root) is None
+
+    assert not staged.exists()
+    assert not (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).exists()
+
+
+def test_closed_sidecar_transaction_allows_later_identical_case_plan_event(tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    staged = output_root / "gemm_perf.txt"
+    staged.write_text("op,latency\nmatmul,1.0\n", encoding="utf-8")
+    first_finalization: dict[Path, collect_mod.PerfFinalizationInfo] = {}
+    parquet_path = collect_mod.finalize_perf_files(
+        [staged],
+        delete_source=False,
+        finalization_info=first_finalization,
+    )[0]
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    ctx = _provenance_ctx(_collections())
+
+    collect_mod._write_collector_provenance(
+        output_root,
+        [parquet_path],
+        ctx,
+        run_errors=[],
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        finalization_info=first_finalization,
+    )
+    assert _attempted(checkpoint_path) == set()
+
+    staged.write_text("op,latency\nmatmul,1.0\n", encoding="utf-8")
+    tracker = collect_mod._resume_tracker_for_collection(
+        _collections()[0],
+        ctx,
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        sm_version=100,
+    )
+    tracker.load_existing()
+    tracker.mark_attempted("case-a")
+    tracker.mark_passed("case-a")
+    tracker.flush(force=True)
+    second_finalization: dict[Path, collect_mod.PerfFinalizationInfo] = {}
+    assert collect_mod.finalize_perf_files(
+        [staged],
+        delete_source=False,
+        finalization_info=second_finalization,
+    ) == [parquet_path]
+
+    collect_mod._write_collector_provenance(
+        output_root,
+        [parquet_path],
+        ctx,
+        run_errors=[],
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        finalization_info=second_finalization,
+    )
+
+    table = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))["tables"]["gemm_perf"]
+    assert len(table["collections"]) == 2
+    assert [event["case_plan_hash"] for event in table["collections"]] == [
+        provenance.case_plan_hash(["case-a"]),
+        provenance.case_plan_hash(["case-a"]),
+    ]
+    assert _attempted(checkpoint_path) == set()
+
+
+def test_shared_table_hashes_and_closes_every_producing_op_only(tmp_path):
+    output_root = tmp_path / "out"
+    parquet_path = output_root / "shared_perf.parquet"
+    _write_parquet(parquet_path, [{"op": "shared", "latency": 1.0}])
+    checkpoint_dir = tmp_path / "checkpoint"
+    collections = [
+        {
+            "name": BACKEND,
+            "type": "gemm",
+            "module": REAL_MODULE,
+            "run_func": "run",
+            "perf_filename": "shared_perf.txt",
+        },
+        {
+            "name": BACKEND,
+            "type": "gemm_extra",
+            "module": REAL_MODULE,
+            "run_func": "run",
+            "perf_filename": "shared_perf.txt",
+        },
+    ]
+    first = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name="sglang.gemm",
+        version="0.5.14",
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    second = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name="sglang.gemm_extra",
+        version="0.5.14",
+        done=["case-b"],
+        failed=["case-c"],
+        attempted=["case-b", "case-c"],
+    )
+    unrelated = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name="sglang.unrelated",
+        version="0.5.14",
+        done=["case-z"],
+        failed=[],
+        attempted=["case-z"],
+    )
+
+    collect_mod._write_collector_provenance(
+        output_root,
+        [parquet_path],
+        _provenance_ctx(collections),
+        run_errors=[],
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        finalization_info=_finalization_info_for(parquet_path),
+    )
+
+    table = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))["tables"]["shared_perf"]
+    assert table["case_plan_hash"] == provenance.case_plan_hash(["case-a", "case-b", "case-c"])
+    assert _attempted(first) == set()
+    assert _attempted(second) == set()
+    assert _attempted(unrelated) == {"case-z"}
+
+
+def test_resume_can_finalize_untouched_staging_file_with_pending_evidence(tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    staged = output_root / "gemm_perf.txt"
+    staged.write_text("op,latency\nmatmul,1.0\n", encoding="utf-8")
+    checkpoint_dir = tmp_path / "checkpoint"
+    _write_checkpoint(checkpoint_dir, done=["case-from-kept-csv"], failed=[])
+
+    pending = collect_mod._pending_resume_perf_outputs(
+        output_root,
+        _provenance_ctx(_collections()),
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        sm_version=100,
+    )
+
+    assert pending == [staged]
+
+
+@pytest.mark.parametrize(
+    ("field", "mismatched_value"),
+    [
+        ("schema", 999),
+        ("backend", "trtllm"),
+        ("module", "sglang.other"),
+        ("run_func", "other_run"),
+        ("framework_version", "0.5.13"),
+        ("sm_version", 90),
+    ],
+)
+def test_pending_resume_ignores_checkpoint_with_mismatched_runtime_identity(
+    tmp_path,
+    field,
+    mismatched_value,
+):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    staged = output_root / "gemm_perf.txt"
+    staged.write_text("op,latency\nmatmul,1.0\n", encoding="utf-8")
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(checkpoint_dir, done=["stale-case"], failed=[])
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint[field] = mismatched_value
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    assert (
+        collect_mod._pending_resume_perf_outputs(
+            output_root,
+            _provenance_ctx(_collections()),
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            sm_version=100,
+        )
+        == []
+    )
+
+
+def test_provenance_writer_rejects_mismatched_checkpoint_identity(tmp_path):
+    output_root = tmp_path / "out"
+    parquet_path = output_root / "gemm_perf.parquet"
+    _write_parquet(parquet_path, [{"op": "matmul", "latency": 1.0}])
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(checkpoint_dir, done=["stale-case"], failed=[])
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint["framework_version"] = "0.5.13"
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Zero attempted cases"):
+        collect_mod._write_collector_provenance(
+            output_root,
+            [parquet_path],
+            _provenance_ctx(_collections()),
+            run_errors=[],
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            finalization_info=_finalization_info_for(parquet_path),
+        )
+
+    assert not (output_root / "collection_meta.yaml").exists()
 
 
 def test_cumulative_checkpoint_without_current_attempts_cannot_attest_event(tmp_path):

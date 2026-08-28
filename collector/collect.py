@@ -68,6 +68,7 @@ setup_warning_filters()
 
 import argparse
 import cProfile
+import hashlib
 import importlib
 import importlib.util
 import io
@@ -76,9 +77,12 @@ import multiprocessing as mp
 import pstats
 import signal
 import subprocess
+import tempfile
 import time
 import traceback
+import uuid
 from collections import Counter
+from collections.abc import Iterable
 from datetime import datetime
 from inspect import Parameter, signature
 from pathlib import Path
@@ -101,8 +105,92 @@ STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before logging a stall
 # Failures of one (model, dtype) group within an op before the summary flags
 # it as systemic (a fix-me warning; nothing is skipped).
 SYSTEMIC_GROUP_THRESHOLD = 5
+_SIDECAR_TRANSACTION_SCHEMA = "collector-sidecar-transaction-v1"
+_SIDECAR_TRANSACTION_FIELD = "sidecar_transaction"
+_SIDECAR_TRANSACTION_FILENAME = ".collection_meta.transaction.json"
+_SIDECAR_STAGING_FILENAME = ".collection_meta.pending.yaml"
 
 FPM_INPUT_ERRORS = (TypeError, ValueError, subprocess.CalledProcessError, FileNotFoundError, RuntimeError)
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """Atomically replace one JSON document without exposing a partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            json.dump(data, temp_file, indent=2)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
+def _close_checkpoint_attempts(
+    checkpoint_path: Path,
+    attempted_case_ids: set[str],
+    *,
+    transaction_id: str | None = None,
+) -> None:
+    """Close only the pending attempts already committed to a sidecar event."""
+    try:
+        with checkpoint_path.open(encoding="utf-8") as checkpoint_file:
+            data = json.load(checkpoint_file)
+    except Exception as error:
+        raise RuntimeError(f"Failed to close finalized checkpoint event {checkpoint_path}: {error}") from error
+
+    if transaction_id is not None and data.get(_SIDECAR_TRANSACTION_FIELD) != transaction_id:
+        raise RuntimeError(
+            f"Failed to close finalized checkpoint event {checkpoint_path}: "
+            f"sidecar transaction {data.get(_SIDECAR_TRANSACTION_FIELD)!r} != {transaction_id!r}"
+        )
+
+    current_attempted = set(data.get("attempted", []))
+    data["attempted"] = sorted(current_attempted - attempted_case_ids)
+    if transaction_id is not None:
+        data.pop(_SIDECAR_TRANSACTION_FIELD, None)
+    data["updated_at"] = datetime.now().isoformat()
+    _atomic_write_json(checkpoint_path, data)
+
+
+def _tag_checkpoint_sidecar_transaction(
+    checkpoint_path: Path,
+    attempted_case_ids: set[str],
+    transaction_id: str,
+) -> None:
+    """Durably bind pending attempts to one prepared sidecar transaction."""
+    try:
+        with checkpoint_path.open(encoding="utf-8") as checkpoint_file:
+            data = json.load(checkpoint_file)
+    except Exception as error:
+        raise RuntimeError(f"Failed to prepare finalized checkpoint event {checkpoint_path}: {error}") from error
+
+    missing = attempted_case_ids - set(data.get("attempted", []))
+    if missing:
+        raise RuntimeError(
+            f"Failed to prepare finalized checkpoint event {checkpoint_path}: "
+            f"pending attempts disappeared: {sorted(missing)}"
+        )
+    existing_transaction = data.get(_SIDECAR_TRANSACTION_FIELD)
+    if existing_transaction not in (None, transaction_id):
+        raise RuntimeError(
+            f"Failed to prepare finalized checkpoint event {checkpoint_path}: "
+            f"unresolved sidecar transaction {existing_transaction!r}"
+        )
+    data[_SIDECAR_TRANSACTION_FIELD] = transaction_id
+    data["updated_at"] = datetime.now().isoformat()
+    _atomic_write_json(checkpoint_path, data)
 
 
 def _resolve_fpm_cli_inputs(parser, resolver):
@@ -222,8 +310,9 @@ class ResumeCheckpoint:
         }
         self._done: set[str] = set()
         self._failed: set[str] = set()
-        # Invocation-scoped, unlike the cumulative resume sets above. The
-        # provenance event emitted by this invocation hashes exactly this set.
+        # Pending-event scoped, unlike the cumulative resume sets above. It is
+        # preserved across interrupted resumes and cleared only after the
+        # common finalizer successfully writes the matching sidecar event.
         self._attempted: set[str] = set()
 
         safe_name = module_name.replace("/", "_").replace(":", "_")
@@ -259,6 +348,14 @@ class ResumeCheckpoint:
 
     # -- public API -------------------------------------------------------
 
+    def start_fresh(self) -> None:
+        """Persist an empty lifecycle before a non-resume run consumes work."""
+        self._done.clear()
+        self._failed.clear()
+        self._attempted.clear()
+        self._dirty = True
+        self.flush(force=True)
+
     def filter_done(self, task_infos: list[dict], retry_failed: bool = False) -> list[dict]:
         """Return only tasks that need to run.
 
@@ -287,17 +384,17 @@ class ResumeCheckpoint:
         self._dirty = True
         self.flush()
 
-    def start_invocation(self):
-        """Reset only the event attestation ledger, preserving resume state."""
-        self._attempted.clear()
-        self._dirty = True
-        self.flush(force=True)
-
     def mark_attempted(self, task_id: str):
-        """Record that this invocation actually consumed a task."""
+        """Record that the pending provenance event consumed one task."""
         self._attempted.add(task_id)
         self._dirty = True
         self.flush()
+
+    def mark_attempted_many(self, task_ids: Iterable[str]) -> None:
+        """Atomically persist a batch that one full-node runner will consume."""
+        self._attempted.update(task_ids)
+        self._dirty = True
+        self.flush(force=True)
 
     def mark_failed(self, task_id: str):
         """Mark a task as failed in cumulative resume state."""
@@ -326,12 +423,7 @@ class ResumeCheckpoint:
             "failed": sorted(self._failed),
             "attempted": sorted(self._attempted),
         }
-        tmp_path = self._path.with_suffix(".json.tmp")
-        with open(tmp_path, "w") as f:
-            json.dump(data, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, self._path)
+        _atomic_write_json(self._path, data)
         self._dirty = False
         self._last_flush = now
 
@@ -563,7 +655,7 @@ def worker(
         if attempted_tasks is not None:
             # Record consumption before publishing the active-task pointer so
             # a hard kill between manager RPCs cannot classify a consumed case
-            # as failed while omitting it from this invocation's attestation.
+            # as failed while omitting it from the pending event's attestation.
             attempted_tasks[task_id] = True
         if current_task_ids is not None:
             current_task_ids[device_id] = task_id
@@ -694,11 +786,8 @@ def parallel_run(tasks, func, num_processes, module_name="unknown", resume_optio
         retry_failed = resume_options.get("retry_failed", False)
         task_infos = resume_tracker.filter_done(raw_task_infos, retry_failed=retry_failed)
     else:
+        resume_tracker.start_fresh()
         task_infos = raw_task_infos
-
-    # ``done``/``failed`` remain cumulative for resume; provenance must attest
-    # only cases consumed during this invocation.
-    resume_tracker.start_invocation()
 
     def _unresolved_failure_errors():
         # A resumed run must not look clean while its checkpoint still holds
@@ -1293,6 +1382,7 @@ def collect_sglang(
         "framework": runtime.framework,
         "installed_version": version,
         "runtime": runtime,
+        "sm_version": sm_version,
         "collections": collections,
     }
     return all_errors, provenance_ctx
@@ -1360,6 +1450,7 @@ def collect_vllm(
         "framework": runtime.framework,
         "installed_version": version,
         "runtime": runtime,
+        "sm_version": sm_version,
         "collections": collections,
     }
     return all_errors, provenance_ctx
@@ -1424,6 +1515,7 @@ def collect_trtllm(
         "framework": runtime.framework,
         "installed_version": version,
         "runtime": runtime,
+        "sm_version": sm_version,
         "collections": collections,
     }
     return all_errors, provenance_ctx
@@ -1571,6 +1663,224 @@ def _preflight_collector_provenance(output_root: Path, provenance_ctx: dict) -> 
         )
 
 
+def _resume_tracker_for_collection(
+    collection: dict,
+    provenance_ctx: dict,
+    *,
+    backend: str,
+    checkpoint_dir: str,
+    sm_version: int | None,
+) -> ResumeCheckpoint:
+    """Build the same runtime-bound checkpoint contract used by collection."""
+    full_name = f"{collection['name']}.{collection['type']}"
+    runtime_version = provenance_ctx.get("installed_version")
+    if runtime_version is None:
+        runtime_version = provenance_ctx["runtime"].version
+    return ResumeCheckpoint(
+        backend=backend,
+        module_name=full_name,
+        run_func_name=collection["run_func"],
+        checkpoint_dir=checkpoint_dir,
+        framework_version=runtime_version,
+        sm_version=sm_version,
+    )
+
+
+def _pending_resume_perf_outputs(
+    output_root: Path,
+    provenance_ctx: dict,
+    *,
+    backend: str,
+    checkpoint_dir: str,
+    sm_version: int | None,
+) -> list[Path]:
+    """Return staged tables whose loaded checkpoint still has an open event.
+
+    This is the zero-work half of resume: a prior process may have completed
+    its cases (or deliberately used ``--keep-csv``) and stopped before common
+    finalization. The staging file is unchanged during the resumed process, so
+    mtime-based selection alone cannot see it; the pending checkpoint ledger is
+    the evidence that makes selecting this explicit registry-owned file safe.
+    """
+    pending_outputs: set[Path] = set()
+    for collection in provenance_ctx.get("collections") or []:
+        resume_tracker = _resume_tracker_for_collection(
+            collection,
+            provenance_ctx,
+            backend=backend,
+            checkpoint_dir=checkpoint_dir,
+            sm_version=sm_version,
+        )
+        checkpoint_path = resume_tracker._path
+        if not checkpoint_path.exists():
+            continue
+        try:
+            resume_tracker.load_existing()
+        except Exception as error:
+            logger.warning(f"resume finalization: ignoring invalid checkpoint {checkpoint_path}: {error}")
+            continue
+        if not resume_tracker._attempted:
+            continue
+
+        perf_path = Path(str(collection["perf_filename"]))
+        if not perf_path.is_absolute():
+            perf_path = output_root / perf_path
+        if perf_path.exists() and perf_path.name.endswith("_perf.txt"):
+            pending_outputs.add(perf_path)
+    return sorted(pending_outputs)
+
+
+def _sidecar_digest(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _cleanup_sidecar_transaction_staging(transaction: dict, journal_path: Path) -> None:
+    """Delete every committed staging input before its recovery journal."""
+    for staging_path_text in transaction.get("staging_paths", []):
+        staging_path = Path(staging_path_text)
+        if not staging_path.name.endswith("_perf.txt"):
+            raise RuntimeError(f"Invalid staging path in collector sidecar transaction {journal_path}: {staging_path}")
+        staging_path.unlink(missing_ok=True)
+
+
+def _recover_collector_provenance_transaction(output_root: Path) -> Path | None:
+    """Finish an interrupted sidecar commit without appending its event twice."""
+    journal_path = output_root / _SIDECAR_TRANSACTION_FILENAME
+    if not journal_path.exists():
+        return None
+
+    try:
+        transaction = json.loads(journal_path.read_text(encoding="utf-8"))
+        if transaction.get("schema") != _SIDECAR_TRANSACTION_SCHEMA:
+            raise ValueError(f"unsupported schema {transaction.get('schema')!r}")
+        transaction_id = transaction["transaction_id"]
+        expected_digest = transaction["sidecar_digest"]
+        participants = transaction["checkpoints"]
+        if not isinstance(transaction_id, str) or not isinstance(expected_digest, str):
+            raise TypeError("transaction_id and sidecar_digest must be strings")
+        if not isinstance(participants, list) or not participants:
+            raise TypeError("checkpoints must be a non-empty list")
+    except Exception as error:
+        raise RuntimeError(f"Failed to load collector sidecar transaction {journal_path}: {error}") from error
+
+    meta_path = output_root / "collection_meta.yaml"
+    staged_meta_path = output_root / _SIDECAR_STAGING_FILENAME
+    recorded_meta_path = Path(str(transaction.get("sidecar_path", "")))
+    if recorded_meta_path != meta_path.resolve():
+        raise RuntimeError(
+            f"Collector sidecar transaction {journal_path} targets {recorded_meta_path}, not {meta_path.resolve()}"
+        )
+
+    tagged_participants: list[tuple[Path, set[str]]] = []
+    for participant in participants:
+        try:
+            checkpoint_path = Path(participant["path"])
+            attempted_case_ids = set(participant["attempted"])
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        except Exception as error:
+            raise RuntimeError(f"Invalid checkpoint participant in {journal_path}: {error}") from error
+        if checkpoint.get(_SIDECAR_TRANSACTION_FIELD) == transaction_id:
+            tagged_participants.append((checkpoint_path, attempted_case_ids))
+
+    sidecar_committed = meta_path.exists() and _sidecar_digest(meta_path) == expected_digest
+    if staged_meta_path.exists():
+        if _sidecar_digest(staged_meta_path) != expected_digest:
+            raise RuntimeError(
+                f"Collector sidecar transaction {journal_path} has neither its committed nor staged document"
+            )
+        # The journal is durable before any checkpoint is tagged. Resume a
+        # prepare-phase interruption by tagging every participant, then make
+        # the already-rendered exact document visible atomically.
+        tagged_participants = []
+        for participant in participants:
+            checkpoint_path = Path(participant["path"])
+            attempted_case_ids = set(participant["attempted"])
+            _tag_checkpoint_sidecar_transaction(checkpoint_path, attempted_case_ids, transaction_id)
+            tagged_participants.append((checkpoint_path, attempted_case_ids))
+        os.replace(staged_meta_path, meta_path)
+        sidecar_committed = True
+    elif not sidecar_committed:
+        raise RuntimeError(
+            f"Collector sidecar transaction {journal_path} has neither its committed nor staged document"
+        )
+
+    if not sidecar_committed:
+        raise RuntimeError(f"Failed to recover collector sidecar transaction {journal_path}")
+
+    # A tag survives until the matching attempts are closed. Its absence means
+    # that participant already closed; importantly, a later same-plan attempt
+    # has no old tag and must not be mistaken for this transaction.
+    recovered_open_event = bool(tagged_participants)
+    for checkpoint_path, attempted_case_ids in tagged_participants:
+        _close_checkpoint_attempts(
+            checkpoint_path,
+            attempted_case_ids,
+            transaction_id=transaction_id,
+        )
+
+    _cleanup_sidecar_transaction_staging(transaction, journal_path)
+    staged_meta_path.unlink(missing_ok=True)
+    journal_path.unlink()
+    if recovered_open_event:
+        logger.info(f"Recovered collector provenance sidecar transaction: {meta_path}")
+        return meta_path
+    return None
+
+
+def _commit_collector_provenance_transaction(
+    output_root: Path,
+    runtime_meta: dict,
+    tables: dict[str, dict],
+    *,
+    provenance_tier: str | None,
+    attempts_to_close: dict[Path, set[str]],
+    staging_paths: set[Path],
+) -> Path:
+    """Atomically publish a sidecar and close its checkpoint participants."""
+    from collector import provenance
+
+    output_root.mkdir(parents=True, exist_ok=True)
+    staged_meta_path = output_root / _SIDECAR_STAGING_FILENAME
+    with tempfile.TemporaryDirectory(dir=output_root, prefix=".collection-meta-render.") as render_dir:
+        rendered_path = provenance.write_collection_meta(
+            render_dir,
+            runtime_meta,
+            tables,
+            provenance_tier=provenance_tier,
+        )
+        os.replace(rendered_path, staged_meta_path)
+
+    transaction_id = uuid.uuid4().hex
+    meta_path = output_root / "collection_meta.yaml"
+    transaction = {
+        "schema": _SIDECAR_TRANSACTION_SCHEMA,
+        "transaction_id": transaction_id,
+        "sidecar_path": str(meta_path.resolve()),
+        "sidecar_digest": _sidecar_digest(staged_meta_path),
+        "checkpoints": [
+            {"path": str(checkpoint_path), "attempted": sorted(attempted_case_ids)}
+            for checkpoint_path, attempted_case_ids in sorted(attempts_to_close.items())
+        ],
+        "staging_paths": sorted(str(path.resolve()) for path in staging_paths),
+    }
+    journal_path = output_root / _SIDECAR_TRANSACTION_FILENAME
+    _atomic_write_json(journal_path, transaction)
+    for checkpoint_path, attempted_case_ids in sorted(attempts_to_close.items()):
+        _tag_checkpoint_sidecar_transaction(checkpoint_path, attempted_case_ids, transaction_id)
+
+    os.replace(staged_meta_path, meta_path)
+    logger.info(f"Wrote collector provenance sidecar: {meta_path}")
+    for checkpoint_path, attempted_case_ids in sorted(attempts_to_close.items()):
+        _close_checkpoint_attempts(
+            checkpoint_path,
+            attempted_case_ids,
+            transaction_id=transaction_id,
+        )
+    _cleanup_sidecar_transaction_staging(transaction, journal_path)
+    journal_path.unlink()
+    return meta_path
+
+
 def _write_collector_provenance(
     output_root: Path,
     converted: list[Path],
@@ -1580,13 +1890,17 @@ def _write_collector_provenance(
     backend: str,
     checkpoint_dir: str,
     finalization_info: dict[Path, PerfFinalizationInfo],
-) -> None:
+) -> Path | None:
     """Write collection_meta.yaml (design §5) flat beside the just-finalized parquet.
 
     Reuses the checkpoint files ResumeCheckpoint already persisted per op.
     ``done``/``failed`` remain cumulative resume state; ``attempted`` is the
-    invocation-scoped case-id set attested by the fresh event.
+    pending event's case-id set, which can span interrupted invocations.
     """
+    recovered_meta_path = _recover_collector_provenance_transaction(output_root)
+    if recovered_meta_path is not None:
+        return recovered_meta_path
+
     import pyarrow.parquet as pq
     import yaml
 
@@ -1594,12 +1908,19 @@ def _write_collector_provenance(
 
     collections = provenance_ctx.get("collections") or []
     ops_by_table: dict[str, list[str]] = {}
+    collection_by_full_name: dict[str, dict] = {}
     module_by_table: dict[str, str] = {}
+    staging_by_table: dict[str, Path] = {}
     for collection in collections:
         table = Path(str(collection["perf_filename"])).stem
         full_name = f"{collection['name']}.{collection['type']}"
         ops_by_table.setdefault(table, []).append(full_name)
+        collection_by_full_name[full_name] = collection
         module_by_table.setdefault(table, collection["module"])
+        staging_path = Path(str(collection["perf_filename"]))
+        if not staging_path.is_absolute():
+            staging_path = output_root / staging_path
+        staging_by_table.setdefault(table, staging_path)
 
     module_failure_names = {e["module"] for e in run_errors if e.get("error_type") == "ModuleCollectionFailure"}
     checkpoint_root = Path(checkpoint_dir).expanduser().resolve() / backend
@@ -1612,6 +1933,7 @@ def _write_collector_provenance(
     tables: dict[str, dict] = {}
     new_rows_by_table: dict[str, int] = {}
     merged_existing_by_table: dict[str, bool] = {}
+    attempts_to_close: dict[Path, set[str]] = {}
     for parquet_path in converted:
         table = parquet_path.stem
         full_names = ops_by_table.get(table)
@@ -1633,24 +1955,32 @@ def _write_collector_provenance(
         case_ids: set[str] = set()
         unresolved_failed = 0
         for full_name in full_names:
-            checkpoint_path = checkpoint_root / f"{full_name}.json"
+            resume_tracker = _resume_tracker_for_collection(
+                collection_by_full_name[full_name],
+                provenance_ctx,
+                backend=backend,
+                checkpoint_dir=checkpoint_dir,
+                sm_version=provenance_ctx.get("sm_version"),
+            )
+            checkpoint_path = resume_tracker._path
             if not checkpoint_path.exists():
                 continue
             try:
-                with open(checkpoint_path) as checkpoint_file:
-                    checkpoint_data = json.load(checkpoint_file)
+                resume_tracker.load_existing()
             except Exception as error:
-                logger.warning(f"collection_meta: failed to read checkpoint {checkpoint_path}: {error}")
+                logger.warning(f"collection_meta: ignoring invalid checkpoint {checkpoint_path}: {error}")
                 continue
-            attempted = checkpoint_data.get("attempted", [])
-            failed = checkpoint_data.get("failed", [])
+            attempted = resume_tracker._attempted
+            failed = resume_tracker._failed
             case_ids.update(attempted)
             unresolved_failed += len(failed)
+            if attempted:
+                attempts_to_close.setdefault(checkpoint_path, set()).update(attempted)
 
         if not case_ids:
-            # Empty invocation-scoped evidence means no case was consumed by
-            # this run: every op's checkpoint is missing/unreadable, predates
-            # the attempted ledger, or was reset by a zero-work resume.
+            # Empty pending-event evidence means no case explains these rows:
+            # every op's checkpoint is missing/unreadable, predates the
+            # attempted ledger, or was already closed by a successful sidecar.
             # Finalized parquet with zero attempted cases is unattestable —
             # fail closed instead of writing a fabricated 'complete' sidecar
             # whose case_plan_hash covers an empty case set.
@@ -1675,7 +2005,8 @@ def _write_collector_provenance(
         }
 
     if not tables:
-        return
+        return None
+    staging_paths = {staging_by_table[table] for table in tables if table in staging_by_table}
 
     # A prior invocation against the same scratch dir (e.g. --ops split across
     # runs) may have already written a sidecar for other tables; preserve them.
@@ -1731,13 +2062,15 @@ def _write_collector_provenance(
                     merged_tables[table] = current_entry
             tables = merged_tables
 
-    meta_path = provenance.write_collection_meta(
+    meta_path = _commit_collector_provenance_transaction(
         output_root,
         runtime_meta,
         tables,
         provenance_tier=provenance_tier,
+        attempts_to_close=attempts_to_close,
+        staging_paths=staging_paths,
     )
-    logger.info(f"Wrote collector provenance sidecar: {meta_path}")
+    return meta_path
 
 
 def main():
@@ -2045,6 +2378,7 @@ def main():
         mp.set_start_method("spawn")
 
     output_root = Path.cwd()
+    _recover_collector_provenance_transaction(output_root)
     existing_perf_outputs = {path.resolve(): path.stat().st_mtime_ns for path in find_perf_csv_outputs(output_root)}
 
     def was_touched_by_run(path: Path) -> bool:
@@ -2071,7 +2405,19 @@ def main():
     if args.keep_csv:
         logger.info("Keeping collector CSV staging files because --keep-csv was passed")
     else:
-        touched_perf_outputs = [path for path in find_perf_csv_outputs(output_root) if was_touched_by_run(path)]
+        touched_perf_outputs = {path for path in find_perf_csv_outputs(output_root) if was_touched_by_run(path)}
+        pending_resume_outputs: set[Path] = set()
+        if resume_options.get("resume") and provenance_ctx is not None:
+            pending_resume_outputs.update(
+                _pending_resume_perf_outputs(
+                    output_root,
+                    provenance_ctx,
+                    backend=args.backend,
+                    checkpoint_dir=args.checkpoint_dir,
+                    sm_version=sm_version,
+                )
+            )
+        touched_perf_outputs = sorted(touched_perf_outputs | pending_resume_outputs)
         if touched_perf_outputs and provenance_ctx is not None:
             _preflight_collector_provenance(output_root, provenance_ctx)
         if touched_perf_outputs:
@@ -2079,7 +2425,11 @@ def main():
                 "Finalizing collector CSV staging files as parquet:\n  "
                 + "\n  ".join(str(path) for path in touched_perf_outputs)
             )
-        converted = finalize_perf_files(touched_perf_outputs, finalization_info=finalization_info)
+        converted = finalize_perf_files(
+            touched_perf_outputs,
+            delete_source=False,
+            finalization_info=finalization_info,
+        )
         if converted:
             logger.info(f"Finalized {len(converted)} collector perf files as parquet")
 
