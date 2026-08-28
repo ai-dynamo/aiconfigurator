@@ -294,6 +294,11 @@ def _engine_config_dict(
         # is always explicit kind tokens, ``None`` = the default ALL policy.
         "database_mode": _database_mode_name(database),
         "transfer_policy": _transfer_policy_tokens(database),
+        # Directory-less fleet-`next` marker (design §14): set only when the
+        # loaded database rode backward fill without a local version
+        # directory, so the Rust reload skips its missing-directory gate for
+        # exactly this identity.
+        "tolerate_dirless_version": bool(getattr(database, "dirless_next_load", False)),
         "extra": {},
     }
     # SpeculativeConfig (flattened, Option<>): emit nextn at the top level

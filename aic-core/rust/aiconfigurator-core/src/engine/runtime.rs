@@ -436,9 +436,12 @@ impl Engine {
             // Estimate-only systems (a spec yaml with no collected data) may
             // back a SOL view: every SOL answer is analytic from the system
             // spec, so tolerate a missing perf-data directory under SOL and
-            // let table-backed lookups miss lazily. All other modes keep the
-            // loud load-time gate.
-            spec.engine.database_mode == DatabaseMode::Sol,
+            // let table-backed lookups miss lazily. A directory-less
+            // fleet-`next` spec (validated by the Python slot resolver, which
+            // loaded the same identity through backward fill) also skips the
+            // gate — the source resolver serves every table from sibling
+            // versions. All other loads keep the loud gate.
+            spec.engine.database_mode == DatabaseMode::Sol || spec.engine.tolerate_dirless_version,
         )?
         .with_mode(spec.engine.database_mode, transfer_policy);
         Engine::build(spec, Arc::new(db))
@@ -1678,6 +1681,7 @@ mod tests {
             speculative: nextn.map(|n| crate::SpeculativeConfig { nextn: Some(n) }),
             enable_shared_layer: None,
             strict_provenance: false,
+            tolerate_dirless_version: false,
             database_mode: Default::default(),
             transfer_policy: None,
             extra: BTreeMap::new(),

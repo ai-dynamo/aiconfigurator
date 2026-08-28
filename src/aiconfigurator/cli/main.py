@@ -1513,7 +1513,9 @@ def _ensure_backend_version_available(
         try:
             backend_version = perf_database.resolve_query_version(system_name, backend_name, backend_version)
         except ValueError as e:
-            logger.error("%s", e)
+            # User-facing gate message: no traceback wanted, so not
+            # logger.exception.
+            logger.error("%s", e)  # noqa: TRY400
             raise SystemExit(1) from e
     else:
         backend_version = _resolve_version_for_matching(system_name, backend_name, backend_version)
