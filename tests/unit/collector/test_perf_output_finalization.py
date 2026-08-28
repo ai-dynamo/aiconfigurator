@@ -8,6 +8,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from collector.helper import (
+    PerfFinalizationInfo,
     convert_perf_csv_to_parquet,
     finalize_perf_files,
     finalize_perf_outputs,
@@ -127,6 +128,24 @@ def test_finalize_merge_replaces_same_key_with_newest_measurement(tmp_path):
     # exactly one row per identity key (no duplicate keys)
     shapes = [r["shape"] for r in pq.read_table(parquet).to_pylist()]
     assert sorted(shapes) == ["s1", "s2", "s3"]
+
+
+def test_finalize_merge_attests_deduplicated_current_identity_count(tmp_path):
+    perf = tmp_path / "gemm_perf.txt"
+    parquet = perf.with_suffix(".parquet")
+
+    _write_keyed_perf_csv(perf, [("s1", 1.0)])
+    finalize_perf_files([perf])
+
+    _write_keyed_perf_csv(perf, [("s1", 2.0), ("s1", 3.0)])
+    finalization_info = {}
+    finalize_perf_files([perf], finalization_info=finalization_info)
+
+    assert _rows_by_key(parquet) == {"s1": 3.0}
+    assert finalization_info[parquet.resolve()] == PerfFinalizationInfo(
+        new_rows=1,
+        merged_existing=True,
+    )
 
 
 def test_convert_without_merge_overwrites(tmp_path):

@@ -822,6 +822,8 @@ PERF_METRIC_COLUMNS = ("latency", "power", "power_limit")
 class PerfFinalizationInfo:
     """Facts needed to attest one finalized staging file."""
 
+    # Current-event rows that survive finalization. Compatible merges count
+    # unique current identity keys; replacement paths count the written rows.
     new_rows: int
     merged_existing: bool
 
@@ -843,13 +845,15 @@ def convert_perf_csv_to_parquet(
     the newest row per key. This makes finalization idempotent and accumulative:
     a resumed / ``--resume-retry-failed`` / batched collection extends the
     parquet instead of clobbering it with only the current run's subset.
-    ``finalization_info``, when provided, is populated with the pre-merge row
-    count and whether an existing parquet took the compatible merge path. The
-    mapping is keyed by the resolved parquet path. Finalization deletes the
-    source ``.txt``, so without merging a partial run after an earlier
-    finalize would silently shrink the complete file. A full fresh run still
-    yields the complete file either way because every identity key is
-    re-measured and replaced.
+    ``finalization_info``, when provided, is populated with the current event's
+    finalized row contribution and whether an existing parquet took the
+    compatible merge path. Compatible merges count unique current identity
+    keys after deduplication; no-existing and schema-replacement paths count
+    the rows actually written. The mapping is keyed by the resolved parquet
+    path. Finalization deletes the source ``.txt``, so without merging a
+    partial run after an earlier finalize would silently shrink the complete
+    file. A full fresh run still yields the complete file either way because
+    every identity key is re-measured and replaced.
     """
     csv_path = Path(csv_file)
     if csv_path.name == "INCOMPLETE.txt" or not csv_path.name.endswith("_perf.txt"):
@@ -885,7 +889,7 @@ def convert_perf_csv_to_parquet(
         new_rows = table.num_rows
         merged_existing = False
         if merge_existing and parquet_path.exists():
-            table, merged_existing = _merge_perf_rows(table, parquet_path, pa=pa, pq=pq)
+            table, merged_existing, new_rows = _merge_perf_rows(table, parquet_path, pa=pa, pq=pq)
         table = _normalize_power_metrics(table, pa=pa, pc=pc_compute)
         pq.write_table(table, tmp_path, compression=compression)
         os.replace(tmp_path, parquet_path)
@@ -953,8 +957,9 @@ def _release_merge_lock(lock_path: Path, lock_fd: int) -> None:
 
 def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
     """Merge freshly-collected rows into an existing perf parquet, keeping the
-    newest row per identity key. Returns ``(table, merged_existing)``; schema
-    incompatibility returns the new table with ``merged_existing=False``."""
+    newest row per identity key. Returns ``(table, merged_existing,
+    current_event_rows)``; schema incompatibility returns the new table with
+    ``merged_existing=False`` and its unchanged row count."""
     import pandas as pd
 
     log = logging.getLogger(__name__)
@@ -986,7 +991,7 @@ def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
             old_fields,
             new_fields,
         )
-        return new_table, False
+        return new_table, False, new_table.num_rows
     # Reconcile metric-column types on BOTH sides: an all-empty metric column
     # is inferred as `null`, and Arrow can cast null -> anything (all nulls)
     # but not double -> null. Whichever side is null-typed is cast toward the
@@ -1015,6 +1020,7 @@ def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
 
     new_df = new_df[old_df.columns.tolist()]  # align column order
     identity = [c for c in old_df.columns if c not in PERF_METRIC_COLUMNS]
+    current_event_rows = len(new_df.drop_duplicates(subset=identity, keep="last"))
     combined = pd.concat([old_df, new_df], ignore_index=True)
     deduped = combined.drop_duplicates(subset=identity, keep="last").reset_index(drop=True)
     log.info(
@@ -1026,7 +1032,7 @@ def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
         len(deduped),
         len(combined) - len(deduped),
     )
-    return pa.Table.from_pandas(deduped, preserve_index=False), True
+    return pa.Table.from_pandas(deduped, preserve_index=False), True, current_event_rows
 
 
 def find_perf_csv_outputs(output_root: str | os.PathLike = ".", *, recursive: bool = False) -> list[Path]:
@@ -1067,8 +1073,9 @@ def finalize_perf_files(
     ``merge_existing`` defaults to True so that finalizing accumulates into any
     pre-existing parquet (resume / retry-failed / batched collection) instead of
     overwriting it with only this run's rows — see convert_perf_csv_to_parquet.
-    When provided, ``finalization_info`` receives each staging file's pre-merge
-    row count and whether an existing parquet took the compatible merge path.
+    When provided, ``finalization_info`` receives each staging file's finalized
+    current-event row contribution and whether an existing parquet took the
+    compatible merge path.
     """
     converted: list[Path] = []
     for csv_file in sorted({Path(path) for path in csv_files}):

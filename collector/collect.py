@@ -1641,10 +1641,17 @@ def _write_collector_provenance(
         existing_tables = existing_doc.get("tables") or {}
         if isinstance(existing_tables, dict):
             existing_runtime = existing_doc.get("runtime")
-            if existing_schema_version == 2 and existing_runtime != runtime_meta:
+            surviving_tables = sorted(
+                table
+                for table in existing_tables
+                if table not in tables or merged_existing_by_table.get(table) is not False
+            )
+            if existing_runtime != runtime_meta and surviving_tables:
                 raise RuntimeError(
-                    f"{existing_meta}: cannot preserve collection histories across different runtime identities "
-                    f"(existing={existing_runtime!r}, current={runtime_meta!r})"
+                    f"{existing_meta}: cannot preserve table data or collection history across different "
+                    f"runtime identities; old table(s) {surviving_tables} would survive "
+                    f"(existing={existing_runtime!r}, current={runtime_meta!r}). Every old table must be "
+                    "replaced, not merged, before changing the sidecar runtime."
                 )
             merged_tables = dict(existing_tables)
             for table, current_entry in tables.items():

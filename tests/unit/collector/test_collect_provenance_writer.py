@@ -303,7 +303,12 @@ def test_existing_sidecar_merge_preserves_prior_tables(tmp_path):
     output_root.mkdir(parents=True)
     existing_doc = {
         "schema_version": 1,
-        "runtime": {"framework": "sglang", "version": "0.5.14"},
+        "runtime": {
+            "framework": "sglang",
+            "version": "0.5.14",
+            "image": "lmsysorg/sglang:v0.5.14",
+            "image_digest": "sha256:" + "0" * 64,
+        },
         "tables": {"other_table": {"status": "complete"}},
     }
     (output_root / "collection_meta.yaml").write_text(yaml.safe_dump(existing_doc, sort_keys=False))
@@ -359,10 +364,11 @@ def test_existing_v2_same_table_history_appends_fresh_event(tmp_path):
     parquet_path = output_root / "gemm_perf.parquet"
     _write_parquet(parquet_path, [{"op": "matmul", "latency": 1.0}])
     perf_path = output_root / "gemm_perf.txt"
-    perf_path.write_text("op,latency\nsoftmax,2.0\n")
+    perf_path.write_text("op,latency\nsoftmax,2.0\nsoftmax,3.0\n")
     finalization_info: dict[Path, collect_mod.PerfFinalizationInfo] = {}
     assert collect_mod.finalize_perf_files([perf_path], finalization_info=finalization_info) == [parquet_path]
     assert pq.read_metadata(parquet_path).num_rows == 2
+    assert pq.read_table(parquet_path).to_pylist()[-1] == {"op": "softmax", "latency": 3.0}
     assert finalization_info[parquet_path.resolve()] == collect_mod.PerfFinalizationInfo(
         new_rows=1,
         merged_existing=True,
@@ -442,6 +448,98 @@ def test_schema_mismatch_overwrite_replaces_stale_table_history(tmp_path):
     assert "collections" not in table
     assert table["case_plan_hash"] == provenance.case_plan_hash(["case-new"])
     assert table["rows"] == 1
+
+
+def test_runtime_change_rejects_schema_replacement_when_an_old_table_survives(tmp_path):
+    output_root = tmp_path / "out"
+    existing_doc = {
+        "schema_version": 1,
+        "runtime": {
+            "framework": "sglang",
+            "version": "0.5.13",
+            "image": "lmsysorg/sglang:v0.5.13",
+            "image_digest": "sha256:" + "1" * 64,
+        },
+        "tables": {
+            "gemm_perf": {"status": "complete"},
+            "other_perf": {"status": "complete"},
+        },
+    }
+    output_root.mkdir(parents=True)
+    meta_path = output_root / "collection_meta.yaml"
+    meta_path.write_text(yaml.safe_dump(existing_doc, sort_keys=False))
+
+    parquet_path = output_root / "gemm_perf.parquet"
+    _write_parquet(parquet_path, [{"op": "matmul", "latency": 1.0}])
+    perf_path = output_root / "gemm_perf.txt"
+    perf_path.write_text("shape,latency\nnew-shape,2.0\n")
+    finalization_info: dict[Path, collect_mod.PerfFinalizationInfo] = {}
+    assert collect_mod.finalize_perf_files([perf_path], finalization_info=finalization_info) == [parquet_path]
+    assert finalization_info[parquet_path.resolve()].merged_existing is False
+
+    checkpoint_dir = tmp_path / "checkpoint"
+    _write_checkpoint(checkpoint_dir, done=["case-new"], failed=[])
+    with pytest.raises(RuntimeError, match="other_perf"):
+        collect_mod._write_collector_provenance(
+            output_root,
+            [parquet_path],
+            _provenance_ctx(_collections()),
+            run_errors=[],
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            finalization_info=finalization_info,
+        )
+
+    assert yaml.safe_load(meta_path.read_text(encoding="utf-8")) == existing_doc
+
+
+def test_runtime_change_allows_every_old_table_to_be_replaced(tmp_path):
+    output_root = tmp_path / "out"
+    provenance.write_collection_meta(
+        output_root,
+        {
+            "framework": "sglang",
+            "version": "0.5.13",
+            "image": "lmsysorg/sglang:v0.5.13",
+            "image_digest": "sha256:" + "1" * 64,
+        },
+        {
+            "gemm_perf": {"status": "complete"},
+            "other_perf": {"status": "complete"},
+        },
+    )
+
+    perf_paths = [output_root / "gemm_perf.txt", output_root / "other_perf.txt"]
+    parquet_paths = [path.with_suffix(".parquet") for path in perf_paths]
+    for parquet_path in parquet_paths:
+        _write_parquet(parquet_path, [{"op": "matmul", "latency": 1.0}])
+    for perf_path in perf_paths:
+        perf_path.write_text("shape,latency\nnew-shape,2.0\n")
+    finalization_info: dict[Path, collect_mod.PerfFinalizationInfo] = {}
+    assert collect_mod.finalize_perf_files(perf_paths, finalization_info=finalization_info) == parquet_paths
+    assert all(not info.merged_existing for info in finalization_info.values())
+
+    checkpoint_dir = tmp_path / "checkpoint"
+    _write_checkpoint(checkpoint_dir, done=["case-new"], failed=[])
+    collect_mod._write_collector_provenance(
+        output_root,
+        parquet_paths,
+        _provenance_ctx([*_collections("gemm_perf"), *_collections("other_perf")]),
+        run_errors=[],
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        finalization_info=finalization_info,
+    )
+
+    doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
+    assert doc["runtime"] == {
+        "framework": "sglang",
+        "version": "0.5.14",
+        "image": "lmsysorg/sglang:v0.5.14",
+        "image_digest": "sha256:" + "0" * 64,
+    }
+    assert set(doc["tables"]) == {"gemm_perf", "other_perf"}
+    assert all("collections" not in table for table in doc["tables"].values())
 
 
 def test_finalize_raises_when_existing_sidecar_is_legacy_tier(tmp_path):
