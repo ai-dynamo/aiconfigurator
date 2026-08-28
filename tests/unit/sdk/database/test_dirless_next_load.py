@@ -46,6 +46,11 @@ def _write_gemm(root: Path, system: str, version: str) -> None:
         "latency": [0.1, 0.2],
     }
     pq.write_table(pa.table({k: pa.array(v) for k, v in rows.items()}), d / "gemm_perf.parquet")
+    # Collector V3 sidecar (§5/§7.4): strict-provenance CI rejects tables
+    # without one.
+    (d / "collection_meta.yaml").write_text(
+        yaml.safe_dump({"schema_version": 1, "tables": {"gemm_perf": {"status": "complete"}}})
+    )
 
 
 @pytest.fixture
