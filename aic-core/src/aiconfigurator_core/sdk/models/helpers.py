@@ -886,6 +886,8 @@ def resolve_nvfp4_for_system(
     model_config: config.ModelConfig,
     system_name: str | None,
     model_path: str | None = None,
+    *,
+    backend_name: str | None = None,
 ) -> None:
     """Remap native nvfp4 to weight-only nvfp4_wo on non-Blackwell systems.
 
@@ -895,8 +897,10 @@ def resolve_nvfp4_for_system(
     transfer ladder then models the Marlin-class memory savings via the
     (0.5625, 1) util-level entry — no direct bfloat16 table aliasing needed.
 
-    Deployability (whether a runtime can load the checkpoint at a given
-    version) is a separate question handled by the support matrix.
+    When the mode is inferred from a checkpoint label, resolve its backend
+    execution lane before applying the hardware fallback. Deployability
+    (whether a runtime can load the checkpoint at a given version) is a
+    separate question handled by the support matrix.
     """
     from aiconfigurator_core.sdk.perf_database import is_blackwell_system
 
@@ -907,14 +911,15 @@ def resolve_nvfp4_for_system(
     moe_q = model_config.moe_quant_mode
     if (gemm_q is None or moe_q is None) and model_path:
         info = _get_model_info(model_path)
+        architecture = info.get("architecture", "")
         inferred = _infer_quant_modes_from_raw_config(
             info.get("raw_config", {}),
-            info.get("architecture", ""),
+            architecture,
         )
         if gemm_q is None:
             gemm_q = inferred.get("gemm_quant_mode")
         if moe_q is None:
-            moe_q = inferred.get("moe_quant_mode")
+            moe_q = resolve_vllm_moe_execution_mode(inferred.get("moe_quant_mode"), backend_name, architecture)
 
     if gemm_q == common.GEMMQuantMode.nvfp4:
         model_config.gemm_quant_mode = common.GEMMQuantMode.nvfp4_wo

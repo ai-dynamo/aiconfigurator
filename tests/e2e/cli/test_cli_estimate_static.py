@@ -19,6 +19,7 @@ import pytest
 
 from aiconfigurator.cli.api import EstimateResult, cli_estimate
 from aiconfigurator.cli.main import configure_parser as configure_cli_parser
+from aiconfigurator.sdk import common
 
 pytestmark = pytest.mark.e2e
 
@@ -264,6 +265,42 @@ def test_agg_estimate_responds_to_common_nextn():
     assert (
         base.ttft != with_mtp.ttft or base.tpot != with_mtp.tpot or base.raw.get("memory") != with_mtp.raw.get("memory")
     ), "nextn=1 produced an estimate identical to nextn=0; the kwarg was dropped"
+
+
+def test_agg_estimate_resolves_lightning_nvfp4_for_hopper_before_model_construction(monkeypatch):
+    """Hopper must use the weight-only MoE lane before its ops are built."""
+    import aiconfigurator.sdk.models as models
+
+    class ModelConstructionObservedError(Exception):
+        pass
+
+    real_get_model = models.get_model
+
+    def get_model_with_resolved_moe(model_path, model_config, backend_name):
+        assert model_config.moe_quant_mode == common.MoEQuantMode.nvfp4_wo
+        model = real_get_model(model_path, model_config, backend_name)
+        assert model.config.moe_quant_mode == common.MoEQuantMode.nvfp4_wo
+        raise ModelConstructionObservedError
+
+    monkeypatch.setattr(models, "get_model", get_model_with_resolved_moe)
+
+    with pytest.raises(ModelConstructionObservedError):
+        cli_estimate(
+            model_path="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+            system_name="h100_sxm",
+            backend_name="vllm",
+            backend_version="0.24.0",
+            database_mode="SILICON",
+            kvcache_quant_mode="fp8",
+            mode="agg",
+            isl=65536,
+            osl=400,
+            prefix=58982,
+            tp_size=1,
+            batch_size=16,
+            moe_tp_size=1,
+            moe_ep_size=1,
+        )
 
 
 def _disagg_kwargs() -> dict:
