@@ -63,6 +63,34 @@ def test_nvfp4_variant_loads_offline_with_quant_metadata(hf_id, monkeypatch):
     sdk_utils._load_model_config_from_model_path.cache_clear()
 
 
+def test_lightning_nvfp4_loads_bundled_quant_config_offline(monkeypatch):
+    import aiconfigurator.sdk.utils as sdk_utils
+    from aiconfigurator_core.sdk.models.helpers import _get_model_info
+
+    hf_id = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
+
+    def _no_network(*args, **kwargs):
+        raise AssertionError("network path reached")
+
+    monkeypatch.setattr(sdk_utils, "_download_hf_config", _no_network)
+    monkeypatch.setattr(sdk_utils, "_download_hf_json", _no_network)
+    sdk_utils.get_model_config_from_model_path.cache_clear()
+    sdk_utils._load_model_config_from_model_path.cache_clear()
+    _get_model_info.cache_clear()
+    try:
+        model_config = _model_config()
+        model = get_model(hf_id, model_config, backend_name="vllm")
+
+        assert model.model_family == "NEMOTRONH"
+        assert model_config.gemm_quant_mode == common.GEMMQuantMode.fp8_static
+        assert model_config.moe_quant_mode == common.MoEQuantMode.nvfp4
+        assert model_config.kvcache_quant_mode == common.KVCacheQuantMode.fp8
+    finally:
+        sdk_utils.get_model_config_from_model_path.cache_clear()
+        sdk_utils._load_model_config_from_model_path.cache_clear()
+        _get_model_info.cache_clear()
+
+
 @pytest.mark.parametrize(
     "hf_id,gemm_mode,moe_mode,kv_mode,fmha_mode",
     [
