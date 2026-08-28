@@ -342,6 +342,7 @@ class TestCLIEstimateUnit:
             raw={},
             kv_cache_warning=None,
             per_ops_data=None,
+            moe_comm_fallbacks=(),
         )
 
         def fake_cli_estimate(**kwargs):

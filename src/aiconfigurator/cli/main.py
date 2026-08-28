@@ -2974,6 +2974,10 @@ def _run_estimate_mode(args):
             # analytic form; degrade to the no-SOL breakdown instead of
             # failing the whole estimate.
             except _SOL_DETAIL_UNAVAILABLE_ERRORS as exc:
+                logger.warning(
+                    "SOL detail comparison unavailable (%s); printing measured columns only.",
+                    exc,
+                )
                 sol_detail_error = str(exc)
 
     print("\n" + "=" * 60)
