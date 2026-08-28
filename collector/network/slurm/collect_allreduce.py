@@ -43,10 +43,15 @@ class NCCLProfiler:
             f.write(self._prefix + f",{self._layer_name},{self._latency}\n")
 
 
+def _resolve_rank(env):
+    """Resolve a Slurm task rank without silently aliasing tasks to rank 0."""
+    return int(env.get("RANK") or env["SLURM_PROCID"])
+
+
 world_size = int(os.environ["SLURM_NTASKS"])
 # srun exports the per-task rank as SLURM_PROCID, not RANK; honor an explicit
 # RANK (torchrun-style launch) and otherwise fall back to the Slurm variable.
-rank = int(os.environ.get("RANK") or os.environ["SLURM_PROCID"])
+rank = _resolve_rank(os.environ)
 gpus_per_node = int(os.environ["SLURM_NTASKS_PER_NODE"])
 local_rank = int(os.environ["SLURM_LOCALID"])
 

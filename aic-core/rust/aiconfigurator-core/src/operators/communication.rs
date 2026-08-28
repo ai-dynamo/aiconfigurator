@@ -8,10 +8,10 @@
 //! `_query_custom_allreduce_table` / `_query_nccl_table`. This is where the
 //! topology-aware scaling lives:
 //!
-//! - `CustomAllReduceOp`: uses the exactly-measured `tp_size` slice when the
-//!   table has one, else caps `tp_size` to `num_gpus_per_node` and scales by
-//!   `(tp-1)/tp * eff/(eff-1) * base_bw/p2p_bw`. The bandwidth correction is
-//!   applied only to the capped (unmeasured) case — a measured cross-node
+//! - `CustomAllReduceOp`: uses the requested `tp_size` through the table's
+//!   maximum measured fan-out, then caps overflow at that maximum and scales
+//!   by `(tp-1)/tp * eff/(eff-1) * base_bw/p2p_bw`. The bandwidth correction
+//!   is applied only to the capped (unmeasured) case — a measured cross-node
 //!   curve already carries that cost.
 //! - `NcclOp`: caps `num_gpus` to the table's max recorded fan-out, then
 //!   scales by `(num_gpus-1)/num_gpus * max/(max-1) * max_bw/req_bw`.
@@ -160,11 +160,11 @@ fn custom_allreduce_sol_ms(spec: &SystemSpec, tp_size: u32, size: f64) -> f64 {
 
 /// `SOL(query)/util` over the collected custom-allreduce size curve.
 /// The Rust engine is the single implementation: SOL uses the real `tp_size`;
-/// when that tp was never measured the util grid comes from the node-capped
-/// slice, so the SOL ratio carries the multi-node bandwidth scaling. Only an
-/// *unmeasured* rank count borrows the node-boundary util slice (the `xshape`
-/// compatibility path, TODO #1260). A measured cross-node slice reports plain
-/// `empirical` provenance.
+/// when that tp exceeds the measured range, the util grid comes from the
+/// maximum measured slice, so the SOL ratio carries the remaining fan-out
+/// scaling. Only an *unmeasured overflow* borrows that boundary util slice
+/// (the `xshape` compatibility path, TODO #1260). A measured cross-node slice
+/// reports plain `empirical` provenance.
 fn custom_allreduce_empirical(
     db: &PerfDatabase,
     quant: CommQuantMode,
@@ -177,8 +177,8 @@ fn custom_allreduce_empirical(
         // No communication for a single rank -> 0/SOL, not a data gap.
         return Ok(sol_q);
     }
-    // Prefer an exactly-measured rank-count slice; only an unmeasured TP
-    // borrows the node-boundary util (issue #1416 / #1260).
+    // Use measured rank-count slices through the table maximum; only overflow
+    // borrows the maximum measured util (issue #1416 / #1260).
     let eff = db
         .communication
         .measured_tp_slice(quant, tp_size, spec.node.num_gpus_per_node);
@@ -197,7 +197,7 @@ fn custom_allreduce_empirical(
     })?;
     let query = [size];
     let (latency, _) = util_empirical::estimate(sol_q, &query, grid.as_deref(), 1.0)?;
-    // Rank-count overflow borrowed the node-boundary tp slice -> "xshape";
+    // Rank-count overflow borrowed the maximum measured tp slice -> "xshape";
     // otherwise own-slice "empirical" (Python communication.py:167-168).
     db.note_provenance(if eff != tp_size {
         util_empirical::ProvenanceTier::XShape

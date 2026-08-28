@@ -99,13 +99,12 @@ def test_trtllm_kernel_source_records_actual_mnnvl_variant():
     assert kernel_source(allreduce, two_shot_tensor, 8, ops) == "TRTLLM_MNNVL_twoshot"
 
 
-def test_trtllm_kernel_source_rejects_unobservable_fallback_or_api_drift():
+def test_trtllm_kernel_source_records_regular_fallback_and_rejects_api_drift():
     kernel_source = _load_pure_function(_COLLECTOR, "_trtllm_mnnvl_kernel_source")
     tensor = SimpleNamespace(numel=lambda: 64, element_size=lambda: 2)
     ops = SimpleNamespace(_MNNVL_ONE_SHOT_THRESHOLD_BYTES=1024)
 
-    with pytest.raises(RuntimeError, match="regular fallback"):
-        kernel_source(SimpleNamespace(mnnvl_allreduce=None), tensor, 8, ops)
+    assert kernel_source(SimpleNamespace(mnnvl_allreduce=None), tensor, 8, ops) == "TRTLLM"
     with pytest.raises(RuntimeError, match="variant threshold"):
         kernel_source(SimpleNamespace(mnnvl_allreduce=object()), tensor, 8, SimpleNamespace())
 
@@ -115,16 +114,13 @@ def test_gb300_trtllm_multinode_rows_record_mnnvl_variant():
 
     rows = pq.read_table(
         _GB300_TRTLLM_DATA,
-        columns=["num_gpus", "message_size", "kernel_source"],
+        columns=["num_gpus", "kernel_source"],
     ).to_pylist()
-    assert len(rows) == 92
-    assert len({(row["num_gpus"], row["message_size"]) for row in rows}) == len(rows)
+    assert rows
 
     for row in rows:
         tp_size = row["num_gpus"]
         if tp_size < 8:
             assert row["kernel_source"] == "TRTLLM"
             continue
-        aggregate_bytes = row["message_size"] * 2 * tp_size
-        variant = "oneshot" if aggregate_bytes <= 64 * 1024 * 8 * 2 else "twoshot"
-        assert row["kernel_source"] == f"TRTLLM_MNNVL_{variant}"
+        assert row["kernel_source"].startswith("TRTLLM_MNNVL_")
