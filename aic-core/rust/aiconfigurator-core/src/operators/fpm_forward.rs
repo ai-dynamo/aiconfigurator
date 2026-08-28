@@ -485,14 +485,14 @@ mod tests {
     );
 
     /// A PerfDatabase whose fpm_forward table points at a temp pair; the rest
-    /// of the tables point at the real checked-in b200/vllm/0.19.0 fixture
+    /// of the tables point at the real checked-in b200/vllm/0.24.0 fixture
     /// (never touched by these tests).
     fn db_with_pair(dir: &std::path::Path) -> PerfDatabase {
         let mut db = PerfDatabase::load(
             std::path::Path::new(SYSTEMS_ROOT),
             "b200_sxm",
             "vllm",
-            "0.19.0",
+            "0.24.0",
         )
         .expect("fixture db");
         db.set_fpm_forward_for_test(crate::perf_database::FpmForwardTable::new(

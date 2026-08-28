@@ -601,6 +601,11 @@ data. V3 makes that cycle computed and mostly declarative:
 
 ## 13. Open question: data retention across quarters
 
+> **Resolved by §14 (2026-08-22):** retention is bounded by the queryable
+> slots plus an explicit keep-list of fill-source data; retired versions are
+> plain directory deletions.
+
+
 Quarterly appends grow the LFS tree without bound (~906 parquet files today,
 plus each quarter's changed families). This design does not prune. A sensible
 policy would be "keep the most recent N quarters of version dirs on main;
@@ -608,3 +613,49 @@ older quarters remain reachable only through their `collector-snapshot-*`
 tags" — but N, and whether pruning also drops declared-reuse chains that
 reference pruned donors, must be decided deliberately. Decide before the
 second quarterly cycle, not by accident.
+
+## 14. Amendment (2026-08-22): queryable-version slots
+
+Adopted after the first at-scale prune (PR #1581) showed that per-directory
+queryability makes every historical version a permanent liability (300+
+compatibility markers, donor retargeting, fixture archaeology). Owner:
+tianhaox.
+
+**Model.** Each (system, framework) exposes at most three queryable
+versions, resolved through `systems/query_versions.yaml`:
+
+- `current` — newest maintainer-completed full upgrade (authored; per-system
+  overrides only for frozen baselines such as a100_sxm and b60);
+- `previous` — the current before it (authored; moved on every bump; may be
+  empty until the first post-adoption bump);
+- `next` — derived, never authored: the highest DATA-BACKED version newer
+  than current anywhere in the fleet. Development drops for new models land
+  there; ops the next version lacks are served by channel-1 backward fill.
+  Marker-only directories do not qualify.
+
+The literal aliases `current`/`previous`/`next` resolve anywhere a version
+is requested; `get_latest_database_version` returns current. Any other
+version fails loudly (`allow_unlisted_version=True` exists for tests that
+address raw data coordinates). `get_supported_databases` — and therefore
+the support matrix — enumerates the slots only.
+
+**What this supersedes.**
+
+- §6.3's forward-borrow role is retired: old versions are not queryable, so
+  no declaration is needed to keep them answering. Channel 2 remains only
+  as a historical mechanism during migration; new reuse.yaml files are not
+  authored. (The 2026-08 investigation traced forward borrowing to the
+  newest-first marker era of #1219 — mechanically legalized in migration,
+  never an owner-argued need.)
+- §12.3's support bar is replaced by slot membership; per-family capability
+  within a slot version remains visible through loader provenance tags
+  rather than a version-level claim.
+- §13 is answered: data directories outside the slots are fill sources kept
+  by an explicit keep-list (comm/multi-node, wideep, sole-source tables,
+  dsa small-heads, test-fixture coordinates); everything else is deleted
+  outright when its slot life ends.
+
+**Operational notes.** The quarterly cycle of §11 becomes: bump `current`
+(old current -> `previous`) in the data PR; the diff shows recollected
+vs riding families; retire the outgoing generation's directories on the
+data-hygiene cadence. Product consumers should pin aliases, not literals.

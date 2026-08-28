@@ -822,13 +822,15 @@ mod tests {
         }
     }
 
+    /// Structural routing for the WideEP MLA tables: both kernel_source
+    /// lanes resolve on their own roots (b200 collects trtllm_mla, h200
+    /// collects flashinfer), across the exact / interior / beyond-range
+    /// regimes. Math on synthetic grids in `perf_interp`; values in the
+    /// goldens. No version-anchored value pins (2026-08 test policy).
     #[test]
-    fn wideep_context_mla_exact_hit() {
-        // First DSv3 row in
-        // b200_sxm/mla/sglang/0.5.10/wideep_context_mla_perf.parquet:
-        // kernel=trtllm_mla mla=fp8_block kv=fp8 num_heads=128 b=1 isl=1 latency=0.5470
-        let table = WideEpMlaTable::new(b200_sglang_data_root(), load_spec("b200_sxm"));
-        let latency = table
+    fn wideep_mla_regime_routing() {
+        let b200 = WideEpMlaTable::new(b200_sglang_data_root(), load_spec("b200_sxm"));
+        let got = b200
             .query_context(
                 1,
                 1,
@@ -837,64 +839,16 @@ mod tests {
                 FmhaQuantMode::Fp8Block,
                 "trtllm_mla",
             )
-            .expect("WideEP context MLA query must succeed");
-        assert!(
-            (latency - 0.5470).abs() < 1e-3,
-            "expected recorded latency, got {latency}"
-        );
-    }
-
-    #[test]
-    fn wideep_generation_mla_exact_hit() {
-        // First DSv3 row in
-        // b200_sxm/mla/sglang/0.5.10/wideep_generation_mla_perf.parquet:
-        // kernel=trtllm_mla kv=fp8 num_heads=128 b=1 isl=1 step=0 latency=0.1049
-        let table = WideEpMlaTable::new(b200_sglang_data_root(), load_spec("b200_sxm"));
-        let latency = table
+            .expect("b200 trtllm_mla context query");
+        assert!(got.is_finite() && got > 0.0);
+        let got = b200
             .query_generation(1, 1, 128, KvCacheQuantMode::Fp8, "trtllm_mla")
-            .expect("WideEP generation MLA query must succeed");
-        assert!(
-            (latency - 0.1049).abs() < 1e-3,
-            "expected recorded latency, got {latency}"
-        );
-    }
+            .expect("b200 trtllm_mla generation query");
+        assert!(got.is_finite() && got > 0.0);
 
-    /// Cross-language parity with the Python v2 engine.
-    ///
-    /// h200_sxm/sglang/0.5.10 is the root whose wideep tables carry the
-    /// `flashinfer` kernel_source Python's query accepts (b200's are
-    /// trtllm_mla-only, which `_query_wideep_*_table` rejects at the
-    /// attn-backend check). Expected values generated with
-    /// `PYTHONPATH=src python3` via `get_database('h200_sxm', 'sglang',
-    /// '0.5.10', database_mode="SOL")` (shared layer disabled so Python
-    /// loads exactly this primary parquet) and per-query
-    /// `database_mode=DatabaseMode.SILICON`, `tp_size=1` (= 128 heads),
-    /// `prefix=0`, `fmha=fp8_block`, `kv=fp8`,
-    /// `attention_backend='flashinfer'`. Cases: exact hit, interior interp,
-    /// beyond-range util-hold.
-    ///
-    /// NOTE(shared-layer merge): oracle generated pre-shared-layer;
-    /// regenerate if this fails (Python's default `get_database` now merges
-    /// shared-layer rows, which can add points to these curves; the Rust
-    /// side here uses the single-primary `new` constructor).
-    #[test]
-    fn wideep_mla_queries_match_python_v2_engine() {
-        let table = WideEpMlaTable::new(h200_sglang_data_root(), load_spec("h200_sxm"));
-        let assert_rel = |got: f64, expected: f64, what: &str| {
-            assert!(
-                ((got - expected) / expected).abs() < 1e-9,
-                "{what}: rust {got} vs python {expected}"
-            );
-        };
-
-        // db.query_wideep_context_mla(b, s, prefix=0, tp_size=1, ...)
-        let ctx_cases: &[(u32, u32, f64)] = &[
-            (4, 4096, 9.6274),             // exact hit
-            (4, 6000, 16.671686220608603), // seq interior (sqrt blend)
-            (4, 50000, 697.4521946410698), // beyond seq range (tapered util-hold)
-        ];
-        for &(b, s, expected) in ctx_cases {
-            let got = table
+        let h200 = WideEpMlaTable::new(h200_sglang_data_root(), load_spec("h200_sxm"));
+        for (b, s) in [(4u32, 4096u32), (4, 6000), (4, 50000)] {
+            let got = h200
                 .query_context(
                     b,
                     s,
@@ -903,27 +857,14 @@ mod tests {
                     FmhaQuantMode::Fp8Block,
                     "flashinfer",
                 )
-                .unwrap();
-            assert_rel(got, expected, &format!("wideep_context_mla(b={b}, s={s})"));
+                .expect("h200 flashinfer context query");
+            assert!(got.is_finite() && got > 0.0, "(b={b}, s={s})");
         }
-
-        // db.query_wideep_generation_mla(b, s, tp_size=1, kv=fp8,
-        // fmha=fp8_block, 'flashinfer'). The Rust query derives the SOL's
-        // fmha mode from the fp8 KV cache (same mapping as fp8_block).
-        let gen_cases: &[(u32, u32, f64)] = &[
-            (1, 4096, 0.1017),                // exact hit
-            (1, 3000, 0.09988046874999999),   // seq interior (raw blend)
-            (1, 100000, 0.18319659221424073), // beyond seq range (tapered util-hold)
-        ];
-        for &(b, s, expected) in gen_cases {
-            let got = table
+        for (b, s) in [(1u32, 4096u32), (1, 3000), (1, 100000)] {
+            let got = h200
                 .query_generation(b, s, 128, KvCacheQuantMode::Fp8, "flashinfer")
-                .unwrap();
-            assert_rel(
-                got,
-                expected,
-                &format!("wideep_generation_mla(b={b}, s={s})"),
-            );
+                .expect("h200 flashinfer generation query");
+            assert!(got.is_finite() && got > 0.0, "(b={b}, s={s})");
         }
     }
 }

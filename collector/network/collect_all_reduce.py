@@ -75,6 +75,11 @@ def get_input_shape_and_comm_size(size, token_dim=4096):
         return [num_token, token_dim]
 
 
+def _resolve_rank(env):
+    """Resolve a Slurm task rank without silently aliasing tasks to rank 0."""
+    return int(env.get("RANK") or env["SLURM_PROCID"])
+
+
 def import_trtllm():
     """Import TensorRT-LLM modules"""
     try:
@@ -87,6 +92,7 @@ def import_trtllm():
         from tensorrt_llm import Mapping
         from tensorrt_llm._torch.distributed import AllReduce, AllReduceFusionOp
         from tensorrt_llm._torch.distributed import AllReduceParams as TorchAllReduceParams
+        from tensorrt_llm._torch.distributed import ops as distributed_ops
         from tensorrt_llm._utils import OMPI_COMM_TYPE_HOST, mpi_comm
         from tensorrt_llm.functional import AllReduceStrategy
 
@@ -97,6 +103,7 @@ def import_trtllm():
             "AllReduce": AllReduce,
             "AllReduceFusionOp": AllReduceFusionOp,
             "TorchAllReduceParams": TorchAllReduceParams,
+            "distributed_ops": distributed_ops,
             "OMPI_COMM_TYPE_HOST": OMPI_COMM_TYPE_HOST,
             "mpi_comm": mpi_comm,
             "AllReduceStrategy": AllReduceStrategy,
@@ -105,6 +112,29 @@ def import_trtllm():
         print(f"Failed to import TensorRT-LLM modules: {e}")
         print("Please ensure TensorRT-LLM is installed and PYTHONPATH is set correctly")
         sys.exit(1)
+
+
+def _trtllm_mnnvl_kernel_source(allreduce, input_tensor, world_size, distributed_ops):
+    """Return the observable TRT-LLM implementation family that will run."""
+    # TensorRT-LLM v1.3.0rc20
+    # tensorrt_llm/_torch/distributed/ops.py:769-786 constructs this object only
+    # when MNNVL is available; forward():871-876 returns its output before
+    # regular AUTO dispatch. The regular C++ AUTO selector does not expose its
+    # selected sub-implementation, so retain the established generic TRTLLM
+    # family label when MNNVL is inactive.
+    if getattr(allreduce, "mnnvl_allreduce", None) is None:
+        return "TRTLLM"
+
+    # TensorRT-LLM v1.3.0rc20
+    # tensorrt_llm/_torch/distributed/ops.py:32,575-590 and
+    # cpp/tensorrt_llm/thop/allreduceOp.cpp:1932-1942 use this exact
+    # aggregate-byte threshold to dispatch MNNVL one-shot or two-shot.
+    threshold = getattr(distributed_ops, "_MNNVL_ONE_SHOT_THRESHOLD_BYTES", None)
+    if not isinstance(threshold, int) or threshold <= 0:
+        raise RuntimeError("TensorRT-LLM does not expose the pinned MNNVL variant threshold")
+    aggregate_bytes = input_tensor.numel() * input_tensor.element_size() * world_size
+    variant = "oneshot" if aggregate_bytes <= threshold else "twoshot"
+    return f"TRTLLM_MNNVL_{variant}"
 
 
 def benchmark_trtllm_allreduce(
@@ -167,9 +197,20 @@ def benchmark_trtllm_allreduce(
         input_shape = get_input_shape_and_comm_size(size)
         input_tensor = torch.ones(input_shape, dtype=torch_dtype, device="cuda")
 
-        op_list = []
-        for i in range(repeat_n):
-            allreduce = trtllm_mods["AllReduce"](mapping=mapping).cuda()
+        # dtype enables MNNVL for multi-node TP (issue #1416):
+        # _torch/distributed/ops.py @v1.3.0rc20 builds
+        # `MNNVLAllReduce(mapping, dtype) if dtype else None`.
+        first_allreduce = trtllm_mods["AllReduce"](mapping=mapping, dtype=torch_dtype).cuda()
+        kernel_source = _trtllm_mnnvl_kernel_source(
+            first_allreduce,
+            input_tensor,
+            world_size,
+            trtllm_mods["distributed_ops"],
+        )
+        first_allreduce(input_tensor, all_reduce_params=all_reduce_params)  # dry run to init
+        op_list = [first_allreduce]
+        for _ in range(1, repeat_n):
+            allreduce = trtllm_mods["AllReduce"](mapping=mapping, dtype=torch_dtype).cuda()
             allreduce(input_tensor, all_reduce_params=all_reduce_params)  # dry run to init
             op_list.append(allreduce)
 
@@ -259,7 +300,7 @@ def benchmark_trtllm_allreduce(
                 version=trtllm_version,
                 device_name=get_device_module().get_device_name(),
                 op_name="all_reduce",
-                kernel_source="TRTLLM",
+                kernel_source=kernel_source,
                 perf_filename=perf_filename,
                 power_stats=power_stats,
             )
@@ -956,15 +997,16 @@ def allreduce_benchmark(
         power_min_duration: Minimum duration for power measurement
     """
     # Setup distributed environment based on backend
+    if use_slurm:
+        world_size = int(os.environ["SLURM_NTASKS"])
+        rank = _resolve_rank(os.environ)
+
     if backend == "trtllm":
         # TensorRT-LLM uses MPI by default
         tllm_mods = import_trtllm()
         tllm = tllm_mods["tllm"]
 
-        if use_slurm:
-            world_size = int(os.environ["SLURM_NTASKS"])
-            rank = int(os.environ["RANK"])
-        else:
+        if not use_slurm:
             world_size = tllm.mpi_world_size()
             rank = tllm.mpi_rank()
 
@@ -976,10 +1018,7 @@ def allreduce_benchmark(
         )
 
     elif backend == "vllm":
-        if use_slurm:
-            world_size = int(os.environ["SLURM_NTASKS"])
-            rank = int(os.environ.get("SLURM_PROCID", os.environ.get("RANK", "0")))
-        else:
+        if not use_slurm:
             # Check if running under torchrun (it sets these env vars)
             if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
                 world_size = int(os.environ["WORLD_SIZE"])
@@ -1000,10 +1039,7 @@ def allreduce_benchmark(
         )
 
     elif backend == "sglang":
-        if use_slurm:
-            world_size = int(os.environ["SLURM_NTASKS"])
-            rank = int(os.environ.get("SLURM_PROCID", os.environ.get("RANK", "0")))
-        else:
+        if not use_slurm:
             # Check if running under torchrun (it sets these env vars)
             if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
                 world_size = int(os.environ["WORLD_SIZE"])

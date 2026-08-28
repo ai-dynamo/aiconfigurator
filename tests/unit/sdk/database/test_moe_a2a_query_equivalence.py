@@ -98,7 +98,7 @@ def _exact_token_probes(token_keys):
     reason="shipped h200_sxm sglang 0.5.6.post2 DeepEP parquets not present",
 )
 def test_l1_deepep_query_equivalence():
-    db = get_database("h200_sxm", "sglang", "0.5.6.post2")
+    db = get_database("h200_sxm", "sglang", "0.5.6.post2", allow_unlisted_version=True)
     assert db is not None
 
     # Legacy table: [node][hidden][topk][experts][sms] -> {tokens: leaf (us)}.
@@ -164,7 +164,7 @@ _OP_MAP = {
     reason="shipped gb200 trtllm 1.3.0rc10 alltoall parquet not present",
 )
 def test_l1_trtllm_alltoall_query_equivalence():
-    db = get_database("gb200", "trtllm", "1.3.0rc10")
+    db = get_database("gb200", "trtllm", "1.3.0rc10", allow_unlisted_version=True)
     assert db is not None
 
     # Legacy table: [kernel][op][quant][node][hidden][topk][experts][ep] -> {tokens: leaf (ms)}.
@@ -199,7 +199,7 @@ def test_l1_fp8_block_normalization_matches_legacy():
     """
     from aiconfigurator_core.sdk import common
 
-    db = get_database("gb200", "trtllm", "1.3.0rc10")
+    db = get_database("gb200", "trtllm", "1.3.0rc10", allow_unlisted_version=True)
     assert db is not None
 
     legacy_table = fetch_table_view(db, "_trtllm_alltoall_data")

@@ -204,6 +204,8 @@ mappings:
 
   # Comm.
   - {framework: trtllm, kernel_source: TRTLLM, backend: custom_allreduce, source: "collector/network/collect_all_reduce.py (trtllm custom AR)"}
+  - {framework: trtllm, kernel_source: TRTLLM_MNNVL_oneshot, backend: custom_allreduce, source: "collector/network/collect_all_reduce.py; tensorrt_llm/_torch/distributed/ops.py:871-876 + cpp/tensorrt_llm/thop/allreduceOp.cpp:1932-1939@v1.3.0rc20"}
+  - {framework: trtllm, kernel_source: TRTLLM_MNNVL_twoshot, backend: custom_allreduce, source: "collector/network/collect_all_reduce.py; tensorrt_llm/_torch/distributed/ops.py:871-876 + cpp/tensorrt_llm/thop/allreduceOp.cpp:1940-1942@v1.3.0rc20"}
   - {framework: trtllm, kernel_source: NCCL, backend: nccl, source: "collector/network/collect_nccl.py"}
   - {framework: trtllm, kernel_source: NVLinkOneSided, backend: nvlink_one_sided, source: "collector/network/slurm/collect_trtllm_alltoall.py"}
   - {framework: trtllm, kernel_source: NVLinkTwoSided, backend: nvlink_two_sided, source: "collector/network/slurm/collect_trtllm_alltoall.py"}

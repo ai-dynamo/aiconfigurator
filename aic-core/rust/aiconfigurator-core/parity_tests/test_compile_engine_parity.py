@@ -65,15 +65,15 @@ pytestmark = pytest.mark.integration
 # sglang/vllm emit `CustomAllReduce` — trtllm comm quant, and the
 # SGLang/TRT-LLM-only Fallback-MLA chain) uncovered here.
 #
-# Cases drawn straight from `SMOKE_CASES` (plus one `POWER_CASES` member) so
-# this tracks the same matrix. All compute (no error-symmetry cases), so every
-# surface yields a real number.
+# Cases drawn straight from `SMOKE_CASES` so this tracks the same matrix. All
+# compute (no error-symmetry cases), so every surface yields a real number.
 #
-#   vllm   : the original 5 b200_sxm/vllm/0.19.0 cases, plus the
-#            Qwen3-30B-A3B b200_sxm/vllm/0.22.0 POWER_CASES member — every
-#            0.19.0/0.5.x/1.3.0rc10 identity is latency-only (energy_wms == 0
-#            in every per-op golden), so this is the one subset case whose
-#            per-op energy comparison actually executes.
+#   vllm   : the original 5 b200_sxm/vllm cases (current slot). The former
+#            b200_sxm/vllm/0.22.0 POWER_CASES member was removed with the
+#            2026-08 prune (its gemm tables are gone; no engine-step-complete
+#            power identity remains). Per-op energy on current-slot goldens
+#            is well-typed zero; the energy MATH is anchored by the rust
+#            synthetic energy oracles instead.
 #   sglang : Kimi-K2.5 (Fallback-MLA + MoE) and MiniMax-M2.5 (MoE), both
 #            b200_sxm/sglang/0.5.10. SGLang's MoEDispatch flavor is the same
 #            `CustomAllReduce` else-branch as vllm; its distinct value is the
@@ -85,27 +85,28 @@ pytestmark = pytest.mark.integration
 #            hits the trtllm dispatch-flavor branch.
 _SUBSET_IDS_BY_BACKEND = {
     "vllm": [
-        "minimax-m25-b200-vllm-019-isl1024-osl2",
-        "kimi-k25-b200-vllm-019-isl1024-osl2",
-        "minimax-m25-b200-vllm-019-sampled-prefix",
-        "minimax-m27-b200-vllm-019-isl1024-osl2",
-        "qwen3-30b-a3b-b200-vllm-019-isl1024-osl2",
-        "qwen3-30b-a3b-b200-vllm-022-power",
+        "minimax-m25-b200-vllm-isl1024-osl2",
+        "kimi-k25-b200-vllm-isl1024-osl2",
+        "minimax-m25-b200-vllm-sampled-prefix",
+        "minimax-m27-b200-vllm-isl1024-osl2",
+        "qwen3-30b-a3b-b200-vllm-isl1024-osl2",
     ],
     "sglang": [
-        "kimi-k25-b200-sglang-0510-isl1024-osl2",
-        "minimax-m25-b200-sglang-0510-isl1024-osl2",
+        "kimi-k25-b200-sglang-isl1024-osl2",
+        "minimax-m25-b200-sglang-isl1024-osl2",
     ],
     "trtllm": [
-        "gpt-oss-20b-b200-trtllm-130rc10-isl1024-osl2",
-        "nemotron-nas-b200-trtllm-130rc10-isl1024-osl2",
+        "gpt-oss-20b-b200-trtllm-isl1024-osl2",
+        "nemotron-nas-b200-trtllm-isl1024-osl2",
     ],
 }
 
 # Subset members on power-carrying database identities: their per-op goldens
 # must carry nonzero energy_wms, so the energy comparison branch is proven to
-# execute (see the anti-vacuous guard in TestCompileEnginePerOpParity).
-_POWER_SUBSET_IDS = {"qwen3-30b-a3b-b200-vllm-022-power"}
+# execute (anti-vacuous guard in TestCompileEnginePerOpParity). EMPTY since
+# the 2026-08 prune removed the last engine-step-complete power identity —
+# repopulate when a current-slot power collection lands.
+_POWER_SUBSET_IDS: set[str] = set()
 
 # Preserve the per-backend ordering (vllm, then sglang, then trtllm) so the
 # parametrize ids group readably and the determinism sweep covers vllm first.
@@ -167,7 +168,14 @@ def _quiet(func, *args, **kwargs):
 
 
 def _build_python_model(case: EngineStepParityCase):
-    database = _quiet(perf_database.get_database, case.system_name, case.backend_name, case.backend_version)
+    database = _quiet(
+        perf_database.get_database,
+        case.system_name,
+        case.backend_name,
+        case.backend_version,
+        # parity cases are frozen data coordinates by design
+        allow_unlisted_version=True,
+    )
     if database is None:
         pytest.skip(f"no perf database for {case.system_name}/{case.backend_name}/{case.backend_version}")
     model_config = config.ModelConfig(
@@ -292,7 +300,7 @@ def _assert_within(name: str, python_value: float, new_value: float, *, backend:
 
 # Chunked-prefill shapes: shared by the parametrized test and the golden
 # pin path (pin_goldens.py) so the fixture keys track the test matrix.
-_CHUNKED_PREFILL_CASE_ID = "minimax-m25-b200-vllm-019-isl1024-osl2"
+_CHUNKED_PREFILL_CASE_ID = "minimax-m25-b200-vllm-isl1024-osl2"
 _CHUNKED_PREFILL_SHAPES = [
     (512, 4, 4096, 128, 0),  # chunked prefill: ctx_tokens < isl
     (512, 4, 4096, 128, 256),  # chunked + cached prefix
@@ -452,7 +460,7 @@ class TestCompileEnginePerOpParity:
 
 
 # Shared by the imbalance tests and the golden pin path.
-_IMBALANCE_CASE_ID = "minimax-m25-b200-vllm-019-isl1024-osl2"
+_IMBALANCE_CASE_ID = "minimax-m25-b200-vllm-isl1024-osl2"
 _IMBALANCE_CTX_SCALE = 1.3
 _IMBALANCE_GEN_SCALE = 0.85
 
@@ -534,7 +542,7 @@ class TestImbalanceScaleParity:
 
 _WIDEEP_SGLANG_MODEL = "deepseek-ai/DeepSeek-V3"
 _WIDEEP_SGLANG_SYSTEM = "h200_sxm"
-_WIDEEP_SGLANG_VERSION = "0.5.6.post2"
+_WIDEEP_SGLANG_VERSION = "0.5.14"
 
 
 def _build_wideep_sglang():
@@ -543,7 +551,15 @@ def _build_wideep_sglang():
     references)."""
     from aiconfigurator.sdk import common
 
-    database = _quiet(perf_database.get_database, _WIDEEP_SGLANG_SYSTEM, "sglang", _WIDEEP_SGLANG_VERSION)
+    database = _quiet(
+        perf_database.get_database,
+        _WIDEEP_SGLANG_SYSTEM,
+        "sglang",
+        _WIDEEP_SGLANG_VERSION,
+        # current slot: the wideEP tables backfill from their sole-source
+        # 0.5.6.post2/0.5.9/0.5.10/0.5.12 dirs while gemm/attention resolve
+        # on the primary — the production large-EP query shape.
+    )
     if database is None:
         pytest.skip(f"no perf database for {_WIDEEP_SGLANG_SYSTEM}/sglang/{_WIDEEP_SGLANG_VERSION}")
     model_config = config.ModelConfig(
@@ -589,8 +605,9 @@ class TestWideEpDeepEpParity:
     raw tp), the deepep MoE compute routing (Rust used to read `moe_perf`
     where Python reads the wideep context/generation tables), and the DeepEP
     dispatch flavor emission (the emitter used to map every sglang dispatch to
-    CustomAllReduce). Data lives on h200_sxm/sglang/0.5.6.post2 (the only
-    shipped version with the deepep dispatch parquets)."""
+    CustomAllReduce). Runs on the current slot; the deepep dispatch and
+    wideEP tables reach it through cross-version backfill from their
+    sole-source dirs."""
 
     def test_wideep_static_parity(self) -> None:
         _model, _backend, _database, spec_json = _build_wideep_sglang()
@@ -618,9 +635,9 @@ def _build_wideep_trtllm():
     shared by the parity test (handle side) and the golden capture."""
     from aiconfigurator.sdk import common
 
-    database = _quiet(perf_database.get_database, "gb200", "trtllm", "1.3.0rc10")
+    database = _quiet(perf_database.get_database, "gb200", "trtllm", "1.3.0rc20")
     if database is None:
-        pytest.skip("no perf database for gb200/trtllm/1.3.0rc10")
+        pytest.skip("no perf database for gb200/trtllm/1.3.0rc20")
     model_config = config.ModelConfig(
         tp_size=1,
         attention_dp_size=8,
@@ -641,7 +658,7 @@ def _build_wideep_trtllm():
         model_path="deepseek-ai/DeepSeek-V3",
         system="gb200",
         backend="trtllm",
-        backend_version="1.3.0rc10",
+        backend_version="1.3.0rc20",
         kv_block_size=None,
         systems_path=None,
         nextn=0,

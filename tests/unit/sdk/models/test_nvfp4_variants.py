@@ -164,7 +164,7 @@ def test_qwen36_task_preserves_inferred_provenance_for_mixed_precision_split():
         model_path="nvidia/Qwen3.6-27B-NVFP4",
         system_name="gb300",
         backend_name="sglang",
-        backend_version="0.5.12",
+        backend_version="0.5.16",  # next slot; 0.5.12-era rows reach it via backward fill
         total_gpus=32,
     )
     model_config = task.build_model_config(role="agg")
@@ -199,7 +199,7 @@ def test_qwen36_task_preserves_explicit_gemm_override():
         model_path="nvidia/Qwen3.6-27B-NVFP4",
         system_name="gb300",
         backend_name="sglang",
-        backend_version="0.5.12",
+        backend_version="0.5.16",  # next slot; 0.5.12-era rows reach it via backward fill
         total_gpus=32,
         gemm_quant_mode=common.GEMMQuantMode.fp8_static,
     )

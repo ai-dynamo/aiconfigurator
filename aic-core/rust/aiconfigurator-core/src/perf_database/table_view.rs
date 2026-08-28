@@ -2364,14 +2364,6 @@ pub const TABLE_VIEW_ATTRIBUTES: &[(&str, &[&str])] = &[
         &["dsv4_paged_mqa_logits_module_perf.parquet"],
     ),
     (
-        "_dsv4_sparse_kernel_data.hca_attn",
-        &["dsv4_hca_attn_module_perf.parquet"],
-    ),
-    (
-        "_dsv4_sparse_kernel_data.csa_attn",
-        &["dsv4_csa_attn_module_perf.parquet"],
-    ),
-    (
         "_dsv4_csa_topk_calib_data",
         &["dsv4_csa_topk_calib_perf.parquet"],
     ),
@@ -2498,12 +2490,6 @@ pub fn table_view_json(tables: &PerfTables, attribute: &str) -> Result<Option<St
         ]),
         "_dsv4_sparse_kernel_data.paged_mqa_logits" => {
             view_dsv4_sparse_kernel(&src("dsv4_paged_mqa_logits_module_perf.parquet")?)?
-        }
-        "_dsv4_sparse_kernel_data.hca_attn" => {
-            view_dsv4_sparse_kernel(&src("dsv4_hca_attn_module_perf.parquet")?)?
-        }
-        "_dsv4_sparse_kernel_data.csa_attn" => {
-            view_dsv4_sparse_kernel(&src("dsv4_csa_attn_module_perf.parquet")?)?
         }
         "_dsv4_csa_topk_calib_data" => {
             view_dsv4_csa_topk_calib(&src("dsv4_csa_topk_calib_perf.parquet")?)?

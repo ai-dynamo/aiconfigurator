@@ -177,7 +177,7 @@ def test_shipped_legacy_comm_sources_resolve_in_comm_family_dir():
     assert comm_dir_fragment in DEEPEP_NORMAL_PATH
     assert comm_dir_fragment in DEEPEP_LL_PATH
 
-    db = get_database("h200_sxm", "sglang", "0.5.6.post2")
+    db = get_database("h200_sxm", "sglang", "0.5.6.post2", allow_unlisted_version=True)
     assert db is not None
     MoEAllToAll.load_data(db)
 
@@ -206,7 +206,7 @@ def test_attention_tp_default_noop_on_shipped_l1_case():
     from aiconfigurator_core.sdk.engine_table_view import fetch_table_view
     from aiconfigurator_core.sdk.perf_database import get_database
 
-    db = get_database("h200_sxm", "sglang", "0.5.6.post2")
+    db = get_database("h200_sxm", "sglang", "0.5.6.post2", allow_unlisted_version=True)
     assert db is not None
 
     # First slice of the legacy table (via the engine view), deterministically.

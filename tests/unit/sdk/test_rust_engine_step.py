@@ -852,7 +852,7 @@ def test_forward_pass_perf_model_native_default_directional_bounds_end_to_end() 
         "model_name": "Qwen/Qwen3-32B",
         "system_name": "h200_sxm",
         "backend": "trtllm",
-        "backend_version": "1.3.0rc10",
+        "backend_version": "1.3.0rc20",
         "tp_size": 4,
         "pp_size": 1,
         "moe_tp_size": None,
@@ -953,7 +953,7 @@ def test_forward_pass_perf_model_best_available_falls_back_on_bad_config() -> No
         "model_name": "this/model-does-not-exist-xyz",
         "system_name": "h200_sxm",
         "backend": "trtllm",
-        "backend_version": "1.3.0rc10",
+        "backend_version": "1.3.0rc20",
         "tp_size": 1,
         "pp_size": 1,
         "moe_tp_size": None,
@@ -1310,7 +1310,10 @@ def test_large_ep_op_graph_compiles_natively(caplog):
         num_gpus_per_node=8,
     )
     model = get_model("deepseek-ai/DeepSeek-R1", cfg, "sglang")
-    database = get_database("h200_sxm", "sglang", "0.5.6.post2")
+    # Current slot: the wideEP tables backfill from their 0.5.6.post2/0.5.9/
+    # 0.5.10/0.5.12 sole-source dirs while gemm/attention resolve on the
+    # primary — the production large-EP query shape.
+    database = get_database("h200_sxm", "sglang", "0.5.14")
 
     # (1) The op graph compiles into an EngineSpec carrying the tagged
     # large-EP variants, with the per-phase comm backends the config set.
@@ -1320,7 +1323,7 @@ def test_large_ep_op_graph_compiles_natively(caplog):
             model_path="deepseek-ai/DeepSeek-R1",
             system="h200_sxm",
             backend="sglang",
-            backend_version="0.5.6.post2",
+            backend_version="0.5.14",
             kv_block_size=None,
             systems_path=None,
             nextn=0,
