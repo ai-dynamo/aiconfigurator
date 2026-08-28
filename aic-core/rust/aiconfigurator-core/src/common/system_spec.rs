@@ -115,6 +115,11 @@ pub struct NodeSpec {
     /// Inter-rack bandwidth, bytes/s. Optional.
     #[serde(default)]
     pub inter_rack_bw: Option<f64>,
+    /// Inter-rack point-to-point latency (seconds). Optional; falls back to
+    /// `p2p_latency` when unset, so systems without a rack tier keep the
+    /// pre-rack behavior.
+    #[serde(default)]
+    pub inter_rack_latency: Option<f64>,
 }
 
 /// Miscellaneous, mostly empirical, configuration.
@@ -173,6 +178,21 @@ impl SystemSpec {
             return node.inter_node_bw;
         }
         node.inter_rack_bw.unwrap_or(node.inter_node_bw)
+    }
+
+    /// Mirrors Python's `SystemSpec.get_p2p_latency` two-tier selection.
+    ///
+    /// The latency counterpart of [`Self::get_p2p_bandwidth`]. Two tiers are
+    /// enough: `p2p_latency` is measured within a scale-up domain (node or
+    /// rack), while crossing racks adds the scale-out fabric's round trip.
+    /// A system with no declared rack tier always returns `p2p_latency`.
+    pub fn get_p2p_latency(&self, num_gpus: u32) -> f64 {
+        let node = &self.node;
+        let per_rack = node.num_gpus_per_rack.unwrap_or(u32::MAX);
+        if num_gpus <= per_rack {
+            return node.p2p_latency;
+        }
+        node.inter_rack_latency.unwrap_or(node.p2p_latency)
     }
 }
 

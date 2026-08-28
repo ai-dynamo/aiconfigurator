@@ -49,6 +49,7 @@ def build_afd_ops_partition(
     phase: AFDPhase = "generation",
     *,
     boundary_on_attn: bool = True,
+    router_on_attn: bool = False,
     allow_unknown_ops: bool = False,
     unknown_side: Literal["attn", "ffn"] = "attn",
 ) -> AFDOpsPartition:
@@ -58,6 +59,13 @@ def build_afd_ops_partition(
         model: Model instance exposing ``context_ops`` and ``generation_ops``.
         phase: ``"context"`` or ``"generation"``.
         boundary_on_attn: Assign boundary ops to A-worker when true; otherwise F-worker.
+        router_on_attn: Assign the MoE router to the A-worker when true,
+            matching the FastAFD boundary (routing decisions are made on the
+            attention worker and routed tokens cross the pool boundary).
+            Default False keeps aic's placement: un-routed hidden states
+            cross to the F-worker, which runs router + grouping + experts.
+            The transfer *volume* model is identical either way (``p_send``
+            combinatorics); only the router GEMM's pool attribution changes.
         allow_unknown_ops: If false, unclassified ops raise ``AFDPartitionError``.
         unknown_side: Destination for unknown ops when ``allow_unknown_ops`` is true.
     """
@@ -67,7 +75,12 @@ def build_afd_ops_partition(
     partition = AFDOpsPartition(phase=model_phase)
 
     for op in op_sequence:
-        side = _classify_op(op, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
+        side = _classify_op(
+            op,
+            router_on_attn=router_on_attn,
+            allow_unknown_ops=allow_unknown_ops,
+            unknown_side=unknown_side,
+        )
         _append_partition_op(partition, op, side, boundary_on_attn=boundary_on_attn)
 
     return partition
@@ -98,6 +111,7 @@ def _classify_by_markers(
     op: operations.Operation,
     name: str,
     *,
+    router_on_attn: bool,
     allow_unknown_ops: bool,
     unknown_side: Literal["attn", "ffn"],
 ) -> AFDSide:
@@ -105,18 +119,24 @@ def _classify_by_markers(
 
     ``_classify_op`` / ``_classify_overlap_op`` (no-inner branch) /
     ``_classify_inner_overlap_op`` all need the same skip / boundary /
-    attn / ffn / fallback decision. Substring markers can overlap
-    (``proj_gemm`` is the canonical example), so the attn-vs-ffn check
-    order materially affects classification and must stay identical at
+    router / attn / ffn / fallback decision. Substring markers can overlap
+    (``proj_gemm`` is the canonical example), so the check order
+    materially affects classification and must stay identical at
     every callsite. Funneling all three through this helper locks the
-    order down to attn -> ffn in exactly one place, so future edits
-    stay coherent by construction.
+    order down to router -> attn -> ffn in exactly one place, so future
+    edits stay coherent by construction.
     """
     if _is_skipped_model_internal_op(op, name):
         return "skip"
     _raise_if_unclassifiable_layer_family(op)
     if _is_boundary_op(name):
         return "boundary"
+    if "router" in name:
+        # Router placement is explicit (not marker-derived): FastAFD routes
+        # on the attention worker; aic's default keeps routing on the
+        # F-worker. See ``build_afd_ops_partition``. Checked before the
+        # attn/ffn markers so the knob is authoritative.
+        return "attn" if router_on_attn else "ffn"
     if _is_attention_side_op(name):
         return "attn"
     if _is_ffn_side_op(name):
@@ -127,17 +147,27 @@ def _classify_by_markers(
 def _classify_op(
     op: operations.Operation,
     *,
+    router_on_attn: bool,
     allow_unknown_ops: bool,
     unknown_side: Literal["attn", "ffn"],
 ) -> AFDSide:
     if isinstance(op, operations.OverlapOp):
-        return _classify_overlap_op(op, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
-    return _classify_by_markers(op, _op_name(op), allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
+        return _classify_overlap_op(
+            op, router_on_attn=router_on_attn, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side
+        )
+    return _classify_by_markers(
+        op,
+        _op_name(op),
+        router_on_attn=router_on_attn,
+        allow_unknown_ops=allow_unknown_ops,
+        unknown_side=unknown_side,
+    )
 
 
 def _classify_overlap_op(
     op: operations.OverlapOp,
     *,
+    router_on_attn: bool,
     allow_unknown_ops: bool,
     unknown_side: Literal["attn", "ffn"],
 ) -> AFDSide:
@@ -145,7 +175,12 @@ def _classify_overlap_op(
     inner_ops = list(getattr(op, "_group_a", [])) + list(getattr(op, "_group_b", []))
     if inner_ops:
         inner_sides = {
-            _classify_inner_overlap_op(inner_op, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
+            _classify_inner_overlap_op(
+                inner_op,
+                router_on_attn=router_on_attn,
+                allow_unknown_ops=allow_unknown_ops,
+                unknown_side=unknown_side,
+            )
             for inner_op in inner_ops
         }
         inner_sides.discard("skip")
@@ -156,18 +191,33 @@ def _classify_overlap_op(
 
         raise AFDPartitionError(f"OverlapOp '{name}' spans A/F boundaries and cannot be kept atomic.")
 
-    return _classify_by_markers(op, name, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
+    return _classify_by_markers(
+        op,
+        name,
+        router_on_attn=router_on_attn,
+        allow_unknown_ops=allow_unknown_ops,
+        unknown_side=unknown_side,
+    )
 
 
 def _classify_inner_overlap_op(
     op: operations.Operation,
     *,
+    router_on_attn: bool,
     allow_unknown_ops: bool,
     unknown_side: Literal["attn", "ffn"],
 ) -> AFDSide:
     if isinstance(op, operations.OverlapOp):
-        return _classify_overlap_op(op, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
-    return _classify_by_markers(op, _op_name(op), allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side)
+        return _classify_overlap_op(
+            op, router_on_attn=router_on_attn, allow_unknown_ops=allow_unknown_ops, unknown_side=unknown_side
+        )
+    return _classify_by_markers(
+        op,
+        _op_name(op),
+        router_on_attn=router_on_attn,
+        allow_unknown_ops=allow_unknown_ops,
+        unknown_side=unknown_side,
+    )
 
 
 def _validate_phase(phase: str) -> AFDPhase:
@@ -194,17 +244,15 @@ def _unknown_or_default(
 
 
 def _is_skipped_model_internal_op(op: operations.Operation, name: str) -> bool:
-    # TODO(afd, Phase-2): when an ``MoEDispatch`` op (name contains ``"dispatch"``)
+    # NOTE(afd): when an ``MoEDispatch`` op (name contains ``"dispatch"``)
     # appears inside an ``OverlapOp`` (e.g. ``generation_moe_overlap``), this
     # skip-list only excludes it from the overlap *classification vote* --
-    # its cost is still folded into the OverlapOp's F-pool latency via
-    # ``OverlapOp.query()`` and stays invisible to the AFD comm ops /
-    # ``_pipeline_tcycle``. That hides the MoE EP all-to-all from the AFD
-    # pipeline overlap math, so contention between the MoE all-to-all and
-    # the cross-pool A<->F transfer on the same NIC fabric is silently
-    # dropped. Surface ``MoEDispatch`` cost as an additional contribution
-    # to ``t_c_layer`` (or split the OverlapOp into compute + dispatch
-    # sub-stages) when AFD is active, instead of folding it into ``t_f``.
+    # ``OverlapOp.query()`` still sums it into the F-pool latency. That is
+    # why the AFD session strips nested dispatch ops from the F partition
+    # before summing (``_strip_moe_dispatch_from_partition``): under AFD the
+    # dispatch all-to-all IS the cross-pool A<->F transfer, already billed
+    # as t_a2f/t_f2a by ``AFDTransfer``. Do NOT additionally surface it as a
+    # ``t_c_layer`` contribution -- that would bill the same bytes twice.
     if isinstance(op, (operations.CustomAllReduce, operations.P2P, operations.NCCL)):
         return True
 
@@ -300,19 +348,28 @@ def _is_attention_side_op(name: str) -> bool:
 
 
 def _is_ffn_side_op(name: str) -> bool:
-    # TODO(afd, Phase-2): the ``"shared"`` marker pins shared-expert ops to
-    # the F-Worker, but the optimal placement is topology-dependent. From a
-    # comm standpoint shared belongs on A (every token is already there, no
-    # cross-pool replication needed); from a compute standpoint it belongs
-    # on F (scale-out across F GPUs and TP-shard the GEMMs). Add a knob --
-    # ``AFDConfig.shared_on_attn`` parallel to ``boundary_on_attn`` -- so
-    # callers can flip the side without editing this classifier. Note that
-    # moving shared to A also requires AFDTransfer to drop the redundant
-    # shared-replication term added by the companion TODO in ``operations.py``.
+    # NOTE(afd, closed): the ``"shared"`` marker pins shared-expert ops to
+    # the F-Worker. A ``shared_on_attn`` flip (parallel to
+    # ``boundary_on_attn``) was considered and is dominated in the current
+    # model, so the knob is deliberately absent:
+    #   * comm: AFDTransfer's volume is p_send-driven (routed dispatch);
+    #     shared placement does not change cross-pool traffic at all.
+    #   * compute: on F, shared overlaps the routed path inside
+    #     ``generation_moe_overlap`` (cost = max(routed, shared)) and is
+    #     nearly free; on A, ops sum serially, so t_a grows by the full
+    #     shared time. max(a+s, r) >= max(a, max(r, s)) always holds --
+    #     the flip can at best tie (s < r and a+s <= r) and never wins.
+    #   * memory: shared is ~1/257 of MoE weights on DeepSeek-V3, so the
+    #     HBM shift between pools is negligible.
+    # A flip would also require dissolving the OverlapOp first (routing its
+    # groups to different pools raises AFDPartitionError). Reopen only if
+    # A-side overlap modeling lands or a shared-dominant model appears.
     return any(
         marker in name
         for marker in (
-            "router",
+            # NOTE: "router" is deliberately absent -- router placement is
+            # decided explicitly in ``_classify_by_markers`` from the
+            # ``router_on_attn`` knob, before these markers are consulted.
             "moe",
             "ffn",
             "mlp",

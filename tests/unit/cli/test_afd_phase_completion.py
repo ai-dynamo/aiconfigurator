@@ -28,6 +28,7 @@ def _fake_phase_metrics(
     t_a2f_layer: float = 0.1,
     t_f2a_layer: float = 0.1,
     t_step: float = 50.0,
+    t_once_per_step: float = 0.0,
     comm_hidden: bool = True,
 ) -> dict:
     """Build a minimal ``_simulate_phase``-style metrics dict for AFD tests.
@@ -42,6 +43,11 @@ def _fake_phase_metrics(
         "t_f2a_layer": t_f2a_layer,
         "t_c_layer": t_a2f_layer + t_f2a_layer,
         "t_step": t_step,
+        # Embedding / logits GEMM are charged once per step rather than
+        # amortized into the per-layer cadence; ``_phase_scalars`` indexes
+        # ``_PHASE_SCALAR_KEYS`` strictly, so a double that omits the key
+        # would fail there instead of in the assertion under test.
+        "t_once_per_step": t_once_per_step,
         "comm_hidden": comm_hidden,
         "balance_ratio": balance_ratio,
         "a_per_op": {},
@@ -370,11 +376,11 @@ def test_afd_prefill_uses_uncached_prefix_suffix_for_token_math(monkeypatch):
             a_combine=FakeCommOp("afd_a_side_combine"),
         )
 
-    def fake_sum_latency(self, _ops, *, batch_size, seq_len, model, runtime_config, is_context):
+    def fake_sum_latency(self, _ops, *, batch_size, seq_len, model, runtime_config, is_context, **_kwargs):
         captured["sum_latency_seq_lens"].append(seq_len)
         return 2.0, {}
 
-    def fake_memory_summary(self, _memory, runtime_config, _free_gpu_memory_fraction):
+    def fake_memory_summary(self, _memory, runtime_config, _free_gpu_memory_fraction, **_kwargs):
         summary = InferenceSummary(runtime_config)
         summary.set_oom(False)
         summary.set_kv_cache_oom(False)
@@ -382,7 +388,10 @@ def test_afd_prefill_uses_uncached_prefix_suffix_for_token_math(monkeypatch):
 
     monkeypatch.setattr(
         "aiconfigurator.sdk.afd_partition.build_afd_ops_partition",
-        lambda *_args, **_kwargs: SimpleNamespace(attn_ops=[], ffn_ops=[]),
+        # ``skipped_ops`` mirrors the real ``AFDOpsPartition`` dataclass field.
+        # The session's MoE-dispatch strip appends to it, so a double without it
+        # is simply not faithful to the type it stands in for.
+        lambda *_args, **_kwargs: SimpleNamespace(attn_ops=[], ffn_ops=[], skipped_ops=[]),
     )
     monkeypatch.setattr(AFDInferenceSession, "_build_afd_comm_ops", fake_build_comm_ops)
     monkeypatch.setattr(AFDInferenceSession, "_sum_latency", fake_sum_latency)
@@ -456,7 +465,7 @@ def test_afd_decode_mtp_widens_compute_and_communication_queries(monkeypatch, ca
         captured["batch_sizes"].append(batch_size)
         return 2.0, {}
 
-    def fake_memory_summary(self, _memory, runtime_config, _free_gpu_memory_fraction):
+    def fake_memory_summary(self, _memory, runtime_config, _free_gpu_memory_fraction, **_kwargs):
         summary = InferenceSummary(runtime_config)
         summary.set_oom(False)
         summary.set_kv_cache_oom(False)
@@ -464,7 +473,10 @@ def test_afd_decode_mtp_widens_compute_and_communication_queries(monkeypatch, ca
 
     monkeypatch.setattr(
         "aiconfigurator.sdk.afd_partition.build_afd_ops_partition",
-        lambda *_args, **_kwargs: SimpleNamespace(attn_ops=[], ffn_ops=[]),
+        # ``skipped_ops`` mirrors the real ``AFDOpsPartition`` dataclass field.
+        # The session's MoE-dispatch strip appends to it, so a double without it
+        # is simply not faithful to the type it stands in for.
+        lambda *_args, **_kwargs: SimpleNamespace(attn_ops=[], ffn_ops=[], skipped_ops=[]),
     )
     monkeypatch.setattr(AFDInferenceSession, "_build_afd_comm_ops", fake_build_comm_ops)
     monkeypatch.setattr(AFDInferenceSession, "_sum_latency", fake_sum_latency)

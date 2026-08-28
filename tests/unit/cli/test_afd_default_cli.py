@@ -71,7 +71,9 @@ class TestServingModeArgument:
         )
         overflow_action = next(action for action in default_parser._actions if action.dest == "afd_candidate_overflow")
 
-        assert max_candidates_action.default == 10_000
+        # Raised from 10k when the A:F cap was dropped: skewed splits and
+        # mb=2 + optimistic are now enumerated, so the search space is larger.
+        assert max_candidates_action.default == 20_000
         assert overflow_action.default == "error"
 
         args = cli_parser.parse_args(
@@ -796,3 +798,300 @@ def test_save_results_auto_handles_asymmetric_backends_by_mode(tmp_path):
     assert not (result_dir / "disagg" / "vllm_exp_config.yaml").exists()
     assert (result_dir / "afd" / "trtllm_exp_config.yaml").is_file()
     assert not (result_dir / "afd" / "vllm_exp_config.yaml").exists()
+
+
+class TestAfdPoolFlags:
+    """Per-pool hetero flags: registration, collection, and Task pass-through."""
+
+    _POOLS = ("prefill", "a", "f")
+    _SUFFIXES = ("system_name", "backend_name", "backend_version")
+
+    @staticmethod
+    def _cli_main():
+        # Imported lazily, matching the rest of this module.
+        import aiconfigurator.cli.main as cli_main
+
+        return cli_main
+
+    def _default_parser(self, cli_parser):
+        subparser_action = next(action for action in cli_parser._actions if action.dest == "mode")
+        return subparser_action.choices["default"]
+
+    def test_all_nine_flags_registered_defaulting_to_none(self, cli_parser):
+        default_parser = self._default_parser(cli_parser)
+        dests = {action.dest: action for action in default_parser._actions}
+        for pool in self._POOLS:
+            for suffix in self._SUFFIXES:
+                dest = f"afd_{pool}_{suffix}"
+                assert dest in dests, f"missing CLI flag for {dest}"
+                assert dests[dest].default is None, f"{dest} must default to None (inherit top level)"
+
+    def test_flag_option_strings_follow_the_afd_convention(self, cli_parser):
+        default_parser = self._default_parser(cli_parser)
+        options = {opt for action in default_parser._actions for opt in action.option_strings}
+        for pool in self._POOLS:
+            assert f"--afd-{pool}-system" in options
+            assert f"--afd-{pool}-backend" in options
+            assert f"--afd-{pool}-backend-version" in options
+
+    def test_no_flags_collects_nothing(self, cli_parser):
+        args = cli_parser.parse_args(
+            ["default", "--model-path", "Qwen/Qwen3-32B", "--total-gpus", "16", "--system", "h200_sxm"]
+        )
+        assert self._cli_main()._collect_afd_pool_kwargs(args) == {}
+
+    def test_collects_only_what_was_passed(self, cli_parser):
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "16",
+                "--system",
+                "h200_sxm",
+                "--serving-mode",
+                "afd",
+                "--afd-f-system",
+                "b200_sxm",
+                "--afd-a-backend",
+                "sglang",
+            ]
+        )
+        assert self._cli_main()._collect_afd_pool_kwargs(args) == {
+            "afd_f_system_name": "b200_sxm",
+            "afd_a_backend_name": "sglang",
+        }
+
+    @pytest.mark.parametrize("serving_mode", ["auto", "agg", "disagg"])
+    def test_pool_flags_outside_afd_mode_are_rejected(self, cli_parser, serving_mode):
+        """An accepted-but-ignored flag is a bug; fail loud instead."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "16",
+                "--system",
+                "h200_sxm",
+                "--serving-mode",
+                serving_mode,
+                "--afd-f-system",
+                "b200_sxm",
+            ]
+        )
+        with pytest.raises(SystemExit, match="only apply to AFD mode"):
+            self._cli_main()._collect_afd_pool_kwargs(args)
+
+    @pytest.mark.parametrize("serving_mode", ["afd", "all"])
+    def test_pool_flags_allowed_in_afd_and_all(self, cli_parser, serving_mode):
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "16",
+                "--system",
+                "h200_sxm",
+                "--serving-mode",
+                serving_mode,
+                "--afd-f-system",
+                "b200_sxm",
+            ]
+        )
+        assert self._cli_main()._collect_afd_pool_kwargs(args) == {"afd_f_system_name": "b200_sxm"}
+
+    def test_build_default_tasks_forwards_pool_overrides_to_task(self, monkeypatch):
+        cli_main = self._cli_main()
+        monkeypatch.setattr(cli_main, "Task", lambda **kwargs: SimpleNamespace(**kwargs))
+        tasks = cli_main.build_default_tasks(
+            model_path="Qwen/Qwen3-235B-A22B",
+            total_gpus=16,
+            system="h200_sxm",
+            backend="trtllm",
+            backend_version="test-version",
+            # SOL needs no declared perf DB; this test only checks kwarg routing.
+            database_mode="SOL",
+            serving_mode="afd",
+            afd_pools={"afd_f_system_name": "b200_sxm", "afd_a_backend_name": "sglang"},
+        )
+        assert "afd" in tasks, f"expected an afd task, got {sorted(tasks)}"
+        afd_task = tasks["afd"]
+        assert afd_task.afd_f_system_name == "b200_sxm"
+        assert afd_task.afd_a_backend_name == "sglang"
+
+    def test_build_default_tasks_omits_pool_fields_when_not_requested(self, monkeypatch):
+        """Unset pools must not even be passed, so Task defaults (inherit) apply."""
+        cli_main = self._cli_main()
+        monkeypatch.setattr(cli_main, "Task", lambda **kwargs: SimpleNamespace(**kwargs))
+        tasks = cli_main.build_default_tasks(
+            model_path="Qwen/Qwen3-235B-A22B",
+            total_gpus=16,
+            system="h200_sxm",
+            backend="trtllm",
+            backend_version="test-version",
+            database_mode="SOL",
+            serving_mode="afd",
+        )
+        assert "afd" in tasks, f"expected an afd task, got {sorted(tasks)}"
+        afd_task = tasks["afd"]
+        for pool in TestAfdPoolFlags._POOLS:
+            for suffix in TestAfdPoolFlags._SUFFIXES:
+                assert not hasattr(afd_task, f"afd_{pool}_{suffix}")
+
+    def test_estimate_mode_exposes_a_f_pools_without_prefill_or_version(self, cli_parser):
+        """`estimate` is single-point: no static prefill pool, versions auto-resolved."""
+        subparser_action = next(action for action in cli_parser._actions if action.dest == "mode")
+        estimate_parser = subparser_action.choices["estimate"]
+        options = {opt for action in estimate_parser._actions for opt in action.option_strings}
+        assert "--afd-a-system" in options
+        assert "--afd-a-backend" in options
+        assert "--afd-f-system" in options
+        assert "--afd-f-backend" in options
+        assert "--afd-prefill-system" not in options
+        assert "--afd-a-backend-version" not in options
+
+    def test_estimate_mode_pool_flags_are_accepted(self, cli_parser):
+        """Regression: `estimate` names the selector --estimate-mode, not --serving-mode.
+
+        The mode guard used to read only ``serving_mode``, so a valid
+        ``--estimate-mode afd --afd-f-system ...`` invocation was wrongly rejected.
+        """
+        cli_main = self._cli_main()
+        args = cli_parser.parse_args(
+            [
+                "estimate",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--system",
+                "h200_sxm",
+                "--estimate-mode",
+                "afd",
+                "--afd-f-system",
+                "b200_sxm",
+            ]
+        )
+        collected = cli_main._collect_afd_pool_kwargs(
+            args,
+            pools=cli_main._AFD_ESTIMATE_POOL_FLAGS,
+            suffixes=cli_main._AFD_ESTIMATE_POOL_SUFFIXES,
+        )
+        assert collected == {"afd_f_system_name": "b200_sxm"}
+
+    @pytest.mark.parametrize("estimate_mode", ["agg", "disagg", "static"])
+    def test_estimate_mode_pool_flags_rejected_outside_afd(self, cli_parser, estimate_mode):
+        cli_main = self._cli_main()
+        args = cli_parser.parse_args(
+            [
+                "estimate",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--system",
+                "h200_sxm",
+                "--estimate-mode",
+                estimate_mode,
+                "--afd-f-system",
+                "b200_sxm",
+            ]
+        )
+        with pytest.raises(SystemExit, match="only apply to AFD mode"):
+            cli_main._collect_afd_pool_kwargs(
+                args,
+                pools=cli_main._AFD_ESTIMATE_POOL_FLAGS,
+                suffixes=cli_main._AFD_ESTIMATE_POOL_SUFFIXES,
+            )
+
+    def test_fastafd_knob_defaults_on_default_parser(self, cli_parser):
+        """All four FastAFD knobs default to preserving current behavior."""
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-32B",
+                "--total-gpus",
+                "64",
+                "--system",
+                "h200_sxm",
+                "--serving-mode",
+                "afd",
+            ]
+        )
+        assert args.afd_max_af_ratio is None  # no cap
+        assert args.afd_router_on_attn is False
+        assert args.afd_f_latency_scale == 1.0
+        assert args.afd_comm_hiding_tolerance == 0.1
+
+    def test_fastafd_knobs_are_parsed_on_default_parser(self, cli_parser):
+        args = cli_parser.parse_args(
+            [
+                "default",
+                "--model-path",
+                "Qwen/Qwen3-235B-A22B",
+                "--total-gpus",
+                "72",
+                "--system",
+                "gb200",
+                "--serving-mode",
+                "afd",
+                "--afd-max-af-ratio",
+                "17",
+                "--afd-router-on-attn",
+                "--afd-f-latency-scale",
+                "0.45",
+                "--afd-comm-hiding-tolerance",
+                "0",
+            ]
+        )
+        assert args.afd_max_af_ratio == 17.0
+        assert args.afd_router_on_attn is True
+        assert args.afd_f_latency_scale == 0.45
+        assert args.afd_comm_hiding_tolerance == 0.0
+
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [
+            ("--afd-max-af-ratio", "0"),
+            ("--afd-max-af-ratio", "-1"),
+            ("--afd-f-latency-scale", "0"),
+            ("--afd-f-latency-scale", "-0.5"),
+            ("--afd-comm-hiding-tolerance", "-0.1"),
+        ],
+    )
+    def test_fastafd_knobs_reject_out_of_range_values(self, cli_parser, flag, value):
+        with pytest.raises(SystemExit):
+            cli_parser.parse_args(
+                [
+                    "default",
+                    "--model-path",
+                    "Qwen/Qwen3-32B",
+                    "--total-gpus",
+                    "64",
+                    "--system",
+                    "h200_sxm",
+                    "--serving-mode",
+                    "afd",
+                    flag,
+                    value,
+                ]
+            )
+
+    def test_estimate_parser_exposes_the_f_side_knobs(self, cli_parser):
+        """Estimate uses unprefixed names, matching its other AFD flags."""
+        args = cli_parser.parse_args(
+            [
+                "estimate",
+                "--model-path",
+                "Qwen/Qwen3-235B-A22B",
+                "--system",
+                "gb200",
+                "--estimate-mode",
+                "afd",
+                "--router-on-attn",
+                "--f-latency-scale",
+                "0.45",
+            ]
+        )
+        assert args.router_on_attn is True
+        assert args.f_latency_scale == 0.45

@@ -386,6 +386,12 @@ def build_afd_parallel_lists(
     * ``tp_a`` divides ``gpus_per_node``
     * ``f_moe_ep_size`` divides ``tp_f = n_f_nodes * gpus_per_node``
     * ``num_experts % f_moe_ep_size == 0`` when known
+
+    ``max_af_ratio`` is ``None`` by default (no A:F cap beyond the node
+    budget). The old 4.0 cap excluded the measured AFD optima: FastAFD
+    reports 7:1 and 11:1 for Qwen3-235B and 17:1 for MiniMax-M2.5 on
+    GB200 NVL72, all outside a 4:1 bound. Set it explicitly to restore a
+    cap.
     """
     if gpus_per_node < 1 or total_gpus < 1:
         return []
@@ -404,8 +410,12 @@ def build_afd_parallel_lists(
     microbatch_candidates = list(search.get("microbatch_list") or [2, 3, 4])
     pipeline_candidates = list(search.get("pipeline_model_list") or ["optimistic", "conservative"])
     f_moe_ep_size_list = search.get("f_moe_ep_size_list")
-    max_af_ratio = float(search.get("max_af_ratio", 4.0))
-    max_candidates = int(search.get("max_candidates", 10_000))
+    max_af_ratio = search.get("max_af_ratio")
+    if max_af_ratio is not None:
+        max_af_ratio = float(max_af_ratio)
+        if max_af_ratio <= 0:
+            raise ValueError(f"afd_config.search.max_af_ratio must be > 0 when set, got {max_af_ratio}.")
+    max_candidates = int(search.get("max_candidates", 20_000))
     candidate_overflow = str(search.get("candidate_overflow", "error"))
     if max_candidates < 1:
         raise ValueError(f"afd_config.search.max_candidates must be >= 1, got {max_candidates}.")
@@ -415,7 +425,7 @@ def build_afd_parallel_lists(
     candidates: list[tuple[int, int, int, int, int, str]] = []
     for n_a_nodes in range(1, total_nodes):
         for n_f_nodes in range(1, total_nodes - n_a_nodes + 1):
-            if n_a_nodes / n_f_nodes > max_af_ratio:
+            if max_af_ratio is not None and n_a_nodes / n_f_nodes > max_af_ratio:
                 continue
             tp_f = n_f_nodes * gpus_per_node
             if is_moe:
@@ -437,15 +447,6 @@ def build_afd_parallel_lists(
                 for f_moe_ep_size in ep_candidates:
                     for num_microbatches in microbatch_candidates:
                         for pipeline_model in pipeline_candidates:
-                            # Skip optimistic + mb < 3: the K=3 pipeline
-                            # requires num_microbatches >= 2 + t_c/max(t_a,
-                            # t_f), which is >= 3 whenever t_c > 0 (the
-                            # normal case).  mb=2 + optimistic always degrades
-                            # to conservative, producing a duplicate of the
-                            # mb=2 + conservative candidate and a flood of
-                            # per-stride warnings.
-                            if pipeline_model == "optimistic" and num_microbatches < 3:
-                                continue
                             candidates.append(
                                 (n_a_nodes, n_f_nodes, tp_a, f_moe_ep_size, num_microbatches, pipeline_model)
                             )
@@ -678,6 +679,15 @@ class Task:
     afd_combined_with_pd: bool = True
     afd_comm_overhead_factor: float = 1.0
     afd_boundary_on_attn: bool = True
+    # FastAFD-aligned knobs. ``afd_router_on_attn`` moves the MoE router to
+    # the A pool (FastAFD's boundary); ``afd_f_latency_scale`` calibrates the
+    # whole F side against a specific FFN runtime (0.3-0.5 emulates a fused
+    # MegaMoE-style kernel, measured at 42-44% lower step latency);
+    # ``afd_comm_hiding_tolerance`` lets mb=2 keep the overlapped K=3
+    # pipeline when the round trip is negligible against compute.
+    afd_router_on_attn: bool = False
+    afd_f_latency_scale: float = 1.0
+    afd_comm_hiding_tolerance: float = 0.1
     afd_total_batch_size: int | None = None
     # Per-A-worker ceiling for the automatic A-batch search.
     afd_max_a_batch_size: int = 1024
@@ -691,9 +701,36 @@ class Task:
     afd_microbatch_candidates: list[int] | None = None
     afd_pipeline_model_candidates: list[str] | None = None
     afd_f_moe_ep_size_candidates: list[int | str] | None = None
-    afd_max_af_ratio: float = 4.0
-    afd_max_candidates: int = 10_000
+    # None = no A:F node-ratio cap beyond the GPU budget. FastAFD's measured
+    # optima on GB200 NVL72 sit at 7:1-17:1, so the former 4.0 default hid
+    # every one of them; set a float to reinstate a cap.
+    afd_max_af_ratio: float | None = None
+    afd_max_candidates: int = 20_000
     afd_candidate_overflow: str = "error"
+    # AFD hetero pools. AFD deploys up to three pools -- a static prefill
+    # pool (when afd_combined_with_pd), the A (attention) pool and the F
+    # (FFN/MoE) pool -- and each can sit on its own hardware / framework.
+    # Every field below is None by default and then inherits the top-level
+    # ``system_name`` / ``backend_name`` / ``backend_version``, so an AFD run
+    # that does not ask for hetero pools behaves exactly as before.
+    #
+    # These are deliberately separate from the shared ``prefill_*`` role
+    # fields: in AFD mode ``_resolve_afd_search`` mirrors the top level into
+    # ``prefill_*`` to build the static pool's parallel candidates, and
+    # ``prefill_backend_name`` carries a non-empty default -- so neither can
+    # express "the user asked for a different prefill device".
+    #
+    # Cross-pool A2F/F2A traffic is priced at the slower of the two
+    # endpoints (bandwidth = min of both sides).
+    afd_prefill_system_name: str | None = None
+    afd_prefill_backend_name: str | None = None
+    afd_prefill_backend_version: str | None = None
+    afd_a_system_name: str | None = None
+    afd_a_backend_name: str | None = None
+    afd_a_backend_version: str | None = None
+    afd_f_system_name: str | None = None
+    afd_f_backend_name: str | None = None
+    afd_f_backend_version: str | None = None
     # AFD prefill search config (used when combined_with_pd=True)
     afd_prefill_batch_size_list: list[int] | None = None
     afd_prefill_max_candidates: int = 256
@@ -714,6 +751,11 @@ class Task:
     _num_experts: int = field(default=0, repr=False, init=False)
     _afd_parallel_config_list: list = field(default_factory=list, repr=False, init=False)
     _afd_gpus_per_node: int = field(default=8, repr=False, init=False)
+    # Per-pool GPUs-per-node, resolved from each pool's system yaml. They
+    # equal ``_afd_gpus_per_node`` unless that pool overrides its system.
+    _afd_a_gpus_per_node: int = field(default=8, repr=False, init=False)
+    _afd_f_gpus_per_node: int = field(default=8, repr=False, init=False)
+    _afd_prefill_gpus_per_node: int = field(default=8, repr=False, init=False)
     _afd_topology_pinned: bool = field(default=False, repr=False, init=False)
     # Which fmha_quant_mode values came from an explicit field (per role) --
     # handed from _resolve_quant_modes to _apply_fmha_data_fallback.
@@ -818,6 +860,50 @@ class Task:
     @property
     def primary_backend_version(self) -> str | None:
         return self.backend_version if self.serving_mode in ("agg", "afd") else self.prefill_backend_version
+
+    # ---- AFD pool resolution -------------------------------------------
+    # AFD has up to three pools: the static prefill pool, the A pool and the
+    # F pool. Each may override system / backend / backend_version; anything
+    # left unset inherits the top-level value.
+    AFD_POOLS = ("afd_prefill", "afd_a", "afd_f")
+
+    def afd_pool_attr(self, pool: str, name: str) -> Any:
+        """Resolve one AFD pool's ``system_name`` / ``backend_name`` / ``backend_version``.
+
+        ``pool`` is one of :data:`AFD_POOLS`. Falls back to the top-level
+        field, which is what makes an unspecified pool homogeneous with the
+        rest of the deployment.
+        """
+        if pool not in self.AFD_POOLS:
+            raise ValueError(f"afd_pool_attr: pool must be one of {self.AFD_POOLS}, got {pool!r}")
+        return getattr(self, f"{pool}_{name}", None) or getattr(self, name)
+
+    def afd_pool_triple(self, pool: str) -> tuple[str, str, str | None]:
+        """``(system_name, backend_name, backend_version)`` for one AFD pool."""
+        return (
+            self.afd_pool_attr(pool, "system_name"),
+            self.afd_pool_attr(pool, "backend_name"),
+            self.afd_pool_attr(pool, "backend_version"),
+        )
+
+    @property
+    def afd_pools_are_homogeneous(self) -> bool:
+        """True when every active AFD pool resolves to the same system+backend.
+
+        The prefill pool only counts when ``afd_combined_with_pd`` is set.
+        """
+        pools = ["afd_a", "afd_f"]
+        if self.afd_combined_with_pd:
+            pools.append("afd_prefill")
+        return len({self.afd_pool_triple(p) for p in pools}) == 1
+
+    def afd_pool_overrides(self) -> dict[str, tuple[str, str, str | None]]:
+        """Active pools whose resolved triple differs from the top-level one."""
+        base = (self.system_name, self.backend_name, self.backend_version)
+        pools = ["afd_a", "afd_f"]
+        if self.afd_combined_with_pd:
+            pools.append("afd_prefill")
+        return {p: self.afd_pool_triple(p) for p in pools if self.afd_pool_triple(p) != base}
 
     @property
     def effective_total_gpus(self) -> int | None:
@@ -1047,6 +1133,28 @@ class Task:
         if self.serving_mode in ("agg", "afd"):
             if self.system_name and self.backend_name:
                 self.backend_version = _resolve(self.system_name, self.backend_name, self.backend_version)
+            if self.serving_mode == "afd":
+                # Per-pool versions: a pool that moved to different hardware or
+                # a different framework cannot inherit the top-level version
+                # (that build may not exist there), so resolve its own latest.
+                # Explicit field table -- these are the only per-pool overrides.
+                afd_pool_fields = (
+                    ("afd_a_system_name", "afd_a_backend_name", "afd_a_backend_version"),
+                    ("afd_f_system_name", "afd_f_backend_name", "afd_f_backend_version"),
+                    ("afd_prefill_system_name", "afd_prefill_backend_name", "afd_prefill_backend_version"),
+                )
+                for system_field, backend_field, version_field in afd_pool_fields:
+                    if getattr(self, version_field, None):
+                        continue  # explicit version wins
+                    pool_system = getattr(self, system_field, None)
+                    pool_backend = getattr(self, backend_field, None)
+                    if not (pool_system or pool_backend):
+                        continue  # fully inherited: afd_pool_triple falls back
+                    system = pool_system or self.system_name
+                    backend = pool_backend or self.backend_name
+                    if not (system and backend):
+                        continue
+                    setattr(self, version_field, _resolve(system, backend, None))
         else:
             if self.prefill_system_name and self.prefill_backend_name:
                 self.prefill_backend_version = _resolve(
@@ -1488,32 +1596,42 @@ class Task:
         spec = load_system_spec(self._role_attr(role, "system_name"))
         return int(spec.get("node", {}).get("num_gpus_per_node", 0) or 0) or None
 
-    def _try_load_role_database(self, role: str):
-        """Load the role's perf DB, returning None when the perf data is
-        unavailable (missing system/backend/version data).  Programmer errors
-        propagate; only data-availability failures are swallowed."""
+    def _try_load_database(self, system: str, backend: str, version: str, *, label: str):
+        """Load a perf DB, returning None when the perf data is unavailable.
+
+        ``label`` only names the caller in the debug log. Programmer errors
+        propagate; only data-availability failures are swallowed.
+        """
         from aiconfigurator.sdk.perf_database import (
             PerfDataNotAvailableError,
             has_perf_data_not_available_cause,
         )
 
-        system = self._role_attr(role, "system_name")
-        backend = self._role_attr(role, "backend_name")
-        version = self._role_attr(role, "backend_version")
         if not (system and backend and version):
             return None
         try:
             return self._load_database(system, backend, version)
         except (PerfDataNotAvailableError, FileNotFoundError) as exc:
-            logger.debug("perf DB unavailable for %s role (%s/%s/%s): %s", role, system, backend, version, exc)
+            logger.debug("perf DB unavailable for %s (%s/%s/%s): %s", label, system, backend, version, exc)
             return None
         except Exception as exc:
             # Match the legacy "DB error" envelope (e.g. wrapped FileNotFoundError
             # inside RuntimeError) without swallowing programmer typos.
             if not has_perf_data_not_available_cause(exc):
                 raise
-            logger.debug("perf DB unavailable for %s role (%s/%s/%s): %s", role, system, backend, version, exc)
+            logger.debug("perf DB unavailable for %s (%s/%s/%s): %s", label, system, backend, version, exc)
             return None
+
+    def _try_load_role_database(self, role: str):
+        """Load the role's perf DB, returning None when the perf data is
+        unavailable (missing system/backend/version data).  Programmer errors
+        propagate; only data-availability failures are swallowed."""
+        return self._try_load_database(
+            self._role_attr(role, "system_name"),
+            self._role_attr(role, "backend_name"),
+            self._role_attr(role, "backend_version"),
+            label=f"{role} role",
+        )
 
     def _context_fmha_supported_modes(self, role: str, ctx_op: str | None = None) -> list[str]:
         """FMHA modes with perf data for one fmha-keyed context-attention op
@@ -1808,6 +1926,24 @@ class Task:
                 "AFD requires a valid system yaml spec."
             )
         self._afd_gpus_per_node = gpus_per_node
+        # Each pool's GPUs-per-node is a hardware fact of that pool's system.
+        # A pool that did not override its system resolves to the same value.
+        for pool, attr in (
+            ("afd_a", "_afd_a_gpus_per_node"),
+            ("afd_f", "_afd_f_gpus_per_node"),
+            ("afd_prefill", "_afd_prefill_gpus_per_node"),
+        ):
+            pool_system = self.afd_pool_attr(pool, "system_name")
+            if pool_system == self.system_name:
+                setattr(self, attr, gpus_per_node)
+                continue
+            pool_gpus_per_node = _lookup_num_gpus_per_node(pool_system)
+            if pool_gpus_per_node is None:
+                raise ValueError(
+                    f"Cannot resolve num_gpus_per_node for AFD {pool} pool system '{pool_system}'; "
+                    "AFD requires a valid system yaml spec for every pool."
+                )
+            setattr(self, attr, pool_gpus_per_node)
 
         pinned_fields = {
             "afd_n_a_nodes": self.afd_n_a_nodes,
@@ -2222,12 +2358,61 @@ class Task:
             or self.afd_max_candidates < 1
         ):
             raise ValueError(f"afd_max_candidates must be a positive integer, got {self.afd_max_candidates!r}.")
+        if self.afd_max_af_ratio is not None and (
+            isinstance(self.afd_max_af_ratio, bool)
+            or not isinstance(self.afd_max_af_ratio, (int, float))
+            or self.afd_max_af_ratio <= 0
+        ):
+            raise ValueError(
+                f"afd_max_af_ratio must be a positive number or None (no cap), got {self.afd_max_af_ratio!r}."
+            )
         if self.afd_candidate_overflow not in {"error", "truncate"}:
             raise ValueError(
                 f"afd_candidate_overflow must be either 'error' or 'truncate', got {self.afd_candidate_overflow!r}."
             )
         if self.backend_name == "vllm" and self._model_family == "DEEPSEEK":
             raise NotImplementedError("AIConfigurator does not yet support the DeepSeek family on the vLLM backend.")
+        self._validate_afd_pools()
+
+    def _validate_afd_pools(self) -> None:
+        """Validate the per-pool hetero overrides (A / F / static prefill).
+
+        Each pool inherits the top-level system/backend/version when unset, so
+        this only has to police explicitly requested overrides.
+        """
+        prefill_pool_fields = {
+            "afd_prefill_system_name": self.afd_prefill_system_name,
+            "afd_prefill_backend_name": self.afd_prefill_backend_name,
+            "afd_prefill_backend_version": self.afd_prefill_backend_version,
+        }
+        if not self.afd_combined_with_pd:
+            requested = sorted(name for name, value in prefill_pool_fields.items() if value)
+            if requested:
+                raise ValueError(
+                    f"afd mode with afd_combined_with_pd=False has no static prefill pool, "
+                    f"so {requested} cannot be set. Enable afd_combined_with_pd, or drop these fields."
+                )
+
+        for pool in self.AFD_POOLS:
+            if pool == "afd_prefill" and not self.afd_combined_with_pd:
+                continue
+            system = self.afd_pool_attr(pool, "system_name")
+            backend = self.afd_pool_attr(pool, "backend_name")
+            if not system:
+                raise ValueError(f"afd {pool} pool has no system_name; set it or the top-level system_name.")
+            # load_system_spec returns an empty dict for an unknown system.
+            if not load_system_spec(system):
+                raise ValueError(f"afd {pool} pool system {system!r} has no system yaml spec.")
+            if backend and backend not in common.BackendName.__members__:
+                raise ValueError(
+                    f"afd {pool} pool backend {backend!r} is not a known backend "
+                    f"({sorted(common.BackendName.__members__)})."
+                )
+            if backend == "vllm" and self._model_family == "DEEPSEEK":
+                raise NotImplementedError(
+                    f"AIConfigurator does not yet support the DeepSeek family on the vLLM backend "
+                    f"(requested for the afd {pool} pool)."
+                )
 
     def _validate_database_quant_modes(self) -> None:
         """Validate user's quant modes against the perf database's supported list.
@@ -2251,6 +2436,14 @@ class Task:
         elif self.serving_mode == "afd":
             # AFD uses the agg worker config for both A and F pools
             self._check_role_against_db("agg", validate_context=True, validate_generation=True)
+            # A pool / F pool / static prefill pool that override the
+            # hardware or framework need their own DB checked too; the
+            # ``agg`` check above only covers the top-level combination.
+            for pool in self.afd_pool_overrides():
+                if pool == "afd_prefill":
+                    self._check_role_against_db("prefill", validate_context=True, validate_generation=False)
+                else:
+                    self._check_role_against_db("agg", validate_context=True, validate_generation=True, pool=pool)
         else:
             self._check_role_against_db("prefill", validate_context=True, validate_generation=False)
             self._check_role_against_db("decode", validate_context=False, validate_generation=True)
@@ -2261,18 +2454,30 @@ class Task:
         *,
         validate_context: bool,
         validate_generation: bool,
+        pool: str | None = None,
     ) -> None:
-        """For one role, fetch its perf DB and verify each quant mode is supported."""
+        """For one role, fetch its perf DB and verify each quant mode is supported.
+
+        ``pool`` (AFD only) redirects the system/backend/version lookup to that
+        AFD pool while keeping ``role``'s quant modes and parallel tuples. It is
+        how an A or F pool on different hardware gets its own DB validated.
+        """
         from aiconfigurator.sdk.errors import UnsupportedWideepConfigError
 
-        system = self._role_attr(role, "system_name")
-        backend = self._role_attr(role, "backend_name")
-        version = self._role_attr(role, "backend_version")
+        if pool is not None:
+            system, backend, version = self.afd_pool_triple(pool)
+        else:
+            system = self._role_attr(role, "system_name")
+            backend = self._role_attr(role, "backend_name")
+            version = self._role_attr(role, "backend_version")
         if not (system and backend and version):
             return  # nothing to validate against
 
         # DB unavailable; let sweep surface the real error later.
-        database = self._try_load_role_database(role)
+        if pool is not None:
+            database = self._try_load_database(system, backend, version, label=f"afd {pool} pool")
+        else:
+            database = self._try_load_role_database(role)
 
         if database is None:
             # In SILICON mode the DB must exist; fp8_static is derived from
@@ -2631,8 +2836,28 @@ class Task:
             "encoder_database": encoder_database,
         }
 
+    def _afd_pool_database(self, pool: str, *, shared_database):
+        """Perf DB for one AFD pool, reusing ``shared_database`` when possible.
+
+        Returning the *same object* for pools that did not override their
+        hardware/framework matters: downstream hetero detection is an identity
+        check, so an inherited pool must not look like a distinct device.
+        """
+        system, backend, version = self.afd_pool_triple(pool)
+        if (system, backend, version) == (self.system_name, self.backend_name, self.backend_version):
+            return shared_database
+        if not (system and backend and version):
+            return shared_database
+        return self._load_database(system, backend, version)
+
     def sweep_afd_kwargs(self, *, database) -> dict[str, Any]:
-        """Return the exact kwargs needed for sweep.sweep_afd."""
+        """Return the exact kwargs needed for sweep.sweep_afd.
+
+        ``database`` is the top-level (shared) perf DB. Any AFD pool that
+        overrides its system / backend / backend_version gets its own DB
+        loaded here; pools that inherit reuse ``database`` unchanged so the
+        homogeneous path is byte-for-byte identical.
+        """
         if self.serving_mode != "afd":
             raise ValueError(f"sweep_afd_kwargs requires serving_mode='afd', got {self.serving_mode!r}")
 
@@ -2647,6 +2872,13 @@ class Task:
             prefill_parallel_config_list = list(self.iter_parallel("prefill"))
             prefill_model_config = self.build_model_config(role="prefill")
 
+        a_system, a_backend, _ = self.afd_pool_triple("afd_a")
+        f_system, f_backend, _ = self.afd_pool_triple("afd_f")
+        p_system, p_backend, p_version = self.afd_pool_triple("afd_prefill")
+        a_database = self._afd_pool_database("afd_a", shared_database=database)
+        f_database = self._afd_pool_database("afd_f", shared_database=database)
+        prefill_database = self._afd_pool_database("afd_prefill", shared_database=database)
+
         return {
             "model_path": self.model_path,
             "runtime_config": runtime_config,
@@ -2659,19 +2891,32 @@ class Task:
             "combined_with_pd": self.afd_combined_with_pd,
             "comm_overhead_factor": self.afd_comm_overhead_factor,
             "boundary_on_attn": self.afd_boundary_on_attn,
+            "router_on_attn": self.afd_router_on_attn,
+            "f_latency_scale": self.afd_f_latency_scale,
+            "comm_hiding_tolerance": self.afd_comm_hiding_tolerance,
             "total_batch_size": self.afd_total_batch_size,
             "max_a_batch_size": self.afd_max_a_batch_size,
             "target_ttft": self.ttft,
             "free_gpu_memory_fraction": self.free_gpu_memory_fraction,
             "max_seq_len": self.max_seq_len,
+            # A / F pools (hetero-capable; inherit the top level when unset)
+            "a_database": a_database,
+            "a_backend_name": a_backend,
+            "a_system_name": a_system,
+            "a_gpus_per_node": self._afd_a_gpus_per_node,
+            "f_database": f_database,
+            "f_backend_name": f_backend,
+            "f_system_name": f_system,
+            "f_gpus_per_node": self._afd_f_gpus_per_node,
             # combined-with-PD prefill options
-            "prefill_database": database if self.afd_combined_with_pd else None,
-            "prefill_backend_name": self.backend_name if self.afd_combined_with_pd else None,
+            "prefill_database": prefill_database if self.afd_combined_with_pd else None,
+            "prefill_backend_name": p_backend if self.afd_combined_with_pd else None,
             "prefill_model_config": prefill_model_config,
             "prefill_parallel_config_list": prefill_parallel_config_list,
             "prefill_batch_size_list": self.afd_prefill_batch_size_list,
-            "prefill_system_name": self.system_name if self.afd_combined_with_pd else None,
-            "prefill_backend_version": self.backend_version if self.afd_combined_with_pd else None,
+            "prefill_system_name": p_system if self.afd_combined_with_pd else None,
+            "prefill_backend_version": p_version if self.afd_combined_with_pd else None,
+            "prefill_gpus_per_node": self._afd_prefill_gpus_per_node if self.afd_combined_with_pd else None,
             "prefill_max_candidates": self.afd_prefill_max_candidates,
             "prefill_candidate_overflow": self.afd_prefill_candidate_overflow,
             "max_prefill_gpus": self.afd_max_prefill_gpus,
@@ -3225,6 +3470,9 @@ class Task:
             f_moe_ep_size=f_moe_ep_size,
             comm_overhead_factor=self.afd_comm_overhead_factor,
             boundary_on_attn=self.afd_boundary_on_attn,
+            router_on_attn=self.afd_router_on_attn,
+            f_latency_scale=self.afd_f_latency_scale,
+            comm_hiding_tolerance=self.afd_comm_hiding_tolerance,
         )
 
         a_model_config = copy.deepcopy(base_model_config)

@@ -26,6 +26,7 @@ def _task(
     primary_system_name: str,
     prefill_system_name: str | None = None,
     decode_system_name: str | None = None,
+    afd_pool_overrides: dict | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         primary_backend_name="vllm",
@@ -43,6 +44,8 @@ def _task(
         # cases don't trip the heterogeneous-placement guard.
         prefill_system_name=prefill_system_name if prefill_system_name is not None else primary_system_name,
         decode_system_name=decode_system_name if decode_system_name is not None else primary_system_name,
+        # AFD per-pool overrides; empty == every pool on the top-level system.
+        afd_pool_overrides=lambda: dict(afd_pool_overrides or {}),
         isl=1024,
         osl=256,
         ttft=2000.0,
@@ -84,3 +87,28 @@ def test_disagg_heterogeneous_systems_raise():
 
     with pytest.raises(ValueError, match="matching prefill/decode systems"):
         task_config_to_generator_config(task, row, num_gpus_per_node=4)
+
+
+def test_afd_homogeneous_pools_preserve_system_name():
+    # No pool override -> the AFD guard must stay out of the way.
+    task = _task(serving_mode="afd", system_name="h200_sxm", primary_system_name="h200_sxm")
+    row = pd.Series({"workers": 1, "tp": 1})
+
+    result = task_config_to_generator_config(task, row, num_gpus_per_node=8)
+
+    assert result["NodeConfig"]["system_name"] == "h200_sxm"
+
+
+def test_afd_heterogeneous_pools_raise():
+    # Hetero AFD pools are modeling-only: NodeConfig carries a single system, so
+    # emitting artifacts would silently place the F pool on the A pool's device.
+    task = _task(
+        serving_mode="afd",
+        system_name="h200_sxm",
+        primary_system_name="h200_sxm",
+        afd_pool_overrides={"afd_f": ("b200_sxm", "vllm", "0.20.1")},
+    )
+    row = pd.Series({"workers": 1, "tp": 1})
+
+    with pytest.raises(ValueError, match="every AFD pool to share"):
+        task_config_to_generator_config(task, row, num_gpus_per_node=8)

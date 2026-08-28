@@ -202,6 +202,13 @@ class AFDConfig:
     (the constructing layer is responsible for cross-checking against
     the spec).
 
+    When the A pool and the F pool sit on **different** hardware, the two
+    sides no longer share one ``num_gpus_per_node``. ``a_gpus_per_node``
+    and ``f_gpus_per_node`` carry the per-pool hardware fact; each falls
+    back to ``gpus_per_node`` when left as ``None``, so the homogeneous
+    case is unchanged. Use ``effective_a_gpus_per_node`` /
+    ``effective_f_gpus_per_node`` to read the resolved values.
+
     ``tp_f`` is the **total GPU count of one F-replica** (i.e. the
     ``ModelConfig.tp_size`` used to shape the F-Worker model). Under the
     Phase 1 assumption F-side DP=1, that's exactly ``n_f_workers``, so
@@ -212,8 +219,8 @@ class AFDConfig:
 
     Derived quantities (computed in ``__post_init__``):
 
-    * ``n_a_workers`` — A-side DP count = ``n_a_nodes * gpus_per_node // tp_a``
-    * ``n_f_workers`` — total F-side GPUs = ``n_f_nodes * gpus_per_node``
+    * ``n_a_workers`` — A-side DP count = ``n_a_nodes * a_gpus_per_node // tp_a``
+    * ``n_f_workers`` — total F-side GPUs = ``n_f_nodes * f_gpus_per_node``
     * ``tp_f``        — set to ``n_f_workers`` (Phase 1: F-DP = 1)
 
     AFD is orthogonal to Prefill/Decode (P/D) disaggregation — it can be
@@ -226,6 +233,10 @@ class AFDConfig:
     n_f_nodes: int = 1
     # 0 = sentinel "inject from system_spec"; see class docstring.
     gpus_per_node: int = 0
+    # Per-pool overrides for hetero A/F hardware; None inherits
+    # ``gpus_per_node``. Normalized to concrete ints in __post_init__.
+    a_gpus_per_node: int | None = None
+    f_gpus_per_node: int | None = None
 
     # -- Per-worker parallelism --
     tp_a: int = 1
@@ -243,6 +254,30 @@ class AFDConfig:
     num_microbatches: int = 3
     pipeline_model: str = "optimistic"  # "optimistic" (K=3), "conservative" (K=2), or "serial"
     comm_overhead_factor: float = 1.0
+    # Comm-hiding tolerance for the optimistic (K=3) pipeline. The strict
+    # occupancy bound requires ``num_microbatches >= 2 + t_c / max(t_a,
+    # t_f)``, which is >= 3 whenever t_c > 0 and so always demotes mb=2 to
+    # the blocking K=2 model. When the cross-pool round trip is a negligible
+    # fraction of compute (``t_c <= comm_hiding_tolerance * max(t_a, t_f)``)
+    # the session keeps the overlapped K=3 cycle instead -- the measured
+    # behavior on NVLink-class fabrics, where FastAFD reports mb=2 already
+    # hides both directions. Set 0 to restore the strict bound.
+    comm_hiding_tolerance: float = 0.1
+    # Router placement. False (default) keeps aic's partition: un-routed
+    # hidden states cross the pool boundary and the F-worker runs
+    # router + grouping + experts. True matches the FastAFD boundary:
+    # routing happens on the A-worker and routed tokens cross. The transfer
+    # *volume* model is identical either way; only the router GEMM's pool
+    # attribution changes.
+    router_on_attn: bool = False
+    # F-pool latency calibration factor. Multiplies every F-side
+    # contribution (MoE compute, router, intra-node AG/RS) so the predicted
+    # T_e can be calibrated against a specific FFN runtime -- e.g. 0.3-0.5
+    # emulates FastAFD's fused MegaMoE kernel (measured 42-44% lower decode
+    # step latency) versus stock per-op kernel data. 1.0 = no calibration.
+    # This is a calibration knob, not a physical model: the number has to
+    # come from outside measurement.
+    f_latency_scale: float = 1.0
     # Which phase(s) AFD should be applied to.
     # "decode" (default) mirrors existing behavior; "prefill" applies to
     # the context phase; "both" produces an aggregated estimate combining
@@ -271,11 +306,19 @@ class AFDConfig:
     # AFD decode pool with a regular prefill pool (or vice versa); the
     # combined estimate is the number a sizing exercise actually needs.
     #
-    # TODO(afd, Phase-2): extend pareto_analysis to merge the AFD
-    # frontier with the agg / disagg frontiers so end-to-end Pareto
-    # evaluation across mixed AFD + P/D deployments is possible. Today
-    # the CLI single-point combine path is in place, but the Pareto
-    # sweep does not yet enumerate AFD-combined-with-PD points.
+    # NOTE(afd, closed): per-mode Pareto fronts are not merged into a
+    # single envelope, and that is fine. What the cross-mode question
+    # needs already works: with serving_mode=all the CLI picks the global
+    # best across agg/disagg/afd (chosen_exp = max(best_throughputs)) and
+    # plots every mode's frontier on the same axes; AFD-combined-with-PD
+    # points are enumerated by _enumerate_afd_prefill_options, so the
+    # A/F/P splits in the report are real candidates. The only residue is
+    # chart noise: because each front is computed independently, points
+    # that a stronger mode dominates still show up. No recommendation
+    # changes. If the chart ever needs cleaning, concat the fronts with a
+    # serving_mode column and rerun get_pareto_front -- mirroring
+    # merge_experiment_results_by_mode, which already does this across
+    # backends within one mode.
     combined_with_pd: bool = True
     # Boundary-op assignment: ``add_norm_2`` and ``logits_gemm`` sit at
     # the natural Attention/FFN boundary and can be assigned to either
@@ -303,6 +346,10 @@ class AFDConfig:
             raise ValueError(f"num_microbatches ({self.num_microbatches}) must be >= 1.")
         if self.comm_overhead_factor <= 0:
             raise ValueError(f"comm_overhead_factor ({self.comm_overhead_factor}) must be > 0.")
+        if self.comm_hiding_tolerance < 0:
+            raise ValueError(f"comm_hiding_tolerance ({self.comm_hiding_tolerance}) must be >= 0.")
+        if self.f_latency_scale <= 0:
+            raise ValueError(f"f_latency_scale ({self.f_latency_scale}) must be > 0.")
         if self.f_moe_ep_size < 1:
             raise ValueError(f"f_moe_ep_size ({self.f_moe_ep_size}) must be >= 1.")
         if self.gpus_per_node < 1:
@@ -312,8 +359,16 @@ class AFDConfig:
                 "from system_spec['node']['num_gpus_per_node']; do not rely "
                 "on the default sentinel."
             )
-        if self.tp_a < 1 or self.gpus_per_node % self.tp_a != 0:
-            raise ValueError(f"tp_a ({self.tp_a}) must be a positive divisor of gpus_per_node ({self.gpus_per_node}).")
+        for name in ("a_gpus_per_node", "f_gpus_per_node"):
+            value = getattr(self, name)
+            if value is None:
+                setattr(self, name, self.gpus_per_node)
+            elif value < 1:
+                raise ValueError(f"{name} ({value}) must be >= 1 when set.")
+        if self.tp_a < 1 or self.a_gpus_per_node % self.tp_a != 0:
+            raise ValueError(
+                f"tp_a ({self.tp_a}) must be a positive divisor of the A-pool gpus_per_node ({self.a_gpus_per_node})."
+            )
         if self.phase == "both" and self.combined_with_pd:
             raise ValueError(
                 "combined_with_pd=True is incompatible with phase='both': "
@@ -321,8 +376,8 @@ class AFDConfig:
                 "is no separate static pool to combine with. Set "
                 "combined_with_pd=False, or pick phase in {'prefill','decode'}."
             )
-        self.n_a_workers = self.n_a_nodes * self.gpus_per_node // self.tp_a
-        self.n_f_workers = self.n_f_nodes * self.gpus_per_node
+        self.n_a_workers = self.n_a_nodes * self.a_gpus_per_node // self.tp_a
+        self.n_f_workers = self.n_f_nodes * self.f_gpus_per_node
 
         # Phase 1: F-side DP = 1, so tp_f (= ModelConfig.tp_size of one
         # F-replica) is exactly n_f_workers. A caller-supplied non-zero
@@ -332,8 +387,33 @@ class AFDConfig:
         if self.tp_f and self.tp_f != derived_tp_f:
             raise ValueError(
                 f"tp_f ({self.tp_f}) is derived under the Phase 1 F-DP=1 "
-                f"assumption as n_f_nodes * gpus_per_node = {derived_tp_f}; "
+                f"assumption as n_f_nodes * f_gpus_per_node = {derived_tp_f}; "
                 "an explicit different value would silently imply F-DP > 1. "
-                "Remove the override, or change n_f_nodes / gpus_per_node."
+                "Remove the override, or change n_f_nodes / f_gpus_per_node."
             )
         self.tp_f = derived_tp_f
+
+    @property
+    def effective_a_gpus_per_node(self) -> int:
+        """A-pool GPUs per node; ``a_gpus_per_node`` or ``gpus_per_node``."""
+        return self.a_gpus_per_node if self.a_gpus_per_node else self.gpus_per_node
+
+    @property
+    def effective_f_gpus_per_node(self) -> int:
+        """F-pool GPUs per node; ``f_gpus_per_node`` or ``gpus_per_node``."""
+        return self.f_gpus_per_node if self.f_gpus_per_node else self.gpus_per_node
+
+    @property
+    def f_moe_tp_size(self) -> int:
+        """F-side MoE tensor-parallel width: ``tp_f / f_moe_ep_size``.
+
+        ``1`` means pure expert parallelism -- every F rank owns its own
+        experts, so no token-dimension TP group exists and the F-node
+        AllGather/ReduceScatter pair has nothing to exchange. Consumers use
+        this as an *existence* gate; it never affects collective sizing.
+
+        Derived rather than configured: under the Phase 1 F-DP=1 assumption
+        ``tp_f == n_f_workers``, which already follows the F pool's own node
+        width under hetero A/F.
+        """
+        return max(self.n_f_workers // max(int(self.f_moe_ep_size), 1), 1)
