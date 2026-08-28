@@ -149,6 +149,16 @@ def _write_parquet(path: Path, rows: list[dict]) -> None:
     pq.write_table(table, path)
 
 
+def _finalization_info_for(*parquet_paths: Path) -> dict[Path, collect_mod.PerfFinalizationInfo]:
+    return {
+        path.resolve(): collect_mod.PerfFinalizationInfo(
+            new_rows=pq.read_metadata(path).num_rows,
+            merged_existing=False,
+        )
+        for path in parquet_paths
+    }
+
+
 def test_writes_sidecar_with_rows_case_plan_hash_status_and_collector_ref(tmp_path):
     output_root = tmp_path / "out"
     parquet_path = output_root / "gemm_perf.parquet"
@@ -164,6 +174,7 @@ def test_writes_sidecar_with_rows_case_plan_hash_status_and_collector_ref(tmp_pa
         run_errors=[],
         backend=BACKEND,
         checkpoint_dir=str(checkpoint_dir),
+        finalization_info=_finalization_info_for(parquet_path),
     )
 
     meta_path = output_root / "collection_meta.yaml"
@@ -196,6 +207,7 @@ def test_status_complete_with_recorded_case_failures(tmp_path):
         run_errors=[],
         backend=BACKEND,
         checkpoint_dir=str(checkpoint_dir),
+        finalization_info=_finalization_info_for(parquet_path),
     )
 
     doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
@@ -224,6 +236,7 @@ def test_status_partial_when_module_collection_failure_recorded(tmp_path):
         run_errors=run_errors,
         backend=BACKEND,
         checkpoint_dir=str(checkpoint_dir),
+        finalization_info=_finalization_info_for(parquet_path),
     )
 
     doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
@@ -248,6 +261,7 @@ def test_finalize_raises_when_no_op_has_checkpoint_evidence(tmp_path):
             run_errors=[],
             backend=BACKEND,
             checkpoint_dir=str(checkpoint_dir),
+            finalization_info=_finalization_info_for(parquet_path),
         )
 
     message = str(excinfo.value)
@@ -278,6 +292,7 @@ def test_finalize_raises_when_all_checkpoints_are_unreadable(tmp_path):
             run_errors=[],
             backend=BACKEND,
             checkpoint_dir=str(checkpoint_dir),
+            finalization_info=_finalization_info_for(parquet_path),
         )
 
     assert not (output_root / "collection_meta.yaml").exists()
@@ -305,6 +320,7 @@ def test_existing_sidecar_merge_preserves_prior_tables(tmp_path):
         run_errors=[],
         backend=BACKEND,
         checkpoint_dir=str(checkpoint_dir),
+        finalization_info=_finalization_info_for(parquet_path),
     )
 
     doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
@@ -341,7 +357,16 @@ def test_existing_v2_same_table_history_appends_fresh_event(tmp_path):
     )
 
     parquet_path = output_root / "gemm_perf.parquet"
-    _write_parquet(parquet_path, [{"op": "matmul", "latency": 1.0}, {"op": "matmul", "latency": 2.0}])
+    _write_parquet(parquet_path, [{"op": "matmul", "latency": 1.0}])
+    perf_path = output_root / "gemm_perf.txt"
+    perf_path.write_text("op,latency\nsoftmax,2.0\n")
+    finalization_info: dict[Path, collect_mod.PerfFinalizationInfo] = {}
+    assert collect_mod.finalize_perf_files([perf_path], finalization_info=finalization_info) == [parquet_path]
+    assert pq.read_metadata(parquet_path).num_rows == 2
+    assert finalization_info[parquet_path.resolve()] == collect_mod.PerfFinalizationInfo(
+        new_rows=1,
+        merged_existing=True,
+    )
     checkpoint_dir = tmp_path / "checkpoint"
     _write_checkpoint(checkpoint_dir, done=["case-new"], failed=[])
 
@@ -352,6 +377,7 @@ def test_existing_v2_same_table_history_appends_fresh_event(tmp_path):
         run_errors=[],
         backend=BACKEND,
         checkpoint_dir=str(checkpoint_dir),
+        finalization_info=finalization_info,
     )
 
     doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
@@ -360,7 +386,62 @@ def test_existing_v2_same_table_history_appends_fresh_event(tmp_path):
     assert doc["provenance"] == "local"
     assert table["collections"][0] == prior_event
     assert table["collections"][1]["case_plan_hash"] == provenance.case_plan_hash(["case-new"])
+    assert table["collections"][1]["rows"] == 1
     assert table["rows"] == 2
+
+
+def test_schema_mismatch_overwrite_replaces_stale_table_history(tmp_path):
+    output_root = tmp_path / "out"
+    provenance.write_collection_meta(
+        output_root,
+        {
+            "framework": "sglang",
+            "version": "0.5.14",
+            "image": "lmsysorg/sglang:v0.5.14",
+            "image_digest": "sha256:" + "0" * 64,
+        },
+        {
+            "gemm_perf": {
+                "collector_ref": "a" * 40,
+                "collector_hash": "sha256:" + "b" * 64,
+                "case_plan_hash": "sha256:" + "c" * 64,
+                "collected_at": "2026-08-10",
+                "rows": 1,
+                "status": "complete",
+            }
+        },
+    )
+
+    parquet_path = output_root / "gemm_perf.parquet"
+    _write_parquet(parquet_path, [{"op": "matmul", "latency": 1.0}])
+    perf_path = output_root / "gemm_perf.txt"
+    perf_path.write_text("shape,latency\nnew-shape,2.0\n")
+    finalization_info: dict[Path, collect_mod.PerfFinalizationInfo] = {}
+    assert collect_mod.finalize_perf_files([perf_path], finalization_info=finalization_info) == [parquet_path]
+    assert pq.read_table(parquet_path).to_pylist() == [{"shape": "new-shape", "latency": 2.0}]
+    assert finalization_info[parquet_path.resolve()] == collect_mod.PerfFinalizationInfo(
+        new_rows=1,
+        merged_existing=False,
+    )
+
+    checkpoint_dir = tmp_path / "checkpoint"
+    _write_checkpoint(checkpoint_dir, done=["case-new"], failed=[])
+    collect_mod._write_collector_provenance(
+        output_root,
+        [parquet_path],
+        _provenance_ctx(_collections()),
+        run_errors=[],
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        finalization_info=finalization_info,
+    )
+
+    doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
+    table = doc["tables"]["gemm_perf"]
+    assert doc["schema_version"] == 1
+    assert "collections" not in table
+    assert table["case_plan_hash"] == provenance.case_plan_hash(["case-new"])
+    assert table["rows"] == 1
 
 
 def test_finalize_raises_when_existing_sidecar_is_legacy_tier(tmp_path):
@@ -390,6 +471,7 @@ def test_finalize_raises_when_existing_sidecar_is_legacy_tier(tmp_path):
             run_errors=[],
             backend=BACKEND,
             checkpoint_dir=str(checkpoint_dir),
+            finalization_info=_finalization_info_for(parquet_path),
         )
 
     # The legacy sidecar itself must be left untouched, not partially rebuilt.

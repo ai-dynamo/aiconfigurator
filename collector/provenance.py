@@ -294,11 +294,15 @@ def _ordered_multi_event_table(table: str, entry: Any) -> dict[str, Any]:
     }
 
 
-def append_collection_event(existing: dict[str, Any], current: dict[str, Any], *, table: str) -> dict[str, Any]:
+def append_collection_event(
+    existing: dict[str, Any], current: dict[str, Any], *, table: str, merged_rows: int
+) -> dict[str, Any]:
     """Append a fresh collection event while retaining an existing valid history.
 
     A full v1 entry is promoted to the first v2 event. Incomplete v1/local
     entries cannot be promoted honestly and fail instead of being discarded.
+    ``current.rows`` describes this event; ``merged_rows`` describes the
+    accumulated parquet table as shipped.
     """
     if "collections" in existing:
         existing_history = _ordered_multi_event_table(table, existing)["collections"]
@@ -306,7 +310,7 @@ def append_collection_event(existing: dict[str, Any], current: dict[str, Any], *
         existing_history = [_ordered_collection_event(existing, table=table, index=0)]
     current_event = _ordered_collection_event(current, table=table, index=len(existing_history))
     return {
-        "rows": current["rows"],
+        "rows": merged_rows,
         "status": current["status"],
         "collections": [*existing_history, current_event],
     }

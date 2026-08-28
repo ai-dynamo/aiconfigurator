@@ -85,6 +85,7 @@ from pathlib import Path
 
 from helper import (
     EXIT_CODE_RESTART,
+    PerfFinalizationInfo,
     WorkerRestartSignal,
     create_test_case_id,
     finalize_perf_files,
@@ -1509,6 +1510,7 @@ def _write_collector_provenance(
     *,
     backend: str,
     checkpoint_dir: str,
+    finalization_info: dict[Path, PerfFinalizationInfo],
 ) -> None:
     """Write collection_meta.yaml (design §5) flat beside the just-finalized parquet.
 
@@ -1543,6 +1545,8 @@ def _write_collector_provenance(
     collected_at = datetime.now().strftime("%Y-%m-%d")
 
     tables: dict[str, dict] = {}
+    new_rows_by_table: dict[str, int] = {}
+    merged_existing_by_table: dict[str, bool] = {}
     for parquet_path in converted:
         table = parquet_path.stem
         full_names = ops_by_table.get(table)
@@ -1550,6 +1554,16 @@ def _write_collector_provenance(
         if not full_names or module is None:
             logger.warning(f"collection_meta: {table} has no registry mapping this run; skipping its provenance entry")
             continue
+
+        resolved_parquet_path = parquet_path.resolve()
+        if resolved_parquet_path not in finalization_info:
+            raise RuntimeError(
+                f"collection_meta: table '{table}' has no finalization facts for {parquet_path}; "
+                "cannot attest the current collection event"
+            )
+        info = finalization_info[resolved_parquet_path]
+        new_rows_by_table[table] = info.new_rows
+        merged_existing_by_table[table] = info.merged_existing
 
         case_ids: set[str] = set()
         unresolved_failed = 0
@@ -1635,14 +1649,17 @@ def _write_collector_provenance(
             merged_tables = dict(existing_tables)
             for table, current_entry in tables.items():
                 existing_entry = existing_tables.get(table)
-                if isinstance(existing_entry, dict):
+                if isinstance(existing_entry, dict) and merged_existing_by_table[table]:
                     if existing_runtime != runtime_meta:
                         raise RuntimeError(
                             f"{existing_meta}: cannot append collection history for table '{table}' across "
                             f"different runtime identities (existing={existing_runtime!r}, current={runtime_meta!r})"
                         )
                     merged_tables[table] = provenance.append_collection_event(
-                        existing_entry, current_entry, table=table
+                        existing_entry,
+                        {**current_entry, "rows": new_rows_by_table[table]},
+                        table=table,
+                        merged_rows=current_entry["rows"],
                     )
                 else:
                     merged_tables[table] = current_entry
@@ -1984,6 +2001,7 @@ def main():
         )
 
     converted: list[Path] = []
+    finalization_info: dict[Path, PerfFinalizationInfo] = {}
     if args.keep_csv:
         logger.info("Keeping collector CSV staging files because --keep-csv was passed")
     else:
@@ -1993,7 +2011,7 @@ def main():
                 "Finalizing collector CSV staging files as parquet:\n  "
                 + "\n  ".join(str(path) for path in touched_perf_outputs)
             )
-        converted = finalize_perf_files(touched_perf_outputs)
+        converted = finalize_perf_files(touched_perf_outputs, finalization_info=finalization_info)
         if converted:
             logger.info(f"Finalized {len(converted)} collector perf files as parquet")
 
@@ -2005,6 +2023,7 @@ def main():
             run_errors or [],
             backend=args.backend,
             checkpoint_dir=args.checkpoint_dir,
+            finalization_info=finalization_info,
         )
 
     # A ModuleCollectionFailure means an op failed before running a single case
