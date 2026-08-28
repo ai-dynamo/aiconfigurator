@@ -1021,6 +1021,44 @@ mod tests {
         }
     }
 
+    /// v13 -> v14 regression (PR #1533): `GdnOp` gained
+    /// `mamba_ssm_dtype`, a positional bincode layout change. A pre-PR v13
+    /// producer's GDN payload must be rejected by the version gate before the
+    /// missing trailing string reaches op decoding as an opaque EOF.
+    #[test]
+    fn from_bincode_rejects_v13_gdn_producer_at_the_version_gate() {
+        let mut legacy_gdn = gdn();
+        legacy_gdn.mamba_ssm_dtype.clear();
+        let spec = EngineSpec::new(
+            sample_engine_config(),
+            vec![],
+            vec![OpSpec::Gdn(legacy_gdn)],
+        );
+        let mut bytes = spec.to_bincode().expect("to_bincode");
+
+        // The GDN op is the final value in the wire payload. An empty String
+        // is encoded as its 8-byte length, so removing that suffix recreates
+        // the exact pre-field GdnOp layout emitted by a v13 producer.
+        assert_eq!(&bytes[bytes.len() - 8..], &[0; 8]);
+        bytes.truncate(bytes.len() - 8);
+        bytes[..4].copy_from_slice(&13u32.to_le_bytes());
+
+        match EngineSpec::from_bincode(&bytes) {
+            Err(AicError::UnsupportedSchemaVersion {
+                kind,
+                got,
+                expected,
+            }) => {
+                assert_eq!(kind, "EngineSpec");
+                assert_eq!(got, 13);
+                assert_eq!(expected, ENGINE_SPEC_SCHEMA_VERSION);
+            }
+            other => {
+                panic!("expected UnsupportedSchemaVersion for a v13 GDN payload, got {other:?}")
+            }
+        }
+    }
+
     /// A correct version but an undecodable op payload is NOT a version skew: it
     /// must surface as an op-payload-stage `EngineSpec` error (op-layout drift
     /// within a version, or corruption), naming the stage and the version.

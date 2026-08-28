@@ -2,16 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: 1
-# `local`: a manual out-of-band collection with structured but hash-less
-# provenance (same tier as the b200_sxm kda/mla_bmm sidecars) — no longer
-# `legacy`, since the whole table now comes from one known 2026-08-14 run.
+# `local`: the original manual campaign has its emitted attestation below; the
+# 2026-08-26 review-healing case-plan hashes were reconstructed from the exact
+# logged filters because those scoped runs did not export sidecars.
 provenance: local
 runtime:
   framework: sglang
   version: 0.5.14
   # Mirrored sglang:v0.5.14-cu130-amd64 image (mirror of
-  # lmsysorg/sglang:v0.5.14; mirror digest not recorded).
+  # lmsysorg/sglang:v0.5.14).
   image: lmsysorg/sglang:v0.5.14
+  image_digest: sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3
 tables:
   gemm_perf:
     # 2026-08-14 (AIC-1759): FULL-TABLE replacement with the first true
@@ -22,13 +23,42 @@ tables:
     # the old for every dtype (+222 bfloat16, +148 fp8 shapes from
     # Step-3.7 cases). Collected via manual JET job on aws-pdx-slurm-1
     # from the AIC-1744/1745 PR branch (#1533, pipeline 62709074).
-    # collector_ref / collector_hash / case_plan_hash are ABSENT because
-    # they cannot be recomputed honestly: the branch history that ran was
-    # rewritten by two post-review rebases (2026-08-15, 2026-08-20), and
-    # the case-plan hash is attested only at run time from the campaign
-    # checkpoint, which was not retained.
-    # (A values-only re-measurement of six stalled/spiked rows lands separately;
-    # it does not change the row count.)
-    collected_at: '2026-08-14'
+    # 2026-08-26 (PR #1533 review healing): values-only replacement of six
+    # isolated >3x m-neighbor spikes: bfloat16 (96,3584,256),
+    # (4353,32,2048), (14,32,10240), (96,768,32), (193,12288,1024), and
+    # nvfp4 (128,2048,6144). Each spike plus both m-neighbors was re-collected
+    # on an 8-GPU B300 SXM6 AC allocation at aws-pdx in the mirrored v0.5.14
+    # amd64 image, in two independent runs; the per-key MIN was landed. Row
+    # count, keys, and schema stayed unchanged; the full-table scan then found
+    # 0 isolated >3x m-neighbor spikes.
     rows: 130906
     status: complete
+    collections:
+      # Exact sidecar emitted by the original 2026-08-14 campaign. Its
+      # `status: partial` is the campaign status; the shipped table above is
+      # complete after selecting its full GEMM table and applying the scoped
+      # review-healing pass.
+      - collector_ref: a08781aa7685516b1bb91703060e89cc1582a289
+        collector_hash: sha256:f7221785c44f83fde369369f1240f74f66a626851c8f92ab19e08ff6557bfdca
+        case_plan_hash: sha256:5e12321dc5ba7b83638bcb17922ec0d3f6739a75b44f5a063cadbb89807642b2
+        collected_at: '2026-08-14'
+        rows: 130906
+        status: partial
+      # Review-healing pass 1 (JET pipeline 64691774, job 412968266): the
+      # flagged row and its two m-neighbors, two independent runs. The
+      # case-plan hash is reconstructed from the exact logged three-case
+      # filter; only the flagged row's per-key MIN was shipped.
+      - collector_ref: f21fbe5d64b64c3a7c1b9299838799eb4e98d30f
+        collector_hash: sha256:924badc34a076536ee73c3862d06dac5082e132c8300ded57bfc42e35c79dc9e
+        case_plan_hash: sha256:bf337c668c550ee41b42b70518db7552ff41ca733a88a988ea4478db28d99af9
+        collected_at: '2026-08-26'
+        rows: 3
+      # Review-healing pass 2 (JET pipeline 64694061, job 412989224): five
+      # flagged rows plus both m-neighbors, two independent runs. The
+      # case-plan hash is reconstructed from the exact logged 15-case filter;
+      # only the five flagged rows' per-key MIN values were shipped.
+      - collector_ref: f21fbe5d64b64c3a7c1b9299838799eb4e98d30f
+        collector_hash: sha256:924badc34a076536ee73c3862d06dac5082e132c8300ded57bfc42e35c79dc9e
+        case_plan_hash: sha256:cf9758c99dc63ed7887007b6ba71bd1fe491ca8943c81918212176351c8bd7f4
+        collected_at: '2026-08-26'
+        rows: 15

@@ -32,11 +32,14 @@ tables:
       # Keys disjoint from prior rows. Manual JET job on aws-pdx-slurm-1
       # (pipeline 62709074) from the AIC-1744/1745 PR branch (#1533), using
       # the mirrored sglang:v0.5.14-cu130-amd64 image (mirror of the
-      # runtime.image above; mirror digest not recorded). collector_ref /
-      # collector_hash / case_plan_hash are ABSENT because they cannot be
-      # recomputed honestly: the branch history that ran was rewritten by two
-      # post-review rebases (2026-08-15, 2026-08-20), and the case-plan hash
-      # is attested only at run time from the campaign checkpoint, which was
-      # not retained.
-      - collected_at: '2026-08-14'
+      # runtime.image above, with the same recorded digest). The exact emitted
+      # attestation below covers the whole 1,243-row GDN campaign and its
+      # partial campaign status; the shipped delta selected from it is the 54
+      # disjoint FlashInfer rows described above.
+      - collector_ref: a08781aa7685516b1bb91703060e89cc1582a289
+        collector_hash: sha256:34d82ff7cdb89e25a3d80bc83e5eee1cb3f9e55bea072179095aaf17fafab532
+        case_plan_hash: sha256:ab10b27a07d6c11dd70b4da441c45a47bad465ecbbe40c4ff83d70fe4e1c1633
+        collected_at: '2026-08-14'
         rows: 54
+        source_campaign_rows: 1243
+        source_campaign_status: partial
