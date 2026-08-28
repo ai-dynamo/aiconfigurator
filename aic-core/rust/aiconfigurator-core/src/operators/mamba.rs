@@ -523,12 +523,10 @@ mod tests {
     /// `gdn_nk_per_tp = nk // tp` / `gdn_nv_per_tp = nv // tp`: nk=4, nv=16),
     /// batch_size=128, real gb300/sglang/0.5.14 spec (mem_bw=8e12,
     /// sm_version=103). `d_model` below is 8192, a deliberate synthetic
-    /// stand-in -- not 397B's real value (4096). Rows for
-    /// `flashinfer_gated_delta_rule_decode` now exist in the packaged
-    /// gb300 table (landed by AIC-1745), keyed at d_model=4096, so this
-    /// off-key d_model keeps the query off those shipped rows and pins
-    /// the pure-SOL closed-form check itself -- exactly the case the
-    /// Python anchor covers.
+    /// stand-in -- not 397B's real value (4096). The current packaged GDN
+    /// table has no FlashInfer rows because all declared model cases use
+    /// float32 state; this explicit bf16 operation therefore pins the pure-SOL
+    /// closed form without claiming packaged silicon coverage.
     ///
     /// Hand-derived expectation (state_bytes=2 for this lane):
     ///   state_size = nv*hk*hv = 16*128*128 = 262144

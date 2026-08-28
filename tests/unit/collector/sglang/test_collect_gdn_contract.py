@@ -53,7 +53,8 @@ class TestResolveFlashinferGdnDecode:
     mamba_ssm_dtype is bfloat16 (server_args.py:4884-4915 @0.5.14). An
     import failure must surface as a classified failure the caller raises
     ONLY for bf16-state cases; fp32-state (every bundled Qwen3.5/3.6 config)
-    and non-major-10 SMs stay legitimate no-ops."""
+    and non-major-10 SMs stay legitimate no-ops even when FlashInfer is
+    importable."""
 
     def _resolve(self, sm_version: int):
         return _load_function(
@@ -105,18 +106,10 @@ class TestResolveFlashinferGdnDecode:
         assert "SM103" in error_message
         assert "collection environment gap" in error_message
 
-    def test_no_required_lane_error_for_fp32_state_on_sm100(self, monkeypatch):
+    def test_fp32_state_never_resolves_flashinfer_on_sm100(self, monkeypatch):
         # Serving never selects the FlashInfer backend for an fp32-state
-        # model (every bundled Qwen3.5/3.6 config): a missing flashinfer
-        # install must be a logged sibling-lane skip, not a classified
-        # required-lane failure.
-        monkeypatch.delitem(sys.modules, "flashinfer.gdn_decode", raising=False)
-        monkeypatch.delitem(sys.modules, "flashinfer", raising=False)
-        resolve = self._resolve(103)
-
-        assert resolve("float32") == (None, None)
-
-    def test_returns_kernel_when_available_on_sm100(self, monkeypatch):
+        # model (every bundled Qwen3.5/3.6 config), even when the package is
+        # importable in the collection image.
         sentinel = object()
         fake_gdn_decode = types.ModuleType("flashinfer.gdn_decode")
         fake_gdn_decode.gated_delta_rule_decode_pretranspose = sentinel
@@ -126,13 +119,40 @@ class TestResolveFlashinferGdnDecode:
         monkeypatch.setitem(sys.modules, "flashinfer.gdn_decode", fake_gdn_decode)
         resolve = self._resolve(103)
 
-        # Sibling coverage is collected for every state dtype when the
-        # kernel is importable on SM major 10.
-        for dtype in ("float32", "bfloat16"):
-            kernel_fn, error_message = resolve(dtype)
+        assert resolve("float32") == (None, None)
 
-            assert kernel_fn is sentinel
-            assert error_message is None
+    def test_explicit_bf16_fixture_returns_kernel_when_available_on_sm100(self, monkeypatch):
+        sentinel = object()
+        fake_gdn_decode = types.ModuleType("flashinfer.gdn_decode")
+        fake_gdn_decode.gated_delta_rule_decode_pretranspose = sentinel
+        fake_flashinfer = types.ModuleType("flashinfer")
+        fake_flashinfer.gdn_decode = fake_gdn_decode
+        monkeypatch.setitem(sys.modules, "flashinfer", fake_flashinfer)
+        monkeypatch.setitem(sys.modules, "flashinfer.gdn_decode", fake_gdn_decode)
+        resolve = self._resolve(103)
+
+        kernel_fn, error_message = resolve("bfloat16")
+
+        assert kernel_fn is sentinel
+        assert error_message is None
+
+    def test_current_repo_plan_has_zero_non_serving_flashinfer_invocations(self, monkeypatch):
+        from collector.case_generator import get_common_gdn_test_cases
+
+        sentinel = object()
+        fake_gdn_decode = types.ModuleType("flashinfer.gdn_decode")
+        fake_gdn_decode.gated_delta_rule_decode_pretranspose = sentinel
+        fake_flashinfer = types.ModuleType("flashinfer")
+        fake_flashinfer.gdn_decode = fake_gdn_decode
+        monkeypatch.setitem(sys.modules, "flashinfer", fake_flashinfer)
+        monkeypatch.setitem(sys.modules, "flashinfer.gdn_decode", fake_gdn_decode)
+        resolve = self._resolve(103)
+
+        generation_cases = [case for case in get_common_gdn_test_cases() if case.phase == "generation"]
+
+        assert generation_cases
+        assert {case.mamba_ssm_dtype for case in generation_cases} == {"float32"}
+        assert [case for case in generation_cases if resolve(case.mamba_ssm_dtype)[0] is not None] == []
 
 
 def test_run_gdn_generation_benchmark_raises_classified_error_not_silent_skip():

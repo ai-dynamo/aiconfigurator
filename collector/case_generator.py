@@ -2013,8 +2013,8 @@ class GdnCommonTestCase:
     # default "float32" — sglang configs/mamba_utils.py @0.5.14). Decides
     # whether SM-major-10 sglang serving auto-selects the FlashInfer GDN
     # decode backend (bfloat16 only; server_args.py:4884-4915 @0.5.14), so
-    # the sglang collector requires the FlashInfer lane only for bf16-state
-    # cases.
+    # the sglang collector selects the FlashInfer lane only for bf16-state
+    # cases on that exact capability major.
     mamba_ssm_dtype: str = "float32"
 
 

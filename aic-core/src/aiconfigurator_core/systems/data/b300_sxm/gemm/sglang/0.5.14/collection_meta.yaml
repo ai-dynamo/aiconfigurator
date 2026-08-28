@@ -51,8 +51,10 @@ tables:
         collector_hash: sha256:924badc34a076536ee73c3862d06dac5082e132c8300ded57bfc42e35c79dc9e
         case_plan_hash: sha256:bf337c668c550ee41b42b70518db7552ff41ca733a88a988ea4478db28d99af9
         collected_at: '2026-08-26'
-        rows: 3
+        rows: 1
         status: complete
+        source_campaign_rows: 3
+        source_campaign_status: complete
       # Review-healing pass 2 (JET pipeline 64694061, job 412989224): five
       # flagged rows plus both m-neighbors, two independent runs. The
       # case-plan hash is reconstructed from the exact logged 15-case filter;
@@ -61,5 +63,7 @@ tables:
         collector_hash: sha256:924badc34a076536ee73c3862d06dac5082e132c8300ded57bfc42e35c79dc9e
         case_plan_hash: sha256:cf9758c99dc63ed7887007b6ba71bd1fe491ca8943c81918212176351c8bd7f4
         collected_at: '2026-08-26'
-        rows: 15
+        rows: 5
         status: complete
+        source_campaign_rows: 15
+        source_campaign_status: complete

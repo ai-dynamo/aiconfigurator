@@ -309,11 +309,11 @@ impl StateSpaceTable {
             // own rows over the fla/triton fp32-state lane when they cover
             // this shape. Every bundled Qwen3.5/3.6 config pins
             // mamba_ssm_dtype=float32, so the default query stays on the fla
-            // lane; tables collected before AIC-1745's collector change carry
-            // no flashinfer_gated_delta_rule_decode rows anyway --
-            // alias_matches stays empty below and this degrades to the fla
-            // lane exactly as before. SM90 and SM120 are untouched (fla lane
-            // always wins there, matching serving's default).
+            // lane. Current packaged tables carry no FlashInfer rows because
+            // every declared model case uses float32 state; alias_matches is
+            // therefore empty and a hypothetical bf16 query degrades to the
+            // fla lane. SM90 and SM120 are untouched (fla always wins there,
+            // matching serving's default).
             &["flashinfer_gated_delta_rule_decode"]
         } else {
             &[]
@@ -1067,8 +1067,8 @@ mod tests {
     fn sglang_sm100_gdn_keeps_fla_lane_for_fp32_state_even_if_flashinfer_present() {
         // Every bundled Qwen3.5/3.6 config pins mamba_ssm_dtype=float32;
         // serving auto-selects FlashInfer only for bfloat16 state, so the
-        // default query must resolve the fla lane's own row even when a
-        // flashinfer sibling row covers the shape.
+        // default query must resolve the fla lane's own row even when this
+        // explicit fixture includes a FlashInfer row at the same shape.
         let table = in_memory_gdn_table_with_sm(
             "sglang",
             "0.5.14",
@@ -1131,10 +1131,9 @@ mod tests {
 
     #[test]
     fn sglang_sm100_gdn_falls_back_to_fla_lane_when_flashinfer_absent() {
-        // Tables collected before AIC-1745's collector change carry no
-        // flashinfer_gated_delta_rule_decode rows: degrade to the fla lane
-        // exactly as before, never a hard failure — even for a bf16-state
-        // model whose serving predicate WOULD select the FlashInfer backend.
+        // This explicit fixture contains no FlashInfer row: degrade to the
+        // fla lane without a hard failure, even for a bf16-state model whose
+        // serving predicate would select the FlashInfer backend.
         let table = in_memory_gdn_table_with_sm(
             "sglang",
             "0.5.14",
@@ -1163,9 +1162,8 @@ mod tests {
     fn sglang_sm90_gdn_never_selects_flashinfer_lane_even_if_present() {
         // Hopper unchanged: serving never runs the FlashInfer decode kernel on
         // SM90, so the modeling layer must not reach for it there even when a
-        // flashinfer row exists (mirrors the Python twin test) — bf16 state
-        // included (the dtype half of the predicate cannot override the SM
-        // half).
+        // explicit fixture includes a FlashInfer row — bf16 state included
+        // (the dtype half of the predicate cannot override the SM half).
         let table = in_memory_gdn_table_with_sm(
             "sglang",
             "0.5.10",

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-schema_version: 2
+schema_version: 1
 runtime:
   framework: sglang
   version: 0.5.14
@@ -9,35 +9,12 @@ runtime:
   image_digest: sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3
 tables:
   gdn_perf:
-    # Two collection events (per-event attestations under `collections`
-    # below); rows/status here describe the merged table as shipped.
-    rows: 8874
+    collector_ref: 5a1834df2865d291f84f5fc1fbf6f3c99b69afba
+    collector_hash: sha256:e18b5b3a83ff649f4955a271b0d3b3680be2c43a5e07e68882b4e91a6991d075
+    case_plan_hash: sha256:1e658e78c925cba9773688165ecec208c0c2c2f0b931268cc15a245fc878ac48
+    collected_at: '2026-08-10'
+    rows: 8820
+    # All 32 failed tasks are strict-completeness raises on the largest
+    # batch x seq inner points (memory-bound sweep tail); collected rows
+    # are unaffected.
     status: complete
-    collections:
-      # Base sweep: the 2026-08-10 registry collector run (fully attested).
-      # All 32 failed tasks are strict-completeness raises on the largest
-      # batch x seq inner points (memory-bound sweep tail); collected rows
-      # are unaffected.
-      - collector_ref: 5a1834df2865d291f84f5fc1fbf6f3c99b69afba
-        collector_hash: sha256:e18b5b3a83ff649f4955a271b0d3b3680be2c43a5e07e68882b4e91a6991d075
-        case_plan_hash: sha256:1e658e78c925cba9773688165ecec208c0c2c2f0b931268cc15a245fc878ac48
-        collected_at: '2026-08-10'
-        rows: 8820
-        status: complete
-      # 2026-08-13 (AIC-1745): appended 54 flashinfer_gated_delta_rule_decode
-      # rows — the FlashInfer bf16-state decode SIBLING lane (serving selects
-      # it only on SM-major-10 for bfloat16-state models,
-      # server_args.py:4884-4915 @0.5.14). Measures ~0.50x the fla fp32-state
-      # lane at matched keys, exactly the state-bytes ratio. Keys disjoint
-      # from prior rows. Run via the auto-collect pipeline from the AIC-1744/
-      # 1745 PR branch (#1533). The exact emitted attestation below covers the
-      # whole 1,243-row GDN campaign and its partial campaign status; the
-      # shipped delta selected from it is the 54 disjoint FlashInfer rows.
-      - collector_ref: 24a0d97479d63062af49f3cb41981e4c55f421ab
-        collector_hash: sha256:34d82ff7cdb89e25a3d80bc83e5eee1cb3f9e55bea072179095aaf17fafab532
-        case_plan_hash: sha256:ab10b27a07d6c11dd70b4da441c45a47bad465ecbbe40c4ff83d70fe4e1c1633
-        collected_at: '2026-08-13'
-        rows: 54
-        status: partial
-        source_campaign_rows: 1243
-        source_campaign_status: partial

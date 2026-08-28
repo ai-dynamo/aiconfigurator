@@ -320,12 +320,9 @@ SMOKE_CASES = [
             backend_name="sglang",
             backend_version="0.5.14",
         ),
-        # 0.5.14 tables carry BOTH GDN decode lanes (fla fp32-state +
-        # flashinfer bf16-state sibling, AIC-1745) at this model's shard
-        # shapes — unlike the 0.5.10 case above. Pins the corrected lane
-        # routing: Qwen3.5 declares mamba_ssm_dtype=float32, so serving
-        # (and the engine) keeps the fla lane on SM100 despite the
-        # flashinfer rows being present (PR #1533 review, jasonqinzhou).
+        # Qwen3.5 declares mamba_ssm_dtype=float32, so serving and the engine
+        # keep the fla lane on SM100. The 0.5.14 packaged table contains no
+        # non-serving FlashInfer rows.
         id="qwen35-397b-a17b-b200-sglang-0514-isl1024-osl2",
     ),
     pytest.param(

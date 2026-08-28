@@ -106,20 +106,11 @@ def test_v2_event_runtime_rejects_unknown_fields(tmp_path):
         _load_collection_meta_yaml(str(path))
 
 
-def test_b300_gdn_records_mixed_runtime_history_honestly():
-    path = (
-        REPO_ROOT
-        / "aic-core/src/aiconfigurator_core/systems/data/b300_sxm/linear_attention/sglang/0.5.14/collection_meta.yaml"
-    )
+def test_b300_gemm_healing_distinguishes_shipped_rows_from_attempted_neighbors():
+    path = REPO_ROOT / "aic-core/src/aiconfigurator_core/systems/data/b300_sxm/gemm/sglang/0.5.14/collection_meta.yaml"
 
     document = _load_collection_meta_yaml(str(path))
-    runtime = document["runtime"]
-    events = document["tables"]["gdn_perf"]["collections"]
+    healing_events = document["tables"]["gemm_perf"]["collections"][1:]
 
-    assert runtime["image"] == "gitlab-master.nvidia.com/yimingl/aic-eval-tools/sglang:v0.5.14-cu130-amd64"
-    assert runtime["image_digest"] == "sha256:9611bd4c5624b0e9e17829506188a12f17205f2083de0dd44d6c521733553a50"
-    assert events[0]["runtime"]["image"] == "lmsysorg/sglang:v0.5.14"
-    assert events[0]["runtime"]["image_digest"] == (
-        "sha256:5027e95bf6ec536856b1b52a91d1f35ff5c564ab83e8a94758a169ff09bb8df3"
-    )
-    assert "runtime" not in events[1]  # inherits the exact private JET runtime above
+    assert [(event["rows"], event["source_campaign_rows"]) for event in healing_events] == [(1, 3), (5, 15)]
+    assert all(event["source_campaign_status"] == "complete" for event in healing_events)
