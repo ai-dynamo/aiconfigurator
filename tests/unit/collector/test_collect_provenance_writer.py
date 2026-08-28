@@ -253,6 +253,54 @@ def _attempted(checkpoint_path: Path) -> set[str]:
     return set(json.loads(checkpoint_path.read_text(encoding="utf-8")).get("attempted", []))
 
 
+def _single_table_finalization(tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
+    parquet_path = staging_path.with_suffix(".parquet")
+    pq.write_table(pa.table({"op": ["matmul"], "shape": ["old"], "latency": [9.0]}), parquet_path)
+    return output_root, checkpoint_dir, checkpoint_path, staging_path, parquet_path
+
+
+def _run_hard_exit(target, args, expected_exitcode, description):
+    process = mp.get_context("spawn").Process(target=target, args=args)
+    process.start()
+    process.join(timeout=20)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        pytest.fail(f"{description} subprocess did not exit")
+    assert process.exitcode == expected_exitcode
+
+
+def _recover_finalization(output_root: Path, checkpoint_dir: Path):
+    return collect_mod._recover_collector_provenance_transaction(
+        output_root,
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+    )
+
+
+def _finalize_single_table(output_root: Path, checkpoint_dir: Path, staging_path: Path) -> None:
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        [staging_path],
+        _provenance_ctx(_collections()),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        sm_version=100,
+    )
+
+
 def _independent_digest(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -467,6 +515,124 @@ def _crash_before_perf_journal_publish(output_root_text: str, checkpoint_dir_tex
     )
 
 
+def _crash_after_first_parquet_render(
+    output_root_text: str,
+    checkpoint_dir_text: str,
+    collections: list[dict],
+) -> None:
+    import helper as helper_mod
+
+    output_root = Path(output_root_text)
+    real_prepare = helper_mod._prepare_perf_file
+    rendered = False
+
+    def prepare_then_exit(*args, **kwargs):
+        nonlocal rendered
+        prepared = real_prepare(*args, **kwargs)
+        if not rendered:
+            rendered = True
+            os._exit(93)
+        return prepared
+
+    helper_mod._prepare_perf_file = prepare_then_exit
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        sorted(output_root.glob("*_perf.txt")),
+        _provenance_ctx(collections),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=checkpoint_dir_text,
+        sm_version=100,
+    )
+
+
+def _crash_during_first_parquet_render(output_root_text: str, checkpoint_dir_text: str) -> None:
+    import pyarrow.parquet as child_pq
+
+    output_root = Path(output_root_text)
+
+    def write_partial_then_exit(_table, destination, **_kwargs):
+        destination.write(b"partial parquet owned by interrupted render")
+        destination.flush()
+        os.fsync(destination.fileno())
+        os._exit(94)
+
+    child_pq.write_table = write_partial_then_exit
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        [output_root / "gemm_perf.txt"],
+        _provenance_ctx(_collections()),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=checkpoint_dir_text,
+        sm_version=100,
+    )
+
+
+def _crash_after_perf_journal_prepare(output_root_text: str, checkpoint_dir_text: str) -> None:
+    output_root = Path(output_root_text)
+    real_prepare = collect_mod._CollectorPerfPublicationTransaction.prepare
+
+    def prepare_then_exit(transaction, publications):
+        real_prepare(transaction, publications)
+        os._exit(95)
+
+    collect_mod._CollectorPerfPublicationTransaction.prepare = prepare_then_exit
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        [output_root / "gemm_perf.txt"],
+        _provenance_ctx(_collections()),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=checkpoint_dir_text,
+        sm_version=100,
+    )
+
+
+def _pause_live_finalization_before_sidecar(
+    output_root_text: str,
+    checkpoint_dir_text: str,
+    entered,
+    release,
+) -> None:
+    output_root = Path(output_root_text)
+    real_write = collect_mod._write_collector_provenance
+
+    def pause_then_write(*args, **kwargs):
+        entered.set()
+        if not release.wait(timeout=20):
+            raise RuntimeError("timed out waiting to release live finalization")
+        return real_write(*args, **kwargs)
+
+    collect_mod._write_collector_provenance = pause_then_write
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        [output_root / "gemm_perf.txt"],
+        _provenance_ctx(_collections()),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=checkpoint_dir_text,
+        sm_version=100,
+    )
+
+
+def _recover_and_signal(
+    output_root_text: str,
+    checkpoint_dir_text: str,
+    started,
+    finished,
+) -> None:
+    started.set()
+    try:
+        collect_mod._recover_collector_provenance_transaction(
+            Path(output_root_text),
+            backend=BACKEND,
+            checkpoint_dir=checkpoint_dir_text,
+        )
+    finally:
+        finished.set()
+
+
 def _crash_after_perf_journal_source_chmod(output_root_text: str, checkpoint_dir_text: str) -> None:
     output_root = Path(output_root_text)
     real_prepare = collect_mod._CollectorPerfPublicationTransaction.prepare
@@ -616,7 +782,8 @@ def test_atomic_exclusive_write_preserves_destination_replacement_after_mismatch
     swapped_temp_path = None
     replacement_injected = False
     real_link = collect_mod.os.link
-    real_ifmt = collect_mod.stat.S_IFMT
+    real_digest_open_fd = collect_mod._digest_open_fd
+    digest_calls = 0
 
     def swap_temp_then_link(source, target, *args, **kwargs):
         nonlocal swapped_temp_path
@@ -626,17 +793,18 @@ def test_atomic_exclusive_write_preserves_destination_replacement_after_mismatch
         replacement.replace(swapped_temp_path)
         return real_link(source, target, *args, **kwargs)
 
-    def replace_before_type_compare(mode):
-        nonlocal replacement_injected
-        file_type = real_ifmt(mode)
-        if not replacement_injected:
+    def replace_before_published_path_digest(file_descriptor):
+        nonlocal digest_calls, replacement_injected
+        result = real_digest_open_fd(file_descriptor)
+        digest_calls += 1
+        if digest_calls == 2 and not replacement_injected:
             replacement_injected = True
             destination.replace(observed_link)
             second_competitor.replace(destination)
-        return file_type
+        return result
 
     monkeypatch.setattr(collect_mod.os, "link", swap_temp_then_link)
-    monkeypatch.setattr(collect_mod.stat, "S_IFMT", replace_before_type_compare)
+    monkeypatch.setattr(collect_mod, "_digest_open_fd", replace_before_published_path_digest)
 
     with pytest.raises(RuntimeError, match=r"publication|changed"):
         collect_mod._atomic_write_bytes(destination, b"owned", replace_existing=False)
@@ -728,6 +896,63 @@ def test_atomic_exclusive_write_publishes_owned_bytes_and_mode(tmp_path, monkeyp
     assert stat.S_IMODE(destination.stat().st_mode) == 0o640
     assert follow_symlinks == [False]
     assert list(tmp_path.glob(".collection_meta.yaml.*.tmp")) == []
+
+
+def test_atomic_exclusive_write_rejects_same_inode_bytes_and_mode_race(tmp_path, monkeypatch):
+    destination = tmp_path / "collection_meta.yaml"
+    owned = b"owned"
+    competitor = b"raced"
+    published_temp = None
+    real_link = collect_mod.os.link
+
+    def link_then_mutate(source, target, *args, **kwargs):
+        nonlocal published_temp
+        published_temp = Path(source)
+        result = real_link(source, target, *args, **kwargs)
+        with published_temp.open("r+b") as raced_file:
+            raced_file.write(competitor)
+            raced_file.flush()
+            os.fchmod(raced_file.fileno(), 0o777)
+            os.fsync(raced_file.fileno())
+        return result
+
+    monkeypatch.setattr(collect_mod.os, "link", link_then_mutate)
+
+    with pytest.raises(RuntimeError, match=r"publication|changed"):
+        collect_mod._atomic_write_bytes(destination, owned, mode=0o640, replace_existing=False)
+
+    assert published_temp is not None
+    assert published_temp.read_bytes() == competitor
+    assert stat.S_IMODE(published_temp.stat().st_mode) == 0o777
+    assert destination.read_bytes() == competitor
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o777
+    assert destination.samefile(published_temp)
+
+
+def test_atomic_replace_write_rejects_same_inode_bytes_and_mode_race(tmp_path, monkeypatch):
+    destination = tmp_path / "checkpoint.json"
+    destination.write_bytes(b"prior")
+    destination.chmod(0o600)
+    owned = b"owned"
+    competitor = b"raced"
+    real_replace = collect_mod.os.replace
+
+    def replace_then_mutate(source, target, *args, **kwargs):
+        result = real_replace(source, target, *args, **kwargs)
+        with Path(target).open("r+b") as raced_file:
+            raced_file.write(competitor)
+            raced_file.flush()
+            os.fchmod(raced_file.fileno(), 0o777)
+            os.fsync(raced_file.fileno())
+        return result
+
+    monkeypatch.setattr(collect_mod.os, "replace", replace_then_mutate)
+
+    with pytest.raises(RuntimeError, match=r"publication|changed"):
+        collect_mod._atomic_write_bytes(destination, owned, mode=0o640)
+
+    assert destination.read_bytes() == competitor
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o777
 
 
 def test_recovery_rejects_retained_atomic_publication_mismatch_without_mutation(tmp_path):
@@ -3148,36 +3373,303 @@ def test_publish_atomically_preserves_target_replaced_at_claim(tmp_path, monkeyp
 
 
 def test_hard_exit_before_perf_journal_does_not_leave_rollback_snapshot(tmp_path):
+    output_root, checkpoint_dir, checkpoint_path, staging_path, parquet_path = _single_table_finalization(tmp_path)
+    parquet_before = parquet_path.read_bytes()
+
+    for _attempt in range(3):
+        _run_hard_exit(
+            _crash_before_perf_journal_publish,
+            (str(output_root), str(checkpoint_dir)),
+            91,
+            "collector pre-journal crash",
+        )
+        assert parquet_path.read_bytes() == parquet_before
+        assert list(output_root.glob(".*.rollback")) == []
+        assert _recover_finalization(output_root, checkpoint_dir) is None
+
+    assert parquet_path.read_bytes() == parquet_before
+    assert staging_path.exists()
+    assert list(output_root.glob(".*.tmp")) == []
+    assert not (output_root / collect_mod._PERF_TRANSACTION_FILENAME).exists()
+
+    _finalize_single_table(output_root, checkpoint_dir, staging_path)
+
+    assert {row["shape"] for row in pq.read_table(parquet_path).to_pylist()} == {"old", "new"}
+    assert not staging_path.exists()
+    assert _attempted(checkpoint_path) == set()
+
+
+def test_hard_exit_during_parquet_render_recovers_exact_reserved_path_and_retries(tmp_path):
+    output_root, checkpoint_dir, checkpoint_path, staging_path, parquet_path = _single_table_finalization(tmp_path)
+    parquet_before = parquet_path.read_bytes()
+
+    _run_hard_exit(
+        _crash_during_first_parquet_render,
+        (str(output_root), str(checkpoint_dir)),
+        94,
+        "collector mid-render crash",
+    )
+
+    assert parquet_path.read_bytes() == parquet_before
+    assert staging_path.exists()
+    assert _attempted(checkpoint_path) == {"case-a"}
+    assert _recover_finalization(output_root, checkpoint_dir) is None
+    assert list(output_root.glob(".*.tmp")) == []
+
+    _finalize_single_table(output_root, checkpoint_dir, staging_path)
+
+    assert {row["shape"] for row in pq.read_table(parquet_path).to_pylist()} == {"old", "new"}
+    assert not staging_path.exists()
+    assert _attempted(checkpoint_path) == set()
+
+
+def test_hard_exit_after_first_multi_table_render_recovers_batch_and_retries(tmp_path):
     output_root = tmp_path / "out"
     output_root.mkdir()
     checkpoint_dir = tmp_path / "checkpoint"
-    _write_checkpoint(
+    gemm_checkpoint = _write_checkpoint(
         checkpoint_dir,
-        done=["case-a"],
+        done=["gemm-case"],
         failed=[],
-        attempted=["case-a"],
+        attempted=["gemm-case"],
     )
-    staging_path = output_root / "gemm_perf.txt"
-    staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
-    parquet_path = staging_path.with_suffix(".parquet")
-    pq.write_table(pa.table({"op": ["matmul"], "shape": ["old"], "latency": [9.0]}), parquet_path)
+    moe_checkpoint = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name=f"{BACKEND}.moe",
+        version="0.5.14",
+        done=["moe-case"],
+        failed=[],
+        attempted=["moe-case"],
+    )
+    collections = [
+        *_collections(),
+        {
+            "name": BACKEND,
+            "type": "moe",
+            "module": "collector.sglang.collect_moe",
+            "run_func": "run_moe_torch",
+            "perf_filename": "moe_perf.txt",
+        },
+    ]
+    staging_paths = [output_root / "gemm_perf.txt", output_root / "moe_perf.txt"]
+    parquet_paths = [path.with_suffix(".parquet") for path in staging_paths]
+    for path, shape in zip(staging_paths, ("new-gemm", "new-moe"), strict=True):
+        path.write_text(f"op,shape,latency\nmatmul,{shape},1.0\n", encoding="utf-8")
+    for path, shape in zip(parquet_paths, ("old-gemm", "old-moe"), strict=True):
+        pq.write_table(pa.table({"op": ["matmul"], "shape": [shape], "latency": [9.0]}), path)
+    parquet_before = {path: path.read_bytes() for path in parquet_paths}
+
+    _run_hard_exit(
+        _crash_after_first_parquet_render,
+        (str(output_root), str(checkpoint_dir), collections),
+        93,
+        "collector post-render crash",
+    )
+
+    assert {path: path.read_bytes() for path in parquet_paths} == parquet_before
+    assert _recover_finalization(output_root, checkpoint_dir) is None
+    assert list(output_root.glob(".*.tmp")) == []
+    assert all(path.exists() for path in staging_paths)
+    assert _attempted(gemm_checkpoint) == {"gemm-case"}
+    assert _attempted(moe_checkpoint) == {"moe-case"}
+
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        staging_paths,
+        _provenance_ctx(collections),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        sm_version=100,
+    )
+
+    assert all(pq.read_metadata(path).num_rows == 2 for path in parquet_paths)
+    assert not any(path.exists() for path in staging_paths)
+    assert _attempted(gemm_checkpoint) == set()
+    assert _attempted(moe_checkpoint) == set()
+
+
+def test_recovery_removes_unjournaled_regular_reserved_parquet(tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    reserved = output_root / ".gemm_perf.parquet.tmp"
+    reserved.write_bytes(b"partial parquet from an interrupted render")
+    unrelated = output_root / ".gemm_perf.parquet.unrelated.tmp"
+    unrelated.write_bytes(b"not a canonical collector reservation")
+
+    assert (
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(tmp_path / "checkpoint"),
+        )
+        is None
+    )
+
+    assert not reserved.exists()
+    assert unrelated.read_bytes() == b"not a canonical collector reservation"
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "directory", "hardlink"])
+def test_recovery_preserves_unowned_reserved_parquet_objects(tmp_path, replacement):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    reserved = output_root / ".gemm_perf.parquet.tmp"
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"must survive")
+    if replacement == "symlink":
+        try:
+            reserved.symlink_to(outside)
+        except OSError as error:
+            pytest.skip(f"symlinks unavailable: {error}")
+    elif replacement == "directory":
+        reserved.mkdir()
+    else:
+        os.link(outside, reserved)
+
+    with pytest.raises(RuntimeError, match=r"reserved|temporary|artifact"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(tmp_path / "checkpoint"),
+        )
+
+    assert reserved.exists() or reserved.is_symlink()
+    assert outside.read_bytes() == b"must survive"
+
+
+def test_hard_exit_after_perf_journal_prepare_recovers_without_publication(tmp_path):
+    output_root, checkpoint_dir, checkpoint_path, staging_path, parquet_path = _single_table_finalization(tmp_path)
     parquet_before = parquet_path.read_bytes()
 
-    process = mp.get_context("spawn").Process(
-        target=_crash_before_perf_journal_publish,
-        args=(str(output_root), str(checkpoint_dir)),
+    _run_hard_exit(
+        _crash_after_perf_journal_prepare,
+        (str(output_root), str(checkpoint_dir)),
+        95,
+        "collector post-prepare crash",
     )
-    process.start()
-    process.join(timeout=20)
-    if process.is_alive():
-        process.terminate()
-        process.join()
-        pytest.fail("collector pre-journal crash subprocess did not exit")
 
-    assert process.exitcode == 91
+    assert (output_root / collect_mod._PERF_TRANSACTION_FILENAME).is_file()
     assert parquet_path.read_bytes() == parquet_before
+    assert _recover_finalization(output_root, checkpoint_dir) is None
+    assert parquet_path.read_bytes() == parquet_before
+    assert staging_path.exists()
+    assert _attempted(checkpoint_path) == {"case-a"}
     assert not (output_root / collect_mod._PERF_TRANSACTION_FILENAME).exists()
-    assert list(output_root.glob(".*.rollback")) == []
+
+
+def test_transactional_retry_reclaims_unjournaled_deterministic_reservation(tmp_path):
+    output_root, checkpoint_dir, checkpoint_path, staging_path, parquet_path = _single_table_finalization(tmp_path)
+    reserved = output_root / ".gemm_perf.parquet.tmp"
+    reserved.write_bytes(b"partial parquet from interrupted transaction")
+
+    _finalize_single_table(output_root, checkpoint_dir, staging_path)
+
+    assert {row["shape"] for row in pq.read_table(parquet_path).to_pylist()} == {"old", "new"}
+    assert not reserved.exists()
+    assert not staging_path.exists()
+    assert _attempted(checkpoint_path) == set()
+
+
+def test_standalone_finalize_preserves_reservation_owned_by_perf_journal(tmp_path):
+    output_root, checkpoint_dir, _checkpoint_path, staging_path, _parquet_path = _single_table_finalization(tmp_path)
+    _run_hard_exit(
+        _crash_after_perf_journal_prepare,
+        (str(output_root), str(checkpoint_dir)),
+        95,
+        "collector post-prepare crash",
+    )
+    journal_path = output_root / collect_mod._PERF_TRANSACTION_FILENAME
+    transaction = json.loads(journal_path.read_text(encoding="utf-8"))
+    reserved = Path(transaction["publications"][0]["prepared"]["path"])
+    reserved_before = reserved.read_bytes()
+
+    with pytest.raises(RuntimeError, match="transaction"):
+        collect_mod.finalize_perf_files([staging_path], delete_source=False)
+
+    assert reserved.read_bytes() == reserved_before
+    assert journal_path.exists()
+
+
+def test_valid_perf_journal_prevents_unjournaled_reserved_cleanup(tmp_path):
+    output_root, checkpoint_dir, checkpoint_path, staging_path, parquet_path = _single_table_finalization(tmp_path)
+    parquet_before = parquet_path.read_bytes()
+
+    _run_hard_exit(
+        _crash_after_perf_journal_prepare,
+        (str(output_root), str(checkpoint_dir)),
+        95,
+        "collector post-prepare crash",
+    )
+
+    journal_path = output_root / collect_mod._PERF_TRANSACTION_FILENAME
+    transaction = json.loads(journal_path.read_text(encoding="utf-8"))
+    prepared_path = Path(transaction["publications"][0]["prepared"]["path"])
+    prepared_path.unlink()
+    outside = tmp_path / "outside-prepared"
+    outside.write_bytes(b"must survive journal recovery")
+    os.link(outside, prepared_path)
+
+    with pytest.raises(RuntimeError, match=r"changed|recovery state"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert prepared_path.samefile(outside)
+    assert outside.read_bytes() == b"must survive journal recovery"
+    assert parquet_path.read_bytes() == parquet_before
+    assert staging_path.exists()
+    assert _attempted(checkpoint_path) == {"case-a"}
+    assert journal_path.exists()
+
+
+def test_recovery_waits_for_live_finalization_through_sidecar_commit(tmp_path):
+    output_root, checkpoint_dir, checkpoint_path, staging_path, parquet_path = _single_table_finalization(tmp_path)
+
+    context = mp.get_context("spawn")
+    live_entered = context.Event()
+    release_live = context.Event()
+    recovery_started = context.Event()
+    recovery_finished = context.Event()
+    live_process = context.Process(
+        target=_pause_live_finalization_before_sidecar,
+        args=(str(output_root), str(checkpoint_dir), live_entered, release_live),
+    )
+    recovery_process = context.Process(
+        target=_recover_and_signal,
+        args=(
+            str(output_root),
+            str(checkpoint_dir),
+            recovery_started,
+            recovery_finished,
+        ),
+    )
+    live_process.start()
+    try:
+        assert live_entered.wait(timeout=20)
+        assert (output_root / collect_mod._PERF_TRANSACTION_FILENAME).is_file()
+        recovery_process.start()
+        assert recovery_started.wait(timeout=20)
+        assert not recovery_finished.wait(timeout=1)
+    finally:
+        release_live.set()
+        live_process.join(timeout=20)
+        recovery_process.join(timeout=20)
+        for process in (live_process, recovery_process):
+            if process.is_alive():
+                process.terminate()
+                process.join()
+
+    assert live_process.exitcode == 0
+    assert recovery_process.exitcode == 0
+    assert {row["shape"] for row in pq.read_table(parquet_path).to_pylist()} == {"old", "new"}
+    assert not staging_path.exists()
+    assert _attempted(checkpoint_path) == set()
+    assert not (output_root / collect_mod._PERF_TRANSACTION_FILENAME).exists()
+    assert not (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).exists()
 
 
 def test_recovery_rejects_source_mode_change_after_perf_journal(tmp_path):
@@ -3430,23 +3922,11 @@ def test_checkpoint_close_failure_retries_sidecar_transaction_without_duplicate_
     assert staged.exists()
 
     monkeypatch.setattr(collect_mod, "_close_checkpoint_attempts", real_close)
-    retry_finalization: dict[Path, collect_mod.PerfFinalizationInfo] = {}
-    assert collect_mod.finalize_perf_files(
-        [staged],
-        delete_source=False,
-        finalization_info=retry_finalization,
-    ) == [parquet_path]
-    assert retry_finalization[parquet_path.resolve()].merged_existing is True
-
-    collect_mod._write_collector_provenance(
+    assert collect_mod._recover_collector_provenance_transaction(
         output_root,
-        [parquet_path],
-        _provenance_ctx(_collections()),
-        run_errors=[],
         backend=BACKEND,
         checkpoint_dir=str(checkpoint_dir),
-        finalization_info=retry_finalization,
-    )
+    ) == (output_root / "collection_meta.yaml")
 
     retry_doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
     retry_table = retry_doc["tables"]["gemm_perf"]

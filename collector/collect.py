@@ -91,14 +91,23 @@ from pathlib import Path
 
 from helper import (
     EXIT_CODE_RESTART,
+    PERF_TRANSACTION_FILENAME,
+    SIDECAR_STAGING_FILENAME,
+    SIDECAR_TRANSACTION_FILENAME,
     PerfFileAttestation,
     PerfFinalizationInfo,
     PerfPublication,
     WorkerRestartSignal,
     cleanup_perf_publication_artifacts,
+    cleanup_unjournaled_perf_preparations,
     create_test_case_id,
     finalize_perf_files,
     find_perf_csv_outputs,
+    perf_finalization_lifecycle,
+    perf_merge_locks,
+    perf_preparation_cleanup_path,
+    perf_preparation_path,
+    perf_transaction_artifact_paths,
     restore_perf_publications,
     save_error_report,
     setup_logging,
@@ -114,10 +123,10 @@ STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before logging a stall
 SYSTEMIC_GROUP_THRESHOLD = 5
 _SIDECAR_TRANSACTION_SCHEMA = "collector-sidecar-transaction-v4"
 _SIDECAR_TRANSACTION_FIELD = "sidecar_transaction"
-_SIDECAR_TRANSACTION_FILENAME = ".collection_meta.transaction.json"
-_SIDECAR_STAGING_FILENAME = ".collection_meta.pending.yaml"
+_SIDECAR_TRANSACTION_FILENAME = SIDECAR_TRANSACTION_FILENAME
+_SIDECAR_STAGING_FILENAME = SIDECAR_STAGING_FILENAME
 _PERF_TRANSACTION_SCHEMA = "collector-perf-publication-v2"
-_PERF_TRANSACTION_FILENAME = ".perf-finalization.transaction.json"
+_PERF_TRANSACTION_FILENAME = PERF_TRANSACTION_FILENAME
 _CHECKPOINT_IDENTITY_FIELDS = ("schema", "backend", "module", "run_func", "framework_version", "sm_version")
 _SIDECAR_TRANSACTION_FIELDS = {
     "schema",
@@ -219,6 +228,82 @@ def _fsync_directory(directory: Path) -> None:
         os.close(directory_fd)
 
 
+def _digest_open_fd(file_descriptor: int) -> tuple[str, os.stat_result]:
+    position = os.lseek(file_descriptor, 0, os.SEEK_CUR)
+    digest = hashlib.sha256()
+    try:
+        os.lseek(file_descriptor, 0, os.SEEK_SET)
+        for chunk in iter(lambda: os.read(file_descriptor, 1024 * 1024), b""):
+            digest.update(chunk)
+        opened = os.fstat(file_descriptor)
+    finally:
+        os.lseek(file_descriptor, position, os.SEEK_SET)
+    return "sha256:" + digest.hexdigest(), opened
+
+
+def _attest_atomic_publication(
+    file_descriptor: int,
+    path: Path,
+    *,
+    expected_identity: tuple[int, int],
+    expected_digest: str,
+    expected_size: int,
+    expected_mode: int,
+) -> None:
+    descriptor_digest, descriptor_state = _digest_open_fd(file_descriptor)
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"Atomic write publication changed before attestation: {path}")
+    with path.open("rb") as published_file:
+        published_digest, published_state = _digest_open_fd(published_file.fileno())
+    current = path.lstat()
+    if (
+        not stat.S_ISREG(descriptor_state.st_mode)
+        or not stat.S_ISREG(published_state.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or (descriptor_state.st_dev, descriptor_state.st_ino) != expected_identity
+        or (published_state.st_dev, published_state.st_ino) != expected_identity
+        or (current.st_dev, current.st_ino) != expected_identity
+        or descriptor_digest != expected_digest
+        or published_digest != expected_digest
+        or descriptor_state.st_size != expected_size
+        or published_state.st_size != expected_size
+        or current.st_size != expected_size
+        or stat.S_IMODE(descriptor_state.st_mode) != expected_mode
+        or stat.S_IMODE(published_state.st_mode) != expected_mode
+        or stat.S_IMODE(current.st_mode) != expected_mode
+    ):
+        raise RuntimeError(f"Atomic write publication changed before attestation: {path}")
+
+
+def _atomic_temporary_matches(
+    path: Path,
+    *,
+    expected_identity: tuple[int, int],
+    expected_digest: str,
+    expected_size: int,
+    expected_mode: int,
+) -> bool:
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        with path.open("rb") as temporary_file:
+            digest, opened = _digest_open_fd(temporary_file.fileno())
+        current = path.lstat()
+    except FileNotFoundError:
+        return False
+    return (
+        stat.S_ISREG(opened.st_mode)
+        and stat.S_ISREG(current.st_mode)
+        and (opened.st_dev, opened.st_ino) == expected_identity
+        and (current.st_dev, current.st_ino) == expected_identity
+        and digest == expected_digest
+        and opened.st_size == expected_size
+        and current.st_size == expected_size
+        and stat.S_IMODE(opened.st_mode) == expected_mode
+        and stat.S_IMODE(current.st_mode) == expected_mode
+    )
+
+
 def _atomic_write_bytes(
     path: Path,
     contents: bytes,
@@ -228,8 +313,12 @@ def _atomic_write_bytes(
 ) -> None:
     """Atomically publish bytes through a private descriptor-owned temporary."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    expected_digest = "sha256:" + hashlib.sha256(contents).hexdigest()
+    expected_size = len(contents)
+    expected_mode = stat.S_IMODE(mode)
     temp_path: Path | None = None
     temp_identity: tuple[int, int] | None = None
+    publication_ready = False
     try:
         with tempfile.NamedTemporaryFile(
             mode="w+b",
@@ -243,34 +332,75 @@ def _atomic_write_bytes(
             temp_identity = (opened.st_dev, opened.st_ino)
             temp_file.write(contents)
             temp_file.flush()
-            os.fchmod(temp_file.fileno(), stat.S_IMODE(mode))
+            os.fchmod(temp_file.fileno(), expected_mode)
             os.fsync(temp_file.fileno())
+            descriptor_digest, descriptor_state = _digest_open_fd(temp_file.fileno())
+            if (
+                not stat.S_ISREG(descriptor_state.st_mode)
+                or (descriptor_state.st_dev, descriptor_state.st_ino) != temp_identity
+                or descriptor_digest != expected_digest
+                or descriptor_state.st_size != expected_size
+                or stat.S_IMODE(descriptor_state.st_mode) != expected_mode
+            ):
+                raise RuntimeError(f"Atomic write temporary changed before publication: {temp_path}")
+            publication_ready = True
             if not replace_existing:
                 current = temp_path.lstat()
-                if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != temp_identity:
+                if (
+                    not stat.S_ISREG(current.st_mode)
+                    or (current.st_dev, current.st_ino) != temp_identity
+                    or current.st_size != expected_size
+                    or stat.S_IMODE(current.st_mode) != expected_mode
+                ):
                     raise RuntimeError(f"Atomic write temporary changed before publication: {temp_path}")
                 os.link(temp_path, path, follow_symlinks=False)
-                published_owner = os.fstat(temp_file.fileno())
-                published = path.lstat()
-                if stat.S_IFMT(published.st_mode) != stat.S_IFREG or (published.st_dev, published.st_ino) != (
-                    published_owner.st_dev,
-                    published_owner.st_ino,
-                ):
-                    # Portable unlink has no inode compare-and-swap; retain the
-                    # mismatched entry as evidence for recovery or inspection.
-                    raise RuntimeError(f"Atomic write publication changed before attestation: {path}")
+                _attest_atomic_publication(
+                    temp_file.fileno(),
+                    path,
+                    expected_identity=temp_identity,
+                    expected_digest=expected_digest,
+                    expected_size=expected_size,
+                    expected_mode=expected_mode,
+                )
                 current = temp_path.lstat()
-                if stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == temp_identity:
-                    temp_path.unlink()
+                if (
+                    not stat.S_ISREG(current.st_mode)
+                    or (current.st_dev, current.st_ino) != temp_identity
+                    or current.st_size != expected_size
+                    or stat.S_IMODE(current.st_mode) != expected_mode
+                ):
+                    raise RuntimeError(f"Atomic write temporary changed before cleanup: {temp_path}")
+                temp_path.unlink()
                 _fsync_directory(path.parent)
+                _attest_atomic_publication(
+                    temp_file.fileno(),
+                    path,
+                    expected_identity=temp_identity,
+                    expected_digest=expected_digest,
+                    expected_size=expected_size,
+                    expected_mode=expected_mode,
+                )
                 temp_path = None
                 return
-        current = temp_path.lstat()
-        if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != temp_identity:
-            raise RuntimeError(f"Atomic write temporary changed before publication: {temp_path}")
-        os.replace(temp_path, path)
-        _fsync_directory(path.parent)
-        temp_path = None
+            current = temp_path.lstat()
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or (current.st_dev, current.st_ino) != temp_identity
+                or current.st_size != expected_size
+                or stat.S_IMODE(current.st_mode) != expected_mode
+            ):
+                raise RuntimeError(f"Atomic write temporary changed before publication: {temp_path}")
+            os.replace(temp_path, path)
+            _fsync_directory(path.parent)
+            _attest_atomic_publication(
+                temp_file.fileno(),
+                path,
+                expected_identity=temp_identity,
+                expected_digest=expected_digest,
+                expected_size=expected_size,
+                expected_mode=expected_mode,
+            )
+            temp_path = None
     finally:
         if temp_path is not None and temp_identity is not None:
             try:
@@ -278,7 +408,19 @@ def _atomic_write_bytes(
             except FileNotFoundError:
                 pass
             else:
-                if stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == temp_identity:
+                owned_unpublished = (
+                    not publication_ready
+                    and stat.S_ISREG(current.st_mode)
+                    and (current.st_dev, current.st_ino) == temp_identity
+                    and current.st_nlink == 1
+                )
+                if owned_unpublished or _atomic_temporary_matches(
+                    temp_path,
+                    expected_identity=temp_identity,
+                    expected_digest=expected_digest,
+                    expected_size=expected_size,
+                    expected_mode=expected_mode,
+                ):
                     temp_path.unlink()
                     _fsync_directory(path.parent)
 
@@ -3731,8 +3873,47 @@ def _recover_collector_provenance_transaction(
     backend: str,
     checkpoint_dir: str,
 ) -> Path | None:
+    with perf_finalization_lifecycle(output_root):
+        return _recover_collector_provenance_transaction_locked(
+            output_root,
+            backend=backend,
+            checkpoint_dir=checkpoint_dir,
+        )
+
+
+def _cleanup_unjournaled_perf_preparations(output_root: Path) -> None:
+    from collector.registry_types import PerfFile
+
+    parquet_paths = [output_root / Path(str(perf_file)).with_suffix(".parquet") for perf_file in PerfFile]
+    candidates = [
+        parquet_path
+        for parquet_path in parquet_paths
+        if any(
+            path.exists() or path.is_symlink()
+            for path in (
+                perf_preparation_path(parquet_path),
+                perf_preparation_cleanup_path(parquet_path),
+            )
+        )
+    ]
+    if not candidates:
+        return
+    with perf_merge_locks(candidates):
+        cleanup_unjournaled_perf_preparations(
+            candidates,
+            transaction_paths=perf_transaction_artifact_paths(output_root),
+        )
+
+
+def _recover_collector_provenance_transaction_locked(
+    output_root: Path,
+    *,
+    backend: str,
+    checkpoint_dir: str,
+) -> Path | None:
     """Finish an interrupted sidecar commit without appending its event twice."""
     output_root = output_root.resolve()
+    _cleanup_unjournaled_perf_preparations(output_root)
     checkpoint_root = _checkpoint_backend_root(checkpoint_dir, backend)
     perf_transaction = _load_perf_publication_transaction(
         output_root,
@@ -4523,6 +4704,28 @@ def _finalize_collector_outputs_transaction(
     checkpoint_dir: str,
     sm_version: int | None,
 ) -> list[Path]:
+    with perf_finalization_lifecycle(output_root):
+        return _finalize_collector_outputs_transaction_locked(
+            output_root,
+            staging_paths,
+            provenance_ctx,
+            run_errors,
+            backend=backend,
+            checkpoint_dir=checkpoint_dir,
+            sm_version=sm_version,
+        )
+
+
+def _finalize_collector_outputs_transaction_locked(
+    output_root: Path,
+    staging_paths: list[Path],
+    provenance_ctx: dict,
+    run_errors: list[dict],
+    *,
+    backend: str,
+    checkpoint_dir: str,
+    sm_version: int | None,
+) -> list[Path]:
     """Commit parquets, provenance, staging cleanup, and checkpoints coherently."""
     if not staging_paths:
         return []
@@ -4580,6 +4783,7 @@ def _finalize_collector_outputs_transaction(
             for path, attestation in staging_attestations.items()
         },
         publication_transaction=publication_transaction,
+        _lifecycle_locked=True,
     )
     try:
         meta_path = _write_collector_provenance(

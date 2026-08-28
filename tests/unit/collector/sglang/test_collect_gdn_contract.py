@@ -127,8 +127,8 @@ class TestResolveFlashinferGdnDecode:
     def test_boundary_sm100_takes_mandatory_lane_branch_for_bf16(self, monkeypatch):
         # SM100 itself (the boundary) must already take the mandatory-lane
         # branch for a bf16-state case: the guard is `100 <= sm < 110`.
-        monkeypatch.delitem(sys.modules, "flashinfer.gdn_decode", raising=False)
-        monkeypatch.delitem(sys.modules, "flashinfer", raising=False)
+        monkeypatch.setitem(sys.modules, "flashinfer", None)
+        monkeypatch.setitem(sys.modules, "flashinfer.gdn_decode", None)
         resolve = self._resolve(100)
 
         kernel_fn, error_message = resolve("bfloat16")
@@ -138,12 +138,11 @@ class TestResolveFlashinferGdnDecode:
         assert "SM100" in error_message
 
     def test_classified_error_when_unavailable_on_sm100_bf16(self, monkeypatch):
-        # flashinfer is genuinely not installed in this dev/CI venv, so this
-        # reproduces the real gap without needing a sys.modules trick: the
-        # previous code returned a bare None here (CodeRabbit finding), so
+        # Force the package unavailable even in environments that install it.
+        # The previous code returned a bare None here (CodeRabbit finding), so
         # the caller happily skipped the row and the case reported success.
-        monkeypatch.delitem(sys.modules, "flashinfer.gdn_decode", raising=False)
-        monkeypatch.delitem(sys.modules, "flashinfer", raising=False)
+        monkeypatch.setitem(sys.modules, "flashinfer", None)
+        monkeypatch.setitem(sys.modules, "flashinfer.gdn_decode", None)
         resolve = self._resolve(103)
 
         kernel_fn, error_message = resolve("bfloat16")
@@ -431,8 +430,8 @@ def test_generation_dynamic_dispatch_allocates_serving_state_dtype(
 
 
 def test_generation_dynamic_missing_flashinfer_raises_without_fla_invocation_or_row(monkeypatch):
-    monkeypatch.delitem(sys.modules, "flashinfer.gdn_decode", raising=False)
-    monkeypatch.delitem(sys.modules, "flashinfer", raising=False)
+    monkeypatch.setitem(sys.modules, "flashinfer", None)
+    monkeypatch.setitem(sys.modules, "flashinfer.gdn_decode", None)
     resolve = _load_function(
         SOURCE_PATH,
         "_resolve_flashinfer_gdn_decode",

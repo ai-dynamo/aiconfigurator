@@ -40,6 +40,9 @@ import numpy as np
 
 # Exit codes
 EXIT_CODE_RESTART = 10  # Exit code to indicate restart is needed
+PERF_TRANSACTION_FILENAME = ".perf-finalization.transaction.json"
+SIDECAR_TRANSACTION_FILENAME = ".collection_meta.transaction.json"
+SIDECAR_STAGING_FILENAME = ".collection_meta.pending.yaml"
 
 
 class WorkerRestartSignal:
@@ -921,15 +924,12 @@ def convert_perf_csv_to_parquet(
         raise ValueError(f"Expected a collector perf CSV ending in _perf.txt, got {csv_path}")
     if not csv_path.exists() and not csv_path.is_symlink():
         raise FileNotFoundError(csv_path)
-    return _finalize_perf_file_batch(
+    return finalize_perf_files(
         [csv_path],
         delete_source=delete_source,
         compression=compression,
         merge_existing=merge_existing,
         finalization_info=finalization_info,
-        prepublish_validate=None,
-        expected_source_identities=None,
-        publication_transaction=None,
     )[0]
 
 
@@ -948,6 +948,45 @@ def _fsync_directory(directory: Path) -> None:
         os.fsync(directory_fd)
     finally:
         os.close(directory_fd)
+
+
+@contextmanager
+def perf_finalization_lifecycle(output_root: Path):
+    """Serialize preparation, publication, sidecar commit, and recovery."""
+    import fcntl
+
+    output_root = output_root.resolve()
+    open_flags = os.O_RDONLY
+    open_flags |= getattr(os, "O_CLOEXEC", 0)
+    open_flags |= getattr(os, "O_DIRECTORY", 0)
+    open_flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(output_root, open_flags)
+    try:
+        opened = os.fstat(directory_fd)
+        current = output_root.lstat()
+        identity = (opened.st_dev, opened.st_ino)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(current.st_mode)
+            or (current.st_dev, current.st_ino) != identity
+        ):
+            raise RuntimeError(f"Collector finalization output root changed: {output_root}")
+        fcntl.flock(directory_fd, fcntl.LOCK_EX)
+        current = output_root.lstat()
+        if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != identity:
+            raise RuntimeError(f"Collector finalization output root changed after flock: {output_root}")
+        yield
+    finally:
+        os.close(directory_fd)
+
+
+def perf_transaction_artifact_paths(output_root: Path) -> tuple[Path, Path, Path]:
+    """Return every marker that transfers preparation ownership to a journal."""
+    return (
+        output_root / PERF_TRANSACTION_FILENAME,
+        output_root / SIDECAR_TRANSACTION_FILENAME,
+        output_root / SIDECAR_STAGING_FILENAME,
+    )
 
 
 def _rename_noreplace(source: Path, target: Path) -> None:
@@ -1429,7 +1468,9 @@ def _is_owned_temporary(path: Path, device: int, inode: int) -> bool:
         current = path.lstat()
     except FileNotFoundError:
         return False
-    return stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == (device, inode)
+    return (
+        stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == (device, inode) and current.st_nlink == 1
+    )
 
 
 def _require_owned_temporary(item: _PreparedPerfFile) -> None:
@@ -1438,8 +1479,23 @@ def _require_owned_temporary(item: _PreparedPerfFile) -> None:
 
 
 def _remove_owned_temporary(item: _PreparedPerfFile) -> None:
-    if _is_owned_temporary(item.temporary, item.temporary_device, item.temporary_inode):
-        item.temporary.unlink()
+    try:
+        current = item.temporary.lstat()
+    except FileNotFoundError:
+        return
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or (current.st_dev, current.st_ino) != (item.temporary_device, item.temporary_inode)
+        or current.st_nlink != 1
+    ):
+        raise RuntimeError(f"Collector temporary file changed before cleanup: {item.temporary}")
+    item.temporary.unlink()
+    _fsync_directory(item.temporary.parent)
+
+
+def perf_preparation_path(parquet_path: Path) -> Path:
+    """Return the one lock-owned pre-journal render path for a parquet."""
+    return parquet_path.with_name(f".{parquet_path.name}.tmp")
 
 
 def _validate_perf_file_paths(csv_path: Path) -> tuple[Path, Path]:
@@ -1524,18 +1580,20 @@ def _prepare_perf_file(
             table, merged_existing, new_rows = _merge_perf_rows(table, old_table, parquet_path, pa=pa)
     table = _normalize_power_metrics(table, pa=pa, pc=pc_compute)
 
-    temporary: Path | None = None
+    temporary = perf_preparation_path(parquet_path)
     temporary_identity: tuple[int, int] | None = None
+    temporary_fd: int | None = None
     try:
-        with tempfile.NamedTemporaryFile(
-            dir=parquet_path.parent,
-            prefix=f".{parquet_path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temp_file:
-            temporary = Path(temp_file.name)
-            temp_stat = os.fstat(temp_file.fileno())
-            temporary_identity = (temp_stat.st_dev, temp_stat.st_ino)
+        open_flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
+        open_flags |= getattr(os, "O_CLOEXEC", 0)
+        open_flags |= getattr(os, "O_NOFOLLOW", 0)
+        temporary_fd = os.open(temporary, open_flags, 0o600)
+        temp_stat = os.fstat(temporary_fd)
+        temporary_identity = (temp_stat.st_dev, temp_stat.st_ino)
+        temp_file = os.fdopen(temporary_fd, "w+b")
+        temporary_fd = None
+        with temp_file:
+            _fsync_directory(temporary.parent)
             pq.write_table(table, temp_file, compression=compression)
             temp_file.flush()
             os.fchmod(temp_file.fileno(), source_mode)
@@ -1560,10 +1618,13 @@ def _prepare_perf_file(
         _require_owned_temporary(prepared)
         return prepared
     except Exception:
-        if temporary is not None and temporary_identity is not None:
+        if temporary_fd is not None:
+            os.close(temporary_fd)
+        if temporary_identity is not None:
             device, inode = temporary_identity
             if _is_owned_temporary(temporary, device, inode):
                 temporary.unlink()
+                _fsync_directory(temporary.parent)
         raise
 
 
@@ -1601,7 +1662,10 @@ def _finalize_perf_file_batch(
 
     unique_inputs: list[tuple[Path, Path, Path]] = []
     seen_inputs: set[tuple[int, int, tuple[int, int, str]]] = set()
-    opened_locks: dict[tuple[int, int], int] = {}
+    opened_locks: dict[
+        tuple[int, int],
+        tuple[int, list[tuple[Path, tuple[int, int, str]]]],
+    ] = {}
     prepared: list[_PreparedPerfFile] = []
     publications: list[PerfPublication] = []
     legacy_snapshots: dict[Path, BinaryIO | None] = {}
@@ -1613,15 +1677,39 @@ def _finalize_perf_file_batch(
                 raise RuntimeError(f"Cannot convert non-regular collector staging file: {item[0]}")
             lock_fd, lock_identity, lock_entry_key = _open_merge_lock(item[2])
             if lock_identity in opened_locks:
+                opened_locks[lock_identity][1].append((item[2], lock_entry_key))
                 _release_merge_lock(lock_fd)
             else:
-                opened_locks[lock_identity] = lock_fd
+                opened_locks[lock_identity] = (lock_fd, [(item[2], lock_entry_key)])
             input_identity = (source_stat.st_dev, source_stat.st_ino, lock_entry_key)
             if input_identity not in seen_inputs:
                 seen_inputs.add(input_identity)
                 unique_inputs.append(item)
-        for lock_identity in sorted(opened_locks):
-            _acquire_merge_lock(opened_locks[lock_identity])
+        lock_order = sorted(
+            opened_locks,
+            key=lambda identity: min(entry_key for _path, entry_key in opened_locks[identity][1]),
+        )
+        for lock_identity in lock_order:
+            lock_fd, lock_entries = opened_locks[lock_identity]
+            _acquire_merge_lock(lock_fd)
+            for lock_path, lock_entry_key in lock_entries:
+                _revalidate_merge_lock_path(
+                    lock_fd,
+                    lock_path,
+                    expected_identity=lock_identity,
+                    expected_entry_key=lock_entry_key,
+                )
+        preparation_targets = tuple(parquet_path for _csv_path, parquet_path, _lock in unique_inputs)
+        transaction_paths = tuple(
+            transaction_path
+            for output_root in sorted({path.parent.resolve() for path in preparation_targets})
+            for transaction_path in perf_transaction_artifact_paths(output_root)
+        )
+        if not cleanup_unjournaled_perf_preparations(
+            preparation_targets,
+            transaction_paths=transaction_paths,
+        ):
+            raise RuntimeError("Cannot finalize collector perf files while a transaction artifact exists")
         for csv_path, parquet_path, _merge_lock in unique_inputs:
             _validate_perf_file_paths(csv_path)
             prepared.append(
@@ -1697,7 +1785,7 @@ def _finalize_perf_file_batch(
         for item in prepared:
             if publication_transaction is None or not publication_transaction.has_durable_journal():
                 _remove_owned_temporary(item)
-        for lock_fd in opened_locks.values():
+        for lock_fd, _lock_entries in opened_locks.values():
             _release_merge_lock(lock_fd)
 
 
@@ -1732,8 +1820,12 @@ def _normalize_power_metrics(table, *, pa, pc):
 
 def _open_merge_lock(lock_path: Path) -> tuple[int, tuple[int, int], tuple[int, int, str]]:
     """Open and attest a merge-lock object without acquiring its flock."""
-    fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY)
+    open_flags = os.O_CREAT | os.O_WRONLY
+    open_flags |= getattr(os, "O_CLOEXEC", 0)
+    open_flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(lock_path, open_flags, 0o600)
     try:
+        _fsync_directory(lock_path.parent)
         opened = os.fstat(fd)
         current = lock_path.lstat()
         identity = (opened.st_dev, opened.st_ino)
@@ -1797,8 +1889,136 @@ def _acquire_merge_lock(lock_fd: int) -> None:
     fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
 
+def _revalidate_merge_lock_path(
+    lock_fd: int,
+    lock_path: Path,
+    *,
+    expected_identity: tuple[int, int],
+    expected_entry_key: tuple[int, int, str],
+) -> None:
+    """Re-attest the pathname after flock; a waiter may have seen it replaced."""
+    opened = os.fstat(lock_fd)
+    try:
+        current = lock_path.lstat()
+    except FileNotFoundError as error:
+        raise RuntimeError(f"Collector parquet merge lock changed after flock: {lock_path}") from error
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or (opened.st_dev, opened.st_ino) != expected_identity
+        or (current.st_dev, current.st_ino) != expected_identity
+        or _merge_lock_entry_key(lock_path, expected_identity) != expected_entry_key
+    ):
+        raise RuntimeError(f"Collector parquet merge lock changed after flock: {lock_path}")
+
+
 def _release_merge_lock(lock_fd: int) -> None:
     os.close(lock_fd)  # closing releases the flock
+
+
+@contextmanager
+def perf_merge_locks(parquet_paths: Iterable[Path]):
+    """Hold and post-attest the canonical merge locks for exact targets."""
+    opened_locks: dict[
+        tuple[int, int],
+        tuple[int, list[tuple[Path, tuple[int, int, str]]]],
+    ] = {}
+    try:
+        for parquet_path in sorted(set(parquet_paths)):
+            lock_path = parquet_path.with_name(f"{parquet_path.name}.mergelock")
+            lock_fd, lock_identity, lock_entry_key = _open_merge_lock(lock_path)
+            if lock_identity in opened_locks:
+                opened_locks[lock_identity][1].append((lock_path, lock_entry_key))
+                _release_merge_lock(lock_fd)
+            else:
+                opened_locks[lock_identity] = (lock_fd, [(lock_path, lock_entry_key)])
+        lock_order = sorted(
+            opened_locks,
+            key=lambda identity: min(entry_key for _path, entry_key in opened_locks[identity][1]),
+        )
+        for lock_identity in lock_order:
+            lock_fd, lock_entries = opened_locks[lock_identity]
+            _acquire_merge_lock(lock_fd)
+            for lock_path, lock_entry_key in lock_entries:
+                _revalidate_merge_lock_path(
+                    lock_fd,
+                    lock_path,
+                    expected_identity=lock_identity,
+                    expected_entry_key=lock_entry_key,
+                )
+        yield
+    finally:
+        for lock_fd, _lock_entries in opened_locks.values():
+            _release_merge_lock(lock_fd)
+
+
+def perf_preparation_cleanup_path(parquet_path: Path) -> Path:
+    return parquet_path.with_name(f".{parquet_path.name}.tmp.cleanup")
+
+
+def cleanup_unjournaled_perf_preparations(
+    parquet_paths: Iterable[Path],
+    *,
+    transaction_paths: Iterable[Path],
+) -> bool:
+    """Remove exact reservations only while every ownership marker is absent."""
+    parquet_paths = tuple(parquet_paths)
+    if any(not _path_absent(path) for path in transaction_paths):
+        return False
+    for parquet_path in parquet_paths:
+        reserved = perf_preparation_path(parquet_path)
+        cleanup_claim = perf_preparation_cleanup_path(parquet_path)
+        if not _path_absent(reserved) and not _path_absent(cleanup_claim):
+            raise RuntimeError(f"Conflicting collector reserved parquet artifacts: {reserved}")
+
+        claimed_attestation: PerfFileAttestation | None = None
+        if not _path_absent(reserved):
+            reserved_state = reserved.lstat()
+            if not stat.S_ISREG(reserved_state.st_mode) or reserved_state.st_nlink != 1:
+                raise RuntimeError(f"Unowned collector reserved parquet artifact: {reserved}")
+            claimed_attestation = _attest_regular_file(
+                reserved,
+                expected_identity=(reserved_state.st_dev, reserved_state.st_ino),
+                expected_mode=stat.S_IMODE(reserved_state.st_mode),
+            )
+            _rename_noreplace(reserved, cleanup_claim)
+        elif not _path_absent(cleanup_claim):
+            claim_state = cleanup_claim.lstat()
+            if not stat.S_ISREG(claim_state.st_mode) or claim_state.st_nlink != 1:
+                raise RuntimeError(f"Unowned collector reserved parquet artifact: {cleanup_claim}")
+            claimed_attestation = _attest_regular_file(
+                cleanup_claim,
+                expected_identity=(claim_state.st_dev, claim_state.st_ino),
+                expected_mode=stat.S_IMODE(claim_state.st_mode),
+            )
+
+        if claimed_attestation is not None:
+            try:
+                _attest_expected_perf_file(cleanup_claim, claimed_attestation)
+                current = cleanup_claim.lstat()
+                if current.st_nlink != 1:
+                    raise RuntimeError(f"Collector reserved parquet artifact changed: {cleanup_claim}")
+                _remove_attested_file(
+                    PerfFileAttestation(
+                        path=cleanup_claim,
+                        digest=claimed_attestation.digest,
+                        device=claimed_attestation.device,
+                        inode=claimed_attestation.inode,
+                        mode=claimed_attestation.mode,
+                    )
+                )
+            except Exception as error:
+                if _path_absent(cleanup_claim):
+                    raise
+                try:
+                    _restore_unknown_private_path(
+                        cleanup_claim,
+                        reserved,
+                        context="reserved preparation",
+                    )
+                except RuntimeError as restore_error:
+                    raise restore_error from error
+    return True
 
 
 def _merge_perf_rows(new_table, old_table, parquet_path: Path, *, pa):
@@ -1915,6 +2135,7 @@ def finalize_perf_files(
     prepublish_validate: Callable[[], None] | None = None,
     expected_source_identities: dict[Path, tuple[str, int, int]] | None = None,
     publication_transaction: PerfPublicationTransaction | None = None,
+    _lifecycle_locked: bool = False,
 ) -> list[Path]:
     """Finalize explicit collector CSV staging files as parquet.
 
@@ -1936,16 +2157,25 @@ def finalize_perf_files(
     ]
     if not selected:
         return []
-    return _finalize_perf_file_batch(
-        selected,
-        delete_source=delete_source,
-        compression=compression,
-        merge_existing=merge_existing,
-        finalization_info=finalization_info,
-        prepublish_validate=prepublish_validate,
-        expected_source_identities=expected_source_identities,
-        publication_transaction=publication_transaction,
-    )
+
+    def finalize_selected() -> list[Path]:
+        return _finalize_perf_file_batch(
+            selected,
+            delete_source=delete_source,
+            compression=compression,
+            merge_existing=merge_existing,
+            finalization_info=finalization_info,
+            prepublish_validate=prepublish_validate,
+            expected_source_identities=expected_source_identities,
+            publication_transaction=publication_transaction,
+        )
+
+    if _lifecycle_locked:
+        return finalize_selected()
+    with ExitStack() as lifecycle_stack:
+        for output_root in sorted({path.parent.resolve() for path in selected}):
+            lifecycle_stack.enter_context(perf_finalization_lifecycle(output_root))
+        return finalize_selected()
 
 
 def finalize_perf_outputs(

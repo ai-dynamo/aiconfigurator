@@ -265,7 +265,7 @@ def test_finalize_perf_files_never_reopens_or_publishes_replaced_temporary(tmp_p
     real_write_table = pq.write_table
 
     def replace_temporary_before_write(table, destination, *args, **kwargs):
-        temporary = Path(destination if isinstance(destination, (str, Path)) else destination.name)
+        temporary = perf.with_suffix(".parquet").with_name(".gemm_perf.parquet.tmp")
         temporary.unlink()
         try:
             temporary.symlink_to(outside_victim)
@@ -282,6 +282,60 @@ def test_finalize_perf_files_never_reopens_or_publishes_replaced_temporary(tmp_p
     assert outside_victim.read_bytes() == victim_before
     assert not perf.with_suffix(".parquet").exists()
     assert finalization_info == {}
+
+
+def test_finalize_closes_and_reclaims_reservation_when_directory_fsync_fails(tmp_path, monkeypatch):
+    perf = tmp_path / "gemm_perf.txt"
+    parquet = perf.with_suffix(".parquet")
+    reserved = parquet.with_name(f".{parquet.name}.tmp")
+    perf.write_text("shape,latency\ns1,1.0\n", encoding="utf-8")
+    real_fsync_directory = helper_mod._fsync_directory
+
+    def fail_after_reservation(directory):
+        if reserved.exists():
+            raise OSError("simulated reservation directory fsync failure")
+        return real_fsync_directory(directory)
+
+    monkeypatch.setattr(helper_mod, "_fsync_directory", fail_after_reservation)
+
+    with pytest.raises(OSError, match="reservation directory fsync failure"):
+        finalize_perf_files([perf], delete_source=False)
+
+    assert not reserved.exists()
+    assert not parquet.exists()
+
+
+def test_finalize_direct_retry_reclaims_stale_deterministic_reservation(tmp_path):
+    perf = tmp_path / "gemm_perf.txt"
+    parquet = perf.with_suffix(".parquet")
+    reserved = parquet.with_name(f".{parquet.name}.tmp")
+    perf.write_text("shape,latency\ns1,1.0\n", encoding="utf-8")
+    reserved.write_bytes(b"partial parquet from interrupted direct finalization")
+
+    assert finalize_perf_files([perf], delete_source=False) == [parquet]
+
+    assert pq.read_table(parquet).to_pylist() == [{"shape": "s1", "latency": 1.0}]
+    assert not reserved.exists()
+
+
+def test_reservation_cleanup_restores_object_changed_during_claim(tmp_path, monkeypatch):
+    parquet = tmp_path / "gemm_perf.parquet"
+    reserved = helper_mod.perf_preparation_path(parquet)
+    cleanup_claim = helper_mod.perf_preparation_cleanup_path(parquet)
+    reserved.write_bytes(b"expected partial parquet")
+    real_rename_noreplace = helper_mod._rename_noreplace
+
+    def rename_then_mutate(source, target):
+        real_rename_noreplace(source, target)
+        Path(target).write_bytes(b"unknown raced object")
+
+    monkeypatch.setattr(helper_mod, "_rename_noreplace", rename_then_mutate)
+
+    with pytest.raises(RuntimeError, match="changed"):
+        helper_mod.cleanup_unjournaled_perf_preparations([parquet], transaction_paths=())
+
+    assert reserved.read_bytes() == b"unknown raced object"
+    assert not cleanup_claim.exists()
 
 
 def test_perf_attestation_rejects_execute_bit_change(tmp_path):
@@ -730,6 +784,38 @@ def test_finalize_merge_lock_does_not_block_sequential_runs(tmp_path):
     perf.write_text("shape,latency\ns2,2.0\n")
     finalize_perf_files([perf])  # would deadlock if the first run kept the flock
     assert sorted(r["shape"] for r in pq.read_table(parquet).to_pylist()) == ["s1", "s2"]
+
+
+def test_finalize_rejects_merge_lock_path_replacement_after_flock(tmp_path, monkeypatch):
+    import fcntl
+
+    perf = tmp_path / "gemm_perf.txt"
+    parquet = perf.with_suffix(".parquet")
+    merge_lock = parquet.with_name(f"{parquet.name}.mergelock")
+    displaced_lock = tmp_path / "displaced.mergelock"
+    perf.write_text("shape,latency\ns1,1.0\n", encoding="utf-8")
+    real_flock = fcntl.flock
+    replaced = False
+
+    def flock_then_replace(lock_fd, operation):
+        nonlocal replaced
+        result = real_flock(lock_fd, operation)
+        if operation & fcntl.LOCK_EX and merge_lock.exists() and not replaced:
+            replaced = True
+            merge_lock.replace(displaced_lock)
+            merge_lock.write_bytes(b"independent lock inode")
+        return result
+
+    monkeypatch.setattr(fcntl, "flock", flock_then_replace)
+
+    with pytest.raises(RuntimeError, match=r"merge lock.*changed|Invalid collector parquet merge lock"):
+        finalize_perf_files([perf], delete_source=False)
+
+    assert replaced
+    assert perf.exists()
+    assert not parquet.exists()
+    assert merge_lock.read_bytes() == b"independent lock inode"
+    assert displaced_lock.exists()
 
 
 def test_finalize_merge_tolerates_reverse_metric_type_drift(tmp_path):
