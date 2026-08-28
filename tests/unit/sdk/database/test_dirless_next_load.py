@@ -148,3 +148,54 @@ def test_probe_handle_serves_a_dirless_next_database(systems_root):
     assert db is not None and getattr(db, "dirless_next_load", False)
     handle = EngineHandle.for_database(db, systems_path=systems_root)
     assert handle is not None
+
+
+def test_hybrid_probe_handle_serves_a_dirless_next_database(systems_root):
+    """HYBRID's generic missing-data allowance must not hide the more
+    specific advertised-next identity required by the Rust load gate."""
+    from aiconfigurator_core.sdk.engine import EngineHandle
+
+    db = pdb.get_database_view(
+        _BETA,
+        "vllm",
+        "next",
+        systems_paths=systems_root,
+        allow_missing_data=True,
+        database_mode="HYBRID",
+    )
+    assert db is not None and getattr(db, "dirless_next_load", False)
+    handle = EngineHandle.for_database(db, systems_path=systems_root)
+    assert handle is not None
+
+
+def test_advertised_next_marks_a_cached_missing_data_candidate(systems_root):
+    """A long-lived process may cache an unlisted missing-data identity before
+    a development drop promotes that literal to the advertised next slot."""
+    from aiconfigurator_core.sdk.engine import EngineHandle
+
+    cached = pdb.get_database(
+        _BETA,
+        "vllm",
+        "1.2.0",
+        systems_paths=systems_root,
+        allow_missing_data=True,
+        database_mode="HYBRID",
+        allow_unlisted_version=True,
+    )
+    assert cached is not None and not getattr(cached, "dirless_next_load", False)
+
+    _write_gemm(Path(systems_root), _ALPHA, "1.2.0")
+    pdb._load_query_slots_doc.cache_clear()
+    pdb._derive_fleet_next.cache_clear()
+
+    db = pdb.get_database_view(
+        _BETA,
+        "vllm",
+        "next",
+        systems_paths=systems_root,
+        allow_missing_data=True,
+        database_mode="HYBRID",
+    )
+    assert db is not None and db.version == "1.2.0"
+    assert getattr(db, "dirless_next_load", False)
+    assert EngineHandle.for_database(db, systems_path=systems_root) is not None

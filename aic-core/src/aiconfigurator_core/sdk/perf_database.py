@@ -1180,6 +1180,7 @@ def get_database(
     effective_strict = _strict_provenance_enabled(strict_provenance)
     missing_data_candidate = None
     dirless_next_candidate = None
+    is_advertised_next = None
     for systems_root in systems_paths:
         system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
         if not os.path.isfile(system_yaml_path):
@@ -1234,9 +1235,6 @@ def get_database(
                     _check_strict_provenance_for_request(paths, backend, data_dir_abs, strict=True)
                     _STRICT_VALIDATED_REQUESTS.add(request_key)
                 return database
-        elif allow_missing_data:
-            if missing_data_candidate is None:
-                missing_data_candidate = (systems_root, cache_key)
         else:
             # Directory-less NEXT candidate (design §14): the fleet-derived
             # next may be data-backed on other default-governed systems only;
@@ -1248,10 +1246,16 @@ def get_database(
             # exactly the advertised next slot — raw versions and the
             # authored current/previous keep the loud missing-directory gate,
             # and provenance labeling is untouched.
-            if dirless_next_candidate is None:
+            if is_advertised_next is None:
                 slots = get_version_slots(system, backend, systems_paths=list(systems_paths))
-                if slots is not None and version == slots.get("next"):
+                is_advertised_next = slots is not None and version == slots.get("next")
+            if is_advertised_next:
+                if dirless_next_candidate is None:
                     dirless_next_candidate = (systems_root, cache_key)
+            elif allow_missing_data:
+                if missing_data_candidate is None:
+                    missing_data_candidate = (systems_root, cache_key)
+                continue
             if is_incomplete:
                 logger.warning(
                     f"data for {system=}, {backend=}, {version=} is marked incomplete in either layout, "
@@ -1265,9 +1269,12 @@ def get_database(
     if dirless_next_candidate is not None:
         systems_root, cache_key = dirless_next_candidate
         try:
-            return databases_cache[cache_key][backend][version]
+            database = databases_cache[cache_key][backend][version]
         except KeyError:
             pass
+        else:
+            database.dirless_next_load = True
+            return database
         logger.info(
             f"Loading directory-less next database for {system=}, {backend=}, {version=} "
             "(no exact directory in any configured root; all ops ride backward fill)"
