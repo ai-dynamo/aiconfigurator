@@ -323,6 +323,26 @@ def test_gdn_tp_declarations_fail_loud_and_dedupe_on_loader_key(monkeypatch):
     } | {(phase, 4096, 4, 8, "example/distinct-d-model") for phase in ("context", "generation")}
 
 
+def test_gdn_case_generation_rejects_unkeyed_non_fp32_state_dtype(monkeypatch):
+    from collector import case_generator
+
+    profile = {
+        "model_path": "example/bfloat16-state",
+        "d_model": 2048,
+        "d_conv": 4,
+        "num_k_heads": 16,
+        "head_k_dim": 128,
+        "num_v_heads": 32,
+        "head_v_dim": 128,
+        "tensor_parallel_sizes": [1],
+        "mamba_ssm_dtype": "bfloat16",
+    }
+    monkeypatch.setattr(case_generator, "_model_case_values", lambda op_name: [profile])
+
+    with pytest.raises(ValueError, match="only float32 collection is supported"):
+        case_generator.get_common_gdn_test_cases()
+
+
 def test_mimo_attention_profile_matches_aic_full_attention_window(monkeypatch):
     from collector.case_generator import get_attention_context_shape_sweeps
 

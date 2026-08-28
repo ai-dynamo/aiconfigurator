@@ -15,14 +15,16 @@ Context (prefill) phase:
 Generation (decode) phase:
     - causal_conv1d_update: Single-step conv state update
     - fused_recurrent_gated_delta_rule_packed_decode: Packed GDN recurrence
-      (fla/triton lane unless serving selects FlashInfer)
+      (the FP32 fla/triton lane used by official repository collection)
     - flashinfer_gated_delta_rule_decode: FlashInfer bf16-state decode via
       flashinfer.gdn_decode.gated_delta_rule_decode_pretranspose (SM-major-10
       only — is_sm100_supported() is capability major EXACTLY 10, so sm
       100/103 yes, sm 120 no; sglang serving auto-selects this decode kernel
       only when the model's mamba_ssm_dtype is bfloat16 — server_args.py
-      _handle_linear_attn_backend, :4884-4915 @0.5.14. Every current bundled
-      Qwen3.5/3.6 config pins float32, so no packaged case selects this lane.)
+      _handle_linear_attn_backend, :4884-4915 @0.5.14). This describes
+      hypothetical consumer-serving behavior: official repository collection
+      remains FP32-only until a state-dtype-keyed persisted identity/schema is
+      separately approved, so it cannot currently select this lane.
 
 The in_proj and out_proj GEMMs are standard linear layers modeled by the
 existing GEMM infrastructure. This collector focuses on the unique GDN ops.
@@ -577,14 +579,15 @@ def run_gdn_generation_benchmark(
             else:
                 # Mirrors FlashInferGDNKernel.decode's
                 # use_state_pool=True branch argument-for-argument
-                # (gdn_flashinfer.py:180-193 @0.5.14 — SM100+ always takes
-                # this branch, use_state_pool = sm_major >= 10), which is fed
+                # (gdn_flashinfer.py:180-193 @0.5.14 — serving selects this
+                # backend only on capability major 10, where use_state_pool =
+                # sm_major >= 10 takes this branch), which is fed
                 # q/k/v split+reshaped from mixed_qkv exactly as
                 # GDNAttnBackend.forward_decode does (gdn_backend.py:348-357
                 # @0.5.14) before calling the kernel_dispatcher. The state
                 # pool is bf16 here, independent of the FLA lane's case dtype,
                 # because server_args.py:4884-4915 hard-requires bf16 state on
-                # this backend on SM100+.
+                # this capability-major-10 backend.
                 flashinfer_query, flashinfer_key, flashinfer_value = torch.split(
                     mixed_qkv, [qk_dim, qk_dim, value_dim], dim=-1
                 )
@@ -688,6 +691,12 @@ def run_gdn_torch(
     Routes to appropriate benchmark function based on phase.
     Imports the target SGLang kernels at runtime.
     """
+    if mamba_ssm_dtype != "float32":
+        raise ValueError(
+            "SGLang GDN collection requires mamba_ssm_dtype='float32'; only float32 collection is supported "
+            "because the persisted GDN identity has no state-dtype dimension"
+        )
+
     import contextlib
 
     with (

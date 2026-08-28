@@ -310,6 +310,7 @@ class Qwen35Model(BaseModel):
                         gdn_nv_per_tp,
                         hv,
                         d_conv,
+                        mamba_ssm_dtype=self._mamba_ssm_dtype,
                     ),
                     ops.GDNKernel(
                         "context_gdn_scan",
@@ -322,6 +323,7 @@ class Qwen35Model(BaseModel):
                         gdn_nv_per_tp,
                         hv,
                         d_conv,
+                        mamba_ssm_dtype=self._mamba_ssm_dtype,
                     ),
                     ops.GEMM(
                         "context_gdn_out_proj_gemm",
@@ -682,6 +684,7 @@ class Qwen35Model(BaseModel):
                         gdn_nv_per_tp,
                         hv,
                         d_conv,
+                        mamba_ssm_dtype=self._mamba_ssm_dtype,
                     ),
                     ops.GDNKernel(
                         "generation_gdn_recurrence",

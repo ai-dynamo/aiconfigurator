@@ -244,6 +244,39 @@ def test_qwen35_memory_charges_kv_on_full_layers_and_constant_gdn_state():
     assert model.get_kvcache_max_tokens(expected_state + 100 * per_token_bytes) == 100
 
 
+def test_qwen35_bf16_config_threads_dtype_to_every_gdn_op(monkeypatch):
+    model_name = "Qwen/Qwen3.5-35B-A3B"
+    model_info = copy.deepcopy(core_models._get_model_info(model_name))
+    raw_config = model_info["raw_config"]
+    text_config = raw_config.get("text_config")
+    if isinstance(text_config, dict):
+        text_config["mamba_ssm_dtype"] = "bfloat16"
+    else:
+        raw_config["mamba_ssm_dtype"] = "bfloat16"
+    monkeypatch.setattr(core_models, "_get_model_info", lambda _model_path: model_info)
+
+    model = models.get_model(model_name, _model_config(tp_size=4), "sglang")
+    gdn_ops = {
+        op._name: op
+        for op in (*model.context_ops, *model.generation_ops)
+        if op._name
+        in {
+            "context_gdn_conv1d",
+            "context_gdn_scan",
+            "generation_gdn_conv1d",
+            "generation_gdn_recurrence",
+        }
+    }
+
+    assert set(gdn_ops) == {
+        "context_gdn_conv1d",
+        "context_gdn_scan",
+        "generation_gdn_conv1d",
+        "generation_gdn_recurrence",
+    }
+    assert {op._mamba_ssm_dtype for op in gdn_ops.values()} == {"bfloat16"}
+
+
 @pytest.mark.parametrize(
     ("configured_dtype", "resolved_dtype", "ssm_element_bytes"),
     [("bfloat16", "bfloat16", 2), ("float8_e4m3", "float32", 4)],

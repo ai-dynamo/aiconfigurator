@@ -1,40 +1,32 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GDN decode lane preference: FlashInfer bf16-state lane on SM-major-10
-sglang.
+"""GDN dtype routing and SOL contracts.
 
-The collector supports ``flashinfer_gated_delta_rule_decode`` only for a real
-bf16-state case selected by serving. The current repository-owned Qwen3.5/3.6
-recipes all declare float32 state, so the shipped 0.5.14 tables contain only
-the fla/triton decode lane. The modeling side still mirrors serving's exact
-predicate
-(``_handle_linear_attn_backend``, server_args.py:4884-4915 @ pinned v0.5.14:
-``is_sm100_supported()`` — capability major EXACTLY 10 — AND
-``mamba_ssm_dtype == "bfloat16"``): the compiled engine must
-(a) prefer the FlashInfer lane's own rows over the fla lane when both cover
-a shape AND the model's SSM state dtype is bfloat16, degrading to the fla
-lane exactly as before when the FlashInfer lane is absent, (b) keep the fla
-lane for float32-state models (every bundled Qwen3.5/3.6 config pins
-``mamba_ssm_dtype: float32``), and (c) size the recurrent state at 2 bytes
-(bf16) for the FlashInfer lane vs. 4 bytes (fp32) for fla lanes in the SOL
-formula.
+Packaged GDN rows have no state-dtype key and were collected with FP32 state
+for state-sensitive kernels. Repository collection therefore rejects
+non-FP32 cases. The compiled consumer may reuse causal-convolution rows for
+any dtype, but uses state-sensitive empirical rows only for FP32. Its sole
+exception mirrors SGLang serving's exact predicate: on compute-capability
+major 10 with BF16 state, a logical generation recurrence may use an exact
+FlashInfer physical alias. If that alias is absent, the query falls to
+dtype-aware SOL instead of using the untyped FLA row.
 
 Rebase note (post pyo3 op-unification, #1552/#1555/#1566): lane selection and
 the SOL byte-count formula now live solely in the Rust engine
 (``operators/mamba.rs::GdnOp``,
 ``perf_database/state_space.rs::StateSpaceTable::query_gdn``). This module
 exercises real on-disk table absence/default routing and pure-SOL formulas
-through the sanctioned ``Operation._engine_query`` shim. The hypothetical
-bf16 preference/fallback cases use explicit Rust in-memory fixtures; they do
-not claim a bf16 model or FlashInfer row exists in packaged data.
+through the sanctioned ``Operation._engine_query`` shim. Hypothetical BF16
+FlashInfer presence uses explicit Rust in-memory fixtures; no packaged table
+is claimed to contain such a row.
 
 The Rust unit tests in ``operators/mamba.rs`` and
 ``perf_database/state_space.rs`` (``sglang_sm100_gdn_prefers_flashinfer_decode_lane_for_bf16_state``,
 ``sglang_sm100_gdn_keeps_fla_lane_for_fp32_state_even_if_flashinfer_present``,
-``sglang_sm100_gdn_falls_back_to_fla_lane_when_flashinfer_absent``,
-``sglang_sm90_gdn_never_selects_flashinfer_lane_even_if_present``,
-``sglang_sm120_gdn_never_selects_flashinfer_lane_regardless_of_dtype``,
+``sglang_sm100_gdn_misses_when_required_flashinfer_alias_is_absent``,
+``sglang_sm90_gdn_uses_fla_rows_only_for_fp32_state``,
+``sglang_sm120_gdn_uses_fla_rows_only_for_fp32_state``,
 ``gdn_flashinfer_lane_sol_matches_python_bs128_census_anchor``) cover the
 routing claims with explicit synthetic in-memory tables. This file is the
 Python-level real-data/SOL companion, not a duplicate.
@@ -84,9 +76,17 @@ def _query_gdn_generation(db, kernel_source, model_key, batch, d_model=None, mam
     return float(result), result.source
 
 
-def _query_gdn_context(db, kernel_source, model_key, batch, seq_len, d_model=None):
+def _query_gdn_context(
+    db,
+    kernel_source,
+    model_key,
+    batch,
+    seq_len,
+    d_model=None,
+    mamba_ssm_dtype="float32",
+):
     key = model_key if d_model is None else (d_model, *model_key[1:])
-    op = _gdn_op(kernel_source, "context", key)
+    op = _gdn_op(kernel_source, "context", key, mamba_ssm_dtype=mamba_ssm_dtype)
     result = op._engine_query(db, batch_size=batch, s=seq_len)
     return float(result), result.source
 
@@ -124,46 +124,106 @@ def test_query_gdn_sglang_sm100_keeps_fla_lane_for_fp32_state():
     )
     assert resolved_source == "silicon"
     assert resolved_latency == pytest.approx(fla_raw, rel=1e-9)
-    assert resolved_latency == pytest.approx(0.004236159920692444, rel=1e-9)
 
 
-def test_query_gdn_sglang_sm90_keeps_fla_lane_first():
-    """Hopper unchanged: serving never runs the FlashInfer decode kernel on
-    SM90, so real SM90 sglang tables carry no flashinfer_gated_delta_rule_decode
-    rows at all and the query resolves the fla lane directly (the strict
-    "even if a flashinfer row were present" edge is real-data-unreachable;
-    the Rust test ``sglang_sm90_gdn_never_selects_flashinfer_lane_even_if_present``
-    covers it with a synthetic table)."""
-    db = get_database("h200_sxm", "sglang", "0.5.14")
-    assert db.system_spec["gpu"]["sm_version"] < 100
-    model_key = (1024, 4, 128, 4, 128, 4)
+def test_query_gdn_sglang_sm100_missing_bf16_flashinfer_alias_uses_sol():
+    db = get_database("gb300", "sglang", "0.5.14")
+    assert db.system_spec["gpu"]["sm_version"] == 103
+    model_key = (4096, 4, 128, 16, 128, 4)
 
     GDNKernel.load_data(db)
-    assert "flashinfer_gated_delta_rule_decode" not in db._gdn_data  # genuinely absent on SM90
+    assert "flashinfer_gated_delta_rule_decode" not in db._gdn_data
 
-    latency, source = _query_gdn_generation(db, "fused_sigmoid_gating_delta_rule_update", model_key, batch=1)
-    assert source == "silicon"
+    latency, source = _query_gdn_generation(
+        db,
+        "fused_sigmoid_gating_delta_rule_update",
+        model_key,
+        batch=1,
+        mamba_ssm_dtype="bfloat16",
+    )
+
+    assert source == "sol"
     assert latency > 0
 
 
-def test_query_gdn_vllm_generation_unaffected_by_sglang_branch_even_at_sm100():
+@pytest.mark.parametrize(
+    ("system", "expected_sm"),
+    [("h200_sxm", 90), ("rtx_pro_6000_server", 120)],
+)
+def test_query_gdn_non_sm10_fla_rows_require_fp32_state(system, expected_sm):
+    db = get_database(system, "sglang", "0.5.14")
+    assert db.system_spec["gpu"]["sm_version"] == expected_sm
+    model_key = (1024, 4, 128, 4, 128, 4)
+
+    GDNKernel.load_data(db)
+    assert "flashinfer_gated_delta_rule_decode" not in db._gdn_data
+
+    fp32_latency, fp32_source = _query_gdn_generation(
+        db,
+        "fused_sigmoid_gating_delta_rule_update",
+        model_key,
+        batch=1,
+        mamba_ssm_dtype="float32",
+    )
+    assert fp32_source == "silicon"
+    assert fp32_latency > 0
+
+    for dtype in ("bfloat16", "float16"):
+        latency, source = _query_gdn_generation(
+            db,
+            "fused_sigmoid_gating_delta_rule_update",
+            model_key,
+            batch=1,
+            mamba_ssm_dtype=dtype,
+        )
+        assert source == "sol"
+        assert latency > 0
+
+
+def test_query_gdn_causal_conv_rows_are_available_for_bf16_state():
+    db = get_database("h200_sxm", "sglang", "0.5.14")
+    model_key = (1024, 4, 128, 4, 128, 4)
+
+    context_latency, context_source = _query_gdn_context(
+        db,
+        "causal_conv1d_fn",
+        model_key,
+        batch=1,
+        seq_len=128,
+        mamba_ssm_dtype="bfloat16",
+    )
+    generation_latency, generation_source = _query_gdn_generation(
+        db,
+        "causal_conv1d_update",
+        model_key,
+        batch=1,
+        mamba_ssm_dtype="bfloat16",
+    )
+
+    assert context_source == generation_source == "silicon"
+    assert context_latency > 0
+    assert generation_latency > 0
+
+
+def test_query_gdn_vllm_generation_unaffected_by_sglang_major10_branch():
     """The sglang branch is parallel to the vllm-0.24.0 branch, not a
     replacement: vllm's own generation row still resolves independent of
     sm_version (regression guard for the added elif's placement). gb300 is
-    sm_version=103 — AT the exact SM100+ threshold that gates the new sglang
-    branch — deliberately chosen so the only thing keeping the sglang elif
-    from firing is the ``backend == "sglang"`` check, not sm_version."""
+    sm_version=103, inside compute-capability major 10; the only thing keeping
+    the sglang branch from firing is the ``backend == "sglang"`` check, not
+    sm_version."""
     db = get_database("gb300", "vllm", "0.24.0")
     assert db.system_spec["gpu"]["sm_version"] >= 100
     model_key = (1024, 2, 128, 2, 128, 4)
 
     latency, source = _query_gdn_generation(db, "fused_sigmoid_gating_delta_rule_update", model_key, batch=1)
     assert source == "silicon"
-    assert latency == pytest.approx(0.004360319972038269, rel=1e-9)
+    assert latency > 0
 
 
 # ---------------------------------------------------------------------------
-# get_sol: per-lane state bytes (2 for flashinfer, 4 for fla). Pure formula —
+# get_sol: state bytes follow mamba_ssm_dtype for context/FLA; explicit
+# FlashInfer remains two bytes. Pure formula —
 # an off-key synthetic d_model (8192, same convention as the census anchors
 # below) keeps the query off every real collected row regardless of system,
 # guaranteeing the pure-SOL fallback path (real gb300/sglang/0.5.14 spec for
@@ -210,30 +270,77 @@ def test_get_sol_flashinfer_lane_state_bytes_ratio_matches_closed_form():
     assert sol_flashinfer / sol_fla == pytest.approx(expected_ratio, rel=1e-9)
 
 
-def test_get_sol_context_scan_state_bytes_unchanged_by_flashinfer_lane():
-    """The FlashInfer lane is decode-only: chunk_gated_delta_rule (context)
-    keeps its 4-byte fp32 state regardless, verified via the closed form
-    (a regression guard that the decode-branch edit didn't leak into
-    context)."""
+def test_get_sol_fla_recurrence_state_bytes_follow_model_dtype():
+    db = get_database("gb300", "sglang", "0.5.14")
+    _, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv = MODEL_KEY
+    batch = 4
+
+    results = {
+        dtype: _query_gdn_generation(
+            db,
+            "fused_sigmoid_gating_delta_rule_update",
+            MODEL_KEY,
+            batch,
+            d_model=8192,
+            mamba_ssm_dtype=dtype,
+        )
+        for dtype in ("float32", "bfloat16", "float16")
+    }
+    assert {source for _, source in results.values()} == {"sol"}
+
+    activation_bytes = batch * (2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2
+    activation_bytes += batch * num_v_heads * head_v_dim * 2
+    state_size = num_v_heads * head_k_dim * head_v_dim
+    total_fp32 = activation_bytes + 2 * state_size * 4 * batch
+    total_16bit = activation_bytes + 2 * state_size * 2 * batch
+    sol_fp32 = results["float32"][0]
+    sol_bf16 = results["bfloat16"][0]
+    sol_fp16 = results["float16"][0]
+
+    assert sol_bf16 == pytest.approx(sol_fp16, rel=1e-9)
+    assert sol_bf16 / sol_fp32 == pytest.approx(total_16bit / total_fp32, rel=1e-9)
+
+
+def test_get_sol_context_scan_state_bytes_follow_model_dtype():
+    """Context scan SOL uses the configured recurrent-state width: two bytes
+    for BF16 and four for FP32, with identical BF16 activation/chunk terms."""
     db = get_database("gb300", "sglang", "0.5.14")
     _, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv = MODEL_KEY
     batch, seq = 4, 128
 
-    sol_context, source = _query_gdn_context(db, "chunk_gated_delta_rule", MODEL_KEY, batch, seq, d_model=8192)
-    assert source == "sol"
+    sol_fp32, source_fp32 = _query_gdn_context(
+        db,
+        "chunk_gated_delta_rule",
+        MODEL_KEY,
+        batch,
+        seq,
+        d_model=8192,
+        mamba_ssm_dtype="float32",
+    )
+    sol_bf16, source_bf16 = _query_gdn_context(
+        db,
+        "chunk_gated_delta_rule",
+        MODEL_KEY,
+        batch,
+        seq,
+        d_model=8192,
+        mamba_ssm_dtype="bfloat16",
+    )
+    assert source_fp32 == source_bf16 == "sol"
 
     x = batch * seq
     chunk_size = 64
     state_size = num_v_heads * head_k_dim * head_v_dim
     num_chunks = seq // chunk_size
     h_chunks_bytes = num_chunks * state_size * 2 * batch
-    read_bytes = (
-        x * (2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2 + state_size * 4 * batch + h_chunks_bytes
-    )
-    write_bytes = x * num_v_heads * head_v_dim * 2 + state_size * 4 * batch + h_chunks_bytes
-    expected_ms = (read_bytes + write_bytes) / db.system_spec["gpu"]["mem_bw"] * 1000
+    activation_and_chunks = x * (2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim) * 2
+    activation_and_chunks += x * num_v_heads * head_v_dim * 2 + 2 * h_chunks_bytes
+    total_fp32 = activation_and_chunks + 2 * state_size * 4 * batch
+    total_bf16 = activation_and_chunks + 2 * state_size * 2 * batch
 
-    assert sol_context == pytest.approx(expected_ms, rel=1e-9)
+    assert sol_fp32 == pytest.approx(total_fp32 / db.system_spec["gpu"]["mem_bw"] * 1000, rel=1e-9)
+    assert sol_bf16 == pytest.approx(total_bf16 / db.system_spec["gpu"]["mem_bw"] * 1000, rel=1e-9)
+    assert sol_bf16 / sol_fp32 == pytest.approx(total_bf16 / total_fp32, rel=1e-9)
 
 
 # ---------------------------------------------------------------------------

@@ -62,6 +62,36 @@ def _load_function(source_path: Path, name: str, namespace: dict | None = None):
     return loaded[name]
 
 
+def test_gdn_collector_entry_rejects_non_fp32_before_runtime_imports(monkeypatch):
+    run_gdn = _load_function(SOURCE_PATH, "run_gdn_torch")
+    imported = []
+    original_import = __import__
+
+    def recording_import(name, *args, **kwargs):
+        imported.append(name)
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", recording_import)
+
+    with pytest.raises(ValueError, match="only float32 collection is supported"):
+        run_gdn(
+            phase="generation",
+            d_model=2048,
+            d_conv=4,
+            num_k_heads=16,
+            head_k_dim=128,
+            num_v_heads=32,
+            head_v_dim=128,
+            batch_size_list=[1],
+            seq_len_list=None,
+            model_name="example/bfloat16-state",
+            mamba_ssm_dtype="bfloat16",
+            perf_filename="unused.parquet",
+        )
+
+    assert imported == []
+
+
 class TestResolveFlashinferGdnDecode:
     """_resolve_flashinfer_gdn_decode (CodeRabbit collect_gdn.py:369, Major;
     lane-predicate fix, jasonqinzhou PR #1533 review): serving auto-selects

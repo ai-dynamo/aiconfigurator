@@ -130,6 +130,15 @@ fn default_mamba_ssm_dtype() -> String {
 }
 
 impl GdnOp {
+    fn state_element_bytes(&self) -> f64 {
+        match self.mamba_ssm_dtype.as_str() {
+            "bfloat16" | "float16" => 2.0,
+            // Qwen35Model resolves invalid configuration values to float32;
+            // keep direct/deserialized invalid values conservative as well.
+            _ => 4.0,
+        }
+    }
+
     pub fn query(
         &self,
         db: &PerfDatabase,
@@ -199,6 +208,7 @@ impl GdnOp {
             0.0
         };
         let h_chunks_bytes = num_chunks * state_size * 2.0 * bs;
+        let state_element_bytes = self.state_element_bytes();
         let _ = chunk_size; // reserved for clarity / future use
 
         let (read_bytes, write_bytes) = match self.kernel_source.as_str() {
@@ -206,30 +216,27 @@ impl GdnOp {
                 x * conv_channels * (d_conv + 1.0) * 2.0,
                 x * conv_channels * 2.0,
             ),
-            // q/k/v reads are 2K + V wide; the recurrent state is always FP32
-            // here (Qwen3.5 pins mamba_ssm_dtype=float32 for the fla/triton
-            // lane, and the FlashInfer bf16-state lane below -- see the decode
-            // arm -- is decode-only, so context scan never sees it) while
-            // h_chunks stay input-dtype BF16.
+            // q/k/v reads are 2K + V wide; recurrent-state bytes follow the
+            // resolved model dtype while h_chunks stay input-dtype BF16.
             "chunk_gated_delta_rule" => (
-                x * (2.0 * nk * hk + nv * hv) * 2.0 + state_size * 4.0 * bs + h_chunks_bytes,
-                x * nv * hv * 2.0 + state_size * 4.0 * bs + h_chunks_bytes,
+                x * (2.0 * nk * hk + nv * hv) * 2.0
+                    + state_size * state_element_bytes * bs
+                    + h_chunks_bytes,
+                x * nv * hv * 2.0 + state_size * state_element_bytes * bs + h_chunks_bytes,
             ),
             // GDN single-step decode: reads q/k/v (2K + V wide) plus the
-            // recurrent state. Two lanes, two state dtypes: the fla/triton lane
-            // (fused_sigmoid_gating_delta_rule_update) keeps Qwen3.5's pinned
-            // mamba_ssm_dtype=float32 state (4 bytes); the FlashInfer lane
-            // (flashinfer_gated_delta_rule_decode, SM100+ sglang) runs a bf16
-            // state (2 bytes) -- sglang's server_args.py
+            // recurrent state. The logical FLA recurrence follows the model's
+            // resolved state dtype; the explicit FlashInfer lane remains BF16
+            // (2 bytes) -- sglang's server_args.py
             // _handle_linear_attn_backend (server_args.py:4884-4915 @ pinned
-            // v0.5.14 clone) auto-selects this backend on SM100+ and
-            // hard-errors a non-bf16 state there. q/k/v activation terms stay
-            // 2-byte bf16 for both lanes.
+            // v0.5.14 clone) auto-selects this backend on compute-capability
+            // major 10 and hard-errors a non-bf16 state there. q/k/v
+            // activation terms stay 2-byte bf16 for both lanes.
             "fused_sigmoid_gating_delta_rule_update" | "flashinfer_gated_delta_rule_decode" => {
                 let state_bytes = if self.kernel_source == "flashinfer_gated_delta_rule_decode" {
                     2.0
                 } else {
-                    4.0
+                    state_element_bytes
                 };
                 (
                     x * (2.0 * nk * hk + nv * hv) * 2.0 + state_size * state_bytes * bs,
@@ -514,7 +521,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// Census anchor for the SM100+ sglang GDN FlashInfer decode lane
+    /// Census anchor for the capability-major-10 sglang GDN FlashInfer decode lane
     /// (AIC-1745 Task 4, Rust twin of Task 3's
     /// `test_flashinfer_lane_sol_matches_census_at_bs128`,
     /// `tests/unit/sdk/database/test_gdn_flashinfer_lane.py`). Same shape:
@@ -564,6 +571,78 @@ mod tests {
             (sol_us - 16.941056).abs() < 1e-6,
             "sol_us = {sol_us}, expected 16.941056"
         );
+    }
+
+    #[test]
+    fn gdn_context_and_fla_sol_state_bytes_follow_resolved_dtype() {
+        let systems_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("src/aiconfigurator_core/systems");
+        let db = PerfDatabase::load(&systems_root, "gb300", "sglang", "0.5.14")
+            .expect("gb300/sglang/0.5.14 must load");
+        let op = |kernel_source: &str, phase: &str, dtype: &str| GdnOp {
+            name: "gdn".into(),
+            scale_factor: 1.0,
+            kernel_source: kernel_source.into(),
+            phase: phase.into(),
+            d_model: 1,
+            d_conv: 4,
+            num_k_heads: 0,
+            head_k_dim: 1,
+            num_v_heads: 1,
+            head_v_dim: 1,
+            mamba_ssm_dtype: dtype.into(),
+        };
+
+        // Context at (b=1,s=64): activation + chunk terms are 260 bytes;
+        // recurrent-state read/write adds 8 bytes for FP32 or 4 for 16-bit.
+        let batch = 1.0;
+        let seq = 64.0;
+        let context_fp32 =
+            op("chunk_gated_delta_rule", "context", "float32").sol_latency_ms(&db, batch, seq);
+        let context_bf16 =
+            op("chunk_gated_delta_rule", "context", "bfloat16").sol_latency_ms(&db, batch, seq);
+        let context_fp16 =
+            op("chunk_gated_delta_rule", "context", "float16").sol_latency_ms(&db, batch, seq);
+        assert!((context_bf16 - context_fp16).abs() < 1e-15);
+        assert!((context_bf16 / context_fp32 - 264.0 / 268.0).abs() < 1e-12);
+
+        // Generation at b=1: activation terms are 4 bytes; state read/write
+        // adds 8 bytes for FP32 or 4 for 16-bit.
+        let generation_fp32 = op(
+            "fused_sigmoid_gating_delta_rule_update",
+            "generation",
+            "float32",
+        )
+        .sol_latency_ms(&db, batch, 0.0);
+        let generation_bf16 = op(
+            "fused_sigmoid_gating_delta_rule_update",
+            "generation",
+            "bfloat16",
+        )
+        .sol_latency_ms(&db, batch, 0.0);
+        let generation_fp16 = op(
+            "fused_sigmoid_gating_delta_rule_update",
+            "generation",
+            "float16",
+        )
+        .sol_latency_ms(&db, batch, 0.0);
+        let generation_invalid = op(
+            "fused_sigmoid_gating_delta_rule_update",
+            "generation",
+            "invalid",
+        )
+        .sol_latency_ms(&db, batch, 0.0);
+        let explicit_flashinfer = op(
+            "flashinfer_gated_delta_rule_decode",
+            "generation",
+            "float32",
+        )
+        .sol_latency_ms(&db, batch, 0.0);
+        assert!((generation_bf16 - generation_fp16).abs() < 1e-15);
+        assert!((generation_invalid - generation_fp32).abs() < 1e-15);
+        assert!((explicit_flashinfer - generation_bf16).abs() < 1e-15);
+        assert!((generation_bf16 / generation_fp32 - 8.0 / 12.0).abs() < 1e-12);
     }
 
     fn kda_op(kernel_source: &str, phase: &str, draft_tokens: i64) -> KdaOp {
