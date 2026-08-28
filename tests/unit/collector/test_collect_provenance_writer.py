@@ -416,6 +416,7 @@ def test_schema_mismatch_overwrite_replaces_stale_table_history(tmp_path):
                 "status": "complete",
             }
         },
+        provenance_tier="local",
     )
 
     parquet_path = output_root / "gemm_perf.parquet"
@@ -445,6 +446,7 @@ def test_schema_mismatch_overwrite_replaces_stale_table_history(tmp_path):
     doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
     table = doc["tables"]["gemm_perf"]
     assert doc["schema_version"] == 1
+    assert "provenance" not in doc
     assert "collections" not in table
     assert table["case_plan_hash"] == provenance.case_plan_hash(["case-new"])
     assert table["rows"] == 1
@@ -479,7 +481,7 @@ def test_runtime_change_rejects_schema_replacement_when_an_old_table_survives(tm
 
     checkpoint_dir = tmp_path / "checkpoint"
     _write_checkpoint(checkpoint_dir, done=["case-new"], failed=[])
-    with pytest.raises(RuntimeError, match="other_perf"):
+    with pytest.raises(RuntimeError, match="different runtime identity"):
         collect_mod._write_collector_provenance(
             output_root,
             [parquet_path],
@@ -493,7 +495,38 @@ def test_runtime_change_rejects_schema_replacement_when_an_old_table_survives(tm
     assert yaml.safe_load(meta_path.read_text(encoding="utf-8")) == existing_doc
 
 
-def test_runtime_change_allows_every_old_table_to_be_replaced(tmp_path):
+def test_runtime_change_preflight_preserves_sidecar_parquet_and_staging_csv(tmp_path):
+    output_root = tmp_path / "out"
+    existing_runtime = {
+        "framework": "sglang",
+        "version": "0.5.13",
+        "image": "lmsysorg/sglang:v0.5.13",
+        "image_digest": "sha256:" + "1" * 64,
+    }
+    provenance.write_collection_meta(
+        output_root,
+        existing_runtime,
+        {"gemm_perf": {"status": "complete"}},
+    )
+    meta_path = output_root / "collection_meta.yaml"
+    parquet_path = output_root / "gemm_perf.parquet"
+    _write_parquet(parquet_path, [{"op": "matmul", "latency": 1.0}])
+    perf_path = output_root / "gemm_perf.txt"
+    perf_path.write_text("shape,latency\nnew-shape,2.0\n")
+
+    original_meta = meta_path.read_bytes()
+    original_parquet = parquet_path.read_bytes()
+    original_staging = perf_path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="different runtime identity"):
+        collect_mod._preflight_collector_provenance(output_root, _provenance_ctx(_collections()))
+
+    assert meta_path.read_bytes() == original_meta
+    assert parquet_path.read_bytes() == original_parquet
+    assert perf_path.read_bytes() == original_staging
+
+
+def test_runtime_change_rejects_even_when_every_old_table_was_replaced(tmp_path):
     output_root = tmp_path / "out"
     provenance.write_collection_meta(
         output_root,
@@ -521,25 +554,19 @@ def test_runtime_change_allows_every_old_table_to_be_replaced(tmp_path):
 
     checkpoint_dir = tmp_path / "checkpoint"
     _write_checkpoint(checkpoint_dir, done=["case-new"], failed=[])
-    collect_mod._write_collector_provenance(
-        output_root,
-        parquet_paths,
-        _provenance_ctx([*_collections("gemm_perf"), *_collections("other_perf")]),
-        run_errors=[],
-        backend=BACKEND,
-        checkpoint_dir=str(checkpoint_dir),
-        finalization_info=finalization_info,
-    )
+    with pytest.raises(RuntimeError, match="different runtime identity"):
+        collect_mod._write_collector_provenance(
+            output_root,
+            parquet_paths,
+            _provenance_ctx([*_collections("gemm_perf"), *_collections("other_perf")]),
+            run_errors=[],
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            finalization_info=finalization_info,
+        )
 
     doc = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))
-    assert doc["runtime"] == {
-        "framework": "sglang",
-        "version": "0.5.14",
-        "image": "lmsysorg/sglang:v0.5.14",
-        "image_digest": "sha256:" + "0" * 64,
-    }
-    assert set(doc["tables"]) == {"gemm_perf", "other_perf"}
-    assert all("collections" not in table for table in doc["tables"].values())
+    assert doc["runtime"]["version"] == "0.5.13"
 
 
 def test_finalize_raises_when_existing_sidecar_is_legacy_tier(tmp_path):

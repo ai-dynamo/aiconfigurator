@@ -1502,6 +1502,39 @@ def _split_image_digest(image_ref: str) -> tuple[str, str | None]:
     return image, (digest if sep else None)
 
 
+def _runtime_metadata(provenance_ctx: dict) -> dict[str, str]:
+    runtime = provenance_ctx["runtime"]
+    image, image_digest = _split_image_digest(runtime.image())
+    runtime_meta = {"framework": runtime.framework, "version": runtime.version, "image": image}
+    if image_digest:
+        runtime_meta["image_digest"] = image_digest
+    return runtime_meta
+
+
+def _preflight_collector_provenance(output_root: Path, provenance_ctx: dict) -> None:
+    """Reject an in-place runtime change before perf finalization mutates files."""
+    import yaml
+
+    existing_meta = output_root / "collection_meta.yaml"
+    if not existing_meta.exists():
+        return
+    try:
+        existing_doc = yaml.safe_load(existing_meta.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return
+    if not isinstance(existing_doc, dict):
+        return
+
+    existing_runtime = existing_doc.get("runtime")
+    runtime_meta = _runtime_metadata(provenance_ctx)
+    if existing_runtime != runtime_meta:
+        raise RuntimeError(
+            f"{existing_meta}: cannot finalize collector outputs in place with a different runtime identity "
+            f"(existing={existing_runtime!r}, current={runtime_meta!r}). Use a clean output directory for the "
+            "new runtime."
+        )
+
+
 def _write_collector_provenance(
     output_root: Path,
     converted: list[Path],
@@ -1537,11 +1570,7 @@ def _write_collector_provenance(
     closures = provenance.load_closures(_REPO_ROOT / "collector" / "hash_closures.yaml")
     collector_ref = _git_collector_ref(_REPO_ROOT)
 
-    runtime = provenance_ctx["runtime"]
-    image, image_digest = _split_image_digest(runtime.image())
-    runtime_meta = {"framework": runtime.framework, "version": runtime.version, "image": image}
-    if image_digest:
-        runtime_meta["image_digest"] = image_digest
+    runtime_meta = _runtime_metadata(provenance_ctx)
     collected_at = datetime.now().strftime("%Y-%m-%d")
 
     tables: dict[str, dict] = {}
@@ -1641,27 +1670,23 @@ def _write_collector_provenance(
         existing_tables = existing_doc.get("tables") or {}
         if isinstance(existing_tables, dict):
             existing_runtime = existing_doc.get("runtime")
-            surviving_tables = sorted(
+            if existing_runtime != runtime_meta:
+                raise RuntimeError(
+                    f"{existing_meta}: cannot write collector provenance in place with a different runtime identity "
+                    f"(existing={existing_runtime!r}, current={runtime_meta!r}). Use a clean output directory for "
+                    "the new runtime."
+                )
+            surviving_tables = [
                 table
                 for table in existing_tables
                 if table not in tables or merged_existing_by_table.get(table) is not False
-            )
-            if existing_runtime != runtime_meta and surviving_tables:
-                raise RuntimeError(
-                    f"{existing_meta}: cannot preserve table data or collection history across different "
-                    f"runtime identities; old table(s) {surviving_tables} would survive "
-                    f"(existing={existing_runtime!r}, current={runtime_meta!r}). Every old table must be "
-                    "replaced, not merged, before changing the sidecar runtime."
-                )
+            ]
+            if provenance_tier == "local" and not surviving_tables:
+                provenance_tier = None
             merged_tables = dict(existing_tables)
             for table, current_entry in tables.items():
                 existing_entry = existing_tables.get(table)
                 if isinstance(existing_entry, dict) and merged_existing_by_table[table]:
-                    if existing_runtime != runtime_meta:
-                        raise RuntimeError(
-                            f"{existing_meta}: cannot append collection history for table '{table}' across "
-                            f"different runtime identities (existing={existing_runtime!r}, current={runtime_meta!r})"
-                        )
                     merged_tables[table] = provenance.append_collection_event(
                         existing_entry,
                         {**current_entry, "rows": new_rows_by_table[table]},
@@ -2013,6 +2038,8 @@ def main():
         logger.info("Keeping collector CSV staging files because --keep-csv was passed")
     else:
         touched_perf_outputs = [path for path in find_perf_csv_outputs(output_root) if was_touched_by_run(path)]
+        if touched_perf_outputs and provenance_ctx is not None:
+            _preflight_collector_provenance(output_root, provenance_ctx)
         if touched_perf_outputs:
             logger.info(
                 "Finalizing collector CSV staging files as parquet:\n  "
