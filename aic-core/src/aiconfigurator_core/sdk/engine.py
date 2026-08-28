@@ -516,6 +516,10 @@ def build_database_probe_spec_json(
         "strict_provenance": _strict_provenance_flag(database),
         "database_mode": database_mode or _database_mode_name(database),
         "transfer_policy": _transfer_policy_tokens(database),
+        # Same dir-less-next tolerance as the model spec builder: a database
+        # get_database returned as valid must stay valid through the probe
+        # handle (table views, ad-hoc op-list evaluation).
+        "tolerate_dirless_version": bool(getattr(database, "dirless_next_load", False)),
         "extra": {},
     }
     spec = {

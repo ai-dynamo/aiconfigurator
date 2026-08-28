@@ -1179,6 +1179,7 @@ def get_database(
         extra_database_kwargs["strict_provenance"] = strict_provenance
     effective_strict = _strict_provenance_enabled(strict_provenance)
     missing_data_candidate = None
+    dirless_next_candidate = None
     for systems_root in systems_paths:
         system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
         if not os.path.isfile(system_yaml_path):
@@ -1237,41 +1238,20 @@ def get_database(
             if missing_data_candidate is None:
                 missing_data_candidate = (systems_root, cache_key)
         else:
-            # Directory-less NEXT load (design §14): the fleet-derived next
-            # may be data-backed on other default-governed systems only; a
-            # system without its own directory serves every op through the
-            # channel-1 backward fill PerfDatabase already performs. The
-            # relaxation covers exactly the advertised next slot — raw
-            # versions and the authored current/previous keep the loud
-            # missing-directory gate, and provenance labeling is untouched
-            # (fill rows carry their own source channel).
-            slots = get_version_slots(system, backend, systems_paths=list(systems_paths))
-            if slots is not None and version == slots.get("next"):
-                try:
-                    return databases_cache[cache_key][backend][version]
-                except KeyError:
-                    pass
-                logger.info(
-                    f"Loading directory-less next database for {system=}, {backend=}, {version=} "
-                    "(no local directory; all ops ride backward fill)"
-                )
-                try:
-                    database = PerfDatabase(
-                        system, backend, version, systems_root, database_mode=database_mode, **extra_database_kwargs
-                    )
-                    # The engine reload (Rust) keeps its own loud
-                    # missing-directory gate; the spec builder reads this
-                    # marker to carry the dir-less-next tolerance on the wire.
-                    database.dirless_next_load = True
-                    databases_cache[cache_key][backend][version] = database
-                    return database
-                except Exception:
-                    if effective_strict:
-                        raise
-                    logger.warning(
-                        f"failed directory-less next load for {system=}, {backend=}, {version=}, continuing searching",
-                        exc_info=True,
-                    )
+            # Directory-less NEXT candidate (design §14): the fleet-derived
+            # next may be data-backed on other default-governed systems only;
+            # a system without its own directory serves every op through the
+            # channel-1 backward fill PerfDatabase already performs. DEFERRED,
+            # never returned mid-loop: an exact next directory in a LATER
+            # configured root must win over a directory-less fallback from an
+            # earlier root (review blocker 2026-08-28). The relaxation covers
+            # exactly the advertised next slot — raw versions and the
+            # authored current/previous keep the loud missing-directory gate,
+            # and provenance labeling is untouched.
+            if dirless_next_candidate is None:
+                slots = get_version_slots(system, backend, systems_paths=list(systems_paths))
+                if slots is not None and version == slots.get("next"):
+                    dirless_next_candidate = (systems_root, cache_key)
             if is_incomplete:
                 logger.warning(
                     f"data for {system=}, {backend=}, {version=} is marked incomplete in either layout, "
@@ -1281,6 +1261,34 @@ def get_database(
                 logger.warning(
                     f"no data found for {system=}, {backend=}, {version=} in either layout, continuing searching"
                 )
+
+    if dirless_next_candidate is not None:
+        systems_root, cache_key = dirless_next_candidate
+        try:
+            return databases_cache[cache_key][backend][version]
+        except KeyError:
+            pass
+        logger.info(
+            f"Loading directory-less next database for {system=}, {backend=}, {version=} "
+            "(no exact directory in any configured root; all ops ride backward fill)"
+        )
+        try:
+            database = PerfDatabase(
+                system, backend, version, systems_root, database_mode=database_mode, **extra_database_kwargs
+            )
+            # The engine reload (Rust) keeps its own loud missing-directory
+            # gate; the spec builders read this marker to carry the
+            # dir-less-next tolerance on the wire.
+            database.dirless_next_load = True
+            databases_cache[cache_key][backend][version] = database
+            return database
+        except Exception:
+            if effective_strict:
+                raise
+            logger.warning(
+                f"failed directory-less next load for {system=}, {backend=}, {version=}",
+                exc_info=True,
+            )
 
     if missing_data_candidate is not None:
         systems_root, cache_key = missing_data_candidate

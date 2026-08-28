@@ -103,3 +103,48 @@ def test_dirless_relaxation_does_not_cover_authored_slots(systems_root):
     # (here previous is simply unpopulated — the alias-level error).
     with pytest.raises(ValueError, match="has no 'previous'"):
         pdb.get_database(_BETA, "vllm", "previous", systems_paths=systems_root)
+
+
+@pytest.fixture
+def two_roots(tmp_path):
+    """Review blocker (2026-08-28): an exact next directory in a LATER root
+    must win over a directory-less fallback from an earlier root."""
+    base = tmp_path / "base"
+    extra = tmp_path / "extra"
+    for root in (base, extra):
+        root.mkdir()
+        shutil.copy(_REAL_SYSTEMS / f"{_BETA}.yaml", root / f"{_BETA}.yaml")
+        spec = yaml.safe_load((root / f"{_BETA}.yaml").read_text())
+        spec["data_dir"] = f"data/{_BETA}"
+        (root / f"{_BETA}.yaml").write_text(yaml.safe_dump(spec))
+    (base / "query_versions.yaml").write_text(
+        yaml.safe_dump({"schema_version": 1, "defaults": {"vllm": {"current": "1.0.0", "previous": None}}})
+    )
+    _write_gemm(base, _BETA, "1.0.0")
+    _write_gemm(extra, _BETA, "1.1.0")  # the exact next collection
+    pdb._load_query_slots_doc.cache_clear()
+    pdb._derive_fleet_next.cache_clear()
+    yield [str(base), str(extra)]
+    pdb._load_query_slots_doc.cache_clear()
+    pdb._derive_fleet_next.cache_clear()
+
+
+def test_exact_next_in_later_root_wins_over_dirless(two_roots):
+    assert pdb.get_version_slots(_BETA, "vllm", two_roots) == {"current": "1.0.0", "next": "1.1.0"}
+    db = pdb.get_database(_BETA, "vllm", "next", systems_paths=two_roots)
+    assert db is not None and db.version == "1.1.0"
+    assert not getattr(db, "dirless_next_load", False), (
+        "exact next data in a later root must not be shadowed by the directory-less fallback"
+    )
+
+
+def test_probe_handle_serves_a_dirless_next_database(systems_root):
+    # get_database returned the object as valid; the public model-less handle
+    # (table views, ad-hoc op-list evaluation) must accept it too — the probe
+    # spec carries the same dir-less tolerance as the model spec builder.
+    from aiconfigurator_core.sdk.engine import EngineHandle
+
+    db = pdb.get_database(_BETA, "vllm", "next", systems_paths=systems_root)
+    assert db is not None and getattr(db, "dirless_next_load", False)
+    handle = EngineHandle.for_database(db, systems_path=systems_root)
+    assert handle is not None
