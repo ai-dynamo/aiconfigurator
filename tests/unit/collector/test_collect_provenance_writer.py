@@ -72,6 +72,25 @@ def _collections(table: str = "gemm_perf") -> list[dict]:
     ]
 
 
+def _shared_collections() -> list[dict]:
+    return [
+        {
+            "name": BACKEND,
+            "type": "mla_bmm_gen_pre",
+            "module": REAL_MODULE,
+            "run_func": "run",
+            "perf_filename": "mla_bmm_perf.txt",
+        },
+        {
+            "name": BACKEND,
+            "type": "mla_bmm_gen_post",
+            "module": REAL_MODULE,
+            "run_func": "run",
+            "perf_filename": "mla_bmm_perf.txt",
+        },
+    ]
+
+
 def _provenance_ctx(collections: list[dict]) -> dict:
     runtime = CollectorRuntime(
         framework="sglang",
@@ -187,6 +206,7 @@ def _write_sidecar_transaction(
     participants: list[tuple[Path, set[str]]],
     staging_paths: list[Path],
     *,
+    checkpoint_dir: Path,
     tagged: set[Path],
     pending_document: bool,
 ) -> None:
@@ -195,7 +215,7 @@ def _write_sidecar_transaction(
     meta_path.write_text("same sidecar bytes\n", encoding="utf-8")
     if pending_document:
         (output_root / collect_mod._SIDECAR_STAGING_FILENAME).write_bytes(meta_path.read_bytes())
-    transaction_id = "test-transaction"
+    transaction_id = "0" * 32
     for checkpoint_path, attempted_case_ids in participants:
         if checkpoint_path in tagged:
             collect_mod._tag_checkpoint_sidecar_transaction(
@@ -206,10 +226,20 @@ def _write_sidecar_transaction(
     transaction = {
         "schema": collect_mod._SIDECAR_TRANSACTION_SCHEMA,
         "transaction_id": transaction_id,
+        "output_root": str(output_root.resolve()),
+        "backend": BACKEND,
+        "checkpoint_root": str((checkpoint_dir.resolve() / BACKEND).resolve()),
         "sidecar_path": str(meta_path.resolve()),
         "sidecar_digest": collect_mod._sidecar_digest(meta_path),
         "checkpoints": [
-            {"path": str(checkpoint_path), "attempted": sorted(attempted_case_ids)}
+            {
+                "path": str(checkpoint_path),
+                "attempted": sorted(attempted_case_ids),
+                "identity": {
+                    field: json.loads(checkpoint_path.read_text(encoding="utf-8"))[field]
+                    for field in collect_mod._CHECKPOINT_IDENTITY_FIELDS
+                },
+            }
             for checkpoint_path, attempted_case_ids in participants
         ],
         "staging_paths": [str(path.resolve()) for path in staging_paths],
@@ -362,7 +392,7 @@ def test_finalize_raises_when_all_checkpoints_are_unreadable(tmp_path):
     corrupt_path.parent.mkdir(parents=True, exist_ok=True)
     corrupt_path.write_text("{not valid json")
 
-    with pytest.raises(RuntimeError, match="gemm_perf"):
+    with pytest.raises(RuntimeError, match="checkpoint"):
         collect_mod._write_collector_provenance(
             output_root,
             [parquet_path],
@@ -552,7 +582,7 @@ def test_deduped_zero_row_event_still_attests_its_attempted_cases(tmp_path):
         checkpoint_dir,
         done=["case-old"],
         failed=[],
-        attempted=["case-deduped-a", "case-deduped-a", "case-deduped-b"],
+        attempted=["case-deduped-a", "case-deduped-b"],
     )
 
     collect_mod._write_collector_provenance(
@@ -707,7 +737,7 @@ def test_recovery_finishes_partial_prepare_when_pending_sidecar_matches_live_byt
         failed=[],
         attempted=["case-b"],
     )
-    staged = output_root / "shared_perf.txt"
+    staged = output_root / "mla_bmm_perf.txt"
     staged.parent.mkdir(parents=True)
     staged.write_text("op,latency\nshared,1.0\n", encoding="utf-8")
     participants = [(first, {"case-a"}), (second, {"case-b"})]
@@ -715,11 +745,16 @@ def test_recovery_finishes_partial_prepare_when_pending_sidecar_matches_live_byt
         output_root,
         participants,
         [staged],
+        checkpoint_dir=checkpoint_dir,
         tagged={first},
         pending_document=True,
     )
 
-    assert collect_mod._recover_collector_provenance_transaction(output_root) == (output_root / "collection_meta.yaml")
+    assert collect_mod._recover_collector_provenance_transaction(
+        output_root,
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+    ) == (output_root / "collection_meta.yaml")
 
     assert _attempted(first) == set()
     assert _attempted(second) == set()
@@ -744,14 +779,553 @@ def test_recovery_cleans_staging_before_removing_journal_after_all_checkpoints_c
         output_root,
         [(checkpoint_path, {"case-a"})],
         [staged],
+        checkpoint_dir=checkpoint_dir,
         tagged=set(),
         pending_document=False,
     )
 
-    assert collect_mod._recover_collector_provenance_transaction(output_root) is None
+    assert (
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+        is None
+    )
 
     assert not staged.exists()
     assert not (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).exists()
+
+
+def test_recovery_rejects_outside_staging_path_without_deleting_it(tmp_path):
+    output_root = tmp_path / "out"
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=[],
+    )
+    outside_victim = tmp_path / "outside_perf.txt"
+    outside_victim.write_bytes(b"outside staging must survive")
+    _write_sidecar_transaction(
+        output_root,
+        [(checkpoint_path, {"case-a"})],
+        [outside_victim],
+        checkpoint_dir=checkpoint_dir,
+        tagged=set(),
+        pending_document=False,
+    )
+    journal_path = output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME
+
+    with pytest.raises(RuntimeError, match="staging"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert outside_victim.read_bytes() == b"outside staging must survive"
+    assert journal_path.exists()
+
+
+def test_recovery_prevalidates_mixed_staging_paths_before_deleting_any(tmp_path):
+    output_root = tmp_path / "out"
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=[],
+    )
+    owned_staging = output_root / "gemm_perf.txt"
+    owned_staging.parent.mkdir(parents=True)
+    owned_staging.write_bytes(b"owned staging must survive")
+    outside_victim = tmp_path / "outside_perf.txt"
+    outside_victim.write_bytes(b"outside staging must survive")
+    _write_sidecar_transaction(
+        output_root,
+        [(checkpoint_path, {"case-a"})],
+        [owned_staging, outside_victim],
+        checkpoint_dir=checkpoint_dir,
+        tagged=set(),
+        pending_document=False,
+    )
+    journal_path = output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME
+
+    with pytest.raises(RuntimeError, match="staging"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert owned_staging.read_bytes() == b"owned staging must survive"
+    assert outside_victim.read_bytes() == b"outside staging must survive"
+    assert journal_path.exists()
+
+
+@pytest.mark.parametrize("path_fragment", ["./gemm_perf.txt", "nested/../gemm_perf.txt"])
+def test_recovery_rejects_staging_path_alias_before_mutation(tmp_path, path_fragment):
+    output_root = tmp_path / "out"
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=[],
+    )
+    staged = output_root / "gemm_perf.txt"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"owned staging")
+    _write_sidecar_transaction(
+        output_root,
+        [(checkpoint_path, {"case-a"})],
+        [staged],
+        checkpoint_dir=checkpoint_dir,
+        tagged=set(),
+        pending_document=False,
+    )
+    journal_path = output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME
+    transaction = json.loads(journal_path.read_text(encoding="utf-8"))
+    transaction["staging_paths"] = [f"{output_root}/{path_fragment}"]
+    journal_path.write_text(json.dumps(transaction), encoding="utf-8")
+    checkpoint_before = checkpoint_path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="staging"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert checkpoint_path.read_bytes() == checkpoint_before
+    assert staged.read_bytes() == b"owned staging"
+    assert journal_path.exists()
+
+
+def test_recovery_rejects_staging_symlink_without_touching_target(tmp_path):
+    output_root = tmp_path / "out"
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=[],
+    )
+    outside_victim = tmp_path / "outside.csv"
+    outside_victim.write_bytes(b"symlink target must survive")
+    staged = output_root / "gemm_perf.txt"
+    staged.parent.mkdir(parents=True)
+    try:
+        staged.symlink_to(outside_victim)
+    except OSError as error:
+        pytest.skip(f"symlinks unavailable: {error}")
+    _write_sidecar_transaction(
+        output_root,
+        [(checkpoint_path, {"case-a"})],
+        [staged],
+        checkpoint_dir=checkpoint_dir,
+        tagged=set(),
+        pending_document=False,
+    )
+    journal_path = output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME
+
+    with pytest.raises(RuntimeError, match="staging"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert staged.is_symlink()
+    assert outside_victim.read_bytes() == b"symlink target must survive"
+    assert journal_path.exists()
+
+
+def test_recovery_prevalidates_mixed_checkpoint_participants_before_rewriting_any(tmp_path):
+    output_root = tmp_path / "out"
+    checkpoint_dir = tmp_path / "checkpoint"
+    valid_checkpoint = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-valid"],
+        failed=[],
+        attempted=["case-valid"],
+    )
+    outside_checkpoint = _write_checkpoint_for(
+        tmp_path,
+        backend=BACKEND,
+        full_name="sglang.gemm",
+        version="0.5.14",
+        done=["case-outside"],
+        failed=[],
+        attempted=["case-outside"],
+    )
+    staged = output_root / "gemm_perf.txt"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("op,latency\nmatmul,1.0\n", encoding="utf-8")
+    _write_sidecar_transaction(
+        output_root,
+        [(valid_checkpoint, {"case-valid"}), (outside_checkpoint, {"case-outside"})],
+        [staged],
+        checkpoint_dir=checkpoint_dir,
+        tagged=set(),
+        pending_document=True,
+    )
+    valid_before = valid_checkpoint.read_bytes()
+    checkpoint_before = outside_checkpoint.read_bytes()
+    journal_path = output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME
+
+    with pytest.raises(RuntimeError, match="checkpoint"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert valid_checkpoint.read_bytes() == valid_before
+    assert outside_checkpoint.read_bytes() == checkpoint_before
+    assert staged.exists()
+    assert journal_path.exists()
+    assert (output_root / collect_mod._SIDECAR_STAGING_FILENAME).exists()
+
+
+def test_recovery_rejects_checkpoint_symlink_without_touching_target(tmp_path):
+    output_root = tmp_path / "out"
+    checkpoint_dir = tmp_path / "checkpoint"
+    outside_checkpoint = _write_checkpoint_for(
+        tmp_path,
+        backend=BACKEND,
+        full_name="sglang.gemm",
+        version="0.5.14",
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    checkpoint_path = checkpoint_dir / BACKEND / f"{FULL_NAME}.json"
+    checkpoint_path.parent.mkdir(parents=True)
+    try:
+        checkpoint_path.symlink_to(outside_checkpoint)
+    except OSError as error:
+        pytest.skip(f"symlinks unavailable: {error}")
+    staged = output_root / "gemm_perf.txt"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"owned staging")
+    _write_sidecar_transaction(
+        output_root,
+        [(checkpoint_path, {"case-a"})],
+        [staged],
+        checkpoint_dir=checkpoint_dir,
+        tagged=set(),
+        pending_document=True,
+    )
+    outside_before = outside_checkpoint.read_bytes()
+    journal_path = output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME
+
+    with pytest.raises(RuntimeError, match="checkpoint"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert checkpoint_path.is_symlink()
+    assert outside_checkpoint.read_bytes() == outside_before
+    assert staged.read_bytes() == b"owned staging"
+    assert journal_path.exists()
+
+
+@pytest.mark.parametrize("document_name", ["collection_meta.yaml", collect_mod._SIDECAR_STAGING_FILENAME])
+def test_recovery_rejects_sidecar_document_symlink_before_mutation(tmp_path, document_name):
+    output_root = tmp_path / "out"
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staged = output_root / "gemm_perf.txt"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"owned staging")
+    _write_sidecar_transaction(
+        output_root,
+        [(checkpoint_path, {"case-a"})],
+        [staged],
+        checkpoint_dir=checkpoint_dir,
+        tagged={checkpoint_path},
+        pending_document=True,
+    )
+    document_path = output_root / document_name
+    outside_document = tmp_path / f"outside-{document_name}"
+    outside_document.write_bytes(document_path.read_bytes())
+    document_path.unlink()
+    try:
+        document_path.symlink_to(outside_document)
+    except OSError as error:
+        pytest.skip(f"symlinks unavailable: {error}")
+    checkpoint_before = checkpoint_path.read_bytes()
+    journal_path = output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME
+
+    with pytest.raises(RuntimeError, match="document"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert checkpoint_path.read_bytes() == checkpoint_before
+    assert outside_document.exists()
+    assert staged.read_bytes() == b"owned staging"
+    assert journal_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "mismatched_value"),
+    [
+        ("output_root", "/tmp/unrelated-output"),
+        ("backend", "trtllm"),
+        ("checkpoint_root", "/tmp/unrelated-checkpoints/sglang"),
+    ],
+)
+def test_recovery_rejects_mismatched_transaction_context_before_mutation(
+    tmp_path,
+    field,
+    mismatched_value,
+):
+    output_root = tmp_path / "out"
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staged = output_root / "gemm_perf.txt"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"owned staging")
+    _write_sidecar_transaction(
+        output_root,
+        [(checkpoint_path, {"case-a"})],
+        [staged],
+        checkpoint_dir=checkpoint_dir,
+        tagged={checkpoint_path},
+        pending_document=False,
+    )
+    journal_path = output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME
+    transaction = json.loads(journal_path.read_text(encoding="utf-8"))
+    transaction[field] = mismatched_value
+    journal_path.write_text(json.dumps(transaction), encoding="utf-8")
+    checkpoint_before = checkpoint_path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="transaction"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert checkpoint_path.read_bytes() == checkpoint_before
+    assert staged.read_bytes() == b"owned staging"
+    assert journal_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "mismatched_value"),
+    [
+        ("schema", "stale-schema"),
+        ("backend", "trtllm"),
+        ("module", "sglang.other"),
+        ("run_func", "other_run"),
+        ("framework_version", "0.5.13"),
+        ("sm_version", 90),
+    ],
+)
+def test_recovery_rejects_mismatched_recorded_checkpoint_identity_before_mutation(
+    tmp_path,
+    field,
+    mismatched_value,
+):
+    output_root = tmp_path / "out"
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staged = output_root / "gemm_perf.txt"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"owned staging")
+    _write_sidecar_transaction(
+        output_root,
+        [(checkpoint_path, {"case-a"})],
+        [staged],
+        checkpoint_dir=checkpoint_dir,
+        tagged={checkpoint_path},
+        pending_document=False,
+    )
+    journal_path = output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME
+    transaction = json.loads(journal_path.read_text(encoding="utf-8"))
+    transaction["checkpoints"][0]["identity"][field] = mismatched_value
+    journal_path.write_text(json.dumps(transaction), encoding="utf-8")
+    checkpoint_before = checkpoint_path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="checkpoint"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert checkpoint_path.read_bytes() == checkpoint_before
+    assert staged.read_bytes() == b"owned staging"
+    assert journal_path.exists()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "duplicate-participant",
+        "duplicate-attempt",
+        "malformed-attempt",
+        "path-alias",
+        "extra-participant-field",
+    ],
+)
+def test_recovery_rejects_malformed_or_duplicate_participants_before_mutation(tmp_path, mutation):
+    output_root = tmp_path / "out"
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staged = output_root / "gemm_perf.txt"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"owned staging")
+    _write_sidecar_transaction(
+        output_root,
+        [(checkpoint_path, {"case-a"})],
+        [staged],
+        checkpoint_dir=checkpoint_dir,
+        tagged={checkpoint_path},
+        pending_document=False,
+    )
+    journal_path = output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME
+    transaction = json.loads(journal_path.read_text(encoding="utf-8"))
+    participant = transaction["checkpoints"][0]
+    if mutation == "duplicate-participant":
+        transaction["checkpoints"].append(dict(participant))
+    elif mutation == "duplicate-attempt":
+        participant["attempted"].append("case-a")
+    elif mutation == "malformed-attempt":
+        participant["attempted"] = "case-a"
+    elif mutation == "path-alias":
+        participant["path"] = f"{checkpoint_path.parent}/./{checkpoint_path.name}"
+    else:
+        participant["unexpected"] = True
+    journal_path.write_text(json.dumps(transaction), encoding="utf-8")
+    checkpoint_before = checkpoint_path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="checkpoint"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert checkpoint_path.read_bytes() == checkpoint_before
+    assert staged.read_bytes() == b"owned staging"
+    assert journal_path.exists()
+
+
+def test_recovery_rejects_duplicate_attempt_ids_across_participants_before_mutation(tmp_path):
+    output_root = tmp_path / "out"
+    checkpoint_dir = tmp_path / "checkpoint"
+    first = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name="sglang.gemm",
+        version="0.5.14",
+        done=["case-shared"],
+        failed=[],
+        attempted=["case-shared"],
+    )
+    second = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name="sglang.gemm_extra",
+        version="0.5.14",
+        done=["case-shared"],
+        failed=[],
+        attempted=["case-shared"],
+    )
+    staged = output_root / "mla_bmm_perf.txt"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"owned staging")
+    _write_sidecar_transaction(
+        output_root,
+        [(first, {"case-shared"}), (second, {"case-shared"})],
+        [staged],
+        checkpoint_dir=checkpoint_dir,
+        tagged=set(),
+        pending_document=True,
+    )
+    first_before = first.read_bytes()
+    second_before = second.read_bytes()
+    journal_path = output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME
+
+    with pytest.raises(RuntimeError, match="unique across"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert first.read_bytes() == first_before
+    assert second.read_bytes() == second_before
+    assert staged.read_bytes() == b"owned staging"
+    assert journal_path.exists()
+
+
+def test_recovery_rejects_unexpected_journal_field_before_mutation(tmp_path):
+    output_root = tmp_path / "out"
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staged = output_root / "gemm_perf.txt"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"owned staging")
+    _write_sidecar_transaction(
+        output_root,
+        [(checkpoint_path, {"case-a"})],
+        [staged],
+        checkpoint_dir=checkpoint_dir,
+        tagged={checkpoint_path},
+        pending_document=False,
+    )
+    journal_path = output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME
+    transaction = json.loads(journal_path.read_text(encoding="utf-8"))
+    transaction["unexpected"] = True
+    journal_path.write_text(json.dumps(transaction), encoding="utf-8")
+    checkpoint_before = checkpoint_path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="fields"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert checkpoint_path.read_bytes() == checkpoint_before
+    assert staged.read_bytes() == b"owned staging"
+    assert journal_path.exists()
 
 
 def test_closed_sidecar_transaction_allows_later_identical_case_plan_event(tmp_path):
@@ -825,7 +1399,7 @@ def test_closed_sidecar_transaction_allows_later_identical_case_plan_event(tmp_p
 
 def test_shared_table_hashes_and_closes_every_producing_op_only(tmp_path):
     output_root = tmp_path / "out"
-    parquet_path = output_root / "shared_perf.parquet"
+    parquet_path = output_root / "mla_bmm_perf.parquet"
     _write_parquet(parquet_path, [{"op": "shared", "latency": 1.0}])
     checkpoint_dir = tmp_path / "checkpoint"
     collections = [
@@ -834,14 +1408,14 @@ def test_shared_table_hashes_and_closes_every_producing_op_only(tmp_path):
             "type": "gemm",
             "module": REAL_MODULE,
             "run_func": "run",
-            "perf_filename": "shared_perf.txt",
+            "perf_filename": "mla_bmm_perf.txt",
         },
         {
             "name": BACKEND,
             "type": "gemm_extra",
             "module": REAL_MODULE,
             "run_func": "run",
-            "perf_filename": "shared_perf.txt",
+            "perf_filename": "mla_bmm_perf.txt",
         },
     ]
     first = _write_checkpoint_for(
@@ -882,7 +1456,7 @@ def test_shared_table_hashes_and_closes_every_producing_op_only(tmp_path):
         finalization_info=_finalization_info_for(parquet_path),
     )
 
-    table = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))["tables"]["shared_perf"]
+    table = yaml.safe_load((output_root / "collection_meta.yaml").read_text(encoding="utf-8"))["tables"]["mla_bmm_perf"]
     assert table["case_plan_hash"] == provenance.case_plan_hash(["case-a", "case-b", "case-c"])
     assert _attempted(first) == set()
     assert _attempted(second) == set()
@@ -911,6 +1485,240 @@ def test_resume_can_finalize_untouched_staging_file_with_pending_evidence(tmp_pa
 @pytest.mark.parametrize(
     ("field", "mismatched_value"),
     [
+        ("schema", "stale-schema"),
+        ("backend", "trtllm"),
+        ("module", "sglang.other"),
+        ("run_func", "other_run"),
+        ("framework_version", "0.5.13"),
+        ("sm_version", 90),
+        (None, None),
+    ],
+    ids=["schema", "backend", "module", "run-func", "framework-version", "sm", "unreadable"],
+)
+def test_pending_resume_rejects_shared_table_when_one_present_producer_is_invalid(
+    tmp_path,
+    field,
+    mismatched_value,
+):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    staged = output_root / "mla_bmm_perf.txt"
+    staged.write_text("op,latency\nmla_bmm,1.0\n", encoding="utf-8")
+    checkpoint_dir = tmp_path / "checkpoint"
+    first = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name="sglang.mla_bmm_gen_pre",
+        version="0.5.14",
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    second = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name="sglang.mla_bmm_gen_post",
+        version="0.5.14",
+        done=["case-b"],
+        failed=[],
+        attempted=["case-b"],
+    )
+    if field is None:
+        second.write_text("{not valid json", encoding="utf-8")
+    else:
+        checkpoint = json.loads(second.read_text(encoding="utf-8"))
+        checkpoint[field] = mismatched_value
+        second.write_text(json.dumps(checkpoint), encoding="utf-8")
+    second_before = second.read_bytes()
+
+    with pytest.raises(RuntimeError, match="checkpoint"):
+        collect_mod._pending_resume_perf_outputs(
+            output_root,
+            _provenance_ctx(_shared_collections()),
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            sm_version=100,
+        )
+
+    assert staged.exists()
+    assert _attempted(first) == {"case-a"}
+    assert second.read_bytes() == second_before
+
+
+@pytest.mark.parametrize(
+    ("field", "mismatched_value"),
+    [
+        ("schema", "stale-schema"),
+        ("backend", "trtllm"),
+        ("module", "sglang.other"),
+        ("run_func", "other_run"),
+        ("framework_version", "0.5.13"),
+        ("sm_version", 90),
+        (None, None),
+    ],
+    ids=["schema", "backend", "module", "run-func", "framework-version", "sm", "unreadable"],
+)
+def test_writer_rejects_shared_table_when_one_present_producer_is_invalid(
+    tmp_path,
+    field,
+    mismatched_value,
+):
+    output_root = tmp_path / "out"
+    parquet_path = output_root / "mla_bmm_perf.parquet"
+    _write_parquet(parquet_path, [{"op": "mla_bmm", "latency": 1.0}])
+    staged = output_root / "mla_bmm_perf.txt"
+    staged.write_text("op,latency\nmla_bmm,1.0\n", encoding="utf-8")
+    checkpoint_dir = tmp_path / "checkpoint"
+    first = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name="sglang.mla_bmm_gen_pre",
+        version="0.5.14",
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    second = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name="sglang.mla_bmm_gen_post",
+        version="0.5.14",
+        done=["case-b"],
+        failed=[],
+        attempted=["case-b"],
+    )
+    if field is None:
+        second.write_text("{not valid json", encoding="utf-8")
+    else:
+        checkpoint = json.loads(second.read_text(encoding="utf-8"))
+        checkpoint[field] = mismatched_value
+        second.write_text(json.dumps(checkpoint), encoding="utf-8")
+    second_before = second.read_bytes()
+
+    with pytest.raises(RuntimeError, match="checkpoint"):
+        collect_mod._write_collector_provenance(
+            output_root,
+            [parquet_path],
+            _provenance_ctx(_shared_collections()),
+            run_errors=[],
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            finalization_info=_finalization_info_for(parquet_path),
+        )
+
+    assert not (output_root / "collection_meta.yaml").exists()
+    assert staged.exists()
+    assert _attempted(first) == {"case-a"}
+    assert second.read_bytes() == second_before
+
+
+def test_pending_resume_rejects_shared_table_with_missing_selected_producer_checkpoint(tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    staged = output_root / "mla_bmm_perf.txt"
+    staged.write_text("op,latency\nmla_bmm,1.0\n", encoding="utf-8")
+    checkpoint_dir = tmp_path / "checkpoint"
+    first = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name="sglang.mla_bmm_gen_pre",
+        version="0.5.14",
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+
+    with pytest.raises(RuntimeError, match="no checkpoint"):
+        collect_mod._pending_resume_perf_outputs(
+            output_root,
+            _provenance_ctx(_shared_collections()),
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            sm_version=100,
+        )
+
+    assert staged.exists()
+    assert _attempted(first) == {"case-a"}
+
+
+def test_writer_rejects_shared_table_with_missing_selected_producer_checkpoint(tmp_path):
+    output_root = tmp_path / "out"
+    parquet_path = output_root / "mla_bmm_perf.parquet"
+    _write_parquet(parquet_path, [{"op": "mla_bmm", "latency": 1.0}])
+    staged = output_root / "mla_bmm_perf.txt"
+    staged.write_text("op,latency\nmla_bmm,1.0\n", encoding="utf-8")
+    checkpoint_dir = tmp_path / "checkpoint"
+    first = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name="sglang.mla_bmm_gen_pre",
+        version="0.5.14",
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+
+    with pytest.raises(RuntimeError, match="no checkpoint"):
+        collect_mod._write_collector_provenance(
+            output_root,
+            [parquet_path],
+            _provenance_ctx(_shared_collections()),
+            run_errors=[],
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            finalization_info=_finalization_info_for(parquet_path),
+        )
+
+    assert not (output_root / "collection_meta.yaml").exists()
+    assert staged.exists()
+    assert _attempted(first) == {"case-a"}
+
+
+def test_filtered_shared_table_collection_uses_only_selected_producer(tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    staged = output_root / "mla_bmm_perf.txt"
+    staged.write_text("op,latency\nmla_bmm,1.0\n", encoding="utf-8")
+    parquet_path = output_root / "mla_bmm_perf.parquet"
+    _write_parquet(parquet_path, [{"op": "mla_bmm", "latency": 1.0}])
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name="sglang.mla_bmm_gen_pre",
+        version="0.5.14",
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    selected_collections = [_shared_collections()[0]]
+    ctx = _provenance_ctx(selected_collections)
+
+    assert collect_mod._pending_resume_perf_outputs(
+        output_root,
+        ctx,
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        sm_version=100,
+    ) == [staged]
+
+    collect_mod._write_collector_provenance(
+        output_root,
+        [parquet_path],
+        ctx,
+        run_errors=[],
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        finalization_info=_finalization_info_for(parquet_path),
+    )
+
+    assert (output_root / "collection_meta.yaml").exists()
+    assert _attempted(checkpoint_path) == set()
+
+
+@pytest.mark.parametrize(
+    ("field", "mismatched_value"),
+    [
         ("schema", 999),
         ("backend", "trtllm"),
         ("module", "sglang.other"),
@@ -919,7 +1727,7 @@ def test_resume_can_finalize_untouched_staging_file_with_pending_evidence(tmp_pa
         ("sm_version", 90),
     ],
 )
-def test_pending_resume_ignores_checkpoint_with_mismatched_runtime_identity(
+def test_pending_resume_rejects_checkpoint_with_mismatched_runtime_identity(
     tmp_path,
     field,
     mismatched_value,
@@ -934,7 +1742,7 @@ def test_pending_resume_ignores_checkpoint_with_mismatched_runtime_identity(
     checkpoint[field] = mismatched_value
     checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
 
-    assert (
+    with pytest.raises(RuntimeError, match="checkpoint mismatch"):
         collect_mod._pending_resume_perf_outputs(
             output_root,
             _provenance_ctx(_collections()),
@@ -942,8 +1750,8 @@ def test_pending_resume_ignores_checkpoint_with_mismatched_runtime_identity(
             checkpoint_dir=str(checkpoint_dir),
             sm_version=100,
         )
-        == []
-    )
+    assert staged.exists()
+    assert _attempted(checkpoint_path) == {"stale-case"}
 
 
 def test_provenance_writer_rejects_mismatched_checkpoint_identity(tmp_path):
@@ -956,7 +1764,7 @@ def test_provenance_writer_rejects_mismatched_checkpoint_identity(tmp_path):
     checkpoint["framework_version"] = "0.5.13"
     checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="Zero attempted cases"):
+    with pytest.raises(RuntimeError, match="checkpoint mismatch"):
         collect_mod._write_collector_provenance(
             output_root,
             [parquet_path],
