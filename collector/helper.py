@@ -11,6 +11,8 @@ case files; this file should stay focused on reusable execution mechanics.
 """
 
 import csv
+import ctypes
+import errno
 import functools
 import hashlib
 import heapq
@@ -26,12 +28,13 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterable
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import BinaryIO, Optional, Protocol
 
 import numpy as np
 
@@ -843,7 +846,47 @@ class _PreparedPerfFile:
     temporary: Path
     temporary_device: int
     temporary_inode: int
+    source_mode: int
     info: PerfFinalizationInfo
+    merge_target: "PerfFileAttestation | None"
+    merge_target_was_absent: bool
+
+
+@dataclass(frozen=True)
+class PerfFileAttestation:
+    """Exact identity and bytes of one regular finalization artifact."""
+
+    path: Path
+    digest: str
+    device: int
+    inode: int
+    mode: int
+
+    @property
+    def identity(self) -> tuple[int, int]:
+        return self.device, self.inode
+
+
+@dataclass(frozen=True)
+class PerfPublication:
+    """Prepared replacement plus the exact target state it may replace."""
+
+    source: PerfFileAttestation
+    target: Path
+    prepared: PerfFileAttestation
+    previous_target: PerfFileAttestation | None
+    target_claim: Path | None
+    info: PerfFinalizationInfo
+
+
+class PerfPublicationTransaction(Protocol):
+    """Durable owner for a collector parquet publication batch."""
+
+    def prepare(self, publications: tuple[PerfPublication, ...]) -> None: ...
+
+    def rollback_complete(self, publications: tuple[PerfPublication, ...]) -> None: ...
+
+    def has_durable_journal(self) -> bool: ...
 
 
 def convert_perf_csv_to_parquet(
@@ -886,6 +929,7 @@ def convert_perf_csv_to_parquet(
         finalization_info=finalization_info,
         prepublish_validate=None,
         expected_source_identities=None,
+        publication_transaction=None,
     )[0]
 
 
@@ -896,6 +940,469 @@ def _stream_digest(file, *, copy_to=None) -> str:
         if copy_to is not None:
             copy_to.write(chunk)
     return "sha256:" + digest.hexdigest()
+
+
+def _fsync_directory(directory: Path) -> None:
+    directory_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _rename_noreplace(source: Path, target: Path) -> None:
+    """Atomically move one path only while the destination is absent."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    target_bytes = os.fsencode(target)
+    if sys.platform.startswith("linux"):
+        try:
+            rename = libc.renameat2
+        except AttributeError as error:
+            raise RuntimeError("Atomic no-replace rename is unavailable on this platform") from error
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(-100, source_bytes, -100, target_bytes, 1)
+    elif sys.platform == "darwin":
+        try:
+            rename = libc.renamex_np
+        except AttributeError as error:
+            raise RuntimeError("Atomic no-replace rename is unavailable on this platform") from error
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(source_bytes, target_bytes, 0x00000004)
+    else:
+        raise RuntimeError("Atomic no-replace rename is unavailable on this platform")
+    if result != 0:
+        error_number = ctypes.get_errno()
+        if error_number in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP):
+            raise RuntimeError("Atomic no-replace rename is unsupported by this filesystem")
+        raise OSError(error_number, os.strerror(error_number), str(source), str(target))
+    _fsync_directory(source.parent)
+    if target.parent != source.parent:
+        _fsync_directory(target.parent)
+
+
+def _attest_regular_file(
+    path: Path,
+    *,
+    expected_identity: tuple[int, int] | None = None,
+    expected_digest: str | None = None,
+    expected_mode: int | None = None,
+) -> PerfFileAttestation:
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"Collector finalization artifact is not a regular file: {path}")
+    with path.open("rb") as artifact:
+        opened = os.fstat(artifact.fileno())
+        digest = _stream_digest(artifact)
+    current = path.lstat()
+    identity = (opened.st_dev, opened.st_ino)
+    opened_mode = stat.S_IMODE(opened.st_mode)
+    current_mode = stat.S_IMODE(current.st_mode)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or identity != (current.st_dev, current.st_ino)
+        or opened_mode != current_mode
+        or (expected_identity is not None and identity != expected_identity)
+        or (expected_digest is not None and digest != expected_digest)
+        or (expected_mode is not None and opened_mode != expected_mode)
+    ):
+        raise RuntimeError(f"Collector finalization artifact changed: {path}")
+    return PerfFileAttestation(
+        path=path,
+        digest=digest,
+        device=opened.st_dev,
+        inode=opened.st_ino,
+        mode=opened_mode,
+    )
+
+
+def _snapshot_perf_target(target: Path) -> tuple[PerfFileAttestation | None, Path | None]:
+    if target.is_symlink() or (target.exists() and not target.is_file()):
+        raise RuntimeError(f"Cannot replace non-regular collector parquet file: {target}")
+    if not target.exists():
+        return None, None
+    previous_target = _attest_regular_file(target)
+    target_claim = target.with_name(f".{target.name}.{uuid.uuid4().hex}.claim")
+    if target_claim.exists() or target_claim.is_symlink():
+        raise RuntimeError(f"Collector parquet target claim already exists: {target_claim}")
+    return previous_target, target_claim
+
+
+def _prepare_perf_publications(prepared: list[_PreparedPerfFile]) -> list[PerfPublication]:
+    publications: list[PerfPublication] = []
+    for item in prepared:
+        prepared_attestation = _attest_regular_file(
+            item.temporary,
+            expected_identity=(item.temporary_device, item.temporary_inode),
+        )
+        previous_target, target_claim = _snapshot_perf_target(item.target)
+        if item.merge_target_was_absent and previous_target is not None:
+            raise RuntimeError(f"Collector parquet target changed after merge preparation: {item.target}")
+        if item.merge_target is not None and (
+            previous_target is None
+            or previous_target.identity != item.merge_target.identity
+            or previous_target.digest != item.merge_target.digest
+            or previous_target.mode != item.merge_target.mode
+        ):
+            raise RuntimeError(f"Collector parquet target changed after merge preparation: {item.target}")
+        source = _attest_regular_file(
+            item.source,
+            expected_identity=(item.info.source_device, item.info.source_inode),
+            expected_digest=item.info.source_digest,
+            expected_mode=item.source_mode,
+        )
+        publications.append(
+            PerfPublication(
+                source=source,
+                target=item.target,
+                prepared=prepared_attestation,
+                previous_target=previous_target,
+                target_claim=target_claim,
+                info=item.info,
+            )
+        )
+    return publications
+
+
+def _remove_attested_file(attestation: PerfFileAttestation) -> None:
+    try:
+        current = attestation.path.lstat()
+    except FileNotFoundError:
+        _fsync_directory(attestation.path.parent)
+        return
+    _attest_regular_file(
+        attestation.path,
+        expected_identity=attestation.identity,
+        expected_digest=attestation.digest,
+        expected_mode=attestation.mode,
+    )
+    current = attestation.path.lstat()
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or (current.st_dev, current.st_ino) != attestation.identity
+        or stat.S_IMODE(current.st_mode) != attestation.mode
+    ):
+        raise RuntimeError(f"Collector finalization artifact changed before cleanup: {attestation.path}")
+    attestation.path.unlink()
+    _fsync_directory(attestation.path.parent)
+
+
+def _same_perf_file(current: PerfFileAttestation, expected: PerfFileAttestation) -> bool:
+    return current.identity == expected.identity and current.digest == expected.digest and current.mode == expected.mode
+
+
+def _attest_expected_perf_file(path: Path, expected: PerfFileAttestation) -> PerfFileAttestation:
+    return _attest_regular_file(
+        path,
+        expected_identity=expected.identity,
+        expected_digest=expected.digest,
+        expected_mode=expected.mode,
+    )
+
+
+def _path_absent(path: Path) -> bool:
+    return not path.exists() and not path.is_symlink()
+
+
+def _restore_unknown_private_path(private_path: Path, target: Path, *, context: str) -> None:
+    if _path_absent(target):
+        try:
+            _rename_noreplace(private_path, target)
+        except Exception as error:
+            raise RuntimeError(
+                f"Collector parquet {context} changed; preserved unknown object at {private_path}"
+            ) from error
+    raise RuntimeError(f"Collector parquet {context} changed: {target}")
+
+
+def _validate_unpublished_perf_publications(publications: Iterable[PerfPublication]) -> None:
+    for publication in publications:
+        _attest_expected_perf_file(publication.source.path, publication.source)
+        _attest_expected_perf_file(publication.prepared.path, publication.prepared)
+        if publication.target_claim is not None and not _path_absent(publication.target_claim):
+            raise RuntimeError(f"Collector parquet target claim changed: {publication.target_claim}")
+        if publication.previous_target is None:
+            if not _path_absent(publication.target):
+                raise RuntimeError(f"Collector parquet target changed before publication: {publication.target}")
+        else:
+            _attest_expected_perf_file(publication.target, publication.previous_target)
+
+
+def _snapshot_legacy_perf_targets(
+    publications: Iterable[PerfPublication],
+    *,
+    snapshot_stack: ExitStack,
+) -> dict[Path, BinaryIO | None]:
+    """Keep anonymous old-target bytes for ordinary exception rollback."""
+    snapshots: dict[Path, BinaryIO | None] = {}
+    for publication in publications:
+        previous = publication.previous_target
+        if previous is None:
+            snapshots[publication.target] = None
+            continue
+        snapshot = snapshot_stack.enter_context(
+            tempfile.TemporaryFile(  # noqa: SIM115 - the stack owns the long-lived file
+                dir=publication.target.parent
+            )
+        )
+        with publication.target.open("rb") as target_file:
+            opened = os.fstat(target_file.fileno())
+            digest = _stream_digest(target_file, copy_to=snapshot)
+        current = publication.target.lstat()
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or (opened.st_dev, opened.st_ino) != previous.identity
+            or (current.st_dev, current.st_ino) != previous.identity
+            or digest != previous.digest
+            or stat.S_IMODE(opened.st_mode) != previous.mode
+            or stat.S_IMODE(current.st_mode) != previous.mode
+        ):
+            raise RuntimeError(f"Collector parquet target changed before publication: {publication.target}")
+        snapshot.flush()
+        os.fsync(snapshot.fileno())
+        snapshot.seek(0)
+        snapshots[publication.target] = snapshot
+    return snapshots
+
+
+def _validate_legacy_perf_rollback(publications: Iterable[PerfPublication]) -> None:
+    for publication in publications:
+        previous = publication.previous_target
+        if previous is None:
+            if not _path_absent(publication.target):
+                raise RuntimeError(f"Collector parquet target is not restored: {publication.target}")
+            continue
+        _attest_regular_file(
+            publication.target,
+            expected_digest=previous.digest,
+            expected_mode=previous.mode,
+        )
+
+
+def _restore_legacy_perf_publications(
+    publications: Iterable[PerfPublication],
+    snapshots: dict[Path, BinaryIO | None],
+) -> None:
+    for publication in reversed(list(publications)):
+        previous = publication.previous_target
+        if _path_absent(publication.target):
+            if previous is None:
+                continue
+            raise RuntimeError(f"Collector parquet target disappeared during rollback: {publication.target}")
+        current = _attest_regular_file(publication.target)
+        if previous is not None and _same_perf_file(current, previous):
+            continue
+        if not _same_perf_file(current, publication.prepared):
+            raise RuntimeError(f"Collector parquet target changed during rollback: {publication.target}")
+        if previous is None:
+            publication.target.unlink()
+            _fsync_directory(publication.target.parent)
+            continue
+
+        snapshot = snapshots[publication.target]
+        if snapshot is None:
+            raise RuntimeError(f"Missing collector parquet rollback snapshot: {publication.target}")
+        restore_path: Path | None = None
+        restore_identity: tuple[int, int] | None = None
+        try:
+            snapshot.seek(0)
+            with tempfile.NamedTemporaryFile(
+                dir=publication.target.parent,
+                prefix=f".{publication.target.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as restore_file:
+                restore_path = Path(restore_file.name)
+                restore_stat = os.fstat(restore_file.fileno())
+                restore_identity = (restore_stat.st_dev, restore_stat.st_ino)
+                shutil.copyfileobj(snapshot, restore_file)
+                restore_file.flush()
+                os.fchmod(restore_file.fileno(), previous.mode)
+                os.fsync(restore_file.fileno())
+            os.replace(restore_path, publication.target)
+            _fsync_directory(publication.target.parent)
+            _attest_regular_file(
+                publication.target,
+                expected_digest=previous.digest,
+                expected_mode=previous.mode,
+            )
+        finally:
+            if (
+                restore_path is not None
+                and restore_identity is not None
+                and _is_owned_temporary(restore_path, *restore_identity)
+            ):
+                restore_path.unlink()
+    _validate_legacy_perf_rollback(publications)
+
+
+def _publish_perf_publication(publication: PerfPublication) -> None:
+    previous = publication.previous_target
+    claim = publication.target_claim
+    if previous is not None:
+        if claim is None:
+            raise RuntimeError(f"Missing collector parquet target claim: {publication.target}")
+        _rename_noreplace(publication.target, claim)
+        try:
+            _attest_expected_perf_file(claim, previous)
+        except Exception as error:
+            try:
+                _restore_unknown_private_path(claim, publication.target, context="target claim")
+            except RuntimeError as restore_error:
+                raise restore_error from error
+            raise
+    elif claim is not None:
+        raise RuntimeError(f"Unexpected collector parquet target claim: {claim}")
+
+    _rename_noreplace(publication.prepared.path, publication.target)
+    _attest_expected_perf_file(publication.target, publication.prepared)
+
+
+def _private_perf_state(
+    path: Path,
+    expected: PerfFileAttestation,
+    *,
+    target: Path,
+    context: str,
+) -> PerfFileAttestation | None:
+    if _path_absent(path):
+        return None
+    try:
+        return _attest_expected_perf_file(path, expected)
+    except Exception as error:
+        try:
+            _restore_unknown_private_path(path, target, context=context)
+        except RuntimeError as restore_error:
+            raise restore_error from error
+        raise
+
+
+def _restore_one_perf_publication(publication: PerfPublication) -> None:
+    target = publication.target
+    previous = publication.previous_target
+    claim = publication.target_claim
+    claim_state = None
+    if claim is not None:
+        if previous is None:
+            raise RuntimeError(f"Unexpected collector parquet target claim: {claim}")
+        claim_state = _private_perf_state(
+            claim,
+            previous,
+            target=target,
+            context="target claim",
+        )
+    prepared_state = _private_perf_state(
+        publication.prepared.path,
+        publication.prepared,
+        target=target,
+        context="prepared claim",
+    )
+
+    if _path_absent(target):
+        if previous is None:
+            return
+        if claim_state is None or claim is None:
+            raise RuntimeError(f"Collector parquet target disappeared during rollback: {target}")
+        _rename_noreplace(claim, target)
+        _attest_expected_perf_file(target, previous)
+        return
+
+    current = _attest_regular_file(target)
+    if previous is not None and _same_perf_file(current, previous):
+        return
+    if not _same_perf_file(current, publication.prepared):
+        raise RuntimeError(f"Collector parquet target changed during rollback: {target}")
+    if prepared_state is not None:
+        raise RuntimeError(f"Collector prepared claim unexpectedly exists during rollback: {publication.prepared.path}")
+
+    _rename_noreplace(target, publication.prepared.path)
+    try:
+        _attest_expected_perf_file(publication.prepared.path, publication.prepared)
+    except Exception as error:
+        try:
+            _restore_unknown_private_path(
+                publication.prepared.path,
+                target,
+                context="prepared rollback claim",
+            )
+        except RuntimeError as restore_error:
+            raise restore_error from error
+        raise
+    if previous is not None:
+        if claim_state is None or claim is None:
+            raise RuntimeError(f"Missing collector parquet target claim during rollback: {target}")
+        _rename_noreplace(claim, target)
+        _attest_expected_perf_file(target, previous)
+
+
+def _restore_perf_publications(publications: Iterable[PerfPublication]) -> None:
+    errors: list[Exception] = []
+    for publication in reversed(list(publications)):
+        try:
+            _restore_one_perf_publication(publication)
+        except Exception as error:
+            errors.append(error)
+    if errors:
+        raise RuntimeError(f"Collector parquet rollback retained strict recovery state: {errors[0]}") from errors[0]
+
+
+def validate_restored_perf_publications(publications: Iterable[PerfPublication]) -> None:
+    """Verify every target is exactly in one journaled pre-publish state."""
+    for publication in publications:
+        target = publication.target
+        previous = publication.previous_target
+        claim = publication.target_claim
+        if _path_absent(target):
+            if previous is None:
+                continue
+            raise RuntimeError(f"Collector parquet target disappeared after rollback: {target}")
+        if previous is None:
+            raise RuntimeError(f"Collector parquet target is not restored: {target}")
+        _attest_expected_perf_file(target, previous)
+        if claim is not None and not _path_absent(claim):
+            raise RuntimeError(f"Collector parquet target claim was not cleared after rollback: {claim}")
+
+
+def restore_perf_publications(publications: Iterable[PerfPublication]) -> None:
+    """Restore an attested publication batch to its exact pre-publish bytes."""
+    publication_list = list(publications)
+    _restore_perf_publications(publication_list)
+    validate_restored_perf_publications(publication_list)
+
+
+def cleanup_perf_publication_artifacts(publications: Iterable[PerfPublication]) -> None:
+    """Remove only transaction-owned prepared files and old-target claims."""
+    publication_list = list(publications)
+    for publication in publication_list:
+        prepared = publication.prepared
+        target_is_published = False
+        if not _path_absent(publication.target):
+            target_is_published = _same_perf_file(
+                _attest_regular_file(publication.target),
+                prepared,
+            )
+        if target_is_published:
+            if not _path_absent(prepared.path):
+                raise RuntimeError(f"Collector prepared claim unexpectedly exists during cleanup: {prepared.path}")
+        else:
+            _remove_attested_file(prepared)
+        claim = publication.target_claim
+        previous = publication.previous_target
+        if claim is not None and not _path_absent(claim):
+            if previous is None:
+                raise RuntimeError(f"Unexpected collector parquet target claim: {claim}")
+            _remove_attested_file(
+                PerfFileAttestation(
+                    path=claim,
+                    digest=previous.digest,
+                    device=previous.device,
+                    inode=previous.inode,
+                    mode=previous.mode,
+                )
+            )
 
 
 def _validate_prepared_source(item: _PreparedPerfFile, *, context: str) -> None:
@@ -911,6 +1418,8 @@ def _validate_prepared_source(item: _PreparedPerfFile, *, context: str) -> None:
         or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
         or (opened.st_dev, opened.st_ino) != (item.info.source_device, item.info.source_inode)
         or source_digest != item.info.source_digest
+        or stat.S_IMODE(opened.st_mode) != item.source_mode
+        or stat.S_IMODE(current.st_mode) != item.source_mode
     ):
         raise RuntimeError(f"Collector staging file changed {context}: {item.source}")
 
@@ -949,6 +1458,30 @@ def _validate_perf_file_paths(csv_path: Path) -> tuple[Path, Path]:
     return parquet_path, merge_lock
 
 
+def _read_attested_parquet(parquet_path: Path, *, pq):
+    with parquet_path.open("rb") as parquet_file, tempfile.TemporaryFile(dir=parquet_path.parent) as snapshot_file:
+        opened = os.fstat(parquet_file.fileno())
+        digest = _stream_digest(parquet_file, copy_to=snapshot_file)
+        snapshot_file.flush()
+        snapshot_file.seek(0)
+        table = pq.read_table(snapshot_file)
+    current = parquet_path.lstat()
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        or stat.S_IMODE(opened.st_mode) != stat.S_IMODE(current.st_mode)
+    ):
+        raise RuntimeError(f"Collector parquet target changed while preparing merge: {parquet_path}")
+    return table, PerfFileAttestation(
+        path=parquet_path,
+        digest=digest,
+        device=opened.st_dev,
+        inode=opened.st_ino,
+        mode=stat.S_IMODE(opened.st_mode),
+    )
+
+
 def _prepare_perf_file(
     csv_path: Path,
     parquet_path: Path,
@@ -963,7 +1496,7 @@ def _prepare_perf_file(
 ) -> _PreparedPerfFile:
     with csv_path.open("rb") as source_file, tempfile.TemporaryFile(dir=parquet_path.parent) as snapshot_file:
         source_stat = os.fstat(source_file.fileno())
-        source_mode = source_stat.st_mode & 0o666
+        source_mode = stat.S_IMODE(source_stat.st_mode)
         source_digest = _stream_digest(source_file, copy_to=snapshot_file)
         if (
             expected_source_identity is not None
@@ -979,8 +1512,16 @@ def _prepare_perf_file(
         table = pc_csv.read_csv(snapshot_file)
     new_rows = table.num_rows
     merged_existing = False
-    if merge_existing and parquet_path.exists():
-        table, merged_existing, new_rows = _merge_perf_rows(table, parquet_path, pa=pa, pq=pq)
+    merge_target = None
+    merge_target_was_absent = False
+    if merge_existing:
+        try:
+            parquet_path.lstat()
+        except FileNotFoundError:
+            merge_target_was_absent = True
+        else:
+            old_table, merge_target = _read_attested_parquet(parquet_path, pq=pq)
+            table, merged_existing, new_rows = _merge_perf_rows(table, old_table, parquet_path, pa=pa)
     table = _normalize_power_metrics(table, pa=pa, pc=pc_compute)
 
     temporary: Path | None = None
@@ -998,12 +1539,14 @@ def _prepare_perf_file(
             pq.write_table(table, temp_file, compression=compression)
             temp_file.flush()
             os.fchmod(temp_file.fileno(), source_mode)
+            os.fsync(temp_file.fileno())
         prepared = _PreparedPerfFile(
             source=csv_path,
             target=parquet_path,
             temporary=temporary,
             temporary_device=temporary_identity[0],
             temporary_inode=temporary_identity[1],
+            source_mode=source_mode,
             info=PerfFinalizationInfo(
                 new_rows=new_rows,
                 merged_existing=merged_existing,
@@ -1011,6 +1554,8 @@ def _prepare_perf_file(
                 source_device=source_stat.st_dev,
                 source_inode=source_stat.st_ino,
             ),
+            merge_target=merge_target,
+            merge_target_was_absent=merge_target_was_absent,
         )
         _require_owned_temporary(prepared)
         return prepared
@@ -1031,8 +1576,11 @@ def _finalize_perf_file_batch(
     finalization_info: dict[Path, PerfFinalizationInfo] | None,
     prepublish_validate: Callable[[], None] | None,
     expected_source_identities: dict[Path, tuple[str, int, int]] | None,
+    publication_transaction: PerfPublicationTransaction | None,
 ) -> list[Path]:
     """Prepare every conversion before publishing any parquet target."""
+    if publication_transaction is not None and delete_source:
+        raise ValueError("A durable perf publication transaction must retain its staging files")
     try:
         import pyarrow as pa
         import pyarrow.compute as pc_compute
@@ -1055,6 +1603,9 @@ def _finalize_perf_file_batch(
     seen_inputs: set[tuple[int, int, tuple[int, int, str]]] = set()
     opened_locks: dict[tuple[int, int], int] = {}
     prepared: list[_PreparedPerfFile] = []
+    publications: list[PerfPublication] = []
+    legacy_snapshots: dict[Path, BinaryIO | None] = {}
+    legacy_snapshot_stack = ExitStack()
     try:
         for item in validated_inputs:
             source_stat = item[0].lstat()
@@ -1104,9 +1655,33 @@ def _finalize_perf_file_batch(
                 _validate_prepared_source(item, context="after prepublish validation")
                 _require_owned_temporary(item)
 
-        for item in prepared:
-            _require_owned_temporary(item)
-            os.replace(item.temporary, item.target)
+        publications = _prepare_perf_publications(prepared)
+        if publication_transaction is not None:
+            publication_transaction.prepare(tuple(publications))
+        else:
+            legacy_snapshots = _snapshot_legacy_perf_targets(
+                publications,
+                snapshot_stack=legacy_snapshot_stack,
+            )
+        _validate_unpublished_perf_publications(publications)
+        try:
+            for publication in publications:
+                if publication_transaction is None:
+                    os.replace(publication.prepared.path, publication.target)
+                    _fsync_directory(publication.target.parent)
+                    _attest_expected_perf_file(publication.target, publication.prepared)
+                else:
+                    _publish_perf_publication(publication)
+        except Exception:
+            if publication_transaction is None:
+                _restore_legacy_perf_publications(publications, legacy_snapshots)
+                cleanup_perf_publication_artifacts(publications)
+            else:
+                _restore_perf_publications(publications)
+                publication_transaction.rollback_complete(tuple(publications))
+            raise
+        if publication_transaction is None:
+            cleanup_perf_publication_artifacts(publications)
 
         if delete_source:
             for item in prepared:
@@ -1118,8 +1693,10 @@ def _finalize_perf_file_batch(
             finalization_info.update({item.target.resolve(): item.info for item in prepared})
         return [item.target for item in prepared]
     finally:
+        legacy_snapshot_stack.close()
         for item in prepared:
-            _remove_owned_temporary(item)
+            if publication_transaction is None or not publication_transaction.has_durable_journal():
+                _remove_owned_temporary(item)
         for lock_fd in opened_locks.values():
             _release_merge_lock(lock_fd)
 
@@ -1224,7 +1801,7 @@ def _release_merge_lock(lock_fd: int) -> None:
     os.close(lock_fd)  # closing releases the flock
 
 
-def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
+def _merge_perf_rows(new_table, old_table, parquet_path: Path, *, pa):
     """Merge freshly-collected rows into an existing perf parquet, keeping the
     newest row per identity key. Returns ``(table, merged_existing,
     current_event_rows)``; schema incompatibility returns the new table with
@@ -1232,7 +1809,6 @@ def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
     import pandas as pd
 
     log = logging.getLogger(__name__)
-    old_table = pq.read_table(parquet_path)
 
     # Compare (name, type) pairs for IDENTITY columns only: matching names
     # with drifted types would otherwise round-trip through pandas and
@@ -1338,6 +1914,7 @@ def finalize_perf_files(
     finalization_info: dict[Path, PerfFinalizationInfo] | None = None,
     prepublish_validate: Callable[[], None] | None = None,
     expected_source_identities: dict[Path, tuple[str, int, int]] | None = None,
+    publication_transaction: PerfPublicationTransaction | None = None,
 ) -> list[Path]:
     """Finalize explicit collector CSV staging files as parquet.
 
@@ -1347,6 +1924,8 @@ def finalize_perf_files(
     When provided, ``finalization_info`` receives each staging file's finalized
     current-event row contribution and whether an existing parquet took the
     compatible merge path, plus the digest of the exact staging bytes parsed.
+    ``publication_transaction`` may durably bind the prepared batch before any
+    target is replaced; transactional callers must retain their staging files.
     """
     selected = [
         csv_file
@@ -1365,6 +1944,7 @@ def finalize_perf_files(
         finalization_info=finalization_info,
         prepublish_validate=prepublish_validate,
         expected_source_identities=expected_source_identities,
+        publication_transaction=publication_transaction,
     )
 
 

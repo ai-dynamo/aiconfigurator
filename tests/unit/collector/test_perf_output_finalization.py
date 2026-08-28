@@ -151,6 +151,111 @@ def test_finalize_perf_files_prepares_every_input_before_publishing_any(tmp_path
     assert list(tmp_path.glob(".*.tmp")) == []
 
 
+def test_finalize_perf_files_rolls_back_every_target_when_second_publish_fails(tmp_path, monkeypatch):
+    first = tmp_path / "gemm_perf.txt"
+    second = tmp_path / "moe_perf.txt"
+    first_parquet = first.with_suffix(".parquet")
+    second_parquet = second.with_suffix(".parquet")
+    first.write_text("shape,latency\nnew-gemm,1.0\n", encoding="utf-8")
+    second.write_text("shape,latency\nnew-moe,2.0\n", encoding="utf-8")
+    pq.write_table(pa.table({"shape": ["old-gemm"], "latency": [9.0]}), first_parquet)
+    pq.write_table(pa.table({"shape": ["old-moe"], "latency": [8.0]}), second_parquet)
+    parquet_before = {path: path.read_bytes() for path in (first_parquet, second_parquet)}
+    staging_before = {path: path.read_bytes() for path in (first, second)}
+    real_replace = helper_mod.os.replace
+    failed = False
+
+    def fail_second_publish(source, target):
+        nonlocal failed
+        if Path(target) == second_parquet and not failed:
+            failed = True
+            raise OSError("simulated second parquet publish failure")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(helper_mod.os, "replace", fail_second_publish)
+    finalization_info = {}
+
+    with pytest.raises(OSError, match="simulated second parquet publish failure"):
+        finalize_perf_files([first, second], delete_source=False, finalization_info=finalization_info)
+
+    assert {path: path.read_bytes() for path in (first_parquet, second_parquet)} == parquet_before
+    assert {path: path.read_bytes() for path in (first, second)} == staging_before
+    assert finalization_info == {}
+
+
+def test_finalize_perf_files_without_transaction_never_uses_private_claims(tmp_path, monkeypatch):
+    perf = tmp_path / "gemm_perf.txt"
+    parquet = perf.with_suffix(".parquet")
+    perf.write_text("shape,latency\nnew,1.0\n", encoding="utf-8")
+    pq.write_table(pa.table({"shape": ["old"], "latency": [9.0]}), parquet)
+
+    def reject_unjournaled_claim(*_args, **_kwargs):
+        raise AssertionError("non-transactional publication must stay a single atomic replace")
+
+    monkeypatch.setattr(helper_mod, "_rename_noreplace", reject_unjournaled_claim)
+
+    finalize_perf_files([perf], delete_source=False)
+
+    assert {row["shape"] for row in pq.read_table(parquet).to_pylist()} == {"old", "new"}
+    assert list(tmp_path.glob(".*.claim")) == []
+
+
+def test_finalize_perf_files_rejects_target_appearing_after_merge_observed_absence(tmp_path, monkeypatch):
+    perf = tmp_path / "gemm_perf.txt"
+    parquet = perf.with_suffix(".parquet")
+    perf.write_text("shape,latency\nnew,1.0\n", encoding="utf-8")
+    real_prepare_publications = helper_mod._prepare_perf_publications
+    concurrent_bytes = None
+
+    def create_target_before_publication(prepared):
+        nonlocal concurrent_bytes
+        pq.write_table(pa.table({"shape": ["concurrent"], "latency": [9.0]}), parquet)
+        concurrent_bytes = parquet.read_bytes()
+        return real_prepare_publications(prepared)
+
+    monkeypatch.setattr(helper_mod, "_prepare_perf_publications", create_target_before_publication)
+    finalization_info = {}
+
+    with pytest.raises(RuntimeError, match="changed after merge preparation"):
+        finalize_perf_files([perf], delete_source=False, finalization_info=finalization_info)
+
+    assert concurrent_bytes is not None
+    assert parquet.read_bytes() == concurrent_bytes
+    assert perf.exists()
+    assert finalization_info == {}
+    assert list(tmp_path.glob(".*.rollback")) == []
+
+
+def test_finalize_perf_files_cleans_rollback_backup_when_transaction_prepare_fails(tmp_path):
+    perf = tmp_path / "gemm_perf.txt"
+    parquet = perf.with_suffix(".parquet")
+    perf.write_text("shape,latency\nnew,1.0\n", encoding="utf-8")
+    pq.write_table(pa.table({"shape": ["old"], "latency": [9.0]}), parquet)
+    parquet_before = parquet.read_bytes()
+
+    class RejectingPublicationTransaction:
+        def prepare(self, _publications):
+            raise RuntimeError("simulated transaction prepare failure")
+
+        def rollback_complete(self, _publications):
+            raise AssertionError("publication never started")
+
+        def has_durable_journal(self):
+            return False
+
+    with pytest.raises(RuntimeError, match="simulated transaction prepare failure"):
+        finalize_perf_files(
+            [perf],
+            delete_source=False,
+            publication_transaction=RejectingPublicationTransaction(),
+        )
+
+    assert parquet.read_bytes() == parquet_before
+    assert perf.exists()
+    assert list(tmp_path.glob(".*.rollback")) == []
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
 def test_finalize_perf_files_never_reopens_or_publishes_replaced_temporary(tmp_path, monkeypatch):
     perf = tmp_path / "gemm_perf.txt"
     perf.write_text("shape,latency\ns1,1.0\n", encoding="utf-8")
@@ -177,6 +282,72 @@ def test_finalize_perf_files_never_reopens_or_publishes_replaced_temporary(tmp_p
     assert outside_victim.read_bytes() == victim_before
     assert not perf.with_suffix(".parquet").exists()
     assert finalization_info == {}
+
+
+def test_perf_attestation_rejects_execute_bit_change(tmp_path):
+    artifact = tmp_path / "artifact.parquet"
+    artifact.write_bytes(b"parquet bytes")
+    artifact.chmod(0o600)
+    attestation = helper_mod._attest_regular_file(artifact)
+    artifact.chmod(0o700)
+
+    with pytest.raises(RuntimeError, match="changed"):
+        helper_mod._attest_expected_perf_file(artifact, attestation)
+
+
+def test_perf_attestation_rejects_chmod_during_digest(tmp_path, monkeypatch):
+    artifact = tmp_path / "artifact.parquet"
+    artifact.write_bytes(b"parquet bytes")
+    artifact.chmod(0o600)
+    real_stream_digest = helper_mod._stream_digest
+    changed = False
+
+    def digest_then_chmod(file, *args, **kwargs):
+        nonlocal changed
+        digest = real_stream_digest(file, *args, **kwargs)
+        if not changed:
+            changed = True
+            artifact.chmod(0o400)
+        return digest
+
+    monkeypatch.setattr(helper_mod, "_stream_digest", digest_then_chmod)
+
+    with pytest.raises(RuntimeError, match="changed"):
+        helper_mod._attest_regular_file(artifact)
+
+    assert changed
+
+
+def test_finalize_perf_files_rejects_source_mode_change_after_preparation(tmp_path, monkeypatch):
+    perf = tmp_path / "gemm_perf.txt"
+    perf.write_text("shape,latency\nnew,1.0\n", encoding="utf-8")
+    perf.chmod(0o600)
+    real_prepare_publications = helper_mod._prepare_perf_publications
+
+    def chmod_source_before_publication(prepared):
+        perf.chmod(0o400)
+        return real_prepare_publications(prepared)
+
+    class UnreachedPublicationTransaction:
+        def prepare(self, _publications):
+            raise AssertionError("journal preparation must not be reached")
+
+        def rollback_complete(self, _publications):
+            raise AssertionError("publication never started")
+
+        def has_durable_journal(self):
+            return False
+
+    monkeypatch.setattr(helper_mod, "_prepare_perf_publications", chmod_source_before_publication)
+
+    with pytest.raises(RuntimeError, match=r"staging.*changed|artifact changed"):
+        finalize_perf_files(
+            [perf],
+            delete_source=False,
+            publication_transaction=UnreachedPublicationTransaction(),
+        )
+
+    assert not perf.with_suffix(".parquet").exists()
 
 
 def test_finalization_info_records_the_exact_staging_digest(tmp_path):
@@ -392,8 +563,8 @@ def test_finalize_perf_files_orders_locks_by_canonical_target(tmp_path, monkeypa
     assert orders[0] == orders[1]
 
 
-@pytest.mark.parametrize("source_mode", [0o600, 0o644])
-def test_finalize_perf_files_preserves_staging_read_permissions(tmp_path, source_mode):
+@pytest.mark.parametrize("source_mode", [0o600, 0o644, 0o750])
+def test_finalize_perf_files_preserves_staging_permissions(tmp_path, source_mode):
     perf = tmp_path / "gemm_perf.txt"
     perf.write_text("shape,latency\ns1,1.0\n", encoding="utf-8")
     perf.chmod(source_mode)

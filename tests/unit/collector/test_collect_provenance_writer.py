@@ -14,6 +14,8 @@ merge path (including the legacy-tier merge guard).
 import hashlib
 import json
 import logging
+import multiprocessing as mp
+import os
 import re
 import stat
 import sys
@@ -328,6 +330,164 @@ def _run_main_with_staged_output(
     collect_mod.main()
 
 
+def _crash_after_first_parquet_publish(
+    output_root_text: str,
+    checkpoint_dir_text: str,
+    collections: list[dict],
+) -> None:
+    import helper as helper_mod
+
+    output_root = Path(output_root_text)
+    real_rename_noreplace = helper_mod._rename_noreplace
+    published = False
+
+    def publish_then_exit(source, target):
+        nonlocal published
+        source = Path(source)
+        target = Path(target)
+        real_rename_noreplace(source, target)
+        if source.name.endswith(".tmp") and target.suffix == ".parquet" and not published:
+            published = True
+            os._exit(86)
+
+    helper_mod._rename_noreplace = publish_then_exit
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        sorted(output_root.glob("*_perf.txt")),
+        _provenance_ctx(collections),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=checkpoint_dir_text,
+        sm_version=100,
+    )
+
+
+def _crash_before_perf_to_sidecar_handoff(output_root_text: str, checkpoint_dir_text: str) -> None:
+    output_root = Path(output_root_text)
+
+    def exit_before_handoff(*_args, **_kwargs):
+        os._exit(87)
+
+    collect_mod._CollectorPerfPublicationTransaction.handoff_to_sidecar = exit_before_handoff
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        [output_root / "gemm_perf.txt"],
+        _provenance_ctx(_collections()),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=checkpoint_dir_text,
+        sm_version=100,
+    )
+
+
+def _crash_after_unjournaled_sidecar_staging(output_root_text: str, checkpoint_dir_text: str) -> None:
+    output_root = Path(output_root_text)
+    real_atomic_write = collect_mod._atomic_write_bytes
+
+    def write_then_exit(path, *args, **kwargs):
+        result = real_atomic_write(path, *args, **kwargs)
+        if Path(path).name == collect_mod._SIDECAR_STAGING_FILENAME:
+            os._exit(88)
+        return result
+
+    collect_mod._atomic_write_bytes = write_then_exit
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        [output_root / "gemm_perf.txt"],
+        _provenance_ctx(_collections()),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=checkpoint_dir_text,
+        sm_version=100,
+    )
+
+
+def _crash_after_first_parquet_rollback(output_root_text: str, checkpoint_dir_text: str) -> None:
+    import helper as helper_mod
+
+    output_root = Path(output_root_text)
+    real_rename_noreplace = helper_mod._rename_noreplace
+    restored = False
+
+    def restore_then_exit(source, target):
+        nonlocal restored
+        source = Path(source)
+        target = Path(target)
+        real_rename_noreplace(source, target)
+        if source.suffix == ".parquet" and target.name.endswith(".tmp") and not restored:
+            restored = True
+            os._exit(89)
+
+    helper_mod._rename_noreplace = restore_then_exit
+    collect_mod._recover_collector_provenance_transaction(
+        output_root,
+        backend=BACKEND,
+        checkpoint_dir=checkpoint_dir_text,
+    )
+
+
+def _crash_after_perf_journal_cleanup(output_root_text: str, checkpoint_dir_text: str) -> None:
+    output_root = Path(output_root_text)
+    real_cleanup = collect_mod._cleanup_transaction_files
+
+    def cleanup_then_exit(attestations, *args, **kwargs):
+        attestations = list(attestations)
+        result = real_cleanup(attestations, *args, **kwargs)
+        if any(attestation.path.name == collect_mod._PERF_TRANSACTION_FILENAME for attestation in attestations):
+            os._exit(90)
+        return result
+
+    collect_mod._cleanup_transaction_files = cleanup_then_exit
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        [output_root / "gemm_perf.txt"],
+        _provenance_ctx(_collections()),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=checkpoint_dir_text,
+        sm_version=100,
+    )
+
+
+def _crash_before_perf_journal_publish(output_root_text: str, checkpoint_dir_text: str) -> None:
+    output_root = Path(output_root_text)
+
+    def exit_before_journal(_transaction, _publications):
+        os._exit(91)
+
+    collect_mod._CollectorPerfPublicationTransaction.prepare = exit_before_journal
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        [output_root / "gemm_perf.txt"],
+        _provenance_ctx(_collections()),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=checkpoint_dir_text,
+        sm_version=100,
+    )
+
+
+def _crash_after_perf_journal_source_chmod(output_root_text: str, checkpoint_dir_text: str) -> None:
+    output_root = Path(output_root_text)
+    real_prepare = collect_mod._CollectorPerfPublicationTransaction.prepare
+
+    def prepare_chmod_then_exit(transaction, publications):
+        real_prepare(transaction, publications)
+        publications[0].source.path.chmod(0o400)
+        os._exit(92)
+
+    collect_mod._CollectorPerfPublicationTransaction.prepare = prepare_chmod_then_exit
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        [output_root / "gemm_perf.txt"],
+        _provenance_ctx(_collections()),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=checkpoint_dir_text,
+        sm_version=100,
+    )
+
+
 def _write_sidecar_transaction(
     output_root: Path,
     participants: list[tuple[Path, set[str]]],
@@ -399,6 +559,7 @@ def _write_sidecar_transaction(
             for checkpoint_path, attempted_case_ids in participants
         ],
         "staging_paths": [_staging_manifest_record(path) for path in staging_paths if path.is_file()],
+        "perf_publications": None,
     }
     (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).write_text(
         json.dumps(transaction),
@@ -485,6 +646,40 @@ def test_atomic_exclusive_write_preserves_destination_replacement_after_mismatch
     assert observed_link.read_bytes() == b"first competitor"
     assert swapped_temp_path is not None
     assert swapped_temp_path.read_bytes() == b"first competitor"
+
+
+def test_validated_regular_file_rejects_chmod_during_digest(tmp_path, monkeypatch):
+    artifact = tmp_path / "artifact"
+    artifact.write_bytes(b"owned")
+    artifact.chmod(0o600)
+    real_sha256 = hashlib.sha256
+    changed = False
+
+    class ChmodDigest:
+        def __init__(self):
+            self._digest = real_sha256()
+
+        def update(self, chunk):
+            nonlocal changed
+            self._digest.update(chunk)
+            if not changed:
+                changed = True
+                artifact.chmod(0o400)
+
+        def hexdigest(self):
+            return self._digest.hexdigest()
+
+    monkeypatch.setattr(collect_mod.hashlib, "sha256", ChmodDigest)
+
+    with pytest.raises(RuntimeError, match="changed"):
+        collect_mod._validated_regular_file(
+            artifact,
+            None,
+            context_path=artifact,
+            kind="test artifact",
+        )
+
+    assert changed
 
 
 def test_atomic_exclusive_write_rejects_symlink_temp_path_swap(tmp_path, monkeypatch):
@@ -2224,6 +2419,972 @@ def test_failed_sidecar_write_keeps_pending_attempts_for_retry(tmp_path, monkeyp
         checkpoint_dir=str(checkpoint_dir),
         sm_version=100,
     ) == [staged]
+
+
+def test_hard_exit_after_first_parquet_publish_recovers_all_old_then_retries(tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    gemm_checkpoint = _write_checkpoint(
+        checkpoint_dir,
+        done=["gemm-case"],
+        failed=[],
+        attempted=["gemm-case"],
+    )
+    moe_checkpoint = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name=f"{BACKEND}.moe",
+        version="0.5.14",
+        done=["moe-case"],
+        failed=[],
+        attempted=["moe-case"],
+    )
+    collections = [
+        *_collections(),
+        {
+            "name": BACKEND,
+            "type": "moe",
+            "module": "collector.sglang.collect_moe",
+            "run_func": "run_moe_torch",
+            "perf_filename": "moe_perf.txt",
+        },
+    ]
+    staging_paths = [output_root / "gemm_perf.txt", output_root / "moe_perf.txt"]
+    for path, shape, latency in zip(staging_paths, ("new-gemm", "new-moe"), (1.0, 2.0), strict=True):
+        path.write_text(f"op,shape,latency\nmatmul,{shape},{latency}\n", encoding="utf-8")
+    parquet_paths = [path.with_suffix(".parquet") for path in staging_paths]
+    for path, shape, latency in zip(parquet_paths, ("old-gemm", "old-moe"), (9.0, 8.0), strict=True):
+        pq.write_table(pa.table({"op": ["matmul"], "shape": [shape], "latency": [latency]}), path)
+    provenance.write_collection_meta(
+        output_root,
+        _sidecar_runtime(),
+        {"gemm_perf": _collection_event(), "moe_perf": _collection_event()},
+    )
+    parquet_before = {path: path.read_bytes() for path in parquet_paths}
+    staging_before = {path: path.read_bytes() for path in staging_paths}
+    sidecar_path = output_root / "collection_meta.yaml"
+    sidecar_before = sidecar_path.read_bytes()
+
+    process = mp.get_context("spawn").Process(
+        target=_crash_after_first_parquet_publish,
+        args=(str(output_root), str(checkpoint_dir), collections),
+    )
+    process.start()
+    process.join(timeout=20)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        pytest.fail("collector finalization crash subprocess did not exit")
+
+    assert process.exitcode == 86
+    assert (output_root / collect_mod._PERF_TRANSACTION_FILENAME).is_file()
+    assert {path: path.read_bytes() for path in parquet_paths} != parquet_before
+
+    rollback_process = mp.get_context("spawn").Process(
+        target=_crash_after_first_parquet_rollback,
+        args=(str(output_root), str(checkpoint_dir)),
+    )
+    rollback_process.start()
+    rollback_process.join(timeout=20)
+    if rollback_process.is_alive():
+        rollback_process.terminate()
+        rollback_process.join()
+        pytest.fail("collector rollback crash subprocess did not exit")
+
+    assert rollback_process.exitcode == 89
+    assert (output_root / collect_mod._PERF_TRANSACTION_FILENAME).is_file()
+    assert not parquet_paths[0].exists()
+    assert parquet_paths[1].read_bytes() == parquet_before[parquet_paths[1]]
+
+    assert (
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+        is None
+    )
+
+    assert {path: path.read_bytes() for path in parquet_paths} == parquet_before
+    assert {path: path.read_bytes() for path in staging_paths} == staging_before
+    assert sidecar_path.read_bytes() == sidecar_before
+    assert _attempted(gemm_checkpoint) == {"gemm-case"}
+    assert _attempted(moe_checkpoint) == {"moe-case"}
+    assert not (output_root / collect_mod._PERF_TRANSACTION_FILENAME).exists()
+
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        staging_paths,
+        _provenance_ctx(collections),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        sm_version=100,
+    )
+
+    assert all(pq.read_metadata(path).num_rows == 2 for path in parquet_paths)
+    assert not any(path.exists() for path in staging_paths)
+    assert _attempted(gemm_checkpoint) == set()
+    assert _attempted(moe_checkpoint) == set()
+    assert not (output_root / collect_mod._PERF_TRANSACTION_FILENAME).exists()
+
+
+def test_incompatible_schema_publish_crash_retry_replaces_sidecar_event_once(tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["replacement-case"],
+        failed=[],
+        attempted=["replacement-case"],
+    )
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.write_text("op,new_shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
+    parquet_path = staging_path.with_suffix(".parquet")
+    pq.write_table(pa.table({"op": ["matmul"], "old_shape": ["old"], "latency": [9.0]}), parquet_path)
+    provenance.write_collection_meta(
+        output_root,
+        _sidecar_runtime(),
+        {"gemm_perf": _collection_event(rows=1)},
+    )
+    parquet_before = parquet_path.read_bytes()
+    sidecar_path = output_root / "collection_meta.yaml"
+    sidecar_before = sidecar_path.read_bytes()
+
+    process = mp.get_context("spawn").Process(
+        target=_crash_after_first_parquet_publish,
+        args=(str(output_root), str(checkpoint_dir), _collections()),
+    )
+    process.start()
+    process.join(timeout=20)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        pytest.fail("collector replacement crash subprocess did not exit")
+
+    assert process.exitcode == 86
+    assert pq.read_table(parquet_path).to_pylist() == [{"op": "matmul", "new_shape": "new", "latency": 1.0}]
+    transaction = json.loads((output_root / collect_mod._PERF_TRANSACTION_FILENAME).read_text(encoding="utf-8"))
+    [publication] = transaction["publications"]
+    assert publication["merged_existing"] is False
+    assert publication["new_rows"] == 1
+    assert publication["source"]["digest"] == _independent_digest(staging_path)
+    assert publication["previous_target"]["digest"] == "sha256:" + hashlib.sha256(parquet_before).hexdigest()
+    assert publication["prepared"]["digest"] == _independent_digest(parquet_path)
+    assert (publication["prepared"]["device"], publication["prepared"]["inode"]) == (
+        parquet_path.stat().st_dev,
+        parquet_path.stat().st_ino,
+    )
+    assert transaction["previous_sidecar"]["digest"] == "sha256:" + hashlib.sha256(sidecar_before).hexdigest()
+    [checkpoint_record] = transaction["checkpoints"]
+    assert checkpoint_record["digest"] == _independent_digest(checkpoint_path)
+    assert (checkpoint_record["device"], checkpoint_record["inode"]) == (
+        checkpoint_path.stat().st_dev,
+        checkpoint_path.stat().st_ino,
+    )
+
+    assert (
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+        is None
+    )
+    assert parquet_path.read_bytes() == parquet_before
+    assert sidecar_path.read_bytes() == sidecar_before
+    assert _attempted(checkpoint_path) == {"replacement-case"}
+
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        [staging_path],
+        _provenance_ctx(_collections()),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        sm_version=100,
+    )
+
+    assert pq.read_table(parquet_path).to_pylist() == [{"op": "matmul", "new_shape": "new", "latency": 1.0}]
+    table = yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))["tables"]["gemm_perf"]
+    assert table["rows"] == 1
+    assert table["case_plan_hash"] == provenance.case_plan_hash(["replacement-case"])
+    assert "collections" not in table
+    assert _attempted(checkpoint_path) == set()
+
+
+def test_recovery_finishes_all_new_after_sidecar_journal_handoff(tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
+    parquet_path = staging_path.with_suffix(".parquet")
+    pq.write_table(pa.table({"op": ["matmul"], "shape": ["old"], "latency": [9.0]}), parquet_path)
+    provenance.write_collection_meta(
+        output_root,
+        _sidecar_runtime(),
+        {"gemm_perf": _collection_event()},
+    )
+
+    process = mp.get_context("spawn").Process(
+        target=_crash_before_perf_to_sidecar_handoff,
+        args=(str(output_root), str(checkpoint_dir)),
+    )
+    process.start()
+    process.join(timeout=20)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        pytest.fail("collector handoff crash subprocess did not exit")
+
+    assert process.exitcode == 87
+    assert (output_root / collect_mod._PERF_TRANSACTION_FILENAME).is_file()
+    assert (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).is_file()
+
+    assert (
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+        == output_root / "collection_meta.yaml"
+    )
+
+    assert {row["shape"] for row in pq.read_table(parquet_path).to_pylist()} == {"old", "new"}
+    assert not staging_path.exists()
+    assert _attempted(checkpoint_path) == set()
+    assert not (output_root / collect_mod._PERF_TRANSACTION_FILENAME).exists()
+    assert not (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).exists()
+    assert list(output_root.glob(".*.rollback")) == []
+
+
+def test_recovery_rolls_back_unjournaled_sidecar_staging_to_all_old(tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
+    parquet_path = staging_path.with_suffix(".parquet")
+    pq.write_table(pa.table({"op": ["matmul"], "shape": ["old"], "latency": [9.0]}), parquet_path)
+    provenance.write_collection_meta(
+        output_root,
+        _sidecar_runtime(),
+        {"gemm_perf": _collection_event()},
+    )
+    parquet_before = parquet_path.read_bytes()
+    sidecar_path = output_root / "collection_meta.yaml"
+    sidecar_before = sidecar_path.read_bytes()
+
+    process = mp.get_context("spawn").Process(
+        target=_crash_after_unjournaled_sidecar_staging,
+        args=(str(output_root), str(checkpoint_dir)),
+    )
+    process.start()
+    process.join(timeout=20)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        pytest.fail("collector sidecar-staging crash subprocess did not exit")
+
+    assert process.exitcode == 88
+    assert (output_root / collect_mod._PERF_TRANSACTION_FILENAME).is_file()
+    assert (output_root / collect_mod._SIDECAR_STAGING_FILENAME).is_file()
+    assert not (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).exists()
+
+    assert (
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+        is None
+    )
+
+    assert parquet_path.read_bytes() == parquet_before
+    assert sidecar_path.read_bytes() == sidecar_before
+    assert staging_path.exists()
+    assert _attempted(checkpoint_path) == {"case-a"}
+    assert not (output_root / collect_mod._PERF_TRANSACTION_FILENAME).exists()
+    assert not (output_root / collect_mod._SIDECAR_STAGING_FILENAME).exists()
+
+
+def test_recovery_uses_sidecar_perf_attestations_after_perf_journal_cleanup(tmp_path, monkeypatch):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
+    parquet_path = staging_path.with_suffix(".parquet")
+    pq.write_table(pa.table({"op": ["matmul"], "shape": ["old"], "latency": [9.0]}), parquet_path)
+    provenance.write_collection_meta(
+        output_root,
+        _sidecar_runtime(),
+        {"gemm_perf": _collection_event()},
+    )
+
+    process = mp.get_context("spawn").Process(
+        target=_crash_after_perf_journal_cleanup,
+        args=(str(output_root), str(checkpoint_dir)),
+    )
+    process.start()
+    process.join(timeout=20)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        pytest.fail("collector final-journal cleanup crash subprocess did not exit")
+
+    assert process.exitcode == 90
+    assert not (output_root / collect_mod._PERF_TRANSACTION_FILENAME).exists()
+    sidecar_journal = output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME
+    assert sidecar_journal.is_file()
+    transaction = json.loads(sidecar_journal.read_text(encoding="utf-8"))
+    [publication] = transaction["perf_publications"]
+    assert publication["prepared"]["digest"] == _independent_digest(parquet_path)
+    assert (publication["prepared"]["device"], publication["prepared"]["inode"]) == (
+        parquet_path.stat().st_dev,
+        parquet_path.stat().st_ino,
+    )
+    assert not staging_path.exists()
+    assert _attempted(checkpoint_path) == set()
+    rows_before_recovery = pq.read_table(parquet_path).to_pylist()
+    sidecar_before_recovery = (output_root / "collection_meta.yaml").read_bytes()
+    fsync_states = []
+    real_fsync_directory = collect_mod._fsync_directory
+
+    def record_transaction_journal_state(directory):
+        if Path(directory) == output_root:
+            fsync_states.append(
+                (
+                    (output_root / collect_mod._PERF_TRANSACTION_FILENAME).exists(),
+                    sidecar_journal.exists(),
+                )
+            )
+        return real_fsync_directory(directory)
+
+    monkeypatch.setattr(collect_mod, "_fsync_directory", record_transaction_journal_state)
+
+    assert (
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+        is None
+    )
+
+    assert pq.read_table(parquet_path).to_pylist() == rows_before_recovery
+    assert (output_root / "collection_meta.yaml").read_bytes() == sidecar_before_recovery
+    assert not sidecar_journal.exists()
+    assert fsync_states.index((False, True)) < fsync_states.index((False, False))
+
+
+def test_recovery_rejects_published_parquet_mode_change_before_irreversible_commit(tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
+    parquet_path = staging_path.with_suffix(".parquet")
+    pq.write_table(pa.table({"op": ["matmul"], "shape": ["old"], "latency": [9.0]}), parquet_path)
+    provenance.write_collection_meta(
+        output_root,
+        _sidecar_runtime(),
+        {"gemm_perf": _collection_event()},
+    )
+
+    process = mp.get_context("spawn").Process(
+        target=_crash_before_perf_to_sidecar_handoff,
+        args=(str(output_root), str(checkpoint_dir)),
+    )
+    process.start()
+    process.join(timeout=20)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        pytest.fail("collector handoff crash subprocess did not exit")
+
+    assert process.exitcode == 87
+    changed_mode = 0o600 if stat.S_IMODE(parquet_path.stat().st_mode) != 0o600 else 0o644
+    parquet_path.chmod(changed_mode)
+
+    with pytest.raises(RuntimeError, match="mode changed"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert staging_path.exists()
+    assert _attempted(checkpoint_path) == {"case-a"}
+    assert (output_root / collect_mod._PERF_TRANSACTION_FILENAME).is_file()
+    assert (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).is_file()
+
+
+def test_final_commit_revalidates_published_parquet_after_artifact_cleanup(tmp_path, monkeypatch):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
+    parquet_path = staging_path.with_suffix(".parquet")
+    pq.write_table(pa.table({"op": ["matmul"], "shape": ["old"], "latency": [9.0]}), parquet_path)
+    provenance.write_collection_meta(
+        output_root,
+        _sidecar_runtime(),
+        {"gemm_perf": _collection_event()},
+    )
+    real_cleanup = collect_mod.cleanup_perf_publication_artifacts
+    tampered = False
+
+    def tamper_during_cleanup(publications):
+        nonlocal tampered
+        publications = tuple(publications)
+        if not tampered:
+            tampered = True
+            attacker = output_root / ".attacker.parquet"
+            pq.write_table(
+                pa.table({"op": ["matmul"], "shape": ["attacker"], "latency": [666.0]}),
+                attacker,
+            )
+            os.replace(attacker, publications[0].target)
+        real_cleanup(publications)
+
+    monkeypatch.setattr(collect_mod, "cleanup_perf_publication_artifacts", tamper_during_cleanup)
+
+    with pytest.raises(RuntimeError, match="published perf target"):
+        collect_mod._finalize_collector_outputs_transaction(
+            output_root,
+            [staging_path],
+            _provenance_ctx(_collections()),
+            [],
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            sm_version=100,
+        )
+
+    assert tampered
+    assert pq.read_table(parquet_path).to_pylist() == [{"op": "matmul", "shape": "attacker", "latency": 666.0}]
+    assert (output_root / collect_mod._PERF_TRANSACTION_FILENAME).is_file()
+    assert (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).is_file()
+    assert _attempted(checkpoint_path) == set()
+
+
+def test_final_commit_rejects_duplicate_prepared_path_without_unlinking_it(tmp_path, monkeypatch):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
+    parquet_path = staging_path.with_suffix(".parquet")
+    pq.write_table(pa.table({"op": ["matmul"], "shape": ["old"], "latency": [9.0]}), parquet_path)
+    real_cleanup = collect_mod.cleanup_perf_publication_artifacts
+    duplicated_path = None
+
+    def duplicate_prepared_path(publications):
+        nonlocal duplicated_path
+        publications = tuple(publications)
+        if duplicated_path is None:
+            duplicated_path = publications[0].prepared.path
+            os.link(publications[0].target, duplicated_path)
+        return real_cleanup(publications)
+
+    monkeypatch.setattr(collect_mod, "cleanup_perf_publication_artifacts", duplicate_prepared_path)
+
+    with pytest.raises(RuntimeError, match="prepared claim unexpectedly exists"):
+        collect_mod._finalize_collector_outputs_transaction(
+            output_root,
+            [staging_path],
+            _provenance_ctx(_collections()),
+            [],
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            sm_version=100,
+        )
+
+    assert duplicated_path is not None
+    assert duplicated_path.is_file()
+    assert duplicated_path.samefile(parquet_path)
+    assert (output_root / collect_mod._PERF_TRANSACTION_FILENAME).is_file()
+    assert (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).is_file()
+
+
+def test_final_commit_rejects_published_parquet_mode_change(tmp_path, monkeypatch):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
+    parquet_path = staging_path.with_suffix(".parquet")
+    pq.write_table(pa.table({"op": ["matmul"], "shape": ["old"], "latency": [9.0]}), parquet_path)
+    real_cleanup = collect_mod.cleanup_perf_publication_artifacts
+    changed_mode = None
+
+    def chmod_during_cleanup(publications):
+        nonlocal changed_mode
+        publications = tuple(publications)
+        real_cleanup(publications)
+        changed_mode = publications[0].prepared.mode ^ stat.S_IXUSR
+        publications[0].target.chmod(changed_mode)
+
+    monkeypatch.setattr(collect_mod, "cleanup_perf_publication_artifacts", chmod_during_cleanup)
+
+    with pytest.raises(RuntimeError, match="published perf target"):
+        collect_mod._finalize_collector_outputs_transaction(
+            output_root,
+            [staging_path],
+            _provenance_ctx(_collections()),
+            [],
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            sm_version=100,
+        )
+
+    assert changed_mode is not None
+    assert stat.S_IMODE(parquet_path.stat().st_mode) == changed_mode
+    assert (output_root / collect_mod._PERF_TRANSACTION_FILENAME).is_file()
+    assert (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).is_file()
+
+
+def test_perf_journal_unlink_is_fsynced_before_sidecar_journal_unlink(tmp_path, monkeypatch):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
+    fsync_states = []
+    real_fsync_directory = collect_mod._fsync_directory
+
+    def record_transaction_journal_state(directory):
+        if Path(directory) == output_root:
+            fsync_states.append(
+                (
+                    (output_root / collect_mod._PERF_TRANSACTION_FILENAME).exists(),
+                    (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).exists(),
+                )
+            )
+        return real_fsync_directory(directory)
+
+    monkeypatch.setattr(collect_mod, "_fsync_directory", record_transaction_journal_state)
+
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        [staging_path],
+        _provenance_ctx(_collections()),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        sm_version=100,
+    )
+
+    perf_unlink_fsync = fsync_states.index((False, True))
+    sidecar_unlink_fsync = fsync_states.index((False, False))
+    assert perf_unlink_fsync < sidecar_unlink_fsync
+
+
+def test_cleanup_fsyncs_parent_when_attested_journal_is_already_absent(tmp_path, monkeypatch):
+    journal_path = tmp_path / collect_mod._PERF_TRANSACTION_FILENAME
+    journal_path.write_bytes(b"journal")
+    attestation = _file_attestation(journal_path)
+    journal_path.unlink()
+    fsynced = []
+
+    monkeypatch.setattr(collect_mod, "_fsync_directory", lambda directory: fsynced.append(Path(directory)))
+
+    collect_mod._cleanup_transaction_files([attestation], context_path=journal_path)
+
+    assert fsynced == [tmp_path]
+
+
+def test_publish_rejects_target_replaced_after_durable_journal(tmp_path, monkeypatch):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
+    parquet_path = staging_path.with_suffix(".parquet")
+    pq.write_table(pa.table({"op": ["matmul"], "shape": ["old"], "latency": [9.0]}), parquet_path)
+    real_prepare = collect_mod._CollectorPerfPublicationTransaction.prepare
+
+    def prepare_then_replace_target(transaction, publications):
+        real_prepare(transaction, publications)
+        attacker = output_root / ".publish-attacker.parquet"
+        pq.write_table(
+            pa.table({"op": ["matmul"], "shape": ["attacker"], "latency": [666.0]}),
+            attacker,
+        )
+        os.replace(attacker, publications[0].target)
+
+    monkeypatch.setattr(
+        collect_mod._CollectorPerfPublicationTransaction,
+        "prepare",
+        prepare_then_replace_target,
+    )
+
+    with pytest.raises(RuntimeError, match="changed"):
+        collect_mod._finalize_collector_outputs_transaction(
+            output_root,
+            [staging_path],
+            _provenance_ctx(_collections()),
+            [],
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            sm_version=100,
+        )
+
+    assert pq.read_table(parquet_path).to_pylist() == [{"op": "matmul", "shape": "attacker", "latency": 666.0}]
+    assert staging_path.exists()
+    assert _attempted(checkpoint_path) == {"case-a"}
+    assert (output_root / collect_mod._PERF_TRANSACTION_FILENAME).is_file()
+
+
+def test_publish_atomically_preserves_target_replaced_at_claim(tmp_path, monkeypatch):
+    import helper as helper_mod
+
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
+    parquet_path = staging_path.with_suffix(".parquet")
+    pq.write_table(pa.table({"op": ["matmul"], "shape": ["old"], "latency": [9.0]}), parquet_path)
+    real_rename_noreplace = helper_mod._rename_noreplace
+    raced = False
+
+    def replace_target_before_claim(source, target):
+        nonlocal raced
+        source = Path(source)
+        target = Path(target)
+        if source == parquet_path and target.name.endswith(".claim") and not raced:
+            raced = True
+            attacker = output_root / ".publish-claim-attacker.parquet"
+            pq.write_table(
+                pa.table({"op": ["matmul"], "shape": ["attacker"], "latency": [666.0]}),
+                attacker,
+            )
+            os.replace(attacker, source)
+        return real_rename_noreplace(source, target)
+
+    monkeypatch.setattr(helper_mod, "_rename_noreplace", replace_target_before_claim)
+
+    with pytest.raises(RuntimeError, match=r"strict recovery state|target claim changed"):
+        collect_mod._finalize_collector_outputs_transaction(
+            output_root,
+            [staging_path],
+            _provenance_ctx(_collections()),
+            [],
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            sm_version=100,
+        )
+
+    assert raced
+    assert pq.read_table(parquet_path).to_pylist() == [{"op": "matmul", "shape": "attacker", "latency": 666.0}]
+    assert staging_path.exists()
+    assert _attempted(checkpoint_path) == {"case-a"}
+    assert (output_root / collect_mod._PERF_TRANSACTION_FILENAME).is_file()
+
+
+def test_hard_exit_before_perf_journal_does_not_leave_rollback_snapshot(tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
+    parquet_path = staging_path.with_suffix(".parquet")
+    pq.write_table(pa.table({"op": ["matmul"], "shape": ["old"], "latency": [9.0]}), parquet_path)
+    parquet_before = parquet_path.read_bytes()
+
+    process = mp.get_context("spawn").Process(
+        target=_crash_before_perf_journal_publish,
+        args=(str(output_root), str(checkpoint_dir)),
+    )
+    process.start()
+    process.join(timeout=20)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        pytest.fail("collector pre-journal crash subprocess did not exit")
+
+    assert process.exitcode == 91
+    assert parquet_path.read_bytes() == parquet_before
+    assert not (output_root / collect_mod._PERF_TRANSACTION_FILENAME).exists()
+    assert list(output_root.glob(".*.rollback")) == []
+
+
+def test_recovery_rejects_source_mode_change_after_perf_journal(tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
+    staging_path.chmod(0o600)
+    parquet_path = staging_path.with_suffix(".parquet")
+    pq.write_table(pa.table({"op": ["matmul"], "shape": ["old"], "latency": [9.0]}), parquet_path)
+    parquet_before = parquet_path.read_bytes()
+
+    process = mp.get_context("spawn").Process(
+        target=_crash_after_perf_journal_source_chmod,
+        args=(str(output_root), str(checkpoint_dir)),
+    )
+    process.start()
+    process.join(timeout=20)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        pytest.fail("collector post-journal source chmod subprocess did not exit")
+
+    assert process.exitcode == 92
+    assert stat.S_IMODE(staging_path.stat().st_mode) == 0o400
+    assert (output_root / collect_mod._PERF_TRANSACTION_FILENAME).is_file()
+
+    with pytest.raises(RuntimeError, match=r"mode changed|staging file changed"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert parquet_path.read_bytes() == parquet_before
+    assert staging_path.exists()
+    assert _attempted(checkpoint_path) == {"case-a"}
+    assert (output_root / collect_mod._PERF_TRANSACTION_FILENAME).is_file()
+
+
+def test_publish_failure_retains_journal_when_restored_target_is_tampered(tmp_path, monkeypatch):
+    import helper as helper_mod
+
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    _write_checkpoint(
+        checkpoint_dir,
+        done=["gemm-case"],
+        failed=[],
+        attempted=["gemm-case"],
+    )
+    _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name=f"{BACKEND}.moe",
+        version="0.5.14",
+        done=["moe-case"],
+        failed=[],
+        attempted=["moe-case"],
+    )
+    collections = [
+        *_collections(),
+        {
+            "name": BACKEND,
+            "type": "moe",
+            "module": "collector.sglang.collect_moe",
+            "run_func": "run_moe_torch",
+            "perf_filename": "moe_perf.txt",
+        },
+    ]
+    staging_paths = [output_root / "gemm_perf.txt", output_root / "moe_perf.txt"]
+    for path, shape, latency in zip(staging_paths, ("new-gemm", "new-moe"), (1.0, 2.0), strict=True):
+        path.write_text(f"op,shape,latency\nmatmul,{shape},{latency}\n", encoding="utf-8")
+    parquet_paths = [path.with_suffix(".parquet") for path in staging_paths]
+    for path, shape, latency in zip(parquet_paths, ("old-gemm", "old-moe"), (9.0, 8.0), strict=True):
+        pq.write_table(pa.table({"op": ["matmul"], "shape": [shape], "latency": [latency]}), path)
+
+    real_rename_noreplace = helper_mod._rename_noreplace
+    failed = False
+    rollback_raced = False
+
+    def fail_second_publish_and_race_rollback(source, target):
+        nonlocal failed, rollback_raced
+        source = Path(source)
+        target = Path(target)
+        if target == parquet_paths[1] and source.name.endswith(".tmp") and not failed:
+            failed = True
+            raise OSError("simulated second parquet publish failure")
+        if source == parquet_paths[0] and target.name.endswith(".tmp") and failed and not rollback_raced:
+            rollback_raced = True
+            attacker = output_root / ".rollback-attacker.parquet"
+            pq.write_table(
+                pa.table({"op": ["matmul"], "shape": ["attacker"], "latency": [777.0]}),
+                attacker,
+            )
+            os.replace(attacker, source)
+        return real_rename_noreplace(source, target)
+
+    monkeypatch.setattr(helper_mod, "_rename_noreplace", fail_second_publish_and_race_rollback)
+
+    with pytest.raises((OSError, RuntimeError)):
+        collect_mod._finalize_collector_outputs_transaction(
+            output_root,
+            staging_paths,
+            _provenance_ctx(collections),
+            [],
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            sm_version=100,
+        )
+
+    assert failed
+    assert rollback_raced
+    assert pq.read_table(parquet_paths[0]).to_pylist() == [{"op": "matmul", "shape": "attacker", "latency": 777.0}]
+    assert (output_root / collect_mod._PERF_TRANSACTION_FILENAME).is_file()
+
+
+def test_rollback_rejects_duplicate_old_claim_without_unlinking_it(tmp_path, monkeypatch):
+    import helper as helper_mod
+
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    _write_checkpoint(
+        checkpoint_dir,
+        done=["gemm-case"],
+        failed=[],
+        attempted=["gemm-case"],
+    )
+    _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name=f"{BACKEND}.moe",
+        version="0.5.14",
+        done=["moe-case"],
+        failed=[],
+        attempted=["moe-case"],
+    )
+    collections = [
+        *_collections(),
+        {
+            "name": BACKEND,
+            "type": "moe",
+            "module": "collector.sglang.collect_moe",
+            "run_func": "run_moe_torch",
+            "perf_filename": "moe_perf.txt",
+        },
+    ]
+    staging_paths = [output_root / "gemm_perf.txt", output_root / "moe_perf.txt"]
+    for path, shape in zip(staging_paths, ("new-gemm", "new-moe"), strict=True):
+        path.write_text(f"op,shape,latency\nmatmul,{shape},1.0\n", encoding="utf-8")
+    parquet_paths = [path.with_suffix(".parquet") for path in staging_paths]
+    for path, shape in zip(parquet_paths, ("old-gemm", "old-moe"), strict=True):
+        pq.write_table(pa.table({"op": ["matmul"], "shape": [shape], "latency": [9.0]}), path)
+
+    real_rename_noreplace = helper_mod._rename_noreplace
+    failed = False
+
+    def fail_second_publish(source, target):
+        nonlocal failed
+        source = Path(source)
+        target = Path(target)
+        if target == parquet_paths[1] and source.name.endswith(".tmp") and not failed:
+            failed = True
+            raise OSError("simulated second parquet publish failure")
+        return real_rename_noreplace(source, target)
+
+    real_rollback_complete = collect_mod._CollectorPerfPublicationTransaction.rollback_complete
+    duplicate_claim = None
+
+    def duplicate_claim_before_validation(transaction, publications):
+        nonlocal duplicate_claim
+        duplicate_claim = publications[0].target_claim
+        os.link(publications[0].target, duplicate_claim)
+        return real_rollback_complete(transaction, publications)
+
+    monkeypatch.setattr(helper_mod, "_rename_noreplace", fail_second_publish)
+    monkeypatch.setattr(
+        collect_mod._CollectorPerfPublicationTransaction,
+        "rollback_complete",
+        duplicate_claim_before_validation,
+    )
+
+    with pytest.raises(RuntimeError, match="target claim was not cleared"):
+        collect_mod._finalize_collector_outputs_transaction(
+            output_root,
+            staging_paths,
+            _provenance_ctx(collections),
+            [],
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+            sm_version=100,
+        )
+
+    assert failed
+    assert duplicate_claim is not None
+    assert duplicate_claim.is_file()
+    assert duplicate_claim.samefile(parquet_paths[0])
+    assert (output_root / collect_mod._PERF_TRANSACTION_FILENAME).is_file()
 
 
 def test_checkpoint_close_failure_retries_sidecar_transaction_without_duplicate_event(tmp_path, monkeypatch):

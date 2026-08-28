@@ -91,14 +91,19 @@ from pathlib import Path
 
 from helper import (
     EXIT_CODE_RESTART,
+    PerfFileAttestation,
     PerfFinalizationInfo,
+    PerfPublication,
     WorkerRestartSignal,
+    cleanup_perf_publication_artifacts,
     create_test_case_id,
     finalize_perf_files,
     find_perf_csv_outputs,
+    restore_perf_publications,
     save_error_report,
     setup_logging,
     setup_signal_handlers,
+    validate_restored_perf_publications,
 )
 
 logger = None
@@ -107,10 +112,12 @@ STALL_THRESHOLD = 30  # iterations (x 0.5 s sleep = 15 s) before logging a stall
 # Failures of one (model, dtype) group within an op before the summary flags
 # it as systemic (a fix-me warning; nothing is skipped).
 SYSTEMIC_GROUP_THRESHOLD = 5
-_SIDECAR_TRANSACTION_SCHEMA = "collector-sidecar-transaction-v3"
+_SIDECAR_TRANSACTION_SCHEMA = "collector-sidecar-transaction-v4"
 _SIDECAR_TRANSACTION_FIELD = "sidecar_transaction"
 _SIDECAR_TRANSACTION_FILENAME = ".collection_meta.transaction.json"
 _SIDECAR_STAGING_FILENAME = ".collection_meta.pending.yaml"
+_PERF_TRANSACTION_SCHEMA = "collector-perf-publication-v2"
+_PERF_TRANSACTION_FILENAME = ".perf-finalization.transaction.json"
 _CHECKPOINT_IDENTITY_FIELDS = ("schema", "backend", "module", "run_func", "framework_version", "sm_version")
 _SIDECAR_TRANSACTION_FIELDS = {
     "schema",
@@ -124,6 +131,18 @@ _SIDECAR_TRANSACTION_FIELDS = {
     "previous_sidecar",
     "checkpoints",
     "staging_paths",
+    "perf_publications",
+}
+_PERF_TRANSACTION_FIELDS = {
+    "schema",
+    "transaction_id",
+    "output_root",
+    "backend",
+    "checkpoint_root",
+    "previous_sidecar",
+    "sidecar_staging_path",
+    "checkpoints",
+    "publications",
 }
 
 FPM_INPUT_ERRORS = (TypeError, ValueError, subprocess.CalledProcessError, FileNotFoundError, RuntimeError)
@@ -192,6 +211,14 @@ class _ClaimedTransactionFile:
     claimed_path: Path
 
 
+def _fsync_directory(directory: Path) -> None:
+    directory_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def _atomic_write_bytes(
     path: Path,
     contents: bytes,
@@ -216,7 +243,7 @@ def _atomic_write_bytes(
             temp_identity = (opened.st_dev, opened.st_ino)
             temp_file.write(contents)
             temp_file.flush()
-            os.fchmod(temp_file.fileno(), mode & 0o666)
+            os.fchmod(temp_file.fileno(), stat.S_IMODE(mode))
             os.fsync(temp_file.fileno())
             if not replace_existing:
                 current = temp_path.lstat()
@@ -235,12 +262,14 @@ def _atomic_write_bytes(
                 current = temp_path.lstat()
                 if stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == temp_identity:
                     temp_path.unlink()
+                _fsync_directory(path.parent)
                 temp_path = None
                 return
         current = temp_path.lstat()
         if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != temp_identity:
             raise RuntimeError(f"Atomic write temporary changed before publication: {temp_path}")
         os.replace(temp_path, path)
+        _fsync_directory(path.parent)
         temp_path = None
     finally:
         if temp_path is not None and temp_identity is not None:
@@ -251,6 +280,7 @@ def _atomic_write_bytes(
             else:
                 if stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == temp_identity:
                     temp_path.unlink()
+                    _fsync_directory(path.parent)
 
 
 def _atomic_write_json(path: Path, data: dict) -> None:
@@ -2178,6 +2208,7 @@ def _validated_regular_file(
     *,
     context_path: Path,
     expected_identity: tuple[int, int] | None = None,
+    expected_mode: int | None = None,
     capture_contents: bool = False,
     kind: str,
 ) -> _FileSnapshot:
@@ -2199,18 +2230,22 @@ def _validated_regular_file(
     except Exception as error:
         raise RuntimeError(f"Invalid collector {kind} in {context_path}: {path}") from error
 
+    opened_mode = stat.S_IMODE(opened.st_mode)
+    current_mode = stat.S_IMODE(current.st_mode)
     snapshot = _FileSnapshot(
         device=opened.st_dev,
         inode=opened.st_ino,
-        mode=opened.st_mode & 0o666,
+        mode=opened_mode,
         digest="sha256:" + digest.hexdigest(),
         contents=b"".join(captured_chunks) if captured_chunks is not None else None,
     )
     if (
         not stat.S_ISREG(current.st_mode)
         or snapshot.identity != (current.st_dev, current.st_ino)
+        or opened_mode != current_mode
         or (expected_identity is not None and snapshot.identity != expected_identity)
         or (expected_digest is not None and snapshot.digest != expected_digest)
+        or (expected_mode is not None and snapshot.mode != expected_mode)
     ):
         raise RuntimeError(f"Collector {kind} changed in {context_path}: {path}")
     return snapshot
@@ -2319,6 +2354,490 @@ def _preflight_collector_finalization_inputs(
     return producer_plan, staging_attestations
 
 
+def _perf_file_record(attestation: PerfFileAttestation, *, include_path: bool = True) -> dict:
+    record = {
+        "digest": attestation.digest,
+        "device": attestation.device,
+        "inode": attestation.inode,
+        "mode": attestation.mode,
+    }
+    if include_path:
+        record = {"path": str(attestation.path), **record}
+    return record
+
+
+def _perf_file_from_record(
+    record: object,
+    *,
+    context_path: Path,
+    expected_path: Path | None = None,
+) -> PerfFileAttestation:
+    expected_fields = {"path", "digest", "device", "inode", "mode"}
+    if not isinstance(record, dict) or set(record) != expected_fields:
+        raise RuntimeError(f"Invalid perf publication file in {context_path}: {record!r}")
+    path_text = record["path"]
+    if not isinstance(path_text, str) or path_text != str(Path(path_text)):
+        raise RuntimeError(f"Invalid perf publication path in {context_path}: {path_text!r}")
+    path = Path(path_text)
+    if expected_path is not None and path != expected_path:
+        raise RuntimeError(f"Unexpected perf publication path in {context_path}: {path}")
+    digest = record["digest"]
+    device = record["device"]
+    inode = record["inode"]
+    mode = record["mode"]
+    if (
+        not _valid_sha256_digest(digest)
+        or not isinstance(device, int)
+        or isinstance(device, bool)
+        or not isinstance(inode, int)
+        or isinstance(inode, bool)
+        or not isinstance(mode, int)
+        or isinstance(mode, bool)
+        or mode < 0
+        or mode > 0o7777
+    ):
+        raise RuntimeError(f"Invalid perf publication attestation in {context_path}: {record!r}")
+    return PerfFileAttestation(path=path, digest=digest, device=device, inode=inode, mode=mode)
+
+
+def _perf_publication_record(publication: PerfPublication) -> dict:
+    return {
+        "source": _perf_file_record(publication.source),
+        "target": str(publication.target),
+        "prepared": _perf_file_record(publication.prepared),
+        "previous_target": (
+            _perf_file_record(publication.previous_target) if publication.previous_target is not None else None
+        ),
+        "target_claim": str(publication.target_claim) if publication.target_claim is not None else None,
+        "new_rows": publication.info.new_rows,
+        "merged_existing": publication.info.merged_existing,
+    }
+
+
+def _perf_publication_from_record(
+    record: object,
+    *,
+    output_root: Path,
+    context_path: Path,
+) -> PerfPublication:
+    from collector.registry_types import PerfFile
+
+    expected_fields = {
+        "source",
+        "target",
+        "prepared",
+        "previous_target",
+        "target_claim",
+        "new_rows",
+        "merged_existing",
+    }
+    if not isinstance(record, dict) or set(record) != expected_fields:
+        raise RuntimeError(f"Invalid perf publication in {context_path}: {record!r}")
+    target_text = record["target"]
+    if not isinstance(target_text, str) or target_text != str(Path(target_text)):
+        raise RuntimeError(f"Invalid perf publication target in {context_path}: {target_text!r}")
+    target = Path(target_text)
+    allowed_sources = {output_root / str(perf_file) for perf_file in PerfFile}
+    source = _perf_file_from_record(record["source"], context_path=context_path)
+    if source.path not in allowed_sources or target != source.path.with_suffix(".parquet"):
+        raise RuntimeError(f"Unowned perf publication path in {context_path}: {source.path} -> {target}")
+    prepared = _perf_file_from_record(record["prepared"], context_path=context_path)
+    if (
+        prepared.path.parent != output_root
+        or not prepared.path.name.startswith(f".{target.name}.")
+        or not prepared.path.name.endswith(".tmp")
+    ):
+        raise RuntimeError(f"Invalid prepared perf publication path in {context_path}: {prepared.path}")
+    previous_record = record["previous_target"]
+    claim_text = record["target_claim"]
+    if (previous_record is None) != (claim_text is None):
+        raise RuntimeError(f"Incomplete perf target claim state in {context_path}: {target}")
+    previous = (
+        None
+        if previous_record is None
+        else _perf_file_from_record(previous_record, context_path=context_path, expected_path=target)
+    )
+    claim = None if claim_text is None else Path(claim_text)
+    if claim is not None and (
+        claim_text != str(claim)
+        or claim.parent != output_root
+        or not claim.name.startswith(f".{target.name}.")
+        or not claim.name.endswith(".claim")
+        or previous is None
+    ):
+        raise RuntimeError(f"Invalid perf target claim in {context_path}: {target}")
+    new_rows = record["new_rows"]
+    merged_existing = record["merged_existing"]
+    if (
+        not isinstance(new_rows, int)
+        or isinstance(new_rows, bool)
+        or new_rows < 0
+        or not isinstance(merged_existing, bool)
+    ):
+        raise RuntimeError(f"Invalid perf finalization facts in {context_path}: {target}")
+    info = PerfFinalizationInfo(
+        new_rows=new_rows,
+        merged_existing=merged_existing,
+        source_digest=source.digest,
+        source_device=source.device,
+        source_inode=source.inode,
+    )
+    return PerfPublication(
+        source=source,
+        target=target,
+        prepared=prepared,
+        previous_target=previous,
+        target_claim=claim,
+        info=info,
+    )
+
+
+def _perf_checkpoint_record(record: _ProducerCheckpointPlan) -> dict:
+    return {
+        "path": str(record.path),
+        "digest": record.attestation.digest,
+        "device": record.attestation.device,
+        "inode": record.attestation.inode,
+        "table": record.table,
+        "done": sorted(record.done),
+        "failed": sorted(record.failed),
+        "attempted": sorted(record.attempted),
+        "identity": record.identity_dict(),
+    }
+
+
+def _validate_perf_transaction_document(
+    transaction: object,
+    *,
+    output_root: Path,
+    backend: str,
+    checkpoint_root: Path,
+    journal_path: Path,
+) -> tuple[list[PerfPublication], list[dict], _FileAttestation | None]:
+    if not isinstance(transaction, dict) or set(transaction) != _PERF_TRANSACTION_FIELDS:
+        raise RuntimeError(f"Invalid collector perf transaction fields in {journal_path}")
+    if transaction["schema"] != _PERF_TRANSACTION_SCHEMA:
+        raise RuntimeError(f"Unsupported collector perf transaction schema in {journal_path}")
+    transaction_id = transaction["transaction_id"]
+    if (
+        not isinstance(transaction_id, str)
+        or len(transaction_id) != 32
+        or any(character not in "0123456789abcdef" for character in transaction_id)
+    ):
+        raise RuntimeError(f"Invalid collector perf transaction ID in {journal_path}")
+    expected_context = {
+        "output_root": str(output_root),
+        "backend": backend,
+        "checkpoint_root": str(checkpoint_root),
+        "sidecar_staging_path": str(output_root / _SIDECAR_STAGING_FILENAME),
+    }
+    if {field: transaction[field] for field in expected_context} != expected_context:
+        raise RuntimeError(f"Collector perf transaction context changed in {journal_path}")
+    publication_records = transaction["publications"]
+    if not isinstance(publication_records, list) or not publication_records:
+        raise RuntimeError(f"Invalid collector perf publications in {journal_path}")
+    publications = [
+        _perf_publication_from_record(record, output_root=output_root, context_path=journal_path)
+        for record in publication_records
+    ]
+    if len({publication.target for publication in publications}) != len(publications):
+        raise RuntimeError(f"Duplicate collector perf publication targets in {journal_path}")
+
+    checkpoint_records = transaction["checkpoints"]
+    if not isinstance(checkpoint_records, list) or not checkpoint_records:
+        raise RuntimeError(f"Invalid collector perf checkpoint participants in {journal_path}")
+    tables = {publication.target.stem for publication in publications}
+    seen_checkpoint_paths: set[Path] = set()
+    seen_attempted: set[str] = set()
+    for checkpoint in checkpoint_records:
+        expected_fields = {
+            "path",
+            "digest",
+            "device",
+            "inode",
+            "table",
+            "done",
+            "failed",
+            "attempted",
+            "identity",
+        }
+        if not isinstance(checkpoint, dict) or set(checkpoint) != expected_fields:
+            raise RuntimeError(f"Invalid collector perf checkpoint record in {journal_path}")
+        attestation = _attestation_from_record(
+            {field: checkpoint[field] for field in ("path", "digest", "device", "inode")},
+            None,
+            context_path=journal_path,
+            kind="perf checkpoint participant",
+        )
+        identity = checkpoint["identity"]
+        if not isinstance(identity, dict) or set(identity) != set(_CHECKPOINT_IDENTITY_FIELDS):
+            raise RuntimeError(f"Invalid collector perf checkpoint identity in {journal_path}")
+        expected_path = _checkpoint_path(checkpoint_root, identity["module"])
+        table = _registered_checkpoint_table(identity, backend=backend)
+        if attestation.path != expected_path or checkpoint["table"] != table or table not in tables:
+            raise RuntimeError(f"Unowned collector perf checkpoint in {journal_path}: {attestation.path}")
+        if attestation.path in seen_checkpoint_paths:
+            raise RuntimeError(f"Duplicate collector perf checkpoint in {journal_path}: {attestation.path}")
+        for field in ("done", "failed", "attempted"):
+            values = checkpoint[field]
+            if (
+                not isinstance(values, list)
+                or any(not isinstance(case_id, str) or not case_id for case_id in values)
+                or len(values) != len(set(values))
+            ):
+                raise RuntimeError(f"Invalid collector perf checkpoint {field} in {journal_path}")
+        attempted = set(checkpoint["attempted"])
+        if not attempted or attempted & seen_attempted:
+            raise RuntimeError(f"Invalid collector perf checkpoint attempts in {journal_path}")
+        seen_checkpoint_paths.add(attestation.path)
+        seen_attempted.update(attempted)
+    if {checkpoint["table"] for checkpoint in checkpoint_records} != tables:
+        raise RuntimeError(f"Collector perf transaction tables lack checkpoint owners in {journal_path}")
+
+    previous_record = transaction["previous_sidecar"]
+    previous_sidecar = (
+        None
+        if previous_record is None
+        else _attestation_from_record(
+            previous_record,
+            output_root / "collection_meta.yaml",
+            context_path=journal_path,
+            kind="perf transaction sidecar snapshot",
+        )
+    )
+    return publications, checkpoint_records, previous_sidecar
+
+
+def _revalidate_perf_transaction_rollback_inputs(
+    publications: list[PerfPublication],
+    checkpoint_records: list[dict],
+    previous_sidecar: _FileAttestation | None,
+    *,
+    output_root: Path,
+    journal_path: Path,
+) -> None:
+    for publication in publications:
+        _validated_regular_file(
+            publication.source.path,
+            publication.source.digest,
+            context_path=journal_path,
+            expected_identity=publication.source.identity,
+            expected_mode=publication.source.mode,
+            kind="perf transaction staging file",
+        )
+    for checkpoint in checkpoint_records:
+        checkpoint_path = Path(checkpoint["path"])
+        snapshot = _validated_regular_file(
+            checkpoint_path,
+            checkpoint["digest"],
+            context_path=journal_path,
+            expected_identity=(checkpoint["device"], checkpoint["inode"]),
+            capture_contents=True,
+            kind="perf transaction checkpoint",
+        )
+        document = json.loads(snapshot.contents)
+        if {field: document.get(field) for field in _CHECKPOINT_IDENTITY_FIELDS} != checkpoint["identity"]:
+            raise RuntimeError(f"Collector perf transaction checkpoint identity changed in {journal_path}")
+        if any(set(document.get(field, [])) != set(checkpoint[field]) for field in ("done", "failed", "attempted")):
+            raise RuntimeError(f"Collector perf transaction checkpoint ledgers changed in {journal_path}")
+        if document.get(_SIDECAR_TRANSACTION_FIELD) is not None:
+            raise RuntimeError(f"Collector perf transaction checkpoint was already tagged in {journal_path}")
+    meta_path = output_root / "collection_meta.yaml"
+    if previous_sidecar is None:
+        if meta_path.exists() or meta_path.is_symlink():
+            raise RuntimeError(f"Collector perf transaction sidecar target changed in {journal_path}")
+    else:
+        _validated_regular_file(
+            meta_path,
+            previous_sidecar.digest,
+            context_path=journal_path,
+            expected_identity=previous_sidecar.identity,
+            kind="perf transaction sidecar target",
+        )
+
+
+def _revalidate_published_perf_publications(
+    publications: Iterable[PerfPublication],
+    *,
+    context_path: Path,
+) -> None:
+    for publication in publications:
+        snapshot = _validated_regular_file(
+            publication.target,
+            publication.prepared.digest,
+            context_path=context_path,
+            expected_identity=publication.prepared.identity,
+            kind="published perf target",
+        )
+        if snapshot.mode != publication.prepared.mode:
+            raise RuntimeError(f"Collector published perf target mode changed in {context_path}: {publication.target}")
+
+
+class _CollectorPerfPublicationTransaction:
+    def __init__(
+        self,
+        output_root: Path,
+        *,
+        backend: str,
+        checkpoint_dir: str,
+        producer_plan: dict[Path, _ProducerCheckpointPlan],
+        sidecar_snapshot: _FileSnapshot | None,
+    ) -> None:
+        self.output_root = output_root.resolve()
+        self.backend = backend
+        self.checkpoint_dir = checkpoint_dir
+        self.checkpoint_root = _checkpoint_backend_root(checkpoint_dir, backend)
+        self.producer_plan = producer_plan
+        self.sidecar_snapshot = sidecar_snapshot
+        self.journal_path = self.output_root / _PERF_TRANSACTION_FILENAME
+        self.publications: tuple[PerfPublication, ...] = ()
+        self.journal_attestation: _FileAttestation | None = None
+        self.sidecar_journal_attestation: _FileAttestation | None = None
+        self._journal_published = False
+
+    def has_durable_journal(self) -> bool:
+        return self._journal_published
+
+    def prepare(self, publications: tuple[PerfPublication, ...]) -> None:
+        if self.journal_path.exists() or self.journal_path.is_symlink():
+            raise RuntimeError(f"Unexpected collector perf transaction journal: {self.journal_path}")
+        if (self.output_root / _SIDECAR_TRANSACTION_FILENAME).exists() or (
+            self.output_root / _SIDECAR_STAGING_FILENAME
+        ).exists():
+            raise RuntimeError(f"Unexpected collector sidecar transaction before perf publication: {self.output_root}")
+        self.publications = publications
+        _revalidate_producer_plan(self.producer_plan)
+        transaction = {
+            "schema": _PERF_TRANSACTION_SCHEMA,
+            "transaction_id": uuid.uuid4().hex,
+            "output_root": str(self.output_root),
+            "backend": self.backend,
+            "checkpoint_root": str(self.checkpoint_root),
+            "previous_sidecar": _attestation_record(
+                self.sidecar_snapshot.attest(self.output_root / "collection_meta.yaml")
+                if self.sidecar_snapshot is not None
+                else None
+            ),
+            "sidecar_staging_path": str(self.output_root / _SIDECAR_STAGING_FILENAME),
+            "checkpoints": [_perf_checkpoint_record(record) for _path, record in sorted(self.producer_plan.items())],
+            "publications": [_perf_publication_record(publication) for publication in publications],
+        }
+        parsed_publications, checkpoint_records, previous_sidecar = _validate_perf_transaction_document(
+            transaction,
+            output_root=self.output_root,
+            backend=self.backend,
+            checkpoint_root=self.checkpoint_root,
+            journal_path=self.journal_path,
+        )
+        _revalidate_perf_transaction_rollback_inputs(
+            parsed_publications,
+            checkpoint_records,
+            previous_sidecar,
+            output_root=self.output_root,
+            journal_path=self.journal_path,
+        )
+        _atomic_write_bytes(
+            self.journal_path,
+            json.dumps(transaction, indent=2).encode(),
+            replace_existing=False,
+        )
+        self._journal_published = True
+        snapshot = _validated_regular_file(
+            self.journal_path,
+            None,
+            context_path=self.journal_path,
+            kind="perf transaction journal",
+        )
+        self.journal_attestation = snapshot.attest(self.journal_path)
+
+    def _validated_state(
+        self,
+    ) -> tuple[_FileAttestation, list[PerfPublication], list[dict], _FileAttestation | None]:
+        if self.journal_attestation is None:
+            raise RuntimeError("Collector perf transaction has no durable journal")
+        state = _load_perf_publication_transaction(
+            self.output_root,
+            backend=self.backend,
+            checkpoint_dir=self.checkpoint_dir,
+        )
+        if state is None or state[0] != self.journal_attestation or tuple(state[1]) != self.publications:
+            raise RuntimeError("Collector perf transaction journal changed after publication preparation")
+        return state
+
+    def rollback_complete(self, publications: tuple[PerfPublication, ...]) -> None:
+        if publications != self.publications or self.journal_attestation is None:
+            raise RuntimeError("Collector perf transaction rollback does not match its prepared batch")
+        state = self._validated_state()
+        _revalidate_perf_transaction_rollback_inputs(
+            state[1],
+            state[2],
+            state[3],
+            output_root=self.output_root,
+            journal_path=self.journal_path,
+        )
+        validate_restored_perf_publications(state[1])
+        cleanup_perf_publication_artifacts(publications)
+        _revalidate_journal_attestation(state[0])
+        _revalidate_perf_transaction_rollback_inputs(
+            state[1],
+            state[2],
+            state[3],
+            output_root=self.output_root,
+            journal_path=self.journal_path,
+        )
+        validate_restored_perf_publications(state[1])
+        _cleanup_transaction_files([self.journal_attestation], context_path=self.journal_path)
+        self.journal_attestation = None
+        self._journal_published = False
+
+    def rollback(self) -> None:
+        state = self._validated_state()
+        _rollback_perf_publication_transaction(state, output_root=self.output_root)
+        self.journal_attestation = None
+        self._journal_published = False
+
+    def handoff_to_sidecar(self, sidecar_journal_attestation: _FileAttestation) -> None:
+        self._validated_state()
+        _revalidate_journal_attestation(sidecar_journal_attestation)
+        _revalidate_published_perf_publications(self.publications, context_path=self.journal_path)
+        self.sidecar_journal_attestation = sidecar_journal_attestation
+
+    def revalidate_published(self, sidecar_journal_attestation: _FileAttestation) -> None:
+        if sidecar_journal_attestation != self.sidecar_journal_attestation:
+            raise RuntimeError("Collector perf transaction sidecar handoff changed before commit")
+        self._validated_state()
+        _revalidate_journal_attestation(sidecar_journal_attestation)
+        _revalidate_published_perf_publications(self.publications, context_path=self.journal_path)
+
+    def commit_complete(self, sidecar_journal_attestation: _FileAttestation) -> None:
+        self.revalidate_published(sidecar_journal_attestation)
+        cleanup_perf_publication_artifacts(self.publications)
+        self.revalidate_published(sidecar_journal_attestation)
+        _cleanup_transaction_files([self.journal_attestation], context_path=self.journal_path)
+        self.journal_attestation = None
+        self.sidecar_journal_attestation = None
+        self._journal_published = False
+
+
+def _sidecar_perf_publications(
+    transaction: dict,
+    *,
+    output_root: Path,
+    journal_path: Path,
+) -> list[PerfPublication] | None:
+    records = transaction.get("perf_publications")
+    if records is None:
+        return None
+    if not isinstance(records, list) or not records:
+        raise RuntimeError(f"Invalid collector sidecar perf publications in {journal_path}")
+    publications = [
+        _perf_publication_from_record(record, output_root=output_root, context_path=journal_path) for record in records
+    ]
+    if len({publication.target for publication in publications}) != len(publications):
+        raise RuntimeError(f"Duplicate collector sidecar perf publication targets in {journal_path}")
+    return publications
+
+
 def _validate_transaction_envelope(
     transaction: dict,
     *,
@@ -2345,6 +2864,11 @@ def _validate_transaction_envelope(
         raise RuntimeError(f"Invalid collector sidecar transaction ID in {journal_path}: {transaction_id!r}")
     if not _valid_sha256_digest(expected_digest):
         raise RuntimeError(f"Invalid collector sidecar digest in {journal_path}: {expected_digest!r}")
+    _sidecar_perf_publications(
+        transaction,
+        output_root=output_root,
+        journal_path=journal_path,
+    )
 
     expected_context = {
         "output_root": str(output_root),
@@ -2970,6 +3494,7 @@ def _delete_claimed_transaction_files(
             kind="claimed transaction file",
         )
         claimed_file.claimed_path.unlink()
+        _fsync_directory(claimed_file.claimed_path.parent)
 
 
 def _cleanup_transaction_files(
@@ -2987,6 +3512,7 @@ def _cleanup_transaction_files(
         )
         for staging_file in staging_files:
             if not staging_file.path.exists() and not staging_file.path.is_symlink():
+                _fsync_directory(staging_file.path.parent)
                 continue
             _validated_regular_file(
                 staging_file.path,
@@ -2996,6 +3522,7 @@ def _cleanup_transaction_files(
                 kind="transaction cleanup file",
             )
             staging_file.path.unlink()
+            _fsync_directory(staging_file.path.parent)
         return
 
     claimed_files = _claim_transaction_files(
@@ -3055,6 +3582,149 @@ def _publish_transaction_sidecar(
     _delete_claimed_transaction_files(claimed_files, context_path=context_path)
 
 
+def _load_perf_publication_transaction(
+    output_root: Path,
+    *,
+    backend: str,
+    checkpoint_dir: str,
+) -> tuple[_FileAttestation, list[PerfPublication], list[dict], _FileAttestation | None] | None:
+    output_root = output_root.resolve()
+    journal_path = output_root / _PERF_TRANSACTION_FILENAME
+    if journal_path.is_symlink():
+        raise RuntimeError(f"Invalid collector perf transaction journal: {journal_path}")
+    if not journal_path.exists():
+        return None
+    if not journal_path.is_file():
+        raise RuntimeError(f"Invalid collector perf transaction journal: {journal_path}")
+    try:
+        snapshot = _validated_regular_file(
+            journal_path,
+            None,
+            context_path=journal_path,
+            capture_contents=True,
+            kind="perf transaction journal",
+        )
+        transaction = json.loads(snapshot.contents)
+        publications, checkpoint_records, previous_sidecar = _validate_perf_transaction_document(
+            transaction,
+            output_root=output_root,
+            backend=backend,
+            checkpoint_root=_checkpoint_backend_root(checkpoint_dir, backend),
+            journal_path=journal_path,
+        )
+    except Exception as error:
+        raise RuntimeError(f"Failed to load collector perf transaction {journal_path}: {error}") from error
+    return snapshot.attest(journal_path), publications, checkpoint_records, previous_sidecar
+
+
+def _rollback_perf_publication_transaction(
+    state: tuple[_FileAttestation, list[PerfPublication], list[dict], _FileAttestation | None],
+    *,
+    output_root: Path,
+) -> None:
+    journal_attestation, publications, checkpoint_records, previous_sidecar = state
+    journal_path = journal_attestation.path
+    staged_meta_path = output_root / _SIDECAR_STAGING_FILENAME
+    staged_meta_attestation: _FileAttestation | None = None
+    if staged_meta_path.is_symlink() or (staged_meta_path.exists() and not staged_meta_path.is_file()):
+        raise RuntimeError(f"Invalid sidecar staging document during perf rollback: {journal_path}")
+    if staged_meta_path.is_file():
+        staged_meta_attestation = _validated_regular_file(
+            staged_meta_path,
+            None,
+            context_path=journal_path,
+            kind="uncommitted sidecar staging document",
+        ).attest(staged_meta_path)
+    _revalidate_journal_attestation(journal_attestation)
+    _revalidate_perf_transaction_rollback_inputs(
+        publications,
+        checkpoint_records,
+        previous_sidecar,
+        output_root=output_root,
+        journal_path=journal_path,
+    )
+    restore_perf_publications(publications)
+    _revalidate_journal_attestation(journal_attestation)
+    _revalidate_perf_transaction_rollback_inputs(
+        publications,
+        checkpoint_records,
+        previous_sidecar,
+        output_root=output_root,
+        journal_path=journal_path,
+    )
+    cleanup_perf_publication_artifacts(publications)
+    if staged_meta_attestation is not None:
+        _cleanup_transaction_files([staged_meta_attestation], context_path=journal_path)
+    _revalidate_journal_attestation(journal_attestation)
+    _revalidate_perf_transaction_rollback_inputs(
+        publications,
+        checkpoint_records,
+        previous_sidecar,
+        output_root=output_root,
+        journal_path=journal_path,
+    )
+    validate_restored_perf_publications(publications)
+    _cleanup_transaction_files([journal_attestation], context_path=journal_path)
+
+
+def _validate_perf_to_sidecar_handoff(
+    perf_state: tuple[_FileAttestation, list[PerfPublication], list[dict], _FileAttestation | None],
+    sidecar_transaction: dict,
+    *,
+    journal_path: Path,
+) -> None:
+    perf_journal, publications, checkpoint_records, previous_sidecar = perf_state
+    _revalidate_journal_attestation(perf_journal)
+    if sidecar_transaction.get("perf_publications") != [
+        _perf_publication_record(publication) for publication in publications
+    ]:
+        raise RuntimeError(f"Collector perf and sidecar transactions disagree on publications in {journal_path}")
+    expected_previous = _attestation_record(previous_sidecar)
+    if sidecar_transaction.get("previous_sidecar") != expected_previous:
+        raise RuntimeError(f"Collector perf and sidecar transactions disagree on prior sidecar in {journal_path}")
+    expected_staging = [
+        {
+            "path": str(publication.source.path),
+            "digest": publication.source.digest,
+            "device": publication.source.device,
+            "inode": publication.source.inode,
+        }
+        for publication in publications
+    ]
+    if sidecar_transaction.get("staging_paths") != expected_staging:
+        raise RuntimeError(f"Collector perf and sidecar transactions disagree on staging files in {journal_path}")
+    expected_checkpoints = [
+        {
+            "path": checkpoint["path"],
+            "done": checkpoint["done"],
+            "failed": checkpoint["failed"],
+            "attempted": checkpoint["attempted"],
+            "identity": checkpoint["identity"],
+        }
+        for checkpoint in checkpoint_records
+    ]
+    if sidecar_transaction.get("checkpoints") != expected_checkpoints:
+        raise RuntimeError(f"Collector perf and sidecar transactions disagree on checkpoints in {journal_path}")
+    _revalidate_published_perf_publications(publications, context_path=journal_path)
+
+
+def _revalidate_perf_sidecar_commit(
+    perf_transaction: tuple[_FileAttestation, list[PerfPublication], list[dict], _FileAttestation | None] | None,
+    sidecar_publications: list[PerfPublication] | None,
+    transaction: dict,
+    *,
+    journal_path: Path,
+) -> None:
+    if perf_transaction is not None:
+        _validate_perf_to_sidecar_handoff(
+            perf_transaction,
+            transaction,
+            journal_path=journal_path,
+        )
+    elif sidecar_publications is not None:
+        _revalidate_published_perf_publications(sidecar_publications, context_path=journal_path)
+
+
 def _recover_collector_provenance_transaction(
     output_root: Path,
     *,
@@ -3064,10 +3734,17 @@ def _recover_collector_provenance_transaction(
     """Finish an interrupted sidecar commit without appending its event twice."""
     output_root = output_root.resolve()
     checkpoint_root = _checkpoint_backend_root(checkpoint_dir, backend)
+    perf_transaction = _load_perf_publication_transaction(
+        output_root,
+        backend=backend,
+        checkpoint_dir=checkpoint_dir,
+    )
     journal_path = output_root / _SIDECAR_TRANSACTION_FILENAME
     if journal_path.is_symlink():
         raise RuntimeError(f"Invalid collector sidecar transaction journal: {journal_path}")
     if not journal_path.exists():
+        if perf_transaction is not None:
+            _rollback_perf_publication_transaction(perf_transaction, output_root=output_root)
         return None
     if not journal_path.is_file():
         raise RuntimeError(f"Invalid collector sidecar transaction journal: {journal_path}")
@@ -3086,6 +3763,17 @@ def _recover_collector_provenance_transaction(
             output_root=output_root,
             backend=backend,
             checkpoint_root=checkpoint_root,
+            journal_path=journal_path,
+        )
+        sidecar_publications = _sidecar_perf_publications(
+            transaction,
+            output_root=output_root,
+            journal_path=journal_path,
+        )
+        _revalidate_perf_sidecar_commit(
+            perf_transaction,
+            sidecar_publications,
+            transaction,
             journal_path=journal_path,
         )
     except Exception as error:
@@ -3293,6 +3981,12 @@ def _recover_collector_provenance_transaction(
             expected_identity=source_snapshot.identity,
         )
         _revalidate_checkpoint_attestations(participant_attestations.values())
+        _revalidate_perf_sidecar_commit(
+            perf_transaction,
+            sidecar_publications,
+            transaction,
+            journal_path=journal_path,
+        )
         _publish_transaction_sidecar(
             staged_meta_path,
             publish_snapshot,
@@ -3323,6 +4017,12 @@ def _recover_collector_provenance_transaction(
         )
 
     _revalidate_journal_attestation(journal_attestation)
+    _revalidate_perf_sidecar_commit(
+        perf_transaction,
+        sidecar_publications,
+        transaction,
+        journal_path=journal_path,
+    )
     _cleanup_transaction_files(
         validated_staging_files,
         context_path=journal_path,
@@ -3333,6 +4033,31 @@ def _recover_collector_provenance_transaction(
             [claim for claim in (pending_claim, previous_claim) if claim is not None],
             context_path=journal_path,
         )
+    if perf_transaction is not None:
+        perf_journal, publications, _checkpoint_records, _previous_sidecar = perf_transaction
+        _revalidate_perf_sidecar_commit(
+            perf_transaction,
+            sidecar_publications,
+            transaction,
+            journal_path=journal_path,
+        )
+        cleanup_perf_publication_artifacts(publications)
+        _revalidate_perf_sidecar_commit(
+            perf_transaction,
+            sidecar_publications,
+            transaction,
+            journal_path=journal_path,
+        )
+        _revalidate_journal_attestation(journal_attestation)
+        _cleanup_transaction_files([perf_journal], context_path=perf_journal.path)
+    if sidecar_publications is not None:
+        _revalidate_published_perf_publications(sidecar_publications, context_path=journal_path)
+        if perf_transaction is None:
+            # A prior process may have unlinked the perf journal without
+            # persisting that unlink. Make its absence durable before the
+            # sidecar journal, now the sole recovery record, is removed.
+            _fsync_directory(output_root)
+    _revalidate_journal_attestation(journal_attestation)
     _cleanup_transaction_files(
         [journal_attestation],
         context_path=journal_path,
@@ -3354,6 +4079,7 @@ def _commit_collector_provenance_transaction(
     existing_sidecar_snapshot: _FileSnapshot | None,
     backend: str,
     checkpoint_dir: str,
+    perf_publication_transaction: _CollectorPerfPublicationTransaction | None = None,
 ) -> Path:
     """Atomically publish a sidecar and close its checkpoint participants."""
     from collector import provenance
@@ -3416,12 +4142,22 @@ def _commit_collector_provenance_transaction(
                 )
                 for path, info in sorted(staging_files.items())
             ],
+            "perf_publications": (
+                [_perf_publication_record(publication) for publication in perf_publication_transaction.publications]
+                if perf_publication_transaction is not None
+                else None
+            ),
         }
         _validate_transaction_envelope(
             transaction,
             output_root=output_root,
             backend=backend,
             checkpoint_root=checkpoint_root,
+            journal_path=journal_path,
+        )
+        sidecar_publications = _sidecar_perf_publications(
+            transaction,
+            output_root=output_root,
             journal_path=journal_path,
         )
         validated_staging_files = _validated_transaction_staging_files(
@@ -3486,6 +4222,8 @@ def _commit_collector_provenance_transaction(
         kind="sidecar transaction journal",
     )
     journal_attestation = journal_snapshot.attest(journal_path)
+    if perf_publication_transaction is not None:
+        perf_publication_transaction.handoff_to_sidecar(journal_attestation)
     _validated_sidecar_document(
         staged_meta_path,
         transaction["sidecar_digest"],
@@ -3509,6 +4247,8 @@ def _commit_collector_provenance_transaction(
         expected_identity=staged_document_snapshot.identity,
     )
     _revalidate_checkpoint_attestations(participant_attestations.values())
+    if perf_publication_transaction is not None:
+        perf_publication_transaction.revalidate_published(journal_attestation)
 
     _publish_transaction_sidecar(
         staged_meta_path,
@@ -3529,11 +4269,18 @@ def _commit_collector_provenance_transaction(
             journal_attestation=journal_attestation,
         )
     _revalidate_journal_attestation(journal_attestation)
+    if perf_publication_transaction is not None:
+        perf_publication_transaction.revalidate_published(journal_attestation)
     _cleanup_transaction_files(
         validated_staging_files,
         context_path=journal_path,
         transaction_id=transaction_id,
     )
+    if perf_publication_transaction is not None:
+        perf_publication_transaction.commit_complete(journal_attestation)
+    if sidecar_publications is not None:
+        _revalidate_published_perf_publications(sidecar_publications, context_path=journal_path)
+    _revalidate_journal_attestation(journal_attestation)
     _cleanup_transaction_files(
         [journal_attestation],
         context_path=journal_path,
@@ -3551,6 +4298,7 @@ def _write_collector_provenance(
     checkpoint_dir: str,
     finalization_info: dict[Path, PerfFinalizationInfo],
     producer_plan: dict[Path, _ProducerCheckpointPlan] | None = None,
+    perf_publication_transaction: _CollectorPerfPublicationTransaction | None = None,
 ) -> Path | None:
     """Write collection_meta.yaml (design §5) flat beside the just-finalized parquet.
 
@@ -3558,13 +4306,14 @@ def _write_collector_provenance(
     ``done``/``failed`` remain cumulative resume state; ``attempted`` is the
     pending event's case-id set, which can span interrupted invocations.
     """
-    recovered_meta_path = _recover_collector_provenance_transaction(
-        output_root,
-        backend=backend,
-        checkpoint_dir=checkpoint_dir,
-    )
-    if recovered_meta_path is not None:
-        return recovered_meta_path
+    if perf_publication_transaction is None:
+        recovered_meta_path = _recover_collector_provenance_transaction(
+            output_root,
+            backend=backend,
+            checkpoint_dir=checkpoint_dir,
+        )
+        if recovered_meta_path is not None:
+            return recovered_meta_path
     if producer_plan is not None:
         _revalidate_producer_plan(producer_plan)
 
@@ -3759,8 +4508,101 @@ def _write_collector_provenance(
         existing_sidecar_snapshot=existing_sidecar_snapshot,
         backend=backend,
         checkpoint_dir=checkpoint_dir,
+        perf_publication_transaction=perf_publication_transaction,
     )
     return meta_path
+
+
+def _finalize_collector_outputs_transaction(
+    output_root: Path,
+    staging_paths: list[Path],
+    provenance_ctx: dict,
+    run_errors: list[dict],
+    *,
+    backend: str,
+    checkpoint_dir: str,
+    sm_version: int | None,
+) -> list[Path]:
+    """Commit parquets, provenance, staging cleanup, and checkpoints coherently."""
+    if not staging_paths:
+        return []
+    output_root = output_root.resolve()
+    tables_to_update = {path.stem for path in staging_paths}
+    sidecar_snapshot = _preflight_collector_provenance(
+        output_root,
+        provenance_ctx,
+        tables_to_update=tables_to_update,
+    )
+    producer_plan, staging_attestations = _preflight_collector_finalization_inputs(
+        output_root,
+        staging_paths,
+        provenance_ctx,
+        backend=backend,
+        checkpoint_dir=checkpoint_dir,
+        sm_version=sm_version,
+    )
+
+    def prepublish_validate():
+        for transaction_path in (
+            output_root / _PERF_TRANSACTION_FILENAME,
+            output_root / _SIDECAR_TRANSACTION_FILENAME,
+            output_root / _SIDECAR_STAGING_FILENAME,
+        ):
+            if transaction_path.exists() or transaction_path.is_symlink():
+                raise RuntimeError(f"Unexpected collector finalization transaction artifact: {transaction_path}")
+        _revalidate_producer_plan(producer_plan)
+        _revalidate_transaction_staging_files(
+            staging_attestations.values(),
+            context_path=output_root,
+            require_present=True,
+        )
+        _revalidate_collector_sidecar_preflight(
+            output_root,
+            sidecar_snapshot,
+            tables_to_update=tables_to_update,
+        )
+
+    publication_transaction = _CollectorPerfPublicationTransaction(
+        output_root,
+        backend=backend,
+        checkpoint_dir=checkpoint_dir,
+        producer_plan=producer_plan,
+        sidecar_snapshot=sidecar_snapshot,
+    )
+    finalization_info: dict[Path, PerfFinalizationInfo] = {}
+    converted = finalize_perf_files(
+        staging_paths,
+        delete_source=False,
+        finalization_info=finalization_info,
+        prepublish_validate=prepublish_validate,
+        expected_source_identities={
+            path.resolve(): (attestation.digest, attestation.device, attestation.inode)
+            for path, attestation in staging_attestations.items()
+        },
+        publication_transaction=publication_transaction,
+    )
+    try:
+        meta_path = _write_collector_provenance(
+            output_root,
+            converted,
+            provenance_ctx,
+            run_errors,
+            backend=backend,
+            checkpoint_dir=checkpoint_dir,
+            finalization_info=finalization_info,
+            producer_plan=producer_plan,
+            perf_publication_transaction=publication_transaction,
+        )
+        if meta_path is None:
+            raise RuntimeError("Collector finalization produced parquets without a provenance sidecar")
+    except Exception:
+        if (
+            publication_transaction.journal_attestation is not None
+            and not (output_root / _SIDECAR_TRANSACTION_FILENAME).exists()
+        ):
+            publication_transaction.rollback()
+        raise
+    return converted
 
 
 def main():
@@ -4095,8 +4937,6 @@ def main():
         )
 
     converted: list[Path] = []
-    finalization_info: dict[Path, PerfFinalizationInfo] = {}
-    producer_plan: dict[Path, _ProducerCheckpointPlan] = {}
     if args.keep_csv:
         logger.info("Keeping collector CSV staging files because --keep-csv was passed")
     else:
@@ -4113,69 +4953,25 @@ def main():
                 )
             )
         touched_perf_outputs = sorted(touched_perf_outputs | pending_resume_outputs)
-        prepublish_validate = None
-        if touched_perf_outputs and provenance_ctx is not None:
-            tables_to_update = {path.stem for path in touched_perf_outputs}
-            sidecar_snapshot = _preflight_collector_provenance(
-                output_root,
-                provenance_ctx,
-                tables_to_update=tables_to_update,
-            )
-            producer_plan, staging_attestations = _preflight_collector_finalization_inputs(
-                output_root,
-                touched_perf_outputs,
-                provenance_ctx,
-                backend=args.backend,
-                checkpoint_dir=args.checkpoint_dir,
-                sm_version=sm_version,
-            )
-
-            def prepublish_validate():
-                _revalidate_producer_plan(producer_plan)
-                _revalidate_transaction_staging_files(
-                    staging_attestations.values(),
-                    context_path=output_root,
-                    require_present=True,
-                )
-                _revalidate_collector_sidecar_preflight(
-                    output_root,
-                    sidecar_snapshot,
-                    tables_to_update=tables_to_update,
-                )
-
         if touched_perf_outputs:
             logger.info(
                 "Finalizing collector CSV staging files as parquet:\n  "
                 + "\n  ".join(str(path) for path in touched_perf_outputs)
             )
-        converted = finalize_perf_files(
-            touched_perf_outputs,
-            delete_source=False,
-            finalization_info=finalization_info,
-            prepublish_validate=prepublish_validate,
-            expected_source_identities=(
-                {
-                    path.resolve(): (attestation.digest, attestation.device, attestation.inode)
-                    for path, attestation in staging_attestations.items()
-                }
-                if touched_perf_outputs and provenance_ctx is not None
-                else None
-            ),
-        )
+        if touched_perf_outputs and provenance_ctx is not None:
+            converted = _finalize_collector_outputs_transaction(
+                output_root,
+                touched_perf_outputs,
+                provenance_ctx,
+                run_errors or [],
+                backend=args.backend,
+                checkpoint_dir=args.checkpoint_dir,
+                sm_version=sm_version,
+            )
+        else:
+            converted = finalize_perf_files(touched_perf_outputs, delete_source=False)
         if converted:
             logger.info(f"Finalized {len(converted)} collector perf files as parquet")
-
-    if converted and provenance_ctx is not None:
-        _write_collector_provenance(
-            output_root,
-            converted,
-            provenance_ctx,
-            run_errors or [],
-            backend=args.backend,
-            checkpoint_dir=args.checkpoint_dir,
-            finalization_info=finalization_info,
-            producer_plan=producer_plan,
-        )
 
     # A ModuleCollectionFailure means an op failed before running a single case
     # (population raised, or the run infrastructure crashed) — the op collected
