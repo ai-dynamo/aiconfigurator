@@ -987,6 +987,15 @@ def _engine_config_json(model: Any, database: Any) -> str:
         "extra": {
             "identity": json.dumps(
                 {
+                    # Models whose op graph is NOT a pure function of
+                    # (model_path, ModelConfig) — e.g. shadow / what-if model
+                    # variants built outside get_model that share a checkpoint
+                    # path with the registry class — declare a discriminator
+                    # via ``engine_identity_extra``; without it two
+                    # structurally different models share one cached handle
+                    # and silently return each other's latencies (same failure
+                    # mode the forward_model key guards against).
+                    "op_graph_identity": getattr(model, "engine_identity_extra", None),
                     "raw_quant_modes": {
                         "gemm": _raw_quant_name(getattr(model_config, "gemm_quant_mode", None)),
                         "moe": _raw_quant_name(getattr(model_config, "moe_quant_mode", None)),

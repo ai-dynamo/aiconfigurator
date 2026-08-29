@@ -37,12 +37,14 @@ from aiconfigurator_core.sdk.models.helpers import (
     attention_op_keys,
     check_is_moe,
     get_model_family,
+    model_facts_divergences,
     mtp_scale_factor,
     resolve_context_fmha_by_data,
     resolve_dsv4_moe_arch,
     resolve_dsv4_moe_arch_mode,
     resolve_kimi_k3_moe_arch_mode,
     resolve_nvfp4_for_system,
+    warn_on_model_facts_divergence,
 )
 
 # Auto-import every other module in this package so ``@register_model``
@@ -97,6 +99,7 @@ def get_model(
     model_path: str,
     model_config: config.ModelConfig,
     backend_name: str,
+    system_name: str | None = None,
 ) -> BaseModel:
     """Build a model from a HuggingFace model path.
 
@@ -105,6 +108,19 @@ def get_model(
     classmethod. Per-family construction details (MoE prefix args, WideEP
     dispatch, post-construction hooks) live inside each model's
     ``create()``.
+
+    ``system_name`` (optional) additionally applies the system-aware quant
+    remaps (``resolve_dsv4_moe_arch`` / ``resolve_nvfp4_for_system``) here,
+    inside the build, instead of relying on each caller to remember them —
+    the embedded ``compile_engine`` path (Rust ``build_aic_engine`` / Dynamo
+    Mocker) previously ran none and silently kept e.g. native-FP4 compute
+    assumptions on Hopper. Callers that already run the resolvers themselves
+    are unaffected (resolvers only touch unset/inferred fields).
+
+    If upstream-produced model facts exist for this checkpoint
+    (``model_facts/<org>--<model>.yaml``, distilled from real framework dry
+    runs), the derived quant/MoE facts are compared against them and any
+    divergence is logged as a warning — never a failure.
 
     ``model_config.forward_model`` selects the forward-pass modeling mode:
     the default "op_level" returns the granular op lists unchanged; "fpm"
@@ -128,6 +144,10 @@ def get_model(
         model_config.gemm_quant_mode is not None if gemm_explicit is None else gemm_explicit
     )
     _apply_model_quant_defaults(model_config, raw_config, architecture, backend_name)
+    if system_name is not None:
+        resolve_dsv4_moe_arch(model_config, model_path, system_name=system_name, backend_name=backend_name)
+        resolve_nvfp4_for_system(model_config, system_name, model_path)
+    warn_on_model_facts_divergence(model_path, model_config, model_info)
     if check_is_moe(model_path, model_info=model_info):
         model_config.resolve_moe_parallelism()
 
@@ -212,6 +232,7 @@ __all__ = [
     "check_is_moe",
     "get_model",
     "get_model_family",
+    "model_facts_divergences",
     "mtp_scale_factor",
     "resolve_context_fmha_by_data",
     "resolve_dsv4_moe_arch",

@@ -1,0 +1,76 @@
+schema: aic-dryrun-summary/v1
+model: zai-org/GLM-5.2-FP8
+framework:
+  name: sglang
+  version: 0.5.16
+platform: sm90
+tp: 1
+kv_cache_dtype: fp8_e4m3
+layer_kinds:
+  full_indexer_dense:
+    quant_by_module:
+      mlp.down_proj: Fp8LinearMethod
+      mlp.gate_up_proj: Fp8LinearMethod
+      self_attn.attn_mha: Fp8KVCacheMethod
+      self_attn.attn_mqa: Fp8KVCacheMethod
+      self_attn.fused_qkv_a_proj_with_mqa: Fp8LinearMethod
+      self_attn.indexer.wk_weights_proj: UnquantizedLinearMethod
+      self_attn.indexer.wq_b: Fp8LinearMethod
+      self_attn.kv_b_proj: Fp8LinearMethod
+      self_attn.o_proj: Fp8LinearMethod
+      self_attn.q_b_proj: Fp8LinearMethod
+    dense_mlp:
+      inter: 12288
+    prefill_branch:
+      isl32: cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAttnFwd
+      isl4096: sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90
+      threshold_candidates:
+        index_topk: 2048
+  full_indexer_moe:
+    quant_by_module:
+      mlp.experts: Fp8MoEMethod
+      self_attn.attn_mha: Fp8KVCacheMethod
+      self_attn.attn_mqa: Fp8KVCacheMethod
+      self_attn.fused_qkv_a_proj_with_mqa: Fp8LinearMethod
+      self_attn.indexer.wk_weights_proj: UnquantizedLinearMethod
+      self_attn.indexer.wq_b: Fp8LinearMethod
+      self_attn.kv_b_proj: Fp8LinearMethod
+      self_attn.o_proj: Fp8LinearMethod
+      self_attn.q_b_proj: Fp8LinearMethod
+    moe_runtime:
+      num_experts: 257
+      inter: 2048
+      router_width: 256
+      topk: 9
+    prefill_branch:
+      isl32: cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAttnFwd
+      isl4096: sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90
+      threshold_candidates:
+        index_topk: 2048
+  shared_indexer_moe:
+    quant_by_module:
+      mlp.experts: Fp8MoEMethod
+      self_attn.attn_mha: Fp8KVCacheMethod
+      self_attn.attn_mqa: Fp8KVCacheMethod
+      self_attn.fused_qkv_a_proj_with_mqa: Fp8LinearMethod
+      self_attn.indexer.wk_weights_proj: UnquantizedLinearMethod
+      self_attn.indexer.wq_b: Fp8LinearMethod
+      self_attn.kv_b_proj: Fp8LinearMethod
+      self_attn.o_proj: Fp8LinearMethod
+      self_attn.q_b_proj: Fp8LinearMethod
+    moe_runtime:
+      num_experts: 257
+      inter: 2048
+      router_width: 256
+      topk: 9
+    prefill_branch:
+      isl32: cutlass::device_kernel<flash::enable_sm90_or_later<flash::FlashAttnFwd
+      isl4096: sm90::decode::sparse_fp8::flash_fwd_splitkv_mla_fp8_sparse_kernel<sm90
+      threshold_candidates:
+        index_topk: 2048
+provenance:
+  probe: opharness probe/recipe_probe.py
+  traces:
+  - /work/dummy_models/glm/GLM-5.2-FP8__full_indexer_dense
+  - /work/dummy_models/glm/GLM-5.2-FP8__full_indexer_moe
+  - /work/dummy_models/glm/GLM-5.2-FP8__shared_indexer_moe

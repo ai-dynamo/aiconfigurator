@@ -988,3 +988,95 @@ def mtp_scale_factor(nextn: int, num_layers: int) -> float:
     if nextn <= 0:
         return 1.0
     return (nextn + num_layers) / num_layers
+
+
+# --------------------------------------------------------------------------- #
+# Model facts: upstream-produced dry-run evidence, checked during build.
+#
+# ``model_facts/<org>--<model>.yaml`` (packaged next to ``model_configs/``) is
+# a ~70-line summary distilled by the collection side from REAL framework dry
+# runs: per layer kind, the per-module quant-method classes and the runtime
+# MoE shape, plus the kv identity. ``get_model`` compares its own derivations
+# against them and LOGS a warning on divergence — never a failure, and only
+# once per model per process. No facts file, no check.
+# --------------------------------------------------------------------------- #
+
+_FACTS_GEMM_BY_CLASS = {
+    "Fp8LinearMethod": "fp8_block",  # GLM-class ckpts are 128x128 block-quant
+    "UnquantizedLinearMethod": "bfloat16",
+}
+_FACTS_KV_BY_DTYPE = {"fp8_e4m3": "fp8", "fp8_e5m2": "fp8", "bfloat16": "bfloat16", "auto": "bfloat16"}
+
+
+@cache
+def _load_model_facts(model_path: str) -> dict | None:
+    import os
+
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..",
+                        "model_facts", f"{model_path.replace('/', '--')}.yaml")
+    if not os.path.exists(path):
+        return None
+    try:
+        import yaml
+
+        return yaml.safe_load(open(path))
+    except Exception as exc:  # a broken facts file must never break the build
+        logger.warning("model facts unreadable for %s (%s) — skipping the check", model_path, exc)
+        return None
+
+
+def model_facts_divergences(model_path: str, model_config, model_info: dict) -> list[str]:
+    """Compare build-time derivations against upstream dry-run facts.
+
+    Checks the few facts that caught real drift in the GLM-5.2 pilot: kv
+    identity, attention-projection quant, and the MoE shape (where the
+    framework fusing the shared expert into the routed experts — runtime
+    ``(routed+shared, topk+shared)`` — is the known, deliberate modeling
+    decomposition and does NOT warn). Empty list = no facts or no divergence.
+    """
+    facts = _load_model_facts(model_path)
+    if not facts:
+        return []
+    msgs: list[str] = []
+    raw = model_info.get("raw_config", {})
+
+    kv_facts = _FACTS_KV_BY_DTYPE.get(facts.get("kv_cache_dtype"))
+    kv_model = getattr(model_config.kvcache_quant_mode, "name", None)
+    if kv_facts and kv_model and kv_model != kv_facts:
+        msgs.append(f"kv cache: resolved {kv_model}, framework dry run used {kv_facts}")
+
+    gemm_model = getattr(model_config.gemm_quant_mode, "name", None)
+    for kind, ev in (facts.get("layer_kinds") or {}).items():
+        o_cls = (ev.get("quant_by_module") or {}).get("self_attn.o_proj")
+        gemm_facts = _FACTS_GEMM_BY_CLASS.get(o_cls)
+        if gemm_facts and gemm_model and gemm_model != gemm_facts:
+            msgs.append(f"attention projections ({kind}): resolved gemm {gemm_model}, "
+                        f"framework ran {o_cls} ({gemm_facts})")
+        break  # projections are identical across kinds; one comparison suffices
+
+    rt = next((ev["moe_runtime"] for ev in (facts.get("layer_kinds") or {}).values()
+               if "moe_runtime" in ev), None)
+    routed = raw.get("n_routed_experts") or raw.get("num_experts")
+    if rt and routed:
+        topk = int(raw.get("num_experts_per_tok") or model_info.get("topk") or 0)
+        n_shared = int(raw.get("n_shared_experts") or 0)
+        inter = int(raw.get("moe_intermediate_size") or model_info.get("moe_inter_size") or 0)
+        exact = rt["num_experts"] == int(routed) and rt.get("topk") == topk
+        fused = (rt["num_experts"] == int(routed) + n_shared
+                 and rt.get("topk") == topk + n_shared)  # deliberate decomposition, no warning
+        if not (exact or fused) or rt.get("inter") != inter:
+            msgs.append(f"MoE: config says ({routed} experts, topk {topk}, +{n_shared} shared, "
+                        f"inter {inter}); framework ran ({rt['num_experts']}, topk {rt.get('topk')}, "
+                        f"inter {rt.get('inter')})")
+    return msgs
+
+
+_FACTS_WARNED: set[str] = set()
+
+
+def warn_on_model_facts_divergence(model_path: str, model_config, model_info: dict) -> None:
+    if model_path in _FACTS_WARNED:  # sweeps call get_model per point; warn once
+        return
+    _FACTS_WARNED.add(model_path)
+    for msg in model_facts_divergences(model_path, model_config, model_info):
+        logger.warning("model facts divergence [%s]: %s", model_path, msg)
