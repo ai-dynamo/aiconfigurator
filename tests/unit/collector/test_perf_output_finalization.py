@@ -292,7 +292,7 @@ def test_finalize_perf_files_without_transaction_never_uses_private_claims(tmp_p
     def reject_unjournaled_claim(*_args, **_kwargs):
         raise AssertionError("non-transactional publication must stay a single atomic replace")
 
-    monkeypatch.setattr(helper_mod, "_rename_noreplace", reject_unjournaled_claim)
+    monkeypatch.setattr(helper_mod, "_rename_noreplace_at", reject_unjournaled_claim)
 
     finalize_perf_files([perf], delete_source=False)
 
@@ -323,7 +323,7 @@ def test_finalize_perf_files_rejects_target_appearing_after_merge_observed_absen
     assert parquet.read_bytes() == concurrent_bytes
     assert perf.exists()
     assert finalization_info == {}
-    assert list(tmp_path.glob(".*.rollback")) == []
+    assert list(tmp_path.glob(".*.rollback.tmp")) == []
 
 
 def test_finalize_perf_files_cleans_rollback_backup_when_transaction_prepare_fails(tmp_path):
@@ -352,7 +352,7 @@ def test_finalize_perf_files_cleans_rollback_backup_when_transaction_prepare_fai
 
     assert parquet.read_bytes() == parquet_before
     assert perf.exists()
-    assert list(tmp_path.glob(".*.rollback")) == []
+    assert list(tmp_path.glob(".*.rollback.tmp")) == []
     retained = helper_mod.perf_preparation_path(parquet)
     _assert_retained_preparation(retained)
     assert list(tmp_path.glob(".*.tmp")) == [retained]

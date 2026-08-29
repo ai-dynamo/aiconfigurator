@@ -109,11 +109,11 @@ def _write_version_dir(root: str, family: str, filename: str, rows: list[dict]) 
     version_dir = os.path.join(root, "data", family, SYNTH_BACKEND, SYNTH_VERSION)
     os.makedirs(version_dir, exist_ok=True)
     pq.write_table(pa.Table.from_pylist(rows), os.path.join(version_dir, filename))
-    # Collector V3 sidecar: without it (or without a matching ``tables`` entry)
-    # the loader warns per table; the synthetic data is complete, not partial.
+    # Legacy compatibility sidecar: these synthetic rows do not model the
+    # runtime and collection-event history required by Collector V3 schema v2.
     stem = filename.split(".")[0]
     with open(os.path.join(version_dir, "collection_meta.yaml"), "w", encoding="utf-8") as f:
-        yaml.safe_dump({"status": "complete", "schema_version": 2, "tables": {stem: {"status": "complete"}}}, f)
+        yaml.safe_dump({"schema_version": 1, "tables": {stem: {"status": "complete"}}}, f)
 
 
 @pytest.fixture(autouse=True)

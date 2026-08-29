@@ -157,8 +157,10 @@ class Qwen35Model(BaseModel):
             raise ValueError("Qwen3.5 does not model context parallelism; cp_size must be 1")
 
         # SSM state dtype, resolved the way sglang's mamba2_state_dtype does
-        # (configs/mamba_utils.py @ pinned v0.5.14: config.mamba_ssm_dtype or
-        # config.text_config.mamba_ssm_dtype, default "float32"). Every
+        # (configs/mamba_utils.py @ pinned v0.5.14:
+        # config.text_config.mamba_ssm_dtype takes precedence over
+        # config.mamba_ssm_dtype; unsupported declared values fall back to
+        # "float32"). Every
         # bundled Qwen3.5/3.6 config pins "float32"; only a bfloat16 state
         # lets SM-major-10 sglang serving auto-select the FlashInfer GDN
         # decode backend (server_args.py:4884-4915), which the Rust GDN query
