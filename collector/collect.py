@@ -78,7 +78,6 @@ import pstats
 import signal
 import stat
 import subprocess
-import tempfile
 import time
 import traceback
 import uuid
@@ -94,12 +93,18 @@ from helper import (
     PERF_TRANSACTION_FILENAME,
     SIDECAR_STAGING_FILENAME,
     SIDECAR_TRANSACTION_FILENAME,
+    LockedOutputRoot,
     PerfFileAttestation,
     PerfFinalizationInfo,
     PerfPublication,
     WorkerRestartSignal,
+    _rename_noreplace,
+    _rename_noreplace_at,
+    atomic_write_reservation_path,
+    cleanup_atomic_write_reservations,
     cleanup_perf_publication_artifacts,
     cleanup_unjournaled_perf_preparations,
+    collector_retained_path,
     create_test_case_id,
     finalize_perf_files,
     find_perf_csv_outputs,
@@ -241,9 +246,103 @@ def _digest_open_fd(file_descriptor: int) -> tuple[str, os.stat_result]:
     return "sha256:" + digest.hexdigest(), opened
 
 
-def _attest_atomic_publication(
+@dataclass(frozen=True)
+class _AtomicPathState:
+    identity: tuple[int, int]
+    digest: str
+    size: int
+    mode: int
+    nlink: int
+
+
+def _atomic_write_previous_path(path: Path) -> Path:
+    return path.with_name(f".{path.name}.tmp.previous")
+
+
+def _require_locked_directory(
+    directory_fd: int,
+    directory: Path,
+    expected_identity: tuple[int, int] | None = None,
+) -> tuple[int, int]:
+    opened = os.fstat(directory_fd)
+    try:
+        current = directory.lstat()
+    except OSError as error:
+        raise RuntimeError(f"Checkpoint directory changed while locked: {directory}") from error
+    identity = (opened.st_dev, opened.st_ino)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or not stat.S_ISDIR(current.st_mode)
+        or identity != (current.st_dev, current.st_ino)
+        or (expected_identity is not None and identity != expected_identity)
+    ):
+        raise RuntimeError(f"Checkpoint directory changed while locked: {directory}")
+    return identity
+
+
+def _entry_state_at(directory_fd: int, name: str) -> os.stat_result | None:
+    try:
+        return os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _open_regular_entry_at(directory_fd: int, name: str) -> tuple[int, os.stat_result]:
+    open_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+    file_descriptor = os.open(name, open_flags, dir_fd=directory_fd)
+    try:
+        opened = os.fstat(file_descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError(f"Entry is not a regular file: {name}")
+    except BaseException:
+        os.close(file_descriptor)
+        raise
+    return file_descriptor, opened
+
+
+def _atomic_path_state_at(directory_fd: int, name: str, display_path: Path) -> _AtomicPathState:
+    try:
+        artifact_fd, _opened = _open_regular_entry_at(directory_fd, name)
+        with os.fdopen(artifact_fd, "rb") as artifact:
+            digest, opened = _digest_open_fd(artifact.fileno())
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except Exception as error:
+        raise RuntimeError(f"Atomic write artifact is not a regular file: {display_path}") from error
+    identity = (opened.st_dev, opened.st_ino)
+    mode = stat.S_IMODE(opened.st_mode)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or (current.st_dev, current.st_ino) != identity
+        or current.st_size != opened.st_size
+        or stat.S_IMODE(current.st_mode) != mode
+        or current.st_nlink != opened.st_nlink
+    ):
+        raise RuntimeError(f"Atomic write artifact changed: {display_path}")
+    return _AtomicPathState(
+        identity=identity,
+        digest=digest,
+        size=opened.st_size,
+        mode=mode,
+        nlink=opened.st_nlink,
+    )
+
+
+def _require_atomic_path_state_at(
+    directory_fd: int,
+    name: str,
+    display_path: Path,
+    expected: _AtomicPathState,
+) -> None:
+    if _atomic_path_state_at(directory_fd, name, display_path) != expected:
+        raise RuntimeError(f"Atomic write artifact changed: {display_path}")
+
+
+def _attest_atomic_publication_at(
     file_descriptor: int,
-    path: Path,
+    directory_fd: int,
+    name: str,
+    display_path: Path,
     *,
     expected_identity: tuple[int, int],
     expected_digest: str,
@@ -251,11 +350,13 @@ def _attest_atomic_publication(
     expected_mode: int,
 ) -> None:
     descriptor_digest, descriptor_state = _digest_open_fd(file_descriptor)
-    if path.is_symlink() or not path.is_file():
-        raise RuntimeError(f"Atomic write publication changed before attestation: {path}")
-    with path.open("rb") as published_file:
-        published_digest, published_state = _digest_open_fd(published_file.fileno())
-    current = path.lstat()
+    try:
+        published_fd, _opened = _open_regular_entry_at(directory_fd, name)
+        with os.fdopen(published_fd, "rb") as published_file:
+            published_digest, published_state = _digest_open_fd(published_file.fileno())
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except Exception as error:
+        raise RuntimeError(f"Atomic write publication changed before attestation: {display_path}") from error
     if (
         not stat.S_ISREG(descriptor_state.st_mode)
         or not stat.S_ISREG(published_state.st_mode)
@@ -271,37 +372,377 @@ def _attest_atomic_publication(
         or stat.S_IMODE(descriptor_state.st_mode) != expected_mode
         or stat.S_IMODE(published_state.st_mode) != expected_mode
         or stat.S_IMODE(current.st_mode) != expected_mode
+        or descriptor_state.st_nlink != 1
+        or published_state.st_nlink != 1
+        or current.st_nlink != 1
     ):
-        raise RuntimeError(f"Atomic write publication changed before attestation: {path}")
+        raise RuntimeError(f"Atomic write publication changed before attestation: {display_path}")
 
 
-def _atomic_temporary_matches(
+def _validated_regular_file_at(
+    directory_fd: int,
+    name: str,
+    display_path: Path,
+    expected_digest: str | None,
+    *,
+    context_path: Path,
+    expected_identity: tuple[int, int] | None = None,
+    capture_contents: bool = False,
+    kind: str,
+) -> _FileSnapshot:
+    try:
+        owned_fd, opened = _open_regular_entry_at(directory_fd, name)
+        with os.fdopen(owned_fd, "rb") as owned_file:
+            digest = hashlib.sha256()
+            captured_chunks: list[bytes] | None = [] if capture_contents else None
+            for chunk in iter(lambda: owned_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+                if captured_chunks is not None:
+                    captured_chunks.append(chunk)
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except Exception as error:
+        raise RuntimeError(f"Invalid collector {kind} in {context_path}: {display_path}") from error
+    snapshot = _FileSnapshot(
+        device=opened.st_dev,
+        inode=opened.st_ino,
+        mode=stat.S_IMODE(opened.st_mode),
+        digest="sha256:" + digest.hexdigest(),
+        contents=b"".join(captured_chunks) if captured_chunks is not None else None,
+    )
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or snapshot.identity != (current.st_dev, current.st_ino)
+        or snapshot.mode != stat.S_IMODE(current.st_mode)
+        or opened.st_nlink != current.st_nlink
+        or (expected_identity is not None and snapshot.identity != expected_identity)
+        or (expected_digest is not None and snapshot.digest != expected_digest)
+    ):
+        raise RuntimeError(f"Collector {kind} changed in {context_path}: {display_path}")
+    return snapshot
+
+
+def _normalize_atomic_replace_state_at(directory_fd: int, path: Path) -> None:
+    name = path.name
+    reservation_name = atomic_write_reservation_path(Path(name)).name
+    previous_name = _atomic_write_previous_path(Path(name)).name
+    if _entry_state_at(directory_fd, previous_name) is None:
+        return
+    if _entry_state_at(directory_fd, reservation_name) is not None:
+        if _entry_state_at(directory_fd, name) is not None:
+            raise RuntimeError(f"Conflicting atomic write artifacts for {path}")
+        previous_state = _atomic_path_state_at(directory_fd, previous_name, path.with_name(previous_name))
+        _rename_noreplace_at(previous_name, name, directory_fd)
+        _require_atomic_path_state_at(directory_fd, name, path, previous_state)
+        return
+    previous_state = _atomic_path_state_at(directory_fd, previous_name, path.with_name(previous_name))
+    _rename_noreplace_at(previous_name, reservation_name, directory_fd)
+    _require_atomic_path_state_at(
+        directory_fd,
+        reservation_name,
+        path.with_name(reservation_name),
+        previous_state,
+    )
+
+
+def _atomic_replace_bytes_at(
+    directory_fd: int,
+    path: Path,
+    contents: bytes,
+    mode: int,
+    *,
+    expected_replaced_state: _AtomicPathState | None,
+) -> None:
+    name = path.name
+    reservation_name = atomic_write_reservation_path(Path(name)).name
+    reservation_path = path.with_name(reservation_name)
+    expected_digest = "sha256:" + hashlib.sha256(contents).hexdigest()
+    expected_size = len(contents)
+    expected_mode = stat.S_IMODE(mode)
+    open_flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
+    reservation_created = False
+    try:
+        temp_fd = os.open(
+            reservation_name,
+            open_flags | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        reservation_created = True
+    except FileExistsError:
+        temp_fd = os.open(reservation_name, open_flags, dir_fd=directory_fd)
+    temp_file = os.fdopen(temp_fd, "r+b")
+    with temp_file:
+        if reservation_created:
+            os.fsync(directory_fd)
+        opened = os.fstat(temp_file.fileno())
+        temp_identity = (opened.st_dev, opened.st_ino)
+        current = os.stat(reservation_name, dir_fd=directory_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or (current.st_dev, current.st_ino) != temp_identity
+            or opened.st_nlink != 1
+            or current.st_nlink != 1
+        ):
+            raise RuntimeError(f"Atomic write temporary changed before reuse: {reservation_path}")
+        temp_file.seek(0)
+        temp_file.truncate()
+        temp_file.write(contents)
+        temp_file.flush()
+        os.fchmod(temp_file.fileno(), expected_mode)
+        os.fsync(temp_file.fileno())
+        descriptor_digest, descriptor_state = _digest_open_fd(temp_file.fileno())
+        if (
+            not stat.S_ISREG(descriptor_state.st_mode)
+            or (descriptor_state.st_dev, descriptor_state.st_ino) != temp_identity
+            or descriptor_digest != expected_digest
+            or descriptor_state.st_size != expected_size
+            or stat.S_IMODE(descriptor_state.st_mode) != expected_mode
+            or descriptor_state.st_nlink != 1
+        ):
+            raise RuntimeError(f"Atomic write temporary changed before publication: {reservation_path}")
+        _require_atomic_path_state_at(
+            directory_fd,
+            reservation_name,
+            reservation_path,
+            _AtomicPathState(
+                identity=temp_identity,
+                digest=expected_digest,
+                size=expected_size,
+                mode=expected_mode,
+                nlink=1,
+            ),
+        )
+
+        previous_name = _atomic_write_previous_path(Path(name)).name
+        current_present = _entry_state_at(directory_fd, name) is not None
+        if expected_replaced_state is None:
+            if current_present:
+                raise RuntimeError(f"Atomic write target changed before replacement: {path}")
+        else:
+            if not current_present:
+                raise RuntimeError(f"Atomic write target changed before replacement: {path}")
+            _require_atomic_path_state_at(directory_fd, name, path, expected_replaced_state)
+
+        if current_present:
+            if _entry_state_at(directory_fd, previous_name) is not None:
+                raise RuntimeError(f"Conflicting atomic write artifacts for {path}")
+            _rename_noreplace_at(name, previous_name, directory_fd)
+            try:
+                _require_atomic_path_state_at(
+                    directory_fd,
+                    previous_name,
+                    path.with_name(previous_name),
+                    expected_replaced_state,
+                )
+            except Exception as error:
+                if _entry_state_at(directory_fd, name) is None:
+                    try:
+                        _rename_noreplace_at(previous_name, name, directory_fd)
+                    except Exception as restore_error:
+                        raise RuntimeError(f"Atomic write target changed during replacement: {path}") from restore_error
+                raise RuntimeError(f"Atomic write target changed during replacement: {path}") from error
+            _rename_noreplace_at(reservation_name, name, directory_fd)
+            _attest_atomic_publication_at(
+                temp_file.fileno(),
+                directory_fd,
+                name,
+                path,
+                expected_identity=temp_identity,
+                expected_digest=expected_digest,
+                expected_size=expected_size,
+                expected_mode=expected_mode,
+            )
+            _rename_noreplace_at(previous_name, reservation_name, directory_fd)
+            _require_atomic_path_state_at(
+                directory_fd,
+                reservation_name,
+                reservation_path,
+                expected_replaced_state,
+            )
+            _attest_atomic_publication_at(
+                temp_file.fileno(),
+                directory_fd,
+                name,
+                path,
+                expected_identity=temp_identity,
+                expected_digest=expected_digest,
+                expected_size=expected_size,
+                expected_mode=expected_mode,
+            )
+            return
+
+        _rename_noreplace_at(reservation_name, name, directory_fd)
+        _attest_atomic_publication_at(
+            temp_file.fileno(),
+            directory_fd,
+            name,
+            path,
+            expected_identity=temp_identity,
+            expected_digest=expected_digest,
+            expected_size=expected_size,
+            expected_mode=expected_mode,
+        )
+
+
+@dataclass(frozen=True)
+class _LockedCheckpointDirectory:
+    path: Path
+    file_descriptor: int
+    identity: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class _EffectiveCheckpointState:
+    canonical: _AtomicPathState | None
+    reservation: _AtomicPathState | None
+    previous: _AtomicPathState | None
+    effective_name: str
+    snapshot: _FileSnapshot
+
+
+def _effective_checkpoint_state_at(
+    directory_fd: int,
     path: Path,
     *,
-    expected_identity: tuple[int, int],
-    expected_digest: str,
-    expected_size: int,
-    expected_mode: int,
-) -> bool:
-    try:
-        if path.is_symlink() or not path.is_file():
-            return False
-        with path.open("rb") as temporary_file:
-            digest, opened = _digest_open_fd(temporary_file.fileno())
-        current = path.lstat()
-    except FileNotFoundError:
-        return False
-    return (
-        stat.S_ISREG(opened.st_mode)
-        and stat.S_ISREG(current.st_mode)
-        and (opened.st_dev, opened.st_ino) == expected_identity
-        and (current.st_dev, current.st_ino) == expected_identity
-        and digest == expected_digest
-        and opened.st_size == expected_size
-        and current.st_size == expected_size
-        and stat.S_IMODE(opened.st_mode) == expected_mode
-        and stat.S_IMODE(current.st_mode) == expected_mode
+    context_path: Path,
+    kind: str,
+) -> _EffectiveCheckpointState:
+    name = path.name
+    reservation_name = atomic_write_reservation_path(Path(name)).name
+    previous_name = _atomic_write_previous_path(Path(name)).name
+
+    def state(entry_name: str) -> _AtomicPathState | None:
+        return (
+            _atomic_path_state_at(directory_fd, entry_name, path.with_name(entry_name))
+            if _entry_state_at(directory_fd, entry_name) is not None
+            else None
+        )
+
+    canonical = state(name)
+    reservation = state(reservation_name)
+    previous = state(previous_name)
+    if previous is None and canonical is not None:
+        effective_name = name
+    elif previous is not None and canonical is None and reservation is not None:
+        effective_name = previous_name
+    elif previous is not None and canonical is not None and reservation is None:
+        effective_name = name
+    else:
+        raise RuntimeError(f"Conflicting atomic write artifacts for {path}")
+    snapshot = _validated_regular_file_at(
+        directory_fd,
+        effective_name,
+        path,
+        None,
+        context_path=context_path,
+        capture_contents=True,
+        kind=kind,
     )
+    return _EffectiveCheckpointState(
+        canonical=canonical,
+        reservation=reservation,
+        previous=previous,
+        effective_name=effective_name,
+        snapshot=snapshot,
+    )
+
+
+def _require_effective_checkpoint_state_at(
+    directory_fd: int,
+    path: Path,
+    expected: _EffectiveCheckpointState,
+) -> None:
+    entries = (
+        (path.name, expected.canonical),
+        (atomic_write_reservation_path(Path(path.name)).name, expected.reservation),
+        (_atomic_write_previous_path(Path(path.name)).name, expected.previous),
+    )
+    for name, expected_state in entries:
+        if expected_state is None:
+            if _entry_state_at(directory_fd, name) is not None:
+                raise RuntimeError(f"Checkpoint atomic write state changed: {path}")
+        else:
+            _require_atomic_path_state_at(directory_fd, name, path.with_name(name), expected_state)
+
+
+@contextlib.contextmanager
+def _locked_checkpoint_root(directory: Path):
+    directory = directory.absolute()
+    with perf_finalization_lifecycle(directory, resolve_path=False) as locked_root:
+        directory_fd = locked_root.file_descriptor
+        identity = _require_locked_directory(directory_fd, directory)
+        locked = _LockedCheckpointDirectory(
+            path=directory,
+            file_descriptor=directory_fd,
+            identity=identity,
+        )
+        yield locked
+        _require_locked_directory(directory_fd, directory, identity)
+
+
+@contextlib.contextmanager
+def _locked_checkpoint_directory(path: Path):
+    with _locked_checkpoint_root(path.parent) as locked:
+        yield locked
+
+
+def _checkpoint_path_in_locked_directory(path: Path, locked: _LockedCheckpointDirectory) -> Path:
+    name = path.name
+    if not name or name in (".", "..") or "\0" in name or Path(name).name != name:
+        raise RuntimeError(f"Checkpoint path is not a direct entry: {path}")
+    canonical_path = locked.path / name
+    if path.parent.absolute() != locked.path:
+        raise RuntimeError(f"Checkpoint path is outside its locked directory: {path}")
+    _require_locked_directory(locked.file_descriptor, locked.path, locked.identity)
+    return canonical_path
+
+
+def _checkpoint_snapshot_at(
+    path: Path,
+    expected_digest: str | None,
+    *,
+    locked: _LockedCheckpointDirectory,
+    context_path: Path,
+    expected_identity: tuple[int, int] | None = None,
+    capture_contents: bool = False,
+    kind: str = "checkpoint",
+) -> _FileSnapshot:
+    canonical_path = _checkpoint_path_in_locked_directory(path, locked)
+    _normalize_atomic_replace_state_at(locked.file_descriptor, canonical_path)
+    snapshot = _validated_regular_file_at(
+        locked.file_descriptor,
+        canonical_path.name,
+        canonical_path,
+        expected_digest,
+        context_path=context_path,
+        expected_identity=expected_identity,
+        capture_contents=capture_contents,
+        kind=kind,
+    )
+    _require_locked_directory(locked.file_descriptor, locked.path, locked.identity)
+    return snapshot
+
+
+def _checkpoint_snapshot(
+    path: Path,
+    expected_digest: str | None,
+    *,
+    context_path: Path,
+    expected_identity: tuple[int, int] | None = None,
+    capture_contents: bool = False,
+    kind: str = "checkpoint",
+) -> _FileSnapshot:
+    with _locked_checkpoint_directory(path) as locked:
+        return _checkpoint_snapshot_at(
+            path,
+            expected_digest,
+            locked=locked,
+            context_path=context_path,
+            expected_identity=expected_identity,
+            capture_contents=capture_contents,
+            kind=kind,
+        )
 
 
 def _atomic_write_bytes(
@@ -309,125 +750,165 @@ def _atomic_write_bytes(
     contents: bytes,
     *,
     mode: int = 0o600,
-    replace_existing: bool = True,
+    _locked_output_root: LockedOutputRoot | None = None,
 ) -> None:
-    """Atomically publish bytes through a private descriptor-owned temporary."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Publish new bytes without replacement under a stable output-root lock."""
+    if _locked_output_root is None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        canonical_path = path.parent.resolve() / path.name
+        with perf_finalization_lifecycle(canonical_path.parent) as locked_root:
+            return _atomic_write_bytes(
+                canonical_path,
+                contents,
+                mode=mode,
+                _locked_output_root=locked_root,
+            )
+    locked_root = _locked_output_root
+    path_name = locked_root.entry(path)
+    reservation = atomic_write_reservation_path(path)
+    reservation_name = locked_root.entry(reservation)
+    retained = collector_retained_path(path)
+    retained_name = locked_root.entry(retained)
+    if _entry_state_at(locked_root.file_descriptor, retained_name) is not None:
+        if any(
+            _entry_state_at(locked_root.file_descriptor, name) is not None for name in (reservation_name, path_name)
+        ):
+            raise RuntimeError(f"Conflicting atomic write artifacts for {path}")
+        retained_state = _atomic_path_state_at(locked_root.file_descriptor, retained_name, retained)
+        if retained_state.nlink != 1:
+            raise RuntimeError(f"Unowned retained atomic write artifact: {retained}")
+        locked_root.rename_noreplace(retained, reservation)
+        _require_atomic_path_state_at(
+            locked_root.file_descriptor,
+            reservation_name,
+            reservation,
+            retained_state,
+        )
     expected_digest = "sha256:" + hashlib.sha256(contents).hexdigest()
     expected_size = len(contents)
     expected_mode = stat.S_IMODE(mode)
-    temp_path: Path | None = None
     temp_identity: tuple[int, int] | None = None
-    publication_ready = False
+    temp_path = atomic_write_reservation_path(path)
+    open_flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    reservation_created = False
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w+b",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temp_file:
-            temp_path = Path(temp_file.name)
-            opened = os.fstat(temp_file.fileno())
-            temp_identity = (opened.st_dev, opened.st_ino)
-            temp_file.write(contents)
-            temp_file.flush()
-            os.fchmod(temp_file.fileno(), expected_mode)
-            os.fsync(temp_file.fileno())
-            descriptor_digest, descriptor_state = _digest_open_fd(temp_file.fileno())
-            if (
-                not stat.S_ISREG(descriptor_state.st_mode)
-                or (descriptor_state.st_dev, descriptor_state.st_ino) != temp_identity
-                or descriptor_digest != expected_digest
-                or descriptor_state.st_size != expected_size
-                or stat.S_IMODE(descriptor_state.st_mode) != expected_mode
-            ):
-                raise RuntimeError(f"Atomic write temporary changed before publication: {temp_path}")
-            publication_ready = True
-            if not replace_existing:
-                current = temp_path.lstat()
-                if (
-                    not stat.S_ISREG(current.st_mode)
-                    or (current.st_dev, current.st_ino) != temp_identity
-                    or current.st_size != expected_size
-                    or stat.S_IMODE(current.st_mode) != expected_mode
-                ):
-                    raise RuntimeError(f"Atomic write temporary changed before publication: {temp_path}")
-                os.link(temp_path, path, follow_symlinks=False)
-                _attest_atomic_publication(
-                    temp_file.fileno(),
-                    path,
-                    expected_identity=temp_identity,
-                    expected_digest=expected_digest,
-                    expected_size=expected_size,
-                    expected_mode=expected_mode,
-                )
-                current = temp_path.lstat()
-                if (
-                    not stat.S_ISREG(current.st_mode)
-                    or (current.st_dev, current.st_ino) != temp_identity
-                    or current.st_size != expected_size
-                    or stat.S_IMODE(current.st_mode) != expected_mode
-                ):
-                    raise RuntimeError(f"Atomic write temporary changed before cleanup: {temp_path}")
-                temp_path.unlink()
-                _fsync_directory(path.parent)
-                _attest_atomic_publication(
-                    temp_file.fileno(),
-                    path,
-                    expected_identity=temp_identity,
-                    expected_digest=expected_digest,
-                    expected_size=expected_size,
-                    expected_mode=expected_mode,
-                )
-                temp_path = None
-                return
-            current = temp_path.lstat()
-            if (
-                not stat.S_ISREG(current.st_mode)
-                or (current.st_dev, current.st_ino) != temp_identity
-                or current.st_size != expected_size
-                or stat.S_IMODE(current.st_mode) != expected_mode
-            ):
-                raise RuntimeError(f"Atomic write temporary changed before publication: {temp_path}")
-            os.replace(temp_path, path)
-            _fsync_directory(path.parent)
-            _attest_atomic_publication(
-                temp_file.fileno(),
-                path,
-                expected_identity=temp_identity,
-                expected_digest=expected_digest,
-                expected_size=expected_size,
-                expected_mode=expected_mode,
-            )
-            temp_path = None
-    finally:
-        if temp_path is not None and temp_identity is not None:
-            try:
-                current = temp_path.lstat()
-            except FileNotFoundError:
-                pass
-            else:
-                owned_unpublished = (
-                    not publication_ready
-                    and stat.S_ISREG(current.st_mode)
-                    and (current.st_dev, current.st_ino) == temp_identity
-                    and current.st_nlink == 1
-                )
-                if owned_unpublished or _atomic_temporary_matches(
-                    temp_path,
-                    expected_identity=temp_identity,
-                    expected_digest=expected_digest,
-                    expected_size=expected_size,
-                    expected_mode=expected_mode,
-                ):
-                    temp_path.unlink()
-                    _fsync_directory(path.parent)
+        temp_fd = locked_root.open(temp_path, open_flags | os.O_CREAT | os.O_EXCL, 0o600)
+        reservation_created = True
+    except FileExistsError:
+        temp_fd = locked_root.open(temp_path, open_flags)
+    temp_file = os.fdopen(temp_fd, "r+b")
+    with temp_file:
+        if reservation_created:
+            locked_root.fsync()
+        opened = os.fstat(temp_file.fileno())
+        temp_identity = (opened.st_dev, opened.st_ino)
+        current = locked_root.stat(temp_path)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or (current.st_dev, current.st_ino) != temp_identity
+            or opened.st_nlink != 1
+            or current.st_nlink != 1
+        ):
+            raise RuntimeError(f"Atomic write temporary changed before reuse: {temp_path}")
+        temp_file.seek(0)
+        temp_file.truncate()
+        temp_file.write(contents)
+        temp_file.flush()
+        os.fchmod(temp_file.fileno(), expected_mode)
+        os.fsync(temp_file.fileno())
+        descriptor_digest, descriptor_state = _digest_open_fd(temp_file.fileno())
+        if (
+            not stat.S_ISREG(descriptor_state.st_mode)
+            or (descriptor_state.st_dev, descriptor_state.st_ino) != temp_identity
+            or descriptor_digest != expected_digest
+            or descriptor_state.st_size != expected_size
+            or stat.S_IMODE(descriptor_state.st_mode) != expected_mode
+            or descriptor_state.st_nlink != 1
+        ):
+            raise RuntimeError(f"Atomic write temporary changed before publication: {temp_path}")
+        current = locked_root.stat(temp_path)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or (current.st_dev, current.st_ino) != temp_identity
+            or current.st_size != expected_size
+            or stat.S_IMODE(current.st_mode) != expected_mode
+            or current.st_nlink != 1
+        ):
+            raise RuntimeError(f"Atomic write temporary changed before publication: {temp_path}")
+        locked_root.rename_noreplace(temp_path, path)
+        _attest_atomic_publication_at(
+            temp_file.fileno(),
+            locked_root.file_descriptor,
+            path_name,
+            path,
+            expected_identity=temp_identity,
+            expected_digest=expected_digest,
+            expected_size=expected_size,
+            expected_mode=expected_mode,
+        )
 
 
-def _atomic_write_json(path: Path, data: dict) -> None:
+def _atomic_write_json(
+    path: Path,
+    data: dict,
+    *,
+    expected_attestation: _FileAttestation | None = None,
+    _locked_directory: _LockedCheckpointDirectory | None = None,
+) -> None:
     """Atomically replace one JSON document without exposing a partial file."""
-    _atomic_write_bytes(path, json.dumps(data, indent=2).encode())
+    if _locked_directory is None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _locked_checkpoint_directory(path) as locked:
+            _atomic_write_json(
+                path,
+                data,
+                expected_attestation=expected_attestation,
+                _locked_directory=locked,
+            )
+        return
+    canonical_path = _checkpoint_path_in_locked_directory(path, _locked_directory)
+    _normalize_atomic_replace_state_at(_locked_directory.file_descriptor, canonical_path)
+    canonical_state = _entry_state_at(_locked_directory.file_descriptor, canonical_path.name)
+    expected_replaced_state = (
+        _atomic_path_state_at(
+            _locked_directory.file_descriptor,
+            canonical_path.name,
+            canonical_path,
+        )
+        if canonical_state is not None
+        else None
+    )
+    if expected_attestation is not None:
+        if expected_attestation.path != canonical_path:
+            raise RuntimeError(f"Checkpoint attested path mismatch: {canonical_path}")
+        _validated_regular_file_at(
+            _locked_directory.file_descriptor,
+            canonical_path.name,
+            canonical_path,
+            expected_attestation.digest,
+            context_path=canonical_path,
+            expected_identity=expected_attestation.identity,
+            kind="checkpoint",
+        )
+        if (
+            expected_replaced_state is None
+            or expected_replaced_state.identity != expected_attestation.identity
+            or expected_replaced_state.digest != expected_attestation.digest
+        ):
+            raise RuntimeError(f"Checkpoint changed before replacement: {canonical_path}")
+    _atomic_replace_bytes_at(
+        _locked_directory.file_descriptor,
+        canonical_path,
+        json.dumps(data, indent=2).encode(),
+        0o600,
+        expected_replaced_state=expected_replaced_state,
+    )
+    _require_locked_directory(
+        _locked_directory.file_descriptor,
+        _locked_directory.path,
+        _locked_directory.identity,
+    )
 
 
 def _checkpoint_case_ids(checkpoint: object, field: str) -> set[str]:
@@ -449,13 +930,23 @@ def _load_checkpoint_for_sidecar_mutation(
     expected_attestation: _FileAttestation | None,
     *,
     action: str,
+    _locked_directory: _LockedCheckpointDirectory | None = None,
 ) -> tuple[dict, _FileAttestation]:
     if expected_attestation is not None and expected_attestation.path != checkpoint_path:
         raise RuntimeError(f"Failed to {action} checkpoint event {checkpoint_path}: attested path mismatch")
+    if _locked_directory is None:
+        with _locked_checkpoint_directory(checkpoint_path) as locked:
+            return _load_checkpoint_for_sidecar_mutation(
+                checkpoint_path,
+                expected_attestation,
+                action=action,
+                _locked_directory=locked,
+            )
     try:
-        snapshot = _validated_regular_file(
+        snapshot = _checkpoint_snapshot_at(
             checkpoint_path,
             expected_attestation.digest if expected_attestation is not None else None,
+            locked=_locked_directory,
             context_path=checkpoint_path,
             expected_identity=expected_attestation.identity if expected_attestation is not None else None,
             capture_contents=True,
@@ -474,48 +965,57 @@ def _close_checkpoint_attempts(
     transaction_id: str | None = None,
     expected_attestation: _FileAttestation | None = None,
     journal_attestation: _FileAttestation | None = None,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> _FileAttestation:
     """Close only the pending attempts already committed to a sidecar event."""
     if journal_attestation is not None:
-        _revalidate_journal_attestation(journal_attestation)
-    data, live_attestation = _load_checkpoint_for_sidecar_mutation(
-        checkpoint_path,
-        expected_attestation,
-        action="close finalized",
-    )
-
-    if transaction_id is not None and data.get(_SIDECAR_TRANSACTION_FIELD) != transaction_id:
-        raise RuntimeError(
-            f"Failed to close finalized checkpoint event {checkpoint_path}: "
-            f"sidecar transaction {data.get(_SIDECAR_TRANSACTION_FIELD)!r} != {transaction_id!r}"
+        _revalidate_journal_attestation(journal_attestation, locked_output_root)
+    with _locked_checkpoint_directory(checkpoint_path) as locked:
+        data, live_attestation = _load_checkpoint_for_sidecar_mutation(
+            checkpoint_path,
+            expected_attestation,
+            action="close finalized",
+            _locked_directory=locked,
         )
+        if transaction_id is not None and data.get(_SIDECAR_TRANSACTION_FIELD) != transaction_id:
+            raise RuntimeError(
+                f"Failed to close finalized checkpoint event {checkpoint_path}: "
+                f"sidecar transaction {data.get(_SIDECAR_TRANSACTION_FIELD)!r} != {transaction_id!r}"
+            )
 
-    current_attempted = _checkpoint_case_ids(data, "attempted")
-    if transaction_id is not None and current_attempted != attempted_case_ids:
-        raise RuntimeError(
-            f"Failed to close finalized checkpoint event {checkpoint_path}: live attempts "
-            f"{sorted(current_attempted)} != transaction attempts {sorted(attempted_case_ids)}"
+        current_attempted = _checkpoint_case_ids(data, "attempted")
+        if transaction_id is not None and current_attempted != attempted_case_ids:
+            raise RuntimeError(
+                f"Failed to close finalized checkpoint event {checkpoint_path}: live attempts "
+                f"{sorted(current_attempted)} != transaction attempts {sorted(attempted_case_ids)}"
+            )
+        data["attempted"] = sorted(current_attempted - attempted_case_ids)
+        if transaction_id is not None:
+            data.pop(_SIDECAR_TRANSACTION_FIELD, None)
+        data["updated_at"] = datetime.now().isoformat()
+        _checkpoint_snapshot_at(
+            checkpoint_path,
+            live_attestation.digest,
+            locked=locked,
+            context_path=checkpoint_path,
+            expected_identity=live_attestation.identity,
+            kind="checkpoint",
         )
-    data["attempted"] = sorted(current_attempted - attempted_case_ids)
-    if transaction_id is not None:
-        data.pop(_SIDECAR_TRANSACTION_FIELD, None)
-    data["updated_at"] = datetime.now().isoformat()
-    _validated_regular_file(
-        checkpoint_path,
-        live_attestation.digest,
-        context_path=checkpoint_path,
-        expected_identity=live_attestation.identity,
-        kind="checkpoint",
-    )
-    if journal_attestation is not None:
-        _revalidate_journal_attestation(journal_attestation)
-    _atomic_write_json(checkpoint_path, data)
-    return _validated_regular_file(
-        checkpoint_path,
-        None,
-        context_path=checkpoint_path,
-        kind="checkpoint",
-    ).attest(checkpoint_path)
+        if journal_attestation is not None:
+            _revalidate_journal_attestation(journal_attestation, locked_output_root)
+        _atomic_write_json(
+            checkpoint_path,
+            data,
+            expected_attestation=live_attestation,
+            _locked_directory=locked,
+        )
+        return _checkpoint_snapshot_at(
+            checkpoint_path,
+            None,
+            locked=locked,
+            context_path=checkpoint_path,
+            kind="checkpoint",
+        ).attest(checkpoint_path)
 
 
 def _tag_checkpoint_sidecar_transaction(
@@ -525,46 +1025,56 @@ def _tag_checkpoint_sidecar_transaction(
     *,
     expected_attestation: _FileAttestation | None = None,
     journal_attestation: _FileAttestation | None = None,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> _FileAttestation:
     """Durably bind pending attempts to one prepared sidecar transaction."""
     if journal_attestation is not None:
-        _revalidate_journal_attestation(journal_attestation)
-    data, live_attestation = _load_checkpoint_for_sidecar_mutation(
-        checkpoint_path,
-        expected_attestation,
-        action="prepare finalized",
-    )
+        _revalidate_journal_attestation(journal_attestation, locked_output_root)
+    with _locked_checkpoint_directory(checkpoint_path) as locked:
+        data, live_attestation = _load_checkpoint_for_sidecar_mutation(
+            checkpoint_path,
+            expected_attestation,
+            action="prepare finalized",
+            _locked_directory=locked,
+        )
 
-    current_attempted = _checkpoint_case_ids(data, "attempted")
-    if current_attempted != attempted_case_ids:
-        raise RuntimeError(
-            f"Failed to prepare finalized checkpoint event {checkpoint_path}: "
-            f"live attempts {sorted(current_attempted)} != transaction attempts {sorted(attempted_case_ids)}"
+        current_attempted = _checkpoint_case_ids(data, "attempted")
+        if current_attempted != attempted_case_ids:
+            raise RuntimeError(
+                f"Failed to prepare finalized checkpoint event {checkpoint_path}: "
+                f"live attempts {sorted(current_attempted)} != transaction attempts {sorted(attempted_case_ids)}"
+            )
+        existing_transaction = data.get(_SIDECAR_TRANSACTION_FIELD)
+        if existing_transaction not in (None, transaction_id):
+            raise RuntimeError(
+                f"Failed to prepare finalized checkpoint event {checkpoint_path}: "
+                f"unresolved sidecar transaction {existing_transaction!r}"
+            )
+        data[_SIDECAR_TRANSACTION_FIELD] = transaction_id
+        data["updated_at"] = datetime.now().isoformat()
+        _checkpoint_snapshot_at(
+            checkpoint_path,
+            live_attestation.digest,
+            locked=locked,
+            context_path=checkpoint_path,
+            expected_identity=live_attestation.identity,
+            kind="checkpoint",
         )
-    existing_transaction = data.get(_SIDECAR_TRANSACTION_FIELD)
-    if existing_transaction not in (None, transaction_id):
-        raise RuntimeError(
-            f"Failed to prepare finalized checkpoint event {checkpoint_path}: "
-            f"unresolved sidecar transaction {existing_transaction!r}"
+        if journal_attestation is not None:
+            _revalidate_journal_attestation(journal_attestation, locked_output_root)
+        _atomic_write_json(
+            checkpoint_path,
+            data,
+            expected_attestation=live_attestation,
+            _locked_directory=locked,
         )
-    data[_SIDECAR_TRANSACTION_FIELD] = transaction_id
-    data["updated_at"] = datetime.now().isoformat()
-    _validated_regular_file(
-        checkpoint_path,
-        live_attestation.digest,
-        context_path=checkpoint_path,
-        expected_identity=live_attestation.identity,
-        kind="checkpoint",
-    )
-    if journal_attestation is not None:
-        _revalidate_journal_attestation(journal_attestation)
-    _atomic_write_json(checkpoint_path, data)
-    return _validated_regular_file(
-        checkpoint_path,
-        None,
-        context_path=checkpoint_path,
-        kind="checkpoint",
-    ).attest(checkpoint_path)
+        return _checkpoint_snapshot_at(
+            checkpoint_path,
+            None,
+            locked=locked,
+            context_path=checkpoint_path,
+            kind="checkpoint",
+        ).attest(checkpoint_path)
 
 
 def _resolve_fpm_cli_inputs(parser, resolver):
@@ -660,6 +1170,12 @@ def _checkpoint_backend_root(checkpoint_dir: str | Path, backend: str) -> Path:
     return backend_root.resolve()
 
 
+def _require_separate_checkpoint_root(output_root: Path, checkpoint_dir: str | Path, backend: str) -> None:
+    checkpoint_root = _checkpoint_backend_root(checkpoint_dir, backend)
+    if checkpoint_root == output_root.resolve():
+        raise RuntimeError(f"Collector output and checkpoint roots must be different: {output_root}")
+
+
 def _checkpoint_path(checkpoint_root: Path, module_name: str) -> Path:
     safe_name = module_name.replace("/", "_").replace(":", "_")
     return checkpoint_root / f"{safe_name}.json"
@@ -712,23 +1228,32 @@ class ResumeCheckpoint:
 
     def load_existing(self):
         """Load an existing checkpoint for resume.  Raises on mismatch."""
-        if not self._path.exists():
+        if not self._path.parent.exists() and not self._path.parent.is_symlink():
             logger.info(f"{self.module_name}: no checkpoint found, starting fresh")
             return
+        with _locked_checkpoint_directory(self._path) as locked:
+            canonical_path = _checkpoint_path_in_locked_directory(self._path, locked)
+            _normalize_atomic_replace_state_at(locked.file_descriptor, canonical_path)
+            if _entry_state_at(locked.file_descriptor, canonical_path.name) is None:
+                logger.info(f"{self.module_name}: no checkpoint found, starting fresh")
+                return
 
-        try:
-            snapshot = _validated_regular_file(
-                self._path,
-                None,
-                context_path=self._path,
-                capture_contents=True,
-                kind="checkpoint",
-            )
-            data = json.loads(snapshot.contents)
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load checkpoint {self._path}: {e}. Run without --resume to start fresh."
-            ) from e
+            try:
+                snapshot = _validated_regular_file_at(
+                    locked.file_descriptor,
+                    canonical_path.name,
+                    canonical_path,
+                    None,
+                    context_path=canonical_path,
+                    capture_contents=True,
+                    kind="checkpoint",
+                )
+                data = json.loads(snapshot.contents)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to load checkpoint {canonical_path}: {e}. Run without --resume to start fresh."
+                ) from e
+            _require_locked_directory(locked.file_descriptor, locked.path, locked.identity)
 
         for key in ("schema", "backend", "module", "run_func", "framework_version", "sm_version"):
             if data.get(key) != self._metadata[key]:
@@ -2050,6 +2575,7 @@ def _load_clean_collector_sidecar(
     output_root: Path,
     *,
     tables_to_update: set[str] | frozenset[str] = frozenset(),
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> tuple[dict | None, _FileSnapshot | None]:
     """Load one regular sidecar only when no transaction artifacts remain."""
     import yaml
@@ -2058,13 +2584,27 @@ def _load_clean_collector_sidecar(
         output_root / _SIDECAR_STAGING_FILENAME,
         output_root / _SIDECAR_TRANSACTION_FILENAME,
     ):
-        if transaction_path.is_symlink() or transaction_path.exists():
+        transaction_absent = (
+            locked_output_root.absent(transaction_path)
+            if locked_output_root is not None
+            else not transaction_path.exists()
+        )
+        if not transaction_absent:
             raise RuntimeError(f"Unexpected collector sidecar transaction document: {transaction_path}")
 
     existing_meta = output_root / "collection_meta.yaml"
-    if existing_meta.is_symlink() or (existing_meta.exists() and not existing_meta.is_file()):
-        raise RuntimeError(f"Invalid collector sidecar document: {existing_meta}")
-    if not existing_meta.is_file():
+    if locked_output_root is not None:
+        try:
+            meta_state = locked_output_root.stat(existing_meta)
+        except FileNotFoundError:
+            meta_state = None
+        if meta_state is not None and not stat.S_ISREG(meta_state.st_mode):
+            raise RuntimeError(f"Invalid collector sidecar document: {existing_meta}")
+    else:
+        if existing_meta.is_symlink() or (existing_meta.exists() and not existing_meta.is_file()):
+            raise RuntimeError(f"Invalid collector sidecar document: {existing_meta}")
+        meta_state = existing_meta.stat() if existing_meta.is_file() else None
+    if meta_state is None:
         return None, None
     try:
         snapshot = _validated_regular_file(
@@ -2073,6 +2613,7 @@ def _load_clean_collector_sidecar(
             context_path=existing_meta,
             capture_contents=True,
             kind="sidecar document",
+            locked_output_root=locked_output_root,
         )
         existing_doc = yaml.safe_load(snapshot.contents) or {}
     except Exception as error:
@@ -2095,11 +2636,13 @@ def _preflight_collector_provenance(
     provenance_ctx: dict,
     *,
     tables_to_update: set[str] | frozenset[str] = frozenset(),
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> _FileSnapshot | None:
     """Reject unsafe sidecar state before perf finalization mutates files."""
     existing_doc, existing_snapshot = _load_clean_collector_sidecar(
         output_root,
         tables_to_update=tables_to_update,
+        locked_output_root=locked_output_root,
     )
     if existing_doc is None:
         return existing_snapshot
@@ -2121,11 +2664,13 @@ def _revalidate_collector_sidecar_preflight(
     expected_snapshot: _FileSnapshot | None,
     *,
     tables_to_update: set[str] | frozenset[str],
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> None:
     """Require the same clean sidecar state immediately before parquet publish."""
     _document, current_snapshot = _load_clean_collector_sidecar(
         output_root,
         tables_to_update=tables_to_update,
+        locked_output_root=locked_output_root,
     )
     if not _same_file_snapshot(current_snapshot, expected_snapshot):
         raise RuntimeError(
@@ -2213,19 +2758,14 @@ def _load_selected_producer_checkpoint(
         sm_version=sm_version,
     )
     checkpoint_path = resume_tracker._path
-    checkpoint_present = checkpoint_path.exists() or checkpoint_path.is_symlink()
-    if not checkpoint_present:
+    resume_tracker.load_existing()
+    if resume_tracker._source_digest is None:
         if not required:
             return None
         raise RuntimeError(
             f"{context}: staged table {staging_path} has no checkpoint for selected producer "
             f"{resume_tracker.module_name} at {checkpoint_path}"
         )
-    if checkpoint_path.is_symlink() or not checkpoint_path.is_file():
-        raise RuntimeError(
-            f"{context}: producer {resume_tracker.module_name} has no regular checkpoint at {checkpoint_path}"
-        )
-    resume_tracker.load_existing()
     if _registered_checkpoint_table(resume_tracker._metadata, backend=backend) != staging_path.stem:
         raise RuntimeError(
             f"{context}: checkpoint producer {resume_tracker.module_name} does not own staged table {staging_path}"
@@ -2257,36 +2797,40 @@ def _producer_checkpoint_plan(resume_tracker: ResumeCheckpoint, table: str) -> _
 
 def _revalidate_producer_plan(producer_plan: dict[Path, _ProducerCheckpointPlan]) -> None:
     """Require every selected producer to remain the exact preflight object."""
-    for checkpoint_path, plan in producer_plan.items():
-        try:
-            if checkpoint_path != plan.path:
-                raise RuntimeError("checkpoint path is not a regular selected producer")
-            snapshot = _validated_regular_file(
-                checkpoint_path,
-                plan.attestation.digest,
-                context_path=checkpoint_path,
-                expected_identity=plan.attestation.identity,
-                capture_contents=True,
-                kind="selected producer checkpoint",
-            )
-            checkpoint = json.loads(snapshot.contents)
-            identity = {field: checkpoint.get(field) for field in _CHECKPOINT_IDENTITY_FIELDS}
-            if (
-                identity != plan.identity_dict()
-                or _registered_checkpoint_table(identity, backend=identity["backend"]) != plan.table
-            ):
-                raise RuntimeError("checkpoint producer identity changed after preflight")
-            if (
-                _checkpoint_case_ids(checkpoint, "done") != set(plan.done)
-                or _checkpoint_case_ids(checkpoint, "attempted") != set(plan.attempted)
-                or _checkpoint_case_ids(checkpoint, "failed") != set(plan.failed)
-                or checkpoint.get(_SIDECAR_TRANSACTION_FIELD) is not None
-            ):
-                raise RuntimeError("checkpoint ledgers changed after preflight")
-        except Exception as error:
-            raise RuntimeError(
-                f"Selected producer checkpoint changed after preflight: {checkpoint_path}: {error}"
-            ) from error
+    if not producer_plan:
+        return
+    with _locked_checkpoint_directory(next(iter(producer_plan))) as locked:
+        for checkpoint_path, plan in producer_plan.items():
+            try:
+                if checkpoint_path != plan.path:
+                    raise RuntimeError("checkpoint path is not a regular selected producer")
+                snapshot = _checkpoint_snapshot_at(
+                    checkpoint_path,
+                    plan.attestation.digest,
+                    locked=locked,
+                    context_path=checkpoint_path,
+                    expected_identity=plan.attestation.identity,
+                    capture_contents=True,
+                    kind="selected producer checkpoint",
+                )
+                checkpoint = json.loads(snapshot.contents)
+                identity = {field: checkpoint.get(field) for field in _CHECKPOINT_IDENTITY_FIELDS}
+                if (
+                    identity != plan.identity_dict()
+                    or _registered_checkpoint_table(identity, backend=identity["backend"]) != plan.table
+                ):
+                    raise RuntimeError("checkpoint producer identity changed after preflight")
+                if (
+                    _checkpoint_case_ids(checkpoint, "done") != set(plan.done)
+                    or _checkpoint_case_ids(checkpoint, "attempted") != set(plan.attempted)
+                    or _checkpoint_case_ids(checkpoint, "failed") != set(plan.failed)
+                    or checkpoint.get(_SIDECAR_TRANSACTION_FIELD) is not None
+                ):
+                    raise RuntimeError("checkpoint ledgers changed after preflight")
+            except Exception as error:
+                raise RuntimeError(
+                    f"Selected producer checkpoint changed after preflight: {checkpoint_path}: {error}"
+                ) from error
 
 
 def _pending_resume_perf_outputs(
@@ -2353,12 +2897,23 @@ def _validated_regular_file(
     expected_mode: int | None = None,
     capture_contents: bool = False,
     kind: str,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> _FileSnapshot:
     """Read one regular file once and bind its path, descriptor, and bytes."""
-    if path.is_symlink() or not path.is_file():
-        raise RuntimeError(f"Invalid collector {kind} in {context_path}: {path}")
     try:
-        with path.open("rb") as owned_file:
+        if locked_output_root is None:
+            if path.is_symlink() or not path.is_file():
+                raise RuntimeError(f"Invalid collector {kind} in {context_path}: {path}")
+            file_descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+            )
+        else:
+            file_descriptor = locked_output_root.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+            )
+        with os.fdopen(file_descriptor, "rb") as owned_file:
             opened = os.fstat(owned_file.fileno())
             if not stat.S_ISREG(opened.st_mode):
                 raise RuntimeError(f"{kind} is not a regular file: {path}")
@@ -2368,7 +2923,7 @@ def _validated_regular_file(
                 digest.update(chunk)
                 if captured_chunks is not None:
                     captured_chunks.append(chunk)
-        current = path.lstat()
+        current = locked_output_root.stat(path) if locked_output_root is not None else path.lstat()
     except Exception as error:
         raise RuntimeError(f"Invalid collector {kind} in {context_path}: {path}") from error
 
@@ -2399,6 +2954,7 @@ def _validated_sidecar_document(
     *,
     context_path: Path,
     expected_identity: tuple[int, int] | None = None,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> _FileSnapshot:
     return _validated_regular_file(
         path,
@@ -2407,16 +2963,21 @@ def _validated_sidecar_document(
         expected_identity=expected_identity,
         capture_contents=True,
         kind="sidecar transaction document",
+        locked_output_root=locked_output_root,
     )
 
 
-def _revalidate_journal_attestation(attestation: _FileAttestation) -> None:
+def _revalidate_journal_attestation(
+    attestation: _FileAttestation,
+    locked_output_root: LockedOutputRoot | None = None,
+) -> None:
     _validated_regular_file(
         attestation.path,
         attestation.digest,
         context_path=attestation.path,
         expected_identity=attestation.identity,
         kind="sidecar transaction journal",
+        locked_output_root=locked_output_root,
     )
 
 
@@ -2428,14 +2989,16 @@ def _preflight_collector_finalization_inputs(
     backend: str,
     checkpoint_dir: str,
     sm_version: int | None,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> tuple[dict[Path, _ProducerCheckpointPlan], dict[Path, _FileAttestation]]:
     """Reject unsafe collector inputs before parquet finalization mutates data."""
-    output_root = output_root.resolve()
+    output_root = locked_output_root.path if locked_output_root is not None else output_root.resolve()
     validated_paths = _validated_collector_staging_paths(
         [str(path) for path in staging_paths],
         output_root=output_root,
         context_path=output_root / "collection_meta.yaml",
         require_present=True,
+        locked_output_root=locked_output_root,
     )
     staging_attestations = {
         path: _validated_regular_file(
@@ -2443,6 +3006,7 @@ def _preflight_collector_finalization_inputs(
             None,
             context_path=output_root,
             kind="staging file",
+            locked_output_root=locked_output_root,
         ).attest(path)
         for path in validated_paths
     }
@@ -2757,6 +3321,7 @@ def _revalidate_perf_transaction_rollback_inputs(
     *,
     output_root: Path,
     journal_path: Path,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> None:
     for publication in publications:
         _validated_regular_file(
@@ -2766,27 +3331,55 @@ def _revalidate_perf_transaction_rollback_inputs(
             expected_identity=publication.source.identity,
             expected_mode=publication.source.mode,
             kind="perf transaction staging file",
+            locked_output_root=locked_output_root,
         )
-    for checkpoint in checkpoint_records:
-        checkpoint_path = Path(checkpoint["path"])
-        snapshot = _validated_regular_file(
-            checkpoint_path,
-            checkpoint["digest"],
-            context_path=journal_path,
-            expected_identity=(checkpoint["device"], checkpoint["inode"]),
-            capture_contents=True,
-            kind="perf transaction checkpoint",
-        )
-        document = json.loads(snapshot.contents)
-        if {field: document.get(field) for field in _CHECKPOINT_IDENTITY_FIELDS} != checkpoint["identity"]:
-            raise RuntimeError(f"Collector perf transaction checkpoint identity changed in {journal_path}")
-        if any(set(document.get(field, [])) != set(checkpoint[field]) for field in ("done", "failed", "attempted")):
-            raise RuntimeError(f"Collector perf transaction checkpoint ledgers changed in {journal_path}")
-        if document.get(_SIDECAR_TRANSACTION_FIELD) is not None:
-            raise RuntimeError(f"Collector perf transaction checkpoint was already tagged in {journal_path}")
+    if checkpoint_records:
+        with _locked_checkpoint_directory(Path(checkpoint_records[0]["path"])) as locked:
+            checkpoint_states = []
+            for checkpoint in checkpoint_records:
+                checkpoint_path = Path(checkpoint["path"])
+                canonical_path = _checkpoint_path_in_locked_directory(checkpoint_path, locked)
+                effective_state = _effective_checkpoint_state_at(
+                    locked.file_descriptor,
+                    canonical_path,
+                    context_path=journal_path,
+                    kind="perf transaction checkpoint",
+                )
+                snapshot = effective_state.snapshot
+                if snapshot.digest != checkpoint["digest"] or snapshot.identity != (
+                    checkpoint["device"],
+                    checkpoint["inode"],
+                ):
+                    raise RuntimeError(f"Collector perf transaction checkpoint changed in {journal_path}")
+                document = json.loads(snapshot.contents)
+                if {field: document.get(field) for field in _CHECKPOINT_IDENTITY_FIELDS} != checkpoint["identity"]:
+                    raise RuntimeError(f"Collector perf transaction checkpoint identity changed in {journal_path}")
+                if any(
+                    set(document.get(field, [])) != set(checkpoint[field]) for field in ("done", "failed", "attempted")
+                ):
+                    raise RuntimeError(f"Collector perf transaction checkpoint ledgers changed in {journal_path}")
+                if document.get(_SIDECAR_TRANSACTION_FIELD) is not None:
+                    raise RuntimeError(f"Collector perf transaction checkpoint was already tagged in {journal_path}")
+                checkpoint_states.append((canonical_path, effective_state))
+            for canonical_path, effective_state in checkpoint_states:
+                _require_effective_checkpoint_state_at(
+                    locked.file_descriptor,
+                    canonical_path,
+                    effective_state,
+                )
+                _normalize_atomic_replace_state_at(locked.file_descriptor, canonical_path)
+                _validated_regular_file_at(
+                    locked.file_descriptor,
+                    canonical_path.name,
+                    canonical_path,
+                    effective_state.snapshot.digest,
+                    context_path=journal_path,
+                    expected_identity=effective_state.snapshot.identity,
+                    kind="perf transaction checkpoint",
+                )
     meta_path = output_root / "collection_meta.yaml"
     if previous_sidecar is None:
-        if meta_path.exists() or meta_path.is_symlink():
+        if not (locked_output_root.absent(meta_path) if locked_output_root is not None else not meta_path.exists()):
             raise RuntimeError(f"Collector perf transaction sidecar target changed in {journal_path}")
     else:
         _validated_regular_file(
@@ -2795,6 +3388,7 @@ def _revalidate_perf_transaction_rollback_inputs(
             context_path=journal_path,
             expected_identity=previous_sidecar.identity,
             kind="perf transaction sidecar target",
+            locked_output_root=locked_output_root,
         )
 
 
@@ -2802,6 +3396,7 @@ def _revalidate_published_perf_publications(
     publications: Iterable[PerfPublication],
     *,
     context_path: Path,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> None:
     for publication in publications:
         snapshot = _validated_regular_file(
@@ -2810,6 +3405,7 @@ def _revalidate_published_perf_publications(
             context_path=context_path,
             expected_identity=publication.prepared.identity,
             kind="published perf target",
+            locked_output_root=locked_output_root,
         )
         if snapshot.mode != publication.prepared.mode:
             raise RuntimeError(f"Collector published perf target mode changed in {context_path}: {publication.target}")
@@ -2824,8 +3420,10 @@ class _CollectorPerfPublicationTransaction:
         checkpoint_dir: str,
         producer_plan: dict[Path, _ProducerCheckpointPlan],
         sidecar_snapshot: _FileSnapshot | None,
+        locked_output_root: LockedOutputRoot,
     ) -> None:
-        self.output_root = output_root.resolve()
+        self.output_root = locked_output_root.path
+        self.locked_output_root = locked_output_root
         self.backend = backend
         self.checkpoint_dir = checkpoint_dir
         self.checkpoint_root = _checkpoint_backend_root(checkpoint_dir, backend)
@@ -2841,11 +3439,11 @@ class _CollectorPerfPublicationTransaction:
         return self._journal_published
 
     def prepare(self, publications: tuple[PerfPublication, ...]) -> None:
-        if self.journal_path.exists() or self.journal_path.is_symlink():
+        if not self.locked_output_root.absent(self.journal_path):
             raise RuntimeError(f"Unexpected collector perf transaction journal: {self.journal_path}")
-        if (self.output_root / _SIDECAR_TRANSACTION_FILENAME).exists() or (
-            self.output_root / _SIDECAR_STAGING_FILENAME
-        ).exists():
+        if not self.locked_output_root.absent(
+            self.output_root / _SIDECAR_TRANSACTION_FILENAME
+        ) or not self.locked_output_root.absent(self.output_root / _SIDECAR_STAGING_FILENAME):
             raise RuntimeError(f"Unexpected collector sidecar transaction before perf publication: {self.output_root}")
         self.publications = publications
         _revalidate_producer_plan(self.producer_plan)
@@ -2877,11 +3475,12 @@ class _CollectorPerfPublicationTransaction:
             previous_sidecar,
             output_root=self.output_root,
             journal_path=self.journal_path,
+            locked_output_root=self.locked_output_root,
         )
         _atomic_write_bytes(
             self.journal_path,
             json.dumps(transaction, indent=2).encode(),
-            replace_existing=False,
+            _locked_output_root=self.locked_output_root,
         )
         self._journal_published = True
         snapshot = _validated_regular_file(
@@ -2889,6 +3488,7 @@ class _CollectorPerfPublicationTransaction:
             None,
             context_path=self.journal_path,
             kind="perf transaction journal",
+            locked_output_root=self.locked_output_root,
         )
         self.journal_attestation = snapshot.attest(self.journal_path)
 
@@ -2901,6 +3501,7 @@ class _CollectorPerfPublicationTransaction:
             self.output_root,
             backend=self.backend,
             checkpoint_dir=self.checkpoint_dir,
+            locked_output_root=self.locked_output_root,
         )
         if state is None or state[0] != self.journal_attestation or tuple(state[1]) != self.publications:
             raise RuntimeError("Collector perf transaction journal changed after publication preparation")
@@ -2916,46 +3517,69 @@ class _CollectorPerfPublicationTransaction:
             state[3],
             output_root=self.output_root,
             journal_path=self.journal_path,
+            locked_output_root=self.locked_output_root,
         )
-        validate_restored_perf_publications(state[1])
-        cleanup_perf_publication_artifacts(publications)
-        _revalidate_journal_attestation(state[0])
+        locked_roots = {self.output_root: self.locked_output_root}
+        validate_restored_perf_publications(state[1], locked_roots)
+        cleanup_perf_publication_artifacts(publications, locked_roots)
+        _revalidate_journal_attestation(state[0], self.locked_output_root)
         _revalidate_perf_transaction_rollback_inputs(
             state[1],
             state[2],
             state[3],
             output_root=self.output_root,
             journal_path=self.journal_path,
+            locked_output_root=self.locked_output_root,
         )
-        validate_restored_perf_publications(state[1])
-        _cleanup_transaction_files([self.journal_attestation], context_path=self.journal_path)
+        validate_restored_perf_publications(state[1], locked_roots)
+        _cleanup_transaction_files(
+            [self.journal_attestation],
+            context_path=self.journal_path,
+            locked_output_root=self.locked_output_root,
+        )
         self.journal_attestation = None
         self._journal_published = False
 
     def rollback(self) -> None:
         state = self._validated_state()
-        _rollback_perf_publication_transaction(state, output_root=self.output_root)
+        _rollback_perf_publication_transaction(
+            state,
+            output_root=self.output_root,
+            locked_output_root=self.locked_output_root,
+        )
         self.journal_attestation = None
         self._journal_published = False
 
     def handoff_to_sidecar(self, sidecar_journal_attestation: _FileAttestation) -> None:
         self._validated_state()
-        _revalidate_journal_attestation(sidecar_journal_attestation)
-        _revalidate_published_perf_publications(self.publications, context_path=self.journal_path)
+        _revalidate_journal_attestation(sidecar_journal_attestation, self.locked_output_root)
+        _revalidate_published_perf_publications(
+            self.publications,
+            context_path=self.journal_path,
+            locked_output_root=self.locked_output_root,
+        )
         self.sidecar_journal_attestation = sidecar_journal_attestation
 
     def revalidate_published(self, sidecar_journal_attestation: _FileAttestation) -> None:
         if sidecar_journal_attestation != self.sidecar_journal_attestation:
             raise RuntimeError("Collector perf transaction sidecar handoff changed before commit")
         self._validated_state()
-        _revalidate_journal_attestation(sidecar_journal_attestation)
-        _revalidate_published_perf_publications(self.publications, context_path=self.journal_path)
+        _revalidate_journal_attestation(sidecar_journal_attestation, self.locked_output_root)
+        _revalidate_published_perf_publications(
+            self.publications,
+            context_path=self.journal_path,
+            locked_output_root=self.locked_output_root,
+        )
 
     def commit_complete(self, sidecar_journal_attestation: _FileAttestation) -> None:
         self.revalidate_published(sidecar_journal_attestation)
-        cleanup_perf_publication_artifacts(self.publications)
+        cleanup_perf_publication_artifacts(self.publications, {self.output_root: self.locked_output_root})
         self.revalidate_published(sidecar_journal_attestation)
-        _cleanup_transaction_files([self.journal_attestation], context_path=self.journal_path)
+        _cleanup_transaction_files(
+            [self.journal_attestation],
+            context_path=self.journal_path,
+            locked_output_root=self.locked_output_root,
+        )
         self.journal_attestation = None
         self.sidecar_journal_attestation = None
         self._journal_published = False
@@ -3032,6 +3656,7 @@ def _validated_collector_staging_paths(
     output_root: Path,
     context_path: Path,
     require_present: bool = False,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> list[Path]:
     """Resolve collector staging targets to direct registry-owned files."""
     from collector.registry_types import PerfFile
@@ -3039,7 +3664,7 @@ def _validated_collector_staging_paths(
     if not isinstance(recorded_paths, list) or not recorded_paths:
         raise RuntimeError(f"Invalid collector staging paths for {context_path}")
 
-    root = output_root.resolve()
+    root = locked_output_root.path if locked_output_root is not None else output_root.resolve()
     allowed_paths = {root / str(perf_file) for perf_file in PerfFile}
     staging_paths: list[Path] = []
     seen: set[Path] = set()
@@ -3049,20 +3674,41 @@ def _validated_collector_staging_paths(
         staging_path = Path(path_text)
         if path_text != str(staging_path) or staging_path not in allowed_paths or staging_path in seen:
             raise RuntimeError(f"Invalid collector staging path for {context_path}: {staging_path}")
-        if (
-            staging_path.is_symlink()
-            or (staging_path.exists() and not staging_path.is_file())
-            or (require_present and not staging_path.is_file())
+        if locked_output_root is not None:
+            try:
+                staging_state = locked_output_root.stat(staging_path)
+            except FileNotFoundError:
+                staging_state = None
+        else:
+            staging_state = staging_path.lstat() if staging_path.exists() or staging_path.is_symlink() else None
+        if (staging_state is not None and not stat.S_ISREG(staging_state.st_mode)) or (
+            require_present and staging_state is None
         ):
             raise RuntimeError(f"Invalid collector staging path for {context_path}: {staging_path}")
-        if staging_path.is_file():
+        if staging_state is not None:
             lock_path = Path(f"{staging_path}.lock")
-            if lock_path.exists() or lock_path.is_symlink():
+            lock_present = (
+                not locked_output_root.absent(lock_path)
+                if locked_output_root is not None
+                else lock_path.exists() or lock_path.is_symlink()
+            )
+            if lock_present:
                 raise RuntimeError(f"Collector staging path has an active writer lock for {context_path}: {lock_path}")
             try:
-                if staging_path.stat().st_mode & 0o444 == 0:
+                if staging_state.st_mode & 0o444 == 0:
                     raise PermissionError("file has no read permission bits")
-                with staging_path.open("rb") as staging_file:
+                file_descriptor = (
+                    locked_output_root.open(
+                        staging_path,
+                        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+                    )
+                    if locked_output_root is not None
+                    else os.open(
+                        staging_path,
+                        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+                    )
+                )
+                with os.fdopen(file_descriptor, "rb") as staging_file:
                     if not staging_file.read(1):
                         raise ValueError("file is empty")
             except Exception as error:
@@ -3134,10 +3780,11 @@ def _validated_sidecar_target(
     meta_path: Path,
     *,
     context_path: Path,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> _FileAttestation | None:
     """Bind publication to the exact pre-transaction sidecar target, or its absence."""
     if record is None:
-        if meta_path.exists() or meta_path.is_symlink():
+        if not (locked_output_root.absent(meta_path) if locked_output_root is not None else not meta_path.exists()):
             raise RuntimeError(f"Collector sidecar target changed in {context_path}: {meta_path}")
         return None
     attestation = _attestation_from_record(
@@ -3152,6 +3799,7 @@ def _validated_sidecar_target(
         context_path=context_path,
         expected_identity=attestation.identity,
         kind="sidecar target",
+        locked_output_root=locked_output_root,
     )
     return snapshot.attest(meta_path)
 
@@ -3161,18 +3809,31 @@ def _revalidate_transaction_staging_files(
     *,
     context_path: Path,
     require_present: bool,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> None:
     """Verify all present staging bytes before any transaction mutation."""
     for staging_file in staging_files:
         staging_path = staging_file.path
-        if staging_path.is_symlink() or (staging_path.exists() and not staging_path.is_file()):
+        if locked_output_root is not None:
+            try:
+                staging_state = locked_output_root.stat(staging_path)
+            except FileNotFoundError:
+                staging_state = None
+        else:
+            staging_state = staging_path.lstat() if staging_path.exists() or staging_path.is_symlink() else None
+        if staging_state is not None and not stat.S_ISREG(staging_state.st_mode):
             raise RuntimeError(f"Invalid collector staging path for {context_path}: {staging_path}")
-        if not staging_path.is_file():
+        if staging_state is None:
             if require_present:
                 raise RuntimeError(f"Missing collector staging path for {context_path}: {staging_path}")
             continue
         lock_path = Path(f"{staging_path}.lock")
-        if lock_path.exists() or lock_path.is_symlink():
+        lock_present = (
+            not locked_output_root.absent(lock_path)
+            if locked_output_root is not None
+            else lock_path.exists() or lock_path.is_symlink()
+        )
+        if lock_present:
             raise RuntimeError(f"Collector staging path has an active writer lock for {context_path}: {lock_path}")
         _validated_regular_file(
             staging_path,
@@ -3180,6 +3841,7 @@ def _revalidate_transaction_staging_files(
             context_path=context_path,
             expected_identity=staging_file.identity,
             kind="staging path",
+            locked_output_root=locked_output_root,
         )
 
 
@@ -3189,6 +3851,7 @@ def _validated_transaction_staging_files(
     output_root: Path,
     context_path: Path,
     require_present: bool,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> list[_FileAttestation]:
     """Validate canonical paths and immutable bytes from one transaction."""
     if not isinstance(recorded_files, list) or not recorded_files:
@@ -3210,6 +3873,7 @@ def _validated_transaction_staging_files(
         output_root=output_root,
         context_path=context_path,
         require_present=require_present,
+        locked_output_root=locked_output_root,
     )
     record_by_path = {staging_file.path: staging_file for staging_file in staging_files}
     staging_files = [record_by_path[path] for path in staging_paths]
@@ -3217,6 +3881,7 @@ def _validated_transaction_staging_files(
         staging_files,
         context_path=context_path,
         require_present=require_present,
+        locked_output_root=locked_output_root,
     )
     return staging_files
 
@@ -3233,7 +3898,7 @@ def _validated_transaction_checkpoints(
     if not isinstance(participants, list) or not participants:
         raise RuntimeError(f"Invalid checkpoint participants in collector sidecar transaction {journal_path}")
 
-    validated_participants: list[_ValidatedCheckpoint] = []
+    parsed_participants = []
     seen_checkpoint_paths: set[Path] = set()
     seen_attempted_case_ids: set[str] = set()
     for participant in participants:
@@ -3266,42 +3931,78 @@ def _validated_transaction_checkpoints(
             if not isinstance(identity, dict) or set(identity) != set(_CHECKPOINT_IDENTITY_FIELDS):
                 raise TypeError(f"checkpoint identity must contain exactly {_CHECKPOINT_IDENTITY_FIELDS!r}")
             table = _registered_checkpoint_table(identity, backend=backend)
-
             checkpoint_path = Path(path_text)
             expected_path = _checkpoint_path(checkpoint_root, identity["module"])
             if path_text != str(expected_path) or checkpoint_path in seen_checkpoint_paths:
                 raise ValueError(f"checkpoint path is not a direct owned file: {checkpoint_path}")
-            snapshot = _validated_regular_file(
-                checkpoint_path,
-                None,
-                context_path=journal_path,
-                capture_contents=True,
-                kind="checkpoint participant",
-            )
-            checkpoint = json.loads(snapshot.contents)
-            if not isinstance(checkpoint, dict):
-                raise TypeError("checkpoint document must be an object")
-            actual_identity = {field: checkpoint.get(field) for field in _CHECKPOINT_IDENTITY_FIELDS}
-            if actual_identity != identity:
-                raise ValueError(f"checkpoint identity {actual_identity!r} != recorded {identity!r}")
-            live_ledgers = {field: _checkpoint_case_ids(checkpoint, field) for field in recorded_ledgers}
-            if any(live_ledgers[field] != recorded_ledgers[field] for field in ("done", "failed")):
-                raise ValueError("checkpoint done/failed ledgers do not match the transaction")
-            checkpoint_transaction = checkpoint.get(_SIDECAR_TRANSACTION_FIELD)
-            if checkpoint_transaction not in (None, transaction["transaction_id"]):
-                raise ValueError(f"checkpoint is bound to another transaction: {checkpoint_transaction!r}")
         except Exception as error:
             raise RuntimeError(f"Invalid checkpoint participant in {journal_path}: {error}") from error
         seen_checkpoint_paths.add(checkpoint_path)
         seen_attempted_case_ids.update(attempted_case_ids)
-        validated_participants.append(
-            _ValidatedCheckpoint(
-                attestation=snapshot.attest(checkpoint_path),
-                table=table,
-                attempted=frozenset(attempted_case_ids),
-                document=checkpoint,
+        parsed_participants.append((checkpoint_path, identity, recorded_ledgers, attempted_case_ids, table))
+
+    validated_participants: list[_ValidatedCheckpoint] = []
+    with _locked_checkpoint_root(checkpoint_root) as locked:
+        preflight_participants = []
+        for checkpoint_path, identity, recorded_ledgers, attempted_case_ids, table in parsed_participants:
+            try:
+                canonical_path = _checkpoint_path_in_locked_directory(checkpoint_path, locked)
+                effective_state = _effective_checkpoint_state_at(
+                    locked.file_descriptor,
+                    canonical_path,
+                    context_path=journal_path,
+                    kind="checkpoint participant",
+                )
+                snapshot = effective_state.snapshot
+                checkpoint = json.loads(snapshot.contents)
+                if not isinstance(checkpoint, dict):
+                    raise TypeError("checkpoint document must be an object")
+                actual_identity = {field: checkpoint.get(field) for field in _CHECKPOINT_IDENTITY_FIELDS}
+                if actual_identity != identity:
+                    raise ValueError(f"checkpoint identity {actual_identity!r} != recorded {identity!r}")
+                live_ledgers = {field: _checkpoint_case_ids(checkpoint, field) for field in recorded_ledgers}
+                if any(live_ledgers[field] != recorded_ledgers[field] for field in ("done", "failed")):
+                    raise ValueError("checkpoint done/failed ledgers do not match the transaction")
+                checkpoint_transaction = checkpoint.get(_SIDECAR_TRANSACTION_FIELD)
+                if checkpoint_transaction not in (None, transaction["transaction_id"]):
+                    raise ValueError(f"checkpoint is bound to another transaction: {checkpoint_transaction!r}")
+            except Exception as error:
+                raise RuntimeError(f"Invalid checkpoint participant in {journal_path}: {error}") from error
+            preflight_participants.append(
+                (
+                    checkpoint_path,
+                    table,
+                    attempted_case_ids,
+                    checkpoint,
+                    effective_state,
+                )
             )
-        )
+
+        for checkpoint_path, table, attempted_case_ids, checkpoint, effective_state in preflight_participants:
+            canonical_path = _checkpoint_path_in_locked_directory(checkpoint_path, locked)
+            _require_effective_checkpoint_state_at(
+                locked.file_descriptor,
+                canonical_path,
+                effective_state,
+            )
+            _normalize_atomic_replace_state_at(locked.file_descriptor, canonical_path)
+            snapshot = _validated_regular_file_at(
+                locked.file_descriptor,
+                canonical_path.name,
+                canonical_path,
+                effective_state.snapshot.digest,
+                context_path=journal_path,
+                expected_identity=effective_state.snapshot.identity,
+                kind="checkpoint participant",
+            )
+            validated_participants.append(
+                _ValidatedCheckpoint(
+                    attestation=snapshot.attest(checkpoint_path),
+                    table=table,
+                    attempted=frozenset(attempted_case_ids),
+                    document=checkpoint,
+                )
+            )
     return validated_participants
 
 
@@ -3389,17 +4090,25 @@ def _validated_checkpoint_participants_for_phase(
 
 
 def _revalidate_checkpoint_attestations(attestations: Iterable[_FileAttestation]) -> None:
-    for attestation in attestations:
-        _validated_regular_file(
-            attestation.path,
-            attestation.digest,
-            context_path=attestation.path,
-            expected_identity=attestation.identity,
-            kind="checkpoint",
-        )
+    attestations = list(attestations)
+    if not attestations:
+        return
+    with _locked_checkpoint_directory(attestations[0].path) as locked:
+        for attestation in attestations:
+            _checkpoint_snapshot_at(
+                attestation.path,
+                attestation.digest,
+                locked=locked,
+                context_path=attestation.path,
+                expected_identity=attestation.identity,
+                kind="checkpoint",
+            )
 
 
-def _restore_claimed_transaction_files(claimed_files: list[_ClaimedTransactionFile]) -> None:
+def _restore_claimed_transaction_files(
+    claimed_files: list[_ClaimedTransactionFile],
+    locked_output_root: LockedOutputRoot | None = None,
+) -> None:
     for claimed_file in reversed(claimed_files):
         try:
             _validated_regular_file(
@@ -3408,10 +4117,15 @@ def _restore_claimed_transaction_files(claimed_files: list[_ClaimedTransactionFi
                 context_path=claimed_file.claimed_path,
                 expected_identity=claimed_file.original.identity,
                 kind="sidecar transaction claim",
+                locked_output_root=locked_output_root,
             )
         except RuntimeError:
             continue
-        if claimed_file.original.path.exists() or claimed_file.original.path.is_symlink():
+        if not (
+            locked_output_root.absent(claimed_file.original.path)
+            if locked_output_root is not None
+            else not claimed_file.original.path.exists()
+        ):
             try:
                 _validated_regular_file(
                     claimed_file.original.path,
@@ -3419,6 +4133,7 @@ def _restore_claimed_transaction_files(claimed_files: list[_ClaimedTransactionFi
                     context_path=claimed_file.claimed_path,
                     expected_identity=claimed_file.original.identity,
                     kind="restored sidecar transaction file",
+                    locked_output_root=locked_output_root,
                 )
                 _validated_regular_file(
                     claimed_file.claimed_path,
@@ -3426,29 +4141,29 @@ def _restore_claimed_transaction_files(claimed_files: list[_ClaimedTransactionFi
                     context_path=claimed_file.claimed_path,
                     expected_identity=claimed_file.original.identity,
                     kind="sidecar transaction claim",
+                    locked_output_root=locked_output_root,
                 )
-                claimed_file.claimed_path.unlink()
             except RuntimeError:
                 pass
             continue
         try:
-            os.link(
-                claimed_file.claimed_path,
-                claimed_file.original.path,
-                follow_symlinks=False,
-            )
+            if locked_output_root is not None:
+                locked_output_root.rename_noreplace(claimed_file.claimed_path, claimed_file.original.path)
+            else:
+                _rename_noreplace(claimed_file.claimed_path, claimed_file.original.path)
         except OSError:
             continue
         try:
-            restored_stat = claimed_file.original.path.lstat()
-            current_claimed_stat = claimed_file.claimed_path.lstat()
-        except FileNotFoundError:
+            _validated_regular_file(
+                claimed_file.original.path,
+                claimed_file.original.digest,
+                context_path=claimed_file.original.path,
+                expected_identity=claimed_file.original.identity,
+                kind="restored sidecar transaction file",
+                locked_output_root=locked_output_root,
+            )
+        except RuntimeError:
             continue
-        if (restored_stat.st_dev, restored_stat.st_ino) == claimed_file.original.identity and (
-            current_claimed_stat.st_dev,
-            current_claimed_stat.st_ino,
-        ) == claimed_file.original.identity:
-            claimed_file.claimed_path.unlink()
 
 
 def _transaction_claim_path(path: Path, transaction_id: str) -> Path:
@@ -3460,10 +4175,11 @@ def _recover_transaction_claim(
     transaction_id: str,
     *,
     context_path: Path,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> _FileAttestation | None:
     """Inspect an exact durable claim without mutating transaction state."""
     claim_path = _transaction_claim_path(attestation.path, transaction_id)
-    if not claim_path.exists() and not claim_path.is_symlink():
+    if locked_output_root.absent(claim_path) if locked_output_root is not None else not claim_path.exists():
         return None
     claim_snapshot = _validated_regular_file(
         claim_path,
@@ -3471,6 +4187,7 @@ def _recover_transaction_claim(
         context_path=context_path,
         expected_identity=attestation.identity,
         kind="sidecar transaction claim",
+        locked_output_root=locked_output_root,
     )
     return claim_snapshot.attest(claim_path)
 
@@ -3480,6 +4197,7 @@ def _restore_transaction_claim(
     claim_attestation: _FileAttestation,
     *,
     context_path: Path,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> None:
     """Restore one prevalidated durable claim without overwriting a competitor."""
     _validated_regular_file(
@@ -3488,18 +4206,26 @@ def _restore_transaction_claim(
         context_path=context_path,
         expected_identity=claim_attestation.identity,
         kind="sidecar transaction claim",
+        locked_output_root=locked_output_root,
     )
-    if attestation.path.exists() or attestation.path.is_symlink():
+    if not (
+        locked_output_root.absent(attestation.path) if locked_output_root is not None else not attestation.path.exists()
+    ):
         _validated_regular_file(
             attestation.path,
             attestation.digest,
             context_path=context_path,
             expected_identity=attestation.identity,
             kind="restored sidecar transaction file",
+            locked_output_root=locked_output_root,
         )
+        raise RuntimeError(f"Collector transaction claim already has a restored target in {context_path}")
     else:
         try:
-            os.link(claim_attestation.path, attestation.path, follow_symlinks=False)
+            if locked_output_root is not None:
+                locked_output_root.rename_noreplace(claim_attestation.path, attestation.path)
+            else:
+                _rename_noreplace(claim_attestation.path, attestation.path)
         except FileExistsError as error:
             raise RuntimeError(f"Collector transaction target changed in {context_path}: {attestation.path}") from error
         _validated_regular_file(
@@ -3508,15 +4234,8 @@ def _restore_transaction_claim(
             context_path=context_path,
             expected_identity=attestation.identity,
             kind="restored sidecar transaction file",
+            locked_output_root=locked_output_root,
         )
-    _validated_regular_file(
-        claim_attestation.path,
-        claim_attestation.digest,
-        context_path=context_path,
-        expected_identity=claim_attestation.identity,
-        kind="sidecar transaction claim",
-    )
-    claim_attestation.path.unlink()
 
 
 def _claim_transaction_files(
@@ -3525,13 +4244,20 @@ def _claim_transaction_files(
     context_path: Path,
     require_present: bool,
     transaction_id: str,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> list[_ClaimedTransactionFile]:
     """Exclusively claim exact transaction-owned objects under durable names."""
     claim_plan: list[tuple[_FileAttestation, Path, bool, bool]] = []
     for staging_file in staging_files:
         claimed_path = _transaction_claim_path(staging_file.path, transaction_id)
-        source_present = staging_file.path.exists() or staging_file.path.is_symlink()
-        claim_present = claimed_path.exists() or claimed_path.is_symlink()
+        source_present = not (
+            locked_output_root.absent(staging_file.path)
+            if locked_output_root is not None
+            else not staging_file.path.exists()
+        )
+        claim_present = not (
+            locked_output_root.absent(claimed_path) if locked_output_root is not None else not claimed_path.exists()
+        )
         if source_present:
             _validated_regular_file(
                 staging_file.path,
@@ -3539,6 +4265,7 @@ def _claim_transaction_files(
                 context_path=context_path,
                 expected_identity=staging_file.identity,
                 kind="staging file",
+                locked_output_root=locked_output_root,
             )
         if claim_present:
             _validated_regular_file(
@@ -3547,6 +4274,11 @@ def _claim_transaction_files(
                 context_path=context_path,
                 expected_identity=staging_file.identity,
                 kind="sidecar transaction claim",
+                locked_output_root=locked_output_root,
+            )
+        if source_present and claim_present:
+            raise RuntimeError(
+                f"Legacy collector transaction source/claim hardlink requires manual recovery: {staging_file.path}"
             )
         if require_present and not source_present and not claim_present:
             raise RuntimeError(f"Missing collector staging file in {context_path}: {staging_file.path}")
@@ -3564,9 +4296,13 @@ def _claim_transaction_files(
                     context_path=context_path,
                     expected_identity=staging_file.identity,
                     kind="staging file",
+                    locked_output_root=locked_output_root,
                 )
                 try:
-                    os.link(staging_file.path, claimed_path, follow_symlinks=False)
+                    if locked_output_root is not None:
+                        locked_output_root.rename_noreplace(staging_file.path, claimed_path)
+                    else:
+                        _rename_noreplace(staging_file.path, claimed_path)
                 except FileExistsError as error:
                     raise RuntimeError(
                         f"Collector transaction claim changed in {context_path}: {claimed_path}"
@@ -3577,16 +4313,8 @@ def _claim_transaction_files(
                 context_path=context_path,
                 expected_identity=staging_file.identity,
                 kind="claimed staging file",
+                locked_output_root=locked_output_root,
             )
-            if staging_file.path.exists() or staging_file.path.is_symlink():
-                _validated_regular_file(
-                    staging_file.path,
-                    staging_file.digest,
-                    context_path=context_path,
-                    expected_identity=staging_file.identity,
-                    kind="staging file",
-                )
-                staging_file.path.unlink()
             claimed_file = _ClaimedTransactionFile(
                 original=staging_file,
                 claimed_path=claimed_path,
@@ -3598,6 +4326,7 @@ def _claim_transaction_files(
                 context_path=context_path,
                 expected_identity=staging_file.identity,
                 kind="claimed staging file",
+                locked_output_root=locked_output_root,
             )
         for claimed_file in claimed_files:
             _validated_regular_file(
@@ -3606,19 +4335,21 @@ def _claim_transaction_files(
                 context_path=context_path,
                 expected_identity=claimed_file.original.identity,
                 kind="claimed staging file",
+                locked_output_root=locked_output_root,
             )
     except Exception:
-        _restore_claimed_transaction_files(claimed_files)
+        _restore_claimed_transaction_files(claimed_files, locked_output_root)
         raise
     return claimed_files
 
 
-def _delete_claimed_transaction_files(
+def _retain_claimed_transaction_files(
     claimed_files: list[_ClaimedTransactionFile],
     *,
     context_path: Path,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> None:
-    """Delete only the private exact objects already claimed by a transaction."""
+    """Retain only the private exact objects already claimed by a transaction."""
     for claimed_file in claimed_files:
         _validated_regular_file(
             claimed_file.claimed_path,
@@ -3626,6 +4357,7 @@ def _delete_claimed_transaction_files(
             context_path=context_path,
             expected_identity=claimed_file.original.identity,
             kind="claimed transaction file",
+            locked_output_root=locked_output_root,
         )
     for claimed_file in claimed_files:
         _validated_regular_file(
@@ -3634,9 +4366,25 @@ def _delete_claimed_transaction_files(
             context_path=context_path,
             expected_identity=claimed_file.original.identity,
             kind="claimed transaction file",
+            locked_output_root=locked_output_root,
         )
-        claimed_file.claimed_path.unlink()
-        _fsync_directory(claimed_file.claimed_path.parent)
+        retained_path = collector_retained_path(claimed_file.original.path)
+        if not (
+            locked_output_root.absent(retained_path) if locked_output_root is not None else not retained_path.exists()
+        ):
+            raise RuntimeError(f"Conflicting retained collector transaction file in {context_path}: {retained_path}")
+        if locked_output_root is not None:
+            locked_output_root.rename_noreplace(claimed_file.claimed_path, retained_path)
+        else:
+            _rename_noreplace(claimed_file.claimed_path, retained_path)
+        _validated_regular_file(
+            retained_path,
+            claimed_file.original.digest,
+            context_path=context_path,
+            expected_identity=claimed_file.original.identity,
+            kind="retained transaction file",
+            locked_output_root=locked_output_root,
+        )
 
 
 def _cleanup_transaction_files(
@@ -3644,17 +4392,27 @@ def _cleanup_transaction_files(
     *,
     context_path: Path,
     transaction_id: str | None = None,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> None:
-    """Delete only exact transaction-owned files, using durable claims when requested."""
+    """Retain only exact transaction-owned files, using durable claims when requested."""
     if transaction_id is None:
         _revalidate_transaction_staging_files(
             staging_files,
             context_path=context_path,
             require_present=False,
+            locked_output_root=locked_output_root,
         )
         for staging_file in staging_files:
-            if not staging_file.path.exists() and not staging_file.path.is_symlink():
-                _fsync_directory(staging_file.path.parent)
+            staging_absent = (
+                locked_output_root.absent(staging_file.path)
+                if locked_output_root is not None
+                else not staging_file.path.exists()
+            )
+            if staging_absent:
+                if locked_output_root is not None:
+                    locked_output_root.fsync()
+                else:
+                    _fsync_directory(staging_file.path.parent)
                 continue
             _validated_regular_file(
                 staging_file.path,
@@ -3662,9 +4420,29 @@ def _cleanup_transaction_files(
                 context_path=context_path,
                 expected_identity=staging_file.identity,
                 kind="transaction cleanup file",
+                locked_output_root=locked_output_root,
             )
-            staging_file.path.unlink()
-            _fsync_directory(staging_file.path.parent)
+            retained_path = collector_retained_path(staging_file.path)
+            if not (
+                locked_output_root.absent(retained_path)
+                if locked_output_root is not None
+                else not retained_path.exists()
+            ):
+                raise RuntimeError(
+                    f"Conflicting retained collector transaction file in {context_path}: {retained_path}"
+                )
+            if locked_output_root is not None:
+                locked_output_root.rename_noreplace(staging_file.path, retained_path)
+            else:
+                _rename_noreplace(staging_file.path, retained_path)
+            _validated_regular_file(
+                retained_path,
+                staging_file.digest,
+                context_path=context_path,
+                expected_identity=staging_file.identity,
+                kind="retained transaction file",
+                locked_output_root=locked_output_root,
+            )
         return
 
     claimed_files = _claim_transaction_files(
@@ -3672,8 +4450,13 @@ def _cleanup_transaction_files(
         context_path=context_path,
         require_present=False,
         transaction_id=transaction_id,
+        locked_output_root=locked_output_root,
     )
-    _delete_claimed_transaction_files(claimed_files, context_path=context_path)
+    _retain_claimed_transaction_files(
+        claimed_files,
+        context_path=context_path,
+        locked_output_root=locked_output_root,
+    )
 
 
 def _publish_transaction_sidecar(
@@ -3685,10 +4468,11 @@ def _publish_transaction_sidecar(
     *,
     context_path: Path,
     journal_attestation: _FileAttestation | None = None,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> None:
     """Publish captured bytes after claiming the exact source and prior target."""
     if journal_attestation is not None:
-        _revalidate_journal_attestation(journal_attestation)
+        _revalidate_journal_attestation(journal_attestation, locked_output_root)
     if source_snapshot.contents is None:
         raise RuntimeError(f"Collector sidecar bytes were not captured for {context_path}")
     source_record = source_snapshot.attest(source_path)
@@ -3697,7 +4481,7 @@ def _publish_transaction_sidecar(
         if target_attestation != source_record:
             raise RuntimeError(f"Collector sidecar target changed in {context_path}: {meta_path}")
     elif target_attestation is None:
-        if meta_path.exists() or meta_path.is_symlink():
+        if not (locked_output_root.absent(meta_path) if locked_output_root is not None else not meta_path.exists()):
             raise RuntimeError(f"Collector sidecar target changed in {context_path}: {meta_path}")
     else:
         claim_records.append(target_attestation)
@@ -3706,22 +4490,27 @@ def _publish_transaction_sidecar(
         context_path=context_path,
         require_present=True,
         transaction_id=transaction_id,
+        locked_output_root=locked_output_root,
     )
     try:
-        if meta_path.exists() or meta_path.is_symlink():
+        if not (locked_output_root.absent(meta_path) if locked_output_root is not None else not meta_path.exists()):
             raise RuntimeError(f"Collector sidecar target changed in {context_path}: {meta_path}")
         if journal_attestation is not None:
-            _revalidate_journal_attestation(journal_attestation)
+            _revalidate_journal_attestation(journal_attestation, locked_output_root)
         _atomic_write_bytes(
             meta_path,
             source_snapshot.contents,
             mode=source_snapshot.mode,
-            replace_existing=False,
+            _locked_output_root=locked_output_root,
         )
     except Exception:
-        _restore_claimed_transaction_files(claimed_files)
+        _restore_claimed_transaction_files(claimed_files, locked_output_root)
         raise
-    _delete_claimed_transaction_files(claimed_files, context_path=context_path)
+    _retain_claimed_transaction_files(
+        claimed_files,
+        context_path=context_path,
+        locked_output_root=locked_output_root,
+    )
 
 
 def _load_perf_publication_transaction(
@@ -3729,14 +4518,20 @@ def _load_perf_publication_transaction(
     *,
     backend: str,
     checkpoint_dir: str,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> tuple[_FileAttestation, list[PerfPublication], list[dict], _FileAttestation | None] | None:
-    output_root = output_root.resolve()
+    output_root = locked_output_root.path if locked_output_root is not None else output_root.resolve()
     journal_path = output_root / _PERF_TRANSACTION_FILENAME
-    if journal_path.is_symlink():
-        raise RuntimeError(f"Invalid collector perf transaction journal: {journal_path}")
-    if not journal_path.exists():
+    if locked_output_root is not None:
+        try:
+            journal_state = locked_output_root.stat(journal_path)
+        except FileNotFoundError:
+            journal_state = None
+    else:
+        journal_state = journal_path.lstat() if journal_path.exists() or journal_path.is_symlink() else None
+    if journal_state is None:
         return None
-    if not journal_path.is_file():
+    if not stat.S_ISREG(journal_state.st_mode):
         raise RuntimeError(f"Invalid collector perf transaction journal: {journal_path}")
     try:
         snapshot = _validated_regular_file(
@@ -3745,6 +4540,7 @@ def _load_perf_publication_transaction(
             context_path=journal_path,
             capture_contents=True,
             kind="perf transaction journal",
+            locked_output_root=locked_output_root,
         )
         transaction = json.loads(snapshot.contents)
         publications, checkpoint_records, previous_sidecar = _validate_perf_transaction_document(
@@ -3763,50 +4559,71 @@ def _rollback_perf_publication_transaction(
     state: tuple[_FileAttestation, list[PerfPublication], list[dict], _FileAttestation | None],
     *,
     output_root: Path,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> None:
     journal_attestation, publications, checkpoint_records, previous_sidecar = state
     journal_path = journal_attestation.path
     staged_meta_path = output_root / _SIDECAR_STAGING_FILENAME
     staged_meta_attestation: _FileAttestation | None = None
-    if staged_meta_path.is_symlink() or (staged_meta_path.exists() and not staged_meta_path.is_file()):
+    if locked_output_root is not None:
+        try:
+            staged_state = locked_output_root.stat(staged_meta_path)
+        except FileNotFoundError:
+            staged_state = None
+    else:
+        staged_state = staged_meta_path.lstat() if staged_meta_path.exists() or staged_meta_path.is_symlink() else None
+    if staged_state is not None and not stat.S_ISREG(staged_state.st_mode):
         raise RuntimeError(f"Invalid sidecar staging document during perf rollback: {journal_path}")
-    if staged_meta_path.is_file():
+    if staged_state is not None:
         staged_meta_attestation = _validated_regular_file(
             staged_meta_path,
             None,
             context_path=journal_path,
             kind="uncommitted sidecar staging document",
+            locked_output_root=locked_output_root,
         ).attest(staged_meta_path)
-    _revalidate_journal_attestation(journal_attestation)
+    _revalidate_journal_attestation(journal_attestation, locked_output_root)
     _revalidate_perf_transaction_rollback_inputs(
         publications,
         checkpoint_records,
         previous_sidecar,
         output_root=output_root,
         journal_path=journal_path,
+        locked_output_root=locked_output_root,
     )
-    restore_perf_publications(publications)
-    _revalidate_journal_attestation(journal_attestation)
+    locked_roots = {output_root: locked_output_root} if locked_output_root is not None else None
+    restore_perf_publications(publications, locked_roots)
+    _revalidate_journal_attestation(journal_attestation, locked_output_root)
     _revalidate_perf_transaction_rollback_inputs(
         publications,
         checkpoint_records,
         previous_sidecar,
         output_root=output_root,
         journal_path=journal_path,
+        locked_output_root=locked_output_root,
     )
-    cleanup_perf_publication_artifacts(publications)
+    cleanup_perf_publication_artifacts(publications, locked_roots)
     if staged_meta_attestation is not None:
-        _cleanup_transaction_files([staged_meta_attestation], context_path=journal_path)
-    _revalidate_journal_attestation(journal_attestation)
+        _cleanup_transaction_files(
+            [staged_meta_attestation],
+            context_path=journal_path,
+            locked_output_root=locked_output_root,
+        )
+    _revalidate_journal_attestation(journal_attestation, locked_output_root)
     _revalidate_perf_transaction_rollback_inputs(
         publications,
         checkpoint_records,
         previous_sidecar,
         output_root=output_root,
         journal_path=journal_path,
+        locked_output_root=locked_output_root,
     )
-    validate_restored_perf_publications(publications)
-    _cleanup_transaction_files([journal_attestation], context_path=journal_path)
+    validate_restored_perf_publications(publications, locked_roots)
+    _cleanup_transaction_files(
+        [journal_attestation],
+        context_path=journal_path,
+        locked_output_root=locked_output_root,
+    )
 
 
 def _validate_perf_to_sidecar_handoff(
@@ -3814,9 +4631,10 @@ def _validate_perf_to_sidecar_handoff(
     sidecar_transaction: dict,
     *,
     journal_path: Path,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> None:
     perf_journal, publications, checkpoint_records, previous_sidecar = perf_state
-    _revalidate_journal_attestation(perf_journal)
+    _revalidate_journal_attestation(perf_journal, locked_output_root)
     if sidecar_transaction.get("perf_publications") != [
         _perf_publication_record(publication) for publication in publications
     ]:
@@ -3847,7 +4665,11 @@ def _validate_perf_to_sidecar_handoff(
     ]
     if sidecar_transaction.get("checkpoints") != expected_checkpoints:
         raise RuntimeError(f"Collector perf and sidecar transactions disagree on checkpoints in {journal_path}")
-    _revalidate_published_perf_publications(publications, context_path=journal_path)
+    _revalidate_published_perf_publications(
+        publications,
+        context_path=journal_path,
+        locked_output_root=locked_output_root,
+    )
 
 
 def _revalidate_perf_sidecar_commit(
@@ -3856,15 +4678,21 @@ def _revalidate_perf_sidecar_commit(
     transaction: dict,
     *,
     journal_path: Path,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> None:
     if perf_transaction is not None:
         _validate_perf_to_sidecar_handoff(
             perf_transaction,
             transaction,
             journal_path=journal_path,
+            locked_output_root=locked_output_root,
         )
     elif sidecar_publications is not None:
-        _revalidate_published_perf_publications(sidecar_publications, context_path=journal_path)
+        _revalidate_published_perf_publications(
+            sidecar_publications,
+            context_path=journal_path,
+            locked_output_root=locked_output_root,
+        )
 
 
 def _recover_collector_provenance_transaction(
@@ -3873,15 +4701,20 @@ def _recover_collector_provenance_transaction(
     backend: str,
     checkpoint_dir: str,
 ) -> Path | None:
-    with perf_finalization_lifecycle(output_root):
+    _require_separate_checkpoint_root(output_root, checkpoint_dir, backend)
+    with perf_finalization_lifecycle(output_root) as locked_output_root:
         return _recover_collector_provenance_transaction_locked(
-            output_root,
+            locked_output_root.path,
             backend=backend,
             checkpoint_dir=checkpoint_dir,
+            locked_output_root=locked_output_root,
         )
 
 
-def _cleanup_unjournaled_perf_preparations(output_root: Path) -> None:
+def _cleanup_unjournaled_perf_preparations(
+    output_root: Path,
+    locked_output_root: LockedOutputRoot | None = None,
+) -> None:
     from collector.registry_types import PerfFile
 
     parquet_paths = [output_root / Path(str(perf_file)).with_suffix(".parquet") for perf_file in PerfFile]
@@ -3889,7 +4722,7 @@ def _cleanup_unjournaled_perf_preparations(output_root: Path) -> None:
         parquet_path
         for parquet_path in parquet_paths
         if any(
-            path.exists() or path.is_symlink()
+            not (locked_output_root.absent(path) if locked_output_root is not None else not path.exists())
             for path in (
                 perf_preparation_path(parquet_path),
                 perf_preparation_cleanup_path(parquet_path),
@@ -3898,11 +4731,28 @@ def _cleanup_unjournaled_perf_preparations(output_root: Path) -> None:
     ]
     if not candidates:
         return
-    with perf_merge_locks(candidates):
+    locked_roots = {output_root: locked_output_root} if locked_output_root is not None else None
+    with perf_merge_locks(candidates, locked_roots):
         cleanup_unjournaled_perf_preparations(
             candidates,
             transaction_paths=perf_transaction_artifact_paths(output_root),
+            locked_roots=locked_roots,
         )
+
+
+def _cleanup_atomic_write_reservations(
+    output_root: Path,
+    locked_output_root: LockedOutputRoot | None = None,
+) -> None:
+    cleanup_atomic_write_reservations(
+        (
+            output_root / _PERF_TRANSACTION_FILENAME,
+            output_root / _SIDECAR_STAGING_FILENAME,
+            output_root / _SIDECAR_TRANSACTION_FILENAME,
+            output_root / "collection_meta.yaml",
+        ),
+        {output_root: locked_output_root} if locked_output_root is not None else None,
+    )
 
 
 def _recover_collector_provenance_transaction_locked(
@@ -3910,24 +4760,33 @@ def _recover_collector_provenance_transaction_locked(
     *,
     backend: str,
     checkpoint_dir: str,
+    locked_output_root: LockedOutputRoot,
 ) -> Path | None:
     """Finish an interrupted sidecar commit without appending its event twice."""
-    output_root = output_root.resolve()
-    _cleanup_unjournaled_perf_preparations(output_root)
+    output_root = locked_output_root.path
+    _cleanup_atomic_write_reservations(output_root, locked_output_root)
+    _cleanup_unjournaled_perf_preparations(output_root, locked_output_root)
     checkpoint_root = _checkpoint_backend_root(checkpoint_dir, backend)
     perf_transaction = _load_perf_publication_transaction(
         output_root,
         backend=backend,
         checkpoint_dir=checkpoint_dir,
+        locked_output_root=locked_output_root,
     )
     journal_path = output_root / _SIDECAR_TRANSACTION_FILENAME
-    if journal_path.is_symlink():
-        raise RuntimeError(f"Invalid collector sidecar transaction journal: {journal_path}")
-    if not journal_path.exists():
+    try:
+        journal_state = locked_output_root.stat(journal_path)
+    except FileNotFoundError:
+        journal_state = None
+    if journal_state is None:
         if perf_transaction is not None:
-            _rollback_perf_publication_transaction(perf_transaction, output_root=output_root)
+            _rollback_perf_publication_transaction(
+                perf_transaction,
+                output_root=output_root,
+                locked_output_root=locked_output_root,
+            )
         return None
-    if not journal_path.is_file():
+    if not stat.S_ISREG(journal_state.st_mode):
         raise RuntimeError(f"Invalid collector sidecar transaction journal: {journal_path}")
 
     try:
@@ -3937,6 +4796,7 @@ def _recover_collector_provenance_transaction_locked(
             context_path=journal_path,
             capture_contents=True,
             kind="sidecar transaction journal",
+            locked_output_root=locked_output_root,
         )
         transaction = json.loads(journal_snapshot.contents)
         transaction_id, expected_digest = _validate_transaction_envelope(
@@ -3956,6 +4816,7 @@ def _recover_collector_provenance_transaction_locked(
             sidecar_publications,
             transaction,
             journal_path=journal_path,
+            locked_output_root=locked_output_root,
         )
     except Exception as error:
         raise RuntimeError(f"Failed to load collector sidecar transaction {journal_path}: {error}") from error
@@ -3981,36 +4842,43 @@ def _recover_collector_provenance_transaction_locked(
     )
     journal_attestation = journal_snapshot.attest(journal_path)
     for document_path in (meta_path, staged_meta_path):
-        if document_path.is_symlink() or (document_path.exists() and not document_path.is_file()):
+        try:
+            document_state = locked_output_root.stat(document_path)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(document_state.st_mode):
             raise RuntimeError(f"Invalid collector sidecar transaction document in {journal_path}: {document_path}")
 
     pending_claim = _recover_transaction_claim(
         pending_attestation,
         transaction_id,
         context_path=journal_path,
+        locked_output_root=locked_output_root,
     )
     previous_claim = (
         _recover_transaction_claim(
             previous_attestation,
             transaction_id,
             context_path=journal_path,
+            locked_output_root=locked_output_root,
         )
         if previous_attestation is not None
         else None
     )
     if previous_attestation is None:
         unexpected_claim = _transaction_claim_path(meta_path, transaction_id)
-        if unexpected_claim.exists() or unexpected_claim.is_symlink():
+        if not locked_output_root.absent(unexpected_claim):
             raise RuntimeError(f"Unexpected collector transaction claim in {journal_path}: {unexpected_claim}")
 
     committed_document_snapshot: _FileSnapshot | None = None
-    if meta_path.exists():
+    if not locked_output_root.absent(meta_path):
         candidate_snapshot = _validated_regular_file(
             meta_path,
             None,
             context_path=journal_path,
             capture_contents=True,
             kind="committed sidecar document",
+            locked_output_root=locked_output_root,
         )
         if candidate_snapshot.digest == expected_digest:
             committed_document_snapshot = _validated_sidecar_document(
@@ -4018,15 +4886,17 @@ def _recover_collector_provenance_transaction_locked(
                 expected_digest,
                 context_path=journal_path,
                 expected_identity=candidate_snapshot.identity,
+                locked_output_root=locked_output_root,
             )
 
     staged_document_snapshot: _FileSnapshot | None = None
-    if staged_meta_path.exists():
+    if not locked_output_root.absent(staged_meta_path):
         staged_document_snapshot = _validated_sidecar_document(
             staged_meta_path,
             expected_digest,
             context_path=journal_path,
             expected_identity=pending_attestation.identity,
+            locked_output_root=locked_output_root,
         )
     claimed_document_snapshot = (
         _validated_sidecar_document(
@@ -4034,6 +4904,7 @@ def _recover_collector_provenance_transaction_locked(
             expected_digest,
             context_path=journal_path,
             expected_identity=pending_attestation.identity,
+            locked_output_root=locked_output_root,
         )
         if pending_claim is not None
         else None
@@ -4058,6 +4929,7 @@ def _recover_collector_provenance_transaction_locked(
         output_root=output_root,
         context_path=journal_path,
         require_present=phase == "preparing",
+        locked_output_root=locked_output_root,
     )
     validated_staging_paths = [staging_file.path for staging_file in validated_staging_files]
     staging_claims = [
@@ -4068,6 +4940,7 @@ def _recover_collector_provenance_transaction_locked(
                 staging_file,
                 transaction_id,
                 context_path=journal_path,
+                locked_output_root=locked_output_root,
             )
         )
         is not None
@@ -4091,15 +4964,16 @@ def _recover_collector_provenance_transaction_locked(
 
     if phase == "preparing":
         if previous_attestation is None:
-            if meta_path.exists() or meta_path.is_symlink():
+            if not locked_output_root.absent(meta_path):
                 raise RuntimeError(f"Collector sidecar target changed in {journal_path}: {meta_path}")
-        elif meta_path.exists() or meta_path.is_symlink():
+        elif not locked_output_root.absent(meta_path):
             _validated_regular_file(
                 meta_path,
                 previous_attestation.digest,
                 context_path=journal_path,
                 expected_identity=previous_attestation.identity,
                 kind="sidecar target",
+                locked_output_root=locked_output_root,
             )
         elif previous_claim is None:
             raise RuntimeError(f"Missing collector sidecar target in {journal_path}: {meta_path}")
@@ -4112,7 +4986,7 @@ def _recover_collector_provenance_transaction_locked(
     )
     participant_attestations = {checkpoint.path: checkpoint.attestation for checkpoint in tagged_participants}
     _revalidate_checkpoint_attestations(participant_attestations.values())
-    _revalidate_journal_attestation(journal_attestation)
+    _revalidate_journal_attestation(journal_attestation, locked_output_root)
 
     if phase == "preparing":
         if pending_claim is not None:
@@ -4120,23 +4994,27 @@ def _recover_collector_provenance_transaction_locked(
                 pending_attestation,
                 pending_claim,
                 context_path=journal_path,
+                locked_output_root=locked_output_root,
             )
         if previous_attestation is not None and previous_claim is not None:
             _restore_transaction_claim(
                 previous_attestation,
                 previous_claim,
                 context_path=journal_path,
+                locked_output_root=locked_output_root,
             )
         source_snapshot = _validated_sidecar_document(
             staged_meta_path,
             expected_digest,
             context_path=journal_path,
             expected_identity=pending_attestation.identity,
+            locked_output_root=locked_output_root,
         )
         sidecar_target_attestation = _validated_sidecar_target(
             transaction.get("previous_sidecar"),
             meta_path,
             context_path=journal_path,
+            locked_output_root=locked_output_root,
         )
         # The journal is durable before any checkpoint is tagged. Resume a
         # prepare-phase interruption by tagging every participant, then make
@@ -4146,6 +5024,7 @@ def _recover_collector_provenance_transaction_locked(
             expected_digest,
             context_path=journal_path,
             expected_identity=source_snapshot.identity,
+            locked_output_root=locked_output_root,
         )
         for checkpoint in tagged_participants:
             participant_attestations[checkpoint.path] = _tag_checkpoint_sidecar_transaction(
@@ -4154,12 +5033,14 @@ def _recover_collector_provenance_transaction_locked(
                 transaction_id,
                 expected_attestation=participant_attestations[checkpoint.path],
                 journal_attestation=journal_attestation,
+                locked_output_root=locked_output_root,
             )
         publish_snapshot = _validated_sidecar_document(
             staged_meta_path,
             expected_digest,
             context_path=journal_path,
             expected_identity=source_snapshot.identity,
+            locked_output_root=locked_output_root,
         )
         _revalidate_checkpoint_attestations(participant_attestations.values())
         _revalidate_perf_sidecar_commit(
@@ -4167,6 +5048,7 @@ def _recover_collector_provenance_transaction_locked(
             sidecar_publications,
             transaction,
             journal_path=journal_path,
+            locked_output_root=locked_output_root,
         )
         _publish_transaction_sidecar(
             staged_meta_path,
@@ -4176,6 +5058,7 @@ def _recover_collector_provenance_transaction_locked(
             transaction_id,
             context_path=journal_path,
             journal_attestation=journal_attestation,
+            locked_output_root=locked_output_root,
         )
     else:
         _validated_sidecar_document(
@@ -4183,6 +5066,7 @@ def _recover_collector_provenance_transaction_locked(
             expected_digest,
             context_path=journal_path,
             expected_identity=committed_document_snapshot.identity,
+            locked_output_root=locked_output_root,
         )
 
     # A matching tag identifies work left between publish and checkpoint close;
@@ -4195,24 +5079,36 @@ def _recover_collector_provenance_transaction_locked(
             transaction_id=transaction_id,
             expected_attestation=participant_attestations[checkpoint.path],
             journal_attestation=journal_attestation,
+            locked_output_root=locked_output_root,
         )
 
-    _revalidate_journal_attestation(journal_attestation)
+    _revalidate_journal_attestation(journal_attestation, locked_output_root)
     _revalidate_perf_sidecar_commit(
         perf_transaction,
         sidecar_publications,
         transaction,
         journal_path=journal_path,
+        locked_output_root=locked_output_root,
     )
     _cleanup_transaction_files(
         validated_staging_files,
         context_path=journal_path,
         transaction_id=transaction_id,
+        locked_output_root=locked_output_root,
     )
     if phase == "committed":
-        _cleanup_transaction_files(
-            [claim for claim in (pending_claim, previous_claim) if claim is not None],
+        recovered_claims = [
+            _ClaimedTransactionFile(original=original, claimed_path=claim.path)
+            for original, claim in (
+                (pending_attestation, pending_claim),
+                (previous_attestation, previous_claim),
+            )
+            if original is not None and claim is not None
+        ]
+        _retain_claimed_transaction_files(
+            recovered_claims,
             context_path=journal_path,
+            locked_output_root=locked_output_root,
         )
     if perf_transaction is not None:
         perf_journal, publications, _checkpoint_records, _previous_sidecar = perf_transaction
@@ -4221,27 +5117,38 @@ def _recover_collector_provenance_transaction_locked(
             sidecar_publications,
             transaction,
             journal_path=journal_path,
+            locked_output_root=locked_output_root,
         )
-        cleanup_perf_publication_artifacts(publications)
+        cleanup_perf_publication_artifacts(publications, {output_root: locked_output_root})
         _revalidate_perf_sidecar_commit(
             perf_transaction,
             sidecar_publications,
             transaction,
             journal_path=journal_path,
+            locked_output_root=locked_output_root,
         )
-        _revalidate_journal_attestation(journal_attestation)
-        _cleanup_transaction_files([perf_journal], context_path=perf_journal.path)
+        _revalidate_journal_attestation(journal_attestation, locked_output_root)
+        _cleanup_transaction_files(
+            [perf_journal],
+            context_path=perf_journal.path,
+            locked_output_root=locked_output_root,
+        )
     if sidecar_publications is not None:
-        _revalidate_published_perf_publications(sidecar_publications, context_path=journal_path)
+        _revalidate_published_perf_publications(
+            sidecar_publications,
+            context_path=journal_path,
+            locked_output_root=locked_output_root,
+        )
         if perf_transaction is None:
-            # A prior process may have unlinked the perf journal without
-            # persisting that unlink. Make its absence durable before the
-            # sidecar journal, now the sole recovery record, is removed.
-            _fsync_directory(output_root)
-    _revalidate_journal_attestation(journal_attestation)
+            # A prior process may have retained the perf journal without
+            # persisting that rename. Make its canonical absence durable before
+            # the sidecar journal, now the sole recovery record, is retained.
+            locked_output_root.fsync()
+    _revalidate_journal_attestation(journal_attestation, locked_output_root)
     _cleanup_transaction_files(
         [journal_attestation],
         context_path=journal_path,
+        locked_output_root=locked_output_root,
     )
     if recovered_open_event:
         logger.info(f"Recovered collector provenance sidecar transaction: {meta_path}")
@@ -4261,146 +5168,143 @@ def _commit_collector_provenance_transaction(
     backend: str,
     checkpoint_dir: str,
     perf_publication_transaction: _CollectorPerfPublicationTransaction | None = None,
+    locked_output_root: LockedOutputRoot,
 ) -> Path:
     """Atomically publish a sidecar and close its checkpoint participants."""
     from collector import provenance
 
     _revalidate_producer_plan(checkpoint_records)
-    output_root.mkdir(parents=True, exist_ok=True)
-    output_root = output_root.resolve()
+    output_root = locked_output_root.path
     checkpoint_root = _checkpoint_backend_root(checkpoint_dir, backend)
     staged_meta_path = output_root / _SIDECAR_STAGING_FILENAME
     transaction_id = uuid.uuid4().hex
     meta_path = output_root / "collection_meta.yaml"
     journal_path = output_root / _SIDECAR_TRANSACTION_FILENAME
-    with tempfile.TemporaryDirectory(dir=output_root, prefix=".collection-meta-render.") as render_dir:
-        rendered_path = provenance.write_collection_meta(
-            render_dir,
-            runtime_meta,
-            tables,
-            provenance_tier=provenance_tier,
-        )
-        rendered_snapshot = _validated_regular_file(
-            rendered_path,
-            None,
-            context_path=journal_path,
-            capture_contents=True,
-            kind="rendered sidecar document",
-        )
-        if rendered_snapshot.contents is None:
-            raise RuntimeError(f"Rendered sidecar bytes were not captured for {journal_path}")
-        transaction = {
-            "schema": _SIDECAR_TRANSACTION_SCHEMA,
-            "transaction_id": transaction_id,
-            "output_root": str(output_root),
-            "backend": backend,
-            "checkpoint_root": str(checkpoint_root),
-            "sidecar_path": str(meta_path),
-            "sidecar_digest": rendered_snapshot.digest,
-            "pending_sidecar": None,
-            "previous_sidecar": _attestation_record(
-                existing_sidecar_snapshot.attest(meta_path) if existing_sidecar_snapshot is not None else None
-            ),
-            "checkpoints": [
-                {
-                    "path": str(checkpoint_path),
-                    "done": sorted(record.done),
-                    "failed": sorted(record.failed),
-                    "attempted": sorted(record.attempted),
-                    "identity": record.identity_dict(),
-                }
-                for checkpoint_path, record in sorted(checkpoint_records.items())
-            ],
-            "staging_paths": [
-                _attestation_record(
-                    _FileAttestation(
-                        path=path,
-                        digest=info.source_digest,
-                        device=info.source_device,
-                        inode=info.source_inode,
-                    ),
-                    include_path=True,
-                )
-                for path, info in sorted(staging_files.items())
-            ],
-            "perf_publications": (
-                [_perf_publication_record(publication) for publication in perf_publication_transaction.publications]
-                if perf_publication_transaction is not None
-                else None
-            ),
-        }
-        _validate_transaction_envelope(
-            transaction,
-            output_root=output_root,
-            backend=backend,
-            checkpoint_root=checkpoint_root,
-            journal_path=journal_path,
-        )
-        sidecar_publications = _sidecar_perf_publications(
-            transaction,
-            output_root=output_root,
-            journal_path=journal_path,
-        )
-        validated_staging_files = _validated_transaction_staging_files(
-            transaction.get("staging_paths"),
-            output_root=output_root,
-            context_path=journal_path,
-            require_present=True,
-        )
-        validated_staging_paths = [staging_file.path for staging_file in validated_staging_files]
-        validated_checkpoints = _validated_transaction_checkpoints(
-            transaction,
-            backend=backend,
-            checkpoint_root=checkpoint_root,
-            journal_path=journal_path,
-        )
-        import yaml
+    rendered_contents = provenance.render_collection_meta(
+        runtime_meta,
+        tables,
+        provenance_tier=provenance_tier,
+    )
+    rendered_digest = "sha256:" + hashlib.sha256(rendered_contents).hexdigest()
+    transaction = {
+        "schema": _SIDECAR_TRANSACTION_SCHEMA,
+        "transaction_id": transaction_id,
+        "output_root": str(output_root),
+        "backend": backend,
+        "checkpoint_root": str(checkpoint_root),
+        "sidecar_path": str(meta_path),
+        "sidecar_digest": rendered_digest,
+        "pending_sidecar": None,
+        "previous_sidecar": _attestation_record(
+            existing_sidecar_snapshot.attest(meta_path) if existing_sidecar_snapshot is not None else None
+        ),
+        "checkpoints": [
+            {
+                "path": str(checkpoint_path),
+                "done": sorted(record.done),
+                "failed": sorted(record.failed),
+                "attempted": sorted(record.attempted),
+                "identity": record.identity_dict(),
+            }
+            for checkpoint_path, record in sorted(checkpoint_records.items())
+        ],
+        "staging_paths": [
+            _attestation_record(
+                _FileAttestation(
+                    path=path,
+                    digest=info.source_digest,
+                    device=info.source_device,
+                    inode=info.source_inode,
+                ),
+                include_path=True,
+            )
+            for path, info in sorted(staging_files.items())
+        ],
+        "perf_publications": (
+            [_perf_publication_record(publication) for publication in perf_publication_transaction.publications]
+            if perf_publication_transaction is not None
+            else None
+        ),
+    }
+    _validate_transaction_envelope(
+        transaction,
+        output_root=output_root,
+        backend=backend,
+        checkpoint_root=checkpoint_root,
+        journal_path=journal_path,
+    )
+    sidecar_publications = _sidecar_perf_publications(
+        transaction,
+        output_root=output_root,
+        journal_path=journal_path,
+    )
+    validated_staging_files = _validated_transaction_staging_files(
+        transaction.get("staging_paths"),
+        output_root=output_root,
+        context_path=journal_path,
+        require_present=True,
+        locked_output_root=locked_output_root,
+    )
+    validated_staging_paths = [staging_file.path for staging_file in validated_staging_files]
+    validated_checkpoints = _validated_transaction_checkpoints(
+        transaction,
+        backend=backend,
+        checkpoint_root=checkpoint_root,
+        journal_path=journal_path,
+    )
+    import yaml
 
-        rendered_sidecar = yaml.safe_load(rendered_snapshot.contents)
-        _validate_transaction_table_ownership(
-            rendered_sidecar,
-            validated_staging_paths,
-            validated_checkpoints,
-            output_root=output_root,
-            journal_path=journal_path,
-        )
-        participants = _validated_checkpoint_participants_for_phase(
-            validated_checkpoints,
-            transaction_id,
-            journal_path,
-            phase="new",
-        )
-        _existing_sidecar, live_sidecar_snapshot = _load_clean_collector_sidecar(output_root)
-        if not _same_file_snapshot(live_sidecar_snapshot, existing_sidecar_snapshot):
-            raise RuntimeError(f"Collector sidecar document changed before transaction commit: {meta_path}")
-        sidecar_target_attestation = _validated_sidecar_target(
-            transaction["previous_sidecar"],
-            meta_path,
-            context_path=journal_path,
-        )
-        _atomic_write_bytes(
-            staged_meta_path,
-            rendered_snapshot.contents,
-            mode=rendered_snapshot.mode,
-            replace_existing=False,
-        )
-        staged_document_snapshot = _validated_sidecar_document(
-            staged_meta_path,
-            transaction["sidecar_digest"],
-            context_path=journal_path,
-        )
-        transaction["pending_sidecar"] = _attestation_record(staged_document_snapshot.attest(staged_meta_path))
+    rendered_sidecar = yaml.safe_load(rendered_contents)
+    _validate_transaction_table_ownership(
+        rendered_sidecar,
+        validated_staging_paths,
+        validated_checkpoints,
+        output_root=output_root,
+        journal_path=journal_path,
+    )
+    participants = _validated_checkpoint_participants_for_phase(
+        validated_checkpoints,
+        transaction_id,
+        journal_path,
+        phase="new",
+    )
+    _existing_sidecar, live_sidecar_snapshot = _load_clean_collector_sidecar(
+        output_root,
+        locked_output_root=locked_output_root,
+    )
+    if not _same_file_snapshot(live_sidecar_snapshot, existing_sidecar_snapshot):
+        raise RuntimeError(f"Collector sidecar document changed before transaction commit: {meta_path}")
+    sidecar_target_attestation = _validated_sidecar_target(
+        transaction["previous_sidecar"],
+        meta_path,
+        context_path=journal_path,
+        locked_output_root=locked_output_root,
+    )
+    _atomic_write_bytes(
+        staged_meta_path,
+        rendered_contents,
+        mode=0o644,
+        _locked_output_root=locked_output_root,
+    )
+    staged_document_snapshot = _validated_sidecar_document(
+        staged_meta_path,
+        transaction["sidecar_digest"],
+        context_path=journal_path,
+        locked_output_root=locked_output_root,
+    )
+    transaction["pending_sidecar"] = _attestation_record(staged_document_snapshot.attest(staged_meta_path))
 
     _atomic_write_bytes(
         journal_path,
         json.dumps(transaction, indent=2).encode(),
-        replace_existing=False,
+        _locked_output_root=locked_output_root,
     )
     journal_snapshot = _validated_regular_file(
         journal_path,
         None,
         context_path=journal_path,
         kind="sidecar transaction journal",
+        locked_output_root=locked_output_root,
     )
     journal_attestation = journal_snapshot.attest(journal_path)
     if perf_publication_transaction is not None:
@@ -4410,6 +5314,7 @@ def _commit_collector_provenance_transaction(
         transaction["sidecar_digest"],
         context_path=journal_path,
         expected_identity=staged_document_snapshot.identity,
+        locked_output_root=locked_output_root,
     )
     participant_attestations = {checkpoint.path: checkpoint.attestation for checkpoint in participants}
     _revalidate_checkpoint_attestations(participant_attestations.values())
@@ -4420,12 +5325,14 @@ def _commit_collector_provenance_transaction(
             transaction_id,
             expected_attestation=participant_attestations[checkpoint.path],
             journal_attestation=journal_attestation,
+            locked_output_root=locked_output_root,
         )
     publish_snapshot = _validated_sidecar_document(
         staged_meta_path,
         transaction["sidecar_digest"],
         context_path=journal_path,
         expected_identity=staged_document_snapshot.identity,
+        locked_output_root=locked_output_root,
     )
     _revalidate_checkpoint_attestations(participant_attestations.values())
     if perf_publication_transaction is not None:
@@ -4439,6 +5346,7 @@ def _commit_collector_provenance_transaction(
         transaction_id,
         context_path=journal_path,
         journal_attestation=journal_attestation,
+        locked_output_root=locked_output_root,
     )
     logger.info(f"Wrote collector provenance sidecar: {meta_path}")
     for checkpoint in participants:
@@ -4448,23 +5356,30 @@ def _commit_collector_provenance_transaction(
             transaction_id=transaction_id,
             expected_attestation=participant_attestations[checkpoint.path],
             journal_attestation=journal_attestation,
+            locked_output_root=locked_output_root,
         )
-    _revalidate_journal_attestation(journal_attestation)
+    _revalidate_journal_attestation(journal_attestation, locked_output_root)
     if perf_publication_transaction is not None:
         perf_publication_transaction.revalidate_published(journal_attestation)
     _cleanup_transaction_files(
         validated_staging_files,
         context_path=journal_path,
         transaction_id=transaction_id,
+        locked_output_root=locked_output_root,
     )
     if perf_publication_transaction is not None:
         perf_publication_transaction.commit_complete(journal_attestation)
     if sidecar_publications is not None:
-        _revalidate_published_perf_publications(sidecar_publications, context_path=journal_path)
-    _revalidate_journal_attestation(journal_attestation)
+        _revalidate_published_perf_publications(
+            sidecar_publications,
+            context_path=journal_path,
+            locked_output_root=locked_output_root,
+        )
+    _revalidate_journal_attestation(journal_attestation, locked_output_root)
     _cleanup_transaction_files(
         [journal_attestation],
         context_path=journal_path,
+        locked_output_root=locked_output_root,
     )
     return meta_path
 
@@ -4480,6 +5395,7 @@ def _write_collector_provenance(
     finalization_info: dict[Path, PerfFinalizationInfo],
     producer_plan: dict[Path, _ProducerCheckpointPlan] | None = None,
     perf_publication_transaction: _CollectorPerfPublicationTransaction | None = None,
+    locked_output_root: LockedOutputRoot | None = None,
 ) -> Path | None:
     """Write collection_meta.yaml (design §5) flat beside the just-finalized parquet.
 
@@ -4487,11 +5403,28 @@ def _write_collector_provenance(
     ``done``/``failed`` remain cumulative resume state; ``attempted`` is the
     pending event's case-id set, which can span interrupted invocations.
     """
+    if locked_output_root is None:
+        _require_separate_checkpoint_root(output_root, checkpoint_dir, backend)
+        with perf_finalization_lifecycle(output_root) as acquired_root:
+            return _write_collector_provenance(
+                acquired_root.path,
+                converted,
+                provenance_ctx,
+                run_errors,
+                backend=backend,
+                checkpoint_dir=checkpoint_dir,
+                finalization_info=finalization_info,
+                producer_plan=producer_plan,
+                perf_publication_transaction=perf_publication_transaction,
+                locked_output_root=acquired_root,
+            )
+    output_root = locked_output_root.path
     if perf_publication_transaction is None:
-        recovered_meta_path = _recover_collector_provenance_transaction(
+        recovered_meta_path = _recover_collector_provenance_transaction_locked(
             output_root,
             backend=backend,
             checkpoint_dir=checkpoint_dir,
+            locked_output_root=locked_output_root,
         )
         if recovered_meta_path is not None:
             return recovered_meta_path
@@ -4539,13 +5472,12 @@ def _write_collector_provenance(
             logger.warning(f"collection_meta: {table} has no registry mapping this run; skipping its provenance entry")
             continue
 
-        resolved_parquet_path = parquet_path.resolve()
-        if resolved_parquet_path not in finalization_info:
+        if parquet_path not in finalization_info:
             raise RuntimeError(
                 f"collection_meta: table '{table}' has no finalization facts for {parquet_path}; "
                 "cannot attest the current collection event"
             )
-        info = finalization_info[resolved_parquet_path]
+        info = finalization_info[parquet_path]
         if (
             not _valid_sha256_digest(info.source_digest)
             or not isinstance(info.source_device, int)
@@ -4620,12 +5552,20 @@ def _write_collector_provenance(
                 "checkpoint dir matches the one this collection ran with."
             )
 
+        with os.fdopen(
+            locked_output_root.open(
+                parquet_path,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+            ),
+            "rb",
+        ) as parquet_file:
+            parquet_rows = pq.read_metadata(parquet_file).num_rows
         tables[table] = {
             "collector_ref": collector_ref,
             "collector_hash": provenance.collector_hash(module, _REPO_ROOT, closures),
             "case_plan_hash": provenance.case_plan_hash(sorted(case_ids)),
             "collected_at": collected_at,
-            "rows": pq.read_metadata(parquet_path).num_rows,
+            "rows": parquet_rows,
             "status": provenance.derive_table_status(
                 unresolved_failed_count=unresolved_failed,
                 had_module_failure=any(full_name in module_failure_names for full_name in full_names),
@@ -4646,6 +5586,7 @@ def _write_collector_provenance(
     existing_doc, existing_sidecar_snapshot = _load_clean_collector_sidecar(
         output_root,
         tables_to_update=set(tables),
+        locked_output_root=locked_output_root,
     )
     provenance_tier: str | None = None
     if existing_doc is not None:
@@ -4690,6 +5631,7 @@ def _write_collector_provenance(
         backend=backend,
         checkpoint_dir=checkpoint_dir,
         perf_publication_transaction=perf_publication_transaction,
+        locked_output_root=locked_output_root,
     )
     return meta_path
 
@@ -4704,15 +5646,17 @@ def _finalize_collector_outputs_transaction(
     checkpoint_dir: str,
     sm_version: int | None,
 ) -> list[Path]:
-    with perf_finalization_lifecycle(output_root):
+    _require_separate_checkpoint_root(output_root, checkpoint_dir, backend)
+    with perf_finalization_lifecycle(output_root) as locked_output_root:
         return _finalize_collector_outputs_transaction_locked(
-            output_root,
+            locked_output_root.path,
             staging_paths,
             provenance_ctx,
             run_errors,
             backend=backend,
             checkpoint_dir=checkpoint_dir,
             sm_version=sm_version,
+            locked_output_root=locked_output_root,
         )
 
 
@@ -4725,16 +5669,18 @@ def _finalize_collector_outputs_transaction_locked(
     backend: str,
     checkpoint_dir: str,
     sm_version: int | None,
+    locked_output_root: LockedOutputRoot,
 ) -> list[Path]:
     """Commit parquets, provenance, staging cleanup, and checkpoints coherently."""
     if not staging_paths:
         return []
-    output_root = output_root.resolve()
+    output_root = locked_output_root.path
     tables_to_update = {path.stem for path in staging_paths}
     sidecar_snapshot = _preflight_collector_provenance(
         output_root,
         provenance_ctx,
         tables_to_update=tables_to_update,
+        locked_output_root=locked_output_root,
     )
     producer_plan, staging_attestations = _preflight_collector_finalization_inputs(
         output_root,
@@ -4743,6 +5689,7 @@ def _finalize_collector_outputs_transaction_locked(
         backend=backend,
         checkpoint_dir=checkpoint_dir,
         sm_version=sm_version,
+        locked_output_root=locked_output_root,
     )
 
     def prepublish_validate():
@@ -4751,18 +5698,20 @@ def _finalize_collector_outputs_transaction_locked(
             output_root / _SIDECAR_TRANSACTION_FILENAME,
             output_root / _SIDECAR_STAGING_FILENAME,
         ):
-            if transaction_path.exists() or transaction_path.is_symlink():
+            if not locked_output_root.absent(transaction_path):
                 raise RuntimeError(f"Unexpected collector finalization transaction artifact: {transaction_path}")
         _revalidate_producer_plan(producer_plan)
         _revalidate_transaction_staging_files(
             staging_attestations.values(),
             context_path=output_root,
             require_present=True,
+            locked_output_root=locked_output_root,
         )
         _revalidate_collector_sidecar_preflight(
             output_root,
             sidecar_snapshot,
             tables_to_update=tables_to_update,
+            locked_output_root=locked_output_root,
         )
 
     publication_transaction = _CollectorPerfPublicationTransaction(
@@ -4771,6 +5720,7 @@ def _finalize_collector_outputs_transaction_locked(
         checkpoint_dir=checkpoint_dir,
         producer_plan=producer_plan,
         sidecar_snapshot=sidecar_snapshot,
+        locked_output_root=locked_output_root,
     )
     finalization_info: dict[Path, PerfFinalizationInfo] = {}
     converted = finalize_perf_files(
@@ -4779,11 +5729,11 @@ def _finalize_collector_outputs_transaction_locked(
         finalization_info=finalization_info,
         prepublish_validate=prepublish_validate,
         expected_source_identities={
-            path.resolve(): (attestation.digest, attestation.device, attestation.inode)
+            path: (attestation.digest, attestation.device, attestation.inode)
             for path, attestation in staging_attestations.items()
         },
         publication_transaction=publication_transaction,
-        _lifecycle_locked=True,
+        _locked_output_roots={output_root: locked_output_root},
     )
     try:
         meta_path = _write_collector_provenance(
@@ -4796,13 +5746,13 @@ def _finalize_collector_outputs_transaction_locked(
             finalization_info=finalization_info,
             producer_plan=producer_plan,
             perf_publication_transaction=publication_transaction,
+            locked_output_root=locked_output_root,
         )
         if meta_path is None:
             raise RuntimeError("Collector finalization produced parquets without a provenance sidecar")
     except Exception:
-        if (
-            publication_transaction.journal_attestation is not None
-            and not (output_root / _SIDECAR_TRANSACTION_FILENAME).exists()
+        if publication_transaction.journal_attestation is not None and locked_output_root.absent(
+            output_root / _SIDECAR_TRANSACTION_FILENAME
         ):
             publication_transaction.rollback()
         raise

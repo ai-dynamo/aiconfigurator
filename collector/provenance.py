@@ -389,17 +389,13 @@ def append_collection_event(
     }
 
 
-def write_collection_meta(
-    out_dir: str | Path,
+def render_collection_meta(
     runtime_meta: dict[str, Any],
     tables: dict[str, dict[str, Any]],
     *,
     provenance_tier: str | None = None,
-) -> Path:
-    """Render ``collection_meta.yaml`` per design §5, with deterministic key order."""
-    out_path = Path(out_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
-
+) -> bytes:
+    """Render the exact design-§5 ``collection_meta.yaml`` bytes."""
     schema_version = (
         MULTI_EVENT_COLLECTION_META_SCHEMA_VERSION
         if any("collections" in entry for entry in tables.values())
@@ -425,8 +421,32 @@ def write_collection_meta(
     )
     doc["tables"] = rendered_tables
 
+    return (
+        spdx_header()
+        + yaml.safe_dump(
+            doc,
+            sort_keys=False,
+            default_flow_style=False,
+        )
+    ).encode()
+
+
+def write_collection_meta(
+    out_dir: str | Path,
+    runtime_meta: dict[str, Any],
+    tables: dict[str, dict[str, Any]],
+    *,
+    provenance_tier: str | None = None,
+) -> Path:
+    """Write ``collection_meta.yaml`` per design §5, with deterministic key order."""
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
     meta_path = out_path / "collection_meta.yaml"
-    with meta_path.open("w", encoding="utf-8") as meta_file:
-        meta_file.write(spdx_header())
-        yaml.safe_dump(doc, meta_file, sort_keys=False, default_flow_style=False)
+    meta_path.write_bytes(
+        render_collection_meta(
+            runtime_meta,
+            tables,
+            provenance_tier=provenance_tier,
+        )
+    )
     return meta_path

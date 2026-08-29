@@ -3,7 +3,9 @@
 
 import hashlib
 import multiprocessing as mp
+import os
 import stat
+from contextlib import contextmanager
 from pathlib import Path
 
 import pyarrow as pa
@@ -33,6 +35,12 @@ def _write_keyed_perf_csv(path: Path, rows) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
+def _assert_retained_preparation(path: Path) -> None:
+    path_stat = path.lstat()
+    assert stat.S_ISREG(path_stat.st_mode)
+    assert path_stat.st_nlink == 1
+
+
 def _finalize_case_aliases_in_child(paths: tuple[str, str]) -> None:
     finalization_info = {}
     converted = finalize_perf_files(
@@ -41,6 +49,40 @@ def _finalize_case_aliases_in_child(paths: tuple[str, str]) -> None:
     )
     assert len(converted) == 1
     assert len(finalization_info) == 1
+
+
+def _pause_finalize_after_output_root_lock(perf_path_text: str, entered, release) -> None:
+    real_lifecycle = helper_mod.perf_finalization_lifecycle
+
+    @contextmanager
+    def pause_after_lock(output_root, **kwargs):
+        with real_lifecycle(output_root, **kwargs) as directory_fd:
+            entered.set()
+            if not release.wait(timeout=20):
+                raise RuntimeError("timed out waiting to release displaced finalizer")
+            yield directory_fd
+
+    helper_mod.perf_finalization_lifecycle = pause_after_lock
+    finalize_perf_files([Path(perf_path_text)], delete_source=False)
+
+
+def _finalize_perf_in_child(perf_path_text: str) -> None:
+    finalize_perf_files([Path(perf_path_text)], delete_source=False)
+
+
+def _directory_regular_state(directory: Path) -> dict[str, tuple[bytes, int, int, int, int]]:
+    state = {}
+    for path in directory.iterdir():
+        path_state = path.lstat()
+        if stat.S_ISREG(path_state.st_mode):
+            state[path.name] = (
+                path.read_bytes(),
+                path_state.st_dev,
+                path_state.st_ino,
+                stat.S_IMODE(path_state.st_mode),
+                path_state.st_nlink,
+            )
+    return state
 
 
 def test_find_perf_csv_outputs_is_non_recursive_by_default(tmp_path):
@@ -106,6 +148,62 @@ def test_finalize_perf_files_converts_only_explicit_outputs(tmp_path):
     assert not untouched.with_suffix(".parquet").exists()
 
 
+def test_finalize_perf_files_uses_supplied_locked_root_for_selection(tmp_path, monkeypatch):
+    perf = tmp_path / "gemm_perf.txt"
+    _write_perf_csv(perf)
+    real_exists = Path.exists
+
+    def reject_pathname_selection(path):
+        if path == perf:
+            raise AssertionError("locked selection escaped to the canonical pathname")
+        return real_exists(path)
+
+    monkeypatch.setattr(Path, "exists", reject_pathname_selection)
+
+    with helper_mod.perf_finalization_lifecycle(tmp_path) as locked_root:
+        converted = finalize_perf_files(
+            [perf],
+            delete_source=False,
+            _locked_output_roots={locked_root.path: locked_root},
+        )
+
+    assert converted == [perf.with_suffix(".parquet")]
+
+
+def test_displaced_perf_finalizer_cannot_modify_recreated_output_root(tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    perf = output_root / "gemm_perf.txt"
+    _write_perf_csv(perf, latency=1.0)
+    initial_state = _directory_regular_state(output_root)
+    displaced = tmp_path / "out.displaced"
+    context = mp.get_context("spawn")
+    entered = context.Event()
+    release = context.Event()
+    first = context.Process(
+        target=_pause_finalize_after_output_root_lock,
+        args=(str(perf), entered, release),
+    )
+
+    first.start()
+    assert entered.wait(timeout=20)
+    output_root.rename(displaced)
+    output_root.mkdir()
+    _write_perf_csv(perf, latency=2.0)
+    second = context.Process(target=_finalize_perf_in_child, args=(str(perf),))
+    second.start()
+    second.join(timeout=20)
+    assert second.exitcode == 0
+    replacement_before = _directory_regular_state(output_root)
+
+    release.set()
+    first.join(timeout=20)
+
+    assert first.exitcode not in (None, 0)
+    assert _directory_regular_state(output_root) == replacement_before
+    assert _directory_regular_state(displaced) == initial_state
+
+
 @pytest.mark.parametrize(
     "invalid_second",
     [
@@ -148,7 +246,9 @@ def test_finalize_perf_files_prepares_every_input_before_publishing_any(tmp_path
     assert {path: path.read_bytes() for path in (first, second)} == staging_before
     assert {path: path.read_bytes() for path in (first_parquet, second_parquet)} == parquet_before
     assert finalization_info == {Path("sentinel"): sentinel_info}
-    assert list(tmp_path.glob(".*.tmp")) == []
+    retained = helper_mod.perf_preparation_path(first_parquet)
+    _assert_retained_preparation(retained)
+    assert list(tmp_path.glob(".*.tmp")) == [retained]
 
 
 def test_finalize_perf_files_rolls_back_every_target_when_second_publish_fails(tmp_path, monkeypatch):
@@ -165,12 +265,12 @@ def test_finalize_perf_files_rolls_back_every_target_when_second_publish_fails(t
     real_replace = helper_mod.os.replace
     failed = False
 
-    def fail_second_publish(source, target):
+    def fail_second_publish(source, target, *args, **kwargs):
         nonlocal failed
-        if Path(target) == second_parquet and not failed:
+        if Path(target).name == second_parquet.name and not failed:
             failed = True
             raise OSError("simulated second parquet publish failure")
-        return real_replace(source, target)
+        return real_replace(source, target, *args, **kwargs)
 
     monkeypatch.setattr(helper_mod.os, "replace", fail_second_publish)
     finalization_info = {}
@@ -207,11 +307,11 @@ def test_finalize_perf_files_rejects_target_appearing_after_merge_observed_absen
     real_prepare_publications = helper_mod._prepare_perf_publications
     concurrent_bytes = None
 
-    def create_target_before_publication(prepared):
+    def create_target_before_publication(prepared, locked_roots):
         nonlocal concurrent_bytes
         pq.write_table(pa.table({"shape": ["concurrent"], "latency": [9.0]}), parquet)
         concurrent_bytes = parquet.read_bytes()
-        return real_prepare_publications(prepared)
+        return real_prepare_publications(prepared, locked_roots)
 
     monkeypatch.setattr(helper_mod, "_prepare_perf_publications", create_target_before_publication)
     finalization_info = {}
@@ -253,7 +353,9 @@ def test_finalize_perf_files_cleans_rollback_backup_when_transaction_prepare_fai
     assert parquet.read_bytes() == parquet_before
     assert perf.exists()
     assert list(tmp_path.glob(".*.rollback")) == []
-    assert list(tmp_path.glob(".*.tmp")) == []
+    retained = helper_mod.perf_preparation_path(parquet)
+    _assert_retained_preparation(retained)
+    assert list(tmp_path.glob(".*.tmp")) == [retained]
 
 
 def test_finalize_perf_files_never_reopens_or_publishes_replaced_temporary(tmp_path, monkeypatch):
@@ -284,24 +386,27 @@ def test_finalize_perf_files_never_reopens_or_publishes_replaced_temporary(tmp_p
     assert finalization_info == {}
 
 
-def test_finalize_closes_and_reclaims_reservation_when_directory_fsync_fails(tmp_path, monkeypatch):
+def test_finalize_closes_and_retains_reservation_when_directory_fsync_fails(tmp_path, monkeypatch):
     perf = tmp_path / "gemm_perf.txt"
     parquet = perf.with_suffix(".parquet")
     reserved = parquet.with_name(f".{parquet.name}.tmp")
     perf.write_text("shape,latency\ns1,1.0\n", encoding="utf-8")
-    real_fsync_directory = helper_mod._fsync_directory
+    real_fsync = os.fsync
+    output_identity = (tmp_path.stat().st_dev, tmp_path.stat().st_ino)
 
-    def fail_after_reservation(directory):
-        if reserved.exists():
+    def fail_after_reservation(file_descriptor):
+        opened = os.fstat(file_descriptor)
+        if stat.S_ISDIR(opened.st_mode) and (opened.st_dev, opened.st_ino) == output_identity and reserved.exists():
             raise OSError("simulated reservation directory fsync failure")
-        return real_fsync_directory(directory)
+        return real_fsync(file_descriptor)
 
-    monkeypatch.setattr(helper_mod, "_fsync_directory", fail_after_reservation)
+    monkeypatch.setattr(helper_mod.os, "fsync", fail_after_reservation)
 
     with pytest.raises(OSError, match="reservation directory fsync failure"):
         finalize_perf_files([perf], delete_source=False)
 
-    assert not reserved.exists()
+    _assert_retained_preparation(reserved)
+    assert not helper_mod.perf_preparation_cleanup_path(parquet).exists()
     assert not parquet.exists()
 
 
@@ -311,10 +416,12 @@ def test_finalize_direct_retry_reclaims_stale_deterministic_reservation(tmp_path
     reserved = parquet.with_name(f".{parquet.name}.tmp")
     perf.write_text("shape,latency\ns1,1.0\n", encoding="utf-8")
     reserved.write_bytes(b"partial parquet from interrupted direct finalization")
+    reserved_identity = (reserved.stat().st_dev, reserved.stat().st_ino)
 
     assert finalize_perf_files([perf], delete_source=False) == [parquet]
 
     assert pq.read_table(parquet).to_pylist() == [{"shape": "s1", "latency": 1.0}]
+    assert (parquet.stat().st_dev, parquet.stat().st_ino) == reserved_identity
     assert not reserved.exists()
 
 
@@ -378,9 +485,9 @@ def test_finalize_perf_files_rejects_source_mode_change_after_preparation(tmp_pa
     perf.chmod(0o600)
     real_prepare_publications = helper_mod._prepare_perf_publications
 
-    def chmod_source_before_publication(prepared):
+    def chmod_source_before_publication(prepared, locked_roots):
         perf.chmod(0o400)
-        return real_prepare_publications(prepared)
+        return real_prepare_publications(prepared, locked_roots)
 
     class UnreachedPublicationTransaction:
         def prepare(self, _publications):
@@ -631,14 +738,14 @@ def test_finalize_perf_files_preserves_staging_permissions(tmp_path, source_mode
 def test_finalize_perf_files_records_info_only_after_source_cleanup_succeeds(tmp_path, monkeypatch):
     perf = tmp_path / "gemm_perf.txt"
     perf.write_text("shape,latency\ns1,1.0\n", encoding="utf-8")
-    real_unlink = Path.unlink
+    real_unlink = os.unlink
 
     def fail_source_cleanup(path, *args, **kwargs):
-        if path == perf:
+        if Path(path).name == perf.name:
             raise OSError("simulated source cleanup failure")
         return real_unlink(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "unlink", fail_source_cleanup)
+    monkeypatch.setattr(helper_mod.os, "unlink", fail_source_cleanup)
     finalization_info = {}
 
     with pytest.raises(OSError, match="simulated source cleanup failure"):

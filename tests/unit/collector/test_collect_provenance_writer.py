@@ -19,6 +19,7 @@ import os
 import re
 import stat
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pyarrow as pa
@@ -48,6 +49,7 @@ if "torch" not in sys.modules:
 
 import collect as collect_mod
 
+import helper as helper_mod
 from collector import provenance
 from collector.framework_manifest import CollectorRuntime
 from collector.registry_types import PerfFile
@@ -187,6 +189,31 @@ def _write_parquet(path: Path, rows: list[dict]) -> None:
     pq.write_table(table, path)
 
 
+def _write_perf_event_through_logger(path: Path) -> None:
+    import helper as helper_mod
+
+    assert helper_mod.log_perf(
+        [{"op": "matmul", "shape": "new", "latency": 1.0}],
+        "sglang",
+        "0.5.14",
+        "test-device",
+        "matmul",
+        "test",
+        str(path),
+    )
+
+
+def _assert_retained_slot(path: Path) -> None:
+    path_stat = path.lstat()
+    assert stat.S_ISREG(path_stat.st_mode)
+    assert path_stat.st_nlink == 1
+
+
+def _private_atomic_artifact_names(destination: Path) -> set[str]:
+    prefix = f".{destination.name}."
+    return {path.name for path in destination.parent.iterdir() if path.name.startswith(prefix)}
+
+
 def _write_reduced_collection_meta(output_root: Path, runtime: dict, tables: dict) -> None:
     provenance.write_collection_meta(
         output_root,
@@ -279,6 +306,98 @@ def _run_hard_exit(target, args, expected_exitcode, description):
         process.join()
         pytest.fail(f"{description} subprocess did not exit")
     assert process.exitcode == expected_exitcode
+
+
+def _mutate_checkpoint_and_exit(checkpoint_path_text: str, operation: str, transaction_id: str) -> None:
+    checkpoint_path = Path(checkpoint_path_text)
+    try:
+        if operation == "tag":
+            collect_mod._tag_checkpoint_sidecar_transaction(
+                checkpoint_path,
+                {"case-a"},
+                transaction_id,
+            )
+        else:
+            collect_mod._close_checkpoint_attempts(
+                checkpoint_path,
+                {"case-a"},
+                transaction_id=transaction_id,
+            )
+    except BaseException:
+        os._exit(17)
+    os._exit(0)
+
+
+def _swap_fifo_after_checkpoint_publication_and_exit(
+    checkpoint_path_text: str,
+    operation: str,
+    transaction_id: str,
+    reservation_evidence_text: str,
+) -> None:
+    checkpoint_path = Path(checkpoint_path_text)
+    reservation_evidence = Path(reservation_evidence_text)
+    expected = collect_mod._checkpoint_snapshot(
+        checkpoint_path,
+        None,
+        context_path=checkpoint_path,
+    ).attest(checkpoint_path)
+    reservation_name = collect_mod.atomic_write_reservation_path(checkpoint_path).name
+    real_rename_noreplace = collect_mod._rename_noreplace_at
+    swapped = False
+
+    def swap_after_publication(source, target, directory_fd):
+        nonlocal swapped
+        result = real_rename_noreplace(source, target, directory_fd)
+        if not swapped and source == reservation_name and target == checkpoint_path.name:
+            swapped = True
+            os.rename(
+                target,
+                reservation_evidence.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            os.mkfifo(target, 0o600, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        return result
+
+    collect_mod._rename_noreplace_at = swap_after_publication
+    try:
+        if operation == "tag":
+            collect_mod._tag_checkpoint_sidecar_transaction(
+                checkpoint_path,
+                {"case-a"},
+                transaction_id,
+                expected_attestation=expected,
+            )
+        else:
+            collect_mod._close_checkpoint_attempts(
+                checkpoint_path,
+                {"case-a"},
+                transaction_id=transaction_id,
+                expected_attestation=expected,
+            )
+    except BaseException:
+        os._exit(17)
+    os._exit(0)
+
+
+def _assert_subprocess_fails_without_blocking(target, args, description: str) -> None:
+    process = mp.get_context("spawn").Process(target=target, args=args)
+    process.start()
+    process.join(timeout=3)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        pytest.fail(f"{description} blocked on a nonregular file")
+    assert process.exitcode not in (None, 0)
+
+
+def _assert_checkpoint_mutation_fails_without_blocking(checkpoint_path: Path, operation: str) -> None:
+    _assert_subprocess_fails_without_blocking(
+        _mutate_checkpoint_and_exit,
+        (str(checkpoint_path), operation, "a" * 32),
+        f"checkpoint {operation}",
+    )
 
 
 def _recover_finalization(output_root: Path, checkpoint_dir: Path):
@@ -386,19 +505,17 @@ def _crash_after_first_parquet_publish(
     import helper as helper_mod
 
     output_root = Path(output_root_text)
-    real_rename_noreplace = helper_mod._rename_noreplace
+    real_rename_noreplace = helper_mod._rename_noreplace_at
     published = False
 
-    def publish_then_exit(source, target):
+    def publish_then_exit(source, target, directory_fd):
         nonlocal published
-        source = Path(source)
-        target = Path(target)
-        real_rename_noreplace(source, target)
-        if source.name.endswith(".tmp") and target.suffix == ".parquet" and not published:
+        real_rename_noreplace(source, target, directory_fd)
+        if source.endswith(".tmp") and Path(target).suffix == ".parquet" and not published:
             published = True
             os._exit(86)
 
-    helper_mod._rename_noreplace = publish_then_exit
+    helper_mod._rename_noreplace_at = publish_then_exit
     collect_mod._finalize_collector_outputs_transaction(
         output_root,
         sorted(output_root.glob("*_perf.txt")),
@@ -407,6 +524,60 @@ def _crash_after_first_parquet_publish(
         backend=BACKEND,
         checkpoint_dir=checkpoint_dir_text,
         sm_version=100,
+    )
+
+
+def _pause_displaced_collector_finalization(
+    output_root_text: str,
+    checkpoint_dir_text: str,
+    ready,
+    release,
+) -> None:
+    output_root = Path(output_root_text)
+    real_lifecycle = collect_mod.perf_finalization_lifecycle
+
+    @contextmanager
+    def pause_after_lock(path, *args, **kwargs):
+        with real_lifecycle(path, *args, **kwargs) as locked_root:
+            ready.set()
+            if not release.wait(timeout=20):
+                raise RuntimeError("timed out waiting to resume displaced finalizer")
+            yield locked_root
+
+    collect_mod.perf_finalization_lifecycle = pause_after_lock
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        [output_root / "gemm_perf.txt"],
+        _provenance_ctx(_collections()),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=checkpoint_dir_text,
+        sm_version=100,
+    )
+
+
+def _pause_displaced_collector_recovery(
+    output_root_text: str,
+    checkpoint_dir_text: str,
+    ready,
+    release,
+) -> None:
+    output_root = Path(output_root_text)
+    real_lifecycle = collect_mod.perf_finalization_lifecycle
+
+    @contextmanager
+    def pause_after_lock(path, *args, **kwargs):
+        with real_lifecycle(path, *args, **kwargs) as locked_root:
+            ready.set()
+            if not release.wait(timeout=20):
+                raise RuntimeError("timed out waiting to resume displaced recovery")
+            yield locked_root
+
+    collect_mod.perf_finalization_lifecycle = pause_after_lock
+    collect_mod._recover_collector_provenance_transaction(
+        output_root,
+        backend=BACKEND,
+        checkpoint_dir=checkpoint_dir_text,
     )
 
 
@@ -454,19 +625,17 @@ def _crash_after_first_parquet_rollback(output_root_text: str, checkpoint_dir_te
     import helper as helper_mod
 
     output_root = Path(output_root_text)
-    real_rename_noreplace = helper_mod._rename_noreplace
+    real_rename_noreplace = helper_mod._rename_noreplace_at
     restored = False
 
-    def restore_then_exit(source, target):
+    def restore_then_exit(source, target, directory_fd):
         nonlocal restored
-        source = Path(source)
-        target = Path(target)
-        real_rename_noreplace(source, target)
-        if source.suffix == ".parquet" and target.name.endswith(".tmp") and not restored:
+        real_rename_noreplace(source, target, directory_fd)
+        if Path(source).suffix == ".parquet" and target.endswith(".tmp") and not restored:
             restored = True
             os._exit(89)
 
-    helper_mod._rename_noreplace = restore_then_exit
+    helper_mod._rename_noreplace_at = restore_then_exit
     collect_mod._recover_collector_provenance_transaction(
         output_root,
         backend=BACKEND,
@@ -587,6 +756,212 @@ def _crash_after_perf_journal_prepare(output_root_text: str, checkpoint_dir_text
         checkpoint_dir=checkpoint_dir_text,
         sm_version=100,
     )
+
+
+def _crash_around_atomic_journal_publication(
+    output_root_text: str,
+    checkpoint_dir_text: str,
+    journal_name: str,
+    after_publication: bool,
+    exit_code: int,
+) -> None:
+    import helper as helper_mod
+
+    output_root = Path(output_root_text)
+    real_rename_noreplace = helper_mod._rename_noreplace_at
+
+    def crash_at_selected_publication(source, target, directory_fd):
+        if target != journal_name:
+            return real_rename_noreplace(source, target, directory_fd)
+        if after_publication:
+            real_rename_noreplace(source, target, directory_fd)
+        os._exit(exit_code)
+
+    helper_mod._rename_noreplace_at = crash_at_selected_publication
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        [output_root / "gemm_perf.txt"],
+        _provenance_ctx(_collections()),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=checkpoint_dir_text,
+        sm_version=100,
+    )
+
+
+def _crash_checkpoint_before_publication(checkpoint_path_text: str, exit_code: int) -> None:
+    checkpoint_path = Path(checkpoint_path_text)
+    real_rename_noreplace_at = collect_mod._rename_noreplace_at
+
+    def crash_at_checkpoint_publication(source, target, directory_fd):
+        if source == checkpoint_path.name:
+            os._exit(exit_code)
+        return real_rename_noreplace_at(source, target, directory_fd)
+
+    collect_mod._rename_noreplace_at = crash_at_checkpoint_publication
+    collect_mod._atomic_write_json(checkpoint_path, {"attempted": ["new"]})
+
+
+def _crash_checkpoint_after_canonical_rotation(checkpoint_path_text: str, exit_code: int) -> None:
+    checkpoint_path = Path(checkpoint_path_text)
+    replacement = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    replacement["done"] = ["replacement"]
+    replacement["failed"] = []
+    replacement["attempted"] = ["replacement"]
+    real_rename_noreplace_at = collect_mod._rename_noreplace_at
+
+    def crash_after_checkpoint_rotation(source, target, directory_fd):
+        result = real_rename_noreplace_at(source, target, directory_fd)
+        if source == checkpoint_path.name:
+            os._exit(exit_code)
+        return result
+
+    collect_mod._rename_noreplace_at = crash_after_checkpoint_rotation
+    collect_mod._atomic_write_json(checkpoint_path, replacement)
+
+
+def _crash_during_transaction_checkpoint_rotation(
+    output_root_text: str,
+    checkpoint_dir_text: str,
+    operation: str,
+    exit_code: int,
+) -> None:
+    output_root = Path(output_root_text)
+    checkpoint_path = Path(checkpoint_dir_text) / BACKEND / f"{FULL_NAME}.json"
+    previous_name = f".{checkpoint_path.name}.tmp.previous"
+    real_rename_noreplace_at = collect_mod._rename_noreplace_at
+    rotations = 0
+
+    def crash_after_selected_rotation(source, target, directory_fd):
+        nonlocal rotations
+        result = real_rename_noreplace_at(source, target, directory_fd)
+        if source == checkpoint_path.name and target == previous_name:
+            rotations += 1
+            if (operation == "tag" and rotations == 1) or (operation == "close" and rotations == 2):
+                os._exit(exit_code)
+        return result
+
+    collect_mod._rename_noreplace_at = crash_after_selected_rotation
+    collect_mod._finalize_collector_outputs_transaction(
+        output_root,
+        [output_root / "gemm_perf.txt"],
+        _provenance_ctx(_collections()),
+        [],
+        backend=BACKEND,
+        checkpoint_dir=checkpoint_dir_text,
+        sm_version=100,
+    )
+
+
+def _pause_checkpoint_writer(checkpoint_path_text: str, entered, release) -> None:
+    checkpoint_path = Path(checkpoint_path_text)
+    real_rename_noreplace_at = collect_mod._rename_noreplace_at
+
+    def pause_before_checkpoint_rotation(source, target, directory_fd):
+        if source == checkpoint_path.name:
+            entered.set()
+            if not release.wait(timeout=20):
+                raise RuntimeError("timed out waiting to release checkpoint writer")
+        return real_rename_noreplace_at(source, target, directory_fd)
+
+    collect_mod._rename_noreplace_at = pause_before_checkpoint_rotation
+    collect_mod._atomic_write_json(checkpoint_path, {"attempted": ["first"]})
+
+
+def _pause_valid_checkpoint_writer_after_rotation(checkpoint_path_text: str, entered, release) -> None:
+    checkpoint_path = Path(checkpoint_path_text)
+    replacement = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    replacement["done"] = ["replacement"]
+    replacement["failed"] = []
+    replacement["attempted"] = ["replacement"]
+    real_rename_noreplace_at = collect_mod._rename_noreplace_at
+
+    def pause_after_checkpoint_rotation(source, target, directory_fd):
+        result = real_rename_noreplace_at(source, target, directory_fd)
+        if source == checkpoint_path.name:
+            entered.set()
+            if not release.wait(timeout=20):
+                raise RuntimeError("timed out waiting to release checkpoint writer")
+        return result
+
+    collect_mod._rename_noreplace_at = pause_after_checkpoint_rotation
+    collect_mod._atomic_write_json(checkpoint_path, replacement)
+
+
+def _write_checkpoint_and_signal(checkpoint_path_text: str, started, finished) -> None:
+    started.set()
+    collect_mod._atomic_write_json(Path(checkpoint_path_text), {"attempted": ["second"]})
+    finished.set()
+
+
+def _load_checkpoint_and_signal(checkpoint_dir_text: str, started, finished, result_queue) -> None:
+    started.set()
+    checkpoint = collect_mod.ResumeCheckpoint(
+        backend=BACKEND,
+        module_name=FULL_NAME,
+        run_func_name=RUN_FUNC,
+        checkpoint_dir=checkpoint_dir_text,
+        framework_version="0.5.14",
+        sm_version=100,
+    )
+    checkpoint.load_existing()
+    result_queue.put((checkpoint._done, checkpoint._failed, checkpoint._attempted))
+    finished.set()
+
+
+def _pause_checkpoint_after_parent_lock(
+    checkpoint_dir_text: str,
+    checkpoint_path_text: str,
+    document: dict | None,
+    entered,
+    release,
+) -> None:
+    if document is not None:
+        real_rename_noreplace_at = collect_mod._rename_noreplace_at
+        paused = False
+
+        def pause_before_first_rename(source, target, directory_fd):
+            nonlocal paused
+            if not paused:
+                paused = True
+                entered.set()
+                if not release.wait(timeout=20):
+                    raise RuntimeError("timed out waiting to release checkpoint operation")
+            return real_rename_noreplace_at(source, target, directory_fd)
+
+        collect_mod._rename_noreplace_at = pause_before_first_rename
+        collect_mod._atomic_write_json(Path(checkpoint_path_text), document)
+        return
+
+    real_lifecycle = collect_mod.perf_finalization_lifecycle
+    paused = False
+
+    @contextmanager
+    def pause_after_lock(directory, **kwargs):
+        nonlocal paused
+        with real_lifecycle(directory, **kwargs) as directory_fd:
+            if not paused:
+                paused = True
+                entered.set()
+                if not release.wait(timeout=20):
+                    raise RuntimeError("timed out waiting to release checkpoint operation")
+            yield directory_fd
+
+    collect_mod.perf_finalization_lifecycle = pause_after_lock
+    checkpoint = collect_mod.ResumeCheckpoint(
+        backend=BACKEND,
+        module_name=FULL_NAME,
+        run_func_name=RUN_FUNC,
+        checkpoint_dir=checkpoint_dir_text,
+        framework_version="0.5.14",
+        sm_version=100,
+    )
+    checkpoint.load_existing()
+
+
+def _write_checkpoint_document_and_signal(checkpoint_path_text: str, document: dict, finished) -> None:
+    collect_mod._atomic_write_json(Path(checkpoint_path_text), document)
+    finished.set()
 
 
 def _pause_live_finalization_before_sidecar(
@@ -737,41 +1112,832 @@ def test_atomic_checkpoint_replace_failure_preserves_previous_document(tmp_path,
     checkpoint_path = tmp_path / "checkpoint.json"
     checkpoint_path.write_text('{"attempted": ["old"]}', encoding="utf-8")
 
-    def fail_replace(_source, _target):
-        raise OSError("simulated replace failure")
+    real_rename_noreplace_at = collect_mod._rename_noreplace_at
 
-    monkeypatch.setattr(collect_mod.os, "replace", fail_replace)
+    def fail_checkpoint_rotation(source, target, directory_fd):
+        if source == checkpoint_path.name:
+            raise OSError("simulated replace failure")
+        return real_rename_noreplace_at(source, target, directory_fd)
+
+    monkeypatch.setattr(collect_mod, "_rename_noreplace_at", fail_checkpoint_rotation)
 
     with pytest.raises(OSError, match="simulated replace failure"):
         collect_mod._atomic_write_json(checkpoint_path, {"attempted": ["new"]})
 
     assert json.loads(checkpoint_path.read_text(encoding="utf-8")) == {"attempted": ["old"]}
+    assert (tmp_path / ".checkpoint.json.tmp").is_file()
     assert list(tmp_path.glob(".checkpoint.json.*.tmp")) == []
+
+
+@pytest.mark.parametrize("operation", ["tag", "close"])
+def test_checkpoint_mutation_rejects_late_canonical_swap_before_rotation(tmp_path, monkeypatch, operation):
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    transaction_id = "a" * 32
+    if operation == "close":
+        document = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        document[collect_mod._SIDECAR_TRANSACTION_FIELD] = transaction_id
+        checkpoint_path.write_text(json.dumps(document), encoding="utf-8")
+    original = checkpoint_path.read_bytes()
+    expected = collect_mod._checkpoint_snapshot(
+        checkpoint_path,
+        None,
+        context_path=checkpoint_path,
+    ).attest(checkpoint_path)
+    stale_path = checkpoint_path.with_name("stale-checkpoint.json")
+    foreign = b'{"foreign": true}'
+    real_atomic_replace = collect_mod._atomic_replace_bytes_at
+    swapped = False
+
+    def swap_canonical_before_rotation(directory_fd, path, contents, mode, *args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            os.rename(
+                checkpoint_path.name,
+                stale_path.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            foreign_fd = os.open(
+                checkpoint_path.name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            with os.fdopen(foreign_fd, "wb") as foreign_file:
+                foreign_file.write(foreign)
+                foreign_file.flush()
+                os.fsync(foreign_file.fileno())
+            os.fsync(directory_fd)
+        return real_atomic_replace(directory_fd, path, contents, mode, *args, **kwargs)
+
+    monkeypatch.setattr(collect_mod, "_atomic_replace_bytes_at", swap_canonical_before_rotation)
+
+    with pytest.raises(RuntimeError, match=r"checkpoint|artifact|changed"):
+        if operation == "tag":
+            collect_mod._tag_checkpoint_sidecar_transaction(
+                checkpoint_path,
+                {"case-a"},
+                transaction_id,
+                expected_attestation=expected,
+            )
+        else:
+            collect_mod._close_checkpoint_attempts(
+                checkpoint_path,
+                {"case-a"},
+                transaction_id=transaction_id,
+                expected_attestation=expected,
+            )
+
+    assert swapped
+    assert checkpoint_path.read_bytes() == foreign
+    assert stale_path.read_bytes() == original
+
+
+@pytest.mark.parametrize("operation", ["tag", "close"])
+@pytest.mark.parametrize("replacement_kind", ["symlink", "directory", "fifo"])
+def test_checkpoint_mutation_restores_unknown_object_swapped_during_rotation(
+    tmp_path,
+    monkeypatch,
+    operation,
+    replacement_kind,
+):
+    checkpoint_path = _write_checkpoint(
+        tmp_path / "checkpoint",
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    transaction_id = "a" * 32
+    if operation == "close":
+        document = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        document[collect_mod._SIDECAR_TRANSACTION_FIELD] = transaction_id
+        checkpoint_path.write_text(json.dumps(document), encoding="utf-8")
+    original = checkpoint_path.read_bytes()
+    expected = collect_mod._checkpoint_snapshot(
+        checkpoint_path,
+        None,
+        context_path=checkpoint_path,
+    ).attest(checkpoint_path)
+    victim = checkpoint_path.with_name("victim.json")
+    victim.write_bytes(b"victim")
+    displaced = checkpoint_path.with_name("displaced-checkpoint.json")
+    previous = collect_mod._atomic_write_previous_path(checkpoint_path)
+    reservation = collect_mod.atomic_write_reservation_path(checkpoint_path)
+    real_rename_noreplace = collect_mod._rename_noreplace_at
+    real_open = os.open
+    swapped = False
+    fifo_open_attempts = 0
+
+    def reject_blocking_fifo_open(path, flags, *args, **kwargs):
+        nonlocal fifo_open_attempts
+        if path == previous.name:
+            if not flags & os.O_NONBLOCK:
+                raise AssertionError("checkpoint recovery attempted a blocking FIFO open")
+            fifo_open_attempts += 1
+        return real_open(path, flags, *args, **kwargs)
+
+    if replacement_kind == "fifo":
+        monkeypatch.setattr(collect_mod.os, "open", reject_blocking_fifo_open)
+
+    def swap_inside_first_rotation(source, target, directory_fd):
+        nonlocal swapped
+        if not swapped and source == checkpoint_path.name and target == previous.name:
+            swapped = True
+            os.rename(
+                source,
+                displaced.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            if replacement_kind == "symlink":
+                os.symlink(victim.name, source, dir_fd=directory_fd)
+            elif replacement_kind == "directory":
+                os.mkdir(source, dir_fd=directory_fd)
+                marker_fd = real_open(
+                    f"{source}/marker",
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                with os.fdopen(marker_fd, "wb") as marker:
+                    marker.write(b"directory victim")
+                    marker.flush()
+                    os.fsync(marker.fileno())
+            else:
+                os.mkfifo(source, 0o600, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        return real_rename_noreplace(source, target, directory_fd)
+
+    monkeypatch.setattr(collect_mod, "_rename_noreplace_at", swap_inside_first_rotation)
+
+    with pytest.raises(RuntimeError, match=r"checkpoint|artifact|changed"):
+        if operation == "tag":
+            collect_mod._tag_checkpoint_sidecar_transaction(
+                checkpoint_path,
+                {"case-a"},
+                transaction_id,
+                expected_attestation=expected,
+            )
+        else:
+            collect_mod._close_checkpoint_attempts(
+                checkpoint_path,
+                {"case-a"},
+                transaction_id=transaction_id,
+                expected_attestation=expected,
+            )
+
+    assert swapped
+    if replacement_kind == "symlink":
+        assert checkpoint_path.is_symlink()
+        assert os.readlink(checkpoint_path) == victim.name
+        assert victim.read_bytes() == b"victim"
+    elif replacement_kind == "directory":
+        assert checkpoint_path.is_dir()
+        assert (checkpoint_path / "marker").read_bytes() == b"directory victim"
+    else:
+        assert stat.S_ISFIFO(checkpoint_path.lstat().st_mode)
+        assert fifo_open_attempts == 1
+    assert displaced.read_bytes() == original
+    assert reservation.is_file()
+    assert not previous.exists() and not previous.is_symlink()
+
+
+def test_checkpoint_mutation_preserves_unknown_previous_when_canonical_is_occupied(tmp_path, monkeypatch):
+    checkpoint_path = _write_checkpoint(
+        tmp_path / "checkpoint",
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    original = checkpoint_path.read_bytes()
+    expected = collect_mod._checkpoint_snapshot(
+        checkpoint_path,
+        None,
+        context_path=checkpoint_path,
+    ).attest(checkpoint_path)
+    victim = checkpoint_path.with_name("victim.json")
+    victim.write_bytes(b"victim")
+    displaced = checkpoint_path.with_name("displaced-checkpoint.json")
+    previous = collect_mod._atomic_write_previous_path(checkpoint_path)
+    reservation = collect_mod.atomic_write_reservation_path(checkpoint_path)
+    competitor = b"competitor"
+    real_rename_noreplace = collect_mod._rename_noreplace_at
+    swapped = False
+
+    def occupy_canonical_after_first_rotation(source, target, directory_fd):
+        nonlocal swapped
+        if swapped or source != checkpoint_path.name or target != previous.name:
+            return real_rename_noreplace(source, target, directory_fd)
+        swapped = True
+        os.rename(
+            source,
+            displaced.name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        os.symlink(victim.name, source, dir_fd=directory_fd)
+        real_rename_noreplace(source, target, directory_fd)
+        competitor_fd = os.open(
+            source,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        with os.fdopen(competitor_fd, "wb") as competitor_file:
+            competitor_file.write(competitor)
+            competitor_file.flush()
+            os.fsync(competitor_file.fileno())
+        os.fsync(directory_fd)
+
+    monkeypatch.setattr(collect_mod, "_rename_noreplace_at", occupy_canonical_after_first_rotation)
+
+    with pytest.raises(RuntimeError, match=r"checkpoint|artifact|changed"):
+        collect_mod._tag_checkpoint_sidecar_transaction(
+            checkpoint_path,
+            {"case-a"},
+            "a" * 32,
+            expected_attestation=expected,
+        )
+
+    assert swapped
+    assert checkpoint_path.read_bytes() == competitor
+    assert previous.is_symlink()
+    assert os.readlink(previous) == victim.name
+    assert victim.read_bytes() == b"victim"
+    assert displaced.read_bytes() == original
+    assert reservation.is_file()
+
+
+@pytest.mark.parametrize("operation", ["tag", "close"])
+def test_checkpoint_mutation_retry_rejects_restored_fifo_without_blocking(tmp_path, operation):
+    checkpoint_path = _write_checkpoint(
+        tmp_path / "checkpoint",
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    original = checkpoint_path.read_bytes()
+    displaced = checkpoint_path.with_name("displaced-checkpoint.json")
+    displaced.write_bytes(original)
+    reservation = collect_mod.atomic_write_reservation_path(checkpoint_path)
+    reservation_bytes = b"future checkpoint evidence"
+    reservation.write_bytes(reservation_bytes)
+    victim = checkpoint_path.with_name("victim.json")
+    victim.write_bytes(b"victim")
+    checkpoint_path.unlink()
+    os.mkfifo(checkpoint_path, 0o600)
+
+    _assert_checkpoint_mutation_fails_without_blocking(checkpoint_path, operation)
+
+    assert stat.S_ISFIFO(checkpoint_path.lstat().st_mode)
+    assert victim.read_bytes() == b"victim"
+    assert displaced.read_bytes() == original
+    assert reservation.read_bytes() == reservation_bytes
+
+
+@pytest.mark.parametrize("operation", ["tag", "close"])
+def test_checkpoint_mutation_rejects_fifo_swapped_after_publication_without_blocking(tmp_path, operation):
+    checkpoint_path = _write_checkpoint(
+        tmp_path / "checkpoint",
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    transaction_id = "a" * 32
+    if operation == "close":
+        document = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        document[collect_mod._SIDECAR_TRANSACTION_FIELD] = transaction_id
+        checkpoint_path.write_text(json.dumps(document), encoding="utf-8")
+    original = checkpoint_path.read_bytes()
+    previous = collect_mod._atomic_write_previous_path(checkpoint_path)
+    reservation_evidence = checkpoint_path.with_name("reservation-evidence.json")
+    victim = checkpoint_path.with_name("victim.json")
+    victim.write_bytes(b"victim")
+
+    _assert_subprocess_fails_without_blocking(
+        _swap_fifo_after_checkpoint_publication_and_exit,
+        (str(checkpoint_path), operation, transaction_id, str(reservation_evidence)),
+        f"checkpoint {operation} publication attestation",
+    )
+
+    assert stat.S_ISFIFO(checkpoint_path.lstat().st_mode)
+    assert victim.read_bytes() == b"victim"
+    assert previous.read_bytes() == original
+    published_document = json.loads(reservation_evidence.read_text(encoding="utf-8"))
+    if operation == "tag":
+        assert published_document[collect_mod._SIDECAR_TRANSACTION_FIELD] == transaction_id
+        assert published_document["attempted"] == ["case-a"]
+    else:
+        assert collect_mod._SIDECAR_TRANSACTION_FIELD not in published_document
+        assert published_document["attempted"] == []
+
+
+@pytest.mark.parametrize("operation", ["tag", "close"])
+def test_checkpoint_mutation_revalidates_journal_through_locked_output_root(tmp_path, monkeypatch, operation):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    journal_path = output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME
+    journal_path.write_bytes(b"journal")
+    checkpoint_path = _write_checkpoint(
+        tmp_path / "checkpoint",
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    transaction_id = "a" * 32
+    if operation == "close":
+        document = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        document[collect_mod._SIDECAR_TRANSACTION_FIELD] = transaction_id
+        checkpoint_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with helper_mod.perf_finalization_lifecycle(output_root) as locked_root:
+        journal_attestation = collect_mod._validated_regular_file(
+            journal_path,
+            None,
+            context_path=journal_path,
+            kind="sidecar transaction journal",
+            locked_output_root=locked_root,
+        ).attest(journal_path)
+        real_revalidate = collect_mod._revalidate_journal_attestation
+        revalidations = 0
+
+        def require_locked_root(attestation, candidate_root=None):
+            nonlocal revalidations
+            assert candidate_root is locked_root
+            revalidations += 1
+            return real_revalidate(attestation, candidate_root)
+
+        monkeypatch.setattr(collect_mod, "_revalidate_journal_attestation", require_locked_root)
+        if operation == "tag":
+            collect_mod._tag_checkpoint_sidecar_transaction(
+                checkpoint_path,
+                {"case-a"},
+                transaction_id,
+                journal_attestation=journal_attestation,
+                locked_output_root=locked_root,
+            )
+        else:
+            collect_mod._close_checkpoint_attempts(
+                checkpoint_path,
+                {"case-a"},
+                transaction_id=transaction_id,
+                journal_attestation=journal_attestation,
+                locked_output_root=locked_root,
+            )
+
+    assert revalidations == 2
+
+
+def test_repeated_checkpoint_crashes_reuse_one_deterministic_reservation(tmp_path):
+    checkpoint_path = tmp_path / "checkpoint.json"
+    checkpoint_path.write_text('{"attempted": ["old"]}', encoding="utf-8")
+    reservation = tmp_path / ".checkpoint.json.tmp"
+    reservation_identity = None
+
+    for _attempt in range(3):
+        _run_hard_exit(
+            _crash_checkpoint_before_publication,
+            (str(checkpoint_path), 100),
+            100,
+            "collector checkpoint pre-publication crash",
+        )
+        assert json.loads(checkpoint_path.read_text(encoding="utf-8")) == {"attempted": ["old"]}
+        assert reservation.is_file()
+        assert reservation.stat().st_nlink == 1
+        current_identity = (reservation.stat().st_dev, reservation.stat().st_ino)
+        if reservation_identity is None:
+            reservation_identity = current_identity
+        assert current_identity == reservation_identity
+        assert {path.name for path in tmp_path.glob(".checkpoint.json*.tmp")} == {reservation.name}
+
+    collect_mod._atomic_write_json(checkpoint_path, {"attempted": ["new"]})
+
+    assert json.loads(checkpoint_path.read_text(encoding="utf-8")) == {"attempted": ["new"]}
+    assert (checkpoint_path.stat().st_dev, checkpoint_path.stat().st_ino) == reservation_identity
+    assert reservation.is_file()
+    assert reservation.stat().st_nlink == 1
+
+
+def test_resume_recovers_old_ledgers_after_checkpoint_canonical_rotation_crash(tmp_path):
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=["case-b"],
+        attempted=["case-pending"],
+    )
+
+    _run_hard_exit(
+        _crash_checkpoint_after_canonical_rotation,
+        (str(checkpoint_path), 101),
+        101,
+        "collector checkpoint canonical-rotation crash",
+    )
+
+    assert not checkpoint_path.exists()
+    assert (checkpoint_path.parent / f".{checkpoint_path.name}.tmp").is_file()
+    assert (checkpoint_path.parent / f".{checkpoint_path.name}.tmp.previous").is_file()
+
+    checkpoint = collect_mod.ResumeCheckpoint(
+        backend=BACKEND,
+        module_name=FULL_NAME,
+        run_func_name=RUN_FUNC,
+        checkpoint_dir=str(checkpoint_dir),
+        framework_version="0.5.14",
+        sm_version=100,
+    )
+    checkpoint.load_existing()
+
+    assert checkpoint._done == {"case-a"}
+    assert checkpoint._failed == {"case-b"}
+    assert checkpoint._attempted == {"case-pending"}
+    assert checkpoint_path.is_file()
+
+
+def test_selected_producer_recovers_checkpoint_after_canonical_rotation_crash(tmp_path):
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=["case-b"],
+        attempted=["case-pending"],
+    )
+    _run_hard_exit(
+        _crash_checkpoint_after_canonical_rotation,
+        (str(checkpoint_path), 102),
+        102,
+        "selected producer checkpoint canonical-rotation crash",
+    )
+
+    tracker = collect_mod._load_selected_producer_checkpoint(
+        _collections()[0],
+        _provenance_ctx(_collections()),
+        backend=BACKEND,
+        checkpoint_dir=str(checkpoint_dir),
+        sm_version=100,
+        staging_path=tmp_path / "gemm_perf.txt",
+        required=True,
+        context="test finalization",
+    )
+
+    assert tracker is not None
+    assert tracker._done == {"case-a"}
+    assert tracker._failed == {"case-b"}
+    assert tracker._attempted == {"case-pending"}
+
+
+@pytest.mark.parametrize(("operation", "exit_code"), [("tag", 103), ("close", 104)])
+def test_transaction_recovery_normalizes_checkpoint_rotation_crash(operation, exit_code, tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=["case-b"],
+        attempted=["case-a", "case-b"],
+    )
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
+
+    _run_hard_exit(
+        _crash_during_transaction_checkpoint_rotation,
+        (str(output_root), str(checkpoint_dir), operation, exit_code),
+        exit_code,
+        f"collector checkpoint {operation} canonical-rotation crash",
+    )
+
+    reservation = checkpoint_path.with_name(f".{checkpoint_path.name}.tmp")
+    previous = checkpoint_path.with_name(f".{checkpoint_path.name}.tmp.previous")
+    assert not checkpoint_path.exists()
+    assert reservation.is_file()
+    assert previous.is_file()
+    assert (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).is_file()
+
+    assert (
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+        == output_root / "collection_meta.yaml"
+    )
+
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert checkpoint["done"] == ["case-a"]
+    assert checkpoint["failed"] == ["case-b"]
+    assert checkpoint["attempted"] == []
+    assert collect_mod._SIDECAR_TRANSACTION_FIELD not in checkpoint
+    assert not (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).exists()
+
+
+def test_live_checkpoint_writer_serializes_reservation_reuse(tmp_path):
+    checkpoint_path = tmp_path / "checkpoint.json"
+    checkpoint_path.write_text('{"attempted": ["old"]}', encoding="utf-8")
+    context = mp.get_context("spawn")
+    entered = context.Event()
+    release = context.Event()
+    waiter_started = context.Event()
+    waiter_finished = context.Event()
+    first = context.Process(target=_pause_checkpoint_writer, args=(str(checkpoint_path), entered, release))
+    second = context.Process(
+        target=_write_checkpoint_and_signal,
+        args=(str(checkpoint_path), waiter_started, waiter_finished),
+    )
+
+    first.start()
+    assert entered.wait(timeout=20)
+    second.start()
+    assert waiter_started.wait(timeout=20)
+    assert not waiter_finished.wait(timeout=0.3)
+    release.set()
+    first.join(timeout=20)
+    second.join(timeout=20)
+
+    assert first.exitcode == 0
+    assert second.exitcode == 0
+    assert waiter_finished.is_set()
+    assert json.loads(checkpoint_path.read_text(encoding="utf-8")) == {"attempted": ["second"]}
+    assert (tmp_path / ".checkpoint.json.tmp").is_file()
+
+
+def test_checkpoint_reader_waits_for_canonical_rotation_to_finish(tmp_path):
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=["case-b"],
+        attempted=["case-pending"],
+    )
+    context = mp.get_context("spawn")
+    entered = context.Event()
+    release = context.Event()
+    reader_started = context.Event()
+    reader_finished = context.Event()
+    result_queue = context.Queue()
+    writer = context.Process(
+        target=_pause_valid_checkpoint_writer_after_rotation,
+        args=(str(checkpoint_path), entered, release),
+    )
+    reader = context.Process(
+        target=_load_checkpoint_and_signal,
+        args=(str(checkpoint_dir), reader_started, reader_finished, result_queue),
+    )
+
+    writer.start()
+    assert entered.wait(timeout=20)
+    assert not checkpoint_path.exists()
+    reader.start()
+    assert reader_started.wait(timeout=20)
+    assert not reader_finished.wait(timeout=0.3)
+    release.set()
+    writer.join(timeout=20)
+    reader.join(timeout=20)
+
+    assert writer.exitcode == 0
+    assert reader.exitcode == 0
+    assert reader_finished.is_set()
+    assert result_queue.get(timeout=2) == ({"replacement"}, set(), {"replacement"})
+
+
+@pytest.mark.parametrize("operation", ["write", "read"])
+def test_checkpoint_operation_fails_closed_if_locked_parent_is_replaced(operation, tmp_path):
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["initial"],
+        failed=[],
+        attempted=["initial"],
+    )
+    initial = checkpoint_path.read_bytes()
+    replacement_document = json.loads(initial)
+    replacement_document["done"] = ["replacement"]
+    replacement_document["attempted"] = ["replacement"]
+    displaced_document = json.loads(initial)
+    displaced_document["done"] = ["displaced-writer"]
+    displaced_document["attempted"] = ["displaced-writer"]
+
+    context = mp.get_context("spawn")
+    entered = context.Event()
+    release = context.Event()
+    replacement_finished = context.Event()
+    displaced = checkpoint_path.parent.with_name(f"{checkpoint_path.parent.name}.displaced")
+    first = context.Process(
+        target=_pause_checkpoint_after_parent_lock,
+        args=(
+            str(checkpoint_dir),
+            str(checkpoint_path),
+            displaced_document if operation == "write" else None,
+            entered,
+            release,
+        ),
+    )
+    second = context.Process(
+        target=_write_checkpoint_document_and_signal,
+        args=(str(checkpoint_path), replacement_document, replacement_finished),
+    )
+
+    first.start()
+    assert entered.wait(timeout=20)
+    checkpoint_path.parent.rename(displaced)
+    checkpoint_path.parent.mkdir()
+    second.start()
+    assert replacement_finished.wait(timeout=20)
+    second.join(timeout=20)
+    assert second.exitcode == 0
+
+    release.set()
+    first.join(timeout=20)
+
+    assert first.exitcode not in (None, 0)
+    assert json.loads(checkpoint_path.read_text(encoding="utf-8")) == replacement_document
+    expected_displaced = displaced_document if operation == "write" else json.loads(initial)
+    assert json.loads((displaced / checkpoint_path.name).read_text(encoding="utf-8")) == expected_displaced
+
+
+@pytest.mark.parametrize("operation", ["tag", "close"])
+def test_checkpoint_mutation_revalidates_after_parent_lock(operation, tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    expected = _file_attestation(checkpoint_path)
+    replacement_document = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    replacement_document["done"] = ["foreign"]
+    replacement = json.dumps(replacement_document).encode()
+    real_atomic_write_json = collect_mod._atomic_write_json
+
+    def replace_after_read_then_write(path, data, **kwargs):
+        _replace_with_new_inode(Path(path), replacement)
+        return real_atomic_write_json(path, data, **kwargs)
+
+    monkeypatch.setattr(collect_mod, "_atomic_write_json", replace_after_read_then_write)
+
+    mutation = (
+        collect_mod._tag_checkpoint_sidecar_transaction
+        if operation == "tag"
+        else collect_mod._close_checkpoint_attempts
+    )
+    kwargs = {"transaction_id": "b" * 32} if operation == "tag" else {}
+    with pytest.raises(RuntimeError, match=r"checkpoint|changed"):
+        mutation(
+            checkpoint_path,
+            {"case-a"},
+            expected_attestation=expected,
+            **kwargs,
+        )
+
+    assert checkpoint_path.read_bytes() == replacement
+
+
+def test_finalization_rejects_equal_output_and_checkpoint_roots(tmp_path):
+    output_root = tmp_path / BACKEND
+    output_root.mkdir()
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.write_text("op,latency\nmatmul,1.0\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match=r"output and checkpoint roots must be different"):
+        collect_mod._finalize_collector_outputs_transaction(
+            output_root,
+            [staging_path],
+            _provenance_ctx(_collections()),
+            [],
+            backend=BACKEND,
+            checkpoint_dir=str(tmp_path),
+            sm_version=100,
+        )
+
+
+def test_displaced_collector_finalizer_cannot_modify_recreated_output_root(tmp_path):
+    output_root, checkpoint_dir, _checkpoint, _staging, _parquet = _single_table_finalization(tmp_path)
+    displaced_root = tmp_path / "displaced-out"
+    process_context = mp.get_context("spawn")
+    ready = process_context.Event()
+    release = process_context.Event()
+    process = process_context.Process(
+        target=_pause_displaced_collector_finalization,
+        args=(str(output_root), str(checkpoint_dir), ready, release),
+    )
+    process.start()
+    assert ready.wait(timeout=20), "displaced finalizer did not acquire its output-root lock"
+
+    output_root.rename(displaced_root)
+
+    def directory_state(directory):
+        return {
+            path.name: (
+                path.read_bytes(),
+                stat.S_IMODE(path.stat().st_mode),
+                path.stat().st_nlink,
+            )
+            for path in directory.iterdir()
+            if path.is_file() and not path.is_symlink()
+        }
+
+    displaced_before = directory_state(displaced_root)
+    output_root.mkdir()
+    replacement_checkpoint_dir = tmp_path / "replacement-checkpoint"
+    _write_checkpoint(
+        replacement_checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    replacement_staging = output_root / "gemm_perf.txt"
+    replacement_staging.write_text("op,shape,latency\nmatmul,replacement,2.0\n", encoding="utf-8")
+    _finalize_single_table(output_root, replacement_checkpoint_dir, replacement_staging)
+    replacement_after_commit = directory_state(output_root)
+
+    release.set()
+    process.join(timeout=20)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        pytest.fail("displaced collector finalizer did not exit")
+
+    assert process.exitcode != 0
+    assert directory_state(displaced_root) == displaced_before
+    assert directory_state(output_root) == replacement_after_commit
+
+
+def test_displaced_collector_recovery_cannot_modify_recreated_output_root(tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    reservation = collect_mod.atomic_write_reservation_path(output_root / collect_mod._PERF_TRANSACTION_FILENAME)
+    reservation.write_bytes(b"interrupted old-root journal")
+    checkpoint_dir = tmp_path / "checkpoint"
+    displaced_root = tmp_path / "displaced-out"
+    process_context = mp.get_context("spawn")
+    ready = process_context.Event()
+    release = process_context.Event()
+    process = process_context.Process(
+        target=_pause_displaced_collector_recovery,
+        args=(str(output_root), str(checkpoint_dir), ready, release),
+    )
+    process.start()
+    assert ready.wait(timeout=20), "displaced recovery did not acquire its output-root lock"
+
+    output_root.rename(displaced_root)
+    displaced_before = {path.name: path.read_bytes() for path in displaced_root.iterdir() if path.is_file()}
+    output_root.mkdir()
+    replacement_checkpoint_dir = tmp_path / "replacement-checkpoint"
+    _write_checkpoint(
+        replacement_checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    replacement_staging = output_root / "gemm_perf.txt"
+    replacement_staging.write_text("op,shape,latency\nmatmul,replacement,2.0\n", encoding="utf-8")
+    _finalize_single_table(output_root, replacement_checkpoint_dir, replacement_staging)
+    replacement_after_commit = {path.name: path.read_bytes() for path in output_root.iterdir() if path.is_file()}
+
+    release.set()
+    process.join(timeout=20)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        pytest.fail("displaced collector recovery did not exit")
+
+    assert process.exitcode != 0
+    assert {path.name: path.read_bytes() for path in displaced_root.iterdir() if path.is_file()} == displaced_before
+    assert {
+        path.name: path.read_bytes() for path in output_root.iterdir() if path.is_file()
+    } == replacement_after_commit
 
 
 def test_atomic_exclusive_write_rejects_regular_temp_path_swap(tmp_path, monkeypatch):
     destination = tmp_path / "collection_meta.yaml"
     competitor = b"competitor"
     swapped_temp_path = None
-    real_link = collect_mod.os.link
+    real_rename_noreplace = helper_mod._rename_noreplace_at
 
-    def swap_temp_then_link(source, target, *args, **kwargs):
+    def swap_temp_then_publish(source, target, directory_fd):
         nonlocal swapped_temp_path
-        swapped_temp_path = Path(source)
+        swapped_temp_path = tmp_path / source
         replacement = tmp_path / "replacement"
         replacement.write_bytes(competitor)
         replacement.replace(swapped_temp_path)
-        return real_link(source, target, *args, **kwargs)
+        return real_rename_noreplace(source, target, directory_fd)
 
-    monkeypatch.setattr(collect_mod.os, "link", swap_temp_then_link)
+    monkeypatch.setattr(helper_mod, "_rename_noreplace_at", swap_temp_then_publish)
 
     with pytest.raises(RuntimeError, match=r"temporary|publication|changed"):
-        collect_mod._atomic_write_bytes(destination, b"owned", replace_existing=False)
+        collect_mod._atomic_write_bytes(destination, b"owned")
 
     assert swapped_temp_path is not None
-    assert swapped_temp_path.read_bytes() == competitor
+    assert not swapped_temp_path.exists()
     assert destination.read_bytes() == competitor
-    assert destination.samefile(swapped_temp_path)
 
 
 def test_atomic_exclusive_write_preserves_destination_replacement_after_mismatch(tmp_path, monkeypatch):
@@ -781,17 +1947,17 @@ def test_atomic_exclusive_write_preserves_destination_replacement_after_mismatch
     second_competitor.write_bytes(b"second competitor")
     swapped_temp_path = None
     replacement_injected = False
-    real_link = collect_mod.os.link
+    real_rename_noreplace = helper_mod._rename_noreplace_at
     real_digest_open_fd = collect_mod._digest_open_fd
     digest_calls = 0
 
-    def swap_temp_then_link(source, target, *args, **kwargs):
+    def swap_temp_then_publish(source, target, directory_fd):
         nonlocal swapped_temp_path
-        swapped_temp_path = Path(source)
+        swapped_temp_path = tmp_path / source
         replacement = tmp_path / "first-competitor"
         replacement.write_bytes(b"first competitor")
         replacement.replace(swapped_temp_path)
-        return real_link(source, target, *args, **kwargs)
+        return real_rename_noreplace(source, target, directory_fd)
 
     def replace_before_published_path_digest(file_descriptor):
         nonlocal digest_calls, replacement_injected
@@ -803,17 +1969,17 @@ def test_atomic_exclusive_write_preserves_destination_replacement_after_mismatch
             second_competitor.replace(destination)
         return result
 
-    monkeypatch.setattr(collect_mod.os, "link", swap_temp_then_link)
+    monkeypatch.setattr(helper_mod, "_rename_noreplace_at", swap_temp_then_publish)
     monkeypatch.setattr(collect_mod, "_digest_open_fd", replace_before_published_path_digest)
 
     with pytest.raises(RuntimeError, match=r"publication|changed"):
-        collect_mod._atomic_write_bytes(destination, b"owned", replace_existing=False)
+        collect_mod._atomic_write_bytes(destination, b"owned")
 
     assert replacement_injected
     assert destination.read_bytes() == b"second competitor"
     assert observed_link.read_bytes() == b"first competitor"
     assert swapped_temp_path is not None
-    assert swapped_temp_path.read_bytes() == b"first competitor"
+    assert not swapped_temp_path.exists()
 
 
 def test_validated_regular_file_rejects_chmod_during_digest(tmp_path, monkeypatch):
@@ -855,25 +2021,25 @@ def test_atomic_exclusive_write_rejects_symlink_temp_path_swap(tmp_path, monkeyp
     competitor = tmp_path / "competitor"
     competitor.write_bytes(b"competitor")
     swapped_temp_path = None
-    real_link = collect_mod.os.link
+    real_rename_noreplace = helper_mod._rename_noreplace_at
 
-    def swap_temp_then_link(source, target, *args, **kwargs):
+    def swap_temp_then_publish(source, target, directory_fd):
         nonlocal swapped_temp_path
-        swapped_temp_path = Path(source)
+        swapped_temp_path = tmp_path / source
         swapped_temp_path.unlink()
         try:
             swapped_temp_path.symlink_to(competitor)
         except OSError as error:
             pytest.skip(f"symlinks unavailable: {error}")
-        return real_link(source, target, *args, **kwargs)
+        return real_rename_noreplace(source, target, directory_fd)
 
-    monkeypatch.setattr(collect_mod.os, "link", swap_temp_then_link)
+    monkeypatch.setattr(helper_mod, "_rename_noreplace_at", swap_temp_then_publish)
 
     with pytest.raises(RuntimeError, match=r"temporary|publication|changed"):
-        collect_mod._atomic_write_bytes(destination, b"owned", replace_existing=False)
+        collect_mod._atomic_write_bytes(destination, b"owned")
 
     assert swapped_temp_path is not None
-    assert swapped_temp_path.is_symlink()
+    assert not swapped_temp_path.exists()
     assert competitor.read_bytes() == b"competitor"
     assert destination.is_symlink()
     assert destination.samefile(competitor)
@@ -881,21 +2047,87 @@ def test_atomic_exclusive_write_rejects_symlink_temp_path_swap(tmp_path, monkeyp
 
 def test_atomic_exclusive_write_publishes_owned_bytes_and_mode(tmp_path, monkeypatch):
     destination = tmp_path / "collection_meta.yaml"
-    follow_symlinks = []
-    real_link = collect_mod.os.link
+    reservation = tmp_path / ".collection_meta.yaml.tmp"
+    published_sources = []
+    events = []
+    real_rename_noreplace = helper_mod._rename_noreplace_at
+    real_fsync = collect_mod.os.fsync
 
-    def record_link(source, target, *args, **kwargs):
-        follow_symlinks.append(kwargs.get("follow_symlinks"))
-        return real_link(source, target, *args, **kwargs)
+    def record_publication(source, target, directory_fd):
+        published_sources.append(tmp_path / source)
+        events.append(("rename", reservation.exists(), destination.exists()))
+        return real_rename_noreplace(source, target, directory_fd)
 
-    monkeypatch.setattr(collect_mod.os, "link", record_link)
+    def record_fsync(file_descriptor):
+        kind = "file-fsync" if stat.S_ISREG(os.fstat(file_descriptor).st_mode) else "directory-fsync"
+        events.append((kind, reservation.exists(), destination.exists()))
+        return real_fsync(file_descriptor)
 
-    collect_mod._atomic_write_bytes(destination, b"owned", mode=0o640, replace_existing=False)
+    monkeypatch.setattr(helper_mod, "_rename_noreplace_at", record_publication)
+    monkeypatch.setattr(collect_mod.os, "fsync", record_fsync)
+
+    collect_mod._atomic_write_bytes(destination, b"owned", mode=0o640)
 
     assert destination.read_bytes() == b"owned"
     assert stat.S_IMODE(destination.stat().st_mode) == 0o640
-    assert follow_symlinks == [False]
-    assert list(tmp_path.glob(".collection_meta.yaml.*.tmp")) == []
+    assert published_sources == [reservation]
+    assert events == [
+        ("directory-fsync", True, False),
+        ("file-fsync", True, False),
+        ("rename", True, False),
+        ("directory-fsync", False, True),
+    ]
+    assert not reservation.exists()
+
+
+def test_atomic_exclusive_write_publishes_without_a_temporary_alias(tmp_path, monkeypatch):
+    destination = tmp_path / "collection_meta.yaml"
+
+    def reject_hardlink(*_args, **_kwargs):
+        raise AssertionError("no-replace publication must not create a hardlink alias")
+
+    monkeypatch.setattr(collect_mod.os, "link", reject_hardlink)
+
+    collect_mod._atomic_write_bytes(destination, b"owned", mode=0o640)
+
+    assert destination.read_bytes() == b"owned"
+    assert destination.stat().st_nlink == 1
+    assert not (tmp_path / ".collection_meta.yaml.tmp").exists()
+
+
+def test_atomic_exclusive_write_reuses_one_retained_reservation(tmp_path):
+    destination = tmp_path / "collection_meta.yaml"
+    reservation = tmp_path / ".collection_meta.yaml.tmp"
+    reservation.write_bytes(b"interrupted")
+    retained_identity = (reservation.stat().st_dev, reservation.stat().st_ino)
+
+    collect_mod._atomic_write_bytes(destination, b"published", mode=0o640)
+
+    assert destination.read_bytes() == b"published"
+    assert (destination.stat().st_dev, destination.stat().st_ino) == retained_identity
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o640
+    assert destination.stat().st_nlink == 1
+    assert not reservation.exists()
+
+
+def test_atomic_exclusive_write_preserves_foreign_hardlink_before_cleanup(tmp_path, monkeypatch):
+    destination = tmp_path / "collection_meta.yaml"
+    reservation = tmp_path / ".collection_meta.yaml.tmp"
+    foreign_link = tmp_path / "foreign-link"
+    real_rename_noreplace = helper_mod._rename_noreplace_at
+
+    def add_foreign_link_then_publish(source, target, directory_fd):
+        os.link(tmp_path / source, foreign_link, follow_symlinks=False)
+        return real_rename_noreplace(source, target, directory_fd)
+
+    monkeypatch.setattr(helper_mod, "_rename_noreplace_at", add_foreign_link_then_publish)
+
+    with pytest.raises(RuntimeError, match=r"publication|temporary|changed"):
+        collect_mod._atomic_write_bytes(destination, b"owned", mode=0o640)
+
+    assert not reservation.exists()
+    assert destination.samefile(foreign_link)
+    assert destination.stat().st_nlink == 2
 
 
 def test_atomic_exclusive_write_rejects_same_inode_bytes_and_mode_race(tmp_path, monkeypatch):
@@ -903,54 +2135,26 @@ def test_atomic_exclusive_write_rejects_same_inode_bytes_and_mode_race(tmp_path,
     owned = b"owned"
     competitor = b"raced"
     published_temp = None
-    real_link = collect_mod.os.link
+    real_rename_noreplace = helper_mod._rename_noreplace_at
 
-    def link_then_mutate(source, target, *args, **kwargs):
+    def publish_then_mutate(source, target, directory_fd):
         nonlocal published_temp
-        published_temp = Path(source)
-        result = real_link(source, target, *args, **kwargs)
-        with published_temp.open("r+b") as raced_file:
+        published_temp = tmp_path / source
+        result = real_rename_noreplace(source, target, directory_fd)
+        with (tmp_path / target).open("r+b") as raced_file:
             raced_file.write(competitor)
             raced_file.flush()
             os.fchmod(raced_file.fileno(), 0o777)
             os.fsync(raced_file.fileno())
         return result
 
-    monkeypatch.setattr(collect_mod.os, "link", link_then_mutate)
-
-    with pytest.raises(RuntimeError, match=r"publication|changed"):
-        collect_mod._atomic_write_bytes(destination, owned, mode=0o640, replace_existing=False)
-
-    assert published_temp is not None
-    assert published_temp.read_bytes() == competitor
-    assert stat.S_IMODE(published_temp.stat().st_mode) == 0o777
-    assert destination.read_bytes() == competitor
-    assert stat.S_IMODE(destination.stat().st_mode) == 0o777
-    assert destination.samefile(published_temp)
-
-
-def test_atomic_replace_write_rejects_same_inode_bytes_and_mode_race(tmp_path, monkeypatch):
-    destination = tmp_path / "checkpoint.json"
-    destination.write_bytes(b"prior")
-    destination.chmod(0o600)
-    owned = b"owned"
-    competitor = b"raced"
-    real_replace = collect_mod.os.replace
-
-    def replace_then_mutate(source, target, *args, **kwargs):
-        result = real_replace(source, target, *args, **kwargs)
-        with Path(target).open("r+b") as raced_file:
-            raced_file.write(competitor)
-            raced_file.flush()
-            os.fchmod(raced_file.fileno(), 0o777)
-            os.fsync(raced_file.fileno())
-        return result
-
-    monkeypatch.setattr(collect_mod.os, "replace", replace_then_mutate)
+    monkeypatch.setattr(helper_mod, "_rename_noreplace_at", publish_then_mutate)
 
     with pytest.raises(RuntimeError, match=r"publication|changed"):
         collect_mod._atomic_write_bytes(destination, owned, mode=0o640)
 
+    assert published_temp is not None
+    assert not published_temp.exists()
     assert destination.read_bytes() == competitor
     assert stat.S_IMODE(destination.stat().st_mode) == 0o777
 
@@ -998,6 +2202,27 @@ def test_recovery_rejects_retained_atomic_publication_mismatch_without_mutation(
     assert {path.relative_to(tmp_path) for path in tmp_path.rglob("*")} == entries_before
 
 
+def test_cleanup_fails_closed_on_legacy_source_claim_hardlink(tmp_path):
+    staging_path = tmp_path / "gemm_perf.txt"
+    staging_path.write_bytes(b"owned staging")
+    attestation = _file_attestation(staging_path)
+    transaction_id = "a" * 32
+    claim_path = collect_mod._transaction_claim_path(staging_path, transaction_id)
+    os.link(staging_path, claim_path)
+
+    with pytest.raises(RuntimeError, match=r"legacy|hardlink|claim"):
+        collect_mod._cleanup_transaction_files(
+            [attestation],
+            context_path=tmp_path / collect_mod._SIDECAR_TRANSACTION_FILENAME,
+            transaction_id=transaction_id,
+        )
+
+    assert staging_path.samefile(claim_path)
+    assert staging_path.stat().st_nlink == 2
+    assert claim_path.stat().st_nlink == 2
+    assert not collect_mod.collector_retained_path(staging_path).exists()
+
+
 def test_claim_rejects_broken_symlink_swap_after_batch_validation(tmp_path, monkeypatch):
     owned_path = tmp_path / "gemm_perf.txt"
     owned_path.write_bytes(b"owned staging")
@@ -1034,7 +2259,7 @@ def test_claim_rejects_broken_symlink_swap_after_batch_validation(tmp_path, monk
     assert outside_owned.read_bytes() == b"owned staging"
 
 
-def test_claim_never_restores_replaced_quarantine_object_to_owned_path(tmp_path, monkeypatch):
+def test_claim_never_restores_foreign_quarantine_replacement_to_owned_path(tmp_path, monkeypatch):
     owned_path = tmp_path / "gemm_perf.txt"
     owned_path.write_bytes(b"owned staging")
     attestation = _file_attestation(owned_path)
@@ -1063,7 +2288,7 @@ def test_claim_never_restores_replaced_quarantine_object_to_owned_path(tmp_path,
         )
 
     assert claimed_path is not None
-    assert owned_path.read_bytes() == b"owned staging"
+    assert not owned_path.exists()
     assert claimed_path.read_bytes() == malicious
     assert outside_owned.read_bytes() == b"owned staging"
 
@@ -1075,14 +2300,14 @@ def test_claim_never_overwrites_racing_deterministic_claim(tmp_path, monkeypatch
     transaction_id = "1" * 32
     claim_path = collect_mod._transaction_claim_path(owned_path, transaction_id)
     competitor = b"competing claim"
-    real_link = collect_mod.os.link
+    real_rename_noreplace = collect_mod._rename_noreplace
 
-    def compete_before_link(source, target, *args, **kwargs):
+    def compete_before_rename(source, target):
         if Path(target) == claim_path:
             claim_path.write_bytes(competitor)
-        return real_link(source, target, *args, **kwargs)
+        return real_rename_noreplace(source, target)
 
-    monkeypatch.setattr(collect_mod.os, "link", compete_before_link)
+    monkeypatch.setattr(collect_mod, "_rename_noreplace", compete_before_rename)
 
     with pytest.raises(RuntimeError, match=r"claim|changed"):
         collect_mod._claim_transaction_files(
@@ -1767,10 +2992,10 @@ def test_normal_commit_revalidates_sidecar_target_before_replacing_it(tmp_path, 
             merged_existing=False,
         )
     }
-    real_write = provenance.write_collection_meta
+    real_render = provenance.render_collection_meta
 
     def render_then_replace_target(*args, **kwargs):
-        rendered = real_write(*args, **kwargs)
+        rendered = real_render(*args, **kwargs)
         meta_path.replace(outside_meta)
         try:
             meta_path.symlink_to(outside_meta)
@@ -1778,7 +3003,7 @@ def test_normal_commit_revalidates_sidecar_target_before_replacing_it(tmp_path, 
             pytest.skip(f"symlinks unavailable: {error}")
         return rendered
 
-    monkeypatch.setattr(provenance, "write_collection_meta", render_then_replace_target)
+    monkeypatch.setattr(provenance, "render_collection_meta", render_then_replace_target)
 
     with pytest.raises(RuntimeError, match=r"sidecar|document"):
         collect_mod._write_collector_provenance(
@@ -1944,19 +3169,19 @@ def test_recovery_completes_deterministic_sidecar_claim_crash(tmp_path, monkeypa
 
     with monkeypatch.context() as fault:
         if crash_point == "after-first-claim":
-            real_link = collect_mod.os.link
+            real_rename_noreplace = helper_mod._rename_noreplace_at
 
-            def link_then_crash(source, target, *args, **kwargs):
-                real_link(source, target, *args, **kwargs)
+            def rename_then_crash(source, target, directory_fd):
+                real_rename_noreplace(source, target, directory_fd)
                 if str(target).endswith(".transaction-claim"):
                     raise SimulatedCrash
 
-            fault.setattr(collect_mod.os, "link", link_then_crash)
+            fault.setattr(helper_mod, "_rename_noreplace_at", rename_then_crash)
         else:
             real_atomic_write = collect_mod._atomic_write_bytes
 
             def crash_before_link(path, *args, **kwargs):
-                if Path(path) == meta_path and kwargs.get("replace_existing") is False:
+                if Path(path) == meta_path:
                     raise SimulatedCrash
                 return real_atomic_write(path, *args, **kwargs)
 
@@ -1986,7 +3211,7 @@ def test_recovery_completes_deterministic_sidecar_claim_crash(tmp_path, monkeypa
     pending_claim = collect_mod._transaction_claim_path(pending_path, transaction_id)
     target_claim = collect_mod._transaction_claim_path(meta_path, transaction_id)
     assert pending_claim.exists()
-    assert pending_path.exists() is (crash_point == "after-first-claim")
+    assert not pending_path.exists()
     if crash_point == "before-link":
         assert target_claim.exists()
         assert not meta_path.exists()
@@ -2010,7 +3235,7 @@ def test_recovery_completes_deterministic_sidecar_claim_crash(tmp_path, monkeypa
     assert "gemm_perf" in doc["tables"]
 
 
-def test_recovery_cleans_deterministic_staging_claim_after_cleanup_crash(tmp_path, monkeypatch):
+def test_recovery_retains_deterministic_staging_claim_after_cleanup_crash(tmp_path, monkeypatch):
     class SimulatedCrash(BaseException):
         pass
 
@@ -2022,15 +3247,15 @@ def test_recovery_cleans_deterministic_staging_claim_after_cleanup_crash(tmp_pat
     staging_path.write_bytes(b"owned staging")
     checkpoint_dir = tmp_path / "checkpoint"
     checkpoint_path = _write_checkpoint(checkpoint_dir, done=["case-a"], failed=[])
-    real_delete = collect_mod._delete_claimed_transaction_files
+    real_retain = collect_mod._retain_claimed_transaction_files
 
-    def crash_before_staging_claim_delete(claimed_files, *args, **kwargs):
+    def crash_before_staging_claim_retention(claimed_files, *args, **kwargs):
         if any(claimed.original.path == staging_path for claimed in claimed_files):
             raise SimulatedCrash
-        return real_delete(claimed_files, *args, **kwargs)
+        return real_retain(claimed_files, *args, **kwargs)
 
     with monkeypatch.context() as fault:
-        fault.setattr(collect_mod, "_delete_claimed_transaction_files", crash_before_staging_claim_delete)
+        fault.setattr(collect_mod, "_retain_claimed_transaction_files", crash_before_staging_claim_retention)
         with pytest.raises(SimulatedCrash):
             collect_mod._write_collector_provenance(
                 output_root,
@@ -2066,6 +3291,70 @@ def test_recovery_cleans_deterministic_staging_claim_after_cleanup_crash(tmp_pat
     assert _attempted(checkpoint_path) == set()
     assert not staging_claim.exists()
     assert not journal_path.exists()
+
+
+def test_repeated_committed_claim_recovery_uses_fixed_retained_slots(tmp_path, monkeypatch):
+    class SimulatedCrash(BaseException):
+        pass
+
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    parquet_path = output_root / "gemm_perf.parquet"
+    _write_parquet(parquet_path, [{"op": "matmul", "latency": 1.0}])
+    staging_path = parquet_path.with_suffix(".txt")
+    checkpoint_dir = tmp_path / "checkpoint"
+    pending_path = output_root / collect_mod._SIDECAR_STAGING_FILENAME
+    meta_path = output_root / "collection_meta.yaml"
+    transaction_ids = set()
+
+    for _attempt in range(3):
+        checkpoint_path = _write_checkpoint(checkpoint_dir, done=["case-a"], failed=[])
+        _write_perf_event_through_logger(staging_path)
+        real_retain = collect_mod._retain_claimed_transaction_files
+
+        def crash_after_sidecar_publication(claimed_files, *args, **kwargs):
+            if any(claimed.original.path in (pending_path, meta_path) for claimed in claimed_files):
+                raise SimulatedCrash
+            return real_retain(claimed_files, *args, **kwargs)
+
+        with monkeypatch.context() as fault:
+            fault.setattr(collect_mod, "_retain_claimed_transaction_files", crash_after_sidecar_publication)
+            with pytest.raises(SimulatedCrash):
+                collect_mod._write_collector_provenance(
+                    output_root,
+                    [parquet_path],
+                    _provenance_ctx(_collections()),
+                    run_errors=[],
+                    backend=BACKEND,
+                    checkpoint_dir=str(checkpoint_dir),
+                    finalization_info={
+                        parquet_path.resolve(): _finalization_fact(
+                            staging_path,
+                            new_rows=1,
+                            merged_existing=False,
+                        )
+                    },
+                )
+
+        journal_path = output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME
+        transaction_id = json.loads(journal_path.read_text(encoding="utf-8"))["transaction_id"]
+        transaction_ids.add(transaction_id)
+
+        assert (
+            collect_mod._recover_collector_provenance_transaction(
+                output_root,
+                backend=BACKEND,
+                checkpoint_dir=str(checkpoint_dir),
+            )
+            == meta_path
+        )
+        assert _attempted(checkpoint_path) == set()
+        assert not any(".transaction-claim" in path.name for path in output_root.iterdir())
+        assert collect_mod.collector_retained_path(pending_path).is_file()
+        assert collect_mod.collector_retained_path(staging_path).is_file()
+
+    assert len(transaction_ids) == 3
+    assert collect_mod.collector_retained_path(meta_path).is_file()
 
 
 def test_recovery_validates_every_participant_before_restoring_sidecar_claim(tmp_path):
@@ -2620,7 +3909,7 @@ def test_failed_sidecar_write_keeps_pending_attempts_for_retry(tmp_path, monkeyp
 
     monkeypatch.setattr(
         provenance,
-        "write_collection_meta",
+        "render_collection_meta",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("simulated sidecar failure")),
     )
 
@@ -2948,7 +4237,45 @@ def test_recovery_rolls_back_unjournaled_sidecar_staging_to_all_old(tmp_path):
     assert not (output_root / collect_mod._SIDECAR_STAGING_FILENAME).exists()
 
 
+def test_repeated_unjournaled_sidecar_staging_crashes_do_not_leak_render_directories(tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_path = _write_checkpoint(
+        checkpoint_dir,
+        done=["case-a"],
+        failed=[],
+        attempted=["case-a"],
+    )
+    staging_path = output_root / "gemm_perf.txt"
+    staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
+    parquet_path = staging_path.with_suffix(".parquet")
+    pq.write_table(pa.table({"op": ["matmul"], "shape": ["old"], "latency": [9.0]}), parquet_path)
+    provenance.write_collection_meta(
+        output_root,
+        _sidecar_runtime(),
+        {"gemm_perf": _collection_event()},
+    )
+    render_counts = []
+
+    for _attempt in range(3):
+        _run_hard_exit(
+            _crash_after_unjournaled_sidecar_staging,
+            (str(output_root), str(checkpoint_dir)),
+            88,
+            "collector unjournaled sidecar-staging crash",
+        )
+        assert _recover_finalization(output_root, checkpoint_dir) is None
+        assert staging_path.is_file()
+        assert _attempted(checkpoint_path) == {"case-a"}
+        render_counts.append(sum(path.name.startswith(".collection-meta-render") for path in output_root.iterdir()))
+
+    assert render_counts == [0, 0, 0]
+
+
 def test_recovery_uses_sidecar_perf_attestations_after_perf_journal_cleanup(tmp_path, monkeypatch):
+    import helper as helper_mod
+
     output_root = tmp_path / "out"
     output_root.mkdir()
     checkpoint_dir = tmp_path / "checkpoint"
@@ -2995,19 +4322,21 @@ def test_recovery_uses_sidecar_perf_attestations_after_perf_journal_cleanup(tmp_
     rows_before_recovery = pq.read_table(parquet_path).to_pylist()
     sidecar_before_recovery = (output_root / "collection_meta.yaml").read_bytes()
     fsync_states = []
-    real_fsync_directory = collect_mod._fsync_directory
+    real_fsync = os.fsync
+    output_identity = (output_root.stat().st_dev, output_root.stat().st_ino)
 
-    def record_transaction_journal_state(directory):
-        if Path(directory) == output_root:
+    def record_transaction_journal_state(file_descriptor):
+        opened = os.fstat(file_descriptor)
+        if stat.S_ISDIR(opened.st_mode) and (opened.st_dev, opened.st_ino) == output_identity:
             fsync_states.append(
                 (
                     (output_root / collect_mod._PERF_TRANSACTION_FILENAME).exists(),
                     sidecar_journal.exists(),
                 )
             )
-        return real_fsync_directory(directory)
+        return real_fsync(file_descriptor)
 
-    monkeypatch.setattr(collect_mod, "_fsync_directory", record_transaction_journal_state)
+    monkeypatch.setattr(helper_mod.os, "fsync", record_transaction_journal_state)
 
     assert (
         collect_mod._recover_collector_provenance_transaction(
@@ -3094,7 +4423,7 @@ def test_final_commit_revalidates_published_parquet_after_artifact_cleanup(tmp_p
     real_cleanup = collect_mod.cleanup_perf_publication_artifacts
     tampered = False
 
-    def tamper_during_cleanup(publications):
+    def tamper_during_cleanup(publications, *args, **kwargs):
         nonlocal tampered
         publications = tuple(publications)
         if not tampered:
@@ -3105,11 +4434,11 @@ def test_final_commit_revalidates_published_parquet_after_artifact_cleanup(tmp_p
                 attacker,
             )
             os.replace(attacker, publications[0].target)
-        real_cleanup(publications)
+        real_cleanup(publications, *args, **kwargs)
 
     monkeypatch.setattr(collect_mod, "cleanup_perf_publication_artifacts", tamper_during_cleanup)
 
-    with pytest.raises(RuntimeError, match="published perf target"):
+    with pytest.raises(RuntimeError, match=r"published perf target|finalization artifact"):
         collect_mod._finalize_collector_outputs_transaction(
             output_root,
             [staging_path],
@@ -3144,13 +4473,13 @@ def test_final_commit_rejects_duplicate_prepared_path_without_unlinking_it(tmp_p
     real_cleanup = collect_mod.cleanup_perf_publication_artifacts
     duplicated_path = None
 
-    def duplicate_prepared_path(publications):
+    def duplicate_prepared_path(publications, *args, **kwargs):
         nonlocal duplicated_path
         publications = tuple(publications)
         if duplicated_path is None:
             duplicated_path = publications[0].prepared.path
             os.link(publications[0].target, duplicated_path)
-        return real_cleanup(publications)
+        return real_cleanup(publications, *args, **kwargs)
 
     monkeypatch.setattr(collect_mod, "cleanup_perf_publication_artifacts", duplicate_prepared_path)
 
@@ -3189,10 +4518,10 @@ def test_final_commit_rejects_published_parquet_mode_change(tmp_path, monkeypatc
     real_cleanup = collect_mod.cleanup_perf_publication_artifacts
     changed_mode = None
 
-    def chmod_during_cleanup(publications):
+    def chmod_during_cleanup(publications, *args, **kwargs):
         nonlocal changed_mode
         publications = tuple(publications)
-        real_cleanup(publications)
+        real_cleanup(publications, *args, **kwargs)
         changed_mode = publications[0].prepared.mode ^ stat.S_IXUSR
         publications[0].target.chmod(changed_mode)
 
@@ -3215,7 +4544,9 @@ def test_final_commit_rejects_published_parquet_mode_change(tmp_path, monkeypatc
     assert (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).is_file()
 
 
-def test_perf_journal_unlink_is_fsynced_before_sidecar_journal_unlink(tmp_path, monkeypatch):
+def test_perf_journal_retirement_is_fsynced_before_sidecar_journal_retirement(tmp_path, monkeypatch):
+    import helper as helper_mod
+
     output_root = tmp_path / "out"
     output_root.mkdir()
     checkpoint_dir = tmp_path / "checkpoint"
@@ -3228,19 +4559,21 @@ def test_perf_journal_unlink_is_fsynced_before_sidecar_journal_unlink(tmp_path, 
     staging_path = output_root / "gemm_perf.txt"
     staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
     fsync_states = []
-    real_fsync_directory = collect_mod._fsync_directory
+    real_fsync = os.fsync
+    output_identity = (output_root.stat().st_dev, output_root.stat().st_ino)
 
-    def record_transaction_journal_state(directory):
-        if Path(directory) == output_root:
+    def record_transaction_journal_state(file_descriptor):
+        opened = os.fstat(file_descriptor)
+        if stat.S_ISDIR(opened.st_mode) and (opened.st_dev, opened.st_ino) == output_identity:
             fsync_states.append(
                 (
                     (output_root / collect_mod._PERF_TRANSACTION_FILENAME).exists(),
                     (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).exists(),
                 )
             )
-        return real_fsync_directory(directory)
+        return real_fsync(file_descriptor)
 
-    monkeypatch.setattr(collect_mod, "_fsync_directory", record_transaction_journal_state)
+    monkeypatch.setattr(helper_mod.os, "fsync", record_transaction_journal_state)
 
     collect_mod._finalize_collector_outputs_transaction(
         output_root,
@@ -3253,7 +4586,7 @@ def test_perf_journal_unlink_is_fsynced_before_sidecar_journal_unlink(tmp_path, 
     )
 
     perf_unlink_fsync = fsync_states.index((False, True))
-    sidecar_unlink_fsync = fsync_states.index((False, False))
+    sidecar_unlink_fsync = fsync_states.index((False, False), perf_unlink_fsync + 1)
     assert perf_unlink_fsync < sidecar_unlink_fsync
 
 
@@ -3335,24 +4668,24 @@ def test_publish_atomically_preserves_target_replaced_at_claim(tmp_path, monkeyp
     staging_path.write_text("op,shape,latency\nmatmul,new,1.0\n", encoding="utf-8")
     parquet_path = staging_path.with_suffix(".parquet")
     pq.write_table(pa.table({"op": ["matmul"], "shape": ["old"], "latency": [9.0]}), parquet_path)
-    real_rename_noreplace = helper_mod._rename_noreplace
+    real_rename_noreplace = helper_mod._rename_noreplace_at
     raced = False
 
-    def replace_target_before_claim(source, target):
+    def replace_target_before_claim(source, target, directory_fd):
         nonlocal raced
-        source = Path(source)
-        target = Path(target)
-        if source == parquet_path and target.name.endswith(".claim") and not raced:
+        source_path = output_root / source
+        target_path = output_root / target
+        if source_path == parquet_path and target_path.name.endswith(".claim") and not raced:
             raced = True
             attacker = output_root / ".publish-claim-attacker.parquet"
             pq.write_table(
                 pa.table({"op": ["matmul"], "shape": ["attacker"], "latency": [666.0]}),
                 attacker,
             )
-            os.replace(attacker, source)
-        return real_rename_noreplace(source, target)
+            os.replace(attacker, source_path)
+        return real_rename_noreplace(source, target, directory_fd)
 
-    monkeypatch.setattr(helper_mod, "_rename_noreplace", replace_target_before_claim)
+    monkeypatch.setattr(helper_mod, "_rename_noreplace_at", replace_target_before_claim)
 
     with pytest.raises(RuntimeError, match=r"strict recovery state|target claim changed"):
         collect_mod._finalize_collector_outputs_transaction(
@@ -3389,7 +4722,9 @@ def test_hard_exit_before_perf_journal_does_not_leave_rollback_snapshot(tmp_path
 
     assert parquet_path.read_bytes() == parquet_before
     assert staging_path.exists()
-    assert list(output_root.glob(".*.tmp")) == []
+    retained = output_root / ".gemm_perf.parquet.tmp"
+    _assert_retained_slot(retained)
+    assert list(output_root.glob(".*.tmp")) == [retained]
     assert not (output_root / collect_mod._PERF_TRANSACTION_FILENAME).exists()
 
     _finalize_single_table(output_root, checkpoint_dir, staging_path)
@@ -3414,7 +4749,9 @@ def test_hard_exit_during_parquet_render_recovers_exact_reserved_path_and_retrie
     assert staging_path.exists()
     assert _attempted(checkpoint_path) == {"case-a"}
     assert _recover_finalization(output_root, checkpoint_dir) is None
-    assert list(output_root.glob(".*.tmp")) == []
+    retained = output_root / ".gemm_perf.parquet.tmp"
+    _assert_retained_slot(retained)
+    assert list(output_root.glob(".*.tmp")) == [retained]
 
     _finalize_single_table(output_root, checkpoint_dir, staging_path)
 
@@ -3469,7 +4806,9 @@ def test_hard_exit_after_first_multi_table_render_recovers_batch_and_retries(tmp
 
     assert {path: path.read_bytes() for path in parquet_paths} == parquet_before
     assert _recover_finalization(output_root, checkpoint_dir) is None
-    assert list(output_root.glob(".*.tmp")) == []
+    retained = output_root / ".gemm_perf.parquet.tmp"
+    _assert_retained_slot(retained)
+    assert list(output_root.glob(".*.tmp")) == [retained]
     assert all(path.exists() for path in staging_paths)
     assert _attempted(gemm_checkpoint) == {"gemm-case"}
     assert _attempted(moe_checkpoint) == {"moe-case"}
@@ -3490,7 +4829,7 @@ def test_hard_exit_after_first_multi_table_render_recovers_batch_and_retries(tmp
     assert _attempted(moe_checkpoint) == set()
 
 
-def test_recovery_removes_unjournaled_regular_reserved_parquet(tmp_path):
+def test_recovery_retains_unjournaled_regular_reserved_parquet(tmp_path):
     output_root = tmp_path / "out"
     output_root.mkdir()
     reserved = output_root / ".gemm_perf.parquet.tmp"
@@ -3507,7 +4846,7 @@ def test_recovery_removes_unjournaled_regular_reserved_parquet(tmp_path):
         is None
     )
 
-    assert not reserved.exists()
+    _assert_retained_slot(reserved)
     assert unrelated.read_bytes() == b"not a canonical collector reservation"
 
 
@@ -3559,15 +4898,382 @@ def test_hard_exit_after_perf_journal_prepare_recovers_without_publication(tmp_p
     assert not (output_root / collect_mod._PERF_TRANSACTION_FILENAME).exists()
 
 
-def test_transactional_retry_reclaims_unjournaled_deterministic_reservation(tmp_path):
+def test_repeated_hard_exit_before_perf_journal_publication_is_bounded(tmp_path):
+    output_root, checkpoint_dir, checkpoint_path, staging_path, parquet_path = _single_table_finalization(tmp_path)
+    parquet_before = parquet_path.read_bytes()
+    journal_path = output_root / collect_mod._PERF_TRANSACTION_FILENAME
+    reservation = collect_mod.atomic_write_reservation_path(journal_path)
+    cleanup_claim = output_root / f".{collect_mod._PERF_TRANSACTION_FILENAME}.tmp.cleanup"
+
+    for _attempt in range(3):
+        _run_hard_exit(
+            _crash_around_atomic_journal_publication,
+            (
+                str(output_root),
+                str(checkpoint_dir),
+                collect_mod._PERF_TRANSACTION_FILENAME,
+                False,
+                96,
+            ),
+            96,
+            "collector pre-publication perf-journal crash",
+        )
+        assert _recover_finalization(output_root, checkpoint_dir) is None
+        assert reservation.is_file()
+        assert reservation.stat().st_nlink == 1
+        assert not cleanup_claim.exists()
+        assert _private_atomic_artifact_names(journal_path) == {reservation.name}
+
+    assert parquet_path.read_bytes() == parquet_before
+    assert staging_path.exists()
+    assert _attempted(checkpoint_path) == {"case-a"}
+
+
+def test_repeated_hard_exit_after_perf_journal_publication_is_bounded(tmp_path):
+    output_root, checkpoint_dir, checkpoint_path, staging_path, parquet_path = _single_table_finalization(tmp_path)
+    parquet_before = parquet_path.read_bytes()
+    journal_path = output_root / collect_mod._PERF_TRANSACTION_FILENAME
+    reservation = collect_mod.atomic_write_reservation_path(journal_path)
+    cleanup_claim = output_root / f".{collect_mod._PERF_TRANSACTION_FILENAME}.tmp.cleanup"
+    retained = collect_mod.collector_retained_path(journal_path)
+
+    for _attempt in range(3):
+        _run_hard_exit(
+            _crash_around_atomic_journal_publication,
+            (
+                str(output_root),
+                str(checkpoint_dir),
+                collect_mod._PERF_TRANSACTION_FILENAME,
+                True,
+                97,
+            ),
+            97,
+            "collector post-publication perf-journal crash",
+        )
+        assert _recover_finalization(output_root, checkpoint_dir) is None
+        assert not reservation.exists()
+        assert not cleanup_claim.exists()
+        assert _private_atomic_artifact_names(journal_path) == {retained.name}
+
+    assert not journal_path.exists()
+    assert parquet_path.read_bytes() == parquet_before
+    assert staging_path.exists()
+    assert _attempted(checkpoint_path) == {"case-a"}
+
+
+def test_repeated_hard_exit_before_sidecar_journal_publication_is_bounded(tmp_path):
+    output_root, checkpoint_dir, checkpoint_path, staging_path, parquet_path = _single_table_finalization(tmp_path)
+    parquet_before = parquet_path.read_bytes()
+    journal_path = output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME
+    reservation = collect_mod.atomic_write_reservation_path(journal_path)
+    cleanup_claim = output_root / f".{collect_mod._SIDECAR_TRANSACTION_FILENAME}.tmp.cleanup"
+
+    for _attempt in range(3):
+        _run_hard_exit(
+            _crash_around_atomic_journal_publication,
+            (
+                str(output_root),
+                str(checkpoint_dir),
+                collect_mod._SIDECAR_TRANSACTION_FILENAME,
+                False,
+                98,
+            ),
+            98,
+            "collector pre-publication sidecar-journal crash",
+        )
+        assert _recover_finalization(output_root, checkpoint_dir) is None
+        assert reservation.is_file()
+        assert reservation.stat().st_nlink == 1
+        assert not cleanup_claim.exists()
+        assert _private_atomic_artifact_names(journal_path) == {reservation.name}
+
+    assert not (output_root / collect_mod._PERF_TRANSACTION_FILENAME).exists()
+    assert not (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).exists()
+    assert parquet_path.read_bytes() == parquet_before
+    assert staging_path.exists()
+    assert _attempted(checkpoint_path) == {"case-a"}
+
+
+def test_repeated_hard_exit_after_sidecar_journal_publication_is_bounded(tmp_path):
+    output_root, checkpoint_dir, checkpoint_path, staging_path, _parquet_path = _single_table_finalization(tmp_path)
+    journal_path = output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME
+    reservation = collect_mod.atomic_write_reservation_path(journal_path)
+    cleanup_claim = output_root / f".{collect_mod._SIDECAR_TRANSACTION_FILENAME}.tmp.cleanup"
+    retained = collect_mod.collector_retained_path(journal_path)
+    meta_path = output_root / "collection_meta.yaml"
+
+    for attempt in range(3):
+        if attempt:
+            checkpoint_path = _write_checkpoint(
+                checkpoint_dir,
+                done=["case-a"],
+                failed=[],
+                attempted=["case-a"],
+            )
+            _write_perf_event_through_logger(staging_path)
+        _run_hard_exit(
+            _crash_around_atomic_journal_publication,
+            (
+                str(output_root),
+                str(checkpoint_dir),
+                collect_mod._SIDECAR_TRANSACTION_FILENAME,
+                True,
+                99,
+            ),
+            99,
+            "collector post-publication sidecar-journal crash",
+        )
+        assert _recover_finalization(output_root, checkpoint_dir) == meta_path
+        assert not reservation.exists()
+        assert not cleanup_claim.exists()
+        assert not staging_path.exists()
+        assert _attempted(checkpoint_path) == set()
+        assert _private_atomic_artifact_names(journal_path) == {retained.name}
+
+    assert not (output_root / collect_mod._PERF_TRANSACTION_FILENAME).exists()
+    assert not (output_root / collect_mod._SIDECAR_TRANSACTION_FILENAME).exists()
+    assert meta_path.is_file()
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "directory", "hardlink"])
+def test_recovery_preserves_unowned_atomic_journal_reservation(tmp_path, replacement):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    journal_path = output_root / collect_mod._PERF_TRANSACTION_FILENAME
+    reservation = output_root / f".{collect_mod._PERF_TRANSACTION_FILENAME}.tmp"
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"must survive")
+    if replacement == "symlink":
+        try:
+            reservation.symlink_to(outside)
+        except OSError as error:
+            pytest.skip(f"symlinks unavailable: {error}")
+    elif replacement == "directory":
+        reservation.mkdir()
+    else:
+        os.link(outside, reservation)
+
+    with pytest.raises(RuntimeError, match=r"atomic write|artifact|Unowned"):
+        _recover_finalization(output_root, tmp_path / "checkpoint")
+
+    assert not journal_path.exists()
+    assert reservation.exists() or reservation.is_symlink()
+    assert outside.read_bytes() == b"must survive"
+
+
+def test_recovery_retains_only_exact_atomic_journal_reservation(tmp_path):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    reservation = output_root / f".{collect_mod._PERF_TRANSACTION_FILENAME}.tmp"
+    reservation.write_bytes(b"interrupted exact reservation")
+    historical_random = output_root / f".{collect_mod._PERF_TRANSACTION_FILENAME}.historical.tmp"
+    historical_random.write_bytes(b"unrelated historical artifact")
+
+    assert _recover_finalization(output_root, tmp_path / "checkpoint") is None
+
+    assert reservation.read_bytes() == b"interrupted exact reservation"
+    assert historical_random.read_bytes() == b"unrelated historical artifact"
+
+
+def test_recovery_fsyncs_atomic_journal_reservation_claim_and_cleanup(tmp_path, monkeypatch):
+    import helper as helper_mod
+
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    reservation = output_root / f".{collect_mod._PERF_TRANSACTION_FILENAME}.tmp"
+    cleanup_claim = output_root / f".{collect_mod._PERF_TRANSACTION_FILENAME}.tmp.cleanup"
+    reservation.write_bytes(b"interrupted exact reservation")
+    fsync_states = []
+    real_fsync = os.fsync
+    output_identity = (output_root.stat().st_dev, output_root.stat().st_ino)
+
+    def record_reservation_state(file_descriptor):
+        opened = os.fstat(file_descriptor)
+        state = (reservation.exists(), cleanup_claim.exists())
+        if (
+            stat.S_ISDIR(opened.st_mode)
+            and (opened.st_dev, opened.st_ino) == output_identity
+            and state in ((False, True), (True, False))
+            and (not fsync_states or fsync_states[-1] != state)
+        ):
+            fsync_states.append(state)
+        return real_fsync(file_descriptor)
+
+    monkeypatch.setattr(helper_mod.os, "fsync", record_reservation_state)
+
+    assert _recover_finalization(output_root, tmp_path / "checkpoint") is None
+
+    assert fsync_states == [(False, True), (True, False)]
+
+
+@pytest.mark.parametrize("target_present", [False, True])
+def test_recovery_resumes_after_hard_exit_from_atomic_reservation_claim(tmp_path, monkeypatch, target_present):
+    import helper as helper_mod
+
+    class SimulatedHardExit(BaseException):
+        pass
+
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    journal_path = output_root / collect_mod._PERF_TRANSACTION_FILENAME
+    reservation = output_root / f".{collect_mod._PERF_TRANSACTION_FILENAME}.tmp"
+    cleanup_claim = output_root / f".{collect_mod._PERF_TRANSACTION_FILENAME}.tmp.cleanup"
+    reservation.write_bytes(b"interrupted reservation")
+    if target_present:
+        os.link(reservation, journal_path)
+    real_rename_noreplace = helper_mod._rename_noreplace
+
+    def crash_after_claim(source, target):
+        real_rename_noreplace(source, target)
+        if Path(target) == cleanup_claim:
+            raise SimulatedHardExit
+
+    with monkeypatch.context() as fault:
+        fault.setattr(helper_mod, "_rename_noreplace", crash_after_claim)
+        with pytest.raises(SimulatedHardExit):
+            helper_mod.cleanup_atomic_write_reservations([journal_path])
+
+    assert not reservation.exists()
+    assert cleanup_claim.is_file()
+    assert cleanup_claim.stat().st_nlink == (2 if target_present else 1)
+
+    if target_present:
+        with pytest.raises(RuntimeError, match=r"atomic write|legacy|artifact"):
+            helper_mod.cleanup_atomic_write_reservations([journal_path])
+        assert journal_path.samefile(reservation)
+        assert journal_path.stat().st_nlink == 2
+    else:
+        helper_mod.cleanup_atomic_write_reservations([journal_path])
+        assert reservation.is_file()
+        assert reservation.stat().st_nlink == 1
+    assert not cleanup_claim.exists()
+
+
+def test_recovery_preserves_foreign_replacement_after_atomic_reservation_claim(tmp_path, monkeypatch):
+    import helper as helper_mod
+
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    reservation = output_root / f".{collect_mod._PERF_TRANSACTION_FILENAME}.tmp"
+    cleanup_claim = output_root / f".{collect_mod._PERF_TRANSACTION_FILENAME}.tmp.cleanup"
+    displaced_owned = output_root / ".displaced-owned"
+    foreign = output_root / ".foreign"
+    reservation.write_bytes(b"owned reservation")
+    foreign.write_bytes(b"MUST SURVIVE")
+    real_rename_noreplace = helper_mod._rename_noreplace_at
+
+    def replace_after_claim(source, target, directory_fd):
+        real_rename_noreplace(source, target, directory_fd)
+        if output_root / target == cleanup_claim:
+            cleanup_claim.rename(displaced_owned)
+            foreign.rename(cleanup_claim)
+
+    monkeypatch.setattr(helper_mod, "_rename_noreplace_at", replace_after_claim)
+
+    with pytest.raises(RuntimeError, match=r"atomic write|artifact|changed"):
+        _recover_finalization(output_root, tmp_path / "checkpoint")
+
+    assert displaced_owned.read_bytes() == b"owned reservation"
+    assert any(
+        path.is_file() and path.read_bytes() == b"MUST SURVIVE" for path in (foreign, reservation, cleanup_claim)
+    )
+
+
+@pytest.mark.parametrize("mutation", ["equal-size-content", "size", "mode"])
+def test_recovery_preserves_same_inode_atomic_reservation_mutation_after_claim(tmp_path, monkeypatch, mutation):
+    import helper as helper_mod
+
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    journal_path = output_root / collect_mod._PERF_TRANSACTION_FILENAME
+    reservation = output_root / f".{collect_mod._PERF_TRANSACTION_FILENAME}.tmp"
+    cleanup_claim = output_root / f".{collect_mod._PERF_TRANSACTION_FILENAME}.tmp.cleanup"
+    reservation.write_bytes(b"owned reservation")
+    reservation.chmod(0o600)
+    original_identity = (reservation.stat().st_dev, reservation.stat().st_ino)
+    real_rename_noreplace = helper_mod._rename_noreplace
+
+    def mutate_after_claim(source, target):
+        real_rename_noreplace(source, target)
+        if Path(target) != cleanup_claim:
+            return
+        if mutation == "equal-size-content":
+            cleanup_claim.write_bytes(b"raced reservation")
+        elif mutation == "size":
+            with cleanup_claim.open("ab") as claimed_file:
+                claimed_file.write(b"!")
+        else:
+            cleanup_claim.chmod(0o700)
+
+    monkeypatch.setattr(helper_mod, "_rename_noreplace", mutate_after_claim)
+
+    with pytest.raises(RuntimeError, match=r"atomic write|artifact|changed"):
+        helper_mod.cleanup_atomic_write_reservations([journal_path])
+
+    assert (reservation.stat().st_dev, reservation.stat().st_ino) == original_identity
+    assert not cleanup_claim.exists()
+    if mutation == "equal-size-content":
+        assert reservation.read_bytes() == b"raced reservation"
+    elif mutation == "size":
+        assert reservation.read_bytes() == b"owned reservation!"
+    else:
+        assert stat.S_IMODE(reservation.stat().st_mode) == 0o700
+
+
+def test_recovery_fails_closed_on_legacy_same_inode_atomic_journal_alias(tmp_path):
+    import helper as helper_mod
+
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    journal_path = output_root / collect_mod._PERF_TRANSACTION_FILENAME
+    reservation = output_root / f".{collect_mod._PERF_TRANSACTION_FILENAME}.tmp"
+    journal_path.write_bytes(b"legacy hardlink publication")
+    os.link(journal_path, reservation)
+
+    with pytest.raises(RuntimeError, match=r"atomic write|legacy|artifact"):
+        helper_mod.cleanup_atomic_write_reservations([journal_path])
+
+    assert journal_path.samefile(reservation)
+    assert journal_path.stat().st_nlink == 2
+    assert reservation.stat().st_nlink == 2
+    assert not helper_mod.collector_retained_path(journal_path).exists()
+
+
+@pytest.mark.parametrize("mismatch", ["content", "size", "mode"])
+def test_recovery_preserves_mismatched_atomic_journal_publication(tmp_path, mismatch):
+    output_root = tmp_path / "out"
+    output_root.mkdir()
+    journal_path = output_root / collect_mod._PERF_TRANSACTION_FILENAME
+    reservation = output_root / f".{collect_mod._PERF_TRANSACTION_FILENAME}.tmp"
+    journal_path.write_bytes(b"target")
+    reservation.write_bytes({"content": b"raced!", "size": b"different size", "mode": b"target"}[mismatch])
+    journal_path.chmod(0o600)
+    reservation.chmod(0o640 if mismatch == "mode" else 0o600)
+    target_alias = output_root / ".target-alias"
+    reservation_alias = output_root / ".reservation-alias"
+    os.link(journal_path, target_alias)
+    os.link(reservation, reservation_alias)
+
+    with pytest.raises(RuntimeError, match=r"atomic write|publication|artifact"):
+        _recover_finalization(output_root, tmp_path / "checkpoint")
+
+    assert journal_path.exists()
+    assert reservation.exists()
+    assert target_alias.exists()
+    assert reservation_alias.exists()
+
+
+def test_transactional_retry_reuses_unjournaled_deterministic_reservation(tmp_path):
     output_root, checkpoint_dir, checkpoint_path, staging_path, parquet_path = _single_table_finalization(tmp_path)
     reserved = output_root / ".gemm_perf.parquet.tmp"
     reserved.write_bytes(b"partial parquet from interrupted transaction")
+    reserved_identity = (reserved.stat().st_dev, reserved.stat().st_ino)
 
     _finalize_single_table(output_root, checkpoint_dir, staging_path)
 
     assert {row["shape"] for row in pq.read_table(parquet_path).to_pylist()} == {"old", "new"}
-    assert not reserved.exists()
+    assert (parquet_path.stat().st_dev, parquet_path.stat().st_ino) == reserved_identity
+    _assert_retained_slot(reserved)
     assert not staging_path.exists()
     assert _attempted(checkpoint_path) == set()
 
@@ -3755,28 +5461,28 @@ def test_publish_failure_retains_journal_when_restored_target_is_tampered(tmp_pa
     for path, shape, latency in zip(parquet_paths, ("old-gemm", "old-moe"), (9.0, 8.0), strict=True):
         pq.write_table(pa.table({"op": ["matmul"], "shape": [shape], "latency": [latency]}), path)
 
-    real_rename_noreplace = helper_mod._rename_noreplace
+    real_rename_noreplace = helper_mod._rename_noreplace_at
     failed = False
     rollback_raced = False
 
-    def fail_second_publish_and_race_rollback(source, target):
+    def fail_second_publish_and_race_rollback(source, target, directory_fd):
         nonlocal failed, rollback_raced
-        source = Path(source)
-        target = Path(target)
-        if target == parquet_paths[1] and source.name.endswith(".tmp") and not failed:
+        source_path = output_root / source
+        target_path = output_root / target
+        if target_path == parquet_paths[1] and source_path.name.endswith(".tmp") and not failed:
             failed = True
             raise OSError("simulated second parquet publish failure")
-        if source == parquet_paths[0] and target.name.endswith(".tmp") and failed and not rollback_raced:
+        if source_path == parquet_paths[0] and target_path.name.endswith(".tmp") and failed and not rollback_raced:
             rollback_raced = True
             attacker = output_root / ".rollback-attacker.parquet"
             pq.write_table(
                 pa.table({"op": ["matmul"], "shape": ["attacker"], "latency": [777.0]}),
                 attacker,
             )
-            os.replace(attacker, source)
-        return real_rename_noreplace(source, target)
+            os.replace(attacker, source_path)
+        return real_rename_noreplace(source, target, directory_fd)
 
-    monkeypatch.setattr(helper_mod, "_rename_noreplace", fail_second_publish_and_race_rollback)
+    monkeypatch.setattr(helper_mod, "_rename_noreplace_at", fail_second_publish_and_race_rollback)
 
     with pytest.raises((OSError, RuntimeError)):
         collect_mod._finalize_collector_outputs_transaction(
@@ -3833,17 +5539,17 @@ def test_rollback_rejects_duplicate_old_claim_without_unlinking_it(tmp_path, mon
     for path, shape in zip(parquet_paths, ("old-gemm", "old-moe"), strict=True):
         pq.write_table(pa.table({"op": ["matmul"], "shape": [shape], "latency": [9.0]}), path)
 
-    real_rename_noreplace = helper_mod._rename_noreplace
+    real_rename_noreplace = helper_mod._rename_noreplace_at
     failed = False
 
-    def fail_second_publish(source, target):
+    def fail_second_publish(source, target, directory_fd):
         nonlocal failed
-        source = Path(source)
-        target = Path(target)
-        if target == parquet_paths[1] and source.name.endswith(".tmp") and not failed:
+        source_path = output_root / source
+        target_path = output_root / target
+        if target_path == parquet_paths[1] and source_path.name.endswith(".tmp") and not failed:
             failed = True
             raise OSError("simulated second parquet publish failure")
-        return real_rename_noreplace(source, target)
+        return real_rename_noreplace(source, target, directory_fd)
 
     real_rollback_complete = collect_mod._CollectorPerfPublicationTransaction.rollback_complete
     duplicate_claim = None
@@ -3854,7 +5560,7 @@ def test_rollback_rejects_duplicate_old_claim_without_unlinking_it(tmp_path, mon
         os.link(publications[0].target, duplicate_claim)
         return real_rollback_complete(transaction, publications)
 
-    monkeypatch.setattr(helper_mod, "_rename_noreplace", fail_second_publish)
+    monkeypatch.setattr(helper_mod, "_rename_noreplace_at", fail_second_publish)
     monkeypatch.setattr(
         collect_mod._CollectorPerfPublicationTransaction,
         "rollback_complete",
@@ -3967,19 +5673,19 @@ def test_normal_commit_rejects_live_checkpoint_ledger_change_before_publish(
         failed=[],
         attempted=["case-a"],
     )
-    real_write = provenance.write_collection_meta
+    real_render = provenance.render_collection_meta
     injected_checkpoint: bytes | None = None
 
     def render_then_change_checkpoint(*args, **kwargs):
         nonlocal injected_checkpoint
-        rendered_path = real_write(*args, **kwargs)
+        rendered = real_render(*args, **kwargs)
         checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
         checkpoint[ledger] = replacement
         checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
         injected_checkpoint = checkpoint_path.read_bytes()
-        return rendered_path
+        return rendered
 
-    monkeypatch.setattr(provenance, "write_collection_meta", render_then_change_checkpoint)
+    monkeypatch.setattr(provenance, "render_collection_meta", render_then_change_checkpoint)
 
     with pytest.raises(RuntimeError, match=error_match):
         collect_mod._write_collector_provenance(
@@ -5290,6 +6996,67 @@ def test_recovery_rejects_duplicate_attempt_ids_across_participants_before_mutat
     assert journal_path.exists()
 
 
+@pytest.mark.parametrize("later_failure", ["malformed-json", "ledger-mismatch"])
+def test_recovery_preflights_all_checkpoint_participants_before_normalizing_any(tmp_path, later_failure):
+    output_root = tmp_path / "out"
+    checkpoint_dir = tmp_path / "checkpoint"
+    first = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name="sglang.mla_bmm_gen_pre",
+        version="0.5.14",
+        done=["case-pre"],
+        failed=[],
+        attempted=["case-pre"],
+    )
+    second = _write_checkpoint_for(
+        checkpoint_dir,
+        backend=BACKEND,
+        full_name="sglang.mla_bmm_gen_post",
+        version="0.5.14",
+        done=["case-post"],
+        failed=[],
+        attempted=["case-post"],
+    )
+    staged = output_root / "mla_bmm_perf.txt"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"owned staging")
+    _write_sidecar_transaction(
+        output_root,
+        [(first, {"case-pre"}), (second, {"case-post"})],
+        [staged],
+        checkpoint_dir=checkpoint_dir,
+        tagged=set(),
+        pending_document=True,
+    )
+
+    first_previous = first.with_name(f".{first.name}.tmp.previous")
+    first_reservation = first.with_name(f".{first.name}.tmp")
+    first.replace(first_previous)
+    first_reservation.write_bytes(b"future checkpoint bytes")
+    tracked_first_paths = (first, first_previous, first_reservation)
+
+    def namespace_state(paths):
+        return {path.name: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) for path in paths if path.exists()}
+
+    first_before = namespace_state(tracked_first_paths)
+    if later_failure == "malformed-json":
+        second.write_bytes(b"{")
+    else:
+        second_document = json.loads(second.read_text(encoding="utf-8"))
+        second_document["done"] = ["different-case"]
+        second.write_text(json.dumps(second_document), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match=r"checkpoint participant|checkpoint"):
+        collect_mod._recover_collector_provenance_transaction(
+            output_root,
+            backend=BACKEND,
+            checkpoint_dir=str(checkpoint_dir),
+        )
+
+    assert namespace_state(tracked_first_paths) == first_before
+
+
 def test_recovery_rejects_unexpected_journal_field_before_mutation(tmp_path):
     output_root = tmp_path / "out"
     checkpoint_dir = tmp_path / "checkpoint"
@@ -5332,7 +7099,7 @@ def test_closed_sidecar_transaction_allows_later_identical_case_plan_event(tmp_p
     output_root = tmp_path / "out"
     output_root.mkdir()
     staged = output_root / "gemm_perf.txt"
-    staged.write_text("op,latency\nmatmul,1.0\n", encoding="utf-8")
+    _write_perf_event_through_logger(staged)
     first_finalization: dict[Path, collect_mod.PerfFinalizationInfo] = {}
     parquet_path = collect_mod.finalize_perf_files(
         [staged],
@@ -5359,7 +7126,7 @@ def test_closed_sidecar_transaction_allows_later_identical_case_plan_event(tmp_p
     )
     assert _attempted(checkpoint_path) == set()
 
-    staged.write_text("op,latency\nmatmul,1.0\n", encoding="utf-8")
+    _write_perf_event_through_logger(staged)
     tracker = collect_mod._resume_tracker_for_collection(
         _collections()[0],
         ctx,
