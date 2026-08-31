@@ -1463,16 +1463,23 @@ class Task:
         )
 
     def _large_ep_eps(self, role: str) -> set[int]:
-        """EP sizes this role could run large-EP: covered in every phase it runs
-        AND in the context phase that sizes its weights (see
-        ``_required_large_ep_phases``)."""
+        """Covered EP sizes that actually span more than one physical node.
+
+        Single-node A2A data may resolve the communication backend for an
+        intra-node tuple, but it must not unlock the multi-node search ladder
+        or its larger replica budget.  Only coverage present in every required
+        phase *and* wider than the system's node width enables that expansion.
+        """
         coverage = self._large_ep_coverage(role)
         eps: set[int] | None = None
         for phase in set(self._role_phases(role)) | set(self._required_large_ep_phases(role)):
             per_backend = coverage.get(phase, {})
             phase_eps = set().union(*per_backend.values()) if per_backend else set()
             eps = phase_eps if eps is None else eps & phase_eps
-        return eps or set()
+        gpus_per_node = self._num_gpus_per_node(role)
+        if not gpus_per_node:
+            return set()
+        return {ep for ep in (eps or set()) if ep > gpus_per_node}
 
     def _role_has_large_ep_tuple(self, role: str) -> bool:
         """Whether any enumerated tuple for this role resolves a comm backend."""

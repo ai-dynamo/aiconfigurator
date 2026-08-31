@@ -1,0 +1,1626 @@
+[
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "bfloat16",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 1,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "bfloat16",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 12,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "bfloat16",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 128,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "bfloat16",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 16,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "bfloat16",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 160,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "bfloat16",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 2,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "bfloat16",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 24,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "bfloat16",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 256,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "bfloat16",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 32,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "bfloat16",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 4,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "bfloat16",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 48,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "bfloat16",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 64,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "bfloat16",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 8,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "bfloat16",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 96,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 1,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 12,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 128,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 16,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 160,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 2,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 24,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 256,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 32,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 4,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 48,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 64,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 8,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 96,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 6144,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 1,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "forced DEEPEPLOWLATENCY does not support truthful post-quant identity 'fp8'",
+    "error_type": "MoeA2ABenchmarkError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 6144,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 12,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "forced DEEPEPLOWLATENCY does not support truthful post-quant identity 'fp8'",
+    "error_type": "MoeA2ABenchmarkError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 6144,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 128,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "forced DEEPEPLOWLATENCY does not support truthful post-quant identity 'fp8'",
+    "error_type": "MoeA2ABenchmarkError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 6144,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 16,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "forced DEEPEPLOWLATENCY does not support truthful post-quant identity 'fp8'",
+    "error_type": "MoeA2ABenchmarkError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 6144,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 160,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "forced DEEPEPLOWLATENCY does not support truthful post-quant identity 'fp8'",
+    "error_type": "MoeA2ABenchmarkError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 6144,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 2,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "forced DEEPEPLOWLATENCY does not support truthful post-quant identity 'fp8'",
+    "error_type": "MoeA2ABenchmarkError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 6144,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 24,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "forced DEEPEPLOWLATENCY does not support truthful post-quant identity 'fp8'",
+    "error_type": "MoeA2ABenchmarkError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 6144,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 256,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "forced DEEPEPLOWLATENCY does not support truthful post-quant identity 'fp8'",
+    "error_type": "MoeA2ABenchmarkError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 6144,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 32,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "forced DEEPEPLOWLATENCY does not support truthful post-quant identity 'fp8'",
+    "error_type": "MoeA2ABenchmarkError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 6144,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 4,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "forced DEEPEPLOWLATENCY does not support truthful post-quant identity 'fp8'",
+    "error_type": "MoeA2ABenchmarkError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 6144,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 48,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "forced DEEPEPLOWLATENCY does not support truthful post-quant identity 'fp8'",
+    "error_type": "MoeA2ABenchmarkError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 6144,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 64,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "forced DEEPEPLOWLATENCY does not support truthful post-quant identity 'fp8'",
+    "error_type": "MoeA2ABenchmarkError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 6144,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 8,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "forced DEEPEPLOWLATENCY does not support truthful post-quant identity 'fp8'",
+    "error_type": "MoeA2ABenchmarkError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "fp8",
+      "ep_size": 8,
+      "hidden_size": 6144,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 96,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "forced DEEPEPLOWLATENCY does not support truthful post-quant identity 'fp8'",
+    "error_type": "MoeA2ABenchmarkError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "nvfp4",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 1,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "nvfp4",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 12,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "nvfp4",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 128,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "nvfp4",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 16,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "nvfp4",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 160,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "nvfp4",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 2,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "nvfp4",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 24,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "nvfp4",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 256,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "nvfp4",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 32,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "nvfp4",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 4,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "nvfp4",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 48,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "nvfp4",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 64,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "nvfp4",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 8,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  },
+  {
+    "case": {
+      "comm_backend": "trtllm_deepep_ll",
+      "comm_dtype": "nvfp4",
+      "ep_size": 8,
+      "hidden_size": 3072,
+      "inference_phase": "generation",
+      "node_num": 1,
+      "num_experts": 256,
+      "num_tokens": 96,
+      "sms": 0,
+      "topk": 8
+    },
+    "classification": "unexpected",
+    "error": "DeepEPLowLatency does not support hidden_size=3072. Supported hidden sizes: [2048, 2560, 3584, 4096, 5120, 6144, 7168]",
+    "error_type": "RuntimeError",
+    "module": "collector.wideep.trtllm.collect_moe_a2a",
+    "op": "moe_a2a",
+    "ranks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ]
+  }
+]

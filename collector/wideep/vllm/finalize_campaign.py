@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Validate and merge one three-job vLLM DeepEP campaign for one system.
+"""Validate and merge one vLLM DeepEP campaign for one system.
 
 Formal input is exactly one job for every supported ``(node_num, backend)``
 pair. A job with any failed case, incomplete provenance, an undeclared row, or
@@ -57,6 +57,11 @@ SYSTEM_GPU_IDENTITIES: dict[str, tuple[str, str]] = {
     "b300_sxm": ("B300", "10.3"),
     "h100_sxm": ("H100", "9.0"),
     "h200_sxm": ("H200", "9.0"),
+}
+V2_FORMAL_SYSTEMS = frozenset({"h100_sxm"})
+LEGACY_BACKENDS = tuple(backend for backend in BACKENDS if backend != "deepep_v2")
+FORMAL_BACKENDS_BY_SYSTEM: dict[str, tuple[str, ...]] = {
+    system: BACKENDS if system in V2_FORMAL_SYSTEMS else LEGACY_BACKENDS for system in SYSTEM_LAYOUTS
 }
 ROW_COLUMNS = (
     "framework",
@@ -384,7 +389,7 @@ def _merge_runtime(jobs: list[ValidatedJob], *, system: str) -> dict[str, Any]:
     )
     backend_abis: dict[str, dict[str, str]] = {}
     backend_capabilities: dict[str, dict[str, dict[str, str]]] = {}
-    for backend in BACKENDS:
+    for backend in FORMAL_BACKENDS_BY_SYSTEM[system]:
         backend_jobs = [job for job in jobs if job.backend == backend]
         contract_keys = set(VLLM_RUNTIME.abi_for_backend(backend)) | {
             "deep_ep_overlay_wheel_sha256",
@@ -420,11 +425,14 @@ def merge_campaign(
     output_dir: str | Path,
     checksum_output: str | Path | None = None,
 ) -> tuple[Path, Path]:
-    """Validate three formal jobs, merge them, and atomically publish artifacts."""
+    """Validate the system's formal jobs, merge them, and atomically publish artifacts."""
     if system not in SYSTEM_LAYOUTS:
         raise CampaignValidationError(f"unsupported system {system!r}")
     jobs = [validate_job_dir(path, system=system) for path in input_dirs]
-    expected_combinations = {(node_num, backend) for node_num in SYSTEM_LAYOUTS[system][1] for backend in BACKENDS}
+    formal_backends = FORMAL_BACKENDS_BY_SYSTEM[system]
+    expected_combinations = {
+        (node_num, backend) for node_num in SYSTEM_LAYOUTS[system][1] for backend in formal_backends
+    }
     observed_combinations = {(job.node_num, job.backend) for job in jobs}
     if len(jobs) != len(expected_combinations) or observed_combinations != expected_combinations:
         raise CampaignValidationError(
@@ -443,7 +451,7 @@ def merge_campaign(
 
     all_case_ids: list[str] = []
     for node_num, ep_size in SYSTEM_LAYOUTS[system][1].items():
-        for backend in BACKENDS:
+        for backend in formal_backends:
             cases = _expected_cases(ep_size=ep_size, node_num=node_num, backend=backend)
             all_case_ids.extend(case_plan_ids(cases, world_size=ep_size, node_num=node_num))
 

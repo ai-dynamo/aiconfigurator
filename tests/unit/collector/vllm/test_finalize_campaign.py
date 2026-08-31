@@ -39,6 +39,8 @@ def _runtime(*, fabric_identity: str, backend: str, ep_size: int, system: str) -
             "deep_ep_overlay_wheel_sha256": "4" * 64,
             "deep_ep_patch_sha256": campaign._sha256(campaign.LEGACY_NVL4_PATCH),
         }
+    elif system == "b300_sxm":
+        abi["deep_ep_overlay_wheel_sha256"] = "4" * 64
     if backend == "deepep_v2":
         abi |= {
             "deep_ep_topology_source": "nccl_lsa",
@@ -144,12 +146,15 @@ def _write_job(
     return job_dir
 
 
-def _three_h200_jobs(root: Path) -> list[Path]:
-    return [_write_job(root, node_num=1, ep_size=8, backend=backend) for backend in campaign.BACKENDS]
+def _h100_jobs(root: Path) -> list[Path]:
+    return [
+        _write_job(root, node_num=1, ep_size=8, backend=backend, system="h100_sxm")
+        for backend in campaign.FORMAL_BACKENDS_BY_SYSTEM["h100_sxm"]
+    ]
 
 
-def test_merge_campaign_requires_and_validates_all_three_formal_jobs(tmp_path):
-    jobs = _three_h200_jobs(tmp_path / "jobs")
+def test_merge_campaign_requires_and_validates_all_three_v2_capable_jobs(tmp_path):
+    jobs = _h100_jobs(tmp_path / "jobs")
     output = tmp_path / "published"
     output.mkdir()
     (output / "collection_meta.yaml").write_text(
@@ -161,7 +166,7 @@ def test_merge_campaign_requires_and_validates_all_three_formal_jobs(tmp_path):
 
     parquet_path, sidecar_path = campaign.merge_campaign(
         jobs,
-        system="h200_sxm",
+        system="h100_sxm",
         output_dir=output,
         checksum_output=checksums,
     )
@@ -178,7 +183,7 @@ def test_merge_campaign_requires_and_validates_all_three_formal_jobs(tmp_path):
     meta = yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
     assert meta["tables"]["custom_allreduce_perf"] == {"status": "complete"}
     assert meta["tables"]["moe_a2a_perf"]["rows"] == len(merged)
-    assert meta["runtime"]["abi"]["campaign_system"] == "h200_sxm"
+    assert meta["runtime"]["abi"]["campaign_system"] == "h100_sxm"
     assert meta["runtime"]["backend_abis"]["deepep_v2"]["deep_ep"] == "b306af06afd412c88e51e71802951606e40b7358"
     assert set(meta["runtime"]["backend_capabilities"]["deepep_v2"]) == {"1n_ep8"}
     assert checksums.is_file()
@@ -189,9 +194,9 @@ def test_clean_republish_removes_stale_error_files_and_checksum_entries(tmp_path
         _write_job(
             tmp_path / "jobs",
             node_num=1,
-            ep_size=4,
+            ep_size=8,
             backend=backend,
-            system="gb200",
+            system="h100_sxm",
         )
         for backend in campaign.BACKENDS
     ]
@@ -208,7 +213,7 @@ def test_clean_republish_removes_stale_error_files_and_checksum_entries(tmp_path
 
     _, sidecar = campaign.merge_campaign(
         jobs,
-        system="gb200",
+        system="h100_sxm",
         output_dir=output,
         checksum_output=checksums,
     )
@@ -222,10 +227,38 @@ def test_clean_republish_removes_stale_error_files_and_checksum_entries(tmp_path
 
 
 def test_merge_campaign_rejects_missing_backend_job(tmp_path):
-    jobs = _three_h200_jobs(tmp_path / "jobs")
+    jobs = _h100_jobs(tmp_path / "jobs")
 
     with pytest.raises(campaign.CampaignValidationError, match="requires exactly"):
-        campaign.merge_campaign(jobs[:-1], system="h200_sxm", output_dir=tmp_path / "published")
+        campaign.merge_campaign(jobs[:-1], system="h100_sxm", output_dir=tmp_path / "published")
+
+
+def test_capability_failed_system_requires_only_legacy_backends(tmp_path):
+    jobs = [
+        _write_job(tmp_path / "jobs", node_num=1, ep_size=4, backend=backend, system="gb200")
+        for backend in campaign.FORMAL_BACKENDS_BY_SYSTEM["gb200"]
+    ]
+
+    parquet, sidecar = campaign.merge_campaign(
+        jobs,
+        system="gb200",
+        output_dir=tmp_path / "published",
+    )
+
+    frame = pd.read_parquet(parquet)
+    assert set(frame["comm_backend"]) == {"deepep_ht", "deepep_ll"}
+    meta = yaml.safe_load(sidecar.read_text(encoding="utf-8"))
+    assert set(meta["runtime"]["backend_abis"]) == {"deepep_ht", "deepep_ll"}
+
+
+def test_capability_failed_system_rejects_extra_v2_job(tmp_path):
+    jobs = [
+        _write_job(tmp_path / "jobs", node_num=1, ep_size=8, backend=backend, system="h200_sxm")
+        for backend in campaign.BACKENDS
+    ]
+
+    with pytest.raises(campaign.CampaignValidationError, match="requires exactly"):
+        campaign.merge_campaign(jobs, system="h200_sxm", output_dir=tmp_path / "published")
 
 
 def test_validate_job_requires_success_exact_checksums_and_recomputed_plan(tmp_path):

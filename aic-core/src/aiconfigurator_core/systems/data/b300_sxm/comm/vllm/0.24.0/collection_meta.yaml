@@ -2,10 +2,83 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: 1
-provenance: legacy
 runtime:
-  framework: vllm
+  framework: wideep_vllm
   version: 0.24.0
+  image: vllm/vllm-openai:v0.24.0@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f
+  image_variant: linux/amd64
+  image_digest: sha256:f9de5cd9fa907fbf6dbba691eb7db095d48ad58ea283e3eba7142f9a91e186e8
+  source_commit: ee0da84ab9e04ac7610e28580af62c365e898389
+  abi:
+    build_mode: official-v0.24.0-image
+    torch: 2.11.0
+    cuda: 13.0.2
+    deep_ep: 73b6ea4a439ba03a695563f9fd242c8e4b02b37c
+    nvshmem: 3.3.24
+    deep_ep_api: Buffer
+    system: b300_sxm
+    fabric_identity: approval:user-approved-pr1542-20260826
+    gpu_name: NVIDIA B300 SXM6 AC
+    driver: 595.58.03
+    compute_capability: '10.3'
+    rdma_device_count_min: '24'
+    cross_node_nvlink_capable: runtime_probe_required
+    nvlink_topology_sha256: e98671001365dfbc12b0dbebc3735e9bee4f3d20f1be04af641fb892cef5e29e
+    gloo_socket_ifname: ens6f0np0
+    slurm_topology_verified: 'true'
+    deep_ep_overlay_wheel_sha256: 6c94ba277cbdc208ac70175f0c0968dd1321834c6a693602018b779d2d8db03f
+    deep_ep_setup_sha256: 6c24ea967faaf5dc1c8024bf5734313a9baf2eb70ce8e154e5909337af19f671
+    deep_ep_cuda_arches: 9.0 10.0a 10.3a
+    deep_ep_scaleup_ranks: '8'
+    pyarrow: 24.0.0
+    pyarrow_wheel_sha256: 6165461f55ef6314f026de6638d661188e3455d3ec49834556a0ebbdbace18bb
+    campaign_system: b300_sxm
+    campaign_node_counts: '1'
+    campaign_ep_sizes: '8'
+    campaign_backends: deepep_ht,deepep_ll
+    fabric_identities: approval:user-approved-pr1542-20260826
+  backend_abis:
+    deepep_ht:
+      build_mode: official-v0.24.0-image
+      cuda: 13.0.2
+      deep_ep: 73b6ea4a439ba03a695563f9fd242c8e4b02b37c
+      deep_ep_api: Buffer
+      deep_ep_cuda_arches: 9.0 10.0a 10.3a
+      deep_ep_overlay_wheel_sha256: 6c94ba277cbdc208ac70175f0c0968dd1321834c6a693602018b779d2d8db03f
+      deep_ep_scaleup_ranks: '8'
+      nvshmem: 3.3.24
+      torch: 2.11.0
+    deepep_ll:
+      build_mode: official-v0.24.0-image
+      cuda: 13.0.2
+      deep_ep: 73b6ea4a439ba03a695563f9fd242c8e4b02b37c
+      deep_ep_api: Buffer
+      deep_ep_cuda_arches: 9.0 10.0a 10.3a
+      deep_ep_overlay_wheel_sha256: 6c94ba277cbdc208ac70175f0c0968dd1321834c6a693602018b779d2d8db03f
+      deep_ep_scaleup_ranks: '8'
+      nvshmem: 3.3.24
+      torch: 2.11.0
+  backend_capabilities:
+    deepep_ht:
+      1n_ep8:
+        backend: deepep_ht
+        topology_source: legacy_compile_time
+        num_scaleout_ranks: '1'
+        num_scaleup_ranks: '8'
+    deepep_ll:
+      1n_ep8:
+        backend: deepep_ll
+        topology_source: legacy_compile_time
+        num_scaleout_ranks: '1'
+        num_scaleup_ranks: '8'
 tables:
   custom_allreduce_perf:
+    status: complete
+  moe_a2a_perf:
+    collector_ref: 65aab00d1a52a2924755ef2c389442c645571409
+    collector_hash: sha256:a0f6bea7b745dc4baa05d4c9a953c43dba3548f8c244497645ec9f784fda0b81
+    case_plan_hash: sha256:6bf802e0fcb586ca028af01eae5e92fcd9cdb40f72d6dd7f3a375b9500721b0c
+    collected_at: '2026-08-30'
+    rows: 324
+    classified_failures: 0
     status: complete
