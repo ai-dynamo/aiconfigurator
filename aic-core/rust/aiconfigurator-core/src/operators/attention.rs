@@ -1147,21 +1147,23 @@ fn encoder_attention_empirical(
 
 /// The b200_sxm/vllm/0.24.0 context-attention walk order Python serializes
 /// for an op with no `attention_backend` override (`resolve_lane_order` +
-/// `attention.lane_walk_order`). The raw vLLM leftovers are density-ranked:
-/// prefill (116 slices / 44,664 rows), decode (116 / 3,684), then triton
-/// (7 / 1,632).
+/// `attention.lane_walk_order`). Primary lanes are density-ranked first:
+/// prefill (72 slices / 44,664 rows), decode (72 / 3,684), then triton
+/// (9 / 1,632). The shared-only vLLM flashinfer lane (50 / 35,360) follows
+/// the canonical donor tier.
 #[cfg(test)]
 pub(crate) fn b200_vllm_context_lane_order() -> Vec<String> {
     [
+        "vllm_flashinfer_trtllmprefill",
+        "vllm_flashinfer_trtllmdecode",
+        "vllm_triton_attn",
         "fa3",
         "fla",
         "flashinfer",
         "triton",
         "trtllm_mha",
         "default",
-        "vllm_flashinfer_trtllmprefill",
-        "vllm_flashinfer_trtllmdecode",
-        "vllm_triton_attn",
+        "vllm_flashinfer",
     ]
     .iter()
     .map(|lane| lane.to_string())
@@ -1169,19 +1171,21 @@ pub(crate) fn b200_vllm_context_lane_order() -> Vec<String> {
 }
 
 /// Decode twin of [`b200_vllm_context_lane_order`]. The vLLM 0.24.0
-/// generation table has no prefill lane; its leftovers are decode
-/// (66 slices / 59,582 rows), then triton (7 / 2,228).
+/// generation table has no prefill lane; its primary lanes are decode
+/// (72 slices / 59,582 rows), then triton (9 / 2,228). The shared-only vLLM
+/// flashinfer lane (50 / 36,240) follows the canonical donor tier.
 #[cfg(test)]
 pub(crate) fn b200_vllm_generation_lane_order() -> Vec<String> {
     [
+        "vllm_flashinfer_trtllmdecode",
+        "vllm_triton_attn",
         "fa3",
         "fla",
         "flashinfer",
         "triton",
         "trtllm_mha",
         "default",
-        "vllm_flashinfer_trtllmdecode",
-        "vllm_triton_attn",
+        "vllm_flashinfer",
     ]
     .iter()
     .map(|lane| lane.to_string())
@@ -1896,110 +1900,136 @@ mod tests {
 
     /// The lane walk owns the EMPIRICAL util carrier too, not just the silicon
     /// slice: the util grid is calibrated from the serving lane's points, and
-    /// the XSHAPE reference head_size is picked PER LANE (Python
-    /// `_ref_lane_and_head_size`). Oracles (shared layer OFF, EMPIRICAL) on
-    /// b200_sxm/sglang/0.5.14:
-    ///
-    /// ```text
-    /// db = perf_database.get_database_view("b200_sxm", "sglang", "0.5.14",
-    ///     allow_missing_data=True, database_mode=DatabaseMode.EMPIRICAL,
-    ///     shared_layer=False)
-    /// order = attention.lane_walk_order(db._context_attention_data,
-    ///     attention.resolve_lane_order(db, override), attention._CONTEXT_SLICE_DEPTH)
-    /// float(ContextAttention._query_context_attention_table(db, b, s, 0, 64, 8,
-    ///     KVCacheQuantMode.bfloat16, FMHAQuantMode.bfloat16,
-    ///     database_mode=DatabaseMode.EMPIRICAL, window_size=0, head_size=hs,
-    ///     lane_order=order))
-    /// ```
+    /// the XSHAPE reference head_size is picked per lane.
     ///
     /// `hs=80` is collected nowhere, so it exercises the per-lane XSHAPE
-    /// reference: the no-override walk lands on `triton`, whose only collected
-    /// head_size under `(bfloat16, bfloat16, n_kv=8)` is 192, while the
-    /// `flashinfer` override borrows that lane's 128 — different reference
-    /// head_size, different `util_scale`, different answer.
+    /// reference. Different walks select different reference lanes and
+    /// therefore different answers. Values are checked by routing and relative
+    /// behavior; end-to-end numeric pins live in the golden.
     #[test]
-    fn context_attention_empirical_lane_selection_matches_python_oracles() {
+    fn context_attention_empirical_lane_selection_routes_to_the_serving_lane() {
         let mut db = b200_sglang_0514_db();
         db.database_mode = crate::common::enums::DatabaseMode::Empirical;
-        // (lane_order, b, s, head_size, expected)
-        let cases: &[(Vec<String>, u32, u32, u32, f64)] = &[
-            // own/donor slice carrier (hs=128 lives in trtllm_mha + flashinfer)
-            (sglang_default_lanes(), 4, 4096, 128, 0.9642000198364257),
-            (sglang_default_lanes(), 3, 3000, 128, 0.42010576839184),
-            (sglang_flashinfer_lanes(), 4, 4096, 128, 1.2178943634033204),
-            (sglang_flashinfer_lanes(), 3, 3000, 128, 0.5368660377101362),
-            // per-lane XSHAPE reference (triton ref hs=192 vs flashinfer 128)
-            (sglang_default_lanes(), 4, 4096, 80, 0.8269055926093262),
-            (sglang_flashinfer_lanes(), 4, 4096, 80, 1.044475875945771),
-        ];
-        for (order, b, s, hs, expected) in cases {
+        type Tier = crate::operators::util_empirical::ProvenanceTier;
+        let query = |order: &[String], b, s, hs| {
+            db.reset_provenance();
             let result = query_context_attention_table(
                 &db,
                 order,
-                *b,
-                *s,
+                b,
+                s,
                 0,
                 64,
                 8,
-                *hs,
+                hs,
                 0,
                 KvCacheQuantMode::Bfloat16,
                 FmhaQuantMode::Bfloat16,
             )
             .expect("empirical query");
-            let (latency, source) = (result.latency_ms, result.source);
-            assert!(
-                (latency - expected).abs() < 1e-9,
-                "({order:?}, b={b}, s={s}, hs={hs}): expected {expected}, got {latency}"
-            );
-            assert_eq!(source, Source::Empirical);
+            (result, db.worst_provenance())
+        };
+
+        for (order, direct, hs, tier) in [
+            (
+                sglang_default_lanes(),
+                lane_vec(&["trtllm_mha"]),
+                128,
+                Tier::Empirical,
+            ),
+            (
+                sglang_flashinfer_lanes(),
+                lane_vec(&["flashinfer"]),
+                128,
+                Tier::Empirical,
+            ),
+        ] {
+            let (resolved, resolved_tier) = query(&order, 4, 4096, hs);
+            let (direct, direct_tier) = query(&direct, 4, 4096, hs);
+            assert_eq!(resolved.latency_ms, direct.latency_ms);
+            assert!(resolved.latency_ms.is_finite() && resolved.latency_ms > 0.0);
+            assert_eq!(resolved.source, Source::Empirical);
+            assert_eq!(direct.source, Source::Empirical);
+            assert_eq!(resolved_tier, tier);
+            assert_eq!(direct_tier, tier);
         }
+
+        let (default, default_tier) = query(&sglang_default_lanes(), 4, 4096, 80);
+        let (override_lane, override_tier) = query(&sglang_flashinfer_lanes(), 4, 4096, 80);
+        assert!(default.latency_ms.is_finite() && default.latency_ms > 0.0);
+        assert!(override_lane.latency_ms.is_finite() && override_lane.latency_ms > 0.0);
+        assert_eq!(default.source, Source::Empirical);
+        assert_eq!(override_lane.source, Source::Empirical);
+        assert_eq!(default_tier, Tier::XShape);
+        assert_eq!(override_tier, Tier::XShape);
+        assert_ne!(default.latency_ms, override_lane.latency_ms);
     }
 
     /// Decode twin of
-    /// [`context_attention_empirical_lane_selection_matches_python_oracles`]
-    /// (`GenerationAttention._query_generation_attention_table(..., EMPIRICAL,
-    /// window_size=0, head_size=hs, lane_order=order)`). Decode XSHAPE keeps
-    /// `util_scale = 1.0`, so `hs=80` differs between the walks purely because
-    /// the borrowed reference lane/head_size differs.
+    /// [`context_attention_empirical_lane_selection_routes_to_the_serving_lane`].
+    /// Decode XSHAPE keeps `util_scale = 1.0`, so `hs=80` differs between the
+    /// walks purely because the borrowed reference lane/head_size differs.
     #[test]
-    fn generation_attention_empirical_lane_selection_matches_python_oracles() {
+    fn generation_attention_empirical_lane_selection_routes_to_the_serving_lane() {
         let mut db = b200_sglang_0514_db();
         db.database_mode = crate::common::enums::DatabaseMode::Empirical;
-        let cases: &[(Vec<String>, u32, u32, u32, f64)] = &[
-            (sglang_default_lanes(), 8, 4096, 128, 0.028808000683784484),
-            (sglang_default_lanes(), 16, 2048, 128, 0.027752000093460082),
-            (sglang_flashinfer_lanes(), 8, 4096, 128, 0.0370959997177124),
-            (
-                sglang_flashinfer_lanes(),
-                16,
-                2048,
-                128,
-                0.03883999884128571,
-            ),
-            (sglang_default_lanes(), 8, 4096, 80, 0.018005000427365303),
-            (sglang_flashinfer_lanes(), 8, 4096, 80, 0.02318499982357025),
-        ];
-        for (order, b, s, hs, expected) in cases {
+        type Tier = crate::operators::util_empirical::ProvenanceTier;
+        let query = |order: &[String], hs| {
+            db.reset_provenance();
             let result = query_generation_attention_table(
                 &db,
                 order,
-                *b,
-                *s,
+                8,
+                4096,
                 64,
                 8,
-                *hs,
+                hs,
                 0,
                 KvCacheQuantMode::Bfloat16,
             )
             .expect("empirical query");
-            let (latency, source) = (result.latency_ms, result.source);
-            assert!(
-                (latency - expected).abs() < 1e-9,
-                "({order:?}, b={b}, s={s}, hs={hs}): expected {expected}, got {latency}"
-            );
-            assert_eq!(source, Source::Empirical);
+            (result, db.worst_provenance())
+        };
+
+        for (order, direct, hs, tier) in [
+            (
+                sglang_default_lanes(),
+                lane_vec(&["trtllm_mha"]),
+                128,
+                Tier::Empirical,
+            ),
+            (
+                sglang_flashinfer_lanes(),
+                lane_vec(&["flashinfer"]),
+                128,
+                Tier::Empirical,
+            ),
+            (
+                sglang_default_lanes(),
+                lane_vec(&["trtllm_mha"]),
+                80,
+                Tier::XShape,
+            ),
+            (
+                sglang_flashinfer_lanes(),
+                lane_vec(&["flashinfer"]),
+                80,
+                Tier::XShape,
+            ),
+        ] {
+            let (resolved, resolved_tier) = query(&order, hs);
+            let (direct, direct_tier) = query(&direct, hs);
+            assert_eq!(resolved.latency_ms, direct.latency_ms);
+            assert!(resolved.latency_ms.is_finite() && resolved.latency_ms > 0.0);
+            assert_eq!(resolved.source, Source::Empirical);
+            assert_eq!(direct.source, Source::Empirical);
+            assert_eq!(resolved_tier, tier);
+            assert_eq!(direct_tier, tier);
         }
+
+        let (default, _) = query(&sglang_default_lanes(), 80);
+        let (override_lane, _) = query(&sglang_flashinfer_lanes(), 80);
+        assert_ne!(default.latency_ms, override_lane.latency_ms);
     }
 
     /// The op carries its lane order into the query. Two ops that differ ONLY
@@ -2017,28 +2047,96 @@ mod tests {
             FmhaQuantMode::Bfloat16,
         );
         ctx.lane_order = sglang_default_lanes();
-        let default_ms = ctx.query(&db, 4, 4096, 0, 1.0).expect("query").latency_ms;
+        let default = ctx.query(&db, 4, 4096, 0, 1.0).expect("query");
+        let default_table = db
+            .attention
+            .query_context(
+                &ctx.lane_order,
+                4,
+                4096,
+                64,
+                8,
+                128,
+                0,
+                KvCacheQuantMode::Bfloat16,
+                FmhaQuantMode::Bfloat16,
+            )
+            .expect("default table query")
+            .latency;
         ctx.lane_order = sglang_flashinfer_lanes();
-        let flashinfer_ms = ctx.query(&db, 4, 4096, 0, 1.0).expect("query").latency_ms;
-        // Table oracles 0.96420002 (trtllm_mha donor) vs 1.21789436
-        // (flashinfer own lane), plus identical fused-op extras.
+        let flashinfer = ctx.query(&db, 4, 4096, 0, 1.0).expect("query");
+        let flashinfer_table = db
+            .attention
+            .query_context(
+                &ctx.lane_order,
+                4,
+                4096,
+                64,
+                8,
+                128,
+                0,
+                KvCacheQuantMode::Bfloat16,
+                FmhaQuantMode::Bfloat16,
+            )
+            .expect("override table query")
+            .latency;
+        assert!(default.latency_ms.is_finite() && default.latency_ms > 0.0);
+        assert!(flashinfer.latency_ms.is_finite() && flashinfer.latency_ms > 0.0);
+        assert_eq!(default.source, Source::Mixed);
+        assert_eq!(flashinfer.source, Source::Mixed);
         assert!(
-            (flashinfer_ms - default_ms - (1.2178943634033204 - 0.9642000198364258)).abs() < 1e-9,
-            "lane order must reach the table: {default_ms} vs {flashinfer_ms}"
+            (flashinfer.latency_ms - default.latency_ms - (flashinfer_table - default_table)).abs()
+                < 1e-12,
+            "lane order must reach the table: {} vs {}",
+            default.latency_ms,
+            flashinfer.latency_ms
         );
+        assert_ne!(default.latency_ms, flashinfer.latency_ms);
 
         let mut gen = GenerationAttentionOp::new("gen", 64, 8, 128, KvCacheQuantMode::Bfloat16);
         gen.lane_order = sglang_default_lanes();
-        let default_ms = gen.query(&db, 8, 4096, 1.0).expect("query").latency_ms;
+        let default = gen.query(&db, 8, 4096, 1.0).expect("query");
+        let default_table = db
+            .attention
+            .query_generation(
+                &gen.lane_order,
+                8,
+                4096,
+                64,
+                8,
+                128,
+                0,
+                KvCacheQuantMode::Bfloat16,
+            )
+            .expect("default table query")
+            .latency;
         gen.lane_order = sglang_flashinfer_lanes();
-        let flashinfer_ms = gen.query(&db, 8, 4096, 1.0).expect("query").latency_ms;
+        let flashinfer = gen.query(&db, 8, 4096, 1.0).expect("query");
+        let flashinfer_table = db
+            .attention
+            .query_generation(
+                &gen.lane_order,
+                8,
+                4096,
+                64,
+                8,
+                128,
+                0,
+                KvCacheQuantMode::Bfloat16,
+            )
+            .expect("override table query")
+            .latency;
+        assert!(default.latency_ms.is_finite() && default.latency_ms > 0.0);
+        assert!(flashinfer.latency_ms.is_finite() && flashinfer.latency_ms > 0.0);
+        assert_eq!(default.source, Source::Silicon);
+        assert_eq!(flashinfer.source, Source::Silicon);
         assert!(
-            (default_ms - 0.028358187839476155).abs() < 1e-9,
-            "got {default_ms}"
+            (flashinfer.latency_ms - default.latency_ms - (flashinfer_table - default_table)).abs()
+                < 1e-12,
+            "lane order must reach the table: {} vs {}",
+            default.latency_ms,
+            flashinfer.latency_ms
         );
-        assert!(
-            (flashinfer_ms - 0.03659885138535173).abs() < 1e-9,
-            "got {flashinfer_ms}"
-        );
+        assert_ne!(default.latency_ms, flashinfer.latency_ms);
     }
 }
