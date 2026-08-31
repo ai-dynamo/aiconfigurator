@@ -58,6 +58,7 @@ from collector.wideep.sglang.collect_moe_a2a import (
     _build_moe_a2a_row,
     derive_dist_identity,
     get_moe_a2a_workload_grid,
+    resolve_moe_a2a_shapes,
 )
 from collector.wideep.sglang.collect_moe_a2a import (
     _git_collector_ref as _unattested_git_collector_ref,
@@ -110,12 +111,19 @@ class VllmMoeA2ACase:
     sms: int | None
     capacity: int
 
+    @property
+    def persisted_backend(self) -> str:
+        """Identity the consumer can distinguish without a parquet schema change."""
+        if self.comm_backend == "deepep_v2":
+            return f"deepep_v2_{self.inference_phase}"
+        return self.comm_backend
+
     def persisted_key(self, *, ep_size: int, node_num: int, sms: int | None = None) -> tuple[Any, ...]:
         resolved_sms = self.sms if sms is None else sms
         if resolved_sms is None:
             raise VllmMoeA2ADeclarationError("deepep_v2 persisted key requires live theoretical SMS")
         return (
-            self.comm_backend,
+            self.persisted_backend,
             COMM_DTYPE,
             ep_size,
             node_num,
@@ -179,18 +187,13 @@ def get_vllm_moe_a2a_shapes(
     required_expert_parallel_size: int | None = None,
 ) -> list[MoeA2AShape]:
     """Resolve correlated WideEP shapes through the vLLM case population."""
-    from collector.case_generator import get_common_moe_test_cases, is_wideep_moe_model
+    from collector.case_generator import get_common_moe_test_cases
 
     recipes = get_common_moe_test_cases(
         backend="vllm",
         required_expert_parallel_size=required_expert_parallel_size,
     )
-    shapes = {
-        MoeA2AShape(int(recipe.hidden_size), int(recipe.topk), int(recipe.num_experts))
-        for recipe in recipes
-        if is_wideep_moe_model(recipe.model_name)
-    }
-    ordered = sorted(shapes)
+    ordered = resolve_moe_a2a_shapes(recipes)
     if not ordered:
         raise VllmMoeA2ADeclarationError(
             "backend='vllm' resolved zero declared WideEP MoE shapes; empty collection is not success"
@@ -208,9 +211,10 @@ def build_case_plan(
 ) -> list[VllmMoeA2ACase]:
     """Build deterministic multi-node cases with serving-owned policies.
 
-    v2 uses the union of the two declared token axes.  Tokens on the LL axis
-    use generation/cudagraph mode; remaining HT-only tokens use context/eager
-    mode.  This gives every persisted v2 key exactly one invocation identity.
+    V2 context/eager and generation/cudagraph are independent declared
+    populations.  Overlapping token counts intentionally produce two cases;
+    ``persisted_backend`` keeps their identities distinct without changing the
+    parquet columns.
     """
     if world_size not in SUPPORTED_WORLD_SIZES:
         raise VllmMoeA2ADeclarationError(f"vLLM moe_a2a supports world sizes {SUPPORTED_WORLD_SIZES}, got {world_size}")
@@ -245,17 +249,10 @@ def build_case_plan(
                 VllmMoeA2ACase("deepep_ll", "generation", shape, tokens, LL_SMS, tokens) for tokens in ll_tokens
             )
         if "deepep_v2" in backends:
-            for tokens in sorted(set(ht_tokens) | set(ll_tokens)):
-                phase = "generation" if tokens in ll_tokens else "context"
-                cases.append(
-                    VllmMoeA2ACase(
-                        "deepep_v2",
-                        phase,
-                        shape,
-                        tokens,
-                        None,
-                        _next_power_of_two(tokens),
-                    )
+            for phase, token_axis in (("context", ht_tokens), ("generation", ll_tokens)):
+                cases.extend(
+                    VllmMoeA2ACase("deepep_v2", phase, shape, tokens, None, _next_power_of_two(tokens))
+                    for tokens in token_axis
                 )
 
     cases.sort(key=VllmMoeA2ACase.sort_key)
@@ -304,12 +301,22 @@ def case_plan_ids(cases: list[VllmMoeA2ACase], *, world_size: int, node_num: int
         payload = {
             "capacity": case.capacity,
             "comm_backend": case.comm_backend,
+            "persisted_backend": case.persisted_backend,
             "ep_size": world_size,
             "hidden_size": case.shape.hidden_size,
             "inference_phase": case.inference_phase,
             "node_num": node_num,
             "num_experts": case.shape.num_experts,
             "num_tokens": case.num_tokens,
+            "routing": {
+                "has_correction_bias": case.shape.routing.has_correction_bias,
+                "method_type": case.shape.routing.method_type,
+                "num_expert_group": case.shape.routing.num_expert_group,
+                "renormalize": case.shape.routing.renormalize,
+                "routed_scaling_factor": case.shape.routing.routed_scaling_factor,
+                "scoring_func": case.shape.routing.scoring_func,
+                "topk_group": case.shape.routing.topk_group,
+            },
             "sms": case.sms,
             "topk": case.shape.topk,
         }
@@ -389,7 +396,7 @@ def collect_with_adapter(
                 timing = result.timings[phase]
                 case_rows.append(
                     _build_moe_a2a_row(
-                        comm_backend=case.comm_backend,
+                        comm_backend=case.persisted_backend,
                         phase=phase,
                         ep_size=world_size,
                         node_num=node_num,
@@ -531,6 +538,63 @@ class VllmBenchmarkAdapter:
             self._buffer = None
             self._buffer_key = None
 
+    def _build_topk_ids(self, torch: Any, case: VllmMoeA2ACase) -> Any:
+        """Generate deterministic unique routes using vLLM 0.24 router semantics.
+
+        This mirrors ``fused_moe/router/{fused_topk,grouped_topk}_router.py``
+        at ``TARGET_VLLM_SOURCE_COMMIT``: global top-k for ordinary routing;
+        grouped selection followed by expert top-k for DeepSeekV3 routing.
+        """
+        routing = case.shape.routing
+        seed_payload = (
+            self.identity.rank,
+            case.shape.hidden_size,
+            case.shape.topk,
+            case.shape.num_experts,
+            case.num_tokens,
+            routing,
+        )
+        seed = int.from_bytes(hashlib.sha256(repr(seed_payload).encode()).digest()[:8], "big") % (2**63 - 1)
+        generator = torch.Generator(device="cuda")
+        generator.manual_seed(seed)
+        logits = torch.randn(
+            (case.num_tokens, case.shape.num_experts),
+            device="cuda",
+            dtype=torch.float32,
+            generator=generator,
+        )
+        if routing.scoring_func == "sigmoid":
+            scores = torch.sigmoid(logits)
+        elif routing.scoring_func == "sqrtsoftplus":
+            scores = torch.nn.functional.softplus(logits).sqrt()
+        else:
+            scores = torch.softmax(logits, dim=-1)
+        selection_scores = scores
+        if routing.has_correction_bias:
+            correction = torch.randn((case.shape.num_experts,), device="cuda", dtype=torch.float32, generator=generator)
+            selection_scores = scores + correction
+        if routing.num_expert_group > 1:
+            experts_per_group = case.shape.num_experts // routing.num_expert_group
+            grouped = scores.view(case.num_tokens, routing.num_expert_group, experts_per_group)
+            if routing.has_correction_bias:
+                grouped_for_selection = selection_scores.view(
+                    case.num_tokens, routing.num_expert_group, experts_per_group
+                )
+                group_scores = grouped_for_selection.topk(2, dim=-1).values.sum(dim=-1)
+            else:
+                group_scores = grouped.max(dim=-1).values
+            selected_groups = group_scores.topk(routing.topk_group, dim=-1).indices
+            group_mask = torch.zeros_like(group_scores, dtype=torch.bool)
+            group_mask.scatter_(1, selected_groups, True)
+            selection_scores = selection_scores.masked_fill(
+                ~group_mask.unsqueeze(-1).expand(-1, -1, experts_per_group).reshape_as(scores),
+                float("-inf"),
+            )
+        topk_ids = selection_scores.topk(case.shape.topk, dim=-1).indices.to(torch.int64)
+        if bool((topk_ids.sort(dim=-1).values[:, 1:] == topk_ids.sort(dim=-1).values[:, :-1]).any()):
+            raise VllmMoeA2ABenchmarkError("routing generator produced duplicate experts for one token")
+        return topk_ids
+
     def benchmark(self, case: VllmMoeA2ACase) -> BenchmarkResult:
         """Run exact public prepare/finalize calls with synthetic activations."""
         torch, prepare_finalize, quant_config, reduce_impl = self._make_runtime(case)
@@ -540,9 +604,7 @@ class VllmBenchmarkAdapter:
             device="cuda",
             dtype=torch.bfloat16,
         )
-        topk_ids = torch.stack(
-            [torch.randperm(case.shape.num_experts, device="cuda")[: case.shape.topk] for _ in range(case.num_tokens)]
-        ).to(torch.int64)
+        topk_ids = self._build_topk_ids(torch, case)
         topk_weights = torch.full(
             topk_ids.shape,
             1.0 / case.shape.topk,

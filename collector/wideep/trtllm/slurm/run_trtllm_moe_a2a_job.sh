@@ -133,23 +133,65 @@ benchmark_status=$?
 set -e
 
 kind_root="${campaign_root}/${SYSTEM}/trtllm/${RUN_KIND}/1n/${BACKEND}"
-if [[ "${benchmark_status}" -eq 0 ]]; then
-    destination="${kind_root}/job_${SLURM_JOB_ID}"
-else
+preserve_failure_evidence() {
+    local status=$1
+    local reason=$2
     destination="${campaign_root}/failure_evidence/${SYSTEM}/trtllm/${RUN_KIND}/1n/${BACKEND}/job_${SLURM_JOB_ID}"
-fi
-mkdir -p "${destination}"
-cp -a "${output_dir}/." "${destination}/"
-python3 - "${destination}/artifact_checksums.json" "${destination}" <<'PY'
+    mkdir -p "${destination}"
+    cp -a "${output_dir}/." "${destination}/"
+    python3 - "${destination}/artifact_checksums.json" "${destination}" \
+        "${status}" "${SLURM_JOB_ID}" "${BACKEND}" "${RUN_KIND}" "${reason}" <<'PY'
 import hashlib, json, sys
 from pathlib import Path
 out, root = Path(sys.argv[1]), Path(sys.argv[2])
+payload = {"benchmark_status": int(sys.argv[3]), "job_id": sys.argv[4], "backend": sys.argv[5],
+           "run_kind": sys.argv[6], "reason": sys.argv[7]}
+(root / "job_failure.json").write_text(json.dumps(payload, sort_keys=True) + "\n")
 checks = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in root.iterdir() if p.is_file() and p != out}
 out.write_text(json.dumps(checks, indent=2, sort_keys=True) + "\n")
 PY
+}
+# ``finalize_perf_files`` intentionally leaves its flock inode in place while
+# finalizers may still race.  At this point the job-unique srun has completed,
+# so no finalizer remains; remove the empty control file before either failure
+# evidence preservation or transactional formal publication.
+merge_lock="${output_dir}/moe_a2a_perf.parquet.mergelock"
+if [[ -e "${merge_lock}" ]]; then
+    if [[ ! -f "${merge_lock}" || -L "${merge_lock}" || -s "${merge_lock}" ]]; then
+        preserve_failure_evidence 92 "invalid parquet merge-lock artifact"
+        die "invalid parquet merge-lock artifact preserved at ${destination}"
+    fi
+    rm -f -- "${merge_lock}"
+fi
 if [[ "${benchmark_status}" -ne 0 ]]; then
+    preserve_failure_evidence "${benchmark_status}" "collector command failed"
     die "collector failed with status ${benchmark_status}; all partial rows and rank evidence preserved at ${destination}"
 fi
-[[ -f "${destination}/moe_a2a_perf.parquet" && -f "${destination}/collection_meta.yaml" ]] || die "collector omitted finalized artifacts"
-touch "${destination}/SUCCESS"
+if [[ ! -f "${output_dir}/moe_a2a_perf.parquet" || ! -f "${output_dir}/collection_meta.yaml" ]]; then
+    preserve_failure_evidence 90 "collector omitted finalized artifacts"
+    die "collector omitted finalized artifacts; evidence preserved at ${destination}"
+fi
+if ! python3 - "${output_dir}/artifact_checksums.json" "${output_dir}" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+out, root = Path(sys.argv[1]), Path(sys.argv[2])
+allowed = {"moe_a2a_perf.parquet", "collection_meta.yaml", "runtime_evidence.json"}
+actual = {p.name for p in root.iterdir() if p.is_file() and p != out}
+if actual != allowed:
+    raise SystemExit(f"unexpected formal artifact set: {sorted(actual)}")
+checks = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in sorted(allowed)}
+out.write_text(json.dumps(checks, indent=2, sort_keys=True) + "\n")
+PY
+then
+    preserve_failure_evidence 91 "unexpected formal artifact set"
+    die "formal artifact validation failed; evidence preserved at ${destination}"
+fi
+touch "${output_dir}/SUCCESS"
+destination="${kind_root}/job_${SLURM_JOB_ID}"
+[[ ! -e "${destination}" ]] || die "refusing to overwrite campaign job output ${destination}"
+publish_stage="${destination}.publish-${SLURM_JOB_ID}"
+[[ ! -e "${publish_stage}" ]] || die "stale transactional publish stage ${publish_stage}"
+mkdir -p "${publish_stage}"
+cp -a "${output_dir}/." "${publish_stage}/"
+mv -- "${publish_stage}" "${destination}"
 echo "Published validated ${SYSTEM} ${BACKEND} ${RUN_KIND} artifacts to ${destination}"

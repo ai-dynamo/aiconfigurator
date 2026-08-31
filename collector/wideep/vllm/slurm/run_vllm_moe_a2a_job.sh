@@ -662,10 +662,13 @@ srun \
     bash -lc "${container_command}"
 benchmark_status=$?
 set -e
-if [[ "${benchmark_status}" -ne 0 ]]; then
+preserve_failure_evidence() {
+    local status=$1
+    local reason=$2
     failure_dir="${campaign_root}/failure_evidence/${SYSTEM}/${RUN_KIND}/${NODE_NUM}n/${BACKEND}/job_${SLURM_JOB_ID}"
     mkdir -p "${failure_dir}"
     failure_dir=$(safe_existing_path "failure evidence directory" "${failure_dir}")
+    cp -a -- "${output_dir}/." "${failure_dir}/"
     export AIC_FAILURE_DIR="${failure_dir}"
     srun --nodes="${NODE_NUM}" --ntasks="${NODE_NUM}" --ntasks-per-node=1 bash -lc '
         destination="${AIC_FAILURE_DIR}/$(hostname)"
@@ -673,17 +676,50 @@ if [[ "${benchmark_status}" -ne 0 ]]; then
         find "${AIC_OUTPUT_DIR}" -maxdepth 1 -type f -name "errors_moe_a2a_vllm.rank*.json" \
             -exec cp -- {} "${destination}/" \;
     ' || true
+    python3 - "${failure_dir}" "${status}" "${SLURM_JOB_ID}" "${BACKEND}" "${RUN_KIND}" "${reason}" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+payload = {"benchmark_status": int(sys.argv[2]), "job_id": sys.argv[3], "backend": sys.argv[4],
+           "run_kind": sys.argv[5], "reason": sys.argv[6]}
+(root / "job_failure.json").write_text(json.dumps(payload, sort_keys=True) + "\n")
+manifest = {}
+for artifact in sorted(root.rglob("*")):
+    if artifact.is_file() and artifact.name != "artifact_checksums.json":
+        manifest[str(artifact.relative_to(root))] = hashlib.sha256(artifact.read_bytes()).hexdigest()
+(root / "artifact_checksums.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+PY
+}
+# ``finalize_perf_files`` intentionally retains its flock inode while
+# finalizers may race.  The job-unique srun is now complete, so remove only the
+# expected empty control file before preserving failure evidence or publishing
+# formal artifacts.
+merge_lock="${output_dir}/moe_a2a_perf.parquet.mergelock"
+if [[ -e "${merge_lock}" ]]; then
+    if [[ ! -f "${merge_lock}" || -L "${merge_lock}" || -s "${merge_lock}" ]]; then
+        preserve_failure_evidence 92 "invalid parquet merge-lock artifact"
+        die "invalid parquet merge-lock artifact copied to ${failure_dir}"
+    fi
+    rm -f -- "${merge_lock}"
+fi
+
+if [[ "${benchmark_status}" -ne 0 ]]; then
+    preserve_failure_evidence "${benchmark_status}" "collector command failed"
     die "collector step failed with status ${benchmark_status}; rank evidence copied to ${failure_dir}"
 fi
 
 parquet_path="${output_dir}/moe_a2a_perf.parquet"
 sidecar_path="${output_dir}/collection_meta.yaml"
-[[ -f "${parquet_path}" && -f "${sidecar_path}" ]] || die "collector did not finalize both formal artifacts"
+if [[ ! -f "${parquet_path}" || ! -f "${sidecar_path}" ]]; then
+    preserve_failure_evidence 90 "collector omitted finalized artifacts"
+    die "collector did not finalize both formal artifacts; evidence copied to ${failure_dir}"
+fi
 mapfile -t failure_paths < <(
     find "${output_dir}" -maxdepth 1 -type f -name 'errors_moe_a2a_vllm.rank*.json' -print | sort
 )
 if [[ "${#failure_paths[@]}" -gt 0 ]]; then
-    die "formal job produced unexpected case failures; refusing publication"
+    preserve_failure_evidence 91 "collector returned success with case failures"
+    die "formal job produced unexpected case failures; evidence copied to ${failure_dir}"
 fi
 
 python3 - "${output_dir}/artifact_checksums.json" "${parquet_path}" "${sidecar_path}" <<'PY'
@@ -696,12 +732,17 @@ paths = [Path(value) for value in sys.argv[2:]]
 checksums = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
 Path(sys.argv[1]).write_text(json.dumps(checksums, indent=2, sort_keys=True) + "\n")
 PY
+touch "${output_dir}/SUCCESS"
 
 campaign_job_dir=$(safe_future_path \
     "campaign job output" \
     "${campaign_root}/${SYSTEM}/${RUN_KIND}/${NODE_NUM}n/${BACKEND}/job_${SLURM_JOB_ID}")
-mkdir -p -- "${campaign_job_dir}"
+[[ ! -e "${campaign_job_dir}" ]] || die "refusing to overwrite campaign job output ${campaign_job_dir}"
+publish_stage="${campaign_job_dir}.publish-${SLURM_JOB_ID}"
+[[ ! -e "${publish_stage}" ]] || die "stale transactional publish stage ${publish_stage}"
+mkdir -p -- "${publish_stage}"
+publish_stage=$(safe_existing_path "transactional publish stage" "${publish_stage}")
+cp -a -- "${output_dir}/." "${publish_stage}/"
+mv -- "${publish_stage}" "${campaign_job_dir}"
 campaign_job_dir=$(safe_existing_path "campaign job output" "${campaign_job_dir}")
-cp -a -- "${output_dir}/." "${campaign_job_dir}/"
-touch "${campaign_job_dir}/SUCCESS"
 echo "Published validated ${SYSTEM} ${NODE_NUM}-node ${BACKEND} ${RUN_KIND} artifacts to ${campaign_job_dir}"

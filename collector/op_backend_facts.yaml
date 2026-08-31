@@ -3445,14 +3445,14 @@ ops:
     family: moe
     axes: [op_name, moe_dtype]
     facts:
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "moe_context", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepepmoe"]}
-      - {framework: "sglang", version: "0.5.10", system: "b300_sxm", op_name: "moe_context", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepepmoe"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "moe_context", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepepmoe"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb300", op_name: "moe_context", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepepmoe"]}
-      - {framework: "sglang", version: "0.5.10", system: "h100_sxm", op_name: "moe_context", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepepmoe"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "moe_context", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepepmoe"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "moe_context", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepepmoe"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "moe_context", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepepmoe"]}
+      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "moe_context", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepep_moe"]}
+      - {framework: "sglang", version: "0.5.10", system: "b300_sxm", op_name: "moe_context", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepep_moe"]}
+      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "moe_context", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepep_moe"]}
+      - {framework: "sglang", version: "0.5.10", system: "gb300", op_name: "moe_context", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepep_moe"]}
+      - {framework: "sglang", version: "0.5.10", system: "h100_sxm", op_name: "moe_context", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepep_moe"]}
+      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "moe_context", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepep_moe"]}
+      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "moe_context", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepep_moe"]}
+      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "moe_context", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepep_moe"]}
   - op_file: wideep_deepep_ll_perf
     family: comm
     axes: [op_name]
@@ -3501,14 +3501,14 @@ ops:
     family: moe
     axes: [op_name, moe_dtype]
     facts:
-      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "moe_generation", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepepmoe"]}
-      - {framework: "sglang", version: "0.5.10", system: "b300_sxm", op_name: "moe_generation", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepepmoe"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "moe_generation", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepepmoe"]}
-      - {framework: "sglang", version: "0.5.10", system: "gb300", op_name: "moe_generation", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepepmoe"]}
-      - {framework: "sglang", version: "0.5.10", system: "h100_sxm", op_name: "moe_generation", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepepmoe"]}
-      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "moe_generation", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepepmoe"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "moe_generation", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepepmoe"]}
-      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "moe_generation", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepepmoe"]}
+      - {framework: "sglang", version: "0.5.10", system: "b200_sxm", op_name: "moe_generation", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepep_moe"]}
+      - {framework: "sglang", version: "0.5.10", system: "b300_sxm", op_name: "moe_generation", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepep_moe"]}
+      - {framework: "sglang", version: "0.5.10", system: "gb200", op_name: "moe_generation", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepep_moe"]}
+      - {framework: "sglang", version: "0.5.10", system: "gb300", op_name: "moe_generation", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepep_moe"]}
+      - {framework: "sglang", version: "0.5.10", system: "h100_sxm", op_name: "moe_generation", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepep_moe"]}
+      - {framework: "sglang", version: "0.5.10", system: "h200_sxm", op_name: "moe_generation", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepep_moe"]}
+      - {framework: "sglang", version: "0.5.6.post2", system: "h100_sxm", op_name: "moe_generation", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepep_moe"]}
+      - {framework: "sglang", version: "0.5.6.post2", system: "h200_sxm", op_name: "moe_generation", moe_dtype: "fp8_block", backends: ["deepep"], kernel_sources: ["deepep_moe"]}
   - op_file: wideep_moe_perf
     family: moe
     axes: [op_name, moe_dtype]

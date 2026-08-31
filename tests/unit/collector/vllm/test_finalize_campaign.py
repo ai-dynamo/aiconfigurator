@@ -91,7 +91,7 @@ def _write_job(
         sms = case.sms if case.sms is not None else 24
         for phase in ("combine", "dispatch"):
             payload = _build_moe_a2a_row(
-                comm_backend=backend,
+                comm_backend=case.persisted_backend,
                 phase=phase,
                 ep_size=ep_size,
                 node_num=node_num,
@@ -135,6 +135,12 @@ def _write_job(
             }
         },
     )
+    artifacts = (job_dir / "moe_a2a_perf.parquet", job_dir / "collection_meta.yaml")
+    (job_dir / "artifact_checksums.json").write_text(
+        json.dumps({path.name: campaign._sha256(path) for path in artifacts}),
+        encoding="utf-8",
+    )
+    (job_dir / "SUCCESS").touch()
     return job_dir
 
 
@@ -163,7 +169,12 @@ def test_merge_campaign_requires_and_validates_all_three_formal_jobs(tmp_path):
     merged = pd.read_parquet(parquet_path)
     assert len(merged) == sum(len(pd.read_parquet(job / "moe_a2a_perf.parquet")) for job in jobs)
     assert set(zip(merged["node_num"], merged["ep_size"], strict=True)) == {(1, 8)}
-    assert set(merged["comm_backend"]) == set(campaign.BACKENDS)
+    assert set(merged["comm_backend"]) == {
+        "deepep_ht",
+        "deepep_ll",
+        "deepep_v2_context",
+        "deepep_v2_generation",
+    }
     meta = yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
     assert meta["tables"]["custom_allreduce_perf"] == {"status": "complete"}
     assert meta["tables"]["moe_a2a_perf"]["rows"] == len(merged)
@@ -215,6 +226,28 @@ def test_merge_campaign_rejects_missing_backend_job(tmp_path):
 
     with pytest.raises(campaign.CampaignValidationError, match="requires exactly"):
         campaign.merge_campaign(jobs[:-1], system="h200_sxm", output_dir=tmp_path / "published")
+
+
+def test_validate_job_requires_success_exact_checksums_and_recomputed_plan(tmp_path):
+    job = _write_job(tmp_path, node_num=1, ep_size=8, backend="deepep_ht")
+    (job / "SUCCESS").unlink()
+    with pytest.raises(campaign.CampaignValidationError, match="missing SUCCESS"):
+        campaign.validate_job_dir(job, system="h200_sxm")
+    (job / "SUCCESS").touch()
+    checksums = json.loads((job / "artifact_checksums.json").read_text())
+    checksums["unexpected.log"] = "0" * 64
+    (job / "artifact_checksums.json").write_text(json.dumps(checksums))
+    with pytest.raises(campaign.CampaignValidationError, match="must contain exactly"):
+        campaign.validate_job_dir(job, system="h200_sxm")
+    checksums.pop("unexpected.log")
+    (job / "artifact_checksums.json").write_text(json.dumps(checksums))
+    sidecar = yaml.safe_load((job / "collection_meta.yaml").read_text())
+    sidecar["tables"]["moe_a2a_perf"]["case_plan_hash"] = "sha256:" + "0" * 64
+    (job / "collection_meta.yaml").write_text(yaml.safe_dump(sidecar, sort_keys=False))
+    checksums["collection_meta.yaml"] = campaign._sha256(job / "collection_meta.yaml")
+    (job / "artifact_checksums.json").write_text(json.dumps(checksums))
+    with pytest.raises(campaign.CampaignValidationError, match="case_plan_hash mismatch"):
+        campaign.validate_job_dir(job, system="h200_sxm")
 
 
 def test_validate_job_rejects_classified_failure(tmp_path):

@@ -19,7 +19,7 @@ Options:
   --approved-nodelist LIST    Required for B200/B300.
   --fabric-approval-id ID     Required for B200/B300; copied into provenance.
   --partition-override NAME   Submit to an explicitly selected compatible Slurm partition.
-  --afterok-job JOB_ID        Gate every submitted full job on this canary.
+  --afterok-job BACKEND=ID    Gate one full backend on its own canary; repeat per backend.
   --allow-full-without-canary Diagnostic escape hatch; formal operators should not use it.
 EOF
 }
@@ -45,7 +45,7 @@ v2_overlay_dir=""
 approved_nodelist=""
 fabric_approval_id=""
 partition_override=""
-afterok_job=""
+afterok_specs=()
 allow_full_without_canary=false
 
 while [[ $# -gt 0 ]]; do
@@ -64,7 +64,12 @@ while [[ $# -gt 0 ]]; do
         --approved-nodelist) approved_nodelist=$2; shift 2 ;;
         --fabric-approval-id) fabric_approval_id=$2; shift 2 ;;
         --partition-override) partition_override=$2; shift 2 ;;
-        --afterok-job) afterok_job=$2; shift 2 ;;
+        --afterok-job)
+            [[ "$2" =~ ^(deepep_ht|deepep_ll|deepep_v2)=([0-9]+)$ ]] || \
+                die "--afterok-job must be BACKEND=JOB_ID"
+            afterok_specs+=("$2")
+            shift 2
+            ;;
         --allow-full-without-canary) allow_full_without_canary=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown argument $1" ;;
@@ -80,9 +85,8 @@ case "${run_kind}" in
         ;;
     *) die "--run-kind must be canary or full" ;;
 esac
-if [[ -n "${afterok_job}" ]]; then
+if [[ "${#afterok_specs[@]}" -gt 0 ]]; then
     [[ "${run_kind}" == full ]] || die "--afterok-job is valid only for full jobs"
-    [[ "${afterok_job}" =~ ^[0-9]+$ ]] || die "--afterok-job must be a numeric Slurm job ID"
 fi
 
 case "${system}" in
@@ -191,6 +195,12 @@ for node_num in "${node_values[@]}"; do
             case "${overlay_dir}" in
                 /mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*) die "prohibited overlay path ${overlay_dir}" ;;
             esac
+        fi
+        afterok_job=""
+        if [[ "${#afterok_specs[@]}" -gt 0 ]]; then
+            for afterok_spec in "${afterok_specs[@]}"; do
+                [[ "${afterok_spec%%=*}" != "${backend}" ]] || afterok_job=${afterok_spec#*=}
+            done
         fi
         if [[ "${run_kind}" == full && -z "${afterok_job}" && "${allow_full_without_canary}" != true ]]; then
             compgen -G "${campaign_root}/${system}/canary/${node_num}n/${backend}/job_*/SUCCESS" >/dev/null || die \

@@ -67,7 +67,17 @@ digest_value=${IMAGE_DIGEST#sha256:}
 final_image="${image_dir}/trtllm_rc20_${IMAGE_ARCH}_${digest_value}.sqsh"
 final_meta="${final_image}.meta.json"
 final_wheel_dir="${artifact_dir}/wheel_${TRT_SOURCE_COMMIT}_${CUDA_ARCHES//[^0-9A-Za-z]/_}"
-[[ ! -e "${final_image}" && ! -e "${final_meta}" && ! -e "${final_wheel_dir}" ]] || die "refusing to overwrite staged runtime"
+if [[ -f "${final_image}" && -f "${final_meta}" && -f "${final_wheel_dir}/SUCCESS" ]]; then
+    repo_root=$(safe_existing_path "repository" "${AIC_REPO_DIR:-}")
+    python3 "${repo_root}/collector/wideep/trtllm/runtime_artifacts.py" \
+        --image "${final_image}" --image-meta "${final_meta}" \
+        --wheel-dir "${final_wheel_dir}" --target-system "${SYSTEM}" \
+        --output "${job_root}/retry_validation.json" || die "existing staged runtime validation failed"
+    echo "Reused checksum-verified staged TRT-LLM runtime ${final_image} and ${final_wheel_dir}"
+    exit 0
+fi
+[[ ! -e "${final_image}" && ! -e "${final_meta}" && ! -e "${final_wheel_dir}" ]] || \
+    die "partial staged runtime set requires operator cleanup"
 
 temporary_image="${job_root}/runtime.sqsh"
 seed_provenance="${job_root}/seed_provenance.json"

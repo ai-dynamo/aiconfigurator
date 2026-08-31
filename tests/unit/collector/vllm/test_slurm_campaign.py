@@ -75,8 +75,17 @@ def test_runner_never_publishes_a_failed_case_plan():
     source = RUNNER.read_text(encoding="utf-8")
 
     assert '[[ "${NODE_NUM}" == 1 ]]' in source
-    assert "formal job produced unexpected case failures; refusing publication" in source
+    assert "formal job produced unexpected case failures; evidence copied" in source
     assert "known_framework_limit" not in source
+    assert 'cp -a -- "${output_dir}/." "${failure_dir}/"' in source
+    assert '"reason": sys.argv[6]' in source
+    assert 'root.rglob("*")' in source
+    assert 'touch "${output_dir}/SUCCESS"' in source
+    assert 'mv -- "${publish_stage}" "${campaign_job_dir}"' in source
+    assert 'merge_lock="${output_dir}/moe_a2a_perf.parquet.mergelock"' in source
+    assert '[[ ! -f "${merge_lock}" || -L "${merge_lock}" || -s "${merge_lock}" ]]' in source
+    assert 'rm -f -- "${merge_lock}"' in source
+    assert source.index('merge_lock="${output_dir}') < source.index('if [[ "${benchmark_status}" -ne 0 ]]')
 
 
 def test_runner_validates_and_propagates_image_metadata_migration():
@@ -123,7 +132,8 @@ def test_submitter_requires_canaries_and_one_job_per_backend():
     assert "node_values=(1 2 4)" not in source
     assert "topology_mode=single_node" in RUNNER.read_text(encoding="utf-8")
     assert '--dependency="afterok:${afterok_job}"' in source
-    assert '"${afterok_job}" =~ ^[0-9]+$' in source
+    assert "--afterok-job must be BACKEND=JOB_ID" in source
+    assert '[[ "${afterok_spec%%=*}" != "${backend}" ]] || afterok_job=${afterok_spec#*=}' in source
     assert "requires --legacy-overlay-dir" in source
 
 
@@ -272,6 +282,8 @@ def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     assert '"${image_stage_gpu_args[@]}"' in submitter
     assert "--exclusive" not in submitter
     assert "--switches=1" in submitter
+    assert "Reused checksum-verified staged image" in runner
+    assert "partial staged image set requires operator cleanup" in runner
 
 
 def test_legacy_nvl4_patch_updates_every_four_byte_token_mask_use():

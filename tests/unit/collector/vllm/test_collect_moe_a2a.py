@@ -98,14 +98,14 @@ def test_declared_shapes_use_vllm_population(monkeypatch):
     shapes = a2a.get_vllm_moe_a2a_shapes()
     assert shapes
     assert shapes == sorted(set(shapes))
-    assert SHAPE in shapes
+    assert (7168, 8, 256) in {(shape.hidden_size, shape.topk, shape.num_experts) for shape in shapes}
 
 
-def test_ll_shape_population_excludes_kimi_megamoe_from_deepep_plan(monkeypatch):
+def test_vllm_024_deepep_plan_excludes_kimi_k3_megamoe_shape(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     shapes = a2a.get_vllm_moe_a2a_shapes(required_expert_parallel_size=WORLD_SIZE)
 
-    assert all(shape != MoeA2AShape(hidden_size=3584, topk=16, num_experts=896) for shape in shapes)
+    assert (3584, 16, 896) not in {(shape.hidden_size, shape.topk, shape.num_experts) for shape in shapes}
 
 
 def test_transport_defaults_are_publishable_and_alternates_are_diagnostic():
@@ -147,6 +147,7 @@ def test_plan_maps_backend_phase_dtype_sms_and_capacity():
     assert {case.capacity for case in by_backend["deepep_ll"]} == {1, 16, 256}
     assert {(case.num_tokens, case.inference_phase, case.sms, case.capacity) for case in by_backend["deepep_v2"]} == {
         (1, "generation", None, 1),
+        (16, "context", None, 16),
         (16, "generation", None, 16),
         (256, "generation", None, 256),
         (512, "context", None, 512),
@@ -230,15 +231,40 @@ def test_pure_adapter_builds_unified_rows_and_full_unique_keys():
     assert adapter.closed
     assert not result.failures
     assert len(result.rows) == 2 * len(cases)
-    assert {row["comm_backend"] for row in result.rows} == set(a2a.BACKENDS)
+    assert {row["comm_backend"] for row in result.rows} == {
+        "deepep_ht",
+        "deepep_ll",
+        "deepep_v2_context",
+        "deepep_v2_generation",
+    }
     assert {row["phase"] for row in result.rows} == {"dispatch", "combine"}
     assert {row["comm_dtype"] for row in result.rows} == {"default"}
     assert {row["sms"] for row in result.rows if row["comm_backend"] == "deepep_ht"} == {20}
     assert {row["sms"] for row in result.rows if row["comm_backend"] == "deepep_ll"} == {0}
-    assert {row["sms"] for row in result.rows if row["comm_backend"] == "deepep_v2"} == {17}
+    assert {row["sms"] for row in result.rows if row["comm_backend"].startswith("deepep_v2_")} == {17}
     keys = [a2a._row_key(row) for row in result.rows]
     assert len(keys) == len(set(keys))
     assert all(row["latency"] == row["transmit_us"] + row["notify_us"] for row in result.rows)
+
+
+def test_v2_overlap_has_two_independent_persisted_identities():
+    overlap = [case for case in _plan(("deepep_v2",)) if case.num_tokens == 16]
+
+    assert {case.inference_phase for case in overlap} == {"context", "generation"}
+    assert {case.persisted_backend for case in overlap} == {
+        "deepep_v2_context",
+        "deepep_v2_generation",
+    }
+    assert len({case.persisted_key(ep_size=WORLD_SIZE, node_num=NODE_NUM, sms=17) for case in overlap}) == 2
+
+
+def test_vllm_routing_generator_is_pinned_unique_topk_not_randperm():
+    start = SOURCE.index("def _build_topk_ids")
+    body = SOURCE[start : SOURCE.index("def benchmark", start)]
+    assert "randperm" not in body
+    assert "selection_scores.topk" in body
+    assert "group_scores.topk" in body
+    assert "TARGET_VLLM_SOURCE_COMMIT" in body
 
 
 def test_collection_prepares_adapter_before_first_case_and_closes_after_last():

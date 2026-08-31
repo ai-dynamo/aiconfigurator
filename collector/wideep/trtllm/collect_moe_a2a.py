@@ -40,7 +40,9 @@ from collector.registry_types import PerfFile
 from collector.wideep.backend_contracts import contract_for
 from collector.wideep.distributed_lifecycle import StageAgreement, agree_stage, raise_for_stage
 from collector.wideep.sglang.collect_moe_a2a import (
-    MoeA2AShape,
+    MoeA2AShape as _MoeA2AGeometry,
+)
+from collector.wideep.sglang.collect_moe_a2a import (
     _build_moe_a2a_row,
     write_moe_a2a_sidecar,
 )
@@ -59,6 +61,11 @@ COMM_BACKEND_HT = "trtllm_deepep_ht"
 COMM_BACKEND_LL = "trtllm_deepep_ll"
 FORMAL_SYSTEMS = frozenset({"gb200", "gb300", "b200_sxm", "b300_sxm", "h100_sxm", "h200_sxm"})
 HOPPER_SYSTEMS = frozenset({"h100_sxm", "h200_sxm"})
+# K3 serving selects the fused MegaMoE A2A+GEMM path, not either standalone
+# DeepEP communication method measured here. This is a backend capability
+# boundary, not a kernel-limit expected-failure filter. Its model declaration
+# also gives TRT-LLM an empty allowed quantization set.
+NON_DEEPEP_SERVING_MODELS = frozenset({"moonshotai/Kimi-K3"})
 FORCED_METHODS = {
     COMM_BACKEND_HT: "DEEPEP",
     COMM_BACKEND_LL: "DEEPEPLOWLATENCY",
@@ -115,6 +122,26 @@ class QuantSpec:
     quant_algo: str | None
 
 
+@dataclass(frozen=True, order=True)
+class RoutingSpec:
+    """Model-declared routing inputs mapped to pinned TensorRT-LLM routing."""
+
+    method: str = "Default"
+    num_expert_group: int = 1
+    topk_group: int = 1
+    routed_scaling_factor: float = 1.0
+
+
+@dataclass(frozen=True, order=True)
+class MoeA2AShape:
+    """Persisted geometry plus the non-persisted serving routing declaration."""
+
+    hidden_size: int
+    topk: int
+    num_experts: int
+    routing: RoutingSpec = RoutingSpec()
+
+
 # Source proof:
 # * DeepEP.supports_post_quant_dispatch: NVFP4 only.
 # * DeepEPLowLatency.supports_post_quant_dispatch: FP8 QDQ, NVFP4, W4AFP8.
@@ -161,6 +188,43 @@ def quant_specs_for_system(backend: str, system: str | None) -> tuple[QuantSpec,
     return specs
 
 
+def communication_dtype_for(
+    *,
+    system: str | None,
+    backend: str,
+    model_quantization: str,
+    communication_phase: str,
+) -> str:
+    """Map serving phase/quantization/system to the persisted wire dtype.
+
+    The pinned HT implementation only post-quantizes NVFP4; Hopper FP8 model
+    compute therefore communicates BF16 in HT. Low-latency FP8 communicates
+    FP8, while Blackwell low-precision NVFP4 combine returns FP4.
+    """
+    if system is not None and system not in FORMAL_SYSTEMS:
+        raise MoeA2ADeclarationError(f"unsupported TensorRT-LLM formal system: {system}")
+    if backend not in FORCED_METHODS or communication_phase not in PHASES:
+        raise MoeA2ADeclarationError(
+            f"unsupported communication identity: backend={backend}, phase={communication_phase}"
+        )
+    quantization = {"fp8_block": "fp8", "none": "bfloat16"}.get(model_quantization, model_quantization)
+    if backend == COMM_BACKEND_HT:
+        if quantization == "nvfp4":
+            return "nvfp4"
+        if quantization in {"bfloat16", "fp8"}:
+            return "bfloat16"
+    elif quantization == "fp8":
+        return "fp8"
+    elif quantization == "bfloat16":
+        return "bfloat16"
+    elif quantization == "nvfp4" and system not in HOPPER_SYSTEMS:
+        return "fp4" if communication_phase == "combine" else "nvfp4"
+    raise MoeA2ADeclarationError(
+        "no pinned TensorRT-LLM communication dtype for "
+        f"system={system}, backend={backend}, quantization={model_quantization}, phase={communication_phase}"
+    )
+
+
 @dataclass(frozen=True)
 class MoeA2ACase:
     comm_backend: str
@@ -170,6 +234,7 @@ class MoeA2ACase:
     num_tokens: int
     ep_size: int
     node_num: int
+    system: str | None = None
     sms: int = SMS
 
     def physical_key(self, phase: str, comm_dtype: str | None = None) -> tuple[Any, ...]:
@@ -177,7 +242,13 @@ class MoeA2ACase:
         return (
             self.comm_backend,
             phase,
-            comm_dtype or self.quant.comm_dtype,
+            comm_dtype
+            or communication_dtype_for(
+                system=self.system,
+                backend=self.comm_backend,
+                model_quantization=self.quant.comm_dtype,
+                communication_phase=phase,
+            ),
             self.ep_size,
             self.node_num,
             self.shape.hidden_size,
@@ -195,6 +266,7 @@ class MoeA2ACase:
             self.inference_phase,
             self.quant.comm_dtype,
             self.quant.quant_algo,
+            self.shape.routing,
             self.ep_size,
             self.node_num,
             self.shape.hidden_size,
@@ -253,8 +325,19 @@ def derive_dist_identity(env: dict[str, str], *, gpus_per_node: int) -> DistIden
     return DistIdentity(rank, world_size, local_rank, gpus_per_node, world_size // gpus_per_node)
 
 
+def _routing_spec(recipe: Any) -> RoutingSpec:
+    # These are model routing declarations despite their historical prefix.
+    # Map them to the corresponding pinned TensorRT-LLM routing method.
+    return RoutingSpec(
+        method=recipe.sglang_moe_routing_method_type or "Default",
+        num_expert_group=recipe.sglang_moe_num_expert_group or 1,
+        topk_group=recipe.sglang_moe_topk_group or 1,
+        routed_scaling_factor=recipe.sglang_moe_routed_scaling_factor or 1.0,
+    )
+
+
 def get_moe_a2a_shapes(*, required_expert_parallel_size: int | None = None) -> list[MoeA2AShape]:
-    """Return declared TensorRT-LLM WideEP geometry, physically deduplicated."""
+    """Return declared TensorRT-LLM WideEP geometry and serving routing."""
     from collector.case_generator import get_common_moe_test_cases, is_wideep_moe_model
 
     recipes = get_common_moe_test_cases(
@@ -262,10 +345,24 @@ def get_moe_a2a_shapes(*, required_expert_parallel_size: int | None = None) -> l
         required_expert_parallel_size=required_expert_parallel_size,
     )
     shapes = {
-        MoeA2AShape(int(recipe.hidden_size), int(recipe.topk), int(recipe.num_experts))
+        MoeA2AShape(
+            int(recipe.hidden_size),
+            int(recipe.topk),
+            int(recipe.num_experts),
+            _routing_spec(recipe),
+        )
         for recipe in recipes
-        if is_wideep_moe_model(recipe.model_name)
+        if is_wideep_moe_model(recipe.model_name) and recipe.model_name not in NON_DEEPEP_SERVING_MODELS
     }
+    routing_by_geometry: dict[_MoeA2AGeometry, set[RoutingSpec]] = {}
+    for shape in shapes:
+        geometry = _MoeA2AGeometry(shape.hidden_size, shape.topk, shape.num_experts)
+        routing_by_geometry.setdefault(geometry, set()).add(shape.routing)
+    collisions = {geometry: specs for geometry, specs in routing_by_geometry.items() if len(specs) != 1}
+    if collisions:
+        raise MoeA2ADeclarationError(
+            f"declared TensorRT-LLM moe_a2a shapes collide on persisted geometry with different routing: {collisions}"
+        )
     ordered = sorted(shapes)
     print(
         f"trtllm moe_a2a: {len(ordered)} physical shapes from {len(recipes)} declared backend='trtllm' recipes",
@@ -336,6 +433,7 @@ def build_case_plan(
                             num_tokens=int(num_tokens),
                             ep_size=ep_size,
                             node_num=node_num,
+                            system=system,
                         )
                     )
 
@@ -386,7 +484,14 @@ def case_plan_ids(cases: list[MoeA2ACase]) -> list[str]:
                 "num_experts": case.shape.num_experts,
                 "num_tokens": case.num_tokens,
                 "quant_algo": case.quant.quant_algo,
+                "routing": {
+                    "method": case.shape.routing.method,
+                    "num_expert_group": case.shape.routing.num_expert_group,
+                    "topk_group": case.shape.routing.topk_group,
+                    "routed_scaling_factor": case.shape.routing.routed_scaling_factor,
+                },
                 "sms": case.sms,
+                "system": case.system,
                 "topk": case.shape.topk,
             },
             sort_keys=True,
@@ -485,6 +590,7 @@ class TensorRTLLMBenchmarkAdapter:
             case.shape.hidden_size,
             case.shape.topk,
             case.shape.num_experts,
+            case.shape.routing,
             self.max_num_tokens_per_rank,
         )
 
@@ -502,12 +608,57 @@ class TensorRTLLMBenchmarkAdapter:
         """Release a failed case's native state before another case runs."""
         self._destroy_active_resources()
 
+    def close(self) -> None:
+        """Collectively release the final DeepEP backend on every rank."""
+        self._destroy_active_resources()
+
+    @staticmethod
+    def _routing_method(case: MoeA2ACase, *, torch: Any) -> Any:
+        """Construct the pinned serving router for this model declaration."""
+        from tensorrt_llm._torch.modules.fused_moe.routing import (
+            DeepSeekV3MoeRoutingMethod,
+            DefaultMoeRoutingMethod,
+            Llama4RenormalizeMoeRoutingMethod,
+            RenormalizeMoeRoutingMethod,
+            RenormalizeNaiveMoeRoutingMethod,
+        )
+
+        spec = case.shape.routing
+        if spec.method == "DeepSeekV3":
+            correction_bias = torch.zeros(
+                case.shape.num_experts,
+                dtype=torch.float32,
+                device=torch.device("cuda"),
+            )
+            return DeepSeekV3MoeRoutingMethod(
+                top_k=case.shape.topk,
+                n_group=spec.num_expert_group,
+                topk_group=spec.topk_group,
+                routed_scaling_factor=spec.routed_scaling_factor,
+                callable_e_score_correction_bias=lambda: correction_bias,
+            )
+        if spec.method == "Renormalize":
+            return RenormalizeMoeRoutingMethod(case.shape.topk)
+        if spec.method == "RenormalizeNaive":
+            return RenormalizeNaiveMoeRoutingMethod(case.shape.topk)
+        if spec.method == "Llama4":
+            return Llama4RenormalizeMoeRoutingMethod(case.shape.topk)
+        if spec.method == "Default":
+            return DefaultMoeRoutingMethod(case.shape.topk)
+        raise MoeA2ADeclarationError(f"unsupported pinned TensorRT-LLM routing method: {spec.method}")
+
+    @staticmethod
+    def _validate_unique_experts(token_selected_slots: Any, *, topk: int) -> None:
+        """Fail closed if one token routes to the same expert more than once."""
+        sorted_slots = token_selected_slots.sort(dim=-1).values
+        if topk > 1 and bool((sorted_slots[:, 1:] == sorted_slots[:, :-1]).any().item()):
+            raise MoeA2ABenchmarkError("pinned routing returned duplicate expert IDs for one token")
+
     def run(self, case: MoeA2ACase, all_rank_num_tokens: list[int]) -> BenchmarkResult:
         import torch
         from tensorrt_llm._torch.model_config import ModelConfig
         from tensorrt_llm._torch.modules.fused_moe import CutlassFusedMoE
         from tensorrt_llm._torch.modules.fused_moe.communication import CommunicationFactory
-        from tensorrt_llm._torch.modules.fused_moe.routing import DefaultMoeRoutingMethod
         from tensorrt_llm._utils import mpi_rank
         from tensorrt_llm.mapping import Mapping
         from tensorrt_llm.models.modeling_utils import QuantConfig
@@ -533,6 +684,7 @@ class TensorRTLLMBenchmarkAdapter:
         resource_key = self._resource_key(case)
         if resource_key != self._active_resource_key:
             self._destroy_active_resources()
+            routing_method = self._routing_method(case, torch=torch)
             model_config = ModelConfig(
                 pretrained_config=_DummyPretrainedConfig(
                     hidden_size=case.shape.hidden_size, torch_dtype=torch.bfloat16
@@ -556,7 +708,7 @@ class TensorRTLLMBenchmarkAdapter:
                 moe = None
                 if quant_algo != QuantAlgo.NO_QUANT and backend.supports_post_quant_dispatch():
                     moe = CutlassFusedMoE(
-                        routing_method=DefaultMoeRoutingMethod(top_k=case.shape.topk),
+                        routing_method=routing_method,
                         num_experts=case.shape.num_experts,
                         hidden_size=case.shape.hidden_size,
                         intermediate_size=case.shape.hidden_size * 4,
@@ -595,14 +747,18 @@ class TensorRTLLMBenchmarkAdapter:
         device = torch.device("cuda")
         hidden_states = torch.randn(case.num_tokens, case.shape.hidden_size, dtype=torch.bfloat16, device=device)
         hidden_states_sf = None
-        token_selected_slots = torch.randint(
-            0,
+        # Use the pinned serving router instead of the microbenchmark's
+        # with-replacement randint. All supported TRT routers produce unique
+        # top-k experts, including grouped DeepSeek routing.
+        routing_method = self._routing_method(case, torch=torch)
+        router_logits = torch.randn(
+            case.num_tokens,
             case.shape.num_experts,
-            (case.num_tokens, case.shape.topk),
-            dtype=torch.int32,
+            dtype=torch.float32,
             device=device,
         )
-        token_final_scales = torch.rand(case.num_tokens, case.shape.topk, dtype=torch.float32, device=device)
+        token_selected_slots, token_final_scales = routing_method.apply(router_logits)
+        self._validate_unique_experts(token_selected_slots, topk=case.shape.topk)
 
         # Serving order from ConfigurableMoE, mirrored by bench_moe_comm.py:
         # Quantize -> Dispatch. Quantization is outside the timed comm region.
@@ -661,11 +817,23 @@ class TensorRTLLMBenchmarkAdapter:
                 PhaseMeasurement(
                     "combine",
                     combine_us,
-                    "fp4"
-                    if case.comm_backend == COMM_BACKEND_LL and case.quant.comm_dtype == "nvfp4"
-                    else case.quant.comm_dtype,
+                    communication_dtype_for(
+                        system=case.system,
+                        backend=case.comm_backend,
+                        model_quantization=case.quant.comm_dtype,
+                        communication_phase="combine",
+                    ),
                 ),
-                PhaseMeasurement("dispatch", dispatch_us, case.quant.comm_dtype),
+                PhaseMeasurement(
+                    "dispatch",
+                    dispatch_us,
+                    communication_dtype_for(
+                        system=case.system,
+                        backend=case.comm_backend,
+                        model_quantization=case.quant.comm_dtype,
+                        communication_phase="dispatch",
+                    ),
+                ),
             )
         )
 
@@ -779,7 +947,7 @@ def record_failure(
     path.write_text(json.dumps(records, indent=2))
 
 
-def run_collection(
+def _run_collection_body(
     *,
     cases: list[MoeA2ACase],
     adapter: BenchmarkAdapter,
@@ -792,7 +960,6 @@ def run_collection(
     token_gather: Callable[[int], list[int]] | None = None,
     failure_agreement: Callable[[bool], bool] = bool,
     stage_agreement: StageAgreement | None = None,
-    final_barrier: Callable[[], None] = lambda: None,
 ) -> Path | None:
     """Execute, write, finalize and attest; zero/partial/write states fail closed."""
     if not cases:
@@ -983,6 +1150,63 @@ def run_collection(
             f"{failures}/{len(cases)} cases failed"
         )
 
+    return parquet_path
+
+
+def run_collection(
+    *,
+    cases: list[MoeA2ACase],
+    adapter: BenchmarkAdapter,
+    output_dir: Path,
+    rank: int,
+    version: str,
+    device_name: str,
+    runtime_meta: dict[str, Any],
+    finalize: Callable[..., list[Path]] = finalize_perf_files,
+    token_gather: Callable[[int], list[int]] | None = None,
+    failure_agreement: Callable[[bool], bool] = bool,
+    stage_agreement: StageAgreement | None = None,
+    final_barrier: Callable[[], None] = lambda: None,
+) -> Path | None:
+    """Run the campaign and collectively close native resources before exit."""
+    agreement = stage_agreement or (
+        lambda stage, failed: failure_agreement(failed) if stage.endswith(":benchmark") else failed
+    )
+    result: Path | None = None
+    body_error: BaseException | None = None
+    try:
+        result = _run_collection_body(
+            cases=cases,
+            adapter=adapter,
+            output_dir=output_dir,
+            rank=rank,
+            version=version,
+            device_name=device_name,
+            runtime_meta=runtime_meta,
+            finalize=finalize,
+            token_gather=token_gather,
+            failure_agreement=failure_agreement,
+            stage_agreement=stage_agreement,
+        )
+    except BaseException as error:
+        body_error = error
+
+    close_error: BaseException | None = None
+    try:
+        close = getattr(adapter, "close", None)
+        if close is not None:
+            close()
+    except BaseException as error:
+        close_error = error
+    close_outcome = agree_stage(
+        "adapter_close",
+        close_error,
+        agreement=agreement,
+        peer_error_type=MoeA2APeerError,
+    )
+    if body_error is not None:
+        raise body_error
+    raise_for_stage(close_outcome)
     raise_for_stage(
         agree_stage(
             "final_ready",
@@ -992,7 +1216,7 @@ def run_collection(
         )
     )
     final_barrier()
-    return parquet_path
+    return result
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

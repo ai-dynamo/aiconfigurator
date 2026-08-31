@@ -31,6 +31,7 @@ from collector.wideep.trtllm.collect_moe_a2a import (
     TARGET_SOURCE_COMMIT,
     build_case_plan,
     case_plan_ids,
+    communication_dtype_for,
     get_moe_a2a_shapes,
     get_moe_a2a_token_grid,
 )
@@ -144,10 +145,11 @@ def _expected_keys(system: str, backend: str) -> set[tuple[Any, ...]]:
     keys = set()
     for case in _cases(system, backend):
         for phase in ("combine", "dispatch"):
-            dtype = (
-                "fp4"
-                if backend == COMM_BACKEND_LL and case.quant.comm_dtype == "nvfp4" and phase == "combine"
-                else case.quant.comm_dtype
+            dtype = communication_dtype_for(
+                system=system,
+                backend=backend,
+                model_quantization=case.quant.comm_dtype,
+                communication_phase=phase,
             )
             keys.add(
                 (
@@ -203,13 +205,18 @@ def _failure_identity(failure: dict[str, Any], *, backend: str) -> tuple[Any, ..
     )
 
 
-def _failure_physical_keys(identity: tuple[Any, ...]) -> set[tuple[Any, ...]]:
+def _failure_physical_keys(identity: tuple[Any, ...], *, system: str) -> set[tuple[Any, ...]]:
     backend, comm_dtype, ep_size, node_num, hidden_size, topk, num_experts, num_tokens, sms = identity
     return {
         (
             backend,
             phase,
-            "fp4" if backend == COMM_BACKEND_LL and comm_dtype == "nvfp4" and phase == "combine" else comm_dtype,
+            communication_dtype_for(
+                system=system,
+                backend=backend,
+                model_quantization=comm_dtype,
+                communication_phase=phase,
+            ),
             ep_size,
             node_num,
             hidden_size,
@@ -324,34 +331,89 @@ def validate_job_dir(
                 raise CampaignValidationError(f"{evidence_path}: seed runtime wheel checksum mismatch")
 
     failures: list[dict[str, Any]] = []
+    ranks_by_failure: dict[tuple[Any, ...], set[int]] = {}
     for error_path in sorted(path.glob("errors_moe_a2a_trtllm.rank*.json")):
+        match = re.fullmatch(r"errors_moe_a2a_trtllm\.rank(\d+)\.json", error_path.name)
+        if match is None:
+            raise CampaignValidationError(f"{error_path}: malformed rank failure filename")
+        file_rank = int(match.group(1))
         payload = json.loads(error_path.read_text(encoding="utf-8"))
         if not isinstance(payload, list) or any(row.get("classification") != "unexpected" for row in payload):
             raise CampaignValidationError(f"{error_path}: malformed failure evidence")
-        failures.extend(payload)
+        for failure in payload:
+            if failure.get("rank") != file_rank:
+                raise CampaignValidationError(f"{error_path}: record rank does not match filename")
+            identity = _failure_identity(failure, backend=backend)
+            if file_rank in ranks_by_failure.setdefault(identity, set()):
+                raise CampaignValidationError(f"{error_path}: duplicate failure identity for rank {file_rank}")
+            ranks_by_failure[identity].add(file_rank)
+            failures.append(failure)
     missing = expected_keys - observed_keys
-    failure_identities = {_failure_identity(failure, backend=backend) for failure in failures}
-    failed_keys = set().union(*(_failure_physical_keys(identity) for identity in failure_identities))
+    expected_ranks = set(range(ep_size))
+    if any(ranks != expected_ranks for ranks in ranks_by_failure.values()):
+        raise CampaignValidationError(f"{path}: failure evidence does not agree across every rank")
+    missing_keys_by_failure = {
+        identity: _failure_physical_keys(identity, system=system) - observed_keys for identity in ranks_by_failure
+    }
+    failed_missing_keys = set().union(*missing_keys_by_failure.values())
     if failures or missing:
         if not allow_partial_evidence:
             raise CampaignValidationError(
                 f"{path}: incomplete formal input ({len(failures)} failures, {len(missing)} missing rows)"
             )
-        if not failures or not missing or failed_keys != missing:
+        if any(not identity_missing for identity_missing in missing_keys_by_failure.values()):
+            raise CampaignValidationError(f"{path}: failure identity does not cover any missing physical row")
+        if not failures or not missing or failed_missing_keys != missing:
             raise CampaignValidationError(f"{path}: partial rows and failure evidence are inconsistent")
+    elif not (path / "SUCCESS").is_file():
+        raise CampaignValidationError(f"{path}: missing SUCCESS marker")
     if int(table.get("rows", -1)) != len(frame):
         raise CampaignValidationError(f"{sidecar_path}: row count mismatch")
     for field in ("collector_ref", "collector_hash", "case_plan_hash", "collected_at"):
         if not table.get(field):
             raise CampaignValidationError(f"{sidecar_path}: missing {field}")
+    expected_plan_hash = provenance.case_plan_hash(case_plan_ids(_cases(system, backend)))
+    if table["case_plan_hash"] != expected_plan_hash:
+        raise CampaignValidationError(
+            f"{sidecar_path}: case_plan_hash mismatch; expected {expected_plan_hash}, found {table['case_plan_hash']}"
+        )
     checksum_path = path / "artifact_checksums.json"
-    if checksum_path.is_file():
-        checksums = _load_json(checksum_path)
-        for artifact in (parquet_path, sidecar_path, evidence_path):
-            if checksums.get(artifact.name) != _sha256(artifact):
-                raise CampaignValidationError(f"{artifact}: checksum mismatch")
+    if not checksum_path.is_file():
+        raise CampaignValidationError(f"{path}: missing artifact_checksums.json")
+    checksums = _load_json(checksum_path)
+    checksum_artifacts = [
+        parquet_path,
+        sidecar_path,
+        evidence_path,
+        *sorted(path.glob("errors_moe_a2a_trtllm.rank*.json")),
+    ]
+    if failures or missing:
+        failure_summary_path = path / "job_failure.json"
+        if not failure_summary_path.is_file():
+            raise CampaignValidationError(f"{path}: missing job_failure.json")
+        failure_summary = _load_json(failure_summary_path)
+        if int(failure_summary.get("benchmark_status", 0)) == 0:
+            raise CampaignValidationError(f"{failure_summary_path}: invalid benchmark_status")
+        checksum_artifacts.append(failure_summary_path)
+    expected_names = {artifact.name for artifact in checksum_artifacts}
+    if set(checksums) != expected_names:
+        raise CampaignValidationError(
+            f"{path}: checksum manifest must contain exactly {sorted(expected_names)}, found {sorted(checksums)}"
+        )
+    for artifact in checksum_artifacts:
+        if checksums[artifact.name] != _sha256(artifact):
+            raise CampaignValidationError(f"{artifact}: checksum mismatch")
     del expected_gpus
-    return ValidatedJob(path, frame, runtime, table, evidence, backend, tuple(failures), len(failure_identities))
+    return ValidatedJob(
+        path,
+        frame,
+        runtime,
+        table,
+        evidence,
+        backend,
+        tuple(failures),
+        len(ranks_by_failure),
+    )
 
 
 def merge_campaign(

@@ -12,6 +12,7 @@ The benchmark internals are covered by source-contract assertions instead.
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -58,30 +59,28 @@ def test_declared_shapes_come_from_the_wideep_model_rows(monkeypatch):
     monkeypatch.delenv("COLLECTOR_MODEL_PATH", raising=False)
     shapes = a2a.get_moe_a2a_shapes()
     # The persisted comm key has no model column, so the declared wideep
-    # model rows collapse onto 6 physical (hidden, topk, experts) tuples.
-    # Kimi-K3 is excluded because its serving EP path is MegaMoE, not DeepEP.
-    assert shapes == [
-        a2a.MoeA2AShape(3072, 8, 256),
-        a2a.MoeA2AShape(4096, 6, 256),
-        a2a.MoeA2AShape(6144, 8, 256),
-        a2a.MoeA2AShape(7168, 6, 384),
-        a2a.MoeA2AShape(7168, 8, 256),
-        a2a.MoeA2AShape(7168, 8, 384),
+    # Kimi-K3 is a MegaMoE serving declaration, not DeepEP. The remaining
+    # rows collapse onto six physical shapes while retaining routing identity.
+    assert [(shape.hidden_size, shape.topk, shape.num_experts) for shape in shapes] == [
+        (3072, 8, 256),
+        (4096, 6, 256),
+        (6144, 8, 256),
+        (7168, 6, 384),
+        (7168, 8, 256),
+        (7168, 8, 384),
     ]
     assert shapes == sorted(shapes)
+    dsv3 = next(shape for shape in shapes if (shape.hidden_size, shape.topk, shape.num_experts) == (7168, 8, 256))
+    assert (dsv3.routing.num_expert_group, dsv3.routing.topk_group) == (8, 4)
 
 
 def test_case_plan_ids_carry_the_persisted_key(monkeypatch):
-    # After 2b046af3 the persisted comm key has no routing column: the shape
-    # is (hidden_size, topk, num_experts) only, and case_plan_ids encodes the
-    # world layout on top of that. This invariant replaces the retired
-    # num_expert_group / topk_group identity checks (routing fields, the
-    # ht_num_topk_groups helper, and the conflicting-routing detector were
-    # all removed from the sglang path when the collector was simplified).
+    # Routing is not a parquet column, so attested plan identity must carry it.
     shape = a2a.MoeA2AShape(7168, 8, 256)
     case = a2a.MoeA2ACase("deepep_ht", shape, num_tokens=1024, sms=20)
     [case_id] = a2a.case_plan_ids([case], ep_size=16, node_num=4)
     payload = json.loads(case_id.split(":run_case:", 1)[1])
+    routing = payload.pop("routing")
     assert payload == {
         "comm_backend": "deepep_ht",
         "ep_size": 16,
@@ -92,8 +91,32 @@ def test_case_plan_ids_carry_the_persisted_key(monkeypatch):
         "sms": 20,
         "topk": 8,
     }
-    assert "num_expert_group" not in payload
-    assert "topk_group" not in payload
+    assert routing["num_expert_group"] == 1
+    assert routing["topk_group"] == 1
+
+
+def test_same_persisted_shape_with_different_routing_fails_loudly(monkeypatch):
+    import collector.case_generator as generator
+
+    monkeypatch.setattr(generator, "is_wideep_moe_model", lambda _name: True)
+
+    def recipe(name, groups, selected):
+        return SimpleNamespace(
+            model_name=name,
+            hidden_size=7168,
+            topk=8,
+            num_experts=256,
+            sglang_moe_num_expert_group=groups,
+            sglang_moe_topk_group=selected,
+            sglang_moe_routing_method_type="DeepSeekV3",
+            sglang_moe_scoring_func="sigmoid",
+            sglang_moe_routed_scaling_factor=2.5,
+            sglang_moe_renormalize=True,
+            sglang_moe_has_correction_bias=True,
+        )
+
+    with pytest.raises(a2a.MoeA2ADeclarationError, match="routing collision"):
+        a2a.resolve_moe_a2a_shapes([recipe("model-a", 8, 4), recipe("model-b", 1, 1)])
 
 
 def test_shapes_stay_correlated_never_crossed(monkeypatch):

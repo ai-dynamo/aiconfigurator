@@ -87,7 +87,7 @@ mappings:
 
   # WideEP module labels.
   - {framework: sglang, kernel_source: deepep, backend: deepep, source: "collector/wideep/sglang"}
-  - {framework: sglang, kernel_source: deepepmoe, backend: deepep, source: "collector/wideep/sglang (DeepEP-MoE compute path)"}
+  - {framework: sglang, kernel_source: deepep_moe, backend: deepep, source: "collector/wideep/sglang/collect_deepep_moe.py (DeepEP-MoE compute path)"}
   - {framework: sglang, kernel_source: deepseek_v3, backend: unverified, source: "wideep mlp label does not name the GEMM backend"}
   - {framework: sglang, kernel_source: sglang_mhc, backend: sgl_kernel, source: "collector/sglang/collect_mhc_module.py"}
 

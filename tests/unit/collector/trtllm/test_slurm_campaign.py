@@ -60,6 +60,8 @@ def test_image_stage_builds_and_attests_exact_source_runtime():
     assert "/mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*" in source
     assert 'python3 "${repo_root}/collector/wideep/trtllm/runtime_artifacts.py"' in source
     assert 'seed_args+=(--wheel-dir "${seed_wheel_dir}")' in source
+    assert "Reused checksum-verified staged TRT-LLM runtime" in source
+    assert "partial staged runtime set requires operator cleanup" in source
 
 
 def test_submitters_keep_six_cluster_parameters_and_afterok_gate():
@@ -110,7 +112,12 @@ def test_runner_is_one_node_mpi_and_preserves_failed_rows():
     assert 'HF_HOME="${rank_cache}/huggingface"' in source
     assert 'FLASHINFER_WORKSPACE_DIR="${rank_cache}/flashinfer"' in source
     assert 'TRITON_CACHE_DIR="${rank_cache}/triton"' in source
-    assert 'touch "${destination}/SUCCESS"' in source
+    assert 'touch "${output_dir}/SUCCESS"' in source
+    assert 'mv -- "${publish_stage}" "${destination}"' in source
+    assert 'merge_lock="${output_dir}/moe_a2a_perf.parquet.mergelock"' in source
+    assert '[[ ! -f "${merge_lock}" || -L "${merge_lock}" || -s "${merge_lock}" ]]' in source
+    assert 'rm -f -- "${merge_lock}"' in source
+    assert source.index('merge_lock="${output_dir}') < source.index('if [[ "${benchmark_status}" -ne 0 ]]')
     assert "/mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*" in source
 
 

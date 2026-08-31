@@ -85,7 +85,31 @@ job_dir="${image_dir}/${SYSTEM}/job_${SLURM_JOB_ID}"
 mkdir -p "${job_dir}"
 job_dir=$(safe_existing_path "image staging evidence" "${job_dir}")
 final_image="${image_dir}/vllm_v024_${IMAGE_ARCH}_${digest_value}.sqsh"
-[[ ! -e "${final_image}" ]] || die "refusing to overwrite staged image ${final_image}"
+image_meta="${final_image}.meta.json"
+if [[ -f "${final_image}" && -f "${image_meta}" ]]; then
+    python3 - "${final_image}" "${image_meta}" "${SYSTEM}" "${IMAGE_INDEX_DIGEST}" "${IMAGE_DIGEST}" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+image, meta_path = map(Path, sys.argv[1:3])
+system, index, child = sys.argv[3:]
+meta = json.loads(meta_path.read_text(encoding="utf-8"))
+expected = {"schema_version": 2, "system": system, "configured_image_digest": index,
+            "observed_image_digest": child}
+for key, value in expected.items():
+    if meta.get(key) != value:
+        raise SystemExit(f"existing staged image {key} mismatch")
+digest = hashlib.sha256()
+with image.open("rb") as handle:
+    for block in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+        digest.update(block)
+if digest.hexdigest() != meta.get("sqsh_sha256"):
+    raise SystemExit("existing staged image checksum mismatch")
+PY
+    touch "${job_dir}/SUCCESS"
+    echo "Reused checksum-verified staged image ${final_image}"
+    exit 0
+fi
+[[ ! -e "${final_image}" && ! -e "${image_meta}" ]] || die "partial staged image set requires operator cleanup"
 temporary_image="${image_dir}/.vllm_v024_${IMAGE_ARCH}_${digest_value}.sqsh.tmp.${SLURM_JOB_ID}"
 [[ ! -e "${temporary_image}" ]] || die "stale temporary image ${temporary_image}"
 
@@ -164,7 +188,6 @@ PY'
 temporary_image=$(safe_existing_path "temporary staged image" "${temporary_image}")
 unsquashfs -s "${temporary_image}" >/dev/null || die "saved image is not a valid squashfs"
 sqsh_sha256=$(sha256sum "${temporary_image}" | awk '{print $1}')
-image_meta="${final_image}.meta.json"
 temporary_meta="${image_meta}.tmp.${SLURM_JOB_ID}"
 [[ ! -e "${image_meta}" && ! -e "${temporary_meta}" ]] || die "refusing to overwrite staged image metadata"
 configured_image="vllm/vllm-openai:v0.24.0@${IMAGE_INDEX_DIGEST}"

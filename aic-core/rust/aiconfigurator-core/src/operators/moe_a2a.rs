@@ -45,10 +45,11 @@ use crate::perf_database::PerfDatabase;
 /// is a config `ValueError`, failed where the intent is expressed rather than
 /// surfacing later as a data miss. Pinned by
 /// `undeclared_phase_is_a_config_error_not_a_data_miss`.
-const MOE_A2A_BACKENDS: [(&str, &[&str]); 7] = [
+const MOE_A2A_BACKENDS: [(&str, &[&str]); 8] = [
     ("deepep_ht", &["dispatch", "combine"]),
     ("deepep_ll", &["dispatch", "combine"]),
-    ("deepep_v2", &["dispatch", "combine"]),
+    ("deepep_v2_context", &["dispatch", "combine"]),
+    ("deepep_v2_generation", &["dispatch", "combine"]),
     ("trtllm_deepep_ht", &["dispatch", "combine"]),
     ("trtllm_deepep_ll", &["dispatch", "combine"]),
     ("nvlink_two_sided", &["prepare", "dispatch", "combine"]),
@@ -761,7 +762,8 @@ mod tests {
             vec![
                 "deepep_ht",
                 "deepep_ll",
-                "deepep_v2",
+                "deepep_v2_context",
+                "deepep_v2_generation",
                 "trtllm_deepep_ht",
                 "trtllm_deepep_ll",
                 "nvlink_two_sided",

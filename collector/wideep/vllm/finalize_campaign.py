@@ -256,6 +256,8 @@ def validate_job_dir(job_dir: str | Path, *, system: str) -> ValidatedJob:
     if system not in SYSTEM_LAYOUTS:
         raise CampaignValidationError(f"unsupported system {system!r}")
     resolved = Path(job_dir).expanduser().resolve(strict=True)
+    if not (resolved / "SUCCESS").is_file():
+        raise CampaignValidationError(f"{resolved}: missing SUCCESS marker")
     parquet_path = resolved / PerfFile.MOE_A2A.value.replace(".txt", ".parquet")
     if not parquet_path.is_file():
         raise CampaignValidationError(f"missing parquet {parquet_path}")
@@ -279,7 +281,13 @@ def validate_job_dir(job_dir: str | Path, *, system: str) -> ValidatedJob:
     if _as_single(frame, "comm_dtype") != "default":
         raise CampaignValidationError(f"{parquet_path}: unexpected communication dtype")
 
-    backend = str(_as_single(frame, "comm_backend"))
+    row_backends = set(frame["comm_backend"].drop_duplicates().astype(str))
+    if row_backends == {"deepep_v2_context", "deepep_v2_generation"}:
+        backend = "deepep_v2"
+    elif len(row_backends) == 1:
+        backend = next(iter(row_backends))
+    else:
+        raise CampaignValidationError(f"{parquet_path}: invalid persisted backend population {sorted(row_backends)}")
     node_num = int(_as_single(frame, "node_num"))
     ep_size = int(_as_single(frame, "ep_size"))
     _, node_to_ep = SYSTEM_LAYOUTS[system]
@@ -300,7 +308,15 @@ def validate_job_dir(job_dir: str | Path, *, system: str) -> ValidatedJob:
             f"{parquet_path}: expected {expected_row_count} rows for the complete declared plan, found {len(frame)}"
         )
     expected_bases = {
-        (backend, ep_size, node_num, case.shape.hidden_size, case.shape.topk, case.shape.num_experts, case.num_tokens)
+        (
+            case.persisted_backend,
+            ep_size,
+            node_num,
+            case.shape.hidden_size,
+            case.shape.topk,
+            case.shape.num_experts,
+            case.num_tokens,
+        )
         for case in cases
     }
     observed_bases = set(frame[list(CASE_BASE_COLUMNS)].itertuples(index=False, name=None))
@@ -321,16 +337,26 @@ def validate_job_dir(job_dir: str | Path, *, system: str) -> ValidatedJob:
     for field in ("collector_ref", "collector_hash", "case_plan_hash", "collected_at"):
         if not table.get(field):
             raise CampaignValidationError(f"{resolved}: sidecar table is missing {field}")
+    expected_plan_hash = provenance.case_plan_hash(case_plan_ids(cases, world_size=ep_size, node_num=node_num))
+    if table["case_plan_hash"] != expected_plan_hash:
+        raise CampaignValidationError(
+            f"{resolved}: case_plan_hash mismatch; expected {expected_plan_hash}, found {table['case_plan_hash']}"
+        )
 
     checksum_path = resolved / "artifact_checksums.json"
-    if checksum_path.is_file():
-        checksums = json.loads(checksum_path.read_text(encoding="utf-8"))
-        expected = checksums.get(parquet_path.name)
-        if expected != _sha256(parquet_path):
-            raise CampaignValidationError(f"{resolved}: parquet checksum mismatch")
-        sidecar = resolved / "collection_meta.yaml"
-        if checksums.get(sidecar.name) != _sha256(sidecar):
-            raise CampaignValidationError(f"{resolved}: sidecar checksum mismatch")
+    if not checksum_path.is_file():
+        raise CampaignValidationError(f"{resolved}: missing artifact_checksums.json")
+    checksums = json.loads(checksum_path.read_text(encoding="utf-8"))
+    sidecar = resolved / "collection_meta.yaml"
+    expected_artifacts = {parquet_path.name, sidecar.name}
+    if set(checksums) != expected_artifacts:
+        raise CampaignValidationError(
+            f"{resolved}: checksum manifest must contain exactly {sorted(expected_artifacts)}, "
+            f"found {sorted(checksums)}"
+        )
+    for artifact in (parquet_path, sidecar):
+        if checksums[artifact.name] != _sha256(artifact):
+            raise CampaignValidationError(f"{resolved}: {artifact.name} checksum mismatch")
     return ValidatedJob(resolved, frame, runtime, table, backend, node_num, ep_size)
 
 

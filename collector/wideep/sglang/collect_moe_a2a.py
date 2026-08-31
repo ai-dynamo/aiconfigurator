@@ -123,9 +123,6 @@ PHASE_COMBINE = "combine"
 
 #: Ported verbatim from ``deepep/test_internode.py:127``.
 HT_RDMA_BUFFER_SIZE = 128
-#: Group-limited routing: DeepSeek-style node-group top-k, ``min(nodes, 4)``
-#: (``deepep/test_internode.py:461-463``).
-HT_MAX_TOPK_GROUPS = 4
 
 #: LL warmup iterations before the profiled region, matching
 #: ``deepep/utils.py:bench``'s ``num_warmups`` default.
@@ -262,12 +259,85 @@ def init_distributed(identity: DistIdentity):
 
 
 @dataclass(frozen=True, order=True)
+class MoeA2ARoutingSpec:
+    """Serving routing declaration attached to one physical MoE shape."""
+
+    method_type: str = "Renormalize"
+    scoring_func: str = "softmax"
+    routed_scaling_factor: float | None = None
+    renormalize: bool = True
+    has_correction_bias: bool = False
+    num_expert_group: int = 1
+    topk_group: int = 1
+
+
+@dataclass(frozen=True, order=True)
 class MoeA2AShape:
     """One correlated MoE geometry: the tuple is declared together, never crossed."""
 
     hidden_size: int
     topk: int
     num_experts: int
+    routing: MoeA2ARoutingSpec = MoeA2ARoutingSpec()
+
+
+def _routing_spec_from_recipe(recipe: Any) -> MoeA2ARoutingSpec:
+    num_groups = recipe.sglang_moe_num_expert_group
+    topk_groups = recipe.sglang_moe_topk_group
+    if (num_groups is None) != (topk_groups is None):
+        raise MoeA2ADeclarationError(f"{recipe.model_name}: num_expert_group and topk_group must be declared together")
+    num_groups = 1 if num_groups is None else int(num_groups)
+    topk_groups = 1 if topk_groups is None else int(topk_groups)
+    if num_groups <= 0 or topk_groups <= 0 or topk_groups > num_groups:
+        raise MoeA2ADeclarationError(f"{recipe.model_name}: invalid routing groups {topk_groups}/{num_groups}")
+    if int(recipe.num_experts) % num_groups:
+        raise MoeA2ADeclarationError(
+            f"{recipe.model_name}: num_experts={recipe.num_experts} is not divisible by num_expert_group={num_groups}"
+        )
+    selected_experts = (int(recipe.num_experts) // num_groups) * topk_groups
+    if int(recipe.topk) > selected_experts:
+        raise MoeA2ADeclarationError(
+            f"{recipe.model_name}: topk={recipe.topk} exceeds {selected_experts} experts "
+            "available in the selected routing groups"
+        )
+    scoring_func = str(recipe.sglang_moe_scoring_func)
+    if scoring_func not in {"softmax", "sigmoid", "sqrtsoftplus"}:
+        raise MoeA2ADeclarationError(f"{recipe.model_name}: unsupported scoring_func={scoring_func!r}")
+    if bool(recipe.sglang_moe_has_correction_bias) and int(recipe.num_experts) // num_groups < 2:
+        raise MoeA2ADeclarationError(f"{recipe.model_name}: correction-bias routing requires two experts per group")
+    return MoeA2ARoutingSpec(
+        method_type=str(recipe.sglang_moe_routing_method_type or "Renormalize"),
+        scoring_func=scoring_func,
+        routed_scaling_factor=recipe.sglang_moe_routed_scaling_factor,
+        renormalize=bool(recipe.sglang_moe_renormalize),
+        has_correction_bias=bool(recipe.sglang_moe_has_correction_bias),
+        num_expert_group=num_groups,
+        topk_group=topk_groups,
+    )
+
+
+def resolve_moe_a2a_shapes(recipes: list[Any]) -> list[MoeA2AShape]:
+    """Resolve declarations and reject routing collisions hidden by the parquet key."""
+    from collector.case_generator import is_wideep_moe_model
+
+    declarations: dict[tuple[int, int, int], tuple[MoeA2AShape, set[str]]] = {}
+    for recipe in recipes:
+        if not is_wideep_moe_model(recipe.model_name):
+            continue
+        physical_key = (int(recipe.hidden_size), int(recipe.topk), int(recipe.num_experts))
+        shape = MoeA2AShape(*physical_key, routing=_routing_spec_from_recipe(recipe))
+        previous = declarations.get(physical_key)
+        if previous is not None and previous[0].routing != shape.routing:
+            raise MoeA2ADeclarationError(
+                "routing collision for persisted shape "
+                f"{physical_key}: {sorted(previous[1])} declare {previous[0].routing}, "
+                f"but {recipe.model_name!r} declares {shape.routing}"
+            )
+        if previous is None:
+            declarations[physical_key] = (shape, {str(recipe.model_name)})
+        else:
+            previous[1].add(str(recipe.model_name))
+    return sorted(value[0] for value in declarations.values())
 
 
 @dataclass(frozen=True)
@@ -311,21 +381,8 @@ def get_moe_a2a_shapes(*, required_expert_parallel_size: int | None = None) -> l
         backend="sglang",
         required_expert_parallel_size=required_expert_parallel_size,
     )
-    dropped_not_declared = 0
-    shapes: set[MoeA2AShape] = set()
-    for recipe in recipes:
-        if not is_wideep_moe_model(recipe.model_name):
-            dropped_not_declared += 1
-            continue
-        shapes.add(
-            MoeA2AShape(
-                hidden_size=int(recipe.hidden_size),
-                topk=int(recipe.topk),
-                num_experts=int(recipe.num_experts),
-            )
-        )
-
-    ordered = sorted(shapes)
+    ordered = resolve_moe_a2a_shapes(recipes)
+    dropped_not_declared = sum(1 for recipe in recipes if not is_wideep_moe_model(recipe.model_name))
     print(
         f"moe_a2a: {len(ordered)} declared shapes from {len(recipes)} moe recipes "
         f"(dropped: {dropped_not_declared} not declared wideep; "
@@ -428,6 +485,15 @@ def case_plan_ids(cases: list[MoeA2ACase], *, ep_size: int, node_num: int) -> li
             "node_num": node_num,
             "num_experts": case.shape.num_experts,
             "num_tokens": case.num_tokens,
+            "routing": {
+                "has_correction_bias": case.shape.routing.has_correction_bias,
+                "method_type": case.shape.routing.method_type,
+                "num_expert_group": case.shape.routing.num_expert_group,
+                "renormalize": case.shape.routing.renormalize,
+                "routed_scaling_factor": case.shape.routing.routed_scaling_factor,
+                "scoring_func": case.shape.routing.scoring_func,
+                "topk_group": case.shape.routing.topk_group,
+            },
             "sms": case.sms,
             "topk": case.shape.topk,
         }
@@ -655,7 +721,7 @@ def run_ht_case(
     """Measure one HT dispatch+combine case; returns per-phase timings in us.
 
     Ported from ``deepep/test_internode.py:test_main``. **Kept**: the routing
-    construction (group-limited top-k over ``min(nodes, 4)`` node groups), the
+    construction (the model-declared grouped/global routing identity), the
     NVL/RDMA buffer sizes, the FP8 dispatch tuning sweep
     (nvl 4..44 step 4 x rdma 4..32 step 4), the rank-0 config broadcast, the
     combine tuning sweep (nvl 1..7 x rdma 8/12..32 step 4), and the
@@ -676,7 +742,7 @@ def run_ht_case(
     shape = case.shape
     num_ranks = identity.world_size
     num_nodes = identity.node_num
-    num_topk_groups = min(num_nodes, HT_MAX_TOPK_GROUPS)
+    routing = shape.routing
     nvl_buffer_size = _ht_nvl_buffer_size(num_ranks)
 
     torch.manual_seed(identity.rank)
@@ -684,11 +750,25 @@ def run_ht_case(
     x_e4m3 = _per_token_cast_to_fp8(x)
     x_e4m3 = (x_e4m3[0], x_e4m3[1].T.contiguous().T)
 
-    scores = torch.randn((case.num_tokens, shape.num_experts), dtype=torch.float32, device="cuda").abs() + 1
-    group_scores = scores.view(case.num_tokens, num_nodes, -1).amax(dim=-1)
-    group_idx = torch.topk(group_scores, k=num_topk_groups, dim=-1, sorted=False).indices
-    masked_scores = _create_grouped_scores(scores, group_idx, num_nodes)
-    topk_idx = torch.topk(masked_scores, shape.topk, dim=-1, largest=True, sorted=False)[1]
+    logits = torch.randn((case.num_tokens, shape.num_experts), dtype=torch.float32, device="cuda")
+    if routing.scoring_func == "sigmoid":
+        scores = torch.sigmoid(logits)
+    elif routing.scoring_func == "sqrtsoftplus":
+        scores = torch.nn.functional.softplus(logits).sqrt()
+    else:
+        scores = torch.softmax(logits, dim=-1)
+    selection_scores = scores
+    if routing.has_correction_bias:
+        selection_scores = scores + torch.randn((shape.num_experts,), dtype=torch.float32, device="cuda")
+    if routing.num_expert_group > 1:
+        grouped = selection_scores.view(case.num_tokens, routing.num_expert_group, -1)
+        if routing.has_correction_bias:
+            group_scores = grouped.topk(2, dim=-1).values.sum(dim=-1)
+        else:
+            group_scores = grouped.amax(dim=-1)
+        group_idx = torch.topk(group_scores, k=routing.topk_group, dim=-1, sorted=False).indices
+        selection_scores = _create_grouped_scores(selection_scores, group_idx, routing.num_expert_group)
+    topk_idx = torch.topk(selection_scores, shape.topk, dim=-1, largest=True, sorted=False)[1]
     topk_weights = torch.ones((case.num_tokens, shape.topk), dtype=torch.float32, device="cuda") * identity.rank
 
     (
@@ -852,8 +932,26 @@ def run_ll_case(*, buffer, group, case: MoeA2ACase, identity: DistIdentity) -> d
 
     num_local_experts = shape.num_experts // identity.world_size
     x = torch.randn((case.num_tokens, shape.hidden_size), dtype=torch.bfloat16, device="cuda") * 0.1
-    scores = torch.randn((case.num_tokens, shape.num_experts), dtype=torch.float32, device="cuda").abs() + 1
-    topk_idx = torch.topk(scores, shape.topk, dim=-1, largest=True, sorted=True)[1]
+    routing = shape.routing
+    logits = torch.randn((case.num_tokens, shape.num_experts), dtype=torch.float32, device="cuda")
+    if routing.scoring_func == "sigmoid":
+        scores = torch.sigmoid(logits)
+    elif routing.scoring_func == "sqrtsoftplus":
+        scores = torch.nn.functional.softplus(logits).sqrt()
+    else:
+        scores = torch.softmax(logits, dim=-1)
+    selection_scores = scores
+    if routing.has_correction_bias:
+        selection_scores = scores + torch.randn((shape.num_experts,), dtype=torch.float32, device="cuda")
+    if routing.num_expert_group > 1:
+        grouped = selection_scores.view(case.num_tokens, routing.num_expert_group, -1)
+        if routing.has_correction_bias:
+            group_scores = grouped.topk(2, dim=-1).values.sum(dim=-1)
+        else:
+            group_scores = grouped.amax(dim=-1)
+        group_idx = torch.topk(group_scores, k=routing.topk_group, dim=-1, sorted=False).indices
+        selection_scores = _create_grouped_scores(selection_scores, group_idx, routing.num_expert_group)
+    topk_idx = torch.topk(selection_scores, shape.topk, dim=-1, largest=True, sorted=True)[1]
     topk_weights = torch.randn((case.num_tokens, shape.topk), dtype=torch.float32, device="cuda").abs()
     for _ in range(10):
         topk_idx[random.randint(0, case.num_tokens - 1), random.randint(0, shape.topk - 1)] = -1
