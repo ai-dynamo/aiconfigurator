@@ -1517,30 +1517,49 @@ def _megamoe_model_shape(model_path: str) -> tuple[int, int, int, int] | None:
     return None
 
 
-def _megamoe_perf_data_available(
+def _megamoe_lane_version(
     backend_name: str,
     system_name: str,
     backend_version: str | None,
     model_path: str,
-) -> bool:
-    """True when measured MegaMoE rows resolve for this model and database.
+) -> str | None:
+    """Query-slot version whose MegaMoE table carries this model's measured rows.
 
-    Probes the unified ``dsv4_megamoe_module`` table at the requested (or
-    latest declared) version for the backend, then verifies that both phases
-    contain the model's exact fused-module shape on the backend's serving
-    pre-dispatch lane. File presence alone is insufficient: for example,
-    GB300/SGLang 0.5.10 contains DeepSeek-V4 rows but no Kimi-K3 rows.
+    Under queryable-version slots the megamoe family is a single-op
+    development drop: its rows ride the ``next`` slot while ``current``
+    serves the full upgrade, and backward fill is never forward — so a lane
+    left on ``current`` would build fine and then die at the module query
+    with PerfDataNotAvailableError. Probe the requested version first (an
+    explicit pin wins), then ``current``, then ``next``. Returns the version
+    the lane must run at, or None when no measured rows resolve anywhere.
 
     Lanes whose rows would arrive only through reuse donors are deliberately
     not chased: the auto sweep should enumerate only lanes holding their own
     measured MegaMoE rows.
     """
-    resolved_version = backend_version or perf_database.get_latest_database_version(
-        system=system_name,
-        backend=backend_name,
-    )
-    if resolved_version is None:
-        return False
+    candidates: list[str] = []
+    if backend_version is not None:
+        candidates.append(backend_version)
+    else:
+        latest = perf_database.get_latest_database_version(system=system_name, backend=backend_name)
+        if latest is not None:
+            candidates.append(latest)
+        slots = perf_database.get_version_slots(system_name, backend_name)
+        if slots is not None and slots.get("next") and slots["next"] not in candidates:
+            candidates.append(slots["next"])
+    for version in candidates:
+        if _megamoe_rows_resolve_at(backend_name, system_name, version, model_path):
+            return version
+    return None
+
+
+def _megamoe_rows_resolve_at(
+    backend_name: str,
+    system_name: str,
+    resolved_version: str,
+    model_path: str,
+) -> bool:
+    """Measured MegaMoE rows for this model resolve at the exact version."""
     system_data_root = _get_system_data_root(system_name)
     if system_data_root is None:
         return False
@@ -1588,6 +1607,23 @@ def _megamoe_perf_data_available(
         and row["pre_dispatch"] == expected_pre_dispatch
     }
     return {"context", "generation"} <= matching_phases
+
+
+def _megamoe_perf_data_available(
+    backend_name: str,
+    system_name: str,
+    backend_version: str | None,
+    model_path: str,
+) -> bool:
+    """True when measured MegaMoE rows resolve for this model and database.
+
+    Probes the unified ``dsv4_megamoe_module`` table at the requested (or
+    latest declared) version for the backend, then verifies that both phases
+    contain the model's exact fused-module shape on the backend's serving
+    pre-dispatch lane. File presence alone is insufficient: for example,
+    GB300/SGLang 0.5.10 contains DeepSeek-V4 rows but no Kimi-K3 rows.
+    """
+    return _megamoe_lane_version(backend_name, system_name, backend_version, model_path) is not None
 
 
 def _ensure_backend_version_available(
@@ -1801,6 +1837,19 @@ def build_default_tasks(
     needs_disagg = "disagg" in modes_to_sweep
 
     backends_to_sweep = [b.value for b in common.BackendName] if backend == "auto" else [backend]
+    # MegaMoE lanes must run at a queryable version that carries the model's
+    # measured rows (see _megamoe_lane_version). Resolved once per
+    # (backend, system); non-megamoe sweeps keep the caller's version.
+    megamoe_lane_versions: dict[tuple[str, str], str | None] = {}
+
+    def _megamoe_lane(backend_name: str, sys_name: str) -> str | None:
+        if moe_backend != "megamoe":
+            return backend_version
+        key = (backend_name, sys_name)
+        if key not in megamoe_lane_versions:
+            megamoe_lane_versions[key] = _megamoe_lane_version(backend_name, sys_name, backend_version, model_path)
+        return megamoe_lane_versions[key]
+
     if backend == "auto" and moe_backend == "megamoe":
         # Join only lanes whose measured MegaMoE rows resolve at the requested
         # (or latest declared) framework version on this system — a lane with
@@ -1813,7 +1862,7 @@ def build_default_tasks(
         # (today: gb300 @ 0.27.0).
         # Explicit --backend <name> --moe-backend megamoe still builds anywhere.
         backends_to_sweep = []
-        if _megamoe_perf_data_available(common.BackendName.sglang.value, system, backend_version, model_path):
+        if _megamoe_lane(common.BackendName.sglang.value, system) is not None:
             backends_to_sweep.append(common.BackendName.sglang.value)
         else:
             logger.warning(
@@ -1823,9 +1872,7 @@ def build_default_tasks(
             )
         from aiconfigurator.sdk.models.helpers import _is_kimi_k3_checkpoint
 
-        if _is_kimi_k3_checkpoint(model_path) and _megamoe_perf_data_available(
-            common.BackendName.vllm.value, system, backend_version, model_path
-        ):
+        if _is_kimi_k3_checkpoint(model_path) and _megamoe_lane(common.BackendName.vllm.value, system) is not None:
             backends_to_sweep.append(common.BackendName.vllm.value)
 
     if backend == "auto":
@@ -1914,7 +1961,7 @@ def build_default_tasks(
         if (
             backend_name in (common.BackendName.sglang.value, common.BackendName.vllm.value)
             and moe_backend == "megamoe"
-            and (not _megamoe_perf_data_available(backend_name, decode_system, backend_version, model_path))
+            and (not _megamoe_lane(backend_name, decode_system))
         ):
             logger.warning(
                 "Skipping disagg for backend %s: no measured MegaMoE rows for decode system %s.",
@@ -1985,7 +2032,7 @@ def build_default_tasks(
             model_path=model_path,
             system_name=system,
             backend_name=backend_name,
-            backend_version=backend_version,
+            backend_version=_megamoe_lane(backend_name, system) or backend_version,
             enable_chunked_prefill=enable_chunked_prefill,
             moe_backend=moe_backend_value,
             enable_epd=enable_epd,
@@ -2004,8 +2051,8 @@ def build_default_tasks(
             decode_system_name=decode_system,
             prefill_backend_name=backend_name,
             decode_backend_name=backend_name,
-            prefill_backend_version=backend_version,
-            decode_backend_version=backend_version,
+            prefill_backend_version=_megamoe_lane(backend_name, system) or backend_version,
+            decode_backend_version=_megamoe_lane(backend_name, decode_system) or backend_version,
             prefill_enable_chunked_prefill=enable_chunked_prefill,
             moe_backend=moe_backend_value,
             enable_epd=enable_epd,

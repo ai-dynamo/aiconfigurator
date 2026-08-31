@@ -733,11 +733,11 @@ class TestBuildDefaultTaskConfigs:
         assert _megamoe_perf_data_available("sglang", "b200_sxm", "0.5.16", "moonshotai/Kimi-K3")
         assert _megamoe_perf_data_available("vllm", "gb300", "0.27.0", "moonshotai/Kimi-K3")
 
-    @patch("aiconfigurator.cli.main._megamoe_perf_data_available", return_value=True)
+    @patch("aiconfigurator.cli.main._megamoe_lane_version", return_value="0.5.10")
     @patch("aiconfigurator.cli.main.Task")
     @patch("aiconfigurator.cli.main.perf_database.get_supported_databases")
     def test_auto_megamoe_vllm_probe_is_model_gated(
-        self, mock_supported_databases, mock_task_config, _mock_megamoe_available
+        self, mock_supported_databases, mock_task_config, _mock_megamoe_lane_version
     ):
         """vLLM MegaMoE rows exist only for Kimi-K3. On systems whose data
         probe passes, a DeepSeek-V4-Pro auto sweep must still not gain vLLM
