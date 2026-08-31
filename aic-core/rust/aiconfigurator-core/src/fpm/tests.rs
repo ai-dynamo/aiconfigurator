@@ -59,7 +59,7 @@ fn context_ops() -> Vec<Op> {
             fmha_quant_mode: FmhaQuantMode::Bfloat16,
             use_qk_norm: false,
             cp_size: 1,
-            lane_order: crate::operators::attention::b200_vllm_lane_order(),
+            lane_order: crate::operators::attention::b200_vllm_context_lane_order(),
         }),
     ]
 }
@@ -81,7 +81,7 @@ fn generation_ops() -> Vec<Op> {
             head_size: 128,
             window_size: 0,
             kv_cache_dtype: KvCacheQuantMode::Fp8,
-            lane_order: crate::operators::attention::b200_vllm_lane_order(),
+            lane_order: crate::operators::attention::b200_vllm_generation_lane_order(),
         }),
     ]
 }

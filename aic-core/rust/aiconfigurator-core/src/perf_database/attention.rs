@@ -153,7 +153,10 @@ fn lane_slice<'a, K: Ord, V>(
 /// back through (see [`lane_slice`]) — i.e. every table lane NOT already
 /// named in `lane_order`. Backs the miss-diagnostic errors below so they
 /// report every lane actually consulted, not just the resolver's named list.
-fn fallback_lanes<'a, K, V>(by_lane: &'a BTreeMap<String, BTreeMap<K, V>>, lane_order: &[String]) -> Vec<&'a str> {
+fn fallback_lanes<'a, K, V>(
+    by_lane: &'a BTreeMap<String, BTreeMap<K, V>>,
+    lane_order: &[String],
+) -> Vec<&'a str> {
     by_lane
         .keys()
         .filter(|lane| !lane_order.iter().any(|tried| tried == *lane))
@@ -452,7 +455,12 @@ impl AttentionTable {
             .ok_or_else(|| missing_key(&self.data_root, lane_order, &grids.by_lane, &key))?;
         let points = perf_interp::node_points(node);
         if points.is_empty() {
-            return Err(missing_key(&self.data_root, lane_order, &grids.by_lane, &key));
+            return Err(missing_key(
+                &self.data_root,
+                lane_order,
+                &grids.by_lane,
+                &key,
+            ));
         }
         Ok(points)
     }
@@ -586,7 +594,12 @@ impl AttentionTable {
             .ok_or_else(|| missing_gen_key(&self.data_root, lane_order, &grids.by_lane, &key))?;
         let points = perf_interp::node_points(node);
         if points.is_empty() {
-            return Err(missing_gen_key(&self.data_root, lane_order, &grids.by_lane, &key));
+            return Err(missing_gen_key(
+                &self.data_root,
+                lane_order,
+                &grids.by_lane,
+                &key,
+            ));
         }
         Ok(points)
     }
@@ -699,7 +712,10 @@ impl AttentionTable {
                     .map(|(lane, slices)| {
                         (
                             lane,
-                            slices.into_iter().map(|(k, g)| (k, grid3_to_node(&g))).collect(),
+                            slices
+                                .into_iter()
+                                .map(|(k, g)| (k, grid3_to_node(&g)))
+                                .collect(),
                         )
                     })
                     .collect(),
@@ -723,7 +739,10 @@ impl AttentionTable {
                     .map(|(lane, slices)| {
                         (
                             lane,
-                            slices.into_iter().map(|(k, g)| (k, grid3_to_node(&g))).collect(),
+                            slices
+                                .into_iter()
+                                .map(|(k, g)| (k, grid3_to_node(&g)))
+                                .collect(),
                         )
                     })
                     .collect(),
@@ -1344,10 +1363,11 @@ mod tests {
         names.iter().map(|n| n.to_string()).collect()
     }
 
-    /// Walk order Python serializes for a no-override op on vllm/0.24.0.
+    /// Context walk order Python serializes for a no-override op on
+    /// vllm/0.24.0.
     /// The canonical lanes miss and the table's raw vLLM lanes follow in
     /// measured-density order (`resolve_lane_order` + `lane_walk_order`).
-    fn vllm_lanes() -> Vec<String> {
+    fn vllm_context_lanes() -> Vec<String> {
         lanes(&[
             "fa3",
             "fla",
@@ -1370,7 +1390,7 @@ mod tests {
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let via_mha = table
             .query_context(
-                &vllm_lanes(),
+                &vllm_context_lanes(),
                 4,
                 16384,
                 64,
@@ -1384,7 +1404,7 @@ mod tests {
             .latency;
         let via_zero = table
             .query_context(
-                &vllm_lanes(),
+                &vllm_context_lanes(),
                 4,
                 16384,
                 64,
@@ -1409,7 +1429,7 @@ mod tests {
         // vLLM b200 context attention has fmha=bfloat16 only; Fp8 fmha
         // is genuinely absent.
         match table.query_context(
-            &vllm_lanes(),
+            &vllm_context_lanes(),
             1,
             1024,
             64,
@@ -1440,7 +1460,7 @@ mod tests {
         let table = AttentionTable::new(b200_vllm_data_root(), b200_sxm_spec());
         let first = table
             .query_context(
-                &vllm_lanes(),
+                &vllm_context_lanes(),
                 8,
                 16384,
                 64,
@@ -1453,7 +1473,7 @@ mod tests {
             .unwrap();
         let second = table
             .query_context(
-                &vllm_lanes(),
+                &vllm_context_lanes(),
                 8,
                 16384,
                 64,
@@ -1585,13 +1605,27 @@ mod tests {
     /// `triton` is the framework-default map lane and the donor tier is
     /// density-ranked, so `trtllm_mha` (66 slices) precedes `flashinfer` (10).
     fn sglang_default_lanes() -> Vec<String> {
-        lanes(&["triton", "trtllm_mha", "flashinfer", "fa3", "fla", "default"])
+        lanes(&[
+            "triton",
+            "trtllm_mha",
+            "flashinfer",
+            "fa3",
+            "fla",
+            "default",
+        ])
     }
 
     /// Same table, `attention_backend="flashinfer"`: the override pins
     /// `flashinfer` ahead of the map lane `triton`.
     fn sglang_flashinfer_lanes() -> Vec<String> {
-        lanes(&["flashinfer", "triton", "trtllm_mha", "fa3", "fla", "default"])
+        lanes(&[
+            "flashinfer",
+            "triton",
+            "trtllm_mha",
+            "fa3",
+            "fla",
+            "default",
+        ])
     }
 
     /// Two-lane in-memory context table: `head` carries only the `hs=128`
@@ -1727,22 +1761,36 @@ mod tests {
         // Donor gap-fill: the head lane has no hs=64 slice at all.
         assert_eq!(two_lane_query(&table, &order, 64).unwrap(), 3.0);
         // Reversing the order flips which lane serves the shared slice.
-        assert_eq!(two_lane_query(&table, &lanes(&["donor", "head"]), 256).unwrap(), 4.0);
+        assert_eq!(
+            two_lane_query(&table, &lanes(&["donor", "head"]), 256).unwrap(),
+            4.0
+        );
 
         // Named-lane walk exhausted (neither "fa3" nor "default" exists in
         // this table): falls back to any other lane still present. Both
         // "donor" and "head" carry hs=256; BTreeMap order ("donor" < "head")
         // picks "donor" — not a miss.
         let fallback = two_lane_query(&table, &lanes(&["fa3", "default"]), 256);
-        assert_eq!(fallback.unwrap(), 4.0, "fallback must scan the table's OTHER lanes, not just miss");
+        assert_eq!(
+            fallback.unwrap(),
+            4.0,
+            "fallback must scan the table's OTHER lanes, not just miss"
+        );
         // No lane anywhere in the table carries hs=999 — a genuine miss the
         // fallback cannot paper over.
         let miss = two_lane_query(&table, &order, 999);
-        assert!(matches!(miss, Err(AicError::PerfDatabase(_))), "got {miss:?}");
+        assert!(
+            matches!(miss, Err(AicError::PerfDatabase(_))),
+            "got {miss:?}"
+        );
         // An empty order still falls back to every table lane: "donor" lacks
         // hs=128 (head-lane-only slice, see above) but "head" carries it.
         let fallback = two_lane_query(&table, &[], 128);
-        assert_eq!(fallback.unwrap(), 1.0, "empty order must still fall back to the table's own lanes");
+        assert_eq!(
+            fallback.unwrap(),
+            1.0,
+            "empty order must still fall back to the table's own lanes"
+        );
     }
 
     /// The loader KEEPS every `kernel_source` as its own lane instead of

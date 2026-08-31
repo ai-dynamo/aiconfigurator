@@ -609,7 +609,7 @@ mod tests {
             fmha_quant_mode: FmhaQuantMode::Bfloat16,
             use_qk_norm: false,
             cp_size: 1,
-            lane_order: crate::operators::attention::b200_vllm_lane_order(),
+            lane_order: crate::operators::attention::b200_vllm_context_lane_order(),
         };
         let (b, sq, p) = (4.0, 682.6666666666666_f64, 128.5_f64);
         let (n, n_kv, h) = (48.0, 8.0, 128.0);
@@ -640,7 +640,7 @@ mod tests {
             head_size: 128,
             window_size: 0,
             kv_cache_dtype: KvCacheQuantMode::Fp8,
-            lane_order: crate::operators::attention::b200_vllm_lane_order(),
+            lane_order: crate::operators::attention::b200_vllm_generation_lane_order(),
         };
         let (b, sq) = (256.0, 8441.75_f64);
         let kv_len = sq - 1.0;

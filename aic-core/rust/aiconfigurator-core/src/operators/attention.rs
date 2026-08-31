@@ -1145,25 +1145,13 @@ fn encoder_attention_empirical(
     Ok(latency)
 }
 
-/// The b200_sxm/vllm/0.24.0 attention walk order Python serializes for an op
-/// with no `attention_backend` override (`resolve_lane_order` +
-/// `attention.lane_walk_order`): every canonical lane misses and the table's
-/// raw vLLM lanes follow in measured-density order. Shared by the hand-built op
-/// fixtures in the `fpm`, `engine::runtime` and `py` test modules, which all
-/// run against that data root.
-///
-/// Rebase-4 review (AIC-1715/1716, Blocker 1 item e): re-verified byte-exact
-/// against live `resolved_lane_order_for_op(get_database("b200_sxm", "vllm",
-/// "0.19.0"), "_context_attention_data" / "_generation_attention_data")`
-/// after the donor/leftover density fix (both tables agree on this order),
-/// so this constant needed no change — the bug was in the density SOURCE
-/// (`operations/attention.py`'s wiring), not in this already-correct
-/// resolved order. As a hand-maintained literal it cannot self-detect a
-/// FUTURE resolver regression the way a golden-diff would; re-verify the
-/// same way on any change to `attention_lane_defaults.yaml`,
-/// `lane_walk_order`'s ranking, or this data root's parquet.
+/// The b200_sxm/vllm/0.24.0 context-attention walk order Python serializes
+/// for an op with no `attention_backend` override (`resolve_lane_order` +
+/// `attention.lane_walk_order`). The raw vLLM leftovers are density-ranked:
+/// prefill (116 slices / 44,664 rows), decode (116 / 3,684), then triton
+/// (7 / 1,632).
 #[cfg(test)]
-pub(crate) fn b200_vllm_lane_order() -> Vec<String> {
+pub(crate) fn b200_vllm_context_lane_order() -> Vec<String> {
     [
         "fa3",
         "fla",
@@ -1172,6 +1160,26 @@ pub(crate) fn b200_vllm_lane_order() -> Vec<String> {
         "trtllm_mha",
         "default",
         "vllm_flashinfer_trtllmprefill",
+        "vllm_flashinfer_trtllmdecode",
+        "vllm_triton_attn",
+    ]
+    .iter()
+    .map(|lane| lane.to_string())
+    .collect()
+}
+
+/// Decode twin of [`b200_vllm_context_lane_order`]. The vLLM 0.24.0
+/// generation table has no prefill lane; its leftovers are decode
+/// (66 slices / 59,582 rows), then triton (7 / 2,228).
+#[cfg(test)]
+pub(crate) fn b200_vllm_generation_lane_order() -> Vec<String> {
+    [
+        "fa3",
+        "fla",
+        "flashinfer",
+        "triton",
+        "trtllm_mha",
+        "default",
         "vllm_flashinfer_trtllmdecode",
         "vllm_triton_attn",
     ]
@@ -1195,22 +1203,27 @@ mod tests {
     }
 
     /// The walk order Python serializes for a no-override op on
-    /// b200_sxm/vllm/0.24.0 — see [`b200_vllm_lane_order`]. Every pre-lane
+    /// b200_sxm/vllm/0.24.0 — see [`b200_vllm_context_lane_order`] and
+    /// [`b200_vllm_generation_lane_order`]. Every pre-lane
     /// assertion below is a query through this order, so the collapsed-table
     /// values must survive the lane axis unchanged.
-    fn vllm_lanes() -> Vec<String> {
-        b200_vllm_lane_order()
+    fn vllm_context_lanes() -> Vec<String> {
+        b200_vllm_context_lane_order()
+    }
+
+    fn vllm_generation_lanes() -> Vec<String> {
+        b200_vllm_generation_lane_order()
     }
 
     /// Attach the b200/vllm walk order to a constructor-built op (whose
     /// default is the always-valid `["default"]`).
     fn with_vllm_lanes_ctx(mut op: ContextAttentionOp) -> ContextAttentionOp {
-        op.lane_order = vllm_lanes();
+        op.lane_order = vllm_context_lanes();
         op
     }
 
     fn with_vllm_lanes_gen(mut op: GenerationAttentionOp) -> GenerationAttentionOp {
-        op.lane_order = vllm_lanes();
+        op.lane_order = vllm_generation_lanes();
         op
     }
 
@@ -1320,18 +1333,78 @@ mod tests {
         // (b, s, prefix, n, n_kv, hs, w, kv, expected tier)
         type Tier = crate::operators::util_empirical::ProvenanceTier;
         let cases: &[(u32, u32, u32, u32, u32, u32, u32, KvCacheQuantMode, Tier)] = &[
-            (7, 3000, 0, 64, 1, 128, 0, KvCacheQuantMode::Fp8, Tier::Empirical),
-            (8, 16384, 0, 64, 1, 128, 0, KvCacheQuantMode::Fp8, Tier::Empirical),
-            (4, 8192, 8192, 64, 1, 128, 0, KvCacheQuantMode::Fp8, Tier::Empirical),
-            (4, 4096, 0, 48, 8, 192, 0, KvCacheQuantMode::Fp8, Tier::XShape),
-            (2, 10000, 0, 32, 1, 128, 8192, KvCacheQuantMode::Bfloat16, Tier::Empirical),
-            (2, 10000, 0, 32, 1, 128, 4096, KvCacheQuantMode::Bfloat16, Tier::Empirical),
+            (
+                7,
+                3000,
+                0,
+                64,
+                1,
+                128,
+                0,
+                KvCacheQuantMode::Fp8,
+                Tier::Empirical,
+            ),
+            (
+                8,
+                16384,
+                0,
+                64,
+                1,
+                128,
+                0,
+                KvCacheQuantMode::Fp8,
+                Tier::Empirical,
+            ),
+            (
+                4,
+                8192,
+                8192,
+                64,
+                1,
+                128,
+                0,
+                KvCacheQuantMode::Fp8,
+                Tier::Empirical,
+            ),
+            (
+                4,
+                4096,
+                0,
+                48,
+                8,
+                192,
+                0,
+                KvCacheQuantMode::Fp8,
+                Tier::XShape,
+            ),
+            (
+                2,
+                10000,
+                0,
+                32,
+                1,
+                128,
+                8192,
+                KvCacheQuantMode::Bfloat16,
+                Tier::Empirical,
+            ),
+            (
+                2,
+                10000,
+                0,
+                32,
+                1,
+                128,
+                4096,
+                KvCacheQuantMode::Bfloat16,
+                Tier::Empirical,
+            ),
         ];
         for &(b, s, p, n, nk, hs, w, kv, tier) in cases {
             db.reset_provenance();
             let result = query_context_attention_table(
                 &db,
-                &vllm_lanes(),
+                &vllm_context_lanes(),
                 b,
                 s,
                 p,
@@ -1344,8 +1417,16 @@ mod tests {
             )
             .expect("empirical query");
             assert!(result.latency_ms.is_finite() && result.latency_ms > 0.0);
-            assert_eq!(result.source, Source::Empirical, "(b={b}, s={s}, hs={hs}, w={w})");
-            assert_eq!(db.worst_provenance(), tier, "(b={b}, s={s}, hs={hs}, w={w})");
+            assert_eq!(
+                result.source,
+                Source::Empirical,
+                "(b={b}, s={s}, hs={hs}, w={w})"
+            );
+            assert_eq!(
+                db.worst_provenance(),
+                tier,
+                "(b={b}, s={s}, hs={hs}, w={w})"
+            );
         }
     }
 
@@ -1357,20 +1438,64 @@ mod tests {
         db.database_mode = crate::common::enums::DatabaseMode::Empirical;
         type Tier = crate::operators::util_empirical::ProvenanceTier;
         let cases: &[(u32, u32, u32, u32, u32, u32, KvCacheQuantMode, Tier)] = &[
-            (48, 7777, 64, 8, 128, 0, KvCacheQuantMode::Fp8, Tier::Empirical),
+            (
+                48,
+                7777,
+                64,
+                8,
+                128,
+                0,
+                KvCacheQuantMode::Fp8,
+                Tier::Empirical,
+            ),
             (32, 2, 64, 4, 128, 0, KvCacheQuantMode::Fp8, Tier::Empirical),
             (16, 4096, 48, 8, 192, 0, KvCacheQuantMode::Fp8, Tier::XShape),
-            (8, 12000, 32, 1, 128, 8192, KvCacheQuantMode::Bfloat16, Tier::Empirical),
-            (8, 12000, 32, 1, 128, 2048, KvCacheQuantMode::Bfloat16, Tier::Empirical),
+            (
+                8,
+                12000,
+                32,
+                1,
+                128,
+                8192,
+                KvCacheQuantMode::Bfloat16,
+                Tier::Empirical,
+            ),
+            (
+                8,
+                12000,
+                32,
+                1,
+                128,
+                2048,
+                KvCacheQuantMode::Bfloat16,
+                Tier::Empirical,
+            ),
         ];
         for &(b, s, n, nk, hs, w, kv, tier) in cases {
             db.reset_provenance();
-            let result =
-                query_generation_attention_table(&db, &vllm_lanes(), b, s, n, nk, hs, w, kv)
-                    .expect("empirical query");
+            let result = query_generation_attention_table(
+                &db,
+                &vllm_generation_lanes(),
+                b,
+                s,
+                n,
+                nk,
+                hs,
+                w,
+                kv,
+            )
+            .expect("empirical query");
             assert!(result.latency_ms.is_finite() && result.latency_ms > 0.0);
-            assert_eq!(result.source, Source::Empirical, "(b={b}, s={s}, hs={hs}, w={w})");
-            assert_eq!(db.worst_provenance(), tier, "(b={b}, s={s}, hs={hs}, w={w})");
+            assert_eq!(
+                result.source,
+                Source::Empirical,
+                "(b={b}, s={s}, hs={hs}, w={w})"
+            );
+            assert_eq!(
+                db.worst_provenance(),
+                tier,
+                "(b={b}, s={s}, hs={hs}, w={w})"
+            );
         }
     }
 
@@ -1412,6 +1537,7 @@ mod tests {
         emp_db.database_mode = crate::common::enums::DatabaseMode::Empirical;
         let empirical_192 = query_context_attention_table(
             &emp_db,
+            &vllm_context_lanes(),
             4,
             4096,
             0,
@@ -1427,6 +1553,7 @@ mod tests {
         let sil_db = b200_vllm_db();
         let silicon_hit = query_context_attention_table(
             &sil_db,
+            &vllm_context_lanes(),
             8,
             16384,
             0,
@@ -1443,7 +1570,7 @@ mod tests {
         db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
         let result = query_context_attention_table(
             &db,
-            &vllm_lanes(),
+            &vllm_context_lanes(),
             4,
             4096,
             0,
@@ -1464,7 +1591,7 @@ mod tests {
         // Collected slice: silicon exact hit, untouched by the fallback.
         let result = query_context_attention_table(
             &db,
-            &vllm_lanes(),
+            &vllm_context_lanes(),
             8,
             16384,
             0,
@@ -1494,7 +1621,7 @@ mod tests {
         db.transfer_policy = crate::common::enums::TransferPolicy::OFF;
         let ctx = query_context_attention_table(
             &db,
-            &vllm_lanes(),
+            &vllm_context_lanes(),
             4,
             4096,
             0,
@@ -1511,7 +1638,7 @@ mod tests {
         );
         let gen = query_generation_attention_table(
             &db,
-            &vllm_lanes(),
+            &vllm_generation_lanes(),
             16,
             4096,
             48,
@@ -1676,7 +1803,8 @@ mod tests {
     /// unchanged (the mem-op extras carry none). Guards the
     /// PerformanceResult composition against regressing to a latency-only
     /// scalar add (which mislabeled the result `silicon`). Uses the real
-    /// b200/vllm lane order (`with_vllm_lanes_ctx` / `vllm_lanes()`) so both
+    /// b200/vllm lane order (`with_vllm_lanes_ctx` / `vllm_context_lanes()`)
+    /// so both
     /// the op and the direct table probe resolve the same SILICON slice.
     #[test]
     fn context_attention_silicon_merges_extras_provenance_into_mixed() {
@@ -1693,7 +1821,7 @@ mod tests {
 
         let table = query_context_attention_table(
             &db,
-            &vllm_lanes(),
+            &vllm_context_lanes(),
             4,
             2048,
             256,

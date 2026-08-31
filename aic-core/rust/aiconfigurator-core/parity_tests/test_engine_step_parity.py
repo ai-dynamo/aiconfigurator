@@ -461,30 +461,19 @@ SMOKE_CASES = [
         ),
         id="kimi-k3-b300-sglang-next-dspark-nextn7",
     ),
-    # Attention kernel-lane coverage (AIC-1715/1716). b200_sxm/sglang/0.5.14
-    # collects three lanes for the dense attention ops (trtllm_mha, triton,
-    # flashinfer) and 0.5.14 is the first version with a framework-default map
-    # entry, so Qwen3.5-27B's full-attention layers walk a REAL multi-lane
-    # table: the no-override case heads on the map lane (triton) and gap-fills
-    # from trtllm_mha, the override case pins trtllm_mha first. Python resolves
-    # the walk order and Rust replays it verbatim off the op spec, so a drift
-    # in either the resolver or the replay shows up here as a latency split.
+    # Attention kernel-lane override coverage (AIC-1715/1716). The existing
+    # qwen35-27b-b200-sglang-isl1024-osl2 current-slot case anchors the default
+    # walk; this case pins trtllm_mha first on the same real multi-lane table.
+    # Python resolves the walk order and Rust replays it verbatim off the op
+    # spec, so a drift in either side shows up as a latency split.
     pytest.param(
         EngineStepParityCase(
             model_path="Qwen/Qwen3.5-27B",
             backend_name="sglang",
-            backend_version="0.5.14",
-        ),
-        id="qwen35-27b-b200-sglang-0514-lanes-default",
-    ),
-    pytest.param(
-        EngineStepParityCase(
-            model_path="Qwen/Qwen3.5-27B",
-            backend_name="sglang",
-            backend_version="0.5.14",
+            backend_version="current",
             attention_backend="trtllm_mha",
         ),
-        id="qwen35-27b-b200-sglang-0514-lanes-trtllm-mha",
+        id="qwen35-27b-b200-sglang-lanes-trtllm-mha",
     ),
 ]
 
