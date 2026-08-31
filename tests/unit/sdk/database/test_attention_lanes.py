@@ -173,7 +173,16 @@ class _StubDatabase:
     would make these tests fail exactly like production did.
     """
 
-    def __init__(self, systems_root, context_lanes=None, generation_lanes=None, *, sm_version=103):
+    def __init__(
+        self,
+        systems_root,
+        context_lanes=None,
+        generation_lanes=None,
+        *,
+        primary_context_lanes=None,
+        primary_generation_lanes=None,
+        sm_version=103,
+    ):
         self.system = "test_system"
         self.backend = "sglang"
         self.version = "0.5.14"
@@ -202,6 +211,14 @@ class _StubDatabase:
             "_context_attention_data": _density(context_lanes, _CTX_DEPTH),
             "_generation_attention_data": _density(generation_lanes, _GEN_DEPTH),
         }
+        self.primary_lane_density = {
+            "_context_attention_data": _density(
+                context_lanes if primary_context_lanes is None else primary_context_lanes, _CTX_DEPTH
+            ),
+            "_generation_attention_data": _density(
+                generation_lanes if primary_generation_lanes is None else primary_generation_lanes, _GEN_DEPTH
+            ),
+        }
 
 
 @pytest.fixture(autouse=True)
@@ -219,7 +236,8 @@ def _route_lane_density_through_the_stub(monkeypatch):
 
     def _fetch(database, attribute, *, shared_layer=None):
         if isinstance(database, _StubDatabase):
-            return database.lane_density.get(attribute, {})
+            density = database.primary_lane_density if shared_layer is False else database.lane_density
+            return density.get(attribute, {})
         return real_fetch(database, attribute, shared_layer=shared_layer)
 
     monkeypatch.setattr(_etv, "fetch_attention_lane_density", _fetch)
@@ -559,7 +577,7 @@ def test_real_shipped_vllm_0220_b200_table_unset_override_fails_closed_and_trito
     )
     from aiconfigurator_core.sdk.perf_database import get_database
 
-    db = get_database("b200_sxm", "vllm", "0.22.0")
+    db = get_database("b200_sxm", "vllm", "0.22.0", allow_unlisted_version=True)
 
     # Guard: the real table really does carry prefixed donor lanes a density
     # ranking WOULD have crowned (vllm_flashinfer is the 0.19/0.22 label).
@@ -620,7 +638,7 @@ def test_real_shipped_vllm_0220_b200_donor_only_override_pin_stays_first():
     from aiconfigurator_core.sdk.perf_database import get_database
 
     table_attr = "_context_attention_data"
-    db = get_database("b200_sxm", "vllm", "0.22.0")
+    db = get_database("b200_sxm", "vllm", "0.22.0", allow_unlisted_version=True)
     primary_lanes = set(fetch_attention_lane_density(db, table_attr, shared_layer=False))
     shared_lanes = set(fetch_attention_lane_density(db, table_attr))
     donor_only_lanes = shared_lanes - primary_lanes
@@ -637,31 +655,51 @@ def test_real_shipped_vllm_0220_b200_donor_only_override_pin_stays_first():
 
 @pytest.mark.parametrize("table_attr", ["_context_attention_data", "_generation_attention_data"])
 @pytest.mark.parametrize("override", [None, "default"], ids=["unset", "default"])
-def test_real_shipped_vllm_0240_h200_primary_lanes_precede_shared_donors(table_attr, override):
+def test_vllm_0240_primary_lanes_precede_shared_donors(table_attr, override):
     """A mapped literal ``default`` means framework dispatch, not donor-first.
 
-    The requested vLLM 0.24.0 table carries ``vllm_flash_attn_fa3`` / ``fa4``
-    lanes, while shared-layer inheritance adds the denser 0.22.0
-    ``vllm_flash_attn`` lane.  With no named override, requested-version lanes
-    must stay ahead of every donor-version lane so donors only fill missing
-    slices; density may rank lanes within either provenance tier, never across
-    the tier boundary.  Explicit ``attention_backend=default`` has the same
-    framework-default semantics as an unset override.
+    Synthetic requested-version lanes model vLLM 0.24.0's split FA3/FA4
+    labels, while the shared layer adds a denser donor lane. With no named
+    override, requested-version lanes must stay ahead of every donor-version
+    lane so donors only fill missing slices; density may rank lanes within
+    either provenance tier, never across the tier boundary. Explicit
+    ``attention_backend=default`` has the same framework-default semantics as
+    an unset override.
     """
-    from aiconfigurator_core.sdk.engine_table_view import fetch_attention_lane_density
     from aiconfigurator_core.sdk.operations.attention import resolved_lane_order_for_op
-    from aiconfigurator_core.sdk.perf_database import get_database
 
-    primary_db = get_database("h200_sxm", "vllm", "0.24.0", shared_layer=False)
-    shared_db = get_database("h200_sxm", "vllm", "0.24.0", shared_layer=True)
-    primary_lanes = set(fetch_attention_lane_density(primary_db, table_attr))
-    shared_lanes = set(fetch_attention_lane_density(shared_db, table_attr))
-    donor_lanes = shared_lanes - primary_lanes
+    lane_factory = _ctx_lane if table_attr == "_context_attention_data" else _gen_lane
+    primary = {
+        "vllm_flash_attn_fa3": lane_factory(_SLOW_LATENCY),
+        "vllm_flash_attn_fa4": lane_factory(_FAST_LATENCY),
+    }
+    donor = lane_factory(_FAST_LATENCY)
+    for extra_head in (256, 512):
+        if table_attr == "_context_attention_data":
+            donor[QM][KCD][KV_N][extra_head] = _ctx_lane(_FAST_LATENCY, head_size=extra_head)[QM][KCD][KV_N][extra_head]
+        else:
+            donor[KCD][KV_N][extra_head] = _gen_lane(_FAST_LATENCY, head_size=extra_head)[KCD][KV_N][extra_head]
+
+    lanes = {**primary, "vllm_flash_attn": donor}
+    database_kwargs = (
+        {"context_lanes": lanes, "primary_context_lanes": primary}
+        if table_attr == "_context_attention_data"
+        else {"generation_lanes": lanes, "primary_generation_lanes": primary}
+    )
+    db = _StubDatabase(None, **database_kwargs)
+    db.backend = "vllm"
+    db.version = "0.24.0"
+
+    primary_lanes = set(db.primary_lane_density[table_attr])
+    donor_lanes = set(db.lane_density[table_attr]) - primary_lanes
 
     assert primary_lanes == {"vllm_flash_attn_fa3", "vllm_flash_attn_fa4"}
-    assert "vllm_flash_attn" in donor_lanes, "the regression needs the denser 0.22.0 donor lane"
+    assert donor_lanes == {"vllm_flash_attn"}
+    assert db.lane_density[table_attr]["vllm_flash_attn"] > max(db.primary_lane_density[table_attr].values()), (
+        "the regression needs a donor denser than either primary lane"
+    )
 
-    order = resolved_lane_order_for_op(shared_db, table_attr, override)
+    order = resolved_lane_order_for_op(db, table_attr, override)
 
     assert max(order.index(lane) for lane in primary_lanes) < min(order.index(lane) for lane in donor_lanes), order
 
