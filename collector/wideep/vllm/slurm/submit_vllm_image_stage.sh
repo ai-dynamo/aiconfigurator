@@ -64,6 +64,7 @@ case "${campaign_root}" in
 esac
 script_dir=$(cd "$(dirname "$0")" && pwd)
 payload=$(realpath -e "${script_dir}/run_vllm_image_stage_job.sh")
+repo_root=$(realpath -e "${script_dir}/../../../..")
 log_dir="${campaign_root}/slurm_logs/${system}/image_stage"
 mkdir -p "${log_dir}"
 log_dir=$(realpath -e "${log_dir}")
@@ -71,6 +72,7 @@ log_dir=$(realpath -e "${log_dir}")
 export SYSTEM="${system}" CAMPAIGN_ROOT="${campaign_root}"
 export IMAGE_INDEX_DIGEST="${image_index_digest}" IMAGE_ARCH="${image_arch}"
 export CONTAINER_IMAGE="registry-1.docker.io#vllm/vllm-openai:${image_index_digest}"
+export AIC_REPO_DIR="${repo_root}"
 
 # Image staging emits no benchmark data and only imports the runtime for ABI
 # attestation. Keep scarce full nodes available for exclusive benchmark jobs.

@@ -258,6 +258,7 @@ OPERATIONS_DEF_INVENTORY = {
             "MoEExpertCompute.clear_cache",
             "MoEExpertCompute.load_data",
             "_cache_key",
+            "communication_dtype_for",
             "_validate_a2a_request",
             "_validate_ep_phase",
             "nodes_for",

@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 import yaml
 
-from collector import provenance
+from collector import artifact_publication, provenance
 from collector.wideep.sglang.collect_moe_a2a import _build_moe_a2a_row
 from collector.wideep.vllm import finalize_campaign as campaign
 from collector.wideep.vllm.collect_moe_a2a import (
@@ -153,6 +153,18 @@ def _h100_jobs(root: Path) -> list[Path]:
     ]
 
 
+def _change_collector_identity(jobs: list[Path]) -> None:
+    for job in jobs:
+        sidecar_path = job / "collection_meta.yaml"
+        sidecar = yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
+        sidecar["tables"]["moe_a2a_perf"]["collector_ref"] = "feedface"
+        sidecar["tables"]["moe_a2a_perf"]["collector_hash"] = "sha256:" + "9" * 64
+        sidecar_path.write_text(yaml.safe_dump(sidecar, sort_keys=False), encoding="utf-8")
+        checksums = json.loads((job / "artifact_checksums.json").read_text(encoding="utf-8"))
+        checksums["collection_meta.yaml"] = campaign._sha256(sidecar_path)
+        (job / "artifact_checksums.json").write_text(json.dumps(checksums), encoding="utf-8")
+
+
 def test_merge_campaign_requires_and_validates_all_three_v2_capable_jobs(tmp_path):
     jobs = _h100_jobs(tmp_path / "jobs")
     output = tmp_path / "published"
@@ -224,6 +236,38 @@ def test_clean_republish_removes_stale_error_files_and_checksum_entries(tmp_path
     assert set(checksum_payload) == {"moe_a2a_perf.parquet", "collection_meta.yaml"}
     meta = yaml.safe_load(sidecar.read_text(encoding="utf-8"))
     assert meta["tables"]["moe_a2a_perf"]["classified_failures"] == 0
+
+
+@pytest.mark.parametrize("failure_step", range(1, 6))
+def test_publish_failure_never_exposes_a_mixed_committed_generation(tmp_path, monkeypatch, failure_step):
+    jobs = _h100_jobs(tmp_path / "jobs")
+    output = tmp_path / "published"
+    checksum_output = tmp_path / "checksums.json"
+    campaign.merge_campaign(jobs, system="h100_sxm", output_dir=output, checksum_output=checksum_output)
+    old_generation = artifact_publication.validate_published_artifact_set(output)
+    _change_collector_identity(jobs)
+
+    real_replace = artifact_publication.os.replace
+    calls = 0
+
+    def fail_at_step(source, target):
+        nonlocal calls
+        calls += 1
+        if calls == failure_step:
+            raise OSError(f"injected publication failure at step {failure_step}")
+        real_replace(source, target)
+
+    monkeypatch.setattr(artifact_publication.os, "replace", fail_at_step)
+    with pytest.raises(OSError, match="injected publication failure"):
+        campaign.merge_campaign(jobs, system="h100_sxm", output_dir=output, checksum_output=checksum_output)
+
+    try:
+        visible_generation = artifact_publication.validate_published_artifact_set(output)
+    except artifact_publication.ArtifactPublicationError:
+        pass
+    else:
+        assert visible_generation == old_generation
+        assert json.loads(checksum_output.read_text(encoding="utf-8")) == old_generation
 
 
 def test_merge_campaign_rejects_missing_backend_job(tmp_path):

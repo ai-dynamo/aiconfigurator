@@ -22,7 +22,7 @@ safe_existing_path() {
     printf '%s\n' "${resolved}"
 }
 
-for required_name in SYSTEM CAMPAIGN_ROOT IMAGE_INDEX_DIGEST IMAGE_ARCH CONTAINER_IMAGE SLURM_JOB_ID; do
+for required_name in SYSTEM CAMPAIGN_ROOT IMAGE_INDEX_DIGEST IMAGE_ARCH CONTAINER_IMAGE SLURM_JOB_ID AIC_REPO_DIR; do
     [[ -n "${!required_name:-}" ]] || die "missing ${required_name}"
 done
 case "${IMAGE_ARCH}" in arm64|amd64) ;; *) die "bad image architecture ${IMAGE_ARCH}" ;; esac
@@ -79,6 +79,7 @@ PY
 image_reference_mode=enroot-3.4-index-digest
 
 campaign_root=$(safe_existing_path "campaign root" "${CAMPAIGN_ROOT}")
+repo_root=$(safe_existing_path "repository" "${AIC_REPO_DIR}")
 digest_value=${IMAGE_DIGEST#sha256:}
 image_dir="${campaign_root}/images"
 job_dir="${image_dir}/${SYSTEM}/job_${SLURM_JOB_ID}"
@@ -86,7 +87,9 @@ mkdir -p "${job_dir}"
 job_dir=$(safe_existing_path "image staging evidence" "${job_dir}")
 final_image="${image_dir}/vllm_v024_${IMAGE_ARCH}_${digest_value}.sqsh"
 image_meta="${final_image}.meta.json"
-if [[ -f "${final_image}" && -f "${image_meta}" ]]; then
+runtime_success="${final_image}.SUCCESS"
+if [[ -f "${runtime_success}" ]]; then
+    [[ -f "${final_image}" && -f "${image_meta}" ]] || die "completed staged image marker has missing artifacts"
     python3 - "${final_image}" "${image_meta}" "${SYSTEM}" "${IMAGE_INDEX_DIGEST}" "${IMAGE_DIGEST}" <<'PY'
 import hashlib, json, sys
 from pathlib import Path
@@ -109,7 +112,10 @@ PY
     echo "Reused checksum-verified staged image ${final_image}"
     exit 0
 fi
-[[ ! -e "${final_image}" && ! -e "${image_meta}" ]] || die "partial staged image set requires operator cleanup"
+# SUCCESS is the commit marker.  An interrupted publication is never visible
+# to campaign consumers and is safe for this retry to replace.
+python3 "${repo_root}/collector/runtime_stage_publication.py" "${runtime_success}" \
+    --file "${final_image}" --file "${image_meta}"
 temporary_image="${image_dir}/.vllm_v024_${IMAGE_ARCH}_${digest_value}.sqsh.tmp.${SLURM_JOB_ID}"
 [[ ! -e "${temporary_image}" ]] || die "stale temporary image ${temporary_image}"
 
@@ -230,5 +236,6 @@ mv "${temporary_meta}" "${image_meta}"
 final_image=$(safe_existing_path "published staged image" "${final_image}")
 image_meta=$(safe_existing_path "published staged image metadata" "${image_meta}")
 [[ "$(sha256sum "${final_image}" | awk '{print $1}')" == "${sqsh_sha256}" ]] || die "staged image checksum mismatch"
+touch "${runtime_success}"
 touch "${job_dir}/SUCCESS"
 echo "Published ${IMAGE_INDEX_DIGEST} ${IMAGE_ARCH} child ${IMAGE_DIGEST} as ${final_image} (${sqsh_sha256})"

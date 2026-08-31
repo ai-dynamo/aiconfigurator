@@ -541,9 +541,13 @@ class VllmBenchmarkAdapter:
     def _build_topk_ids(self, torch: Any, case: VllmMoeA2ACase) -> Any:
         """Generate deterministic unique routes using vLLM 0.24 router semantics.
 
-        This mirrors ``fused_moe/router/{fused_topk,grouped_topk}_router.py``
-        at ``TARGET_VLLM_SOURCE_COMMIT``: global top-k for ordinary routing;
-        grouped selection followed by expert top-k for DeepSeekV3 routing.
+        Serving citations at ``TARGET_VLLM_SOURCE_COMMIT``: global
+        softmax/sigmoid selection and unbiased routing weights are populated
+        in ``vllm/model_executor/layers/fused_moe/router/``
+        ``fused_topk_bias_router.py:291-319``; its sqrt-softplus population is
+        ``:59-147``; grouped correction-bias/group/expert selection is
+        ``grouped_topk_router.py:112-161``.  This function mirrors only the
+        expert-ID portion of those population sites.
         """
         routing = case.shape.routing
         seed_payload = (
@@ -605,6 +609,12 @@ class VllmBenchmarkAdapter:
             dtype=torch.bfloat16,
         )
         topk_ids = self._build_topk_ids(torch, case)
+        # The serving sites cited by _build_topk_ids populate score-derived
+        # weights.  This communication-only benchmark intentionally substitutes
+        # equal float32 payload values: DeepEP uses topk_ids for the dispatch
+        # layout and merely transports/applies topk_weights; their numeric value
+        # does not select a communication path (deepep_ht.py:258-327 and
+        # deepep_ll.py:229-402 at TARGET_VLLM_SOURCE_COMMIT).
         topk_weights = torch.full(
             topk_ids.shape,
             1.0 / case.shape.topk,

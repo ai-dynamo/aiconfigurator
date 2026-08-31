@@ -7,7 +7,7 @@ templates below. Never submit data collected from a different hash.
 
 | System | Login / partition | GPUs | vLLM HT/LL | vLLM V2 | TRT-LLM HT/LL |
 |---|---|---:|---|---|---|
-| `gb200` | `ocics001 / batch` | 4 | canary → backend-bound full | canary after final hash | canary → backend-bound full |
+| `gb200` | `ocics001 / batch` | 4 | canary → backend-bound full | capability-failed | canary → backend-bound full |
 | `gb300` | `dlcluster / gb300nvl72_preprod` | 4 | canary → backend-bound full | capability-failed | canary → backend-bound full |
 | `b200_sxm` | `awscmh / b200@cr+mp-1000W/umbriel-b200@ts4/8gpu-224cpu-2048gb` | 8 | canary → backend-bound full | capability-failed | canary → backend-bound full |
 | `b300_sxm` | `awscmh / b300@ts5/b300-nvl8@ts5/8gpu-224cpu-2048gb` | 8 | canary → backend-bound full | capability-failed | canary → backend-bound full |

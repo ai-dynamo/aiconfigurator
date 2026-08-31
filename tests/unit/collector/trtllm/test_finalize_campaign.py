@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 import yaml
 
-from collector import provenance
+from collector import artifact_publication, provenance
 from collector.wideep.sglang.collect_moe_a2a import _build_moe_a2a_row
 from collector.wideep.trtllm import finalize_campaign as campaign
 from collector.wideep.trtllm.collect_moe_a2a import case_plan_ids
@@ -151,6 +151,85 @@ def test_merge_complete_ht_and_ll_campaign(tmp_path):
     assert meta["runtime"]["image"] == campaign.RUNTIME.image()
     assert meta["runtime"]["image_digest"] == "sha256:" + "c" * 64
     assert meta["runtime"]["abi"]["source_wheel_sha256"] == "d" * 64
+
+
+def _change_collector_identity(jobs: list[Path]) -> None:
+    for job in jobs:
+        sidecar_path = job / "collection_meta.yaml"
+        sidecar = yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
+        sidecar["tables"]["moe_a2a_perf"]["collector_ref"] = "e" * 40
+        sidecar["tables"]["moe_a2a_perf"]["collector_hash"] = "sha256:" + "f" * 64
+        sidecar_path.write_text(yaml.safe_dump(sidecar, sort_keys=False), encoding="utf-8")
+        evidence_path = job / "runtime_evidence.json"
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["collector_ref"] = "e" * 40
+        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+        checksums = json.loads((job / "artifact_checksums.json").read_text(encoding="utf-8"))
+        for path in (sidecar_path, evidence_path):
+            checksums[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        (job / "artifact_checksums.json").write_text(json.dumps(checksums), encoding="utf-8")
+
+
+@pytest.mark.parametrize("failure_step", range(1, 6))
+def test_complete_publish_failure_never_exposes_a_mixed_committed_generation(tmp_path, monkeypatch, failure_step):
+    jobs = [_write_job(tmp_path / "jobs", backend=backend) for backend in campaign.BACKENDS]
+    output = tmp_path / "published"
+    checksum_output = tmp_path / "checksums.json"
+    campaign.merge_campaign(jobs, system="h200_sxm", output_dir=output, checksum_output=checksum_output)
+    old_generation = artifact_publication.validate_published_artifact_set(output)
+    _change_collector_identity(jobs)
+
+    real_replace = artifact_publication.os.replace
+    calls = 0
+
+    def fail_at_step(source, target):
+        nonlocal calls
+        calls += 1
+        if calls == failure_step:
+            raise OSError(f"injected publication failure at step {failure_step}")
+        real_replace(source, target)
+
+    monkeypatch.setattr(artifact_publication.os, "replace", fail_at_step)
+    with pytest.raises(OSError, match="injected publication failure"):
+        campaign.merge_campaign(jobs, system="h200_sxm", output_dir=output, checksum_output=checksum_output)
+
+    try:
+        visible_generation = artifact_publication.validate_published_artifact_set(output)
+    except artifact_publication.ArtifactPublicationError:
+        pass
+    else:
+        assert visible_generation == old_generation
+        assert json.loads(checksum_output.read_text(encoding="utf-8")) == old_generation
+
+
+def test_stale_error_cleanup_failure_leaves_publication_uncommitted(tmp_path, monkeypatch):
+    partial_jobs = [
+        _write_job(tmp_path / "partial-jobs", backend=backend, partial=backend == campaign.COMM_BACKEND_HT)
+        for backend in campaign.BACKENDS
+    ]
+    output = tmp_path / "published"
+    campaign.merge_campaign(
+        partial_jobs,
+        system="h200_sxm",
+        output_dir=output,
+        allow_partial_evidence=True,
+    )
+    stale_name = f"errors_moe_a2a_trtllm.{campaign.COMM_BACKEND_HT}.json"
+    assert (output / stale_name).is_file()
+    complete_jobs = [_write_job(tmp_path / "complete-jobs", backend=backend) for backend in campaign.BACKENDS]
+
+    real_unlink = Path.unlink
+
+    def fail_stale_cleanup(path, *args, **kwargs):
+        if path.name == stale_name:
+            raise OSError("injected stale-error cleanup failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_stale_cleanup)
+    with pytest.raises(OSError, match="injected stale-error cleanup failure"):
+        campaign.merge_campaign(complete_jobs, system="h200_sxm", output_dir=output)
+    with pytest.raises(artifact_publication.ArtifactPublicationError, match="not complete"):
+        artifact_publication.validate_published_artifact_set(output)
 
 
 def test_partial_input_is_rejected_by_default_and_explicitly_partial_when_requested(tmp_path):

@@ -1330,7 +1330,6 @@ class Task:
         compute_probe = getattr(database, "moe_expert_compute_coverage", None)
         coverage: dict[str, dict[str, set[int]]] = {}
         if gpus_per_node and a2a_probe is not None and compute_probe is not None:
-            a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts)
             quant_mode = self._role_attr(role, "moe_quant_mode")
             if quant_mode is not None and not isinstance(quant_mode, common.MoEQuantMode):
                 # The compute table is keyed by MoEQuantMode members; any
@@ -1342,6 +1341,7 @@ class Task:
                     f"{type(quant_mode).__name__} {quant_mode!r} "
                 )
             for phase in ("context", "generation"):
+                a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts, quant_mode, phase)
                 compute = compute_probe(
                     shape.hidden_size, shape.moe_inter_size, shape.topk, shape.num_experts, quant_mode, phase
                 )
@@ -2057,6 +2057,7 @@ class Task:
             # ops take the comm node span at construction and would otherwise
             # have no channel to it (models.helpers.large_ep_gpus_per_node).
             num_gpus_per_node=num_gpus_per_node,
+            system=self._role_attr(role, "system_name"),
         )
         model_config._gemm_quant_mode_is_explicit = self._gemm_quant_mode_explicit_by_role.get(role, False)
         if parallel is not None:

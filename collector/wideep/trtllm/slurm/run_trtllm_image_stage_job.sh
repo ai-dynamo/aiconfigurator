@@ -76,8 +76,12 @@ if [[ -f "${final_image}" && -f "${final_meta}" && -f "${final_wheel_dir}/SUCCES
     echo "Reused checksum-verified staged TRT-LLM runtime ${final_image} and ${final_wheel_dir}"
     exit 0
 fi
-[[ ! -e "${final_image}" && ! -e "${final_meta}" && ! -e "${final_wheel_dir}" ]] || \
-    die "partial staged runtime set requires operator cleanup"
+# The wheel-directory SUCCESS file is the runtime-set commit marker.  If a
+# previous attempt stopped before that marker became visible, no consumer can
+# use the set and this retry can safely replace the incomplete generation.
+repo_root=$(safe_existing_path "repository" "${AIC_REPO_DIR:-}")
+python3 "${repo_root}/collector/runtime_stage_publication.py" "${final_wheel_dir}/SUCCESS" \
+    --file "${final_image}" --file "${final_meta}" --tree "${final_wheel_dir}"
 
 temporary_image="${job_root}/runtime.sqsh"
 seed_provenance="${job_root}/seed_provenance.json"
@@ -118,8 +122,8 @@ ENROOT_LIBRARY_PATH="${enroot_library_dir}" enroot import --arch="$([[ "${IMAGE_
 fi
 unsquashfs -s "${temporary_image}" >/dev/null || die "invalid staged squashfs"
 
+publish_wheel_dir="${job_root}/publish-wheel"
 if [[ -n "${SEED_WHEEL_DIR}" ]]; then
-    publish_wheel_dir="${job_root}/publish-wheel"
     cp -a -- "${seed_wheel_dir}" "${publish_wheel_dir}"
     rm -f -- "${publish_wheel_dir}/SUCCESS"
     python3 - "${publish_wheel_dir}/build_meta.json" "${seed_provenance}" "${SYSTEM}" <<'PY'
@@ -176,9 +180,9 @@ mapfile -t dependency_wheels < <(find "${dependency_staging}" -maxdepth 1 -type 
 [[ "${#dependency_wheels[@]}" -gt 0 ]] || die "dependency wheelhouse is empty"
 wheel_sha=$(sha256sum "${wheels[0]}" | awk '{print $1}')
 sqsh_sha=$(sha256sum "${temporary_image}" | awk '{print $1}')
-mkdir -p "${final_wheel_dir}/dependencies"
-cp -- "${wheels[0]}" "${final_wheel_dir}/"
-cp -- "${dependency_wheels[@]}" "${final_wheel_dir}/dependencies/"
+mkdir -p "${publish_wheel_dir}/dependencies"
+cp -- "${wheels[0]}" "${publish_wheel_dir}/"
+cp -- "${dependency_wheels[@]}" "${publish_wheel_dir}/dependencies/"
 wheel_name=$(basename "${wheels[0]}")
 python3 - "${job_root}/build_meta.json" "${SYSTEM}" "${IMAGE_ARCH}" "${CUDA_ARCHES}" \
     "${IMAGE_INDEX_DIGEST}" "${IMAGE_DIGEST}" "${sqsh_sha}" "${wheel_name}" "${wheel_sha}" \
@@ -209,8 +213,9 @@ if seed is not None:
     payload["seed_provenance"] = seed
 Path(out).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
-cp -- "${job_root}/build_meta.json" "${final_wheel_dir}/build_meta.json"
+cp -- "${job_root}/build_meta.json" "${publish_wheel_dir}/build_meta.json"
 cp -- "${job_root}/build_meta.json" "${final_meta}"
 mv "${temporary_image}" "${final_image}"
-touch "${final_wheel_dir}/SUCCESS"
+touch "${publish_wheel_dir}/SUCCESS"
+mv -- "${publish_wheel_dir}" "${final_wheel_dir}"
 echo "Published TRT-LLM image ${final_image} and rc11 wheel ${final_wheel_dir}/${wheel_name} (${wheel_sha})"

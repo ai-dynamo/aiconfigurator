@@ -15,8 +15,11 @@ The collected performance data can be used for performance modeling, scheduling 
 ## Overview
 
 - **collect_mla_module.py**: Collects performance data for MLA and DSA attention module operators
-- Large-EP expert compute is modeled from stock `moe_perf`; measured
+- Large-EP expert compute is measured by
+  `../wideep/sglang/collect_deepep_moe.py` into the `moe_ep` table; measured
   communication is collected by `../wideep/sglang/collect_moe_a2a.py`.
+  Stock `moe_perf` remains only the modeled fallback when no matching
+  dedicated `moe_ep` row is available.
 
 ## Requirements
 
@@ -155,4 +158,8 @@ framework,version,device,op_name,kernel_source,model,architecture,mla_dtype,kv_c
 
 ## 2. Large-EP communication collection
 
-Use `collector/wideep/sglang/collect_moe_a2a.py` for measured dispatch/combine communication. Large-EP local expert compute has no dedicated collector or table; it is estimated from stock `moe_perf`.
+Use `collector/wideep/sglang/collect_moe_a2a.py` for measured dispatch/combine
+communication. Use `collector/wideep/sglang/collect_deepep_moe.py` for
+Large-EP local expert compute; it publishes the dedicated `moe_ep` table.
+Stock `moe_perf` is a modeled fallback only when a matching `moe_ep` row is
+not available.

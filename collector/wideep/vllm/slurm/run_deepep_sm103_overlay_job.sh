@@ -74,6 +74,7 @@ case "${IMAGE_VARIANT}" in linux/amd64|linux/arm64) ;; *) die "invalid image var
 container_image=$(safe_existing_path "container image" "${CONTAINER_IMAGE}")
 unsquashfs -s "${container_image}" >/dev/null || die "container image is not a valid squashfs"
 container_image_meta=$(safe_existing_path "container image metadata" "${container_image}.meta.json")
+safe_existing_path "container image completion marker" "${container_image}.SUCCESS" >/dev/null
 python3 - "${container_image}" "${container_image_meta}" "${IMAGE_INDEX_DIGEST}" \
     "${IMAGE_DIGEST}" "${IMAGE_VARIANT}" <<'PY'
 import hashlib

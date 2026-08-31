@@ -244,8 +244,11 @@ collector.wideep.vllm.collect_moe_a2a:
   - collector/wideep/vllm/patches/deepep_73b_nvl4.patch
   - collector/wideep/vllm/slurm/run_vllm_image_stage_job.sh
   - collector/wideep/vllm/slurm/submit_vllm_image_stage.sh
+  - collector/runtime_stage_publication.py
   - collector/wideep/vllm/runtime_artifacts.py
   - collector/wideep/vllm/finalize_campaign.py
+  - collector/wideep/vllm/failure_evidence.py
+  - collector/artifact_publication.py
   - collector/wideep/sglang/collect_moe_a2a.py
   - __model_cases__
 collector.wideep.trtllm.collect_moe_compute:
@@ -262,9 +265,12 @@ collector.wideep.trtllm.collect_moe_a2a:
   - collector/wideep/distributed_lifecycle.py
   - collector/wideep/sglang/collect_moe_a2a.py
   - collector/wideep/trtllm/finalize_campaign.py
+  - collector/artifact_publication.py
+  - aic-core/src/aiconfigurator_core/sdk/operations/moe_comm.py
   - collector/wideep/trtllm/runtime_artifacts.py
   - collector/wideep/trtllm/slurm/run_trtllm_image_stage_job.sh
   - collector/wideep/trtllm/slurm/submit_trtllm_image_stage.sh
+  - collector/runtime_stage_publication.py
   - collector/wideep/trtllm/slurm/run_trtllm_moe_a2a_job.sh
   - collector/wideep/trtllm/slurm/submit_trtllm_moe_a2a.sh
   - __model_cases__

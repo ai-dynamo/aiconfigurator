@@ -750,6 +750,12 @@ def run_ht_case(
     x_e4m3 = _per_token_cast_to_fp8(x)
     x_e4m3 = (x_e4m3[0], x_e4m3[1].T.contiguous().T)
 
+    # Serving source: SGLang v0.5.12 (127b9e3283f7c2a43234b852ff5c9f1796d53624),
+    # python/sglang/srt/layers/moe/topk.py:525-563 (global), :678-739
+    # (softmax grouped), :902-971 (biased grouped), and :807-865 plus
+    # :1415-1434 (sqrtsoftplus biased selection).  DeepSeek-V4 supplies these
+    # TopK fields at models/deepseek_v2.py:549-579.  We mirror expert IDs only;
+    # the synthetic float32 weights below are value-insensitive DeepEP payload.
     logits = torch.randn((case.num_tokens, shape.num_experts), dtype=torch.float32, device="cuda")
     if routing.scoring_func == "sigmoid":
         scores = torch.sigmoid(logits)
@@ -933,6 +939,11 @@ def run_ll_case(*, buffer, group, case: MoeA2ACase, identity: DistIdentity) -> d
     num_local_experts = shape.num_experts // identity.world_size
     x = torch.randn((case.num_tokens, shape.hidden_size), dtype=torch.bfloat16, device="cuda") * 0.1
     routing = shape.routing
+    # Same serving population contract as run_ht_case: SGLang v0.5.12 commit
+    # 127b9e3283f7c2a43234b852ff5c9f1796d53624, topk.py:525-563,
+    # :678-739, :807-865, :902-971, and :1415-1434; DeepSeek-V4 field
+    # population is models/deepseek_v2.py:549-579.  Values of the synthetic
+    # float32 weights do not alter DeepEP's communication layout.
     logits = torch.randn((case.num_tokens, shape.num_experts), dtype=torch.float32, device="cuda")
     if routing.scoring_func == "sigmoid":
         scores = torch.sigmoid(logits)

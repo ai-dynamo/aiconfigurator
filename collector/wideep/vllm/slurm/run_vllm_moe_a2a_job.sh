@@ -114,6 +114,14 @@ esac
 repo_dir=$(safe_existing_path "repository" "${REPO_DIR}")
 vllm_source_root=$(safe_existing_path "vLLM source" "${VLLM_SOURCE_ROOT}")
 campaign_root=$(safe_existing_path "campaign root" "${CAMPAIGN_ROOT}")
+canary_job_id=${AIC_CANARY_JOB_ID:-}
+if [[ -n "${canary_job_id}" ]]; then
+    [[ "${RUN_KIND}" == full ]] || die "AIC_CANARY_JOB_ID is valid only for full jobs"
+    [[ "${canary_job_id}" =~ ^[0-9]+$ ]] || die "invalid AIC_CANARY_JOB_ID ${canary_job_id}"
+    safe_existing_path \
+        "backend-local canary completion marker" \
+        "${campaign_root}/${SYSTEM}/canary/${NODE_NUM}n/${BACKEND}/job_${canary_job_id}/SUCCESS" >/dev/null
+fi
 [[ -z "$(git -C "${repo_dir}" status --porcelain)" ]] || die "repository checkout is dirty"
 [[ -z "$(git -C "${vllm_source_root}" status --porcelain)" ]] || die "vLLM source checkout is dirty"
 collector_ref=$(git -C "${repo_dir}" rev-parse HEAD)
@@ -124,6 +132,7 @@ collector_ref=$(git -C "${repo_dir}" rev-parse HEAD)
 [[ "${CONTAINER_IMAGE}" == /* ]] || die "formal benchmark requires a locally staged image"
 container_image=$(safe_existing_path "container image" "${CONTAINER_IMAGE}")
 container_image_meta=$(safe_existing_path "container image metadata" "${container_image}.meta.json")
+safe_existing_path "container image completion marker" "${container_image}.SUCCESS" >/dev/null
 image_metadata_migration_json=$(python3 - "${container_image}" "${container_image_meta}" "${IMAGE_INDEX_DIGEST}" \
     "${IMAGE_DIGEST}" "${IMAGE_VARIANT}" <<'PY'
 import hashlib
@@ -676,19 +685,8 @@ preserve_failure_evidence() {
         find "${AIC_OUTPUT_DIR}" -maxdepth 1 -type f -name "errors_moe_a2a_vllm.rank*.json" \
             -exec cp -- {} "${destination}/" \;
     ' || true
-    python3 - "${failure_dir}" "${status}" "${SLURM_JOB_ID}" "${BACKEND}" "${RUN_KIND}" "${reason}" <<'PY'
-import hashlib, json, sys
-from pathlib import Path
-root = Path(sys.argv[1])
-payload = {"benchmark_status": int(sys.argv[2]), "job_id": sys.argv[3], "backend": sys.argv[4],
-           "run_kind": sys.argv[5], "reason": sys.argv[6]}
-(root / "job_failure.json").write_text(json.dumps(payload, sort_keys=True) + "\n")
-manifest = {}
-for artifact in sorted(root.rglob("*")):
-    if artifact.is_file() and artifact.name != "artifact_checksums.json":
-        manifest[str(artifact.relative_to(root))] = hashlib.sha256(artifact.read_bytes()).hexdigest()
-(root / "artifact_checksums.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-PY
+    python3 "${repo_dir}/collector/wideep/vllm/failure_evidence.py" \
+        "${failure_dir}" "${status}" "${SLURM_JOB_ID}" "${BACKEND}" "${RUN_KIND}" "${reason}"
 }
 # ``finalize_perf_files`` intentionally retains its flock inode while
 # finalizers may race.  The job-unique srun is now complete, so remove only the

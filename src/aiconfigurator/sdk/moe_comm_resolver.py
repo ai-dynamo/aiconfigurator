@@ -148,8 +148,18 @@ def resolve_model_config_moe_comm(
     if coverage_snapshot is None and family in LARGE_EP_READY_FAMILIES and database is not None:
         a2a_probe = getattr(database, "moe_a2a_coverage", None)
         compute_probe = getattr(database, "moe_expert_compute_coverage", None)
-        a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts) if a2a_probe is not None else {}
         for phase in dict.fromkeys(required_phases):
+            a2a = (
+                a2a_probe(
+                    shape.hidden_size,
+                    shape.topk,
+                    shape.num_experts,
+                    model_config.moe_quant_mode,
+                    phase,
+                )
+                if a2a_probe is not None
+                else {}
+            )
             compute_eps = (
                 compute_probe(
                     shape.hidden_size,
@@ -211,6 +221,8 @@ def resolve_model_config_moe_comm(
         return None
 
     model_config.moe_comm_backend = resolved
+    if database is not None:
+        model_config.system = getattr(database, "system", None)
     if backend_name == "sglang" and info["architecture"] == "DeepseekV3ForCausalLM":
         # The SGLang WideEP MLA collectors label their rows fp8_block/fp8.
         # Preserve explicit user modes, but restore the PR #1314 defaults for

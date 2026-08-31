@@ -8,9 +8,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
-import shutil
 import tempfile
 from dataclasses import dataclass
 from datetime import date
@@ -22,6 +20,7 @@ import pyarrow.parquet as pq
 import yaml
 
 from collector import provenance
+from collector.artifact_publication import publish_artifact_set, validate_published_artifact_set
 from collector.framework_manifest import get_collector_runtime
 from collector.registry_types import PerfFile
 from collector.wideep.trtllm.collect_moe_a2a import (
@@ -496,26 +495,15 @@ def merge_campaign(
                     target.write_text(json.dumps(job.failures, indent=2, sort_keys=True) + "\n", encoding="utf-8")
                     staged_errors.append(target)
         staged_checksums = {p.name: _sha256(p) for p in (staged_parquet, staged_sidecar, *staged_errors)}
-        publish = [(staged_parquet, final_parquet), (staged_sidecar, final_sidecar)] + [
-            (path, destination / path.name) for path in staged_errors
-        ]
-        if checksum_output:
-            checksum_path = Path(checksum_output).expanduser()
-            checksum_path.parent.mkdir(parents=True, exist_ok=True)
-            staged_checksum = staging / "artifact_checksums.json"
-            staged_checksum.write_text(json.dumps(staged_checksums, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            publish.append((staged_checksum, checksum_path))
-        for source, target in publish:
-            temporary = target.parent / f".{target.name}.tmp.{os.getpid()}"
-            shutil.copyfile(source, temporary)
-            os.replace(temporary, target)
-        for stale in destination.glob("errors_moe_a2a_trtllm.*.json"):
-            if stale.name not in staged_checksums:
-                stale.unlink()
-    if (
-        _sha256(final_parquet) != staged_checksums[final_parquet.name]
-        or _sha256(final_sidecar) != staged_checksums[final_sidecar.name]
-    ):
+        published_checksums = publish_artifact_set(
+            staging=staging,
+            destination=destination,
+            artifact_names=(staged_parquet.name, staged_sidecar.name, *(path.name for path in staged_errors)),
+            owned_patterns=(staged_parquet.name, staged_sidecar.name, "errors_moe_a2a_trtllm.*.json"),
+            checksum_output=Path(checksum_output).expanduser() if checksum_output else None,
+        )
+    committed_checksums = validate_published_artifact_set(destination)
+    if committed_checksums != staged_checksums or committed_checksums != published_checksums:
         raise CampaignValidationError("published artifact checksum mismatch")
     return final_parquet, final_sidecar
 

@@ -61,7 +61,20 @@ def test_image_stage_builds_and_attests_exact_source_runtime():
     assert 'python3 "${repo_root}/collector/wideep/trtllm/runtime_artifacts.py"' in source
     assert 'seed_args+=(--wheel-dir "${seed_wheel_dir}")' in source
     assert "Reused checksum-verified staged TRT-LLM runtime" in source
-    assert "partial staged runtime set requires operator cleanup" in source
+    assert 'collector/runtime_stage_publication.py" "${final_wheel_dir}/SUCCESS"' in source
+    assert source.index('touch "${publish_wheel_dir}/SUCCESS"') < source.index(
+        'mv -- "${publish_wheel_dir}" "${final_wheel_dir}"'
+    )
+
+
+def test_image_stage_retry_replaces_only_uncommitted_runtime_sets():
+    source = (SLURM / "run_trtllm_image_stage_job.sh").read_text(encoding="utf-8")
+    complete_guard = 'if [[ -f "${final_image}" && -f "${final_meta}" && -f "${final_wheel_dir}/SUCCESS" ]]; then'
+    cleanup_call = 'python3 "${repo_root}/collector/runtime_stage_publication.py" "${final_wheel_dir}/SUCCESS"'
+    assert complete_guard in source
+    assert cleanup_call in source
+    assert source.index(complete_guard) < source.index(cleanup_call)
+    assert source.index(cleanup_call) < source.index('temporary_image="${job_root}/runtime.sqsh"')
 
 
 def test_submitters_keep_six_cluster_parameters_and_afterok_gate():
@@ -126,6 +139,9 @@ def test_trtllm_hash_closure_includes_full_campaign_chain():
         "collector.wideep.trtllm.collect_moe_a2a"
     ]
     assert {
+        "aic-core/src/aiconfigurator_core/sdk/operations/moe_comm.py",
+        "collector/artifact_publication.py",
+        "collector/runtime_stage_publication.py",
         "collector/wideep/trtllm/finalize_campaign.py",
         "collector/wideep/trtllm/slurm/run_trtllm_image_stage_job.sh",
         "collector/wideep/trtllm/slurm/submit_trtllm_image_stage.sh",

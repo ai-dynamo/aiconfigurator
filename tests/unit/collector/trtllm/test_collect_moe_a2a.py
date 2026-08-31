@@ -205,6 +205,15 @@ def test_declared_shapes_retain_grouped_and_global_routing():
     assert (3584, 16, 896) not in by_geometry
 
 
+def test_kimi_k3_is_excluded_by_the_shared_operation_declaration():
+    from collector.case_generator import get_common_moe_test_cases, is_wideep_moe_model
+
+    recipes = get_common_moe_test_cases(backend="trtllm", required_expert_parallel_size=8)
+    kimi = next(recipe for recipe in recipes if recipe.model_name == "moonshotai/Kimi-K3")
+
+    assert not is_wideep_moe_model(kimi.model_name)
+
+
 def test_declared_duplicate_shapes_deduplicate_on_physical_identity(capsys):
     cases = a2a.build_case_plan(
         shapes=[SHAPE, SHAPE],

@@ -521,8 +521,9 @@ This collects the stock SGLang ops, including:
 - MoE (Mixture of Experts) operations
 - Normal attention operations
 
-Large-EP local expert compute reuses stock `moe_perf`; there is no separate
-expert-compute collector. WideEP MLA is not registered because its legacy
+Large-EP local expert compute is available as the separately routed `moe_ep`
+operator under `wideep/sglang/collect_deepep_moe.py`; run it explicitly in its
+pinned SGLang 0.5.10 image. WideEP MLA is not registered because its legacy
 wrapper now reaches the stock 0.5.14-only module implementation.
 
 ### DeepEP multi-node collector

@@ -34,6 +34,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from aiconfigurator_core.sdk.operations.moe_comm import communication_dtype_for as _shared_communication_dtype_for
 from collector.framework_manifest import get_collector_runtime
 from collector.helper import finalize_perf_files, log_perf, stale_output_artifacts
 from collector.registry_types import PerfFile
@@ -61,11 +62,6 @@ COMM_BACKEND_HT = "trtllm_deepep_ht"
 COMM_BACKEND_LL = "trtllm_deepep_ll"
 FORMAL_SYSTEMS = frozenset({"gb200", "gb300", "b200_sxm", "b300_sxm", "h100_sxm", "h200_sxm"})
 HOPPER_SYSTEMS = frozenset({"h100_sxm", "h200_sxm"})
-# K3 serving selects the fused MegaMoE A2A+GEMM path, not either standalone
-# DeepEP communication method measured here. This is a backend capability
-# boundary, not a kernel-limit expected-failure filter. Its model declaration
-# also gives TRT-LLM an empty allowed quantization set.
-NON_DEEPEP_SERVING_MODELS = frozenset({"moonshotai/Kimi-K3"})
 FORCED_METHODS = {
     COMM_BACKEND_HT: "DEEPEP",
     COMM_BACKEND_LL: "DEEPEPLOWLATENCY",
@@ -207,22 +203,16 @@ def communication_dtype_for(
         raise MoeA2ADeclarationError(
             f"unsupported communication identity: backend={backend}, phase={communication_phase}"
         )
-    quantization = {"fp8_block": "fp8", "none": "bfloat16"}.get(model_quantization, model_quantization)
-    if backend == COMM_BACKEND_HT:
-        if quantization == "nvfp4":
-            return "nvfp4"
-        if quantization in {"bfloat16", "fp8"}:
-            return "bfloat16"
-    elif quantization == "fp8":
-        return "fp8"
-    elif quantization == "bfloat16":
-        return "bfloat16"
-    elif quantization == "nvfp4" and system not in HOPPER_SYSTEMS:
-        return "fp4" if communication_phase == "combine" else "nvfp4"
-    raise MoeA2ADeclarationError(
-        "no pinned TensorRT-LLM communication dtype for "
-        f"system={system}, backend={backend}, quantization={model_quantization}, phase={communication_phase}"
-    )
+    try:
+        return _shared_communication_dtype_for(
+            system=system,
+            comm_backend=backend,
+            model_quantization=model_quantization,
+            communication_phase=communication_phase,
+            inference_phase="context" if backend == COMM_BACKEND_HT else "generation",
+        )
+    except ValueError as error:
+        raise MoeA2ADeclarationError(f"no pinned TensorRT-LLM communication dtype: {error}") from error
 
 
 @dataclass(frozen=True)
@@ -352,7 +342,7 @@ def get_moe_a2a_shapes(*, required_expert_parallel_size: int | None = None) -> l
             _routing_spec(recipe),
         )
         for recipe in recipes
-        if is_wideep_moe_model(recipe.model_name) and recipe.model_name not in NON_DEEPEP_SERVING_MODELS
+        if is_wideep_moe_model(recipe.model_name)
     }
     routing_by_geometry: dict[_MoeA2AGeometry, set[RoutingSpec]] = {}
     for shape in shapes:
@@ -614,7 +604,15 @@ class TensorRTLLMBenchmarkAdapter:
 
     @staticmethod
     def _routing_method(case: MoeA2ACase, *, torch: Any) -> Any:
-        """Construct the pinned serving router for this model declaration."""
+        """Construct the pinned serving router for this model declaration.
+
+        TensorRT-LLM commit 14efb6ac673c0cbe828e1206cc5c7d5748d05ffa
+        implements the invoked routers in
+        ``tensorrt_llm/_torch/modules/fused_moe/routing.py:190-217`` and
+        ``:224-378``.  DeepSeekV3 serving allocates and loads the correction
+        bias, then passes it to this same router, in
+        ``tensorrt_llm/_torch/models/modeling_deepseekv3.py:834-875``.
+        """
         from tensorrt_llm._torch.modules.fused_moe.routing import (
             DeepSeekV3MoeRoutingMethod,
             DefaultMoeRoutingMethod,
@@ -625,6 +623,10 @@ class TensorRTLLMBenchmarkAdapter:
 
         spec = case.shape.routing
         if spec.method == "DeepSeekV3":
+            # A collector has no checkpoint weights, so zero is the explicit
+            # neutral synthetic stand-in for the serving-populated parameter
+            # cited above; the framework's pinned router still performs all
+            # score, group, weight, and expert-ID population.
             correction_bias = torch.zeros(
                 case.shape.num_experts,
                 dtype=torch.float32,

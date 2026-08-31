@@ -91,6 +91,7 @@ case "${container_image}" in
     /mnt/cifs|/mnt/cifs/*|/mnt/nvdl|/mnt/nvdl/*) die "prohibited container image path ${container_image}" ;;
 esac
 container_image_meta=$(realpath -e -- "${container_image}.meta.json")
+realpath -e -- "${container_image}.SUCCESS" >/dev/null || die "staged image completion marker does not exist"
 read -r image_digest image_variant < <(
     python3 - "${container_image_meta}" "${image_index_digest}" "${image_arch}" <<'PY'
 import json

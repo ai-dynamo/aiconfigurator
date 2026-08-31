@@ -15,8 +15,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
-import shutil
 import tempfile
 from dataclasses import dataclass
 from datetime import date
@@ -28,6 +26,7 @@ import pyarrow.parquet as pq
 import yaml
 
 from collector import provenance
+from collector.artifact_publication import publish_artifact_set, validate_published_artifact_set
 from collector.framework_manifest import get_collector_runtime
 from collector.registry_types import PerfFile
 from collector.wideep.vllm.collect_moe_a2a import (
@@ -490,38 +489,20 @@ def merge_campaign(
             staged_parquet.name: _sha256(staged_parquet),
             staged_sidecar.name: _sha256(staged_sidecar),
         }
-        publish_pairs = [
-            (staged_parquet, final_parquet),
-            (staged_sidecar, final_sidecar),
-        ]
-        if checksum_output is not None:
-            checksum_path = Path(checksum_output).expanduser()
-            checksum_path.parent.mkdir(parents=True, exist_ok=True)
-            staged_checksum = staging / "artifact_checksums.json"
-            staged_checksum.write_text(
-                json.dumps(staged_checksums, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-            publish_pairs.append((staged_checksum, checksum_path))
-        for staged_file, final_file in publish_pairs:
-            temporary_destination = final_file.parent / f".{final_file.name}.tmp.{os.getpid()}"
-            shutil.copyfile(staged_file, temporary_destination)
-            os.replace(temporary_destination, final_file)
+        published_checksums = publish_artifact_set(
+            staging=staging,
+            destination=destination,
+            artifact_names=(staged_parquet.name, staged_sidecar.name),
+            owned_patterns=(staged_parquet.name, staged_sidecar.name, "errors_moe_a2a_vllm.rank*.json"),
+            checksum_output=Path(checksum_output).expanduser() if checksum_output is not None else None,
+        )
 
-        # Error JSON files are owned by this publisher. A clean republish must
-        # remove stale failures from an older partial campaign instead of
-        # leaving contradictory evidence beside a complete sidecar.
-        for stale_error in destination.glob("errors_moe_a2a_vllm.rank*.json"):
-            stale_error.unlink()
-
-    parquet_mismatch = _sha256(final_parquet) != staged_checksums[final_parquet.name]
-    sidecar_mismatch = _sha256(final_sidecar) != staged_checksums[final_sidecar.name]
-    stale_errors = sorted(destination.glob("errors_moe_a2a_vllm.rank*.json"))
+    committed_checksums = validate_published_artifact_set(destination)
     if checksum_output is not None:
-        published_checksums = json.loads(Path(checksum_output).expanduser().read_text(encoding="utf-8"))
-        if published_checksums != staged_checksums:
+        checksum_manifest = json.loads(Path(checksum_output).expanduser().read_text(encoding="utf-8"))
+        if checksum_manifest != published_checksums:
             raise CampaignValidationError("atomic publish checksum manifest verification failed")
-    if parquet_mismatch or sidecar_mismatch or stale_errors:
+    if committed_checksums != staged_checksums:
         raise CampaignValidationError("atomic publish checksum verification failed")
     return final_parquet, final_sidecar
 

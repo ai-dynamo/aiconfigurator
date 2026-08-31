@@ -78,8 +78,11 @@ def test_runner_never_publishes_a_failed_case_plan():
     assert "formal job produced unexpected case failures; evidence copied" in source
     assert "known_framework_limit" not in source
     assert 'cp -a -- "${output_dir}/." "${failure_dir}/"' in source
-    assert '"reason": sys.argv[6]' in source
-    assert 'root.rglob("*")' in source
+    assert 'python3 "${repo_dir}/collector/wideep/vllm/failure_evidence.py"' in source
+    assert source.count("preserve_failure_evidence") == 5  # definition plus all four fail-closed exits
+    assert 'preserve_failure_evidence "${benchmark_status}" "collector command failed"' in source
+    assert 'preserve_failure_evidence 90 "collector omitted finalized artifacts"' in source
+    assert 'preserve_failure_evidence 91 "collector returned success with case failures"' in source
     assert 'touch "${output_dir}/SUCCESS"' in source
     assert 'mv -- "${publish_stage}" "${campaign_job_dir}"' in source
     assert 'merge_lock="${output_dir}/moe_a2a_perf.parquet.mergelock"' in source
@@ -118,8 +121,12 @@ def test_runner_discovers_and_records_a_routable_gloo_interface():
 
 def test_submitter_requires_canaries_and_one_job_per_backend():
     source = SUBMITTER.read_text(encoding="utf-8")
-    assert 'backends="deepep_ht,deepep_ll,deepep_v2"' in source
-    assert "canary/${node_num}n/${backend}/job_*/SUCCESS" in source
+    assert 'h100_sxm) formal_backends="deepep_ht,deepep_ll,deepep_v2"' in source
+    assert 'gb200|gb300|b200_sxm|b300_sxm|h200_sxm) formal_backends="deepep_ht,deepep_ll"' in source
+    assert "backends=${backends:-${formal_backends}}" in source
+    assert source.index('die "${backend} is not a formal backend for ${system}') < source.index("job_id=$(sbatch")
+    assert source.index("declare -A overlay_dirs") < source.index('for node_num in "${node_values[@]}"')
+    assert "canary/1n/${backend}/job_*/SUCCESS" in source
     assert '--gpus-per-node="${gpus_per_node}"' in source
     assert "--exclusive" in source
     assert "--switches=1" in source
@@ -134,7 +141,87 @@ def test_submitter_requires_canaries_and_one_job_per_backend():
     assert '--dependency="afterok:${afterok_job}"' in source
     assert "--afterok-job must be BACKEND=JOB_ID" in source
     assert '[[ "${afterok_spec%%=*}" != "${backend}" ]] || afterok_job=${afterok_spec#*=}' in source
+    assert 'export AIC_CANARY_JOB_ID="${afterok_job}"' in source
+    assert (
+        '"${campaign_root}/${SYSTEM}/canary/${NODE_NUM}n/${BACKEND}/job_${canary_job_id}/SUCCESS"'
+        in RUNNER.read_text(encoding="utf-8")
+    )
     assert "requires --legacy-overlay-dir" in source
+
+
+def test_submitter_rejects_unsupported_v2_before_path_or_submission_validation():
+    result = _run_submitter_dependency_validation("--backends", "deepep_v2")
+
+    assert result.returncode != 0
+    assert "deepep_v2 is not a formal backend for h200_sxm" in result.stderr
+    assert "/does/not/exist" not in result.stderr
+
+
+def _run_submitter_dependency_validation(*extra_args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "bash",
+            str(SUBMITTER),
+            "--system",
+            "h200_sxm",
+            "--run-kind",
+            "full",
+            "--campaign-root",
+            "/does/not/exist",
+            "--repo-dir",
+            "/does/not/exist",
+            "--vllm-source-root",
+            "/does/not/exist",
+            *extra_args,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_submitter_rejects_unbound_scalar_canary_dependency():
+    result = _run_submitter_dependency_validation("--backends", "deepep_ht", "--afterok-job", "123")
+
+    assert result.returncode != 0
+    assert "--afterok-job must be BACKEND=JOB_ID" in result.stderr
+
+
+def test_submitter_rejects_canary_mapping_for_unselected_backend():
+    result = _run_submitter_dependency_validation("--backends", "deepep_ht", "--afterok-job", "deepep_ll=123")
+
+    assert result.returncode != 0
+    assert "--afterok-job backend deepep_ll is not selected" in result.stderr
+
+
+def test_submitter_rejects_missing_backend_canary_mapping():
+    result = _run_submitter_dependency_validation("--backends", "deepep_ht,deepep_ll", "--afterok-job", "deepep_ht=123")
+
+    assert result.returncode != 0
+    assert "missing --afterok-job for selected backend deepep_ll" in result.stderr
+
+
+def test_submitter_rejects_duplicate_or_shared_canary_mapping():
+    duplicate = _run_submitter_dependency_validation(
+        "--backends",
+        "deepep_ht,deepep_ll",
+        "--afterok-job",
+        "deepep_ht=123",
+        "--afterok-job",
+        "deepep_ht=456",
+    )
+    shared = _run_submitter_dependency_validation(
+        "--backends",
+        "deepep_ht,deepep_ll",
+        "--afterok-job",
+        "deepep_ht=123",
+        "--afterok-job",
+        "deepep_ll=123",
+    )
+
+    assert duplicate.returncode != 0
+    assert "duplicate --afterok-job for deepep_ht" in duplicate.stderr
+    assert shared.returncode != 0
+    assert "Slurm canary job 123 is bound to multiple backends" in shared.stderr
 
 
 @pytest.mark.parametrize("nodes", ["2", "4", "all"])
@@ -193,6 +280,9 @@ def test_vllm_collector_hash_closure_includes_campaign_pipeline():
     closure = closures["collector.wideep.vllm.collect_moe_a2a"]
     assert "collector/framework_manifest.yaml" in closure
     assert "collector/wideep/vllm/finalize_campaign.py" in closure
+    assert "collector/wideep/vllm/failure_evidence.py" in closure
+    assert "collector/artifact_publication.py" in closure
+    assert "collector/runtime_stage_publication.py" in closure
     assert "collector/wideep/vllm/slurm/run_vllm_moe_a2a_job.sh" in closure
     assert "collector/wideep/vllm/slurm/host_tools/ibstat" in closure
     assert "collector/wideep/vllm/slurm/submit_vllm_moe_a2a.sh" in closure
@@ -268,6 +358,13 @@ def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     assert "docker_path.write_text(source)" in runner
     assert "common_path.write_text(source)" in runner
     assert "AIC_ENROOT_JSON_DEBUG_FILE" in runner
+    assert 'runtime_success="${final_image}.SUCCESS"' in runner
+    assert 'if [[ -f "${runtime_success}" ]]; then' in runner
+    assert 'collector/runtime_stage_publication.py" "${runtime_success}"' in runner
+    assert runner.index('mv "${temporary_meta}" "${image_meta}"') < runner.index('touch "${runtime_success}"')
+    assert "${container_image}.SUCCESS" in (REPO_ROOT / "collector/wideep/vllm/slurm/submit_vllm_moe_a2a.sh").read_text(
+        encoding="utf-8"
+    )
     assert 'replacement = \'if ! tee "${AIC_ENROOT_JSON_DEBUG_FILE:-/dev/null}" | jq "$@"; then\'' in runner
     assert 'ENROOT_LIBRARY_PATH="${enroot_library_dir}" enroot import' in runner
     assert "amd64) enroot_arch=x86_64" in runner
@@ -283,7 +380,8 @@ def test_image_stage_serializes_exact_digest_to_verified_sqsh():
     assert "--exclusive" not in submitter
     assert "--switches=1" in submitter
     assert "Reused checksum-verified staged image" in runner
-    assert "partial staged image set requires operator cleanup" in runner
+    assert 'collector/runtime_stage_publication.py" "${runtime_success}"' in runner
+    assert 'export AIC_REPO_DIR="${repo_root}"' in submitter
 
 
 def test_legacy_nvl4_patch_updates_every_four_byte_token_mask_use():
