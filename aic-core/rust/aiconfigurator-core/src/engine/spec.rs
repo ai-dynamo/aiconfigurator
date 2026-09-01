@@ -224,6 +224,9 @@ mod tests {
             fmha_quant_mode: FmhaQuantMode::Bfloat16,
             use_qk_norm: true,
             cp_size: 1,
+            // Multi-entry so the round-trip proves the whole Vec<String>
+            // survives, not just a single-element degenerate case.
+            lane_order: vec!["trtllm_mha".into(), "flashinfer".into(), "default".into()],
         }
     }
 
@@ -236,6 +239,7 @@ mod tests {
             head_size: 128,
             window_size: 4096,
             kv_cache_dtype: KvCacheQuantMode::Int8,
+            lane_order: vec!["triton".into(), "trtllm_mha".into(), "default".into()],
         }
     }
 

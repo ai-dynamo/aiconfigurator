@@ -61,7 +61,15 @@ pub const ENGINE_CONFIG_SCHEMA_VERSION: u32 = 1;
 //   (`perf_database/source_resolution.rs`).
 // - 14 (PR #1533): `GdnOp` gained `mamba_ssm_dtype` — a positional bincode
 //   op-layout change (the serde default covers JSON only).
-pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 14;
+// - 15 (AIC-1715/1716): `Context/GenerationAttentionOp` gained `lane_order`
+//   (appended at the struct tail; always serialized — bincode decodes
+//   positionally). Concurrently claimed v8, v9, v10, and v12 on its own
+//   branch (v8 alongside #1503's v7/v8, v9 alongside #1461's
+//   `Op::FpmForward` v9, v10 alongside issue #1498's Mhc `seq_split` v10,
+//   v12 alongside PR-6's `DsaModuleOp` `attn_projection_quant_modes` v12,
+//   and v14 alongside #1533's `GdnOp::mamba_ssm_dtype` v14); each landed
+//   first, so this renumbers to 15 at merge (same v3/v4, v5/v6 precedent).
+pub const ENGINE_SPEC_SCHEMA_VERSION: u32 = 15;
 
 /// Static engine identity and setup information carried by an
 /// [`crate::engine::spec::EngineSpec`].

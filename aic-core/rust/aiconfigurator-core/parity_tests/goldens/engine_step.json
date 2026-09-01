@@ -1516,6 +1516,34 @@
         }
       }
     },
+    "qwen35-27b-b200-sglang-lanes-trtllm-mha": {
+      "agg": {
+        "values": {
+          "agg_request": 50.615449946924,
+          "agg_tpot": 17.157779643025084,
+          "agg_ttft": 33.457670303898915
+        }
+      },
+      "disagg": {
+        "values": {
+          "disagg_request": 39.654,
+          "disagg_tpot": 4.201,
+          "disagg_ttft": 35.453
+        }
+      },
+      "mixed": {
+        "values": {
+          "mixed_step": 17.14664202673626
+        }
+      },
+      "static": {
+        "values": {
+          "static_ctx": 17.906,
+          "static_gen": 3.764,
+          "static_total": 21.669999999999998
+        }
+      }
+    },
     "qwen35-27b-b200-trtllm-isl1024-osl2": {
       "agg": {
         "values": {
@@ -2564,6 +2592,22 @@
     "qwen35-27b-b200-sglang-isl1024-osl2::static": {
       "engine": "rust",
       "git_head": "760b6c92edc00389ff79938b62b028c01bcfefdd"
+    },
+    "qwen35-27b-b200-sglang-lanes-trtllm-mha::agg": {
+      "engine": "rust",
+      "git_head": "b508895f5b894bc92a2b55150d3632246efea526"
+    },
+    "qwen35-27b-b200-sglang-lanes-trtllm-mha::disagg": {
+      "engine": "rust",
+      "git_head": "b508895f5b894bc92a2b55150d3632246efea526"
+    },
+    "qwen35-27b-b200-sglang-lanes-trtllm-mha::mixed": {
+      "engine": "rust",
+      "git_head": "b508895f5b894bc92a2b55150d3632246efea526"
+    },
+    "qwen35-27b-b200-sglang-lanes-trtllm-mha::static": {
+      "engine": "rust",
+      "git_head": "b508895f5b894bc92a2b55150d3632246efea526"
     },
     "qwen35-27b-b200-trtllm-isl1024-osl2::agg": {
       "engine": "rust",

@@ -356,9 +356,12 @@ def _build_comprehensive_test_data():
     return {
         "system_spec": dummy_system_spec,
         "gemm_data": dummy_gemm_data,
-        "context_attention_data": dummy_context_attention_data,
+        # Both attention loaders key on kernel_source first (AIC-1715); rows
+        # without one land in lane "default", which is what these fixtures
+        # impersonate.
+        "context_attention_data": {"default": dummy_context_attention_data},
         "encoder_attention_data": dummy_encoder_attention_data,
-        "generation_attention_data": dummy_generation_attention_data,
+        "generation_attention_data": {"default": dummy_generation_attention_data},
         "moe_data": dummy_moe_data,
         "context_mla_data": dummy_context_mla_data,
         "generation_mla_data": dummy_generation_mla_data,

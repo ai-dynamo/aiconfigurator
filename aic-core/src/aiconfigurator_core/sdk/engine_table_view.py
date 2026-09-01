@@ -17,6 +17,7 @@ in the Rust fold, never here (single-oracle rule).
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Callable
 from typing import Any
@@ -152,33 +153,27 @@ def _database_has_data_dir(database) -> bool:
     )
 
 
-def fetch_table_view(database, attribute: str):
-    """Fetch one loader-shaped table from the engine, keys rehydrated.
+def _probe_engine_handle(database):
+    """The cached probe ``EngineHandle`` for ``database`` — the same spec
+    (and thus the same shared-layer source map) the query path uses.
 
-    Returns ``None`` exactly when the retired Python loader returned ``None``
-    (every source file missing). Estimate-only databases (no backend/version
-    data directory at all) fetch through a SOL-moded probe — the one view the
-    engine loads with missing-data tolerance — so the nccl_version-scoped
-    NCCL/OneCCL tables still resolve (their files live outside the missing
-    dir, and the old parsers loaded them standalone) while every
-    backend/version-scoped view naturally answers ``None``. The engine handle
-    is the cached probe handle for ``database`` — the same spec (and thus the
-    same shared-layer source map) the query path uses.
+    Shared by every engine-backed enumeration/diagnostic fetch
+    (:func:`fetch_table_view`, :func:`fetch_attention_lane_density`): one
+    probe SPEC per database instance. ``_probe_handle_for``'s cache key is
+    the probe-spec JSON itself, and BUILDING that key re-runs the
+    shared-layer source resolution for every op file — a full warm does
+    ~40 fetches, so memoize the KEY on the database (its sources are
+    construction-time state; mode/policy views are separate objects). The
+    HANDLE itself always comes from the engine-side LRU, so the documented
+    eviction levers (clear_all_op_caches / clear_database_runtime_caches /
+    unload_database) govern every pinned Rust perf-DB load: the memo is
+    (generation, key, systems_path) and re-resolves — sources and the
+    SOL-mode decision both — whenever a lever advances the generation.
+    Plain strings only, never a pyo3 object: a warmed database stays
+    picklable and deep-copyable.
     """
     from aiconfigurator_core.sdk import engine as _engine
 
-    # One probe SPEC per database instance: _probe_handle_for's cache key is
-    # the probe-spec JSON itself, and BUILDING that key re-runs the
-    # shared-layer source resolution for every op file — a full warm does
-    # ~40 fetches, so memoize the KEY on the database (its sources are
-    # construction-time state; mode/policy views are separate objects). The
-    # HANDLE itself always comes from the engine-side LRU, so the documented
-    # eviction levers (clear_all_op_caches / clear_database_runtime_caches /
-    # unload_database) govern every pinned Rust perf-DB load: the memo is
-    # (generation, key, systems_path) and re-resolves — sources and the
-    # SOL-mode decision both — whenever a lever advances the generation.
-    # Plain strings only, never a pyo3 object: a warmed database stays
-    # picklable and deep-copyable.
     memo = database.__dict__.get("_table_view_probe_spec")
     if memo is None or memo[0] != _engine._PROBE_CACHE_GENERATION:
         mode_token = None if _database_has_data_dir(database) else "SOL"
@@ -192,11 +187,82 @@ def fetch_table_view(database, attribute: str):
         database._materialize_source_reports()
         memo = (_engine._PROBE_CACHE_GENERATION, key, systems_path)
         database.__dict__["_table_view_probe_spec"] = memo
-    handle = _engine._probe_handle_from_key(memo[1], memo[2])
+    return _engine._probe_handle_from_key(memo[1], memo[2])
+
+
+def fetch_table_view(database, attribute: str):
+    """Fetch one loader-shaped table from the engine, keys rehydrated.
+
+    Returns ``None`` exactly when the retired Python loader returned ``None``
+    (every source file missing). Estimate-only databases (no backend/version
+    data directory at all) fetch through a SOL-moded probe — the one view the
+    engine loads with missing-data tolerance — so the nccl_version-scoped
+    NCCL/OneCCL tables still resolve (their files live outside the missing
+    dir, and the old parsers loaded them standalone) while every
+    backend/version-scoped view naturally answers ``None``.
+    """
+    handle = _probe_engine_handle(database)
     raw = handle._engine.table_view_json(attribute)
     if raw is None:
         return None
     return _rehydrate(json.loads(raw), VIEW_KEY_LAYERS[attribute], 0)
+
+
+def fetch_attention_lane_density(
+    database, attribute: str, *, shared_layer: bool | None = None
+) -> dict[str, tuple[int, int]]:
+    """``{kernel_source: (slice_count, row_count)}`` for one attention QUERY
+    table (AIC-1715/1716 follow-up). ``attribute`` is
+    ``"_context_attention_data"`` or ``"_generation_attention_data"``.
+
+    Deliberately NOT part of :func:`fetch_table_view` / ``VIEW_KEY_LAYERS``:
+    that path folds the lane-blind enumeration view (first-wins across
+    kernel_source, kept for charts/support-matrix — see
+    ``perf_database/table_view.rs``), which cannot answer "how much data
+    does lane X actually carry" at all. This calls the Rust
+    ``attention_lane_density`` accessor directly, which reads the QUERY-path
+    `by_lane` structure (``perf_database/attention.rs::AttentionTable::
+    context_lanes``/``generation_lanes``) — the real collected kernel_source
+    lanes with their measured coverage. Backs
+    ``operations/attention.py::lane_walk_order``'s donor/leftover density
+    ranking. Empty (never raises) when the table has no data.
+
+    Density is immutable for a loaded probe, so the original database memoizes
+    each ``(attribute, effective shared-layer view)`` for the engine probe-cache
+    generation. The memo contains plain Python data, and every call returns a
+    copy so callers cannot mutate the cached value.
+
+    ``shared_layer=False`` probes the requested version's own rows through the
+    same FFI.  Lane resolution uses that view to preserve source precedence:
+    requested-version lanes form a tier ahead of inherited donor lanes, with
+    density ranking confined to each tier.  The lightweight copy changes only
+    the probe-spec policy bit; it never mutates the caller's database view.
+    """
+    from aiconfigurator_core.sdk import engine as _engine
+
+    original_database = database
+    effective_shared_layer = bool(database.enable_shared_layer) if shared_layer is None else bool(shared_layer)
+    cache_key = (attribute, effective_shared_layer)
+    memo = original_database.__dict__.get("_attention_lane_density_cache")
+    if memo is None or memo[0] != _engine._PROBE_CACHE_GENERATION:
+        cache = {}
+        original_database.__dict__["_attention_lane_density_cache"] = (_engine._PROBE_CACHE_GENERATION, cache)
+    else:
+        cache = memo[1]
+    if cache_key in cache:
+        return dict(cache[cache_key])
+    if effective_shared_layer != bool(database.enable_shared_layer):
+        database = copy.copy(database)
+        database._shared_layer_mode = effective_shared_layer
+        database.__dict__.pop("_table_view_probe_spec", None)
+        # The caller's normal shared-view probe owns source diagnostics.  This
+        # auxiliary provenance probe only needs the compiled table and must not
+        # duplicate every fallback warning or mutate shallow-copied reports.
+        database._source_reports_materialized = True
+    handle = _probe_engine_handle(database)
+    density = {lane: (slices, rows) for lane, slices, rows in handle._engine.attention_lane_density(attribute)}
+    cache[cache_key] = density
+    return dict(density)
 
 
 def load_view(database, attribute: str, filename_enum):

@@ -85,6 +85,12 @@ class EngineStepParityCase:
     afd_a_tp_size: int = 1
     afd_a_batch_size: int = 128
     afd_f_moe_ep_size: int = 1
+    # Attention kernel-lane override (`ModelConfig.attention_backend`,
+    # AIC-1715/1716). `None` = no override, i.e. the framework-default lane
+    # heads the precedence order. The op carries the RESOLVED walk order into
+    # the spec, so this is the knob that makes Rust and Python have to agree on
+    # which kernel's measurements answer a query.
+    attention_backend: str | None = None
 
 
 # Coverage contract (first principles, 2026-08): a case earns its slot by
@@ -459,6 +465,20 @@ SMOKE_CASES = [
         ),
         id="kimi-k3-b300-sglang-next-dspark-nextn7",
     ),
+    # Attention kernel-lane override coverage (AIC-1715/1716). The existing
+    # qwen35-27b-b200-sglang-isl1024-osl2 current-slot case anchors the default
+    # walk; this case pins trtllm_mha first on the same real multi-lane table.
+    # Python resolves the walk order and Rust replays it verbatim off the op
+    # spec, so a drift in either side shows up as a latency split.
+    pytest.param(
+        EngineStepParityCase(
+            model_path="Qwen/Qwen3.5-27B",
+            backend_name="sglang",
+            backend_version="current",
+            attention_backend="trtllm_mha",
+        ),
+        id="qwen35-27b-b200-sglang-lanes-trtllm-mha",
+    ),
 ]
 
 PARITY_RTOL = 0.01
@@ -597,6 +617,7 @@ def _static_metrics(
         "database_mode": case.database_mode,
         "transfer_policy": case.transfer_policy,
         "moe_quant_mode": case.moe_quant_mode,
+        "attention_backend": case.attention_backend,
     }
     ctx_result = _MemoizedCall(lambda: _quiet_call(cli_estimate, mode="static_ctx", **kwargs))
     gen_result = _MemoizedCall(lambda: _quiet_call(cli_estimate, mode="static_gen", **kwargs))
@@ -649,6 +670,7 @@ def _agg_metrics(case: EngineStepParityCase) -> dict[str, float | _ErrorSentinel
             database_mode=case.database_mode,
             transfer_policy=case.transfer_policy,
             moe_quant_mode=case.moe_quant_mode,
+            attention_backend=case.attention_backend,
         )
 
     # Errors propagate from a single call site — capture once, surface
@@ -693,6 +715,7 @@ def _disagg_metrics(case: EngineStepParityCase) -> dict[str, float | _ErrorSenti
             database_mode=case.database_mode,
             transfer_policy=case.transfer_policy,
             moe_quant_mode=case.moe_quant_mode,
+            attention_backend=case.attention_backend,
         )
 
     err: _ErrorSentinel | None = None
@@ -823,6 +846,7 @@ def _case_model_config(case: EngineStepParityCase) -> config.ModelConfig:
         moe_quant_mode=(common.MoEQuantMode[case.moe_quant_mode] if case.moe_quant_mode else None),
         kvcache_quant_mode=(common.KVCacheQuantMode[case.kvcache_quant_mode] if case.kvcache_quant_mode else None),
         nextn=case.nextn,
+        attention_backend=case.attention_backend,
     )
 
 

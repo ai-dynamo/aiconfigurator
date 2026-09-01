@@ -195,6 +195,7 @@ def cli_default(
     generator_set: list[str] | None = None,
     generator_config: str | None = None,
     generator_dynamo_version: str | None = None,
+    attention_backend: str | None = None,
     engine_step_backend: str | None = None,
     forward_model: str | None = None,
 ) -> CLIResult:
@@ -255,6 +256,9 @@ def cli_default(
             Equivalent to repeating ``--generator-set`` on the CLI.
         generator_config: Path to a unified generator YAML config file.
         generator_dynamo_version: Override Dynamo version used by the generator.
+        attention_backend: Attention kernel-lane override ('fa3', 'triton',
+            'trtllm_mha', 'flashinfer', 'fla', or 'default'). None uses the
+            framework default for the target system/backend version.
         engine_step_backend: Engine-step backend; "rust" (the compiled engine,
             default and only executor) is the only accepted value.
         forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None keeps the default.
@@ -328,6 +332,7 @@ def cli_default(
         nextn_accepted=nextn_accepted,
         free_gpu_memory_fraction=free_gpu_memory_fraction,
         max_seq_len=max_seq_len,
+        attention_backend=attention_backend,
         engine_step_backend=engine_step_backend,
         forward_model=forward_model,
     )
@@ -426,6 +431,7 @@ def cli_recommend(
     max_seq_len: int | None = None,
     enable_wideep: bool = False,
     moe_backend: str | None = None,
+    attention_backend: str | None = None,
     top_n: int = 5,
     save_dir: str | None = None,
     engine_step_backend: str | None = None,
@@ -479,6 +485,12 @@ def cli_recommend(
         max_seq_len: TRT-LLM max_seq_len setting.
         enable_wideep: Enable Wide Expert Parallelism for MoE models.
         moe_backend: Explicit SGLang MoE backend override.
+        attention_backend: Attention kernel-lane override ('fa3', 'triton',
+            'trtllm_mha', 'flashinfer', 'fla', or 'default'). Supported values
+            depend on the backend's collected tables (e.g. vllm supports
+            'triton', 'flashinfer', and 'default'); an unsupported
+            (backend, value) pair raises. None (default) uses the framework
+            default for the target system/backend version.
         top_n: Number of top configurations to return per mode. Default is 5.
         save_dir: Directory to save results. If None, results are not saved.
         engine_step_backend: Engine-step backend; "rust" (the compiled engine,
@@ -556,6 +568,7 @@ def cli_recommend(
         forward_model=forward_model,
         enable_wideep=enable_wideep,
         moe_backend=moe_backend,
+        attention_backend=attention_backend,
     )
 
     # Build escalation sequence: gpus_per_node, *2, *4, *8, capped at _MAX_GPUS_PER_WORKER.
@@ -635,6 +648,7 @@ def cli_exp(
     *,
     yaml_path: str | None = None,
     config: dict[str, dict] | None = None,
+    attention_backend: str | None = None,
     top_n: int = 5,
     save_dir: str | None = None,
 ) -> CLIResult:
@@ -650,6 +664,10 @@ def cli_exp(
         yaml_path: Path to a YAML file containing experiment definitions.
         config: Dict containing experiment definitions (alternative to yaml_path).
             Keys are experiment names, values are experiment configs.
+        attention_backend: Optional global attention kernel-lane override
+            ('fa3', 'triton', 'trtllm_mha', 'flashinfer', 'fla', or 'default'),
+            applied to every experiment. Per-experiment ``attention_backend``
+            entries in the YAML/config take precedence.
         top_n: Number of top configurations to return for each experiment. Default is 5.
         save_dir: Directory to save results. If None, results are not saved to disk.
 
@@ -711,6 +729,7 @@ def cli_exp(
     tasks = build_experiment_tasks(
         yaml_path=yaml_path,
         config=config,
+        attention_backend=attention_backend,
     )
 
     if not tasks:
@@ -1028,6 +1047,7 @@ def cli_estimate(
     decode_max_seq_len: int | None = None,
     engine_step_backend: str | None = None,
     forward_model: str | None = None,
+    attention_backend: str | None = None,
     # Static-mode (and shared) extras
     prefix: int = 0,
     nextn: int | str = 0,
@@ -1127,6 +1147,13 @@ def cli_estimate(
             disagg. Overrides ``max_seq_len`` for the decode worker.
         engine_step_backend: Engine-step backend; "rust" (the compiled engine,
             default and only executor) is the only accepted value.
+        attention_backend: Attention kernel-lane override ('fa3', 'triton',
+            'trtllm_mha', 'flashinfer', 'fla', or 'default'). Supported values
+            depend on the backend's collected tables (e.g. vllm supports
+            'triton', 'flashinfer', and 'default'); an unsupported
+            (backend_name, value) pair raises. None (default) uses the
+            framework default for the target system/backend version. Applied
+            to agg, disagg, afd, and all static modes.
         prefix: (common) Prefix cache length (subset of ``isl`` already cached).
             Applied to agg, disagg, and all static modes. Default 0.
         nextn: (common) MTP draft length, or ``"auto"`` to use the checkpoint's
@@ -1287,6 +1314,7 @@ def cli_estimate(
             load_database=_load_database,
             get_backend=get_backend,
             get_model=get_model,
+            attention_backend=attention_backend,
         )
 
     if mode == "agg":
@@ -1321,6 +1349,7 @@ def cli_estimate(
             max_seq_len=max_seq_len,
             engine_step_backend=engine_step_backend,
             forward_model=forward_model,
+            attention_backend=attention_backend,
             prefix=prefix,
             nextn=nextn,
             nextn_accepted=nextn_accepted,
@@ -1393,6 +1422,7 @@ def cli_estimate(
             get_model=get_model,
             engine_step_backend=engine_step_backend,
             forward_model=forward_model,
+            attention_backend=attention_backend,
             prefix=prefix,
             nextn=nextn,
             nextn_accepted=nextn_accepted,
@@ -1454,6 +1484,7 @@ def cli_estimate(
             get_model=get_model,
             free_gpu_memory_fraction=free_gpu_memory_fraction,
             max_seq_len=max_seq_len,
+            attention_backend=attention_backend,
             prefix=prefix,
             nextn=nextn,
             nextn_accepted=nextn_accepted,
@@ -1499,6 +1530,7 @@ def cli_estimate(
             load_database=_load_database,
             get_backend=get_backend,
             get_model=get_model,
+            attention_backend=attention_backend,
         )
         if static_result.summary is not None and static_result.summary.check_oom():
             phase_label = "decode" if static_mode == "static_gen" else "prefill"
@@ -1548,6 +1580,7 @@ def _run_agg_estimate(
     max_seq_len=None,
     engine_step_backend=None,
     forward_model=None,
+    attention_backend: str | None = None,
     # Common (also accepted by disagg / static)
     prefix: int = 0,
     nextn: int = 0,
@@ -1574,6 +1607,7 @@ def _run_agg_estimate(
         comm_quant_mode,
         forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
+        attention_backend=attention_backend,
     )
     _apply_nextn(model_config, nextn)
     # Agg workers run context attention → resolve fmha against the perf data
@@ -1687,6 +1721,7 @@ def _run_static_estimate(
     get_backend,
     get_model,
     forward_model=None,
+    attention_backend: str | None = None,
 ) -> EstimateResult:
     """Run a single-pass static-batching estimation.
 
@@ -1718,6 +1753,7 @@ def _run_static_estimate(
         comm_quant_mode,
         forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
+        attention_backend=attention_backend,
     )
     _apply_nextn(model_config, nextn)
     database = load_database(system_name)
@@ -1851,6 +1887,7 @@ def _run_disagg_estimate(
     get_model,
     engine_step_backend=None,
     forward_model=None,
+    attention_backend: str | None = None,
     # Common (also accepted by agg / static)
     prefix: int = 0,
     nextn: int = 0,
@@ -1895,6 +1932,7 @@ def _run_disagg_estimate(
         comm_quant_mode,
         forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
+        attention_backend=attention_backend,
     )
     decode_model_config = _build_model_config(
         decode_tp_size,
@@ -1909,6 +1947,7 @@ def _run_disagg_estimate(
         comm_quant_mode,
         forward_model=forward_model,
         enable_encoder_dp=enable_encoder_dp,
+        attention_backend=attention_backend,
     )
     # Apply common nextn/MTP overrides to *both* prefill and decode worker
     # configs so a single ``--nextn N`` reaches each side of the disagg pair.
@@ -2190,6 +2229,7 @@ def _run_afd_estimate(
     get_model,
     free_gpu_memory_fraction,
     max_seq_len,
+    attention_backend: str | None = None,
     prefix: int = 0,
     nextn: int = 0,
     nextn_accepted: float | None = None,
@@ -2245,6 +2285,7 @@ def _run_afd_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        attention_backend=attention_backend,
     )
     f_model_config = _build_model_config(
         f_tp_size,
@@ -2257,6 +2298,7 @@ def _run_afd_estimate(
         fmha_quant_mode,
         moe_quant_mode,
         comm_quant_mode,
+        attention_backend=attention_backend,
     )
     # Pass speculative decode knobs through to A/F model configs. TODO:
     # AFDTransfer still models committed decode-token volume only; recalibrate

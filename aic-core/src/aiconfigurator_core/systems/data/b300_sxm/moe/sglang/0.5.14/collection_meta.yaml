@@ -16,4 +16,19 @@ tables:
     # 3078 bf16 sglang_fused_moe_triton + 3078 nvidia/MiniMax-M3-NVFP4 nvfp4
     # sglang_flashinfer_trtllm_moe; model-filtered internal collection CI
     # runs, zero failures.
+    # 2026-08-16: appended 3159 nvfp4 rows at the Qwen3.5-397B shape
+    # (512 experts, 4096/1024, topk 10, sglang_flashinfer_trtllm_moe,
+    # TP 1-32 x EP 1-256 x 3 distributions x 27 token counts), AIC-1716 —
+    # same case plan as the gb300/gb200 2026-08-13 appends. Manual JET run
+    # 62913618 on aws-pdx (8x 'NVIDIA B300 SXM6 AC', mirrored
+    # lmsysorg/sglang:v0.5.14-cu130 amd64 image); zero failures, keys
+    # disjoint from prior rows.
+    # 2026-08-26: replaced 135 rows (5 plans x 27 tokens) at the Qwen3.5-397B
+    # nvfp4 shape — PR #1519 review healing of isolated latency spikes
+    # (tp2/ep1 pl1.2, tp2/ep2 pl1.2, tp2/ep16 bal, tp2/ep128 bal, tp32/ep8
+    # pl1.01). Scoped --case-filter re-collection on 1x B300 SXM6 AC
+    # (aws-pdx, mirrored sglang v0.5.14-cu130 amd64 image), per-key MIN of
+    # two runs. Scoped checker after: 0 same-plan >1.5x cells vs gb300
+    # (was 5); remaining token-curve steps are cross-device-consistent
+    # kernel-regime transitions, not artifacts.
     status: complete

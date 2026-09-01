@@ -431,9 +431,15 @@ def context_fmha_supported_modes(database, ctx_op: str, kv_cache_mode) -> list[s
         if not data:
             continue
         saw_table = True
-        for fmha_key in data:
-            if kv_cache_mode in data[fmha_key]:
-                modes.add(fmha_key.name if hasattr(fmha_key, "name") else str(fmha_key))
+        # Lane-aware shape (AIC-1715): outermost keys are strings (kernel_source).
+        # Union across ALL lanes — a joint (fmha, kv) slice present in any lane
+        # is reachable at query time (own lane or donor gap-fill).
+        first_key = next(iter(data))
+        lanes = list(data.values()) if isinstance(first_key, str) else [data]
+        for lane_data in lanes:
+            for fmha_key in lane_data:
+                if kv_cache_mode in lane_data[fmha_key]:
+                    modes.add(fmha_key.name if hasattr(fmha_key, "name") else str(fmha_key))
     if not saw_table:
         return list(flat)
     return sorted(modes)
@@ -1680,7 +1686,11 @@ def _store_loaded_database(
 ) -> None:
     system, backend, version, systems_root = ref
     # A worker result may replace an existing root object for this data key.
-    # Drop configured copies keyed by the old root so they cannot accumulate.
+    # Evict probe snapshots before publishing that replacement, and drop
+    # configured copies keyed by the old root so they cannot accumulate.
+    from aiconfigurator_core.sdk import engine
+
+    engine._clear_probe_handle_cache()
     _cached_configured_database_view.cache_clear()
     database_dict[system][backend][version] = database
     # get_all_databases() constructs the default (shared-enabled) view. Preserve
@@ -2183,10 +2193,27 @@ def _enum_key_names(data) -> list[str]:
     """Safely extract Enum key names from a mapping.
 
     Many perf tables are optional and loaders return ``None`` when data
-    files are missing. Treat missing/empty tables as supporting no modes."""
+    files are missing. Treat missing/empty tables as supporting no modes.
+
+    Tables with the lane-aware shape introduced by AIC-1715 (outermost keys
+    are strings — kernel_source values) report the UNION of their lanes' enum
+    keys: any lane can serve a query (own lane or donor gap-fill), so a mode
+    collected in only one lane is still supported.
+    """
     if not data:
         return []
-    names: list[str] = []
+    first_key = next(iter(data))
+    if isinstance(first_key, str):
+        # Lane-aware shape: union the enum keys across every kernel_source lane.
+        names: list[str] = []
+        seen: set[str] = set()
+        for lane in data:
+            for name in _enum_key_names(data[lane]):
+                if name not in seen:
+                    seen.add(name)
+                    names.append(name)
+        return names
+    names = []
     for key in data:
         names.append(key.name if hasattr(key, "name") else str(key))
     return names
