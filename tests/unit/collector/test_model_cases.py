@@ -992,6 +992,17 @@ def test_kimi_mla_plan_includes_generation_bmm_helpers():
         assert required_ops <= plan.selected_ops
 
 
+def test_kimi_k3_vllm_plan_activates_mla_module_ops():
+    vllm_plan = build_collection_case_plan(backend="vllm", model_path="moonshotai/Kimi-K3")
+    assert {"mla_context_module", "mla_generation_module"} <= vllm_plan.selected_ops
+    assert {"mla_context", "mla_generation"}.isdisjoint(vllm_plan.selected_ops)
+
+    # Framework scoping: sglang keeps the granular MLA lane.
+    sglang_plan = build_collection_case_plan(backend="sglang", model_path="moonshotai/Kimi-K3")
+    assert {"mla_context_module", "mla_generation_module"}.isdisjoint(sglang_plan.selected_ops)
+    assert {"mla_context", "mla_generation"} <= sglang_plan.selected_ops
+
+
 def test_kimi_k3_moe_is_planned_per_framework_and_never_for_trtllm():
     # K3 has no trtllm serving lane. moe activation is framework-specific
     # (sglang/vllm), so a K3-scoped trtllm run plans NO moe at all — a
@@ -1211,7 +1222,7 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
     vllm_sweep = get_mla_module_sweep_spec("vllm")
     assert vllm_sweep.context_sequence_lengths[-1] == 32768
     assert vllm_sweep.generation_sequence_lengths[-1] == 131072
-    assert vllm_sweep.inner_sweep_head_counts == [128, 64, 32, 16, 8, 4, 2, 1]
+    assert vllm_sweep.inner_sweep_head_counts == [128, 96, 64, 48, 32, 24, 16, 12, 8, 4, 2, 1]
     assert vllm_sweep.generation_max_tokens == 33554432
     assert vllm_sweep.generation_large_cache_tokens == 16777216
     assert [
@@ -1289,6 +1300,7 @@ def test_mla_module_metadata_and_micro_sweeps_are_yaml_backed():
         ("nvidia/Kimi-K2.5-NVFP4", "KimiK25ForConditionalGeneration", 64),
         ("nvidia/Kimi-K2.6-NVFP4", "KimiK25ForConditionalGeneration", 64),
         ("nvidia/Kimi-K2.7-Code-NVFP4", "KimiK25ForConditionalGeneration", 64),
+        ("moonshotai/Kimi-K3", "KimiK3ForConditionalGeneration", 96),
     }
     assert {spec.model_path for spec in wideep_specs} == {
         "deepseek-ai/DeepSeek-R1",

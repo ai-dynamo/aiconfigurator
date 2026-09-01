@@ -99,6 +99,9 @@ pub(crate) fn mla_module_native_heads(model: &str) -> Option<u32> {
         // vllm 0.22.0 provenance aliases of the same 128-native geometry.
         "deepseek-ai/DeepSeek-R1" => Some(128),
         "nvidia/DeepSeek-V3.1-NVFP4" => Some(128),
+        // #1458-style pin for the Kimi-K3 targeted vllm module rows
+        // (96-native head identity; exact gb300/vllm/0.27.0 collection).
+        "moonshotai/Kimi-K3" => Some(96),
         _ => None,
     }
 }
