@@ -1,0 +1,60 @@
+diff --git a/csrc/deep_ep.hpp b/csrc/deep_ep.hpp
+index 7213bdd..0012dee 100644
+--- a/csrc/deep_ep.hpp
++++ b/csrc/deep_ep.hpp
+@@ -27 +27 @@ struct Buffer {
+-    EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS == 8, "The number of maximum NVLink peers must be 8");
++    EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS == 4, "This build requires exactly four NVLink peers per scale-up group");
+diff --git a/csrc/kernels/configs.cuh b/csrc/kernels/configs.cuh
+index b26f298..1667014 100644
+--- a/csrc/kernels/configs.cuh
++++ b/csrc/kernels/configs.cuh
+@@ -3 +3 @@
+-#define NUM_MAX_NVL_PEERS 8
++#define NUM_MAX_NVL_PEERS 4
+diff --git a/csrc/kernels/internode.cu b/csrc/kernels/internode.cu
+index e6a8510..d79b2e9 100644
+--- a/csrc/kernels/internode.cu
++++ b/csrc/kernels/internode.cu
+@@ -20 +20 @@ struct SourceMeta {
+-    EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS == 8, "Invalid number of maximum NVL peers");
++    EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS == 4, "This build requires exactly four NVLink peers per scale-up group");
+@@ -295,4 +295,4 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
+-                EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS * sizeof(bool) == sizeof(uint64_t), "Invalid number of NVL peers");
+-                auto is_token_in_rank_uint64 =
+-                    *reinterpret_cast<const uint64_t*>(is_token_in_rank + i * num_ranks + dst_rdma_rank * NUM_MAX_NVL_PEERS);
+-                auto is_token_in_rank_values = reinterpret_cast<const bool*>(&is_token_in_rank_uint64);
++                EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS * sizeof(bool) == sizeof(uint32_t), "Invalid number of NVL peers");
++                auto is_token_in_rank_uint32 =
++                    *reinterpret_cast<const uint32_t*>(is_token_in_rank + i * num_ranks + dst_rdma_rank * NUM_MAX_NVL_PEERS);
++                auto is_token_in_rank_values = reinterpret_cast<const bool*>(&is_token_in_rank_uint32);
+@@ -302 +302 @@ __global__ void notify_dispatch(const int* num_tokens_per_rank,
+-                total_count += (is_token_in_rank_uint64 != 0);
++                total_count += (is_token_in_rank_uint32 != 0);
+@@ -507 +507 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
+-    EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS * sizeof(bool) == sizeof(uint64_t), "Invalid number of NVL peers");
++    EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS * sizeof(bool) == sizeof(uint32_t), "Invalid number of NVL peers");
+@@ -619 +619 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
+-            uint64_t is_token_in_rank_uint64 = 0;
++            uint32_t is_token_in_rank_uint32 = 0;
+@@ -621,3 +621,3 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
+-                is_token_in_rank_uint64 =
+-                    __ldg(reinterpret_cast<const uint64_t*>(is_token_in_rank + token_idx * num_ranks + lane_id * NUM_MAX_NVL_PEERS));
+-                global_rdma_tail_idx += (is_token_in_rank_uint64 != 0);
++                is_token_in_rank_uint32 =
++                    __ldg(reinterpret_cast<const uint32_t*>(is_token_in_rank + token_idx * num_ranks + lane_id * NUM_MAX_NVL_PEERS));
++                global_rdma_tail_idx += (is_token_in_rank_uint32 != 0);
+@@ -630 +630 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
+-            auto rdma_tail_idx = is_token_in_rank_uint64 == 0 ? -1 : global_rdma_tail_idx - 1;
++            auto rdma_tail_idx = is_token_in_rank_uint32 == 0 ? -1 : global_rdma_tail_idx - 1;
+@@ -634 +634 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
+-            while (is_token_in_rank_uint64 != 0 and rdma_tail_idx - cached_rdma_channel_head >= num_max_rdma_chunked_recv_tokens) {
++            while (is_token_in_rank_uint32 != 0 and rdma_tail_idx - cached_rdma_channel_head >= num_max_rdma_chunked_recv_tokens) {
+@@ -664,2 +664,2 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
+-                    auto recv_is_token_in_rank_uint64 = broadcast(is_token_in_rank_uint64, i);
+-                    auto recv_is_token_in_rank_values = reinterpret_cast<const bool*>(&recv_is_token_in_rank_uint64);
++                    auto recv_is_token_in_rank_uint32 = broadcast(is_token_in_rank_uint32, i);
++                    auto recv_is_token_in_rank_values = reinterpret_cast<const bool*>(&recv_is_token_in_rank_uint32);
+@@ -716 +716 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
+-            if (is_token_in_rank_uint64 != 0) {
++            if (is_token_in_rank_uint32 != 0) {

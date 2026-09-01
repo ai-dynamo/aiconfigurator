@@ -58,6 +58,14 @@ use crate::perf_database::parquet_loader::PerfReader;
 const CONTEXT_AXES: &[&str] = &["num_heads", "seq_len", "batch"];
 /// Axes for the generation table (RAW Grid; seq is innermost).
 const GENERATION_AXES: &[&str] = &["num_heads", "batch", "seq_len"];
+const WIDEEP_MLA_ATTENTION_BACKENDS: &[&str] = &["flashinfer", "fa3"];
+const BLACKWELL_MLA_KERNEL_SOURCE: &str = "trtllm_mla";
+
+fn invalid_kernel_source(requested: &str) -> AicError {
+    AicError::InvalidEngineConfig(format!(
+        "attention_backend must be 'flashinfer', 'fa3', or match an available kernel_source; got {requested:?}."
+    ))
+}
 
 /// Owner for both WideEP MLA tables. Each side is lazily loaded on first
 /// query.
@@ -99,43 +107,71 @@ pub struct GenerationKey {
     pub kv_quant: String,
 }
 
-fn resolve_context_key(grids: &WideEpContextMlaGrids, requested: ContextKey) -> ContextKey {
+/// Resolve a user-facing backend alias to the measured context-table key.
+///
+/// Exact measured kernel sources remain valid for low-level callers. Only the
+/// supported user-facing aliases may borrow Blackwell's `trtllm_mla` slice;
+/// unknown or empty values must not silently select it.
+fn resolve_context_key(
+    grids: &WideEpContextMlaGrids,
+    requested: ContextKey,
+) -> Result<ContextKey, AicError> {
+    if requested.kernel_source.is_empty() {
+        return Err(invalid_kernel_source(&requested.kernel_source));
+    }
     if grids.by_keys.contains_key(&requested) {
-        return requested;
+        return Ok(requested);
     }
-    if !matches!(requested.kernel_source.as_str(), "flashinfer" | "fa3") {
-        return requested;
+    if WIDEEP_MLA_ATTENTION_BACKENDS.contains(&requested.kernel_source.as_str()) {
+        let fallback = ContextKey {
+            kernel_source: BLACKWELL_MLA_KERNEL_SOURCE.to_string(),
+            ..requested.clone()
+        };
+        return Ok(if grids.by_keys.contains_key(&fallback) {
+            fallback
+        } else {
+            requested
+        });
     }
-    let fallback = ContextKey {
-        kernel_source: "trtllm_mla".to_string(),
-        ..requested.clone()
-    };
-    if grids.by_keys.contains_key(&fallback) {
-        fallback
-    } else {
-        requested
+    if grids
+        .by_keys
+        .keys()
+        .any(|key| key.kernel_source == requested.kernel_source)
+    {
+        return Ok(requested);
     }
+    Err(invalid_kernel_source(&requested.kernel_source))
 }
 
 fn resolve_generation_key(
     grids: &WideEpGenerationMlaGrids,
     requested: GenerationKey,
-) -> GenerationKey {
+) -> Result<GenerationKey, AicError> {
+    if requested.kernel_source.is_empty() {
+        return Err(invalid_kernel_source(&requested.kernel_source));
+    }
     if grids.by_keys.contains_key(&requested) {
-        return requested;
+        return Ok(requested);
     }
-    if !matches!(requested.kernel_source.as_str(), "flashinfer" | "fa3") {
-        return requested;
+    if WIDEEP_MLA_ATTENTION_BACKENDS.contains(&requested.kernel_source.as_str()) {
+        let fallback = GenerationKey {
+            kernel_source: BLACKWELL_MLA_KERNEL_SOURCE.to_string(),
+            ..requested.clone()
+        };
+        return Ok(if grids.by_keys.contains_key(&fallback) {
+            fallback
+        } else {
+            requested
+        });
     }
-    let fallback = GenerationKey {
-        kernel_source: "trtllm_mla".to_string(),
-        ..requested.clone()
-    };
-    if grids.by_keys.contains_key(&fallback) {
-        fallback
-    } else {
-        requested
+    if grids
+        .by_keys
+        .keys()
+        .any(|key| key.kernel_source == requested.kernel_source)
+    {
+        return Ok(requested);
     }
+    Err(invalid_kernel_source(&requested.kernel_source))
 }
 
 impl WideEpMlaTable {
@@ -201,7 +237,7 @@ impl WideEpMlaTable {
                 fmha_quant: fmha_quant.name().to_string(),
                 kv_quant: kv_quant.name().to_string(),
             },
-        );
+        )?;
         let node = grids
             .by_keys
             .get(&key)
@@ -263,7 +299,7 @@ impl WideEpMlaTable {
                 kernel_source: kernel_source.to_string(),
                 kv_quant: kv_quant.name().to_string(),
             },
-        );
+        )?;
         let node = grids
             .by_keys
             .get(&key)
@@ -317,7 +353,7 @@ impl WideEpMlaTable {
                 fmha_quant: fmha_quant.name().to_string(),
                 kv_quant: kv_quant.name().to_string(),
             },
-        );
+        )?;
         let node = grids
             .by_keys
             .get(&key)
@@ -339,7 +375,7 @@ impl WideEpMlaTable {
                 kernel_source: kernel_source.to_string(),
                 kv_quant: kv_quant.name().to_string(),
             },
-        );
+        )?;
         let node = grids
             .by_keys
             .get(&key)
@@ -747,11 +783,13 @@ mod tests {
 
         for source in ["flashinfer", "fa3"] {
             assert_eq!(
-                resolve_context_key(&context, context_key(source)),
+                resolve_context_key(&context, context_key(source))
+                    .expect("supported context alias"),
                 context_key("trtllm_mla")
             );
             assert_eq!(
-                resolve_generation_key(&generation, generation_key(source)),
+                resolve_generation_key(&generation, generation_key(source))
+                    .expect("supported generation alias"),
                 generation_key("trtllm_mla")
             );
         }
@@ -773,12 +811,33 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_context_key(&context, context_key("flashinfer")),
+            resolve_context_key(&context, context_key("flashinfer")).expect("exact context slice"),
             context_key("flashinfer")
         );
         assert_eq!(
-            resolve_generation_key(&generation, generation_key("flashinfer")),
+            resolve_generation_key(&generation, generation_key("flashinfer"))
+                .expect("exact generation slice"),
             generation_key("flashinfer")
+        );
+    }
+
+    #[test]
+    fn wideep_mla_exact_measured_source_remains_valid() {
+        let context = WideEpContextMlaGrids {
+            by_keys: BTreeMap::from([(context_key("torch"), Node::branch())]),
+        };
+        let generation = WideEpGenerationMlaGrids {
+            by_keys: BTreeMap::from([(generation_key("torch"), Node::branch())]),
+        };
+
+        assert_eq!(
+            resolve_context_key(&context, context_key("torch")).expect("measured context source"),
+            context_key("torch")
+        );
+        assert_eq!(
+            resolve_generation_key(&generation, generation_key("torch"))
+                .expect("measured generation source"),
+            generation_key("torch")
         );
     }
 
@@ -792,11 +851,13 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_context_key(&context, context_key("flashinfer")),
+            resolve_context_key(&context, context_key("flashinfer"))
+                .expect("supported context alias"),
             context_key("flashinfer")
         );
         assert_eq!(
-            resolve_generation_key(&generation, generation_key("flashinfer")),
+            resolve_generation_key(&generation, generation_key("flashinfer"))
+                .expect("supported generation alias"),
             generation_key("flashinfer")
         );
     }
@@ -811,119 +872,52 @@ mod tests {
         };
 
         for source in ["torch", ""] {
-            assert_eq!(
-                resolve_context_key(&context, context_key(source)),
-                context_key(source)
-            );
-            assert_eq!(
-                resolve_generation_key(&generation, generation_key(source)),
-                generation_key(source)
-            );
-        }
-    }
-
-    #[test]
-    fn wideep_context_mla_exact_hit() {
-        // First DSv3 row in
-        // b200_sxm/mla/sglang/0.5.10/wideep_context_mla_perf.parquet:
-        // kernel=trtllm_mla mla=fp8_block kv=fp8 num_heads=128 b=1 isl=1 latency=0.5470
-        let table = WideEpMlaTable::new(b200_sglang_data_root(), load_spec("b200_sxm"));
-        let latency = table
-            .query_context(
-                1,
-                1,
-                128,
-                KvCacheQuantMode::Fp8,
-                FmhaQuantMode::Fp8Block,
-                "trtllm_mla",
-            )
-            .expect("WideEP context MLA query must succeed");
-        assert!(
-            (latency - 0.5470).abs() < 1e-3,
-            "expected recorded latency, got {latency}"
-        );
-    }
-
-    #[test]
-    fn wideep_generation_mla_exact_hit() {
-        // First DSv3 row in
-        // b200_sxm/mla/sglang/0.5.10/wideep_generation_mla_perf.parquet:
-        // kernel=trtllm_mla kv=fp8 num_heads=128 b=1 isl=1 step=0 latency=0.1049
-        let table = WideEpMlaTable::new(b200_sglang_data_root(), load_spec("b200_sxm"));
-        let latency = table
-            .query_generation(1, 1, 128, KvCacheQuantMode::Fp8, "trtllm_mla")
-            .expect("WideEP generation MLA query must succeed");
-        assert!(
-            (latency - 0.1049).abs() < 1e-3,
-            "expected recorded latency, got {latency}"
-        );
-    }
-
-    /// Cross-language parity with the Python v2 engine.
-    ///
-    /// h200_sxm/sglang/0.5.10 is the root whose wideep tables carry the
-    /// `flashinfer` kernel_source Python's query accepts (b200's are
-    /// trtllm_mla-only, which `_query_wideep_*_table` rejects at the
-    /// attn-backend check). Expected values generated with
-    /// `PYTHONPATH=src python3` via `get_database('h200_sxm', 'sglang',
-    /// '0.5.10', database_mode="SOL")` (shared layer disabled so Python
-    /// loads exactly this primary parquet) and per-query
-    /// `database_mode=DatabaseMode.SILICON`, `tp_size=1` (= 128 heads),
-    /// `prefix=0`, `fmha=fp8_block`, `kv=fp8`,
-    /// `attention_backend='flashinfer'`. Cases: exact hit, interior interp,
-    /// beyond-range util-hold.
-    ///
-    /// NOTE(shared-layer merge): oracle generated pre-shared-layer;
-    /// regenerate if this fails (Python's default `get_database` now merges
-    /// shared-layer rows, which can add points to these curves; the Rust
-    /// side here uses the single-primary `new` constructor).
-    #[test]
-    fn wideep_mla_queries_match_python_v2_engine() {
-        let table = WideEpMlaTable::new(h200_sglang_data_root(), load_spec("h200_sxm"));
-        let assert_rel = |got: f64, expected: f64, what: &str| {
             assert!(
-                ((got - expected) / expected).abs() < 1e-9,
-                "{what}: rust {got} vs python {expected}"
+                matches!(
+                    resolve_context_key(&context, context_key(source)),
+                    Err(AicError::InvalidEngineConfig(_))
+                ),
+                "invalid context source {source:?} must not borrow trtllm_mla"
             );
-        };
-
-        // db.query_wideep_context_mla(b, s, prefix=0, tp_size=1, ...)
-        let ctx_cases: &[(u32, u32, f64)] = &[
-            (4, 4096, 9.6274),             // exact hit
-            (4, 6000, 16.671686220608603), // seq interior (sqrt blend)
-            (4, 50000, 697.4521946410698), // beyond seq range (tapered util-hold)
-        ];
-        for &(b, s, expected) in ctx_cases {
-            let got = table
-                .query_context(
-                    b,
-                    s,
-                    128,
-                    KvCacheQuantMode::Fp8,
-                    FmhaQuantMode::Fp8Block,
-                    "flashinfer",
-                )
-                .unwrap();
-            assert_rel(got, expected, &format!("wideep_context_mla(b={b}, s={s})"));
+            assert!(
+                matches!(
+                    resolve_generation_key(&generation, generation_key(source)),
+                    Err(AicError::InvalidEngineConfig(_))
+                ),
+                "invalid generation source {source:?} must not borrow trtllm_mla"
+            );
         }
+    }
 
-        // db.query_wideep_generation_mla(b, s, tp_size=1, kv=fp8,
-        // fmha=fp8_block, 'flashinfer'). The Rust query derives the SOL's
-        // fmha mode from the fp8 KV cache (same mapping as fp8_block).
-        let gen_cases: &[(u32, u32, f64)] = &[
-            (1, 4096, 0.1017),                // exact hit
-            (1, 3000, 0.09988046874999999),   // seq interior (raw blend)
-            (1, 100000, 0.18319659221424073), // beyond seq range (tapered util-hold)
-        ];
-        for &(b, s, expected) in gen_cases {
-            let got = table
+    /// Structural routing for the WideEP MLA tables: both kernel_source
+    /// lanes resolve on their own roots (b200 collects trtllm_mla, h200
+    /// collects flashinfer), across the exact / interior / beyond-range
+    /// regimes. Math on synthetic grids in `perf_interp`; values in the
+    /// goldens. No version-anchored value pins (2026-08 test policy).
+    #[test]
+    fn wideep_mla_regime_routing() {
+        let b200 = WideEpMlaTable::new(b200_sglang_data_root(), load_spec("b200_sxm"));
+        let got = b200
+            .query_context(1, 1, 128, KvCacheQuantMode::Fp8, FmhaQuantMode::Fp8Block, "trtllm_mla")
+            .expect("b200 trtllm_mla context query");
+        assert!(got.is_finite() && got > 0.0);
+        let got = b200
+            .query_generation(1, 1, 128, KvCacheQuantMode::Fp8, "trtllm_mla")
+            .expect("b200 trtllm_mla generation query");
+        assert!(got.is_finite() && got > 0.0);
+
+        let h200 = WideEpMlaTable::new(h200_sglang_data_root(), load_spec("h200_sxm"));
+        for (b, s) in [(4u32, 4096u32), (4, 6000), (4, 50000)] {
+            let got = h200
+                .query_context(b, s, 128, KvCacheQuantMode::Fp8, FmhaQuantMode::Fp8Block, "flashinfer")
+                .expect("h200 flashinfer context query");
+            assert!(got.is_finite() && got > 0.0, "(b={b}, s={s})");
+        }
+        for (b, s) in [(1u32, 4096u32), (1, 3000), (1, 100000)] {
+            let got = h200
                 .query_generation(b, s, 128, KvCacheQuantMode::Fp8, "flashinfer")
-                .unwrap();
-            assert_rel(
-                got,
-                expected,
-                &format!("wideep_generation_mla(b={b}, s={s})"),
-            );
+                .expect("h200 flashinfer generation query");
+            assert!(got.is_finite() && got > 0.0, "(b={b}, s={s})");
         }
     }
 }

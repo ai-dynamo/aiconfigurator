@@ -1540,6 +1540,10 @@ def _write_collector_provenance(
     runtime_meta = {"framework": runtime.framework, "version": runtime.version, "image": image}
     if image_digest:
         runtime_meta["image_digest"] = image_digest
+    if runtime.source_commit:
+        runtime_meta["source_commit"] = runtime.source_commit
+    if runtime.abi:
+        runtime_meta["abi"] = runtime.abi
     collected_at = datetime.now().strftime("%Y-%m-%d")
 
     tables: dict[str, dict] = {}

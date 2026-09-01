@@ -7,10 +7,6 @@ runtime:
   framework: sglang
   version: 0.5.10
 tables:
-  context_mla_perf:
-    status: complete
-  generation_mla_perf:
-    status: complete
   wideep_context_mla_perf:
     status: complete
   wideep_generation_mla_perf:

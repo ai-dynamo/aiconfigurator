@@ -43,6 +43,7 @@ from aiconfigurator_core.sdk.models.helpers import (
     resolve_dsv4_moe_arch_mode,
     resolve_kimi_k3_moe_arch_mode,
     resolve_nvfp4_for_system,
+    resolve_vllm_moe_execution_mode,
 )
 
 # Auto-import every other module in this package so ``@register_model``
@@ -218,4 +219,5 @@ __all__ = [
     "resolve_dsv4_moe_arch_mode",
     "resolve_kimi_k3_moe_arch_mode",
     "resolve_nvfp4_for_system",
+    "resolve_vllm_moe_execution_mode",
 ]

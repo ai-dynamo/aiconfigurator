@@ -7,5 +7,20 @@ runtime:
   framework: trtllm
   version: 1.3.0rc20
 tables:
+  # TP2/TP4 (single tray, original wave) + TP8/TP16 multi-node added
+  # 2026-08-12 from a 4-node x 4-GPU GB300 NVL fleet via mpirun.
+  # The multi-node rows required the issue #1416 collector fix: the old
+  # code path did not pass a dtype, which disqualified the TRT-LLM MNNVL
+  # allreduce, so a naive multi-node run silently measured the fallback.
+  # Measured A/B on identical hardware/payload: 256B (message_size 128)
+  # 4.42us (MNNVL) vs 27.27us (fallback), i.e. small payloads — the
+  # decode-dominant region — were previously over-reported by up to 6.2x.
+  # 23 message sizes per TP size; message_size counts BF16 elements, so
+  # the 128..536,870,912 range spans 256B..1GiB of payload.
+  # TP8/TP16 kernel_source values record TRTLLM_MNNVL_oneshot/twoshot.
+  # In v1.3.0rc20, tensorrt_llm/_torch/distributed/ops.py:871-876 makes an
+  # active MNNVL path terminal; cpp/tensorrt_llm/thop/allreduceOp.cpp:
+  # 1932-1942 selects the variant from aggregate bytes. Legacy TP2/TP4 rows
+  # retain TRTLLM because regular AUTO does not expose its runtime choice.
   custom_allreduce_perf:
     status: complete

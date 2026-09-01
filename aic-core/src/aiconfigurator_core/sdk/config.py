@@ -68,6 +68,9 @@ class ModelConfig:
     # No default: a wrong node width silently mis-prices cross-node all-to-all, so
     # large-EP construction raises when it is missing (models.helpers.large_ep_gpus_per_node).
     num_gpus_per_node: int | None = None
+    # Internal system identity used by phase/quantization-specific communication
+    # dtype selection.  It travels with ModelConfig through sweep replacements.
+    system: str | None = None
 
     def resolve_moe_parallelism(self) -> tuple[int, int]:
         """Resolve and validate MoE parallelism dimensions in-place.

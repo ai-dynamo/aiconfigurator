@@ -396,8 +396,9 @@ def _add_default_mode_arguments(parser):
         type=str,
         default=None,
         help="[expert] Performance-database version used for the simulation/search "
-        "(search fidelity). Default: latest measured version; marker-only shared-layer versions "
-        "require an explicit value. Alias: --backend-version.",
+        "(search fidelity). Accepts a queryable slot version or the aliases "
+        "current / previous / next (see systems/query_versions.yaml). "
+        "Default: current. Alias: --backend-version.",
     )
     parser.add_argument(
         "--database-mode",
@@ -872,8 +873,9 @@ def _add_estimate_mode_arguments(parser):
         type=str,
         default=None,
         help="[expert] Performance-database version used for the simulation/search "
-        "(search fidelity). Default: latest measured version; marker-only shared-layer versions "
-        "require an explicit value. Alias: --backend-version.",
+        "(search fidelity). Accepts a queryable slot version or the aliases "
+        "current / previous / next (see systems/query_versions.yaml). "
+        "Default: current. Alias: --backend-version.",
     )
     parser.add_argument("--isl", type=int, default=1024, help="Input sequence length. Default: 1024.")
     parser.add_argument("--osl", type=int, default=1024, help="Output sequence length. Default: 1024.")
@@ -1458,6 +1460,25 @@ def _database_mode_requires_declared_perf_database(database_mode: str | None) ->
     }
 
 
+def _resolve_version_for_matching(system_name: str, backend_name: str, backend_version: str | None) -> str | None:
+    """Alias-aware form of a requested version for membership checks.
+
+    `get_supported_databases` enumerates resolved LITERALS, so every
+    comparison against it must resolve the requested alias per
+    (system, backend) first — otherwise `--backend-version current` is
+    rejected while its literal passes. Raw versions pass through untouched
+    (allow_unlisted: matching decides membership, not the slot gate);
+    unresolvable aliases (gate off / slot unpopulated) fall back to the raw
+    string so the membership check fails with the normal guidance.
+    """
+    if backend_version is None:
+        return None
+    try:
+        return perf_database.resolve_query_version(system_name, backend_name, backend_version, allow_unlisted=True)
+    except (ValueError, KeyError):
+        return backend_version
+
+
 def _ensure_backend_version_available(
     system_name: str,
     backend_name: str,
@@ -1485,7 +1506,35 @@ def _ensure_backend_version_available(
         raise SystemExit(1)
 
     versions = supported.get(system_name, {}).get(backend_name, [])
+    if backend_version in ("current", "previous", "next"):
+        # An alias that fails to resolve deserves the alias-specific error
+        # ("has no 'previous' version; available slots: ..."), not the
+        # generic missing-directory guidance that circularly suggests aliases.
+        try:
+            backend_version = perf_database.resolve_query_version(system_name, backend_name, backend_version)
+        except ValueError as e:
+            # User-facing gate message: no traceback wanted, so not
+            # logger.exception.
+            logger.error("%s", e)  # noqa: TRY400
+            raise SystemExit(1) from e
+    else:
+        backend_version = _resolve_version_for_matching(system_name, backend_name, backend_version)
     if backend_version is None or backend_version in versions:
+        return
+
+    # Old-style raw-version escape: the loader-level unlisted-version gate
+    # (perf_database resolve) honors this variable; the precheck must not be
+    # stricter than the loader, or the documented escape is unreachable.
+    if os.environ.get("AIC_ALLOW_UNLISTED_VERSIONS", "").lower() in ("1", "true", "yes"):
+        logger.warning(
+            "AIC_ALLOW_UNLISTED_VERSIONS is set: querying raw version %s/%s on %s "
+            "outside the queryable slots %s. This data is not maintained to the "
+            "queryable bar; results may have partial op coverage.",
+            backend_name,
+            backend_version,
+            system_name,
+            versions,
+        )
         return
 
     systems_paths = perf_database.get_systems_paths()
@@ -1510,12 +1559,16 @@ def _ensure_backend_version_available(
     if versions:
         logger.error("Available versions: %s", ", ".join(versions))
         logger.error(
-            "Fix: switch --backend-version to one of the available versions, "
-            "remove --backend-version to use latest, "
-            "or add a declared version directory with %s (legacy: %s) when this version "
-            "intentionally reuses shared-layer data.",
-            perf_database.REUSE_YAML_MARKER,
-            perf_database.SHARED_LAYER_REUSE_MARKER,
+            "Fix: switch --backend-version to one of the available slot versions "
+            "or the aliases current / previous / next, or remove "
+            "--backend-version to use current. Versions outside the slots "
+            "are data coordinates, not queryable versions "
+            "(see systems/query_versions.yaml).",
+        )
+        logger.error(
+            "Old-style raw-version query (data outside the slots is not "
+            "maintained to the queryable bar): re-run the same command with "
+            "AIC_ALLOW_UNLISTED_VERSIONS=1.",
         )
     else:
         logger.error("Available versions: none")
@@ -1647,6 +1700,7 @@ def build_default_tasks(
             sys_backends = supported.get(system, {})
             if not requires_declared_perf_database:
                 sys_versions = sys_backends.get(backend_name, [])
+                resolved_bv = _resolve_version_for_matching(system, backend_name, backend_version)
                 if not sys_versions:
                     logger.warning(
                         "No measured database for backend %s on system=%s; including it for %s estimates.",
@@ -1654,7 +1708,7 @@ def build_default_tasks(
                         system,
                         database_mode,
                     )
-                elif backend_version is not None and backend_version not in sys_versions:
+                elif resolved_bv is not None and resolved_bv not in sys_versions:
                     logger.warning(
                         "No measured database version %s for backend %s on system=%s; including it for %s estimates.",
                         backend_version,
@@ -1667,7 +1721,9 @@ def build_default_tasks(
             if backend_name not in sys_backends:
                 logger.warning("Skipping backend %s: not supported for system %s.", backend_name, system)
                 continue
-            if backend_version is not None and backend_version not in sys_backends.get(backend_name, []):
+            if backend_version is not None and _resolve_version_for_matching(
+                system, backend_name, backend_version
+            ) not in sys_backends.get(backend_name, []):
                 logger.warning(
                     "Skipping backend %s: version %s not available for system %s.",
                     backend_name,
@@ -1695,7 +1751,8 @@ def build_default_tasks(
             systems_to_check = [("prefill", system), ("decode", decode_system)]
         for role, sys_name in systems_to_check:
             versions = supported.get(sys_name, {}).get(backend, [])
-            if backend_version is not None and versions and backend_version not in versions:
+            resolved_bv = _resolve_version_for_matching(sys_name, backend, backend_version)
+            if resolved_bv is not None and versions and resolved_bv not in versions:
                 logger.warning(
                     "No measured database version %s for %s system=%s backend=%s; using %s estimates.",
                     backend_version,
@@ -1725,7 +1782,10 @@ def build_default_tasks(
                 decode_system,
             )
             return False
-        if backend_version is not None and backend_version not in decode_versions:
+        if (
+            backend_version is not None
+            and _resolve_version_for_matching(decode_system, backend_name, backend_version) not in decode_versions
+        ):
             logger.warning(
                 "Skipping disagg for backend %s: version %s not available for decode system %s.",
                 backend_name,

@@ -234,7 +234,7 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("src/aiconfigurator_core/systems");
-        PerfDatabase::load(&root, "b200_sxm", "sglang", "0.5.10").expect("db loads")
+        PerfDatabase::load(&root, "b200_sxm", "sglang", "0.5.14").expect("db loads")
     }
 
     fn mhc_op(op: &str) -> MhcModuleOp {
@@ -251,120 +251,62 @@ mod tests {
         }
     }
 
-    /// Item 1: beyond-range mHC holds must anchor on the mHC ROOFLINE ratio,
-    /// mirroring Python `_query_mhc_table` (`sol_fn=lambda t: get_sol(t,
-    /// op_name)[0]`). The b200 sglang curve tops out at nt=524288; querying
-    /// nt=1048576 exercises the hold. Python oracle generated with:
-    ///
-    /// ```text
-    /// PYTHONPATH=src python3 -c "
-    /// from aiconfigurator.sdk.perf_database import PerfDatabase
-    /// from aiconfigurator.sdk import common
-    /// db = PerfDatabase('b200_sxm','sglang','0.5.10',
-    ///                   systems_root='src/aiconfigurator_core/systems', database_mode='SOL')
-    /// for nt, op in [(1048576,'pre'), (1048576,'post'), (1048576,'both')]:
-    ///     r = db.query_mhc_module(num_tokens=nt, hidden_size=7168, hc_mult=4,
-    ///                             sinkhorn_iters=20, op=op,
-    ///                             database_mode=common.DatabaseMode.SILICON)
-    ///     print(nt, op, repr(float(r)))"
-    /// ```
-    ///
-    /// The old linear-token-proxy hold returned 2×lat(524288) instead
-    /// (pre: 71.5548 vs the roofline 71.55398…), so this fails on the old code.
+    /// Beyond the collected token range the hold answers from the mHC
+    /// roofline; the fused "both" op equals pre + post exactly (additive
+    /// SOLs, same hold regime). Relative pins only (2026-08 test policy);
+    /// in-range hold-neutrality is pinned synthetically in `perf_interp`.
     #[test]
-    fn mhc_beyond_range_hold_matches_python_roofline() {
+    fn mhc_beyond_range_hold_is_sol_additive() {
         let db = b200_sglang_db();
-        let cases: &[(&str, f64)] = &[
-            ("pre", 71.55398179178216),
-            ("post", 40.511536369374085),
-            ("both", 112.06551816115625),
-        ];
-        for &(op, expected) in cases {
-            let got = mhc_op(op)
+        let q = |op: &str| {
+            mhc_op(op)
                 .query(&db, 1_048_576)
                 .expect("query must succeed")
-                .latency_ms;
-            assert!(
-                ((got - expected) / expected).abs() < 1e-9,
-                "op={op}: rust {got} vs python {expected}"
-            );
-        }
+                .latency_ms
+        };
+        let (pre, post, both) = (q("pre"), q("post"), q("both"));
+        assert!(pre > 0.0 && post > 0.0);
+        assert!(
+            ((both - (pre + post)) / both).abs() < 1e-9,
+            "both must be SOL-additive beyond range: {both} vs {pre}+{post}"
+        );
     }
 
-    /// In-range queries are SOL-free (RAW lerp / exact hit) and must be
-    /// unchanged by the roofline threading. Same oracle command as above with
-    /// (3,'pre') and (8,'pre'), sinkhorn_iters irrelevant in range.
-    #[test]
-    fn mhc_in_range_unchanged_by_roofline() {
-        let db = b200_sglang_db();
-        for &(nt, expected) in &[(3u32, 0.025050000000000003), (8u32, 0.0251)] {
-            let got = mhc_op("pre")
-                .query(&db, nt)
-                .expect("query must succeed")
-                .latency_ms;
-            assert!(
-                ((got - expected) / expected).abs() < 1e-9,
-                "nt={nt}: rust {got} vs python {expected}"
-            );
-        }
-    }
 
-    /// Oracle values generated from the Python reference on the same data:
-    ///
-    /// ```text
-    /// uv run --no-sync python3 -c "
-    /// from aiconfigurator.sdk import perf_database, common
-    /// from aiconfigurator.sdk.operations.dsv4 import DeepSeekV4MHCModule as MHC
-    /// db = perf_database.get_database('b200_sxm', 'sglang', '0.5.10')
-    /// for nt, op in [(3000,'pre'), (3000,'post'), (3000,'both'), (8,'pre'), (8,'both'), (1048576,'pre')]:
-    ///     r = MHC._query_mhc_table(db, num_tokens=nt, hidden_size=7168, hc_mult=4,
-    ///                              sinkhorn_iters=20, op=op, quant_mode=common.GEMMQuantMode.bfloat16,
-    ///                              database_mode=common.DatabaseMode.EMPIRICAL)
-    ///     print(nt, op, repr(float(r)))"
-    /// ```
-    ///
-    /// Covers: off-grid interior IDW (nt=3000), the exact collected hit
-    /// reconstructing the measured value (nt=8), the `both` = emp(pre) +
-    /// emp(post) composition at both points, and the beyond-range clamp
-    /// (nt=1048576: boundary util frozen, the mHC roofline ratio carries the
-    /// growth). Regenerate if the shipped mHC table or the util-empirical
-    /// math changes.
+    /// Routing + the "both" = emp(pre) + emp(post) composition, pinned
+    /// RELATIVELY (each half resolves on its own curve with its own SOL).
+    /// Estimator math lives on synthetic grids; values in the goldens.
     #[test]
-    fn mhc_empirical_matches_python_oracles() {
+    fn mhc_empirical_regime_routing() {
         let mut db = b200_sglang_db();
         db.database_mode = crate::common::enums::DatabaseMode::Empirical;
-        let cases: &[(&str, u32, f64)] = &[
-            ("pre", 3000, 0.28677656188924283),
-            ("post", 3000, 0.12520766094146765),
-            // "both" empirical = emp("pre") + emp("post"), each half on its
-            // own curve with its own SOL (Python `_emp_for_op` composition).
-            ("both", 3000, 0.41198422283071046),
-            ("pre", 8, 0.0251),
-            ("both", 8, 0.0357),
-            ("pre", 1_048_576, 71.55398179178216),
-        ];
-        for &(op, nt, expected) in cases {
-            let result = mhc_op(op).query(&db, nt).expect("empirical query");
+        let q = |op: &str, nt: u32| {
+            let r = mhc_op(op).query(&db, nt).expect("empirical query");
+            assert!(r.latency_ms.is_finite() && r.latency_ms > 0.0, "op={op}, nt={nt}");
+            assert_eq!(r.source, Source::Empirical, "op={op}, nt={nt}");
+            r.latency_ms
+        };
+        for nt in [3000u32, 8, 1_048_576] {
+            let (pre, post, both) = (q("pre", nt), q("post", nt), q("both", nt));
             assert!(
-                ((result.latency_ms - expected) / expected).abs() < 1e-9,
-                "op={op}, nt={nt}: rust {} vs python {expected}",
-                result.latency_ms
+                ((both - (pre + post)) / both).abs() < 1e-9,
+                "nt={nt}: both must compose pre+post: {both} vs {pre}+{post}"
             );
-            assert_eq!(result.source, Source::Empirical);
         }
     }
 
-    /// HYBRID with silicon data present must stay on the silicon path
-    /// (in-range RAW lerp, Source::Silicon) — same oracle as the silicon test.
+    /// Cross-mode relative pin: HYBRID replays the SILICON answer on a
+    /// covered slice (the empirical layer must not preempt it).
     #[test]
     fn mhc_hybrid_with_data_stays_silicon() {
+        let sil = b200_sglang_db();
+        let want = mhc_op("pre").query(&sil, 3).expect("silicon query").latency_ms;
         let mut db = b200_sglang_db();
         db.database_mode = crate::common::enums::DatabaseMode::Hybrid;
         let result = mhc_op("pre").query(&db, 3).expect("hybrid query");
-        let expected = 0.025050000000000003;
         assert!(
-            ((result.latency_ms - expected) / expected).abs() < 1e-9,
-            "rust {} vs python {expected}",
+            (result.latency_ms - want).abs() < 1e-12,
+            "hybrid must replay silicon: {} vs {want}",
             result.latency_ms
         );
         assert_eq!(result.source, Source::Silicon);
@@ -388,52 +330,30 @@ mod tests {
         );
     }
 
-    /// CP (issue #1498): the mHC module is token-major, so `seq_split = cp`
-    /// divides the queried token count (ceil = busiest rank) BEFORE the
-    /// table/SOL/empirical dispatch — exactly Python
-    /// `DeepSeekV4MHCModule.query`'s `-(-x // self._seq_split)`. The missing
-    /// division was 100% of the DSV4 CSA CP static_ctx divergence (python
-    /// 42.430756 vs rust 56.943256 ms). Python oracle:
-    ///
-    /// ```text
-    /// uv run --no-sync python3 -c "
-    /// from aiconfigurator.sdk import perf_database, common
-    /// from aiconfigurator.sdk.operations.dsv4 import DeepSeekV4MHCModule
-    /// db = perf_database.get_database('b200_sxm', 'sglang', '0.5.10')
-    /// for opn, x, split in [('pre',8192,8),('post',8192,8),('pre',8193,8),('both',8192,8),('pre',8192,1)]:
-    ///     op = DeepSeekV4MHCModule('mhc_cp', 1.0, opn, 7168, 4, 20,
-    ///                              common.GEMMQuantMode.bfloat16, seq_split=split)
-    ///     print(opn, x, split, repr(float(op.query(db, x=x))))"
-    /// ```
-    ///
-    /// Covers: pre/post/both at the shard count (8192/8 = 1024, a collected
-    /// point), the ceil rounding (8193 -> 1025, off-grid lerp), and the
-    /// `seq_split=1` identity (equals the plain full-token query).
+    /// seq_split=k must equal the direct query at ceil(nt/k) tokens —
+    /// relative pin, no recorded values (2026-08 test policy).
     #[test]
     fn mhc_seq_split_divides_tokens_like_python_cp() {
         let db = b200_sglang_db();
-        let cases: &[(&str, u32, u32, f64)] = &[
-            ("pre", 8192, 8, 0.1029),
-            ("post", 8192, 8, 0.0543),
-            ("pre", 8193, 8, 0.103024609375),
-            ("both", 8192, 8, 0.1572),
-            ("pre", 8192, 1, 0.6357),
-        ];
-        for &(op_name, x, split, expected) in cases {
-            let mut op = mhc_op(op_name);
-            op.seq_split = split;
-            let got = op.query(&db, x).expect("query must succeed").latency_ms;
+        let q_split = |op: &str, nt: u32, split: u32| {
+            let mut o = mhc_op(op);
+            o.seq_split = split;
+            o.query(&db, nt).expect("query must succeed").latency_ms
+        };
+        for &(op, nt, split) in &[
+            ("pre", 8192u32, 8u32),
+            ("post", 8192, 8),
+            ("pre", 8193, 8),
+            ("both", 8192, 8),
+            ("pre", 8192, 1),
+        ] {
+            let got = q_split(op, nt, split);
+            let want = q_split(op, nt.div_ceil(split), 1);
             assert!(
-                ((got - expected) / expected).abs() < 1e-9,
-                "op={op_name}, x={x}, seq_split={split}: rust {got} vs python {expected}"
+                (got - want).abs() < 1e-12,
+                "op={op}, nt={nt}, split={split}: {got} vs direct {want}"
             );
         }
-        // seq_split=8 at x=8192 must equal the direct per-rank query.
-        let direct = mhc_op("pre")
-            .query(&db, 1024)
-            .expect("direct query")
-            .latency_ms;
-        assert_eq!(direct, 0.1029);
     }
 
     /// `sinkhorn_iters` / `quant_mode` are new opspec fields; old specs lack
