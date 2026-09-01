@@ -50,6 +50,8 @@ STANDALONE_COLLECTOR_MODULES: frozenset[str] = frozenset(
     {
         "collector.sglang.collect_dsv4_megamoe",
         "collector.wideep.sglang.collect_moe_a2a",
+        "collector.wideep.vllm.collect_moe_a2a",
+        "collector.wideep.trtllm.collect_moe_a2a",
         "collector.network.slurm.collect_trtllm_alltoall",
     }
 )
@@ -59,8 +61,39 @@ STATUS_PARTIAL = "partial"
 COLLECTION_META_SCHEMA_VERSION = 1
 MULTI_EVENT_COLLECTION_META_SCHEMA_VERSION = 2
 
-_RUNTIME_FIELD_ORDER = ("framework", "version", "image", "image_variant", "image_digest")
-_TABLE_FIELD_ORDER = ("collector_ref", "collector_hash", "case_plan_hash", "collected_at", "rows", "status")
+_RUNTIME_FIELD_ORDER = (
+    "framework",
+    "version",
+    "image",
+    "image_variant",
+    "image_digest",
+    "source_commit",
+    "abi",
+    "live_abi",
+    "transport",
+    "backend_capability",
+    "backend_abis",
+    "backend_capabilities",
+)
+_RUNTIME_STRING_FIELDS = ("image", "image_variant", "image_digest", "source_commit")
+_RUNTIME_MAPPING_FIELDS = (
+    "abi",
+    "live_abi",
+    "transport",
+    "backend_capability",
+    "backend_abis",
+    "backend_capabilities",
+)
+_TABLE_FIELD_ORDER = (
+    "collector_ref",
+    "collector_hash",
+    "case_plan_hash",
+    "collected_at",
+    "rows",
+    "classified_failures",
+    "status",
+)
+_TABLE_REQUIRED_FIELD_ORDER = tuple(field for field in _TABLE_FIELD_ORDER if field != "classified_failures")
 _COLLECTION_OPTIONAL_FIELD_ORDER = ("source_campaign_rows", "source_campaign_status", "runtime")
 
 
@@ -220,9 +253,12 @@ def _ordered_runtime(runtime: Any, *, field: str) -> dict[str, Any]:
     for key in ("framework", "version"):
         if not isinstance(runtime.get(key), str) or not runtime[key].strip():
             raise ValueError(f"{field}.{key} must be a non-empty string")
-    for key in _RUNTIME_FIELD_ORDER[2:]:
+    for key in _RUNTIME_STRING_FIELDS:
         if key in runtime and (not isinstance(runtime[key], str) or not runtime[key].strip()):
             raise ValueError(f"{field}.{key} must be a non-empty string when provided")
+    for key in _RUNTIME_MAPPING_FIELDS:
+        if key in runtime and not isinstance(runtime[key], dict):
+            raise ValueError(f"{field}.{key} must be a mapping when provided")
     return {key: runtime[key] for key in _RUNTIME_FIELD_ORDER if key in runtime}
 
 
@@ -230,7 +266,7 @@ def _ordered_collection_event(event: Any, *, table: str, index: int) -> dict[str
     if not isinstance(event, dict):
         raise ValueError(f"{table}.collections[{index}] must be a mapping")  # noqa: TRY004
 
-    missing = [field for field in _TABLE_FIELD_ORDER if field not in event]
+    missing = [field for field in _TABLE_REQUIRED_FIELD_ORDER if field not in event]
     if missing:
         raise ValueError(f"{table}.collections[{index}] missing required field(s): {', '.join(missing)}")
 
@@ -246,6 +282,11 @@ def _ordered_collection_event(event: Any, *, table: str, index: int) -> dict[str
         raise ValueError(f"{table}.collections[{index}].status must be '{STATUS_COMPLETE}' or '{STATUS_PARTIAL}'")
     if not isinstance(event["rows"], int) or isinstance(event["rows"], bool) or event["rows"] < 0:
         raise ValueError(f"{table}.collections[{index}].rows must be a non-negative integer")
+    classified_failures = event.get("classified_failures")
+    if classified_failures is not None and (
+        not isinstance(classified_failures, int) or isinstance(classified_failures, bool) or classified_failures < 0
+    ):
+        raise ValueError(f"{table}.collections[{index}].classified_failures must be a non-negative integer")
     source_rows = event.get("source_campaign_rows")
     if source_rows is not None and (
         not isinstance(source_rows, int) or isinstance(source_rows, bool) or source_rows < event["rows"]
@@ -357,8 +398,10 @@ def validate_collection_meta_for_update(
                 raise ValueError(f"{table}.status must be '{STATUS_COMPLETE}' or '{STATUS_PARTIAL}'")
             reduced_tables.add(table)
             continue
-        if not isinstance(entry, dict) or set(entry) != set(_TABLE_FIELD_ORDER):
-            raise ValueError(f"{table} must contain exactly {', '.join(_TABLE_FIELD_ORDER)}")
+        if not isinstance(entry, dict) or not set(_TABLE_REQUIRED_FIELD_ORDER) <= set(entry) <= set(_TABLE_FIELD_ORDER):
+            raise ValueError(
+                f"{table} must contain {', '.join(_TABLE_REQUIRED_FIELD_ORDER)} and may include classified_failures"
+            )
         _ordered_collection_event(entry, table=table, index=0)
 
     if reduced_tables and set(tables_to_update) & set(tables):

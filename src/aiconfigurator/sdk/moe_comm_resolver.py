@@ -20,8 +20,7 @@ from aiconfigurator.sdk.models.helpers import _apply_model_quant_defaults
 from aiconfigurator.sdk.operations.moe_comm import MOE_A2A_BACKENDS, nodes_for
 from aiconfigurator.sdk.perf_database import PerfDataNotAvailableError
 
-_DEEPEP_NODE1_FALLBACK_BACKENDS = frozenset(("deepep_ht", "deepep_ll"))
-_LEGACY_DEEPEP_NODE1_COORDINATE = (8, 1)
+_DEEPEP_NODE1_FALLBACK_BACKENDS = frozenset(("deepep_ht", "deepep_ll", "trtllm_deepep_ht", "trtllm_deepep_ll"))
 
 LargeEpCoverage = Mapping[str, Mapping[str, Set[int]]]
 
@@ -33,24 +32,54 @@ def a2a_covers_parallel(
     comm_backend: str,
     moe_ep_size: int,
     expected_nodes: int,
+    gpus_per_node: int,
 ) -> bool:
     """Whether A2A data can serve a target EP/node scale.
 
-    SGLang DeepEP preserves the marked node-1 substitution introduced by
-    PR #1314: prefer an exact scale, otherwise let the canonical legacy
-    ``(ep=8, node_num=1)`` row for the already shape-filtered coverage probe
-    represent a multi-node request. The Rust legacy adapter uses the same
-    coordinate and marks that substitution as estimated. Other frameworks
-    and communication backends remain exact-scale only.
+    Prefer an exact scale. Otherwise, vLLM/TRT-LLM DeepEP HT/LL may use the
+    physical full-node ``(ep=gpus_per_node, node_num=1)`` row. SGLang keeps
+    its legacy normalized ``(ep=8, node_num=1)`` coordinate from PR #1314.
+    The query engine marks every substitution as estimated.
     """
     if (moe_ep_size, expected_nodes) in pairs:
         return True
-    return (
-        framework == "sglang"
-        and comm_backend in _DEEPEP_NODE1_FALLBACK_BACKENDS
-        and expected_nodes > 1
-        and _LEGACY_DEEPEP_NODE1_COORDINATE in pairs
+    if comm_backend not in _DEEPEP_NODE1_FALLBACK_BACKENDS or expected_nodes <= 1:
+        return False
+    if framework == "sglang":
+        # Preserve PR #1314's legacy adapter coordinate. Those tables are
+        # normalized to EP8/node1 independently of the queried system width.
+        return (8, 1) in pairs
+    return framework in {"vllm", "trtllm"} and (gpus_per_node, 1) in pairs
+
+
+def moe_compute_coverage(
+    database: Any,
+    *,
+    backend_name: str,
+    hidden_size: int,
+    inter_size: int,
+    topk: int,
+    num_experts: int,
+    quant_mode: common.MoEQuantMode,
+    phase: str,
+) -> set[int]:
+    """Return compute coverage for the large-EP graph without comm fallback.
+
+    Prefer the unified WideEP compute table. vLLM/TRT-LLM may additionally
+    use their regular expert-kernel table; communication remains exclusively
+    modeled by ``MoEAllToAll``.
+    """
+    compute_probe = getattr(database, "moe_expert_compute_coverage", None)
+    covered = (
+        set(compute_probe(hidden_size, inter_size, topk, num_experts, quant_mode, phase))
+        if compute_probe is not None
+        else set()
     )
+    if backend_name in {"vllm", "trtllm"}:
+        legacy_probe = getattr(database, "legacy_moe_compute_coverage", None)
+        if legacy_probe is not None:
+            covered.update(legacy_probe(hidden_size, inter_size, topk, num_experts, quant_mode))
+    return covered
 
 
 def select_moe_comm_backend(
@@ -147,20 +176,27 @@ def resolve_model_config_moe_comm(
         resolved = {}
     if coverage_snapshot is None and family in LARGE_EP_READY_FAMILIES and database is not None:
         a2a_probe = getattr(database, "moe_a2a_coverage", None)
-        compute_probe = getattr(database, "moe_expert_compute_coverage", None)
-        a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts) if a2a_probe is not None else {}
         for phase in dict.fromkeys(required_phases):
-            compute_eps = (
-                compute_probe(
+            a2a = (
+                a2a_probe(
                     shape.hidden_size,
-                    shape.moe_inter_size,
                     shape.topk,
                     shape.num_experts,
                     model_config.moe_quant_mode,
                     phase,
                 )
-                if compute_probe is not None
-                else {moe_ep_size}
+                if a2a_probe is not None
+                else {}
+            )
+            compute_eps = moe_compute_coverage(
+                database,
+                backend_name=backend_name,
+                hidden_size=shape.hidden_size,
+                inter_size=shape.moe_inter_size,
+                topk=shape.topk,
+                num_experts=shape.num_experts,
+                quant_mode=model_config.moe_quant_mode,
+                phase=phase,
             )
             for comm_backend, backend_spec in MOE_A2A_BACKENDS.items():
                 if backend_name not in backend_spec.frameworks or phase not in backend_spec.inference_phases:
@@ -177,6 +213,7 @@ def resolve_model_config_moe_comm(
                         comm_backend=comm_backend,
                         moe_ep_size=moe_ep_size,
                         expected_nodes=expected_nodes,
+                        gpus_per_node=gpus_per_node,
                     )
                     and moe_ep_size in compute_eps
                     and backend_spec.feasible(
@@ -211,6 +248,8 @@ def resolve_model_config_moe_comm(
         return None
 
     model_config.moe_comm_backend = resolved
+    if database is not None:
+        model_config.system = getattr(database, "system", None)
     if backend_name == "sglang" and info["architecture"] == "DeepseekV3ForCausalLM":
         # The SGLang WideEP MLA collectors label their rows fp8_block/fp8.
         # Preserve explicit user modes, but restore the PR #1314 defaults for

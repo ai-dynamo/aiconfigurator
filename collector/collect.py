@@ -2562,12 +2562,16 @@ def _split_image_digest(image_ref: str) -> tuple[str, str | None]:
     return image, (digest if sep else None)
 
 
-def _runtime_metadata(provenance_ctx: dict) -> dict[str, str]:
+def _runtime_metadata(provenance_ctx: dict) -> dict:
     runtime = provenance_ctx["runtime"]
     image, image_digest = _split_image_digest(runtime.image())
     runtime_meta = {"framework": runtime.framework, "version": runtime.version, "image": image}
     if image_digest:
         runtime_meta["image_digest"] = image_digest
+    if runtime.source_commit:
+        runtime_meta["source_commit"] = runtime.source_commit
+    if runtime.abi:
+        runtime_meta["abi"] = runtime.abi
     return runtime_meta
 
 

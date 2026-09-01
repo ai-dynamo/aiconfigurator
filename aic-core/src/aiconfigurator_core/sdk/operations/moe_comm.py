@@ -82,6 +82,57 @@ class MoECommBackendSpec:
         )
 
 
+_HOPPER_SYSTEMS = frozenset(("h100_sxm", "h200_sxm"))
+
+
+def communication_dtype_for(
+    *,
+    system: str | None,
+    comm_backend: str,
+    model_quantization,
+    communication_phase: str,
+    inference_phase: str,
+) -> str:
+    """Resolve the exact persisted A2A wire dtype used by serving.
+
+    This is the single consumer/collector contract for dtype selection.  In
+    particular, TensorRT-LLM HT communicates FP8-model activations as BF16,
+    while LL communicates them as FP8.  The result is used both to decide
+    whether data covers a candidate and to construct the operation that later
+    performs the Rust lookup.
+    """
+    if communication_phase not in ("prepare", "dispatch", "combine"):
+        raise ValueError(f"unsupported MoE communication phase: {communication_phase!r}")
+    if inference_phase not in ("context", "generation"):
+        raise ValueError(f"unsupported MoE inference phase: {inference_phase!r}")
+
+    quantization = getattr(model_quantization, "name", model_quantization)
+    quantization = str(quantization)
+    normalized = {"none": "bfloat16", "fp8_block": "fp8"}.get(quantization, quantization)
+
+    if comm_backend.startswith("deepep"):
+        return "default"
+    if comm_backend == "trtllm_deepep_ht":
+        if normalized == "nvfp4":
+            return "nvfp4"
+        if normalized in {"bfloat16", "fp8"}:
+            return "bfloat16"
+    elif comm_backend == "trtllm_deepep_ll":
+        if normalized in {"bfloat16", "fp8"}:
+            return normalized
+        if normalized == "nvfp4" and system not in _HOPPER_SYSTEMS:
+            return "fp4" if communication_phase == "combine" else "nvfp4"
+    elif comm_backend in {"nvlink_two_sided", "nvlink_one_sided"}:
+        if normalized == "nvfp4" and inference_phase == "generation" and communication_phase == "combine":
+            return "fp4"
+        return normalized
+    raise ValueError(
+        "no serving MoE communication dtype for "
+        f"system={system!r}, backend={comm_backend!r}, quantization={quantization!r}, "
+        f"inference_phase={inference_phase!r}, communication_phase={communication_phase!r}"
+    )
+
+
 MOE_A2A_BACKENDS: dict[str, MoECommBackendSpec] = {
     "deepep_ht": MoECommBackendSpec(
         name="deepep_ht",
@@ -92,6 +143,30 @@ MOE_A2A_BACKENDS: dict[str, MoECommBackendSpec] = {
     "deepep_ll": MoECommBackendSpec(
         name="deepep_ll",
         frameworks=("sglang", "vllm"),
+        inference_phases=("generation",),
+        comm_phases=("dispatch", "combine"),
+    ),
+    "deepep_v2_context": MoECommBackendSpec(
+        name="deepep_v2_context",
+        frameworks=("vllm",),
+        inference_phases=("context",),
+        comm_phases=("dispatch", "combine"),
+    ),
+    "deepep_v2_generation": MoECommBackendSpec(
+        name="deepep_v2_generation",
+        frameworks=("vllm",),
+        inference_phases=("generation",),
+        comm_phases=("dispatch", "combine"),
+    ),
+    "trtllm_deepep_ht": MoECommBackendSpec(
+        name="trtllm_deepep_ht",
+        frameworks=("trtllm",),
+        inference_phases=("context",),
+        comm_phases=("dispatch", "combine"),
+    ),
+    "trtllm_deepep_ll": MoECommBackendSpec(
+        name="trtllm_deepep_ll",
+        frameworks=("trtllm",),
         inference_phases=("generation",),
         comm_phases=("dispatch", "combine"),
     ),

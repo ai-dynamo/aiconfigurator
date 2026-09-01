@@ -319,7 +319,7 @@ impl MoeOp {
 
     /// SILICON resolution (retired-deepep gate + low-latency probe + the default
     /// grid, scale/clamp applied per branch — the audit-PR body, unchanged).
-    fn silicon_pr(
+    pub(crate) fn silicon_pr(
         &self,
         db: &PerfDatabase,
         num_tokens: u32,

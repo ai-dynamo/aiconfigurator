@@ -117,7 +117,10 @@ def test_disagg_with_separate_role_specs():
     assert t.is_moe is True
     assert t.prefill_tp_candidates is not None
     assert t.decode_tp_candidates is not None
-    assert t.num_gpu_per_replica is not None
+    # A fused-only search materializes the legacy replica list, while shipped
+    # large-EP coverage intentionally uses the resolved maximum as its budget.
+    # This construction test must accept either data-driven regime.
+    assert t.num_gpu_per_replica is not None or t.max_gpu_per_replica is not None
     assert t.max_gpu_per_replica == 32  # clamped to total_gpus=32, matches v1 _finalize_disagg
     assert t.max_prefill_workers == 32
 
@@ -836,6 +839,42 @@ def test_dsv4_native_sglang_moe_remap():
     assert moe("sglang", moe_backend="megamoe") != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
     # FP8 requant artifacts keep their own (fp8_block-family) resolution.
     assert moe("sglang", mp="sgl-project/DeepSeek-V4-Flash-FP8") != common.MoEQuantMode.w4a8_mxfp4_mxfp8_trtllm
+
+
+@pytest.mark.parametrize(
+    ("backend", "version", "expected_moe"),
+    [
+        # The Task/cli-default path resolves HF modes BEFORE get_model(), so
+        # the backend-aware W4A16_NVFP4 remap must act at Task's HF-base
+        # layer too (PR #1574 review P1): vLLM executes these experts on the
+        # w4a4 nvfp4 lane; trtllm keeps the weight-only label mode.
+        ("vllm", "0.24.0", common.MoEQuantMode.nvfp4),
+        ("trtllm", "1.3.0rc20", common.MoEQuantMode.w4a16_nvfp4),
+    ],
+)
+def test_lightning_task_resolves_moe_to_the_backend_execution_lane(backend, version, expected_moe):
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+        system_name="b200_sxm",
+        backend_name=backend,
+        backend_version=version,
+    )
+    assert t.moe_quant_mode == expected_moe
+
+
+def test_lightning_task_preserves_an_explicit_w4a16_moe_mode():
+    """Explicit fields are the user's contract: the HF-base remap must not
+    rewrite them (downstream validate fails fast on modes with no data lane)."""
+    t = Task(
+        serving_mode="agg",
+        model_path="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+        system_name="b200_sxm",
+        backend_name="vllm",
+        backend_version="0.24.0",
+        moe_quant_mode=common.MoEQuantMode.w4a16_nvfp4,
+    )
+    assert t.moe_quant_mode == common.MoEQuantMode.w4a16_nvfp4
 
 
 @pytest.mark.parametrize(
