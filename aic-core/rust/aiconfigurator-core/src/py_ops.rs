@@ -2655,7 +2655,7 @@ impl PyGDNKernel {
     const _ENGINE_QUERY_SHAPE: &'static str = "module";
 
     #[new]
-    #[pyo3(signature = (name, scale_factor, kernel_source, phase, d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv, seq_split=1))]
+    #[pyo3(signature = (name, scale_factor, kernel_source, phase, d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv, seq_split=1, mamba_ssm_dtype=String::from("float32")))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
@@ -2669,6 +2669,7 @@ impl PyGDNKernel {
         head_v_dim: u32,
         d_conv: u32,
         seq_split: u32,
+        mamba_ssm_dtype: String,
     ) -> PyResult<(Self, PyOperation)> {
         cp_audit_gate("GDNKernel", false, seq_split)?;
         let inner = Op::Gdn(crate::operators::GdnOp {
@@ -2682,6 +2683,7 @@ impl PyGDNKernel {
             head_k_dim,
             num_v_heads,
             head_v_dim,
+            mamba_ssm_dtype,
         });
         Ok((PyGDNKernel, PyOperation { inner }))
     }
@@ -2704,7 +2706,9 @@ impl PyGDNKernel {
             o.d_conv,
         )
             .into_pyobject(py)?;
-        Ok((args, PyDict::new(py)))
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("mamba_ssm_dtype", o.mamba_ssm_dtype.clone())?;
+        Ok((args, kwargs))
     }
 
     #[getter(_kernel_source)]
@@ -2751,6 +2755,11 @@ impl PyGDNKernel {
     #[getter(_d_conv)]
     fn d_conv(slf: PyRef<'_, Self>) -> PyResult<u32> {
         Ok(slf.as_super().gdn()?.d_conv)
+    }
+
+    #[getter(_mamba_ssm_dtype)]
+    fn mamba_ssm_dtype(slf: PyRef<'_, Self>) -> PyResult<String> {
+        Ok(slf.as_super().gdn()?.mamba_ssm_dtype.clone())
     }
 }
 

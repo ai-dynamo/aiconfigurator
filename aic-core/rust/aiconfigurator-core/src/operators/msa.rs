@@ -81,24 +81,25 @@ impl MsaModuleOp {
             DatabaseMode::Sol | DatabaseMode::SolFull => {
                 Ok(PerformanceResult::new(sol * self.scale_factor, Source::Sol))
             }
-            DatabaseMode::Silicon => self
-                .silicon_context(db, batch_size, s, prefix)
-                .map(|latency| PerformanceResult::new(latency * self.scale_factor, Source::Silicon)),
+            DatabaseMode::Silicon => {
+                self.silicon_context(db, batch_size, s, prefix)
+                    .map(|latency| {
+                        PerformanceResult::new(latency * self.scale_factor, Source::Silicon)
+                    })
+            }
             // EMPIRICAL is SOL+empirical for every op (README/CLI contract;
             // same split as operators/dsa.rs): it must NOT consult silicon.
             DatabaseMode::Empirical => self.xop_context(db, batch_size, s, prefix, sol),
-            DatabaseMode::Hybrid => {
-                match self.silicon_context(db, batch_size, s, prefix) {
-                    Ok(latency) => Ok(PerformanceResult::new(
-                        latency * self.scale_factor,
-                        Source::Silicon,
-                    )),
-                    Err(err) if err.is_missing_perf_data() => {
-                        self.xop_context(db, batch_size, s, prefix, sol)
-                    }
-                    Err(err) => Err(err),
+            DatabaseMode::Hybrid => match self.silicon_context(db, batch_size, s, prefix) {
+                Ok(latency) => Ok(PerformanceResult::new(
+                    latency * self.scale_factor,
+                    Source::Silicon,
+                )),
+                Err(err) if err.is_missing_perf_data() => {
+                    self.xop_context(db, batch_size, s, prefix, sol)
                 }
-            }
+                Err(err) => Err(err),
+            },
         }
     }
 
@@ -152,23 +153,21 @@ impl MsaModuleOp {
             DatabaseMode::Sol | DatabaseMode::SolFull => {
                 Ok(PerformanceResult::new(sol * self.scale_factor, Source::Sol))
             }
-            DatabaseMode::Silicon => self
-                .silicon_generation(db, batch_size, s)
-                .map(|latency| PerformanceResult::new(latency * self.scale_factor, Source::Silicon)),
+            DatabaseMode::Silicon => self.silicon_generation(db, batch_size, s).map(|latency| {
+                PerformanceResult::new(latency * self.scale_factor, Source::Silicon)
+            }),
             // See query_context: EMPIRICAL never consults silicon.
             DatabaseMode::Empirical => self.xop_generation(db, batch_size, s, sol),
-            DatabaseMode::Hybrid => {
-                match self.silicon_generation(db, batch_size, s) {
-                    Ok(latency) => Ok(PerformanceResult::new(
-                        latency * self.scale_factor,
-                        Source::Silicon,
-                    )),
-                    Err(err) if err.is_missing_perf_data() => {
-                        self.xop_generation(db, batch_size, s, sol)
-                    }
-                    Err(err) => Err(err),
+            DatabaseMode::Hybrid => match self.silicon_generation(db, batch_size, s) {
+                Ok(latency) => Ok(PerformanceResult::new(
+                    latency * self.scale_factor,
+                    Source::Silicon,
+                )),
+                Err(err) if err.is_missing_perf_data() => {
+                    self.xop_generation(db, batch_size, s, sol)
                 }
-            }
+                Err(err) => Err(err),
+            },
         }
     }
 
@@ -567,8 +566,8 @@ fn msa_attention_sol_ms_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perf_database::perf_interp::LeafValue;
     use crate::common::enums::TransferPolicy;
+    use crate::perf_database::perf_interp::LeafValue;
     use std::path::PathBuf;
 
     const REPO_ROOT_HINT: &str = env!("CARGO_MANIFEST_DIR");
@@ -731,11 +730,15 @@ mod tests {
             let op = msa_op();
 
             db.reset_provenance();
-            let ctx = op.query_context(&db, 1, 1024, 0).expect("context silicon hit");
+            let ctx = op
+                .query_context(&db, 1, 1024, 0)
+                .expect("context silicon hit");
             approx(ctx.latency_ms, 10.0);
             assert_eq!(ctx.source, Source::Silicon, "{mode:?}");
 
-            let gen = op.query_generation(&db, 1, 4097).expect("generation silicon hit");
+            let gen = op
+                .query_generation(&db, 1, 4097)
+                .expect("generation silicon hit");
             approx(gen.latency_ms, 0.5);
             assert_eq!(gen.source, Source::Silicon, "{mode:?}");
             assert_eq!(
@@ -776,7 +779,9 @@ mod tests {
             Err(other) => panic!("unexpected error: {other}"),
         }
         // The bf16 op still hits silicon on the same db.
-        let hit = bf16_op.query_context(&hybrid, 1, 1024, 0).expect("silicon hit");
+        let hit = bf16_op
+            .query_context(&hybrid, 1, 1024, 0)
+            .expect("silicon hit");
         assert_eq!(hit.source, Source::Silicon);
     }
 
@@ -824,18 +829,24 @@ mod tests {
         silicon.database_mode = DatabaseMode::Silicon;
         inject_msa_grids(&silicon);
         assert_eq!(
-            op.query_context(&silicon, 1, 1024, 0).expect("silicon ctx").source,
+            op.query_context(&silicon, 1, 1024, 0)
+                .expect("silicon ctx")
+                .source,
             Source::Silicon
         );
         assert_eq!(
-            op.query_generation(&silicon, 1, 4097).expect("silicon gen").source,
+            op.query_generation(&silicon, 1, 4097)
+                .expect("silicon gen")
+                .source,
             Source::Silicon
         );
 
         let hybrid = db("vllm", "0.24.0"); // Hybrid by default in `db()`
         inject_msa_grids(&hybrid);
         assert_eq!(
-            op.query_context(&hybrid, 1, 1024, 0).expect("hybrid ctx").source,
+            op.query_context(&hybrid, 1, 1024, 0)
+                .expect("hybrid ctx")
+                .source,
             Source::Silicon
         );
 
@@ -843,14 +854,18 @@ mod tests {
         empirical.database_mode = DatabaseMode::Empirical;
         inject_msa_grids(&empirical);
         empirical.reset_provenance();
-        let ctx = op.query_context(&empirical, 1, 1024, 0).expect("empirical ctx");
+        let ctx = op
+            .query_context(&empirical, 1, 1024, 0)
+            .expect("empirical ctx");
         assert_eq!(ctx.source, Source::Empirical);
         assert_eq!(
             empirical.worst_provenance(),
             crate::operators::util_empirical::ProvenanceTier::XOp
         );
         empirical.reset_provenance();
-        let generation = op.query_generation(&empirical, 8, 1025).expect("empirical gen");
+        let generation = op
+            .query_generation(&empirical, 8, 1025)
+            .expect("empirical gen");
         assert_eq!(generation.source, Source::Empirical);
         assert_eq!(
             empirical.worst_provenance(),

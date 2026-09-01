@@ -1114,21 +1114,99 @@ mod tests {
         // (b, s, prefix, n, n_kv, hs, w, kv, expected tier)
         type Tier = crate::operators::util_empirical::ProvenanceTier;
         let cases: &[(u32, u32, u32, u32, u32, u32, u32, KvCacheQuantMode, Tier)] = &[
-            (7, 3000, 0, 64, 1, 128, 0, KvCacheQuantMode::Fp8, Tier::Empirical),
-            (8, 16384, 0, 64, 1, 128, 0, KvCacheQuantMode::Fp8, Tier::Empirical),
-            (4, 8192, 8192, 64, 1, 128, 0, KvCacheQuantMode::Fp8, Tier::Empirical),
-            (4, 4096, 0, 48, 8, 192, 0, KvCacheQuantMode::Fp8, Tier::XShape),
-            (2, 10000, 0, 32, 1, 128, 8192, KvCacheQuantMode::Bfloat16, Tier::Empirical),
-            (2, 10000, 0, 32, 1, 128, 4096, KvCacheQuantMode::Bfloat16, Tier::Empirical),
+            (
+                7,
+                3000,
+                0,
+                64,
+                1,
+                128,
+                0,
+                KvCacheQuantMode::Fp8,
+                Tier::Empirical,
+            ),
+            (
+                8,
+                16384,
+                0,
+                64,
+                1,
+                128,
+                0,
+                KvCacheQuantMode::Fp8,
+                Tier::Empirical,
+            ),
+            (
+                4,
+                8192,
+                8192,
+                64,
+                1,
+                128,
+                0,
+                KvCacheQuantMode::Fp8,
+                Tier::Empirical,
+            ),
+            (
+                4,
+                4096,
+                0,
+                48,
+                8,
+                192,
+                0,
+                KvCacheQuantMode::Fp8,
+                Tier::XShape,
+            ),
+            (
+                2,
+                10000,
+                0,
+                32,
+                1,
+                128,
+                8192,
+                KvCacheQuantMode::Bfloat16,
+                Tier::Empirical,
+            ),
+            (
+                2,
+                10000,
+                0,
+                32,
+                1,
+                128,
+                4096,
+                KvCacheQuantMode::Bfloat16,
+                Tier::Empirical,
+            ),
         ];
         for &(b, s, p, n, nk, hs, w, kv, tier) in cases {
             db.reset_provenance();
-            let result =
-                query_context_attention_table(&db, b, s, p, n, nk, hs, w, kv, FmhaQuantMode::Bfloat16)
-                    .expect("empirical query");
+            let result = query_context_attention_table(
+                &db,
+                b,
+                s,
+                p,
+                n,
+                nk,
+                hs,
+                w,
+                kv,
+                FmhaQuantMode::Bfloat16,
+            )
+            .expect("empirical query");
             assert!(result.latency_ms.is_finite() && result.latency_ms > 0.0);
-            assert_eq!(result.source, Source::Empirical, "(b={b}, s={s}, hs={hs}, w={w})");
-            assert_eq!(db.worst_provenance(), tier, "(b={b}, s={s}, hs={hs}, w={w})");
+            assert_eq!(
+                result.source,
+                Source::Empirical,
+                "(b={b}, s={s}, hs={hs}, w={w})"
+            );
+            assert_eq!(
+                db.worst_provenance(),
+                tier,
+                "(b={b}, s={s}, hs={hs}, w={w})"
+            );
         }
     }
 
@@ -1140,19 +1218,54 @@ mod tests {
         db.database_mode = crate::common::enums::DatabaseMode::Empirical;
         type Tier = crate::operators::util_empirical::ProvenanceTier;
         let cases: &[(u32, u32, u32, u32, u32, u32, KvCacheQuantMode, Tier)] = &[
-            (48, 7777, 64, 8, 128, 0, KvCacheQuantMode::Fp8, Tier::Empirical),
+            (
+                48,
+                7777,
+                64,
+                8,
+                128,
+                0,
+                KvCacheQuantMode::Fp8,
+                Tier::Empirical,
+            ),
             (32, 2, 64, 4, 128, 0, KvCacheQuantMode::Fp8, Tier::Empirical),
             (16, 4096, 48, 8, 192, 0, KvCacheQuantMode::Fp8, Tier::XShape),
-            (8, 12000, 32, 1, 128, 8192, KvCacheQuantMode::Bfloat16, Tier::Empirical),
-            (8, 12000, 32, 1, 128, 2048, KvCacheQuantMode::Bfloat16, Tier::Empirical),
+            (
+                8,
+                12000,
+                32,
+                1,
+                128,
+                8192,
+                KvCacheQuantMode::Bfloat16,
+                Tier::Empirical,
+            ),
+            (
+                8,
+                12000,
+                32,
+                1,
+                128,
+                2048,
+                KvCacheQuantMode::Bfloat16,
+                Tier::Empirical,
+            ),
         ];
         for &(b, s, n, nk, hs, w, kv, tier) in cases {
             db.reset_provenance();
             let result = query_generation_attention_table(&db, b, s, n, nk, hs, w, kv)
                 .expect("empirical query");
             assert!(result.latency_ms.is_finite() && result.latency_ms > 0.0);
-            assert_eq!(result.source, Source::Empirical, "(b={b}, s={s}, hs={hs}, w={w})");
-            assert_eq!(db.worst_provenance(), tier, "(b={b}, s={s}, hs={hs}, w={w})");
+            assert_eq!(
+                result.source,
+                Source::Empirical,
+                "(b={b}, s={s}, hs={hs}, w={w})"
+            );
+            assert_eq!(
+                db.worst_provenance(),
+                tier,
+                "(b={b}, s={s}, hs={hs}, w={w})"
+            );
         }
     }
 

@@ -37,6 +37,12 @@ pub struct StateSpaceTable {
     gdn_sources: Vec<PerfSource>,
     kda_sources: Vec<PerfSource>,
     vllm_024_gdn_aliases: bool,
+    /// SM-major-10 (sm 100/103, NOT sm 120) sglang serving auto-selects the
+    /// FlashInfer bf16-state GDN decode kernel when the model's
+    /// `mamba_ssm_dtype` is bfloat16 (see `query_gdn`'s alias branch below —
+    /// the dtype half of the predicate is per-query). Computed once at
+    /// construction, same convention as `vllm_024_gdn_aliases`.
+    sglang_sm100_gdn_flashinfer_lane: bool,
     mamba2: OnceLock<Result<Mamba2Grids, AicError>>,
     gdn: OnceLock<Result<GdnGrids, AicError>>,
     kda: OnceLock<Result<KdaGrids, AicError>>,
@@ -115,6 +121,7 @@ impl StateSpaceTable {
             data_root,
             backend,
             version,
+            None,
             &SourceResolver::fixed(PerfDbSources::default()),
         )
         .expect("fixed-map resolution is infallible")
@@ -124,10 +131,15 @@ impl StateSpaceTable {
     /// engine's `SourceResolver` (live resolution owns the shared-layer walk;
     /// a fixed source map is the test-only path). Each state-space file falls back to
     /// its primary `data_root/<basename>` when the resolver names no override. No I/O.
+    ///
+    /// `sm_version` is the system spec's `gpu.sm_version` (absent on systems
+    /// that don't declare one) — needed to gate the SM-major-10 sglang GDN
+    /// flashinfer-lane branch in `query_gdn`.
     pub fn with_sources(
         data_root: PathBuf,
         backend: &str,
         version: &str,
+        sm_version: Option<u32>,
         resolver: &SourceResolver,
     ) -> Result<Self, AicError> {
         let mamba2_sources = resolver.sources_for("mamba2_perf.parquet", &data_root)?;
@@ -139,6 +151,11 @@ impl StateSpaceTable {
             gdn_sources,
             kda_sources,
             vllm_024_gdn_aliases: backend == "vllm" && version == "0.24.0",
+            // Mirror sglang's `is_sm100_supported` (utils/common.py @ pinned
+            // v0.5.14 clone): device capability major EXACTLY 10, so sm
+            // 100/103 qualify and sm 120 (rtx_pro_6000_server) does not.
+            sglang_sm100_gdn_flashinfer_lane: backend == "sglang"
+                && matches!(sm_version, Some(v) if (100..110).contains(&v)),
             mamba2: OnceLock::new(),
             gdn: OnceLock::new(),
             kda: OnceLock::new(),
@@ -242,8 +259,36 @@ impl StateSpaceTable {
         head_k_dim: u32,
         num_v_heads: u32,
         head_v_dim: u32,
+        mamba_ssm_dtype: &str,
         sol: &dyn Fn(f64, f64) -> f64,
     ) -> Result<LeafValue, AicError> {
+        let causal_conv = matches!(kernel_source, "causal_conv1d_fn" | "causal_conv1d_update");
+        let flashinfer_physical = kernel_source == "flashinfer_gated_delta_rule_decode";
+        let flashinfer_bf16_query = self.sglang_sm100_gdn_flashinfer_lane
+            && mamba_ssm_dtype == "bfloat16"
+            && phase == "generation";
+        let requires_flashinfer_alias =
+            flashinfer_bf16_query && kernel_source == "fused_sigmoid_gating_delta_rule_update";
+        let exact_flashinfer_query = flashinfer_bf16_query && flashinfer_physical;
+
+        // Packaged GDN rows do not carry state dtype in their persisted key.
+        // Causal convolution does not consume recurrent state, but every
+        // other empirical kernel is safe only for the FP32 state used during
+        // collection. The sole exception is sglang's exact SM-major-10 BF16
+        // FlashInfer decode lane.
+        if (flashinfer_physical && !exact_flashinfer_query)
+            || (mamba_ssm_dtype != "float32"
+                && !causal_conv
+                && !requires_flashinfer_alias
+                && !exact_flashinfer_query)
+        {
+            return Err(AicError::PerfDatabase(format!(
+                "GDN state-sensitive silicon row is not keyed by mamba_ssm_dtype; \
+                 refusing kernel_source={kernel_source}, phase={phase}, \
+                 mamba_ssm_dtype={mamba_ssm_dtype}"
+            )));
+        }
+
         let grids = self.load_gdn()?;
         let key = GdnKey {
             kernel_source: kernel_source.to_string(),
@@ -260,7 +305,9 @@ impl StateSpaceTable {
         // the operator degrades to SOL.
         //
         // The framework's own persisted physical kernels (vLLM 0.24 names its
-        // context scan chunk_gated_delta_rule_*) take precedence: after the
+        // context scan chunk_gated_delta_rule_*; capability-major-10 sglang
+        // BF16 decode requires flashinfer_gated_delta_rule_decode) take
+        // precedence: after the
         // shared-layer merge the logical lane can hold cross-backend donor
         // rows, which only serve as gap fill when no own physical lane covers
         // the shape. Ambiguous physical data fails closed.
@@ -276,6 +323,20 @@ impl StateSpaceTable {
                 }
                 _ => &[],
             }
+        } else if requires_flashinfer_alias {
+            // SM-major-10 sglang serving auto-selects the FlashInfer
+            // bf16-state GDN decode kernel ONLY when the model's
+            // mamba_ssm_dtype is bfloat16 (server_args.py's
+            // _handle_linear_attn_backend, server_args.py:4884-4915 @ pinned
+            // v0.5.14 clone: `is_sm100_supported()` — capability major
+            // exactly 10 — AND `mamba_ssm_dtype == "bfloat16"`): prefer its
+            // own rows over the fla/triton fp32-state lane when they cover
+            // this shape. Every bundled Qwen3.5/3.6 config pins
+            // mamba_ssm_dtype=float32, so the default query stays on the fla
+            // lane. If this exact alias is absent, the query must miss and
+            // let the operator use dtype-aware SOL; falling through to the
+            // untyped FLA row would model a kernel serving does not run.
+            &["flashinfer_gated_delta_rule_decode"]
         } else {
             &[]
         };
@@ -298,7 +359,19 @@ impl StateSpaceTable {
             )));
         }
         if let Some((_, node)) = alias_matches.first() {
+            // `sol` closes over the caller's logical kernel source, not the
+            // winning physical alias. For the only cross-dtype alias allowed
+            // here, both the BF16 logical recurrence and explicit FlashInfer
+            // formula use two-byte state, so beyond-range util-hold stays on
+            // the correct byte model.
             return engine_query(node, phase, batch_size, seq_len, sol);
+        }
+        if requires_flashinfer_alias {
+            return Err(missing(
+                "GDN FlashInfer BF16 alias",
+                &self.data_root,
+                format!("{key:?}"),
+            ));
         }
         let node = match grids.by_keys.get(&key) {
             Some(node) => node,
@@ -794,6 +867,19 @@ mod tests {
         phase: &str,
         num_v_heads: u32,
     ) -> Result<f64, AicError> {
+        // Default state dtype (every bundled Qwen3.5/3.6 config pins
+        // float32); the flashinfer-lane tests below pass "bfloat16"
+        // explicitly via query_gdn_test_shape_with_dtype.
+        query_gdn_test_shape_with_dtype(table, kernel_source, phase, num_v_heads, "float32")
+    }
+
+    fn query_gdn_test_shape_with_dtype(
+        table: &StateSpaceTable,
+        kernel_source: &str,
+        phase: &str,
+        num_v_heads: u32,
+        mamba_ssm_dtype: &str,
+    ) -> Result<f64, AicError> {
         table
             .query_gdn(
                 kernel_source,
@@ -806,6 +892,7 @@ mod tests {
                 128,
                 num_v_heads,
                 128,
+                mamba_ssm_dtype,
                 &dummy_sol,
             )
             .map(|v| v.latency)
@@ -845,6 +932,66 @@ mod tests {
             .unwrap(),
             3.0
         );
+    }
+
+    #[test]
+    fn gdn_causal_conv_rows_are_state_dtype_independent() {
+        let table = in_memory_gdn_table(
+            "sglang",
+            "0.5.14",
+            &[
+                ("causal_conv1d_fn", "context", 48, 2.0),
+                ("causal_conv1d_update", "generation", 48, 3.0),
+            ],
+        );
+        for dtype in ["bfloat16", "float16"] {
+            assert_eq!(
+                query_gdn_test_shape_with_dtype(&table, "causal_conv1d_fn", "context", 48, dtype,)
+                    .unwrap(),
+                2.0
+            );
+            assert_eq!(
+                query_gdn_test_shape_with_dtype(
+                    &table,
+                    "causal_conv1d_update",
+                    "generation",
+                    48,
+                    dtype,
+                )
+                .unwrap(),
+                3.0
+            );
+        }
+    }
+
+    #[test]
+    fn gdn_context_scan_rows_require_fp32_state() {
+        let table = in_memory_gdn_table(
+            "sglang",
+            "0.5.14",
+            &[("chunk_gated_delta_rule", "context", 48, 2.0)],
+        );
+        assert_eq!(
+            query_gdn_test_shape_with_dtype(
+                &table,
+                "chunk_gated_delta_rule",
+                "context",
+                48,
+                "float32"
+            )
+            .unwrap(),
+            2.0
+        );
+        for dtype in ["bfloat16", "float16"] {
+            assert!(query_gdn_test_shape_with_dtype(
+                &table,
+                "chunk_gated_delta_rule",
+                "context",
+                48,
+                dtype
+            )
+            .is_err());
+        }
     }
 
     #[test]
@@ -923,6 +1070,221 @@ mod tests {
             ],
         );
         assert!(query_gdn_test_shape(&table, "chunk_gated_delta_rule", "context", 48).is_err());
+    }
+
+    /// Like `in_memory_gdn_table`, but threads an explicit `sm_version`
+    /// through `StateSpaceTable::with_sources` -- needed to exercise the
+    /// capability-major-10 sglang GDN flashinfer-lane branch below
+    /// (`in_memory_gdn_table`'s `StateSpaceTable::new` always passes
+    /// `sm_version=None`, so it can't reach that branch).
+    fn in_memory_gdn_table_with_sm(
+        backend: &str,
+        version: &str,
+        sm_version: Option<u32>,
+        rows: &[(&str, &str, u32, f64)],
+    ) -> StateSpaceTable {
+        let mut by_keys: BTreeMap<GdnKey, Node> = BTreeMap::new();
+        for &(kernel_source, phase, num_v_heads, latency) in rows {
+            let key = GdnKey {
+                kernel_source: kernel_source.to_string(),
+                phase: phase.to_string(),
+                d_model: 5120,
+                d_conv: 4,
+                num_k_heads: 16,
+                head_k_dim: 128,
+                num_v_heads,
+                head_v_dim: 128,
+            };
+            let node = by_keys.entry(key).or_insert_with(Node::branch);
+            let leaf = LeafValue::latency_only(latency);
+            if phase == "generation" {
+                insert_first_wins(node, &[1], leaf);
+            } else {
+                insert_first_wins(node, &[1, 1024], leaf);
+            }
+        }
+        let table = StateSpaceTable::with_sources(
+            PathBuf::from("test-data"),
+            backend,
+            version,
+            sm_version,
+            &SourceResolver::fixed(PerfDbSources::default()),
+        )
+        .expect("fixed-map resolution is infallible");
+        assert!(table.gdn.set(Ok(GdnGrids { by_keys })).is_ok());
+        table
+    }
+
+    #[test]
+    fn sglang_sm100_gdn_prefers_flashinfer_decode_lane_for_bf16_state() {
+        // Serving predicate (server_args.py:4884-4915 @ pinned v0.5.14):
+        // capability major exactly 10 AND mamba_ssm_dtype == "bfloat16".
+        let table = in_memory_gdn_table_with_sm(
+            "sglang",
+            "0.5.14",
+            Some(103),
+            &[
+                (
+                    "fused_sigmoid_gating_delta_rule_update",
+                    "generation",
+                    48,
+                    4.0,
+                ),
+                ("flashinfer_gated_delta_rule_decode", "generation", 48, 2.1),
+            ],
+        );
+        assert_eq!(
+            query_gdn_test_shape_with_dtype(
+                &table,
+                "fused_sigmoid_gating_delta_rule_update",
+                "generation",
+                48,
+                "bfloat16"
+            )
+            .unwrap(),
+            2.1
+        );
+    }
+
+    #[test]
+    fn sglang_sm100_gdn_keeps_fla_lane_for_fp32_state_even_if_flashinfer_present() {
+        // Every bundled Qwen3.5/3.6 config pins mamba_ssm_dtype=float32;
+        // serving auto-selects FlashInfer only for bfloat16 state, so the
+        // default query must resolve the fla lane's own row even when this
+        // explicit fixture includes a FlashInfer row at the same shape.
+        let table = in_memory_gdn_table_with_sm(
+            "sglang",
+            "0.5.14",
+            Some(103),
+            &[
+                (
+                    "fused_sigmoid_gating_delta_rule_update",
+                    "generation",
+                    48,
+                    4.0,
+                ),
+                ("flashinfer_gated_delta_rule_decode", "generation", 48, 2.1),
+            ],
+        );
+        assert_eq!(
+            query_gdn_test_shape(
+                &table,
+                "fused_sigmoid_gating_delta_rule_update",
+                "generation",
+                48
+            )
+            .unwrap(),
+            4.0
+        );
+    }
+
+    #[test]
+    fn sglang_sm120_gdn_uses_fla_rows_only_for_fp32_state() {
+        // Untyped FLA rows were collected with FP32 recurrent state. SM120
+        // never selects the SM-major-10 FlashInfer exception, so non-FP32
+        // state must miss instead of consuming those rows.
+        let table = in_memory_gdn_table_with_sm(
+            "sglang",
+            "0.5.14",
+            Some(120),
+            &[
+                (
+                    "fused_sigmoid_gating_delta_rule_update",
+                    "generation",
+                    48,
+                    4.0,
+                ),
+                ("flashinfer_gated_delta_rule_decode", "generation", 48, 2.1),
+            ],
+        );
+        assert_eq!(
+            query_gdn_test_shape_with_dtype(
+                &table,
+                "fused_sigmoid_gating_delta_rule_update",
+                "generation",
+                48,
+                "float32"
+            )
+            .unwrap(),
+            4.0
+        );
+        for dtype in ["bfloat16", "float16"] {
+            assert!(query_gdn_test_shape_with_dtype(
+                &table,
+                "fused_sigmoid_gating_delta_rule_update",
+                "generation",
+                48,
+                dtype
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn sglang_sm100_gdn_misses_when_required_flashinfer_alias_is_absent() {
+        // This explicit fixture contains no FlashInfer row. A BF16 query must
+        // miss instead of falling through to the untyped FLA row.
+        let table = in_memory_gdn_table_with_sm(
+            "sglang",
+            "0.5.14",
+            Some(103),
+            &[(
+                "fused_sigmoid_gating_delta_rule_update",
+                "generation",
+                48,
+                4.0,
+            )],
+        );
+        assert!(query_gdn_test_shape_with_dtype(
+            &table,
+            "fused_sigmoid_gating_delta_rule_update",
+            "generation",
+            48,
+            "bfloat16"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn sglang_sm90_gdn_uses_fla_rows_only_for_fp32_state() {
+        // Hopper never selects the FlashInfer exception. FP32 keeps the
+        // collected FLA row; non-FP32 state must miss even if an unrelated
+        // FlashInfer row is present.
+        let table = in_memory_gdn_table_with_sm(
+            "sglang",
+            "0.5.10",
+            Some(90),
+            &[
+                (
+                    "fused_sigmoid_gating_delta_rule_update",
+                    "generation",
+                    48,
+                    4.0,
+                ),
+                ("flashinfer_gated_delta_rule_decode", "generation", 48, 2.1),
+            ],
+        );
+        assert_eq!(
+            query_gdn_test_shape_with_dtype(
+                &table,
+                "fused_sigmoid_gating_delta_rule_update",
+                "generation",
+                48,
+                "float32"
+            )
+            .unwrap(),
+            4.0
+        );
+        for dtype in ["bfloat16", "float16"] {
+            assert!(query_gdn_test_shape_with_dtype(
+                &table,
+                "fused_sigmoid_gating_delta_rule_update",
+                "generation",
+                48,
+                dtype
+            )
+            .is_err());
+        }
     }
 
     /// In-memory KDA table over one fixed model shape (d_model=4096, heads
@@ -1044,6 +1406,7 @@ mod tests {
                 128,
                 32,
                 128,
+                "float32",
                 &dummy_sol,
             )
             .err();
@@ -1064,6 +1427,7 @@ mod tests {
             128,
             48,
             128,
+            "float32",
             &dummy_sol,
         );
         eprintln!("query: {r:?}");
@@ -1121,6 +1485,7 @@ mod tests {
                 128,
                 32,
                 128,
+                "float32",
                 &dummy_sol,
             )
             .unwrap();

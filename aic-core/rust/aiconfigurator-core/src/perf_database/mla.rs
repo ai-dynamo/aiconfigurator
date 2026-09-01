@@ -1454,7 +1454,10 @@ mod tests {
                 )
                 .unwrap()
                 .latency;
-            assert!(got.is_finite() && got > 0.0, "gen_mla_module_fp8kv(b={b}, s={s}): {got}");
+            assert!(
+                got.is_finite() && got > 0.0,
+                "gen_mla_module_fp8kv(b={b}, s={s}): {got}"
+            );
         }
     }
 
@@ -1473,7 +1476,7 @@ mod tests {
         }
     }
 
-   #[test]
+    #[test]
     fn generation_mla_energy_matches_python_oracle() {
         use crate::perf_database::energy_test_fixtures::{energy_test_spec, write_parquet, Col};
         let tmp = tempfile::tempdir().expect("tmpdir");
