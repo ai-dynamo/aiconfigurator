@@ -21,9 +21,9 @@ def blackwell_empirical_database():
         "b200_sxm",
         "sglang",
         "0.5.10",
+        allow_unlisted_version=True,
         database_mode=common.DatabaseMode.EMPIRICAL,
         shared_layer=False,
-        allow_unlisted_version=True,
     )
     assert database is not None
     return database

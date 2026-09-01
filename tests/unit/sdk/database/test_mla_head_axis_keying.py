@@ -22,12 +22,15 @@ import pytest
 from aiconfigurator_core.sdk.errors import PerfDataNotAvailableError
 from aiconfigurator_core.sdk.perf_database import PerfDatabase
 
+pytestmark = pytest.mark.unit
+
 # Test-held copy of the model pin (single source: the Rust
 # ``perf_database/table_view.rs::MLA_MODULE_NATIVE_HEADS``).
 _MLA_MODULE_NATIVE_HEADS = {
     "deepseek-ai/DeepSeek-V3": 128,
     "deepseek-ai/DeepSeek-R1": 128,
     "nvidia/DeepSeek-V3.1-NVFP4": 128,
+    "moonshotai/Kimi-K3": 96,
 }
 
 _DSV3 = "deepseek-ai/DeepSeek-V3"
