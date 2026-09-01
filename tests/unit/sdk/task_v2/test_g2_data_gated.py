@@ -142,6 +142,40 @@ def _ep_rows() -> list[dict]:
     return rows
 
 
+def _trtllm_fp8_a2a_rows() -> list[dict]:
+    """Hopper FP8 serving dtypes: HT is BF16 while LL is FP8."""
+    rows = []
+    for backend, comm_dtype in (("trtllm_deepep_ht", "bfloat16"), ("trtllm_deepep_ll", "fp8")):
+        for ep_size, node_num in _PAIRS:
+            for phase in ("dispatch", "combine"):
+                for num_tokens in _TOKEN_POINTS:
+                    rows.append(
+                        {
+                            "comm_backend": backend,
+                            "phase": phase,
+                            "comm_dtype": comm_dtype,
+                            "ep_size": ep_size,
+                            "node_num": node_num,
+                            "hidden_size": SYNTH_HIDDEN,
+                            "topk": SYNTH_TOPK,
+                            "num_experts": SYNTH_EXPERTS,
+                            "sms": 0,
+                            "num_tokens": num_tokens,
+                            "latency": 50.0,
+                            "power": 300.0,
+                        }
+                    )
+    return rows
+
+
+def _trtllm_fp8_ep_rows() -> list[dict]:
+    rows = _ep_rows()
+    for row in rows:
+        row["kernel_source"] = "trtllm_deepep"
+        row["moe_dtype"] = "fp8_block"
+    return rows
+
+
 def _write_version_dir(root: str, family: str, backend: str, filename: str, rows: list[dict]) -> None:
     version_dir = os.path.join(root, "data", family, backend, SYNTH_VERSION)
     os.makedirs(version_dir, exist_ok=True)
@@ -191,6 +225,8 @@ def synth_systems(tmp_path):
     for backend in BACKENDS:
         _write_version_dir(root, "comm", backend, "moe_a2a_perf.parquet", _a2a_rows())
         _write_version_dir(root, "moe", backend, "moe_expert_compute_perf.parquet", _ep_rows())
+    _write_version_dir(root, "comm", "trtllm", "moe_a2a_perf.parquet", _trtllm_fp8_a2a_rows())
+    _write_version_dir(root, "moe", "trtllm", "moe_expert_compute_perf.parquet", _trtllm_fp8_ep_rows())
     databases_cache.clear()
     set_systems_paths(["default", root])
     try:
@@ -321,6 +357,35 @@ def test_candidate_graph_builds_and_large_ep_ops_query_finitely(synth_systems, s
     # 128 * dp8 = 1024 on the compute curve (in range).
     database = get_database(SYNTH_SYSTEM, backend, SYNTH_VERSION)
     for op in large_ops:
+        latency = float(op._engine_query(database, x=128))
+        assert math.isfinite(latency) and latency > 0.0, op._name
+
+
+def test_hopper_fp8_trtllm_coverage_emission_and_rust_lookup(synth_systems, synth_model_path):
+    """Coverage and graph emission use the same serving wire-dtype contract."""
+    task = _synth_task(synth_model_path, "trtllm")
+    task.moe_quant_mode = common.MoEQuantMode.fp8_block
+    task._large_ep_coverage_cache.clear()
+
+    assert task._large_ep_coverage("agg") == {
+        "context": {"trtllm_deepep_ht": {8, 16}},
+        "generation": {"trtllm_deepep_ll": {8, 16}},
+    }
+    model_config = task.build_model_config(role="agg", parallel=(1, 1, 8, 1, 8, 1))
+    assert model_config.system == SYNTH_SYSTEM
+    assert model_config.moe_comm_backend == {
+        "context": "trtllm_deepep_ht",
+        "generation": "trtllm_deepep_ll",
+    }
+
+    model = get_model(synth_model_path, model_config, "trtllm")
+    context_a2a = [op for op in _large_ep_ops(model.context_ops) if isinstance(op, MoEAllToAll)]
+    generation_a2a = [op for op in _large_ep_ops(model.generation_ops) if isinstance(op, MoEAllToAll)]
+    assert {op._comm_dtype for op in context_a2a} == {"bfloat16"}
+    assert {op._comm_dtype for op in generation_a2a} == {"fp8"}
+
+    database = get_database(SYNTH_SYSTEM, "trtllm", SYNTH_VERSION)
+    for op in context_a2a + generation_a2a:
         latency = float(op._engine_query(database, x=128))
         assert math.isfinite(latency) and latency > 0.0, op._name
 

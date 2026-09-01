@@ -270,14 +270,35 @@ def test_sglang_node1_deepep_coverage_represents_multi_node_ep(synth_systems_nod
     assert t.build_model_config(role="agg", parallel=point).moe_comm_backend == both
 
 
-@pytest.mark.parametrize("noncanonical_pair", [{(4, 1)}, {(16, 1)}, {(32, 2)}])
-def test_sglang_node1_fallback_requires_legacy_canonical_coordinate(noncanonical_pair):
+@pytest.mark.parametrize("noncanonical_pair", [{(2, 1)}, {(4, 1)}, {(32, 2)}])
+def test_sglang_node1_fallback_requires_legacy_ep8_coordinate(noncanonical_pair):
     assert not a2a_covers_parallel(
         noncanonical_pair,
         framework="sglang",
         comm_backend="deepep_ht",
         moe_ep_size=32,
         expected_nodes=8,
+        gpus_per_node=4,
+    )
+
+
+@pytest.mark.parametrize(
+    ("framework", "comm_backend", "donor_ep"),
+    [
+        ("sglang", "deepep_ht", 8),
+        ("vllm", "deepep_ll", 4),
+        ("trtllm", "trtllm_deepep_ht", 4),
+        ("trtllm", "trtllm_deepep_ll", 4),
+    ],
+)
+def test_deepep_node1_fallback_is_shared_by_serving_frameworks(framework, comm_backend, donor_ep):
+    assert a2a_covers_parallel(
+        {(donor_ep, 1)},
+        framework=framework,
+        comm_backend=comm_backend,
+        moe_ep_size=64,
+        expected_nodes=16,
+        gpus_per_node=4,
     )
 
 
@@ -285,7 +306,7 @@ def test_exact_resolver_accepts_sglang_node1_deepep_substitution():
     database = SimpleNamespace(
         system="synthetic",
         version="1.0",
-        system_spec={"node": {"num_gpus_per_node": 4}, "gpu": {"sm_version": 100}},
+        system_spec={"node": {"num_gpus_per_node": 8}, "gpu": {"sm_version": 100}},
         moe_a2a_coverage=lambda *_args: {"deepep_ht": {(8, 1)}, "deepep_ll": {(8, 1)}},
         moe_expert_compute_coverage=lambda *_args: {128},
     )
@@ -302,11 +323,48 @@ def test_exact_resolver_accepts_sglang_node1_deepep_substitution():
     assert resolved == {"context": "deepep_ht", "generation": "deepep_ll"}
 
 
-def test_sglang_deepseek_node1_substitution_restores_wideep_mla_defaults():
+@pytest.mark.parametrize(
+    ("framework", "expected"),
+    [
+        ("vllm", {"context": "deepep_ht", "generation": "deepep_ll"}),
+        (
+            "trtllm",
+            {"context": "trtllm_deepep_ht", "generation": "trtllm_deepep_ll"},
+        ),
+    ],
+)
+def test_exact_resolver_accepts_node1_deepep_substitution_for_other_frameworks(framework, expected):
     database = SimpleNamespace(
         system="synthetic",
         version="1.0",
         system_spec={"node": {"num_gpus_per_node": 4}, "gpu": {"sm_version": 100}},
+        moe_a2a_coverage=lambda *_args: {
+            "deepep_ht": {(4, 1)},
+            "deepep_ll": {(4, 1)},
+            "trtllm_deepep_ht": {(4, 1)},
+            "trtllm_deepep_ll": {(4, 1)},
+        },
+        moe_expert_compute_coverage=lambda *_args: set(),
+        legacy_moe_compute_coverage=lambda *_args: {64},
+    )
+    model_config = ModelConfig(attention_dp_size=64, moe_tp_size=1, moe_ep_size=64)
+
+    resolved = resolve_model_config_moe_comm(
+        model_config,
+        model_path=SYNTH_MODEL,
+        backend_name=framework,
+        database=database,
+        required_phases=("context", "generation"),
+    )
+
+    assert resolved == expected
+
+
+def test_sglang_deepseek_node1_substitution_restores_wideep_mla_defaults():
+    database = SimpleNamespace(
+        system="synthetic",
+        version="1.0",
+        system_spec={"node": {"num_gpus_per_node": 8}, "gpu": {"sm_version": 100}},
         moe_a2a_coverage=lambda *_args: {"deepep_ht": {(8, 1)}},
         moe_expert_compute_coverage=lambda *_args: {128},
     )

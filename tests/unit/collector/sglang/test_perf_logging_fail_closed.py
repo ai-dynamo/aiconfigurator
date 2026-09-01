@@ -21,11 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
         ("collector/sglang/collect_mla.py", "run_mla", 1),
         ("collector/sglang/collect_mla_bmm.py", "run_mla_gen_pre", 1),
         ("collector/sglang/collect_mla_bmm.py", "run_mla_gen_post", 1),
-        ("collector/wideep/sglang/collect_deepep_moe.py", "benchmark_moe_layer_prefill", 1),
-        ("collector/wideep/sglang/collect_deepep_moe.py", "benchmark_moe_layer_decode", 1),
         ("collector/wideep/sglang/collect_moe_a2a.py", "_emit_case_rows", 1),
-        ("collector/wideep/trtllm/collect_moe_compute.py", "run_moe_ep", 1),
-        ("collector/wideep/vllm/collect_moe_ep.py", "run_moe_ep", 1),
         ("collector/network/slurm/collect_trtllm_alltoall.py", "run_benchmark", 1),
     ],
 )

@@ -51,6 +51,7 @@ from aiconfigurator.sdk.models import (
 from aiconfigurator.sdk.models.blocks.moe import LARGE_EP_READY_FAMILIES, MoEBlockShape
 from aiconfigurator.sdk.moe_comm_resolver import (
     a2a_covers_parallel,
+    moe_compute_coverage,
     resolve_model_config_moe_comm,
     select_moe_comm_backend,
 )
@@ -1275,8 +1276,9 @@ class Task:
 
         Per spec section 4.5, an EP size is explorable for a phase when its
         comm backend carries dispatch+combine rows for the model shape at the
-        requested EP/node scale, or SGLang DeepEP carries the marked node-1
-        substitute retained from PR #1314. The backend's registry feasibility
+        requested EP/node scale, or DeepEP HT/LL carries its marked node-1
+        substitute (legacy EP8 for SGLang, physical full-node EP otherwise).
+        The backend's registry feasibility
         rules must admit the config, and the EP expert-compute table must cover
         the shape under the role's MoE quant mode for that phase. BOTH phases
         are probed for every role: a
@@ -1327,10 +1329,8 @@ class Task:
         # (a lightweight double injected by a caller) carries no coverage
         # information, which is the same answer as an absent table.
         a2a_probe = getattr(database, "moe_a2a_coverage", None)
-        compute_probe = getattr(database, "moe_expert_compute_coverage", None)
         coverage: dict[str, dict[str, set[int]]] = {}
-        if gpus_per_node and a2a_probe is not None and compute_probe is not None:
-            a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts)
+        if gpus_per_node and a2a_probe is not None:
             quant_mode = self._role_attr(role, "moe_quant_mode")
             if quant_mode is not None and not isinstance(quant_mode, common.MoEQuantMode):
                 # The compute table is keyed by MoEQuantMode members; any
@@ -1342,8 +1342,16 @@ class Task:
                     f"{type(quant_mode).__name__} {quant_mode!r} "
                 )
             for phase in ("context", "generation"):
-                compute = compute_probe(
-                    shape.hidden_size, shape.moe_inter_size, shape.topk, shape.num_experts, quant_mode, phase
+                a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts, quant_mode, phase)
+                compute = moe_compute_coverage(
+                    database,
+                    backend_name=backend_name,
+                    hidden_size=shape.hidden_size,
+                    inter_size=shape.moe_inter_size,
+                    topk=shape.topk,
+                    num_experts=shape.num_experts,
+                    quant_mode=quant_mode,
+                    phase=phase,
                 )
                 per_backend: dict[str, set[int]] = {}
                 for name, backend_spec in MOE_A2A_BACKENDS.items():
@@ -1358,6 +1366,7 @@ class Task:
                             comm_backend=name,
                             moe_ep_size=ep,
                             expected_nodes=nodes_for(ep, gpus_per_node),
+                            gpus_per_node=gpus_per_node,
                         )
                         and backend_spec.feasible(
                             topk=shape.topk,
@@ -1463,16 +1472,23 @@ class Task:
         )
 
     def _large_ep_eps(self, role: str) -> set[int]:
-        """EP sizes this role could run large-EP: covered in every phase it runs
-        AND in the context phase that sizes its weights (see
-        ``_required_large_ep_phases``)."""
+        """Covered EP sizes that actually span more than one physical node.
+
+        Single-node A2A data may resolve the communication backend for an
+        intra-node tuple, but it must not unlock the multi-node search ladder
+        or its larger replica budget.  Only coverage present in every required
+        phase *and* wider than the system's node width enables that expansion.
+        """
         coverage = self._large_ep_coverage(role)
         eps: set[int] | None = None
         for phase in set(self._role_phases(role)) | set(self._required_large_ep_phases(role)):
             per_backend = coverage.get(phase, {})
             phase_eps = set().union(*per_backend.values()) if per_backend else set()
             eps = phase_eps if eps is None else eps & phase_eps
-        return eps or set()
+        gpus_per_node = self._num_gpus_per_node(role)
+        if not gpus_per_node:
+            return set()
+        return {ep for ep in (eps or set()) if ep > gpus_per_node}
 
     def _role_has_large_ep_tuple(self, role: str) -> bool:
         """Whether any enumerated tuple for this role resolves a comm backend."""
@@ -2050,6 +2066,7 @@ class Task:
             # ops take the comm node span at construction and would otherwise
             # have no channel to it (models.helpers.large_ep_gpus_per_node).
             num_gpus_per_node=num_gpus_per_node,
+            system=self._role_attr(role, "system_name"),
         )
         model_config._gemm_quant_mode_is_explicit = self._gemm_quant_mode_explicit_by_role.get(role, False)
         if parallel is not None:

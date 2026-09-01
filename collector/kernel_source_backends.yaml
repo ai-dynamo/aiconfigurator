@@ -87,9 +87,7 @@ mappings:
 
   # WideEP module labels.
   - {framework: sglang, kernel_source: deepep, backend: deepep, source: "collector/wideep/sglang"}
-  - {framework: sglang, kernel_source: deepepmoe, backend: deepep, source: "collector/wideep/sglang (DeepEP-MoE compute path)"}
-  # Unified moe_ep table spelling of the same DeepEPMoE.run_moe_core path
-  # (the consumer keys sglang large-EP compute as deepep_moe).
+  - {framework: sglang, kernel_source: deepepmoe, backend: deepep, source: "historical shipped WideEP compute label for the DeepEP-MoE path"}
   - {framework: sglang, kernel_source: deepep_moe, backend: deepep, source: "collector/wideep/sglang/collect_deepep_moe.py (DeepEP-MoE compute path)"}
   - {framework: sglang, kernel_source: deepseek_v3, backend: unverified, source: "wideep mlp label does not name the GEMM backend"}
   - {framework: sglang, kernel_source: sglang_mhc, backend: sgl_kernel, source: "collector/sglang/collect_mhc_module.py"}
@@ -195,8 +193,8 @@ mappings:
   - {framework: trtllm, kernel_source: DeepseekV4TrtllmAttention, backend: trtllm_internal, source: "collector/trtllm/collect_dsv4_attn.py (framework-selected backend class name)"}
 
   # Mamba/GDN kernels.
-  - {framework: trtllm, kernel_source: causal_conv1d_fn, backend: causal_conv1d, source: "collector/trtllm/collect_gdn.py:652 and collect_mamba2.py:763 both import tensorrt_llm._torch.modules.mamba.causal_conv1d; that module is byte-identical at 1.3.0rc10/rc15/rc17/rc20 (the only shipped versions) and has no Triton path — causal_conv1d.py:26,70 calls torch.ops.trtllm.causal_conv1d_fwd, registered on CUDA at cpp/tensorrt_llm/thop/causalConv1dOp.cpp:322@v1.3.0rc20 and dispatching causal_conv1d_fwd_cuda (:192-193); vendored Dao-AILab causal-conv1d CUDA kernel per :2"}
-  - {framework: trtllm, kernel_source: causal_conv1d_update, backend: causal_conv1d, source: "collector/trtllm/collect_gdn.py:652 and collect_mamba2.py:763 (same import); tensorrt_llm/_torch/modules/mamba/causal_conv1d.py:77,113 calls torch.ops.trtllm.causal_conv1d_update — no Triton path, byte-identical at 1.3.0rc10/rc15/rc17/rc20 — registered on CUDA at cpp/tensorrt_llm/thop/causalConv1dOp.cpp:323@v1.3.0rc20 and dispatching causal_conv1d_update_cuda (:288-289)"}
+  - {framework: trtllm, kernel_source: causal_conv1d_fn, backend: causal_conv1d, source: "trtllm _torch mamba modules"}
+  - {framework: trtllm, kernel_source: causal_conv1d_update, backend: causal_conv1d, source: "trtllm _torch mamba modules"}
   - {framework: trtllm, kernel_source: chunk_gated_delta_rule, backend: fla_triton, source: "trtllm _torch GDN (triton)"}
   - {framework: trtllm, kernel_source: fused_recurrent_gated_delta_rule, backend: fla_triton, source: "trtllm _torch GDN (triton)"}
   - {framework: trtllm, kernel_source: mamba_chunk_scan_combined, backend: flashinfer, source: "collector/trtllm/collect_mamba2.py:290 (mamba2 SSD chunk scan; tensorrt_llm/_torch/modules/mamba/ssd_combined.py:437-444@1.3.0rc15 flashinfer SSDCombined on SM100+ when _flashinfer_ssd_supported; Triton fallback on non-SM100 or unsupported tile sizes — no shipped row takes it: all rc15 scan rows are (chunk=128, dstate=128, headdim=64) on b200_sxm, flashinfer-eligible by construction; label split for future fallback coverage: AIC-1677)"}
@@ -208,9 +206,11 @@ mappings:
   - {framework: trtllm, kernel_source: NCCL, backend: nccl, source: "collector/network/collect_nccl.py"}
   - {framework: trtllm, kernel_source: NVLinkOneSided, backend: nvlink_one_sided, source: "collector/network/slurm/collect_trtllm_alltoall.py"}
   - {framework: trtllm, kernel_source: NVLinkTwoSided, backend: nvlink_two_sided, source: "collector/network/slurm/collect_trtllm_alltoall.py"}
+  - {framework: trtllm, kernel_source: deepep, backend: deepep, source: "collector/wideep/trtllm/collect_moe_a2a.py (CommunicationFactory forced DeepEP paths)"}
 
   # ---------------------------------------------------------------- vllm
   # vLLM labels name the attention backend class vLLM's selector picked.
+  - {framework: vllm, kernel_source: deepep, backend: deepep, source: "collector/wideep/vllm/collect_moe_a2a.py (vLLM prepare/finalize paths)"}
   - {framework: vllm, kernel_source: vllm_flash_attn, backend: flash_attn, source: "collector/vllm/collect_attn.py (FLASH_ATTN)"}
   - {framework: vllm, kernel_source: vllm_flashinfer, backend: flashinfer, source: "collector/vllm/collect_attn.py (FLASHINFER)"}
   - {framework: vllm, kernel_source: vllm_vit_flash_attn, backend: flash_attn, source: "collector/vllm/collect_attn_encoder.py"}
