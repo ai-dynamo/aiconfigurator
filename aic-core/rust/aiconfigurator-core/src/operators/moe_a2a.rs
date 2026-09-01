@@ -195,10 +195,15 @@ impl MoeAllToAllOp {
         ) && self.node_num > 1
             && !exact_shape;
         let (lookup_ep_size, lookup_node_num, source) = if use_node1_fallback {
-            // Use the system's full single-node EP coordinate as the donor.
-            // This is EP4 on GB200/GB300 NVL4 systems and EP8 on HGX systems.
-            // The optimistic substitution is always marked as estimated.
-            (db.system_spec.node.num_gpus_per_node, 1, Source::Estimated)
+            // Preserve SGLang's legacy adapter coordinate from PR #1314.
+            // New vLLM/TRT-LLM tables use the system's physical full-node EP
+            // (EP4 on NVL4, EP8 on HGX). Every substitution is estimated.
+            let donor_ep = if db.backend == "sglang" {
+                crate::perf_database::moe_a2a::legacy_deepep_ep_size(1)
+            } else {
+                db.system_spec.node.num_gpus_per_node
+            };
+            (donor_ep, 1, Source::Estimated)
         } else {
             (self.moe_ep_size, self.node_num, Source::Silicon)
         };

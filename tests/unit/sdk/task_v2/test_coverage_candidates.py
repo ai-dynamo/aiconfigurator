@@ -270,8 +270,8 @@ def test_sglang_node1_deepep_coverage_represents_multi_node_ep(synth_systems_nod
     assert t.build_model_config(role="agg", parallel=point).moe_comm_backend == both
 
 
-@pytest.mark.parametrize("noncanonical_pair", [{(2, 1)}, {(8, 1)}, {(32, 2)}])
-def test_deepep_node1_fallback_requires_full_system_node_coordinate(noncanonical_pair):
+@pytest.mark.parametrize("noncanonical_pair", [{(2, 1)}, {(4, 1)}, {(32, 2)}])
+def test_sglang_node1_fallback_requires_legacy_ep8_coordinate(noncanonical_pair):
     assert not a2a_covers_parallel(
         noncanonical_pair,
         framework="sglang",
@@ -283,17 +283,17 @@ def test_deepep_node1_fallback_requires_full_system_node_coordinate(noncanonical
 
 
 @pytest.mark.parametrize(
-    ("framework", "comm_backend"),
+    ("framework", "comm_backend", "donor_ep"),
     [
-        ("sglang", "deepep_ht"),
-        ("vllm", "deepep_ll"),
-        ("trtllm", "trtllm_deepep_ht"),
-        ("trtllm", "trtllm_deepep_ll"),
+        ("sglang", "deepep_ht", 8),
+        ("vllm", "deepep_ll", 4),
+        ("trtllm", "trtllm_deepep_ht", 4),
+        ("trtllm", "trtllm_deepep_ll", 4),
     ],
 )
-def test_deepep_node1_fallback_is_shared_by_serving_frameworks(framework, comm_backend):
+def test_deepep_node1_fallback_is_shared_by_serving_frameworks(framework, comm_backend, donor_ep):
     assert a2a_covers_parallel(
-        {(4, 1)},
+        {(donor_ep, 1)},
         framework=framework,
         comm_backend=comm_backend,
         moe_ep_size=64,

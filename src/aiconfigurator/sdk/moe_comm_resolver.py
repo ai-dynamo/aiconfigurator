@@ -36,19 +36,20 @@ def a2a_covers_parallel(
 ) -> bool:
     """Whether A2A data can serve a target EP/node scale.
 
-    Prefer an exact scale. Otherwise, DeepEP HT/LL may use the full-node
-    ``(ep=gpus_per_node, node_num=1)`` row for the already shape-filtered
-    coverage probe to represent a multi-node request. The query engine uses
-    the same coordinate and marks that substitution as estimated.
+    Prefer an exact scale. Otherwise, vLLM/TRT-LLM DeepEP HT/LL may use the
+    physical full-node ``(ep=gpus_per_node, node_num=1)`` row. SGLang keeps
+    its legacy normalized ``(ep=8, node_num=1)`` coordinate from PR #1314.
+    The query engine marks every substitution as estimated.
     """
     if (moe_ep_size, expected_nodes) in pairs:
         return True
-    return (
-        framework in {"sglang", "vllm", "trtllm"}
-        and comm_backend in _DEEPEP_NODE1_FALLBACK_BACKENDS
-        and expected_nodes > 1
-        and (gpus_per_node, 1) in pairs
-    )
+    if comm_backend not in _DEEPEP_NODE1_FALLBACK_BACKENDS or expected_nodes <= 1:
+        return False
+    if framework == "sglang":
+        # Preserve PR #1314's legacy adapter coordinate. Those tables are
+        # normalized to EP8/node1 independently of the queried system width.
+        return (8, 1) in pairs
+    return framework in {"vllm", "trtllm"} and (gpus_per_node, 1) in pairs
 
 
 def moe_compute_coverage(
