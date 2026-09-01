@@ -11,6 +11,8 @@ case files; this file should stay focused on reusable execution mechanics.
 """
 
 import csv
+import ctypes
+import errno
 import functools
 import hashlib
 import heapq
@@ -21,20 +23,26 @@ import multiprocessing as mp
 import os
 import shutil
 import signal
+import stat
 import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterable
-from contextlib import contextmanager
+import uuid
+from collections.abc import Callable, Iterable
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import BinaryIO, Optional, Protocol
 
 import numpy as np
 
 # Exit codes
 EXIT_CODE_RESTART = 10  # Exit code to indicate restart is needed
+PERF_TRANSACTION_FILENAME = ".perf-finalization.transaction.json"
+SIDECAR_TRANSACTION_FILENAME = ".collection_meta.transaction.json"
+SIDECAR_STAGING_FILENAME = ".collection_meta.pending.yaml"
 
 
 class WorkerRestartSignal:
@@ -740,8 +748,48 @@ def log_perf(
         print(f"Error writing log: {message}")
         raise PerfLogError(message)
 
+    staging_fd: int | None = None
+    retained_attestation: PerfFileAttestation | None = None
     try:
-        with open(perf_filename, "a+", newline="") as f:
+        perf_path = Path(perf_filename)
+        retained_path = collector_retained_path(perf_path)
+        if retained_path.exists() or retained_path.is_symlink():
+            if perf_path.exists() or perf_path.is_symlink():
+                raise PerfLogError(f"Conflicting retained performance file for {perf_filename}")
+            retained_state = retained_path.lstat()
+            if not stat.S_ISREG(retained_state.st_mode) or retained_state.st_nlink != 1:
+                raise PerfLogError(f"Unowned retained performance file for {perf_filename}")
+            retained_attestation = _attest_regular_file(
+                retained_path,
+                expected_identity=(retained_state.st_dev, retained_state.st_ino),
+                expected_mode=stat.S_IMODE(retained_state.st_mode),
+            )
+            _rename_noreplace(retained_path, perf_path)
+            _attest_regular_file(
+                perf_path,
+                expected_identity=retained_attestation.identity,
+                expected_digest=retained_attestation.digest,
+                expected_mode=retained_attestation.mode,
+            )
+            open_flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            staging_fd = os.open(perf_path, open_flags)
+            opened = os.fstat(staging_fd)
+            current = perf_path.lstat()
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or not stat.S_ISREG(current.st_mode)
+                or (opened.st_dev, opened.st_ino) != retained_attestation.identity
+                or (current.st_dev, current.st_ino) != retained_attestation.identity
+                or opened.st_nlink != 1
+                or current.st_nlink != 1
+            ):
+                raise PerfLogError(f"Retained performance file changed for {perf_filename}")
+            os.ftruncate(staging_fd, 0)
+            os.fsync(staging_fd)
+        with (
+            open(perf_filename, "a+", newline="") if staging_fd is None else os.fdopen(staging_fd, "r+", newline="")
+        ) as f:
+            staging_fd = None
             # Add header only if file is empty
             is_empty = os.fstat(f.fileno()).st_size == 0
 
@@ -798,12 +846,29 @@ def log_perf(
             # Force disk write (for NFS)
             f.flush()
             os.fsync(f.fileno())
+            if retained_attestation is not None:
+                opened = os.fstat(f.fileno())
+                current = perf_path.lstat()
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or not stat.S_ISREG(current.st_mode)
+                    or (opened.st_dev, opened.st_ino) != retained_attestation.identity
+                    or (current.st_dev, current.st_ino) != retained_attestation.identity
+                    or opened.st_size != current.st_size
+                    or stat.S_IMODE(opened.st_mode) != retained_attestation.mode
+                    or stat.S_IMODE(current.st_mode) != retained_attestation.mode
+                    or opened.st_nlink != 1
+                    or current.st_nlink != 1
+                ):
+                    raise PerfLogError(f"Retained performance file changed for {perf_filename}")
     except PerfLogError:
         raise
     except Exception as e:
         print(f"Error writing log: {e}")
         raise PerfLogError(f"Failed to write {perf_filename}: {e}") from e
     finally:
+        if staging_fd is not None:
+            os.close(staging_fd)
         # Delete the lock file, even if writing crashed
         if got_lock and os.path.exists(lock_file):
             os.unlink(lock_file)
@@ -817,12 +882,80 @@ def log_perf(
 PERF_METRIC_COLUMNS = ("latency", "power", "power_limit")
 
 
+@dataclass(frozen=True)
+class PerfFinalizationInfo:
+    """Row contribution and exact byte/object identity of one staging file."""
+
+    # Current-event rows that survive finalization. Compatible merges count
+    # unique current identity keys; replacement paths count the written rows.
+    new_rows: int
+    merged_existing: bool
+    # SHA-256 and descriptor identity captured from the bytes parsed into the
+    # prepared parquet. Callers revalidate all three before publication.
+    source_digest: str
+    source_device: int
+    source_inode: int
+
+
+@dataclass(frozen=True)
+class _PreparedPerfFile:
+    """One fully rendered parquet awaiting batch publication."""
+
+    source: Path
+    target: Path
+    temporary: Path
+    temporary_device: int
+    temporary_inode: int
+    source_mode: int
+    info: PerfFinalizationInfo
+    merge_target: "PerfFileAttestation | None"
+    merge_target_was_absent: bool
+
+
+@dataclass(frozen=True)
+class PerfFileAttestation:
+    """Exact identity and bytes of one regular finalization artifact."""
+
+    path: Path
+    digest: str
+    device: int
+    inode: int
+    mode: int
+
+    @property
+    def identity(self) -> tuple[int, int]:
+        return self.device, self.inode
+
+
+@dataclass(frozen=True)
+class PerfPublication:
+    """Prepared replacement plus the exact target state it may replace."""
+
+    source: PerfFileAttestation
+    target: Path
+    prepared: PerfFileAttestation
+    previous_target: PerfFileAttestation | None
+    target_claim: Path | None
+    info: PerfFinalizationInfo
+
+
+class PerfPublicationTransaction(Protocol):
+    """Durable owner for a collector parquet publication batch."""
+
+    def prepare(self, publications: tuple[PerfPublication, ...]) -> None: ...
+
+    def rollback_complete(self, publications: tuple[PerfPublication, ...]) -> None: ...
+
+    def has_durable_journal(self) -> bool: ...
+
+
 def convert_perf_csv_to_parquet(
     csv_file: str | os.PathLike,
     *,
     delete_source: bool = True,
     compression: str = "zstd",
     merge_existing: bool = False,
+    finalization_info: dict[Path, PerfFinalizationInfo] | None = None,
 ) -> Path:
     """Convert a collector CSV staging file to parquet atomically.
 
@@ -833,24 +966,1026 @@ def convert_perf_csv_to_parquet(
     the newest row per key. This makes finalization idempotent and accumulative:
     a resumed / ``--resume-retry-failed`` / batched collection extends the
     parquet instead of clobbering it with only the current run's subset.
-    Finalization deletes the source ``.txt``, so without this a partial run after
-    an earlier finalize would silently shrink the complete file. A full fresh run
-    (all cases for the op) still yields the complete file either way, since every
-    identity key is re-measured and replaced.
+    ``finalization_info``, when provided, is populated with the current event's
+    finalized row contribution and whether an existing parquet took the
+    compatible merge path. Compatible merges count unique current identity
+    keys after deduplication; no-existing and schema-replacement paths count
+    the rows actually written. The mapping is keyed by the resolved parquet
+    path. Finalization deletes the source ``.txt``, so without merging a
+    partial run after an earlier finalize would silently shrink the complete
+    file. A full fresh run still yields the complete file either way because
+    every identity key is re-measured and replaced.
     """
     csv_path = Path(csv_file)
     if csv_path.name == "INCOMPLETE.txt" or not csv_path.name.endswith("_perf.txt"):
         raise ValueError(f"Expected a collector perf CSV ending in _perf.txt, got {csv_path}")
-    if not csv_path.exists():
+    if not csv_path.exists() and not csv_path.is_symlink():
         raise FileNotFoundError(csv_path)
+    return finalize_perf_files(
+        [csv_path],
+        delete_source=delete_source,
+        compression=compression,
+        merge_existing=merge_existing,
+        finalization_info=finalization_info,
+    )[0]
 
+
+def _stream_digest(file, *, copy_to=None) -> str:
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: file.read(1024 * 1024), b""):
+        digest.update(chunk)
+        if copy_to is not None:
+            copy_to.write(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _fsync_directory(directory: Path) -> None:
+    directory_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+@dataclass(frozen=True)
+class LockedOutputRoot:
+    """Capability for I/O bound to one flocked directory inode."""
+
+    path: Path
+    file_descriptor: int
+    identity: tuple[int, int]
+
+    def assert_canonical(self) -> None:
+        opened = os.fstat(self.file_descriptor)
+        try:
+            current = self.path.lstat()
+        except OSError as error:
+            raise RuntimeError(f"Collector finalization output root changed while locked: {self.path}") from error
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(current.st_mode)
+            or (opened.st_dev, opened.st_ino) != self.identity
+            or (current.st_dev, current.st_ino) != self.identity
+        ):
+            raise RuntimeError(f"Collector finalization output root changed while locked: {self.path}")
+
+    def entry(self, path: Path) -> str:
+        path = path.absolute()
+        name = path.name
+        if path.parent != self.path or not name or name in (".", "..") or "\0" in name or Path(name).name != name:
+            raise RuntimeError(f"Collector path is outside its locked output root: {path}")
+        self.assert_canonical()
+        return name
+
+    def stat(self, path: Path) -> os.stat_result:
+        return os.stat(self.entry(path), dir_fd=self.file_descriptor, follow_symlinks=False)
+
+    def absent(self, path: Path) -> bool:
+        try:
+            self.stat(path)
+        except FileNotFoundError:
+            return True
+        return False
+
+    def open(self, path: Path, flags: int, mode: int = 0o600) -> int:
+        return os.open(self.entry(path), flags, mode, dir_fd=self.file_descriptor)
+
+    def rename_noreplace(self, source: Path, target: Path) -> None:
+        source_name = self.entry(source)
+        target_name = self.entry(target)
+        _rename_noreplace_at(source_name, target_name, self.file_descriptor)
+        self.assert_canonical()
+
+    def replace(self, source: Path, target: Path) -> None:
+        source_name = self.entry(source)
+        target_name = self.entry(target)
+        os.replace(
+            source_name,
+            target_name,
+            src_dir_fd=self.file_descriptor,
+            dst_dir_fd=self.file_descriptor,
+        )
+        os.fsync(self.file_descriptor)
+        self.assert_canonical()
+
+    def unlink(self, path: Path) -> None:
+        os.unlink(self.entry(path), dir_fd=self.file_descriptor)
+        os.fsync(self.file_descriptor)
+        self.assert_canonical()
+
+    def fsync(self) -> None:
+        self.assert_canonical()
+        os.fsync(self.file_descriptor)
+
+
+@contextmanager
+def perf_finalization_lifecycle(output_root: Path, *, resolve_path: bool = True):
+    """Serialize preparation, publication, sidecar commit, and recovery."""
+    import fcntl
+
+    output_root = output_root.resolve() if resolve_path else output_root.absolute()
+    open_flags = os.O_RDONLY
+    open_flags |= getattr(os, "O_CLOEXEC", 0)
+    open_flags |= getattr(os, "O_DIRECTORY", 0)
+    open_flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(output_root, open_flags)
+    try:
+        opened = os.fstat(directory_fd)
+        current = output_root.lstat()
+        identity = (opened.st_dev, opened.st_ino)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or not stat.S_ISDIR(current.st_mode)
+            or (current.st_dev, current.st_ino) != identity
+        ):
+            raise RuntimeError(f"Collector finalization output root changed: {output_root}")
+        fcntl.flock(directory_fd, fcntl.LOCK_EX)
+        current = output_root.lstat()
+        if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != identity:
+            raise RuntimeError(f"Collector finalization output root changed after flock: {output_root}")
+        locked_root = LockedOutputRoot(
+            path=output_root,
+            file_descriptor=directory_fd,
+            identity=identity,
+        )
+        yield locked_root
+        try:
+            current = output_root.lstat()
+        except OSError as error:
+            raise RuntimeError(f"Collector finalization output root changed while locked: {output_root}") from error
+        if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != identity:
+            raise RuntimeError(f"Collector finalization output root changed while locked: {output_root}")
+    finally:
+        os.close(directory_fd)
+
+
+def perf_transaction_artifact_paths(output_root: Path) -> tuple[Path, Path, Path]:
+    """Return every marker that transfers preparation ownership to a journal."""
+    return (
+        output_root / PERF_TRANSACTION_FILENAME,
+        output_root / SIDECAR_TRANSACTION_FILENAME,
+        output_root / SIDECAR_STAGING_FILENAME,
+    )
+
+
+def _rename_noreplace(source: Path, target: Path) -> None:
+    """Atomically move one path only while the destination is absent."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    target_bytes = os.fsencode(target)
+    if sys.platform.startswith("linux"):
+        try:
+            rename = libc.renameat2
+        except AttributeError as error:
+            raise RuntimeError("Atomic no-replace rename is unavailable on this platform") from error
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(-100, source_bytes, -100, target_bytes, 1)
+    elif sys.platform == "darwin":
+        try:
+            rename = libc.renamex_np
+        except AttributeError as error:
+            raise RuntimeError("Atomic no-replace rename is unavailable on this platform") from error
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(source_bytes, target_bytes, 0x00000004)
+    else:
+        raise RuntimeError("Atomic no-replace rename is unavailable on this platform")
+    if result != 0:
+        error_number = ctypes.get_errno()
+        if error_number in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP):
+            raise RuntimeError("Atomic no-replace rename is unsupported by this filesystem")
+        raise OSError(error_number, os.strerror(error_number), str(source), str(target))
+    _fsync_directory(source.parent)
+    if target.parent != source.parent:
+        _fsync_directory(target.parent)
+
+
+def _rename_noreplace_at(source: str, target: str, directory_fd: int) -> None:
+    """Atomically rename two entries relative to one held directory."""
+    if any(not name or name in (".", "..") or "\0" in name or Path(name).name != name for name in (source, target)):
+        raise ValueError("Descriptor-relative rename requires direct entry names")
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    target_bytes = os.fsencode(target)
+    if sys.platform.startswith("linux"):
+        try:
+            rename = libc.renameat2
+        except AttributeError as error:
+            raise RuntimeError("Atomic no-replace rename is unavailable on this platform") from error
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(directory_fd, source_bytes, directory_fd, target_bytes, 1)
+    elif sys.platform == "darwin":
+        try:
+            rename = libc.renameatx_np
+        except AttributeError as error:
+            raise RuntimeError("Atomic no-replace rename is unavailable on this platform") from error
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(directory_fd, source_bytes, directory_fd, target_bytes, 0x00000004)
+    else:
+        raise RuntimeError("Atomic no-replace rename is unavailable on this platform")
+    if result != 0:
+        error_number = ctypes.get_errno()
+        if error_number == errno.EEXIST:
+            raise FileExistsError(error_number, os.strerror(error_number), target)
+        unsupported_errors = {errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP}
+        if sys.platform.startswith("linux"):
+            unsupported_errors.add(errno.EINVAL)
+        if error_number in unsupported_errors:
+            raise RuntimeError("Atomic no-replace rename is unsupported by this filesystem")
+        raise OSError(error_number, os.strerror(error_number), source, None, target)
+    os.fsync(directory_fd)
+
+
+def _lstat_path(path: Path, locked_root: LockedOutputRoot | None = None) -> os.stat_result:
+    return locked_root.stat(path) if locked_root is not None else path.lstat()
+
+
+def _open_path(
+    path: Path,
+    flags: int,
+    mode: int = 0o600,
+    *,
+    locked_root: LockedOutputRoot | None = None,
+) -> int:
+    return locked_root.open(path, flags, mode) if locked_root is not None else os.open(path, flags, mode)
+
+
+def _rename_path_noreplace(source: Path, target: Path, locked_root: LockedOutputRoot | None = None) -> None:
+    if locked_root is not None:
+        locked_root.rename_noreplace(source, target)
+    else:
+        _rename_noreplace(source, target)
+
+
+def _replace_path(source: Path, target: Path, locked_root: LockedOutputRoot | None = None) -> None:
+    if locked_root is not None:
+        locked_root.replace(source, target)
+    else:
+        os.replace(source, target)
+        _fsync_directory(target.parent)
+
+
+def _unlink_path(path: Path, locked_root: LockedOutputRoot | None = None) -> None:
+    if locked_root is not None:
+        locked_root.unlink(path)
+    else:
+        path.unlink()
+
+
+def _fsync_path_parent(path: Path, locked_root: LockedOutputRoot | None = None) -> None:
+    if locked_root is not None:
+        locked_root.fsync()
+    else:
+        _fsync_directory(path.parent)
+
+
+def _attest_regular_file(
+    path: Path,
+    *,
+    expected_identity: tuple[int, int] | None = None,
+    expected_digest: str | None = None,
+    expected_mode: int | None = None,
+    locked_root: LockedOutputRoot | None = None,
+) -> PerfFileAttestation:
+    open_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
+    try:
+        artifact_fd = _open_path(path, open_flags, locked_root=locked_root)
+    except OSError as error:
+        raise RuntimeError(f"Collector finalization artifact is not a regular file: {path}") from error
+    with os.fdopen(artifact_fd, "rb") as artifact:
+        opened = os.fstat(artifact.fileno())
+        digest = _stream_digest(artifact)
+    current = _lstat_path(path, locked_root)
+    identity = (opened.st_dev, opened.st_ino)
+    opened_mode = stat.S_IMODE(opened.st_mode)
+    current_mode = stat.S_IMODE(current.st_mode)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or identity != (current.st_dev, current.st_ino)
+        or opened_mode != current_mode
+        or (expected_identity is not None and identity != expected_identity)
+        or (expected_digest is not None and digest != expected_digest)
+        or (expected_mode is not None and opened_mode != expected_mode)
+    ):
+        raise RuntimeError(f"Collector finalization artifact changed: {path}")
+    return PerfFileAttestation(
+        path=path,
+        digest=digest,
+        device=opened.st_dev,
+        inode=opened.st_ino,
+        mode=opened_mode,
+    )
+
+
+def _snapshot_perf_target(
+    target: Path,
+    locked_root: LockedOutputRoot,
+) -> tuple[PerfFileAttestation | None, Path | None]:
+    if _path_absent(target, locked_root):
+        return None, None
+    previous_target = _attest_regular_file(target, locked_root=locked_root)
+    target_claim = target.with_name(f".{target.name}.{uuid.uuid4().hex}.claim")
+    if not _path_absent(target_claim, locked_root):
+        raise RuntimeError(f"Collector parquet target claim already exists: {target_claim}")
+    return previous_target, target_claim
+
+
+def _prepare_perf_publications(
+    prepared: list[_PreparedPerfFile],
+    locked_roots: dict[Path, LockedOutputRoot],
+) -> list[PerfPublication]:
+    publications: list[PerfPublication] = []
+    for item in prepared:
+        locked_root = locked_roots[item.target.parent]
+        prepared_attestation = _attest_regular_file(
+            item.temporary,
+            expected_identity=(item.temporary_device, item.temporary_inode),
+            locked_root=locked_root,
+        )
+        previous_target, target_claim = _snapshot_perf_target(item.target, locked_root)
+        if item.merge_target_was_absent and previous_target is not None:
+            raise RuntimeError(f"Collector parquet target changed after merge preparation: {item.target}")
+        if item.merge_target is not None and (
+            previous_target is None
+            or previous_target.identity != item.merge_target.identity
+            or previous_target.digest != item.merge_target.digest
+            or previous_target.mode != item.merge_target.mode
+        ):
+            raise RuntimeError(f"Collector parquet target changed after merge preparation: {item.target}")
+        source = _attest_regular_file(
+            item.source,
+            expected_identity=(item.info.source_device, item.info.source_inode),
+            expected_digest=item.info.source_digest,
+            expected_mode=item.source_mode,
+            locked_root=locked_root,
+        )
+        publications.append(
+            PerfPublication(
+                source=source,
+                target=item.target,
+                prepared=prepared_attestation,
+                previous_target=previous_target,
+                target_claim=target_claim,
+                info=item.info,
+            )
+        )
+    return publications
+
+
+def _same_perf_file(current: PerfFileAttestation, expected: PerfFileAttestation) -> bool:
+    return current.identity == expected.identity and current.digest == expected.digest and current.mode == expected.mode
+
+
+def _attest_expected_perf_file(
+    path: Path,
+    expected: PerfFileAttestation,
+    locked_root: LockedOutputRoot | None = None,
+) -> PerfFileAttestation:
+    return _attest_regular_file(
+        path,
+        expected_identity=expected.identity,
+        expected_digest=expected.digest,
+        expected_mode=expected.mode,
+        locked_root=locked_root,
+    )
+
+
+def _path_absent(path: Path, locked_root: LockedOutputRoot | None = None) -> bool:
+    try:
+        _lstat_path(path, locked_root)
+    except FileNotFoundError:
+        return True
+    return False
+
+
+def _restore_unknown_private_path(
+    private_path: Path,
+    target: Path,
+    *,
+    context: str,
+    locked_root: LockedOutputRoot | None = None,
+) -> None:
+    if _path_absent(target, locked_root):
+        try:
+            _rename_path_noreplace(private_path, target, locked_root)
+        except Exception as error:
+            raise RuntimeError(
+                f"Collector parquet {context} changed; preserved unknown object at {private_path}"
+            ) from error
+    raise RuntimeError(f"Collector parquet {context} changed: {target}")
+
+
+def _validate_unpublished_perf_publications(
+    publications: Iterable[PerfPublication],
+    locked_roots: dict[Path, LockedOutputRoot],
+) -> None:
+    for publication in publications:
+        locked_root = locked_roots[publication.target.parent]
+        _attest_expected_perf_file(publication.source.path, publication.source, locked_root)
+        _attest_expected_perf_file(publication.prepared.path, publication.prepared, locked_root)
+        if publication.target_claim is not None and not _path_absent(publication.target_claim, locked_root):
+            raise RuntimeError(f"Collector parquet target claim changed: {publication.target_claim}")
+        if publication.previous_target is None:
+            if not _path_absent(publication.target, locked_root):
+                raise RuntimeError(f"Collector parquet target changed before publication: {publication.target}")
+        else:
+            _attest_expected_perf_file(publication.target, publication.previous_target, locked_root)
+
+
+def _snapshot_legacy_perf_targets(
+    publications: Iterable[PerfPublication],
+    *,
+    snapshot_stack: ExitStack,
+    locked_roots: dict[Path, LockedOutputRoot],
+) -> dict[Path, BinaryIO | None]:
+    """Keep anonymous old-target bytes for ordinary exception rollback."""
+    snapshots: dict[Path, BinaryIO | None] = {}
+    for publication in publications:
+        previous = publication.previous_target
+        if previous is None:
+            snapshots[publication.target] = None
+            continue
+        locked_root = locked_roots[publication.target.parent]
+        snapshot = snapshot_stack.enter_context(tempfile.TemporaryFile())  # noqa: SIM115 - owned by ExitStack
+        with os.fdopen(
+            locked_root.open(
+                publication.target,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+            ),
+            "rb",
+        ) as target_file:
+            opened = os.fstat(target_file.fileno())
+            digest = _stream_digest(target_file, copy_to=snapshot)
+        current = locked_root.stat(publication.target)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or (opened.st_dev, opened.st_ino) != previous.identity
+            or (current.st_dev, current.st_ino) != previous.identity
+            or digest != previous.digest
+            or stat.S_IMODE(opened.st_mode) != previous.mode
+            or stat.S_IMODE(current.st_mode) != previous.mode
+        ):
+            raise RuntimeError(f"Collector parquet target changed before publication: {publication.target}")
+        snapshot.flush()
+        os.fsync(snapshot.fileno())
+        snapshot.seek(0)
+        snapshots[publication.target] = snapshot
+    return snapshots
+
+
+def _validate_legacy_perf_rollback(
+    publications: Iterable[PerfPublication],
+    locked_roots: dict[Path, LockedOutputRoot],
+) -> None:
+    for publication in publications:
+        locked_root = locked_roots[publication.target.parent]
+        previous = publication.previous_target
+        if previous is None:
+            if not _path_absent(publication.target, locked_root):
+                raise RuntimeError(f"Collector parquet target is not restored: {publication.target}")
+            continue
+        _attest_regular_file(
+            publication.target,
+            expected_digest=previous.digest,
+            expected_mode=previous.mode,
+            locked_root=locked_root,
+        )
+
+
+def _restore_legacy_perf_publications(
+    publications: Iterable[PerfPublication],
+    snapshots: dict[Path, BinaryIO | None],
+    locked_roots: dict[Path, LockedOutputRoot],
+) -> None:
+    for publication in reversed(list(publications)):
+        locked_root = locked_roots[publication.target.parent]
+        previous = publication.previous_target
+        if _path_absent(publication.target, locked_root):
+            if previous is None:
+                continue
+            raise RuntimeError(f"Collector parquet target disappeared during rollback: {publication.target}")
+        current = _attest_regular_file(publication.target, locked_root=locked_root)
+        if previous is not None and _same_perf_file(current, previous):
+            continue
+        if not _same_perf_file(current, publication.prepared):
+            raise RuntimeError(f"Collector parquet target changed during rollback: {publication.target}")
+        prepared_path = publication.prepared.path
+        if not _path_absent(prepared_path, locked_root):
+            raise RuntimeError(f"Conflicting collector parquet rollback artifact: {prepared_path}")
+        if previous is None:
+            _rename_path_noreplace(publication.target, prepared_path, locked_root)
+            _attest_expected_perf_file(prepared_path, publication.prepared, locked_root)
+            continue
+
+        snapshot = snapshots[publication.target]
+        if snapshot is None:
+            raise RuntimeError(f"Missing collector parquet rollback snapshot: {publication.target}")
+        _rename_path_noreplace(publication.target, prepared_path, locked_root)
+        _attest_expected_perf_file(prepared_path, publication.prepared, locked_root)
+        restore_path = publication.target.with_name(f".{publication.target.name}.rollback.tmp")
+        open_flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        restore_created = False
+        try:
+            restore_fd = locked_root.open(restore_path, open_flags | os.O_CREAT | os.O_EXCL, 0o600)
+            restore_created = True
+        except FileExistsError:
+            restore_fd = locked_root.open(restore_path, open_flags)
+        with os.fdopen(restore_fd, "r+b") as restore_file:
+            if restore_created:
+                locked_root.fsync()
+            opened = os.fstat(restore_file.fileno())
+            restore_current = locked_root.stat(restore_path)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or not stat.S_ISREG(restore_current.st_mode)
+                or (opened.st_dev, opened.st_ino) != (restore_current.st_dev, restore_current.st_ino)
+                or opened.st_nlink != 1
+                or restore_current.st_nlink != 1
+            ):
+                raise RuntimeError(f"Collector parquet rollback artifact changed: {restore_path}")
+            restore_file.seek(0)
+            restore_file.truncate()
+            snapshot.seek(0)
+            shutil.copyfileobj(snapshot, restore_file)
+            restore_file.flush()
+            os.fchmod(restore_file.fileno(), previous.mode)
+            os.fsync(restore_file.fileno())
+        _attest_regular_file(
+            restore_path,
+            expected_digest=previous.digest,
+            expected_mode=previous.mode,
+            locked_root=locked_root,
+        )
+        _rename_path_noreplace(restore_path, publication.target, locked_root)
+        _attest_regular_file(
+            publication.target,
+            expected_digest=previous.digest,
+            expected_mode=previous.mode,
+            locked_root=locked_root,
+        )
+    _validate_legacy_perf_rollback(publications, locked_roots)
+
+
+def _publish_perf_publication(publication: PerfPublication, locked_root: LockedOutputRoot) -> None:
+    previous = publication.previous_target
+    claim = publication.target_claim
+    if previous is not None:
+        if claim is None:
+            raise RuntimeError(f"Missing collector parquet target claim: {publication.target}")
+        _rename_path_noreplace(publication.target, claim, locked_root)
+        try:
+            _attest_expected_perf_file(claim, previous, locked_root)
+        except Exception as error:
+            try:
+                _restore_unknown_private_path(
+                    claim,
+                    publication.target,
+                    context="target claim",
+                    locked_root=locked_root,
+                )
+            except RuntimeError as restore_error:
+                raise restore_error from error
+            raise
+    elif claim is not None:
+        raise RuntimeError(f"Unexpected collector parquet target claim: {claim}")
+
+    _rename_path_noreplace(publication.prepared.path, publication.target, locked_root)
+    _attest_expected_perf_file(publication.target, publication.prepared, locked_root)
+
+
+def _private_perf_state(
+    path: Path,
+    expected: PerfFileAttestation,
+    *,
+    target: Path,
+    context: str,
+    locked_root: LockedOutputRoot | None = None,
+) -> PerfFileAttestation | None:
+    if _path_absent(path, locked_root):
+        return None
+    try:
+        return _attest_expected_perf_file(path, expected, locked_root)
+    except Exception as error:
+        try:
+            _restore_unknown_private_path(path, target, context=context, locked_root=locked_root)
+        except RuntimeError as restore_error:
+            raise restore_error from error
+        raise
+
+
+def _restore_one_perf_publication(
+    publication: PerfPublication,
+    locked_root: LockedOutputRoot | None = None,
+) -> None:
+    target = publication.target
+    previous = publication.previous_target
+    claim = publication.target_claim
+    claim_state = None
+    if claim is not None:
+        if previous is None:
+            raise RuntimeError(f"Unexpected collector parquet target claim: {claim}")
+        claim_state = _private_perf_state(
+            claim,
+            previous,
+            target=target,
+            context="target claim",
+            locked_root=locked_root,
+        )
+    prepared_state = _private_perf_state(
+        publication.prepared.path,
+        publication.prepared,
+        target=target,
+        context="prepared claim",
+        locked_root=locked_root,
+    )
+
+    if _path_absent(target, locked_root):
+        if previous is None:
+            return
+        if claim_state is None or claim is None:
+            raise RuntimeError(f"Collector parquet target disappeared during rollback: {target}")
+        _rename_path_noreplace(claim, target, locked_root)
+        _attest_expected_perf_file(target, previous, locked_root)
+        return
+
+    current = _attest_regular_file(target, locked_root=locked_root)
+    if previous is not None and _same_perf_file(current, previous):
+        return
+    if not _same_perf_file(current, publication.prepared):
+        raise RuntimeError(f"Collector parquet target changed during rollback: {target}")
+    if prepared_state is not None:
+        raise RuntimeError(f"Collector prepared claim unexpectedly exists during rollback: {publication.prepared.path}")
+
+    _rename_path_noreplace(target, publication.prepared.path, locked_root)
+    try:
+        _attest_expected_perf_file(publication.prepared.path, publication.prepared, locked_root)
+    except Exception as error:
+        try:
+            _restore_unknown_private_path(
+                publication.prepared.path,
+                target,
+                context="prepared rollback claim",
+                locked_root=locked_root,
+            )
+        except RuntimeError as restore_error:
+            raise restore_error from error
+        raise
+    if previous is not None:
+        if claim_state is None or claim is None:
+            raise RuntimeError(f"Missing collector parquet target claim during rollback: {target}")
+        _rename_path_noreplace(claim, target, locked_root)
+        _attest_expected_perf_file(target, previous, locked_root)
+
+
+def _restore_perf_publications(
+    publications: Iterable[PerfPublication],
+    locked_roots: dict[Path, LockedOutputRoot] | None = None,
+) -> None:
+    errors: list[Exception] = []
+    for publication in reversed(list(publications)):
+        try:
+            _restore_one_perf_publication(
+                publication,
+                locked_roots[publication.target.parent] if locked_roots is not None else None,
+            )
+        except Exception as error:
+            errors.append(error)
+    if errors:
+        raise RuntimeError(f"Collector parquet rollback retained strict recovery state: {errors[0]}") from errors[0]
+
+
+def validate_restored_perf_publications(
+    publications: Iterable[PerfPublication],
+    locked_roots: dict[Path, LockedOutputRoot] | None = None,
+) -> None:
+    """Verify every target is exactly in one journaled pre-publish state."""
+    for publication in publications:
+        locked_root = locked_roots[publication.target.parent] if locked_roots is not None else None
+        target = publication.target
+        previous = publication.previous_target
+        claim = publication.target_claim
+        if _path_absent(target, locked_root):
+            if previous is None:
+                continue
+            raise RuntimeError(f"Collector parquet target disappeared after rollback: {target}")
+        if previous is None:
+            raise RuntimeError(f"Collector parquet target is not restored: {target}")
+        _attest_expected_perf_file(target, previous, locked_root)
+        if claim is not None and not _path_absent(claim, locked_root):
+            raise RuntimeError(f"Collector parquet target claim was not cleared after rollback: {claim}")
+
+
+def restore_perf_publications(
+    publications: Iterable[PerfPublication],
+    locked_roots: dict[Path, LockedOutputRoot] | None = None,
+) -> None:
+    """Restore an attested publication batch to its exact pre-publish bytes."""
+    publication_list = list(publications)
+    _restore_perf_publications(publication_list, locked_roots)
+    validate_restored_perf_publications(publication_list, locked_roots)
+
+
+def cleanup_perf_publication_artifacts(
+    publications: Iterable[PerfPublication],
+    locked_roots: dict[Path, LockedOutputRoot] | None = None,
+) -> None:
+    """Park transaction-owned artifacts in their bounded preparation slots."""
+    publication_list = list(publications)
+    for publication in publication_list:
+        locked_root = locked_roots[publication.target.parent] if locked_roots is not None else None
+        prepared = publication.prepared
+        target_is_published = False
+        if not _path_absent(publication.target, locked_root):
+            target_is_published = _same_perf_file(
+                _attest_regular_file(publication.target, locked_root=locked_root),
+                prepared,
+            )
+        if target_is_published:
+            if not _path_absent(prepared.path, locked_root):
+                raise RuntimeError(f"Collector prepared claim unexpectedly exists during cleanup: {prepared.path}")
+        else:
+            _attest_expected_perf_file(prepared.path, prepared, locked_root)
+        claim = publication.target_claim
+        previous = publication.previous_target
+        if claim is not None and not _path_absent(claim, locked_root):
+            if previous is None:
+                raise RuntimeError(f"Unexpected collector parquet target claim: {claim}")
+            if not _path_absent(prepared.path, locked_root):
+                raise RuntimeError(f"Conflicting collector parquet cleanup artifacts: {prepared.path}")
+            claimed_previous = PerfFileAttestation(
+                path=claim,
+                digest=previous.digest,
+                device=previous.device,
+                inode=previous.inode,
+                mode=previous.mode,
+            )
+            _attest_expected_perf_file(claim, claimed_previous, locked_root)
+            _rename_path_noreplace(claim, prepared.path, locked_root)
+            _attest_expected_perf_file(prepared.path, claimed_previous, locked_root)
+
+
+def _validate_prepared_source(
+    item: _PreparedPerfFile,
+    *,
+    context: str,
+    locked_root: LockedOutputRoot,
+) -> None:
+    open_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
+    try:
+        source_fd = locked_root.open(item.source, open_flags)
+    except OSError as error:
+        raise RuntimeError(f"Collector staging file changed {context}: {item.source}") from error
+    with os.fdopen(source_fd, "rb") as source_file:
+        opened = os.fstat(source_file.fileno())
+        source_digest = _stream_digest(source_file)
+    current = locked_root.stat(item.source)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        or (opened.st_dev, opened.st_ino) != (item.info.source_device, item.info.source_inode)
+        or source_digest != item.info.source_digest
+        or stat.S_IMODE(opened.st_mode) != item.source_mode
+        or stat.S_IMODE(current.st_mode) != item.source_mode
+    ):
+        raise RuntimeError(f"Collector staging file changed {context}: {item.source}")
+
+
+def _is_owned_temporary(
+    path: Path,
+    device: int,
+    inode: int,
+    locked_root: LockedOutputRoot | None = None,
+) -> bool:
+    try:
+        current = _lstat_path(path, locked_root)
+    except FileNotFoundError:
+        return False
+    return (
+        stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == (device, inode) and current.st_nlink == 1
+    )
+
+
+def _require_owned_temporary(item: _PreparedPerfFile, locked_root: LockedOutputRoot) -> None:
+    if not _is_owned_temporary(
+        item.temporary,
+        item.temporary_device,
+        item.temporary_inode,
+        locked_root,
+    ):
+        raise RuntimeError(f"Collector temporary file changed during finalization: {item.temporary}")
+
+
+def _validate_owned_temporary_cleanup(item: _PreparedPerfFile, locked_root: LockedOutputRoot) -> None:
+    try:
+        current = locked_root.stat(item.temporary)
+    except FileNotFoundError:
+        return
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or (current.st_dev, current.st_ino) != (item.temporary_device, item.temporary_inode)
+        or current.st_nlink != 1
+    ):
+        raise RuntimeError(f"Collector temporary file changed before cleanup: {item.temporary}")
+    _require_owned_temporary(item, locked_root)
+
+
+def perf_preparation_path(parquet_path: Path) -> Path:
+    """Return the one lock-owned pre-journal render path for a parquet."""
+    return parquet_path.with_name(f".{parquet_path.name}.tmp")
+
+
+def _validate_perf_file_paths(csv_path: Path, locked_root: LockedOutputRoot) -> tuple[Path, Path]:
+    try:
+        source_state = locked_root.stat(csv_path)
+    except FileNotFoundError as error:
+        raise RuntimeError(f"Cannot convert non-regular collector staging file: {csv_path}") from error
+    if not stat.S_ISREG(source_state.st_mode):
+        raise RuntimeError(f"Cannot convert non-regular collector staging file: {csv_path}")
     lock_path = Path(f"{csv_path}.lock")
-    if lock_path.exists():
+    if not locked_root.absent(lock_path):
         raise RuntimeError(f"Cannot convert {csv_path} while lock file exists: {lock_path}")
 
+    parquet_path = csv_path.with_suffix(".parquet")
+    if not locked_root.absent(parquet_path):
+        parquet_state = locked_root.stat(parquet_path)
+        if not stat.S_ISREG(parquet_state.st_mode):
+            raise RuntimeError(f"Cannot replace non-regular collector parquet file: {parquet_path}")
+    merge_lock = parquet_path.with_name(f"{parquet_path.name}.mergelock")
+    if not locked_root.absent(merge_lock):
+        merge_lock_state = locked_root.stat(merge_lock)
+        if not stat.S_ISREG(merge_lock_state.st_mode):
+            raise RuntimeError(f"Invalid collector parquet merge lock: {merge_lock}")
+    return parquet_path, merge_lock
+
+
+def _read_attested_parquet(parquet_path: Path, *, pq, locked_root: LockedOutputRoot):
+    parquet_fd = locked_root.open(
+        parquet_path,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+    )
+    with os.fdopen(parquet_fd, "rb") as parquet_file, tempfile.TemporaryFile() as snapshot_file:
+        opened = os.fstat(parquet_file.fileno())
+        digest = _stream_digest(parquet_file, copy_to=snapshot_file)
+        snapshot_file.flush()
+        snapshot_file.seek(0)
+        table = pq.read_table(snapshot_file)
+    current = locked_root.stat(parquet_path)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        or stat.S_IMODE(opened.st_mode) != stat.S_IMODE(current.st_mode)
+    ):
+        raise RuntimeError(f"Collector parquet target changed while preparing merge: {parquet_path}")
+    return table, PerfFileAttestation(
+        path=parquet_path,
+        digest=digest,
+        device=opened.st_dev,
+        inode=opened.st_ino,
+        mode=stat.S_IMODE(opened.st_mode),
+    )
+
+
+def _prepare_perf_file(
+    csv_path: Path,
+    parquet_path: Path,
+    *,
+    expected_source_identity: tuple[str, int, int] | None,
+    compression: str,
+    merge_existing: bool,
+    pa,
+    pc_compute,
+    pc_csv,
+    pq,
+    locked_root: LockedOutputRoot,
+) -> _PreparedPerfFile:
+    source_fd = locked_root.open(
+        csv_path,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+    )
+    with os.fdopen(source_fd, "rb") as source_file, tempfile.TemporaryFile() as snapshot_file:
+        source_stat = os.fstat(source_file.fileno())
+        source_mode = stat.S_IMODE(source_stat.st_mode)
+        source_digest = _stream_digest(source_file, copy_to=snapshot_file)
+        if (
+            expected_source_identity is not None
+            and (
+                source_digest,
+                source_stat.st_dev,
+                source_stat.st_ino,
+            )
+            != expected_source_identity
+        ):
+            raise RuntimeError(f"Collector staging file changed after preflight: {csv_path}")
+        snapshot_file.seek(0)
+        table = pc_csv.read_csv(snapshot_file)
+    new_rows = table.num_rows
+    merged_existing = False
+    merge_target = None
+    merge_target_was_absent = False
+    if merge_existing:
+        try:
+            locked_root.stat(parquet_path)
+        except FileNotFoundError:
+            merge_target_was_absent = True
+        else:
+            old_table, merge_target = _read_attested_parquet(parquet_path, pq=pq, locked_root=locked_root)
+            table, merged_existing, new_rows = _merge_perf_rows(table, old_table, parquet_path, pa=pa)
+    table = _normalize_power_metrics(table, pa=pa, pc=pc_compute)
+
+    temporary = perf_preparation_path(parquet_path)
+    temporary_identity: tuple[int, int] | None = None
+    temporary_fd: int | None = None
+    try:
+        open_flags = os.O_RDWR
+        open_flags |= getattr(os, "O_CLOEXEC", 0)
+        open_flags |= getattr(os, "O_NOFOLLOW", 0)
+        temporary_created = False
+        try:
+            temporary_fd = locked_root.open(temporary, open_flags | os.O_CREAT | os.O_EXCL, 0o600)
+            temporary_created = True
+        except FileExistsError:
+            temporary_fd = locked_root.open(temporary, open_flags)
+        temp_stat = os.fstat(temporary_fd)
+        temporary_identity = (temp_stat.st_dev, temp_stat.st_ino)
+        current = locked_root.stat(temporary)
+        if (
+            not stat.S_ISREG(temp_stat.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or (current.st_dev, current.st_ino) != temporary_identity
+            or temp_stat.st_nlink != 1
+            or current.st_nlink != 1
+        ):
+            raise RuntimeError(f"Collector temporary file changed before reuse: {temporary}")
+        temp_file = os.fdopen(temporary_fd, "r+b")
+        temporary_fd = None
+        with temp_file:
+            if temporary_created:
+                locked_root.fsync()
+            temp_file.seek(0)
+            temp_file.truncate()
+            pq.write_table(table, temp_file, compression=compression)
+            temp_file.flush()
+            os.fchmod(temp_file.fileno(), source_mode)
+            os.fsync(temp_file.fileno())
+        prepared = _PreparedPerfFile(
+            source=csv_path,
+            target=parquet_path,
+            temporary=temporary,
+            temporary_device=temporary_identity[0],
+            temporary_inode=temporary_identity[1],
+            source_mode=source_mode,
+            info=PerfFinalizationInfo(
+                new_rows=new_rows,
+                merged_existing=merged_existing,
+                source_digest=source_digest,
+                source_device=source_stat.st_dev,
+                source_inode=source_stat.st_ino,
+            ),
+            merge_target=merge_target,
+            merge_target_was_absent=merge_target_was_absent,
+        )
+        _require_owned_temporary(prepared, locked_root)
+        return prepared
+    except Exception:
+        if temporary_fd is not None:
+            os.close(temporary_fd)
+        if temporary_identity is not None:
+            device, inode = temporary_identity
+            if _is_owned_temporary(temporary, device, inode, locked_root):
+                _attest_regular_file(
+                    temporary,
+                    expected_identity=(device, inode),
+                    locked_root=locked_root,
+                )
+        raise
+
+
+def _finalize_perf_file_batch(
+    csv_paths: list[Path],
+    *,
+    locked_roots: dict[Path, LockedOutputRoot],
+    delete_source: bool,
+    compression: str,
+    merge_existing: bool,
+    finalization_info: dict[Path, PerfFinalizationInfo] | None,
+    prepublish_validate: Callable[[], None] | None,
+    expected_source_identities: dict[Path, tuple[str, int, int]] | None,
+    publication_transaction: PerfPublicationTransaction | None,
+) -> list[Path]:
+    """Prepare every conversion before publishing any parquet target."""
+    if publication_transaction is not None and delete_source:
+        raise ValueError("A durable perf publication transaction must retain its staging files")
     try:
         import pyarrow as pa
-        import pyarrow.csv as pc
+        import pyarrow.compute as pc_compute
+        import pyarrow.csv as pc_csv
         import pyarrow.parquet as pq
     except ImportError as exc:
         raise RuntimeError(
@@ -858,30 +1993,248 @@ def convert_perf_csv_to_parquet(
             "Install the project runtime dependencies before collecting perf data."
         ) from exc
 
-    parquet_path = csv_path.with_suffix(".parquet")
-    tmp_path = parquet_path.with_name(f".{parquet_path.name}.tmp")
-    # Serialize the read-merge-replace sequence per parquet target: the source
-    # .lock above only guards CSV writers. Two finalizers racing here would
-    # both read the same existing parquet and the later os.replace would
-    # silently drop the earlier merge's rows.
-    merge_lock = parquet_path.with_name(f"{parquet_path.name}.mergelock")
-    lock_fd = _acquire_merge_lock(merge_lock)
+    validated_inputs = [
+        (csv_path, *_validate_perf_file_paths(csv_path, locked_roots[csv_path.parent])) for csv_path in csv_paths
+    ]
+    if expected_source_identities is not None:
+        expected_paths = set(expected_source_identities)
+        selected_paths = {csv_path for csv_path, _parquet_path, _merge_lock in validated_inputs}
+        if expected_paths != selected_paths:
+            raise RuntimeError("Collector staging preflight does not match the selected finalization inputs")
+
+    unique_inputs: list[tuple[Path, Path, Path]] = []
+    seen_inputs: set[tuple[int, int, tuple[int, int, str]]] = set()
+    opened_locks: dict[
+        tuple[int, int],
+        tuple[int, list[tuple[Path, tuple[int, int, str]]]],
+    ] = {}
+    prepared: list[_PreparedPerfFile] = []
+    publications: list[PerfPublication] = []
+    legacy_snapshots: dict[Path, BinaryIO | None] = {}
+    legacy_snapshot_stack = ExitStack()
     try:
-        table = pc.read_csv(csv_path)
-        if merge_existing and parquet_path.exists():
-            table = _merge_perf_rows(table, parquet_path, pa=pa, pq=pq)
-        pq.write_table(table, tmp_path, compression=compression)
-        os.replace(tmp_path, parquet_path)
+        for item in validated_inputs:
+            locked_root = locked_roots[item[0].parent]
+            source_stat = locked_root.stat(item[0])
+            if not stat.S_ISREG(source_stat.st_mode):
+                raise RuntimeError(f"Cannot convert non-regular collector staging file: {item[0]}")
+            lock_fd, lock_identity, lock_entry_key = _open_merge_lock(item[2], locked_root)
+            if lock_identity in opened_locks:
+                opened_locks[lock_identity][1].append((item[2], lock_entry_key))
+                _release_merge_lock(lock_fd)
+            else:
+                opened_locks[lock_identity] = (lock_fd, [(item[2], lock_entry_key)])
+            input_identity = (source_stat.st_dev, source_stat.st_ino, lock_entry_key)
+            if input_identity not in seen_inputs:
+                seen_inputs.add(input_identity)
+                unique_inputs.append(item)
+        lock_order = sorted(
+            opened_locks,
+            key=lambda identity: min(entry_key for _path, entry_key in opened_locks[identity][1]),
+        )
+        for lock_identity in lock_order:
+            lock_fd, lock_entries = opened_locks[lock_identity]
+            _acquire_merge_lock(lock_fd)
+            for lock_path, lock_entry_key in lock_entries:
+                _revalidate_merge_lock_path(
+                    lock_fd,
+                    lock_path,
+                    expected_identity=lock_identity,
+                    expected_entry_key=lock_entry_key,
+                    locked_root=locked_roots[lock_path.parent],
+                )
+        preparation_targets = tuple(parquet_path for _csv_path, parquet_path, _lock in unique_inputs)
+        transaction_paths = tuple(
+            transaction_path
+            for output_root in sorted({path.parent for path in preparation_targets})
+            for transaction_path in perf_transaction_artifact_paths(output_root)
+        )
+        if not cleanup_unjournaled_perf_preparations(
+            preparation_targets,
+            transaction_paths=transaction_paths,
+            locked_roots=locked_roots,
+        ):
+            raise RuntimeError("Cannot finalize collector perf files while a transaction artifact exists")
+        for csv_path, parquet_path, _merge_lock in unique_inputs:
+            locked_root = locked_roots[csv_path.parent]
+            _validate_perf_file_paths(csv_path, locked_root)
+            prepared.append(
+                _prepare_perf_file(
+                    csv_path,
+                    parquet_path,
+                    expected_source_identity=(
+                        expected_source_identities[csv_path] if expected_source_identities is not None else None
+                    ),
+                    compression=compression,
+                    merge_existing=merge_existing,
+                    pa=pa,
+                    pc_compute=pc_compute,
+                    pc_csv=pc_csv,
+                    pq=pq,
+                    locked_root=locked_root,
+                )
+            )
+
+        # The bytes parsed above are the bytes this batch owns. Validate the
+        # whole input set again before any parquet is replaced.
+        for item in prepared:
+            locked_root = locked_roots[item.source.parent]
+            _validate_perf_file_paths(item.source, locked_root)
+            _validate_prepared_source(item, context="during finalization", locked_root=locked_root)
+            _require_owned_temporary(item, locked_root)
+        if prepublish_validate is not None:
+            prepublish_validate()
+            for item in prepared:
+                locked_root = locked_roots[item.source.parent]
+                _validate_perf_file_paths(item.source, locked_root)
+                _validate_prepared_source(item, context="after prepublish validation", locked_root=locked_root)
+                _require_owned_temporary(item, locked_root)
+
+        publications = _prepare_perf_publications(prepared, locked_roots)
+        if publication_transaction is not None:
+            publication_transaction.prepare(tuple(publications))
+        else:
+            legacy_snapshots = _snapshot_legacy_perf_targets(
+                publications,
+                snapshot_stack=legacy_snapshot_stack,
+                locked_roots=locked_roots,
+            )
+        _validate_unpublished_perf_publications(publications, locked_roots)
+        try:
+            for publication in publications:
+                locked_root = locked_roots[publication.target.parent]
+                if publication_transaction is None:
+                    _replace_path(publication.prepared.path, publication.target, locked_root)
+                    _attest_expected_perf_file(publication.target, publication.prepared, locked_root)
+                else:
+                    _publish_perf_publication(publication, locked_root)
+        except Exception:
+            if publication_transaction is None:
+                _restore_legacy_perf_publications(publications, legacy_snapshots, locked_roots)
+                cleanup_perf_publication_artifacts(publications, locked_roots)
+            else:
+                _restore_perf_publications(publications, locked_roots)
+                publication_transaction.rollback_complete(tuple(publications))
+            raise
+        if publication_transaction is None:
+            cleanup_perf_publication_artifacts(publications, locked_roots)
+
         if delete_source:
-            csv_path.unlink()
+            for item in prepared:
+                locked_root = locked_roots[item.source.parent]
+                _validate_perf_file_paths(item.source, locked_root)
+                _validate_prepared_source(item, context="before cleanup", locked_root=locked_root)
+            for item in prepared:
+                _unlink_path(item.source, locked_roots[item.source.parent])
+        if finalization_info is not None:
+            finalization_info.update({item.target: item.info for item in prepared})
+        return [item.target for item in prepared]
     finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
-        _release_merge_lock(merge_lock, lock_fd)
-    return parquet_path
+        legacy_snapshot_stack.close()
+        for item in prepared:
+            if publication_transaction is None or not publication_transaction.has_durable_journal():
+                _validate_owned_temporary_cleanup(item, locked_roots[item.temporary.parent])
+        for lock_fd, _lock_entries in opened_locks.values():
+            _release_merge_lock(lock_fd)
 
 
-def _acquire_merge_lock(lock_path: Path) -> int:
+def _normalize_power_metrics(table, *, pa, pc):
+    """Store unavailable power metrics as typed zero sentinels.
+
+    A running GPU workload cannot have a valid zero-watt measurement, and the
+    SDK already interprets zero energy as uncovered power data.  Committed
+    parquet files therefore use ``0.0`` rather than null for unavailable
+    ``power``/``power_limit`` cells.  Tables that omit these optional columns
+    remain unchanged.
+    """
+    for name in ("power", "power_limit"):
+        if name not in table.column_names:
+            continue
+
+        index = table.schema.get_field_index(name)
+        column = table.column(index)
+        try:
+            column = column.cast(pa.float64())
+        except (pa.ArrowInvalid, pa.ArrowNotImplementedError, pa.ArrowTypeError) as exc:
+            raise ValueError(f"{name} must be convertible to float64") from exc
+
+        column = pc.fill_null(column, 0.0)
+        for row_index, value in enumerate(column.to_pylist()):
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must contain finite non-negative values; row {row_index} has {value!r}")
+
+        table = table.set_column(index, name, column)
+    return table
+
+
+def _open_merge_lock(
+    lock_path: Path,
+    locked_root: LockedOutputRoot | None = None,
+) -> tuple[int, tuple[int, int], tuple[int, int, str]]:
+    """Open and attest a merge-lock object without acquiring its flock."""
+    open_flags = os.O_CREAT | os.O_WRONLY
+    open_flags |= getattr(os, "O_CLOEXEC", 0)
+    open_flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = _open_path(lock_path, open_flags, locked_root=locked_root)
+    try:
+        _fsync_path_parent(lock_path, locked_root)
+        opened = os.fstat(fd)
+        current = _lstat_path(lock_path, locked_root)
+        identity = (opened.st_dev, opened.st_ino)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or identity != (current.st_dev, current.st_ino)
+        ):
+            raise RuntimeError(f"Invalid collector parquet merge lock: {lock_path}")
+        return fd, identity, _merge_lock_entry_key(lock_path, identity, locked_root)
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _merge_lock_entry_key(
+    lock_path: Path,
+    lock_identity: tuple[int, int],
+    locked_root: LockedOutputRoot | None = None,
+) -> tuple[int, int, str]:
+    """Identify the actual parent-directory entry naming an opened lock."""
+    parent_fd = (
+        os.dup(locked_root.file_descriptor) if locked_root is not None else os.open(lock_path.parent, os.O_RDONLY)
+    )
+    try:
+        parent = os.fstat(parent_fd)
+        if not stat.S_ISDIR(parent.st_mode):
+            raise RuntimeError(f"Invalid collector parquet merge lock directory: {lock_path.parent}")
+        names = os.listdir(parent_fd)
+        same_object: list[str] = []
+        for name in names:
+            try:
+                entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError as error:
+                raise RuntimeError(f"Collector parquet merge lock directory changed: {lock_path.parent}") from error
+            if stat.S_ISREG(entry.st_mode) and (entry.st_dev, entry.st_ino) == lock_identity:
+                same_object.append(name)
+
+        requested_name = lock_path.name
+        if requested_name in names:
+            if requested_name not in same_object:
+                raise RuntimeError(f"Collector parquet merge lock changed: {lock_path}")
+            actual_name = requested_name
+        else:
+            case_equivalent = [name for name in same_object if name.casefold() == requested_name.casefold()]
+            if len(case_equivalent) == 1:
+                actual_name = case_equivalent[0]
+            elif len(same_object) == 1:
+                actual_name = same_object[0]
+            else:
+                raise RuntimeError(f"Ambiguous collector parquet merge lock entry: {lock_path}")
+        return parent.st_dev, parent.st_ino, actual_name
+    finally:
+        os.close(parent_fd)
+
+
+def _acquire_merge_lock(lock_fd: int) -> None:
     """Advisory flock on a per-target lock file (blocking).
 
     flock is atomic, releases automatically when the holding process exits
@@ -891,32 +2244,303 @@ def _acquire_merge_lock(lock_path: Path) -> int:
     """
     import fcntl
 
-    fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY)
-    fcntl.flock(fd, fcntl.LOCK_EX)
-    return fd
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
 
-def _release_merge_lock(lock_path: Path, lock_fd: int) -> None:
+def _revalidate_merge_lock_path(
+    lock_fd: int,
+    lock_path: Path,
+    *,
+    expected_identity: tuple[int, int],
+    expected_entry_key: tuple[int, int, str],
+    locked_root: LockedOutputRoot | None = None,
+) -> None:
+    """Re-attest the pathname after flock; a waiter may have seen it replaced."""
+    opened = os.fstat(lock_fd)
+    try:
+        current = _lstat_path(lock_path, locked_root)
+    except FileNotFoundError as error:
+        raise RuntimeError(f"Collector parquet merge lock changed after flock: {lock_path}") from error
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or (opened.st_dev, opened.st_ino) != expected_identity
+        or (current.st_dev, current.st_ino) != expected_identity
+        or _merge_lock_entry_key(lock_path, expected_identity, locked_root) != expected_entry_key
+    ):
+        raise RuntimeError(f"Collector parquet merge lock changed after flock: {lock_path}")
+
+
+def _release_merge_lock(lock_fd: int) -> None:
     os.close(lock_fd)  # closing releases the flock
 
 
-def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
+@contextmanager
+def perf_merge_locks(
+    parquet_paths: Iterable[Path],
+    locked_roots: dict[Path, LockedOutputRoot] | None = None,
+):
+    """Hold and post-attest the canonical merge locks for exact targets."""
+    opened_locks: dict[
+        tuple[int, int],
+        tuple[int, list[tuple[Path, tuple[int, int, str]]]],
+    ] = {}
+    try:
+        for parquet_path in sorted(set(parquet_paths)):
+            lock_path = parquet_path.with_name(f"{parquet_path.name}.mergelock")
+            locked_root = locked_roots[parquet_path.parent] if locked_roots is not None else None
+            lock_fd, lock_identity, lock_entry_key = _open_merge_lock(lock_path, locked_root)
+            if lock_identity in opened_locks:
+                opened_locks[lock_identity][1].append((lock_path, lock_entry_key))
+                _release_merge_lock(lock_fd)
+            else:
+                opened_locks[lock_identity] = (lock_fd, [(lock_path, lock_entry_key)])
+        lock_order = sorted(
+            opened_locks,
+            key=lambda identity: min(entry_key for _path, entry_key in opened_locks[identity][1]),
+        )
+        for lock_identity in lock_order:
+            lock_fd, lock_entries = opened_locks[lock_identity]
+            _acquire_merge_lock(lock_fd)
+            for lock_path, lock_entry_key in lock_entries:
+                _revalidate_merge_lock_path(
+                    lock_fd,
+                    lock_path,
+                    expected_identity=lock_identity,
+                    expected_entry_key=lock_entry_key,
+                    locked_root=(locked_roots[lock_path.parent] if locked_roots is not None else None),
+                )
+        yield
+    finally:
+        for lock_fd, _lock_entries in opened_locks.values():
+            _release_merge_lock(lock_fd)
+
+
+def perf_preparation_cleanup_path(parquet_path: Path) -> Path:
+    return parquet_path.with_name(f".{parquet_path.name}.tmp.cleanup")
+
+
+def atomic_write_reservation_path(destination: Path) -> Path:
+    """Return the one reserved no-replace publication path for a target."""
+    return destination.with_name(f".{destination.name}.tmp")
+
+
+def atomic_write_cleanup_path(destination: Path) -> Path:
+    return destination.with_name(f".{destination.name}.tmp.cleanup")
+
+
+def collector_retained_path(path: Path) -> Path:
+    """Return the bounded parked-inode slot for one consumed collector file."""
+    return path.with_name(f".{path.name}.retained")
+
+
+def _atomic_write_path_state(
+    path: Path,
+    locked_root: LockedOutputRoot | None = None,
+) -> tuple[PerfFileAttestation, int, int]:
+    try:
+        before = _lstat_path(path, locked_root)
+    except FileNotFoundError as error:
+        raise RuntimeError(f"Collector atomic write artifact disappeared: {path}") from error
+    if not stat.S_ISREG(before.st_mode):
+        raise RuntimeError(f"Unowned collector atomic write artifact: {path}")
+    attestation = _attest_regular_file(
+        path,
+        expected_identity=(before.st_dev, before.st_ino),
+        expected_mode=stat.S_IMODE(before.st_mode),
+        locked_root=locked_root,
+    )
+    current = _lstat_path(path, locked_root)
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or (current.st_dev, current.st_ino) != attestation.identity
+        or current.st_size != before.st_size
+        or stat.S_IMODE(current.st_mode) != attestation.mode
+        or current.st_nlink != before.st_nlink
+    ):
+        raise RuntimeError(f"Collector atomic write artifact changed: {path}")
+    return attestation, current.st_size, current.st_nlink
+
+
+def _require_atomic_write_path_state(
+    path: Path,
+    expected: PerfFileAttestation,
+    *,
+    expected_size: int,
+    expected_nlink: int,
+    locked_root: LockedOutputRoot | None = None,
+) -> None:
+    observed, observed_size, observed_nlink = _atomic_write_path_state(path, locked_root)
+    if (
+        observed.identity != expected.identity
+        or observed.digest != expected.digest
+        or observed.mode != expected.mode
+        or observed_size != expected_size
+        or observed_nlink != expected_nlink
+    ):
+        raise RuntimeError(f"Collector atomic write artifact changed: {path}")
+
+
+def cleanup_atomic_write_reservations(
+    destinations: Iterable[Path],
+    locked_roots: dict[Path, LockedOutputRoot] | None = None,
+) -> None:
+    """Normalize exact interrupted reservations without deleting their inodes."""
+    for destination in destinations:
+        locked_root = locked_roots[destination.parent] if locked_roots is not None else None
+        reserved = atomic_write_reservation_path(destination)
+        cleanup_claim = atomic_write_cleanup_path(destination)
+        if not _path_absent(reserved, locked_root) and not _path_absent(cleanup_claim, locked_root):
+            raise RuntimeError(f"Conflicting collector atomic write artifacts: {reserved}")
+        if _path_absent(reserved, locked_root) and _path_absent(cleanup_claim, locked_root):
+            continue
+
+        try:
+            if not _path_absent(reserved, locked_root):
+                claimed_attestation, claimed_size, claimed_links = _atomic_write_path_state(reserved, locked_root)
+                _rename_path_noreplace(reserved, cleanup_claim, locked_root)
+            else:
+                claimed_attestation, claimed_size, claimed_links = _atomic_write_path_state(cleanup_claim, locked_root)
+
+            _require_atomic_write_path_state(
+                cleanup_claim,
+                claimed_attestation,
+                expected_size=claimed_size,
+                expected_nlink=claimed_links,
+                locked_root=locked_root,
+            )
+            if _path_absent(destination, locked_root):
+                if claimed_links != 1:
+                    raise RuntimeError(f"Unowned collector atomic write artifact: {cleanup_claim}")
+            else:
+                target_attestation, target_size, target_links = _atomic_write_path_state(destination, locked_root)
+                if (
+                    claimed_links != 2
+                    or target_links != 2
+                    or claimed_attestation.identity != target_attestation.identity
+                    or claimed_attestation.digest != target_attestation.digest
+                    or claimed_size != target_size
+                    or claimed_attestation.mode != target_attestation.mode
+                ):
+                    raise RuntimeError(f"Collector atomic write publication changed: {destination}")
+                raise RuntimeError(f"Legacy collector atomic write hardlink requires manual recovery: {destination}")
+
+            _require_atomic_write_path_state(
+                cleanup_claim,
+                claimed_attestation,
+                expected_size=claimed_size,
+                expected_nlink=claimed_links,
+                locked_root=locked_root,
+            )
+            _rename_path_noreplace(cleanup_claim, reserved, locked_root)
+            _require_atomic_write_path_state(
+                reserved,
+                claimed_attestation,
+                expected_size=claimed_size,
+                expected_nlink=claimed_links,
+                locked_root=locked_root,
+            )
+        except Exception as error:
+            if _path_absent(cleanup_claim, locked_root):
+                raise
+            try:
+                _restore_unknown_private_path(
+                    cleanup_claim,
+                    reserved,
+                    context="atomic write reservation",
+                    locked_root=locked_root,
+                )
+            except RuntimeError as restore_error:
+                raise restore_error from error
+            raise
+
+
+def cleanup_unjournaled_perf_preparations(
+    parquet_paths: Iterable[Path],
+    *,
+    transaction_paths: Iterable[Path],
+    locked_roots: dict[Path, LockedOutputRoot] | None = None,
+) -> bool:
+    """Normalize exact reservations only while every ownership marker is absent."""
+    parquet_paths = tuple(parquet_paths)
+    if any(
+        not _path_absent(path, locked_roots[path.parent] if locked_roots is not None else None)
+        for path in transaction_paths
+    ):
+        return False
+    for parquet_path in parquet_paths:
+        locked_root = locked_roots[parquet_path.parent] if locked_roots is not None else None
+        reserved = perf_preparation_path(parquet_path)
+        cleanup_claim = perf_preparation_cleanup_path(parquet_path)
+        if not _path_absent(reserved, locked_root) and not _path_absent(cleanup_claim, locked_root):
+            raise RuntimeError(f"Conflicting collector reserved parquet artifacts: {reserved}")
+
+        claimed_attestation: PerfFileAttestation | None = None
+        if not _path_absent(reserved, locked_root):
+            reserved_state = _lstat_path(reserved, locked_root)
+            if not stat.S_ISREG(reserved_state.st_mode) or reserved_state.st_nlink != 1:
+                raise RuntimeError(f"Unowned collector reserved parquet artifact: {reserved}")
+            claimed_attestation = _attest_regular_file(
+                reserved,
+                expected_identity=(reserved_state.st_dev, reserved_state.st_ino),
+                expected_mode=stat.S_IMODE(reserved_state.st_mode),
+                locked_root=locked_root,
+            )
+            _rename_path_noreplace(reserved, cleanup_claim, locked_root)
+        elif not _path_absent(cleanup_claim, locked_root):
+            claim_state = _lstat_path(cleanup_claim, locked_root)
+            if not stat.S_ISREG(claim_state.st_mode) or claim_state.st_nlink != 1:
+                raise RuntimeError(f"Unowned collector reserved parquet artifact: {cleanup_claim}")
+            claimed_attestation = _attest_regular_file(
+                cleanup_claim,
+                expected_identity=(claim_state.st_dev, claim_state.st_ino),
+                expected_mode=stat.S_IMODE(claim_state.st_mode),
+                locked_root=locked_root,
+            )
+
+        if claimed_attestation is not None:
+            try:
+                _attest_expected_perf_file(cleanup_claim, claimed_attestation, locked_root)
+                current = _lstat_path(cleanup_claim, locked_root)
+                if current.st_nlink != 1:
+                    raise RuntimeError(f"Collector reserved parquet artifact changed: {cleanup_claim}")
+                _rename_path_noreplace(cleanup_claim, reserved, locked_root)
+                _attest_expected_perf_file(reserved, claimed_attestation, locked_root)
+                if _lstat_path(reserved, locked_root).st_nlink != 1:
+                    raise RuntimeError(f"Collector reserved parquet artifact changed: {reserved}")
+            except Exception as error:
+                if _path_absent(cleanup_claim, locked_root):
+                    raise
+                try:
+                    _restore_unknown_private_path(
+                        cleanup_claim,
+                        reserved,
+                        context="reserved preparation",
+                        locked_root=locked_root,
+                    )
+                except RuntimeError as restore_error:
+                    raise restore_error from error
+    return True
+
+
+def _merge_perf_rows(new_table, old_table, parquet_path: Path, *, pa):
     """Merge freshly-collected rows into an existing perf parquet, keeping the
-    newest row per identity key. Returns the merged pyarrow table (or the new
-    table unchanged if the schemas are incompatible)."""
+    newest row per identity key. Returns ``(table, merged_existing,
+    current_event_rows)``; schema incompatibility returns the new table with
+    ``merged_existing=False`` and its unchanged row count."""
     import pandas as pd
 
     log = logging.getLogger(__name__)
-    old_table = pq.read_table(parquet_path)
 
     # Compare (name, type) pairs for IDENTITY columns only: matching names
     # with drifted types would otherwise round-trip through pandas and
     # silently rewrite the parquet under a different schema. Metric columns
     # are exempt from the type check — pyarrow.csv infers an all-empty
-    # optional metric column (e.g. power on a power-off run) as `null` while
-    # populated runs infer `double`, and treating that drift as a mismatch
-    # made the merge silently OVERWRITE the accumulated dataset. Metric
-    # values are cast to the existing metric type instead. Order-insensitive
+    # optional metric column as `null` while populated runs infer `double`,
+    # and treating that drift as a mismatch made the merge silently OVERWRITE
+    # the accumulated dataset. Metric types are reconciled for concatenation;
+    # the finalizer then casts power metrics to double and replaces nulls with
+    # the repository's 0.0 unavailable-measurement sentinel. Order-insensitive
     # (the merge realigns column order below); Arrow metadata is ignored
     # (pandas round-trips change it).
     def fields(schema):
@@ -934,7 +2558,7 @@ def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
             old_fields,
             new_fields,
         )
-        return new_table
+        return new_table, False, new_table.num_rows
     # Reconcile metric-column types on BOTH sides: an all-empty metric column
     # is inferred as `null`, and Arrow can cast null -> anything (all nulls)
     # but not double -> null. Whichever side is null-typed is cast toward the
@@ -963,6 +2587,7 @@ def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
 
     new_df = new_df[old_df.columns.tolist()]  # align column order
     identity = [c for c in old_df.columns if c not in PERF_METRIC_COLUMNS]
+    current_event_rows = len(new_df.drop_duplicates(subset=identity, keep="last"))
     combined = pd.concat([old_df, new_df], ignore_index=True)
     deduped = combined.drop_duplicates(subset=identity, keep="last").reset_index(drop=True)
     log.info(
@@ -974,7 +2599,7 @@ def _merge_perf_rows(new_table, parquet_path: Path, *, pa, pq):
         len(deduped),
         len(combined) - len(deduped),
     )
-    return pa.Table.from_pandas(deduped, preserve_index=False)
+    return pa.Table.from_pandas(deduped, preserve_index=False), True, current_event_rows
 
 
 def find_perf_csv_outputs(output_root: str | os.PathLike = ".", *, recursive: bool = False) -> list[Path]:
@@ -1008,26 +2633,60 @@ def finalize_perf_files(
     delete_source: bool = True,
     compression: str = "zstd",
     merge_existing: bool = True,
+    finalization_info: dict[Path, PerfFinalizationInfo] | None = None,
+    prepublish_validate: Callable[[], None] | None = None,
+    expected_source_identities: dict[Path, tuple[str, int, int]] | None = None,
+    publication_transaction: PerfPublicationTransaction | None = None,
+    _locked_output_roots: dict[Path, LockedOutputRoot] | None = None,
 ) -> list[Path]:
     """Finalize explicit collector CSV staging files as parquet.
 
     ``merge_existing`` defaults to True so that finalizing accumulates into any
     pre-existing parquet (resume / retry-failed / batched collection) instead of
     overwriting it with only this run's rows — see convert_perf_csv_to_parquet.
+    When provided, ``finalization_info`` receives each staging file's finalized
+    current-event row contribution and whether an existing parquet took the
+    compatible merge path, plus the digest of the exact staging bytes parsed.
+    ``publication_transaction`` may durably bind the prepared batch before any
+    target is replaced; transactional callers must retain their staging files.
     """
-    converted: list[Path] = []
+    selected = []
     for csv_file in sorted({Path(path) for path in csv_files}):
-        if csv_file.name == "INCOMPLETE.txt" or not csv_file.name.endswith("_perf.txt") or not csv_file.exists():
+        if csv_file.name == "INCOMPLETE.txt" or not csv_file.name.endswith("_perf.txt"):
             continue
-        converted.append(
-            convert_perf_csv_to_parquet(
-                csv_file,
-                delete_source=delete_source,
-                compression=compression,
-                merge_existing=merge_existing,
-            )
+        if _locked_output_roots is None:
+            if csv_file.exists() or csv_file.is_symlink():
+                selected.append(csv_file.parent.resolve() / csv_file.name)
+            continue
+        csv_file = csv_file.absolute()
+        locked_root = _locked_output_roots.get(csv_file.parent)
+        if locked_root is None:
+            raise RuntimeError(f"Collector CSV is outside its locked output root: {csv_file}")
+        if not locked_root.absent(csv_file):
+            selected.append(csv_file)
+    if not selected:
+        return []
+
+    def finalize_selected(locked_roots: dict[Path, LockedOutputRoot]) -> list[Path]:
+        return _finalize_perf_file_batch(
+            selected,
+            locked_roots=locked_roots,
+            delete_source=delete_source,
+            compression=compression,
+            merge_existing=merge_existing,
+            finalization_info=finalization_info,
+            prepublish_validate=prepublish_validate,
+            expected_source_identities=expected_source_identities,
+            publication_transaction=publication_transaction,
         )
-    return converted
+
+    if _locked_output_roots is not None:
+        return finalize_selected(_locked_output_roots)
+    with ExitStack() as lifecycle_stack:
+        locked_roots = {}
+        for output_root in sorted({path.parent.resolve() for path in selected}):
+            locked_roots[output_root] = lifecycle_stack.enter_context(perf_finalization_lifecycle(output_root))
+        return finalize_selected(locked_roots)
 
 
 def finalize_perf_outputs(
@@ -1037,6 +2696,7 @@ def finalize_perf_outputs(
     delete_source: bool = True,
     compression: str = "zstd",
     merge_existing: bool = True,
+    finalization_info: dict[Path, PerfFinalizationInfo] | None = None,
 ) -> list[Path]:
     """Finalize collector CSV staging files directly under `output_root` as parquet."""
     return finalize_perf_files(
@@ -1044,6 +2704,7 @@ def finalize_perf_outputs(
         delete_source=delete_source,
         compression=compression,
         merge_existing=merge_existing,
+        finalization_info=finalization_info,
     )
 
 

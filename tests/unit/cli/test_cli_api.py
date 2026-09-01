@@ -20,6 +20,97 @@ pytestmark = pytest.mark.unit
 class TestCLIEstimateUnit:
     """Unit tests for cli_estimate API internals."""
 
+    def test_static_estimate_resolves_coverage_gated_moe_comm_before_model_build(self, monkeypatch):
+        import aiconfigurator.cli.api as api
+        import aiconfigurator.sdk.inference_session as inference_session
+
+        captured = {}
+        database = object()
+
+        def fake_resolve(model_config, **kwargs):
+            captured["resolver_config"] = model_config
+            captured["resolver_kwargs"] = kwargs
+            model_config.moe_comm_backend = {
+                "context": "nvlink_two_sided",
+                "generation": "nvlink_two_sided",
+            }
+            model_config.num_gpus_per_node = 4
+
+        def fake_get_model(_model_path, model_config, _backend_name):
+            captured["built_config"] = model_config
+            return object()
+
+        class FakeSummary:
+            def check_oom(self):
+                return False
+
+            def get_result_dict(self):
+                return {"ttft": 0.0, "tpot": 1.0, "power_w": 1.0}
+
+            def get_power_data_coverage(self):
+                return 1.0
+
+            def get_moe_comm_fallbacks(self):
+                return ()
+
+        class FakeSession:
+            def __init__(self, model, loaded_database, backend):
+                assert loaded_database is database
+
+            def run_static(self, **kwargs):
+                return FakeSummary()
+
+        monkeypatch.setattr(api, "_resolve_moe_parallelism", lambda *args, **kwargs: (1, 32))
+        monkeypatch.setattr(api, "resolve_context_fmha_by_data", lambda *args, **kwargs: None)
+        monkeypatch.setattr(api, "resolve_dsv4_moe_arch", lambda *args, **kwargs: None)
+        monkeypatch.setattr(api, "resolve_nvfp4_for_system", lambda *args, **kwargs: None)
+        monkeypatch.setattr(api, "resolve_model_config_moe_comm", fake_resolve)
+        monkeypatch.setattr(inference_session, "InferenceSession", FakeSession)
+
+        api._run_static_estimate(
+            static_mode="static_gen",
+            model_path="deepseek-ai/DeepSeek-R1",
+            system_name="gb200",
+            backend_name="trtllm",
+            resolved_version="test",
+            isl=8192,
+            osl=1024,
+            image_height=0,
+            image_width=0,
+            num_images=1,
+            enable_encoder_dp=True,
+            batch_size=10,
+            prefix=0,
+            tp_size=1,
+            pp_size=1,
+            attention_dp_size=32,
+            moe_tp_size=1,
+            moe_ep_size=32,
+            gemm_quant_mode=None,
+            kvcache_quant_mode=None,
+            fmha_quant_mode=None,
+            moe_quant_mode=None,
+            comm_quant_mode=None,
+            nextn=0,
+            nextn_accepted=None,
+            stride=32,
+            engine_step_backend="rust",
+            load_database=lambda _system: database,
+            get_backend=lambda _backend: object(),
+            get_model=fake_get_model,
+        )
+
+        assert captured["built_config"] is captured["resolver_config"]
+        assert captured["built_config"].moe_comm_backend["generation"] == "nvlink_two_sided"
+        assert captured["resolver_kwargs"] == {
+            "model_path": "deepseek-ai/DeepSeek-R1",
+            "backend_name": "trtllm",
+            "database": database,
+            "required_phases": ("context", "generation"),
+            "fmha_quant_mode_explicit": False,
+            "kvcache_quant_mode_explicit": False,
+        }
+
     def test_systems_paths_are_scoped_to_call(self, tmp_path, monkeypatch):
         import aiconfigurator.cli.api as api
         import aiconfigurator.sdk.perf_database as perf_database
@@ -164,6 +255,118 @@ class TestCLIEstimateUnit:
         assert hybrid_default.mode is common.DatabaseMode.HYBRID
         assert hybrid_default.transfer_policy == common.ALL_TRANSFERS
 
+    def test_estimate_accepts_attention_backend_parameter(self, monkeypatch):
+        """Test that cli_estimate accepts attention_backend parameter without error."""
+        import aiconfigurator.cli.api as api
+
+        captured_kwargs = {}
+
+        def fake_run_agg_estimate(**kwargs):
+            captured_kwargs.update(kwargs)
+            # Return minimal EstimateResult to avoid schema errors
+            from aiconfigurator.cli.api import EstimateResult
+
+            return EstimateResult(
+                ttft=100.0,
+                tpot=10.0,
+                power_w=500.0,
+                isl=1024,
+                osl=512,
+                batch_size=32,
+                ctx_tokens=1024,
+                tp_size=1,
+                pp_size=1,
+                model_path="Qwen/Qwen3-32B",
+                system_name="h200_sxm",
+                backend_name="trtllm",
+                backend_version="latest",
+                raw={},
+            )
+
+        monkeypatch.setattr(api, "_run_agg_estimate", fake_run_agg_estimate)
+
+        # Call cli_estimate with attention_backend; should not raise
+        result = api.cli_estimate(
+            model_path="Qwen/Qwen3-32B",
+            system_name="h200_sxm",
+            mode="agg",
+            backend_name="trtllm",
+            attention_backend="trtllm_mha",
+        )
+
+        # Verify result is valid
+        assert result is not None
+        assert result.ttft == 100.0
+
+        # CRITICAL: Verify attention_backend parameter actually reached the runner
+        assert captured_kwargs.get("attention_backend") == "trtllm_mha", (
+            f"attention_backend not passed to _run_agg_estimate; captured_kwargs: {captured_kwargs}"
+        )
+
+    def test_agg_estimate_attention_backend_reaches_model_config(self, monkeypatch):
+        """attention_backend flows from _run_agg_estimate into the constructed ModelConfig.
+
+        Patches _build_model_config at the api module level with a wrapper that:
+        1. Records the call kwargs (especially attention_backend).
+        2. Delegates to the real build_model_config and captures the returned ModelConfig.
+        3. Raises _CaptureComplete to exit before the perf-database/InferenceSession boundary.
+        Asserts BOTH the recorded kwarg value AND the captured config's field value.
+        """
+        import aiconfigurator.cli.api as api
+        from aiconfigurator.sdk.config_builders import build_model_config as _real_build_model_config
+
+        captured_kwargs: dict = {}
+        captured_configs: list = []
+
+        class _CaptureCompleteError(Exception):
+            pass
+
+        def _wrapping_build_model_config(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            cfg = _real_build_model_config(*args, **kwargs)
+            captured_configs.append(cfg)
+            raise _CaptureCompleteError
+
+        monkeypatch.setattr(api, "_build_model_config", _wrapping_build_model_config)
+
+        with pytest.raises(_CaptureCompleteError):
+            api._run_agg_estimate(
+                model_path="Qwen/Qwen3-32B",
+                system_name="h200_sxm",
+                backend_name="trtllm",
+                resolved_version="test",
+                isl=1024,
+                osl=512,
+                image_height=0,
+                image_width=0,
+                num_images=1,
+                enable_encoder_dp=True,
+                batch_size=32,
+                ctx_tokens=1024,
+                tp_size=8,
+                pp_size=1,
+                attention_dp_size=1,
+                moe_tp_size=1,
+                moe_ep_size=1,
+                gemm_quant_mode=None,
+                kvcache_quant_mode=None,
+                fmha_quant_mode=None,
+                moe_quant_mode=None,
+                comm_quant_mode=None,
+                load_database=lambda _: MagicMock(),
+                get_backend=lambda _: MagicMock(),
+                get_model=lambda *_: MagicMock(),
+                attention_backend="trtllm_mha",
+            )
+
+        assert captured_kwargs.get("attention_backend") == "trtllm_mha", (
+            f"attention_backend not forwarded to _build_model_config; captured_kwargs: {captured_kwargs}"
+        )
+        assert len(captured_configs) == 1
+        assert captured_configs[0].attention_backend == "trtllm_mha", (
+            f"attention_backend not set in ModelConfig; got: {captured_configs[0].attention_backend}"
+        )
+
 
 class TestCLIDefaultNextn:
     """cli_default exposes MTP control with the same semantics as the CLI flags."""
@@ -247,11 +450,60 @@ class TestCLIExpUnit:
         mock_build.assert_called_once_with(
             yaml_path=None,
             config=config,
+            attention_backend=None,
         )
 
         assert isinstance(result, CLIResult)
         assert "exp_agg_simplified" in result.tasks
         assert "exp_agg_simplified" in result.best_throughputs
+
+    def test_exp_attention_backend_reaches_task_model_config(self, monkeypatch):
+        """Test that attention_backend from exp mode reaches Task's ModelConfig.
+
+        Wraps ``config.ModelConfig`` (the same capture-then-delegate-to-real
+        technique ``test_agg_estimate_attention_backend_reaches_model_config``
+        uses for ``_build_model_config``) so the ModelConfig assertion is on
+        an actually-captured forwarded kwarg -- like every neighboring test
+        that mocks its builder's dependency -- instead of only inspecting the
+        field on an unmocked, real end-to-end Task/ModelConfig construction.
+        """
+        from aiconfigurator.cli.main import build_experiment_tasks
+        from aiconfigurator.sdk import config as sdk_config
+
+        captured_kwargs: list[dict] = []
+        real_model_config = sdk_config.ModelConfig
+
+        def _capturing_model_config(*args, **kwargs):
+            captured_kwargs.append(kwargs)
+            return real_model_config(*args, **kwargs)
+
+        monkeypatch.setattr(sdk_config, "ModelConfig", _capturing_model_config)
+
+        # Minimal experiment YAML fixture
+        exp_config = {
+            "exp_test": {
+                "serving_mode": "agg",
+                "model_path": "Qwen/Qwen3-32B",
+                "system_name": "h200_sxm",
+                "total_gpus": 8,
+            }
+        }
+
+        # Build experiment tasks with attention_backend override
+        tasks = build_experiment_tasks(config=exp_config, attention_backend="fa3")
+
+        # Verify attention_backend reached the Task
+        assert tasks is not None and len(tasks) > 0
+        for task in tasks.values():
+            assert task.attention_backend == "fa3"
+            # Verify it reaches the ModelConfig
+            model_config = task.build_model_config(role="agg")
+            assert model_config.attention_backend == "fa3"
+
+        assert captured_kwargs, "config.ModelConfig was never called"
+        assert all(kwargs.get("attention_backend") == "fa3" for kwargs in captured_kwargs), (
+            f"attention_backend not forwarded to every ModelConfig construction; captured: {captured_kwargs}"
+        )
 
 
 class TestCLIGenerateEquivalence:
@@ -539,6 +791,238 @@ class TestCLIRecommendUnit:
 
         assert captured_kwargs["enable_wideep"] is True
         assert captured_kwargs["moe_backend"] == "deepep_moe"
+
+    def test_dspark_nextn_auto_uses_explicit_acceptance(self, monkeypatch):
+        """Explicit auto resolves DSPARK depth without inferring acceptance."""
+        import aiconfigurator.cli.api as api
+
+        captured = {}
+
+        def fake_build_default_tasks(**kwargs):
+            captured.update(kwargs)
+            return {}
+
+        def fake_execute(tasks, mode, **kwargs):
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+        monkeypatch.setattr(api, "_resolve_nextn_auto", lambda _: 0)
+        monkeypatch.setattr(api, "_resolve_dspark_nextn", lambda _: 7)
+
+        api.cli_recommend(
+            model_path="moonshotai/Kimi-K3",
+            system="h200_sxm",
+            target_concurrency=16,
+            nextn="auto",
+            nextn_accepted=3.0,
+        )
+
+        assert captured["nextn"] == 7
+        assert captured["nextn_accepted"] == 3.0
+
+    def test_dspark_auto_requires_explicit_acceptance(self, monkeypatch):
+        """DSPARK architectural depth never implies workload acceptance."""
+        import aiconfigurator.cli.api as api
+
+        monkeypatch.setattr(api, "_resolve_nextn_auto", lambda _: 0)
+        monkeypatch.setattr(api, "_resolve_dspark_nextn", lambda _: 7)
+
+        with pytest.raises(ValueError, match="requires 'nextn_accepted'"):
+            api.cli_recommend(
+                model_path="moonshotai/Kimi-K3",
+                system="h200_sxm",
+                target_concurrency=16,
+                nextn="auto",
+            )
+
+    @pytest.mark.parametrize("accepted", [3.0, 0.0])
+    def test_dspark_omitted_depth_uses_explicit_acceptance(self, monkeypatch, accepted):
+        """Measured acceptance opts an omitted DSPARK depth into architecture resolution."""
+        import aiconfigurator.cli.api as api
+
+        captured = {}
+
+        def fake_build_default_tasks(**kwargs):
+            captured.update(kwargs)
+            return {}
+
+        def fake_execute(tasks, mode, **kwargs):
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+        monkeypatch.setattr(api, "_resolve_dspark_nextn", lambda _: 7)
+
+        api.cli_recommend(
+            model_path="moonshotai/Kimi-K3",
+            system="h200_sxm",
+            target_concurrency=16,
+            nextn_accepted=accepted,
+        )
+
+        assert captured["nextn"] == 7
+        assert captured["nextn_accepted"] == accepted
+
+    def test_dspark_explicit_zero_opts_out(self, monkeypatch):
+        """Explicit nextn=0 remains disabled and bypasses DSPARK resolution."""
+        import aiconfigurator.cli.api as api
+
+        captured = {}
+
+        def fake_build_default_tasks(**kwargs):
+            captured.update(kwargs)
+            return {}
+
+        def fake_execute(tasks, mode, **kwargs):
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+        monkeypatch.setattr(
+            api,
+            "_resolve_dspark_nextn",
+            lambda _: pytest.fail("explicit zero must not resolve DSPARK"),
+        )
+
+        api.cli_recommend(
+            model_path="moonshotai/Kimi-K3",
+            system="h200_sxm",
+            target_concurrency=16,
+            nextn=0,
+        )
+
+        assert captured["nextn"] == 0
+        assert captured["nextn_accepted"] is None
+
+    def test_omitted_speculation_remains_disabled(self, monkeypatch):
+        """Existing callers that omit both inputs keep speculative decoding off."""
+        import aiconfigurator.cli.api as api
+
+        captured = {}
+
+        def fake_build_default_tasks(**kwargs):
+            captured.update(kwargs)
+            return {}
+
+        def fake_execute(tasks, mode, **kwargs):
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+        monkeypatch.setattr(
+            api,
+            "_resolve_dspark_nextn",
+            lambda _: pytest.fail("omitted speculation must not fetch DSPARK metadata"),
+        )
+
+        api.cli_recommend(
+            model_path="moonshotai/Kimi-K3",
+            system="h200_sxm",
+            target_concurrency=16,
+        )
+
+        assert captured["nextn"] == 0
+        assert captured["nextn_accepted"] is None
+
+    def test_non_dspark_model_unaffected(self, monkeypatch):
+        """Non-DSPARK models are not touched by the DSPARK auto-detect path."""
+        import aiconfigurator.cli.api as api
+
+        captured = {}
+
+        def fake_build_default_tasks(**kwargs):
+            captured.update(kwargs)
+            return {}
+
+        def fake_execute(tasks, mode, **kwargs):
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+        monkeypatch.setattr(api, "_resolve_nextn_auto", lambda _: 0)
+        monkeypatch.setattr(api, "_resolve_dspark_nextn", lambda _: None)
+
+        api.cli_recommend(
+            model_path="Qwen/Qwen3-32B",
+            system="h200_sxm",
+            target_concurrency=16,
+            nextn="auto",
+        )
+
+        assert captured["nextn"] == 0
+        assert captured["nextn_accepted"] is None
+
+    def test_attention_backend_forwarded(self, monkeypatch):
+        import aiconfigurator.cli.api as api
+
+        captured_kwargs = {}
+
+        def fake_build_default_tasks(**kwargs):
+            captured_kwargs.update(kwargs)
+            return {}
+
+        def fake_execute(tasks, mode, **kwargs):
+            return ("agg", {"agg": pd.DataFrame({"x": [1]})}, {}, {}, {}, {})
+
+        monkeypatch.setattr(api, "build_default_tasks", fake_build_default_tasks)
+        monkeypatch.setattr(api, "_execute_tasks_internal", fake_execute)
+
+        api.cli_recommend(
+            model_path="Qwen/Qwen3-32B",
+            system="h200_sxm",
+            target_request_rate=10.0,
+            attention_backend="trtllm_mha",
+        )
+
+        assert captured_kwargs["attention_backend"] == "trtllm_mha"
+
+    def test_attention_backend_reaches_model_config_in_default_tasks(self, monkeypatch):
+        """Test that --attention-backend reaches ModelConfig via build_default_tasks (default mode path).
+
+        Wraps ``config.ModelConfig`` (the same capture-then-delegate-to-real
+        technique ``test_agg_estimate_attention_backend_reaches_model_config``
+        uses for ``_build_model_config``) so the ModelConfig assertion is on
+        an actually-captured forwarded kwarg -- like every neighboring test
+        that mocks its builder's dependency -- instead of only inspecting the
+        field on an unmocked, real end-to-end Task/ModelConfig construction.
+        """
+        from aiconfigurator.cli.main import build_default_tasks
+        from aiconfigurator.sdk import config as sdk_config
+        from aiconfigurator.sdk.task_v2 import Task
+
+        captured_kwargs: list[dict] = []
+        real_model_config = sdk_config.ModelConfig
+
+        def _capturing_model_config(*args, **kwargs):
+            captured_kwargs.append(kwargs)
+            return real_model_config(*args, **kwargs)
+
+        monkeypatch.setattr(sdk_config, "ModelConfig", _capturing_model_config)
+
+        # Build default tasks with attention_backend
+        tasks = build_default_tasks(
+            model_path="Qwen/Qwen3-32B",
+            total_gpus=8,
+            system="h200_sxm",
+            attention_backend="triton",
+        )
+
+        # Verify that tasks were created
+        assert tasks is not None and len(tasks) > 0
+
+        # Verify that the attention_backend reached the Task and ModelConfig
+        for task in tasks.values():
+            assert isinstance(task, Task)
+            assert task.attention_backend == "triton"
+            # Build ModelConfig and verify attention_backend is there
+            model_config = task.build_model_config(role="agg")
+            assert model_config.attention_backend == "triton"
+
+        assert captured_kwargs, "config.ModelConfig was never called"
+        assert all(kwargs.get("attention_backend") == "triton" for kwargs in captured_kwargs), (
+            f"attention_backend not forwarded to every ModelConfig construction; captured: {captured_kwargs}"
+        )
 
     def test_escalates_on_oom(self, monkeypatch):
         import aiconfigurator.cli.api as api

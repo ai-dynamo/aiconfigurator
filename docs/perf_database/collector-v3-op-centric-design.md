@@ -188,10 +188,63 @@ tables:
     collector_ref: 0b077da5        # repo SHA the collector ran from
     collector_hash: "sha256:..."   # content hash of the op's module closure
     case_plan_hash: "sha256:..."   # hash of the resolved case set
-    collected_at: 2026-07-20
+    collected_at: "2026-07-20"
     rows: 12345
     status: complete               # complete | partial
 ```
+
+Schema v1 remains the single-event format above. Schema v2 is required when a
+shipped table combines or amends more than one collection event:
+
+```yaml
+schema_version: 2
+runtime:
+  framework: sglang
+  version: "0.5.14"
+  image: "registry.example/sglang:v0.5.14"
+  image_digest: "sha256:..."
+tables:
+  gdn_perf:
+    rows: 8874                    # merged table as shipped
+    status: complete
+    collections:
+      - collector_ref: 0b077da5
+        collector_hash: "sha256:..."
+        case_plan_hash: "sha256:..."
+        collected_at: "2026-08-10"
+        rows: 8820
+        status: complete
+        runtime:                    # optional event override
+          framework: sglang
+          version: "0.5.14"
+          image: "registry.example/older-sglang:v0.5.14"
+          image_digest: "sha256:..."
+      - collector_ref: 1c188eb6
+        collector_hash: "sha256:..."
+        case_plan_hash: "sha256:..."
+        collected_at: "2026-08-13"
+        rows: 54
+        status: partial
+        source_campaign_rows: 1243
+        source_campaign_status: partial
+```
+
+Every v2 event requires all six v1 attestation fields. In particular,
+`case_plan_hash` must attest a non-empty attempted set and `status` must be
+`complete` or `partial`; CI validates every event rather than only the merged
+table summary. `source_campaign_rows` and `source_campaign_status` are optional
+when only a selected subset of a larger campaign contributes rows. The top-level
+`runtime` is the default for every event. An event may carry a `runtime` mapping
+with the same known fields to override that default; an absent event runtime
+inherits the top-level identity. The automatic finalizer only appends histories
+whose top-level runtime matches the current run, because it cannot infer a
+missing historical override.
+
+The finalize writer continues to emit v1 for a single event. If a valid v2
+sidecar already exists, it preserves histories for untouched tables, promotes
+other fully-attested single-event entries when needed, and appends the fresh
+event when the same accumulated parquet table is finalized again. An explicit
+top-level provenance tier such as `provenance: local` is preserved.
 
 - `collector_hash` covers the registry-declared `collect_*.py` module plus its
   declared shared dependencies (e.g. `helper.py`, the family's
@@ -333,9 +386,12 @@ The loader's source ordering (§7) in one list:
    declaration says so.
 4. Cross-backend fill only for kernel sources whitelisted by
    `perf_data_reuse_manifest.yaml`, and only after channels 1–2.
-5. The `comm` family is excluded from sibling-version reuse entirely — NCCL
-   curves are topology-bound, so shape-filling across versions is wrong there
-   (current NCCL/oneCCL behavior, now stated as policy).
+5. The `comm` family never uses declared (`reuse.yaml`) or cross-backend fill.
+   Framework-versioned namespaces (`comm/sglang`, `comm/trtllm`, and
+   `comm/vllm`) may fill from strictly earlier versions of the same storage
+   backend. Communication-library namespaces (`comm/nccl`, `comm/oneccl`) and
+   every unknown future backend remain primary-only until their version
+   semantics are explicitly validated.
 
 Guardrails:
 
@@ -348,6 +404,9 @@ Guardrails:
   operational definition of **unsupported silent fallback**.
 - **Scope limits:** all reuse runs only in SILICON/HYBRID modes; formula-only
   modes (EMPIRICAL, SOL) are untouched.
+- **Retention:** an older framework communication table can now be a live
+  donor (for example TRT-LLM rc20 falling back to rc10). Per-op pruning must
+  account for this same-backend chain before deleting old comm data.
 
 ## 7. Loader changes (`aic-core/src/aiconfigurator_core/sdk/perf_database.py`)
 
@@ -548,6 +607,11 @@ data. V3 makes that cycle computed and mostly declarative:
 
 ## 13. Open question: data retention across quarters
 
+> **Resolved by §14 (2026-08-22):** retention is bounded by the queryable
+> slots plus an explicit keep-list of fill-source data; retired versions are
+> plain directory deletions.
+
+
 Quarterly appends grow the LFS tree without bound (~906 parquet files today,
 plus each quarter's changed families). This design does not prune. A sensible
 policy would be "keep the most recent N quarters of version dirs on main;
@@ -555,3 +619,49 @@ older quarters remain reachable only through their `collector-snapshot-*`
 tags" — but N, and whether pruning also drops declared-reuse chains that
 reference pruned donors, must be decided deliberately. Decide before the
 second quarterly cycle, not by accident.
+
+## 14. Amendment (2026-08-22): queryable-version slots
+
+Adopted after the first at-scale prune (PR #1581) showed that per-directory
+queryability makes every historical version a permanent liability (300+
+compatibility markers, donor retargeting, fixture archaeology). Owner:
+tianhaox.
+
+**Model.** Each (system, framework) exposes at most three queryable
+versions, resolved through `systems/query_versions.yaml`:
+
+- `current` — newest maintainer-completed full upgrade (authored; per-system
+  overrides only for frozen baselines such as a100_sxm and b60);
+- `previous` — the current before it (authored; moved on every bump; may be
+  empty until the first post-adoption bump);
+- `next` — derived, never authored: the highest DATA-BACKED version newer
+  than current anywhere in the fleet. Development drops for new models land
+  there; ops the next version lacks are served by channel-1 backward fill.
+  Marker-only directories do not qualify.
+
+The literal aliases `current`/`previous`/`next` resolve anywhere a version
+is requested; `get_latest_database_version` returns current. Any other
+version fails loudly (`allow_unlisted_version=True` exists for tests that
+address raw data coordinates). `get_supported_databases` — and therefore
+the support matrix — enumerates the slots only.
+
+**What this supersedes.**
+
+- §6.3's forward-borrow role is retired: old versions are not queryable, so
+  no declaration is needed to keep them answering. Channel 2 remains only
+  as a historical mechanism during migration; new reuse.yaml files are not
+  authored. (The 2026-08 investigation traced forward borrowing to the
+  newest-first marker era of #1219 — mechanically legalized in migration,
+  never an owner-argued need.)
+- §12.3's support bar is replaced by slot membership; per-family capability
+  within a slot version remains visible through loader provenance tags
+  rather than a version-level claim.
+- §13 is answered: data directories outside the slots are fill sources kept
+  by an explicit keep-list (comm/multi-node, wideep, sole-source tables,
+  dsa small-heads, test-fixture coordinates); everything else is deleted
+  outright when its slot life ends.
+
+**Operational notes.** The quarterly cycle of §11 becomes: bump `current`
+(old current -> `previous`) in the data PR; the diff shows recollected
+vs riding families; retire the outgoing generation's directories on the
+data-hygiene cadence. Product consumers should pin aliases, not literals.

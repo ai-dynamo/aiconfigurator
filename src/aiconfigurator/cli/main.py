@@ -28,6 +28,7 @@ from aiconfigurator.generator.api import (
 )
 from aiconfigurator.logging_utils import setup_logging
 from aiconfigurator.sdk import common, perf_database
+from aiconfigurator.sdk.attention_lanes import ATTENTION_BACKEND_CHOICES
 from aiconfigurator.sdk.config_builders import resolve_nextn_auto
 from aiconfigurator.sdk.errors import (
     EmpiricalNotImplementedError,
@@ -302,6 +303,22 @@ def _parse_afd_max_candidates(value: str) -> int:
     return parsed
 
 
+def _add_attention_backend_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--attention-backend",
+        type=str,
+        choices=ATTENTION_BACKEND_CHOICES,
+        default=None,
+        help="Attention kernel backend used by the deployment. Applies to every model graph with standard "
+        "dense ContextAttention/GenerationAttention ops and to supported DeepSeek MLA/WideEP paths. "
+        "Support depends on the serving backend, performance tables, and backend version; unsupported named "
+        "values fail closed. For modeling, unset/default uses the mapped framework default when available and "
+        "otherwise the safe default fallback. SGLang WideEP maps unset/default to flashinfer and also supports "
+        "fa3. The deployment generator emits supported named SGLang values, omits unset/default, and rejects "
+        "fla for SGLang 0.5.14.",
+    )
+
+
 def _add_default_mode_arguments(parser):
     parser.add_argument(
         "--model-path",
@@ -396,8 +413,9 @@ def _add_default_mode_arguments(parser):
         type=str,
         default=None,
         help="[expert] Performance-database version used for the simulation/search "
-        "(search fidelity). Default: latest measured version; marker-only shared-layer versions "
-        "require an explicit value. Alias: --backend-version.",
+        "(search fidelity). Accepts a queryable slot version or the aliases "
+        "current / previous / next (see systems/query_versions.yaml). "
+        "Default: current. Alias: --backend-version.",
     )
     parser.add_argument(
         "--database-mode",
@@ -569,6 +587,7 @@ def _add_default_mode_arguments(parser):
         help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell. "
         "'deepep_moe' is deprecated and ignored (large-EP is explored automatically from data coverage).",
     )
+    _add_attention_backend_argument(parser)
 
 
 def _add_recommend_mode_arguments(parser):
@@ -691,11 +710,11 @@ def _add_recommend_mode_arguments(parser):
     parser.add_argument(
         "--nextn",
         type=_parse_nextn,
-        default=0,
+        default=None,
         help="MTP (Multi-Token Prediction) draft length, or 'auto' to use the checkpoint's "
-        "num_nextn_predict_layers (absent/0 keeps MTP disabled). When the depth is > 0, enables "
-        "speculative decoding in the configuration search and requires --nextn-accepted. "
-        "Default: 0 (disabled); MTP is never enabled implicitly when the flag is omitted.",
+        "num_nextn_predict_layers and then DSPARK architecture metadata. When the depth is > 0, "
+        "enables speculative decoding and requires a measured --nextn-accepted value. Omitted or "
+        "0 keeps speculation disabled unless a DSPARK model is paired with --nextn-accepted.",
     )
     parser.add_argument(
         "--nextn-accepted",
@@ -743,6 +762,7 @@ def _add_recommend_mode_arguments(parser):
         help="Explicit SGLang MoE backend. Use 'megamoe' to model DeepSeek-V4 MegaMoE on Blackwell. "
         "'deepep_moe' is deprecated and ignored (large-EP is explored automatically from data coverage).",
     )
+    _add_attention_backend_argument(parser)
 
 
 def _add_experiments_mode_arguments(parser):
@@ -761,6 +781,7 @@ def _add_experiments_mode_arguments(parser):
             "Affects terminal output and saved CSV only; SLA filtering always uses inter-token latency."
         ),
     )
+    _add_attention_backend_argument(parser)
 
 
 def _add_generate_mode_arguments(parser):
@@ -872,8 +893,9 @@ def _add_estimate_mode_arguments(parser):
         type=str,
         default=None,
         help="[expert] Performance-database version used for the simulation/search "
-        "(search fidelity). Default: latest measured version; marker-only shared-layer versions "
-        "require an explicit value. Alias: --backend-version.",
+        "(search fidelity). Accepts a queryable slot version or the aliases "
+        "current / previous / next (see systems/query_versions.yaml). "
+        "Default: current. Alias: --backend-version.",
     )
     parser.add_argument("--isl", type=int, default=1024, help="Input sequence length. Default: 1024.")
     parser.add_argument("--osl", type=int, default=1024, help="Output sequence length. Default: 1024.")
@@ -1292,6 +1314,7 @@ def _add_estimate_mode_arguments(parser):
         "Controls how many KV blocks TRT-LLM pre-allocates per sequence. "
         "Set this to match your actual deployment to get an accurate KV cache capacity warning.",
     )
+    _add_attention_backend_argument(parser)
 
 
 def _add_support_mode_arguments(parser):
@@ -1458,6 +1481,25 @@ def _database_mode_requires_declared_perf_database(database_mode: str | None) ->
     }
 
 
+def _resolve_version_for_matching(system_name: str, backend_name: str, backend_version: str | None) -> str | None:
+    """Alias-aware form of a requested version for membership checks.
+
+    `get_supported_databases` enumerates resolved LITERALS, so every
+    comparison against it must resolve the requested alias per
+    (system, backend) first — otherwise `--backend-version current` is
+    rejected while its literal passes. Raw versions pass through untouched
+    (allow_unlisted: matching decides membership, not the slot gate);
+    unresolvable aliases (gate off / slot unpopulated) fall back to the raw
+    string so the membership check fails with the normal guidance.
+    """
+    if backend_version is None:
+        return None
+    try:
+        return perf_database.resolve_query_version(system_name, backend_name, backend_version, allow_unlisted=True)
+    except (ValueError, KeyError):
+        return backend_version
+
+
 def _ensure_backend_version_available(
     system_name: str,
     backend_name: str,
@@ -1485,7 +1527,35 @@ def _ensure_backend_version_available(
         raise SystemExit(1)
 
     versions = supported.get(system_name, {}).get(backend_name, [])
+    if backend_version in ("current", "previous", "next"):
+        # An alias that fails to resolve deserves the alias-specific error
+        # ("has no 'previous' version; available slots: ..."), not the
+        # generic missing-directory guidance that circularly suggests aliases.
+        try:
+            backend_version = perf_database.resolve_query_version(system_name, backend_name, backend_version)
+        except ValueError as e:
+            # User-facing gate message: no traceback wanted, so not
+            # logger.exception.
+            logger.error("%s", e)  # noqa: TRY400
+            raise SystemExit(1) from e
+    else:
+        backend_version = _resolve_version_for_matching(system_name, backend_name, backend_version)
     if backend_version is None or backend_version in versions:
+        return
+
+    # Old-style raw-version escape: the loader-level unlisted-version gate
+    # (perf_database resolve) honors this variable; the precheck must not be
+    # stricter than the loader, or the documented escape is unreachable.
+    if os.environ.get("AIC_ALLOW_UNLISTED_VERSIONS", "").lower() in ("1", "true", "yes"):
+        logger.warning(
+            "AIC_ALLOW_UNLISTED_VERSIONS is set: querying raw version %s/%s on %s "
+            "outside the queryable slots %s. This data is not maintained to the "
+            "queryable bar; results may have partial op coverage.",
+            backend_name,
+            backend_version,
+            system_name,
+            versions,
+        )
         return
 
     systems_paths = perf_database.get_systems_paths()
@@ -1510,12 +1580,16 @@ def _ensure_backend_version_available(
     if versions:
         logger.error("Available versions: %s", ", ".join(versions))
         logger.error(
-            "Fix: switch --backend-version to one of the available versions, "
-            "remove --backend-version to use latest, "
-            "or add a declared version directory with %s (legacy: %s) when this version "
-            "intentionally reuses shared-layer data.",
-            perf_database.REUSE_YAML_MARKER,
-            perf_database.SHARED_LAYER_REUSE_MARKER,
+            "Fix: switch --backend-version to one of the available slot versions "
+            "or the aliases current / previous / next, or remove "
+            "--backend-version to use current. Versions outside the slots "
+            "are data coordinates, not queryable versions "
+            "(see systems/query_versions.yaml).",
+        )
+        logger.error(
+            "Old-style raw-version query (data outside the slots is not "
+            "maintained to the queryable bar): re-run the same command with "
+            "AIC_ALLOW_UNLISTED_VERSIONS=1.",
         )
     else:
         logger.error("Available versions: none")
@@ -1561,6 +1635,7 @@ def build_default_tasks(
     max_seq_len: int | None = None,
     enable_wideep: bool = False,
     moe_backend: str | None = None,
+    attention_backend: str | None = None,
     engine_step_backend: str | None = None,
     forward_model: str | None = None,
     serving_mode: str = "auto",
@@ -1647,6 +1722,7 @@ def build_default_tasks(
             sys_backends = supported.get(system, {})
             if not requires_declared_perf_database:
                 sys_versions = sys_backends.get(backend_name, [])
+                resolved_bv = _resolve_version_for_matching(system, backend_name, backend_version)
                 if not sys_versions:
                     logger.warning(
                         "No measured database for backend %s on system=%s; including it for %s estimates.",
@@ -1654,7 +1730,7 @@ def build_default_tasks(
                         system,
                         database_mode,
                     )
-                elif backend_version is not None and backend_version not in sys_versions:
+                elif resolved_bv is not None and resolved_bv not in sys_versions:
                     logger.warning(
                         "No measured database version %s for backend %s on system=%s; including it for %s estimates.",
                         backend_version,
@@ -1667,7 +1743,9 @@ def build_default_tasks(
             if backend_name not in sys_backends:
                 logger.warning("Skipping backend %s: not supported for system %s.", backend_name, system)
                 continue
-            if backend_version is not None and backend_version not in sys_backends.get(backend_name, []):
+            if backend_version is not None and _resolve_version_for_matching(
+                system, backend_name, backend_version
+            ) not in sys_backends.get(backend_name, []):
                 logger.warning(
                     "Skipping backend %s: version %s not available for system %s.",
                     backend_name,
@@ -1695,7 +1773,8 @@ def build_default_tasks(
             systems_to_check = [("prefill", system), ("decode", decode_system)]
         for role, sys_name in systems_to_check:
             versions = supported.get(sys_name, {}).get(backend, [])
-            if backend_version is not None and versions and backend_version not in versions:
+            resolved_bv = _resolve_version_for_matching(sys_name, backend, backend_version)
+            if resolved_bv is not None and versions and resolved_bv not in versions:
                 logger.warning(
                     "No measured database version %s for %s system=%s backend=%s; using %s estimates.",
                     backend_version,
@@ -1725,7 +1804,10 @@ def build_default_tasks(
                 decode_system,
             )
             return False
-        if backend_version is not None and backend_version not in decode_versions:
+        if (
+            backend_version is not None
+            and _resolve_version_for_matching(decode_system, backend_name, backend_version) not in decode_versions
+        ):
             logger.warning(
                 "Skipping disagg for backend %s: version %s not available for decode system %s.",
                 backend_name,
@@ -1747,6 +1829,7 @@ def build_default_tasks(
         "transfer_policy": transfer_policy,
         "free_gpu_memory_fraction": free_gpu_memory_fraction,
         "max_seq_len": max_seq_len,
+        "attention_backend": attention_backend,
         "engine_step_backend": engine_step_backend,
     }
     if forward_model is not None:
@@ -1879,6 +1962,7 @@ def build_experiment_tasks(
     config: dict[str, Any] | None = None,
     engine_step_backend: str | None = None,
     forward_model: str | None = None,
+    attention_backend: str | None = None,
 ) -> dict[str, Task]:
     """Build task configs from YAML file or config dict.
 
@@ -1989,6 +2073,8 @@ def build_experiment_tasks(
             overrides["engine_step_backend"] = engine_step_backend
         if forward_model is not None and "forward_model" not in exp_config:
             overrides["forward_model"] = forward_model
+        if attention_backend is not None and "attention_backend" not in exp_config:
+            overrides["attention_backend"] = attention_backend
 
         try:
             task_config = {**exp_config, "database_mode": database_mode}
@@ -2701,6 +2787,7 @@ def _run_estimate_mode(args):
         max_seq_len=args.max_seq_len,
         engine_step_backend=args.engine_step_backend,
         forward_model=args.forward_model,
+        attention_backend=getattr(args, "attention_backend", None),
         prefix=args.prefix,
         nextn=args.nextn,
         nextn_accepted=args.nextn_accepted,
@@ -3009,6 +3096,7 @@ def _run_recommend(args) -> None:
             max_seq_len=args.max_seq_len,
             enable_wideep=getattr(args, "enable_wideep", False),
             moe_backend=getattr(args, "moe_backend", None),
+            attention_backend=getattr(args, "attention_backend", None),
             top_n=args.top_n,
             save_dir=args.save_dir,
             engine_step_backend=args.engine_step_backend,
@@ -3093,8 +3181,15 @@ def main(args):
             raise SystemExit("recommend mode requires --model-path")
         if not getattr(args, "system", None):
             raise SystemExit("recommend mode requires --system")
-        _resolve_and_validate_nextn(args)
-        _run_recommend(args)
+        # Preserve omitted, explicit zero, and "auto" as distinct recommend API
+        # inputs. cli_recommend owns DSPARK fallback and acceptance validation.
+        try:
+            _run_recommend(args)
+        except Exception as exc:
+            if is_expected_cli_error(exc):
+                logger.debug("Traceback for recommend mode", exc_info=True)
+                raise SystemExit("Error: " + str(exc)) from exc
+            raise
         return
 
     if args.mode == "default":
@@ -3178,6 +3273,7 @@ def main(args):
             afd_candidate_overflow=getattr(args, "afd_candidate_overflow", "error"),
             enable_wideep=getattr(args, "enable_wideep", False),
             moe_backend=getattr(args, "moe_backend", None),
+            attention_backend=getattr(args, "attention_backend", None),
         )
     elif args.mode == "exp":
         try:
@@ -3186,6 +3282,8 @@ def main(args):
                 build_kwargs["engine_step_backend"] = args.engine_step_backend
             if args.forward_model is not None:
                 build_kwargs["forward_model"] = args.forward_model
+            if getattr(args, "attention_backend", None) is not None:
+                build_kwargs["attention_backend"] = args.attention_backend
             tasks = build_experiment_tasks(**build_kwargs)
         except (ValueError, TypeError) as exc:
             logger.exception("Failed to build experiment task configs")

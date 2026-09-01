@@ -15,6 +15,16 @@ Context (prefill) phase:
 Generation (decode) phase:
     - causal_conv1d_update: Single-step conv state update
     - fused_recurrent_gated_delta_rule_packed_decode: Packed GDN recurrence
+      (the FP32 fla/triton lane used by official repository collection)
+    - flashinfer_gated_delta_rule_decode: FlashInfer bf16-state decode via
+      flashinfer.gdn_decode.gated_delta_rule_decode_pretranspose (SM-major-10
+      only — is_sm100_supported() is capability major EXACTLY 10, so sm
+      100/103 yes, sm 120 no; sglang serving auto-selects this decode kernel
+      only when the model's mamba_ssm_dtype is bfloat16 — server_args.py
+      _handle_linear_attn_backend, :4884-4915 @0.5.14). This describes
+      hypothetical consumer-serving behavior: official repository collection
+      remains FP32-only until a state-dtype-keyed persisted identity/schema is
+      separately approved, so it cannot currently select this lane.
 
 The in_proj and out_proj GEMMs are standard linear layers modeled by the
 existing GEMM infrastructure. This collector focuses on the unique GDN ops.
@@ -94,6 +104,7 @@ def get_gdn_test_cases():
                     common_case.batch_size_list,
                     common_case.seq_len_list,
                     common_case.model_name,
+                    common_case.mamba_ssm_dtype,
                 ]
             )
         else:
@@ -109,6 +120,7 @@ def get_gdn_test_cases():
                     common_case.batch_size_list,
                     None,  # seq_len_list not used for generation
                     common_case.model_name,
+                    common_case.mamba_ssm_dtype,
                 ]
             )
 
@@ -329,6 +341,58 @@ def run_gdn_context_benchmark(
         raise RuntimeError(f"SGLang GDN context collection failed strict completeness: {summary}")
 
 
+def _resolve_flashinfer_gdn_decode(mamba_ssm_dtype: str = "float32"):
+    """
+    Resolve the FlashInfer bf16-state GDN decode kernel for the SM-major-10 lane.
+
+    ``mamba_ssm_dtype`` is the case's model-config SSM state dtype (serving
+    default "float32" — configs/mamba_utils.py @0.5.14). Serving's own
+    predicate for auto-selecting this backend is ``is_sm100_supported()``
+    (capability major EXACTLY 10 — sm 100/103 yes, sm 120 NO) AND
+    ``mamba_ssm_dtype == "bfloat16"`` (server_args.py's
+    _handle_linear_attn_backend, :4884-4915 @0.5.14; it hard-errors a
+    non-bf16 state on that backend).
+
+    Returns a ``(kernel_fn, classified_error)`` pair, at most one of which is
+    not None:
+    - SM major != 10, or state dtype != ``bfloat16``: ``(None, None)``.
+      Serving never selects this backend for the case.
+    - SM major 10, bf16 state, flashinfer importable: ``(kernel_fn, None)``.
+    - SM major 10, bf16 state, flashinfer NOT importable:
+      ``(None, message)``. Serving MANDATES this kernel for the case's model
+      there, so a missing import is a collection-environment gap, not a
+      legitimate skip: the caller raises this message as a classified failure
+      (layer_permissions.md: "execute it, or raise") without invoking or
+      logging the non-serving FLA decode lane.
+
+    The lazy import mirrors sglang's own guard for this kernel
+    (gdn_flashinfer.py:34-56 @0.5.14, _get_flashinfer_gdn_kernels ->
+    gated_delta_rule_decode_pretranspose).
+    """
+    sm_version = get_sm_version()
+    if not (100 <= sm_version < 110 and mamba_ssm_dtype == "bfloat16"):
+        print(
+            f"  SM{sm_version}, mamba_ssm_dtype={mamba_ssm_dtype!r}: "
+            "FlashInfer GDN decode not selected; sglang 0.5.14 requires "
+            "capability major exactly 10 and bfloat16 state "
+            "(server_args.py:4884-4915)."
+        )
+        return None, None
+    try:
+        from flashinfer.gdn_decode import gated_delta_rule_decode_pretranspose
+    except (ImportError, RuntimeError) as e:
+        message = (
+            f"SM{sm_version}: FlashInfer bf16 GDN decode lane required but unavailable "
+            f"(flashinfer.gdn_decode import failed: {type(e).__name__}: {e}); SM100 "
+            "sglang serving mandates this kernel for GDN decode when mamba_ssm_dtype "
+            "== 'bfloat16' (server_args.py:4884-4915 @0.5.14) -- this is a "
+            "collection environment gap, not a skip."
+        )
+        print(f"  {message}")
+        return None, message
+    return gated_delta_rule_decode_pretranspose, None
+
+
 def run_gdn_generation_benchmark(
     d_model: int,
     d_conv: int,
@@ -341,6 +405,7 @@ def run_gdn_generation_benchmark(
     perf_filename: str,
     sglang_version: str,
     device: str = "cuda:0",
+    mamba_ssm_dtype: str = "float32",
 ):
     """
     Benchmark GDN operations for generation (decode) phase using SGLang's Triton FLA kernels.
@@ -348,12 +413,28 @@ def run_gdn_generation_benchmark(
     Benchmarks:
     1. causal_conv1d_update  — Single-step conv state update
     2. fused_recurrent_gated_delta_rule_packed_decode — Packed GDN recurrence
+       (fla/triton lane unless serving selects FlashInfer)
+    3. flashinfer_gated_delta_rule_decode — FlashInfer bf16-state decode,
+       selected instead of FLA only when the SM major is 10 and the case
+       declares bf16 state; unavailable kernels raise a classified failure
     """
     device = torch.device(device)
     torch.cuda.set_device(device)
     torch.set_default_device(device)
 
     dtype = torch.bfloat16
+    # Serving population @v0.5.14: configs/qwen3_next.py:294-305 builds
+    # Mamba2CacheParams with configs/mamba_utils.py:63-67,70-107's resolved
+    # dtype; mem_cache/memory_pool.py:342-344,390-394 allocates the temporal
+    # state in it, and linear/kernels/gdn_triton.py:81-92 consumes it unchanged.
+    try:
+        recurrent_state_dtype = {
+            "float32": torch.float32,
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+        }[mamba_ssm_dtype]
+    except KeyError as error:
+        raise ValueError(f"Unsupported mamba_ssm_dtype for SGLang GDN: {mamba_ssm_dtype!r}") from error
     qk_dim = num_k_heads * head_k_dim
     value_dim = num_v_heads * head_v_dim
     conv_channels = 2 * qk_dim + value_dim
@@ -365,15 +446,19 @@ def run_gdn_generation_benchmark(
         )
 
     conv_weight = torch.randn(conv_channels, d_conv, dtype=dtype, device=device)
+    # Resolve serving's exact decode dispatch: SM-major 10 + bf16 uses FI;
+    # current FP32 recipes stay on FLA, and a required-but-missing FI raises.
+    flashinfer_gdn_decode_fn, flashinfer_gdn_decode_error = _resolve_flashinfer_gdn_decode(mamba_ssm_dtype)
     successful_points = 0
     failed_points = 0
+    failures = []
 
     for batch_size in batch_size_list:
         if aic_debug:
             print(f"  Benchmarking batch_size={batch_size}")
 
         a = a_log = b = conv_state = dt_bias = mixed_qkv = None
-        output = recurrent_state = state_indices = None
+        output = recurrent_state = state_indices = flashinfer_recurrent_state = None
         try:
             num_warmups = 3
             num_runs = 10
@@ -386,14 +471,6 @@ def run_gdn_generation_benchmark(
                 device=device,
             )
             state_indices = torch.arange(batch_size, dtype=torch.int32, device=device)
-            recurrent_state = torch.zeros(
-                batch_size,
-                num_v_heads,
-                head_v_dim,
-                head_k_dim,
-                dtype=torch.float32,
-                device=device,
-            )
             a = torch.randn(batch_size, num_v_heads, dtype=dtype, device=device)
             b = torch.randn(batch_size, num_v_heads, dtype=dtype, device=device)
             a_log = torch.zeros(num_v_heads, dtype=torch.float32, device=device)
@@ -453,47 +530,124 @@ def run_gdn_generation_benchmark(
                 ):
                     raise RuntimeError(f"failed to persist SGLang GDN generation row to {perf_filename}")
 
-            def run_gdn_update():
-                fused_recurrent_gated_delta_rule_packed_decode(
-                    mixed_qkv=mixed_qkv,
-                    a=a,
-                    b=b,
-                    A_log=a_log,
-                    dt_bias=dt_bias,
-                    scale=head_k_dim**-0.5,
-                    initial_state=recurrent_state,
-                    out=output,
-                    ssm_state_indices=state_indices,
-                    use_qk_l2norm_in_kernel=True,
+            if flashinfer_gdn_decode_error is not None:
+                raise RuntimeError(flashinfer_gdn_decode_error)
+
+            if flashinfer_gdn_decode_fn is None:
+                recurrent_state = torch.zeros(
+                    batch_size,
+                    num_v_heads,
+                    head_v_dim,
+                    head_k_dim,
+                    dtype=recurrent_state_dtype,
+                    device=device,
                 )
 
-            with benchmark_with_power(
-                device=device,
-                kernel_func=run_gdn_update,
-                num_warmups=num_warmups,
-                num_runs=num_runs,
-                repeat_n=10,
-            ) as results:
-                if not log_perf(
-                    item_list=[{**common_log_data, "latency": results["latency_ms"]}],
-                    framework="SGLang",
-                    version=sglang_version,
-                    device_name=torch.cuda.get_device_name(device),
-                    op_name="gdn",
-                    kernel_source="fused_recurrent_gated_delta_rule_packed_decode",
-                    perf_filename=perf_filename,
-                    power_stats=results["power_stats"],
-                ):
-                    raise RuntimeError(f"failed to persist SGLang GDN generation row to {perf_filename}")
+                def run_gdn_update():
+                    fused_recurrent_gated_delta_rule_packed_decode(
+                        mixed_qkv=mixed_qkv,
+                        a=a,
+                        b=b,
+                        A_log=a_log,
+                        dt_bias=dt_bias,
+                        scale=head_k_dim**-0.5,
+                        initial_state=recurrent_state,
+                        out=output,
+                        ssm_state_indices=state_indices,
+                        use_qk_l2norm_in_kernel=True,
+                    )
+
+                with benchmark_with_power(
+                    device=device,
+                    kernel_func=run_gdn_update,
+                    num_warmups=num_warmups,
+                    num_runs=num_runs,
+                    repeat_n=10,
+                ) as results:
+                    if not log_perf(
+                        item_list=[{**common_log_data, "latency": results["latency_ms"]}],
+                        framework="SGLang",
+                        version=sglang_version,
+                        device_name=torch.cuda.get_device_name(device),
+                        op_name="gdn",
+                        kernel_source="fused_recurrent_gated_delta_rule_packed_decode",
+                        perf_filename=perf_filename,
+                        power_stats=results["power_stats"],
+                    ):
+                        raise RuntimeError(f"failed to persist SGLang GDN generation row to {perf_filename}")
+
+            else:
+                # Mirrors FlashInferGDNKernel.decode's
+                # use_state_pool=True branch argument-for-argument
+                # (gdn_flashinfer.py:180-193 @0.5.14 — serving selects this
+                # backend only on capability major 10, where use_state_pool =
+                # sm_major >= 10 takes this branch), which is fed
+                # q/k/v split+reshaped from mixed_qkv exactly as
+                # GDNAttnBackend.forward_decode does (gdn_backend.py:348-357
+                # @0.5.14) before calling the kernel_dispatcher. The state
+                # pool is bf16 here, independent of the FLA lane's case dtype,
+                # because server_args.py:4884-4915 hard-requires bf16 state on
+                # this capability-major-10 backend.
+                flashinfer_query, flashinfer_key, flashinfer_value = torch.split(
+                    mixed_qkv, [qk_dim, qk_dim, value_dim], dim=-1
+                )
+                flashinfer_query = flashinfer_query.view(batch_size, 1, num_k_heads, head_k_dim)
+                flashinfer_key = flashinfer_key.view(batch_size, 1, num_k_heads, head_k_dim)
+                flashinfer_value = flashinfer_value.view(batch_size, 1, num_v_heads, head_v_dim)
+                flashinfer_a = a.view(batch_size, 1, num_v_heads)
+                flashinfer_b = b.view(batch_size, 1, num_v_heads)
+                flashinfer_recurrent_state = torch.zeros(
+                    batch_size,
+                    num_v_heads,
+                    head_v_dim,
+                    head_k_dim,
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+
+                def run_gdn_update_flashinfer():
+                    flashinfer_gdn_decode_fn(
+                        q=flashinfer_query,
+                        k=flashinfer_key,
+                        v=flashinfer_value,
+                        state=None,
+                        A_log=a_log.detach().float(),
+                        a=flashinfer_a,
+                        dt_bias=dt_bias.detach(),
+                        b=flashinfer_b,
+                        use_qk_l2norm=True,
+                        initial_state=flashinfer_recurrent_state,
+                        initial_state_indices=state_indices,
+                    )
+
+                with benchmark_with_power(
+                    device=device,
+                    kernel_func=run_gdn_update_flashinfer,
+                    num_warmups=num_warmups,
+                    num_runs=num_runs,
+                    repeat_n=10,
+                ) as results:
+                    if not log_perf(
+                        item_list=[{**common_log_data, "latency": results["latency_ms"]}],
+                        framework="SGLang",
+                        version=sglang_version,
+                        device_name=torch.cuda.get_device_name(device),
+                        op_name="gdn",
+                        kernel_source="flashinfer_gated_delta_rule_decode",
+                        perf_filename=perf_filename,
+                        power_stats=results["power_stats"],
+                    ):
+                        raise RuntimeError(f"failed to persist SGLang GDN generation row to {perf_filename}")
             successful_points += 1
 
         except Exception as e:
             failed_points += 1
+            failures.append(f"batch_size={batch_size}: {type(e).__name__}: {e}")
             print(f"  Error at batch_size={batch_size}: {e}")
             continue
         finally:
             a = a_log = b = conv_state = dt_bias = mixed_qkv = None
-            output = recurrent_state = state_indices = None
+            output = recurrent_state = state_indices = flashinfer_recurrent_state = None
             cleanup_errors = []
             for cleanup_name, cleanup_fn in (
                 ("gc.collect", gc.collect),
@@ -509,7 +663,10 @@ def run_gdn_generation_benchmark(
     summary = f"ok={successful_points} error={failed_points} skip=0"
     print(f"GDN generation summary: {summary}")
     if failed_points or successful_points == 0:
-        raise RuntimeError(f"SGLang GDN generation collection failed strict completeness: {summary}")
+        raise RuntimeError(
+            f"SGLang GDN generation collection failed strict completeness: {summary}; "
+            f"failed cells: {'; '.join(failures)}"
+        )
 
 
 def run_gdn_torch(
@@ -523,6 +680,7 @@ def run_gdn_torch(
     batch_size_list: list[int],
     seq_len_list: list[int] | None,
     model_name: str,
+    mamba_ssm_dtype: str = "float32",
     *,
     perf_filename: str,
     device: str = "cuda:0",
@@ -533,6 +691,12 @@ def run_gdn_torch(
     Routes to appropriate benchmark function based on phase.
     Imports the target SGLang kernels at runtime.
     """
+    if mamba_ssm_dtype != "float32":
+        raise ValueError(
+            "SGLang GDN collection requires mamba_ssm_dtype='float32'; only float32 collection is supported "
+            "because the persisted GDN identity has no state-dtype dimension"
+        )
+
     import contextlib
 
     with (
@@ -592,6 +756,7 @@ def run_gdn_torch(
             perf_filename=perf_filename,
             sglang_version=sglang_version,
             device=device,
+            mamba_ssm_dtype=mamba_ssm_dtype,
         )
     else:
         raise ValueError(f"Unknown phase: {phase}")
@@ -638,6 +803,7 @@ if __name__ == "__main__":
             batch_size_list,
             seq_len_list,
             model_name,
+            mamba_ssm_dtype,
         ) = test_case
 
         print(f"\n[{i + 1}/{len(test_cases)}] {model_name} - {phase}")
@@ -663,6 +829,7 @@ if __name__ == "__main__":
             batch_size_list=batch_size_list,
             seq_len_list=seq_len_list,
             model_name=model_name,
+            mamba_ssm_dtype=mamba_ssm_dtype,
             perf_filename=PerfFile.GDN,
         )
 

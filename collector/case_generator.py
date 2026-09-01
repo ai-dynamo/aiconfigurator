@@ -1461,7 +1461,19 @@ def get_moe_backend_test_cases(backend: str) -> list[MoeCommonTestCase]:
     return test_cases
 
 
-def get_common_moe_test_cases(*, backend: str | None = None):
+def get_common_moe_test_cases(
+    *,
+    backend: str | None = None,
+    required_expert_parallel_size: int | None = None,
+):
+    """Return declared MoE recipes with optional runtime constraints.
+
+    ``num_experts % expert_parallel_size == 0`` is universal MoE sharding
+    math, so callers that collect one fixed EP world declare that requirement
+    here rather than silently discarding generated shapes in collector code.
+    """
+    if required_expert_parallel_size is not None and required_expert_parallel_size <= 0:
+        raise ValueError(f"required_expert_parallel_size must be positive, got {required_expert_parallel_size}")
     moe_sweep = _required_base_common_case_values("moe")
     num_tokens = _as_int_list(moe_sweep.get("token_counts"), field_name="moe.token_counts")
     tp_list = _as_int_list(moe_sweep.get("tensor_parallel_sizes"), field_name="moe.tensor_parallel_sizes")
@@ -1525,6 +1537,8 @@ def get_common_moe_test_cases(*, backend: str | None = None):
         num_experts = int(model_config["num_experts"])
         model_name = str(model_config["model_path"])
 
+        if required_expert_parallel_size is not None and num_experts % required_expert_parallel_size != 0:
+            continue
         max_tp_exclusive = model_config.get("max_tp_exclusive")
         if max_tp_exclusive is not None and tp >= int(max_tp_exclusive):
             continue
@@ -2009,6 +2023,12 @@ class GdnCommonTestCase:
     batch_size_list: Optional[list[int]]
     seq_len_list: Optional[list[int]]  # For context phase; None for generation
     model_name: str
+    # SSM state dtype from the model config (`mamba_ssm_dtype`; serving
+    # default "float32" — sglang configs/mamba_utils.py @0.5.14). Consumers
+    # use it to model the hypothetical bfloat16 FlashInfer serving lane on
+    # capability major 10. Official repository collection remains FP32-only
+    # until a state-dtype-keyed persisted identity/schema is separately approved.
+    mamba_ssm_dtype: str = "float32"
 
 
 # =============================================================================
@@ -2088,6 +2108,13 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
         num_v_heads = int(model_config["num_v_heads"])
         head_v_dim = int(model_config["head_v_dim"])
         model_name = str(model_config["model_path"])
+        mamba_ssm_dtype = str(model_config.get("mamba_ssm_dtype", "float32"))
+        if mamba_ssm_dtype != "float32":
+            raise ValueError(
+                "model_case_values.gdn.mamba_ssm_dtype must be float32; only float32 collection is supported "
+                "because the persisted GDN identity has no state-dtype dimension, "
+                f"got {mamba_ssm_dtype!r} for {model_name}"
+            )
         tp_sizes = _as_int_list(
             model_config.get("tensor_parallel_sizes"),
             field_name="model_case_values.gdn.tensor_parallel_sizes",
@@ -2132,6 +2159,7 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
                     batch_size_list=context_batch_sizes,
                     seq_len_list=context_seq_lens,
                     model_name=model_name,
+                    mamba_ssm_dtype=mamba_ssm_dtype,
                 )
             )
 
@@ -2148,6 +2176,7 @@ def get_common_gdn_test_cases() -> list[GdnCommonTestCase]:
                     batch_size_list=generation_batch_sizes,
                     seq_len_list=None,
                     model_name=model_name,
+                    mamba_ssm_dtype=mamba_ssm_dtype,
                 )
             )
 

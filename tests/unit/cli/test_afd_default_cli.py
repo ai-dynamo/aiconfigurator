@@ -27,7 +27,7 @@ pytestmark = pytest.mark.unit
 @pytest.fixture(autouse=True)
 def _stub_latest_db_version(monkeypatch):
     """Avoid touching the on-disk perf database when resolving versions."""
-    monkeypatch.setattr(task_v2_module, "get_latest_database_version", lambda **_: "test-version")
+    monkeypatch.setattr(task_v2_module, "get_latest_database_version", lambda **_: "current")
 
 
 class TestServingModeArgument:
@@ -372,7 +372,7 @@ class TestV2AfdTask:
             model_path="Qwen/Qwen3-32B",
             system_name="h200_sxm",
             backend_name="sglang",
-            backend_version="test-version",
+            backend_version="current",
             enable_wideep=True,
             total_gpus=32,
             prefill_num_gpu_candidates=[8],
@@ -382,7 +382,7 @@ class TestV2AfdTask:
         assert task.prefill_model_path == task.model_path
         assert task.prefill_system_name == task.system_name
         assert task.prefill_backend_name == "sglang"
-        assert task.prefill_backend_version == "test-version"
+        assert task.prefill_backend_version == "current"
         assert task.prefill_enable_wideep is True
         assert task.prefill_num_gpu_candidates == [8]
         assert task.prefill_tp_candidates == [4]
@@ -671,16 +671,22 @@ class TestExpLoaderAcceptsAfd:
 def test_hybrid_auto_mode_skips_missing_decode_backend(monkeypatch):
     import aiconfigurator.cli.main as cli_main
 
+    # The real enumeration carries resolved LITERALS (never aliases); the
+    # request below uses the alias and must match through per-(system,
+    # backend) resolution. Version-agnostic: literals come from the slots.
+    trtllm_cur = cli_main.perf_database.resolve_query_version("h200_sxm", "trtllm", "current")
+    sglang_cur = cli_main.perf_database.resolve_query_version("h200_sxm", "sglang", "current")
+    h100_trtllm_cur = cli_main.perf_database.resolve_query_version("h100_sxm", "trtllm", "current")
     monkeypatch.setattr(
         cli_main.perf_database,
         "get_supported_databases",
         lambda: {
             "h200_sxm": {
-                "trtllm": ["test-version"],
-                "sglang": ["test-version"],
+                "trtllm": [trtllm_cur],
+                "sglang": [sglang_cur],
             },
             "h100_sxm": {
-                "trtllm": ["test-version"],
+                "trtllm": [h100_trtllm_cur],
             },
         },
     )
@@ -695,7 +701,7 @@ def test_hybrid_auto_mode_skips_missing_decode_backend(monkeypatch):
         system="h200_sxm",
         decode_system="h100_sxm",
         backend="auto",
-        backend_version="test-version",
+        backend_version="current",
         database_mode="HYBRID",
     )
 
@@ -710,7 +716,7 @@ def test_save_results_skips_afd_deployment_artifacts(tmp_path, monkeypatch, capl
         model_path="Qwen/Qwen3-32B",
         system_name="h200_sxm",
         backend_name="trtllm",
-        backend_version="test-version",
+        backend_version="current",
         total_gpus=16,
     )
     result = pd.DataFrame([{"tokens/s/user": 10.0, "tokens/s/gpu": 2.0, "power_w": float("nan")}])
@@ -727,7 +733,7 @@ def test_save_results_skips_afd_deployment_artifacts(tmp_path, monkeypatch, capl
             pareto_fronts={"afd": result},
             tasks={"afd": task},
             save_dir=str(tmp_path),
-            generated_backend_version="test-version",
+            generated_backend_version="current",
             backend="trtllm",
         )
 
@@ -745,7 +751,7 @@ def test_save_results_auto_handles_asymmetric_backends_by_mode(tmp_path):
             model_path="Qwen/Qwen3-32B",
             system_name="h200_sxm",
             backend_name="trtllm",
-            backend_version="test-version",
+            backend_version="current",
             total_gpus=16,
         ),
         "agg_vllm": Task(
@@ -753,7 +759,7 @@ def test_save_results_auto_handles_asymmetric_backends_by_mode(tmp_path):
             model_path="Qwen/Qwen3-32B",
             system_name="h200_sxm",
             backend_name="vllm",
-            backend_version="test-version",
+            backend_version="current",
             total_gpus=16,
         ),
         "disagg_trtllm": Task(
@@ -761,11 +767,11 @@ def test_save_results_auto_handles_asymmetric_backends_by_mode(tmp_path):
             prefill_model_path="Qwen/Qwen3-32B",
             prefill_system_name="h200_sxm",
             prefill_backend_name="trtllm",
-            prefill_backend_version="test-version",
+            prefill_backend_version="current",
             decode_model_path="Qwen/Qwen3-32B",
             decode_system_name="h200_sxm",
             decode_backend_name="trtllm",
-            decode_backend_version="test-version",
+            decode_backend_version="current",
             total_gpus=16,
         ),
         "afd_trtllm": Task(
@@ -773,7 +779,7 @@ def test_save_results_auto_handles_asymmetric_backends_by_mode(tmp_path):
             model_path="Qwen/Qwen3-32B",
             system_name="h200_sxm",
             backend_name="trtllm",
-            backend_version="test-version",
+            backend_version="current",
             total_gpus=16,
             afd_combined_with_pd=False,
         ),

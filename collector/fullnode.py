@@ -157,6 +157,11 @@ def collect_sglang_fullnode_op(
     task_by_id = {task_info["id"]: task_info["params"] for task_info in task_infos}
     id_by_case = {str(task_info["params"]): task_info["id"] for task_info in task_infos}
     try:
+        # The runner consumes the selected cases as one batch, so persist its
+        # entire pending provenance set atomically before handing it control.
+        # An interrupted resume then extends this set; only the successful
+        # common parquet/sidecar finalizer closes it.
+        resume_tracker.mark_attempted_many(task_by_id)
         result = run_func(
             perf_filename=collection["perf_filename"],
             limit=None,

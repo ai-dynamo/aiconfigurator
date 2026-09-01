@@ -148,6 +148,11 @@ collector.vllm.collect_attn:
   - collector/cases/base_ops/attention_context.yaml
   - collector/cases/base_ops/attention_generation.yaml
   - __model_cases__
+collector.vllm.collect_attn_xpu:
+  - collector/cases/base_ops/attention_context.yaml
+  - collector/cases/base_ops/attention_generation.yaml
+  - collector/vllm/utils_xpu.py
+  - __model_cases__
 collector.vllm.collect_attn_encoder:
   - collector/cases/base_ops/attention_encoder.yaml
   - __model_cases__
@@ -170,13 +175,25 @@ collector.vllm.collect_gdn:
 collector.vllm.collect_gemm:
   - collector/cases/base_ops/gemm.yaml
   - __model_cases__
+collector.vllm.collect_gemm_xpu:
+  - collector/cases/base_ops/gemm.yaml
+  - collector/vllm/utils_xpu.py
+  - __model_cases__
 collector.vllm.collect_mhc_module:
   - collector/cases/base_ops/mhc.yaml
   - __model_cases__
 collector.vllm.collect_mla_module:
   - collector/cases/base_ops/mla_module.yaml
   - __model_cases__
+collector.vllm.collect_mla_module_027:
+  # 0.27.0-route shim whose get/run functions are re-exported from
+  # collector/vllm/collect_mla_module.py — identical case reads.
+  - collector/cases/base_ops/mla_module.yaml
+  - __model_cases__
 collector.vllm.collect_moe:
+  - collector/cases/base_ops/moe.yaml
+  - __model_cases__
+collector.vllm.collect_moe_xpu:
   - collector/cases/base_ops/moe.yaml
   - __model_cases__
 
@@ -215,6 +232,7 @@ collector.wideep.sglang.collect_deepep_normal:
   - collector/wideep/sglang/deepep/test_intranode.py
   - collector/wideep/sglang/deepep/test_low_latency.py
   - collector/wideep/sglang/deepep/utils.py
+  - __model_cases__
 collector.wideep.sglang.collect_moe_a2a:
   # moe_a2a (standalone multi-node): the workload grid it reads plus the
   # declared model shapes it correlates against. The DeepEP benchmark
@@ -224,10 +242,52 @@ collector.wideep.sglang.collect_moe_a2a:
   # so it is in the closure like the dsv4_megamoe run scripts.
   - collector/cases/base_ops/moe_a2a.yaml
   - collector/cases/base_ops/moe.yaml
+  - collector/wideep/distributed_lifecycle.py
   - collector/network/slurm/submit_moe_a2a.sh
+  - __model_cases__
+collector.wideep.vllm.collect_moe_a2a:
+  # moe_a2a (vllm serving adapter): declared workload/model geometry plus the
+  # immutable serving identity and shared row/sidecar lifecycle.
+  - collector/cases/base_ops/moe_a2a.yaml
+  - collector/cases/base_ops/moe.yaml
+  - collector/framework_manifest.yaml
+  - collector/wideep/backend_contracts.py
+  - collector/wideep/distributed_lifecycle.py
+  - collector/wideep/vllm/slurm/run_vllm_moe_a2a_job.sh
+  - collector/wideep/vllm/slurm/host_tools/ibstat
+  - collector/wideep/vllm/slurm/submit_vllm_moe_a2a.sh
+  - collector/wideep/vllm/slurm/run_deepep_sm103_overlay_job.sh
+  - collector/wideep/vllm/slurm/submit_deepep_sm103_overlay.sh
+  - collector/wideep/vllm/patches/deepep_73b_nvl4.patch
+  - collector/wideep/vllm/slurm/run_vllm_image_stage_job.sh
+  - collector/wideep/vllm/slurm/submit_vllm_image_stage.sh
+  - collector/runtime_stage_publication.py
+  - collector/wideep/vllm/runtime_artifacts.py
+  - collector/wideep/vllm/finalize_campaign.py
+  - collector/wideep/vllm/failure_evidence.py
+  - collector/artifact_publication.py
+  - collector/wideep/sglang/collect_moe_a2a.py
   - __model_cases__
 collector.wideep.trtllm.collect_moe_compute:
   # moe_ep (trtllm): uses case_generator.get_common_moe_test_cases /
   # is_wideep_moe_model.
   - collector/cases/base_ops/moe.yaml
+  - __model_cases__
+collector.wideep.trtllm.collect_moe_a2a:
+  # moe_a2a (trtllm serving adapter): the factory-forced DeepEP paths use the
+  # same declared geometry and frozen identity/lifecycle contracts.
+  - collector/cases/base_ops/moe_a2a.yaml
+  - collector/cases/base_ops/moe.yaml
+  - collector/wideep/backend_contracts.py
+  - collector/wideep/distributed_lifecycle.py
+  - collector/wideep/sglang/collect_moe_a2a.py
+  - collector/wideep/trtllm/finalize_campaign.py
+  - collector/artifact_publication.py
+  - aic-core/src/aiconfigurator_core/sdk/operations/moe_comm.py
+  - collector/wideep/trtllm/runtime_artifacts.py
+  - collector/wideep/trtllm/slurm/run_trtllm_image_stage_job.sh
+  - collector/wideep/trtllm/slurm/submit_trtllm_image_stage.sh
+  - collector/runtime_stage_publication.py
+  - collector/wideep/trtllm/slurm/run_trtllm_moe_a2a_job.sh
+  - collector/wideep/trtllm/slurm/submit_trtllm_moe_a2a.sh
   - __model_cases__

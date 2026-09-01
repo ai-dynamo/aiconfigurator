@@ -12,6 +12,7 @@ from collector.framework_manifest import get_collector_runtime, require_collecto
 from collector.sglang.registry import REGISTRY as SGLANG_REGISTRY
 from collector.trtllm.registry import REGISTRY as TRTLLM_REGISTRY
 from collector.vllm.registry import REGISTRY as VLLM_REGISTRY
+from collector.vllm.registry import REGISTRY_XPU as VLLM_XPU_REGISTRY
 from collector.wideep.sglang import dataset_version_label
 from collector.wideep.sglang.registry import REGISTRY as WIDEEP_SGLANG_REGISTRY
 from collector.wideep.trtllm.registry import REGISTRY as WIDEEP_TRTLLM_REGISTRY
@@ -39,6 +40,15 @@ def test_manifest_exposes_current_framework_versions_and_images():
     assert vllm.image("cu130") == vllm.image()
 
 
+def test_manifest_exposes_pinned_vllm_xpu_runtime_identity():
+    runtime = get_collector_runtime("vllm_xpu")
+
+    assert runtime.framework == "vllm_xpu"
+    assert runtime.data_backend == "vllm"
+    assert runtime.version == "0.26.0"
+    assert runtime.image().startswith("vllm/vllm-openai-xpu:v0.26.0@sha256:")
+
+
 def test_active_cuda_vllm_collectors_are_exactly_pinned_to_manifest_version():
     assert all(not entry.versions for entry in VLLM_REGISTRY)
 
@@ -57,6 +67,16 @@ def test_active_cuda_vllm_collectors_are_exactly_pinned_to_manifest_version():
         assert declarations == [expected], module
 
 
+def test_active_vllm_xpu_collectors_are_exactly_pinned_to_manifest_version():
+    expected = f'__compat__ = "vllm=={get_collector_runtime("vllm_xpu").version}"'
+    assert all(not entry.versions for entry in VLLM_XPU_REGISTRY)
+
+    for module in sorted({entry.module for entry in VLLM_XPU_REGISTRY}):
+        source = (REPO_ROOT / f"{module.replace('.', '/')}.py").read_text(encoding="utf-8")
+        declarations = [line.strip() for line in source.splitlines() if line.startswith("__compat__")]
+        assert declarations == [expected], module
+
+
 def test_wideep_runtime_stays_independent_from_default_framework_runtime():
     wideep_sglang = get_collector_runtime("sglang", workload="wideep")
     assert wideep_sglang.version == "0.5.10"
@@ -65,11 +85,25 @@ def test_wideep_runtime_stays_independent_from_default_framework_runtime():
     assert "deepseek-v4" in wideep_sglang.image()
 
 
+def test_wideep_vllm_runtime_has_backend_specific_deepep_abis():
+    runtime = get_collector_runtime("vllm", workload="wideep")
+
+    assert runtime.images == {
+        "default": "vllm/vllm-openai:v0.24.0@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f"
+    }
+    assert runtime.abi_for_backend("deepep_ht")["deep_ep"] == "73b6ea4a439ba03a695563f9fd242c8e4b02b37c"
+    assert runtime.abi_for_backend("deepep_ht")["deep_ep_api"] == "Buffer"
+    assert runtime.abi_for_backend("deepep_ll")["deep_ep_api"] == "Buffer"
+    v2 = runtime.abi_for_backend("deepep_v2")
+    assert v2["deep_ep"] == "b306af06afd412c88e51e71802951606e40b7358"
+    assert v2["deep_ep_api"] == "ElasticBuffer"
+    assert v2["nccl"] == "2.30.4"
+
+
 def test_deepep_ops_resolve_to_the_comm_family_runtime(monkeypatch):
     # The `comm` family override retargets exactly the two DeepEP ops; moe_ep
-    # (the retired wideep_moe's successor) is family `moe` and stays on the
-    # DeepSeek-V4 runtime its 0.5.10 dataset was collected with, where DSv4
-    # module support is verified.
+    # is family `moe` and stays on the DeepSeek-V4 runtime its 0.5.10 dataset
+    # was collected with.
     moe = resolve_op_runtime("wideep_sglang", "moe_ep")
     assert (moe.family, moe.version) == ("moe", "0.5.10")
     assert "deepseek-v4" in moe.image()
@@ -125,6 +159,65 @@ frameworks:
     )
     with pytest.raises(ValueError, match="digest-pinned"):
         get_collector_runtime("sglang", path=manifest)
+
+
+def test_runtime_source_commit_and_abi_are_pinned_and_exposed(tmp_path):
+    digest = "@sha256:" + "0" * 64
+    source_commit = "1" * 40
+    manifest = tmp_path / "framework_manifest.yaml"
+    manifest.write_text(
+        f"""
+schema_version: 2
+frameworks:
+  vllm:
+    source_repo: "https://github.com/vllm-project/vllm.git"
+    default:
+      version: "0.26.1.dev587"
+      source_commit: "{source_commit}"
+      abi:
+        deep_ep: "d4f41e4e93"
+        nvshmem: "3.3.24"
+      images:
+        default: "vllm/vllm-openai:nightly{digest}"
+""",
+        encoding="utf-8",
+    )
+
+    runtime = get_collector_runtime("vllm", path=manifest)
+    assert runtime.source_commit == source_commit
+    assert runtime.abi == {"deep_ep": "d4f41e4e93", "nvshmem": "3.3.24"}
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("source_commit", "abc123", "full 40-character"),
+        ("abi", "not-a-map", "must map"),
+        ("abi", {}, "must map"),
+    ],
+)
+def test_runtime_source_and_abi_reject_unpinned_values(tmp_path, field, value, message):
+    digest = "@sha256:" + "0" * 64
+    runtime_extra = yaml.safe_dump({field: value}, default_flow_style=False).rstrip()
+    indented_extra = "\n".join(f"      {line}" for line in runtime_extra.splitlines())
+    manifest = tmp_path / "framework_manifest.yaml"
+    manifest.write_text(
+        f"""
+schema_version: 2
+frameworks:
+  vllm:
+    source_repo: "https://github.com/vllm-project/vllm.git"
+    default:
+{indented_extra}
+      version: "0.26.1.dev587"
+      images:
+        default: "vllm/vllm-openai:nightly{digest}"
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        get_collector_runtime("vllm", path=manifest)
 
 
 def test_wideep_entry_missing_base_framework_is_rejected(tmp_path):
@@ -200,6 +293,19 @@ def test_runtime_selection_accepts_only_the_matching_pin(installed_version, requ
     assert (runtime.workload, runtime.version) == (workload, version)
 
 
+def test_vllm_xpu_runtime_selection_uses_xpu_registry_and_accepts_local_version_metadata():
+    runtime = require_collector_runtime("vllm_xpu", "0.26.0+xpu", requested_ops={"gemm"}, wideep_ops=set())
+
+    assert runtime.framework == "vllm_xpu"
+    assert runtime.version == "0.26.0"
+    assert runtime.image().startswith("vllm/vllm-openai-xpu:v0.26.0@sha256:")
+
+
+def test_vllm_xpu_runtime_selection_rejects_version_mismatch():
+    with pytest.raises(RuntimeError, match=r"vllm_xpu stock collector requires exactly 0\.26\.0"):
+        require_collector_runtime("vllm_xpu", "0.24.0", requested_ops={"gemm"}, wideep_ops=set())
+
+
 @pytest.mark.parametrize(
     ("installed_version", "requested_ops", "match"),
     [
@@ -221,6 +327,11 @@ def test_runtime_selection_rejects_mismatched_or_mixed_pins(installed_version, r
 def test_unknown_requested_op_fails_with_key_error():
     with pytest.raises(KeyError, match=r"has no op\(s\): \['not_a_real_op'\]"):
         require_collector_runtime("sglang", "0.5.14", requested_ops={"not_a_real_op"}, wideep_ops=set())
+
+
+def test_vllm_xpu_unknown_requested_op_fails_with_key_error():
+    with pytest.raises(KeyError, match=r"vllm_xpu registry has no op\(s\): \['not_a_real_op'\]"):
+        require_collector_runtime("vllm_xpu", "0.26.0+xpu", requested_ops={"not_a_real_op"}, wideep_ops=set())
 
 
 def test_typo_mixed_with_real_op_fails_closed():

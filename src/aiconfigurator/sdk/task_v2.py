@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from aiconfigurator.sdk import common, config
+from aiconfigurator.sdk.attention_lanes import ATTENTION_BACKEND_CHOICES
 from aiconfigurator.sdk.errors import NoFeasibleConfigError
 from aiconfigurator.sdk.models import (
     _get_model_info,
@@ -47,10 +48,12 @@ from aiconfigurator.sdk.models import (
     get_model_family,
     resolve_dsv4_moe_arch_mode,
     resolve_kimi_k3_moe_arch_mode,
+    resolve_vllm_moe_execution_mode,
 )
 from aiconfigurator.sdk.models.blocks.moe import LARGE_EP_READY_FAMILIES, MoEBlockShape
 from aiconfigurator.sdk.moe_comm_resolver import (
     a2a_covers_parallel,
+    moe_compute_coverage,
     resolve_model_config_moe_comm,
     select_moe_comm_backend,
 )
@@ -561,7 +564,11 @@ class Task:
     nextn: int | str = 0
     nextn_accepted: float | None = None
     moe_backend: str | None = None
-    attention_backend: str | None = None  # 'flashinfer' (default) or 'fa3'; only consumed by MLA models
+    # Applies to every graph with standard dense ContextAttention/GenerationAttention ops and to
+    # supported DeepSeek MLA/WideEP paths. Named support is backend/table/version-specific and fails
+    # closed; None/default uses the mapped framework default or safe default fallback. SGLang WideEP
+    # maps None/default to flashinfer and also supports fa3.
+    attention_backend: str | None = None
     wideep_num_slots: int | None = None  # EPLB slot count; defaults to num_experts when None
     gemm_quant_mode: common.GEMMQuantMode | None = None
     moe_quant_mode: common.MoEQuantMode | None = None
@@ -1125,6 +1132,18 @@ class Task:
                         )
                     if arch_mode is not None:
                         from_hf = arch_mode
+                    # HF-base-layer remap: vLLM executes W4A16_NVFP4-labeled
+                    # experts on the w4a4 nvfp4 lane (see the helper). Applied
+                    # to the HF-derived value only, so an explicit field still
+                    # overrides it — and validate fails fast on an explicit
+                    # w4a16_nvfp4, which vLLM has no data lane for.
+                    from_hf = resolve_vllm_moe_execution_mode(
+                        from_hf,
+                        self._role_attr(role, "backend_name"),
+                        self._raw_config.get("architectures", [None])[0]
+                        if isinstance(self._raw_config.get("architectures"), list)
+                        else self._raw_config.get("architecture"),
+                    )
                 fallback = _QUANT_FALLBACKS[key]
 
                 if explicit is not None:
@@ -1275,8 +1294,9 @@ class Task:
 
         Per spec section 4.5, an EP size is explorable for a phase when its
         comm backend carries dispatch+combine rows for the model shape at the
-        requested EP/node scale, or SGLang DeepEP carries the marked node-1
-        substitute retained from PR #1314. The backend's registry feasibility
+        requested EP/node scale, or DeepEP HT/LL carries its marked node-1
+        substitute (legacy EP8 for SGLang, physical full-node EP otherwise).
+        The backend's registry feasibility
         rules must admit the config, and the EP expert-compute table must cover
         the shape under the role's MoE quant mode for that phase. BOTH phases
         are probed for every role: a
@@ -1327,10 +1347,8 @@ class Task:
         # (a lightweight double injected by a caller) carries no coverage
         # information, which is the same answer as an absent table.
         a2a_probe = getattr(database, "moe_a2a_coverage", None)
-        compute_probe = getattr(database, "moe_expert_compute_coverage", None)
         coverage: dict[str, dict[str, set[int]]] = {}
-        if gpus_per_node and a2a_probe is not None and compute_probe is not None:
-            a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts)
+        if gpus_per_node and a2a_probe is not None:
             quant_mode = self._role_attr(role, "moe_quant_mode")
             if quant_mode is not None and not isinstance(quant_mode, common.MoEQuantMode):
                 # The compute table is keyed by MoEQuantMode members; any
@@ -1342,8 +1360,16 @@ class Task:
                     f"{type(quant_mode).__name__} {quant_mode!r} "
                 )
             for phase in ("context", "generation"):
-                compute = compute_probe(
-                    shape.hidden_size, shape.moe_inter_size, shape.topk, shape.num_experts, quant_mode, phase
+                a2a = a2a_probe(shape.hidden_size, shape.topk, shape.num_experts, quant_mode, phase)
+                compute = moe_compute_coverage(
+                    database,
+                    backend_name=backend_name,
+                    hidden_size=shape.hidden_size,
+                    inter_size=shape.moe_inter_size,
+                    topk=shape.topk,
+                    num_experts=shape.num_experts,
+                    quant_mode=quant_mode,
+                    phase=phase,
                 )
                 per_backend: dict[str, set[int]] = {}
                 for name, backend_spec in MOE_A2A_BACKENDS.items():
@@ -1358,6 +1384,7 @@ class Task:
                             comm_backend=name,
                             moe_ep_size=ep,
                             expected_nodes=nodes_for(ep, gpus_per_node),
+                            gpus_per_node=gpus_per_node,
                         )
                         and backend_spec.feasible(
                             topk=shape.topk,
@@ -1463,16 +1490,23 @@ class Task:
         )
 
     def _large_ep_eps(self, role: str) -> set[int]:
-        """EP sizes this role could run large-EP: covered in every phase it runs
-        AND in the context phase that sizes its weights (see
-        ``_required_large_ep_phases``)."""
+        """Covered EP sizes that actually span more than one physical node.
+
+        Single-node A2A data may resolve the communication backend for an
+        intra-node tuple, but it must not unlock the multi-node search ladder
+        or its larger replica budget.  Only coverage present in every required
+        phase *and* wider than the system's node width enables that expansion.
+        """
         coverage = self._large_ep_coverage(role)
         eps: set[int] | None = None
         for phase in set(self._role_phases(role)) | set(self._required_large_ep_phases(role)):
             per_backend = coverage.get(phase, {})
             phase_eps = set().union(*per_backend.values()) if per_backend else set()
             eps = phase_eps if eps is None else eps & phase_eps
-        return eps or set()
+        gpus_per_node = self._num_gpus_per_node(role)
+        if not gpus_per_node:
+            return set()
+        return {ep for ep in (eps or set()) if ep > gpus_per_node}
 
     def _role_has_large_ep_tuple(self, role: str) -> bool:
         """Whether any enumerated tuple for this role resolves a comm backend."""
@@ -2029,11 +2063,11 @@ class Task:
             nextn=self.nextn,
             enable_encoder_dp=self.enable_encoder_dp,
             enable_eplb=self._role_attr(role, "enable_eplb"),
-            # attention_backend / wideep_num_slots are shared across roles (Task has no
-            # per-role variant) and fed to ModelConfig so get_model selects the MLA
-            # attention perf tables (fa3 vs flashinfer) and the EPLB slot count.
-            # workload_distribution remains non-configurable in v2 and ModelConfig's
-            # default matches v1's.
+            # moe_backend / attention_backend / wideep_num_slots are shared across roles
+            # (Task has no per-role variant) and fed to ModelConfig so get_model selects the
+            # right MoE kernel (deepep_moe / megamoe), MLA attention perf tables (fa3 vs
+            # flashinfer), and EPLB slot count. workload_distribution remains non-configurable
+            # in v2 and ModelConfig's default matches v1's.
             #
             # moe_backend="deepep_moe" is NOT forwarded: it used to select both the
             # sglang wideEP model classes and the wideep MoE compute tables for the
@@ -2041,8 +2075,11 @@ class Task:
             # would make a fused tuple price itself off the large-EP tables. MegaMoE
             # is a real DeepSeek-V4 kernel selection and passes through.
             moe_backend=self.moe_backend if self.moe_backend != "deepep_moe" else None,
-            # None means "unspecified" -> fall back to flashinfer (matches v1 and ModelConfig's default).
-            attention_backend=self.attention_backend or "flashinfer",
+            # None means "unspecified" and MUST stay None: the WideEP MLA ops apply
+            # their own "flashinfer" default, while dense attention (AIC-1715) reads
+            # this field as the kernel-LANE override — materializing a lane name here
+            # would silently pin every model to the flashinfer lane.
+            attention_backend=self.attention_backend,
             wideep_num_slots=self.wideep_num_slots,
             forward_model=self.forward_model or "op_level",
             moe_comm_backend=None,
@@ -2050,6 +2087,7 @@ class Task:
             # ops take the comm node span at construction and would otherwise
             # have no channel to it (models.helpers.large_ep_gpus_per_node).
             num_gpus_per_node=num_gpus_per_node,
+            system=self._role_attr(role, "system_name"),
         )
         model_config._gemm_quant_mode_is_explicit = self._gemm_quant_mode_explicit_by_role.get(role, False)
         if parallel is not None:
@@ -2142,8 +2180,11 @@ class Task:
             UnsupportedWideepConfigError specifically for wideep_* ops
             (lets callers distinguish from generic ``ValueError``).
         """
-        if self.attention_backend is not None and self.attention_backend not in ("flashinfer", "fa3"):
-            raise ValueError(f"attention_backend must be 'flashinfer' or 'fa3', got {self.attention_backend!r}.")
+        if self.attention_backend is not None and self.attention_backend not in ATTENTION_BACKEND_CHOICES:
+            raise ValueError(
+                f"attention_backend must be one of {', '.join(repr(b) for b in ATTENTION_BACKEND_CHOICES)}, "
+                f"got {self.attention_backend!r}."
+            )
         if self.wideep_num_slots is not None and self.wideep_num_slots <= 0:
             raise ValueError(f"wideep_num_slots must be a positive integer, got {self.wideep_num_slots!r}.")
         self._check_encoder_knobs_require_epd()
@@ -2172,7 +2213,32 @@ class Task:
             self._validate_afd()
         else:
             raise ValueError(f"Invalid serving_mode: {self.serving_mode!r}")
+        self._validate_sglang_wideep_attention_backend()
         self._validate_database_quant_modes()
+
+    def _validate_sglang_wideep_attention_backend(self) -> None:
+        """Reject dense-only attention backends when a role can reach WideEP.
+
+        SGLang's WideEP MLA operators accept only ``flashinfer`` and ``fa3``;
+        ``default`` means their established framework default (``flashinfer``).
+        The wider attention-lane vocabulary remains valid for tasks whose
+        enumerated tuples are all dense/fused.
+        """
+        if self.attention_backend in (None, "default", "flashinfer", "fa3"):
+            return
+        roles = ("agg",) if self.serving_mode in ("agg", "afd") else ("prefill", "decode")
+        for role in roles:
+            if self._role_attr(role, "backend_name") != "sglang":
+                continue
+            if ("wideep_context_mla", "wideep_generation_mla") not in self._reachable_attention_op_keys(role):
+                continue
+            from aiconfigurator.sdk.errors import UnsupportedAttentionBackendError
+
+            raise UnsupportedAttentionBackendError(
+                f"SGLang WideEP MLA does not support attention_backend={self.attention_backend!r}; "
+                "supported values: ['fa3', 'flashinfer', 'default']. "
+                "Dense-only SGLang tasks may use the wider attention-backend vocabulary."
+            )
 
     def _validate_agg(self) -> None:
         if not self.model_path:

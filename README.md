@@ -25,6 +25,14 @@ configurations and runs anywhere via the CLI.
 
 Let's get started.
 
+> [!WARNING]
+> AIConfigurator 0.12.0 is the compatibility release for moving the
+> application distribution and Sweeper workflows to AISimulate. The
+> `aiconfigurator` CLI command remains supported from the `aisimulate` wheel;
+> users change the installed package, not the command name. Follow the
+> [AISimulate migration guide](docs/aisimulate_migration.md) for installation,
+> API guidance, and the temporary compatibility behavior.
+
 ## Build and Install
 
 ### Install from PyPI
@@ -78,13 +86,13 @@ owner first when crossing this package boundary:
 
 ```bash
 python3 -m pip uninstall -y aiconfigurator aiconfigurator-core
-python3 -m pip install 'aiconfigurator==0.11.0'
+python3 -m pip install 'aiconfigurator==0.12.0'
 ```
 
 If a normal upgrade was already attempted, repair the core payload with:
 
 ```bash
-python3 -m pip install --force-reinstall --no-deps 'aiconfigurator-core==0.11.0'
+python3 -m pip install --force-reinstall --no-deps 'aiconfigurator-core==0.12.0'
 ```
 
 ### Build and Install from Source

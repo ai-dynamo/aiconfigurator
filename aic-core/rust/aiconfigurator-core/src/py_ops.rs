@@ -42,6 +42,7 @@ use pyo3::types::{PyDict, PyTuple};
 use crate::common::enums::{
     CommQuantMode, FmhaQuantMode, GemmQuantMode, KvCacheQuantMode, MoeQuantMode,
 };
+use crate::operators::attention::default_lane_order;
 use crate::operators::dsa::DsaProjectionQuants;
 use crate::operators::{
     ContextAttentionOp, ContextMlaOp, CustomAllReduceOp, ElementwiseOp, EmbeddingOp,
@@ -987,7 +988,7 @@ impl PyContextAttention {
     const _ENGINE_QUERY_SHAPE: &'static str = "context";
 
     #[new]
-    #[pyo3(signature = (name, scale_factor, n, n_kv, kvcache_quant_mode, fmha_quant_mode, window_size=0, head_size=128, use_qk_norm=false, cp_size=1))]
+    #[pyo3(signature = (name, scale_factor, n, n_kv, kvcache_quant_mode, fmha_quant_mode, window_size=0, head_size=128, use_qk_norm=false, cp_size=1, lane_order=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
@@ -1000,6 +1001,7 @@ impl PyContextAttention {
         head_size: u32,
         use_qk_norm: bool,
         cp_size: u32,
+        lane_order: Option<Vec<String>>,
     ) -> PyResult<(Self, PyOperation)> {
         let inner = Op::ContextAttention(ContextAttentionOp {
             name,
@@ -1012,6 +1014,7 @@ impl PyContextAttention {
             fmha_quant_mode: fmha_quant(fmha_quant_mode)?,
             use_qk_norm,
             cp_size,
+            lane_order: lane_order.unwrap_or_else(default_lane_order),
         });
         Ok((PyContextAttention, PyOperation { inner }))
     }
@@ -1032,6 +1035,7 @@ impl PyContextAttention {
             o.head_size,
             o.use_qk_norm,
             o.cp_size,
+            o.lane_order.clone(),
         )
             .into_pyobject(py)?;
         Ok((args, PyDict::new(py)))
@@ -1093,6 +1097,22 @@ impl PyContextAttention {
         slf.as_super().context_attention_mut()?.cp_size = value;
         Ok(())
     }
+
+    #[getter(_lane_order)]
+    fn lane_order(slf: PyRef<'_, Self>) -> PyResult<Vec<String>> {
+        Ok(slf.as_super().context_attention()?.lane_order.clone())
+    }
+
+    /// Set post-construction, mirroring ``_cp_size``: the resolved kernel-lane
+    /// walk (AIC-1715/1716) is a database-dependent computation
+    /// (``sdk/operations/attention.py::resolve_lane_order`` +
+    /// ``lane_walk_order``) done by the model-building/spec-build layer once
+    /// the database handle is available, not at op construction time.
+    #[setter(_lane_order)]
+    fn set_lane_order(mut slf: PyRefMut<'_, Self>, value: Vec<String>) -> PyResult<()> {
+        slf.as_super().context_attention_mut()?.lane_order = value;
+        Ok(())
+    }
 }
 
 /// Decode GQA/MHA attention.
@@ -1110,7 +1130,7 @@ impl PyGenerationAttention {
     const _ENGINE_QUERY_SHAPE: &'static str = "generation";
 
     #[new]
-    #[pyo3(signature = (name, scale_factor, n, n_kv, kv_cache_dtype, window_size=0, head_size=128, use_qk_norm=false))]
+    #[pyo3(signature = (name, scale_factor, n, n_kv, kv_cache_dtype, window_size=0, head_size=128, use_qk_norm=false, lane_order=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
@@ -1121,6 +1141,7 @@ impl PyGenerationAttention {
         window_size: u32,
         head_size: u32,
         use_qk_norm: bool,
+        lane_order: Option<Vec<String>>,
     ) -> PyResult<(Self, PyOperation)> {
         // use_qk_norm is accepted for calling-shape compatibility; the decode
         // table never keyed on it (the retired serializer dropped it too).
@@ -1133,6 +1154,7 @@ impl PyGenerationAttention {
             head_size,
             window_size,
             kv_cache_dtype: kv_quant(kv_cache_dtype)?,
+            lane_order: lane_order.unwrap_or_else(default_lane_order),
         });
         Ok((PyGenerationAttention, PyOperation { inner }))
     }
@@ -1152,7 +1174,12 @@ impl PyGenerationAttention {
             o.head_size,
         )
             .into_pyobject(py)?;
-        Ok((args, PyDict::new(py)))
+        // lane_order rides the kwargs dict, not the positional tuple: position
+        // 8 is use_qk_norm, which this op discards (never round-tripped), so a
+        // positional 8th slot would bind to the wrong parameter.
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("lane_order", o.lane_order.clone())?;
+        Ok((args, kwargs))
     }
 
     #[getter(_n)]
@@ -1182,6 +1209,18 @@ impl PyGenerationAttention {
             "KVCacheQuantMode",
             &enum_token(&slf.as_super().generation_attention()?.kv_cache_dtype),
         )
+    }
+
+    #[getter(_lane_order)]
+    fn lane_order(slf: PyRef<'_, Self>) -> PyResult<Vec<String>> {
+        Ok(slf.as_super().generation_attention()?.lane_order.clone())
+    }
+
+    /// See ``PyContextAttention.set_lane_order``.
+    #[setter(_lane_order)]
+    fn set_lane_order(mut slf: PyRefMut<'_, Self>, value: Vec<String>) -> PyResult<()> {
+        slf.as_super().generation_attention_mut()?.lane_order = value;
+        Ok(())
     }
 }
 
@@ -2655,7 +2694,7 @@ impl PyGDNKernel {
     const _ENGINE_QUERY_SHAPE: &'static str = "module";
 
     #[new]
-    #[pyo3(signature = (name, scale_factor, kernel_source, phase, d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv, seq_split=1))]
+    #[pyo3(signature = (name, scale_factor, kernel_source, phase, d_model, num_k_heads, head_k_dim, num_v_heads, head_v_dim, d_conv, seq_split=1, mamba_ssm_dtype=String::from("float32")))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         name: String,
@@ -2669,6 +2708,7 @@ impl PyGDNKernel {
         head_v_dim: u32,
         d_conv: u32,
         seq_split: u32,
+        mamba_ssm_dtype: String,
     ) -> PyResult<(Self, PyOperation)> {
         cp_audit_gate("GDNKernel", false, seq_split)?;
         let inner = Op::Gdn(crate::operators::GdnOp {
@@ -2682,6 +2722,7 @@ impl PyGDNKernel {
             head_k_dim,
             num_v_heads,
             head_v_dim,
+            mamba_ssm_dtype,
         });
         Ok((PyGDNKernel, PyOperation { inner }))
     }
@@ -2704,7 +2745,9 @@ impl PyGDNKernel {
             o.d_conv,
         )
             .into_pyobject(py)?;
-        Ok((args, PyDict::new(py)))
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("mamba_ssm_dtype", o.mamba_ssm_dtype.clone())?;
+        Ok((args, kwargs))
     }
 
     #[getter(_kernel_source)]
@@ -2751,6 +2794,11 @@ impl PyGDNKernel {
     #[getter(_d_conv)]
     fn d_conv(slf: PyRef<'_, Self>) -> PyResult<u32> {
         Ok(slf.as_super().gdn()?.d_conv)
+    }
+
+    #[getter(_mamba_ssm_dtype)]
+    fn mamba_ssm_dtype(slf: PyRef<'_, Self>) -> PyResult<String> {
+        Ok(slf.as_super().gdn()?.mamba_ssm_dtype.clone())
     }
 }
 

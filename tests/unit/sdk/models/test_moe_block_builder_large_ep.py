@@ -306,7 +306,7 @@ class TestSglangLargeEPValues:
 
     @pytest.fixture(scope="class")
     def db(self):
-        db = get_database("h200_sxm", "sglang", "0.5.6.post2")
+        db = get_database("h200_sxm", "sglang", "0.5.6.post2", allow_unlisted_version=True)
         assert db is not None
         return db
 
@@ -569,7 +569,7 @@ class TestTrtllmLargeEPStructure:
 class TestTrtllmLargeEPValues:
     @pytest.fixture(scope="class")
     def db(self):
-        db = get_database("gb200", "trtllm", "1.3.0rc10")
+        db = get_database("gb200", "trtllm", "1.3.0rc10", allow_unlisted_version=True)
         assert db is not None
         return db
 
@@ -668,16 +668,18 @@ class TestA3RouterVariants:
 
 
 def _write_parquet(path, rows):
-    """Write one synthetic table and keep the version dir's Collector V3
+    """Write one synthetic table and keep the version dir's compatibility
     sidecar covering every table written into it so far. Without the sidecar
     a family-layout dir fails ``get_database()``'s strict-provenance check
     (design §5/§7.4), which CI runs with ``AIC_STRICT_PROVENANCE=1``; the
-    synthetic data is complete, not partial."""
+    synthetic data is complete, not partial. This fixture does not model real
+    Collector V3 event provenance, so it uses the legacy schema instead of
+    fabricating the runtime and collection history required by schema v2."""
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_parquet(path, index=False)
 
     meta_path = path.parent / "collection_meta.yaml"
-    meta = yaml.safe_load(meta_path.read_text()) if meta_path.exists() else {"schema_version": 2, "tables": {}}
+    meta = yaml.safe_load(meta_path.read_text()) if meta_path.exists() else {"schema_version": 1, "tables": {}}
     meta["tables"][path.stem] = {"status": "complete"}
     meta_path.write_text(yaml.safe_dump(meta))
 

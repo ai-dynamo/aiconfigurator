@@ -27,6 +27,6 @@ misc:
     2: 358612992 # 342MB
     4: 411041792 # 392MB
     8: 411041792 # 392MB
-  other_mem: 3758096384 # increase from 551MB to 3.5GB for safer deployment, this will cover part of the inaccurate mem calc.
+  other_mem: 524288000 # 500MiB runtime reserve; a 3GiB+ overhead is too strict for B60-class small-memory cards.
   nccl_version: '2.23'
-  oneccl_version: '2021.17.2'
+  oneccl_version: '2021.15.9'

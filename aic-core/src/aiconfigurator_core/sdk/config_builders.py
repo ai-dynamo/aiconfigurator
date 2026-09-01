@@ -9,6 +9,8 @@ Keeping them in ``sdk`` prevents lower-level code from importing CLI code.
 
 from __future__ import annotations
 
+import logging
+
 from aiconfigurator_core.sdk.common import (
     CommQuantMode,
     FMHAQuantMode,
@@ -17,6 +19,8 @@ from aiconfigurator_core.sdk.common import (
     MoEQuantMode,
 )
 from aiconfigurator_core.sdk.config import ModelConfig
+
+logger = logging.getLogger(__name__)
 
 
 def build_model_config(
@@ -32,6 +36,7 @@ def build_model_config(
     comm_quant_mode: str | None = None,
     forward_model: str | None = None,
     enable_encoder_dp: bool = True,
+    attention_backend: str | None = None,
 ) -> ModelConfig:
     """Build a ModelConfig with optional quant mode overrides."""
     return ModelConfig(
@@ -47,6 +52,7 @@ def build_model_config(
         comm_quant_mode=CommQuantMode[comm_quant_mode] if comm_quant_mode else None,
         forward_model=forward_model or "op_level",
         enable_encoder_dp=enable_encoder_dp,
+        attention_backend=attention_backend,
     )
 
 
@@ -90,6 +96,33 @@ def resolve_nextn_auto(model_path: str) -> int:
     text_key = MULTIMODAL_TEXT_CONFIG_KEY.get(info["architecture"])
     cfg = raw[text_key] if text_key and text_key in raw else raw
     return int(cfg.get("num_nextn_predict_layers") or 0)
+
+
+def resolve_dspark_nextn(model_path: str) -> int | None:
+    """Resolve the DSPARK draft depth for the recommend/sizing path.
+
+    DSPARK architectures use a standalone trained draft model whose block size
+    is a fixed architectural constant — not stored in the main checkpoint, so
+    ``nextn='auto'`` always returns 0 for these models.
+
+    Returns the architectural block size when the model uses DSPARK. Accepted
+    draft-token progress remains an explicit workload input in the upper SDK
+    layer and is intentionally not inferred here. Returns ``None`` for other
+    architectures or when expected model-config access fails. Unexpected or
+    malformed metadata errors propagate. Raises ``ValueError`` when
+    ``model_path`` is empty, matching ``resolve_nextn_auto``.
+    """
+    from aiconfigurator_core.sdk.common import DSPARK_NEXTN
+    from aiconfigurator_core.sdk.utils import HuggingFaceDownloadError, get_model_config_from_model_path
+
+    if not model_path:
+        raise ValueError("resolve_dspark_nextn requires a model path.")
+    try:
+        info = get_model_config_from_model_path(model_path)
+    except (HuggingFaceDownloadError, OSError) as exc:
+        logger.warning("Could not resolve DSPARK draft depth for %r: %s", model_path, exc)
+        return None
+    return DSPARK_NEXTN.get(info["architecture"])
 
 
 def apply_nextn(

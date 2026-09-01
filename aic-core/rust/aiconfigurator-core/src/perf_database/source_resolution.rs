@@ -24,6 +24,10 @@
 //!   4. Cross-backend fill (design §6.4), kernel-identity gated by
 //!      `perf_data_reuse_manifest.yaml`, newest-first per framework.
 //!
+//! `comm` is the conservative exception: validated framework-versioned
+//! storage backends use only channels 1 and 3, while NCCL, oneCCL, unknown
+//! comm backends, and ambiguous legacy namespaces use channel 1 only.
+//!
 //! Deliberate divergences from the retired Python resolver (both documented
 //! at their sites): no `.parquet -> .txt` candidate fallback (the engine
 //! reads parquet only — `.txt` retired with the Python parsers in PR-6), and
@@ -50,9 +54,14 @@ const COLLECTION_META_MARKER: &str = "collection_meta.yaml";
 const INCOMPLETE_MARKER: &str = "INCOMPLETE.txt";
 const SHARED_LAYER_REUSE_MARKER: &str = "SHARED_LAYER_REUSE.txt";
 const COMM_FAMILY_DIR: &str = "comm";
-/// Framework-agnostic comm tables: never inherit siblings (op-name early
-/// return, independent of the family-path check). Mirrors the Python
-/// `PerfDataFilename.nccl / .oneccl` early exit.
+/// Communication directories whose version component is the serving-framework
+/// version. These namespaces may fill missing shapes from strictly earlier
+/// versions of the SAME storage backend. Keep this deliberately separate from
+/// `BackendKind`: adding a serving backend must not enable comm reuse until its
+/// version namespace has been validated.
+const FRAMEWORK_VERSIONED_COMM_BACKENDS: [&str; 3] = ["sglang", "trtllm", "vllm"];
+/// Framework-agnostic comm tables: never inherit siblings (table-identity
+/// guard, independent of path discovery).
 const FRAMEWORK_AGNOSTIC_BASENAMES: [&str; 2] = ["nccl_perf.parquet", "oneccl_perf.parquet"];
 const REUSE_ENTRY_REQUIRED_KEYS: [&str; 4] = ["table", "from_version", "reason", "approved_by"];
 
@@ -127,6 +136,30 @@ impl ResolveReport {
             })
             .collect()
     }
+
+    fn prioritized_sources(&self) -> Vec<PrioritizedSource> {
+        self.records
+            .iter()
+            .zip(self.sources())
+            .map(|(record, source)| PrioritizedSource {
+                channel: record.channel,
+                version: record.version.clone(),
+                source,
+            })
+            .collect()
+    }
+}
+
+/// Load-facing source plus the resolver priority metadata that is deliberately
+/// absent from the public/wire [`PerfSource`] tuple. Most table loaders need
+/// only the ordered source projection; multi-basename adapters such as MoE A2A
+/// need the channel and version to preserve one global priority order across
+/// all contributing file formats.
+#[derive(Clone, Debug)]
+pub(crate) struct PrioritizedSource {
+    pub(crate) channel: &'static str,
+    pub(crate) version: String,
+    pub(crate) source: PerfSource,
 }
 
 // ---------------------------------------------------------------------------
@@ -567,20 +600,85 @@ fn iter_version_subdirs(backend_path: &Path, out: &mut Vec<(String, PathBuf)>) {
     }
 }
 
-/// Best-effort family-dir name for an op's resolved primary path. Returns
-/// `None` for legacy-layout (3-component) or otherwise-unresolved paths —
-/// the comm exclusion then simply does not trigger (deliberate transition
-/// exception, pinned by `test_legacy_layout_comm_op_keeps_pre_v3_siblings`).
-fn op_file_family_from_path(primary_path: &Path, system_data_root: &Path) -> Option<String> {
+/// Physical location encoded by either a family-first
+/// `<family>/<backend>/<version>/<table>` path or a legacy
+/// `<backend>/<version>/<table>` path. Family inference is deliberately kept
+/// separate: a legacy override still carries an authoritative physical
+/// backend even though its operation family must be discovered elsewhere.
+#[derive(Clone, Debug)]
+struct OpFileLocation {
+    family: Option<String>,
+    storage_backend: String,
+}
+
+fn op_file_location_from_path(
+    primary_path: &Path,
+    system_data_root: &Path,
+) -> Option<OpFileLocation> {
     let rel = primary_path.strip_prefix(system_data_root).ok()?;
     let parts: Vec<_> = rel
         .components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect();
     if parts.len() == 4 && !KNOWN_BACKEND_DIRS.contains(&parts[0].as_str()) {
-        return Some(parts[0].clone());
+        return Some(OpFileLocation {
+            family: Some(parts[0].to_lowercase()),
+            storage_backend: parts[1].to_lowercase(),
+        });
+    }
+    if parts.len() == 3 {
+        return Some(OpFileLocation {
+            family: None,
+            storage_backend: parts[0].to_lowercase(),
+        });
     }
     None
+}
+
+/// Infer operation-family metadata for a legacy-shaped or missing primary from
+/// family-first copies of the same table. This is namespace discovery, not an
+/// operation allowlist: a newly added table under
+/// `comm/<validated-backend>/...` automatically gets the comm policy.
+///
+/// More than one result is deliberately preserved so the caller can fail
+/// closed when a legacy basename is ambiguous across families.
+fn inferred_op_families(system_data_root: &Path, op_file_basename: &str) -> BTreeSet<String> {
+    let mut families_with_table = BTreeSet::new();
+    let Ok(families) = std::fs::read_dir(system_data_root) else {
+        return families_with_table;
+    };
+    for family_entry in families.flatten() {
+        let family = family_entry.file_name().to_string_lossy().into_owned();
+        let family_path = family_entry.path();
+        if family.starts_with('.')
+            || KNOWN_BACKEND_DIRS.contains(&family.as_str())
+            || !family_path.is_dir()
+        {
+            continue;
+        }
+        let Ok(storage_backends) = std::fs::read_dir(&family_path) else {
+            continue;
+        };
+        let family_has_table = storage_backends.flatten().any(|backend_entry| {
+            if !backend_entry.path().is_dir() {
+                return false;
+            }
+            let Ok(versions) = std::fs::read_dir(backend_entry.path()) else {
+                return false;
+            };
+            versions.flatten().any(|version_entry| {
+                let version = version_entry.file_name();
+                let version = version.to_string_lossy();
+                !version.starts_with(['.', '_'])
+                    && version_entry.path().is_dir()
+                    && version_entry.path().join(op_file_basename).is_file()
+            })
+        });
+        if family_has_table {
+            families_with_table.insert(family.to_lowercase());
+        }
+    }
+    families_with_table
 }
 
 // ---------------------------------------------------------------------------
@@ -837,6 +935,36 @@ pub fn resolve_one(
             op_file_basename,
         ),
     };
+    let primary_location = op_file_location_from_path(&primary_path, &ctx.system_data_root);
+    let candidate_namespaces = match &primary_location {
+        Some(OpFileLocation {
+            family: Some(family),
+            storage_backend,
+        }) => BTreeSet::from([(family.clone(), storage_backend.clone())]),
+        Some(OpFileLocation {
+            family: None,
+            storage_backend,
+        }) => inferred_op_families(&ctx.system_data_root, op_file_basename)
+            .into_iter()
+            .map(|family| (family, storage_backend.clone()))
+            .collect(),
+        None => inferred_op_families(&ctx.system_data_root, op_file_basename)
+            .into_iter()
+            .map(|family| (family, String::new()))
+            .collect(),
+    };
+    let comm_namespace_ambiguous = candidate_namespaces.len() > 1
+        && candidate_namespaces
+            .iter()
+            .any(|(family, _)| family == COMM_FAMILY_DIR);
+    let comm_storage_backend = if candidate_namespaces.len() == 1 {
+        candidate_namespaces
+            .iter()
+            .next()
+            .and_then(|(family, backend)| (family == COMM_FAMILY_DIR).then(|| backend.clone()))
+    } else {
+        None
+    };
     let primary_version_dir = primary_path
         .parent()
         .map(Path::to_path_buf)
@@ -851,7 +979,9 @@ pub fn resolve_one(
         )?;
     if primary_is_file
         && !primary_unusable
-        && op_file_family_from_path(&primary_path, &ctx.system_data_root).is_some()
+        && primary_location
+            .as_ref()
+            .is_some_and(|location| location.family.is_some())
     {
         check_strict_provenance_coverage(&primary_version_dir, ctx.strict, None, &mut warnings)?;
     }
@@ -886,83 +1016,112 @@ pub fn resolve_one(
         }
     };
 
-    if !ctx.enable_shared_layer
-        || FRAMEWORK_AGNOSTIC_BASENAMES.contains(&op_file_basename)
-        || op_file_family_from_path(&primary_path, &ctx.system_data_root).as_deref()
-            == Some(COMM_FAMILY_DIR)
-    {
+    if !ctx.enable_shared_layer || FRAMEWORK_AGNOSTIC_BASENAMES.contains(&op_file_basename) {
         return Ok(finish(records, warnings));
     }
+
+    // Communication reuse is derived from the storage namespace. A direct
+    // family-first path is authoritative; legacy/missing primaries may infer
+    // the family from existing copies of the same table. Ambiguous legacy
+    // basenames and unknown/mismatched storage backends fail closed.
+    let comm_implicit_same_backend = if let Some(storage_backend) = comm_storage_backend.as_deref()
+    {
+        if storage_backend != backend_lower
+            || !FRAMEWORK_VERSIONED_COMM_BACKENDS.contains(&storage_backend)
+        {
+            return Ok(finish(records, warnings));
+        }
+        Some(storage_backend.to_string())
+    } else if comm_namespace_ambiguous {
+        return Ok(finish(records, warnings));
+    } else {
+        None
+    };
 
     // Channel 2 (design §6.3): declared donors, in file order, deduped on
     // from_version (first occurrence wins).
     let mut declared_donor_versions: BTreeSet<String> = BTreeSet::new();
-    for reuse_entry in requested_version_reuse_entries(
-        &ctx.system_data_root,
-        &backend_lower,
-        &ctx.version,
-        op_file_basename,
-        ctx.strict,
-        &mut warnings,
-    )? {
-        if declared_donor_versions.contains(&reuse_entry.from_version) {
-            warnings.push(warn(
-                "duplicate_declared",
-                vec![
-                    reuse_entry.table.clone(),
-                    reuse_entry.from_version.clone(),
-                    ctx.system_data_root.display().to_string(),
-                ],
-            ));
-            continue;
-        }
-        let donor_path = resolve_op_data_path(
+    if comm_implicit_same_backend.is_none() {
+        for reuse_entry in requested_version_reuse_entries(
             &ctx.system_data_root,
             &backend_lower,
-            &reuse_entry.from_version,
+            &ctx.version,
             op_file_basename,
-        );
-        if !donor_path.is_file() {
-            continue;
-        }
-        let donor_dir = donor_path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default();
-        if version_dir_unusable_for_request(
-            &donor_dir,
-            &ctx.system_data_root,
             ctx.strict,
             &mut warnings,
         )? {
-            continue;
-        }
-        if op_file_family_from_path(&donor_path, &ctx.system_data_root).is_some() {
-            check_strict_provenance_coverage(
+            if declared_donor_versions.contains(&reuse_entry.from_version) {
+                warnings.push(warn(
+                    "duplicate_declared",
+                    vec![
+                        reuse_entry.table.clone(),
+                        reuse_entry.from_version.clone(),
+                        ctx.system_data_root.display().to_string(),
+                    ],
+                ));
+                continue;
+            }
+            let donor_path = resolve_op_data_path(
+                &ctx.system_data_root,
+                &backend_lower,
+                &reuse_entry.from_version,
+                op_file_basename,
+            );
+            if !donor_path.is_file() {
+                continue;
+            }
+            let donor_dir = donor_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
+            if version_dir_unusable_for_request(
                 &donor_dir,
+                &ctx.system_data_root,
                 ctx.strict,
-                Some(&reuse_entry.table),
                 &mut warnings,
-            )?;
+            )? {
+                continue;
+            }
+            if op_file_location_from_path(&donor_path, &ctx.system_data_root)
+                .is_some_and(|location| location.family.is_some())
+            {
+                check_strict_provenance_coverage(
+                    &donor_dir,
+                    ctx.strict,
+                    Some(&reuse_entry.table),
+                    &mut warnings,
+                )?;
+            }
+            records.push((
+                reuse_entry.from_version.clone(),
+                donor_path,
+                "declared_reuse",
+                None,
+            ));
+            declared_donor_versions.insert(reuse_entry.from_version);
         }
-        records.push((
-            reuse_entry.from_version.clone(),
-            donor_path,
-            "declared_reuse",
-            None,
-        ));
-        declared_donor_versions.insert(reuse_entry.from_version);
     }
 
     // Channel 3 (design §6.2): nearest-earlier same-backend fallback.
     // Unparseable sibling versions are excluded (warned once, Python-side
     // registry); declared donors are excluded to avoid double-listing.
     if let Some(requested_parsed) = parse_pep440(&ctx.version) {
-        let mut sibling_versions: BTreeSet<String> =
-            iter_backend_version_dirs(&ctx.system_data_root, &backend_lower, &mut warnings)
+        let mut sibling_versions: BTreeSet<String> = match &comm_implicit_same_backend {
+            Some(storage_backend) => {
+                let mut versions = Vec::new();
+                iter_version_subdirs(
+                    &ctx.system_data_root
+                        .join(COMM_FAMILY_DIR)
+                        .join(storage_backend),
+                    &mut versions,
+                );
+                versions.into_iter().map(|(version, _)| version).collect()
+            }
+            None => iter_backend_version_dirs(&ctx.system_data_root, &backend_lower, &mut warnings)
                 .into_iter()
-                .map(|(v, _)| v)
-                .collect();
+                .map(|(version, _)| version)
+                .collect(),
+        };
         sibling_versions.remove(&ctx.version);
         for donor in &declared_donor_versions {
             sibling_versions.remove(donor);
@@ -987,12 +1146,20 @@ pub fn resolve_one(
         }
         earlier_versions.sort_by(|a, b| b.0.cmp(&a.0)); // nearest-earlier first
         for (_, sibling_version) in earlier_versions {
-            let sibling_path = resolve_op_data_path(
-                &ctx.system_data_root,
-                &backend_lower,
-                &sibling_version,
-                op_file_basename,
-            );
+            let sibling_path = match &comm_implicit_same_backend {
+                Some(storage_backend) => ctx
+                    .system_data_root
+                    .join(COMM_FAMILY_DIR)
+                    .join(storage_backend)
+                    .join(&sibling_version)
+                    .join(op_file_basename),
+                None => resolve_op_data_path(
+                    &ctx.system_data_root,
+                    &backend_lower,
+                    &sibling_version,
+                    op_file_basename,
+                ),
+            };
             if !sibling_path.is_file() {
                 continue;
             }
@@ -1010,6 +1177,13 @@ pub fn resolve_one(
             }
             records.push((sibling_version, sibling_path, "fallback", None));
         }
+    }
+
+    if comm_implicit_same_backend.is_some() {
+        // Framework-owned communication data uses only the primary plus the
+        // nearest-earlier same-storage-backend chain. Declared and
+        // cross-backend channels remain disabled for every comm table.
+        return Ok(finish(records, warnings));
     }
 
     // Channel 4 (design §6.4): cross-backend fill, kernel-identity gated.
@@ -1138,7 +1312,7 @@ enum ResolverKind {
 /// directories and parses sidecar yaml).
 pub struct SourceResolver {
     kind: ResolverKind,
-    cache: Mutex<BTreeMap<String, Vec<PerfSource>>>,
+    cache: Mutex<BTreeMap<String, Vec<PrioritizedSource>>>,
 }
 
 impl SourceResolver {
@@ -1165,29 +1339,61 @@ impl SourceResolver {
         basename: &str,
         data_root: &Path,
     ) -> Result<Vec<PerfSource>, AicError> {
+        Ok(self
+            .prioritized_sources_for(basename, data_root)?
+            .into_iter()
+            .map(|source| source.source)
+            .collect())
+    }
+
+    /// Source list with internal resolver priority retained. The public wire
+    /// remains [`PerfSource`]; this richer projection is for loaders that merge
+    /// multiple basenames into one logical table and therefore cannot infer a
+    /// global order from four independently ordered vectors.
+    pub(crate) fn prioritized_sources_for(
+        &self,
+        basename: &str,
+        data_root: &Path,
+    ) -> Result<Vec<PrioritizedSource>, AicError> {
         match &self.kind {
-            ResolverKind::Fixed(map) => Ok(match map.get(basename) {
-                Some(sources) if !sources.is_empty() => sources.clone(),
-                // A PRESENT but EMPTY list is a deliberate veto statement:
-                // load NO sources. Falling back to the primary here would
-                // silently undo the veto.
-                Some(_) => Vec::new(),
-                None => {
-                    let legacy = data_root.join(basename);
-                    let path = if legacy.is_file() {
-                        legacy
-                    } else {
-                        find_in_family_dirs(data_root, basename).unwrap_or(legacy)
-                    };
-                    vec![PerfSource(path, None)]
-                }
-            }),
+            ResolverKind::Fixed(map) => {
+                let sources = match map.get(basename) {
+                    Some(sources) if !sources.is_empty() => sources.clone(),
+                    // A PRESENT but EMPTY list is a deliberate veto statement:
+                    // load NO sources. Falling back to the primary here would
+                    // silently undo the veto.
+                    Some(_) => Vec::new(),
+                    None => {
+                        let legacy = data_root.join(basename);
+                        let path = if legacy.is_file() {
+                            legacy
+                        } else {
+                            find_in_family_dirs(data_root, basename).unwrap_or(legacy)
+                        };
+                        vec![PerfSource(path, None)]
+                    }
+                };
+                Ok(sources
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, source)| PrioritizedSource {
+                        channel: if index == 0 { "primary" } else { "fallback" },
+                        version: source
+                            .path()
+                            .parent()
+                            .and_then(Path::file_name)
+                            .map(|value| value.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        source,
+                    })
+                    .collect())
+            }
             ResolverKind::Live(ctx) => {
                 if let Some(cached) = self.cache.lock().unwrap().get(basename) {
                     return Ok(cached.clone());
                 }
                 let report = resolve_one(ctx, basename, None)?;
-                let sources = report.sources();
+                let sources = report.prioritized_sources();
                 self.cache
                     .lock()
                     .unwrap()
@@ -1483,26 +1689,212 @@ mod tests {
     }
 
     #[test]
-    fn comm_family_and_framework_agnostic_early_returns() {
+    fn framework_comm_uses_only_earlier_same_backend() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let data = root.join("data");
+        write(
+            &data.join("comm/trtllm/2.0.0/custom_allreduce_perf.parquet"),
+            "stub",
+        );
         write(
             &data.join("comm/trtllm/1.0.0/custom_allreduce_perf.parquet"),
             "stub",
         );
         write(
-            &data.join("comm/trtllm/0.9.0/custom_allreduce_perf.parquet"),
+            &data.join("comm/trtllm/3.0.0/custom_allreduce_perf.parquet"),
             "stub",
         );
+        write(
+            &data.join("comm/sglang/0.5.14/custom_allreduce_perf.parquet"),
+            "stub",
+        );
+        write(
+            &data.join("comm/trtllm/2.0.0/reuse.yaml"),
+            "schema_version: 1\nreuse:\n  - table: custom_allreduce_perf\n    from_version: '3.0.0'\n    reason: decoy\n    approved_by: test\n",
+        );
+        write(
+            &root.join("perf_data_reuse_manifest.yaml"),
+            "groups:\n  - op_file: custom_allreduce_perf.parquet\n    kernel_source: shared_comm\n    tier: shared\n    frameworks: [trtllm, sglang]\n",
+        );
         let report = resolve_one(
-            &ctx(root, "trtllm", "1.0.0"),
+            &ctx(root, "trtllm", "2.0.0"),
             "custom_allreduce_perf.parquet",
             None,
         )
         .unwrap();
+        assert_eq!(channels(&report), ["primary", "fallback"]);
+        assert_eq!(report.records[0].version, "2.0.0");
+        assert_eq!(report.records[1].version, "1.0.0");
+    }
+
+    #[test]
+    fn missing_framework_comm_primary_infers_family() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            &root.join("data/comm/trtllm/1.3.0rc10/trtllm_alltoall_perf.parquet"),
+            "stub",
+        );
+
+        let report = resolve_one(
+            &ctx(root, "trtllm", "1.3.0rc20"),
+            "trtllm_alltoall_perf.parquet",
+            None,
+        )
+        .unwrap();
+        assert_eq!(channels(&report), ["primary", "fallback"]);
+        assert!(!report.records[0].exists);
+        assert_eq!(report.records[1].version, "1.3.0rc10");
+    }
+
+    #[test]
+    fn legacy_comm_primary_blocks_declared_and_cross_backend_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let data = root.join("data");
+        write(
+            &data.join("trtllm/2.0.0/custom_allreduce_perf.parquet"),
+            "stub",
+        );
+        write(
+            &data.join("comm/trtllm/1.0.0/custom_allreduce_perf.parquet"),
+            "stub",
+        );
+        write(
+            &data.join("comm/trtllm/3.0.0/custom_allreduce_perf.parquet"),
+            "stub",
+        );
+        write(
+            &data.join("comm/sglang/0.5.14/custom_allreduce_perf.parquet"),
+            "stub",
+        );
+        write(
+            &data.join("comm/trtllm/2.0.0/reuse.yaml"),
+            "schema_version: 1\nreuse:\n  - table: custom_allreduce_perf\n    from_version: '3.0.0'\n    reason: decoy\n    approved_by: test\n",
+        );
+        write(
+            &root.join("perf_data_reuse_manifest.yaml"),
+            "groups:\n  - op_file: custom_allreduce_perf.parquet\n    kernel_source: shared_comm\n    tier: shared\n    frameworks: [trtllm, sglang]\n",
+        );
+
+        let report = resolve_one(
+            &ctx(root, "trtllm", "2.0.0"),
+            "custom_allreduce_perf.parquet",
+            None,
+        )
+        .unwrap();
+        assert_eq!(channels(&report), ["primary", "fallback"]);
+        assert_eq!(report.records[1].version, "1.0.0");
+    }
+
+    #[test]
+    fn unknown_comm_storage_backend_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let data = root.join("data");
+        let primary = data.join("comm/futurelib/2.0.0/custom_allreduce_perf.parquet");
+        write(&primary, "stub");
+        write(
+            &data.join("comm/futurelib/1.0.0/custom_allreduce_perf.parquet"),
+            "stub",
+        );
+        write(
+            &data.join("comm/trtllm/1.0.0/custom_allreduce_perf.parquet"),
+            "stub",
+        );
+
+        let report = resolve_one(
+            &ctx(root, "trtllm", "2.0.0"),
+            "custom_allreduce_perf.parquet",
+            Some(&primary),
+        )
+        .unwrap();
         assert_eq!(channels(&report), ["primary"]);
-        // op-name early exit, independent of the family path
+    }
+
+    #[test]
+    fn ambiguous_legacy_comm_basename_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let data = root.join("data");
+        write(&data.join("trtllm/2.0.0/shared_perf.parquet"), "stub");
+        write(&data.join("comm/trtllm/1.0.0/shared_perf.parquet"), "stub");
+        write(&data.join("gemm/trtllm/1.0.0/shared_perf.parquet"), "stub");
+
+        let report =
+            resolve_one(&ctx(root, "trtllm", "2.0.0"), "shared_perf.parquet", None).unwrap();
+        assert_eq!(channels(&report), ["primary"]);
+    }
+
+    #[test]
+    fn mismatched_comm_storage_backend_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let data = root.join("data");
+        let primary = data.join("comm/vllm/2.0.0/custom_allreduce_perf.parquet");
+        write(&primary, "stub");
+        write(
+            &data.join("comm/vllm/1.0.0/custom_allreduce_perf.parquet"),
+            "stub",
+        );
+
+        let report = resolve_one(
+            &ctx(root, "trtllm", "2.0.0"),
+            "custom_allreduce_perf.parquet",
+            Some(&primary),
+        )
+        .unwrap();
+        assert_eq!(channels(&report), ["primary"]);
+    }
+
+    #[test]
+    fn legacy_comm_primary_preserves_mismatched_physical_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let data = root.join("data");
+        let primary = data.join("vllm/2.0.0/custom_allreduce_perf.parquet");
+        write(&primary, "stub");
+        write(
+            &data.join("comm/trtllm/1.0.0/custom_allreduce_perf.parquet"),
+            "stub",
+        );
+
+        let report = resolve_one(
+            &ctx(root, "trtllm", "2.0.0"),
+            "custom_allreduce_perf.parquet",
+            Some(&primary),
+        )
+        .unwrap();
+        assert_eq!(channels(&report), ["primary"]);
+    }
+
+    #[test]
+    fn legacy_comm_primary_preserves_unknown_physical_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let data = root.join("data");
+        let primary = data.join("futurelib/2.0.0/custom_allreduce_perf.parquet");
+        write(&primary, "stub");
+        write(
+            &data.join("comm/trtllm/1.0.0/custom_allreduce_perf.parquet"),
+            "stub",
+        );
+
+        let report = resolve_one(
+            &ctx(root, "trtllm", "2.0.0"),
+            "custom_allreduce_perf.parquet",
+            Some(&primary),
+        )
+        .unwrap();
+        assert_eq!(channels(&report), ["primary"]);
+    }
+
+    #[test]
+    fn framework_agnostic_comm_basename_stays_primary_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Op-name early exit, independent of the family path.
         let report = resolve_one(&ctx(root, "trtllm", "1.0.0"), "nccl_perf.parquet", None).unwrap();
         assert_eq!(channels(&report), ["primary"]);
     }

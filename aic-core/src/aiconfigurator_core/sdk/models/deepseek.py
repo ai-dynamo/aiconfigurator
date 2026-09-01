@@ -446,7 +446,19 @@ class DeepSeekModel(BaseModel):
             # qkv_a_proj outside the MLA forward, TP all_gather/reduce_scatter
             # around attention, and NO add_norm_2 / logits_gemm / P2P (the
             # legacy graph never emitted them).
-            attn_backend = self.config.attention_backend
+            # AIC-1715/1716: `ModelConfig.attention_backend` now defaults to
+            # None ("no attention-lane override", widened for the general
+            # dense-attention lane feature) instead of the historical
+            # "flashinfer" — pre-bake WideEP MLA's own default here, since
+            # Rust's `PyWideEPContextMLA`/`PyWideEPGenerationMLA` constructors
+            # take `attn_backend: &str` (non-Optional; `None` raises a
+            # TypeError at construction, not a friendly fallback). The
+            # user-facing literal "default" has the same framework-default
+            # semantics as an unset override, so both resolve to WideEP's
+            # established flashinfer default before serialization.
+            attn_backend = (
+                "flashinfer" if self.config.attention_backend in (None, "default") else self.config.attention_backend
+            )
             self.context_ops.extend(
                 [
                     # qkv_a projection (fused q_a + kv_a + rope): hidden_size ->

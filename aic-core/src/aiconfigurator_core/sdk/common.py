@@ -437,10 +437,22 @@ def check_support(
     """
     matrix = get_support_matrix()
 
+    @cache
+    def _version_for_row_backend(row_backend: str, requested: str) -> str:
+        # Matrix rows carry resolved LITERALS; a slot alias in the request
+        # must resolve per (system, row backend) before comparison. Raw
+        # versions and unresolvable aliases compare as given.
+        try:
+            from aiconfigurator_core.sdk.perf_database import resolve_query_version
+
+            return resolve_query_version(system, row_backend, requested, allow_unlisted=True)
+        except (ValueError, KeyError):
+            return requested
+
     def _matches_filters(row: dict, backend: str | None, version: str | None) -> bool:
         if backend and row["Backend"].lower() != backend.lower():
             return False
-        return not (version and row["Version"] != version)
+        return not (version and row["Version"] != _version_for_row_backend(row["Backend"], version))
 
     # 1. Check for exact model+system matches
     exact_matches = [
@@ -558,6 +570,9 @@ DefaultHFModels = {
     "zai-org/GLM-5.2",
     "zai-org/GLM-5.2-FP8",
     "nvidia/GLM-5.2-NVFP4",
+    "zai-org/GLM-5.3",
+    "zai-org/GLM-5.3-FP8",
+    "nvidia/GLM-5.3-NVFP4",
     # DeepSeek V4
     *DEEPSEEK_V4_HF_MODELS,
     # Qwen 3 Models
@@ -607,6 +622,7 @@ DefaultHFModels = {
     "XiaomiMiMo/MiMo-7B-Base",
     # NVIDIA Nemotron
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
+    "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
@@ -753,6 +769,15 @@ MULTIMODAL_TEXT_CONFIG_KEY = {
 # nextn="auto" cannot enable speculation and the MTP mismatch warning does
 # not apply (see Task._resolve_model_identity).
 DSPARK_ARCHITECTURES = frozenset({"KimiK3ForConditionalGeneration"})
+
+# Block size (draft tokens proposed per step) for each DSPARK architecture.
+# This is a fixed constant of the draft model's design — not user-configurable
+# and not present in the main checkpoint (the draft is a separate artifact).
+# Maps architecture name → nextn block size passed to the backend as
+# speculative_config.num_speculative_tokens.
+DSPARK_NEXTN: dict[str, int] = {
+    "KimiK3ForConditionalGeneration": 7,
+}
 
 """
 All reduce strategy for trtllm custom allreduce
@@ -1122,6 +1147,10 @@ def _transfer_kind_from_token(token: str) -> TransferKind:
 class BackendName(Enum):
     """
     Backend name for inference.
+
+    Adding a backend here does not automatically enable communication-data
+    reuse. Validate its version namespace separately, then update
+    ``FRAMEWORK_VERSIONED_COMM_BACKENDS`` in the Rust source resolver.
     """
 
     trtllm = "trtllm"

@@ -29,6 +29,7 @@ use std::fmt::Write as _;
 
 use crate::common::error::AicError;
 use crate::perf_database::parquet_loader::{PerfReader, PerfRow};
+use crate::perf_database::source_resolution::PrioritizedSource;
 use crate::perf_database::{kernel_source_ok, PerfSource, PerfTables};
 
 /// Leaf field value. Integer-typed Python fields must serialize WITHOUT a
@@ -110,6 +111,26 @@ impl ViewNode {
         match node.child_index(last) {
             Some(i) => node.entries_mut()[i].1 = leaf,
             None => node.entries_mut().push((last.to_string(), leaf)),
+        }
+    }
+
+    /// Recursively fill keys that are absent from this node while preserving
+    /// every existing leaf and its insertion position. Used when a completed
+    /// lower-priority source tier is admitted only for missing coordinates.
+    fn merge_fill(&mut self, lower_priority: ViewNode) {
+        let (ViewNode::Branch(existing), ViewNode::Branch(lower_entries)) = (self, lower_priority)
+        else {
+            return;
+        };
+        for (key, lower_child) in lower_entries {
+            if let Some(index) = existing
+                .iter()
+                .position(|(existing_key, _)| existing_key == &key)
+            {
+                existing[index].1.merge_fill(lower_child);
+            } else {
+                existing.push((key, lower_child));
+            }
         }
     }
 
@@ -1238,12 +1259,42 @@ fn require_latency(ctx: &RowCtx<'_>, table: &str) -> Result<f64, AicError> {
     Ok(lat)
 }
 
-/// `operations/moe_comm.py::load_moe_a2a_data` — the unified 10-level a2a
-/// store `[comm_backend][phase][comm_dtype][ep_size][node_num][hidden][topk]
-/// [num_experts][sms][num_tokens]`. Legacy adapters load first (keep-first);
-/// the first new-schema occurrence of a key overwrites a legacy leaf, and
-/// new-schema repeats keep the first row. New-schema latency is µs -> ms.
+/// `operations/moe_comm.py::load_moe_a2a_data` with global source priority
+/// across the four physical table formats. Each priority tier loads legacy
+/// adapters first and lets the first new-schema occurrence override a legacy
+/// leaf in that same tier. Completed lower-priority tiers fill missing keys
+/// only. New-schema latency is µs -> ms.
 pub fn view_moe_a2a(
+    sources: &[PrioritizedSource],
+    legacy_normal: &[PrioritizedSource],
+    legacy_ll: &[PrioritizedSource],
+    legacy_trtllm_alltoall: &[PrioritizedSource],
+) -> Result<Option<ViewNode>, AicError> {
+    let mut root = ViewNode::branch();
+    let mut any_loaded = false;
+    for tier in crate::perf_database::moe_a2a::source_tiers(
+        sources,
+        legacy_normal,
+        legacy_ll,
+        legacy_trtllm_alltoall,
+    ) {
+        if let Some(tier_root) = view_moe_a2a_tier(
+            &tier.moe_a2a,
+            &tier.legacy_normal,
+            &tier.legacy_ll,
+            &tier.legacy_trtllm_alltoall,
+        )? {
+            root.merge_fill(tier_root);
+            any_loaded = true;
+        }
+    }
+    Ok(any_loaded.then_some(root))
+}
+
+/// Fold one completed resolver priority tier into the unified 10-level a2a
+/// store `[comm_backend][phase][comm_dtype][ep_size][node_num][hidden][topk]
+/// [num_experts][sms][num_tokens]`.
+fn view_moe_a2a_tier(
     sources: &[PerfSource],
     legacy_normal: &[PerfSource],
     legacy_ll: &[PerfSource],
@@ -2364,14 +2415,6 @@ pub const TABLE_VIEW_ATTRIBUTES: &[(&str, &[&str])] = &[
         &["dsv4_paged_mqa_logits_module_perf.parquet"],
     ),
     (
-        "_dsv4_sparse_kernel_data.hca_attn",
-        &["dsv4_hca_attn_module_perf.parquet"],
-    ),
-    (
-        "_dsv4_sparse_kernel_data.csa_attn",
-        &["dsv4_csa_attn_module_perf.parquet"],
-    ),
-    (
         "_dsv4_csa_topk_calib_data",
         &["dsv4_csa_topk_calib_perf.parquet"],
     ),
@@ -2395,6 +2438,11 @@ pub fn table_view_json(tables: &PerfTables, attribute: &str) -> Result<Option<St
         tables
             .source_resolver
             .sources_for(basename, &tables.data_root)
+    };
+    let prioritized_src = |basename: &str| {
+        tables
+            .source_resolver
+            .prioritized_sources_for(basename, &tables.data_root)
     };
     let comm_src = |root: Option<&std::path::Path>, basename: &str| -> Vec<PerfSource> {
         match root {
@@ -2455,10 +2503,10 @@ pub fn table_view_json(tables: &PerfTables, attribute: &str) -> Result<Option<St
         "_wideep_moe_compute_data" => view_wideep_moe_compute(&src("wideep_moe_perf.parquet")?)?,
         "_trtllm_alltoall_data" => view_trtllm_alltoall(&src("trtllm_alltoall_perf.parquet")?)?,
         "_moe_a2a_data" => view_moe_a2a(
-            &src("moe_a2a_perf.parquet")?,
-            &src("wideep_deepep_normal_perf.parquet")?,
-            &src("wideep_deepep_ll_perf.parquet")?,
-            &src("trtllm_alltoall_perf.parquet")?,
+            &prioritized_src("moe_a2a_perf.parquet")?,
+            &prioritized_src("wideep_deepep_normal_perf.parquet")?,
+            &prioritized_src("wideep_deepep_ll_perf.parquet")?,
+            &prioritized_src("trtllm_alltoall_perf.parquet")?,
         )?,
         "_moe_ep_data" => view_moe_expert_compute(
             &src("moe_expert_compute_perf.parquet")?,
@@ -2498,12 +2546,6 @@ pub fn table_view_json(tables: &PerfTables, attribute: &str) -> Result<Option<St
         ]),
         "_dsv4_sparse_kernel_data.paged_mqa_logits" => {
             view_dsv4_sparse_kernel(&src("dsv4_paged_mqa_logits_module_perf.parquet")?)?
-        }
-        "_dsv4_sparse_kernel_data.hca_attn" => {
-            view_dsv4_sparse_kernel(&src("dsv4_hca_attn_module_perf.parquet")?)?
-        }
-        "_dsv4_sparse_kernel_data.csa_attn" => {
-            view_dsv4_sparse_kernel(&src("dsv4_csa_attn_module_perf.parquet")?)?
         }
         "_dsv4_csa_topk_calib_data" => {
             view_dsv4_csa_topk_calib(&src("dsv4_csa_topk_calib_perf.parquet")?)?

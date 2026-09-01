@@ -781,6 +781,38 @@ impl AicEngine {
         })
         .map_err(aic_to_py)
     }
+
+    /// Per-lane `(lane, slice_count, row_count)` density for one attention
+    /// QUERY table (AIC-1715/1716 follow-up). `attribute` is
+    /// `"_context_attention_data"` or `"_generation_attention_data"`.
+    ///
+    /// Unlike `table_view_json` (which folds the lane-blind enumeration
+    /// view kept for charts/support-matrix), this reads
+    /// `AttentionTable::context_lanes`/`generation_lanes` directly off the
+    /// QUERY-path `by_lane` structure — the real collected `kernel_source`
+    /// lanes, with the measured coverage `operations/attention.py::
+    /// lane_walk_order`'s donor/leftover tiers rank by. Empty (never an
+    /// error) when the table has no data at all, matching the tolerant
+    /// `unwrap_or_default()` the XSHAPE reference-grid fallback uses for
+    /// the same underlying accessor.
+    fn attention_lane_density(
+        &self,
+        py: Python<'_>,
+        attribute: &str,
+    ) -> PyResult<Vec<(String, u32, u32)>> {
+        py.allow_threads(|| {
+            let db = self.inner.database();
+            match attribute {
+                "_context_attention_data" => Ok(db.attention.context_lanes().unwrap_or_default()),
+                "_generation_attention_data" => {
+                    Ok(db.attention.generation_lanes().unwrap_or_default())
+                }
+                other => Err(PyValueError::new_err(format!(
+                    "attention_lane_density: unknown attribute {other:?}"
+                ))),
+            }
+        })
+    }
 }
 
 /// Convert a JSON-encoded [`EngineSpec`] into bincode bytes (Python → Rust
@@ -940,6 +972,7 @@ struct EngineBuildRequest {
     kvcache_quant_mode: Option<String>,
     fmha_quant_mode: Option<String>,
     comm_quant_mode: Option<String>,
+    attention_backend: Option<String>,
     nextn: u32,
     kv_block_size: Option<u32>,
     systems_path: Option<String>,
@@ -979,6 +1012,7 @@ impl AicEngineBuilder {
                 kvcache_quant_mode: None,
                 fmha_quant_mode: None,
                 comm_quant_mode: None,
+                attention_backend: None,
                 nextn: 0,
                 kv_block_size: None,
                 systems_path: None,
@@ -1055,6 +1089,12 @@ impl AicEngineBuilder {
         self
     }
 
+    /// Override the attention kernel backend.
+    pub fn attention_backend(mut self, value: impl Into<String>) -> Self {
+        self.request.attention_backend = Some(value.into());
+        self
+    }
+
     /// Configure speculative decoding.
     pub fn speculative_decoding(mut self, nextn: u32) -> Self {
         self.request.nextn = nextn;
@@ -1093,6 +1133,7 @@ mod builder_tests {
         assert!(builder.request.backend_version.is_none());
         assert!(builder.request.moe_tp_size.is_none());
         assert!(builder.request.moe_ep_size.is_none());
+        assert!(builder.request.attention_backend.is_none());
         assert!(builder.request.kv_block_size.is_none());
     }
 
@@ -1104,6 +1145,7 @@ mod builder_tests {
             .pp_size(2)
             .attention_dp_size(4)
             .moe_parallelism(Some(1), Some(8))
+            .attention_backend("fa3")
             .speculative_decoding(2)
             .kv_block_size(16)
             .systems_path("/tmp/systems");
@@ -1115,6 +1157,7 @@ mod builder_tests {
             (builder.request.moe_tp_size, builder.request.moe_ep_size),
             (Some(1), Some(8))
         );
+        assert_eq!(builder.request.attention_backend.as_deref(), Some("fa3"));
         assert_eq!(builder.request.nextn, 2);
         assert_eq!(builder.request.kv_block_size, Some(16));
         assert_eq!(
@@ -1159,6 +1202,7 @@ fn compile_engine_from_request(request: EngineBuildRequest) -> Result<Engine, Ai
         kwargs.set_item("kvcache_quant_mode", request.kvcache_quant_mode.as_deref())?;
         kwargs.set_item("fmha_quant_mode", request.fmha_quant_mode.as_deref())?;
         kwargs.set_item("comm_quant_mode", request.comm_quant_mode.as_deref())?;
+        kwargs.set_item("attention_backend", request.attention_backend.as_deref())?;
         kwargs.set_item("forward_model", request.forward_model.as_deref())?;
         kwargs.set_item("nextn", request.nextn)?;
         kwargs.set_item("kv_block_size", request.kv_block_size)?;
@@ -1224,6 +1268,8 @@ pub(crate) fn compile_engine_to_engine(
             .map(str::to_owned),
         // Comm quant is not carried on EngineConfig; let Python default it.
         comm_quant_mode: None,
+        // Attention backend is not carried on EngineConfig; let Python resolve it.
+        attention_backend: None,
         nextn,
         kv_block_size: config.kv_block_size,
         systems_path: systems_path.map(str::to_owned),
@@ -1512,7 +1558,7 @@ mod tests {
 
     const TEST_MODEL: &str = "MiniMaxAI/MiniMax-M2.5";
 
-    /// Hand-built context op list against the b200_sxm/vllm/0.19.0 perf tables.
+    /// Hand-built context op list against the b200_sxm/vllm/0.24.0 perf tables.
     /// `Elementwise` is DB-free (pure mem-bandwidth SOL); `Gemm` and
     /// `ContextAttention` hit `gemm_perf` / `context_attention_perf`, both of
     /// which exist for this fixture. Mirrors a MiniMax-shaped context graph
@@ -1549,6 +1595,7 @@ mod tests {
                 fmha_quant_mode: FmhaQuantMode::Bfloat16,
                 use_qk_norm: false,
                 cp_size: 1,
+                lane_order: crate::operators::attention::b200_vllm_context_lane_order(),
             }),
         ]
     }
@@ -1572,6 +1619,7 @@ mod tests {
                 head_size: 128,
                 window_size: 0,
                 kv_cache_dtype: KvCacheQuantMode::Fp8,
+                lane_order: crate::operators::attention::b200_vllm_generation_lane_order(),
             }),
         ]
     }
@@ -1583,7 +1631,7 @@ mod tests {
             system_name: "b200_sxm".to_string(),
             systems_path: None,
             backend: BackendKind::Vllm,
-            backend_version: Some("0.19.0".to_string()),
+            backend_version: Some("0.24.0".to_string()),
             forward_model: None,
             kv_block_size: None,
             parallel: ParallelMapping {
@@ -1603,6 +1651,7 @@ mod tests {
             speculative: None,
             enable_shared_layer: None,
             strict_provenance: false,
+            tolerate_dirless_version: false,
             database_mode: Default::default(),
             transfer_policy: None,
             extra: BTreeMap::new(),
@@ -1610,7 +1659,7 @@ mod tests {
     }
 
     /// Build bincoded `EngineSpec` bytes from hand-built op lists. The lists
-    /// query the real b200_sxm/vllm/0.19.0 perf tables so the binding
+    /// query the real b200_sxm/vllm/0.24.0 perf tables so the binding
     /// pass-through numbers are real, not synthetic.
     fn fixture_spec_bytes() -> Vec<u8> {
         let spec = EngineSpec::new(fixture_engine_config(), context_ops(), generation_ops());

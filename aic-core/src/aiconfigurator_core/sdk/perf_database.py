@@ -108,6 +108,214 @@ def get_systems_paths() -> list[str]:
     return list(_SYSTEMS_PATHS)
 
 
+def _version_sort_tuple(version_str: str) -> tuple:
+    """Comparable tuple for version strings like '1.3.0rc10' / '0.5.6.post2' / 'v0.20_fix'."""
+    import re
+
+    version_str = str(version_str).lower()
+
+    def suffix_number(start: int) -> int:
+        suffix_match = re.search(r"(\d+)(?!.*\d)", version_str[start:])
+        return int(suffix_match.group(1)) if suffix_match else 0
+
+    def prerelease_parts() -> list[int]:
+        rc_match = re.search(r"rc(\d+)", version_str)
+        if rc_match:
+            return [0, int(rc_match.group(1))]
+        if "rc" in version_str:
+            return [0, 0]
+        return [1, 0]
+
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
+    if m:
+        parts = [int(m.group(1)), int(m.group(2)), int(m.group(3))]
+        parts.extend(prerelease_parts())
+        parts.append(suffix_number(m.end()))
+        return tuple(parts)
+    m = re.search(r"v?(\d+)\.(\d+)", version_str)
+    if m:
+        parts = [int(m.group(1)), int(m.group(2)), 0]
+        parts.extend(prerelease_parts())
+        parts.append(suffix_number(m.end()))
+        return tuple(parts)
+    return (0, 0, 0, 0, 0, 0)
+
+
+# ---------------------------------------------------------------------------
+# Queryable-version slots.
+#
+# Each (system, framework) exposes at most three queryable versions:
+#   current  — the newest maintainer-completed full upgrade (authored in
+#              systems/query_versions.yaml; per-system overrides win)
+#   previous — the current before it (authored alongside)
+#   next     — DERIVED: the highest declared version newer than current
+#              (single-op development drops for new models land here; their
+#              lower-version op data serves next queries via backward fill)
+#
+# The literal aliases "current" / "previous" / "next" are accepted wherever a
+# version is requested. Any other version is rejected loudly unless the
+# caller passes allow_unlisted_version=True (test fixtures pinning data
+# coordinates). Data directories outside the slots are NOT versions — they
+# are backward-fill / cross-backend sources only. When the slots file is
+# absent from the systems root (external/synthetic trees), the gate is off
+# and behavior is unchanged.
+# ---------------------------------------------------------------------------
+
+_QUERY_VERSIONS_BASENAME = "query_versions.yaml"
+_SLOT_ALIASES = ("current", "previous", "next")
+
+
+@functools.cache
+def _load_query_slots_doc(systems_paths: tuple[str, ...]) -> dict | None:
+    for systems_root in systems_paths:
+        path = os.path.join(systems_root, _QUERY_VERSIONS_BASENAME)
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    return yaml.safe_load(f) or {}
+            except Exception as e:
+                logger.warning(f"failed to parse {path}: {e}; version slots disabled")
+                return None
+    return None
+
+
+def get_version_slots(system: str, backend: str, systems_paths: str | list[str] | None = None) -> dict[str, str] | None:
+    """Resolved slots for (system, backend): {'current': v[, 'previous': v][, 'next': v]}.
+
+    None when the slots file is absent (gate off) or the combination has no
+    authored entry (e.g. a framework never maintained on that system).
+    """
+    if systems_paths is None:
+        systems_paths = get_systems_paths()
+    elif isinstance(systems_paths, str):
+        systems_paths = [systems_paths]
+    doc = _load_query_slots_doc(tuple(systems_paths))
+    if not doc:
+        return None
+    override_entry = (doc.get("overrides") or {}).get(system, {}).get(backend)
+    entry = override_entry if override_entry is not None else (doc.get("defaults") or {}).get(backend)
+    if not entry or not entry.get("current"):
+        return None
+    # Slots only govern systems that actually hold data for this backend:
+    # estimate-only spec yamls (no data tree) and synthetic test systems keep
+    # the ungated behavior even though the framework defaults exist.
+    has_any_version_dir = False
+    for systems_root in systems_paths:
+        system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
+        if not os.path.isfile(system_yaml_path):
+            continue
+        try:
+            with open(system_yaml_path) as f:
+                system_spec = yaml.safe_load(f) or {}
+            data_dir = os.path.join(systems_root, system_spec.get("data_dir", ""))
+            if any(True for _ in _iter_backend_version_dirs(data_dir, backend)):
+                has_any_version_dir = True
+                break
+        except Exception:
+            continue
+    if not has_any_version_dir:
+        return None
+    slots = {"current": str(entry["current"])}
+    if entry.get("previous"):
+        slots["previous"] = str(entry["previous"])
+    # next is derived FLEET-WIDE per framework: systematic upgrades and
+    # development drops land on typical hardware together, so the next version
+    # is one label across every defaults-governed system — a system without
+    # its own next-version data serves next queries through backward fill (exactly the
+    # rows the retired reuse markers used to graft). Override systems
+    # (frozen baselines like a100/b60) expose no next.
+    if override_entry is None:
+        # Override-governed systems (frozen baselines like a100/b60) are a
+        # separate compatibility domain: their data drops must not advertise
+        # a fleet-wide next that defaults-governed systems cannot load.
+        override_systems = frozenset(
+            name for name, per_backend in (doc.get("overrides") or {}).items() if (per_backend or {}).get(backend)
+        )
+        nxt = _derive_fleet_next(tuple(systems_paths), backend, slots["current"], override_systems)
+        if nxt is not None:
+            slots["next"] = nxt
+    return slots
+
+
+@functools.cache
+def _derive_fleet_next(
+    systems_paths: tuple[str, ...], backend: str, current: str, exclude_systems: frozenset[str] = frozenset()
+) -> str | None:
+    """Highest DATA-BACKED version strictly newer than `current`, across all
+    defaults-governed systems in the tree (override-governed systems are
+    excluded — their frozen baselines are not part of the fleet upgrade
+    cadence). Marker-only directories do not qualify — next means a developer
+    actually dropped measurements somewhere."""
+    current_key = _version_sort_tuple(current)
+    candidates: set[str] = set()
+    for systems_root in systems_paths:
+        try:
+            entries = os.listdir(systems_root)
+        except Exception:
+            continue
+        for entry in entries:
+            if not entry.endswith(".yaml"):
+                continue
+            if entry[: -len(".yaml")] in exclude_systems:
+                continue
+            try:
+                with open(os.path.join(systems_root, entry)) as f:
+                    system_spec = yaml.safe_load(f) or {}
+                data_dir = os.path.join(systems_root, system_spec.get("data_dir", ""))
+                if not os.path.isdir(data_dir):
+                    continue
+                for version, version_path in _iter_backend_version_dirs(data_dir, backend):
+                    if _version_sort_tuple(version) > current_key and _database_version_dir_has_perf_files(
+                        version_path
+                    ):
+                        candidates.add(version)
+            except Exception as e:
+                logger.warning("could not derive next slot from %s: %s", entry, e)
+    return max(candidates, key=_version_sort_tuple) if candidates else None
+
+
+def resolve_query_version(
+    system: str,
+    backend: str,
+    version: str,
+    systems_paths: str | list[str] | None = None,
+    allow_unlisted: bool = False,
+) -> str:
+    """Map a requested version (or slot alias) onto the queryable slots.
+
+    Raises ValueError for versions outside the slots unless allow_unlisted.
+    """
+    slots = get_version_slots(system, backend, systems_paths=systems_paths)
+    if slots is None:
+        if version in _SLOT_ALIASES:
+            raise ValueError(
+                f"no queryable versions defined for {backend} on {system}; cannot resolve alias {version!r}"
+            )
+        return version
+    if version in _SLOT_ALIASES:
+        resolved = slots.get(version)
+        if resolved is None:
+            raise ValueError(f"{backend} on {system} has no {version!r} version; available slots: {slots}")
+        return resolved
+    if version in slots.values() or allow_unlisted:
+        return version
+    # Transition escape for legacy test fixtures that pin data coordinates
+    # through user-level surfaces (Task/CLI) with no allow parameter. Not for
+    # production use; the fixture-discipline follow-up retires it.
+    if os.environ.get("AIC_ALLOW_UNLISTED_VERSIONS", "").lower() in ("1", "true", "yes"):
+        return version
+    raise ValueError(
+        f"{backend}/{version!r} looks like an old-style raw version query; "
+        f"{system} now resolves versions through queryable slots. "
+        f"New way: use an alias ('current'/'previous'/'next') or one of the "
+        f"slot versions {slots}. "
+        f"Old way (raw data-coordinate access, data outside these slots is "
+        f"not maintained to the queryable bar): re-run with the environment "
+        f"variable AIC_ALLOW_UNLISTED_VERSIONS=1, or pass "
+        f"allow_unlisted_version=True in SDK code."
+    )
+
+
 @functools.cache
 def _load_system_spec_from_paths(systems_paths: tuple[str, ...], system_name: str) -> dict:
     for systems_root in systems_paths:
@@ -223,9 +431,15 @@ def context_fmha_supported_modes(database, ctx_op: str, kv_cache_mode) -> list[s
         if not data:
             continue
         saw_table = True
-        for fmha_key in data:
-            if kv_cache_mode in data[fmha_key]:
-                modes.add(fmha_key.name if hasattr(fmha_key, "name") else str(fmha_key))
+        # Lane-aware shape (AIC-1715): outermost keys are strings (kernel_source).
+        # Union across ALL lanes — a joint (fmha, kv) slice present in any lane
+        # is reachable at query time (own lane or donor gap-fill).
+        first_key = next(iter(data))
+        lanes = list(data.values()) if isinstance(first_key, str) else [data]
+        for lane_data in lanes:
+            for fmha_key in lane_data:
+                if kv_cache_mode in lane_data[fmha_key]:
+                    modes.add(fmha_key.name if hasattr(fmha_key, "name") else str(fmha_key))
     if not saw_table:
         return list(flat)
     return sorted(modes)
@@ -284,7 +498,14 @@ def get_supported_databases(
     supported_dict = defaultdict(lambda: defaultdict(list))
     for system, backend_versions in supported_sets.items():
         for backend, versions in backend_versions.items():
-            supported_dict[system][backend] = sorted(versions)
+            # With version slots active, the queryable surface is the slot set
+            # (current / previous / derived next), not every declared directory —
+            # directories outside the slots are fill sources, not versions.
+            slots = get_version_slots(system, backend, systems_paths=systems_paths)
+            if slots is not None:
+                supported_dict[system][backend] = sorted(set(slots.values()), key=_version_sort_tuple)
+            else:
+                supported_dict[system][backend] = sorted(versions)
 
     return supported_dict
 
@@ -393,7 +614,108 @@ def _load_collection_meta_yaml(path: str) -> dict:
         raise ValueError(f"{path}: failed to parse collection_meta.yaml: {e}") from e
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: expected a YAML mapping at the top level, got {type(raw).__name__}")  # noqa: TRY004
+    schema_version = raw.get("schema_version", 1)
+    if schema_version == 2:
+        _validate_collection_meta_v2(raw, path)
+    elif schema_version == 1:
+        tables = raw.get("tables")
+        if isinstance(tables, dict):
+            for table, entry in tables.items():
+                if isinstance(entry, dict) and "collections" in entry:
+                    raise ValueError(f"{path}: tables.{table}.collections requires schema_version 2")
+    else:
+        raise ValueError(f"{path}: unsupported collection_meta.yaml schema_version {schema_version!r}")
     return raw
+
+
+_COLLECTION_EVENT_REQUIRED_KEYS = (
+    "collector_ref",
+    "collector_hash",
+    "case_plan_hash",
+    "collected_at",
+    "rows",
+    "status",
+)
+_COLLECTION_EVENT_OPTIONAL_KEYS = ("source_campaign_rows", "source_campaign_status", "runtime")
+_COLLECTION_STATUSES = frozenset({"complete", "partial"})
+_COLLECTION_RUNTIME_KEYS = ("framework", "version", "image", "image_variant", "image_digest")
+
+
+def _validate_non_negative_row_count(value: object, *, field: str, path: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{path}: {field} must be a non-negative integer")
+
+
+def _validate_collection_runtime(runtime: object, *, field: str, path: str) -> None:
+    if not isinstance(runtime, dict):
+        raise ValueError(f"{path}: {field} must be a mapping")  # noqa: TRY004
+    unknown = sorted(set(runtime) - set(_COLLECTION_RUNTIME_KEYS))
+    if unknown:
+        raise ValueError(f"{path}: {field} has unsupported key(s): {', '.join(unknown)}")
+    for key in ("framework", "version"):
+        if not isinstance(runtime.get(key), str) or not runtime[key].strip():
+            raise ValueError(f"{path}: {field}.{key} must be a non-empty string")
+    for key in _COLLECTION_RUNTIME_KEYS[2:]:
+        if key in runtime and (not isinstance(runtime[key], str) or not runtime[key].strip()):
+            raise ValueError(f"{path}: {field}.{key} must be a non-empty string when provided")
+
+
+def _validate_collection_event(event: object, *, table: str, index: int, path: str) -> None:
+    field_path = f"tables.{table}.collections[{index}]"
+    if not isinstance(event, dict):
+        raise ValueError(f"{path}: {field_path} must be a mapping")  # noqa: TRY004
+
+    missing = [key for key in _COLLECTION_EVENT_REQUIRED_KEYS if key not in event]
+    if missing:
+        raise ValueError(f"{path}: {field_path} missing required key(s): {', '.join(missing)}")
+    allowed = {*_COLLECTION_EVENT_REQUIRED_KEYS, *_COLLECTION_EVENT_OPTIONAL_KEYS}
+    unknown = sorted(set(event) - allowed)
+    if unknown:
+        raise ValueError(f"{path}: {field_path} has unsupported key(s): {', '.join(unknown)}")
+
+    for key in ("collector_ref", "collector_hash", "case_plan_hash", "collected_at"):
+        if not isinstance(event[key], str) or not event[key].strip():
+            raise ValueError(f"{path}: {field_path}.{key} must be a non-empty string")
+    _validate_non_negative_row_count(event["rows"], field=f"{field_path}.rows", path=path)
+    if event["status"] not in _COLLECTION_STATUSES:
+        raise ValueError(f"{path}: {field_path}.status must be 'complete' or 'partial'")
+
+    if "source_campaign_rows" in event:
+        _validate_non_negative_row_count(
+            event["source_campaign_rows"], field=f"{field_path}.source_campaign_rows", path=path
+        )
+        if event["source_campaign_rows"] < event["rows"]:
+            raise ValueError(f"{path}: {field_path}.source_campaign_rows must be at least as large as rows")
+    if "source_campaign_status" in event and event["source_campaign_status"] not in _COLLECTION_STATUSES:
+        raise ValueError(f"{path}: {field_path}.source_campaign_status must be 'complete' or 'partial'")
+    if "runtime" in event:
+        _validate_collection_runtime(event["runtime"], field=f"{field_path}.runtime", path=path)
+
+
+def _validate_collection_meta_v2(raw: dict, path: str) -> None:
+    _validate_collection_runtime(raw.get("runtime"), field="runtime", path=path)
+
+    tables = raw.get("tables")
+    if not isinstance(tables, dict):
+        raise ValueError(f"{path}: schema v2 'tables' must be a mapping")  # noqa: TRY004
+    for table, entry in tables.items():
+        if not isinstance(table, str) or not table:
+            raise ValueError(f"{path}: schema v2 table names must be non-empty strings")
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path}: tables.{table} must be a mapping")  # noqa: TRY004
+        unknown = sorted(set(entry) - {"rows", "status", "collections"})
+        if unknown:
+            raise ValueError(f"{path}: tables.{table} has unsupported key(s): {', '.join(unknown)}")
+        if "rows" not in entry or "status" not in entry or "collections" not in entry:
+            raise ValueError(f"{path}: tables.{table} requires rows, status, and collections")
+        _validate_non_negative_row_count(entry["rows"], field=f"tables.{table}.rows", path=path)
+        if entry["status"] not in _COLLECTION_STATUSES:
+            raise ValueError(f"{path}: tables.{table}.status must be 'complete' or 'partial'")
+        collections = entry["collections"]
+        if not isinstance(collections, list) or not collections:
+            raise ValueError(f"{path}: tables.{table}.collections must be a non-empty list")
+        for index, event in enumerate(collections):
+            _validate_collection_event(event, table=table, index=index, path=path)
 
 
 def _collection_meta_partial_tables(meta: dict) -> frozenset[str]:
@@ -567,11 +889,19 @@ def get_latest_database_version(
     """
     import re
 
+    # Under version slots, "latest" means the maintained default (current) —
+    # next is opt-in via its alias, never the implicit default. The shortcut
+    # only fires when current is visible in the supported set, so tests that
+    # monkeypatch get_supported_databases keep their synthetic behavior.
+    slots = get_version_slots(system, backend, systems_paths=systems_paths)
+
     if systems_paths is None:
         supported_databases = get_supported_databases()
     else:
         supported_databases = get_supported_databases(systems_paths=systems_paths)
     database_versions = supported_databases.get(system, {}).get(backend, [])
+    if slots is not None and slots["current"] in database_versions:
+        return slots["current"]
     if not include_shared_layer_marker_versions:
         database_versions = [
             version
@@ -819,7 +1149,7 @@ def _is_family_layout_version_dir(version_path: str, data_dir: str) -> bool:
     legacy layout as deprecated fallback for one transition window") -- a
     legacy-shaped dir predates the V3 metadata regime entirely, so strict
     provenance does not apply to it, mirroring how the engine resolver's
-    ``op_file_family_from_path`` (``perf_database/source_resolution.rs``)
+    ``op_file_namespace_from_path`` (``perf_database/source_resolution.rs``)
     treats legacy-shaped paths as structurally outside the comm-family
     exclusion (Task 1's FIX-2).
     """
@@ -897,6 +1227,7 @@ def get_database(
     database_mode: str | None = None,
     shared_layer: bool | None = None,
     strict_provenance: bool | None = None,
+    allow_unlisted_version: bool = False,
 ) -> PerfDatabase | None:
     """
     Get the database for a given system, backend and version.
@@ -941,6 +1272,10 @@ def get_database(
         logger.error(f"No database version available for {system=}, {backend=}")
         return None
 
+    version = resolve_query_version(
+        system, backend, version, systems_paths=systems_paths, allow_unlisted=allow_unlisted_version
+    )
+
     shared_flag = _shared_layer_enabled(database_mode) if shared_layer is None else bool(shared_layer)
     # Only pass the override kwarg when explicitly set: PerfDatabase derives the
     # same flag from database_mode otherwise, and tests monkeypatch PerfDatabase
@@ -951,6 +1286,8 @@ def get_database(
         extra_database_kwargs["strict_provenance"] = strict_provenance
     effective_strict = _strict_provenance_enabled(strict_provenance)
     missing_data_candidate = None
+    dirless_next_candidate = None
+    is_advertised_next = None
     for systems_root in systems_paths:
         system_yaml_path = os.path.join(systems_root, f"{system}.yaml")
         if not os.path.isfile(system_yaml_path):
@@ -1005,10 +1342,27 @@ def get_database(
                     _check_strict_provenance_for_request(paths, backend, data_dir_abs, strict=True)
                     _STRICT_VALIDATED_REQUESTS.add(request_key)
                 return database
-        elif allow_missing_data:
-            if missing_data_candidate is None:
-                missing_data_candidate = (systems_root, cache_key)
         else:
+            # Directory-less NEXT candidate (design §14): the fleet-derived
+            # next may be data-backed on other default-governed systems only;
+            # a system without its own directory serves every op through the
+            # channel-1 backward fill PerfDatabase already performs. DEFERRED,
+            # never returned mid-loop: an exact next directory in a LATER
+            # configured root must win over a directory-less fallback from an
+            # earlier root (review blocker 2026-08-28). The relaxation covers
+            # exactly the advertised next slot — raw versions and the
+            # authored current/previous keep the loud missing-directory gate,
+            # and provenance labeling is untouched.
+            if is_advertised_next is None:
+                slots = get_version_slots(system, backend, systems_paths=list(systems_paths))
+                is_advertised_next = slots is not None and version == slots.get("next")
+            if is_advertised_next:
+                if dirless_next_candidate is None:
+                    dirless_next_candidate = (systems_root, cache_key)
+            elif allow_missing_data:
+                if missing_data_candidate is None:
+                    missing_data_candidate = (systems_root, cache_key)
+                continue
             if is_incomplete:
                 logger.warning(
                     f"data for {system=}, {backend=}, {version=} is marked incomplete in either layout, "
@@ -1018,6 +1372,37 @@ def get_database(
                 logger.warning(
                     f"no data found for {system=}, {backend=}, {version=} in either layout, continuing searching"
                 )
+
+    if dirless_next_candidate is not None:
+        systems_root, cache_key = dirless_next_candidate
+        try:
+            database = databases_cache[cache_key][backend][version]
+        except KeyError:
+            pass
+        else:
+            database.dirless_next_load = True
+            return database
+        logger.info(
+            f"Loading directory-less next database for {system=}, {backend=}, {version=} "
+            "(no exact directory in any configured root; all ops ride backward fill)"
+        )
+        try:
+            database = PerfDatabase(
+                system, backend, version, systems_root, database_mode=database_mode, **extra_database_kwargs
+            )
+            # The engine reload (Rust) keeps its own loud missing-directory
+            # gate; the spec builders read this marker to carry the
+            # dir-less-next tolerance on the wire.
+            database.dirless_next_load = True
+            databases_cache[cache_key][backend][version] = database
+            return database
+        except Exception:
+            if effective_strict:
+                raise
+            logger.warning(
+                f"failed directory-less next load for {system=}, {backend=}, {version=}",
+                exc_info=True,
+            )
 
     if missing_data_candidate is not None:
         systems_root, cache_key = missing_data_candidate
@@ -1132,6 +1517,7 @@ def get_database_view(
     transfer_policy=None,
     shared_layer: bool | None = None,
     strict_provenance: bool | None = None,
+    allow_unlisted_version: bool = False,
 ) -> PerfDatabase | None:
     """Return an isolated, lightweight query view over a cached database.
 
@@ -1156,6 +1542,7 @@ def get_database_view(
         "database_mode": mode.name,
         "shared_layer": shared_layer,
         "strict_provenance": strict_provenance,
+        "allow_unlisted_version": allow_unlisted_version,
     }
     if systems_paths is not None:
         database_kwargs["systems_paths"] = systems_paths
@@ -1299,7 +1686,11 @@ def _store_loaded_database(
 ) -> None:
     system, backend, version, systems_root = ref
     # A worker result may replace an existing root object for this data key.
-    # Drop configured copies keyed by the old root so they cannot accumulate.
+    # Evict probe snapshots before publishing that replacement, and drop
+    # configured copies keyed by the old root so they cannot accumulate.
+    from aiconfigurator_core.sdk import engine
+
+    engine._clear_probe_handle_cache()
     _cached_configured_database_view.cache_clear()
     database_dict[system][backend][version] = database
     # get_all_databases() constructs the default (shared-enabled) view. Preserve
@@ -1802,10 +2193,27 @@ def _enum_key_names(data) -> list[str]:
     """Safely extract Enum key names from a mapping.
 
     Many perf tables are optional and loaders return ``None`` when data
-    files are missing. Treat missing/empty tables as supporting no modes."""
+    files are missing. Treat missing/empty tables as supporting no modes.
+
+    Tables with the lane-aware shape introduced by AIC-1715 (outermost keys
+    are strings — kernel_source values) report the UNION of their lanes' enum
+    keys: any lane can serve a query (own lane or donor gap-fill), so a mode
+    collected in only one lane is still supported.
+    """
     if not data:
         return []
-    names: list[str] = []
+    first_key = next(iter(data))
+    if isinstance(first_key, str):
+        # Lane-aware shape: union the enum keys across every kernel_source lane.
+        names: list[str] = []
+        seen: set[str] = set()
+        for lane in data:
+            for name in _enum_key_names(data[lane]):
+                if name not in seen:
+                    seen.add(name)
+                    names.append(name)
+        return names
+    names = []
     for key in data:
         names.append(key.name if hasattr(key, "name") else str(key))
     return names
@@ -2327,29 +2735,44 @@ class PerfDatabase:
             if callable(cache_clear):
                 cache_clear()
 
-    def moe_a2a_coverage(self, hidden_size: int, topk: int, num_experts: int) -> dict[str, set[tuple[int, int]]]:
+    def moe_a2a_coverage(
+        self,
+        hidden_size: int,
+        topk: int,
+        num_experts: int,
+        model_quantization=None,
+        inference_phase: str | None = None,
+    ) -> dict[str, set[tuple[int, int]]]:
         """Probe moe_a2a coverage for one model shape (PR 2's enumerator contract).
 
         Returns ``comm_backend -> {(ep_size, node_num)}`` where BOTH the
         dispatch AND combine phases carry a non-empty token curve for the
-        shape, under ANY ``comm_dtype`` and ANY ``sms`` (the prepare phase is
-        not required). Read-only key walk over the table bound by
+        shape. When model quantization and inference phase are supplied, each
+        phase must exist under the exact serving communication dtype; omitted
+        arguments preserve the legacy ANY-dtype introspection behavior. SMS
+        remains an ANY axis and prepare is not required. Read-only key walk over the table bound by
         ``MoEAllToAll.load_data`` — no query execution, and non-vivifying
         (``.get`` only: injected stores may be auto-vivifying defaultdicts).
         An absent or unloaded table — including a ``LoadedOpData`` wrapping
         ``None``, which raises on item access but is falsy — yields ``{}``.
         Deliberately not lru_cached: the returned sets are mutable.
         """
-        from aiconfigurator_core.sdk.operations.moe_comm import MoEAllToAll
+        from aiconfigurator_core.sdk.operations.moe_comm import (
+            MOE_A2A_BACKENDS,
+            MoEAllToAll,
+            communication_dtype_for,
+        )
 
         MoEAllToAll.load_data(self)
         table = self._moe_a2a_data
         if not table:
             return {}
 
-        def pairs_for(by_phase, phase: str) -> set[tuple[int, int]]:
+        def pairs_for(by_phase, phase: str, required_dtype: str | None) -> set[tuple[int, int]]:
             pairs: set[tuple[int, int]] = set()
-            for by_ep in (by_phase.get(phase) or {}).values():  # ANY comm_dtype
+            by_dtype = by_phase.get(phase) or {}
+            dtype_slices = by_dtype.values() if required_dtype is None else (by_dtype.get(required_dtype) or {},)
+            for by_ep in dtype_slices:
                 for ep_size, by_node in by_ep.items():
                     for node_num, by_hidden in by_node.items():
                         by_sms = ((by_hidden.get(hidden_size) or {}).get(topk) or {}).get(num_experts) or {}
@@ -2359,7 +2782,27 @@ class PerfDatabase:
 
         coverage: dict[str, set[tuple[int, int]]] = {}
         for comm_backend, by_phase in table.items():
-            covered = pairs_for(by_phase, "dispatch") & pairs_for(by_phase, "combine")
+            required = {"dispatch": None, "combine": None}
+            if model_quantization is not None and inference_phase is not None:
+                backend_spec = MOE_A2A_BACKENDS.get(comm_backend)
+                if backend_spec is None or inference_phase not in backend_spec.inference_phases:
+                    continue
+                try:
+                    required = {
+                        phase: communication_dtype_for(
+                            system=self.system,
+                            comm_backend=comm_backend,
+                            model_quantization=model_quantization,
+                            communication_phase=phase,
+                            inference_phase=inference_phase,
+                        )
+                        for phase in ("dispatch", "combine")
+                    }
+                except ValueError:
+                    continue
+            covered = pairs_for(by_phase, "dispatch", required["dispatch"]) & pairs_for(
+                by_phase, "combine", required["combine"]
+            )
             if covered:
                 coverage[comm_backend] = covered
         return coverage
@@ -2397,6 +2840,36 @@ class PerfDatabase:
                 for by_hidden in by_slots.values():  # ANY num_slots
                     by_ep = ((by_hidden.get(hidden_size) or {}).get(inter_size) or {}).get(1) or {}  # moe_tp == 1
                     covered.update(ep_size for ep_size, tokens in by_ep.items() if tokens)
+        return covered
+
+    def legacy_moe_compute_coverage(
+        self,
+        hidden_size: int,
+        inter_size: int,
+        topk: int,
+        num_experts: int,
+        quant_mode: common.MoEQuantMode,
+    ) -> set[int]:
+        """Return EP sizes covered by the regular expert-kernel MoE table.
+
+        vLLM and TensorRT-LLM publish expert compute in ``moe_perf.parquet``
+        rather than the WideEP-specific compute tables.  This probe is used
+        only to gate the compute leg of a graph whose communication is already
+        owned by :class:`MoEAllToAll`; it does not enable the legacy
+        ``MoEDispatch``/NCCL graph.
+        """
+        from aiconfigurator_core.sdk.operations.moe import MoE
+
+        MoE.load_data(self)
+        table = self._moe_data
+        if not table:
+            return set()
+
+        covered: set[int] = set()
+        for by_topk in (table.get(quant_mode) or {}).values():  # ANY distribution
+            by_hidden = ((by_topk.get(topk) or {}).get(num_experts) or {}).get(hidden_size) or {}
+            by_ep = (by_hidden.get(inter_size) or {}).get(1) or {}  # moe_tp == 1
+            covered.update(ep_size for ep_size, tokens in by_ep.items() if tokens)
         return covered
 
     # ═══════════════════════════════════════════════════════════════════

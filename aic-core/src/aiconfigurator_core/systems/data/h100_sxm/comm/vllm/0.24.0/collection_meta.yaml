@@ -2,10 +2,97 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: 1
-provenance: legacy
 runtime:
-  framework: vllm
+  framework: wideep_vllm
   version: 0.24.0
+  image: vllm/vllm-openai:v0.24.0@sha256:251eba5cc7c12fed0b75da22a9240e582b1c9e39f6fbc064f86781b963bd814f
+  image_variant: linux/amd64
+  image_digest: sha256:f9de5cd9fa907fbf6dbba691eb7db095d48ad58ea283e3eba7142f9a91e186e8
+  source_commit: ee0da84ab9e04ac7610e28580af62c365e898389
+  abi:
+    torch: 2.11.0
+    cuda: 13.0.2
+    nvshmem: 3.3.24
+    system: h100_sxm
+    fabric_identity: single-node:viking-prod-234
+    gpu_name: NVIDIA H100 80GB HBM3
+    driver: 580.159.04
+    compute_capability: '9.0'
+    rdma_device_count_min: '12'
+    cross_node_nvlink_capable: runtime_probe_required
+    nvlink_topology_sha256: 8744cb51d268b6c0151ffc88e45367dfbf7c40da321cee5e1c4767f1c36ee28e
+    gloo_socket_ifname: ens6f0np0
+    slurm_topology_verified: 'true'
+    deep_ep_cuda_arches: 9.0 10.0a 10.3a
+    pyarrow: 24.0.0
+    pyarrow_wheel_sha256: 6165461f55ef6314f026de6638d661188e3455d3ec49834556a0ebbdbace18bb
+    campaign_system: h100_sxm
+    campaign_node_counts: '1'
+    campaign_ep_sizes: '8'
+    campaign_backends: deepep_ht,deepep_ll,deepep_v2
+    fabric_identities: single-node:viking-prod-234
+  backend_abis:
+    deepep_ht:
+      build_mode: official-v0.24.0-image
+      cuda: 13.0.2
+      deep_ep: 73b6ea4a439ba03a695563f9fd242c8e4b02b37c
+      deep_ep_api: Buffer
+      deep_ep_cuda_arches: 9.0 10.0a 10.3a
+      deep_ep_overlay_wheel_sha256: 6c94ba277cbdc208ac70175f0c0968dd1321834c6a693602018b779d2d8db03f
+      deep_ep_scaleup_ranks: '8'
+      nvshmem: 3.3.24
+      torch: 2.11.0
+    deepep_ll:
+      build_mode: official-v0.24.0-image
+      cuda: 13.0.2
+      deep_ep: 73b6ea4a439ba03a695563f9fd242c8e4b02b37c
+      deep_ep_api: Buffer
+      deep_ep_cuda_arches: 9.0 10.0a 10.3a
+      deep_ep_overlay_wheel_sha256: 6c94ba277cbdc208ac70175f0c0968dd1321834c6a693602018b779d2d8db03f
+      deep_ep_scaleup_ranks: '8'
+      nvshmem: 3.3.24
+      torch: 2.11.0
+    deepep_v2:
+      build_mode: official-v0.24.0-image+deepep-v2-overlay
+      cuda: 13.0.2
+      deep_ep: b306af06afd412c88e51e71802951606e40b7358
+      deep_ep_api: ElasticBuffer
+      deep_ep_cuda_arches: 9.0 10.0a 10.3a
+      deep_ep_overlay_wheel_sha256: 67abac095a1166058162b9c1d43c55d311f4b10b54892a7ce16157ba43a5ff0c
+      deep_ep_scaleup_ranks: auto
+      deep_ep_topology_source: nccl_lsa
+      nccl: 2.30.4
+      nvshmem: 3.3.24
+      torch: 2.11.0
+  backend_capabilities:
+    deepep_ht:
+      1n_ep8:
+        backend: deepep_ht
+        topology_source: legacy_compile_time
+        num_scaleout_ranks: '1'
+        num_scaleup_ranks: '8'
+    deepep_ll:
+      1n_ep8:
+        backend: deepep_ll
+        topology_source: legacy_compile_time
+        num_scaleout_ranks: '1'
+        num_scaleup_ranks: '8'
+    deepep_v2:
+      1n_ep8:
+        backend: deepep_v2
+        topology_source: nccl_lsa
+        num_scaleout_ranks: '1'
+        num_scaleup_ranks: '8'
+        num_rdma_ranks: '1'
+        num_nvlink_ranks: '8'
 tables:
   custom_allreduce_perf:
+    status: complete
+  moe_a2a_perf:
+    collector_ref: 65aab00d1a52a2924755ef2c389442c645571409
+    collector_hash: sha256:a0f6bea7b745dc4baa05d4c9a953c43dba3548f8c244497645ec9f784fda0b81
+    case_plan_hash: sha256:d570036e66f4c7546d2f4ea3907700c4429f28c24d7bf06b68e7cd5acbcb5262
+    collected_at: '2026-08-31'
+    rows: 648
+    classified_failures: 0
     status: complete

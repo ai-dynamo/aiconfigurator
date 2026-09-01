@@ -29,13 +29,15 @@ model_case_values:
       window_size: 0
       sglang_backends: {90: fa3, 100: trtllm_mha, 103: trtllm_mha}
       tensor_parallel_sizes: [1, 2, 4, 8]
-    # vLLM prices the K3 MLA layers through the ATTENTION (GQA) tables at
-    # the per-rank shard (ops.ContextAttention/GenerationAttention in
-    # models/kimi_k3.py; the custom vLLM MLA's attention core resolves
-    # through vllm's standard backend selector,
-    # models/kimi_k3/nvidia/mla.py:259-312 @ 0.1.dev19262). Declared
-    # framework-agnostic (the generator has no framework-scoped attention
-    # profiles); the extra sglang expansion is interpolation support.
+    # vLLM 0.27.0's upstream K3 MLA is a real MLA lane (via
+    # vllm/models/kimi_k3/nvidia/mla.py MultiHeadLatentAttention ->
+    # get_attn_backend(use_mla=True)); aiconfigurator's kimi_k3 model
+    # prices its 24 full-attention layers against the module-level MLA
+    # tables with FallbackOp GQA fallback to THIS attention profile for
+    # systems without 96-head module rows (see mla_module section).
+    # Declared framework-agnostic (the generator has no framework-scoped
+    # attention profiles); the extra sglang expansion is interpolation
+    # support.
     - id: kimi_k3_mla_as_attention
       model_path: moonshotai/Kimi-K3
       num_attention_heads: 96
@@ -78,7 +80,11 @@ model_case_values:
         # axis gates this label to SM in [100, 120). Hopper keeps the
         # bf16-activation marlin W4A16 lane above.
         w4a8_mxfp4_mxfp8: {100: flashinfer_mxfp4, 103: flashinfer_mxfp4}
-      wideep: true
+      # Do not enroll K3 in the standalone DeepEP WideEP collectors.  The
+      # pinned vLLM 0.24.0 source predates K3 serving support, and the current
+      # vLLM/SGLang K3 expert-parallel serving path selects MegaMoE
+      # (deep_gemm_mega_moe / --moe-a2a-backend megamoe), whose fused
+      # A2A+GEMM path is not represented by the DeepEP communication table.
       framework_quantization:
         sglang:
           allowed_modes: [w4a16_mxfp4, w4a8_mxfp4_mxfp8]
@@ -139,6 +145,21 @@ model_case_values:
       num_v_heads: 12
       head_v_dim: 128
 
+framework_specific_model_case_values:
+  vllm:
+    # vLLM 0.27.0 upstream ships Kimi-K3's own MultiHeadLatentAttention
+    # (vllm/models/kimi_k3/nvidia/mla.py: get_attn_backend(use_mla=True)
+    # + MLAAttentionImpl over the 512+64 latent KV head). Price its cost via
+    # the module-level MLA tables; deliver the exact 96-head module identity
+    # (queries resolve native-nearest to the DeepSeek 128-head rows until
+    # these land).
+    mla_module:
+      - model_path: moonshotai/Kimi-K3
+        attention_type: mla
+        architecture: KimiK3ForConditionalGeneration
+        native_num_heads: 96
+        wideep_mla: false
+
 # moe is activated per-framework (NOT all_frameworks): K3 has no trtllm
 # serving lane, and an all-frameworks activation made a K3-scoped trtllm run
 # plan moe and expand it to zero cases with no logged drop (review
@@ -156,6 +177,13 @@ framework_specific_op_cases:
     mla_bmm_gen_pre:
       cases: all
     mla_bmm_gen_post:
+      cases: all
+    # vLLM 0.27.0's upstream K3 MLA is a real MLA lane; the kimi_k3 model
+    # prices its 24 full-attention layers against the module-level tables
+    # (FallbackOp GQA fallback stays for pre-collection systems).
+    mla_context_module:
+      cases: all
+    mla_generation_module:
       cases: all
   sglang:
     moe:
