@@ -137,6 +137,7 @@ def _execute_and_wrap_result(
     target_request_rate: float | None = None,
     target_concurrency: float | None = None,
     parallel_experiments: bool = False,
+    inclusive_tpot: bool = False,
 ) -> CLIResult:
     """Execute task configs using main.py's function and wrap result in CLIResult."""
     chosen_exp, best_configs, pareto_fronts, best_throughputs, best_latencies, outcomes = _execute_tasks_internal(
@@ -147,6 +148,7 @@ def _execute_and_wrap_result(
         target_request_rate=target_request_rate,
         target_concurrency=target_concurrency,
         parallel_experiments=parallel_experiments,
+        inclusive_tpot=inclusive_tpot,
     )
 
     return CLIResult(
@@ -197,6 +199,7 @@ def cli_default(
     generator_dynamo_version: str | None = None,
     engine_step_backend: str | None = None,
     forward_model: str | None = None,
+    inclusive_tpot: bool = False,
 ) -> CLIResult:
     """
     Run the default CLI mode: compare aggregated vs disaggregated serving.
@@ -258,6 +261,11 @@ def cli_default(
         engine_step_backend: Engine-step backend; "rust" (the compiled engine,
             default and only executor) is the only accepted value.
         forward_model: Forward-pass modeling mode ("op_level" or "fpm"). None keeps the default.
+        inclusive_tpot: When True, report TPOT as (ttft + tpot * (osl - 1)) / osl
+            in terminal output and saved CSV files. Output-only, matching the
+            CLI flag: the returned DataFrames stay raw (inter-token latency) and
+            SLA filtering is unaffected. Callers needing the transformed value
+            can use ``get_inclusive_tpot()``. Default is False.
 
     Returns:
         CLIResult with chosen experiment, best configs, pareto fronts, and throughputs.
@@ -293,6 +301,18 @@ def cli_default(
         ... )
         >>> print(result.chosen_exp)  # e.g., 'agg_trtllm' or 'disagg_vllm'
         >>> print(result.best_throughputs)  # Shows all 6 backend/mode combinations
+
+        >>> # With inclusive TPOT: transforms terminal output and saved CSVs.
+        >>> # The returned DataFrames stay raw; use get_inclusive_tpot() to
+        >>> # transform a scalar, or apply the formula to a frame yourself.
+        >>> result = cli_default(
+        ...     model_path="Qwen/Qwen3-32B",
+        ...     total_gpus=8,
+        ...     system="h200_sxm",
+        ...     save_dir="./results",
+        ...     inclusive_tpot=True,
+        ... )
+        >>> # ./results CSVs report inclusive TPOT; result.best_configs is raw.
     """
     # Fail fast on inconsistent MTP inputs (same early check as the CLI path).
     # nextn="auto" resolves the draft depth from the checkpoint first.
@@ -332,7 +352,9 @@ def cli_default(
         forward_model=forward_model,
     )
 
-    result = _execute_and_wrap_result(tasks, mode="default", top_n=top_n, strict_sla=strict_sla)
+    result = _execute_and_wrap_result(
+        tasks, mode="default", top_n=top_n, strict_sla=strict_sla, inclusive_tpot=inclusive_tpot
+    )
     if not result.best_configs:
         raise NoFeasibleConfigError("No feasible configurations found for the given parameters.")
 
@@ -361,6 +383,7 @@ def cli_default(
         mock_args.generator_set = generator_set
         mock_args.generator_config = generator_config
         mock_args.generator_dynamo_version = generator_dynamo_version
+        mock_args.inclusive_tpot = inclusive_tpot
 
         save_results(
             args=mock_args,
@@ -437,6 +460,7 @@ def cli_recommend(
     save_dir: str | None = None,
     engine_step_backend: str | None = None,
     forward_model: str | None = None,
+    inclusive_tpot: bool = False,
 ) -> CLIResult:
     """Find the minimum number of GPUs to meet a performance target.
 
@@ -490,6 +514,11 @@ def cli_recommend(
             default and only executor) is the only accepted value.
         forward_model: Forward-pass modeling mode ("op_level" or "fpm").
             None keeps the default.
+        inclusive_tpot: When True, report TPOT as (ttft + tpot * (osl - 1)) / osl
+            in terminal output and saved CSV files. Output-only, matching the
+            CLI flag: the returned DataFrames stay raw (inter-token latency) and
+            SLA filtering is unaffected. Callers needing the transformed value
+            can use ``get_inclusive_tpot()``. Default is False.
 
     Returns:
         CLIResult with best configs containing ``total_gpus_needed`` and
@@ -504,6 +533,15 @@ def cli_recommend(
         ...     tpot=30,
         ... )
         >>> print(result.best_configs)
+
+        >>> # With inclusive TPOT: transforms terminal output and saved CSVs.
+        >>> # The returned DataFrames stay raw (see get_inclusive_tpot()).
+        >>> result = cli_recommend(
+        ...     model_path="Qwen/Qwen3-32B",
+        ...     system="h200_sxm",
+        ...     target_request_rate=50.0,
+        ...     inclusive_tpot=True,
+        ... )
     """
     import math
 
@@ -584,6 +622,7 @@ def cli_recommend(
             target_request_rate=target_request_rate,
             target_concurrency=target_concurrency,
             parallel_experiments=True,
+            inclusive_tpot=inclusive_tpot,
         )
         retriable = [
             name
@@ -626,6 +665,7 @@ def cli_recommend(
         mock_args.generator_set = None
         mock_args.generator_config = None
         mock_args.generator_dynamo_version = None
+        mock_args.inclusive_tpot = inclusive_tpot
 
         save_results(
             args=mock_args,
@@ -645,6 +685,7 @@ def cli_exp(
     config: dict[str, dict] | None = None,
     top_n: int = 5,
     save_dir: str | None = None,
+    inclusive_tpot: bool = False,
 ) -> CLIResult:
     """
     Run multiple experiments defined by YAML file or dict config.
@@ -660,6 +701,11 @@ def cli_exp(
             Keys are experiment names, values are experiment configs.
         top_n: Number of top configurations to return for each experiment. Default is 5.
         save_dir: Directory to save results. If None, results are not saved to disk.
+        inclusive_tpot: When True, report TPOT as (ttft + tpot * (osl - 1)) / osl
+            in terminal output and saved CSV files. Output-only, matching the
+            CLI flag: the returned DataFrames stay raw (inter-token latency) and
+            SLA filtering is unaffected. Callers needing the transformed value
+            can use ``get_inclusive_tpot()``. Default is False.
 
     Returns:
         CLIResult with chosen experiment, best configs, pareto fronts, and throughputs.
@@ -715,6 +761,15 @@ def cli_exp(
           system_name: h200_sxm
           backend_name: trtllm
           total_gpus: 16
+
+    Example (with inclusive TPOT):
+        >>> # Transforms terminal output and saved CSVs; returned DataFrames
+        >>> # stay raw (see get_inclusive_tpot() to transform a scalar).
+        >>> result = cli_exp(
+        ...     yaml_path="experiments.yaml",
+        ...     save_dir="./results",
+        ...     inclusive_tpot=True,
+        ... )
     """
     tasks = build_experiment_tasks(
         yaml_path=yaml_path,
@@ -724,7 +779,7 @@ def cli_exp(
     if not tasks:
         raise ValueError("No valid experiments found in configuration.")
 
-    result = _execute_and_wrap_result(tasks, mode="exp", top_n=top_n)
+    result = _execute_and_wrap_result(tasks, mode="exp", top_n=top_n, inclusive_tpot=inclusive_tpot)
     if not result.best_configs:
         raise NoFeasibleConfigError("No feasible configurations found for the given experiments.")
 
@@ -739,6 +794,7 @@ def cli_exp(
         mock_args.yaml_path = yaml_path
         mock_args.top_n = top_n
         mock_args.generated_config_version = None
+        mock_args.inclusive_tpot = inclusive_tpot
 
         save_results(
             args=mock_args,
@@ -1188,6 +1244,15 @@ def cli_estimate(
         ...     prefill_batch_size=4, prefill_num_workers=2,
         ...     decode_batch_size=64, decode_num_workers=2,
         ... )
+
+    Note:
+        This function always returns raw TPOT values (inter-token latency). For
+        inclusive TPOT (spreading TTFT across all tokens), use the CLI flag
+        --inclusive-tpot or apply the transformation manually:
+
+        >>> from aiconfigurator.cli.report_and_save import get_inclusive_tpot
+        >>> result = cli_estimate("Qwen/Qwen3-32B", "h100_sxm")
+        >>> inclusive = get_inclusive_tpot(result.ttft, result.tpot, result.osl)
     """
     from aiconfigurator.sdk.backends.factory import get_backend
     from aiconfigurator.sdk.models import get_model

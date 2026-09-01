@@ -882,7 +882,26 @@ disagg Top Configurations: (Sorted by tokens/s/gpu)
 
 AIC's TPOT metric is the inter-token latency during the decode phase — it does not include TTFT. Pass `--inclusive-tpot` to report TPOT as `(ttft + tpot × (osl − 1)) / osl`, which spreads the TTFT cost across all output tokens. This matches the end-to-end per-token latency reported by GuideLLM and other benchmarking tools, making predicted values directly comparable to benchmark measurements.
 
-The flag only affects terminal output and saved CSV — SLA filtering always uses inter-token latency.
+The flag is available in default, exp, estimate, and recommend modes. It only affects terminal output and saved CSV — SLA filtering always uses inter-token latency.
+
+Example in estimate mode (single-point predictions):
+```bash
+aiconfigurator cli estimate \
+  --model-path Qwen/Qwen3-32B \
+  --system h200_sxm \
+  --batch-size 128 \
+  --inclusive-tpot
+```
+
+Example in recommend mode (minimum GPU finding):
+```bash
+aiconfigurator cli recommend \
+  --model-path Qwen/Qwen3-32B \
+  --system h200_sxm \
+  --target-request-rate 50 \
+  --save-dir ./results \
+  --inclusive-tpot
+```
 
 #### Strict SLA filtering (`--strict-sla`)
 
