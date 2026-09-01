@@ -1296,9 +1296,9 @@ fn kvcache_quant_name(dtype: Option<&DataType>) -> Option<&'static str> {
 /// `with_gil`, which is re-entrant, so calling it from inside a `#[pymethod]`
 /// staticmethod is fine.
 ///
-/// Constructors take the engine config + options as JSON strings (the same
-/// marshalling the Python `RustForwardPassPerfModel` wrapper used to pass over
-/// ctypes), so the Python wrapper's public surface is unchanged.
+/// Constructors take the engine config + options as JSON strings. Regression
+/// construction additionally takes the engine-level worker type so every DP
+/// rank is evaluated with one fixed feature schema.
 #[pyclass(name = "RustForwardPassPerfModel")]
 pub struct PyForwardPassPerfModel {
     inner: crate::ForwardPassPerfModel,
@@ -1306,12 +1306,28 @@ pub struct PyForwardPassPerfModel {
 
 /// Parse the optional options JSON into [`ForwardPassPerfOptions`], defaulting
 /// when `None`/empty. Serde fills missing fields from the per-field defaults.
+/// Raw JSON callers represent nonfinite regression weights with the exact
+/// quoted sentinels `"NaN"`, `"Infinity"`, and `"-Infinity"`.
 fn parse_fpm_options(options_json: Option<&str>) -> PyResult<crate::ForwardPassPerfOptions> {
     match options_json {
         None => Ok(crate::ForwardPassPerfOptions::default()),
         Some(s) if s.trim().is_empty() => Ok(crate::ForwardPassPerfOptions::default()),
         Some(s) => serde_json::from_str(s)
             .map_err(|e| PyValueError::new_err(format!("invalid options JSON: {e}"))),
+    }
+}
+
+/// Parse the exact worker-type spellings shared with the Dynamo planner.
+/// Aliases are intentionally rejected so model identity cannot depend on which
+/// API surface constructed it.
+fn parse_fpm_worker_type(worker_type: &str) -> PyResult<crate::ForwardPassWorkerType> {
+    match worker_type {
+        "prefill" => Ok(crate::ForwardPassWorkerType::Prefill),
+        "decode" => Ok(crate::ForwardPassWorkerType::Decode),
+        "aggregated" => Ok(crate::ForwardPassWorkerType::Aggregated),
+        _ => Err(PyValueError::new_err(format!(
+            "invalid worker_type {worker_type:?}: expected 'prefill', 'decode', or 'aggregated'"
+        ))),
     }
 }
 
@@ -1345,27 +1361,36 @@ impl PyForwardPassPerfModel {
         Ok(Self { inner })
     }
 
-    /// `RustForwardPassPerfModel.best_available(config_json, options_json=None)`:
+    /// `RustForwardPassPerfModel.best_available(config_json, worker_type,
+    /// options_json=None)`:
     /// native when possible, else regression fallback (reason in
     /// `diagnostics()["last_warning"]`).
     #[staticmethod]
-    #[pyo3(signature = (config_json, options_json=None))]
-    fn best_available(config_json: &str, options_json: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (config_json, worker_type, options_json=None))]
+    fn best_available(
+        config_json: &str,
+        worker_type: &str,
+        options_json: Option<&str>,
+    ) -> PyResult<Self> {
         let config: EngineConfig = serde_json::from_str(config_json)
             .map_err(|e| PyValueError::new_err(format!("invalid engine config JSON: {e}")))?;
+        let worker_type = parse_fpm_worker_type(worker_type)?;
         let options = parse_fpm_options(options_json)?;
-        let inner =
-            crate::ForwardPassPerfModel::best_available(config, options).map_err(aic_to_py)?;
+        let inner = crate::ForwardPassPerfModel::best_available(config, worker_type, options)
+            .map_err(aic_to_py)?;
         Ok(Self { inner })
     }
 
-    /// `RustForwardPassPerfModel.from_regression(options_json=None)`:
+    /// `RustForwardPassPerfModel.from_regression(worker_type,
+    /// options_json=None)`:
     /// regression-only model (no native engine, no Python compile).
     #[staticmethod]
-    #[pyo3(signature = (options_json=None))]
-    fn from_regression(options_json: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (worker_type, options_json=None))]
+    fn from_regression(worker_type: &str, options_json: Option<&str>) -> PyResult<Self> {
+        let worker_type = parse_fpm_worker_type(worker_type)?;
         let options = parse_fpm_options(options_json)?;
-        let inner = crate::ForwardPassPerfModel::from_regression(options).map_err(aic_to_py)?;
+        let inner = crate::ForwardPassPerfModel::from_regression(worker_type, options)
+            .map_err(aic_to_py)?;
         Ok(Self { inner })
     }
 

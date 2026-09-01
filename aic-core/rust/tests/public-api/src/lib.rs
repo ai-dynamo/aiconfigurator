@@ -3,9 +3,11 @@
 
 //! Compile-time contract tests from an external crate's point of view.
 
+use std::path::Path;
+
 use aiconfigurator_core::{
-    AicEngine, AicEngineBuilder, AicError, BackendKind, ForwardPassPerfModel,
-    ForwardPassPerfOptions, KvCacheEstimateRequest,
+    AicEngine, AicEngineBuilder, AicError, BackendKind, EngineConfig, ForwardPassPerfModel,
+    ForwardPassPerfOptions, ForwardPassWorkerType, KvCacheEstimateRequest,
 };
 
 /// Compile the ergonomic engine builder without starting embedded Python.
@@ -35,7 +37,40 @@ pub fn build_engine(builder: AicEngineBuilder) -> Result<AicEngine, AicError> {
 
 /// Compile the forward-pass model's public constructor and telemetry type.
 pub fn regression_model() -> Result<ForwardPassPerfModel, AicError> {
-    ForwardPassPerfModel::from_regression(ForwardPassPerfOptions::default())
+    ForwardPassPerfModel::from_regression(ForwardPassWorkerType::Aggregated, regression_options())
+}
+
+/// Construct and expose every public regression-weight option from an external crate.
+pub fn regression_options() -> ForwardPassPerfOptions {
+    ForwardPassPerfOptions {
+        regression_attention_kv_weight: 2.0,
+        regression_prefill_attention_pair_weight: 3.0,
+        regression_ffn_token_weight: 4.0,
+        ..ForwardPassPerfOptions::default()
+    }
+}
+
+/// Compile the fallback-capable constructor with its required worker type.
+/// This is not called because native construction embeds Python.
+pub fn best_available_model(config: EngineConfig) -> Result<ForwardPassPerfModel, AicError> {
+    ForwardPassPerfModel::best_available(
+        config,
+        ForwardPassWorkerType::Decode,
+        ForwardPassPerfOptions::default(),
+    )
+}
+
+/// Compile the explicit-systems-root constructor from an external crate.
+pub fn best_available_model_with_roots(
+    config: EngineConfig,
+    systems_root: impl AsRef<Path>,
+) -> Result<ForwardPassPerfModel, AicError> {
+    ForwardPassPerfModel::best_available_with_roots(
+        config,
+        ForwardPassWorkerType::Prefill,
+        ForwardPassPerfOptions::default(),
+        systems_root,
+    )
 }
 
 /// Keep the KV request type in the external-consumer contract without
@@ -89,6 +124,19 @@ mod tests {
     #[test]
     fn regression_constructor_is_environment_independent() {
         let _model = regression_model().expect("construct regression model");
+        let _roles = [
+            ForwardPassWorkerType::Prefill,
+            ForwardPassWorkerType::Decode,
+            ForwardPassWorkerType::Aggregated,
+        ];
+    }
+
+    #[test]
+    fn regression_weight_fields_are_public() {
+        let options = regression_options();
+        assert_eq!(options.regression_attention_kv_weight, 2.0);
+        assert_eq!(options.regression_prefill_attention_pair_weight, 3.0);
+        assert_eq!(options.regression_ffn_token_weight, 4.0);
     }
 
     #[test]

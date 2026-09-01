@@ -432,8 +432,8 @@ const NODES = [
      sym:['<code>AggRuntime</code> · <code>DisaggRuntime</code>','<code>WorkerType</code>: aggregated · prefill · decode','<code>VllmCore::execute_pass()</code> · <code>SglangCore::execute_pass()</code>','<code>python -m dynamo.replay</code>']}},
   {id:'m_estlat', l:3, repo:'aic', label:'AIC ForwardPassPerfModel', sub:'mixed agg or prefill/decode scheduled pass → latency',
    det:{file:['dynamo: lib/mocker/src/common/engine_perf.rs','aiconfigurator: aic-core/rust/aiconfigurator-core/src/fpm/model.rs','aiconfigurator: aic-core/src/aiconfigurator_core/sdk/rust_engine_step.py'],
-     desc:'AIC’s <b>per-forward-pass timing model</b>. Mocker supplies the exact scheduled workload: mixed prefill+decode fields for an aggregated pass, prefill-only fields for a prefill worker, or decode-only fields for a decode worker. It predicts duration from the AIC modeling core and measured perf data; it does <b>not</b> own queues, routing, replica pools, KV allocation, or P→D handoff.',
-     sym:['<code>EnginePerfModel</code> → <code>ForwardPassPerfModel</code>','<code>estimate_forward_pass_time()</code>','mixed · prefill · decode FPM workload kinds','native AIC model with regression fallback']}},
+     desc:'AIC’s <b>per-forward-pass timing model</b>. Mocker supplies the exact scheduled workload: mixed prefill+decode fields for an aggregated worker, prefill-only fields for a prefill worker, or decode-only fields for a decode worker. AIC’s regression fallback is bound to an immutable <code>worker_type</code>, but forwarding Dynamo’s engine role into the new constructors remains <b>pending downstream integration</b>. Native AIC continues to infer each iteration’s workload for op composition and correction. The model predicts duration only—it does <b>not</b> own queues, routing, replica pools, KV allocation, or P→D handoff.',
+     sym:['<code>EnginePerfModel</code> → <code>ForwardPassPerfModel</code>','<code>ForwardPassWorkerType</code>: aggregated · prefill · decode','<code>estimate_forward_pass_time()</code>','pending: Dynamo worker-role forwarding']}},
 
   // ---- L4 AIC Core · Python and Rust surfaces over one native implementation ----
   {id:'aic_wheel', l:4, repo:'aic', label:'aiconfigurator-core · Python Wheel', sub:'EngineConfig · ForwardPassMetrics · RustForwardPassPerfModel estimator',
@@ -472,10 +472,10 @@ const NODES = [
      desc:'The <b>planned</b> layer-granularity alternative. Real vLLM, SGLang, and TensorRT-LLM executions are traced with NVTX + CUPTI/Nsight, producing per-step × module/layer GPU time and kernel counts across batch, past-KV, precision, and parallelism. It is intended to capture fusion, CUDA-graph, and framework effects that per-op composition can miss. The collector prototype is substantial, but no stable estimator or main-branch integration exists yet; communication remains separate.',
      sym:['planned <code>Layerwise</code> operation','planned <code>query_layerwise()</code>','<code>layerwise_perf.csv</code>','NVTX module ranges + CUPTI kernel attribution']}},
 
-  {id:'pm_fpm', l:5, repo:'aic', label:'Pure FPM Data–based Perf Model', sub:'scheduled FPM features + observed wall_time → bucketed regression',
-   det:{file:['aic-core/rust/aiconfigurator-core/src/fpm/model.rs','aic-core/rust/aiconfigurator-core/src/fpm/regression.rs','aic-core/rust/aiconfigurator-core/src/fpm/metrics.rs'],
-     desc:'The implemented <b>FPM-only regression</b> path. It uses no HF config, system spec, op graph, or op database: scheduled FPM fields are the features and positive <code>wall_time</code> observations are the target. Separate prefill, decode, and mixed regressions become available only after their minimum observation count is reached; fitting is currently in-memory.',
-     sym:['<code>ForwardPassPerfModel::from_regression()</code>','<code>tune_with_fpms()</code>','<code>BucketedRegression</code>','source: <code>FallbackRegression</code>']}},
+  {id:'pm_fpm', l:5, repo:'aic', label:'Pure FPM Data–based Perf Model', sub:'worker-type 2D features + observed wall_time → bucketed regression',
+   det:{file:['aic-core/rust/aiconfigurator-core/src/fpm/model.rs','aic-core/rust/aiconfigurator-core/src/fpm/regression.rs','docs/fpm/aic-fpm-regression-design.md'],
+     desc:'The implemented <b>FPM-only regression</b> path. It uses no HF config, system spec, op graph, or op database: one model is bound to an immutable prefill, decode, or aggregated worker type. Every role uses the same axis order—critical-rank attention followed by cross-rank FFN/MoE work. <code>log1p</code> coordinates drive a single dynamic 2D retention grid; the constrained fit uses standardized raw features and positive max-rank <code>wall_time</code>. Native workload inference and correction grids are unchanged.',
+     sym:['<code>ForwardPassPerfModel::from_regression(worker_type, ...)</code>','<code>ForwardPassWorkerType</code>','<code>[critical attention, global FFN/MoE]</code>','source: <code>FallbackRegression</code>']}},
 
   {id:'pm_fpm_tuned', l:5, repo:'aic', label:'Fine-tuned with FPM Perf Model', sub:'native op estimate + FPM correction buckets · observed/native calibration',
    det:{file:['aic-core/rust/aiconfigurator-core/src/fpm/model.rs','aic-core/rust/aiconfigurator-core/src/fpm/correction.rs','aic-core/rust/aiconfigurator-core/src/fpm/samples.rs','aic-core/rust/aiconfigurator-core/src/fpm/options.rs'],
@@ -808,7 +808,10 @@ const TODOS = {
     'Combine the separately modeled communication cost with measured layer compute to produce whole-pass latency.',
   ],
   pm_fpm: [
-    'Persist and reload the prefill, decode, and mixed regression fits instead of keeping them only in memory.',
+    'Persist and reload each worker-type-bound regression fit instead of keeping it only in memory.',
+    'Retain the original per-rank raw FPM observations alongside derived 2D samples before introducing a Gaussian-process backend.',
+    'Evaluate calibrated attention/FFN weights for a future Gaussian-process feature space.',
+    'Evaluate freshness-aware retention, robust shrinking bounds, and deterministic eviction ties against production FPM traces.',
   ],
   pm_fpm_tuned: [],
   op_model: [],

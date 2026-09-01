@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 from collections import OrderedDict
@@ -31,6 +32,11 @@ _MoeCommFallbackPayload = tuple[str, str, int, int, int, int]
 _MoeCommFallbackMetadata = tuple[_MoeCommFallbackPayload, list[_MoeCommFallbackPayload]]
 PerOpValue = tuple[str, float, float, str]
 _PerOpValueWithMetadata = tuple[str, float, float, str, _MoeCommFallbackMetadata | None]
+_REGRESSION_WEIGHT_FIELDS = (
+    "regression_attention_kv_weight",
+    "regression_prefill_attention_pair_weight",
+    "regression_ffn_token_weight",
+)
 
 
 # Python-step telemetry (#1357): count every remaining Python op.query() use
@@ -91,17 +97,16 @@ class RustForwardPassPerfModel:
     """Facade over the compiled Rust forward-pass perf model (PR #1152).
 
     Built on the PyO3 ``aiconfigurator_core`` extension (the compiled
-    ``Engine``). The public class name and method signatures match PR #1152 so
-    callers (the Dynamo planner / mocker) are unaffected; FPM inputs are passed
-    as Python dictionaries and marshalled to JSON for the Rust boundary.
+    ``Engine``). FPM inputs are passed as Python dictionaries and marshalled to
+    JSON for the Rust boundary.
 
     This wrapper is forward-pass-level only. It does not model TTFT, ITL, SLA,
     queueing, or engine limits. ``estimate_forward_pass_time_ms()`` takes one
     iteration as a list of FPM dictionaries, one per attention-DP rank. Single
     rank callers may pass either one FPM dictionary or a one-element list.
 
-    The Rust model infers the workload kind from each iteration's scheduled FPM
-    fields:
+    Native AIC models infer the workload kind from each iteration's scheduled
+    FPM fields:
 
     * prefill: scheduled prefill tokens and no scheduled decode work, using
       ``[sum_prefill_tokens]``
@@ -112,6 +117,12 @@ class RustForwardPassPerfModel:
     * empty: no scheduled prefill or decode work, estimates ``0.0`` and is not
       used for tuning
 
+    Regression models instead bind one immutable ``worker_type`` at
+    construction: ``"prefill"``, ``"decode"``, or ``"aggregated"``. All DP
+    ranks in an iteration use that worker type's two-dimensional critical-
+    attention/global-FFN feature schema. ``"agg"`` and other aliases are not
+    accepted.
+
     Queued request fields are accepted for schema compatibility but ignored by
     this AIC forward-pass model. ``estimate_forward_pass_time_ms()`` treats FPM
     as a workload descriptor: scheduled request fields are used, while
@@ -119,8 +130,8 @@ class RustForwardPassPerfModel:
     telemetry: scheduled request fields are used as features and positive
     ``wall_time`` is the latency target. For tuning, ``tune_with_fpms()`` accepts
     multiple iterations as ``[[iter0_rank0, iter0_rank1], [iter1_rank0,
-    iter1_rank1]]``. Each iteration is merged using max-rank load features and
-    max positive ``wall_time`` across ranks.
+    iter1_rank1]]``. Each backend derives its own cross-rank features, and the
+    maximum positive ``wall_time`` across ranks is the latency target.
 
     Correction grids use fixed constructor-time ranges from ``options``:
     ``max_num_tokens`` bounds ``sum_prefill_tokens`` and defaults to ``8192``,
@@ -134,6 +145,14 @@ class RustForwardPassPerfModel:
     It defaults to ``2.0``, limiting learned slowdowns to ``2x``. Passing
     ``None`` for either option leaves that direction unbounded. Regression
     fallback ignores both options.
+
+    The three regression-weight options accept ordinary Python floats. To keep
+    their transport valid JSON, this facade encodes nonfinite values as the
+    exact strings ``"NaN"``, ``"Infinity"``, and ``"-Infinity"``. Raw PyO3
+    ``options_json`` callers must use those same quoted sentinels. Native models,
+    including a successful-native ``best_available()``, ignore all three
+    weights; regression construction (including fallback) decodes the sentinels
+    and rejects the resulting nonfinite value with its field-specific error.
     """
 
     def __init__(self, inner: Any) -> None:
@@ -167,19 +186,24 @@ class RustForwardPassPerfModel:
     def best_available(
         cls,
         config: dict[str, Any],
+        worker_type: str,
         options: dict[str, Any] | None = None,
     ) -> RustForwardPassPerfModel:
-        """API: ``RustForwardPassPerfModel.best_available(config, options=None)``.
+        """API: ``best_available(config, worker_type, options=None)``.
 
         Description: create a native model when possible, otherwise fall back to
-        regression. Fallback reason is available from
-        ``diagnostics()["last_warning"]``.
+        regression bound to ``worker_type``. Fallback reason is available from
+        ``diagnostics()["last_warning"]``. ``worker_type`` must be exactly
+        ``"prefill"``, ``"decode"``, or ``"aggregated"``; a successful native
+        construction does not otherwise use it.
         """
+        worker_type = _validate_worker_type(worker_type)
         _configure_default_data_roots()
         import aiconfigurator_core
 
         inner = aiconfigurator_core.RustForwardPassPerfModel.best_available(
             _json_dumps(config),
+            worker_type,
             _optional_json_dumps(options),
         )
         return cls(inner)
@@ -187,20 +211,24 @@ class RustForwardPassPerfModel:
     @classmethod
     def from_regression(
         cls,
+        worker_type: str,
         options: dict[str, Any] | None = None,
     ) -> RustForwardPassPerfModel:
-        """API: ``RustForwardPassPerfModel.from_regression(options=None)``.
+        """API: ``from_regression(worker_type, options=None)``.
 
-        Description: create a regression-only forward-pass model. Regression
-        models return ``None`` for non-empty estimates until enough samples have
-        been provided for the inferred workload kind through
+        Description: create a regression-only forward-pass model bound to one
+        engine-level ``worker_type``. It returns ``None`` for non-empty estimates
+        until enough compatible samples have been provided through
         ``tune_with_fpms()``. Correction factor getters return ``None`` in this
-        mode.
+        mode. ``worker_type`` must be exactly ``"prefill"``, ``"decode"``, or
+        ``"aggregated"``.
         """
+        worker_type = _validate_worker_type(worker_type)
         _configure_default_data_roots()
         import aiconfigurator_core
 
         inner = aiconfigurator_core.RustForwardPassPerfModel.from_regression(
+            worker_type,
             _optional_json_dumps(options),
         )
         return cls(inner)
@@ -212,11 +240,11 @@ class RustForwardPassPerfModel:
 
         ``metrics`` represents one iteration. Pass a list of FPM dictionaries
         for attention-DP ranks, or a single FPM dictionary for a single-rank
-        convenience form. The inferred workload kind uses only
-        ``scheduled_requests``; queued fields and ``wall_time`` are ignored for
-        estimation. Regression models return ``None`` until the matching
-        inferred workload kind has enough tuned observations. Empty scheduled
-        work returns ``0.0``.
+        convenience form. Native workload inference and role-bound regression
+        feature extraction use only ``scheduled_requests``; queued fields and
+        ``wall_time`` are ignored for estimation. Regression models return
+        ``None`` until their single store has enough tuned observations. Empty
+        scheduled work returns ``0.0``.
         """
         return self._inner.estimate_forward_pass_time_ms(_json_dumps(metrics))
 
@@ -276,7 +304,23 @@ def _json_dumps(value: Any) -> str:
 def _optional_json_dumps(value: dict[str, Any] | None) -> str | None:
     if value is None:
         return None
-    return _json_dumps(value)
+    wire_value = value.copy()
+    for field in _REGRESSION_WEIGHT_FIELDS:
+        weight = wire_value.get(field)
+        if isinstance(weight, float) and not math.isfinite(weight):
+            if math.isnan(weight):
+                wire_value[field] = "NaN"
+            elif weight > 0.0:
+                wire_value[field] = "Infinity"
+            else:
+                wire_value[field] = "-Infinity"
+    return _json_dumps(wire_value)
+
+
+def _validate_worker_type(worker_type: str) -> str:
+    if worker_type not in ("prefill", "decode", "aggregated"):
+        raise ValueError(f"invalid worker_type {worker_type!r}: expected 'prefill', 'decode', or 'aggregated'")
+    return worker_type
 
 
 def _normalize_tuning_iterations(iterations: dict[str, Any] | list[Any]) -> list[Any]:

@@ -7,8 +7,9 @@
 //! observations partitioned into per-axis buckets, used by both the native
 //! correction grid ([`super::correction`]) and the regression fallback
 //! ([`super::regression`]). [`AxisRange`] describes a fixed correction axis
-//! bound, and the [`WithOptions`] / [`StoreStats`] traits let the workload
-//! store dispatch generically over either backend.
+//! bound. [`WithOptions`] constructs native workload-kind stores, while
+//! [`StoreStats`] provides the count/readiness view shared by native correction
+//! and the single role-bound regression store.
 
 use std::collections::HashMap;
 

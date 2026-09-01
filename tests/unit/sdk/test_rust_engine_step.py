@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections import OrderedDict
 from pathlib import Path
@@ -767,6 +768,176 @@ def test_forward_pass_perf_model_regression_marshalling(monkeypatch) -> None:
     assert model.get_min_correction_factor() is None
 
 
+def test_forward_pass_perf_model_constructors_forward_exact_worker_type(monkeypatch) -> None:
+    """Regression-capable constructors preserve the engine-level role and
+    reject aliases before crossing the extension boundary."""
+    import aiconfigurator_core
+
+    calls: list[tuple[str, object, object, object | None]] = []
+
+    class _FakeRawModel:
+        @staticmethod
+        def from_regression(worker_type, options_json=None):
+            calls.append(("from_regression", worker_type, options_json, None))
+            return object()
+
+        @staticmethod
+        def best_available(config_json, worker_type, options_json=None):
+            calls.append(("best_available", json.loads(config_json), worker_type, options_json))
+            return object()
+
+    monkeypatch.setattr(aiconfigurator_core, "RustForwardPassPerfModel", _FakeRawModel)
+    monkeypatch.setattr(rust_engine_step, "_configure_default_data_roots", lambda: None)
+
+    for worker_type in ("prefill", "decode", "aggregated"):
+        rust_engine_step.RustForwardPassPerfModel.from_regression(
+            worker_type,
+            {"min_observations": 2},
+        )
+    rust_engine_step.RustForwardPassPerfModel.best_available(
+        {"schema_version": 1},
+        "aggregated",
+        {"min_observations": 3},
+    )
+
+    assert calls[:3] == [
+        ("from_regression", "prefill", '{"min_observations":2}', None),
+        ("from_regression", "decode", '{"min_observations":2}', None),
+        ("from_regression", "aggregated", '{"min_observations":2}', None),
+    ]
+    assert calls[3] == (
+        "best_available",
+        {"schema_version": 1},
+        "aggregated",
+        '{"min_observations":3}',
+    )
+
+    for invalid in ("agg", "Prefill", ""):
+        with pytest.raises(ValueError, match="invalid worker_type"):
+            rust_engine_step.RustForwardPassPerfModel.from_regression(invalid)
+        with pytest.raises(ValueError, match="invalid worker_type"):
+            rust_engine_step.RustForwardPassPerfModel.best_available({}, invalid)
+
+
+def test_forward_pass_perf_model_constructors_forward_all_regression_weights(monkeypatch) -> None:
+    """The facade preserves every public regression knob by its wire name."""
+    import aiconfigurator_core
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class _FakeRawModel:
+        @staticmethod
+        def from_regression(worker_type, options_json=None):
+            calls.append((worker_type, json.loads(options_json)))
+            return object()
+
+        @staticmethod
+        def best_available(config_json, worker_type, options_json=None):
+            calls.append((worker_type, json.loads(options_json)))
+            return object()
+
+    monkeypatch.setattr(aiconfigurator_core, "RustForwardPassPerfModel", _FakeRawModel)
+    monkeypatch.setattr(rust_engine_step, "_configure_default_data_roots", lambda: None)
+    options = {
+        "regression_attention_kv_weight": 2.0,
+        "regression_prefill_attention_pair_weight": 3.0,
+        "regression_ffn_token_weight": 4.0,
+    }
+
+    rust_engine_step.RustForwardPassPerfModel.from_regression("aggregated", options)
+    rust_engine_step.RustForwardPassPerfModel.best_available({}, "decode", options)
+
+    assert calls == [("aggregated", options), ("decode", options)]
+
+
+def test_forward_pass_perf_model_marshals_nonfinite_weights_as_valid_json_without_mutation(
+    monkeypatch,
+) -> None:
+    """The ergonomic facade owns the float-to-sentinel transport, not its caller."""
+    import aiconfigurator_core
+
+    calls: list[str] = []
+
+    class _FakeRawModel:
+        @staticmethod
+        def from_native(config_json, options_json=None):
+            calls.append(options_json)
+            return object()
+
+        @staticmethod
+        def from_regression(worker_type, options_json=None):
+            calls.append(options_json)
+            return object()
+
+        @staticmethod
+        def best_available(config_json, worker_type, options_json=None):
+            calls.append(options_json)
+            return object()
+
+    monkeypatch.setattr(aiconfigurator_core, "RustForwardPassPerfModel", _FakeRawModel)
+    monkeypatch.setattr(rust_engine_step, "_configure_default_data_roots", lambda: None)
+    options = {
+        "regression_attention_kv_weight": float("nan"),
+        "regression_prefill_attention_pair_weight": float("inf"),
+        "regression_ffn_token_weight": float("-inf"),
+    }
+
+    rust_engine_step.RustForwardPassPerfModel.from_native({}, options)
+    rust_engine_step.RustForwardPassPerfModel.from_regression("aggregated", options)
+    rust_engine_step.RustForwardPassPerfModel.best_available({}, "decode", options)
+
+    expected = (
+        '{"regression_attention_kv_weight":"NaN",'
+        '"regression_ffn_token_weight":"-Infinity",'
+        '"regression_prefill_attention_pair_weight":"Infinity"}'
+    )
+    assert calls == [expected, expected, expected]
+    assert math.isnan(options["regression_attention_kv_weight"])
+    assert options["regression_prefill_attention_pair_weight"] == math.inf
+    assert options["regression_ffn_token_weight"] == -math.inf
+
+
+def _supported_fpm_config() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "model_name": "Qwen/Qwen3-32B",
+        "system_name": "h200_sxm",
+        "backend": "trtllm",
+        "backend_version": "1.3.0rc10",
+        "tp_size": 4,
+        "pp_size": 1,
+        "moe_tp_size": None,
+        "moe_ep_size": None,
+        "attention_dp_size": 1,
+        "weight_dtype": None,
+        "moe_dtype": None,
+        "activation_dtype": None,
+        "kv_cache_dtype": None,
+        "kv_block_size": None,
+        "nextn": None,
+        "extra": {},
+    }
+
+
+def _unsupported_fpm_config() -> dict[str, object]:
+    config = _supported_fpm_config()
+    config["model_name"] = "this/model-does-not-exist-xyz"
+    config["tp_size"] = 1
+    return config
+
+
+def _supported_fpm_validation_config() -> dict[str, object]:
+    """Use the perf-data subset present in the regression feature worktree."""
+    config = _supported_fpm_config()
+    config.update(
+        system_name="b200_sxm",
+        backend="vllm",
+        backend_version="0.19.0",
+        tp_size=1,
+    )
+    return config
+
+
 @pytest.mark.integration
 def test_nemotron_super_fp8_native_estimation_uses_packaged_moe_data() -> None:
     """Issue #1522: the exact deployed MoE key must estimate successfully."""
@@ -847,25 +1018,7 @@ def test_forward_pass_perf_model_native_default_directional_bounds_end_to_end() 
     pytest.importorskip("aiconfigurator_core")
     from aiconfigurator.sdk.rust_engine_step import RustForwardPassPerfModel
 
-    config = {
-        "schema_version": 1,
-        "model_name": "Qwen/Qwen3-32B",
-        "system_name": "h200_sxm",
-        "backend": "trtllm",
-        "backend_version": "1.3.0rc10",
-        "tp_size": 4,
-        "pp_size": 1,
-        "moe_tp_size": None,
-        "moe_ep_size": None,
-        "attention_dp_size": 1,
-        "weight_dtype": None,
-        "moe_dtype": None,
-        "activation_dtype": None,
-        "kv_cache_dtype": None,
-        "kv_block_size": None,
-        "nextn": None,
-        "extra": {},
-    }
+    config = _supported_fpm_config()
     model = RustForwardPassPerfModel.from_native(
         config,
         {
@@ -948,29 +1101,112 @@ def test_forward_pass_perf_model_best_available_falls_back_on_bad_config() -> No
     pytest.importorskip("aiconfigurator_core")
     from aiconfigurator.sdk.rust_engine_step import RustForwardPassPerfModel
 
-    config = {
-        "schema_version": 1,
-        "model_name": "this/model-does-not-exist-xyz",
-        "system_name": "h200_sxm",
-        "backend": "trtllm",
-        "backend_version": "1.3.0rc10",
-        "tp_size": 1,
-        "pp_size": 1,
-        "moe_tp_size": None,
-        "moe_ep_size": None,
-        "attention_dp_size": 1,
-        "weight_dtype": None,
-        "moe_dtype": None,
-        "activation_dtype": None,
-        "kv_cache_dtype": None,
-        "kv_block_size": None,
-        "nextn": None,
-        "extra": {},
-    }
-    model = RustForwardPassPerfModel.best_available(config, {"min_observations": 2})
+    config = _unsupported_fpm_config()
+    model = RustForwardPassPerfModel.best_available(
+        config,
+        "aggregated",
+        {"min_observations": 2},
+    )
     diag = model.diagnostics()
     assert diag["source"] == "fallback_regression"
     assert diag["last_warning"] is not None
+
+    decode_fpm = {
+        "version": 1,
+        "scheduled_requests": {
+            "num_decode_requests": 2,
+            "sum_decode_kv_tokens": 1024,
+        },
+    }
+    assert model.estimate_forward_pass_time_ms(decode_fpm) is None
+
+    prefill_model = RustForwardPassPerfModel.best_available(
+        config,
+        "prefill",
+        {"min_observations": 2},
+    )
+    with pytest.raises(ValueError, match="prefill regression worker received scheduled decode work"):
+        prefill_model.estimate_forward_pass_time_ms(decode_fpm)
+
+
+@pytest.mark.integration
+def test_best_available_validates_regression_weights_only_after_fallback() -> None:
+    """Regression-only knobs and worker semantics apply only if native AIC is unavailable."""
+    pytest.importorskip("aiconfigurator_core")
+    from aiconfigurator.sdk.rust_engine_step import RustForwardPassPerfModel
+
+    invalid_regression_options = {"regression_attention_kv_weight": 0.0}
+    decode_fpm = {
+        "version": 1,
+        "scheduled_requests": {
+            "num_decode_requests": 2,
+            "sum_decode_kv_tokens": 1024,
+        },
+    }
+
+    native = RustForwardPassPerfModel.best_available(
+        _supported_fpm_validation_config(),
+        "prefill",
+        invalid_regression_options,
+    )
+    assert native.diagnostics()["source"] == "aic"
+    native_prediction = native.estimate_forward_pass_time_ms(decode_fpm)
+    assert native_prediction is not None and native_prediction > 0.0
+
+    with pytest.raises(ValueError, match="regression_attention_kv_weight"):
+        RustForwardPassPerfModel.best_available(
+            _unsupported_fpm_config(),
+            "prefill",
+            invalid_regression_options,
+        )
+
+
+@pytest.mark.integration
+def test_native_constructors_ignore_all_nonfinite_regression_weights() -> None:
+    """Nonfinite regression-only knobs must not block either successful Native path."""
+    pytest.importorskip("aiconfigurator_core")
+    from aiconfigurator.sdk.rust_engine_step import RustForwardPassPerfModel
+
+    options = {
+        "regression_attention_kv_weight": float("nan"),
+        "regression_prefill_attention_pair_weight": float("inf"),
+        "regression_ffn_token_weight": float("-inf"),
+    }
+    config = _supported_fpm_validation_config()
+
+    strict_native = RustForwardPassPerfModel.from_native(config, options)
+    best_native = RustForwardPassPerfModel.best_available(config, "aggregated", options)
+
+    assert strict_native.diagnostics()["source"] == "aic"
+    assert best_native.diagnostics()["source"] == "aic"
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("regression_attention_kv_weight", float("nan")),
+        ("regression_prefill_attention_pair_weight", float("inf")),
+        ("regression_ffn_token_weight", float("-inf")),
+    ],
+)
+def test_regression_constructors_decode_and_reject_nonfinite_weight_sentinels(
+    field: str,
+    value: float,
+) -> None:
+    """Strict and fallback Regression retain their field-specific validation errors."""
+    pytest.importorskip("aiconfigurator_core")
+    from aiconfigurator.sdk.rust_engine_step import RustForwardPassPerfModel
+
+    options = {field: value}
+    with pytest.raises(ValueError, match=field):
+        RustForwardPassPerfModel.from_regression("aggregated", options)
+    with pytest.raises(ValueError, match=field):
+        RustForwardPassPerfModel.best_available(
+            _unsupported_fpm_config(),
+            "aggregated",
+            options,
+        )
 
 
 def test_sparse_cp_ops_emit_cp_fields_in_spec():

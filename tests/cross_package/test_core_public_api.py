@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import importlib.resources
 import inspect
+import json
 import subprocess
 import sys
+
+import pytest
 
 import aiconfigurator_core
 import aiconfigurator_core.sdk as sdk
@@ -76,6 +79,185 @@ def test_stable_function_signatures() -> None:
     )
     assert "scheduler_block_size" in inspect.signature(estimate_num_gpu_blocks).parameters
     assert "memory_fraction_kind" in inspect.signature(estimate_kv_cache).parameters
+    assert str(inspect.signature(RustForwardPassPerfModel.from_regression)) == (
+        "(worker_type: 'str', options: 'dict[str, Any] | None' = None) -> 'RustForwardPassPerfModel'"
+    )
+    assert str(inspect.signature(RustForwardPassPerfModel.best_available)) == (
+        "(config: 'dict[str, Any]', worker_type: 'str', "
+        "options: 'dict[str, Any] | None' = None) -> 'RustForwardPassPerfModel'"
+    )
+
+
+@pytest.mark.parametrize("worker_type", ["agg", "Prefill", "AGGREGATED", ""])
+def test_raw_fpm_binding_rejects_worker_type_aliases(worker_type: str) -> None:
+    with pytest.raises(ValueError, match="invalid worker_type"):
+        aiconfigurator_core.RustForwardPassPerfModel.from_regression(worker_type)
+    config = json.dumps(
+        {
+            "schema_version": 1,
+            "model_name": "this/model-is-not-compiled",
+            "system_name": "b200_sxm",
+            "backend": "vllm",
+            "backend_version": "0.19.0",
+            "tp_size": 1,
+            "pp_size": 1,
+            "attention_dp_size": 1,
+            "moe_tp_size": None,
+            "moe_ep_size": None,
+            "weight_dtype": None,
+            "activation_dtype": None,
+            "moe_dtype": None,
+            "kv_cache_dtype": None,
+            "kv_block_size": None,
+            "nextn": None,
+            "extra": {},
+        }
+    )
+    with pytest.raises(ValueError, match="invalid worker_type"):
+        aiconfigurator_core.RustForwardPassPerfModel.best_available(config, worker_type)
+
+
+def test_raw_fpm_binding_requires_worker_type() -> None:
+    with pytest.raises(TypeError):
+        aiconfigurator_core.RustForwardPassPerfModel.from_regression()
+    with pytest.raises(TypeError):
+        aiconfigurator_core.RustForwardPassPerfModel.best_available("{}")
+
+
+@pytest.mark.parametrize("worker_type", ["prefill", "decode", "aggregated"])
+def test_raw_fpm_binding_constructs_every_worker_type_with_weights(worker_type: str) -> None:
+    options = json.dumps(
+        {
+            "regression_attention_kv_weight": 2.0,
+            "regression_prefill_attention_pair_weight": 3.0,
+            "regression_ffn_token_weight": 4.0,
+        }
+    )
+    model = aiconfigurator_core.RustForwardPassPerfModel.from_regression(worker_type, options)
+    diagnostics = json.loads(model.diagnostics())
+    assert diagnostics == {
+        "source": "fallback_regression",
+        "readiness": "insufficient_data",
+        "retained_observations": 0,
+        "correction_ready_buckets": 0,
+        "last_warning": None,
+    }
+
+
+def _raw_regression_iteration(worker_type: str, index: int) -> dict[str, object]:
+    if worker_type == "prefill":
+        num_prefill_requests = index % 3 + 1
+        sum_prefill_tokens = index * 5 + 3
+        sum_prefill_kv_tokens = index * index * 7
+        scheduled_requests = {
+            "num_prefill_requests": num_prefill_requests,
+            "sum_prefill_tokens": sum_prefill_tokens,
+            "sum_prefill_kv_tokens": sum_prefill_kv_tokens,
+        }
+        attention = (
+            sum_prefill_kv_tokens
+            + sum_prefill_kv_tokens * sum_prefill_tokens / num_prefill_requests
+            + sum_prefill_tokens**2 / (2 * num_prefill_requests)
+            + sum_prefill_tokens / 2
+        )
+        ffn = sum_prefill_tokens
+    elif worker_type == "decode":
+        num_decode_requests = index + 1
+        sum_decode_kv_tokens = index * index * 17 + 11
+        scheduled_requests = {
+            "num_decode_requests": num_decode_requests,
+            "sum_decode_kv_tokens": sum_decode_kv_tokens,
+        }
+        attention = sum_decode_kv_tokens
+        ffn = num_decode_requests
+    else:
+        num_prefill_requests = index % 3 + 1
+        sum_prefill_tokens = index * 4 + 2
+        sum_prefill_kv_tokens = index * index * 5
+        num_decode_requests = index + 1
+        sum_decode_kv_tokens = index * index * 13 + 7
+        scheduled_requests = {
+            "num_prefill_requests": num_prefill_requests,
+            "sum_prefill_tokens": sum_prefill_tokens,
+            "sum_prefill_kv_tokens": sum_prefill_kv_tokens,
+            "num_decode_requests": num_decode_requests,
+            "sum_decode_kv_tokens": sum_decode_kv_tokens,
+        }
+        attention = (
+            sum_prefill_kv_tokens
+            + sum_decode_kv_tokens
+            + sum_prefill_kv_tokens * sum_prefill_tokens / num_prefill_requests
+            + sum_prefill_tokens**2 / (2 * num_prefill_requests)
+            + sum_prefill_tokens / 2
+        )
+        ffn = sum_prefill_tokens + num_decode_requests
+
+    observed_ms = 1.0 + 0.01 * attention + 0.1 * ffn
+    return {
+        "version": 1,
+        "wall_time": observed_ms / 1000.0,
+        "scheduled_requests": scheduled_requests,
+    }
+
+
+@pytest.mark.parametrize("worker_type", ["prefill", "decode", "aggregated"])
+def test_raw_fpm_binding_regression_round_trip(worker_type: str) -> None:
+    model = aiconfigurator_core.RustForwardPassPerfModel.from_regression(
+        worker_type,
+        '{"min_observations":5}',
+    )
+    iterations = [[_raw_regression_iteration(worker_type, index)] for index in range(1, 7)]
+
+    assert model.estimate_forward_pass_time_ms(json.dumps(iterations[-1])) is None
+    model.tune_with_fpms(json.dumps(iterations))
+
+    diagnostics = json.loads(model.diagnostics())
+    assert diagnostics == {
+        "source": "fallback_regression",
+        "readiness": "ready",
+        "retained_observations": 6,
+        "correction_ready_buckets": 0,
+        "last_warning": None,
+    }
+    prediction = model.estimate_forward_pass_time_ms(json.dumps(iterations[-1]))
+    assert prediction is not None and prediction > 0.0
+
+
+def test_raw_fpm_binding_validates_regression_weights() -> None:
+    with pytest.raises(ValueError, match="regression_attention_kv_weight"):
+        aiconfigurator_core.RustForwardPassPerfModel.from_regression(
+            "prefill",
+            '{"regression_attention_kv_weight": 0.0}',
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "regression_attention_kv_weight",
+        "regression_prefill_attention_pair_weight",
+        "regression_ffn_token_weight",
+    ],
+)
+@pytest.mark.parametrize("sentinel", ["NaN", "Infinity", "-Infinity"])
+def test_raw_fpm_binding_decodes_exact_nonfinite_weight_sentinels(
+    field: str,
+    sentinel: str,
+) -> None:
+    """Raw ``options_json`` callers use quoted sentinels rather than non-JSON numbers."""
+    with pytest.raises(ValueError, match=field):
+        aiconfigurator_core.RustForwardPassPerfModel.from_regression(
+            "aggregated",
+            json.dumps({field: sentinel}),
+        )
+
+
+def test_raw_fpm_binding_rejects_unknown_nonfinite_weight_sentinel() -> None:
+    with pytest.raises(ValueError, match="invalid options JSON"):
+        aiconfigurator_core.RustForwardPassPerfModel.from_regression(
+            "decode",
+            '{"regression_ffn_token_weight":"Inf"}',
+        )
 
 
 def test_native_operation_constructors_preserve_legacy_keyword_names() -> None:

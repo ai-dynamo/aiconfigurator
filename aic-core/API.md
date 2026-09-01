@@ -156,12 +156,21 @@ Python modules carry their own annotations.
 ## Choosing a forward-pass API
 
 For adaptive forward-pass modeling, use
-`RustForwardPassPerfModel.best_available(...)` from Python or
-`ForwardPassPerfModel::best_available(...)` from Rust. This path uses the
-native AIC estimate when the native estimator can be built, learns online
-correction factors from FPM observations, and falls back to regression for
-eligible native build or data-availability failures. These include unsupported
-models and missing or unreadable model, system, or performance data. Check
+`RustForwardPassPerfModel.best_available(config, worker_type, options=None)`
+from Python or
+`ForwardPassPerfModel::best_available(config, worker_type, options)` from Rust.
+`worker_type` is an immutable property of the engine model, not an inferred
+property of one FPM iteration. Python accepts exactly `"prefill"`, `"decode"`,
+or `"aggregated"`; Rust uses
+`ForwardPassWorkerType::{Prefill, Decode, Aggregated}`.
+
+This path uses the native AIC estimate when the native estimator can be built,
+learns online correction factors from FPM observations, and falls back to the
+regression associated with `worker_type` for eligible native build or
+data-availability failures. These include unsupported models and missing or
+unreadable model, system, or performance data. A successful native build keeps
+the existing workload-kind inference and correction behavior; `worker_type`
+and regression-only weights do not alter native estimates. Check
 `diagnostics()` to determine whether the active source is `aic`,
 `aic_with_correction`, or `fallback_regression`, and to inspect any fallback
 warning.
@@ -173,7 +182,34 @@ in that direction. Regression fallback ignores both options.
 
 Use `from_native(...)` instead when native AIC support is required and an
 unsupported configuration or native data failure should surface rather than
-fall back.
+fall back. This strict-native constructor does not take `worker_type`.
+
+Use `RustForwardPassPerfModel.from_regression(worker_type, options=None)` or
+`ForwardPassPerfModel::from_regression(worker_type, options)` for a
+regression-only model. It owns one two-dimensional retained sample set and one
+fit for the engine's fixed role. Its axes are consistently ordered as
+`[critical attention, global FFN/MoE]`; bucket retention uses `log1p` of those
+raw features, while fitting uses standardized raw features. The optional
+regression weights below default to `1.0` and must be finite and strictly
+positive:
+
+- `regression_attention_kv_weight` (`alpha`);
+- `regression_prefill_attention_pair_weight` (`beta`);
+- `regression_ffn_token_weight` (`gamma`).
+
+The ergonomic Python facade accepts ordinary Python floats. For these three
+fields only, it marshals nonfinite values on a shallow copy of the options
+dictionary as the exact valid-JSON string sentinels `"NaN"`, `"Infinity"`, and
+`"-Infinity"`; finite values remain JSON numbers. Callers of the JSON-oriented
+raw PyO3 API may use the same sentinels directly. The sentinels preserve values
+for backend-dependent validation rather than making them valid regression
+weights: `from_native` and a successful native `best_available` ignore all
+three fields, while `from_regression` and a fallback `best_available` reject a
+decoded nonfinite value with the corresponding field-specific error. Other
+strings and value types remain invalid.
+
+The formulas, role-compatibility rules, and fitting pipeline are specified in
+the [FPM regression design](../docs/fpm/aic-fpm-regression-design.md).
 
 `AicEngineBuilder` serves a different purpose: it constructs the strict native
 Rust engine for direct public prefill and decode latency calls. It does not
@@ -184,7 +220,7 @@ for `best_available(...)`.
 from aiconfigurator_core.sdk import RustForwardPassPerfModel
 
 # Engine-config and per-rank FPM dictionary setup is omitted here.
-model = RustForwardPassPerfModel.best_available(config)
+model = RustForwardPassPerfModel.best_available(config, "decode")
 diagnostics = model.diagnostics()
 print(diagnostics["source"])
 if diagnostics["last_warning"] is not None:
@@ -192,7 +228,7 @@ if diagnostics["last_warning"] is not None:
 
 estimate_ms = model.estimate_forward_pass_time_ms(metrics_by_rank)
 if estimate_ms is None:
-    # Regression fallback starts without observations for each workload kind.
+    # Regression fallback starts without observations for this worker type.
     # Supply observed FPM iterations with positive wall_time until the configured
     # min_observations threshold is reached, then retry the estimate.
     model.tune_with_fpms(observed_iterations)  # Observed-iteration setup omitted.
@@ -223,8 +259,9 @@ The supported root-level Rust surface is grouped as follows:
 
 - compiled engine: `AicEngineBuilder`, `AicEngine`, `AicError`;
 - forward-pass estimation: `ForwardPassPerfModel`,
-  `ForwardPassPerfOptions`, diagnostics/readiness/source types, and the
-  `ForwardPassMetrics` telemetry types;
+  `ForwardPassWorkerType`, `ForwardPassPerfOptions`,
+  diagnostics/readiness/source types, and the `ForwardPassMetrics` telemetry
+  types;
 - KV-cache estimation: `estimate_kv_cache`, `KvCacheEstimateRequest`,
   `KvCacheEstimateOptions`, `KvCacheMemoryFraction`, and estimate/result/error
   types;
@@ -249,6 +286,15 @@ energy is 0.0 wherever the perf tables carry no power columns.
 - A supported facade name is not removed or given a new required parameter
   without a documented deprecation path. The package is pre-1.0, so an
   unavoidable incompatible API change also requires a minor-version bump.
+- Requiring `worker_type` in `from_regression` and `best_available` is a
+  documented incompatible change for the next minor release. Adding the three
+  public regression-weight fields to `ForwardPassPerfOptions` is also a Rust
+  source break for downstream exhaustive struct literals. Rust callers should
+  prefer update syntax such as
+  `ForwardPassPerfOptions { bucket_count: 8, ..Default::default() }` so future
+  option fields do not require source changes. This feature worktree does not
+  itself change package versions; release coordination must publish matching
+  crate and wheel minor versions.
 - The raw PyO3 class and ergonomic SDK wrapper intentionally share the name
   `RustForwardPassPerfModel`; callers should import from `aiconfigurator_core.sdk`
   unless they specifically need the JSON-oriented native binding.
