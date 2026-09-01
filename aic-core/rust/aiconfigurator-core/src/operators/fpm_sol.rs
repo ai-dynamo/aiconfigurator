@@ -639,6 +639,8 @@ mod tests {
             head_size: 128,
             window_size: 0,
             kv_cache_dtype: KvCacheQuantMode::Fp8,
+            scale_num_tokens: 1,
+            verify_query_tokens: 0,
         };
         let (b, sq) = (256.0, 8441.75_f64);
         let kv_len = sq - 1.0;

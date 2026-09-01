@@ -143,6 +143,11 @@ class FPMForwardOp(PythonOperation):
             _norm_identity(bool(getattr(model_config, "enable_eplb", False))),
         )
         self._sol_ops = list(sol_ops)
+        # Speculative verify width for the equivalent-AR decode mapping
+        # (1 = plain AR). Set post-construction by the fpm model rewrite for
+        # draft-scheme models; Python only CARRIES it onto the wire (the
+        # single-oracle rule — pricing lives in the Rust operator).
+        self._verify_width = 1
 
     def get_weights(self, **kwargs) -> float:
         """Per-rank weight bytes of the whole model (captured from the original

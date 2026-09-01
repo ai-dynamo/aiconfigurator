@@ -73,7 +73,24 @@ pub struct FpmForwardOp {
     /// path does not read it.
     #[serde(default)]
     pub weight_bytes: f64,
+    /// Speculative verify width (tokens verified per request per decode
+    /// step). Default 1 = plain AR decode (bit-compatible with pre-field
+    /// specs). When > 1, the decode query maps the WIDENED token batch onto
+    /// the AR-collected surface at the equivalent-AR point: the engine hands
+    /// this op `batch = requests x width` tokens, and the true step reads
+    /// each request's KV once, so the coordinates are
+    /// `(tokens = batch, total_kv = batch / width * s)` — total new tokens
+    /// AND total KV bytes both match the real verify step exactly; only the
+    /// per-token QK-PV compute (memory-shadowed in decode) is folded onto
+    /// the AR curve. Prefill is unaffected (draft prefill work rides
+    /// separate op-level draft ops).
+    #[serde(default = "default_verify_width")]
+    pub verify_width: u32,
     pub sol_ops: Vec<Op>,
+}
+
+fn default_verify_width() -> u32 {
+    1
 }
 
 fn data_err(msg: String) -> AicError {
@@ -111,9 +128,17 @@ impl FpmForwardOp {
                 let prefix = ctx.prefix as f64;
                 vec![b, b * s as f64, b * prefix]
             }
-            // One new token per request; `s` is the per-request KV length at
-            // this decode step, so the iteration reads batch*s KV tokens.
-            FpmPhase::Decode => vec![b, b * s as f64],
+            // `s` is the per-request KV length at this decode step. Plain AR
+            // (verify_width == 1): one new token per request, the iteration
+            // reads batch*s KV tokens. Verify (width w > 1): `batch` arrives
+            // WIDENED (requests x w new tokens); the step still reads each
+            // request's KV once, so total KV = (batch / w) * s — the
+            // equivalent-AR point on the collected surface (same token count,
+            // same KV bytes as the real block-verify step).
+            FpmPhase::Decode => {
+                let w = f64::from(self.verify_width.max(1));
+                vec![b, b / w * s as f64]
+            }
         };
         self.resolve(db, cell, &coords)
     }
@@ -147,9 +172,17 @@ impl FpmForwardOp {
     }
 
     /// Decode-pass baseline at the smallest collectable KV for this batch:
-    /// `kv_floor = max(batch, decode-domain KV min)`. See the Python
-    /// docstring — `query(B, KV) - query_pass_baseline(B)` is the decode
-    /// work's marginal cost when it rides an existing (mixed) pass.
+    /// `kv_floor = max(batch, KV covered AT this batch coordinate)`. See the
+    /// Python docstring — `query(B, KV) - query_pass_baseline(B)` is the
+    /// decode work's marginal cost when it rides an existing (mixed) pass.
+    ///
+    /// "Covered at this batch" consults the curve(s) the resolution will
+    /// actually use — the own curve on a lattice hit, both bracket rows off
+    /// lattice — NOT the global domain KV min: a collection whose chains
+    /// have a per-curve floor (real-KV benches can't build chain length 1,
+    /// so their floor is 2*batch) would otherwise turn every baseline query
+    /// into an out-of-domain miss (off lattice) or a silent below-floor
+    /// extrapolation (on lattice).
     pub fn query_pass_baseline(
         &self,
         db: &PerfDatabase,
@@ -175,7 +208,17 @@ impl FpmForwardOp {
                 cell.cell_ids, cell.model_path
             )));
         };
-        let kv_floor = batch_size.max(domain[1].0);
+        let covered_floor = if let Some(&(low, _)) = cell.decode_curve_bounds.get(&batch_size) {
+            low
+        } else if let Some((lo_row, hi_row)) = decode_bracket_rows(cell, batch_size as f64) {
+            // Interpolation needs BOTH bracket rows to cover the KV.
+            cell.decode_curve_bounds[&lo_row]
+                .0
+                .max(cell.decode_curve_bounds[&hi_row].0)
+        } else {
+            domain[1].0
+        };
+        let kv_floor = batch_size.max(covered_floor);
         self.resolve(db, cell, &[batch_size as f64, kv_floor as f64])
     }
 
@@ -335,28 +378,9 @@ impl FpmForwardOp {
         cfg: &OpInterpConfig,
     ) -> Result<Option<f64>, AicError> {
         let (batch, kv) = (coords[0], coords[1]);
-        if cell.decode_rungs.is_empty()
-            || cell.decode_curve_bounds.keys().any(|&b| b as f64 == batch)
-        {
-            return Ok(None);
-        }
-        let Some(&lower_rung) = cell
-            .decode_rungs
-            .iter()
-            .rev()
-            .find(|&&r| (r as f64) < batch)
-        else {
-            // Between the domain floor and the first rung: no pair structure
-            // to bracket with — keep the legacy path.
+        let Some((lo_row, hi_row)) = decode_bracket_rows(cell, batch) else {
             return Ok(None);
         };
-        let lo_row = lower_rung + 1;
-        let hi_row = cell
-            .decode_rungs
-            .iter()
-            .copied()
-            .find(|&r| (r as f64) >= batch)
-            .unwrap_or(*cell.decode_batches.last().expect("non-empty lattice"));
         let covers = |row: u32| {
             let (low, high) = cell.decode_curve_bounds[&row];
             (low as f64) <= kv && kv <= (high as f64)
@@ -397,6 +421,26 @@ impl FpmForwardOp {
             cell.model_path
         ))
     }
+}
+
+/// Bracket rows for an OFF-LATTICE decode batch (the row-pair selection
+/// [`FpmForwardOp::decode_bracket`] resolves with, shared by
+/// [`FpmForwardOp::query_pass_baseline`]'s coverage floor): `None` on a
+/// lattice hit, when no rung structure exists, or between the domain floor
+/// and the first rung (legacy k-NN path keeps those).
+fn decode_bracket_rows(cell: &FpmForwardCell, batch: f64) -> Option<(u32, u32)> {
+    if cell.decode_rungs.is_empty() || cell.decode_curve_bounds.keys().any(|&b| b as f64 == batch) {
+        return None;
+    }
+    let lower_rung = *cell.decode_rungs.iter().rev().find(|&&r| (r as f64) < batch)?;
+    let lo_row = lower_rung + 1;
+    let hi_row = cell
+        .decode_rungs
+        .iter()
+        .copied()
+        .find(|&r| (r as f64) >= batch)
+        .unwrap_or(*cell.decode_batches.last().expect("non-empty lattice"));
+    Some((lo_row, hi_row))
 }
 
 /// The exact Python interp configs (`fpm_prefill_config` / `fpm_decode_config`
@@ -477,7 +521,9 @@ pub(crate) fn sol_total(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perf_database::fpm_forward::tests::{default_identity, default_rows, write_pair};
+    use crate::perf_database::fpm_forward::tests::{
+        cliff_decode_rows, default_identity, default_rows, write_pair,
+    };
 
     const SYSTEMS_ROOT: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -511,6 +557,7 @@ mod tests {
             model_path: "org/model-a".to_string(),
             match_identity: default_identity(4),
             weight_bytes: 0.0,
+            verify_width: 1,
             // Empty sol_ops: exact hits and in-curve lerps never call SOL.
             sol_ops: vec![],
         }
@@ -755,7 +802,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_pair(tmp.path(), &default_rows());
         let db = db_with_pair(tmp.path());
-        // decode domain kv min is 8; batch=8 -> kv_floor = max(8, 8) = 8,
+        // batch=8's own curve floor is 8 -> kv_floor = max(8, 8) = 8,
         // which is the exact collected point (8, 8) -> 6.0.
         let r = op(FpmPhase::Decode).query_pass_baseline(&db, 8).unwrap();
         assert_eq!(r.latency_ms, 6.0);
@@ -764,6 +811,30 @@ mod tests {
             .query_pass_baseline(&db, 8)
             .unwrap_err();
         assert!(err.to_string().contains("decode-only"), "{err}");
+    }
+
+    /// Real-KV collections have a PER-CURVE KV floor above the batch size
+    /// (chain length >= 2). The baseline must land on the covered floor —
+    /// on-lattice via the own curve, off-lattice via the bracket rows — not
+    /// on the global domain min (which would be out of coverage: a loud
+    /// bracket miss off lattice, a silent below-floor transfer on lattice).
+    #[test]
+    fn pass_baseline_respects_per_curve_kv_floor() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_pair(tmp.path(), &cliff_decode_rows());
+        let db = db_with_pair(tmp.path());
+        // Lattice hit: batch=512's curve spans kv [1024, 4096] -> floor
+        // 1024 -> exact row (512, 1024) = 10.5.
+        let r = op(FpmPhase::Decode).query_pass_baseline(&db, 512).unwrap();
+        assert_eq!(r.latency_ms, 10.5);
+        // Off-lattice: batch=504 brackets rows 497/512 (both floors 1024)
+        // -> query (504, 1024) -> lerp 10.0..10.5 at (504-497)/(512-497).
+        let r = op(FpmPhase::Decode).query_pass_baseline(&db, 504).unwrap();
+        assert!(
+            (r.latency_ms - (10.0 + 0.5 * 7.0 / 15.0)).abs() < 1e-9,
+            "{}",
+            r.latency_ms
+        );
     }
 
     /// SOL support is lazy (mirrors Python, whose SOL view answers every op

@@ -562,6 +562,18 @@ class Task:
     # still never inferred.
     nextn: int | str = 0
     nextn_accepted: float | None = None
+    # Scheme-based speculative decoding (generalizes the nextn pair):
+    #   speculative:
+    #     method: dspark              # registry kind; "mtp" == legacy nextn
+    #     params: {num_draft_tokens: 7}
+    #     draft_model_path: <repo>    # draft config.json source, or:
+    #     draft_config: {...}         # inline parsed draft config
+    #     accepted_tokens: 4.09       # measured acceptance (REQUIRED; the
+    #                                 # no-built-in-assumption contract holds)
+    # method="mtp" desugars onto nextn/nextn_accepted; other methods require
+    # nextn to stay 0 (one speculative source only, mirroring
+    # config_builders.resolve_speculation).
+    speculative: dict | None = None
     moe_backend: str | None = None
     attention_backend: str | None = None  # 'flashinfer' (default) or 'fa3'; only consumed by MLA models
     wideep_num_slots: int | None = None  # EPLB slot count; defaults to num_experts when None
@@ -853,6 +865,7 @@ class Task:
         # depend on it (non-negative integer nextn; finite acceptance in range).
         # nextn="auto" is the one exception: its depth comes from the checkpoint,
         # so it is resolved and validated in _resolve_model_identity.
+        self._resolve_speculative_block()
         if self.nextn != "auto":
             self.nextn, self.nextn_accepted = normalize_speculative_decoding(self.nextn, self.nextn_accepted)
         self._validate_deepseek_v4_hardware()
@@ -2056,6 +2069,7 @@ class Task:
             fmha_quant_mode=self._role_attr(role, "fmha_quant_mode"),
             comm_quant_mode=self._role_attr(role, "comm_quant_mode"),
             nextn=self.nextn,
+            speculation=getattr(self, "_speculation_config", None),
             enable_encoder_dp=self.enable_encoder_dp,
             enable_eplb=self._role_attr(role, "enable_eplb"),
             # attention_backend / wideep_num_slots are shared across roles (Task has no
@@ -2105,8 +2119,40 @@ class Task:
 
         return _build
 
+    def _resolve_speculative_block(self) -> None:
+        """Normalize the ``speculative:`` block into a SpeculationConfig.
+
+        ``method="mtp"`` desugars onto the legacy nextn pair so every existing
+        code path stays authoritative. Other methods build a scheme config
+        consumed by ``build_model_config`` / ``build_speculative_profile``;
+        the acceptance value is validated against the scheme's verify width
+        here so bad inputs fail at task construction, not mid-sweep.
+        """
+        from aiconfigurator.sdk.speculative import resolve_speculative_block
+
+        resolution = resolve_speculative_block(self.speculative, nextn=self.nextn, nextn_accepted=self.nextn_accepted)
+        if resolution.speculation_config is not None and self.serving_mode == "afd":
+            # sweep_afd / _run_afd_single_point do not consume the speculative
+            # progress profile: the scheme's draft cost would enter the model
+            # while the accepted-token progress silently would not — refuse
+            # rather than report one-sided numbers.
+            raise ValueError(
+                "scheme-based speculative decoding is not supported for serving_mode='afd' "
+                "(the AFD paths do not consume the speculative progress profile)."
+            )
+        self.nextn = resolution.nextn
+        self.nextn_accepted = resolution.nextn_accepted
+        self._speculation_config = resolution.speculation_config
+        self._speculative_accepted = resolution.accepted_tokens
+
     def build_speculative_profile(self) -> SpeculativeDecodingProfile:
         """Build the upper-layer expected-progress assumption for prediction."""
+        spec_config = getattr(self, "_speculation_config", None)
+        if spec_config is not None:
+            from aiconfigurator.sdk.speculation import build_spec_scheme
+
+            scheme = build_spec_scheme(None, spec_config)
+            return SpeculativeDecodingProfile.from_scheme(scheme, self._speculative_accepted)
         return SpeculativeDecodingProfile.from_inputs(self.nextn, self.nextn_accepted)
 
     def iter_parallel(self, role: Literal["agg", "prefill", "decode"]) -> Iterator[ParallelChoice]:

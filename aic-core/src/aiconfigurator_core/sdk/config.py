@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Union
 
 from aiconfigurator_core.sdk import common
+from aiconfigurator_core.sdk.speculation.base import SpeculationConfig
 
 
 @dataclass
@@ -43,7 +44,13 @@ class ModelConfig:
     # quantization options
     # MTP speculative decoding: draft length (compute/verification cost only).
     # Accepted-token progress belongs to the upper prediction/simulation layer.
+    # Legacy sugar: nextn > 0 desugars to speculation=SpeculationConfig("mtp",
+    # {"depth": nextn}) in config_builders.resolve_speculation.
     nextn: int = 0
+    # Speculative decoding scheme (cost side). None means "derive from nextn"
+    # (mtp when nextn > 0, otherwise disabled). Resolved and written back by
+    # config_builders.resolve_speculation before model construction.
+    speculation: SpeculationConfig | None = None
     overwrite_num_layers: int = 0
     # model builder falvors
     sms: int = 20

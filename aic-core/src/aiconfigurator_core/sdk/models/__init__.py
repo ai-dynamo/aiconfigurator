@@ -70,26 +70,44 @@ def _apply_forward_model_fpm(model: BaseModel) -> BaseModel:
             f"forward_model='fpm' does not support encoder/multimodal models "
             f"(model_family={model.model_family!r} has encoder ops). Use forward_model='op_level'."
         )
-    if getattr(model, "_nextn", 0):
-        # The collected whole-model curves carry neither the MTP-head cost nor
-        # the acceptance amortization that op_level encodes in
-        # mtp_scale_factor, so fpm would silently price MTP as plain decode.
+    from aiconfigurator_core.sdk.speculation import NullScheme, SpecSchemeBase
+    from aiconfigurator_core.sdk.speculation.mtp import MTPScheme
+
+    scheme = getattr(model, "spec_scheme", None)
+    has_draft_scheme = (
+        isinstance(scheme, SpecSchemeBase) and not isinstance(scheme, MTPScheme) and type(scheme) is not NullScheme
+    )
+    if getattr(model, "_nextn", 0) and not has_draft_scheme:
+        # MTP's draft cost lives INSIDE the target layers (nextn-scaled op
+        # counts) which the AR-collected whole-model curves do not carry, so
+        # fpm would silently price it as plain decode. Draft SCHEMES are
+        # supported below via the hybrid shape: the target folds into the
+        # FpmForward op (verify width mapped to the equivalent-AR point) and
+        # the materialized op-level draft ops ride alongside.
         raise NotImplementedError(
-            f"forward_model='fpm' does not support MTP speculative decoding (nextn={model._nextn}). "
-            "Use forward_model='op_level'."
+            f"forward_model='fpm' does not support MTP speculative decoding "
+            f"(nextn={model._nextn}). Use forward_model='op_level'."
         )
     # The ORIGINAL op-level lists stay alive inside the FPM ops as the
     # whole-model roofline (queried in DatabaseMode.SOL at interpolation
-    # time) and as the weight-bytes inventory for memory estimation.
-    context_ops = list(model.context_ops)
-    generation_ops = list(model.generation_ops)
+    # time) and as the weight-bytes inventory for memory estimation. For a
+    # draft scheme (hybrid shape) only the TARGET ops fold into the
+    # whole-model op: the scheme's draft cost is not in the AR-collected
+    # curves, so its materialized ``draft_`` ops stay op-level after the
+    # FpmForward lead op (the engine validates and prices this shape).
+    context_ops = [op for op in model.context_ops if not op._name.startswith("draft_")]
+    generation_ops = [op for op in model.generation_ops if not op._name.startswith("draft_")]
+    draft_context_ops = [op for op in model.context_ops if op._name.startswith("draft_")]
+    draft_generation_ops = [op for op in model.generation_ops if op._name.startswith("draft_")]
     weight_bytes = float(sum(op.get_weights() for op in context_ops))
-    model.context_ops = [
-        FPMForwardOp("prefill", model.config, model.model_path, sol_ops=context_ops, weight_bytes=weight_bytes)
-    ]
-    model.generation_ops = [
-        FPMForwardOp("decode", model.config, model.model_path, sol_ops=generation_ops, weight_bytes=weight_bytes)
-    ]
+    prefill_op = FPMForwardOp("prefill", model.config, model.model_path, sol_ops=context_ops, weight_bytes=weight_bytes)
+    decode_op = FPMForwardOp(
+        "decode", model.config, model.model_path, sol_ops=generation_ops, weight_bytes=weight_bytes
+    )
+    if has_draft_scheme:
+        decode_op._verify_width = int(model.verify_width)
+    model.context_ops = [prefill_op, *draft_context_ops]
+    model.generation_ops = [decode_op, *draft_generation_ops]
     model.forward_model = "fpm"
     return model
 
@@ -168,7 +186,18 @@ def get_model(
     else:
         model_config.cp_style = "none"
 
+    # Resolve the speculative scheme BEFORE construction (an explicit mtp
+    # scheme writes its depth back onto nextn, which model families read),
+    # attach it after, and gate unsupported (model, backend) combinations.
+    from aiconfigurator_core.sdk.config_builders import resolve_speculation
+    from aiconfigurator_core.sdk.speculation import build_spec_scheme
+    from aiconfigurator_core.sdk.speculation.materialize import materialize_spec_scheme
+
+    spec_config = resolve_speculation(model_config)
     model = cls.create(model_info, model_config, backend_name)
+    model.spec_scheme = build_spec_scheme(model_config, spec_config)
+    model.spec_scheme.validate(model, backend_name)
+    materialize_spec_scheme(model)
     if forward_model == "fpm":
         model = _apply_forward_model_fpm(model)
     return model

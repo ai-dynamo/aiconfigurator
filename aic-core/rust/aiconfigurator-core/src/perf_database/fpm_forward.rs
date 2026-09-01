@@ -1970,7 +1970,7 @@ pub(crate) mod tests {
         assert!(err.to_string().contains("never substitutes"), "{err}");
     }
 
-    fn cliff_decode_rows() -> Vec<RowSpec> {
+    pub(crate) fn cliff_decode_rows() -> Vec<RowSpec> {
         let mk = |batch: u32, kv: u32, lat: f64| RowSpec {
             workload_kind: "decode",
             batch_size: batch,

@@ -2154,6 +2154,67 @@ _FPM_MIXED_FROZEN = {
 _FPM_GENONLY_FROZEN = 4.5
 
 
+# Hybrid speculative fpm (verify-on-FPM): pinned when the config class
+# became reachable (schema v15, FpmForwardOp.verify_width). The ngram scheme
+# is the pure verify-width channel (no draft ops): the decode query maps the
+# widened batch to the equivalent-AR point (tokens = c*w, total KV
+# unchanged) on the same synthetic fixture. Values pinned from the compiled
+# engine at introduction (append-only; there is no Python reference).
+_FPM_HYBRID_STATIC_GEN_FROZEN = 4.1246337890625  # (ngram k3, batch 1, isl 1024, osl 2)
+_FPM_HYBRID_MIXED_FROZEN = 18.187255859375  # (ctx 1024, gen 1, isl 1024, osl 2)
+
+
+class TestRustEngineStepFpmHybridParity:
+    """Hybrid (fpm target + speculative scheme) parity pins."""
+
+    def _build_ngram(self):
+        from aiconfigurator.sdk.config_builders import build_model_config
+        from aiconfigurator_core.sdk.speculation import SpeculationConfig
+
+        cfg = build_model_config(
+            tp_size=2,
+            pp_size=1,
+            attention_dp_size=1,
+            moe_tp_size=1,
+            moe_ep_size=2,
+            gemm_quant_mode="fp8_block",
+            moe_quant_mode="fp8_block",
+            kvcache_quant_mode="fp8",
+            fmha_quant_mode="bfloat16",
+            comm_quant_mode="half",
+            forward_model="fpm",
+        )
+        cfg.speculation = SpeculationConfig(kind="ngram", params={"num_speculative_tokens": 3})
+        model = get_model(_FPM_MODEL, cfg, "vllm")
+        database = _quiet_call(perf_database.get_database, "b200_sxm", "vllm", _FPM_VERSION)
+        return model, get_backend("vllm"), database
+
+    def test_hybrid_ngram_static_gen_pin(self, fpm_systems_root):
+        model, backend, database = self._build_ngram()
+        assert model.generation_ops[0]._verify_width == 4
+        rc = config.RuntimeConfig(batch_size=1, beam_width=1, isl=1024, osl=2)
+        summary = backend.run_static(model, database, rc, mode="static_gen")
+        value = sum(summary.get_generation_latency_dict().values())
+        if _FPM_HYBRID_STATIC_GEN_FROZEN is None:
+            print(f"\nPIN static_gen: {value!r}")
+        else:
+            allowed = max(abs(_FPM_HYBRID_STATIC_GEN_FROZEN) * PARITY_RTOL, 1e-9)
+            assert abs(value - _FPM_HYBRID_STATIC_GEN_FROZEN) <= allowed
+
+    def test_hybrid_ngram_mixed_pin(self, fpm_systems_root):
+        from aiconfigurator_core.sdk.backends.base_backend import MixedStepInput
+
+        model, backend, database = self._build_ngram()
+        rc = config.RuntimeConfig(batch_size=4, beam_width=1, isl=1024, osl=2)
+        est = backend.run_mixed(model, database, rc, MixedStepInput(context_tokens=1024, num_decode_requests=1))
+        value = est.latency_ms
+        if _FPM_HYBRID_MIXED_FROZEN is None:
+            print(f"\nPIN mixed: {value!r}")
+        else:
+            allowed = max(abs(_FPM_HYBRID_MIXED_FROZEN) * PARITY_RTOL, 1e-9)
+            assert abs(value - _FPM_HYBRID_MIXED_FROZEN) <= allowed
+
+
 class TestRustEngineStepFpmParity:
     """forward_model='fpm' regression vs the frozen Python reference.
 
